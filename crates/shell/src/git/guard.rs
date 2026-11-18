@@ -62,10 +62,10 @@ fn own_checkout_hint(ovnfs: Option<&str>) -> Cow<'static, str> {
 			"In an ovnfs checkout of your own ({command} new --name <name>) it runs, and uncommitted \
 			 changes it would discard are saved first. Add --rev <rev> to start at a clean commit or \
 			 branch. Its work comes back with {command} land <name> (its commits onto the branch \
-			 checked out here, files included) or {command} apply <name> (its uncommitted edits). Use \
-			 {command} run --rev HEAD -- <command> for a clean-commit check without touching this \
-			 checkout; --take SRC:PATH mixes in paths from the folder (.), the index (empty SRC), or \
-			 another revision."
+			 checked out here, files included) or {command} apply <name> (its uncommitted edits). \
+			 Use {command} run --rev HEAD -- <command> for a clean-commit check without touching \
+			 this checkout; --take SRC:PATH mixes in paths from the folder (.), the index (empty \
+			 SRC), or another revision."
 		)),
 		None => Cow::Borrowed(OWN_WORKTREE),
 	}

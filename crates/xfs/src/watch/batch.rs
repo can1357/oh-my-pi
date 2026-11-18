@@ -49,13 +49,13 @@ pub struct Event<'a> {
 	/// The system's own flags: `FSEvents` event flags, the inotify mask, or
 	/// the `ReadDirectoryChangesW` action; 0 from kqueue and polling.
 	pub native: u32,
-	/// Index of the root in [`Config::roots`](crate::watch::Config::roots) the path
-	/// lies below.
+	/// Index of the root in [`Config::roots`](crate::watch::Config::roots) the
+	/// path lies below.
 	pub root:   usize,
 	/// What ties the event to related ones: the inotify cookie shared by the
 	/// two halves of a rename, or the path's file id from `FSEvents` under
-	/// [`Config::file_ids`](crate::watch::Config::file_ids); 0 when the system gives
-	/// none.
+	/// [`Config::file_ids`](crate::watch::Config::file_ids); 0 when the system
+	/// gives none.
 	pub id:     u64,
 }
 

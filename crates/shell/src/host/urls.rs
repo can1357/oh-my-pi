@@ -204,8 +204,8 @@ pub(super) async fn resolve(fs: &omp_vfs::Fs, names: &Names) -> io::Result<Names
 		Some(cwd) => match host_path(fs, cwd).await? {
 			// A child may write anywhere under its working directory, so it must
 			// not start in one the shell itself refuses to change (`skill://`,
-			// a read-only `local://`). Arguments still translate: those name single files
-			// the program was asked to use.
+			// a read-only `local://`). Arguments still translate: those name
+			// single files the program was asked to use.
 			Some(backing) => match fs.access(cwd, false, true, false).await {
 				Ok(()) => Some(backing),
 				Err(err) if err.kind() == io::ErrorKind::ReadOnlyFilesystem => {

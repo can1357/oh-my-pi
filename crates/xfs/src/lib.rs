@@ -19,8 +19,8 @@
 //! - [`glob`]: path selection in pi's glob dialect and the glob search.
 //! - [`grep`]: pattern compilation in pi's regex dialect, buffer scanning, and
 //!   the directory/file content search.
-//! - [`watch`]: file-system change notification on the platform's own
-//!   mechanism (FSEvents, inotify, `ReadDirectoryChangesW`, kqueue, polling).
+//! - [`watch`]: file-system change notification on the platform's own mechanism
+//!   (FSEvents, inotify, `ReadDirectoryChangesW`, kqueue, polling).
 //!
 //! Below an ovnfs checkout, [`glob::glob`] and [`grep::grep`] ask the ovnfs
 //! daemon serving it first, which searches its overlay in-process instead of

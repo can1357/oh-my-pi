@@ -29,11 +29,11 @@ use std::{
 };
 
 use async_trait::async_trait;
-use parking_lot::RwLock;
 use omp_vfs::{
 	CanonicalizeOptions, DirEntry, DirOptions, File, FileSystem, FileTime, Metadata, NodeKind,
 	OpenOptions, Permissions, ReadDir, StatFs, SymlinkKind,
 };
+use parking_lot::RwLock;
 
 /// One mapping of a URL onto a host entry.
 #[derive(Clone, Debug, PartialEq, Eq)]

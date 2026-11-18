@@ -23,7 +23,9 @@ use std::{
 
 use hashbrown::{HashMap, hash_map::Entry};
 
-use crate::watch::{Descend, Flags, MISSING_ROOT_RECHECK, Root, Timing, batch::Emitter, missing_root};
+use crate::watch::{
+	Descend, Flags, MISSING_ROOT_RECHECK, Root, Timing, batch::Emitter, missing_root,
+};
 
 /// Changes every watch reports.
 const CHANGES: u32 = libc::IN_CREATE
