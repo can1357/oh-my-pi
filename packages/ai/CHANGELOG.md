@@ -6,7 +6,6 @@
 
 - Added `JudgmentResult.cached`, set when every answer came from an answer cache and no provider request was made ([#19281](https://github.com/can1357/oh-my-pi/pull/19281) by [@Xytronix](https://github.com/Xytronix))
 
-## [18.22.1] - 2026-11-17
 ## [18.22.2] - 2026-11-18
 
 ### Added
