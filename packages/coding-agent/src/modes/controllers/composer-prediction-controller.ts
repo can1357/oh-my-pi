@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, isExcludedFromContext } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { MeterProvider } from "@opentelemetry/api";
 import { logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -39,13 +39,16 @@ const LIST_MARKER = /^\s*(?:[-*•]|\d{1,2}[.)])\s+/;
 const NON_WORD = /[^\p{L}\p{N}]+/gu;
 
 /**
- * The message a prediction is keyed on: the last one that is not an advisor card. Silent advisor
- * notes land after the turn without changing what the user would reply to.
+ * The message a prediction is keyed on: the last one that reaches the model and is not an advisor
+ * card. Silent advisor notes and rows kept out of context (an extension's stats line sent with
+ * `excludeFromContext`) land after the turn without changing what the user would reply to.
  */
 function predictionAnchor(session: AgentViewSession): AgentMessage | undefined {
 	const messages = session.messages;
 	for (let i = messages.length - 1; i >= 0; i--) {
-		if (!isAdvisorCard(messages[i])) return messages[i];
+		const message = messages[i];
+		if (isAdvisorCard(message) || isExcludedFromContext(message)) continue;
+		return message;
 	}
 	return undefined;
 }

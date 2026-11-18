@@ -299,6 +299,26 @@ describe("ComposerPredictionController", () => {
 		expect(controller.choices).toEqual(["now run the tests"]);
 	});
 
+	it("keeps the prediction when a row kept out of context lands, but not when a context message does", async () => {
+		const extensionRow = (timestamp: number, excludeFromContext: boolean) =>
+			({
+				role: "custom",
+				customType: "plugin-stats",
+				content: "row",
+				display: true,
+				excludeFromContext,
+				timestamp,
+			}) as AgentMessage;
+		const { controller, messages, reply } = harness();
+		controller.request();
+		messages.push(extensionRow(2, true));
+		await reply(0, "now run the tests");
+		expect(controller.choices).toEqual(["now run the tests"]);
+
+		messages.push(extensionRow(3, false));
+		expect(controller.choices).toBeUndefined();
+	});
+
 	it("drops a reply that lands after cancel or a newer request", async () => {
 		const { controller, turns, reply } = harness();
 		controller.request();

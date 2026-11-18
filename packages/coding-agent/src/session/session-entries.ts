@@ -328,7 +328,7 @@ export interface ModeChangeEntry extends SessionEntryBase {
  * Custom message entry for extensions to inject messages into LLM context.
  * Use customType to identify your extension's entries.
  *
- * Unlike CustomEntry, this DOES participate in LLM context.
+ * Unlike CustomEntry, this DOES participate in LLM context unless `excludeFromContext` is set.
  * The content participates in LLM context through convertToLlm().
  * Use details for extension-specific metadata (not sent to LLM).
  *
@@ -344,6 +344,8 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	display: boolean;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
+	/** Rendered and saved, never sent to the model (like `!!` bash rows). */
+	excludeFromContext?: boolean;
 }
 
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
