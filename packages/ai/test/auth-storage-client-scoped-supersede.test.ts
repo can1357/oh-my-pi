@@ -12,7 +12,7 @@ import { AuthStorage, type OAuthCredential, SqliteAuthCredentialStore } from "@o
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 
-function saved(args: { client: string; accountId: string; email: string }): OAuthCredential {
+function saved(args: { client: string; accountId: string; email?: string }): OAuthCredential {
 	return {
 		type: "oauth",
 		access: `access-${args.client}`,
@@ -20,7 +20,7 @@ function saved(args: { client: string; accountId: string; email: string }): OAut
 		expires: Date.now() + 60_000,
 		oauthClientId: args.client,
 		accountId: args.accountId,
-		email: args.email,
+		...(args.email ? { email: args.email } : {}),
 	};
 }
 
@@ -93,11 +93,8 @@ describe("openai sign-in over saved ChatGPT accounts", () => {
 		expect(store.listAuthCredentials("openai")).toHaveLength(2);
 	});
 
-	it("keeps a saved registration when the new sign-in carries no email to tell teammates of one workspace apart", async () => {
-		await store.upsertAuthCredential(
-			"openai",
-			saved({ client: "client_old", accountId: "acct_ws_1", email: "a@x.io" }),
-		);
+	it("keeps a saved registration when neither sign-in has an email to tell teammates of one workspace apart", async () => {
+		await store.upsertAuthCredential("openai", saved({ client: "client_old", accountId: "acct_ws_1" }));
 		await storage.credentials.reload();
 
 		const identity = await signInAs({
