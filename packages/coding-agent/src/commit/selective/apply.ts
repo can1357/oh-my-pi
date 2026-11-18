@@ -65,10 +65,15 @@ export interface CommitRequest {
 export interface CommitOutcome {
 	sha: string;
 	subject: string;
-	/** Repo-relative paths the commit changed. */
+	/** Repo-relative paths the commit changed against `parent` (on amend: everything the amended commit changes). */
 	paths: string[];
-	/** HEAD the commit was placed on (differs from the draft's HEAD when someone committed meanwhile); `null` for a root commit. */
+	/**
+	 * First parent of the commit, `null` for a root commit. Without amend this is the HEAD the commit was
+	 * placed on, which differs from the draft's HEAD when someone committed meanwhile.
+	 */
 	parent: string | null;
+	/** On amend, the commit that was replaced. */
+	amended?: string;
 	/** Committed paths whose shared-index entry kept someone else's staged content instead of the commit's. */
 	indexNotes: string[];
 }
@@ -161,7 +166,8 @@ export async function commitSelection(
 		`omp-commit-${draft.id}-${Math.floor(Math.random() * 46656).toString(36)}.index`,
 	);
 	let sha: string | undefined;
-	let parent = draft.head;
+	/** HEAD the commit was built on; on amend, the commit it replaced. */
+	let base = draft.head;
 	try {
 		for (let attempt = 1; sha === undefined; attempt++) {
 			context.signal?.throwIfAborted();
@@ -195,7 +201,7 @@ export async function commitSelection(
 					},
 					context.signal,
 				);
-				parent = head;
+				base = head;
 			} catch (error) {
 				if (!(vcs.isVcsError(error) && error.code === "HeadMoved") || attempt >= HEAD_RACE_ATTEMPTS) throw error;
 			}
@@ -207,7 +213,7 @@ export async function commitSelection(
 	const indexNotes: string[] = [];
 	// A new repository may have no index file yet. Git reads that as an empty index, but patch
 	// application reads HEAD in its place, so seed it with the root commit's tree instead.
-	const seedIndex = parent === null && !(await Bun.file(path.join(gitDir, "index")).exists());
+	const seedIndex = base === null && !(await Bun.file(path.join(gitDir, "index")).exists());
 	if (seedIndex) await repo.readTree(sha, undefined, context.signal);
 	// One write for every path: each write takes `index.lock`, which a concurrent git (a prompt's
 	// or an editor's `git status`) may hold. Per-path writes only when a path's entry differs.
@@ -225,8 +231,22 @@ export async function commitSelection(
 						`\`git diff --cached\` there shows this commit reverted until \`git reset -q -- ${entry.path}\`.`,
 		);
 	}
-	const paths = patches.map(entry => entry.path);
-	await context.journal?.recordCommit({ agent: context.agent.agent, parent: context.agent.parent, sha, paths });
-	const subject = (await repo.commitDetails(sha)).message.split("\n", 1)[0];
-	return { sha, subject, paths, parent, indexNotes };
+	const selected = patches.map(entry => entry.path);
+	await context.journal?.recordCommit({
+		agent: context.agent.agent,
+		parent: context.agent.parent,
+		sha,
+		paths: selected,
+	});
+	// The commit exists and is recorded: the reads below describe it and are not cancelled.
+	const details = await repo.commitDetails(sha);
+	const subject = details.message.split("\n", 1)[0];
+	if (!request.amend) return { sha, subject, paths: selected, parent: base, indexNotes };
+	// An amended commit keeps the replaced commit's parents and carries its changes along with this selection.
+	const parent = details.parents[0] ?? null;
+	const paths =
+		parent === null
+			? (await repo.lsTree(sha, [])).map(entry => entry.path)
+			: await repo.changedFiles({ base: parent, head: sha });
+	return { sha, subject, paths, parent, amended: base ?? undefined, indexNotes };
 }

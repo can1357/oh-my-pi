@@ -32,7 +32,7 @@ describe("parseReadUrlTarget", () => {
 		});
 		expect(parseReadUrlTarget("https://example.com/foo:50")).toEqual({
 			path: "https://example.com/foo",
-			sel: { kind: "lines", ranges: [{ startLine: 50, endLine: undefined }], raw: false },
+			sel: { kind: "lines", ranges: [{ startLine: 50, endLine: 50 }], raw: false },
 		});
 	});
 
@@ -112,7 +112,7 @@ describe("parseReadUrlTarget", () => {
 		// `https://example.com/:80` is the documented form to read line 80 of the homepage.
 		expect(parseReadUrlTarget("https://example.com/:80")).toEqual({
 			path: "https://example.com/",
-			sel: { kind: "lines", ranges: [{ startLine: 80, endLine: undefined }], raw: false },
+			sel: { kind: "lines", ranges: [{ startLine: 80, endLine: 80 }], raw: false },
 		});
 	});
 

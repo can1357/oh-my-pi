@@ -72,6 +72,9 @@ export interface DaemonBrokerClient {
 /** A request reached the broker and the broker rejected the operation. */
 export class DaemonBrokerRejectedError extends Error {}
 
+/** A request got no answer from the broker in time; the broker may still be carrying it out. */
+export class DaemonBrokerTimeoutError extends Error {}
+
 async function readOrCreateToken(runtimeDir: string): Promise<string> {
 	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
 	const tokenPath = path.join(runtimeDir, TOKEN_FILE);
@@ -161,7 +164,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			if (!pending) return;
 			this.#pending.delete(id);
 			pending.removeAbort?.();
-			reject(new Error(`Daemon ${operation.op} request timed out`));
+			reject(new DaemonBrokerTimeoutError(`Daemon ${operation.op} request timed out`));
 		}, requestTimeoutMs(operation));
 		const pending: PendingRequest = { operation, resolve, reject, timer };
 		if (signal) {

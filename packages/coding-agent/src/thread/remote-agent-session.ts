@@ -87,7 +87,7 @@ import {
 import { BlobStore, type BlobPutOptions, type BlobPutResult, lazyImageDataSync } from "../session/blob-store";
 import type { IdleMaintenanceOptions } from "../session/idle-maintenance";
 import type { CustomMessage } from "../session/messages";
-import { resolveRoleModelCycle, roleThinkingLevelForModel, serviceTierForModel } from "../session/model-controls";
+import { resolveRoleModelCycle, serviceTierForModel } from "../session/model-controls";
 import type { ServingModel } from "../session/retry-fallback-chains";
 import {
 	buildSessionContext,
@@ -190,7 +190,6 @@ function emptyViewState(): SessionViewState {
 		compactionSpeculation: "idle",
 		contextUsageRevision: 0,
 		contextUsage: undefined,
-		isGeneratingHandoff: false,
 		isRetrying: false,
 		retryAttempt: 0,
 		isTtsrAbortPending: false,
@@ -347,7 +346,6 @@ export class RemoteAgentSession implements AgentViewSession {
 			putBlob: (data: Buffer, options?: BlobPutOptions): Promise<BlobPutResult> => blobs().put(data, options),
 			putBlobSync: (data: Buffer, options?: BlobPutOptions): BlobPutResult => blobs().putSync(data, options),
 			getArtifactPath: id => this.#command("getArtifactPath", id),
-			getArtifactContent: id => this.#command("getArtifactContent", id),
 		};
 	}
 
@@ -470,10 +468,6 @@ export class RemoteAgentSession implements AgentViewSession {
 		return this.#view.contextUsageRevision;
 	}
 
-	get isGeneratingHandoff(): boolean {
-		return this.#view.isGeneratingHandoff;
-	}
-
 	get isRetrying(): boolean {
 		return this.#view.isRetrying;
 	}
@@ -576,10 +570,6 @@ export class RemoteAgentSession implements AgentViewSession {
 		if (!next) return undefined;
 		this.setThinkingLevel(next);
 		return next;
-	}
-
-	resolveTemporaryModelThinkingLevel(model: Model): ConfiguredThinkingLevel | undefined {
-		return roleThinkingLevelForModel(this.settings, this.modelRegistry.getAvailable(), model);
 	}
 
 	setModelTemporary(
@@ -768,10 +758,6 @@ export class RemoteAgentSession implements AgentViewSession {
 
 	abortCompaction(reason?: unknown): void {
 		this.#notify("abortCompaction", toWireData(reason));
-	}
-
-	abortHandoff(): void {
-		this.#notify("abortHandoff");
 	}
 
 	runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {

@@ -1,4 +1,5 @@
 /** Session-scoped service supervision through the shared project broker. */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TERMINAL_STATES } from "@oh-my-pi/pi-tui/apps/ps-data";
 import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
@@ -6,7 +7,9 @@ import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-util
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { compileNotifyPattern } from "../async/notify";
-import { type DaemonBrokerClient, daemonClientForProject } from "./client";
+import { shellProcessCommand } from "../exec/shell-process";
+import { isUrlPath } from "../internal-urls/url-filesystem";
+import { type DaemonBrokerClient, DaemonBrokerTimeoutError, daemonClientForProject } from "./client";
 import { canonicalProjectDir } from "./paths";
 import { DAEMON_OUTPUT_PATTERN_FLAGS, type DaemonOperation, type DaemonRpcResult } from "./protocol";
 import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
@@ -32,7 +35,15 @@ export interface ServiceStart {
 	notify?: string;
 	/** Overlay on the configured shell env; wins over it. */
 	env?: Record<string, string>;
+	/**
+	 * Script the service's shell sources first: the mounts behind the URL paths its command may
+	 * name (`local://…`, a URL `cwd`), then the functions and aliases of the session starting it.
+	 */
+	seed?: string;
 }
+
+/** The script a service's shell sources, in the service's record directory. */
+const SERVICE_SEED_FILE = "shell.sh";
 
 const serviceStateKey = Symbol("ownedServices");
 interface ServiceSession extends ToolSession {
@@ -48,6 +59,18 @@ function serviceState(session: ToolSession): NonNullable<ServiceSession[typeof s
 		listeners: new Set(),
 		subscribed: new Set(),
 	});
+}
+
+/**
+ * Write the script `name`'s shell sources at each start into the broker's record of the service,
+ * where a relaunch finds it again and which is removed with the service's records.
+ */
+async function writeServiceSeed(session: ToolSession, name: string, seed: string): Promise<string> {
+	const dir = path.join(getDaemonRuntimeDir(await canonicalProjectDir(session.cwd)), "daemons", name);
+	await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+	const file = path.join(dir, SERVICE_SEED_FILE);
+	await fs.writeFile(file, seed, { mode: 0o600 });
+	return file;
 }
 
 export function hasLiveOwnedService(session: ToolSession): boolean {
@@ -268,12 +291,19 @@ export async function startService(
 	}
 	if (params.notify) compileNotifyPattern(params.notify);
 	const shell = session.settings.getShellConfig();
+	// The service is a shell process: the bash tool's shell, with omp's utilities and the mounts
+	// its script makes. A URL directory is entered by that shell; the process starts on the host.
+	const urlCwd = params.cwd !== undefined && isUrlPath(params.cwd) ? params.cwd : undefined;
+	const source = params.seed ? await writeServiceSeed(session, params.name, params.seed) : undefined;
 	const spec: DaemonSpec = {
 		name: params.name,
-		application: shell.shell,
-		args: [...shell.args, `${shell.prefix ? `${shell.prefix} ` : ""}${params.command}`],
+		...shellProcessCommand({
+			command: `${shell.prefix ? `${shell.prefix} ` : ""}${params.command}`,
+			source,
+			cwd: urlCwd,
+		}),
 		env: { ...shell.env, ...params.env },
-		cwd: serviceDirectory(params.cwd, session.cwd),
+		cwd: serviceDirectory(urlCwd === undefined ? params.cwd : undefined, session.cwd),
 		pty: params.pty ?? true,
 		ready: ready
 			? {
@@ -298,7 +328,16 @@ export async function startService(
 			awaitReady: readyInterrupt === undefined,
 		},
 		signal,
-	);
+	).catch(async (error: unknown) => {
+		if (!(error instanceof DaemonBrokerTimeoutError)) throw error;
+		// The broker may have started the service anyway: say where it stands.
+		const described = await request(session, { op: "describe", name: params.name }, signal).catch(() => undefined);
+		const state =
+			described?.op === "describe"
+				? `${params.name} is ${described.daemon.state}${described.daemon.pid === undefined ? "" : ` (pid ${described.daemon.pid})`}; read proc://${params.name}`
+				: "the broker did not answer a status request either";
+		throw new ToolError(`Service start request timed out; ${state}.`);
+	});
 	if (result.op !== "start") throw new Error("Unexpected daemon start response");
 	const launched = result.daemon;
 	const notifyArmed = result.notifyArmed === true;

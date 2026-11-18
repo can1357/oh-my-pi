@@ -361,7 +361,8 @@ function openQuickPicker(picked: string[], options: ModelPickerOptions = {}): Mo
 			onPick: (_model, selector, meta) =>
 				picked.push(`session:${selector}${meta.thinkingLevel ? `:${meta.thinkingLevel}` : ""}`),
 			onPickTask: (_model, selector) => picked.push(`task:${selector}`),
-			onCancel: () => {},
+			onKeepThinking: level => picked.push(`keep:${level}`),
+			onCancel: () => picked.push("cancel"),
 		},
 		{ currentSelector: "demo/demo", taskModeKeys: ["alt+p"], thinkingLevelFor: () => Effort.High, ...options },
 	);
@@ -520,6 +521,27 @@ test("←/→ and the slider set the thinking level a pick applies, clamped to t
 	// A model without reasoning gets no level.
 	picker.handleNativeEvent({ type: "activate", key: "", item: "local/tiny" });
 	expect(picked.at(-1)).toBe("session:local/tiny");
+});
+
+test("Esc keeps a level moved on the current model's row and drops one moved elsewhere", () => {
+	const picked: string[] = [];
+	const picker = openQuickPicker(picked);
+
+	// Untouched: Esc only closes.
+	picker.handleInput("\x1b");
+	expect(picked).toEqual(["cancel"]);
+
+	picker.handleInput("\x1b[D"); // ← on demo/demo (current)
+	picker.handleInput("\x1b");
+	expect(picked.slice(1)).toEqual(["keep:medium", "cancel"]);
+
+	// Moved while another model is highlighted: Esc leaves the session's level alone.
+	const other = openQuickPicker(picked);
+	picked.length = 0;
+	other.handleNativeEvent({ type: "select", key: "", item: "demo/demo-lite" });
+	quickAct(other, "level", "low");
+	other.handleInput("\x1b");
+	expect(picked).toEqual(["cancel"]);
 });
 
 test("the thinking slider is session-only: none in task mode or among quick roles", () => {

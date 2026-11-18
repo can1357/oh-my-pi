@@ -236,6 +236,11 @@ export interface ExtensionUIDialogOptions {
 	/** Invoked when user input resets a UI-managed timeout countdown */
 	onTimeoutReset?: () => void;
 	/**
+	 * Form dialogs: invoked when `signal` closes the form before a submit (a message the user sent
+	 * instead), with the answers the user changed from the form's defaults and their option notes.
+	 */
+	onAbandon?: (given: ExtensionFormDialogResult) => void;
+	/**
 	 * Host hint to mask entered characters in `input` dialogs.
 	 * Enforced by the interactive TUI (masked as bullets), forwarded on RPC `input`
 	 * requests for hosts that honor it, and rejected (`undefined`) in ACP mode where
@@ -510,15 +515,17 @@ export interface ExtensionUIContext {
 
 export type { ContextUsage };
 
+/** One invocation's history-rewrite options and lifecycle callbacks. */
 export interface CompactOptions {
 	onComplete?: (result: CompactionResult) => void;
 	onError?: (error: Error) => void;
 	/**
 	 * Force a one-off compaction mode for this invocation, replacing the
-	 * configured `compaction.methodOrder` (`/compact soft`, `remote`, or
-	 * `snapcompact`). Omitted = configured preference order.
+	 * configured `compaction.methodOrder`. Omitted = configured preference order.
 	 */
 	mode?: CompactMode;
+	/** Cancel the compaction without interrupting any live turn. */
+	signal?: AbortSignal;
 	/**
 	 * Internal summarizer guidance — piped only to native summarization, never
 	 * exposed as `customInstructions` on the `session_before_compact` extension
@@ -532,7 +539,7 @@ export interface CompactOptions {
 	 */
 	internalGuidance?: string;
 	/**
-	 * A manual compaction aborts any turn in flight and, once the summary is
+	 * A foreground compaction aborts any turn in flight and, once the summary is
 	 * committed (or at once when there was nothing to compact), resumes it with
 	 * the auto-continue nudge. Set this when the caller dispatches its own
 	 * follow-up turn after compaction — plan-mode "Approve and compact context" —

@@ -13,7 +13,7 @@
  * is diagnosed correctly.
  */
 
-/** Prefix of the stamp slot linked into every addon (`crates/pi-natives/src/lib.rs`). */
+/** Prefix of the stamp slot linked into every addon (`crates/natives/src/lib.rs`). */
 export const VERSION_STAMP_MAGIC = "PI_NATIVES_VERSION_STAMP:";
 
 /** Total stamp slot size in bytes: magic, version, NUL padding. */

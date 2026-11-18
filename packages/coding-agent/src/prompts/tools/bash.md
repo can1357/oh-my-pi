@@ -1,5 +1,5 @@
 Persistent bash 5.3.
-cwd will reset after each turn, don't rely on cd; `pty` = interactive.
+cwd will reset after each turn, don't rely on cd{{#if hasPty}}; `pty` = interactive{{/if}}.
 Internal URIs work as paths for builtins/coreutils, redirects, globs.
 In-process builtins, ahead of PATH: {{join builtins ", "}}.
 {{#if asyncEnabled}}
@@ -10,7 +10,7 @@ Don't trunc output by habit, result will be summarized and saved as an artifact.
 {{#if hasLaunch}}
 Long-lived services:
 - unique name; ready requires name; no async/timeout; pty defaults true.
-- ready needs log regex or port (both if given); host defaults 127.0.0.1, ready.timeout 30s.
+- ready needs log regex or port (both if given); host defaults localhost, ready.timeout 30s.
 - `notify` (regex) sends each matching output line as a follow-up while the service runs.
 {{/if}}
 {{#if autoBackgroundEnabled}}

@@ -569,6 +569,8 @@ const COMPOSER_STATUS_PERSIST_DELAY_MS = 1_000;
 /** Status-line slot of the link-hint mode prompt; the `omp:` prefix keeps it apart from extension keys. */
 const LINK_HINT_STATUS_KEY = "omp:link-hints";
 const DEFAULT_WORKING_MESSAGE = "Working…";
+/** The composer's hint while an ask waits above it. */
+const ASK_COMPOSER_HINT = "↑ answer the questions above, or type here to skip them";
 /** Native working-message shimmer under a session accent: the hue itself is the terminal's `accent`. */
 const NATIVE_ACCENT_SHIMMER: ShimmerPalette = { low: "dim", mid: "accent", high: "accent", bold: true };
 
@@ -963,6 +965,14 @@ function describeRunningSegment(spec: RunningSegmentSpec, running: number): Nati
 		],
 		spec.key,
 	);
+}
+
+/** The ask waiting above the composer; in rows a blank row parts it from the working row under it. */
+class AskContainer extends AnchoredLiveContainer {
+	override render(width: number): readonly string[] {
+		const lines = super.render(width);
+		return lines.length > 0 ? [...lines, ""] : lines;
+	}
 }
 
 class StatusHudContainer extends AnchoredLiveContainer {
@@ -1399,6 +1409,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	chatContainer: TranscriptContainer;
 	/** `!`/`$` runs started while the agent streams; {@link flushPendingBashComponents} moves them into the transcript. */
 	pendingShellContainer: Container;
+	askContainer: Container;
 	pendingMessagesContainer: Container;
 	/** Judge-batch and automatic-download progress rows above the working line. */
 	progressHudContainer: Container;
@@ -2146,6 +2157,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor = this.composer.editor;
 		this.editor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		this.editor.placeholder = () => this.#composerHint();
+		this.editor.faint = () => this.#extensionUiController.askHoldsKeys();
+		this.editor.onUpFromTop = () => this.#extensionUiController.focusAsk();
 		this.editor.predictions = () => this.#eventController.composerPrediction.choices;
 		this.editor.onPredictionAccepted = index => this.#eventController.composerPrediction.accepted(index);
 		this.editor.onPredictionShown = () => this.#eventController.composerPrediction.shown();
@@ -2232,6 +2245,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 		this.chatContainer = new TranscriptContainer();
 		this.pendingShellContainer = new AnchoredLiveContainer();
+		this.askContainer = new AskContainer();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.progressHudContainer = new AnchoredLiveContainer();
 		this.progressHudContainer.addChild(this.#judgmentBatchProgressHud);
@@ -2574,6 +2588,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				// Judge batches and automatic downloads stay editor-anchored and update
 				// independently of transcript output, directly above the working/throughput/title row.
 				this.progressHudContainer,
+				// The ask waiting for answers, over the working row and the composer, a blank row under it
+				// (natively it flows at the transcript's end).
+				this.askContainer,
 				// Working loader / transient status sits below the sticky todo + subagent
 				// HUDs, just above the editor's hook-widget top margin — so it reads next to
 				// the prompt while keeping the one-line gap above the editor (the band
@@ -2595,6 +2612,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// in. Classify every new root that can collapse on its own.
 				transientChrome: [
 					this.editorContainer,
+					this.askContainer,
 					this.attachmentChipsContainer,
 					this.reportContainer,
 					this.pendingShellContainer,
@@ -2640,7 +2658,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				],
 				// Deferred shell runs are transcript output: natively they flow at its
 				// end, where they stay when they move in, not pinned over the composer.
-				nativeTail: [this.pendingShellContainer],
+				// An ask waiting for answers follows them, right above the composer.
+				nativeTail: [this.pendingShellContainer, this.askContainer],
 			},
 		);
 		this.ui.setFocus(this.editor);
@@ -4914,6 +4933,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					: undefined,
 			viewing: this.#viewingLineage(),
 			btw: this.#btwController.isFocused(),
+			ask: this.#extensionUiController.composerAsk(),
 			title: this.sessionManager.getSessionName(),
 		};
 	}
@@ -4936,6 +4956,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Placeholder for the empty composer; see `COMPOSER_HINTS` for the registered hints. */
 	#composerHint(): string | undefined {
+		// An ask above holding the keys: its key hints; the keys here: what typing does.
+		const ask = this.#extensionUiController.composerAsk();
+		if (ask) return this.#extensionUiController.askKeyHints() ?? ASK_COMPOSER_HINT;
 		return resolveComposerHint({
 			runningAgents: this.#runningSubagentCount,
 			focusedOnAgent: this.focusedAgentId !== undefined,
@@ -8575,6 +8598,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.viewportRowsProvider = () => this.ui.terminal.rows;
 		nextEditor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		nextEditor.placeholder = () => this.#composerHint();
+		nextEditor.faint = () => this.#extensionUiController.askHoldsKeys();
+		nextEditor.onUpFromTop = () => this.#extensionUiController.focusAsk();
 		nextEditor.predictions = () => this.#eventController.composerPrediction.choices;
 		nextEditor.onPredictionAccepted = index => this.#eventController.composerPrediction.accepted(index);
 		nextEditor.onPredictionShown = () => this.#eventController.composerPrediction.shown();
@@ -9561,10 +9586,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleCompactCommand(customInstructions, mode, beforeFlush, options);
 	}
 
-	handleHandoffCommand(customInstructions?: string): Promise<void> {
-		return this.#commandController.handleHandoffCommand(customInstructions);
-	}
-
 	handleShakeCommand(mode: ShakeMode): Promise<void> {
 		return this.#commandController.handleShakeCommand(mode);
 	}
@@ -9745,6 +9766,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleBtwEscape(): boolean {
 		return this.#btwController.handleEscape();
+	}
+
+	focusAsk(): boolean {
+		return this.#extensionUiController.focusAsk();
 	}
 
 	get isBtwFocused(): boolean {

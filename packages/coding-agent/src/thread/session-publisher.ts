@@ -496,7 +496,6 @@ export class SessionPublisher {
 			compactionSpeculation: session.compactionSpeculation,
 			contextUsageRevision: session.contextUsageRevision,
 			contextUsage: toWireData(session.getContextUsage()),
-			isGeneratingHandoff: session.isGeneratingHandoff,
 			isRetrying: session.isRetrying,
 			retryAttempt: session.retryAttempt,
 			isTtsrAbortPending: session.isTtsrAbortPending,
@@ -591,7 +590,6 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 	flushSession: async publisher => settle(publisher, publisher.session.sessionManager.flush()),
 	ensureOnDisk: async publisher => settle(publisher, publisher.session.sessionManager.ensureOnDisk()),
 	getArtifactPath: (publisher, id) => publisher.session.sessionManager.getArtifactPath(id),
-	getArtifactContent: (publisher, id) => publisher.session.sessionManager.getArtifactContent(id),
 	resume: async publisher => settle(publisher, publisher.session.resume()),
 	retry: async publisher => settle(publisher, publisher.session.retry()),
 	abortRetry: publisher => {
@@ -600,10 +598,6 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 	},
 	abortCompaction: (publisher, reason) => {
 		publisher.session.abortCompaction(reason);
-		publisher.schedule();
-	},
-	abortHandoff: publisher => {
-		publisher.session.abortHandoff();
 		publisher.schedule();
 	},
 	setModelTemporary: async (publisher, model, thinkingLevel, options) =>

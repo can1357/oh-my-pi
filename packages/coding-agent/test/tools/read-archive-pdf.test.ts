@@ -121,7 +121,7 @@ describe("PDF archive members", () => {
 			for (const line of excluded) expect(text).not.toContain(line);
 		}
 		const raw = await tool.execute("pdf-raw-range", { path: `${archivePath}:${MEMBER}:30-31:raw` });
-		expect(textOf(raw)).toBe("pdf line 30\npdf line 31");
+		expect(textOf(raw)).toBe("pdf line 30\npdf line 31\n");
 	});
 
 	it("keeps the scanned-PDF guidance from the existing converter", async () => {

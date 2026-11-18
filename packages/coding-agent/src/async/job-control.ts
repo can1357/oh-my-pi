@@ -12,6 +12,7 @@ import {
 	type AsyncJobManagerApi,
 	type AsyncJobType,
 	agentProgress,
+	type EvictedJob,
 } from "./job-manager";
 
 import { renderStructuredJson, structuredStatusLabel, taskAgentHandles } from "../session/async-job-delivery";
@@ -545,10 +546,22 @@ export async function executeCancel(
 			);
 			continue;
 		}
+		// Cancelling a task job alone only aborts its current turn: the agent stays
+		// live and idle, and the next message queued for it starts it again. Kill
+		// the agent too, as an explicit kill, before its run observes the abort.
+		const runAgent = agentRunOf(existing);
+		const agentKill = runAgent ? await cancelAgentRegistration(session, ownerId, runAgent) : undefined;
 		const cancelled = manager.cancel(id, { ownerId });
 		cancelOutcomes.push(
 			cancelled
-				? { id, status: "cancelled", message: `Cancelled background job ${id}.` }
+				? {
+						id,
+						status: "cancelled",
+						message:
+							agentKill?.status === "cancelled"
+								? `Cancelled background job ${id}. ${agentKill.message}`
+								: `Cancelled background job ${id}.`,
+					}
 				: { id, status: "already_completed", message: `Background job ${id} is already completed.` },
 		);
 	}
@@ -559,9 +572,41 @@ export async function executeCancel(
 }
 
 /**
- * Kill a non-job-backed agent registration named by `id`: abort any in-flight
- * turn, then release it from the lifecycle (dispose session + unregister). This
- * is the only kill path for a keep-alive subagent that was budget-aborted, went
+ * What became of an evicted job, in one line: when it settled, whether its
+ * result reached the owner, and why its row is gone.
+ */
+export function describeEvictedJob(record: EvictedJob, now: number = Date.now()): string {
+	const settled = record.endTime === undefined ? "" : ` ${formatDuration(Math.max(0, now - record.endTime))} ago`;
+	const result = record.delivered
+		? "its result reached you then (a follow-up message or a wait result)"
+		: record.reason === "cleared"
+			? "its undelivered result was dropped"
+			: "its result was never read";
+	const gone =
+		record.reason === "cleared"
+			? "its row was cleared when your session was reset, replaced, or switched"
+			: "its row has since expired";
+	return `${record.id} [${record.type}] ${record.status}${settled} — ${record.label.replace(/\s+/g, " ")}; ${result}; ${gone}.`;
+}
+
+/**
+ * The agent whose run `job` is: a spawned agent's job, or a later turn's job of
+ * it, which takes the agent id with a `-N` collision suffix. Undefined for any
+ * other job, including a workpool batch, which runs on a pool worker it does not own.
+ */
+function agentRunOf(job: AsyncJob): string | undefined {
+	const agentId = job.agentId;
+	if (job.type !== "task" || !agentId) return undefined;
+	if (job.id === agentId) return agentId;
+	return job.id.startsWith(`${agentId}-`) && /^\d+$/.test(job.id.slice(agentId.length + 1)) ? agentId : undefined;
+}
+
+/**
+ * Kill an agent registration named by `id`: abort any in-flight turn, then
+ * release it from the lifecycle as an explicit kill (dispose the session and
+ * keep a terminal `aborted` row, so no queued message wakes it, while a message
+ * sent to it later reopens its transcript). It is the kill path for a task
+ * job's agent and for a keep-alive subagent that was budget-aborted, went
  * `idle`/`parked`, and outlived its job row — otherwise it is unstoppable short
  * of a broker restart (issue #6315). Scoped to the caller's own descendants so
  * cross-agent kills stay impossible; an unowned caller (no owner id) reaches
@@ -589,7 +634,7 @@ export async function cancelAgentRegistration(
 			await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 		}
 		if (lifecycle) {
-			await lifecycle.release(id);
+			await lifecycle.release(id, undefined, { tombstone: true });
 		} else {
 			await ref.session?.dispose();
 			registry?.unregister(id);
@@ -601,5 +646,9 @@ export async function cancelAgentRegistration(
 			message: `Agent ${id} could not be fully cancelled: ${error instanceof Error ? error.message : String(error)}.`,
 		};
 	}
-	return { id, status: "cancelled", message: `Cancelled agent ${id} (killed session, dropped registration).` };
+	return {
+		id,
+		status: "cancelled",
+		message: `Killed agent ${id}; its transcript stays at history://${id}.`,
+	};
 }

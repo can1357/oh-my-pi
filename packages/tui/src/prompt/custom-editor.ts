@@ -59,6 +59,8 @@ const SHELL_SIGIL_RE = /^\s*(?:!!?|\$\$?)[ \t]?/;
 
 /** The untitled session's TSP placeholder; the rotating ANSI hints (thinking effort, …) move into control tooltips. */
 const NATIVE_COMPOSER_PLACEHOLDER = "What are we cooking?";
+/** The TSP placeholder while an ask waits above the composer. */
+const ASK_PLACEHOLDER = "Answer above, or type here to skip the questions";
 
 /** Live composer state the TSP layout shows; the interactive host wires {@link CustomEditor.composerState}. */
 export interface ComposerNativeState {
@@ -78,6 +80,12 @@ export interface ComposerNativeState {
 	readonly viewing?: readonly string[];
 	/** Drafts go to the `/btw` note the user clicked, as its follow-ups: role `omp.editor.btw`, a `btw` chip. */
 	readonly btw?: boolean;
+	/**
+	 * An ask waits inline above the composer (Tern). `pending`: the placeholder says typing here skips it, and
+	 * the composer folds to its compact row while the keys are away from it. `skip`: sending the draft skips
+	 * the ask, so a `skips ask` chip leads the input and send reads Skip & send.
+	 */
+	readonly ask?: "pending" | "skip";
 	/** The session's title, quoted in italics as the TSP placeholder; undefined until it has one. */
 	readonly title?: string;
 }
@@ -1131,6 +1139,16 @@ export class CustomEditor extends Editor {
 			!dictationHoldsDraft(this.composerState().dictation)
 		);
 	}
+	/** Rows: while it returns true the composer draws faint, its keys with an ask above it. */
+	faint?: () => boolean;
+
+	override render(width: number): readonly string[] {
+		const lines = super.render(width);
+		if (!this.faint?.()) return lines;
+		// Faint every cell: re-applied after each reset the rows carry, so styled runs stay faint too.
+		return lines.map(line => `\x1b[2m${line.replace(/\x1b\[(?:0|22)?m/g, reset => `${reset}\x1b[2m`)}\x1b[22m`);
+	}
+
 	/** The quoted-title placeholder, kept while the title stands so the editor node stays reused. */
 	#titlePlaceholder: { title: string; text: TspText } | undefined;
 	/**
@@ -1138,8 +1156,9 @@ export class CustomEditor extends Editor {
 	 * it: the placeholder names it; else the session's title, quoted in italics.
 	 */
 	override describePlaceholder = (): TspText => {
-		const { viewing, title, btw } = this.composerState();
+		const { viewing, title, btw, ask } = this.composerState();
 		if (btw) return "Ask about this…";
+		if (ask) return ASK_PLACEHOLDER;
 		const agent = viewing?.at(-1);
 		if (agent !== undefined) return `Message ${agent}`;
 		if (!title) return NATIVE_COMPOSER_PLACEHOLDER;
@@ -1188,6 +1207,8 @@ export class CustomEditor extends Editor {
 		const thinkingKey = this.#actionKeys.get("app.thinking.cycle")?.[0];
 		const modelKey = this.#actionKeys.get("app.model.selectTemporary")?.[0];
 		const interruptKey = this.#actionKeys.get("app.interrupt")?.[0] ?? "escape";
+		// The keys away at an ask above: the composer folds until a click or a key brings them back.
+		const folded = state.ask !== undefined && !this.focused;
 		const key = [
 			shell?.kind,
 			shell?.excluded,
@@ -1199,6 +1220,8 @@ export class CustomEditor extends Editor {
 			interruptKey,
 			state.viewing?.join("\u0001"),
 			state.btw,
+			state.ask,
+			folded,
 			effortGlyph,
 			state.thinkingInModel,
 		].join("\0");
@@ -1252,6 +1275,7 @@ export class CustomEditor extends Editor {
 		const layout: NativeEditorLayout = {
 			role: shell ? `omp.editor.${shell.kind}` : state.btw ? "omp.editor.btw" : "omp.editor",
 			tone: state.running ? "pending" : undefined,
+			...(folded ? { folded: true } : {}),
 			children: compact([facts?.context, controls.focus, chips, line, bar]),
 			caret: "line/input",
 		};
@@ -1439,33 +1463,60 @@ export class CustomEditor extends Editor {
 						"dictation",
 					);
 		const dictating = dictationHoldsDraft(state.dictation);
-		const submit = state.running
-			? node(
-					"text",
-					{
-						role: "omp.composer.stop",
-						text: "Stop",
-						tone: "error",
-						title: `Stop  ${formatTooltipKey(interruptKey)}`,
-						actions: { click: "interrupt" },
-					},
-					undefined,
-					"stop",
-				)
-			: node(
-					"kbd",
-					{
-						role: "omp.composer.send",
-						keys: ["enter"],
-						title: dictating ? "Finish dictation before sending" : `Send  ${formatTooltipKey("enter")}`,
-						tone: dictating ? "muted" : undefined,
-						actions: dictating ? undefined : { click: "submit" },
-					},
-					undefined,
-					"send",
-				);
+		const submit =
+			state.ask === "skip"
+				? node(
+						"text",
+						{
+							role: "omp.composer.skip",
+							text: "Skip & send",
+							tone: "warning",
+							title: `Send this message instead of answering the questions  ${formatTooltipKey("enter")}`,
+							actions: { click: "submit" },
+						},
+						undefined,
+						"skip",
+					)
+				: state.running
+					? node(
+							"text",
+							{
+								role: "omp.composer.stop",
+								text: "Stop",
+								tone: "error",
+								title: `Stop  ${formatTooltipKey(interruptKey)}`,
+								actions: { click: "interrupt" },
+							},
+							undefined,
+							"stop",
+						)
+					: node(
+							"kbd",
+							{
+								role: "omp.composer.send",
+								keys: ["enter"],
+								title: dictating ? "Finish dictation before sending" : `Send  ${formatTooltipKey("enter")}`,
+								tone: dictating ? "muted" : undefined,
+								actions: dictating ? undefined : { click: "submit" },
+							},
+							undefined,
+							"send",
+						);
 		if (!shell) {
-			const mode = state.btw ? this.#describeBtwChip(interruptKey) : undefined;
+			const mode = state.btw
+				? this.#describeBtwChip(interruptKey)
+				: state.ask === "skip"
+					? keyed(
+							row([node("text", { spans: [span("skips ask", "warning")], wrap: "none" }, undefined, "label")], {
+								role: "omp.composer.mode",
+								tone: "warning",
+								gap: "xs",
+								align: "center",
+								title: "Sending this message skips the questions above",
+							}),
+							"mode",
+						)
+					: undefined;
 			return { focus, mode, model, effort, dictation, submit };
 		}
 		const runs = shell.kind === "bash" ? "Runs in your shell" : "Runs in Python";

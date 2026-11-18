@@ -1499,6 +1499,9 @@
 				"details": {},
 				"attribution": {
 					"$ref": "#/$defs/Attribution"
+				},
+				"excludeFromContext": {
+					"type": "boolean"
 				}
 			},
 			"required": [
@@ -4034,7 +4037,7 @@
 			"required": [
 				"type"
 			],
-			"description": "A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted."
+			"description": "A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle."
 		},
 		"ManualCompactionEndEvent": {
 			"type": "object",
