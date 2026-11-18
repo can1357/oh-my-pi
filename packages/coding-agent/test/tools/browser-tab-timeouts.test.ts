@@ -3,12 +3,14 @@ import {
 	BROWSER_PAGE_PROTOCOL_TIMEOUT_MS,
 	BROWSER_PROTOCOL_TIMEOUT_MS,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import { createFrameApi, type FrameApiHooks } from "@oh-my-pi/pi-coding-agent/tools/browser/frames";
 import { resolveOpTimeouts, resolveWaitTimeout } from "@oh-my-pi/pi-coding-agent/tools/browser/op-timeouts";
 import { parseRoleSelector } from "@oh-my-pi/pi-coding-agent/tools/browser/query-handlers";
 import { renderTabCall, tabCallBudgetSeconds } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-call";
 import { dispatchScroll, normalizeSelector } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import { resolvePredicateTimeout } from "@oh-my-pi/pi-coding-agent/tools/run-scope";
-import { Connection, type ConnectionTransport } from "puppeteer-core";
+import { Connection, type ConnectionTransport, type Frame } from "puppeteer-core";
+import { rejectionOf } from "../helpers/rejection";
 
 // Regression coverage for the "weird timeouts" failure mode: interactive `tab.*` helpers
 // used to run with the full cell budget as their internal puppeteer timeout, so a stalled
@@ -134,6 +136,12 @@ describe("browser wait-helper timeout resolution", () => {
 			waitForFunction: (...values: unknown[]) => values,
 		});
 		expect(received).toEqual(["(n) => n", { timeout: 0 }, 7]);
+	});
+
+	it("rejects frame.waitFor given a function, as frame.waitForSelector does, instead of throwing", async () => {
+		const frame = createFrameApi({} as Frame, {} as FrameApiHooks);
+		const pending = frame.waitFor((() => true) as never);
+		expect(String(await rejectionOf(pending))).toContain("frame.waitFor(fn) waits for a selector string");
 	});
 
 	it("defaults a wait to the cell budget when no explicit timeout is given", () => {

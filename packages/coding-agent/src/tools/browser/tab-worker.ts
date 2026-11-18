@@ -3445,7 +3445,7 @@ export class WorkerCore {
 			},
 			waitForFunction: (predicate, opts, ...args) => {
 				const w = waitMs(opts?.timeout);
-				return act("tab.waitForFunction()", w, sig =>
+				return documentOp("tab.waitForFunction()", w, sig =>
 					waitForPagePredicate(page.mainFrame(), "tab.waitForFunction()", predicate, {
 						timeout: w,
 						polling: opts?.polling,

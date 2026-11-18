@@ -105,6 +105,7 @@ import {
 	mapWaitUntil,
 	serializeEvalWithEnvelope,
 	unwrapEvalEnvelope,
+	wrapEvalEnvelope,
 } from "./rpc";
 import type { CmuxSocketClient } from "./socket-client";
 
@@ -479,6 +480,23 @@ const RESPONSE_OBSERVER_SCRIPT = String.raw`
 	return true;
 })()
 `;
+
+/**
+ * The cmux script for one poll of a page predicate. A function is inlined, so a page whose CSP forbids `eval` still
+ * runs it; a string goes through indirect eval, so its syntax error reaches the envelope instead of failing the
+ * whole script with the daemon's opaque `js_error`. The daemon evaluates synchronously: a Promise is handed to the
+ * envelope, which reports it, not judged here.
+ */
+export function cmuxPredicateScript(
+	fn: string | ((...args: unknown[]) => unknown | Promise<unknown>),
+	args: unknown[],
+): string {
+	const predicate = typeof fn === "function" ? `(${String(fn)}\n)` : `(0, eval)(${JSON.stringify(`(${fn}\n)`)})`;
+	const call = `(${PREDICATE_CALL_SOURCE})(${predicate}, ${JSON.stringify(args)})`;
+	return wrapEvalEnvelope(
+		`(() => { const value = ${call}; return value && typeof value.then === "function" ? value : (${PREDICATE_ANSWER_SOURCE})(value); })()`,
+	);
+}
 
 export class CmuxTab implements InProcessRunTab {
 	/** Guest file-name prefix of cmux runs. */
@@ -1829,15 +1847,9 @@ export class CmuxTab implements InProcessRunTab {
 	): Promise<unknown> {
 		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
 		const signal = this.#runContext?.signal;
-		const pollingMs = typeof opts?.polling === "number" ? opts.polling : 200;
+		const pollingMs = typeof opts?.polling === "number" && opts.polling > 0 ? opts.polling : 200;
 		const deadline = Date.now() + timeoutMs;
-		const expression = `(0, eval)(${JSON.stringify(`(${String(fn)}\n)`)})`;
-		const call = `(${PREDICATE_CALL_SOURCE})(${expression}, ${JSON.stringify(args)})`;
-		// The daemon evaluates synchronously: a Promise is handed to the envelope, which reports it, not judged here.
-		const script = serializeEvalWithEnvelope(
-			`(() => { const value = ${call}; return value && typeof value.then === "function" ? value : (${PREDICATE_ANSWER_SOURCE})(value); })()`,
-			[],
-		);
+		const script = cmuxPredicateScript(fn, args);
 		while (Date.now() <= deadline) {
 			const result = (await this.#request("browser.eval", { script })) as CmuxEvalResult;
 			const answer = unwrapEvalEnvelope<PredicateAnswer | undefined>(result.value, label);
