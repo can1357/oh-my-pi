@@ -10,6 +10,7 @@
 
 - Windows shell discovery skips the WSL `bash.exe` launcher, so services no longer run in WSL
 - Opening an archive no longer fails because one unrelated member exceeds the 64 MiB extraction limit; the limit applies when that member is read
+- Markdown emphasis and link labels no longer close at a `*`, `_` or `]` inside a code span, autolink, inline HTML tag or link destination, so ``*use `*` as the marker*`` renders as italic around code ([#19669](https://github.com/can1357/oh-my-pi/issues/19669))
 
 ## [18.22.2] - 2026-11-18
 
