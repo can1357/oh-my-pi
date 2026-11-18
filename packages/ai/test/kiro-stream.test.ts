@@ -246,6 +246,9 @@ test("maps HTTP context overflow responses", async () => {
 	for (const respond of [
 		json(400, "ValidationException", "input exceeds the context window"),
 		() => new Response(null, { status: 413 }),
+		// Kiro's own wording: the Kiro CLI reads it as a context overflow on any status, 429 included.
+		json(400, "ValidationException", "Input is too long."),
+		json(429, "ThrottlingException", "Input is too long."),
 	]) {
 		const { result } = await run(respond);
 		expect(AIError.is(result.errorId, AIError.Flag.ContextOverflow)).toBe(true);

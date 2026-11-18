@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Kiro requests rejected with `Input is too long.` now compact the conversation instead of failing the turn ([#19723](https://github.com/can1357/oh-my-pi/pull/19723) by [@emotionbug](https://github.com/emotionbug))
+
 ## [19.0.0] - 2026-11-18
 
 ### Added

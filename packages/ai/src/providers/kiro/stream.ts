@@ -41,6 +41,12 @@ const FIRST_EVENT_TIMEOUT_ERROR = "Kiro stream timed out while waiting for the f
 /** `ThrottlingError.reason` when the selected model has no capacity (Smithy model in aws/amazon-q-developer-cli). */
 const INSUFFICIENT_MODEL_CAPACITY = "INSUFFICIENT_MODEL_CAPACITY";
 /**
+ * Body text of Kiro's context-window rejection. The Kiro CLI treats any error
+ * body containing it as a context overflow, whatever the HTTP status
+ * (`classify_error_kind` in aws/amazon-q-developer-cli `api_client/mod.rs`).
+ */
+const INPUT_TOO_LONG = "Input is too long.";
+/**
  * HTTP-equivalent status of in-stream exception shapes, keyed lowercase. Exception
  * frames ride inside an HTTP 200, so without this the shared retry classifier
  * would read a temporary throttle as terminal. Unknown shapes stay status-less.
@@ -109,7 +115,9 @@ async function httpError(response: Response, signal: AbortSignal | undefined): P
 	const detail = kiroString(payload.message) ?? kiroString(payload.reason);
 	const message = `Kiro HTTP ${response.status}${code ? ` ${code}` : ""}${detail ? `: ${detail}` : ""}`;
 	const error = new KiroApiError(message, response.status, code, payload.reason, response.headers);
-	return response.status === 413 ? AIError.attach(error, AIError.create(AIError.Flag.ContextOverflow)) : error;
+	const overflow =
+		response.status === 413 || (body !== null && new TextDecoder().decode(body.bytes).includes(INPUT_TOO_LONG));
+	return overflow ? AIError.attach(error, AIError.create(AIError.Flag.ContextOverflow)) : error;
 }
 
 /** An `exception`/`error` frame: the failure is in its headers, a payload (when present) adds the shape's fields. */

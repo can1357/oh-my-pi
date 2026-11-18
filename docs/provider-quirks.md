@@ -681,6 +681,7 @@ The native Kiro provider (`kiro-api`) streams AWS event-stream frames from the K
 - **Transient retry**: A request is retried at most once, with an identical body and a fresh request id, and only before any output, for a `ThrottlingError` with reason `INSUFFICIENT_MODEL_CAPACITY` (over HTTP or as an in-stream exception) and for HTTP 400 `ValidationException: Invalid tool use format.`. A billed request is never replayed; every other failure is terminal.
 - **Stop reasons**: `MAX_TOKENS` maps to `length` and a tool call whose arguments were cut off is dropped. `CONTENT_FILTERED` is reported as a refusal with the service's category and explanation and is not retried.
 - **Context size**: `contextUsageEvent` percentages are reported as context size, scaled to the model's context window.
+- **Context overflow**: HTTP 413, and any error body containing Kiro's `Input is too long.` (on any status, 429 included, as the Kiro CLI classifies it), are reported as context overflow so OMP compacts instead of failing the turn.
 
 ### Auth & usage
 
