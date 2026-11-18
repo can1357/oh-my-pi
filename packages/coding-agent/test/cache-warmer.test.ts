@@ -830,6 +830,14 @@ describe("cache warmer rent and buy-out", () => {
 		expect(h.replays[0]?.options).toMatchObject({ prewarm: true, maxTokens: 4_096 });
 		expect(h.warmer.status.state).toBe("scheduled");
 
+		// The endpoint refuses a pre-warm with a forced tool choice: such a request replays.
+		const forced = harness();
+		start(forced, { toolChoice: "any" });
+		expect(forced.warmer.status.decision?.method).toBe("replay");
+		await advance(SHORT_DELAY_MS);
+		expect(forced.replays[0]?.options).toMatchObject({ maxTokens: 1 });
+		expect(forced.replays[0]?.options?.prewarm).toBeUndefined();
+
 		const sent: string[] = [];
 		const refused = harness({
 			stream: (_model, _context, options) => {
@@ -898,7 +906,7 @@ describe("cache warmer rent and buy-out", () => {
 		start(h);
 		await advance(SHORT_DELAY_MS);
 		await advance(SHORT_DELAY_MS);
-		expect(h.replays).toHaveLength(2);
+		expect(h.replays.map(record => record.options?.prewarm)).toEqual([true, true]);
 		const touchedAt = h.warmer.cacheEntry?.touchedAt ?? 0;
 		expect(h.warmer.status).toMatchObject({
 			state: "scheduled",
