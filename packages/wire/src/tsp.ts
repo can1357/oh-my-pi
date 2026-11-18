@@ -195,6 +195,20 @@ export interface TspCommonProps {
 	 * that don't know it ignore it and keep showing `title`.
 	 */
 	hovercard?: TspPropNode;
+	/**
+	 * `layout` makes the node a layout-transition container: descendants carrying a {@link motionKey} glide to
+	 * their new place and size when an update moves, resizes, adds or removes them; new keys fade in, leaving
+	 * ones fade out. Reduced motion turns it off.
+	 */
+	transition?: "layout";
+	/** A `transition` container's duration in ms (200 by default, at most 1000; 0 snaps). */
+	transitionMs?: number;
+	/**
+	 * The node's identity in its nearest `transition` container. Unlike `key`, it survives a move to another
+	 * parent, so the node glides there; give two shapes of one thing (a folded and an open question) the
+	 * same one so it resizes instead of swapping.
+	 */
+	motionKey?: string;
 }
 
 /** A {@link TspCommonProps.mark}. */
