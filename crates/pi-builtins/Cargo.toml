@@ -247,6 +247,8 @@ default = ["utils"]
 "util.direnv" = ["dep:toml"]
 "util.dirname" = []
 "util.du" = []
+# Needs change notification and processes: unix and windows targets.
+"util.entr" = []
 "util.env" = []
 "util.fd" = []
 # Needs the codecs `-z` decodes with: unix and windows targets.
@@ -355,6 +357,7 @@ utils = [
   "util.direnv",
   "util.dirname",
   "util.du",
+  "util.entr",
   "util.env",
   "util.fd",
   "util.file",

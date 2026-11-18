@@ -339,6 +339,7 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		"direnv",
 		"dirname",
 		"du",
+		"entr",
 		"env",
 		#[cfg(unix)]
 		"errno",

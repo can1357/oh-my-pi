@@ -123,6 +123,8 @@ mod direnv;
 mod dirname;
 #[cfg(feature = "util.du")]
 mod du;
+#[cfg(all(feature = "util.entr", any(unix, windows)))]
+mod entr;
 #[cfg(feature = "util.env")]
 mod env;
 #[cfg(all(feature = "util.errno", unix))]

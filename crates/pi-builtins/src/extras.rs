@@ -56,6 +56,7 @@ macro_rules! for_each_extra {
 			utility [feature = "util.direnv"] "direnv" direnv::Direnv;
 			utility [feature = "util.dirname"] "dirname" dirname::Dirname;
 			utility [feature = "util.du"] "du" du::Du;
+			async_utility [all(feature = "util.entr", any(unix, windows))] "entr" entr::Entr;
 			utility [feature = "util.env"] "env" env::Env;
 			utility [all(feature = "util.errno", unix)] "errno" errno::Errno;
 			async_utility [feature = "util.fd"] "fd" fd::FdCli;
