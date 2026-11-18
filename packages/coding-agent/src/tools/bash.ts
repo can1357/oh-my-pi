@@ -1610,7 +1610,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				? notifyNotice
 				: notifySource === undefined
 					? undefined
-					: "Ignored notify: this project's service broker is from an older omp; it is replaced once every omp session using the project has exited.";
+					: `Ignored notify: this project's service broker is from an older omp, so ${name}'s output is not reported; read proc://${name} for it.`;
 			if (service.readyInterrupted) {
 				// A queued message arrived mid-wait: return so it injects promptly.
 				// The broker keeps starting the service, inspectable via proc://.

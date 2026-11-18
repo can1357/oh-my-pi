@@ -223,7 +223,7 @@ Choose the setting by the desired outcome:
    - Starts like a foreground managed job, then backgrounds it when it outlives the wait window; at capacity, Bash falls back to direct foreground execution.
 6. Named supervised service
    - Requires `launch.enabled` and an active Bash tool; `async: true` and any supplied `timeout` are incompatible and ignored with a notice.
-   - `notify` reports the service's matching output for as long as it runs, across restarts of the same spec. A broker left running by an older omp starts the service and ignores the regex; the result then says `Ignored notify: …` instead of confirming it.
+   - `notify` reports the service's matching output while it runs, up to 30 notices per start; starting it again re-arms it. A broker left running by an older omp starts the service and ignores the regex; the result then says `Ignored notify: …` instead of confirming it.
    - Runs through the launch broker with project-unique `name`, the configured shell environment plus the session identity, PTY defaulting to `true`, and optional readiness conditions. Reusing a live name restarts it with the new spec.
    - Readiness waits for all supplied log/port conditions, service exit, or timeout. `ready.log` is a Unicode multiline regex over accumulated output: `^` and `$` match line boundaries, including after earlier startup output, and matches may span output chunks. `$` also matches at the end of the output received so far, so an anchored pattern can match a line the service has not finished writing (this lets prompts without a trailing newline match). Inspect with `read proc://<name>`.
 7. Intercepted command

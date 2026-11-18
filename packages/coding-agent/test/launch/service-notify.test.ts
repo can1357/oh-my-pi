@@ -359,7 +359,11 @@ describe("service notify", () => {
 
 	it.each([
 		{ broker: "a broker that armed the regex", notifyArmed: true, told: /Output lines matching \/ERROR\/ arrive/ },
-		{ broker: "a broker from an older omp", notifyArmed: undefined, told: /Ignored notify/ },
+		{
+			broker: "a broker from an older omp",
+			notifyArmed: undefined,
+			told: /Ignored notify: .* web's output is not reported; read proc:\/\/web for it\./,
+		},
 	])("tells the model what became of the regex on $broker", async ({ notifyArmed, told }) => {
 		using tempDir = TempDir.createSync("@omp-service-notify-bash-");
 		const daemon: DaemonSnapshot = {
