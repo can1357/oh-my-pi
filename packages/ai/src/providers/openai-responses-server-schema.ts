@@ -107,7 +107,7 @@ const assistantMessageItemSchema = type({
 	role: "'assistant'",
 	"content?": type("string").or(outputContentBlockSchema.array()),
 	"status?": "'in_progress' | 'completed' | 'incomplete'",
-	"phase?": "'commentary' | 'final_answer' | null",
+	"phase?": "'commentary' | 'final_answer' | 'partial_answer' | null",
 });
 
 const reasoningItemSchema = type({
