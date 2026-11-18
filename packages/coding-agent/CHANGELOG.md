@@ -163,6 +163,10 @@
 ### Changed
 
 - Model registries in one process (SDK embedders, tests) now share discovered-model builds, so refreshing another registry skips rebuilding models an earlier one already built
+### Added
+
+- Added `notify` to the `bash` tool: a regex whose matching output lines are reported to the agent while a background command or a named service runs, waking an idle session or ending a blocked `wait`; the command's result or the service's exit notice still follows
+- Added radare2 as a third `dsm` backend alongside IDA and Ghidra, with the same open, view, exec, annotate, save and close actions, managed radare2 projects, and a free scriptable option for binary analysis ([#19612](https://github.com/can1357/oh-my-pi/pull/19612) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
@@ -225,7 +229,6 @@
 - Computer `el.setValue()` now accepts finite safe integer and decimal numbers and writes them as text, while continuing to reject unsupported values such as booleans, objects, `NaN`, and `Infinity`.
 - On macOS, browser results now report relevant native windows—such as pickers, print or save sheets, sign-in prompts, passkey dialogs, and permission bubbles—with their `computer.window()` identifiers.
 - Browser `select()` now accepts label-, value-, and zero-based index-based choices, including mixed choices for multi-select controls, across Chromium, Tern, and cmux tabs.
-- Added radare2 as a third `dsm` backend alongside IDA and Ghidra, with the same open, view, exec, annotate, save and close actions, managed radare2 projects, and a free scriptable option for binary analysis ([#19612](https://github.com/can1357/oh-my-pi/pull/19612) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
 
