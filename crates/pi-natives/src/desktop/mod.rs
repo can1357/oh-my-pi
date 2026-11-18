@@ -442,6 +442,24 @@ impl Request {
 		)
 	}
 
+	/// Requests that send pointer or keyboard input, which a desktop with no
+	/// input route refuses ([`Backend::refuse_input`]). An element click is one:
+	/// it clicks at the element's bounds.
+	const fn is_raw_input(&self) -> bool {
+		matches!(
+			self,
+			Self::Click { .. }
+				| Self::MoveMouse { .. }
+				| Self::Drag { .. }
+				| Self::Scroll { .. }
+				| Self::TypeText { .. }
+				| Self::KeyChord { .. }
+				| Self::AxClick { .. }
+				| Self::HoldKeys { .. }
+				| Self::HoldMouse { .. }
+		)
+	}
+
 	/// Whether this mutation takes over the user's own input or foreground,
 	/// which arms the physical-Escape stop: `takeover: true` delivery, input
 	/// to a desktop or display target (it drives the user's real pointer and
@@ -1100,6 +1118,14 @@ impl Worker {
 			return Ok(Response::Unit);
 		}
 		token.check()?;
+		// Pointer and keyboard input on a desktop with no input route is refused
+		// before it waits for the input lease or resolves its target or frame. A
+		// backend that could not be built leaves the call to fail where it did.
+		if request.is_raw_input()
+			&& let Ok(backend) = self.backend.as_mut()
+		{
+			backend.refuse_input()?;
+		}
 		let _scope = token.enter();
 		// A ref whose row the app rebuilt names the row's copy before the
 		// request reads its element or its app. That probe asks the element's
@@ -3050,6 +3076,8 @@ mod capture_tests {
 		input_lookups:          Arc<Mutex<u32>>,
 		/// Every click lands on a control whose menu would take the keyboard.
 		menu_control:           bool,
+		/// The desktop has no input route at all.
+		no_input:               bool,
 		/// What a drag is made as instead of input; `None` posts it.
 		drag_selection:         Option<AxTextSelection>,
 	}
@@ -3123,6 +3151,7 @@ mod capture_tests {
 				window_present: true,
 				tree: None,
 				menu_control: false,
+				no_input: false,
 				clicks: Arc::new(Mutex::new(Vec::new())),
 				modes: Arc::new(Mutex::new(Vec::new())),
 				layout: Arc::new(Mutex::new(vec![DesktopDisplay {
@@ -3347,6 +3376,13 @@ mod capture_tests {
 				display_asleep: screen.display_asleep,
 				..DesktopCapabilities::unavailable()
 			}
+		}
+
+		fn refuse_input(&mut self) -> CoreResult<()> {
+			if self.no_input {
+				return Err(DesktopError::permission_denied("no input route"));
+			}
+			Ok(())
 		}
 
 		fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>> {
@@ -5108,6 +5144,116 @@ mod capture_tests {
 			ErrorCode::InvalidCoordinateFrame
 		);
 		assert_eq!(*captures.lock(), 1, "invalid zoom must not reach the capture backend");
+	}
+
+	/// With no input route, every pointer and keyboard call, element clicks
+	/// included, is refused at once: before it waits for control another session
+	/// holds or resolves a frame or a window, so none of them asks for a
+	/// screenshot first or opens a capture to refresh the display layout.
+	#[test]
+	fn every_input_call_is_refused_before_its_frame_when_input_is_unavailable() {
+		let mut backend = FakeWaylandBackend::new();
+		backend.no_input = true;
+		let captures = Arc::clone(&backend.captures);
+		let layout_reads = Arc::clone(&backend.window_queries);
+		let clicks = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		let token = CancellationSource::default().token();
+		// Another session holds control, which input would otherwise wait for.
+		let other = CancellationSource::default();
+		control::grant_for_test(&other);
+		let window = Target::Window(WAYLAND_ID.to_string());
+		let pointer = || ParsedPointerOptions::parse(None).unwrap();
+		let takeover = Takeover::new(None, None);
+		let reply = || flume::unbounded().0;
+		let requests = [
+			Request::Click {
+				target:  Target::Desktop,
+				x:       1.0,
+				y:       1.0,
+				options: pointer(),
+				reply:   reply(),
+			},
+			Request::MoveMouse { target: window.clone(), x: 1.0, y: 1.0, takeover, reply: reply() },
+			Request::Drag {
+				target:  Target::Desktop,
+				path:    vec![(1.0, 1.0), (2.0, 2.0)],
+				options: pointer(),
+				reply:   reply(),
+			},
+			Request::Scroll {
+				target: window.clone(),
+				x: 1.0,
+				y: 1.0,
+				dx: 0.0,
+				dy: 3.0,
+				takeover,
+				reply: reply(),
+			},
+			Request::HoldMouse {
+				target: Target::Desktop,
+				x: 1.0,
+				y: 1.0,
+				button: MouseButton::Left,
+				keys: Vec::new(),
+				duration: Duration::ZERO,
+				takeover,
+				refuse_menu: false,
+				reply: reply(),
+			},
+			Request::TypeText { target: Target::Desktop, text: "x".into(), takeover, reply: reply() },
+			Request::KeyChord {
+				target: window.clone(),
+				keys: vec![KeyName::Enter],
+				takeover,
+				reply: reply(),
+			},
+			Request::HoldKeys {
+				target: window,
+				keys: vec![KeyName::Enter],
+				duration: Duration::ZERO,
+				takeover,
+				reply: reply(),
+			},
+			Request::AxClick { reference: "e1".into(), options: pointer(), reply: reply() },
+		];
+		for request in &requests {
+			let error = worker
+				.execute(request, &token)
+				.err()
+				.expect("input is refused");
+			assert_eq!(error.code, ErrorCode::PermissionDenied, "{}", error.message);
+		}
+		assert_eq!(*captures.lock(), 0);
+		assert_eq!(*layout_reads.lock(), 0, "no window was looked up");
+		assert!(clicks.lock().is_empty());
+	}
+
+	/// Without a backend there is nothing to ask about an input route, so a
+	/// coordinate call still fails on its missing frame first.
+	#[test]
+	fn input_without_a_backend_still_asks_for_its_frame() {
+		let mut worker = worker_with(FakeWaylandBackend::new());
+		worker.backend = Err(DesktopError::capture_failed("no display server"));
+		// The user-input watch would ask the missing backend for the window's
+		// app first, so it stays off.
+		#[cfg(target_os = "macos")]
+		{
+			worker.listener = control::intervention::Listener::off();
+		}
+		let token = CancellationSource::default().token();
+		let click = Request::Click {
+			target:  Target::Window(WAYLAND_ID.to_string()),
+			x:       1.0,
+			y:       1.0,
+			options: ParsedPointerOptions::parse(None).unwrap(),
+			reply:   flume::unbounded().0,
+		};
+		let error = worker
+			.execute(&click, &token)
+			.err()
+			.expect("the click fails");
+		assert_eq!(error.code, ErrorCode::InvalidCoordinateFrame, "{}", error.message);
 	}
 
 	#[test]
