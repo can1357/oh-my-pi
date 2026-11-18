@@ -183,6 +183,8 @@ export class ApprovalDialogComponent implements Component {
 	#nativeDrafting = false;
 	/** Page Up/Down forwarded to the terminal's details scroller: bumped per key press. */
 	#nativeScroll: NativeScroll = { by: "start", n: 0 };
+	/** The summary's first prompted compound-bash segment row when it opens past {@link MAX_DETAIL_ROWS}. */
+	#promptedRow: number | undefined;
 	readonly #armedAt = performance.now() + APPROVE_ARM_MS;
 	readonly #countdown: CountdownTimer | undefined;
 
@@ -203,7 +205,8 @@ export class ApprovalDialogComponent implements Component {
 			.slice(segmentStart, segmentEnd)
 			.findIndex(line => PROMPTED_SEGMENT_RE.test(line));
 		if (firstPrompted >= 0 && segmentStart + firstPrompted >= MAX_DETAIL_ROWS) {
-			this.#scrollOffset = segmentStart + firstPrompted - MAX_DETAIL_ROWS + 1;
+			this.#promptedRow = segmentStart + firstPrompted;
+			this.#scrollOffset = this.#promptedRow - MAX_DETAIL_ROWS + 1;
 		}
 		this.#choices = this.#buildChoices();
 		this.#choice = this.#choices.findIndex(choice => choice.answer === "once");
@@ -427,7 +430,9 @@ export class ApprovalDialogComponent implements Component {
 			const rows = this.#details.map((line, index) => {
 				const styled = styledRows[index]!;
 				const content = styled.spans ? { spans: styled.spans } : { text: line };
-				return node("text", this.#expanded ? content : { ...content, truncate: "end" }, undefined, String(index));
+				const row = node("text", this.#expanded ? content : { ...content, truncate: "end" }, undefined, String(index));
+				// Like the text view's opening offset: the first prompted segment past the fold scrolls into view on mount.
+				return !this.#expanded && index === this.#promptedRow ? { ...row, reveal: "nearest" as const } : row;
 			});
 			const details = node("col", { role: "omp.approval.details" }, rows, "details");
 			children.push(

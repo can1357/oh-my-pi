@@ -631,6 +631,10 @@ describe("dialogs under a native surface", () => {
 		const longDialog = new ApprovalDialogComponent(longPrompt, { onApprove: vi.fn(), onDeny: vi.fn() });
 		const longRendered = stripVTControlCharacters(longDialog.render(80).join("\n"));
 		expect(longRendered).toContain("? rm -rf / (critical pattern)");
+		// Natively the capped scroller opens at its top, so that row reveals itself on mount instead.
+		const longRows = find(longDialog.describe(), node => node.p?.role === "omp.approval.details")!.node.c ?? [];
+		const revealed = longRows.filter(isNode).filter(row => row.reveal !== undefined);
+		expect(revealed.map(row => ({ key: row.key, reveal: row.reveal }))).toEqual([{ key: "9", reveal: "nearest" }]);
 
 		// Marker-shaped lines outside a bare `Command:` block (a multi-line command, code) stay plain accent text.
 		const spoof = new ApprovalDialogComponent(
@@ -661,7 +665,9 @@ describe("dialogs under a native surface", () => {
 		});
 		try {
 			expect(harness.errors).toEqual([]);
-			const details = harness.findAll(node => node.p?.role === "omp.approval.details")[0];
+			const root = harness.region("dock")!.c?.find(node => node.p?.role === "omp.editor.ask.approval");
+			const scroller = root?.c?.find(node => node.k === "list");
+			const details = scroller?.c?.find(node => node.p?.role === "omp.approval.details");
 			expect(details?.c?.map(node => node.p)).toEqual([
 				expect.objectContaining({ text: "Path: /tmp/out.txt", truncate: "end" }),
 			]);
