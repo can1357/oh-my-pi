@@ -177,6 +177,8 @@ interface Turn {
 	cancellation?: Promise<void>;
 	/** Automatic continuations already requested for this turn. */
 	continuations: number;
+	/** Bumped for every prompt dispatched for this turn, including continuations. */
+	generation: number;
 	/** Usage summed over the turn's completed prompts, including continuations. */
 	usage?: PromptResponse["usage"];
 	/** Armed only while an explicit cancellation drains the turn. */
@@ -644,7 +646,9 @@ export class AgyHost implements ProviderSessionState {
 			stopped: Promise.withResolvers<never>(),
 			cancelling: false,
 			continuations: 0,
+			generation: 0,
 		};
+		turn.generation++;
 		if (continuing) turn.response = Promise.withResolvers<PromptResponse>();
 		else {
 			turn.stopped.promise.catch(() => undefined);
@@ -847,12 +851,14 @@ export class AgyHost implements ProviderSessionState {
 		const conversationId = this.#conversation?.id;
 		if (!step || !turn || !conversationId)
 			return errorOutput("Tool call cancelled: the request it belonged to is no longer active.");
+		const generation = turn.generation;
 		const stale = (): boolean =>
 			this.#process !== agy ||
 			this.#step !== step ||
 			step.writer.done ||
 			step.aborted ||
 			this.#turn !== turn ||
+			turn.generation !== generation ||
 			turn.cancelling;
 		if (callerId !== undefined && callerId !== conversationId) {
 			this.#fail(new Error("Antigravity CLI requested a tool for another session"));
