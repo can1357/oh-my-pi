@@ -12,6 +12,18 @@ export const cfgGoalEnabled = register({
 	},
 });
 
+export const cfgGoalGuidedAsk = register({
+	id: "goal.guidedAsk",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Modes",
+		label: "Batch Guided Goal Questions",
+		description: "Use forms for /guided-goal interviews when the built-in ask tool is active",
+	},
+});
+
 export const cfgGoalStatusInFooter = register({
 	id: "goal.statusInFooter",
 	type: "boolean",
