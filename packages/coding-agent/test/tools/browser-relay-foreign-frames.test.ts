@@ -226,7 +226,7 @@ describe("pastForeignFrames", () => {
 				).toBeTrue();
 				expect(await page.$eval("iframe", frame => frame.hasAttribute("srcdoc"))).toBeTrue();
 			} finally {
-				await closeLaunchedBrowser(browser);
+				await closeLaunchedBrowser({ browser });
 			}
 		},
 		30_000,
@@ -283,7 +283,7 @@ describe("pastForeignFrames", () => {
 				// Reading the whole body would run into the probe's time limit and name nothing.
 				expect(await probed.promise).toEqual([{ url: endless, title: "Endless vault page" }]);
 			} finally {
-				await closeLaunchedBrowser(browser);
+				await closeLaunchedBrowser({ browser });
 				server.stop(true);
 			}
 		},
