@@ -62,13 +62,14 @@ let lastDrainAt = 0;
 const IDLE_DISCARD_MS = 2_000;
 
 /**
- * The bun:jsc-backed sampler, or null when sampling is disabled: by env
- * `PI_LOOP_SAMPLER=0|false`, or because the process runs under `--cpu-prof`,
- * whose profiler and this one would steal each other's samples.
+ * The bun:jsc-backed sampler, or null unless `PI_LOOP_SAMPLER=1|true`.
+ * Sampling can repeatedly restart slow native calls on WSL2; the event-loop
+ * watchdog still reports blocks without stack attribution by default.
+ * Also disabled under `--cpu-prof`, whose profiler would steal its samples.
  */
 export function createJscLoopSampler(): LoopSampler | null {
 	const env = Bun.env.PI_LOOP_SAMPLER;
-	if (env === "0" || env === "false") return null;
+	if (env !== "1" && env !== "true") return null;
 	for (const arg of process.execArgv) {
 		if (arg.startsWith("--cpu-prof")) return null;
 	}

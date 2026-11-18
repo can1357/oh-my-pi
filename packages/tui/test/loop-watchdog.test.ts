@@ -668,10 +668,14 @@ describe("LoopWatchdog stack attribution", () => {
 		wd.stop();
 	});
 
-	test("PI_LOOP_SAMPLER=0 disables the JSC sampler", () => {
+	test("requires explicit opt-in for JSC stack sampling", () => {
 		const previous = Bun.env.PI_LOOP_SAMPLER;
-		Bun.env.PI_LOOP_SAMPLER = "0";
 		try {
+			delete Bun.env.PI_LOOP_SAMPLER;
+			expect(createJscLoopSampler()).toBeNull();
+			Bun.env.PI_LOOP_SAMPLER = "1";
+			expect(createJscLoopSampler()).not.toBeNull();
+			Bun.env.PI_LOOP_SAMPLER = "0";
 			expect(createJscLoopSampler()).toBeNull();
 		} finally {
 			if (previous === undefined) delete Bun.env.PI_LOOP_SAMPLER;

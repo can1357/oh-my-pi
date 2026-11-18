@@ -5,6 +5,7 @@
 ### Fixed
 
 - In Tern, typing `->` or `=>` in the composer no longer moves the caret to a new line; the queued message continues on the same line
+- Fixed long TUI freezes on WSL2 by disabling stack sampling by default; set `PI_LOOP_SAMPLER=1` to opt in ([#19634](https://github.com/can1357/oh-my-pi/issues/19634))
 
 
 ## [18.22.2] - 2026-11-18
