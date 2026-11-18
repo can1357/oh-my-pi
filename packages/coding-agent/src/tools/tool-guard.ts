@@ -110,8 +110,14 @@ const GIT_READS = wordTable(
 		"show-ref whatchanged version help",
 );
 const GIT_BRANCH_LISTING = wordTable("-a -r -v -vv --all --remotes --list --show-current --merged --no-merged");
-/** Git global options that take a value as the next word. */
-const GIT_VALUE_OPTIONS = wordTable("-C -c --git-dir --work-tree --namespace");
+/** Git global options that take a value as the next word or after `=`. */
+const GIT_VALUE_OPTIONS = wordTable("-C --git-dir --work-tree --namespace --attr-source --shallow-file");
+/** Git global options without a value; any other (`-c`, `--config-env`, `--exec-path`) is judged. */
+const GIT_GLOBAL_FLAGS = wordTable(
+	"-p --paginate -P --no-pager --bare --no-replace-objects --literal-pathspecs --no-literal-pathspecs " +
+		"--glob-pathspecs --noglob-pathspecs --icase-pathspecs --no-optional-locks --no-advice --no-lazy-fetch " +
+		"-v --version -h --help --html-path --man-path --info-path",
+);
 const FIND_ACTIONS = wordTable("-exec -execdir -ok -okdir -delete -fprint -fprint0 -fprintf -fls");
 /** Prefixes that run the rest of the line as the command; reads stay reads under the first group. */
 const READ_WRAPPERS = wordTable("time nice timeout command");
@@ -214,26 +220,31 @@ function unwrapCommand(words: string[], wrappers: WordTable): string[] {
 
 /**
  * Whether `arg` names one of the long `options`, alone or with `=VALUE`. getopt and git take any unambiguous
- * prefix (`--out` for `--output`), so every prefix counts, as does a longer name (`--output-directory`).
+ * prefix (`--out` for `--output`), so every prefix counts, as does a longer name (`--output-directory`), except
+ * a name in `exact`: a real option that wins over the longer one it begins (`--text` beside `--textconv`).
  */
-function longOption(arg: string, options: readonly string[]): boolean {
+function longOption(arg: string, options: readonly string[], exact: readonly string[] = []): boolean {
 	if (!arg.startsWith("--")) return false;
 	const name = arg.split("=", 1)[0];
-	return name.length > 2 && options.some(option => name.startsWith(option) || option.startsWith(name));
+	if (name.length <= 2 || exact.includes(name)) return false;
+	return options.some(option => name.startsWith(option) || option.startsWith(name));
 }
 
-/** Read-subcommand options that write a file or run a program: `--output=F`, `git grep -O<cmd>`, external diff and textconv drivers. */
+/** Read-subcommand options that write a file or run a program: `--output=F`, external diff and textconv drivers, `git grep --open-files-in-pager`. */
 const GIT_EXEC_OPTIONS = ["--output", "--open-files-in-pager", "--ext-diff", "--textconv"];
+/** `git grep -O[CMD]`, also inside a cluster (`-iO`), runs a pager on the matching files. */
+const GIT_PAGER_FLAG = /^-[^-]*O/;
 
 function readOnlyGit(args: string[]): boolean {
 	let i = 0;
 	while (i < args.length && args[i].startsWith("-")) {
 		const option = args[i];
-		// Config set on the command line (`-c diff.external=x`) or another exec path can run anything.
-		if (option.startsWith("-c") || longOption(option, ["--config-env", "--exec-path"])) {
+		const name = option.split("=", 1)[0];
+		// Command-line config or another exec path can run anything, and an unknown option may take the next word.
+		if (inTable(GIT_VALUE_OPTIONS, option)) i++;
+		else if (!inTable(GIT_GLOBAL_FLAGS, option) && !(name !== option && inTable(GIT_VALUE_OPTIONS, name))) {
 			return false;
 		}
-		if (inTable(GIT_VALUE_OPTIONS, option)) i++;
 		i++;
 	}
 	const sub = args[i];
@@ -241,7 +252,7 @@ function readOnlyGit(args: string[]): boolean {
 	const positional = rest.filter(arg => !arg.startsWith("-"));
 	const flags = rest.filter(arg => arg.startsWith("-"));
 	if (sub === undefined) return true;
-	if (flags.some(flag => flag.startsWith("-O") || longOption(flag, GIT_EXEC_OPTIONS))) return false;
+	if (flags.some(flag => GIT_PAGER_FLAG.test(flag) || longOption(flag, GIT_EXEC_OPTIONS, ["--text"]))) return false;
 	if (inTable(GIT_READS, sub)) return true;
 	if (sub === "branch") return positional.length === 0 && flags.every(flag => inTable(GIT_BRANCH_LISTING, flag));
 	if (sub === "remote" || sub === "stash" || sub === "tag") {
@@ -254,7 +265,12 @@ function readOnlyGit(args: string[]): boolean {
 				: sub !== "tag" && (action === "show" || action === "list" || action === "get-url");
 		return listing && flags.every(flag => flag === "-v" || flag === "-l" || flag === "--list");
 	}
-	if (sub === "config") return rest.some(arg => arg.startsWith("--get") || arg === "--list" || arg === "-l");
+	if (sub === "config") {
+		// Legacy `git config` stops reading options at the first operand (`--global KEY VALUE -l` sets KEY).
+		const operand = rest.findIndex(arg => !arg.startsWith("-"));
+		const options = operand === -1 ? rest : rest.slice(0, operand);
+		return options.some(arg => arg.startsWith("--get") || arg === "--list" || arg === "-l");
+	}
 	return sub === "reflog" && (positional[0] === undefined || positional[0] === "show");
 }
 

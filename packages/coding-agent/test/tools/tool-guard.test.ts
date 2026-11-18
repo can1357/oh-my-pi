@@ -170,6 +170,12 @@ describe("tool guard", () => {
 			"git tag",
 			"git grep foo",
 			"git log --oneline --stat",
+			// An exact long name wins over a longer option it begins: `--text` is `-a`, not `--textconv`.
+			"git diff --text",
+			"git grep --text foo",
+			"git --no-pager --git-dir=.git log",
+			"git config --get user.name",
+			"git config -l",
 		]) {
 			expect(isReadOnlyCommand(command)).toBe(true);
 		}
@@ -220,6 +226,16 @@ describe("tool guard", () => {
 			"git diff --ext",
 			"git log -p --textc",
 			"file --comp magic",
+			// `-O` runs a pager inside a short-option cluster too.
+			"git grep -iO'rm -rf ~' foo",
+			"git grep -nOvi foo",
+			// A global option's value is not the subcommand; an unknown global option is judged.
+			"git --attr-source status push origin main",
+			"git --shallow-file log reset --hard",
+			"git --frobnicate status",
+			// Legacy `git config` stops reading options at the first operand, so a trailing `-l` lists nothing.
+			"git config --global core.pager vi -l",
+			"git config --global core.fsmonitor /tmp/x.sh --get",
 		]) {
 			expect(isReadOnlyCommand(command)).toBe(false);
 		}
