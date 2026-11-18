@@ -28,6 +28,7 @@ import {
 	resolveModelRoleValue,
 	resolveModelScope,
 	resolveRoleChain,
+	resolveSessionModelSelector,
 	rolePriorityDefaults,
 	resolveProviderModelReference,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -1537,6 +1538,62 @@ describe("resolveExactModelIdentity", () => {
 		expect(routed && formatModelStringWithRouting(routed)).toBe("openrouter/z-ai/glm-4.7@cerebras");
 		expect(
 			resolveExactModelIdentity("openrouter/z-ai/glm-4.7@cerebras:high", { getAvailable: () => allModels }),
+		).toBeUndefined();
+	});
+});
+
+describe("resolveSessionModelSelector", () => {
+	const registryFor = (models: Model<Api>[], authenticated = true) =>
+		({
+			find: (provider: string, id: string) => models.find(model => model.provider === provider && model.id === id),
+			hasConfiguredAuth: () => authenticated,
+		}) as unknown as Parameters<typeof resolveSessionModelSelector>[0];
+
+	test.each([
+		["openrouter/z-ai/glm-4.7", "openrouter/z-ai/glm-4.7", undefined],
+		["openrouter/z-ai/glm-4.7@cerebras", "openrouter/z-ai/glm-4.7@cerebras", undefined],
+		["openrouter/z-ai/glm-4.7@cerebras:high", "openrouter/z-ai/glm-4.7@cerebras", Effort.High],
+	] as const)("restores saved selector %s without losing routing or thinking", (selector, expected, thinking) => {
+		const restored = resolveSessionModelSelector(registryFor(allModels), selector);
+		expect(restored?.model && formatModelStringWithRouting(restored.model)).toBe(expected);
+		expect(restored?.thinkingLevel).toBe(thinking);
+	});
+
+	test("restores a bundled colon-containing model ID with routing and thinking", () => {
+		const model = getBundledModel("openrouter", "qwen/qwen3-coder:exacto");
+		if (!model) throw new Error("Expected bundled OpenRouter Qwen3 Coder Exacto model");
+
+		const restored = resolveSessionModelSelector(
+			registryFor([model]),
+			"openrouter/qwen/qwen3-coder:exacto@cerebras:high",
+		);
+		expect(restored?.model && formatModelStringWithRouting(restored.model)).toBe(
+			"openrouter/qwen/qwen3-coder:exacto@cerebras",
+		);
+		expect(restored?.thinkingLevel).toBe(Effort.High);
+	});
+
+	test("prefers a registered literal @ model ID over interpreting it as a route", () => {
+		const base = mockOpenRouterModels.find(model => model.id === "z-ai/glm-4.7")!;
+		const literal = { ...base, id: `${base.id}@cerebras` };
+		const registry = registryFor([base, literal]);
+
+		expect(resolveSessionModelSelector(registry, `openrouter/${literal.id}`)).toEqual({ model: literal });
+		expect(resolveSessionModelSelector(registry, `openrouter/${literal.id}:high`)).toEqual({
+			model: literal,
+			thinkingLevel: Effort.High,
+		});
+	});
+
+	test("rejects routed restore without configured auth", () => {
+		expect(
+			resolveSessionModelSelector(registryFor(allModels, false), "openrouter/z-ai/glm-4.7@cerebras:high"),
+		).toBeUndefined();
+	});
+
+	test("rejects an upstream suffix on a host without routing support", () => {
+		expect(
+			resolveSessionModelSelector(registryFor(allModels), "anthropic/claude-sonnet-4-5@cerebras:high"),
 		).toBeUndefined();
 	});
 });

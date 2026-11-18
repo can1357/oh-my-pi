@@ -1771,10 +1771,10 @@ function parseSessionModelSelector(modelRegistry: ModelRegistry, selector: strin
 }
 
 /**
- * Resolve a saved session model selector (`provider/id`, optionally with a
- * thinking suffix) to a registered model whose provider is enabled and has
- * credentials configured. Startup resume and runtime session switches share
- * this lookup, so both restore the same models.
+ * Resolve a saved session model selector (`provider/id`, optionally with an
+ * upstream route and thinking suffix) to a registered model whose provider is
+ * enabled and has credentials configured. Startup resume and runtime session
+ * switches share this lookup, so both restore the same models.
  *
  * Uses the side-effect-free `hasConfiguredAuth` probe: it refreshes no OAuth
  * tokens and runs no `!command` keys, which would stall a restore on the network.
@@ -1783,9 +1783,18 @@ export function resolveSessionModelSelector(
 	modelRegistry: ModelRegistry,
 	selector: string,
 ): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
-	const parsed = parseSessionModelSelector(modelRegistry, selector);
+	let parsed = parseSessionModelSelector(modelRegistry, selector);
 	if (!parsed) return undefined;
-	const model = modelRegistry.find(parsed.provider, parsed.id);
+	let model = modelRegistry.find(parsed.provider, parsed.id);
+	if (!model) {
+		const routing = splitUpstreamRouting(selector);
+		const base = routing && parseSessionModelSelector(modelRegistry, routing.base);
+		const baseModel = base && modelRegistry.find(base.provider, base.id);
+		if (routing && base && baseModel && supportsUpstreamRouting(baseModel)) {
+			model = applyUpstreamRouting(baseModel, routing.upstream);
+			parsed = base;
+		}
+	}
 	if (!model || !modelRegistry.hasConfiguredAuth(model)) return undefined;
 	return { model, thinkingLevel: parsed.thinkingLevel };
 }

@@ -6,6 +6,7 @@ import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { CustomToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/wrapper";
 import { DeferredMCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { dispatchXdevTool, type XdevDispatch, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
@@ -134,13 +135,14 @@ describe("AgentSession prewalk", () => {
 			agentKind?: "main" | "sub";
 			sessionManager?: SessionManager;
 			extendedContext?: boolean;
+			primary?: Model;
 			target?: Model;
 			startupTarget?: Model;
 			tools?: AgentTool[];
 			registry?: Map<string, AgentTool>;
 		} = {},
 	) {
-		const primary = modelOrThrow("claude-sonnet-4-5");
+		const primary = options.primary ?? modelOrThrow("claude-sonnet-4-5");
 		const target = options.target ?? modelOrThrow("claude-sonnet-4-6");
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -151,6 +153,7 @@ describe("AgentSession prewalk", () => {
 		settings.setModelRole("smol", `anthropic/missing-model,${target.provider}/${target.id}:low`);
 		const mock = createMockModel({ responses });
 		const requested: string[] = [];
+		const requestedModels: Model[] = [];
 		const nudges: string[][] = [];
 		let requestNudges: string[] = [];
 		const agent = new Agent({
@@ -170,6 +173,7 @@ describe("AgentSession prewalk", () => {
 			},
 			streamFn: (model, context, streamOptions) => {
 				requested.push(model.id);
+				requestedModels.push(model);
 				nudges.push(requestNudges);
 				return mock.stream(model, context, streamOptions);
 			},
@@ -188,8 +192,40 @@ describe("AgentSession prewalk", () => {
 			agentKind: options.agentKind,
 		});
 		session = created;
-		return { session: created, primary, target, settings, requested, nudges };
+		return { session: created, primary, target, settings, requested, requestedModels, nudges };
 	}
+
+	it.each(["main", "sub"] as const)(
+		"hands off a route-only %s prewalk and journals the selected route",
+		async agentKind => {
+			const row = getBundledModel("openrouter", "z-ai/glm-4.7");
+			if (!row) throw new Error("Expected bundled OpenRouter model");
+			const source = parseModelPattern("openrouter/z-ai/glm-4.7@cerebras", [row]).model;
+			const target = parseModelPattern("openrouter/z-ai/glm-4.7@sambanova", [row]).model;
+			if (!source || !target) throw new Error("Expected routed prewalk models");
+			authStorage.keys.setRuntime("openrouter", "test-key");
+			const created = createLifecycleSession(
+				[toolCall("todo", "todo"), toolCall("write", "write"), { content: ["done"] }],
+				{ primary: source, target, agentKind },
+			);
+			created.session.setThinkingLevel(Effort.Low);
+
+			await created.session.prompt("implement the plan");
+
+			expect(created.requestedModels.map(model => model.compat)).toEqual([
+				source.compat,
+				source.compat,
+				target.compat,
+			]);
+			expect(created.session.model?.compat).toMatchObject({ openRouterRouting: { only: ["sambanova"] } });
+			expect(created.session.sessionManager.getSessionLocalModelChange()).toMatchObject({
+				model: "openrouter/z-ai/glm-4.7@sambanova",
+				role: "prewalk",
+			});
+			expect(created.session.getPrewalkState()).toBeUndefined();
+			expect(created.nudges.at(-1)).toContain("prewalk-checklist");
+		},
+	);
 
 	it("/new restores the previous prewalk source and effort, then requires a fresh todo before handoff", async () => {
 		const created = createLifecycleSession([
@@ -386,6 +422,26 @@ describe("AgentSession prewalk", () => {
 
 		expect(created.session.model?.id).toBe(created.primary.id);
 		expect(created.session.getPrewalkState()?.target.id).toBe(target.id);
+	});
+
+	it.each([
+		["the bare model", "", false],
+		["a different pinned upstream", "@cerebras", true],
+	] as const)("handles a legacy bare prewalk journal restored on %s", (_case, restoredRoute, armed) => {
+		const row = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!row) throw new Error("Expected bundled OpenRouter model");
+		const source = parseModelPattern(`openrouter/z-ai/glm-4.7${restoredRoute}`, [row]).model;
+		const target = parseModelPattern("openrouter/z-ai/glm-4.7@sambanova", [row]).model;
+		if (!source || !target) throw new Error("Expected routed prewalk models");
+		const manager = SessionManager.inMemory(tempDir.path());
+		manager.appendModelChange("openrouter/z-ai/glm-4.7", "prewalk");
+		const created = createLifecycleSession([], { sessionManager: manager, primary: source, target });
+
+		if (armed) {
+			expect(created.session.getPrewalkState()?.target.compat).toEqual(target.compat);
+		} else {
+			expect(created.session.getPrewalkState()).toBeUndefined();
+		}
 	});
 
 	it("/new restores the prewalk source and effort after automatic fallback and primary restoration", async () => {

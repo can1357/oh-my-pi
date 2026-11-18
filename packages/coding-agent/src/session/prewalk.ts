@@ -1,10 +1,10 @@
 import type { Agent, AgentMessage, AgentToolResult, AgentTurnEndContext } from "@oh-my-pi/pi-agent-core";
 import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { AutoPrewalkDecision } from "../auto-prewalk/classifier";
 import { cfgOffline } from "../config/auxiliary-model-policy";
+import { formatModelString, formatModelStringWithRouting } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { resolveApprovedPlan } from "../plan-mode/approved-plan";
@@ -158,12 +158,14 @@ export class PrewalkCoordinator {
 		const handoff = prewalk ? host.sessionManager.getSessionLocalModelChange() : undefined;
 		// A revived session still on the target its recorded handoff switched to has spent this prewalk;
 		// one that starts elsewhere (an explicit startup model, a fallback) keeps the arm.
-		const target = prewalk ? `${prewalk.target.provider}/${prewalk.target.id}` : undefined;
+		const target = prewalk ? formatModelStringWithRouting(prewalk.target) : undefined;
 		const current = host.model();
+		// Legacy handoff entries omitted the upstream route.
 		const spent =
 			handoff?.role === PREWALK_MODEL_CHANGE_ROLE &&
-			handoff.model === target &&
-			`${current?.provider}/${current?.id}` === target;
+			(handoff.model === target || (prewalk !== undefined && handoff.model === formatModelString(prewalk.target))) &&
+			current !== undefined &&
+			formatModelStringWithRouting(current) === handoff.model;
 		this.#prewalk = spent ? undefined : prewalk;
 		this.#planYolo = options.planYolo;
 		this.#autoSuppressed = options.suppressAutoPrewalk === true;
@@ -429,7 +431,8 @@ export class PrewalkCoordinator {
 		if (!switched) {
 			// `disarm()` already reported its cancellation, and a newer arm owns what comes next.
 			if (disarmed || replaced) return;
-			if (!modelsAreEqual(this.#host.model(), target)) {
+			const current = this.#host.model();
+			if (!current || formatModelStringWithRouting(current) !== formatModelStringWithRouting(target)) {
 				this.#host.emitNotice(
 					"info",
 					`Prewalk: cancelled the switch to ${target.provider}/${target.id}; the model or thinking level changed while it was switching.`,
