@@ -80,6 +80,7 @@ import type {
 	ToolChoice,
 	ToolResultMessage,
 	UsageReport,
+	UsageResetCredit,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
@@ -106,6 +107,7 @@ import {
 	logger,
 	postmortem,
 	prompt,
+	sanitizeText,
 	Snowflake,
 	stringProperty,
 	toError,
@@ -368,6 +370,7 @@ import {
 import type { ClientBridge } from "./client-bridge";
 import {
 	type ClaudeResetAction,
+	type ClaudeResetHold,
 	type ClaudeResetPlan,
 	claudeResetStatusesFromReports,
 	planClaudeResetRedemptions,
@@ -16043,6 +16046,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (plan.actions.length === 0) {
 				const adoptedId = await this.#adoptRecentReset(statuses, coordinator);
 				if (adoptedId !== undefined) return { restored: true, restoredCredentialIds: [adoptedId] };
+				if ("held" in plan) this.#noticeHeldClaudeResets(plan.held, coordinator);
 				let retryAfterMs: number | undefined;
 				if (provider === "anthropic" && Object.values(modes).includes("yes")) {
 					for (const status of statuses) {
@@ -16068,6 +16072,31 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			.finally(() => coordinator.inFlightByAccount.delete(accountKey));
 		coordinator.inFlightByAccount.set(accountKey, run);
 		return run;
+	}
+
+	/**
+	 * Tell the user once per block episode why a blocked Claude account's offered
+	 * reset was not spent: it clears more than the windows blocking the account.
+	 */
+	#noticeHeldClaudeResets(
+		held: readonly ClaudeResetHold[] | undefined,
+		coordinator: CodexAutoRedeemCoordinator,
+	): void {
+		const windows = (ids: readonly string[]) => ids.map(formatUsageResetWindow).join(" + ");
+		const name = (credit: UsageResetCredit) =>
+			sanitizeText(credit.title ? `“${credit.title}” (${credit.id})` : credit.id).replace(/\s+/g, " ");
+		for (const hold of held ?? []) {
+			if (coordinator.notifiedKeys.has(hold.attemptKey)) continue;
+			coordinator.notifiedKeys.add(hold.attemptKey);
+			const narrower = hold.narrower
+				? ` ${name(hold.narrower)} clears only what blocks it, but Claude offers it after that one.`
+				: "";
+			this.emitNotice(
+				"warning",
+				`${hold.label} is blocked by ${windows(hold.blockedWindows)} for about ${formatDuration(hold.remainingMs)}. The saved reset Claude offers next, ${name(hold.credit)}, also clears ${windows(hold.beyond)}, so it was not spent automatically.${narrower} To spend it anyway: \`/usage reset anthropic/${hold.target.credentialId}:${hold.credit.id}\`.`,
+				"claude-auto-reset",
+			);
+		}
 	}
 
 	/**

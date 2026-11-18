@@ -1,4 +1,5 @@
 import {
+	groupResetCreditsByClears,
 	type OAuthAccountSummary,
 	type ResetCreditAccountStatus,
 	type ResetCreditTarget,
@@ -59,7 +60,8 @@ export type ClaudeResetSkipReason =
 	| "window-mostly-free"
 	| "already-attempted"
 	| "deferred"
-	| "cooldown";
+	| "cooldown"
+	| "broader-than-blocked";
 
 /** Live grant eligibility and usage evidence for one deterministic planning pass. */
 export interface ClaudeResetPlanInput {
@@ -118,10 +120,31 @@ export interface ClaudeResetSkip {
 	reason: ClaudeResetSkipReason;
 }
 
+/**
+ * A blocked account whose offered grant clears more than the blocking windows:
+ * not spent automatically, so the session tells the user instead.
+ */
+export interface ClaudeResetHold {
+	accountKey: string;
+	attemptKey: string;
+	label: string;
+	target: ResetCreditTarget;
+	/** The grant the server offers next. */
+	credit: UsageResetCredit;
+	blockedWindows: string[];
+	/** Limits the offered grant clears beyond the blocking ones. */
+	beyond: string[];
+	/** A banked grant on the same account that clears only what blocks it, offered later. */
+	narrower?: UsageResetCredit;
+	remainingMs: number;
+}
+
 /** At most one blocked-account restore followed by independent expiry salvages. */
 export interface ClaudeResetPlan {
 	actions: ClaudeResetAction[];
 	skipped: ClaudeResetSkip[];
+	/** Blocked accounts left unspent because the offered grant clears more than blocks them. */
+	held?: ClaudeResetHold[];
 }
 
 interface ClaudeAccountSnapshot {
@@ -131,6 +154,8 @@ interface ClaudeAccountSnapshot {
 	active: boolean;
 	availableCount: number;
 	credit: UsageResetCredit;
+	/** Every banked grant on the account, offered next or not. */
+	credits: readonly UsageResetCredit[];
 	limits: UsageLimit[];
 }
 
@@ -251,6 +276,19 @@ export function fullestClaudeLimit(
 		}
 	}
 	return fullest;
+}
+
+/**
+ * Limits `credit` clears beyond `blockers`. The 5h window rides along with every
+ * reset, and clearing the shared weekly window covers the model-scoped weekly caps
+ * under it, so neither counts. Anything left is a wider reset than the block needs.
+ */
+export function claudeResetClearsBeyond(credit: UsageResetCreditDetail, blockers: readonly string[]): string[] {
+	const blocked = new Set(blockers);
+	const weeklyBlocked = blocked.has(WEEKLY_LIMIT_ID);
+	return (credit.clears ?? []).filter(
+		id => !blocked.has(id) && id !== FIVE_HOUR_LIMIT_ID && !(weeklyBlocked && id.startsWith(`${WEEKLY_LIMIT_ID}:`)),
+	);
 }
 
 function claudeBlockedAttemptKey(
@@ -401,11 +439,13 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			active: status.active,
 			availableCount: status.availableCount,
 			credit,
+			credits: status.credits,
 			limits,
 		});
 	}
 
 	let restore: ClaudeResetAction | undefined;
+	const held: ClaudeResetHold[] = [];
 	if (input.trigger === "blocked") {
 		interface RestoreCandidate {
 			snapshot: ClaudeAccountSnapshot;
@@ -502,6 +542,32 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 				blockers,
 				unblockAtMs,
 			);
+			// Never spend a wider reset than the block needs, e.g. a full reset on a
+			// Fable-only block. The user decides; the session tells them.
+			const beyond = claudeResetClearsBeyond(snapshot.credit, blockers);
+			if (beyond.length > 0) {
+				const narrower = groupResetCreditsByClears(snapshot.credits, input.nowMs)
+					.flat()
+					.find(
+						credit =>
+							credit.id !== snapshot.credit.id &&
+							blockers.every(id => credit.clears?.includes(id)) &&
+							claudeResetClearsBeyond(credit, blockers).length === 0,
+					);
+				held.push({
+					accountKey: snapshot.accountKey,
+					attemptKey,
+					label: snapshot.label,
+					target: snapshot.target,
+					credit: snapshot.credit,
+					blockedWindows: blockers,
+					beyond,
+					...(narrower ? { narrower } : {}),
+					remainingMs,
+				});
+				skip("broader-than-blocked");
+				continue;
+			}
 			const episodeSkip = skipForEpisode(input, snapshot.accountKey, attemptKey);
 			if (episodeSkip) {
 				skip(episodeSkip);
@@ -641,7 +707,11 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 	}
 	salvages.sort((left, right) => (left.expiresInMs ?? 0) - (right.expiresInMs ?? 0));
 
-	return { actions: restore ? [restore, ...salvages] : salvages, skipped };
+	return {
+		actions: restore ? [restore, ...salvages] : salvages,
+		skipped,
+		...(held.length > 0 ? { held } : {}),
+	};
 }
 
 /**

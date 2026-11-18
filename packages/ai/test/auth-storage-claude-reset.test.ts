@@ -31,6 +31,8 @@ interface ResetFixture {
 		postArrived?: () => void;
 		usageGate?: Promise<void>;
 		usageArrived?: () => void;
+		/** Further Cedar grants listed after the offered one. */
+		extraGrants?: unknown[];
 	};
 }
 
@@ -113,6 +115,7 @@ async function fixture(): Promise<ResetFixture> {
 											percent_used: { five_hour: 100 },
 											blocking: [],
 										},
+										...(state.extraGrants ?? []),
 									]
 								: [],
 					},
@@ -246,6 +249,35 @@ describe("Claude saved reset account safety", () => {
 		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
 		expect(outcome.code).toBe("offer_changed");
 		expect(f.posts).toEqual([]);
+	});
+
+	it("never spends the offered grant without its id when the account banks grants that clear different limits", async () => {
+		const f = await fixture();
+		const hour = 3_600_000;
+		f.state.extraGrants = [
+			{
+				id: "launch-fable",
+				label: "New model launch: one Fable reset",
+				resets_total: 1,
+				resets_left: 1,
+				starts_at: new Date(Date.now() - hour).toISOString(),
+				ends_at: new Date(Date.now() + 48 * hour).toISOString(),
+				clears: ["five_hour", "seven_day_overage_included"],
+				paused: false,
+				usable_now: false,
+				use_requires_limit: true,
+				percent_used: {},
+				blocking: [],
+			},
+		];
+		const { creditId: _named, ...unnamed } = f.target;
+		const refused = await f.storage.resets.redeem({ target: unnamed, baseUrlResolver: f.baseUrlResolver });
+		expect(refused).toMatchObject({ ok: false, code: "credit_choice_required" });
+		expect(f.posts).toEqual([]);
+
+		const named = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
+		expect(named.ok).toBe(true);
+		expect(f.posts.map(post => post.body.grant_id)).toEqual(["saved-reset"]);
 	});
 
 	it("retains the request ID after an indeterminate response so a multi-use grant cannot double-spend", async () => {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `resets.redeem` no longer spends the Claude grant offered next when the target names no credit and the account banks grants that clear different limits; it returns `credit_choice_required` and spends nothing. `groupResetCreditsByClears` groups an account's spendable credits by the limits they clear
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

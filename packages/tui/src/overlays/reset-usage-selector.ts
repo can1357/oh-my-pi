@@ -1,4 +1,4 @@
-import type { UsageResetCreditDetail } from "@oh-my-pi/pi-ai";
+import type { UsageResetCredit, UsageResetCreditDetail } from "@oh-my-pi/pi-ai";
 import { Container, matchesKey, ScrollView, Spacer, Text, TruncatedText } from "../index";
 import { formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
 import { theme } from "../theme/theme";
@@ -91,6 +91,8 @@ export interface ResetUsageAccount {
 	unavailableReason?: string;
 	expiresAt?: string;
 	credit?: UsageResetCreditDetail;
+	/** Every banked credit on the account, spendable now or not. */
+	credits?: readonly UsageResetCredit[];
 }
 
 /**

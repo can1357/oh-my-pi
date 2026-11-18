@@ -59,7 +59,10 @@ async function handleUsageResetCommand(
 	}
 	if (!arg.trim()) {
 		const lines = ["Saved rate-limit resets:", ...accounts.map(formatResetUsageAccountLine)];
-		lines.push("", "Spend one with `/usage reset <provider>/<credential id>` or `/usage reset <provider>/active`.");
+		lines.push(
+			"",
+			"Spend one with `/usage reset <provider>/<credential id>` or `/usage reset <provider>/active`; name the reset with `:<credit id>` after either.",
+		);
 		await output(lines.join("\n"));
 		return;
 	}

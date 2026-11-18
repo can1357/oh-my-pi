@@ -703,8 +703,10 @@ export interface ResetCreditRedeemOutcome {
 	 * `no_credit`, `nothing_to_reset`. Locally-synthesized: `no_account`
 	 * (target not found), `account_unavailable` (token refresh failed),
 	 * `credit_list_failed` (transport/auth failure while listing credits —
-	 * retryable, unlike a genuine `no_credit`), `http_<status>` (unexpected
-	 * HTTP).
+	 * retryable, unlike a genuine `no_credit`), `credit_choice_required`
+	 * (Claude account banks grants that clear different limits and the target
+	 * named none), `offer_changed` (the named grant is not the one the provider
+	 * offers next), `http_<status>` (unexpected HTTP).
 	 */
 	code: string;
 	provider?: string;

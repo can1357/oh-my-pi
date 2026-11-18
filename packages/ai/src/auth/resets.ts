@@ -1,6 +1,6 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
-import type { UsageReport } from "../usage";
+import { groupResetCreditsByClears, type UsageReport } from "../usage";
 import { claudeResetClearedBlockScopes, consumeClaudeResetCredit, listClaudeResetCredits } from "../usage/claude-reset";
 import { consumeCodexResetCredit, listCodexResetCredits, pickSoonestExpiringCredit } from "../usage/openai-codex-reset";
 import type { CredentialBlocks } from "./blocks";
@@ -173,6 +173,11 @@ export class ResetCredits implements ResetsApi {
 			const selected = list.credits.find(credit => credit.id === list.nextCreditId);
 			if (creditId && creditId !== list.nextCreditId) {
 				return { ...identity, ok: false, code: "offer_changed", creditId };
+			}
+			// Grants that clear different limits are different resets: spending
+			// whichever the server offers next must be the caller's explicit choice.
+			if (!creditId && groupResetCreditsByClears(list.credits).length > 1) {
+				return { ...identity, ok: false, code: "credit_choice_required" };
 			}
 			if (!list.eligible || !selected || !selected.usable || (list.redeemableCount ?? 0) < 1) {
 				return {

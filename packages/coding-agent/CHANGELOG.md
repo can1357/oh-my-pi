@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Spending a saved reset no longer picks a reset type you didn't choose: `omp usage reset` and `/usage reset` take `<provider>/<credential id>:<credit id>` to spend exactly that reset, refuse a target without one when the account holds resets that clear different limits (a full Claude reset next to a Fable-only one), listing each reset and its command, and refuse a named Claude grant that isn't the one Claude offers next. The listing now shows each reset's id, title and the limits it clears. Automatic Claude restores no longer spend a grant that clears more than the windows blocking the account (a full reset on a Fable-only or 5h-only block); the session shows a notice with the command instead, and the expiry banner's spend command names the expiring grant
 - Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy
 - Fixed the Spotlight experiment re-asking Stencil Cloud on every tool call for an account without Cloud access (waitlisted): omp now warns once and pauses Spotlight for that account for a few hours, honors `Retry-After` on rate limits and outages, and sends its `omp/<version>` User-Agent on every Spotlight request
 
