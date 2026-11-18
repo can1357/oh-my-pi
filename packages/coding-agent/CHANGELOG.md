@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Startup prints `Waiting for auth broker at <url> …` to stderr while it retries an unreachable auth broker, in CLI commands (`omp login`, `omp models`, `omp commit`, `omp usage`, …) and in interactive launches that start without the prepaint composer (`--model`, `--resume`, …) ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
@@ -63,10 +67,6 @@
 - `/restart` now re-execs through the launcher omp was started by, so an open session moves onto an upgraded binary instead of re-running a retained old install ([#19529](https://github.com/can1357/oh-my-pi/pull/19529) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - RPC hosts now always receive a terminal `agent_end` after an over-quota 429: usage-limit bookkeeping is bounded so a stalled usage report can no longer hold the event ([#19411](https://github.com/can1357/oh-my-pi/issues/19411), [#19417](https://github.com/can1357/oh-my-pi/pull/19417) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Rex and other OSC 7501 terminals no longer play a success sound mid-run when a stale agent end arrives after another run has opened ([#17307](https://github.com/can1357/oh-my-pi/issues/17307), [#19418](https://github.com/can1357/oh-my-pi/pull/19418) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
-### Added
-
-- CLI commands outside the interactive session (`omp login`, `omp models`, `omp commit`, `omp usage`, …) print `Waiting for auth broker at <url> …` to stderr while startup retries an unreachable auth broker ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.1] - 2026-11-17
 

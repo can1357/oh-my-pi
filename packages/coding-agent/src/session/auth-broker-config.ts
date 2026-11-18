@@ -254,8 +254,9 @@ export function createAuthStorageSettingsSync(
  *
  * Default `agentDir` is the current configured agent directory. Outside the
  * interactive host, a startup that waits on an unreachable broker says so once
- * on stderr; the interactive host skips it because its prepaint composer owns
- * the terminal.
+ * on stderr. In the interactive host the TUI may own the terminal, so only the
+ * caller can tell whether a line is safe: `main.ts` passes its own hook for
+ * startup discovery.
  */
 export function discoverAuthStorage(
 	agentDir: string = getAgentDir(),
@@ -270,7 +271,7 @@ export function discoverAuthStorage(
 }
 
 /** Print the first retry of one startup to stderr; the retry is otherwise only in the log file. */
-function authBrokerWaitNotice(): (retry: AuthBrokerStartupRetry) => void {
+export function authBrokerWaitNotice(): (retry: AuthBrokerStartupRetry) => void {
 	let shown = false;
 	return ({ url, error, budgetMs }) => {
 		if (shown) return;
