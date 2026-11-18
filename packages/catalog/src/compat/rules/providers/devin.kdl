@@ -40,6 +40,19 @@ provider "devin" {
 	// otherwise fail and silently fall back to the next model (issue #18423).
 	temperature-floor 0.0001
 
+	// Cascade refuses a request whose decompressed protobuf exceeds 32 MiB
+	// (`resource_exhausted`). It relays its upstream's image rules: Claude 600
+	// images, 10 MiB base64 each, 8,000 px edges (3,000 px past 20 images); GPT
+	// 1,500 images; Gemini counts images only against context. On Devin's own
+	// host the byte budget bounds 60 images; a custom baseUrl gets no byte
+	// clamp, so 40 images at the 500 KiB resize target (682,667 B base64 each,
+	// 27.3 MB in all) stay under the limit.
+	image-count-budget 40
+	official-image-count-budget 60
+	inline-image-byte-budget 24000000
+	request-body-byte-limit 32000000
+	catalog-endpoint-budgets #true
+
 	// Enterprise (ACUs) fallback prices: https://docs.devin.ai/desktop/models
 	// (as of 2026-11-05). Seed only when upstream reports no token price.
 	// Self-serve SWE-2 Flash is free until 2026-12-04 18:00 UTC; SWE-2 in
@@ -131,6 +144,10 @@ provider "devin" {
 	// below, so an unpublished generation records no cache-write price.
 	class "anthropic" {
 		cache-write-rate 1.25
+		// Past 20 images Claude rejects any image edge over 3,000 px, and Devin
+		// relays images as sent.
+		image-count-budget 20
+		official-image-count-budget 20
 	}
 	class "openai" {
 		family "gpt" {
@@ -205,6 +222,18 @@ provider "devin" {
 					output-multiplier 1.5
 				}
 			}
+		}
+	}
+	// Devin bills Gemini images at a fixed ~1,089 tokens from 512 px to 4,096 px
+	// (Google's fixed `media_resolution` budget passed through), under the
+	// lineage's unverified 1,120. verified: billing matched across 8 sizes on
+	// these two; 3.5/3.8 Flash and 4 Hydrogen/Argon billed 1,089-1,091 in a
+	// single two-point check and stay on the lineage rule until measured.
+	models "gemini-4-carbon" "gemini-3-7-flash" {
+		image-tokenization {
+			regime "fixed"
+			verified #true
+			tokens 1089
 		}
 	}
 	// residue: Gemini 2.5 Pro's legacy uid carries no model identity.

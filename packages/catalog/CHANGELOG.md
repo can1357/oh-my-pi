@@ -9,6 +9,9 @@
 ### Fixed
 
 - Hosted jev (TypeSafe, OpenRouter, Command Code, OpenCode Zen) splits judgment requests at 32 questions, ending `400 questions must map 1 through 32 ids` find failures
+### Fixed
+
+- Fixed Devin models seeing only the newest 5 images of a conversation: Devin's own host now takes up to 60 (20 for Claude models) within 24 MB of image data and a custom Devin base URL up to 40, and snapcompact plans Gemini 4 Carbon and Gemini 3.7 Flash archive frames at the 1,089 tokens Devin bills instead of about 5,000 ([#19619](https://github.com/can1357/oh-my-pi/pull/19619) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 
