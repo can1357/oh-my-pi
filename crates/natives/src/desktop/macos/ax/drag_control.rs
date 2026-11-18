@@ -114,7 +114,7 @@ impl Control {
 	}
 
 	/// Movement along the control's track; perpendicular motion cannot move it.
-	pub(crate) fn movement(&self, dx: f64, dy: f64) -> f64 {
+	pub(crate) const fn movement(&self, dx: f64, dy: f64) -> f64 {
 		if self.vertical { dy.abs() } else { dx.abs() }
 	}
 }
