@@ -97,6 +97,7 @@ describe("omp auth-broker serve shutdown", () => {
 				stdout: "pipe",
 				stderr: "pipe",
 			});
+			let exitCode: number | undefined;
 			try {
 				const exitedFirst = await Promise.race([tokenRequested.promise.then(() => undefined), proc.exited]);
 				if (exitedFirst !== undefined) {
@@ -109,12 +110,14 @@ describe("omp auth-broker serve shutdown", () => {
 				tokenResponse.resolve(
 					Response.json({ access_token: "rotated-access", refresh_token: "rotated-refresh", expires_in: 3600 }),
 				);
-				await proc.exited;
+				exitCode = await proc.exited;
 			} finally {
 				proc.kill("SIGKILL");
 				await proc.exited;
 			}
 
+			// A supervisor's stop is not a failure.
+			expect(exitCode).toBe(0);
 			expect(await storedRefreshToken(dbPath)).toBe("rotated-refresh");
 		},
 		30_000,
