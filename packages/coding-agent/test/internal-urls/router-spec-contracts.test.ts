@@ -9,6 +9,7 @@ import {
 	type ProtocolHandler,
 	type SchemeSpec,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { registerArtifactsDir } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
@@ -101,7 +102,6 @@ describe("InternalUrlRouter URL shape", () => {
 		const router = InternalUrlRouter.instance();
 		expect(router.normalize("local:/notes.md")).toBe("local://notes.md");
 		expect(router.normalize("vault:/Work/a.md")).toBe("vault:/Work/a.md");
-		expect(router.normalize("artifact:/3")).toBe("artifact:/3");
 	});
 
 	it("strips a filesystem path prefixed onto an aliasing scheme's URL", () => {
@@ -119,7 +119,7 @@ describe("InternalUrlRouter URL shape", () => {
 		expect(router.normalize("/home/me/repo/local:/notes.md")).toBe("/home/me/repo/local:/notes.md");
 		// A prefix that is itself a URL, or a scheme without the alias, is not repaired.
 		expect(router.normalize("https://host/local://x")).toBe("https://host/local://x");
-		expect(router.normalize("/repo/artifact://3")).toBe("/repo/artifact://3");
+		expect(router.normalize("/repo/skill://x")).toBe("/repo/skill://x");
 	});
 
 	it("never treats a URL query as a glob, but keeps path globs", () => {
@@ -140,17 +140,16 @@ describe("InternalUrlRouter URL shape", () => {
 });
 
 describe("InternalUrlRouter.requireLocal diagnostics", () => {
-	it("surfaces the handler's not-found detail for an unknown artifact id", async () => {
+	it("surfaces the handler's not-found detail for an unknown agent output id", async () => {
 		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "router-require-local-"));
+		const unregister = registerArtifactsDir(artifactsDir);
 		try {
-			await Bun.write(path.join(artifactsDir, "4.bash.log"), "log\n");
-			const context = {
-				localProtocolOptions: { getArtifactsDir: () => artifactsDir, getSessionId: () => "s" },
-			};
-			await expect(InternalUrlRouter.instance().requireLocal("artifact://9", "find", context)).rejects.toThrow(
-				"Cannot find artifact://9: Artifact 9 not found. Available: 4",
+			await Bun.write(path.join(artifactsDir, "reviewer_0.md"), "report\n");
+			await expect(InternalUrlRouter.instance().requireLocal("agent://reviewer_9", "find", {})).rejects.toThrow(
+				"Cannot find agent://reviewer_9: Not found: reviewer_9",
 			);
 		} finally {
+			unregister();
 			await fs.rm(artifactsDir, { recursive: true, force: true });
 		}
 	});
@@ -170,7 +169,7 @@ describe("InternalUrlRouter write approval", () => {
 			settings: Settings.isolated(),
 		};
 		const tool = new WriteTool(session);
-		for (const target of ["artifact://3", "history://Worker", "skill://docs/SKILL.md"]) {
+		for (const target of ["history://Worker", "skill://docs/SKILL.md"]) {
 			expect(resolveApproval(tool, { path: target, content: "x" }, "always-ask")).toMatchObject({
 				policy: "deny",
 				source: "tool",

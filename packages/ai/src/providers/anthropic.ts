@@ -1129,6 +1129,61 @@ function hasAnthropicStreamWithResponseRequest(request: unknown): request is Ant
 	return isRecord(request) && typeof request.withResponse === "function";
 }
 
+type AnthropicMessageWithResponseRequest = {
+	withResponse(): Promise<{ data: unknown; response: Response; request_id: string | null }>;
+};
+
+function hasAnthropicMessageWithResponseRequest(request: unknown): request is AnthropicMessageWithResponseRequest {
+	return isRecord(request) && typeof request.withResponse === "function";
+}
+
+/** Response of a non-streaming Messages request: the decoded `Message` body and its HTTP envelope. */
+async function getAnthropicMessageResponse(
+	request: unknown,
+): Promise<{ message: unknown; response: Response; requestId: string | null }> {
+	if (hasAnthropicRawResponseRequest(request)) {
+		const response = await request.asResponse();
+		const message: unknown = await response.json();
+		return { message, response, requestId: response.headers.get("request-id") };
+	}
+	if (hasAnthropicMessageWithResponseRequest(request)) {
+		const { data, response, request_id } = await request.withResponse();
+		return { message: data, response, requestId: request_id };
+	}
+	throw new AIError.AnthropicStreamEnvelopeError("Anthropic SDK request did not expose a response");
+}
+
+/**
+ * What in `params` the endpoint rejects on a `max_tokens: 0` pre-warm, or
+ * undefined when it can be sent: budget thinking, a forced `tool_choice`, and
+ * structured output are refused, and a wrapping transport speaks only SSE.
+ */
+function anthropicPrewarmRejection(params: MessageCreateParamsStreaming, viaTransport: boolean): string | undefined {
+	if (viaTransport) return "a wrapping transport";
+	if (params.thinking?.type === "enabled") return "budget thinking";
+	const toolChoice = params.tool_choice?.type;
+	if (toolChoice === "any" || toolChoice === "tool") return "a forced tool_choice";
+	if ((params.output_config as AnthropicOutputConfig | undefined)?.format != null) return "structured output";
+	return undefined;
+}
+
+/** Copy a pre-warm response's usage onto `output`; its (empty) content is not kept. */
+function applyAnthropicPrewarmResponse(output: AssistantMessage, body: unknown, model: Model<Api>): void {
+	if (!isRecord(body) || !isRecord(body.usage)) {
+		throw new AIError.AnthropicStreamEnvelopeError("Anthropic pre-warm response carried no usage");
+	}
+	const usage = body.usage as AnthropicWireUsage;
+	applyAnthropicUsageExtras(output.usage, usage);
+	output.usage.input = usage.input_tokens || 0;
+	output.usage.output = usage.output_tokens || 0;
+	output.usage.cacheRead = usage.cache_read_input_tokens || 0;
+	output.usage.cacheWrite = usage.cache_creation_input_tokens || 0;
+	output.usage.totalTokens =
+		output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
+	calculateCost(model, output.usage, output.timestamp);
+	if (typeof body.id === "string") output.responseId = body.id;
+}
+
 async function getAnthropicStreamResponse(
 	request: unknown,
 	signal?: AbortSignal,
@@ -2715,6 +2770,29 @@ const streamAnthropicOnce = (
 					maxRetries: 0,
 					...(requestHeaders ? { headers: requestHeaders } : {}),
 				};
+				if (options?.prewarm) {
+					// The body the real request would send, under the same client, auth and
+					// headers, so it lands on the same cache key; only the output cap and
+					// the streaming flag differ.
+					const refusal = anthropicPrewarmRejection(wireParams, transport !== undefined);
+					if (refusal) {
+						throw new AIError.ConfigurationError(
+							`Anthropic prompt-cache pre-warm (max_tokens: 0) cannot be sent with ${refusal}`,
+						);
+					}
+					const prewarmBody = { ...wireParams, max_tokens: 0, stream: false };
+					if (rawRequestDump) rawRequestDump.body = prewarmBody;
+					const prewarmRequest: unknown =
+						isOAuthToken && client.beta
+							? client.beta.messages.create(prewarmBody, requestOptions)
+							: client.messages.create(prewarmBody, requestOptions);
+					const prewarmed = await getAnthropicMessageResponse(prewarmRequest);
+					await notifyProviderResponse(options, prewarmed.response, sourceModel, prewarmed.requestId);
+					applyAnthropicPrewarmResponse(output, prewarmed.message, sourceModel);
+					// Zero output tokens always stop at the cap (`stop_reason: "max_tokens"`).
+					output.stopReason = "length";
+					break;
+				}
 				const anthropicRequest: unknown =
 					isOAuthToken && client.beta
 						? client.beta.messages.create({ ...wireParams, stream: true }, requestOptions)

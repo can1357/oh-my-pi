@@ -25,7 +25,7 @@ type OAuthKeyEncoder = NonNullable<ProviderDefinition["getApiKey"]>;
 
 /**
  * Default config value resolver that checks env vars and treats as literal.
- * Does NOT support "!command" syntax (that requires pi-natives).
+ * Does NOT support "!command" syntax (that requires omp-natives).
  */
 async function defaultConfigValueResolver(config: string): Promise<string | undefined> {
 	const envValue = $envExact(config);

@@ -64,7 +64,7 @@ import { hasColumnTruncationClause, isColumnTruncationNotice } from "@oh-my-pi/p
 import { recoverConflictUriPrefix } from "./conflict-detect";
 import { unwrapHashlineHeaderPath } from "./hashline-header-path";
 import { outputMeta } from "./output-meta";
-import { formatPathRelativeToCwd, probeLiteralPathExists, specialFileKind } from "./path-utils";
+import { formatPathRelativeToCwd, probeLiteralPathExists, resolveToCwd, specialFileKind } from "./path-utils";
 import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { enforcePlanModeWrite, resolvePlanPath, targetsLocalSandbox } from "./plan-mode-guard";
 import { decodeUtf8Text } from "./read-format";
@@ -1000,7 +1000,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const verbatim = policy?.payload === "verbatim";
 			const { text: cleanContent, stripped } = verbatim
 				? { text: content, stripped: false }
-				: stripWriteContent(this.session, content);
+				: stripWriteContent(this.session, content, {
+						targetPath: target ? undefined : resolveToCwd(path, this.session.cwd),
+					});
 			// One UTF-8 scan per call, shared by the progress and result lines.
 			const cleanBytes = Buffer.byteLength(cleanContent, "utf8");
 			assertWriteTargetAddressable(path, router);

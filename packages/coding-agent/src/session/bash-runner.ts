@@ -299,7 +299,7 @@ export class BashRunner {
 	async #saveOriginalArtifact(target: BashSessionTarget, originalText: string): Promise<string | undefined> {
 		try {
 			const destination = target.destination ?? (await target.pending);
-			return await destination?.manager.saveArtifact(originalText, "bash-original");
+			return await destination?.manager.saveArtifact(originalText);
 		} catch {
 			return undefined;
 		}

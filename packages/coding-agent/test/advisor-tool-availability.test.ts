@@ -42,8 +42,7 @@ async function outcomeText(tool: AgentTool): Promise<string> {
 	try {
 		const result = await tool.execute("advisor-service", {
 			command: "true",
-			name: "advisor-web",
-			cwd: "proc://",
+			name: "advisor web",
 		} as never);
 		return result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
 	} catch (error) {
@@ -124,7 +123,7 @@ test("advisor tool availability follows that advisor's grant, not the primary", 
 		expect(narrowGrep.description).not.toContain("`find`");
 
 		const launch = await outcomeText(richBash);
-		expect(launch).toContain("exists only in the embedded shell");
+		expect(launch).toContain("Service name must be");
 		expect(launch).not.toContain("Service launch is disabled");
 
 		const bridgeGrep = narrow.createGrepTool?.({});
