@@ -521,6 +521,49 @@ describe("browser reads after an action", () => {
 	);
 
 	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"settles a handle action before a handle read, without settling the next read again",
+		async () => {
+			const pages = detailServer();
+			try {
+				const result = await runOnPage(
+					pages.url,
+					`
+						const load = await tab.waitForSelector("#load");
+						const pane = await tab.waitForSelector("#pane");
+						${latency(1500)}
+						await load.click();
+						const text = await pane.text();
+						const sent = page.waitForRequest(request => request.url().endsWith("/hold"));
+						await page.evaluate(() => startPoll());
+						await sent;
+						return [text, await pane.evaluate(el => [el.textContent, document.body.dataset.late ?? "early"])];
+					`,
+				);
+				expect(result).toEqual(["Detail", ["Detail", "early"]]);
+			} finally {
+				pages.stop();
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)("reads the URL while a confirm is pending", async () => {
+		const url = `data:text/html,${encodeURIComponent(`<button id="b" onclick="confirm('Go?')">Go</button>`)}`;
+		const result = await runOnPage(
+			url,
+			`
+					await tab.click("#b");
+					try {
+						return await tab.url();
+					} finally {
+						await tab.handleDialog({ accept: true });
+					}
+				`,
+		);
+		expect(result).toBe(url);
+	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"return the page as it is at the bound when the click's request never answers",
 		async () => {
 			const pages = detailServer();

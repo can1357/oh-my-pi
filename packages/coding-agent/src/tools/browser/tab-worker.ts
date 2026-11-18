@@ -3194,7 +3194,7 @@ export class WorkerCore {
 			name,
 			page,
 			signal,
-			url: () => read("tab.url()", quickOpMs, async () => page.url()),
+			url: () => settled("tab.url()", quickOpMs, async () => page.url(), { awaitNavigation: true }),
 			title: () => read("tab.title()", INF, sig => untilAborted(sig, () => page.title())),
 			goto: (url, opts) =>
 				input(`tab.goto(${JSON.stringify(url)})`, INF, async sig => {
