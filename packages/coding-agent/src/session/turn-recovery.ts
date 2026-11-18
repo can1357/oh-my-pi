@@ -142,6 +142,22 @@ const GENERIC_ABORT_MESSAGES: Record<string, true> = {
 	"The operation was aborted.": true,
 };
 
+/**
+ * Whether two raw fallback selectors name the same model, ignoring thinking
+ * level suffixes (a swap carries the session level while a chain entry may pin
+ * its own). Unparseable selectors never match.
+ */
+function sameRetryFallbackBaseSelector(
+	first: string,
+	second: string,
+	modelLookup: Pick<RetryFallbackModelLookup, "find">,
+): boolean {
+	const parsedFirst = parseRetryFallbackSelector(first, modelLookup);
+	const parsedSecond = parseRetryFallbackSelector(second, modelLookup);
+	if (!parsedFirst || !parsedSecond) return false;
+	return formatRetryFallbackBaseSelector(parsedFirst) === formatRetryFallbackBaseSelector(parsedSecond);
+}
+
 function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
 }

@@ -73,6 +73,11 @@
 - Rex and other OSC 7501 terminals no longer play a success sound mid-run when a stale agent end arrives after another run has opened ([#17307](https://github.com/can1357/oh-my-pi/issues/17307), [#19418](https://github.com/can1357/oh-my-pi/pull/19418) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.22.0] - 2026-11-16
+### Fixed
+
+- Stop restoring a fallback-chain primary that keeps failing after its cooldown expires: after 3 consecutive failed restores the session stays on the fallback instead of ping-ponging between primary and fallback forever ([#13065](https://github.com/can1357/oh-my-pi/pull/13065) by [@Deftera186](https://github.com/Deftera186)).
+
+## [18.3.0] - 2026-09-24
 
 ### Breaking Changes
 

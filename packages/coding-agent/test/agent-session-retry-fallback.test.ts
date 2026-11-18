@@ -7613,8 +7613,8 @@ describe("AgentSession retry fallback", () => {
 		}
 
 		const requestedModels: string[] = [];
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		const agent = createFallbackAgent(primaryModel, requestedModels, { retryAfterMs: 200 });
-
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
@@ -7632,9 +7632,13 @@ describe("AgentSession retry fallback", () => {
 			modelRegistry,
 			thinkingLevel: Effort.High,
 		});
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") {
+				fallbackAppliedEvents.push(event);
+			}
+		});
 		let now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
-
 		await session.prompt("First prompt triggers bare-selector fallback");
 		await session.waitForIdle();
 		expect(requestedModels).toEqual([
