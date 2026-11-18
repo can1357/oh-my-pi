@@ -5,6 +5,13 @@
 ### Fixed
 
 - Bounded cooldown-expiry restoration to three failed restores per fallback episode. Successful primary output or explicit model selection ends the episode; cancellations preserve effort, attribution, and unused restore allowance. Restoration also handles noncanonical startup selectors and model-clamped fallback effort. Restored primaries honor their current effort-specific chains, and intrinsic Fast-to-Standard downgrades end automatic restoration. Fallback-success notices survive interrupted observers without being duplicated by overlapping callbacks ([#13065](https://github.com/can1357/oh-my-pi/pull/13065) by [@Deftera186](https://github.com/Deftera186))
+- Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy
+- Fixed the Spotlight experiment re-asking Stencil Cloud on every tool call for an account without Cloud access (waitlisted): omp now warns once and pauses Spotlight for that account for a few hours, honors `Retry-After` on rate limits and outages, and sends its `omp/<version>` User-Agent on every Spotlight request
+
+### Changed
+
+- Commit draft `show()` now prints each run of lines from one unit under a single `1a ✓ Main` header instead of repeating the unit, mark, and owner on every line
+- The "Separate checkouts" guidance and the git guard's hint for a refused command now say how work comes back from an ovnfs checkout: `ovnfs land` puts its commits on the folder's branch with their files, `ovnfs pull` brings the folder's newer files in to resolve a conflict there, and `ovnfs rm` discards the rest. They no longer send agents through `apply --branch` and a fast-forward merge of their own, and point at `ovnfs help` for the rest (needs an ovnfs with `land`)
 
 ## [18.22.2] - 2026-11-18
 
@@ -19,6 +26,9 @@
 ### Changed
 
 - Model registries in one process (SDK embedders, tests) now share discovered-model builds, so refreshing another registry skips rebuilding models an earlier one already built
+### Added
+
+- Added `notify` to the `bash` tool: a regex whose matching output lines are reported to the agent while a background command or a named service runs, waking an idle session or ending a blocked `wait`; the command's result or the service's exit notice still follows
 
 ### Fixed
 
