@@ -44,6 +44,8 @@ runs:
       if: inputs.guarded != 'true'
       with:
         min-free-gb: ${{ inputs.min-free-gb }}
+    - uses: ./.github/actions/macos-hosted-cache
+      if: inputs.guarded == 'true' && runner.environment == 'github-hosted'
     - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       if: runner.environment == 'github-hosted'
     - name: Execute native objective

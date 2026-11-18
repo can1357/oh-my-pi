@@ -96,6 +96,24 @@ class HostedRunnerPolicy(unittest.TestCase):
         self.assertEqual(job['env']['CI_MACOS_FALLBACK_LABELS'], '${{ vars.CI_MACOS_FALLBACK_LABELS || ' + labels + ' }}')
 
     @unittest.skipIf(yaml is None, 'PyYAML is unavailable')
+    def test_guarded_hosted_cache_restores_inputs_without_running_native_preparation(self):
+        action = yaml.load((ROOT / '.github/actions/macos-native-objective/action.yml').read_text(), Loader=yaml.BaseLoader)
+        cache_step = next(step for step in action['runs']['steps'] if step.get('uses') == './.github/actions/macos-hosted-cache')
+        self.assertEqual(cache_step['if'], "inputs.guarded == 'true' && runner.environment == 'github-hosted'")
+        cache = yaml.load((ROOT / '.github/actions/macos-hosted-cache/action.yml').read_text(), Loader=yaml.BaseLoader)
+        steps = cache['runs']['steps']
+        saves = [step for step in steps if step.get('uses', '').startswith('actions/cache@')]
+        self.assertEqual(len(saves), 2)
+        python_cache, cargo_cache = (step['with'] for step in saves)
+        self.assertIn('vendor/.omp-python-ready.json', python_cache['path'])
+        self.assertIn('scripts/macos_worker_state.py', python_cache['key'])
+        self.assertIn('steps.workspace.outputs.digest', python_cache['key'])
+        self.assertNotIn('restore-keys', python_cache)
+        self.assertNotIn('target', cargo_cache['path'])
+        self.assertNotIn('credentials', cargo_cache['path'])
+        self.assertTrue(all('fetch-python' not in step.get('run', '') for step in steps))
+
+    @unittest.skipIf(yaml is None, 'PyYAML is unavailable')
     def test_control_changes_keep_pinned_hosted_first_fallback_without_admin_variables(self):
         ci = yaml.load(self.ci, Loader=yaml.BaseLoader)
         self.assertEqual(ci['env']['CI_MACOS_CONTROL_POLICY'], 'source-bound')
