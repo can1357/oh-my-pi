@@ -87,12 +87,26 @@ fn is_aws_stdout_pipe(command: &str) -> bool {
 	command.split_whitespace().any(|token| token == "-")
 }
 
+/// Whether the command picks its own output shape with `--output` or
+/// `--query`: the result is then exactly what was asked for, and reshaping it
+/// into a summary table drops the fields the query selected.
+fn is_aws_explicit_output(command: &str) -> bool {
+	command.split_whitespace().any(|token| {
+		matches!(token, "--output" | "--query")
+			|| token.starts_with("--output=")
+			|| token.starts_with("--query=")
+	})
+}
+
 fn filter_aws(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> String {
 	if is_aws_stdout_pipe(ctx.command) {
 		return input.to_string();
 	}
 
 	let without_progress = strip_transfer_progress(input);
+	if is_aws_explicit_output(ctx.command) {
+		return without_progress;
+	}
 	// Only the `ls` listing form should be reshaped into a bucket/date table;
 	// `aws s3 cp`/`sync`/`rm` emit progress/result lines (`upload: ... to
 	// s3://...`) that must not be misparsed as listing rows.
@@ -1314,6 +1328,26 @@ mod tests {
 		cfg: &'a MinimizerConfig,
 	) -> MinimizerCtx<'a> {
 		MinimizerCtx { program: "aws", subcommand: Some(subcommand), command, config: cfg }
+	}
+
+	#[test]
+	fn aws_explicit_output_or_query_is_not_reshaped() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut input = String::from("{\n    \"QueueUrls\": [\n");
+		for idx in 0..80 {
+			let _ =
+				writeln!(input, "        \"https://sqs.us-east-1.amazonaws.com/123/queue-{idx}\",");
+		}
+		input.push_str("        \"https://sqs.us-east-1.amazonaws.com/123/last\"\n    ]\n}\n");
+		for command in [
+			"aws sqs list-queues --output json",
+			"aws sqs list-queues --output=json",
+			"aws sqs list-queues --query QueueUrls",
+		] {
+			let out = filter(&aws_ctx("sqs", command, &cfg), &input, 0);
+			assert!(!out.changed, "{command}: {}", out.text);
+			assert_eq!(out.text, input);
+		}
 	}
 
 	#[test]
