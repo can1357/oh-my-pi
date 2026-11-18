@@ -9,6 +9,7 @@
 ### Fixed
 
 - Hosted jev (TypeSafe, OpenRouter, Command Code, OpenCode Zen) splits judgment requests at 32 questions, ending `400 questions must map 1 through 32 ids` find failures
+- Kiro API keys (`KIRO_API_KEY` / `ksk_…`) now list models, chat, and report `/usage` instead of failing with HTTP 400 `Invalid profileArn` ([#19689](https://github.com/can1357/oh-my-pi/issues/19689))
 
 ## [18.22.2] - 2026-11-18
 
