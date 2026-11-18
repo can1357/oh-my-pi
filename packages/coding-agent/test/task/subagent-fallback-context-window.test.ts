@@ -77,7 +77,8 @@ describe("subagent context window after a model swap", () => {
 					};
 					activeModel = fallback;
 					session.model = fallback;
-					await recovery.onAssistantSettledSuccessfully(SERVED_TURN);
+					const fallbackSuccess = recovery.onAssistantMessageEnd(SERVED_TURN);
+					await recovery.onAssistantSettledSuccessfully(SERVED_TURN, fallbackSuccess);
 					emit({
 						type: "retry_fallback_succeeded",
 						model: "openai-codex/gpt-6-sol",

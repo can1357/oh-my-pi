@@ -51,21 +51,22 @@ export interface RetryFallbackResolutionContext {
 	modelLookup: RetryFallbackModelLookup;
 }
 
-/** Active retry fallback state retained until the primary can be restored. */
+/** Outage accounting survives temporary restoration; chain ownership follows each fallback walk. */
 export interface ActiveRetryFallbackState {
 	/** Chain key that produced this fallback: a model-role name or a model-selector key. */
 	role: string;
 	originalSelector: string;
+	/** Resolved routed identity, independent of configured spelling and thinking level. */
+	originalModelIdentity?: string;
 	originalThinkingLevel: ConfiguredThinkingLevel | undefined;
 	lastAppliedFallbackThinkingLevel: ConfiguredThinkingLevel | undefined;
 	pinned: boolean;
-	/**
-	 * Set once a turn on the fallback target settles successfully. Until then the
-	 * switch is only a routing decision — nothing has been produced by the new
-	 * model, so no observer may report the run as having used it.
-	 */
-	served?: boolean;
+	/** Failed automatic primary restores; excludes the initial failure and fallback hops. */
+	failedRestores?: number;
 }
+
+/** Cooldown expiry cannot reopen an episode that exhausts this restoration allowance. */
+export const MAX_RETRY_FALLBACK_FAILED_RESTORES = 3;
 
 /** Model a session's produced work is attributed to. */
 export interface ServingModel {

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Effort, type FetchImpl } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
@@ -2752,5 +2753,278 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		// silently escape the scope the user just asked for.
 		expect(cliOptions.model?.provider).toBe(scopedTarget.provider);
 		expect(cliOptions.model?.id).toBe(scopedTarget.id);
+	});
+
+	async function setupStartupPrimary(
+		role: "default" | "slow",
+		{
+			primaryPresent = true,
+			successfulPrimaryRequest,
+			historyChain,
+		}: {
+			primaryPresent?: boolean;
+			successfulPrimaryRequest?: number;
+			historyChain?: "absent" | "empty" | "fallback";
+		} = {},
+	) {
+		const primary = "startup-primary/primary-model";
+		const fallback = "startup-fallback/fallback-model";
+		const other = "openai/gpt-4o-mini";
+		const primaryConfig: ProviderConfigInput = {
+			baseUrl: "https://startup-primary.example.invalid/v1",
+			api: "openai-completions",
+			oauth: {
+				name: "Startup primary",
+				login: async () => {
+					throw new Error("Startup selection must not initiate an OAuth login");
+				},
+			},
+			models: [
+				{
+					id: "primary-model",
+					name: "Startup primary model",
+					reasoning: true,
+					thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128000,
+					maxTokens: 8192,
+				},
+			],
+		};
+		const fallbackConfig: ProviderConfigInput = {
+			baseUrl: "https://startup-fallback.example.invalid/v1",
+			api: "openai-completions",
+			oauth: {
+				name: "Startup fallback",
+				login: async () => {
+					throw new Error("Startup selection must not initiate an OAuth login");
+				},
+			},
+			models: [
+				{
+					id: "fallback-model",
+					name: "Startup fallback model",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128000,
+					maxTokens: 8192,
+				},
+			],
+		};
+		const fallbackChains: Record<string, string[]> = { [role]: [fallback] };
+		if (historyChain === "empty") fallbackChains.default = [];
+		if (historyChain === "fallback") fallbackChains.default = [other];
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.modelFallback": true,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 0,
+			"retry.fallbackChains": fallbackChains,
+			"retry.fallbackRevertPolicy": "cooldown-expiry",
+		});
+		settings.setModelRole(role, "Startup-Primary/PRIMARY-MODEL:high");
+		if (historyChain !== undefined) settings.setModelRole("default", `${primary}:${Effort.High}`);
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime("startup-fallback", "test-key");
+		if (historyChain === "fallback") authStorage.keys.setRuntime("openai", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "startup-primary-models.yml"));
+		const extension: ExtensionFactory = pi => {
+			if (primaryPresent) pi.registerProvider("startup-primary", primaryConfig);
+			pi.registerProvider("startup-fallback", fallbackConfig);
+		};
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const { session } = await createAgentSession({
+			...buildSessionOptions(role === "slow" ? "slow" : []),
+			authStorage,
+			modelRegistry,
+			settings,
+			extensions: [extension],
+			cacheWarming: false,
+			toolNames: [],
+		});
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		let primaryRequests = 0;
+		session.agent.streamFn = (model, context, options) => {
+			const selector = `${model.provider}/${model.id}`;
+			requestedModels.push(selector);
+			if (selector === primary) {
+				primaryRequests += 1;
+				mock.push(
+					primaryRequests === successfulPrimaryRequest
+						? { content: ["The primary served"] }
+						: { throw: "429 Rate limit exceeded. Please try again later." },
+				);
+			} else if (selector === fallback || selector === other) {
+				mock.push({ content: ["The fallback served"] });
+			} else {
+				throw new Error(`Unexpected startup model request: ${selector}`);
+			}
+			return mock.stream(model, context, options);
+		};
+		let prompts = 0;
+		const nextPrompt = async () => {
+			now += 61_000;
+			await session.prompt(`Startup primary recovery ${prompts++}`);
+			await session.waitForIdle();
+		};
+		return {
+			session,
+			settings,
+			authStorage,
+			modelRegistry,
+			primaryConfig,
+			primary,
+			fallback,
+			other,
+			requestedModels,
+			nextPrompt,
+		};
+	}
+
+	for (const [role, historyChain] of [
+		["default", undefined],
+		["slow", undefined],
+		["slow", "absent"],
+	] as const) {
+		const name =
+			historyChain === "absent"
+				? "caps slow startup primary restores when matching history has no chain"
+				: `caps ${role} startup primary restores for a supported noncanonical selector`;
+		test(name, async () => {
+			const fixture = await setupStartupPrimary(role, { historyChain });
+			const { primary, fallback, session } = fixture;
+			try {
+				await fixture.nextPrompt();
+				expect(fixture.requestedModels).toEqual([fallback]);
+				fixture.authStorage.keys.setRuntime("startup-primary", "test-key");
+				for (let prompt = 0; prompt < 5; prompt += 1) await fixture.nextPrompt();
+				expect(fixture.requestedModels).toEqual([
+					fallback,
+					primary,
+					fallback,
+					primary,
+					fallback,
+					primary,
+					fallback,
+					fallback,
+					fallback,
+				]);
+				expect(session.servingModel).toMatchObject({ modelIdentity: fallback, isFallback: true });
+			} finally {
+				await session.dispose();
+			}
+		});
+	}
+
+	for (const historyChain of ["empty", "fallback"] as const) {
+		test(
+			historyChain === "empty"
+				? "honors an empty matching history role ahead of the saved startup role"
+				: "honors a nonempty matching history role ahead of the saved startup role",
+			async () => {
+				const fixture = await setupStartupPrimary("slow", { historyChain });
+				const { primary, fallback, other, session } = fixture;
+				try {
+					await fixture.nextPrompt();
+					expect(fixture.requestedModels).toEqual([fallback]);
+					fixture.authStorage.keys.setRuntime("startup-primary", "test-key");
+					await fixture.nextPrompt();
+					expect(fixture.requestedModels).toEqual(
+						historyChain === "empty" ? [fallback, primary] : [fallback, primary, other],
+					);
+					if (historyChain === "empty") {
+						expect(session.model).toMatchObject({ provider: "startup-primary", id: "primary-model" });
+						expect(session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+					} else {
+						expect(session.servingModel).toMatchObject({ modelIdentity: other, isFallback: true });
+					}
+				} finally {
+					await session.dispose();
+				}
+			},
+		);
+	}
+
+	test("ignores a saved startup role whose assignment has changed", async () => {
+		const fixture = await setupStartupPrimary("slow");
+		const { primary, fallback, other, session } = fixture;
+		try {
+			await fixture.nextPrompt();
+			expect(fixture.requestedModels).toEqual([fallback]);
+			fixture.settings.setModelRole("slow", other);
+			fixture.authStorage.keys.setRuntime("openai", "test-key");
+			fixture.authStorage.keys.setRuntime("startup-primary", "test-key");
+			await fixture.nextPrompt();
+			expect(fixture.requestedModels).toEqual([fallback, primary]);
+			expect(session.model).toMatchObject({ provider: "startup-primary", id: "primary-model" });
+			expect(session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("starts a fresh outage after successful startup primary output", async () => {
+		const fixture = await setupStartupPrimary("default", { successfulPrimaryRequest: 3 });
+		const { primary, fallback, session } = fixture;
+		try {
+			await fixture.nextPrompt();
+			expect(fixture.requestedModels).toEqual([fallback]);
+			fixture.authStorage.keys.setRuntime("startup-primary", "test-key");
+			for (let prompt = 0; prompt < 3; prompt += 1) await fixture.nextPrompt();
+			const primaryServing = session.servingModel;
+			for (let prompt = 0; prompt < 5; prompt += 1) await fixture.nextPrompt();
+			expect(fixture.requestedModels).toEqual([
+				fallback,
+				primary,
+				fallback,
+				primary,
+				fallback,
+				primary,
+				primary,
+				fallback,
+				primary,
+				fallback,
+				primary,
+				fallback,
+				primary,
+				fallback,
+				fallback,
+			]);
+			expect(primaryServing).toMatchObject({ modelIdentity: primary, isFallback: false });
+			expect(session.servingModel).toMatchObject({ modelIdentity: fallback, isFallback: true });
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("resolves a late-registered startup primary before charging restores", async () => {
+		const fixture = await setupStartupPrimary("default", { primaryPresent: false });
+		const { primary, fallback, session } = fixture;
+		try {
+			await fixture.nextPrompt();
+			expect(fixture.requestedModels).toEqual([fallback]);
+			fixture.modelRegistry.registerProvider("startup-primary", fixture.primaryConfig);
+			fixture.authStorage.keys.setRuntime("startup-primary", "test-key");
+			for (let prompt = 0; prompt < 5; prompt += 1) await fixture.nextPrompt();
+			expect(fixture.requestedModels).toEqual([
+				fallback,
+				primary,
+				fallback,
+				primary,
+				fallback,
+				primary,
+				fallback,
+				fallback,
+				fallback,
+			]);
+			expect(session.servingModel).toMatchObject({ modelIdentity: fallback, isFallback: true });
+		} finally {
+			await session.dispose();
+		}
 	});
 });

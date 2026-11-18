@@ -168,6 +168,8 @@ export interface InitialRetryFallbackState {
 	role: string;
 	/** Configured primary selector retained for restoration when it becomes available. */
 	originalSelector: string;
+	/** Resolved routed identity, when the unavailable primary is already known. */
+	originalModelIdentity?: string;
 	/** Thinking selector configured for the unavailable primary. */
 	originalThinkingLevel: ConfiguredThinkingLevel | undefined;
 	/** Prevent cooldown restoration when startup selected this fallback from live usage health. */
