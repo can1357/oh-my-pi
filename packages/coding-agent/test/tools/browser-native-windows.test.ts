@@ -115,7 +115,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("native-window frame isolation", () => {
 				});
 			expect(await readTabFrame(page)).toEqual(frame);
 		} finally {
-			await closeLaunchedBrowser(browser);
+			await closeLaunchedBrowser({ browser, userDataDir });
 			if (userDataDir) await removeUserDataDir(userDataDir);
 		}
 	});
@@ -152,7 +152,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("page-backed native-window candidates", () 
 			);
 			expect(await call(watch)).toEqual([]);
 		} finally {
-			await closeLaunchedBrowser(browser);
+			await closeLaunchedBrowser({ browser, userDataDir });
 			if (userDataDir) await removeUserDataDir(userDataDir);
 		}
 	});
@@ -241,7 +241,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE || process.platform !== "darwin")("native no
 				begin.mockRestore();
 				end.mockRestore();
 				timeoutSpy.mockRestore();
-				await closeLaunchedBrowser(browser);
+				await closeLaunchedBrowser({ browser, userDataDir });
 				if (userDataDir) await removeUserDataDir(userDataDir);
 			}
 		},
