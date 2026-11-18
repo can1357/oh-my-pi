@@ -1,3 +1,4 @@
+import { samplingProfilerStackTraces } from "bun:jsc";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import {
 	createJscLoopSampler,
@@ -339,7 +340,7 @@ describe("LoopWatchdog", () => {
 			callbacks.push(cb);
 			return {};
 		};
-		const wd = new LoopWatchdog({ now: () => nowValue, schedule });
+		const wd = new LoopWatchdog({ now: () => nowValue, schedule, sampler: null });
 
 		wd.start(); // arms callbacks[0] under generation 0
 		const stale = callbacks[callbacks.length - 1]!;
@@ -363,7 +364,7 @@ describe("LoopWatchdog", () => {
 			cb = c;
 			return { unref };
 		};
-		const wd = new LoopWatchdog({ now: () => nowValue, schedule });
+		const wd = new LoopWatchdog({ now: () => nowValue, schedule, sampler: null });
 
 		wd.start();
 		expect(unref).toHaveBeenCalledTimes(1); // armed on start
@@ -465,6 +466,7 @@ describe("LoopWatchdog long-block classification", () => {
 				scheduled = cb;
 				return {};
 			},
+			sampler: null,
 			...options,
 		});
 		return {
@@ -553,6 +555,7 @@ function fakeSampler() {
 		start() {
 			starts++;
 		},
+		stop() {},
 		drain() {
 			drains++;
 			const out = pending;
@@ -714,6 +717,21 @@ describe("LoopWatchdog with the JSC sampler", () => {
 		const ctx = warnSpy.mock.calls[0]![1] as { cause?: string; top?: string[] };
 		const named = [ctx.cause ?? "", ...(ctx.top ?? [])].join("\n");
 		expect(named).toContain("blockLoopInSamplerProbe");
+	});
+
+	test.skipIf(createJscLoopSampler() === null)("stops the profiler once the last running watchdog stops", () => {
+		const schedule = () => ({});
+		const first = new LoopWatchdog({ schedule });
+		const second = new LoopWatchdog({ schedule });
+		first.start();
+		second.start();
+		first.stop();
+		// The profiler is process-wide: it keeps sampling for the watchdog still running.
+		while (samplingProfilerStackTraces().traces.length === 0) blockLoopInSamplerProbe(10);
+		second.stop();
+		// A sample left in the profiler's buffer keeps the functions on its stack from being collected.
+		blockLoopInSamplerProbe(50);
+		expect(samplingProfilerStackTraces().traces).toEqual([]);
 	});
 });
 
