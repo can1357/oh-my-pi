@@ -91,6 +91,11 @@ export class IrcBus implements IrcBusApi {
 		return IrcBus.#global;
 	}
 
+	/** The process-global bus if one exists; never creates it (no bus means no message was ever held). */
+	static existing(): IrcBusApi | undefined {
+		return IrcBus.#global;
+	}
+
 	/** Install the process-global bus. Worker bootstrap only. */
 	static installGlobal(api: IrcBusApi): void {
 		IrcBus.#global = api;

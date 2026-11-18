@@ -5348,8 +5348,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			const registry = AgentRegistry.global();
 			registry.syncSessionStatus(id, session);
 			// Messages parked while this agent waited for a spawn slot or was starting.
-			const bus = IrcBus.global();
-			for (let parked = bus.take(id); parked; parked = bus.take(id)) await session.deliverIrcMessage(parked);
+			const bus = IrcBus.existing();
+			for (let parked = bus?.take(id); parked; parked = bus?.take(id)) await session.deliverIrcMessage(parked);
 			const runRef = registry.get(id);
 			if (runRef) {
 				// Agent Hub kills bypass this run's caller signal: lifecycle.release()
