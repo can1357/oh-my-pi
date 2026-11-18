@@ -41,7 +41,8 @@ export type SpecialHandler = (
 /** Network read bound for a fetched body; the only size limit on rendered URL content. */
 export const MAX_BYTES = 50 * 1024 * 1024;
 
-const USER_AGENTS = [
+/** User agents a fetch tries in turn while the site refuses the previous one ({@link BLOCKED_STATUSES}). */
+export const USER_AGENTS = [
 	"curl/8.0",
 	"Mozilla/5.0 (compatible; TextBot/1.0)",
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -52,7 +53,7 @@ const USER_AGENTS = [
  * says: a bare nginx "403 Forbidden" page, SEC's "Undeclared Automated Tool" page or a 429
  * keyed on the agent all serve the page to the next user agent.
  */
-const BLOCKED_STATUSES = new Set([403, 429, 503, 999]);
+export const BLOCKED_STATUSES = new Set([403, 429, 503, 999]);
 
 /** A challenge interstitial carries no content (Reddit's is about 8 KB); a larger page is no wall. */
 const CHALLENGE_PAGE_MAX_CHARS = 64 * 1024;

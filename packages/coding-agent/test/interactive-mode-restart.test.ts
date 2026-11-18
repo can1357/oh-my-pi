@@ -62,7 +62,7 @@ describe("InteractiveMode restart", () => {
 		vi.spyOn(postmortem, "drainStdout").mockResolvedValue();
 		vi.spyOn(postmortem, "quit").mockResolvedValue();
 		await mode.restart();
-		const command = process.platform === "win32" ? spawn.mock.calls[0]?.[0] : exec.mock.calls[0]?.[0];
+		const command = process.platform === "win32" ? spawn.mock.calls[0]?.[0] : exec.mock.calls[0]?.[1];
 		if (!Array.isArray(command)) throw new Error("expected replacement command");
 		return command;
 	}

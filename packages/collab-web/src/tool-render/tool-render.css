@@ -445,6 +445,12 @@
 	overflow-wrap: anywhere;
 }
 
+/* A source's page excerpt under its title (web_search without an answer). */
+.tv-excerpt {
+	display: block;
+	color: var(--tv-muted);
+}
+
 /* ---- todo ---- */
 
 .tv-todo {

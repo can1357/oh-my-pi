@@ -45,6 +45,8 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const WRITE_MESSAGE_TIMEOUT_MS = 30_000;
 /** Default wait for socket-mode adapters to become reachable. */
 const SOCKET_READY_TIMEOUT_MS = 10_000;
+/** How long a cleanly ended transport waits for the adapter's exit, to report its stderr. */
+const READER_EXIT_GRACE_MS = 200;
 
 function toErrorMessage(value: unknown): string {
 	if (value instanceof Error) return value.message;
@@ -650,6 +652,11 @@ export class DapClient {
 		} finally {
 			reader.releaseLock();
 			this.#isReading = false;
+		}
+		// A clean stream end usually means the adapter is exiting: give its exit a
+		// moment to land so callers see its exit code and stderr, not a bare close.
+		if (!closeError) {
+			await Promise.race([this.proc.exited.catch(() => {}), Bun.sleep(READER_EXIT_GRACE_MS)]);
 		}
 		// The transport is gone once the reader loop exits — on a thrown error
 		// or a clean stream end (a socket the peer dropped after we wrote, e.g.

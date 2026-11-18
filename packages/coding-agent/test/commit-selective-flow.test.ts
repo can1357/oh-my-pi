@@ -78,6 +78,9 @@ async function emptyRepo() {
 	await git(root, ["config", "user.email", "test@example.com"]);
 	await git(root, ["config", "user.name", "Test"]);
 	await git(root, ["config", "commit.gpgSign", "false"]);
+	// Drafts convert content in-process, reading the developer's global config, where
+	// `core.autocrlf` may be set; the oracle `git` above ignores it.
+	await git(root, ["config", "core.autocrlf", "false"]);
 	const journal = ChangeJournal.at(artifacts);
 	const write = async (agent: string, parent: string | undefined, file: string, after: string) => {
 		const absolute = path.join(root, file);
@@ -868,8 +871,77 @@ describe("selective commit flow", () => {
 			);
 			expect(amended.sha).not.toBe(outcome.sha);
 			expect((await git(root, ["rev-parse", "HEAD"])).trim()).toBe(amended.sha);
+			// The amend replaced the root commit: no parent, the replaced commit named, its paths kept.
+			expect(amended.amended).toBe(outcome.sha);
+			expect(amended.parent).toBeNull();
+			expect(amended.paths).toEqual(["notes.txt"]);
+			expect((await git(root, ["rev-list", "--count", "HEAD"])).trim()).toBe("1");
 		} finally {
 			spy.mockRestore();
 		}
+	});
+
+	it("shows every file the summary lists under Review", async () => {
+		const { root, journal, write } = await emptyRepo();
+		await write("Main", undefined, "blob.bin", "binary\0content\n");
+		await journal.flush();
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+
+		expect(draft.summary()).toContain("? blob.bin  whole binary, non-UTF-8, or large file; edited by Main");
+		expect(draft.show()).toBe(
+			"blob.bin  whole-file change (binary, non-UTF-8, or large file); edited by Main\n  1 ? whole file",
+		);
+	});
+
+	it("compares and commits worktree content in its git form", async () => {
+		const { root, journal, write } = await emptyRepo();
+		await git(root, ["config", "core.autocrlf", "true"]);
+		await Bun.write(path.join(root, "notes.txt"), "one\r\ntwo\r\nthree\r\n");
+		await git(root, ["add", "notes.txt"]);
+		await git(root, ["commit", "-qm", "seed"]);
+		await write("Main", undefined, "notes.txt", "one\r\n2\r\nthree\r\n");
+		await journal.flush();
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+
+		expect(draft.summary()).toContain("✓ notes.txt  +1 −1");
+		await commitSelection(draft, { subject: "fix: two" }, { journal, agent: { agent: "Main" } });
+		expect(await git(root, ["show", "HEAD:notes.txt"])).toBe("one\n2\nthree\n");
+	});
+
+	it("says so when the session keeps no change journal", async () => {
+		const { root } = await emptyRepo();
+		await Bun.write(path.join(root, "a.txt"), "a\n");
+		const draft = await createDraft({ cwd: root, journal: null, caller: "Main" });
+
+		expect(draft.summary()).toContain("No change journal: this session keeps no artifacts");
+		expect(draft.summary()).toContain("Not yours: 1 path(s).");
+	});
+
+	it("reports an amend against the replaced commit's parent with all of its paths", async () => {
+		const { root, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "seed.txt"), "seed\n");
+		await git(root, ["add", "seed.txt"]);
+		await git(root, ["commit", "-qm", "seed"]);
+		const seed = (await git(root, ["rev-parse", "HEAD"])).trim();
+		await write("Main", undefined, "a.txt", "a\n");
+		await write("Main", undefined, "b.txt", "b\n");
+		await journal.flush();
+		const first = await commitSelection(
+			await createDraft({ cwd: root, journal, caller: "Main" }),
+			{ subject: "feat: a and b" },
+			{ journal, agent: { agent: "Main" } },
+		);
+
+		await write("Main", undefined, "a.txt", "a\nmore\n");
+		await journal.flush();
+		const amended = await commitSelection(
+			await createDraft({ cwd: root, journal, caller: "Main" }),
+			{ subject: "feat: a and b", amend: true },
+			{ journal, agent: { agent: "Main" } },
+		);
+		expect(amended.amended).toBe(first.sha);
+		expect(amended.parent).toBe(seed);
+		expect(amended.paths).toEqual(["a.txt", "b.txt"]);
+		expect((await git(root, ["rev-list", "--count", "HEAD"])).trim()).toBe("2");
 	});
 });
