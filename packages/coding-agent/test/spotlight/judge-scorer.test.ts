@@ -137,10 +137,11 @@ describe("judge scorer", () => {
 			const scorer = new JudgeScorer(judge, 5_000);
 			expect(await scorer.score(lines, context())).toHaveLength(120);
 
-			expect(sent).toBe(2);
+			// Hosted jev takes at most 32 questions a request, so the second 48-line chunk goes out as two requests.
+			expect(sent).toBe(3);
 			expect(scorer.usage.calls).toBe(3);
 			expect(scorer.usage.cached).toBe(1);
-			expect(scorer.usage.tokens).toBe(200);
+			expect(scorer.usage.tokens).toBe(300);
 		} finally {
 			cache.close();
 		}

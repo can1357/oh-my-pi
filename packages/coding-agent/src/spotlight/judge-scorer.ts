@@ -21,10 +21,10 @@ import {
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { Settings } from "../config/settings";
 import type { ModelRegistry } from "../config/model-registry";
-import type { JudgmentUsageLedger } from "../judgment";
 import { journalJudgmentUsage, resolveJudge } from "../judgment";
 import { sharedJudgmentCache } from "../judgment/cache";
 import type { CostGateApi } from "../session/cost-gate";
+import type { ModelUsageLedger } from "../session/model-usage-journal";
 import type { SpotlightRequestParams } from "@oh-my-pi/pi-tui/chat/spotlight";
 import questionFile from "../prompts/judge/shape.json" with { type: "json" };
 import { logger } from "@oh-my-pi/pi-utils";
@@ -93,7 +93,7 @@ export interface SpotlightScorerSession {
 	getActiveModel?: () => Model | undefined;
 	getTelemetry?: () => AgentTelemetryConfig | undefined;
 	costGate?: CostGateApi;
-	sessionManager?: Partial<JudgmentUsageLedger>;
+	sessionManager?: Partial<ModelUsageLedger>;
 }
 
 /**
