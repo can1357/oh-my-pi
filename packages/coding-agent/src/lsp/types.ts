@@ -387,8 +387,8 @@ export interface LspWriteSink {
 
 /**
  * Byte transport carrying one LSP JSON-RPC link. Structurally satisfied by
- * `ptree.ChildProcess<"pipe">` (local server spawn) and by the IPC link adapter
- * in `mux/daemon.ts` (broker-shared server). `exited` may reject (ptree kill).
+ * `ptree.ChildProcess<"pipe">` (local server spawn) and by the daemon `lsp` unit
+ * tunnel adapter in `client.ts` (daemon-shared server). `exited` may reject (ptree kill).
  */
 export interface LspTransport {
 	readonly stdin: LspWriteSink;
@@ -396,7 +396,7 @@ export interface LspTransport {
 	readonly exited: Promise<number>;
 	readonly exitCode: number | null;
 	readonly pid?: number;
-	/** Present and true on broker-shared mux links; `lsp reload` uses it to request a shared-server restart. */
+	/** Present and true on daemon-shared links; `lsp reload` uses it to request a shared-server restart. */
 	readonly sharedMux?: boolean;
 	kill(): void;
 	peekStderr(): string;

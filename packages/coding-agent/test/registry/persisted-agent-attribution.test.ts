@@ -242,16 +242,17 @@ describe("persisted agent model attribution", () => {
 		expect(history?.metrics?.contextTokens).toBe(165);
 	});
 
-	it("labels the row with the newest role a transition assigned, skipping ephemeral ones", async () => {
+	it("labels the row with the newest role a transition assigned, skipping fallback and temporary picks", async () => {
 		using tempDir = TempDir.createSync("@omp-attribution-role-");
-		// Two real role transitions plus an ephemeral fallback on top: the label
-		// must be the latest deliberate role, not the first one nor the fallback.
+		// Two real role transitions, then an ephemeral fallback and a temporary
+		// model pick: the label must be the latest role, never "fallback" or "temporary".
 		const registry = await historyFor(tempDir.path(), "Rerolled", [
 			...transcriptHead(),
 			assistant("a1", "si", SONNET, "stop", [{ type: "text", text: "first role" }]),
 			modelChange("m2", "a1", "openai-codex/gpt-5.6-sol", "slow", false),
 			assistant("a2", "m2", SOL, "stop", [{ type: "text", text: "second role" }]),
 			modelChange("m3", "a2", "openai-codex/gpt-5.6-sol", "fallback", true),
+			modelChange("m4", "m3", "anthropic/claude-sonnet-5", "temporary", false),
 		]);
 
 		const history = registry.get("Rerolled")?.history;

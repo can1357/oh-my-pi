@@ -971,7 +971,8 @@ export const cfgToolsIntentTracing = register({
 		tab: "tools",
 		group: "Execution",
 		label: "Intent Tracing",
-		description: "Ask the agent to describe the intent of each tool call before executing it",
+		description:
+			"Ask the agent to describe the intent of each tool call before executing it. Unset: on in the interactive TUI, off in print, RPC, ACP, and SDK sessions",
 	},
 });
 

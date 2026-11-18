@@ -6,7 +6,7 @@ import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/t
 import { bashToolRenderer, formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
 import { previewWindowRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { sanitizeText, spillUrl } from "@oh-my-pi/pi-utils";
 import { RunTrace } from "@oh-my-pi/pi-natives";
 import { defaultShellVizPreferences, readShellPresentation } from "@oh-my-pi/pi-tui/tools/shell-viz";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
@@ -218,7 +218,7 @@ describe("bashToolRenderer", () => {
 	it("folds raw output artifact notices into the status footer", async () => {
 		const component = bashToolRenderer.renderResult(
 			{
-				content: [{ type: "text", text: "filtered\n[raw output: artifact://13]\n\nWall time: 0.08 seconds" }],
+				content: [{ type: "text", text: "filtered\n[raw output: local://13.log]\n\nWall time: 0.08 seconds" }],
 				details: { timeoutSeconds: 300, wallTimeMs: 80 },
 				isError: false,
 			},
@@ -230,9 +230,9 @@ describe("bashToolRenderer", () => {
 		expect(rendered).toContain("filtered");
 		expect(rendered).toContain("Wall: 0.08s");
 		expect(rendered).toContain("Timeout: 300s");
-		expect(rendered).toContain("Artifact: 13");
-		expect(rendered).not.toContain("[raw output: artifact://13]");
-		expect(rendered).not.toContain("artifact://13");
+		// The footer notice leaves the body; its URL shows once, in the status line.
+		expect(rendered).not.toContain("[raw output:");
+		expect(rendered.split(spillUrl(13))).toHaveLength(2);
 	});
 	it("renders the exit status in the footer and strips the textual exit notice for failed commands", async () => {
 		const component = bashToolRenderer.renderResult(
@@ -482,7 +482,7 @@ describe("bashToolRenderer", () => {
 		const filter = `\x1b[31mlint\x1b[0m\tun\x07safe\nfooter ${"界".repeat(30)}`;
 		const label = `lint unsafe footer ${"界".repeat(10)}…`;
 		const result = {
-			content: [{ type: "text" as const, text: "1 error\n[raw output: artifact://2]" }],
+			content: [{ type: "text" as const, text: "1 error\n[raw output: local://2.log]" }],
 			details: { meta: { minimized: { filter, inputBytes: 1960, outputBytes: 27, artifactId: "2" } } },
 		};
 		const args = { command: "pnpm lint" };
@@ -504,7 +504,7 @@ describe("bashToolRenderer", () => {
 		const home = spyOn(os, "homedir").mockReturnValue("/home/alice");
 		try {
 			const result = {
-				content: [{ type: "text" as const, text: "ok\n[raw output: artifact://3]" }],
+				content: [{ type: "text" as const, text: "ok\n[raw output: local://3.log]" }],
 				details: {
 					meta: {
 						minimized: { filter: "/home/alice/bin/lint", inputBytes: 1960, outputBytes: 27, artifactId: "3" },
