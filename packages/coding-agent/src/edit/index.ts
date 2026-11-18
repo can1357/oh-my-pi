@@ -477,6 +477,11 @@ export class EditTool implements AgentTool<TInput> {
 		return entries.length > 0 ? entries : undefined;
 	}
 
+	matcherSections(args: unknown): readonly { path: string; text: string }[] | undefined {
+		const sections = this.#inspect(args).sections;
+		return sections.length > 0 ? sections : undefined;
+	}
+
 	openArgStream(init: AgentToolArgStreamInit): AgentToolArgStream {
 		this.#sessions.get(init.toolCallId)?.native.close();
 		this.#streamedArgs.delete(init.toolCallId);
@@ -628,7 +633,7 @@ export class EditTool implements AgentTool<TInput> {
 		try {
 			inspection = editInspect(this.mode, JSON.stringify(args ?? {}));
 		} catch {
-			inspection = { paths: [], entries: [], fileOps: [] };
+			inspection = { paths: [], entries: [], fileOps: [], sections: [] };
 		}
 		if (tagged) tagged[kInspection] = { mode: this.mode, inspection };
 		return inspection;

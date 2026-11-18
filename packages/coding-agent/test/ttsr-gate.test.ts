@@ -500,6 +500,30 @@ describe("TTSR gate rules", () => {
 		expect(verdict.refusal).toContain("env-files guidance");
 	});
 
+	it.each([
+		{ name: "removes lines from", sections: ["*** Update File: README.md", "@@", "-secrets.env"] },
+		{ name: "deletes", sections: ["*** Delete File: secrets.env"] },
+	])(
+		"[gate-24] shows a gate globbed to one file nothing of a sibling file the edit call $name",
+		async ({ sections }) => {
+			const edit = applyPatchTool();
+			const rule = judgedRule("ts-files", {
+				gate: "before",
+				question: "Does this call change an env file?",
+				scope: ["tool:edit(*.ts)"],
+			});
+			const { coordinator } = setup([rule], contentJudge("secrets.env"), Settings.isolated(), [edit]);
+
+			const verdict = await coordinator.gateToolCall({
+				tool: edit,
+				args: patchAddingLineAnd(...sections),
+				toolCallId: "call-1",
+			});
+
+			expect(verdict).toEqual({ covered: true });
+		},
+	);
+
 	it("[gate-20] leaves a call too long for the judge to read in full to onJudgeError", async () => {
 		const { judge } = fakeJudge({ [DELETES]: 0.05 });
 		const blocking = setup([gateRule("no-rm", { onJudgeError: "block" })], judge, Settings.isolated());

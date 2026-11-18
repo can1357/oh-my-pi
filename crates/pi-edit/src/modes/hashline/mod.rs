@@ -130,10 +130,12 @@ fn inspect_input(input: &str) -> Inspection {
 	let headers = header_parts(input);
 	let paths = headers.iter().map(|(path, ..)| path.clone()).collect();
 	let mut entries = Vec::<(String, String)>::new();
-	for (index, (path, _, body_start)) in headers.iter().enumerate() {
+	let mut sections = Vec::new();
+	for (index, (path, start, body_start)) in headers.iter().enumerate() {
 		let body_end = headers
 			.get(index + 1)
 			.map_or(input.len(), |(_, start, _)| *start);
+		super::push_section(&mut sections, path, input[*start..body_end].trim());
 		let digest = super::added_lines(input[*body_start..body_end].lines()).unwrap_or_default();
 		if digest.is_empty() {
 			continue;
@@ -157,7 +159,8 @@ fn inspect_input(input: &str) -> Inspection {
 			}
 		}
 	}
-	Inspection { paths, entries, file_ops }
+	super::pair_move_destinations(&mut sections, &file_ops);
+	Inspection { paths, entries, file_ops, sections }
 }
 
 #[cfg(test)]
@@ -170,5 +173,9 @@ mod tests {
 			inspect_input("[*** Update File: src/a.ts#ABCD]\nPUT 1.=1:\n+new\n[src/b.ts]\nCUT 2.=2");
 		assert_eq!(inspected.paths, ["src/a.ts", "src/b.ts"]);
 		assert_eq!(inspected.entries, [("src/a.ts".into(), "new".into())]);
+		assert_eq!(inspected.sections, [
+			("src/a.ts".into(), "[*** Update File: src/a.ts#ABCD]\nPUT 1.=1:\n+new".into()),
+			("src/b.ts".into(), "[src/b.ts]\nCUT 2.=2".into()),
+		]);
 	}
 }

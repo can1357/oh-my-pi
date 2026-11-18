@@ -168,6 +168,12 @@ fn matcher_paths_entries_and_file_ops_follow_the_envelope() {
 	assert_eq!(inspection.paths, ["a.txt", "c.txt"]);
 	assert_eq!(inspection.entries, [("a.txt".into(), "new".into())]);
 	assert_eq!(inspection.file_ops.len(), 2);
+	let moved = "*** Update File: a.txt\n*** Move to: b.txt\n@@\n-old\n+new";
+	assert_eq!(inspection.sections, [
+		("a.txt".into(), moved.into()),
+		("c.txt".into(), "*** Delete File: c.txt".into()),
+		("b.txt".into(), moved.into()),
+	]);
 }
 
 #[tokio::test]

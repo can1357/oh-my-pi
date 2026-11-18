@@ -505,12 +505,30 @@ fn natural_order_previews(input: &str) -> Vec<PreviewFile> {
 		.collect()
 }
 
-fn inspect_entries(input: &str) -> (Vec<String>, Vec<(String, String)>, Vec<FileOpIntent>) {
-	let paths = ENVELOPE_PATH
+fn inspect_entries(input: &str) -> Inspection {
+	let headers = ENVELOPE_PATH
 		.captures_iter(input)
-		.filter_map(|capture| capture.get(1).map(|value| value.as_str().trim().to_owned()))
-		.filter(|path| !path.is_empty())
+		.filter_map(|capture| {
+			let path = capture.get(1)?.as_str().trim();
+			let start = capture.get(0)?.start();
+			(!path.is_empty()).then(|| (path.to_owned(), start))
+		})
 		.collect::<Vec<_>>();
+	let paths = headers
+		.iter()
+		.map(|(path, _)| path.clone())
+		.collect::<Vec<_>>();
+	let mut sections = Vec::new();
+	for (index, (path, start)) in headers.iter().enumerate() {
+		let end = headers
+			.get(index + 1)
+			.map_or(input.len(), |(_, next)| *next);
+		let section = &input[*start..end];
+		let section = section
+			.find(END_PATCH_MARKER)
+			.map_or(section, |at| &section[..at]);
+		super::push_section(&mut sections, path, section.trim());
+	}
 	let entries = parse_apply_patch(input)
 		.or_else(|_| parse_apply_patch_streaming(input))
 		.unwrap_or_default();
@@ -540,11 +558,12 @@ fn inspect_entries(input: &str) -> (Vec<String>, Vec<(String, String)>, Vec<File
 			file_ops.push(FileOpIntent::Move { from: entry.path, to: rename });
 		}
 	}
-	let matcher_entries = order
+	let entries = order
 		.into_iter()
 		.map(|path| (path.clone(), digests.remove(&path).unwrap()))
 		.collect();
-	(paths, matcher_entries, file_ops)
+	super::pair_move_destinations(&mut sections, &file_ops);
+	Inspection { paths, entries, file_ops, sections }
 }
 
 /// Codex envelope mode engine.
@@ -626,8 +645,7 @@ impl ModeEngine for ApplyPatchEngine {
 		let Some(input) = args.input.as_deref() else {
 			return Inspection::default();
 		};
-		let (paths, entries, file_ops) = inspect_entries(input);
-		Inspection { paths, entries, file_ops }
+		inspect_entries(input)
 	}
 }
 

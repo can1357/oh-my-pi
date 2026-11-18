@@ -176,7 +176,8 @@ pub struct PreviewFile {
 }
 
 /// Static projection of a payload (no filesystem access): target paths, the
-/// per-file added-lines digest for stream matchers, and delete/move intents.
+/// per-file added-lines digest for stream matchers, each file's section of the
+/// payload, and delete/move intents.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Inspection {
 	/// Every path the payload targets, one entry per section (duplicates kept).
@@ -186,6 +187,13 @@ pub struct Inspection {
 	pub entries:  Vec<(String, String)>,
 	/// Delete / move intents for the ACP permission gate.
 	pub file_ops: Vec<FileOpIntent>,
+	/// `(path, section)`: the payload text about each file, patch grammar kept,
+	/// so a check scoped to one file also sees what the payload removes from it,
+	/// deletes or moves, and nothing about its other files. A move destination
+	/// shares its source's section; same-path sections merge. Empty for the
+	/// single-file modes (`replace`, `patch`), whose whole payload is about one
+	/// file.
+	pub sections: Vec<(String, String)>,
 }
 
 /// A destructive file operation a payload declares.

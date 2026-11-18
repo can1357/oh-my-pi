@@ -229,18 +229,21 @@ impl ModeEngine for SloppyEngine {
 	fn inspect(&self, args: &ArgSnapshot) -> Inspection {
 		// An unparseable payload targets nothing; `preview` and `stage` surface
 		// the error.
-		let sections =
+		let parsed =
 			split_sloppy_sections(args.input.as_deref().unwrap_or_default()).unwrap_or_default();
+		let paths = parsed.iter().map(|section| section.path.clone()).collect();
+		let mut sections = Vec::new();
+		for section in &parsed {
+			super::push_section(&mut sections, &section.path, &section.body);
+		}
 		Inspection {
-			paths:    sections
-				.iter()
-				.map(|section| section.path.clone())
-				.collect(),
-			entries:  sections
+			paths,
+			entries: parsed
 				.into_iter()
 				.map(|section| (section.path, section.body))
 				.collect(),
 			file_ops: Vec::new(),
+			sections,
 		}
 	}
 }
