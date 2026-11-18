@@ -4,13 +4,18 @@ name: Package macOS
 # scripts/package-macos.sh and installs the result into a scratch prefix with
 # scripts/install-smoke-macos.sh. The same two steps run locally as
 # `just package-macos` and `just install-smoke-macos`; this workflow only
-# runs them on the macOS runner and keeps the artifacts. It publishes
-# nothing.
+# runs them on the macOS runner and keeps validated artifacts. An explicit owner
+# dispatch on omp2 can also publish those same bytes as a draft GitHub Release.
 #
 # Manual only: a cold release build (thin LTO, one codegen unit, the LTO
 # CPython bundle) is far too slow for every push.
 on:
   workflow_dispatch:
+    inputs:
+      publish_draft:
+        description: Publish validated packages as a draft release (owner on omp2 only)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -27,6 +32,9 @@ jobs:
   package:
     name: Package and install-smoke omp (macOS arm64)
     runs-on: macos-15
+    outputs:
+      build_attempt: ${{ steps.provenance.outputs.build_attempt }}
+      artifact_name: ${{ steps.provenance.outputs.artifact_name }}
     # Bound manual runner occupancy while leaving time to upload artifacts.
     timeout-minutes: 120
     env:
@@ -34,6 +42,7 @@ jobs:
       # even parsed: GitHub recorded a job-less failure on every push). The
       # job env is where secrets may be read; steps test `env` instead.
       BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_ORG_API_KEY }}
+      CARGO_BUILD_JOBS: "4"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -79,8 +88,6 @@ jobs:
 
       - name: Build release omp
         timeout-minutes: 105
-        env:
-          CARGO_BUILD_JOBS: "4"
         run: |
           echo '::group::cargo build (release, LTO, embedded Python)'
           if [ -n "${BUILDBUDDY_API_KEY-}" ] && command -v sccache >/dev/null 2>&1; then
@@ -102,14 +109,23 @@ jobs:
 
       - name: Install smoke
         timeout-minutes: 5
-        continue-on-error: true
         run: scripts/install-smoke-macos.sh dist
+
+      - name: Record validated package provenance
+        id: provenance
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          python3 scripts/package_macos_evidence.py record dist \
+            --source-sha "$SOURCE_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+          printf 'build_attempt=%s\n' "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          printf 'artifact_name=omp-macos-arm64-%s-attempt-%s\n' "$SOURCE_SHA" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
 
       - name: Upload partial artifacts on failure
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: omp-macos-arm64-partial-${{ github.sha }}
+          name: omp-macos-arm64-partial-${{ github.sha }}-attempt-${{ github.run_attempt }}
           path: |
             dist/
             target/release/omp
@@ -117,13 +133,40 @@ jobs:
           retention-days: 3
 
       - name: Upload packages
-        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: omp-macos-arm64-${{ github.sha }}
+          name: ${{ steps.provenance.outputs.artifact_name }}
           path: |
             dist/*.tar.gz
             dist/*.pkg
             dist/*.sha256
-          if-no-files-found: warn
+            dist/package-provenance.json
+          if-no-files-found: error
           retention-days: 14
+
+  publish:
+    name: Publish validated macOS packages as draft
+    needs: package
+    if: ${{ inputs.publish_draft && github.event_name == 'workflow_dispatch' && github.repository == 'blyzer/oh-my-pi' && github.ref == 'refs/heads/omp2' && github.actor == 'blyzer' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Download this run's validated package artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: ${{ needs.package.outputs.artifact_name }}
+          path: .ci-packages
+      - name: Validate and publish exact existing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.sha }}
+          BUILD_ATTEMPT: ${{ needs.package.outputs.build_attempt }}
+        run: |
+          python3 scripts/package_macos_evidence.py publish .ci-packages \
+            --source-sha "$SOURCE_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$BUILD_ATTEMPT"

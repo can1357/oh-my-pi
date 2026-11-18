@@ -72,7 +72,7 @@ class HostedRunnerPolicy(unittest.TestCase):
 
     def test_manual_package_uses_the_hosted_mac_and_keeps_its_buildbuddy_cache(self):
         package = (ROOT / ".github/workflows/package-macos.yml").read_text()
-        self.assertEqual(dict(CI_PATHS.runs_on(package.splitlines())), {"package": "macos-15"})
+        self.assertEqual(dict(CI_PATHS.runs_on(package.splitlines())), {"package": "macos-15", "publish": "ubuntu-24.04"})
         self.assertIn("secrets.BUILDBUDDY_ORG_API_KEY", package)
         self.assertIn("sccache + BuildBuddy GCS cache active", package)
 
@@ -88,31 +88,80 @@ class HostedRunnerPolicy(unittest.TestCase):
         self.assertEqual([failure[0] for failure in native_runner_failures(redirected)], ['rust'])
 
     @unittest.skipIf(yaml is None, 'PyYAML is unavailable')
+    def test_fallback_default_runner_labels_match_admission_and_hosted_stays_first(self):
+        worker = yaml.load((ROOT / '.github/workflows/macos-verification.yml').read_text(), Loader=yaml.BaseLoader)
+        job = worker['jobs']['native']
+        labels = '\'["self-hosted","macOS","ARM64"]\''
+        self.assertEqual(job['runs-on'], "${{ inputs.pool == 'self-hosted' && fromJSON(vars.CI_MACOS_FALLBACK_LABELS || " + labels + ") || 'macos-15' }}")
+        self.assertEqual(job['env']['CI_MACOS_FALLBACK_LABELS'], '${{ vars.CI_MACOS_FALLBACK_LABELS || ' + labels + ' }}')
+
+    @unittest.skipIf(yaml is None, 'PyYAML is unavailable')
+    def test_guarded_hosted_cache_restores_inputs_without_running_native_preparation(self):
+        action = yaml.load((ROOT / '.github/actions/macos-native-objective/action.yml').read_text(), Loader=yaml.BaseLoader)
+        cache_step = next(step for step in action['runs']['steps'] if step.get('uses') == './.github/actions/macos-hosted-cache')
+        self.assertEqual(cache_step['if'], "inputs.guarded == 'true' && runner.environment == 'github-hosted'")
+        cache = yaml.load((ROOT / '.github/actions/macos-hosted-cache/action.yml').read_text(), Loader=yaml.BaseLoader)
+        steps = cache['runs']['steps']
+        saves = [step for step in steps if step.get('uses', '').startswith('actions/cache@')]
+        self.assertEqual(len(saves), 2)
+        python_cache, cargo_cache = (step['with'] for step in saves)
+        self.assertIn('vendor/.omp-python-ready.json', python_cache['path'])
+        self.assertIn('scripts/macos_worker_state.py', python_cache['key'])
+        self.assertIn('steps.workspace.outputs.digest', python_cache['key'])
+        self.assertNotIn('restore-keys', python_cache)
+        self.assertNotIn('target', cargo_cache['path'])
+        self.assertNotIn('credentials', cargo_cache['path'])
+        self.assertTrue(all('fetch-python' not in step.get('run', '') for step in steps))
+
+    @unittest.skipIf(yaml is None, 'PyYAML is unavailable')
+    def test_control_changes_keep_pinned_hosted_first_fallback_without_admin_variables(self):
+        ci = yaml.load(self.ci, Loader=yaml.BaseLoader)
+        self.assertEqual(ci['env']['CI_MACOS_CONTROL_POLICY'], 'source-bound')
+        self.assertRegex(ci['env']['CI_MACOS_WORKER_SHA'], r'^[0-9a-f]{40}$')
+        self.assertEqual(ci['env']['CI_MACOS_WORKER_REF'], 'ci-macos-worker-source-bound-v4')
+        for name in MACOS_JOBS:
+            job = ci['jobs'][name]
+            self.assertNotIn('macos_controls', job['runs-on'])
+            self.assertIn("github.repository == 'blyzer/oh-my-pi'", job['runs-on'])
+            control = next(step for step in job['steps'] if step.get('name') == 'Check out reviewed macOS controller')
+            self.assertEqual(control['with']['ref'], '${{ env.CI_MACOS_WORKER_SHA }}')
+            coordinate = next(step for step in job['steps'] if step.get('name') == 'Coordinate macOS objective')
+            self.assertEqual(coordinate['env']['CI_MACOS_FALLBACK_ENABLED'], "${{ vars.CI_MACOS_FALLBACK_ENABLED || 'true' }}")
+            self.assertNotIn('CI_MACOS_WORKER_SHA', coordinate['env'])
+
+    @unittest.skipIf(yaml is None, 'PyYAML is unavailable')
     def test_worker_and_shared_action_parse_as_real_yaml(self):
         worker = yaml.load((ROOT / '.github/workflows/macos-verification.yml').read_text(), Loader=yaml.BaseLoader)
         ci = yaml.load(self.ci, Loader=yaml.BaseLoader)
         action = yaml.load((ROOT / '.github/actions/macos-native-objective/action.yml').read_text(), Loader=yaml.BaseLoader)
         self.assertEqual(set(worker['on']), {'workflow_dispatch'})
         self.assertEqual(worker['permissions'], {'contents': 'read', 'actions': 'read'})
-        self.assertIn('.github/workflows/macos-verification.yml', ci['on']['push']['paths'])
+        self.assertNotIn('paths', ci['on']['push'])
+        self.assertIn('python3 scripts/ci_scope.py --workflow ci', self.ci)
         steps = worker['jobs']['native']['steps']
         admission = next(i for i, step in enumerate(steps) if step.get('id') == 'admit')
-        candidate = next(i for i, step in enumerate(steps) if step.get('with', {}).get('path') == '.ci-source')
+        candidate = next(i for i, step in enumerate(steps) if step.get('name') == 'Check out admitted candidate')
         self.assertLess(admission, candidate)
         self.assertEqual(steps[candidate]['with']['ref'], '${{ steps.admit.outputs.source_sha }}')
         for step in steps:
             if step.get('uses', '').startswith('actions/checkout@'):
                 self.assertEqual(step['with']['persist-credentials'], 'false')
         native = next(step for step in steps if step.get('name') == 'Run native objective')
-        self.assertEqual(native['with']['control-directory'], '.')
-        self.assertEqual(native['with']['source-directory'], '.ci-source')
+        self.assertEqual(native['with']['control-directory'], '.ci-control')
+        self.assertEqual(native['with']['source-directory'], '.')
         self.assertEqual(native['with']['guarded'], 'true')
+        restored = next(i for i, step in enumerate(steps) if step.get('with', {}).get('path') == '.ci-control')
+        self.assertLess(candidate, restored)
+        self.assertEqual(steps[restored]['with']['ref'], '${{ github.workflow_sha }}')
+        self.assertNotIn('path', steps[candidate]['with'])
+        self.assertEqual(worker['jobs']['native']['env']['CI_MACOS_CONTROL_POLICY'], 'source-bound')
         self.assertTrue(any('macos_worker_guard.py' in step.get('run', '') for step in action['runs']['steps']))
         for step in action['runs']['steps']:
             if step.get('name') in {'Select pinned Rust toolchain', 'Check provisioned cargo-nextest'} or step.get('uses') == './.github/actions/macos-build-state':
                 self.assertIn("inputs.guarded != 'true'", step['if'])
         execute = next(step for step in action['runs']['steps'] if step.get('name') == 'Execute native objective')
-        self.assertIn('-- python3 "$control/scripts/macos_worker_state.py" -- bash', execute['run'])
+        self.assertIn('-- python3 scripts/macos_worker_state.py -- bash scripts/ci-macos-objective.sh', execute['run'])
+        self.assertIn('python3 "$control/scripts/macos_worker_guard.py" run', execute['run'])
         self.assertIn('--request-file "$RUNNER_TEMP/macos-request.json"', execute['run'])
         self.assertIn('&& 330 || 120', str(ci['jobs']['rust']['timeout-minutes']))
         self.assertIn('&& 330 || 45', str(ci['jobs']['lint_macos']['timeout-minutes']))

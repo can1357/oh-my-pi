@@ -1,5 +1,10 @@
 # Hosted-first macOS routing implementation and rollout
 
+> Historical v1 rollout record below. The [source-bound v2 update](source-bound.md)
+> supersedes its configuration defaults, frozen parent-workflow digest requirement
+> and direct-hosted exception for control changes. Existing timing, ownership,
+> cancellation, lease and result contracts remain unless that update states otherwise.
+
 Status: implementation under review; no live fallback activation or Mac canary
 claimed. Base `omp2@98303fde57bcaeb4d34149df5ec6f302c3ed8179`, 2026-11-17.
 Follows the approved [plan](README.md) and [S0 design](design.md).
@@ -35,7 +40,8 @@ Guarded setup and native work run inside one locked, supervised process group
 with inherited `GH_TOKEN`/`GITHUB_TOKEN` removed. Worker state uses a dedicated
 `omp-macos-worker` namespace and never evicts BuildBuddy/other workflow caches.
 Credential scrubbing is not OS isolation against hostile code running as the
-same user; the explicit repository-writer trust prerequisite remains necessary.
+same user; the existing repository-writer trust policy applies, as documented
+in the [preflight reassessment](preflight.md#2026-11-17-reassessment-established-mac-operation).
 
 ## Code boundaries
 
@@ -67,13 +73,15 @@ not new lint evidence. `TERM` remains scoped to P7.
 3. Run a trusted hosted-worker canary with Mac fallback off. Check native
    outcomes, result artifact, required-check identity and full Rust proof reuse.
    Hosted success must finish with the personal Mac offline.
-4. Complete [Mac preflight](preflight.md): real services/labels, Apple Silicon,
-   pinned tools/nextest/LLVM22, Seatbelt, disk, cache ownership, one heavy service
-   on the physical host, process-tree cleanup and developer-file isolation.
-   Other heavy workloads must share admission or be excluded operationally.
-5. If runner controls cannot enforce trusted-workflow access, explicitly accept
-   the broader repository-writer boundary before configuring trust acceptance.
-   Labels are not admission security, and plan/PR approval alone is not acceptance.
+4. Reuse the established Mac setup and [historical preflight evidence](preflight.md#2026-11-17-reassessment-established-mac-operation): successful native
+   jobs on `Envers-MacBook-Pro`, Apple Silicon, provisioned tools, nextest and
+   Seatbelt/P12. The owner confirms current readiness. Verify the new worker's
+   separate state/cache ownership, physical-host admission and process-tree
+   cleanup during its canary; coordinate other heavy workloads with admission.
+5. Configure the existing accepted repository-writer policy below. The historical
+   policy already trusts repository writers with the Mac and key; no new trust
+   confirmation is required. Labels select runners and do not enforce workflow
+   isolation.
 6. Enable an owner-only Mac canary. Exercise a real queued-hosted fallback,
    cancellation race, restart/supersession, stale result and physical-slot cases.
    Immediate hosted success does not prove fallback. Broaden only with evidence.
@@ -83,7 +91,7 @@ not new lint evidence. `TERM` remains scoped to P7.
 | `CI_MACOS_WORKER_REF` | Reviewed immutable `ci-macos-worker-*` tag |
 | `CI_MACOS_WORKER_SHA` | Its exact 40-character worker/control commit |
 | `CI_MACOS_FALLBACK_ENABLED` | Literal `true` to consider Mac fallback; otherwise retain hosted |
-| `CI_MACOS_FALLBACK_TRUST` | Literal `repository-writers`: explicit operational trust acceptance |
+| `CI_MACOS_FALLBACK_TRUST` | Literal `repository-writers`: records the existing accepted operational trust policy |
 | `CI_MACOS_FALLBACK_LABELS` | JSON array of actual confirmed labels including `self-hosted`, `macOS`, `ARM64` |
 | `CI_MACOS_PARENT_WORKFLOW_SHA256` | SHA256 of reviewed `.github/workflows/ci.yml` bytes; changed parent workflow disables Mac admission until reviewed/configured again |
 
@@ -107,10 +115,15 @@ native command inventory and unchanged nonmacOS job bodies. These are not
 macOS or live dispatch proofs.
 
 On 2026-11-17, read-only runner/variable inventory still returned HTTP403
-`Resource not accessible by integration`. No direct Mac connection is established.
-No tags, variables, services or live candidates were configured in this session.
-Deployment and real Mac canaries remain blocked on those prerequisites. Code
-presence does not mean active runner diversification.
+`Resource not accessible by integration`. Historical job API evidence nevertheless
+confirms successful self-hosted native execution on `Envers-MacBook-Pro` with
+requested labels `["self-hosted","macOS","ARM64"]` (jobs `131755633290` and
+`131084739510`); see [preflight](preflight.md) for pinned source, proof steps and
+version-evidence limits. The owner confirms current readiness and reuse of the
+existing trust policy. No direct Mac connection, tags, variables, services or live
+candidates were configured in this session. Reviewed worker deployment and live
+protocol canaries remain pending; they validate new lease/state/cleanup behavior
+on the existing setup. Code presence does not mean active runner diversification.
 
 Executed local validation:
 

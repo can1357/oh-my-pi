@@ -1,40 +1,12 @@
 name: CI
 
 on:
-  # KEEP IN SYNC with .github/ci-paths.txt (`just check-ci-paths`).
+  # Always start the cheap selector; expensive jobs have independent path scopes.
   push:
     branches: [main, omp2]
-    paths:
-      - ".cargo/**"
-      - ".config/**"
-      - ".github/actions/**"
-      - ".github/ci-paths.txt"
-      - ".github/ci-rust-paths.txt"
-      - ".github/workflows/ci.yml"
-      - ".github/workflows/macos-verification.yml"
-      - ".github/actions/macos-*/**"
-      - "scripts/macos_*.py"
-      - "scripts/ci-macos-objective.sh"
-      - "about.toml"
-      - "deny.toml"
-      - "justfile"
-      - "LICENSE*"
-      - "THIRD-PARTY-NOTICES.txt"
-      - "crates/**"
-      - "examples/**"
-      - "extensions/**"
-      - "fixtures/**"
-      - "docs/py/**"
-      - "scripts/**"
-      - "tools/lintx/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "clippy.toml"
-      - "rust-toolchain.toml"
-      - "rustfmt.toml"
   # No `paths` filter here on purpose: a workflow that a path filter keeps out
   # never reports its jobs, and the required checks would stay pending. The
-  # `changes` job below reads .github/ci-paths.txt instead, and every other
+  # `changes` job below reads .github/ci-job-paths.json instead, and every other
   # job is skipped, which a required check counts as passing.
   pull_request:
     branches: [main, omp2]
@@ -52,19 +24,22 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
+  # Pin admission/transport separately from the exact candidate's native commands.
+  CI_MACOS_WORKER_REF: ci-macos-worker-source-bound-v4
+  CI_MACOS_WORKER_SHA: 6e361f2d70c505aa38c9ad6aaf359cb9b5cd457b
+  CI_MACOS_CONTROL_POLICY: source-bound
 
 jobs:
-  # Native CI jobs use standard GitHub-hosted runners regardless of repository
-  # runner variables. CI_LINUX_MODE/CI_LINUX_RUNNER/MACOS_RUNNER retain their
+  # Native jobs default to hosted; the two macOS checks use their version-pinned
+  # hosted-first workers for eligible requests. CI_LINUX_MODE/CI_LINUX_RUNNER/MACOS_RUNNER retain their
   # existing behavior only for the BuildBuddy-capable lintx_ratchet, runtime_spec,
   # remote_linux and remote_seed jobs; their trust and remote execution stay
   # unchanged. Each remaining self-hosted-capable runs-on routes fork pull
   # requests to hosted first, checked by `just check-ci-paths`.
   #
-  # Decides whether a pull request touches anything CI proves. Every required
-  # check is a job of this workflow; when no CI path changed, they are all
-  # skipped, and a skipped required check passes. The decision fails closed:
-  # if this job errors, `ci` is empty and the jobs run.
+  # Required contexts stay declared; unrelated jobs skip instead of staying
+  # pending. PRs and valid pushes use per-job dependencies. Missing outputs
+  # remain fail-closed through each job's != 'false' gate.
   changes:
     name: Detect CI-relevant changes
     runs-on: ubuntu-24.04
@@ -75,53 +50,33 @@ jobs:
     outputs:
       ci: ${{ steps.paths.outputs.ci }}
       rust: ${{ steps.paths.outputs.rust }}
+      affected: ${{ steps.paths.outputs.affected }}
+      format: ${{ steps.paths.outputs.format }}
+      format_rust: ${{ steps.paths.outputs.format_rust }}
+      protobuf: ${{ steps.paths.outputs.protobuf }}
+      lintx_ratchet: ${{ steps.paths.outputs.lintx_ratchet }}
+      runtime_spec: ${{ steps.paths.outputs.runtime_spec }}
+      extensions_conformance: ${{ steps.paths.outputs.extensions_conformance }}
+      licenses: ${{ steps.paths.outputs.licenses }}
+      lint_macos: ${{ steps.paths.outputs.lint_macos }}
+      lint_linux: ${{ steps.paths.outputs.lint_linux }}
+      p9_p10_linux: ${{ steps.paths.outputs.p9_p10_linux }}
+      p7_linux: ${{ steps.paths.outputs.p7_linux }}
+      remote_linux: ${{ steps.paths.outputs.remote_linux }}
+      macos_controls: ${{ steps.paths.outputs.macos_controls }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - name: Match the changed files against the CI path lists
+      - name: Select checks from changed paths and their dependencies
         id: paths
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PULL_REQUEST: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          # An event without a pull request number (push, merge_group, dispatch) runs everything.
-          # ci   = .github/ci-paths.txt: needs the light CI-infrastructure jobs.
-          # rust = .github/ci-rust-paths.txt: can change compiled or tested Rust
-          #        behaviour; only then do the heavy jobs run on a pull request.
-          if [ -z "$PULL_REQUEST" ]; then
-            echo "Not a pull request; CI is needed"
-            echo "ci=true" >> "$GITHUB_OUTPUT"
-            echo "rust=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          files=$(gh api --paginate "repos/$REPO/pulls/$PULL_REQUEST/files" \
-            --jq '.[] | .filename, (.previous_filename // empty)')
-          matches() {
-            local list="$1" file pattern
-            while IFS= read -r file; do
-              while IFS= read -r pattern; do
-                case "$pattern" in ''|'#'*) continue ;; esac
-                # A ** glob is a plain prefix match here; case patterns let * cross /.
-                # shellcheck disable=SC2254
-                case "$file" in ${pattern//\*\*/\*})
-                  echo "$file matches $pattern in $list"
-                  return 0
-                ;; esac
-              done < "$list"
-            done <<< "$files"
-            return 1
-          }
-          if matches .github/ci-paths.txt; then ci=true; else ci=false; fi
-          if matches .github/ci-rust-paths.txt; then rust=true; else rust=false; fi
-          echo "ci=$ci" >> "$GITHUB_OUTPUT"
-          echo "rust=$rust" >> "$GITHUB_OUTPUT"
-          echo "ci=$ci rust=$rust"
+        run: python3 scripts/ci_scope.py --workflow ci --github-output "$GITHUB_OUTPUT"
 
   affected:
     name: Affected crates (opt-in)
     needs: changes
-    if: ${{ !cancelled() && github.event_name == 'pull_request' && vars.CI_AFFECTED_ONLY == 'true' && needs.changes.outputs.rust != 'false' }}
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && vars.CI_AFFECTED_ONLY == 'true' && needs.changes.outputs.affected != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -143,14 +98,16 @@ jobs:
   format:
     name: Rust format
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.format != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Select pinned Rust toolchain
+        if: needs.changes.outputs.format_rust != 'false'
         run: rustup show active-toolchain
       - name: Check formatting
+        if: needs.changes.outputs.format_rust != 'false'
         run: cargo fmt --all -- --check
       - name: Check the CI gate
         run: python3 scripts/check-ci-paths.py
@@ -158,6 +115,10 @@ jobs:
         run: python3 scripts/test_check_ci_paths.py
       - name: Test hosted runner policy
         run: python3 scripts/test_hosted_runners.py
+      - name: Test path and dependency classification
+        run: python3 scripts/test_ci_scope.py
+      - name: Test optional workflow selection
+        run: python3 scripts/test_ci_optional_workflows.py
       - name: Test the affected-crates script
         run: python3 scripts/test_affected_crates.py
       - name: Check the editing discipline of repo text
@@ -169,7 +130,7 @@ jobs:
   protobuf:
     name: Protobuf format and lint
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.protobuf != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -234,7 +195,7 @@ jobs:
   lintx_ratchet:
     name: Error-formatting ratchet (lintx)
     needs: [changes, format]
-    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.lintx_ratchet != 'false' }}
     runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
     timeout-minutes: 20
     steps:
@@ -275,7 +236,7 @@ jobs:
   runtime_spec:
     name: Runtime symbol and dependency contracts
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.runtime_spec != 'false' }}
     runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
     timeout-minutes: 10
     steps:
@@ -306,7 +267,7 @@ jobs:
   extensions_conformance:
     name: First-party extension conformance
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.extensions_conformance != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -317,7 +278,7 @@ jobs:
   licenses:
     name: License policy and release notices
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.ci != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.licenses != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -380,7 +341,8 @@ jobs:
   # of this job) leaves `verified` unset and `rust` runs as before.
   push_verified:
     name: Pushed tree already verified
-    if: github.event_name == 'push'
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'push' && (needs.changes.outputs.rust != 'false' || needs.changes.outputs.lint_macos != 'false') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -425,13 +387,13 @@ jobs:
     name: Rust workspace and acceptance proofs
     needs: [changes, push_verified, affected]
     if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' && needs.push_verified.outputs.verified != 'true' }}
-    runs-on: ${{ (vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 'ubuntu-24.04' || 'macos-15' }}
-    timeout-minutes: ${{ (vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 330 || 120 }}
+    runs-on: ${{ (github.repository == 'blyzer/oh-my-pi' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 'ubuntu-24.04' || 'macos-15' }}
+    timeout-minutes: ${{ (github.repository == 'blyzer/oh-my-pi' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 330 || 120 }}
     permissions:
       contents: read
       actions: write
     env:
-      MACOS_CONTROLLER: ${{ vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2')) }}
+      MACOS_CONTROLLER: ${{ github.repository == 'blyzer/oh-my-pi' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2')) }}
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: "sccache"
       CARGO_INCREMENTAL: "0"
@@ -456,32 +418,29 @@ jobs:
         if: env.MACOS_CONTROLLER == 'true'
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ vars.CI_MACOS_WORKER_SHA }}
+          ref: ${{ env.CI_MACOS_WORKER_SHA }}
           path: .ci-control
           persist-credentials: false
       - name: Coordinate macOS objective
         if: env.MACOS_CONTROLLER == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          CI_MACOS_WORKER_REF: ${{ vars.CI_MACOS_WORKER_REF }}
-          CI_MACOS_WORKER_SHA: ${{ vars.CI_MACOS_WORKER_SHA }}
-          CI_MACOS_PARENT_WORKFLOW_SHA256: ${{ vars.CI_MACOS_PARENT_WORKFLOW_SHA256 }}
-          CI_MACOS_FALLBACK_ENABLED: ${{ vars.CI_MACOS_FALLBACK_ENABLED }}
-          CI_MACOS_FALLBACK_TRUST: ${{ vars.CI_MACOS_FALLBACK_TRUST }}
-          CI_MACOS_FALLBACK_LABELS: ${{ vars.CI_MACOS_FALLBACK_LABELS }}
+          CI_MACOS_FALLBACK_ENABLED: ${{ vars.CI_MACOS_FALLBACK_ENABLED || 'true' }}
+          CI_MACOS_FALLBACK_TRUST: ${{ vars.CI_MACOS_FALLBACK_TRUST || 'repository-writers' }}
+          CI_MACOS_FALLBACK_LABELS: ${{ vars.CI_MACOS_FALLBACK_LABELS || '["self-hosted","macOS","ARM64"]' }}
         run: python3 .ci-control/scripts/macos_fallback_controller.py --objective rust
 
   lint_macos:
     name: Lint workspace (macOS)
     needs: [changes, push_verified]
-    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' && needs.push_verified.outputs.verified != 'true' }}
-    runs-on: ${{ (vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 'ubuntu-24.04' || 'macos-15' }}
-    timeout-minutes: ${{ (vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 330 || 45 }}
+    if: ${{ !cancelled() && needs.changes.outputs.lint_macos != 'false' && needs.push_verified.outputs.verified != 'true' }}
+    runs-on: ${{ (github.repository == 'blyzer/oh-my-pi' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 'ubuntu-24.04' || 'macos-15' }}
+    timeout-minutes: ${{ (github.repository == 'blyzer/oh-my-pi' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 330 || 45 }}
     permissions:
       contents: read
       actions: write
     env:
-      MACOS_CONTROLLER: ${{ vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2')) }}
+      MACOS_CONTROLLER: ${{ github.repository == 'blyzer/oh-my-pi' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2')) }}
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: "sccache"
       CARGO_INCREMENTAL: "0"
@@ -506,25 +465,22 @@ jobs:
         if: env.MACOS_CONTROLLER == 'true'
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ vars.CI_MACOS_WORKER_SHA }}
+          ref: ${{ env.CI_MACOS_WORKER_SHA }}
           path: .ci-control
           persist-credentials: false
       - name: Coordinate macOS objective
         if: env.MACOS_CONTROLLER == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          CI_MACOS_WORKER_REF: ${{ vars.CI_MACOS_WORKER_REF }}
-          CI_MACOS_WORKER_SHA: ${{ vars.CI_MACOS_WORKER_SHA }}
-          CI_MACOS_PARENT_WORKFLOW_SHA256: ${{ vars.CI_MACOS_PARENT_WORKFLOW_SHA256 }}
-          CI_MACOS_FALLBACK_ENABLED: ${{ vars.CI_MACOS_FALLBACK_ENABLED }}
-          CI_MACOS_FALLBACK_TRUST: ${{ vars.CI_MACOS_FALLBACK_TRUST }}
-          CI_MACOS_FALLBACK_LABELS: ${{ vars.CI_MACOS_FALLBACK_LABELS }}
+          CI_MACOS_FALLBACK_ENABLED: ${{ vars.CI_MACOS_FALLBACK_ENABLED || 'true' }}
+          CI_MACOS_FALLBACK_TRUST: ${{ vars.CI_MACOS_FALLBACK_TRUST || 'repository-writers' }}
+          CI_MACOS_FALLBACK_LABELS: ${{ vars.CI_MACOS_FALLBACK_LABELS || '["self-hosted","macOS","ARM64"]' }}
         run: python3 .ci-control/scripts/macos_fallback_controller.py --objective lint_macos
 
   lint_linux:
     name: Lint workspace (Linux)
     needs: [format, changes]
-    if: ${{ needs.changes.outputs.rust != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.lint_linux != 'false' }}
     runs-on: ubuntu-24.04
     # Clippy plus `just check-minimal-caps` (default `omp-app` and the
     # all-`cap-*`-off profile, different feature unification).
@@ -634,7 +590,7 @@ jobs:
   p9_p10_linux:
     name: Acceptance proofs P9, P10 and tool sources (Linux)
     needs: [format, changes]
-    if: ${{ needs.changes.outputs.rust != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.p9_p10_linux != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -738,7 +694,7 @@ jobs:
   p7_linux:
     name: Terminal proof P7 (Linux PTY)
     needs: [format, changes]
-    if: ${{ needs.changes.outputs.rust != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.p7_linux != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -823,7 +779,7 @@ jobs:
   remote_linux:
     name: Remote Linux verification (BuildBuddy)
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.remote_linux != 'false' }}
     runs-on: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '"ubuntu-24.04"' || vars.CI_LINUX_MODE == 'remote' && (vars.CI_LINUX_RUNNER || vars.MACOS_RUNNER) || '"ubuntu-24.04"') }}
     timeout-minutes: 90
     permissions:

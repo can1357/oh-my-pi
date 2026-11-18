@@ -1,6 +1,6 @@
-# Paths whose change makes a pull request run CI (.github/workflows/ci.yml).
-# One glob per line; `**` matches across directories. `push` in ci.yml must list
-# the same paths (`just check-ci-paths`).
+# Historical flat CI path list, retained for source/research compatibility.
+# Runtime selection now uses .github/ci-job-paths.json and scripts/ci_scope.py.
+# This file does not filter push/PR workflows or select their jobs.
 .cargo/**
 .config/**
 .github/actions/**

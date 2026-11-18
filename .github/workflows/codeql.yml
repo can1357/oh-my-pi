@@ -38,8 +38,28 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Select CodeQL languages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      codeql_actions: ${{ steps.scope.outputs.codeql_actions }}
+      codeql_python: ${{ steps.scope.outputs.codeql_python }}
+      codeql_javascript: ${{ steps.scope.outputs.codeql_javascript }}
+      codeql_rust: ${{ steps.scope.outputs.codeql_rust }}
+      codeql_languages: ${{ steps.scope.outputs.codeql_languages }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Select affected languages
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_scope.py --workflow codeql --github-output "$GITHUB_OUTPUT"
+
   analyze:
     name: Analyze (${{ matrix.language }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.codeql_languages != '[]' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -50,7 +70,7 @@ jobs:
       matrix:
         # The fast, extraction-only languages from the former default setup.
         # Rust has its own job below because it needs the pyo3 build inputs.
-        language: [actions, javascript-typescript, python]
+        language: ${{ fromJSON(needs.changes.outputs.codeql_languages || '["actions","javascript-typescript","python"]') }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -67,6 +87,8 @@ jobs:
 
   analyze-rust:
     name: Analyze (rust)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.codeql_rust != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:

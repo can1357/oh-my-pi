@@ -157,7 +157,7 @@ class GitHub:
         if path.startswith(("/", "http:" , "https:")) or ".." in path or "\\" in path:
             raise VerificationError("invalid API path")
         headers = {"Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json",
-                   "X-GitHub-Api-Version": "2026-03-10", "User-Agent": "omp-macos-verification"}
+                   "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "omp-macos-verification"}
         data = None if body is None else json.dumps(body).encode()
         if data is not None:
             headers["Content-Type"] = "application/json"
@@ -337,6 +337,17 @@ def verify_mac_configuration(api, request):
             or os.environ.get("CI_MACOS_FALLBACK_TRUST") != "repository-writers"):
         raise VerificationError("self-hosted trust not explicitly enabled")
     expected = os.environ.get("CI_MACOS_PARENT_WORKFLOW_SHA256", "")
+    if os.environ.get("CI_MACOS_CONTROL_POLICY") == "source-bound":
+        # Repository writers already authorize executing candidate code on the
+        # Mac. Bind that authority to live GitHub observations, not a frozen
+        # ci.yml hash that prevents verification of CI changes themselves.
+        run = verify_parent_liveness(api, request)
+        if (run.get("actor", {}).get("login") != "blyzer"
+                or run.get("triggering_actor", {}).get("login") != "blyzer"
+                or run.get("head_repository", {}).get("full_name") != request["repository"]):
+            raise VerificationError("source-bound parent is not owner-authorized")
+        verify_source_current(api, request)
+        return
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
         raise VerificationError("missing reviewed parent workflow digest")
     prefix = f"repos/{request['repository']}"

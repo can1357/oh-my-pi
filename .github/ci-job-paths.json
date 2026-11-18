@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "groups": {
+    "build": [".cargo/**", ".config/**", "Cargo.toml", "Cargo.lock", "**/Cargo.toml", "rust-toolchain.toml", "crates/**", "examples/**", "extensions/**", "fixtures/**", "justfile", "**/*.rs", "!scripts/check-spec.rs", "!tools/lintx/**"],
+    "remote": ["scripts/remote-verify.sh", "scripts/remote-verify-runner.sh", ".github/actions/buildbuddy-*/**"],
+    "mac_native": [".github/workflows/macos-verification.yml", ".github/actions/macos-*/**", "scripts/ci-macos-objective.sh", "scripts/ssh-loopback-fixture.sh", "scripts/check-python-examples.py"],
+    "mac_controls": [".github/workflows/ci.yml", ".github/workflows/macos-verification.yml", ".github/actions/macos-*/**", "scripts/macos_*.py", "scripts/ci-macos-objective.sh"],
+    "policy": ["AGENTS.md", ".claude/**", "*.md", ".github/workflows/**", ".github/rulesets/**", ".github/ci-paths.txt", ".github/ci-rust-paths.txt", ".github/labeler.yml", ".github/dependabot.yml", "scripts/macos_*.py", "scripts/test_*.py", "scripts/package_macos_evidence.py", "scripts/check-ci-paths.py", "scripts/check-editing-discipline.py"],
+    "perf_core": [".cargo/**", ".config/**", "Cargo.toml", "Cargo.lock", "**/Cargo.toml", "rust-toolchain.toml", "crates/**", "examples/**", "fixtures/**", "justfile"]
+  },
+  "workflows": {
+    "ci": {
+      "global": [".github/ci-job-paths.json", ".github/workflows/ci.yml", "scripts/ci_scope.py", "scripts/test_ci_scope.py"],
+      "ignored": ["docs/**", "*.png", "*.svg", ".git-blame-ignore-revs"],
+      "jobs": {
+        "format": ["@policy", "@build", "@mac_native", "about.toml", "deny.toml", "clippy.toml", "rustfmt.toml", "LICENSE*", "THIRD-PARTY-NOTICES*", "tools/lintx/**", "scripts/check-spec.rs", "scripts/check-extension-conformance.py"],
+        "format_rust": ["**/*.rs", "Cargo.toml", "**/Cargo.toml", "rustfmt.toml", "rust-toolchain.toml", ".cargo/**"],
+        "protobuf": ["crates/proto/**"],
+        "lintx_ratchet": ["**/*.rs", "tools/lintx/**", "Cargo.toml", "Cargo.lock", ".cargo/**", ".config/**", "rust-toolchain.toml", "justfile", "scripts/remote-verify.sh", "scripts/remote-verify-runner.sh", ".github/actions/buildbuddy-*/**"],
+        "runtime_spec": ["crates/**", "scripts/check-spec.rs", "Cargo.toml", "Cargo.lock", ".cargo/**", "rust-toolchain.toml", "justfile", "scripts/remote-verify.sh", "scripts/remote-verify-runner.sh", ".github/actions/buildbuddy-*/**"],
+        "extensions_conformance": ["extensions/**", "crates/py/**", "docs/py/**", "scripts/check-extension-conformance.py"],
+        "licenses": ["Cargo.toml", "Cargo.lock", "**/Cargo.toml", "about.toml", "deny.toml", "LICENSE*", "**/LICENSE*", "THIRD-PARTY-NOTICES*", "**/THIRD-PARTY-NOTICES*", "crates/py/requirements.txt", "crates/py/notices/**", "justfile"],
+        "rust": ["@build", "@mac_native", "docs/py/**", "scripts/affected-crates.py"],
+        "lint_macos": ["@build", "@mac_native", "clippy.toml"],
+        "lint_linux": ["@build", "clippy.toml"],
+        "p9_p10_linux": ["@build"],
+        "p7_linux": ["@build"],
+        "remote_linux": ["@build", "@remote"],
+        "affected": ["@build", "scripts/affected-crates.py"]
+      }
+    },
+    "codeql": {
+      "global": [".github/ci-job-paths.json", ".github/workflows/codeql.yml", ".github/codeql/**", "scripts/ci_scope.py", "scripts/test_ci_scope.py"],
+      "ignored": ["*.md", "docs/**", "scripts/**", "fixtures/**", "examples/**", "**/*.sh", ".github/**", "LICENSE*", "**/LICENSE*", "THIRD-PARTY-NOTICES*", "about.toml", "deny.toml", "clippy.toml", "rustfmt.toml", "tools/**", "crates/**/tests/**", "crates/**/benches/**", "crates/**/examples/**", "crates/e2e/**", "**/*.toml", "**/*.yaml", "**/*.yml", "**/*.json"],
+      "jobs": {
+        "codeql_actions": [".github/workflows/**", ".github/actions/**"],
+        "codeql_python": ["*.py"],
+        "codeql_javascript": ["*.js", "*.jsx", "*.mjs", "*.cjs", "*.ts", "*.tsx"],
+        "codeql_rust": ["crates/**", "Cargo.toml", "Cargo.lock", "**/Cargo.toml", ".cargo/**", "rust-toolchain.toml", "!**/*.md", "!crates/**/tests/**", "!crates/**/benches/**", "!crates/**/examples/**", "!crates/e2e/**"]
+      }
+    },
+    "p8": {
+      "global": [".github/ci-job-paths.json", ".github/workflows/p8-baseline.yml", "scripts/ci_scope.py", "scripts/test_ci_scope.py"],
+      "ignored": ["docs/**", "*.md", ".github/**", "scripts/**", "tools/**", "extensions/**", "LICENSE*", "THIRD-PARTY-NOTICES*", "about.toml", "deny.toml", "clippy.toml", "rustfmt.toml"],
+      "jobs": {
+        "p8_macos": ["@perf_core", ".github/actions/macos-native-tools/**", ".github/actions/macos-build-state/**"],
+        "p8_linux": ["@perf_core", ".github/actions/buildbuddy-*/**", "scripts/remote-verify.sh", "scripts/remote-verify-runner.sh"]
+      }
+    }
+  }
+}

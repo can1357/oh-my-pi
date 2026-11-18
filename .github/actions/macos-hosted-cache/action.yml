@@ -1,0 +1,28 @@
+name: Guarded macOS hosted caches
+description: Restore Python inputs and Cargo downloads without preparing or executing native code.
+runs:
+  using: composite
+  steps:
+    - name: Key absolute Python configuration paths
+      id: workspace
+      shell: bash
+      run: |
+        python3 -c 'import hashlib,os; print("digest=" + hashlib.sha256(os.path.realpath(os.getcwd()).encode()).hexdigest())' >> "$GITHUB_OUTPUT"
+    - name: Cache guarded embedded Python
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      with:
+        path: |
+          vendor/python
+          vendor/python-release
+          vendor/.omp-python-ready.json
+        key: guarded-python-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.workspace.outputs.digest }}-${{ hashFiles('scripts/macos_worker_state.py', 'crates/py/scripts/fetch-python.sh', 'crates/py/scripts/pack-pymodules.py', 'crates/py/scripts/gen-py-notices.py', 'crates/py/requirements.txt') }}
+    - name: Cache guarded Cargo downloads
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      with:
+        path: |
+          ~/.cargo/registry/cache
+          ~/.cargo/registry/index
+          ~/.cargo/git/db
+        key: guarded-cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          guarded-cargo-v1-${{ runner.os }}-${{ runner.arch }}-
