@@ -7,13 +7,15 @@
 - `omp usage reset` and `/usage reset` take `<provider>/<credential id>:<credit id>` to spend exactly that saved reset, and refuse a target without one when the account holds resets that clear different limits (a full Claude reset next to a Fable-only one), or a named Claude grant that isn't the one Claude offers next ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
 - Automatic Claude restores no longer spend a reset that clears more than the block needs, such as a full reset on a Fable-only block or a reset that also clears the weekly window on a 5h-only block (even with `claudeResets.autoRedeem5h: yes`); the session shows the command to spend it instead ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
 - The expiry banner's spend command for a Claude account names the expiring reset ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
+- The `/usage reset` picker no longer spends on an account holding resets that clear different limits; it shows the command that spends each one by name ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
+- A session now explains a held Claude reset even when the same recovery spends, fails to spend or asks about another account's reset ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
 - Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy
 - Fixed the Spotlight experiment re-asking Stencil Cloud on every tool call for an account without Cloud access (waitlisted): omp now warns once and pauses Spotlight for that account for a few hours, honors `Retry-After` on rate limits and outages, and sends its `omp/<version>` User-Agent on every Spotlight request
 
 ### Changed
 
 - Commit draft `show()` now prints each run of lines from one unit under a single `1a ✓ Main` header instead of repeating the unit, mark, and owner on every line
-- `omp usage reset` and `/usage reset` list each saved reset's id, title and the limits it clears ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
+- `omp usage reset` and `/usage reset` list each saved reset's id and title, and for Claude the limits it clears; the `/usage reset` picker shows the selected account's resets too ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
 - The "Separate checkouts" guidance and the git guard's hint for a refused command now say how work comes back from an ovnfs checkout: `ovnfs land` puts its commits on the folder's branch with their files, `ovnfs pull` brings the folder's newer files in to resolve a conflict there, and `ovnfs rm` discards the rest. They no longer send agents through `apply --branch` and a fast-forward merge of their own, and point at `ovnfs help` for the rest (needs an ovnfs with `land`)
 
 ## [18.22.2] - 2026-11-18

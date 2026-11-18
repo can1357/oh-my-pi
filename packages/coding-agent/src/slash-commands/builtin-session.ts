@@ -414,13 +414,13 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "gauge",
 		description: "Show provider usage and limits",
 		acpDescription: "Show token usage",
-		acpInputHint: "[show|reset [provider/credential-id|provider/active]]",
+		acpInputHint: "[show|reset [provider/credential-id|provider/active][:credit-id]]",
 		subcommands: [
 			{ name: "show", description: "Show provider usage and limits" },
 			{
 				name: "reset",
 				description: "Spend a saved provider rate-limit reset",
-				usage: "[provider/credential-id|provider/active]",
+				usage: "[provider/credential-id|provider/active][:credit-id]",
 			},
 		],
 		allowArgs: true,
@@ -434,7 +434,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				await handleUsageResetCommand(rest, runtime.session, runtime.output);
 				return commandConsumed();
 			}
-			return usage("Usage: /usage [show|reset [provider/credential-id|provider/active]]", runtime);
+			return usage("Usage: /usage [show|reset [provider/credential-id|provider/active][:credit-id]]", runtime);
 		},
 		handleTui: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
@@ -452,7 +452,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				clearSubmittedText(runtime);
 				return;
 			}
-			runtime.ctx.showStatus("Usage: /usage [show|reset [provider/credential-id|provider/active]]");
+			runtime.ctx.showStatus("Usage: /usage [show|reset [provider/credential-id|provider/active][:credit-id]]");
 			clearSubmittedText(runtime);
 		},
 	},

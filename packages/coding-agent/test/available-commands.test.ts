@@ -42,7 +42,7 @@ describe("buildAvailableSlashCommands", () => {
 		expect(byName.usage.subcommands).toContainEqual({
 			name: "reset",
 			description: "Spend a saved provider rate-limit reset",
-			usage: "[provider/credential-id|provider/active]",
+			usage: "[provider/credential-id|provider/active][:credit-id]",
 		});
 		expect(byName["reset-usage"]).toBeUndefined();
 
