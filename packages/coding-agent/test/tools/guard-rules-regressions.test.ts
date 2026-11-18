@@ -203,11 +203,7 @@ describe("guard rule regressions", () => {
 		]) {
 			expect({ command, decision: bashApproval(cwd, command) }).toEqual({ command, decision: "exec" });
 		}
-		for (const command of [
-			"tar xzf ~/.ssh/keys.tgz",
-			"tar --ext -f ~/.gnupg/backup.tar",
-			"tar -rf x.tar ~/.netrc",
-		]) {
+		for (const command of ["tar xzf ~/.ssh/keys.tgz", "tar --ext -f ~/.gnupg/backup.tar", "tar -rf x.tar ~/.netrc"]) {
 			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "credential_read" });
 		}
 	});
@@ -833,10 +829,7 @@ describe("guard rule regressions", () => {
 
 	it("bounds the directory it follows: past the bound the directory is unknown, in time linear in the command", () => {
 		const started = performance.now();
-		for (const command of [
-			`${"cd a;".repeat(25_000)}cat x`,
-			`${"pushd a;".repeat(16_000)}cat x`,
-		]) {
+		for (const command of [`${"cd a;".repeat(25_000)}cat x`, `${"pushd a;".repeat(16_000)}cat x`]) {
 			expect({ command: command.slice(0, 16), decision: bashApproval(cwd, command) }).toEqual({
 				command: command.slice(0, 16),
 				decision: "exec",
