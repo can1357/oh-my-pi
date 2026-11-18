@@ -1191,14 +1191,13 @@ export class CacheWarmer {
 			economicsAvailable,
 			action: "stop",
 		};
-		const stopReason =
-			!economicsAvailable
-				? "cache economics unavailable"
-				: method === undefined
-					? "request cannot be replayed safely"
-					: expectedSavings < CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS
-						? "expected savings below threshold"
-						: "refresh spend reached the cost of losing the cache";
+		const stopReason = !economicsAvailable
+			? "cache economics unavailable"
+			: method === undefined
+				? "request cannot be replayed safely"
+				: expectedSavings < CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS
+					? "expected savings below threshold"
+					: "refresh spend reached the cost of losing the cache";
 		decision.action = this.#act(run, decision, compactNow);
 		return { decision, stopReason, compactNow };
 	}
