@@ -8669,14 +8669,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#models.resolveRoleModelWithThinking(role);
 	}
 
-	/**
-	 * Resolve the explicit thinking suffix that should apply when a temporary
-	 * picker selects a model already assigned to a configured role.
-	 */
-	resolveTemporaryModelThinkingLevel(model: Model): ConfiguredThinkingLevel | undefined {
-		return this.#models.resolveTemporaryModelThinkingLevel(model);
-	}
-
 	get promptTemplates(): ReadonlyArray<PromptTemplate> {
 		return this.#promptTemplates;
 	}

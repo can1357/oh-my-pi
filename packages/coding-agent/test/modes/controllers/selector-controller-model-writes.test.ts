@@ -119,6 +119,20 @@ describe("SelectorController model selector writes", () => {
 		expect(showError).not.toHaveBeenCalled();
 	});
 
+	it("carries the session's level to a picked model, clamped to its ladder, over a role's level for it", async () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "anthropic/claude-opus-4-5:low" } });
+		const { controller, showError } = start(settings, model("claude-opus-4-7"));
+		session!.setThinkingLevel(Effort.Max);
+
+		const { callbacks } = openModelPicker(controller);
+		await callbacks.onPick(model("claude-opus-4-5"), "anthropic/claude-opus-4-5", { overContext: false });
+
+		// Opus 4.5 tops out at xhigh: the nearest level to max, not the smol role's low.
+		expect(session!.model?.id).toBe("claude-opus-4-5");
+		expect(session!.configuredThinkingLevel()).toBe(Effort.XHigh);
+		expect(showError).not.toHaveBeenCalled();
+	});
+
 	it("saves only the edited fallback chain, never the chains a --config overlay supplies", async () => {
 		const agentDir = tempDir.join("agent");
 		const overlayPath = tempDir.join("overlay.yml");

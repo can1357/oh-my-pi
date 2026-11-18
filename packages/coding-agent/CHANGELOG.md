@@ -6,6 +6,10 @@
 
 - Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
 
+### Changed
+
+- Switching models keeps your thinking level, moving it only as far as the new model's effort ladder requires; a model's own default level now applies only when no level is set, and picking a model no longer borrows the level of a role that names it (quick-role picks still apply their role's level)
+
 ### Fixed
 
 - `urlmap` shell builtin maps a URL path onto a host directory or file for the shell and the programs it runs (`urlmap [-r] [-e] URL PATH`, `urlmap -d URL`, bare `urlmap` lists the mounts as commands); named services and `pty` commands get the session's `local://`, `skill://`, `artifact://` and `attachment://` paths through it

@@ -87,7 +87,7 @@ import {
 import { BlobStore, type BlobPutOptions, type BlobPutResult, lazyImageDataSync } from "../session/blob-store";
 import type { IdleMaintenanceOptions } from "../session/idle-maintenance";
 import type { CustomMessage } from "../session/messages";
-import { resolveRoleModelCycle, roleThinkingLevelForModel, serviceTierForModel } from "../session/model-controls";
+import { resolveRoleModelCycle, serviceTierForModel } from "../session/model-controls";
 import type { ServingModel } from "../session/retry-fallback-chains";
 import {
 	buildSessionContext,
@@ -576,10 +576,6 @@ export class RemoteAgentSession implements AgentViewSession {
 		if (!next) return undefined;
 		this.setThinkingLevel(next);
 		return next;
-	}
-
-	resolveTemporaryModelThinkingLevel(model: Model): ConfiguredThinkingLevel | undefined {
-		return roleThinkingLevelForModel(this.settings, this.modelRegistry.getAvailable(), model);
 	}
 
 	setModelTemporary(

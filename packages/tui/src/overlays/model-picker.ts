@@ -92,8 +92,8 @@ export interface ModelPickerOptions {
 	taskSelector?: string;
 	/**
 	 * Thinking selector picking `model` applies when the slider is untouched
-	 * (its role's level, else what the session carries over). Enables the
-	 * session-mode thinking slider; absent, the picker shows none.
+	 * (what the session carries over). Enables the session-mode thinking
+	 * slider; absent, the picker shows none.
 	 */
 	thinkingLevelFor?: (model: Model) => ConfiguredThinkingLevel | undefined;
 }

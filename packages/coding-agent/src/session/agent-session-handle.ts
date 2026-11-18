@@ -306,8 +306,6 @@ export interface AgentViewSession extends AgentSessionHandle {
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist?: boolean): void;
 	/** Advance to the next thinking level. */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined;
-	/** Thinking level a temporary switch to `model` would use. */
-	resolveTemporaryModelThinkingLevel(model: Model): ConfiguredThinkingLevel | undefined;
 	/** Switch model without persisting it as the default. */
 	setModelTemporary(
 		model: Model,
