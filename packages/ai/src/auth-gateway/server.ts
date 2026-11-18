@@ -798,6 +798,11 @@ async function handleCredentialsCheck(opts: AuthGatewayRouteOptions, signal: Abo
  * when the catalog explicitly reports `false`; absent means usable). `kind` is
  * emitted for non-chat rows (`judge`, `image`, `tts`, `stt`, `embedding`,
  * `rerank`, `video`) so clients can keep them off chat routes; absent means chat.
+ * The reasoning surface uses the fields omp's proxy discovery reads from
+ * reasoning-aware gateways: `reasoning`, `supported_reasoning_levels`,
+ * `default_reasoning_level`, and `reasoning_required`. A model whose ladder the
+ * catalog has not verified advertises none of them, so clients keep their own
+ * reference instead of trusting a provisional ladder.
  */
 interface ModelListRow {
 	id: string;
@@ -810,6 +815,10 @@ interface ModelListRow {
 	max_output_tokens?: number;
 	input_modalities: ("text" | "image")[];
 	supports_tools?: boolean;
+	reasoning?: boolean;
+	supported_reasoning_levels?: Effort[];
+	default_reasoning_level?: Effort;
+	reasoning_required?: boolean;
 }
 
 function handleModelsList(opts: AuthGatewayRouteOptions): Response {
@@ -831,6 +840,15 @@ function handleModelsList(opts: AuthGatewayRouteOptions): Response {
 		if (model.contextWindow != null) row.context_length = model.contextWindow;
 		if (model.maxTokens != null) row.max_output_tokens = model.maxTokens;
 		if (model.supportsTools === false) row.supports_tools = false;
+		if (!model.thinking?.unverified) {
+			row.reasoning = model.reasoning;
+			const efforts = getSupportedEfforts(model);
+			if (efforts.length > 0) {
+				row.supported_reasoning_levels = [...efforts];
+				if (model.thinking?.defaultLevel !== undefined) row.default_reasoning_level = model.thinking.defaultLevel;
+				if (model.thinking?.requiresEffort !== undefined) row.reasoning_required = model.thinking.requiresEffort;
+			}
+		}
 		data.push(row);
 	}
 	return json(200, { object: "list", data });

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { type Api, AuthStorage, type Model } from "@oh-my-pi/pi-ai";
+import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -148,6 +150,70 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 		expect(resolveGatewayModel("jev-latest", index)?.provider).toBe("typesafe");
 		// Tiny on-device models have no gateway route and are not advertised.
 		expect(index.models.some(model => modelKind(model) === "tiny")).toBe(false);
+	});
+});
+
+describe("gateway /v1/models discovery", () => {
+	test("a client discovering through the gateway inherits the served model's reasoning ladder", async () => {
+		// No bundled reference exists for this id, so the discovering client can
+		// only learn the ladder from the gateway's model list; without it the
+		// model stays non-reasoning and requests never carry an effort.
+		const served = buildModel({
+			id: "acme-reasoner-1",
+			name: "Acme Reasoner 1",
+			api: "openai-completions",
+			provider: "acme",
+			baseUrl: "https://example.test",
+			reasoning: true,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+				defaultLevel: Effort.Medium,
+				requiresEffort: true,
+			},
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 8192,
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: [],
+			storage: await createAuthStorage(),
+			version: "test",
+			resolveModel: () => undefined,
+			listModels: () => [served],
+		});
+		try {
+			using tempDir = TempDir.createSync("@omp-auth-gateway-discovery-");
+			const modelsPath = tempDir.join("models.yml");
+			await Bun.write(
+				modelsPath,
+				[
+					"providers:",
+					"  gateway:",
+					`    baseUrl: ${handle.url}`,
+					"    api: openai-completions",
+					"    auth: none",
+					"    discovery:",
+					"      type: openai-models-list",
+					"",
+				].join("\n"),
+			);
+			// Registry tests disable network by default; the gateway is loopback.
+			const registry = new ModelRegistry(await createAuthStorage(), modelsPath, { fetch });
+			await registry.refreshProvider("gateway", "online");
+
+			const discovered = registry.find("gateway", "acme/acme-reasoner-1");
+			expect(discovered?.reasoning).toBe(true);
+			expect(discovered?.thinking).toMatchObject({
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+				defaultLevel: Effort.Medium,
+				requiresEffort: true,
+			});
+		} finally {
+			await handle.close();
+		}
 	});
 });
 

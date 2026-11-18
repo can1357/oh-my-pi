@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `omp auth-gateway` now lists each model's reasoning surface on `/v1/models` (`reasoning`, `supported_reasoning_levels`, `default_reasoning_level`, `reasoning_required`), so an omp client discovering models through the gateway gets the served model's effort ladder instead of a provisional guess ([#19645](https://github.com/can1357/oh-my-pi/pull/19645) by [@ray8828](https://github.com/ray8828))
+
 ### Fixed
 
 - Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy
