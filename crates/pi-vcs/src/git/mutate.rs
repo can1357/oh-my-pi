@@ -777,6 +777,27 @@ impl GitRepo {
 		Ok(WorktreeAddResult { cloned_with: None, clone_error })
 	}
 
+	/// Paths under the source root, relative to it, that a clone into `path`
+	/// must leave out: `path` itself and every other worktree of the repository.
+	fn clone_holes(&self, path: &Path) -> Result<Vec<PathBuf>> {
+		let root = fs::canonicalize(self.root())?;
+		let mut holes = Vec::new();
+		let mut add = |candidate: PathBuf| {
+			if let Ok(relative) = candidate.strip_prefix(&root)
+				&& !relative.as_os_str().is_empty()
+			{
+				holes.push(relative.to_path_buf());
+			}
+		};
+		add(canonical_target(path)?);
+		for worktree in self.worktrees()? {
+			if let Ok(canonical) = fs::canonicalize(&worktree.path) {
+				add(canonical);
+			}
+		}
+		Ok(holes)
+	}
+
 	/// Replicate the source checkout's uncommitted state onto a worktree at
 	/// `path` freshly checked out at the source `HEAD` (`head_commit`): copy
 	/// every staged, dirty tracked, and untracked file (deleting what the
@@ -848,20 +869,23 @@ impl GitRepo {
 			return Err(Error::backend("git worktree add", "source index is missing"));
 		}
 
-		pi_iso::backend(kind)
-			.clone_tree(self.root(), path, &[OsStr::new(".git")])
+		// The destination and the other worktrees may sit inside the source
+		// (`.worktrees/x`): cloning them would copy the clone into itself and
+		// drag other checkouts along.
+		let holes = self.clone_holes(path)?;
+		clone_tree_with_holes(pi_iso::backend(kind), self.root(), path, &holes, true)
 			.map_err(|err| Error::backend("git worktree add", err))?;
 		let admin = register_worktree(path, &self.info().common_dir, head)?;
 		fs::copy(&source_index, admin.join("index"))?;
 
 		let (dirty_tracked, _) = collect_clone_reconciliation_paths(&repo)?;
-		// Backends may clone entire subtrees atomically. Apply the same
-		// nonrelocatable-directory policy to every backend's disposable copy,
-		// independently of Git's ignore rules.
-		let excluded = prune_nonrelocatable_clone_dirs(path)?;
 		let linked = Self::require(path)?;
 		let linked_repo = linked.gix()?;
 		let mut current = load_index_or_empty(&linked_repo, "git worktree add")?;
+		// Backends may clone entire subtrees atomically. Apply the same
+		// nonrelocatable-directory policy to every backend's disposable copy,
+		// independently of Git's ignore rules.
+		let excluded = prune_nonrelocatable_clone_dirs(path, &current)?;
 		if keep_changes {
 			// Environment artifacts are never portable, but tracked edits
 			// beneath an excluded directory still belong to the user.
@@ -2095,10 +2119,90 @@ fn collect_clone_reconciliation_paths(
 	Ok((dirty_tracked, untracked))
 }
 
-/// Drop source-bound environments from a fresh clone, never following
-/// symlinks or walking Git metadata. Return the removed directory paths so
-/// target-tracked entries can be checked out even when both indexes agree.
-fn prune_nonrelocatable_clone_dirs(root: &Path) -> Result<BTreeSet<PathBuf>> {
+/// `path` with symlinks resolved, for a path that may not exist yet: the
+/// nearest existing ancestor is canonicalized and the rest appended.
+fn canonical_target(path: &Path) -> Result<PathBuf> {
+	let absolute = std::path::absolute(path)?;
+	let mut existing = absolute.as_path();
+	let mut rest = Vec::new();
+	loop {
+		match fs::canonicalize(existing) {
+			Ok(canonical) => {
+				return Ok(rest
+					.iter()
+					.rev()
+					.fold(canonical, |acc, part| acc.join(part)));
+			},
+			Err(err) if err.kind() == io::ErrorKind::NotFound => {
+				let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
+					return Err(err.into());
+				};
+				rest.push(name.to_os_string());
+				existing = parent;
+			},
+			Err(err) => return Err(err.into()),
+		}
+	}
+}
+
+/// Clone `source` into `target`, leaving out each path in `holes` (relative
+/// to `source`) and, at the top level, `.git`. A hole's ancestors are cloned
+/// level by level so their other entries still come along.
+fn clone_tree_with_holes(
+	backend: &dyn pi_iso::IsolationBackend,
+	source: &Path,
+	target: &Path,
+	holes: &[PathBuf],
+	top: bool,
+) -> pi_iso::IsoResult<()> {
+	let mut skip: Vec<&OsStr> = Vec::new();
+	if top {
+		skip.push(OsStr::new(".git"));
+	}
+	let mut nested: BTreeMap<&OsStr, Vec<PathBuf>> = BTreeMap::new();
+	let mut whole: HashSet<&OsStr> = HashSet::new();
+	for hole in holes {
+		let mut components = hole.components();
+		let Some(std::path::Component::Normal(first)) = components.next() else {
+			continue;
+		};
+		if !skip.contains(&first) {
+			skip.push(first);
+		}
+		let rest = components.as_path();
+		if rest.as_os_str().is_empty() {
+			whole.insert(first);
+		} else {
+			nested.entry(first).or_default().push(rest.to_path_buf());
+		}
+	}
+	backend.clone_tree(source, target, &skip)?;
+	for (name, rest) in nested {
+		let src = source.join(name);
+		if whole.contains(name) || !fs::symlink_metadata(&src).is_ok_and(|meta| meta.is_dir()) {
+			continue;
+		}
+		clone_tree_with_holes(backend, &src, &target.join(name), &rest, false)?;
+	}
+	Ok(())
+}
+
+/// Whether `name` is a dotenv file (`.env`, `.env.local`, …).
+fn is_dotenv(name: &OsStr) -> bool {
+	name
+		.to_str()
+		.is_some_and(|name| name == ".env" || name.starts_with(".env."))
+}
+
+/// Drop source-bound environments and untracked dotenv secrets from a fresh
+/// clone, never following symlinks or walking Git metadata. `index` is the
+/// source index the clone carries; a dotenv file it tracks stays. Return the
+/// removed directory paths so target-tracked entries can be checked out even
+/// when both indexes agree.
+fn prune_nonrelocatable_clone_dirs(
+	root: &Path,
+	index: &gix::index::File,
+) -> Result<BTreeSet<PathBuf>> {
 	let mut excluded = BTreeSet::new();
 	let mut pending = vec![root.to_path_buf()];
 	while let Some(dir) = pending.pop() {
@@ -2117,10 +2221,22 @@ fn prune_nonrelocatable_clone_dirs(root: &Path) -> Result<BTreeSet<PathBuf>> {
 			if entry.file_name() == ".git" {
 				continue;
 			}
+			let file_type = entry.file_type()?;
 			if marked {
 				force_remove(root, &entry.path())?;
-			} else if entry.file_type()?.is_dir() {
+			} else if file_type.is_dir() {
 				pending.push(entry.path());
+			} else if is_dotenv(&entry.file_name()) {
+				let path = entry.path();
+				let relative = path.strip_prefix(root).expect("cloned entry is under root");
+				let tracked = gix::path::try_into_bstr(relative).is_ok_and(|key| {
+					index
+						.entry_by_path(&gix::path::to_unix_separators_on_windows(key))
+						.is_some()
+				});
+				if !tracked {
+					force_remove(root, &path)?;
+				}
 			}
 		}
 		if marked {
@@ -3700,6 +3816,44 @@ mod tests {
 		let _ = fs::remove_dir_all(&source);
 		let _ = fs::remove_dir_all(&target);
 		works
+	}
+
+	#[test]
+	fn clone_first_worktree_inside_the_source_skips_itself_other_worktrees_and_dotenv() {
+		let (temp, repo) = fixture();
+		fs::write(temp.path().join(".gitignore"), ".worktrees/\n.env\nbuild/\n").unwrap();
+		fs::write(temp.path().join(".env.example"), "KEY=\n").unwrap();
+		git(temp.path(), &["add", ".gitignore", ".env.example"]);
+		git(temp.path(), &["commit", "-qm", "ignores"]);
+		fs::write(temp.path().join(".env"), "KEY=secret\n").unwrap();
+		fs::create_dir_all(temp.path().join("build")).unwrap();
+		fs::write(temp.path().join("build/out.txt"), "ignored\n").unwrap();
+		fs::create_dir_all(temp.path().join(".worktrees")).unwrap();
+		fs::write(temp.path().join(".worktrees/notes"), "kept\n").unwrap();
+		git(temp.path(), &["worktree", "add", "-q", "-b", "other", ".worktrees/other"]);
+		git(temp.path(), &["branch", "new"]);
+		let clone_works = clone_works_on(temp.path());
+
+		let linked = temp.path().join(".worktrees/new");
+		let result = repo
+			.worktree_add(&linked, "new", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.unwrap();
+
+		assert_eq!(result.cloned_with.is_some(), clone_works, "{:?}", result.clone_error);
+		assert!(!linked.join(".worktrees/new").exists());
+		assert!(!linked.join(".worktrees/other").exists());
+		assert!(!linked.join(".env").exists());
+		assert_eq!(fs::read_to_string(linked.join(".env.example")).unwrap(), "KEY=\n");
+		if clone_works {
+			assert_eq!(fs::read_to_string(linked.join(".worktrees/notes")).unwrap(), "kept\n");
+			assert_eq!(fs::read_to_string(linked.join("build/out.txt")).unwrap(), "ignored\n");
+		}
+		let listed = git(temp.path(), &["worktree", "list", "--porcelain"]);
+		assert!(listed.contains(".worktrees/new"), "{listed}");
 	}
 
 	#[test]

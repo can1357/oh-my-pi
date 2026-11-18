@@ -73,11 +73,9 @@ pub fn usable(
 	}
 	// A program's shell is a bash without readline
 	// ([`crate::bash::Profile::Tool`]): no programmable completion, no key
-	// bindings.
-	if matches!(
-		resolved,
-		Some(IntrinsicId::Compgen | IntrinsicId::Complete | IntrinsicId::Compopt | IntrinsicId::Bind)
-	) && crate::bash::vm::is_tool(store, vp)?
+	// bindings. `compgen` stays: scripts list names with it.
+	if matches!(resolved, Some(IntrinsicId::Complete | IntrinsicId::Compopt | IntrinsicId::Bind))
+		&& crate::bash::vm::is_tool(store, vp)?
 	{
 		return Ok(None);
 	}

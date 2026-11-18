@@ -144,11 +144,14 @@ pub enum ExtraKind {
 
 type RunFn = fn(Invocation) -> BoxFuture<'static, i32>;
 
+type LacksFn = fn(Vec<String>) -> bool;
+
 /// One row of the table.
 struct Extra {
-	name: &'static str,
-	kind: ExtraKind,
-	run:  RunFn,
+	name:  &'static str,
+	kind:  ExtraKind,
+	run:   RunFn,
+	lacks: LacksFn,
 }
 
 fn utility<U: Utility>(invocation: Invocation) -> BoxFuture<'static, i32> {
@@ -163,23 +166,47 @@ fn process<P: Process>(invocation: Invocation) -> BoxFuture<'static, i32> {
 	Box::pin(run_process::<P>(invocation))
 }
 
+/// clap's verdict on `argv`: an option the parser does not know.
+fn unknown_argument<T: clap::Parser>(argv: &[std::ffi::OsString]) -> bool {
+	matches!(T::try_parse_from(argv), Err(err) if err.kind() == clap::error::ErrorKind::UnknownArgument)
+}
+
+fn utility_lacks<U: Utility>(argv: Vec<String>) -> bool {
+	U::rewrite_argv(argv.into_iter().map(Into::into).collect())
+		.is_ok_and(|argv| unknown_argument::<U>(&argv))
+}
+
+fn async_utility_lacks<U: AsyncUtility>(argv: Vec<String>) -> bool {
+	U::rewrite_argv(argv.into_iter().map(Into::into).collect())
+		.is_ok_and(|argv| unknown_argument::<U>(&argv))
+}
+
+fn process_lacks<P: Process>(argv: Vec<String>) -> bool {
+	match P::try_parse_from(P::rewrite_argv(argv)) {
+		Ok(parsed) => parsed.lacks_option(),
+		Err(err) => err.kind() == clap::error::ErrorKind::UnknownArgument,
+	}
+}
+
 macro_rules! extra_row {
 	(utility, $name:literal, $ty:path) => {
 		Extra {
 			name: $name,
-			kind: ExtraKind::Utility { runs_commands: <$ty as Utility>::RUNS_COMMANDS },
-			run:  utility::<$ty>,
+			kind:  ExtraKind::Utility { runs_commands: <$ty as Utility>::RUNS_COMMANDS },
+			run:   utility::<$ty>,
+			lacks: utility_lacks::<$ty>,
 		}
 	};
 	(async_utility, $name:literal, $ty:path) => {
 		Extra {
 			name: $name,
-			kind: ExtraKind::Utility { runs_commands: <$ty as AsyncUtility>::RUNS_COMMANDS },
-			run:  async_utility::<$ty>,
+			kind:  ExtraKind::Utility { runs_commands: <$ty as AsyncUtility>::RUNS_COMMANDS },
+			run:   async_utility::<$ty>,
+			lacks: async_utility_lacks::<$ty>,
 		}
 	};
 	(process, $name:literal, $ty:path) => {
-		Extra { name: $name, kind: ExtraKind::Process, run: process::<$ty> }
+		Extra { name: $name, kind: ExtraKind::Process, run: process::<$ty>, lacks: process_lacks::<$ty> }
 	};
 }
 
@@ -214,6 +241,14 @@ pub fn kind(name: &str) -> Option<ExtraKind> {
 	find(name).map(|extra| extra.kind)
 }
 
+/// Whether `argv` (command name first) asks the extra named `name` for an
+/// option it does not implement, which a host program of that name may: the
+/// shell then runs `PATH`'s program instead. `false` for any other name.
+#[must_use]
+pub fn lacks_option(name: &str, argv: Vec<String>) -> bool {
+	find(name).is_some_and(|extra| (extra.lacks)(argv))
+}
+
 /// Runs the extra named [`Invocation::name`] to completion, returning its
 /// exit status: 130 once [`Invocation::cancel`] fires (unless the utility
 /// reports its own end, as `rsync` does).
@@ -242,7 +277,7 @@ mod tests {
 
 	use tokio_util::sync::CancellationToken;
 
-	use super::{ExtraKind, Fd, Invocation, extras, kind, run};
+	use super::{ExtraKind, Fd, Invocation, extras, kind, lacks_option, run};
 
 	/// An invocation of `argv` with pipes on fds 0, 1, and 2 and no shell.
 	/// Returns it with the write end of stdin and the read ends of stdout
@@ -273,6 +308,24 @@ mod tests {
 		drop(stdin);
 		let code = run(invocation).await;
 		(code, read_all(stdout), read_all(stderr))
+	}
+
+	fn argv(args: &[&str]) -> Vec<String> {
+		args.iter().map(ToString::to_string).collect()
+	}
+
+	/// Failure mode: an option only the host program has (`ps --forest`)
+	/// must send the command to it, while options the extra implements, and
+	/// names that are no extra, keep running in-process.
+	#[cfg(all(feature = "util.cat", feature = "util.ps"))]
+	#[test]
+	fn lacks_option_flags_only_options_the_extra_does_not_implement() {
+		assert!(lacks_option("ps", argv(&["ps", "-eo", "pid,args", "--forest"])));
+		assert!(!lacks_option("ps", argv(&["ps", "-ef"])));
+		assert!(lacks_option("cat", argv(&["cat", "--no-such-option", "file"])));
+		assert!(!lacks_option("cat", argv(&["cat", "-n", "file"])));
+		assert!(!lacks_option("cat", argv(&["cat", "--help"])));
+		assert!(!lacks_option("git", argv(&["git", "--no-such-option"])));
 	}
 
 	#[cfg(feature = "util.sort")]

@@ -437,6 +437,20 @@ function connectPort(host: string, port: number): Promise<boolean> {
 	return promise;
 }
 
+/**
+ * Hosts the port readiness probe tries: the configured one, else both loopbacks, since `localhost`
+ * servers (Vite, Node ≥17) may bind only `::1`.
+ */
+function readinessHosts(ready: DaemonReadySpec): readonly string[] {
+	return ready.host === undefined ? ["127.0.0.1", "::1"] : [ready.host];
+}
+
+/** The first of `hosts` where `port` accepts a connection. */
+async function listeningHost(hosts: readonly string[], port: number): Promise<string | undefined> {
+	const connected = await Promise.all(hosts.map(host => connectPort(host, port)));
+	return hosts[connected.indexOf(true)];
+}
+
 class DaemonBroker {
 	readonly #projectDir: string;
 	readonly #runtimeDir: string;
@@ -760,6 +774,16 @@ class DaemonBroker {
 			if (spec.notify) compileNotifyPattern(spec.notify);
 			const stat = await fs.stat(spec.cwd);
 			if (!stat.isDirectory()) throw new Error(`Daemon cwd is not a directory: ${spec.cwd}`);
+			// A listener already on the port would satisfy the readiness probe before this
+			// daemon binds it (and the daemon itself then fails with "address in use").
+			if (spec.ready?.port !== undefined) {
+				const busy = await listeningHost(readinessHosts(spec.ready), spec.ready.port);
+				if (busy !== undefined) {
+					throw new Error(
+						`Port ${spec.ready.port} already accepts connections on ${busy} before ${spec.name} started; another process holds it, so ready.port cannot tell when ${spec.name} is ready. Stop that process or use another port.`,
+					);
+				}
+			}
 			const dir = path.join(this.#runtimeDir, "daemons", spec.name);
 			const now = Date.now();
 			record = {
@@ -1219,11 +1243,11 @@ class DaemonBroker {
 	}
 
 	async #pollPort(record: ManagedDaemon, generation: number, ready: DaemonReadySpec): Promise<void> {
-		const host = ready.host ?? "127.0.0.1";
+		const hosts = readinessHosts(ready);
 		const port = ready.port;
 		if (port === undefined) return;
 		while (generation === record.generation && !terminalState(record.snapshot.state)) {
-			if (await connectPort(host, port)) {
+			if ((await listeningHost(hosts, port)) !== undefined) {
 				record.portReady = true;
 				syncReadyPending(record);
 				this.#markReady(record);

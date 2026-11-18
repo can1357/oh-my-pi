@@ -4003,7 +4003,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// artifact; `result` is its elided inline body, so link the raw capture.
 		// The capture lacks notices the tool appended after the stream (exit code,
 		// wall time, timeout), so the preview keeps `result`'s tail as well.
-		const rawArtifactId = meta?.truncation?.artifactId ?? meta?.limits?.columnTruncated?.artifactId;
+		const rawArtifactId =
+			meta?.truncation?.artifactId ?? meta?.limits?.columnTruncated?.artifactId ?? meta?.minimized?.artifactId;
 		if (rawArtifactId) {
 			const headTail = truncateMiddle(result, {
 				maxBytes: ASYNC_PREVIEW_MAX_CHARS,

@@ -178,10 +178,10 @@ pub enum Profile {
 	/// completion system or key bindings (zsh/zle, zsh/complete,
 	/// zsh/complist, zsh/computil, zsh/compctl, zsh/zleparameter and
 	/// zsh/deltochar do not load, so `zle`, `bindkey`, `vared`, `compadd`, …
-	/// fail; bash's `complete`, `compgen`, `compopt` and `bind` do not
-	/// exist), and a nested interactive shell skips the interactive startup
-	/// files (`~/.bashrc`, `$ENV`, `/etc/zshrc`, `.zshrc`) where completion
-	/// and history are set up.
+	/// fail; bash's `complete`, `compopt` and `bind` do not exist, while
+	/// `compgen` lists names for scripts), and a nested interactive shell skips
+	/// the interactive startup files (`~/.bashrc`, `$ENV`, `/etc/zshrc`,
+	/// `.zshrc`) where completion and history are set up.
 	Tool,
 }
 

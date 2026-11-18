@@ -1046,6 +1046,9 @@ exit 64
 				typeof ms === "number" && ms >= 1000 ? 5 : ms,
 				...rest,
 			)) as typeof globalThis.setTimeout);
+		// The fallback waits until the clock says the deadline passed; advance it with the timers.
+		let clock = 0;
+		vi.spyOn(performance, "now").mockImplementation(() => (clock += 10_000));
 
 		let nativeSignal: AbortSignal | undefined;
 		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation((options, onChunk) => {
@@ -1081,6 +1084,9 @@ exit 64
 				typeof ms === "number" && ms >= 1000 ? 5 : ms,
 				...rest,
 			)) as typeof globalThis.setTimeout);
+		// The fallback waits until the clock says the deadline passed; advance it with the timers.
+		let clock = 0;
+		vi.spyOn(performance, "now").mockImplementation(() => (clock += 10_000));
 
 		const ownerResult = Promise.withResolvers<ShellRunResult>();
 		const isolatedResult = Promise.withResolvers<ShellRunResult>();
@@ -1621,6 +1627,18 @@ describe("executeBash :async: background retention", () => {
 		resetSettingsForTest();
 		vi.restoreAllMocks();
 		if (fs.existsSync(tmp)) removeSyncWithRetries(tmp);
+	});
+
+	it("starts a per-job :async: shell as a copy of the seed session's shell", async () => {
+		await executeBash("export SEEDED=yes; seeded_fn() { echo fn-ok; }", { sessionKey: "seed-probe", cwd: tmp });
+		const job = await executeBash('echo "$SEEDED"; seeded_fn; export SEEDED=changed', {
+			sessionKey: "seed-probe:async:job1",
+			seedSessionKey: "seed-probe",
+			cwd: tmp,
+		});
+		expect(job.output).toBe("yes\nfn-ok\n");
+		const after = await executeBash('echo "$SEEDED"', { sessionKey: "seed-probe", cwd: tmp });
+		expect(after.output).toBe("yes\n");
 	});
 
 	it.skipIf(process.platform === "win32")(

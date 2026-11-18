@@ -134,6 +134,31 @@ async function wokenAgentSession(
 }
 
 describe("proc:// background jobs", () => {
+	it("tells what became of a job whose row was evicted instead of reporting it not found", async () => {
+		const manager = new AsyncJobManager({});
+		const id = manager.register("bash", "pod install", async () => "installed", { id: "bg_98", ownerId: "Main" });
+		await manager.getJob(id)?.promise;
+		manager.consumeJobResults([id]);
+		manager.evictCompletedJobs({ ownerId: "Main" });
+		const session = toolSession(process.cwd(), manager, { launch: false });
+		const protocol = new ProcProtocolHandler();
+		try {
+			expect(manager.getJob(id)).toBeUndefined();
+			const read = await protocol.resolve(parseInternalUrl(`proc://${id}`), { session });
+			expect(read.content).toContain("bg_98 [bash] completed");
+			expect(read.content).toContain("its result reached you");
+			expect(read.content).toContain("cleared when your session was reset");
+			const kill = await protocol.write(parseInternalUrl(`proc://${id}/kill`), "", { session });
+			expect(kill.details?.proc).toMatchObject({ cancelled: [{ id, status: "already_completed" }] });
+			const otherOwner = { ...session, getAgentId: () => "Other" } as ToolSession;
+			await expect(protocol.resolve(parseInternalUrl(`proc://${id}`), { session: otherOwner })).rejects.toThrow(
+				"not found",
+			);
+		} finally {
+			await manager.dispose();
+		}
+	});
+
 	it("lists owned jobs, preserves delivery on read, and scopes kill to the owner", async () => {
 		const manager = new AsyncJobManager({});
 		const pending = Promise.withResolvers<string>();
@@ -850,14 +875,11 @@ describe("bash services via proc://", () => {
 				),
 			).toContain("must remain persistent");
 			await proc.write(parseInternalUrl("proc://detach-candidate/kill"), "", { session });
-			const ignored = await bash.execute("invalid", {
-				command: "sleep 30",
-				name: "svc-bad",
-				timeout: 1,
-				async: true,
-			});
-			const ignoredText = ignored.content[0]?.type === "text" ? ignored.content[0].text : "";
-			expect(ignoredText.includes("Ignored timeout") && ignoredText.includes("Ignored async")).toBe(true);
+			expect(
+				await rejectionMessage(
+					bash.execute("invalid", { command: "sleep 30", name: "svc-bad", timeout: 1, async: true }),
+				),
+			).toContain("`name` starts a long-lived service");
 		} finally {
 			await client.request({ op: "stop", name: "echo-service", timeoutMs: 1_000 }).catch(() => undefined);
 			await client.request({ op: "stop", name: "detach-candidate", timeoutMs: 1_000 }).catch(() => undefined);

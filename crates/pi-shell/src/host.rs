@@ -557,9 +557,21 @@ impl crate::bash::Host for PiHost {
 	/// On Windows, a utility written in the syntax of the System32 program it
 	/// shadows (`find /c /v ""`, `sort /r`, `timeout /t 5`, `whoami /all`)
 	/// goes to `PATH`'s program of that name ([`crate::cmd_dialect`]).
+	/// Elsewhere, an extra given an option it does not implement (`ps --forest`,
+	/// `tar --hard-dereference`) goes to `PATH`'s program, which may have it;
+	/// with none there the extra runs and reports the option. Windows' `PATH`
+	/// programs of those names are System32's, a different command language.
 	fn defers_to_path(&mut self, name: &BStr, argv: &[BString]) -> bool {
-		cfg!(windows)
-			&& crate::cmd_dialect::speaks_shadowed_program(name, argv.get(1..).unwrap_or_default())
+		(cfg!(windows)
+			&& crate::cmd_dialect::speaks_shadowed_program(name, argv.get(1..).unwrap_or_default()))
+			|| (!cfg!(windows)
+				&& pi_builtins::extras::lacks_option(
+					&name.to_str_lossy(),
+					argv
+						.iter()
+						.map(|arg| arg.to_str_lossy().into_owned())
+						.collect(),
+				))
 	}
 
 	/// Runs the extra `cmd` names on the runtime ([`crate::extras::ExtraTask`]),

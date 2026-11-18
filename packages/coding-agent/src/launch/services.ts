@@ -6,7 +6,7 @@ import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-util
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { compileNotifyPattern } from "../async/notify";
-import { type DaemonBrokerClient, daemonClientForProject } from "./client";
+import { type DaemonBrokerClient, DaemonBrokerTimeoutError, daemonClientForProject } from "./client";
 import { canonicalProjectDir } from "./paths";
 import { DAEMON_OUTPUT_PATTERN_FLAGS, type DaemonOperation, type DaemonRpcResult } from "./protocol";
 import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
@@ -298,7 +298,16 @@ export async function startService(
 			awaitReady: readyInterrupt === undefined,
 		},
 		signal,
-	);
+	).catch(async (error: unknown) => {
+		if (!(error instanceof DaemonBrokerTimeoutError)) throw error;
+		// The broker may have started the service anyway: say where it stands.
+		const described = await request(session, { op: "describe", name: params.name }, signal).catch(() => undefined);
+		const state =
+			described?.op === "describe"
+				? `${params.name} is ${described.daemon.state}${described.daemon.pid === undefined ? "" : ` (pid ${described.daemon.pid})`}; read proc://${params.name}`
+				: "the broker did not answer a status request either";
+		throw new ToolError(`Service start request timed out; ${state}.`);
+	});
 	if (result.op !== "start") throw new Error("Unexpected daemon start response");
 	const launched = result.daemon;
 	const notifyArmed = result.notifyArmed === true;

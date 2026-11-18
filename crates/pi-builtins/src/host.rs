@@ -56,7 +56,6 @@ use parking_lot::Mutex;
 use pi_vfs::{BlockingFs, Metadata, absolute_path};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(unix)]
 use crate::openfile::DescriptorPath;
 use crate::{
 	openfile::{self, Fd, OpenFile},
@@ -483,7 +482,6 @@ const UNAVAILABLE_DESCRIPTOR: &str = "/dev/fd/-1";
 pub(crate) struct ShellPaths {
 	cwd:         PathBuf,
 	filesystem:  BlockingFs,
-	#[cfg(unix)]
 	descriptors: Arc<[(i32, OpenFile)]>,
 }
 
@@ -491,7 +489,6 @@ impl std::fmt::Debug for ShellPaths {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		let mut debug = f.debug_struct("ShellPaths");
 		debug.field("cwd", &self.cwd);
-		#[cfg(unix)]
 		debug.field("fds", &self.descriptors.iter().map(|(fd, _)| *fd).collect::<Vec<_>>());
 		debug.finish()
 	}
@@ -516,23 +513,16 @@ impl ShellPaths {
 			Some(token) => filesystem.with_cancellation(token),
 			None => filesystem,
 		};
-		#[cfg(unix)]
 		let descriptors: Arc<[(i32, OpenFile)]> = descriptors.into_iter().collect();
-		#[cfg(not(unix))]
-		drop(descriptors);
-		#[cfg(unix)]
+		// Engine-backed descriptors (a process substitution's pipe) open by path
+		// on every platform; host descriptors only through Unix's `/dev/fd`.
 		let filesystem = descriptors.iter().fold(filesystem, |filesystem, (fd, file)| {
 			match file.as_vfs().and_then(|file| file.try_clone().ok()) {
 				Some(file) => filesystem.mount_file(virtual_descriptor_path(*fd), file),
 				None => filesystem,
 			}
 		});
-		Self {
-			cwd,
-			filesystem,
-			#[cfg(unix)]
-			descriptors,
-		}
+		Self { cwd, filesystem, descriptors }
 	}
 
 	/// A resolver with no descriptors, for tests that exercise path handling
@@ -559,6 +549,15 @@ impl ShellPaths {
 	/// A descriptor path becomes `/dev/fd/<host fd>` for the shell's
 	/// descriptor, or a path that cannot be opened when the shell has none.
 	pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
+		// Windows has no `/dev/fd`: an engine-backed descriptor named as the
+		// shell spells it (`diff <(a) <(b)`) resolves to its mount, before the
+		// spelling becomes a native path.
+		#[cfg(not(unix))]
+		if let Some(DescriptorPath::Fd(fd)) = DescriptorPath::parse(path.as_ref())
+			&& self.file(fd).and_then(OpenFile::as_vfs).is_some()
+		{
+			return virtual_descriptor_path(fd);
+		}
 		let resolved = self.absolute(path.as_ref());
 		#[cfg(unix)]
 		if let Some(descriptor) = DescriptorPath::parse(&resolved) {
@@ -621,7 +620,6 @@ impl ShellPaths {
 		}
 	}
 
-	#[cfg(unix)]
 	fn file(&self, fd: i32) -> Option<&OpenFile> {
 		self.descriptors
 			.iter()
@@ -631,7 +629,6 @@ impl ShellPaths {
 }
 
 /// Virtual descriptors cannot share native `/dev/fd` numbers in the overlay.
-#[cfg(unix)]
 fn virtual_descriptor_path(fd: i32) -> PathBuf {
 	PathBuf::from(format!("omp-descriptor://{fd}"))
 }
@@ -2624,6 +2621,13 @@ pub(crate) trait Process: clap::Parser + Send + Sync + 'static {
 	/// the identity unless overridden (`top` normalizes its flags).
 	fn rewrite_argv(argv: Vec<String>) -> Vec<String> {
 		argv
+	}
+
+	/// Whether these arguments ask for an option this builtin lacks, for a
+	/// builtin that parses its own options (`ps`); the others rely on clap's
+	/// verdict ([`crate::extras::lacks_option`]).
+	fn lacks_option(&self) -> bool {
+		false
 	}
 
 	/// Runs the builtin to completion, returning its exit status. An error
