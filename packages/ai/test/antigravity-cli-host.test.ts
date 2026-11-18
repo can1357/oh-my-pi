@@ -302,6 +302,29 @@ describe("AgyHost stateful steps", () => {
 			properties: { data: { anyOf: [{ type: "object" }, { type: "string" }] } },
 		});
 	});
+	it("delivers text that only resembles the quota notice prefix", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Usage Limit Reached");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		expect(run.writer.output.content).toEqual([{ type: "text", text: "Usage Limit Reached" }]);
+	});
+
+	it("drops a late text chunk between steps", async () => {
+		const state = await parked();
+		state.fake.text("Usage");
+		const second = step(state.host, [...state.messages, result(state.first.writer.output)]);
+		await state.output;
+		state.fake.text("Next file.");
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		const text = second.writer.output.content.find(block => block.type === "text");
+		expect(text).toMatchObject({ type: "text", text: "Next file." });
+	});
+
 	it("does not stream the quota notice before failing", async () => {
 		const state = await fixture();
 		const run = step(state.host, [user("hello")]);

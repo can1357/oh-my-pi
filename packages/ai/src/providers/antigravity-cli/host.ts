@@ -164,7 +164,7 @@ export class AgyHost implements ProviderSessionState {
 	readonly #turns = new Set<Turn>();
 	#loading: object | undefined;
 	#contextTokens = 0;
-	#noticeBuffer: string | undefined;
+	#noticeBuffer: { text: string; writer: StepWriter } | undefined;
 	#announced = new Map<string, number>();
 	#announcementWaiters = new Set<{ name: string; finish(announced: boolean): void }>();
 
@@ -654,7 +654,7 @@ export class AgyHost implements ProviderSessionState {
 		}
 		const quota =
 			quotaError(step.writer.output) ??
-			(this.#noticeBuffer !== undefined ? quotaErrorFromText(this.#noticeBuffer) : undefined);
+			(this.#noticeBuffer !== undefined ? quotaErrorFromText(this.#noticeBuffer.text) : undefined);
 		if (quota) {
 			this.#noticeBuffer = undefined;
 			step.writer.discardText();
@@ -705,25 +705,30 @@ export class AgyHost implements ProviderSessionState {
 
 	/** Hold text that may be the official quota notice until the turn is classified. */
 	#bufferNotice(text: string, writer: StepWriter | undefined): void {
+		if (!writer || writer.done) return;
 		if (this.#noticeBuffer !== undefined) {
-			this.#noticeBuffer += text;
-			if (isQuotaNoticePrefix(this.#noticeBuffer)) return;
-			writer?.text(this.#noticeBuffer);
-			this.#noticeBuffer = undefined;
-			return;
+			if (this.#noticeBuffer.writer !== writer) {
+				this.#noticeBuffer = undefined;
+			} else {
+				this.#noticeBuffer.text += text;
+				if (isQuotaNoticePrefix(this.#noticeBuffer.text)) return;
+				writer.text(this.#noticeBuffer.text);
+				this.#noticeBuffer = undefined;
+				return;
+			}
 		}
 		if (isQuotaNoticePrefix(text)) {
-			this.#noticeBuffer = text;
+			this.#noticeBuffer = { text, writer };
 			return;
 		}
-		writer?.text(text);
+		writer.text(text);
 	}
 
 	#flushNotice(): void {
 		const buffered = this.#noticeBuffer;
 		if (buffered === undefined) return;
 		this.#noticeBuffer = undefined;
-		this.#step?.writer.text(buffered);
+		buffered.writer.text(buffered.text);
 	}
 
 	#onUpdate(notification: SessionNotification): void {
@@ -770,13 +775,14 @@ export class AgyHost implements ProviderSessionState {
 		const writer = step.writer;
 		const quota =
 			quotaError(writer.output) ??
-			(this.#noticeBuffer !== undefined ? quotaErrorFromText(this.#noticeBuffer) : undefined);
+			(this.#noticeBuffer !== undefined ? quotaErrorFromText(this.#noticeBuffer.text) : undefined);
 		if (quota) {
 			this.#noticeBuffer = undefined;
 			writer.discardText();
 			this.#fail(quota);
 			return;
 		}
+		this.#flushNotice();
 		if (
 			!writer.output.content.some(
 				block => (block.type === "text" && block.text.trim().length > 0) || block.type === "toolCall",
@@ -785,7 +791,6 @@ export class AgyHost implements ProviderSessionState {
 			this.#fail(new Error("Antigravity CLI ended the request without a usable response"));
 			return;
 		}
-		this.#flushNotice();
 		writer.usage(this.#contextTokens, response.usage);
 		const digest = transcriptDigest([...step.messages, writer.output]);
 		let checkpoint: AntigravityCliCheckpoint | undefined;
