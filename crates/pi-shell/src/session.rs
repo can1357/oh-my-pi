@@ -71,17 +71,18 @@ use std::{
 
 use bstr::{BString, ByteSlice};
 use parking_lot::Mutex;
+use pi_builtins::extras::SpeechHost;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
 	bash::{
-		Budget, CallId, Cx, Engine, EngineConfig, EventMask, EventSink, Fs, MemStore, PipeTap,
-		Profile, RestoreError, RestoreOpts, RunId, Script, Shell, ShellError, ShellInit, Signal,
-		Step, ToolCall, VprocSel,
-		store::{Key, MiscKey, Record},
+		Budget, CallId, Cx, Engine, EngineConfig, EventMask, EventSink, Fs, ImageDiff, MemStore,
+		PipeTap, Profile, RestoreError, RestoreOpts, RunId, Script, Shell, ShellError, ShellInit,
+		Signal, StateStore, Step, ToolCall, UnitId, VprocSel,
+		store::{BlobSlot, Key, MiscKey, Record, Table},
 	},
 	host::{PiHost, SpawnObserver, TERM_GRACE},
-	sys::OutputDecoding,
+	sys::{OutputDecoding, Sessions},
 	tools::{ToolCalls, ToolConfig},
 	vfs::VfsFs,
 };
@@ -142,6 +143,9 @@ pub struct RunOptions {
 	/// Set when a utility reports an error its exit status hides (`jq`
 	/// after a failing input that is not the last).
 	pub reported_error: Option<Arc<AtomicBool>>,
+	/// The application's speech synthesizer, which `say` speaks through;
+	/// `None` leaves `say` to the system's.
+	pub speech:         Option<Arc<dyn SpeechHost>>,
 	/// The command's stdout and stderr are one pipe whose reader takes its
 	/// bytes as shell text: what externals write there is decoded per
 	/// program by the host's output decoding
@@ -166,6 +170,7 @@ impl RunOptions {
 			cwd:            None,
 			pipe_tap:       None,
 			reported_error: None,
+			speech:         None,
 			text_capture:   false,
 			events:         None,
 		}
@@ -180,6 +185,7 @@ impl std::fmt::Debug for RunOptions {
 			.field("cwd", &self.cwd)
 			.field("pipe_tap", &self.pipe_tap.is_some())
 			.field("reported_error", &self.reported_error)
+			.field("speech", &self.speech)
 			.field("events", &self.events.is_some())
 			.finish()
 	}
@@ -299,28 +305,195 @@ impl Image {
 	}
 }
 
-/// The [`Image`] a [`Session`] published at its last command boundary.
+/// The [`Image`] a [`Session`] published at its last command boundary, with
+/// the fork changes adopted since ([`LatestImage::adopt`]).
 ///
 /// Boundaries are its creation and the end of each command. Readable while a
 /// command runs: pi forks a busy session from it. Cheap to clone; clones share
 /// the slot.
 #[derive(Clone)]
-pub struct LatestImage(Arc<Mutex<Image>>);
+pub struct LatestImage {
+	slot:  Arc<Mutex<Latest>>,
+	/// Rings the session's driver, which writes adopted changes into the
+	/// session between commands.
+	waker: Waker,
+}
+
+/// The state behind a [`LatestImage`].
+struct Latest {
+	/// The published state with the queued merges applied.
+	image:  Image,
+	/// Adopted fork changes the driver has yet to write into the session.
+	merges: Vec<Merge>,
+}
 
 impl LatestImage {
-	/// The state as of the last command boundary: while a command runs, the
-	/// state it started from.
+	/// The state as of the last command boundary, with the fork changes
+	/// adopted since: while a command runs, the state it started from.
 	pub fn get(&self) -> Image {
-		self.0.lock().clone()
+		self.slot.lock().image.clone()
 	}
 
-	fn new(store: &MemStore) -> Self {
-		Self(Arc::new(Mutex::new(Image(Arc::new(store.clone())))))
+	/// Carry what a fork of this session changed, from `base` (the image it
+	/// started from) to `state` (its image now), into the session: the state
+	/// a command sets up for the commands after it ([`carried`]). The session
+	/// takes it at its next command boundary (at once between commands);
+	/// [`Self::get`] shows it now. A key the session's running command
+	/// changes too keeps the command's value: that command ends after the
+	/// fork, and the later write wins.
+	pub fn adopt(&self, base: &Image, state: &Image) {
+		let mut changes = state.0.image().diff(base.0.image());
+		changes.retain(carried);
+		if changes.is_empty() {
+			return;
+		}
+		let units = changes
+			.records()
+			.filter_map(|record| match record {
+				Record::Func { unit, .. } => {
+					let blob = state.0.blob(BlobSlot::Unit(*unit))?;
+					Some((*unit, blob.to_vec()))
+				},
+				_ => None,
+			})
+			.collect();
+		let mut latest = self.slot.lock();
+		let merge = Merge { changes, units, reference: latest.image.clone() };
+		let mut view = MemStore::clone(&merge.reference.0);
+		merge.apply(&mut view);
+		latest.image = Image(Arc::new(view));
+		latest.merges.push(merge);
+		drop(latest);
+		self.waker.wake_by_ref();
 	}
 
-	fn publish(&self, store: &MemStore) {
-		*self.0.lock() = Image(Arc::new(store.clone()));
+	fn new(store: &MemStore, waker: Waker) -> Self {
+		let latest = Latest { image: Image(Arc::new(store.clone())), merges: Vec::new() };
+		Self { slot: Arc::new(Mutex::new(latest)), waker }
 	}
+
+	/// Write the adopted changes into `store` and publish it: a command
+	/// boundary.
+	fn publish(&self, store: &mut MemStore) {
+		self.slot.lock().publish(store);
+	}
+
+	/// [`Self::publish`] when changes were adopted since the last boundary
+	/// (the driver between commands).
+	fn publish_adopted(&self, store: &mut MemStore) {
+		let mut latest = self.slot.lock();
+		if !latest.merges.is_empty() {
+			latest.publish(store);
+		}
+	}
+}
+
+impl Latest {
+	fn publish(&mut self, store: &mut MemStore) {
+		for merge in self.merges.drain(..) {
+			merge.apply(store);
+		}
+		self.image = Image(Arc::new(store.clone()));
+	}
+}
+
+/// Fork changes adopted into a session ([`LatestImage::adopt`]).
+struct Merge {
+	/// What the fork changed of the state a session carries ([`carried`]).
+	changes:   ImageDiff,
+	/// The compiled bodies of the functions among them, so the session keeps
+	/// their line numbers.
+	units:     Vec<(UnitId, Vec<u8>)>,
+	/// The session's state ([`LatestImage::get`]) when the fork ended.
+	reference: Image,
+}
+
+impl Merge {
+	/// Write the changes into `store`, out of band, where it still holds the
+	/// reference's record: a key changed since was changed by a command that
+	/// ended after the fork, and keeps that command's value.
+	fn apply(&self, store: &mut MemStore) {
+		let mut path_set = false;
+		for (key, record) in self.changes.changes() {
+			if store.record(key) != self.reference.0.record(key) {
+				continue;
+			}
+			match record {
+				// The record came from a store under this key, so it fits.
+				Some(record) => drop(store.put_out_of_band(key, record.clone())),
+				None => store.del_out_of_band(key),
+			}
+			path_set |= matches!(key, Key::Var(name) if resets_hash(name));
+		}
+		for (unit, blob) in &self.units {
+			// A memory store's blob writes cannot fail.
+			drop(store.put_blob(BlobSlot::Unit(*unit), blob));
+		}
+		if path_set {
+			flush_hash(store);
+		}
+	}
+}
+
+/// Whether a fork's change to `key` carries into the session it was forked
+/// from ([`LatestImage::adopt`]): what a command sets up for the commands
+/// after it (variables, functions, aliases, options, traps, `umask`, `set
+/// --`). Not carried: the working directory and what follows it (`PWD`,
+/// `OLDPWD`, the directory stack), which pi sets for every command; the
+/// command hash table, a cache ([`flush_hash`] empties it when `PATH`
+/// carries); the shell's bookkeeping (`$_`, history, counters); and the
+/// process state a fork does not copy (jobs, scopes).
+fn carried(key: Key<'_>) -> bool {
+	match key {
+		Key::Var(name) => !matches!(name.as_bytes(), b"PWD" | b"OLDPWD"),
+		Key::Func(_)
+		| Key::Alias(_)
+		| Key::Opt(_)
+		| Key::Trap(_)
+		| Key::ZshOpt(_)
+		| Key::ZshAlias { .. } => true,
+		Key::Misc(misc) => matches!(
+			misc,
+			MiscKey::Umask
+				| MiscKey::Positional
+				| MiscKey::DisabledBuiltins
+				| MiscKey::LoadedBuiltins
+				| MiscKey::ZshTies
+				| MiscKey::ZshDisabledAliases
+				| MiscKey::ZshDisabledSuffixAliases
+				| MiscKey::ZshDisabledFuncs
+				| MiscKey::ZshDisabledReswords
+				| MiscKey::ZshPatDisables
+				| MiscKey::ZshNamedDirs
+				| MiscKey::ZshModules
+				| MiscKey::ZshStyles
+				| MiscKey::ZshMathFuncs
+		),
+		Key::DirStack
+		| Key::CmdHash(_)
+		| Key::Job(_)
+		| Key::Proc(_)
+		| Key::Scope(_)
+		| Key::Local { .. } => false,
+	}
+}
+
+/// Whether writing variable `name` empties the command hash table, as the
+/// engine's `resets_hash` decides for the host platform.
+fn resets_hash(name: &[u8]) -> bool {
+	name == b"PATH" || (cfg!(windows) && name == b"PATHEXT")
+}
+
+/// Empty `store`'s command hash table out of band, as the engine's
+/// `flush_hash` does when `PATH` is assigned.
+fn flush_hash(store: &mut MemStore) {
+	let mut hashed = Vec::new();
+	// A memory store's scans cannot fail.
+	drop(store.scan(Table::CmdHash, &mut |key, _| hashed.push(key.to_buf())));
+	for key in hashed {
+		store.del_out_of_band(key.as_key());
+	}
+	store.del_out_of_band(Key::Misc(MiscKey::ZshPathChecked));
 }
 
 /// The shell's working directory as `store` records it.
@@ -369,7 +542,20 @@ impl Session {
 	///
 	/// [`SessionError::Create`] when the engine refuses the initial state.
 	pub fn new(config: SessionConfig) -> Result<Self, SessionError> {
-		Self::start(config, None)
+		Self::start(config, None, Sessions::Detach)
+	}
+
+	/// [`Session::new`] for a process that exists to run this shell (a
+	/// service, a command on a pseudo-terminal the process leads): externals
+	/// stay in the process's session and process group
+	/// ([`Sessions::Inherit`]), so they share its controlling terminal and
+	/// the signals the terminal sends its foreground group.
+	///
+	/// # Errors
+	///
+	/// [`SessionError::Create`] when the engine refuses the initial state.
+	pub fn for_process(config: SessionConfig) -> Result<Self, SessionError> {
+		Self::start(config, None, Sessions::Inherit)
 	}
 
 	/// Start a shell from `image` (a fork of the session it came from): its
@@ -383,17 +569,21 @@ impl Session {
 	///
 	/// [`SessionError::Restore`] when the engine refuses the image.
 	pub fn restore(config: SessionConfig, image: &Image) -> Result<Self, SessionError> {
-		Self::start(config, Some(image))
+		Self::start(config, Some(image), Sessions::Detach)
 	}
 
-	fn start(config: SessionConfig, image: Option<&Image>) -> Result<Self, SessionError> {
+	fn start(
+		config: SessionConfig,
+		image: Option<&Image>,
+		sessions: Sessions,
+	) -> Result<Self, SessionError> {
 		let SessionConfig { env, cwd, fs, vfs, runtime, output_decoding } = config;
 		let (jobs, rx) = flume::unbounded();
 		let children = Children::default();
 		let bell = Arc::new(Bell::default());
 		let waker = Waker::from(Arc::clone(&bell));
 		let tools = ToolConfig::from_env(&env, vfs.clone(), runtime.clone());
-		let mut host = PiHost::new(fs, runtime.clone());
+		let mut host = PiHost::with_sessions(fs, runtime.clone(), sessions);
 		if output_decoding.is_some() {
 			host.set_output_decoding(output_decoding);
 		}
@@ -425,7 +615,7 @@ impl Session {
 		};
 		// Nothing observes events: skip building them.
 		shell.set_event_mask(EventMask::NONE);
-		let image = LatestImage::new(&store);
+		let image = LatestImage::new(&store, waker.clone());
 		let driver = Driver {
 			shell,
 			store,
@@ -648,10 +838,12 @@ impl Driver {
 	/// them.
 	async fn serve(mut self) {
 		loop {
+			// Adopted fork changes land before any request that follows them.
+			self.image.publish_adopted(&mut self.store);
 			match self.jobs.try_recv() {
 				Ok(Request::Run(job)) => self.run(job).await,
 				Ok(Request::LiveJobs(reply)) => {
-					let _ = reply.send(self.shell.live_external_jobs());
+					let _ = reply.send(self.shell.live_external_jobs(&mut self.store));
 				},
 				Err(flume::TryRecvError::Disconnected) => break,
 				Err(flume::TryRecvError::Empty) => self.idle_turn().await,
@@ -676,8 +868,9 @@ impl Driver {
 	/// Run one job to completion and send its outcome.
 	async fn run(&mut self, job: Job) {
 		let Job { options, stdio, cancel, reply } = job;
-		let RunOptions { command, env, cwd, pipe_tap, reported_error, text_capture, events } =
+		let RunOptions { command, env, cwd, pipe_tap, reported_error, speech, text_capture, events } =
 			options;
+		self.host.set_speech(speech);
 		self.host.set_pipe_tap(pipe_tap);
 		// A command owns its observer generation, even when successive
 		// observers request identical event masks.
@@ -752,7 +945,7 @@ impl Driver {
 		self.shell.set_event_mask(EventMask::NONE);
 		self.host.set_reported_error(None);
 		self.restore_overlay(saved);
-		self.image.publish(&self.store);
+		self.image.publish(&mut self.store);
 		let cwd = store_cwd(&self.store);
 		// The caller may have stopped waiting (dropped future).
 		let _ = reply.send(RunOutcome { status, cancelled: applied > 0, exited, cwd });

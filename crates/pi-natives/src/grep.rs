@@ -99,6 +99,9 @@ pub struct GrepOptions<'env> {
 	pub hidden:             Option<bool>,
 	/// Respect .gitignore files (default: true).
 	pub gitignore:          Option<bool>,
+	/// Follow descendant symbolic links with cycle detection (default: false).
+	/// The filesystem provider is responsible for enforcing mount containment.
+	pub follow_links:       Option<bool>,
 	/// Maximum number of matches to return.
 	pub max_count:          Option<u32>,
 	/// Skip first N matches.
@@ -334,6 +337,7 @@ struct GrepRequest {
 	max_count_per_file: Option<u64>,
 	hidden:             bool,
 	gitignore:          bool,
+	follow_links:       bool,
 }
 
 /// Forward each streamed batch to `onMatches`, awaiting the JS call so the
@@ -393,6 +397,7 @@ async fn grep_async(
 		walk: pi_walker::walk::Options {
 			hidden: request.hidden,
 			gitignore: request.gitignore,
+			follow_links: request.follow_links,
 			..Default::default()
 		},
 		sink,
@@ -538,6 +543,7 @@ pub fn grep<'env>(
 		multiline,
 		hidden,
 		gitignore,
+		follow_links,
 		max_count,
 		offset,
 		context_before,
@@ -580,6 +586,7 @@ pub fn grep<'env>(
 		max_count_per_file: max_count_per_file.map(u64::from),
 		hidden: hidden.unwrap_or(true),
 		gitignore: gitignore.unwrap_or(true),
+		follow_links: follow_links.unwrap_or(false),
 	};
 
 	let ct = task::CancelToken::new(timeout_ms, signal);

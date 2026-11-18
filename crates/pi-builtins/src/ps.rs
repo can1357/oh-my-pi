@@ -359,6 +359,13 @@ impl PsProcessRow {
 impl Process for PsCommand {
 	const USES_PATHS: bool = true;
 
+	fn lacks_option(&self) -> bool {
+		matches!(
+			parse_ps_args(&self.argv, &ShellPaths::default()),
+			Err((_, message)) if message.ends_with(SYSTEM_PS_HINT)
+		)
+	}
+
 	fn run(&self, context: &ProcContext) -> impl Future<Output = io::Result<i32>> + Send {
 		async move {
 			let options = match parse_ps_args(&self.argv, context.paths()) {
@@ -661,10 +668,10 @@ fn parse_ps_flag_group(
 }
 
 /// Appended to every unsupported-option error: this `ps` covers a subset of
-/// procps. In the embedded shell `command ps` and `env ps` still run this
-/// builtin, so only a full path reaches a host `ps`, and not every host has one.
-const SYSTEM_PS_HINT: &str = "this ps supports a subset of procps options (see 'ps --help'); a \
-                              system ps, if installed, may support more when run by its full path";
+/// procps. The shell runs `PATH`'s `ps` for options this one lacks
+/// ([`Process::lacks_option`]), so the error shows only when there is none.
+const SYSTEM_PS_HINT: &str =
+	"this ps supports a subset of procps options (see 'ps --help'), and no system ps is on PATH";
 
 fn unsupported_option(message: &str) -> (u8, String) {
 	(1, format!("{message}; {SYSTEM_PS_HINT}"))
@@ -1452,7 +1459,6 @@ mod tests {
 				.unwrap_or_else(|| panic!("{args:?}: {message:?} must start with {named:?}"));
 			assert!(hint.contains("'ps --help'"), "{args:?}: {message:?}");
 			assert!(hint.contains("system ps"), "{args:?}: {message:?}");
-			assert!(hint.contains("full path"), "{args:?}: {message:?}");
 		}
 	}
 

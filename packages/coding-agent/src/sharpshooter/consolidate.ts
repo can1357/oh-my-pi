@@ -13,6 +13,7 @@ import { redactMemorySecrets as redactSecrets } from "../memory-backend/redact";
 import { truncateApproxTokens } from "../mnemopi/config";
 import consolidateInputTemplate from "../prompts/memories/sharpshooter-consolidate-input.md" with { type: "text" };
 import consolidateSystemTemplate from "../prompts/memories/sharpshooter-consolidate-system.md" with { type: "text" };
+import { journalCompletion, type ModelUsageLedger } from "../session/model-usage-journal";
 import { resolveSharpshooterModel } from "./extract";
 import {
 	readSharpshooterState,
@@ -106,6 +107,8 @@ export async function runSharpshooterConsolidation(options: {
 	sessionId: string;
 	getSessionProvider?: () => string | undefined;
 	force?: boolean;
+	/** Session journal the pass's model usage is billed to; unjournaled when omitted. */
+	usageLedger?: Partial<ModelUsageLedger>;
 }): Promise<SharpshooterConsolidationResult> {
 	const bankDir = sharpshooterBankDir(options.agentDir, options.cwd);
 	try {
@@ -183,6 +186,7 @@ async function consolidateLocked(
 		sessionId: string;
 		getSessionProvider?: () => string | undefined;
 		force?: boolean;
+		usageLedger?: Partial<ModelUsageLedger>;
 	},
 	bankDir: string,
 ): Promise<SharpshooterConsolidationResult> {
@@ -229,6 +233,7 @@ async function consolidateLocked(
 		if (cfgOffline.get(options.settings) && options.getSessionProvider?.() !== model.provider) {
 			return { ran: false, reason: "no_model" };
 		}
+		const journal = journalCompletion(options.usageLedger, { purpose: "sharpshooter:consolidate" });
 		const response = await retryTransientCompletion(
 			() => {
 				if (cfgOffline.get(options.settings) && options.getSessionProvider?.() !== model.provider) {
@@ -247,6 +252,7 @@ async function consolidateLocked(
 						maxTokens,
 						reasoning: clampThinkingLevelForModel(model, Effort.Medium),
 						toolChoice: "required",
+						onAttempt: message => journal?.(message, input),
 					},
 				);
 			},

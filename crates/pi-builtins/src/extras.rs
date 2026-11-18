@@ -17,6 +17,7 @@ use super::*;
 pub use crate::{
 	host::{CommandRunner, CommandStatus, EnvChange, Invocation, ShellCommand},
 	openfile::Fd,
+	speech::{SpeechAudio, SpeechHost, SpeechOutcome, SpeechRequest, SpeechVoice},
 };
 #[allow(unused_imports, reason = "used by whichever table entries the enabled features compile")]
 use crate::host::{AsyncUtility, Process, Utility, run_async_utility, run_process, run_utility};
@@ -52,13 +53,18 @@ macro_rules! for_each_extra {
 			utility [feature = "util.dd"] "dd" dd::Dd;
 			utility [feature = "util.df"] "df" df::Df;
 			utility [feature = "util.diff"] "diff" diff::Diff;
+			utility [feature = "util.direnv"] "direnv" direnv::Direnv;
 			utility [feature = "util.dirname"] "dirname" dirname::Dirname;
 			utility [feature = "util.du"] "du" du::Du;
+			async_utility [all(feature = "util.entr", any(unix, windows))] "entr" entr::Entr;
 			utility [feature = "util.env"] "env" env::Env;
 			utility [all(feature = "util.errno", unix)] "errno" errno::Errno;
 			async_utility [feature = "util.fd"] "fd" fd::FdCli;
+			utility [all(feature = "util.file", any(unix, windows))] "file" file::FileCli;
 			async_utility [feature = "util.find"] "find" find::Find;
+			async_utility [all(feature = "util.flock", any(unix, windows))] "flock" flock::Flock;
 			utility [feature = "util.fold"] "fold" fold::Fold;
+			async_utility [all(feature = "util.fswatch", any(unix, windows))] "fswatch" fswatch::Fswatch;
 			async_utility [feature = "util.grep"] "grep" grep::Grep;
 			async_utility [feature = "util.rg"] "rg" rg::Rg;
 			utility [feature = "util.head"] "head" head::Head;
@@ -77,6 +83,15 @@ macro_rules! for_each_extra {
 			utility [feature = "util.nl"] "nl" nl::Nl;
 			utility [feature = "util.nproc"] "nproc" nproc::Nproc;
 			utility [feature = "util.od"] "od" od::Od;
+			utility [all(
+				feature = "util.open",
+				any(target_os = "macos", target_os = "linux", windows)
+			)] "open" open::Open;
+			utility [all(
+				feature = "util.open",
+				any(target_os = "macos", target_os = "linux", windows)
+			)] "xdg-open" open::Open;
+			utility [all(feature = "util.open", windows)] "start" open::windows::Start;
 			utility [feature = "util.paste"] "paste" paste::Paste;
 			utility [feature = "util.printenv"] "printenv" printenv::Printenv;
 			utility [feature = "util.readlink"] "readlink" readlink::Readlink;
@@ -84,6 +99,7 @@ macro_rules! for_each_extra {
 			utility [feature = "util.rm"] "rm" rm::Rm;
 			utility [feature = "util.rmdir"] "rmdir" rmdir::Rmdir;
 			utility [all(feature = "util.rsync", any(unix, windows))] "rsync" rsync::Rsync;
+			async_utility [feature = "util.say"] "say" say::Say;
 			utility [feature = "util.sd"] "sd" sd::Sd;
 			utility [feature = "util.sed"] "sed" sed::Sed;
 			utility [feature = "util.seq"] "seq" seq::Seq;
@@ -108,6 +124,7 @@ macro_rules! for_each_extra {
 			utility [feature = "util.uname"] "uname" uname::Uname;
 			utility [feature = "util.uniq"] "uniq" uniq::Uniq;
 			utility [feature = "util.uptime"] "uptime" uptime::Uptime;
+			async_utility [all(feature = "util.watchexec", any(unix, windows))] "watchexec" watchexec::Watchexec;
 			utility [feature = "util.wc"] "wc" wc::Wc;
 			utility [feature = "util.which"] "which" which::WhichCli;
 			utility [feature = "util.whoami"] "whoami" whoami::Whoami;
@@ -144,11 +161,14 @@ pub enum ExtraKind {
 
 type RunFn = fn(Invocation) -> BoxFuture<'static, i32>;
 
+type LacksFn = fn(Vec<String>) -> bool;
+
 /// One row of the table.
 struct Extra {
-	name: &'static str,
-	kind: ExtraKind,
-	run:  RunFn,
+	name:  &'static str,
+	kind:  ExtraKind,
+	run:   RunFn,
+	lacks: LacksFn,
 }
 
 fn utility<U: Utility>(invocation: Invocation) -> BoxFuture<'static, i32> {
@@ -163,23 +183,48 @@ fn process<P: Process>(invocation: Invocation) -> BoxFuture<'static, i32> {
 	Box::pin(run_process::<P>(invocation))
 }
 
+/// clap's verdict on `argv`: an option the parser does not know.
+fn unknown_argument<T: clap::Parser>(argv: &[std::ffi::OsString]) -> bool {
+	matches!(T::try_parse_from(argv), Err(err) if err.kind() == clap::error::ErrorKind::UnknownArgument)
+}
+
+fn utility_lacks<U: Utility>(argv: Vec<String>) -> bool {
+	U::DEFERS_TO_PATH
+		&& U::rewrite_argv(argv.into_iter().map(Into::into).collect())
+			.is_ok_and(|argv| unknown_argument::<U>(&argv))
+}
+
+fn async_utility_lacks<U: AsyncUtility>(argv: Vec<String>) -> bool {
+	U::rewrite_argv(argv.into_iter().map(Into::into).collect())
+		.is_ok_and(|argv| unknown_argument::<U>(&argv))
+}
+
+fn process_lacks<P: Process>(argv: Vec<String>) -> bool {
+	match P::try_parse_from(P::rewrite_argv(argv)) {
+		Ok(parsed) => parsed.lacks_option(),
+		Err(err) => err.kind() == clap::error::ErrorKind::UnknownArgument,
+	}
+}
+
 macro_rules! extra_row {
 	(utility, $name:literal, $ty:path) => {
 		Extra {
 			name: $name,
-			kind: ExtraKind::Utility { runs_commands: <$ty as Utility>::RUNS_COMMANDS },
-			run:  utility::<$ty>,
+			kind:  ExtraKind::Utility { runs_commands: <$ty as Utility>::RUNS_COMMANDS },
+			run:   utility::<$ty>,
+			lacks: utility_lacks::<$ty>,
 		}
 	};
 	(async_utility, $name:literal, $ty:path) => {
 		Extra {
 			name: $name,
-			kind: ExtraKind::Utility { runs_commands: <$ty as AsyncUtility>::RUNS_COMMANDS },
-			run:  async_utility::<$ty>,
+			kind:  ExtraKind::Utility { runs_commands: <$ty as AsyncUtility>::RUNS_COMMANDS },
+			run:   async_utility::<$ty>,
+			lacks: async_utility_lacks::<$ty>,
 		}
 	};
 	(process, $name:literal, $ty:path) => {
-		Extra { name: $name, kind: ExtraKind::Process, run: process::<$ty> }
+		Extra { name: $name, kind: ExtraKind::Process, run: process::<$ty>, lacks: process_lacks::<$ty> }
 	};
 }
 
@@ -214,6 +259,14 @@ pub fn kind(name: &str) -> Option<ExtraKind> {
 	find(name).map(|extra| extra.kind)
 }
 
+/// Whether `argv` (command name first) asks the extra named `name` for an
+/// option it does not implement, which a host program of that name may: the
+/// shell then runs `PATH`'s program instead. `false` for any other name.
+#[must_use]
+pub fn lacks_option(name: &str, argv: Vec<String>) -> bool {
+	find(name).is_some_and(|extra| (extra.lacks)(argv))
+}
+
 /// Runs the extra named [`Invocation::name`] to completion, returning its
 /// exit status: 130 once [`Invocation::cancel`] fires (unless the utility
 /// reports its own end, as `rsync` does).
@@ -242,7 +295,7 @@ mod tests {
 
 	use tokio_util::sync::CancellationToken;
 
-	use super::{ExtraKind, Fd, Invocation, extras, kind, run};
+	use super::{ExtraKind, Fd, Invocation, extras, kind, lacks_option, run};
 
 	/// An invocation of `argv` with pipes on fds 0, 1, and 2 and no shell.
 	/// Returns it with the write end of stdin and the read ends of stdout
@@ -273,6 +326,34 @@ mod tests {
 		drop(stdin);
 		let code = run(invocation).await;
 		(code, read_all(stdout), read_all(stderr))
+	}
+
+	fn argv(args: &[&str]) -> Vec<String> {
+		args.iter().map(ToString::to_string).collect()
+	}
+
+	/// Failure mode: an option only the host program has (`ps --forest`)
+	/// must send the command to it, while options the extra implements, and
+	/// names that are no extra, keep running in-process.
+	#[cfg(all(feature = "util.cat", feature = "util.ps"))]
+	#[test]
+	fn lacks_option_flags_only_options_the_extra_does_not_implement() {
+		assert!(lacks_option("ps", argv(&["ps", "-eo", "pid,args", "--forest"])));
+		assert!(!lacks_option("ps", argv(&["ps", "-ef"])));
+		assert!(lacks_option("cat", argv(&["cat", "--no-such-option", "file"])));
+		assert!(!lacks_option("cat", argv(&["cat", "-n", "file"])));
+		assert!(!lacks_option("cat", argv(&["cat", "--help"])));
+		assert!(!lacks_option("git", argv(&["git", "--no-such-option"])));
+	}
+
+	/// Failure mode: on macOS, `basename --foo` deferred to BSD `basename`,
+	/// which printed `illegal option -- -` plus its own usage. `basename` implements
+	/// GNU's full option set, so unknown options must stay in-process.
+	#[cfg(feature = "util.basename")]
+	#[test]
+	fn basename_reports_unknown_options_itself() {
+		assert!(!lacks_option("basename", argv(&["basename", "--foo"])));
+		assert!(!lacks_option("basename", argv(&["basename", "-x", "a"])));
 	}
 
 	#[cfg(feature = "util.sort")]

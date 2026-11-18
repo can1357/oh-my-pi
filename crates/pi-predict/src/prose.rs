@@ -10,6 +10,8 @@
 
 use std::borrow::Cow;
 
+use xutf::Text;
+
 /// Prompts longer than this (UTF-16 units) get no completion at all.
 const MAX_BUFFER: usize = 20_000;
 /// Lines longer than this (UTF-16 units) get no completion.
@@ -68,7 +70,7 @@ const fn is_mark(c: char) -> bool {
 }
 
 fn utf16_len(text: &str) -> usize {
-	text.chars().map(char::len_utf16).sum()
+	text.transcoded_len::<u16>()
 }
 
 fn is_blank(text: &str) -> bool {

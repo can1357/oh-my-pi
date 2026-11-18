@@ -1,13 +1,17 @@
 /** Session-scoped service supervision through the shared project broker. */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TERMINAL_STATES } from "@oh-my-pi/pi-tui/apps/ps-data";
 import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
-import { type DaemonBrokerClient, daemonClientForProject } from "./client";
+import { compileNotifyPattern } from "../async/notify";
+import { shellProcessCommand } from "../exec/shell-process";
+import { isUrlPath } from "../internal-urls/url-filesystem";
+import { type DaemonBrokerClient, DaemonBrokerTimeoutError, daemonClientForProject } from "./client";
 import { canonicalProjectDir } from "./paths";
-import type { DaemonOperation, DaemonRpcResult } from "./protocol";
+import { DAEMON_OUTPUT_PATTERN_FLAGS, type DaemonOperation, type DaemonRpcResult } from "./protocol";
 import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
 import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
@@ -27,9 +31,19 @@ export interface ServiceStart {
 	cwd?: string;
 	pty?: boolean;
 	ready?: ServiceReady;
+	/** Regex; each output line it matches is reported to the owning session while the service runs. */
+	notify?: string;
 	/** Overlay on the configured shell env; wins over it. */
 	env?: Record<string, string>;
+	/**
+	 * Script the service's shell sources first: the mounts behind the URL paths its command may
+	 * name (`local://…`, a URL `cwd`), then the functions and aliases of the session starting it.
+	 */
+	seed?: string;
 }
+
+/** The script a service's shell sources, in the service's record directory. */
+const SERVICE_SEED_FILE = "shell.sh";
 
 const serviceStateKey = Symbol("ownedServices");
 interface ServiceSession extends ToolSession {
@@ -45,6 +59,18 @@ function serviceState(session: ToolSession): NonNullable<ServiceSession[typeof s
 		listeners: new Set(),
 		subscribed: new Set(),
 	});
+}
+
+/**
+ * Write the script `name`'s shell sources at each start into the broker's record of the service,
+ * where a relaunch finds it again and which is removed with the service's records.
+ */
+async function writeServiceSeed(session: ToolSession, name: string, seed: string): Promise<string> {
+	const dir = path.join(getDaemonRuntimeDir(await canonicalProjectDir(session.cwd)), "daemons", name);
+	await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+	const file = path.join(dir, SERVICE_SEED_FILE);
+	await fs.writeFile(file, seed, { mode: 0o600 });
+	return file;
 }
 
 export function hasLiveOwnedService(session: ToolSession): boolean {
@@ -91,7 +117,23 @@ function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
 		}
 		return session.queueLaunchCompletion?.(notification);
 	});
+	const unsubscribeNotify = client.onNotify(owner, notification => {
+		const { daemon } = notification;
+		// The match proves the service live: track it, so `running` answers even before this session lists its services.
+		track(session, daemon);
+		session.queueServiceNotify?.({
+			id: daemon.name,
+			type: "service",
+			pattern: notification.pattern,
+			running: () => serviceState(session).owned.get(daemon.name)?.id === daemon.id,
+			owner,
+			lines: notification.lines,
+			omitted: notification.omitted,
+			stopped: notification.stopped,
+		});
+	});
 	session.registerDisposeCallback?.(() => {
+		unsubscribeNotify();
 		unsubscribe({ preservePending: true });
 		clients.delete(client);
 		serviceState(session).owned.clear();
@@ -100,6 +142,8 @@ function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
 	session.registerSessionChangeCallback?.(() => {
 		// The previous session stays resumable (`/resume`, fork parent), so keep its
 		// completions queued in the broker for replay when that session id re-subscribes.
+		// Its services' `notify` matches are not kept: they reach it again once it does.
+		unsubscribeNotify();
 		unsubscribe({ preservePending: true });
 		clients.delete(client);
 		serviceState(session).owned.clear();
@@ -217,7 +261,8 @@ function serviceDirectory(cwd: string | undefined, sessionCwd: string): string {
  * `readyInterrupt` ends only the readiness wait, after the broker acknowledged
  * the launch: the call then resolves `readyInterrupted` with the launched
  * snapshot while the service keeps starting. Validation, connection, and launch
- * failures still reject.
+ * failures still reject. `notifyArmed` is false for a `notify` regex the broker
+ * did not take: one from an older omp ignores it.
  */
 export async function startService(
 	session: ToolSession,
@@ -228,6 +273,7 @@ export async function startService(
 	daemon: DaemonSnapshot;
 	readyTimedOut: boolean;
 	readyInterrupted: boolean;
+	notifyArmed: boolean;
 }> {
 	if (!cfgLaunchEnabled.get(session.settings)) throw new ToolError("Service launch is disabled in this session.");
 	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(params.name))
@@ -238,18 +284,26 @@ export async function startService(
 	if (ready && !ready.log && ready.port === undefined) throw new ToolError("ready requires log or port");
 	if (ready?.log) {
 		try {
-			new RegExp(ready.log, "u");
+			new RegExp(ready.log, DAEMON_OUTPUT_PATTERN_FLAGS);
 		} catch (error) {
 			throw new ToolError(`Invalid readiness regex: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
+	if (params.notify) compileNotifyPattern(params.notify);
 	const shell = session.settings.getShellConfig();
+	// The service is a shell process: the bash tool's shell, with omp's utilities and the mounts
+	// its script makes. A URL directory is entered by that shell; the process starts on the host.
+	const urlCwd = params.cwd !== undefined && isUrlPath(params.cwd) ? params.cwd : undefined;
+	const source = params.seed ? await writeServiceSeed(session, params.name, params.seed) : undefined;
 	const spec: DaemonSpec = {
 		name: params.name,
-		application: shell.shell,
-		args: [...shell.args, `${shell.prefix ? `${shell.prefix} ` : ""}${params.command}`],
+		...shellProcessCommand({
+			command: `${shell.prefix ? `${shell.prefix} ` : ""}${params.command}`,
+			source,
+			cwd: urlCwd,
+		}),
 		env: { ...shell.env, ...params.env },
-		cwd: serviceDirectory(params.cwd, session.cwd),
+		cwd: serviceDirectory(urlCwd === undefined ? params.cwd : undefined, session.cwd),
 		pty: params.pty ?? true,
 		ready: ready
 			? {
@@ -259,6 +313,7 @@ export async function startService(
 					timeoutMs: Math.round(Math.max(0.05, Math.min(3_600, ready.timeout ?? 30)) * 1_000),
 				}
 			: undefined,
+		notify: params.notify,
 		restart: "no",
 		persist: cfgLaunchPersist.get(session.settings),
 		detached: false,
@@ -273,9 +328,19 @@ export async function startService(
 			awaitReady: readyInterrupt === undefined,
 		},
 		signal,
-	);
+	).catch(async (error: unknown) => {
+		if (!(error instanceof DaemonBrokerTimeoutError)) throw error;
+		// The broker may have started the service anyway: say where it stands.
+		const described = await request(session, { op: "describe", name: params.name }, signal).catch(() => undefined);
+		const state =
+			described?.op === "describe"
+				? `${params.name} is ${described.daemon.state}${described.daemon.pid === undefined ? "" : ` (pid ${described.daemon.pid})`}; read proc://${params.name}`
+				: "the broker did not answer a status request either";
+		throw new ToolError(`Service start request timed out; ${state}.`);
+	});
 	if (result.op !== "start") throw new Error("Unexpected daemon start response");
 	const launched = result.daemon;
+	const notifyArmed = result.notifyArmed === true;
 	// A legacy broker ignores `awaitReady` and already waited: its result is
 	// ready, terminal, or timed out, so the wait phase is skipped.
 	if (
@@ -285,7 +350,7 @@ export async function startService(
 		launched.readyAt !== undefined ||
 		TERMINAL_STATES[launched.state]
 	)
-		return { daemon: launched, readyTimedOut: result.readyTimedOut, readyInterrupted: false };
+		return { daemon: launched, readyTimedOut: result.readyTimedOut, readyInterrupted: false, notifyArmed };
 	const timeoutMs = Math.max(0, spec.ready.timeoutMs - (Date.now() - launched.startedAt));
 	try {
 		const waited = await request(
@@ -299,10 +364,11 @@ export async function startService(
 			daemon: waited.daemon,
 			readyTimedOut: waited.timedOut && !TERMINAL_STATES[waited.daemon.state],
 			readyInterrupted: false,
+			notifyArmed,
 		};
 	} catch (error) {
 		if (readyInterrupt.aborted && !signal?.aborted)
-			return { daemon: launched, readyTimedOut: false, readyInterrupted: true };
+			return { daemon: launched, readyTimedOut: false, readyInterrupted: true, notifyArmed };
 		throw error;
 	}
 }

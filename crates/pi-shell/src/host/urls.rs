@@ -5,9 +5,14 @@
 //! `scheme://` path handed to one means nothing there. File-backed schemes
 //! (`skill://`, `local://`, `artifact://`, …) alias a real file and resolve
 //! to it; rendered ones and schemes no provider serves alias nothing and keep
-//! their spelling. A provider error (an unknown skill, a path escaping its
-//! root) fails the spawn: the child would only fail later on a URL it cannot
-//! open.
+//! their spelling. So does anything the provider cannot resolve in an
+//! argument or an environment value: a program is as often handed a URL as
+//! an identifier or as part of a message (`bm read memory://notes/x`,
+//! `log.sh 'agent://A; agent://B'`) as it is handed a path. Only a program
+//! or working directory the provider rejects fails the spawn, since nothing
+//! could run there. `omp` resolves the URLs it is given itself (with their
+//! selectors: `omp read skill://x:1-20`), so its arguments and environment
+//! are never rewritten.
 //!
 //! A spawn that names a URL is taken apart ([`split`]) into the [`Names`] to
 //! resolve and the [`Rest`] it moves untouched; the provider is awaited
@@ -92,12 +97,43 @@ impl Rest {
 	}
 }
 
-/// Whether `spec` names a URL (program, working directory, or an argument
-/// containing `://`): then it resolves first, else it spawns as it is.
+/// Whether `spec` names a URL (program, working directory, an argument
+/// containing `://`, or an environment value that is one): then it resolves
+/// first, else it spawns as it is.
 pub(super) fn names_url(spec: &SpawnSpec<'_>) -> bool {
 	is_url(spec.path)
 		|| is_url(spec.cwd)
-		|| spec.argv.iter().skip(1).any(|arg| arg.contains_str("://"))
+		|| (!runs_omp(spec.argv)
+			&& (spec.argv.iter().skip(1).any(|arg| arg.contains_str("://"))
+				|| spec.env.iter().any(|(name, value)| env_url(name, value))))
+}
+
+/// Whether `argv` runs `omp`: as the program, or as the command a wrapper
+/// (`nice omp …`, `npx omp …`) is given ahead of any URL.
+fn runs_omp(argv: &[BString]) -> bool {
+	argv
+		.iter()
+		.take_while(|arg| !arg.contains_str("://"))
+		.any(|arg| is_omp(arg))
+}
+
+/// Whether `word` names the `omp` program, by any path.
+fn is_omp(word: &[u8]) -> bool {
+	let name = word
+		.rsplit(|&b| b == b'/' || (cfg!(windows) && b == b'\\'))
+		.next()
+		.unwrap_or(word);
+	name == b"omp" || (cfg!(windows) && name.eq_ignore_ascii_case(b"omp.exe"))
+}
+
+/// Whether the environment variable `name` holds a URL to resolve. `PWD`
+/// follows the working directory instead, and a web address aliases no file,
+/// so the provider is not asked about one on every spawn.
+fn env_url(name: &BStr, value: &BStr) -> bool {
+	name != "PWD"
+		&& as_path(value)
+			.and_then(pi_vfs::url_scheme)
+			.is_some_and(|scheme| !matches!(scheme, "http" | "https"))
 }
 
 /// Take `spec` apart for a spawn that waits on the provider: the names as
@@ -202,30 +238,48 @@ pub(super) async fn resolve(fs: &pi_vfs::Fs, names: &Names) -> io::Result<Names>
 		},
 		_ => names.path.clone(),
 	};
+	let literal = runs_omp(&names.argv);
 	let mut argv = Vec::with_capacity(names.argv.len());
 	for (i, arg) in names.argv.iter().enumerate() {
-		let host = if i == 0 {
+		let host = if i == 0 || literal {
 			None
 		} else {
-			host_arg(fs, arg.as_bstr()).await?
+			host_arg(fs, arg.as_bstr()).await
 		};
 		argv.push(host.unwrap_or_else(|| arg.clone()));
 	}
-	let (cwd, env) = match spawn_dir {
+	// What the child's environment says differently from the shell's.
+	let mut hosted: Vec<(BString, BString)> = Vec::new();
+	if !literal {
+		for (name, value) in names.env.iter() {
+			if env_url(name, value)
+				&& let Some(host) = host_arg(fs, value).await
+			{
+				hosted.push((BString::from(name.as_bytes()), host));
+			}
+		}
+	}
+	let cwd = match spawn_dir {
 		// The shell's `$PWD` keeps the URL spelling; only the child is told
 		// the directory it actually starts in, so what it reads from `PWD`
 		// agrees with its own `getcwd()`.
 		Some(dir) => {
 			let dir = path_bytes(&dir);
-			let mut pairs: Vec<(BString, BString)> = names
-				.env
-				.iter()
-				.map(|(k, v)| (BString::from(k.as_bytes()), BString::from(v.as_bytes())))
-				.collect();
-			pairs.push((BString::from("PWD"), dir.clone()));
-			(dir, EnvView::new(pairs))
+			hosted.push((BString::from("PWD"), dir.clone()));
+			dir
 		},
-		None => (names.cwd.clone(), names.env.clone()),
+		None => names.cwd.clone(),
+	};
+	let env = if hosted.is_empty() {
+		names.env.clone()
+	} else {
+		let mut pairs: Vec<(BString, BString)> = names
+			.env
+			.iter()
+			.map(|(k, v)| (BString::from(k.as_bytes()), BString::from(v.as_bytes())))
+			.collect();
+		pairs.append(&mut hosted);
+		EnvView::new(pairs)
 	};
 	Ok(Names { path, argv, env, cwd })
 }
@@ -248,44 +302,57 @@ fn unresolved(path: &Path, err: &io::Error) -> io::Error {
 
 /// `arg` rewritten to the host path it names, if it names one.
 ///
-/// Both the bare spelling (`skill://example-skill/tool.py`) and the
-/// attached-value spelling (`--index=skill://example-skill/data`) translate.
-/// Anything the filesystem does not route to a backing file is left exactly
-/// as it was written, so `https://…`, `s3://…`, and ordinary words reach the
-/// child untouched. A bare scheme root (`local://`), or one followed by words
+/// The URL may be the whole argument (`skill://example-skill/tool.py`) or
+/// follow a lead that attaches it ([`url_start`]). Anything the filesystem
+/// does not route to a backing file, or cannot resolve, is left exactly as
+/// it was written, so `https://…`, `s3://…`, an identifier that only looks
+/// like one of the provider's URLs, and ordinary words reach the child
+/// untouched. A bare scheme root (`local://`), or one followed by words
 /// (`skill:// external command`), is far likelier a search pattern or message
-/// text than a path, so it stays literal too.
-async fn host_arg(fs: &pi_vfs::Fs, arg: &BStr) -> io::Result<Option<BString>> {
-	let Ok(text) = arg.to_str() else {
-		return Ok(None);
-	};
-	if !text.contains("://") {
-		return Ok(None);
+/// text than a path, so it stays literal too, as does a URL with words after
+/// it (`artifact://12 shows the failure`) unless a file has exactly that name.
+async fn host_arg(fs: &pi_vfs::Fs, arg: &BStr) -> Option<BString> {
+	let text = arg.to_str().ok()?;
+	let (lead, url) = text.split_at(url_start(text)?);
+	if names_nothing(url) {
+		return None;
 	}
-	if pi_vfs::is_virtual_path(Path::new(text)) {
-		if names_nothing(text) {
-			return Ok(None);
-		}
-		return Ok(host_path(fs, Path::new(text))
-			.await?
-			.map(|host| path_bytes(&host)));
+	let host = host_path(fs, Path::new(url)).await.ok()??;
+	if url.contains(char::is_whitespace) && std::fs::symlink_metadata(&host).is_err() {
+		return None;
 	}
-	let Some((name, value)) = text.split_once('=') else {
-		return Ok(None);
-	};
-	// Only an option name may carry an attached URL. A URL of its own that
-	// happens to embed one in a query string (`https://host/cb?next=local://x`)
-	// is one opaque string to the program receiving it.
-	if name.contains("://") || names_nothing(value) {
-		return Ok(None);
-	}
-	let Some(host) = host_path(fs, Path::new(value)).await? else {
-		return Ok(None);
-	};
-	let mut rewritten = BString::from(name);
-	rewritten.push(b'=');
+	let mut rewritten = BString::from(lead);
 	rewritten.extend_from_slice(&path_bytes(&host));
-	Ok(Some(rewritten))
+	Some(rewritten)
+}
+
+/// Where the URL `text` hands a program starts: at its beginning, or after
+/// what attaches it to an option: a name and `=` (`--index=skill://x/data`,
+/// `if=local://in`), a short option letter (`-olocal://out`), and then an `@`
+/// that says "the contents of" (`@local://body.json`, `body=@local://b.md`,
+/// `-d@local://b.json`).
+///
+/// Only an option name may carry an attached URL. A URL of its own that
+/// happens to embed one in a query string (`https://host/cb?next=local://x`)
+/// is one opaque string to the program receiving it.
+fn url_start(text: &str) -> Option<usize> {
+	if !text.contains("://") {
+		return None;
+	}
+	let url_at = |at: usize| pi_vfs::is_virtual_path(Path::new(&text[at..]));
+	if url_at(0) {
+		return Some(0);
+	}
+	let bytes = text.as_bytes();
+	let mut at = match text.split_once('=') {
+		Some((name, _)) if !name.contains("://") => name.len() + 1,
+		_ if bytes.first() == Some(&b'-') && bytes.get(1).is_some_and(u8::is_ascii_alphabetic) => 2,
+		_ => 0,
+	};
+	if bytes.get(at) == Some(&b'@') {
+		at += 1;
+	}
+	url_at(at).then_some(at)
 }
 
 /// Whether `text` is a URL naming nothing below its scheme: a bare root

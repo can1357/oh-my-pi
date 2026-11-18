@@ -38,6 +38,7 @@ import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { ExtensionRunner, PreparedExtension } from "../extensibility/extensions";
+import type { MCPLoadResult } from "../mcp";
 import type { CacheWarmer } from "./cache-warmer";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
@@ -71,9 +72,11 @@ export interface AgentSessionDisposeOptions {
 	 * Postmortem reason that triggered this dispose (signal/fatal teardown
 	 * paths). When set, the persisted `session_exit` diagnostic records it
 	 * instead of the generic `"dispose"` used for normal programmatic disposal
-	 * (`/quit`, test teardown, subagent completion). `EXIT` (also a subagent cut
-	 * off by its owner's shutdown) additionally records a turn still in flight as
-	 * interrupted, so `omp --restore` goes on with it.
+	 * (`/quit`, test teardown, subagent completion). A reason that ends the process
+	 * under the turn (`EXIT`, also a subagent cut off by its owner's shutdown;
+	 * `SIGTERM`/`SIGHUP` from the host, such as a terminal restarting; a fatal
+	 * error) additionally records a turn still in flight as interrupted, so
+	 * `omp --restore` goes on with it. `SIGINT` and `MANUAL` stop it, as a quit does.
 	 */
 	reason?: postmortem.Reason;
 }
@@ -422,6 +425,12 @@ export interface AgentSessionConfig {
 	advisorConfigWarnings?: string[];
 	/** Disconnect the MCP manager owned by this session during disposal. */
 	disconnectOwnedMcpManager?: () => Promise<void>;
+	/**
+	 * Reconnect the MCP manager owned by this session against the session's current cwd and
+	 * rebind its tools; serialized. Resolves `undefined` once the session is disposed. Absent
+	 * when the session borrows or disables MCP.
+	 */
+	reloadOwnedMcpServers?: () => Promise<MCPLoadResult | undefined>;
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
 	/**
@@ -642,6 +651,9 @@ export interface ResetSessionContextResult {
 /** Queued user content restored to the editor. */
 export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
 
+/** A queued message the dequeue key took back, tagged with the queue it left so the editor can restore its delivery. */
+export type DequeuedMessage = RestoredQueuedMessage & { queue: "steering" | "followUp" };
+
 /** Options for the same ephemeral side turn used by /btw. */
 export interface EphemeralTurnOptions {
 	promptText: string;
@@ -667,6 +679,12 @@ export interface EphemeralTurnOptions {
 	 * off-transcript callers can journal the spend. A throw is logged, never surfaced.
 	 */
 	onUsage?: (message: AssistantMessage) => void;
+	/**
+	 * Names the turn in the session journal (`recap`, `btw`). When set and no
+	 * `onUsage` is given, every billed attempt is written as a `model_usage` entry
+	 * with its reply; the prompt is left out, since the turn reads the conversation.
+	 */
+	purpose?: string;
 	signal?: AbortSignal;
 	dedupeReply?: boolean;
 	/** UTF-8 byte cap of the deduped reply (default 4 KiB); `Infinity` keeps a long answer whole. */

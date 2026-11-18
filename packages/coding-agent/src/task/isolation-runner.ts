@@ -30,6 +30,7 @@ import { AgentRegistry } from "../registry/agent-registry";
 import { readSnapshot } from "../commit/selective/journal";
 import type { FileChangeReport, ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
+import { patchSectionPaths, splitPatchSections } from "../utils/git-diff-paths";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { withRepoLock } from "../utils/repo-lock";
 import type { ExecutorOptions } from "./executor";
@@ -177,7 +178,14 @@ export function makeIsolationCommitMessage(session: ToolSession): BuildCommitMes
 		const settings = session.settings;
 		const sessionId = session.getSessionId?.() ?? undefined;
 		return async (diff: string) =>
-			generateCommitMessage(diff, registry, settings, sessionId, session.getActiveModel?.()?.provider);
+			generateCommitMessage(
+				diff,
+				registry,
+				settings,
+				sessionId,
+				session.getActiveModel?.()?.provider,
+				session.sessionManager,
+			);
 	};
 }
 
@@ -745,9 +753,8 @@ export interface IsolationMergeOptions {
 /** Repo-relative paths a git patch touches (both sides of each `diff --git` header). */
 function patchPaths(patch: string): string[] {
 	const paths = new Set<string>();
-	for (const match of patch.matchAll(/^diff --git a\/(.+?) b\/(.+)$/gm)) {
-		paths.add(match[1]);
-		paths.add(match[2]);
+	for (const section of splitPatchSections(patch)) {
+		for (const file of patchSectionPaths(section)) paths.add(file);
 	}
 	return [...paths];
 }

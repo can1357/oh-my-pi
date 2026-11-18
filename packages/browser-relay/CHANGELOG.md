@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.22.1] - 2026-11-17
+
+### Fixed
+
+- Fixed an issue where the browser relay could fail to identify the page and title of a frame it emptied and hid in a tab.
+
 ## [18.18.2] - 2026-11-08
 
 ### Added

@@ -1395,13 +1395,23 @@ export class FileSessionStorage implements SessionStorage {
 		sessionPath: string,
 		options?: { historyDbPath?: string; statsDbPath?: string },
 	): Promise<void> {
-		// Purge history/stats rows before the transcript is gone: the purge
-		// reads the session id from the live header (#18674). Best-effort, so
-		// a busy dashboard store never fails the delete itself.
-		purgeDeletedSessionRows(sessionPath, options);
-
-		// Delete the session file itself
-		await this.unlink(sessionPath);
+		// Read the id while the transcript is still here. Rows are purged only
+		// once that transcript is gone, so a failed unlink does not drop
+		// history/stats for a session that is still on disk. A transcript that
+		// is already absent still purges (callers treat ENOENT as success) and
+		// then rethrows, so artifact cleanup does not run for a file this call
+		// did not remove.
+		const sessionId = readSessionHeaderIdSync(sessionPath);
+		let alreadyGone: unknown;
+		try {
+			await this.unlink(sessionPath);
+		} catch (err) {
+			if (!isEnoent(err)) throw err;
+			alreadyGone = err;
+		}
+		// Best-effort: a busy dashboard store never fails the delete itself.
+		purgeDeletedSessionRows(sessionPath, { ...options, sessionId });
+		if (alreadyGone) throw alreadyGone;
 
 		// Compute artifacts directory: /path/to/session.jsonl -> /path/to/session
 		const artifactsDir = sessionPath.slice(0, -6);

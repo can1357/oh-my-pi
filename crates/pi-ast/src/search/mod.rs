@@ -168,9 +168,11 @@ pub struct Discover {
 	pub follow_links: bool,
 	/// Walking threads; `None` picks the walker's default.
 	pub workers:      Option<usize>,
-	/// Keep files whose name maps to no language (an explicit language will
-	/// parse them).
-	pub any_file:     bool,
+	/// Explicit language: a file root of any name is kept, and a walk keeps
+	/// files whose name maps to no language or to one that parses as this one
+	/// ([`SupportLang::parses_as`]), skipping other languages' files. `None`:
+	/// every file whose name maps to a language.
+	pub lang:         Option<SupportLang>,
 }
 
 /// A file to search.
@@ -187,7 +189,7 @@ pub struct Candidate {
 /// `opts` keeps, in path order.
 ///
 /// A file root is its own only candidate (when its name maps to a language
-/// or [`Discover::any_file`] is set); the globs do not apply to it.
+/// or [`Discover::lang`] is set); the globs do not apply to it.
 ///
 /// # Errors
 /// [`Error::Invalid`] when `root` does not exist or is neither file nor
@@ -199,9 +201,9 @@ pub async fn discover(fs: &Fs, root: &Path, opts: &Discover) -> Result<Vec<Candi
 		.metadata(&root)
 		.await
 		.map_err(|err| Error::Invalid(format!("Path not found: {err}")))?;
-	let any_file = opts.any_file;
+	let lang = opts.lang;
 	if metadata.is_file() {
-		if !any_file && SupportLang::from_path(&root).is_none() {
+		if lang.is_none() && SupportLang::from_path(&root).is_none() {
 			return Ok(Vec::new());
 		}
 		let display = pi_vfs::file_name(&root)
@@ -249,7 +251,11 @@ pub async fn discover(fs: &Fs, root: &Path, opts: &Discover) -> Result<Vec<Candi
 					.as_ref()
 					.is_none_or(|include| include.matches(entry.path))
 					&& !excluded(entry.path)
-					&& (any_file || SupportLang::from_path(entry.rel_path()).is_some()) =>
+					&& match (lang, SupportLang::from_path(entry.rel_path())) {
+						(Some(_), None) | (None, Some(_)) => true,
+						(None, None) => false,
+						(Some(lang), Some(found)) => found.parses_as(lang),
+					} =>
 			{
 				Action::Continue
 			},
@@ -289,7 +295,8 @@ pub struct Span {
 }
 
 impl Span {
-	fn of(node: &Node<'_, StrDoc<SupportLang>>) -> Self {
+	/// The span of `node`.
+	pub fn of(node: &Node<'_, StrDoc<SupportLang>>) -> Self {
 		let range = node.range();
 		let start = node.start_pos();
 		let end = node.end_pos();
@@ -327,7 +334,8 @@ pub struct Captures {
 }
 
 impl Captures {
-	fn of(matched: &NodeMatch<'_, StrDoc<SupportLang>>) -> Self {
+	/// The metavariable bindings of `matched`.
+	pub fn of(matched: &NodeMatch<'_, StrDoc<SupportLang>>) -> Self {
 		let env = matched.get_env();
 		let mut captures = Self::default();
 		for variable in env.get_matched_variables() {
@@ -1305,17 +1313,28 @@ fn stage(
 				continue;
 			}
 			let end = edit.position + edit.deleted_length;
-			if skip_overlaps
-				&& kept
-					.range(..end)
-					.next_back()
-					.is_some_and(|(_, &kept_end)| kept_end > edit.position)
-			{
+			let overlaps = kept
+				.range(..end)
+				.next_back()
+				.is_some_and(|(_, &kept_end)| kept_end > edit.position);
+			if overlaps && skip_overlaps {
 				continue;
 			}
 			if staged.changes.len() >= budget {
 				staged.limit_reached = true;
 				break 'rules;
+			}
+			if overlaps {
+				// Raised while staging, so a preview reports the overlap a
+				// write would hit instead of queueing an apply that fails.
+				return Err(Error::Invalid(match display {
+					Some(display) => format!(
+						"{display}: overlapping replacements detected; refine pattern to avoid \
+						 ambiguous edits"
+					),
+					None => "Overlapping replacements detected; refine pattern to avoid ambiguous edits"
+						.to_owned(),
+				}));
 			}
 			let after = String::from_utf8(edit.inserted_text.clone()).map_err(|err| {
 				Error::Invalid(match display {

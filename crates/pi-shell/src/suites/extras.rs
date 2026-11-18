@@ -462,3 +462,221 @@ async fn utilities_read_provider_files() {
 	assert_eq!(out(&mut s, "cat mem://notes | sort | head -n1").await, "apple\n");
 	assert_eq!(out(&mut s, "x=$(sort mem://notes); echo \"[$x]\"").await, "[apple\npear]\n");
 }
+
+/// A directory holding `a.txt`, by its real path.
+fn watched_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+	let dir = tempfile::tempdir().unwrap();
+	let root = dir.path().canonicalize().unwrap();
+	std::fs::write(root.join("a.txt"), "first\n").unwrap();
+	(dir, root)
+}
+
+/// `entr` runs its utility as a command of the shell: a builtin, a shell
+/// command line with the changed file as `$0`, and a missing command in
+/// entr's own words.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn entr_runs_its_utility_through_the_shell() {
+	let (_dir, root) = watched_dir();
+	let mut s = session_in(&root, &[("SHELL", "/bin/sh")]);
+	let file = root.join("a.txt");
+	assert_eq!(
+		out(&mut s, "echo a.txt | entr -z echo ran /_").await,
+		format!("ran {}\n", file.display())
+	);
+
+	let ran = run(&mut s, "echo a.txt | entr -zs 'echo \"changed $0\"; exit 4'").await;
+	assert_eq!(
+		(ran.status, ran.stdout),
+		(4, format!("changed {}\n", file.display())),
+		"{}",
+		ran.stderr
+	);
+
+	let ran = run(&mut s, "echo a.txt | entr -z no-such-utility").await;
+	assert_eq!(
+		(ran.status, ran.stderr.as_str()),
+		(1, "entr: exec no-such-utility: No such file or directory\n")
+	);
+}
+
+/// `entr -r` ends the running utility's process before it starts the next,
+/// and a cancelled `entr` leaves none behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn entr_reload_replaces_the_process_and_cancel_ends_it() {
+	let (_dir, root) = watched_dir();
+	let logs = tempfile::tempdir().unwrap();
+	let pids = logs.path().join("pids");
+	let started = || -> Vec<i32> {
+		std::fs::read_to_string(&pids)
+			.unwrap_or_default()
+			.lines()
+			.filter_map(|line| line.parse().ok())
+			.collect()
+	};
+	let alive = |pid: i32| {
+		// SAFETY: signal 0 only probes existence.
+		unsafe { libc::kill(pid, 0) == 0 }
+	};
+	let mut s = session_in(&root, &[]);
+	let cancel = CancellationToken::new();
+	let command =
+		format!("echo a.txt | entr -r /bin/sh -c 'echo $$ >> {}; exec sleep 30'", pids.display());
+	let trigger = cancel.clone();
+	let probe = async {
+		let deadline = Instant::now() + Duration::from_secs(20);
+		let mut touched = Instant::now();
+		// A change `entr` discounts right after the start is made again.
+		while started().len() < 2 {
+			assert!(Instant::now() < deadline, "started {:?}", started());
+			if !started().is_empty() && touched.elapsed() >= Duration::from_millis(500) {
+				std::fs::write(root.join("a.txt"), "again\n").unwrap();
+				touched = Instant::now();
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+		let pids = started();
+		let replaced = !alive(pids[0]);
+		trigger.cancel();
+		(pids, replaced)
+	};
+	let (ran, (pids, replaced)) = tokio::join!(run_with(&mut s, &command, cancel), probe);
+	assert!(ran.cancelled, "status {} stderr {:?}", ran.status, ran.stderr);
+	assert!(replaced, "the first utility {} was still running beside the second", pids[0]);
+	let gone = Instant::now();
+	while pids.iter().any(|&pid| alive(pid)) {
+		assert!(gone.elapsed() < Duration::from_secs(5), "a utility of {pids:?} survived the cancel");
+		tokio::time::sleep(Duration::from_millis(20)).await;
+	}
+}
+
+/// `watchexec` runs its command as a command line of the shell itself, or
+/// with `-n` as an argv, and `-1` reports the command's status.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn watchexec_runs_its_command_through_the_shell() {
+	let (_dir, root) = watched_dir();
+	let mut s = session_in(&root, &[]);
+	assert_eq!(
+		out(&mut s, "watchexec -1 -q 'greet() { echo \"hello $1\"; }; greet shell; type cat'").await,
+		"hello shell\ncat is a shell builtin\n"
+	);
+	assert_eq!(out(&mut s, "watchexec -1 -q -n -- echo 'a  b' '$HOME'").await, "a  b $HOME\n");
+	let ran = run(&mut s, "watchexec -1 -E CODE=7 'exit $CODE'").await;
+	assert_eq!(
+		(ran.status, ran.stderr.as_str()),
+		(7, "[Running: exit $CODE]\n[Command exited with 7]\n")
+	);
+}
+
+/// `watchexec -r` stops the running command's process before it starts the
+/// next, `-s` signals the command where it runs, and a cancelled `watchexec`
+/// leaves no process behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn watchexec_restarts_signals_and_cancels_its_command() {
+	let (_dir, root) = watched_dir();
+	let logs = tempfile::tempdir().unwrap();
+	let pids = logs.path().join("pids");
+	let started = || -> Vec<i32> {
+		std::fs::read_to_string(&pids)
+			.unwrap_or_default()
+			.lines()
+			.filter_map(|line| line.parse().ok())
+			.collect()
+	};
+	let alive = |pid: i32| {
+		// SAFETY: signal 0 only probes existence.
+		unsafe { libc::kill(pid, 0) == 0 }
+	};
+	let mut s = session_in(&root, &[]);
+	let cancel = CancellationToken::new();
+	let command = format!(
+		"watchexec -r -e trigger -n -- /bin/sh -c 'echo $$ >> {}; exec sleep 30'",
+		pids.display()
+	);
+	let trigger = cancel.clone();
+	let probe = async {
+		let deadline = Instant::now() + Duration::from_secs(20);
+		let mut touched = Instant::now();
+		while started().len() < 2 {
+			assert!(Instant::now() < deadline, "started {:?}", started());
+			if !started().is_empty() && touched.elapsed() >= Duration::from_millis(500) {
+				std::fs::write(root.join("a.trigger"), "again\n").unwrap();
+				touched = Instant::now();
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+		let pids = started();
+		let replaced = !alive(pids[0]);
+		trigger.cancel();
+		(pids, replaced)
+	};
+	let (ran, (pids, replaced)) = tokio::join!(run_with(&mut s, &command, cancel), probe);
+	assert!(ran.cancelled, "status {} stderr {:?}", ran.status, ran.stderr);
+	assert!(replaced, "the first command {} was still running beside the second", pids[0]);
+	let gone = Instant::now();
+	while pids.iter().any(|&pid| alive(pid)) {
+		assert!(gone.elapsed() < Duration::from_secs(5), "a command of {pids:?} survived the cancel");
+		tokio::time::sleep(Duration::from_millis(20)).await;
+	}
+
+	// A signal reaches a command that runs in the shell itself: its trap
+	// runs, and the command goes on.
+	let log = logs.path().join("log");
+	let seen = || std::fs::read_to_string(&log).unwrap_or_default();
+	let cancel = CancellationToken::new();
+	let command = format!(
+		"watchexec -s USR1 -e trigger 'trap \"echo reloaded >> {log}\" USR1; echo ready >> {log}; \
+		 while :; do sleep 0.05; done'",
+		log = log.display()
+	);
+	let trigger = cancel.clone();
+	let probe = async {
+		let deadline = Instant::now() + Duration::from_secs(20);
+		let mut touched = Instant::now();
+		while !seen().contains("reloaded") {
+			assert!(Instant::now() < deadline, "saw {:?}", seen());
+			if seen().contains("ready") && touched.elapsed() >= Duration::from_millis(500) {
+				std::fs::write(root.join("b.trigger"), "again\n").unwrap();
+				touched = Instant::now();
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+		trigger.cancel();
+	};
+	let (ran, ()) = tokio::join!(run_with(&mut s, &command, cancel), probe);
+	assert!(ran.cancelled, "status {} stderr {:?}", ran.status, ran.stderr);
+	assert_eq!(seen().matches("ready").count(), 1, "the command was restarted: {:?}", seen());
+}
+
+/// `watchexec -j` runs its filter programs as the shell's `jq` over each
+/// event: only events a program answers `true` for reach the command, and a
+/// program that does not compile ends `watchexec` before it watches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn watchexec_filter_programs_decide_which_events_run_the_command() {
+	let (_dir, root) = watched_dir();
+	let mut s = session_in(&root, &[]);
+	let ran = run(&mut s, "watchexec -1 -j 'any(.tags[' -n true").await;
+	assert_eq!(ran.status, 1, "{}", ran.stdout);
+	assert!(ran.stderr.contains("invalid filter program: any(.tags["), "{}", ran.stderr);
+
+	let command = r#"watchexec -p -1 -q -e trigger --emit-events-to=stdio -j 'any(.tags[] | select(.kind == "path"); .absolute | test("keep"))' cat"#;
+	let done = std::sync::atomic::AtomicBool::new(false);
+	let probe = async {
+		while !done.load(std::sync::atomic::Ordering::Relaxed) {
+			std::fs::write(root.join("drop.trigger"), "x").unwrap();
+			std::fs::write(root.join("keep.trigger"), "x").unwrap();
+			tokio::time::sleep(Duration::from_millis(200)).await;
+		}
+	};
+	let watching = async {
+		let ran = run(&mut s, command).await;
+		done.store(true, std::sync::atomic::Ordering::Relaxed);
+		ran
+	};
+	let (ran, ()) = tokio::join!(watching, probe);
+	assert_eq!(ran.status, 0, "{}", ran.stderr);
+	let keep = root.join("keep.trigger");
+	assert!(!ran.stdout.is_empty(), "{}", ran.stderr);
+	for line in ran.stdout.lines() {
+		assert!(line.ends_with(&format!(":{}", keep.display())), "{}", ran.stdout);
+	}
+}

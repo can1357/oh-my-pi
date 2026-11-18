@@ -93,9 +93,17 @@ fn inserts_before_after_head_and_tail() {
 	assert_eq!(apply("one\ntwo\n", &edits, None).text, "head\none\nbefore\ntwo\nafter\ntail\n");
 }
 
+/// The empty row after a trailing newline is not a line: replacing it used
+/// to drop the delete and append the body instead of rejecting.
 #[test]
-fn ignores_a_delete_of_the_trailing_phantom_line() {
-	assert_eq!(apply("one\ntwo\n", &[delete(3, 1)], None).text, "one\ntwo\n");
+fn rejects_a_replacement_of_the_row_after_the_trailing_newline() {
+	let error = apply_edits("one\ntwo\n", &replacement(3, 3, &["three"], 1), ApplyOptions {
+		clipboard:      None,
+		path:           None,
+		on_empty_paste: EmptyPaste::Throw,
+	})
+	.unwrap_err();
+	assert_eq!(error.to_string(), "Line 3 does not exist (file has 2 lines)");
 }
 
 #[test]
@@ -110,20 +118,15 @@ fn rejects_an_out_of_bounds_anchor() {
 }
 
 #[test]
-fn restores_a_uniformly_omitted_base_indent_from_unchanged_structural_rows() {
+fn applies_an_unindented_replacement_body_verbatim() {
 	let file = "fn f() {\n\tlet a = 1;\n\tlet b = 2;\n\tlet c = 3;\n}";
 	let result = apply(
 		file,
 		&replacement(2, 4, &["let a = 1;", "let b = 20;", "let c = 3;"], 1),
 		Some("x.rs"),
 	);
-	assert_eq!(result.text, "fn f() {\n\tlet a = 1;\n\tlet b = 20;\n\tlet c = 3;\n}");
-	assert!(
-		result
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("Auto-indented"))
-	);
+	assert_eq!(result.text, "fn f() {\nlet a = 1;\nlet b = 20;\nlet c = 3;\n}");
+	assert!(result.warnings.is_empty(), "{:?}", result.warnings);
 }
 
 #[test]
@@ -137,21 +140,15 @@ fn preserves_intentional_indentation_only_replacements() {
 	assert!(result.warnings.is_empty());
 }
 
+/// A replacement that swallows a closer the file needs is rejected with the
+/// range that keeps it, never applied with the closer silently retained.
 #[test]
-fn spares_the_deleted_closing_line_when_the_payload_omits_it() {
+fn suggests_keeping_a_closing_line_the_payload_omits() {
 	let file = "const handlers = {\n\ta() {\n\t\treturn 1;\n\t},\n};";
-	let result =
-		apply(file, &replacement(5, 5, &["\tb() {", "\t\treturn 2;", "\t},"], 1), Some("x.ts"));
-	assert_eq!(
-		result.text,
-		"const handlers = {\n\ta() {\n\t\treturn 1;\n\t},\n\tb() {\n\t\treturn 2;\n\t},\n};"
-	);
-	assert!(
-		result
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("Auto-repaired replacement boundaries"))
-	);
+	let error =
+		rejection(file, &replacement(5, 5, &["\tb() {", "\t\treturn 2;", "\t},"], 1), "x.ts");
+	assert!(error.contains("line 5 stays (use `PUT <5:`)"), "{error}");
+	assert!(error.contains("Nothing was applied"), "{error}");
 }
 
 #[test]
@@ -199,21 +196,47 @@ fn keeps_the_placement_rejection_when_dropping_the_comma_does_not_parse() {
 	}
 }
 
+/// Both readings parse (the duplicates are valid statements), so the echo is
+/// rejected rather than dropped.
 #[test]
-fn drops_duplicated_leading_and_trailing_boundary_lines_around_a_range_replacement() {
+fn rejects_a_body_that_restates_both_neighbours_of_its_range() {
 	let file = "function f() {\n  keepA();\n  old1();\n  old2();\n  keepB();\n}";
-	let result = apply(
+	let error = rejection(
 		file,
 		&replacement(3, 4, &["  keepA();", "  new1();", "  new2();", "  keepB();"], 1),
-		Some("x.ts"),
+		"x.ts",
 	);
-	assert_eq!(result.text, "function f() {\n  keepA();\n  new1();\n  new2();\n  keepB();\n}");
-	assert!(
-		result
-			.warnings
-			.iter()
-			.any(|warning| warning.contains("boundary echo"))
-	);
+	assert!(error.contains("write line 2 (just above the range) a second time"), "{error}");
+	assert!(error.contains("write line 5 (just below the range) a second time"), "{error}");
+}
+
+/// A body row equal to the line just outside its range is content when
+/// another edit in the batch deletes that line: an `.await` the next hunk
+/// cuts, a closer the same patch replaces. It used to be dropped as an echo.
+#[test]
+fn keeps_a_row_that_restates_a_neighbour_another_hunk_deletes() {
+	let file = "async fn f() {\n\tlet x = call(\n\t\ta)\n\t\t.await;\n\tdone();\n}\n";
+	let mut edits = replacement(2, 3, &["\tlet x = other(", "\t\tb)", "\t\t.await;"], 1);
+	edits.push(delete(4, 2));
+	let result = apply(file, &edits, Some("x.rs"));
+	assert_eq!(result.text, "async fn f() {\n\tlet x = other(\n\t\tb)\n\t\t.await;\n\tdone();\n}\n");
+	assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+
+	let file = "fn f() {\n\told();\n}\n";
+	let mut edits = replacement(1, 2, &["fn g() {", "\tnew();", "}"], 1);
+	edits.extend(replacement(3, 3, &["// end"], 2));
+	let result = apply(file, &edits, Some("x.rs"));
+	assert_eq!(result.text, "fn g() {\n\tnew();\n}\n// end\n");
+}
+
+/// A body ending in `}` above an enclosing `}` is the function's own closer:
+/// the file parses as written and not without it, so it is applied verbatim.
+#[test]
+fn keeps_a_closer_the_parse_needs_even_when_it_matches_the_next_line() {
+	let file = "mod m {\nfn f() {\nold();\n}\n}\n";
+	let result = apply(file, &replacement(3, 4, &["new();", "more();", "}"], 1), Some("x.rs"));
+	assert_eq!(result.text, "mod m {\nfn f() {\nnew();\nmore();\n}\n}\n");
+	assert!(result.warnings.is_empty(), "{:?}", result.warnings);
 }
 
 /// A body whose echo drop would leave its range unchanged means the literal
@@ -359,13 +382,10 @@ fn refuses_a_too_short_echo_whose_keep_row_repair_also_parses() {
 }
 
 /// A body that restates the line above (or below) its range more than once.
-/// The first pass drops one copy and records no refusal, and what remains is
-/// the one-sided too-short shape. The drop-only repair parses and deletes
-/// `old();`, which the body never restates; skipping that repair applied the
-/// body as written, which does not parse (the first case writes the function
-/// header twice). Each case is refused and names the range row the body
-/// leaves out. The third case reaches that shape after the first pass drops
-/// an echo on each side.
+/// With one copy set aside, what remains is the one-sided too-short shape,
+/// which would delete `old();`, a row the body never restates. Each case is
+/// refused and names the range row the body leaves out. The third case
+/// reaches that shape with an echo set aside on each side.
 #[test]
 fn refuses_a_too_short_echo_a_dropped_copy_exposed() {
 	let one = "const z = 0;\nfunction f() {\n\told();\n}\nafter();\n";
@@ -410,25 +430,23 @@ fn refuses_a_too_short_echo_a_dropped_copy_exposed() {
 	}
 }
 
-/// A body that restates the line above its range, fills the range, and adds
-/// a new line equal to that neighbour: a `break;` above a new `case`, a second
-/// `@property`, a second `#[test]` on a one-row range. Dropping the echo keeps
-/// no range row, so the new copy is content the body asks for, not a
-/// duplicate: the edit applies. It was refused as holding "one more copy" of
-/// the neighbour.
+/// A body that opens by restating the line above its range (or ends with the
+/// line below) where the file parses both with and without that row: a
+/// `break;` above a new `case`, a second `@property`, a second `#[test]` or
+/// `#[napi]` on a one-row range. Nothing tells a context row from a new copy,
+/// so the edit is refused naming the repeated line; the row is never dropped.
 #[test]
-fn applies_a_dropped_echo_whose_body_adds_a_new_copy_of_the_neighbour() {
-	// (path, file, start, end, body, expected)
+fn refuses_an_echo_when_both_readings_parse() {
+	// (path, file, start, end, body, repeated)
 	type Case<'a> = (&'a str, &'a str, u32, u32, &'a [&'a str], &'a str);
-	let cases: [Case; 3] = [
+	let cases: [Case; 4] = [
 		(
 			"s.ts",
 			"switch (x) {\n\tcase 1:\n\t\ta();\n\t\tbreak;\n\tdefault:\n\t\tb();\n}\n",
 			5,
 			6,
 			&["\t\tbreak;", "\tcase 2:", "\t\tc();", "\t\tbreak;", "\tdefault:", "\t\tb();"],
-			"switch (x) {\n\tcase 1:\n\t\ta();\n\t\tbreak;\n\tcase \
-			 2:\n\t\tc();\n\t\tbreak;\n\tdefault:\n\t\tb();\n}\n",
+			"write line 4 (just above the range) a second time",
 		),
 		(
 			"c.py",
@@ -444,8 +462,7 @@ fn applies_a_dropped_echo_whose_body_adds_a_new_copy_of_the_neighbour() {
 				"    def b(self):",
 				"        return 3",
 			],
-			"class C:\n    @property\n    def a(self):\n        return 2\n\n    @property\n    def \
-			 b(self):\n        return 3\n",
+			"write line 2 (just above the range) a second time",
 		),
 		(
 			"t.rs",
@@ -453,20 +470,21 @@ fn applies_a_dropped_echo_whose_body_adds_a_new_copy_of_the_neighbour() {
 			2,
 			2,
 			&["#[test]", "fn a() { x(); }", "", "#[test]", "fn b() {}"],
-			"#[test]\nfn a() { x(); }\n\n#[test]\nfn b() {}\n",
+			"write line 1 (just above the range) a second time",
+		),
+		(
+			"x.rs",
+			"/// Old summary.\n#[napi]\npub fn f() {}",
+			1,
+			1,
+			&["/// New summary.", "#[napi]"],
+			"write line 2 (just below the range) a second time",
 		),
 	];
-	for (path, file, start, end, body, expected) in cases {
-		let result = apply(file, &replacement(start, end, body, 1), Some(path));
-		assert_eq!(result.text, expected, "{path}");
+	for (path, file, start, end, body, repeated) in cases {
+		let error = rejection(file, &replacement(start, end, body, 1), path);
+		assert!(error.contains(repeated), "{path}: {error}");
 	}
-}
-
-#[test]
-fn drops_a_trailing_attribute_echo_in_a_single_line_replacement() {
-	let file = "/// Old summary.\n#[napi]\npub fn f() {}";
-	let result = apply(file, &replacement(1, 1, &["/// New summary.", "#[napi]"], 1), Some("x.rs"));
-	assert_eq!(result.text, "/// New summary.\n#[napi]\npub fn f() {}");
 }
 
 #[test]
@@ -476,26 +494,27 @@ fn keeps_a_trailing_statement_echo_literal_on_a_single_line_range() {
 	assert_eq!(result.text, "foo();\nnew();\nbar();\nbar();");
 }
 
+/// `PUT >N:` inserts after line N whatever the body's indentation; it used to
+/// slide past the closers that follow.
 #[test]
-fn slides_a_shallower_body_past_the_closing_line_and_warns() {
+fn keeps_a_shallower_gap_insert_where_it_was_written() {
 	let file = "function f() {\n    if (x) {\n        a();\n    }\n    b();\n}\n";
-	let result = apply(file, &[insert_after(3, "    c();", 1)], None);
+	let result = apply(file, &[insert_after(3, "    c();", 1)], Some("x.ts"));
 	assert_eq!(
 		result.text,
-		"function f() {\n    if (x) {\n        a();\n    }\n    c();\n    b();\n}\n"
+		"function f() {\n    if (x) {\n        a();\n    c();\n    }\n    b();\n}\n"
 	);
-	assert!(result.warnings[0].contains("moved past 1 closing line to after line 4"));
+	assert!(result.warnings.is_empty(), "{:?}", result.warnings);
 }
 
+/// When the insert as written breaks the parse and the landing its
+/// indentation points to parses, the edit is rejected with that landing.
 #[test]
-fn crosses_multiple_closer_levels_and_stops_at_the_body_depth() {
-	let file = "function f() {\n    if (x) {\n        for (y) {\n            a();\n        }\n    \
-	            }\n    b();\n}\n";
-	let outer = apply(file, &[insert_after(4, "    c();", 1)], None);
-	assert_eq!(outer.text.lines().nth(6), Some("    c();"));
-	assert!(outer.warnings[0].contains("moved past 2 closing lines to after line 6"));
-	let inner = apply(file, &[insert_after(4, "        c();", 1)], None);
-	assert_eq!(inner.text.lines().nth(5), Some("        c();"));
+fn rejects_a_shallower_gap_insert_that_parses_only_past_the_closer() {
+	let file = "{\n  \"a\": {\n    \"b\": 1\n  },\n  \"d\": 3\n}\n";
+	let error = rejection(file, &[insert_after(3, "  \"c\": 2,", 1)], "x.json");
+	assert!(error.contains("re-issue as `PUT >4:`"), "{error}");
+	assert!(error.contains("Nothing was applied"), "{error}");
 }
 
 #[test]
@@ -504,25 +523,6 @@ fn refuses_to_cross_a_line_targeted_by_another_hunk() {
 	let result = apply(file, &[insert_after(3, "    c();", 1), delete(4, 2)], None);
 	assert_eq!(result.text, "function f() {\n    if (x) {\n        a();\n    c();\n    b();\n}\n");
 	assert!(result.warnings.is_empty());
-}
-
-#[test]
-fn inward_block_landing_pulls_a_deeper_body_inside() {
-	let file = "function f() {\n    afterEach(() => {\n        destroy();\n    });\n}\n";
-	let edit = Edit::Insert {
-		cursor:      Cursor::AfterAnchor(Anchor { line: 4 }),
-		text:        "        setup();".into(),
-		line_num:    1,
-		index:       0,
-		replacement: false,
-		block_start: Some(2),
-	};
-	let result = apply(file, &[edit], None);
-	assert_eq!(
-		result.text,
-		"function f() {\n    afterEach(() => {\n        destroy();\n        setup();\n    });\n}\n"
-	);
-	assert!(result.warnings[0].contains("placed inside the block, after line 3"));
 }
 
 #[test]
@@ -632,6 +632,21 @@ fn markdown_edits_never_warn_of_a_syntax_error() {
 	let file = "# Results\n\n| case | before | after |\n|---|---|---|\n| a | 1 | 2 |\n";
 	let result = apply(file, &[insert_after(5, "| b |||", 1)], Some("notes.md"));
 	assert_eq!(result.text, format!("{file}| b |||\n"));
+	assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+}
+
+/// The parse warning names the line tree-sitter reports, not the first
+/// changed line, and grammars with known gaps (here a bash heredoc) give none.
+#[test]
+fn parse_warning_names_the_error_line_and_skips_gap_grammars() {
+	let file = "function f() {\n  a();\n}\n\nfunction g() {\n  b();\n}\n";
+	let edits = [replacement(2, 2, &["  a2();"], 1), replacement(6, 6, &["  b(;"], 2)].concat();
+	let result = apply(file, &edits, Some("x.ts"));
+	assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+	assert!(result.warnings[0].contains("near line 6"), "{:?}", result.warnings);
+
+	let script = "f() {\n  echo a\n}\n";
+	let result = apply(script, &[insert_after(2, "  cat <<EOF\nx\nEOF", 1)], Some("x.sh"));
 	assert!(result.warnings.is_empty(), "{:?}", result.warnings);
 }
 

@@ -1442,6 +1442,10 @@ pub enum Probe {
 	/// ([`super::builtins::history::io`]): [`ProbeResult::Hist`]. `seq`
 	/// numbers the operation's steps.
 	Hist { seq: u32, op: Box<super::builtins::history::io::HistOp> },
+	/// The host file a `scheme://` path is an alias of
+	/// ([`Fs::backing_path`](crate::bash::fs::Fs::backing_path)):
+	/// [`ProbeResult::Path`], `None` when it aliases none.
+	Backing { path: BString },
 }
 
 /// The question of a [`Probe::DumpHas`].
@@ -1698,7 +1702,8 @@ pub enum Live {
 	None,
 	Stat(Box<dyn FsPending<Stat>>),
 	Access(Box<dyn FsPending<()>>),
-	/// `realpath` of a `RealPath` probe in flight.
+	/// `realpath` of a `RealPath` probe, or `backing_path` of a `Backing`
+	/// probe, in flight.
 	Path(Box<dyn FsPending<BString>>),
 	/// `open` of a `Read` probe in flight.
 	Open(Box<dyn FsPending<Box<dyn crate::bash::fs::File>>>),

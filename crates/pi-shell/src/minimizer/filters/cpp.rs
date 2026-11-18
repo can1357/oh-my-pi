@@ -160,7 +160,16 @@ fn is_ninja_noise(line: &str, exit_code: i32) -> bool {
 			|| line.contains("] CC "))
 }
 
+/// Condense `GoogleTest` output. A binary is routed here by name (`*_test`,
+/// `*-tests`, …), which many non-gtest programs share, so output without
+/// gtest's `[==========]`/`[ RUN      ]` banners is returned untouched.
 fn filter_gtest(input: &str, exit_code: i32) -> String {
+	if !input.lines().any(|line| {
+		let trimmed = line.trim_start();
+		trimmed.starts_with("[==========]") || trimmed.starts_with("[ RUN      ]")
+	}) {
+		return input.to_string();
+	}
 	let mut out = String::new();
 	let mut keeping_failure = false;
 
@@ -322,6 +331,16 @@ mod tests {
 		assert!(out.text.contains("foo_test.cc:42: Failure"));
 		assert!(out.text.contains("Expected equality"));
 		assert!(out.text.contains("[  FAILED  ] Foo.Fails"));
+	}
+
+	#[test]
+	fn test_named_binary_without_gtest_output_passes_through() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = ctx("camera_test", None, "./build/camera_test", &cfg);
+		let input = "opening device 0\ncaptured 30 frames at 29.97 fps\ncamera test ok\n";
+		let out = filter(&ctx, input, 0);
+		assert!(!out.changed);
+		assert_eq!(out.text, input);
 	}
 
 	#[test]

@@ -2,6 +2,95 @@
 
 ## [Unreleased]
 
+### Added
+
+- Custom message payloads accept `excludeFromContext`, kept through normalization and when a saved entry is restored ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
+### Changed
+
+- Native asks (`HtmlFormDialog`, `AskDialogComponent`) describe one inline card (`native/ask-card.ts`, role `omp.ask.card`) instead of a tabbed sheet in the composer's place: every question stacked, the focused one open and the rest folded to their answer or up to four option pills a click picks, gliding between the two (`transition: "layout"`); no question tabs, Review, Next or Hide natively. Both take `skipNotice`, `claimKeys` and `releaseKeys`; `HtmlFormDialog.givenAnswers()` reports what changed from the defaults
+- The composer's `ask` state (`ComposerNativeState.ask`): while an ask waits above it the placeholder says typing there skips it, it dims away from the keys (`NativeEditorLayout.mark`), and a draft that would skip it gets a `skips ask` chip and Skip & send
+- Model search treats `provider/model` specially: the text before `/` prefixes the provider (an exact provider first), the rest searches that provider's model ids, and those rows list ahead of other matches — `ol/` now shows Ollama models first instead of recent `…-sol` models
+
+### Fixed
+
+- In Tern, typing `->` or `=>` in the composer no longer moves the caret to a new line; the queued message continues on the same line
+- Fixed long tool-approval prompts in Tern growing past the window and pushing the choices and Approve/Deny buttons off screen; the details now scroll within a few rows, as in the terminal view ([#19617](https://github.com/can1357/oh-my-pi/pull/19617) by [@c-w-z](https://github.com/c-w-z))
+- Table charts read `402.7 → 13.3 µs` with the unit on both sides; the change factor was off by the unit's scale (30,278,195× instead of 30×)
+- Enter on a checkbox group with nothing checked checks the focused box before moving on
+
+## [18.22.2] - 2026-11-18
+
+### Added
+
+- `ui.loop-blocked` log records now name what held the event loop (`cause`, `causeShare`, `top`), sampled by an always-on profiler; `PI_LOOP_SAMPLER=0` turns it off
+- Added the `async-notify` transcript block, which shows the output lines a running background job or service reported
+
+### Changed
+
+- On Windows, terminal output is written off the JS thread, so input and rendering stay responsive while the console drains a large repaint
+
+### Fixed
+
+- On Windows, omp no longer freezes when the terminal stops reading its output (a hung Windows Terminal, a paused ssh client); it keeps running and catches up once the terminal reads again
+
+## [18.22.1] - 2026-11-17
+
+### Added
+
+- Task tool and agent hub rows now use distinct, theme-aware colours for the main agent and subagents; themes can optionally customize the six subagent colours.
+- Added word wrapping for table columns and rows, preserving hard line breaks so long table content remains readable.
+
+### Changed
+
+- Improved terminal UI responsiveness and reduced CPU usage while streaming long responses, monitoring the event loop, and typing with macOS spell checking enabled.
+- Status account identities can now include an optional credential ID, allowing usage to be attributed to API-key accounts and cached usage to refresh when the credential changes.
+
+### Fixed
+
+- Images in Ask forms now render correctly in Kitty-protocol terminals, including Kitty, Ghostty, and herdr.
+- Fixed model mentions followed by punctuation so they become editable chips without consuming the punctuation.
+- Fixed /copy to copy the visible prose from mid-turn out:// replies, including replies sent by commands, instead of the tool's internal result text.
+
+## [18.22.0] - 2026-11-16
+
+### Breaking Changes
+
+- Terminals that support output backpressure must now implement onOutputDrain(callback), which returns an unsubscribe function; terminals without backpressure can omit both pendingOutputBytes and onOutputDrain.
+- Updated PlanReviewOverlay options to use PlanReviewOverlayChoice objects and report choice IDs to onPick and selectOption. Refine and Save actions now reflect plan feedback and saving behavior; removed disabledIndices and externalEditorName, and updated describe to receive DescribeContext.
+
+### Added
+
+- Added configurable model search placement, provider scopes, and an optional thinking-level slider to ModelPickerComponent; selected thinking levels are reported through onPick metadata. The native picker sheet now supports anchoring, scope styling, level display, and icon actions.
+- Added a native plan review document and dock with editable and commentable plans, quote annotations, plan-edit notifications, Approve, Save, and Cancel actions, plus model selection.
+
+### Changed
+
+- Provider scopes now show only the selected provider's models when a provider is chosen, with scope cycling able to return to the full model list.
+- Updated thinking-level controls to use left and right arrow keys, and refreshed the slider and footer hint presentation.
+- Retitled the plan-saving overlay to “Save plan” and updated its action label.
+
+### Fixed
+
+- Fixed slow scrolling and typing in long agent transcripts.
+- Fixed slow typing and cursor movement in drafts longer than 256 lines.
+
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added support for pasting images into `HtmlFormDialog` option notes when opened with `acceptImages`, including image attachment, removal, and access to retained images through `OptionNote.images`.
+- Added live web-page and image rendering in assistant replies for supported terminals, including inline images and embedded page previews. Added the `/btw` transcript note for sharing side topics without interrupting the main conversation.
+
+### Changed
+
+- Improved reasoning-capability discovery so models awaiting discovery follow the session's thinking default and offer automatic thinking in addition to disabled and effort-level settings.
+- Renamed the public `html-form/media` APIs to `media`, including `loadMedia`, `Media`, and `MAX_MEDIA_BYTES`.
+
+### Fixed
+
+- Fixed fallback model selection so roles are offered only models they can use, excluding incompatible image and speech models.
+- Fixed macOS spelling assistance, autocorrect, replacements, and word completion for shell (`!`) and Python (`$`) drafts.
+
 ## [18.20.1] - 2026-11-14
 
 ### Added

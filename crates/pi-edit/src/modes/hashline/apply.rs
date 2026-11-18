@@ -1,4 +1,8 @@
-//! Edit application with boundary repair (`packages/hashline/src/apply.ts`).
+//! Edit application (`packages/hashline/src/apply.ts`).
+//!
+//! Body rows are applied verbatim. The boundary, echo and landing checks below
+//! never rewrite a patch: each either lets it apply as written or rejects it
+//! with the change that would make it read as intended.
 
 use std::{
 	collections::{HashMap, HashSet},
@@ -10,15 +14,16 @@ use regex::Regex;
 use super::{
 	clipboard::resolve_clipboard_edits,
 	messages::{
-		BoundarySide, REPLACEMENT_INDENT_AUTO_SHIFT_WARNING, Restated, UNRESOLVED_BLOCK_INTERNAL,
-		UNRESOLVED_CLIPBOARD_INTERNAL, after_insert_landing_shift_warning,
-		after_insert_opener_escape_warning, ambiguous_boundary_echo_message,
-		ambiguous_boundary_placement_message, block_insert_landing_shift_warning,
-		boundary_echo_outcome_message, boundary_variant_repair_warning, edit_broke_parse_warning,
-		repeated_boundary_echo_message, textual_boundary_echo_warning,
-		trailing_comma_replacement_message, two_sided_boundary_echo_message,
+		BoundaryFix, BoundarySide, UNRESOLVED_BLOCK_INTERNAL, UNRESOLVED_CLIPBOARD_INTERNAL,
+		after_insert_landing_message, after_insert_opener_message, ambiguous_boundary_echo_message,
+		ambiguous_boundary_placement_message, block_insert_landing_message,
+		boundary_echo_outcome_message, boundary_fix_message, edit_broke_parse_warning,
+		repeated_boundary_echo_message, trailing_comma_replacement_message,
+		two_sided_boundary_echo_message,
 	},
-	syntax::{enclosing_boundaries, node_chain, parses_cleanly},
+	syntax::{
+		enclosing_boundaries, has_syntax_oracle, node_chain, parses_cleanly, syntax_error_spans,
+	},
 	types::{Anchor, ApplyResult, BlockResolution, Cursor, Edit},
 };
 use crate::{
@@ -30,6 +35,15 @@ use crate::{
 /// separator.
 pub static STRUCTURAL_CLOSER_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"^\s*[)\]}]+[;,]?\s*$").expect("valid structural-closer regex"));
+
+/// A C-family preprocessor directive row. Written at column 0 whatever the
+/// surrounding depth, so it says nothing about a body's indentation.
+static PREPROCESSOR_RE: LazyLock<Regex> = LazyLock::new(|| {
+	Regex::new(
+		r"^\s*#\s*(if|ifdef|ifndef|elif|elifdef|elifndef|else|endif|define|undef|include|pragma|error|warning|line|region|endregion)\b",
+	)
+	.expect("valid preprocessor regex")
+});
 
 /// Behavior when an anonymous paste has no available cut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,19 +86,24 @@ fn with_index(edit: &Edit, index: u32) -> Edit {
 	edit
 }
 
+/// The empty row a trailing newline leaves after the last line.
 fn phantom_line(lines: &[&str]) -> Option<u32> {
 	(lines.len() > 1 && lines.last().is_some_and(|line| line.is_empty()))
 		.then_some(lines.len() as u32)
+}
+
+fn out_of_range(line: u32, count: usize) -> EditError {
+	EditError::rejected(
+		Rejection::OutOfRange,
+		format!("Line {line} does not exist (file has {count} lines)"),
+	)
 }
 
 fn validate_bounds(edits: &[Edit], lines: &[&str]) -> Result<(), EditError> {
 	for edit in edits {
 		for anchor in anchors(edit) {
 			if anchor.line < 1 || anchor.line as usize > lines.len() {
-				return Err(EditError::rejected(
-					Rejection::OutOfRange,
-					format!("Line {} does not exist (file has {} lines)", anchor.line, lines.len()),
-				));
+				return Err(out_of_range(anchor.line, lines.len()));
 			}
 		}
 	}
@@ -164,79 +183,21 @@ fn has_content(text: &str) -> bool {
 	text.bytes().any(|byte| !matches!(byte, 9..=13 | 32))
 }
 
-fn repair_indentation(edits: &mut [Edit], lines: &[&str]) -> Vec<String> {
-	let mut repaired = false;
-	let mut start = 0;
-	while start < edits.len() {
-		let Some(group) = replacement_group(edits, start) else {
-			start += 1;
-			continue;
-		};
-		start = group.delete_indices.last().copied().unwrap_or(start) + 1;
-		if group.payload.len() != group.delete_indices.len() {
-			continue;
-		}
-		let preceding = lines
-			.get(group.start.saturating_sub(2) as usize)
-			.copied()
-			.unwrap_or("");
-		let source_first = lines.get((group.start - 1) as usize).copied().unwrap_or("");
-		let payload_first = group.payload.first().map_or("", String::as_str);
-		if !preceding.trim_end().ends_with('{')
-			|| !indent_deeper(leading_indent(source_first), leading_indent(preceding))
-			|| indent_deeper(leading_indent(payload_first), leading_indent(preceding))
-		{
-			continue;
-		}
-		let mut shift: Option<&str> = None;
-		let mut matches = 0;
-		let mut consistent = true;
-		for (offset, payload) in group.payload.iter().enumerate() {
-			let source = lines
-				.get((group.start - 1) as usize + offset)
-				.copied()
-				.unwrap_or("");
-			if source.trim().is_empty() || source.trim_start() != payload.trim_start() {
-				continue;
-			}
-			let source_indent = leading_indent(source);
-			let payload_indent = leading_indent(payload);
-			if !source_indent.ends_with(payload_indent) {
-				consistent = false;
-				break;
-			}
-			let candidate = &source_indent[..source_indent.len() - payload_indent.len()];
-			if shift.is_some_and(|old| old != candidate) {
-				consistent = false;
-				break;
-			}
-			shift = Some(candidate);
-			matches += 1;
-		}
-		let Some(shift) = shift else { continue };
-		if !consistent || shift.is_empty() || matches < 2 || matches * 2 <= group.payload.len() {
-			continue;
-		}
-		for &index in &group.insert_indices {
-			if let Edit::Insert { text, .. } = &mut edits[index]
-				&& !text.trim().is_empty()
-			{
-				text.insert_str(0, shift);
-			}
-		}
-		repaired = true;
+/// How many of `group`'s first body rows restate the lines just above its
+/// range. None when an edit in the batch deletes the line just above: the body
+/// then carries that line's content rather than echoing a line that stays.
+fn duplicate_leading(group: &ReplacementGroup, edits: &[Edit], lines: &[&str]) -> usize {
+	if group.start > 1 && source_deleted(edits, group.start - 1) {
+		return 0;
 	}
-	if repaired {
-		vec![REPLACEMENT_INDENT_AUTO_SHIFT_WARNING.to_owned()]
-	} else {
-		Vec::new()
-	}
-}
-
-fn duplicate_leading(group: &ReplacementGroup, lines: &[&str]) -> usize {
 	restated_above(&group.payload, group.start, lines)
 }
-fn duplicate_trailing(group: &ReplacementGroup, lines: &[&str]) -> usize {
+/// How many of `group`'s last body rows restate the lines just below its
+/// range; none when an edit in the batch deletes the line just below.
+fn duplicate_trailing(group: &ReplacementGroup, edits: &[Edit], lines: &[&str]) -> usize {
+	if source_deleted(edits, group.end + 1) {
+		return 0;
+	}
 	restated_below(&group.payload, group.end, lines)
 }
 /// How many of `rows`' first rows restate the lines just above line `start`.
@@ -345,7 +306,8 @@ struct Ambiguity {
 	/// Range rows the body leaves out: for a one-sided echo, if it means the
 	/// range is shifted; for a two-sided one, past the rows between the echoes.
 	left_out: (u32, u32),
-	/// An earlier pass dropped one copy of a repeated echo to expose this.
+	/// The body restates the neighbour more than once; this shape is what is
+	/// left with one copy set aside.
 	repeated: bool,
 }
 
@@ -404,26 +366,50 @@ fn drop_is_noop(group: &ReplacementGroup, lines: &[&str], drop_l: usize, drop_t:
 	kept.len() == range.len() && kept.iter().zip(range).all(|(row, line)| row == line)
 }
 
-/// Drops boundary echoes from replacement bodies. Also returns the start lines
-/// of groups kept as written because dropping their echo would be a no-op.
-fn normalize_echoes(
+/// `edits` without `group`'s first `drop_l` and last `drop_t` body rows.
+fn without_echo(
+	edits: &[Edit],
+	group: &ReplacementGroup,
+	drop_l: usize,
+	drop_t: usize,
+) -> Vec<Edit> {
+	let inserts = &group.insert_indices;
+	let dropped: HashSet<usize> = inserts[..drop_l]
+		.iter()
+		.chain(&inserts[inserts.len() - drop_t..])
+		.copied()
+		.collect();
+	edits
+		.iter()
+		.enumerate()
+		.filter(|(index, _)| !dropped.contains(index))
+		.map(|(_, edit)| edit.clone())
+		.collect()
+}
+
+/// Classifies replacement bodies that restate the lines just outside their
+/// range (boundary echoes). Nothing is dropped: an echo is either content or a
+/// reason to reject. Returns the too-short shapes to refuse, and the start
+/// lines of groups whose restated rows are content, because dropping them
+/// would leave the range as it is (a no-op) or because the file parses as
+/// written and not without them.
+fn classify_echoes(
 	edits: &[Edit],
 	lines: &[&str],
 	path: Option<&str>,
-) -> (Vec<Edit>, Vec<String>, Vec<Ambiguity>, Vec<u32>) {
-	let mut out = Vec::new();
-	let mut warnings = Vec::new();
+	authored_parses: bool,
+) -> (Vec<Ambiguity>, Vec<u32>) {
 	let mut ambiguities = Vec::new();
-	let mut literal = Vec::new();
+	let mut accepted = Vec::new();
 	let mut i = 0;
 	while i < edits.len() {
 		let Some(group) = replacement_group(edits, i) else {
-			out.push(with_index(&edits[i], i as u32));
 			i += 1;
 			continue;
 		};
-		let leading = duplicate_leading(&group, lines);
-		let trailing = duplicate_trailing(&group, lines);
+		i = group.delete_indices.last().copied().unwrap() + 1;
+		let leading = duplicate_leading(&group, edits, lines);
+		let trailing = duplicate_trailing(&group, edits, lines);
 		let range_len = group.delete_indices.len();
 		let (mut drop_l, mut drop_t) = (0, 0);
 		if leading > 0 && trailing > 0 {
@@ -458,39 +444,42 @@ fn normalize_echoes(
 				ambiguities.extend(short_echo(&group, 0, trailing));
 			}
 		}
-		if (drop_l > 0 || drop_t > 0) && drop_is_noop(&group, lines, drop_l, drop_t) {
-			literal.push(group.start);
-			(drop_l, drop_t) = (0, 0);
+		if drop_l == 0 && drop_t == 0 {
+			continue;
 		}
-		if drop_l > 0 || drop_t > 0 {
-			// A body that restates the neighbour more than once keeps a copy
-			// after this drop; record the too-short shape that copy exposes.
-			let mut rest = group.clone();
-			rest.payload.drain(..drop_l);
-			rest.payload.truncate(rest.payload.len() - drop_t);
-			let (j, k) = restated_edges(&rest.payload, lines, group.start, group.end);
-			if range_len > 1
-				&& let Some(mut ambiguity) = short_echo(&rest, j, k)
-			{
-				ambiguity.repeated = true;
-				ambiguities.push(ambiguity);
-			}
-			let inserts = group_inserts(&group, edits);
-			out.extend(inserts[drop_l..inserts.len() - drop_t].iter().cloned());
-			out.extend(group_deletes(&group, edits));
-			warnings.push(textual_boundary_echo_warning(group.start, drop_l as u32, drop_t as u32));
+		if drop_is_noop(&group, lines, drop_l, drop_t)
+			|| (authored_parses
+				&& !parses_cleanly(
+					path,
+					&materialize(lines, &without_echo(edits, &group, drop_l, drop_t)).0,
+				)) {
+			accepted.push(group.start);
+			continue;
+		}
+		// A body that restates the neighbour more than once keeps a copy once
+		// one is set aside; record the too-short shape that copy exposes.
+		let mut rest = group.clone();
+		rest.payload.drain(..drop_l);
+		rest.payload.truncate(rest.payload.len() - drop_t);
+		let (j, k) = restated_edges(&rest.payload, lines, group.start, group.end);
+		let j = if group.start > 1 && source_deleted(edits, group.start - 1) {
+			0
 		} else {
-			out.extend(
-				group
-					.insert_indices
-					.iter()
-					.chain(&group.delete_indices)
-					.map(|&idx| with_index(&edits[idx], idx as u32)),
-			);
+			j
+		};
+		let k = if source_deleted(edits, group.end + 1) {
+			0
+		} else {
+			k
+		};
+		if range_len > 1
+			&& let Some(mut ambiguity) = short_echo(&rest, j, k)
+		{
+			ambiguity.repeated = true;
+			ambiguities.push(ambiguity);
 		}
-		i = group.delete_indices.last().copied().unwrap() + 1;
 	}
-	(out, warnings, ambiguities, literal)
+	(ambiguities, accepted)
 }
 
 fn indent_columns(line: &str) -> usize {
@@ -546,10 +535,7 @@ fn effective_trailing(group: &ReplacementGroup, edits: &[Edit], lines: &[&str]) 
 	}
 	line
 }
-fn essential(lines: &[&str], path: &str, line: u32, baseline: bool) -> bool {
-	if !baseline {
-		return true;
-	}
+fn essential(lines: &[&str], path: &str, line: u32) -> bool {
 	let without = lines[..(line - 1) as usize]
 		.iter()
 		.chain(&lines[line as usize..])
@@ -559,19 +545,21 @@ fn essential(lines: &[&str], path: &str, line: u32, baseline: bool) -> bool {
 	!parses_cleanly(Some(path), &without)
 }
 
+/// A boundary change to one replacement group: what the patch would be if it
+/// kept a selected row or dropped body rows that repeat a neighbour. Only ever
+/// suggested in a rejection, never applied.
 #[derive(Clone)]
 struct Variant {
 	edits:   Vec<Edit>,
 	kept:    usize,
 	dropped: usize,
-	/// A repair of a too-short echo shape that deletes range rows the body may
-	/// never restate: a drop-only repair of the one-sided shape, or any repair
-	/// of the two-sided one. Choosing it refuses the edit; this describes the
-	/// refusal for a patch `normalize_echoes` recorded none for.
-	lossy:   Option<Ambiguity>,
+	/// The selected range row kept instead of replaced.
+	keep:    Option<u32>,
+	drop_l:  usize,
+	drop_t:  usize,
 }
 
-/// Why a replacement group cannot be applied as written or repaired.
+/// Why a replacement group's parse failure has no single suggested fix.
 #[derive(Clone, Copy)]
 enum Undecided {
 	/// A syntax-essential selected row could belong on either side of the body.
@@ -597,32 +585,30 @@ fn parses_without_trailing_comma(replaced: &[Edit], lines: &[&str], path: &str) 
 	parses_cleanly(Some(path), &materialize(lines, &stripped).0)
 }
 
+/// The boundary changes that may make a replacement group parse, for a file
+/// that parsed before the patch.
 fn group_variants(
 	group: &ReplacementGroup,
 	edits: &[Edit],
 	lines: &[&str],
 	path: &str,
-	baseline: bool,
 ) -> (Vec<Variant>, Option<Undecided>) {
 	let inserts = group_inserts(group, edits);
 	let deletes = group_deletes(group, edits);
 	let trailing = effective_trailing(group, edits, lines);
-	let first_essential = essential(lines, path, group.start, baseline);
+	let first_essential = essential(lines, path, group.start);
 	let last_essential = if trailing == group.start {
 		first_essential
 	} else {
-		essential(lines, path, trailing, baseline)
+		essential(lines, path, trailing)
 	};
 	let inner_start = group.start + 1;
-	let leading_structure = baseline
-		&& inner_start <= trailing
+	let leading_structure = inner_start <= trailing
 		&& enclosing_boundaries(lines, path, inner_start, trailing).contains(&group.start);
-	let drop_j = duplicate_leading(group, lines);
-	let drop_k = duplicate_trailing(group, lines);
+	let drop_j = duplicate_leading(group, edits, lines);
+	let drop_k = duplicate_trailing(group, edits, lines);
 	let leading_drops: Vec<_> = if drop_j > 0 { vec![0, drop_j] } else { vec![0] };
 	let trailing_drops: Vec<_> = if drop_k > 0 { vec![0, drop_k] } else { vec![0] };
-	let too_short = short_echo(group, drop_j, drop_k);
-	let two_sided_short = matches!(too_short, Some(Ambiguity { echoed: Echoed::Both(..), .. }));
 	let mut variants = Vec::new();
 	let mut ambiguous = None;
 	for drop_l in leading_drops {
@@ -646,8 +632,7 @@ fn group_variants(
 				let fits = previous.is_none_or(|line| indent_columns(line) == indent_columns(trail));
 				if first_essential && fits && indent_columns(trail) > indent_columns(first) {
 					plans.push((None, Some(group.start), 1));
-				} else if baseline && first_essential && indent_columns(trail) == indent_columns(first)
-				{
+				} else if first_essential && indent_columns(trail) == indent_columns(first) {
 					let replaced = [inserts.clone(), deletes.clone()].concat();
 					if !parses_cleanly(Some(path), &materialize(lines, &replaced).0) {
 						// Only a replacement that breaks the file on its own leaves
@@ -695,8 +680,7 @@ fn group_variants(
 				if keeps_trailing {
 					plans.push((None, Some(trailing), 1));
 				}
-				if baseline
-					&& first_essential
+				if first_essential
 					&& before_first.is_some_and(|line| indent_columns(first) < indent_columns(line))
 					&& indent_columns(lead) > indent_columns(first)
 				{
@@ -713,16 +697,6 @@ fn group_variants(
 				{
 					continue;
 				}
-				// In those shapes, dropping the echo alone deletes range rows the
-				// body may never restate, and with both neighbours restated no
-				// repair keeps them. The variant still competes, so the search
-				// picks what it would pick without this check, but a pick that
-				// uses it is refused instead of applied.
-				let lossy = if kept == 0 || two_sided_short {
-					too_short
-				} else {
-					None
-				};
 				let mut kept_inserts = inserts[drop_l..inserts.len() - drop_t].to_vec();
 				if let Some(line) = before {
 					let cursor = if line as usize >= lines.len() {
@@ -738,7 +712,14 @@ fn group_variants(
 				}
 				let mut result = kept_inserts;
 				result.extend(deletes.iter().filter(|edit| !matches!(edit, Edit::Delete { anchor, .. } if Some(anchor.line) == before || Some(anchor.line) == after)).cloned());
-				variants.push(Variant { edits: result, kept, dropped, lossy });
+				variants.push(Variant {
+					edits: result,
+					kept,
+					dropped,
+					keep: before.or(after),
+					drop_l,
+					drop_t,
+				});
 			}
 		}
 	}
@@ -782,36 +763,43 @@ fn splice_variants(
 	out
 }
 
-type RepairedEdits = (Vec<Edit>, Vec<String>);
+/// Line of the first syntax error tree-sitter reports in `text`.
+fn first_error_line(path: &str, text: &str) -> Option<u32> {
+	syntax_error_spans(Some(path), text)
+		.first()
+		.map(|&(start, _)| start)
+}
 
-fn undecided_error(start: u32, end: u32, reason: Undecided) -> EditError {
+fn undecided_error(start: u32, end: u32, reason: Undecided, error_line: Option<u32>) -> EditError {
 	EditError::rejected(Rejection::AmbiguousBoundary, match reason {
-		Undecided::Placement => ambiguous_boundary_placement_message(start, end),
+		Undecided::Placement => ambiguous_boundary_placement_message(start, end, error_line),
 		Undecided::TrailingComma => trailing_comma_replacement_message(start, end),
 	})
 }
 
-fn repair_boundaries(
+/// For a patch that breaks a file which parsed, finds the boundary change
+/// that makes it parse: keeping a selected row a replacement swallows, or
+/// dropping body rows that repeat a neighbouring line. The patch itself is
+/// never rewritten: a unique fix becomes a rejection naming it, an undecided
+/// placement a rejection explaining it, and anything else applies as written.
+fn boundary_fix_rejection(
 	edits: &[Edit],
 	lines: &[&str],
-	path: Option<&str>,
-	baseline: bool,
-	recorded: &[u32],
+	path: &str,
+	authored: &str,
 	literal: &[u32],
-) -> Result<Option<RepairedEdits>, EditError> {
-	let Some(path) = path else { return Ok(None) };
+) -> Option<EditError> {
 	let mut groups = Vec::new();
 	let mut ambiguous = None;
 	let mut i = 0;
 	while i < edits.len() {
 		if let Some(group) = replacement_group(edits, i) {
 			i = group.delete_indices.last().copied().unwrap() + 1;
-			// Dropping this group's echo would be a no-op, so the body means the
-			// edit as written; a repair would only turn it back into that no-op.
+			// The body restates a neighbour as content (see `classify_echoes`).
 			if literal.contains(&group.start) {
 				continue;
 			}
-			let (variants, group_ambiguity) = group_variants(&group, edits, lines, path, baseline);
+			let (variants, group_ambiguity) = group_variants(&group, edits, lines, path);
 			if let Some(kind) = group_ambiguity
 				&& ambiguous.is_none()
 			{
@@ -824,11 +812,13 @@ fn repair_boundaries(
 			i += 1;
 		}
 	}
+	let undecided = |reason: Option<Undecided>| {
+		ambiguous.map(|(start, end, kind)| {
+			undecided_error(start, end, reason.unwrap_or(kind), first_error_line(path, authored))
+		})
+	};
 	if groups.is_empty() {
-		if let Some((start, end, kind)) = ambiguous {
-			return Err(undecided_error(start, end, kind));
-		}
-		return Ok(None);
+		return undecided(None);
 	}
 	#[derive(Clone)]
 	struct Combo {
@@ -857,7 +847,6 @@ fn repair_boundaries(
 		next.truncate(512);
 		combos = next;
 	}
-	let authored = materialize(lines, edits).0;
 	combos.retain(|combo| combo.touched > 0);
 	combos.sort_by_key(|combo| (combo.touched, combo.kept, combo.dropped));
 	let mut best: Option<(Combo, String)> = None;
@@ -874,65 +863,37 @@ fn repair_boundaries(
 		}
 		if let Some((_, best_text)) = &best {
 			if *best_text != text {
-				// Two repairs parse differently: placement, not the body, is in
+				// Two fixes parse differently: placement, not the body, is in
 				// question.
-				if let Some((start, end, _)) = ambiguous {
-					return Err(undecided_error(start, end, Undecided::Placement));
-				}
-				return Ok(None);
+				return undecided(Some(Undecided::Placement));
 			}
 		} else {
 			best = Some((combo, text));
 		}
 	}
 	let Some((combo, _)) = best else {
-		if let Some((start, end, kind)) = ambiguous {
-			return Err(undecided_error(start, end, kind));
-		}
-		return Ok(None);
+		return undecided(None);
 	};
-	// The best repair drops an echo from a body too short for its range. If
-	// `normalize_echoes` recorded a too-short refusal for this patch, returning
-	// no repair hands the edit to it. For a group it dropped an echo from, it
-	// records one only when the copy left behind exposes that shape, so with no
-	// recorded refusal the edit is refused here.
-	if let Some(lossy) = groups
-		.iter()
-		.zip(&combo.choices)
-		.find_map(|((_, variants), choice)| choice.and_then(|index| variants[index].lossy))
-	{
-		if !recorded.is_empty() {
-			return Ok(None);
-		}
-		// Nothing recorded means the echo was dropped once already: a repeated
-		// echo.
-		return Err(Ambiguity { repeated: true, ..lossy }.refusal());
-	}
-	// A group with a recorded too-short refusal that the chosen repair leaves
-	// as written keeps the lossy body: hand the edit to that refusal.
-	if recorded.iter().any(|start| {
-		!groups
-			.iter()
-			.zip(&combo.choices)
-			.any(|((group, _), choice)| group.start == *start && choice.is_some())
-	}) {
-		return Ok(None);
-	}
-	let warnings = groups
+	let fixes = groups
 		.iter()
 		.zip(&combo.choices)
 		.filter_map(|((group, variants), choice)| {
 			choice.map(|index| {
 				let variant = &variants[index];
-				boundary_variant_repair_warning(
-					group.start,
-					variant.kept as u32,
-					variant.dropped as u32,
-				)
+				BoundaryFix {
+					start:         group.start,
+					end:           group.end,
+					keep:          variant.keep,
+					drop_leading:  variant.drop_l as u32,
+					drop_trailing: variant.drop_t as u32,
+				}
 			})
 		})
-		.collect();
-	Ok(Some((splice_variants(edits, &groups, &combo.choices), warnings)))
+		.collect::<Vec<_>>();
+	Some(EditError::rejected(
+		Rejection::AmbiguousBoundary,
+		boundary_fix_message(&fixes, first_error_line(path, authored)),
+	))
 }
 
 #[derive(Clone)]
@@ -945,7 +906,7 @@ fn body_indent(rows: &[&str]) -> Option<String> {
 	let non_blank: Vec<_> = rows
 		.iter()
 		.copied()
-		.filter(|row| has_content(row))
+		.filter(|row| has_content(row) && !PREPROCESSOR_RE.is_match(row))
 		.collect();
 	if non_blank.is_empty()
 		|| non_blank
@@ -997,7 +958,12 @@ fn body_relocatable(rows: &[&str], path: &str) -> bool {
 	false
 }
 
-fn repair_landings(edits: &[Edit], lines: &[&str], path: Option<&str>) -> (Vec<Edit>, Vec<String>) {
+/// For a patch that breaks a file which parsed, checks each gap insert after
+/// line N against where its indentation points: past the closers that follow
+/// N, inside the `PUT >N*` block it trails, or past the block line N opens.
+/// When the file parses with the body there, the patch is rejected with that
+/// landing; gap inserts never move.
+fn landing_rejection(edits: &[Edit], lines: &[&str], path: &str) -> Option<EditError> {
 	let mut groups: Vec<((u32, u32), InsertGroup)> = Vec::new();
 	for (index, edit) in edits.iter().enumerate() {
 		if let Edit::Insert {
@@ -1025,8 +991,17 @@ fn repair_landings(edits: &[Edit], lines: &[&str], path: Option<&str>) -> (Vec<E
 		.flat_map(anchors)
 		.map(|anchor| anchor.line)
 		.collect();
-	let mut out = edits.to_vec();
-	let mut warnings = Vec::new();
+	let parses_at = |group: &InsertGroup, landing: u32| {
+		let mut trial = edits.to_vec();
+		for &index in &group.members {
+			if let Edit::Insert { cursor, .. } = &mut trial[index] {
+				*cursor = Cursor::AfterAnchor(Anchor { line: landing });
+			}
+		}
+		parses_cleanly(Some(path), &materialize(lines, &trial).0)
+	};
+	let rejected =
+		|message: String| Some(EditError::rejected(Rejection::AmbiguousBoundary, message));
 	for (_, group) in &groups {
 		let rows: Vec<_> = group
 			.members
@@ -1046,7 +1021,6 @@ fn repair_landings(edits: &[Edit], lines: &[&str], path: Option<&str>) -> (Vec<E
 			.get((group.anchor - 1) as usize)
 			.copied()
 			.unwrap_or("");
-		let mut outward = None;
 		if has_content(anchor_text) && indent_deeper(leading_indent(anchor_text), &target) {
 			let mut landing = group.anchor;
 			let mut crossed = 0;
@@ -1069,35 +1043,9 @@ fn repair_landings(edits: &[Edit], lines: &[&str], path: Option<&str>) -> (Vec<E
 					break;
 				}
 			}
-			if !blocked && landing != group.anchor {
-				outward = Some((landing, crossed));
+			if !blocked && landing != group.anchor && parses_at(group, landing) {
+				return rejected(after_insert_landing_message(group.anchor, landing, crossed));
 			}
-		}
-		// The shift is an indentation guess. Veto it only when the shift itself
-		// breaks the parse: the batch as written parses, the shifted one does
-		// not (a shallower `case`, `} else {`, or member belongs before the
-		// closer). Unrelated broken edits in the batch leave the shift alone.
-		if let (Some((landing, _)), Some(path)) = (outward, path) {
-			let mut trial = out.clone();
-			for &index in &group.members {
-				if let Edit::Insert { cursor, .. } = &mut trial[index] {
-					*cursor = Cursor::AfterAnchor(Anchor { line: landing });
-				}
-			}
-			if parses_cleanly(Some(path), &materialize(lines, &out).0)
-				&& !parses_cleanly(Some(path), &materialize(lines, &trial).0)
-			{
-				outward = None;
-			}
-		}
-		if let Some((landing, crossed)) = outward {
-			for &index in &group.members {
-				if let Edit::Insert { cursor, .. } = &mut out[index] {
-					*cursor = Cursor::AfterAnchor(Anchor { line: landing });
-				}
-			}
-			warnings.push(after_insert_landing_shift_warning(group.anchor, landing, crossed));
-			continue;
 		}
 		if let Some(block_start) = group.block_start {
 			if STRUCTURAL_CLOSER_RE.is_match(anchor_text)
@@ -1122,20 +1070,11 @@ fn repair_landings(edits: &[Edit], lines: &[&str], path: Option<&str>) -> (Vec<E
 					}
 					landing = line - 1;
 				}
-				if !blocked && landing != group.anchor {
-					for &index in &group.members {
-						if let Edit::Insert { cursor, .. } = &mut out[index] {
-							*cursor = Cursor::AfterAnchor(Anchor { line: landing });
-						}
-					}
-					warnings.push(block_insert_landing_shift_warning(
-						block_start,
-						group.anchor,
-						landing,
-					));
+				if !blocked && landing != group.anchor && parses_at(group, landing) {
+					return rejected(block_insert_landing_message(block_start, group.anchor, landing));
 				}
 			}
-		} else if let Some(path) = path {
+		} else {
 			let target_cols = indent_columns(&target);
 			if target_cols < indent_columns(anchor_text) {
 				let chain = node_chain(lines, path, group.anchor);
@@ -1161,23 +1100,15 @@ fn repair_landings(edits: &[Edit], lines: &[&str], path: Option<&str>) -> (Vec<E
 						{
 							break;
 						}
-						let mut trial = out.clone();
-						for &index in &group.members {
-							if let Edit::Insert { cursor, .. } = &mut trial[index] {
-								*cursor = Cursor::AfterAnchor(Anchor { line: landing });
-							}
-						}
-						if parses_cleanly(Some(path), &materialize(lines, &trial).0) {
-							out = trial;
-							warnings.push(after_insert_opener_escape_warning(group.anchor, landing));
-							break;
+						if parses_at(group, landing) {
+							return rejected(after_insert_opener_message(group.anchor, landing));
 						}
 					}
 				}
 			}
 		}
 	}
-	(out, warnings)
+	None
 }
 
 /// Where an anchored edit lands relative to its anchor line.
@@ -1190,6 +1121,24 @@ enum Slot {
 }
 
 fn materialize(original: &[&str], edits: &[Edit]) -> (String, Option<u32>) {
+	render(original, edits, None)
+}
+
+/// Applies `edits` to `original`. With `spans`, also collects the 1-indexed
+/// inclusive result line spans the edits wrote; a pure deletion yields the two
+/// lines that now meet at its position.
+fn render(
+	original: &[&str],
+	edits: &[Edit],
+	mut spans: Option<&mut Vec<(u32, u32)>>,
+) -> (String, Option<u32>) {
+	let touched = |before: usize, after: usize| {
+		if after > before {
+			(before as u32 + 1, after as u32)
+		} else {
+			((before as u32).max(1), before as u32 + 1)
+		}
+	};
 	let mut first = None;
 	let mut bof = Vec::new();
 	let mut eof = Vec::new();
@@ -1239,12 +1188,16 @@ fn materialize(original: &[&str], edits: &[Edit]) -> (String, Option<u32>) {
 				.filter(move |entry| entry.1 == slot)
 				.map(|entry| entry.2)
 		};
+		let before = lines.len();
 		lines.extend(texts(Slot::Before));
 		lines.extend(texts(Slot::Replacement));
 		if !group.iter().any(|entry| entry.1 == Slot::Delete) {
 			lines.push(original.get(index).copied().unwrap_or(""));
 		}
 		lines.extend(texts(Slot::After));
+		if let Some(spans) = spans.as_deref_mut() {
+			spans.push(touched(before, lines.len()));
+		}
 		copied = index + 1;
 		first.get_or_insert(line);
 	}
@@ -1252,14 +1205,22 @@ fn materialize(original: &[&str], edits: &[Edit]) -> (String, Option<u32>) {
 		lines.extend_from_slice(rest);
 	}
 	if !bof.is_empty() {
+		let count = bof.len() as u32;
 		if lines.len() == 1 && lines[0].is_empty() {
 			lines = bof;
 		} else {
 			lines.splice(0..0, bof);
 		}
+		if let Some(spans) = spans.as_deref_mut() {
+			for span in spans.iter_mut() {
+				*span = (span.0 + count, span.1 + count);
+			}
+			spans.push((1, count));
+		}
 		first = Some(1);
 	}
 	if !eof.is_empty() {
+		let count = eof.len();
 		let at = if lines.len() == 1 && lines[0].is_empty() {
 			lines = eof;
 			1
@@ -1272,6 +1233,9 @@ fn materialize(original: &[&str], edits: &[Edit]) -> (String, Option<u32>) {
 			lines.splice(index..index, eof);
 			index + 1
 		};
+		if let Some(spans) = spans {
+			spans.push((at as u32, (at + count - 1) as u32));
+		}
 		first = Some(first.map_or(at as u32, |old| old.min(at as u32)));
 	}
 	(lines.join("\n"), first)
@@ -1308,108 +1272,96 @@ pub fn apply_edits(
 		}
 	}
 	if let Some(phantom) = phantom_line(&lines) {
+		// A range may end on the empty row after the trailing newline (it ends
+		// at the last line), but a replacement that starts there names no line:
+		// with the delete dropped it would append instead.
+		if target.iter().any(|edit| {
+			matches!(edit, Edit::Insert { cursor: Cursor::BeforeAnchor(anchor), replacement: true, .. } if anchor.line == phantom)
+		}) {
+			return Err(out_of_range(phantom, lines.len() - 1));
+		}
 		target.retain(|edit| !matches!(edit, Edit::Delete { anchor, .. } if anchor.line == phantom));
 	}
 	for (index, edit) in target.iter_mut().enumerate() {
 		set_index(edit, index as u32);
 	}
 	validate_bounds(&target, &lines)?;
-	let indentation_warnings = repair_indentation(&mut target, &lines);
-	let (landed, landing_warnings) = repair_landings(&target, &lines, options.path);
-	let (normalized, echo_warnings, ambiguities, literal) =
-		normalize_echoes(&landed, &lines, options.path);
-	let mut leading = clipboard_warnings;
-	leading.extend(indentation_warnings);
-	leading.extend(landing_warnings);
-	leading.extend(echo_warnings);
-	let authored = materialize(&lines, &normalized);
+	let mut warnings = clipboard_warnings;
+	let mut changed = Vec::new();
+	let (result, first_changed_line) = render(&lines, &target, Some(&mut changed));
 	let baseline = parses_cleanly(options.path, text);
-	let authored_parses = parses_cleanly(options.path, &authored.0);
-	let finish = |result: (String, Option<u32>), mut warnings: Vec<String>| {
-		if baseline && !parses_cleanly(options.path, &result.0) {
-			warnings.push(edit_broke_parse_warning(result.1));
-		}
-		ApplyResult {
-			text: result.0,
-			first_changed_line: result.1,
-			warnings,
-			block_resolutions: Vec::<BlockResolution>::new(),
-		}
-	};
-	// A body that restates both neighbouring lines and is too short for its
-	// range has no reading that keeps the rows it leaves out, so no repair is
-	// tried for it.
-	let repair = if authored_parses
-		|| ambiguities
-			.iter()
-			.any(|ambiguity| matches!(ambiguity.echoed, Echoed::Both(..)))
-	{
-		None
-	} else {
-		let recorded = ambiguities
-			.iter()
-			.map(|ambiguity| ambiguity.start)
-			.collect::<Vec<_>>();
-		repair_boundaries(&normalized, &lines, options.path, baseline, &recorded, &literal)?.and_then(
-			|(repaired, warnings)| {
-				let result = materialize(&lines, &repaired);
-				parses_cleanly(options.path, &result.0).then_some((repaired, warnings, result))
-			},
-		)
-	};
-	let (committed, result) = if let Some((repaired, warnings, result)) = repair {
-		leading.extend(warnings);
-		(repaired, result)
-	} else {
-		if let Some(ambiguity) = ambiguities.first() {
-			return Err(ambiguity.refusal());
-		}
-		(normalized, authored)
-	};
-	if let Some(error) =
-		lossy_echo_outcome(&landed, &committed, &lines, options.path, &ambiguities, &literal)
-	{
+	let authored_parses = parses_cleanly(options.path, &result);
+	let (ambiguities, literal) = classify_echoes(&target, &lines, options.path, authored_parses);
+	if let Some(ambiguity) = ambiguities.first() {
+		return Err(ambiguity.refusal());
+	}
+	if let Some(error) = echo_outcome(&target, &lines, options.path, &literal) {
 		return Err(error);
 	}
-	Ok(finish(result, leading))
+	let broke_parse = baseline && !authored_parses;
+	if broke_parse && let Some(path) = options.path.filter(|path| has_syntax_oracle(path)) {
+		if let Some(error) = landing_rejection(&target, &lines, path) {
+			return Err(error);
+		}
+		if let Some(error) = boundary_fix_rejection(&target, &lines, path, &result, &literal) {
+			return Err(error);
+		}
+		if let Some(line) = parse_error_in(path, &result, &changed) {
+			warnings.push(edit_broke_parse_warning(line));
+		}
+	}
+	Ok(ApplyResult {
+		text: result,
+		first_changed_line,
+		warnings,
+		block_resolutions: Vec::<BlockResolution>::new(),
+	})
 }
 
-/// The last check before a patch is applied, whichever path produced it.
+/// The line of the first syntax error in `text` that touches (or borders) one
+/// of the `changed` result spans. Tree-sitter often places errors away from
+/// their cause or in constructs its grammar lacks; only an error at the edit
+/// is worth reporting.
+fn parse_error_in(path: &str, text: &str, changed: &[(u32, u32)]) -> Option<u32> {
+	syntax_error_spans(Some(path), text)
+		.into_iter()
+		.find_map(|(error_start, error_end)| {
+			changed.iter().find_map(|&(start, end)| {
+				(error_start <= end + 1 && error_end + 1 >= start).then(|| error_start.max(start))
+			})
+		})
+}
+
+/// The last echo check, run on the patch as written.
 ///
-/// For every replacement group whose body restates a neighbouring line (an
-/// echo the passes above act on), look at the rows the committed edits write
-/// in place of its range. Refuse if they hold a second copy of a neighbouring
-/// line, or if they are fewer than the range once such copies are set aside:
-/// either way the patch loses or duplicates lines that no reading of the body
-/// asks for. The echo passes refuse the shapes they recognise with a more
-/// specific message; this keeps one they do not recognise from applying. A
-/// group in `literal` whose body was committed as written is the range's final
-/// content: its neighbour copy is a line the body adds.
-fn lossy_echo_outcome(
-	authored: &[Edit],
-	committed: &[Edit],
+/// For every replacement group whose body restates a neighbouring line, refuse
+/// if its rows hold a copy of that line at their edge, or are fewer than the
+/// range once such copies are set aside: as written, the patch would duplicate
+/// or lose lines that no reading of the body asks for. `classify_echoes`
+/// refuses the too-short shapes it recognises with a more specific message.
+/// A group in `literal` is the range's final content: its neighbour copy is a
+/// line the body adds.
+fn echo_outcome(
+	edits: &[Edit],
 	lines: &[&str],
 	path: Option<&str>,
-	recorded: &[Ambiguity],
 	literal: &[u32],
 ) -> Option<EditError> {
-	let deleted = |line: u32| {
-		committed
-			.iter()
-			.any(|edit| matches!(edit, Edit::Delete { anchor, .. } if anchor.line == line))
-	};
 	let mut i = 0;
-	while i < authored.len() {
-		let Some(group) = replacement_group(authored, i) else {
+	while i < edits.len() {
+		let Some(group) = replacement_group(edits, i) else {
 			i += 1;
 			continue;
 		};
 		i = group.delete_indices.last().copied().unwrap() + 1;
+		if literal.contains(&group.start) {
+			continue;
+		}
 		let range_len = group.delete_indices.len();
-		let leading = duplicate_leading(&group, lines);
-		let trailing = duplicate_trailing(&group, lines);
-		// The same conditions under which `normalize_echoes` treats the rows
-		// as an echo; elsewhere (a one-row range) they are content.
+		let leading = duplicate_leading(&group, edits, lines);
+		let trailing = duplicate_trailing(&group, edits, lines);
+		// The same conditions under which `classify_echoes` treats the rows as
+		// an echo; elsewhere (a one-row range) they are content.
 		let echo = if leading > 0 && trailing > 0 {
 			range_len > 1 || group.payload.len().checked_sub(leading + trailing) == Some(range_len)
 		} else if leading > 0 {
@@ -1423,113 +1375,28 @@ fn lossy_echo_outcome(
 		if !echo {
 			continue;
 		}
-		let rows = committed_rows(&group, authored, committed, lines);
-		if literal.contains(&group.start) && rows == group.payload {
-			continue;
-		}
-		let (mut above, mut below) = restated_edges(&rows, lines, group.start, group.end);
-		if deleted(group.start - 1) {
+		let (mut above, mut below) = restated_edges(&group.payload, lines, group.start, group.end);
+		if leading == 0 {
 			above = 0;
 		}
-		if deleted(group.end + 1) {
+		if trailing == 0 {
 			below = 0;
 		}
-		// A repair can keep a source row outside an echo copy, which hides the
-		// copy from the edge check above: also count the neighbour's copies
-		// anywhere in the written rows, beyond those the range already had.
-		// Where every range row is deleted no row is kept, so a copy past the
-		// edges is a line the body adds, not a hidden echo.
-		let keeps_row = (group.start..=group.end).any(|line| !deleted(line));
-		let extra = |line: u32| -> usize {
-			if !keeps_row || line == 0 || deleted(line) {
-				return 0;
-			}
-			let Some(text) = lines
-				.get((line - 1) as usize)
-				.filter(|text| has_content(text))
-			else {
-				return 0;
-			};
-			let had = lines[(group.start - 1) as usize..group.end as usize]
-				.iter()
-				.filter(|row| *row == text)
-				.count();
-			rows
-				.iter()
-				.filter(|row| row.as_str() == *text)
-				.count()
-				.saturating_sub(had)
-		};
-		let (extra_above, extra_below) = (extra(group.start - 1), extra(group.end + 1));
-		let supplied = rows
-			.len()
-			.saturating_sub(above.max(extra_above) + below.max(extra_below));
-		if above == 0 && below == 0 && extra_above == 0 && extra_below == 0 && supplied >= range_len {
+		let supplied = group.payload.len().saturating_sub(above + below);
+		if above == 0 && below == 0 && supplied >= range_len {
 			continue;
 		}
-		if let Some(ambiguity) = recorded
-			.iter()
-			.find(|ambiguity| ambiguity.start == group.start)
-		{
-			return Some(ambiguity.refusal());
-		}
 		let (start, end) = (group.start, group.end);
-		// Word each side from the copy at the edge where there is one, else
-		// from the count of extra copies of the neighbouring line.
-		let side = |edge: usize, span: (u32, u32), line: u32, extra: usize| {
-			if edge > 0 {
-				Some(Restated::Span(span.0, span.1))
-			} else {
-				(extra > 0).then_some(Restated::Copies(line, extra as u32))
-			}
-		};
 		return Some(EditError::rejected(
 			Rejection::AmbiguousBoundary,
 			boundary_echo_outcome_message(
 				start,
 				end,
-				side(above, (start.saturating_sub(above as u32), start - 1), start - 1, extra_above),
-				side(below, (end + 1, end + below as u32), end + 1, extra_below),
+				(above > 0).then(|| (start - above as u32, start - 1)),
+				(below > 0).then(|| (end + 1, end + below as u32)),
 				(supplied < range_len).then(|| (start + supplied as u32, end)),
 			),
 		));
 	}
 	None
-}
-
-/// The rows `committed` writes in place of `group`'s range: its body rows and
-/// any range row a repair kept, applied on their own to the source lines.
-fn committed_rows(
-	group: &ReplacementGroup,
-	authored: &[Edit],
-	committed: &[Edit],
-	lines: &[&str],
-) -> Vec<String> {
-	let op = authored[group.insert_indices[0]].line_num();
-	let range = group.start..=group.end;
-	let own: Vec<Edit> = committed
-		.iter()
-		.filter(|edit| match edit {
-			Edit::Delete { anchor, line_num, .. } => *line_num == op && range.contains(&anchor.line),
-			Edit::Insert { cursor, line_num, replacement: true, .. } => {
-				*line_num == op
-					&& match cursor {
-						Cursor::BeforeAnchor(anchor) => {
-							(group.start..=group.end + 1).contains(&anchor.line)
-						},
-						Cursor::Eof => group.end as usize + 1 >= lines.len(),
-						_ => false,
-					}
-			},
-			_ => false,
-		})
-		.cloned()
-		.collect();
-	let text = materialize(lines, &own).0;
-	let rows: Vec<&str> = text.split('\n').collect();
-	let suffix = lines.len() - group.end as usize;
-	rows[(group.start - 1) as usize..rows.len().saturating_sub(suffix)]
-		.iter()
-		.map(|row| (*row).to_owned())
-		.collect()
 }

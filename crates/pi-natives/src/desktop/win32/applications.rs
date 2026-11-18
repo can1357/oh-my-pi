@@ -342,10 +342,13 @@ fn shortcuts(
 			// cycles.
 			if metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
 				pending.push(path);
-			} else if metadata.is_file()
-				&& has_extension(&path, "lnk")
-				&& let Some(target) = reader.target(&path)?
-			{
+			} else if metadata.is_file() && has_extension(&path, "lnk") {
+				// One shortcut whose target cannot be read (a drive that is not
+				// ready, a WindowsApps alias this user may not open) says nothing
+				// about the others: skip it rather than fail the whole listing.
+				let Ok(Some(target)) = reader.target(&path) else {
+					continue;
+				};
 				let mut app = describe_path(&path)?;
 				set_running(&mut app, &target, processes);
 				apps.push(app);

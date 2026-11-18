@@ -5,7 +5,7 @@ import { getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } f
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import { raceSignal } from "./abort";
-import { authCredentialEquals, type CredentialPool, credentialDisabledEvent } from "./pool";
+import { authCredentialEquals, type CredentialPool, credentialDisabledEvent, redactCredentialForWire } from "./pool";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import {
 	type AuthCredentialStore,
@@ -14,7 +14,6 @@ import {
 	hasRefreshLeases,
 } from "./store";
 import {
-	REMOTE_REFRESH_SENTINEL,
 	type AuthCredentialSnapshotEntry,
 	type AuthStorageOptions,
 	type OAuthCredential,
@@ -128,6 +127,7 @@ export function mergeRefreshedCredential<T extends OAuthCredential>(current: T, 
 		projectId: refreshed.projectId ?? current.projectId,
 		enterpriseUrl: refreshed.enterpriseUrl ?? current.enterpriseUrl,
 		apiEndpoint: refreshed.apiEndpoint ?? current.apiEndpoint,
+		kiroProfileArn: refreshed.kiroProfileArn ?? current.kiroProfileArn,
 		...mergeRefreshedOrganizationScope(current, refreshed),
 		authorizedAt: refreshed.authorizedAt ?? current.authorizedAt,
 	};
@@ -923,7 +923,16 @@ export class OAuthRefresher {
 		reason?: OAuthRefreshReason,
 		rejectedAccess?: string,
 	): Promise<OAuthCredentials> {
-		if (this.#shuttingDown) return Promise.reject(new AIError.AbortError("OAuth refresh stopped during shutdown"));
+		if (this.#shuttingDown) {
+			// Shutdown refuses new token exchanges, not tokens that need none: join one
+			// already under way (the drain waits for it) or serve a still-fresh token.
+			const inFlight =
+				credentialId === undefined ? undefined : this.#oauthCredentialRefreshInFlight.get(credentialId);
+			if (inFlight) return raceSignal(inFlight, signal, "credential refresh aborted");
+			const current = normalizeOAuthCredentialExpiry(provider, credential);
+			if (Date.now() + OAUTH_REFRESH_SKEW_MS < current.expires) return Promise.resolve(current);
+			return Promise.reject(new AIError.AbortError("OAuth refresh stopped during shutdown"));
+		}
 		const authRecovery = reason === "auth-recovery";
 		if (authRecovery && credentialId !== undefined && !this.#oauthCredentialRefreshInFlight.has(credentialId)) {
 			const recent = this.#recentMint(credentialId);
@@ -1008,7 +1017,7 @@ export class OAuthRefresher {
 					this.#requestOAuthCredentialRefresh(provider, current, credentialId, refreshSignal, reason, undefined),
 				// A usage probe is advisory: leave a dead grant for an interactive request to disable.
 				isDefinitiveFailure:
-					reason === "usage-probe" ? undefined : error => AIError.isDefinitiveOAuthFailure(String(error)),
+					reason === "usage-probe" ? undefined : error => AIError.isDefinitiveOAuthFailure(error),
 				disabledCause: error => `oauth refresh failed: ${String(error)}`,
 			});
 			if (result.credential) {
@@ -1073,9 +1082,9 @@ export class OAuthRefresher {
 						provider,
 					});
 				}
-				refreshPromise = customProvider.refreshToken(credential, signal);
+				refreshPromise = customProvider.refreshToken(credential, signal, reason);
 			} else {
-				refreshPromise = refreshOAuthToken(provider as OAuthProvider, credential, signal);
+				refreshPromise = refreshOAuthToken(provider as OAuthProvider, credential, signal, reason);
 			}
 		}
 		// Stop awaiting after `timeoutMs` or on `signal`. Leased exchanges pass no
@@ -1202,7 +1211,7 @@ export class OAuthRefresher {
 				// attempted credential is known. CAS on the persisted credential so a
 				// peer/login rotation in flight leaves the freshly-rotated row intact.
 				// A usage probe is advisory: leave a dead grant for an interactive request to disable.
-				if (reason !== "usage-probe" && AIError.isDefinitiveOAuthFailure(String(error))) {
+				if (reason !== "usage-probe" && AIError.isDefinitiveOAuthFailure(error)) {
 					// CAS-loss (false) means a peer/login rotated the row mid-refresh, so
 					// our #data copy is stale — reload so the next caller serves the
 					// freshly-rotated credential rather than the dead token we attempted.
@@ -1230,12 +1239,12 @@ export class OAuthRefresher {
 	}
 }
 
-/** Broker-facing snapshot entry for a refreshed row; the real refresh token never leaves the store. */
+/** Broker-facing snapshot entry for a refreshed row; refresh secrets never leave the store. */
 function snapshotEntry(id: number, provider: string, credential: OAuthCredential): AuthCredentialSnapshotEntry {
 	return {
 		id,
 		provider,
-		credential: { ...credential, refresh: REMOTE_REFRESH_SENTINEL },
+		credential: redactCredentialForWire(credential),
 		identityKey: resolveCredentialIdentityKey(provider, credential),
 	};
 }

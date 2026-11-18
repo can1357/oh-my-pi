@@ -98,7 +98,7 @@ describe("read tool large artifact handling", () => {
 		const output = getTextOutput(result);
 
 		// Raw chunks stay verbatim so copy/paste workflows never absorb the notice.
-		expect(output.split("\n")).toEqual(largeArtifactText().split("\n").slice(0, 2));
+		expect(output).toBe(`${largeArtifactText().split("\n").slice(0, 2).join("\n")}\n`);
 		expect(output).not.toMatch(/0\.mcp\.log/);
 	});
 
@@ -132,7 +132,7 @@ describe("read tool large artifact handling", () => {
 		expect(shownRange).toBeDefined();
 		if (!shownRange) throw new Error("expected shown range");
 		expect(truncation.nextOffset).toBe(shownRange.end + 1);
-		expect(formatTruncationMetaNotice(truncation)).toContain(`Use :${truncation.nextOffset} to continue`);
+		expect(formatTruncationMetaNotice(truncation)).toContain(`Use :${truncation.nextOffset}- to continue`);
 	});
 
 	it("reports an oversized selected line instead of sending a looping continuation selector", async () => {
@@ -154,7 +154,7 @@ describe("read tool large artifact handling", () => {
 		expect(truncation?.totalBytes).toBeGreaterThan(70_000);
 		expect(truncation?.nextOffset).toBeUndefined();
 		if (!truncation) throw new Error("expected truncation metadata");
-		expect(formatTruncationMetaNotice(truncation)).not.toContain("Use :2 to continue");
+		expect(formatTruncationMetaNotice(truncation)).not.toContain("Use :2- to continue");
 	});
 
 	it("still returns the oversized selected line when a wider range raises the byte budget", async () => {

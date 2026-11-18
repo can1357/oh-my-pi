@@ -58,6 +58,41 @@ export const MUX_PING_RESULT = "pong";
  */
 export const MUX_RESTART_METHOD = "omp/muxRestartServer";
 
+/**
+ * Last frame the mux writes on each link bound to a server that just exited,
+ * before closing the link: carries the real exit code and stderr tail, which
+ * a bare connection close cannot. Sent as `{ jsonrpc, method, params }` (in
+ * that key order) so the client finds it by prefix in the link's final bytes.
+ */
+export const MUX_SERVER_EXITED_METHOD = "omp/muxServerExited";
+
+/** Bytes of server stderr forwarded in {@link MUX_SERVER_EXITED_METHOD}. */
+export const MUX_SERVER_EXIT_STDERR_BYTES = 4_096;
+
+/** Payload of {@link MUX_SERVER_EXITED_METHOD}. */
+export interface MuxServerExit {
+	/** Process exit code; -1 when the process died from a signal. */
+	code: number;
+	/** Tail of the server's stderr. */
+	stderr: string;
+}
+
+const MUX_SERVER_EXIT_PREFIX = `{"jsonrpc":"2.0","method":"${MUX_SERVER_EXITED_METHOD}"`;
+
+/** Find the server-exit notification at the end of a link's final bytes. */
+export function parseMuxServerExit(tail: string): MuxServerExit | undefined {
+	const start = tail.lastIndexOf(MUX_SERVER_EXIT_PREFIX);
+	if (start < 0) return undefined;
+	try {
+		const message = JSON.parse(tail.slice(start)) as { params?: Partial<MuxServerExit> };
+		const params = message.params;
+		if (typeof params?.code !== "number") return undefined;
+		return { code: params.code, stderr: typeof params.stderr === "string" ? params.stderr : "" };
+	} catch {
+		return undefined;
+	}
+}
+
 /** Handshake parameters identifying a reusable server process. */
 export interface MuxConnectParams {
 	/** Executable to spawn (the client's `resolvedCommand ?? command`). */

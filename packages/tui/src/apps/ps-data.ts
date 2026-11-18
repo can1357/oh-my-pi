@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { formatDuration } from "@oh-my-pi/pi-utils";
+import { formatDuration, SHELL_PROCESS_SELECTOR } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { DaemonSnapshot, DaemonSpec, DaemonState } from "../tools/daemon";
 
@@ -40,9 +40,11 @@ export interface PsTarget {
 /** Process states without a running process or live uptime. */
 export const TERMINAL_STATES: Partial<Record<DaemonState, true>> = { exited: true, failed: true };
 
-/** Combine an executable and its arguments for display. */
+/** Combine an executable and its arguments for display; a shell process shows as the command it runs. */
 export function formatCommand(spec: DaemonSpec | undefined): string | undefined {
-	return spec ? [spec.application, ...spec.args].join(" ") : undefined;
+	if (!spec) return undefined;
+	if (spec.args.includes(SHELL_PROCESS_SELECTOR)) return spec.args.at(-1);
+	return [spec.application, ...spec.args].join(" ");
 }
 
 /** Collapse a launch command to one display line (inline scripts embed newlines/tabs). */

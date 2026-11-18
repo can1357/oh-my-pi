@@ -2,7 +2,7 @@
 	"source": "packages/hashline/test/landing-shift.test.ts",
 	"cases": [
 		{
-			"name": "slides a shallower body past the closing line and warns",
+			"name": "keeps a shallower gap insert after its anchor instead of sliding past the closer",
 			"parse": [
 				{
 					"input": "PUT >3:\n+    c();",
@@ -17,17 +17,14 @@
 					"text": "function f() {\n    if (x) {\n        a();\n    }\n    b();\n}\n",
 					"input": "PUT >3:\n+    c();",
 					"expect": {
-						"text": "function f() {\n    if (x) {\n        a();\n    }\n    c();\n    b();\n}\n",
-						"firstChangedLine": 4,
-						"warnings": [
-							"PUT >3: body indented shallower than the anchor, so the landing moved past 1 closing line to after line 4. For the deeper position inside the block, re-issue with the body indented to match."
-						]
+						"text": "function f() {\n    if (x) {\n        a();\n    c();\n    }\n    b();\n}\n",
+						"firstChangedLine": 3
 					}
 				}
 			]
 		},
 		{
-			"name": "crosses multiple closer levels and stops when depth returns to the body's",
+			"name": "keeps gap inserts after their anchor whatever their depth",
 			"parse": [
 				{
 					"input": "PUT >4:\n+    c();",
@@ -49,22 +46,16 @@
 					"text": "function f() {\n    if (x) {\n        for (y) {\n            a();\n        }\n    }\n    b();\n}\n",
 					"input": "PUT >4:\n+    c();",
 					"expect": {
-						"text": "function f() {\n    if (x) {\n        for (y) {\n            a();\n        }\n    }\n    c();\n    b();\n}\n",
-						"firstChangedLine": 6,
-						"warnings": [
-							"PUT >4: body indented shallower than the anchor, so the landing moved past 2 closing lines to after line 6. For the deeper position inside the block, re-issue with the body indented to match."
-						]
+						"text": "function f() {\n    if (x) {\n        for (y) {\n            a();\n    c();\n        }\n    }\n    b();\n}\n",
+						"firstChangedLine": 4
 					}
 				},
 				{
 					"text": "function f() {\n    if (x) {\n        for (y) {\n            a();\n        }\n    }\n    b();\n}\n",
 					"input": "PUT >4:\n+        c();",
 					"expect": {
-						"text": "function f() {\n    if (x) {\n        for (y) {\n            a();\n        }\n        c();\n    }\n    b();\n}\n",
-						"firstChangedLine": 5,
-						"warnings": [
-							"PUT >4: body indented shallower than the anchor, so the landing moved past 1 closing line to after line 5. For the deeper position inside the block, re-issue with the body indented to match."
-						]
+						"text": "function f() {\n    if (x) {\n        for (y) {\n            a();\n        c();\n        }\n    }\n    b();\n}\n",
+						"firstChangedLine": 4
 					}
 				}
 			]
@@ -180,7 +171,7 @@
 			]
 		},
 		{
-			"name": "looks past blank lines between the anchor and the closer",
+			"name": "keeps a gap insert after its anchor despite blank lines before the closer",
 			"parse": [
 				{
 					"input": "PUT >3:\n+    c();",
@@ -195,11 +186,8 @@
 					"text": "function f() {\n    if (x) {\n        a();\n\n    }\n    b();\n}\n",
 					"input": "PUT >3:\n+    c();",
 					"expect": {
-						"text": "function f() {\n    if (x) {\n        a();\n\n    }\n    c();\n    b();\n}\n",
-						"firstChangedLine": 5,
-						"warnings": [
-							"PUT >3: body indented shallower than the anchor, so the landing moved past 1 closing line to after line 5. For the deeper position inside the block, re-issue with the body indented to match."
-						]
+						"text": "function f() {\n    if (x) {\n        a();\n    c();\n\n    }\n    b();\n}\n",
+						"firstChangedLine": 3
 					}
 				}
 			]
@@ -321,7 +309,7 @@
 			]
 		},
 		{
-			"name": "lands a tab-indented construct body after the block, not inside the opener",
+			"name": "lands a tab-indented construct body after the anchor, inside the opener, as written",
 			"parse": [
 				{
 					"input": "PUT >5:\n+\n+\tmod stdout_policy {\n+\t\tuse super::MemStream;\n+\n+\t\t#[test]\n+\t\tfn line_policy() {\n+\t\t\tassert!(true);\n+\t\t}\n+\t}",
@@ -337,11 +325,8 @@
 					"input": "PUT >5:\n+\n+\tmod stdout_policy {\n+\t\tuse super::MemStream;\n+\n+\t\t#[test]\n+\t\tfn line_policy() {\n+\t\t\tassert!(true);\n+\t\t}\n+\t}",
 					"path": "fixture.rs",
 					"expect": {
-						"text": "mod testing {\n   struct MemStream;\n\n   impl Stream for MemStream {\n      fn clone_box(&self) -> u32 {\n         1\n      }\n\n      fn try_borrow(&self) -> u32 {\n         7\n      }\n   }\n\n\tmod stdout_policy {\n\t\tuse super::MemStream;\n\n\t\t#[test]\n\t\tfn line_policy() {\n\t\t\tassert!(true);\n\t\t}\n\t}\n}\n",
-						"firstChangedLine": 12,
-						"warnings": [
-							"PUT >5: line 5 opens a block, and the body's indentation claims a position outside it, so the body was landed after line 12 (verified by the syntax probe). To insert after a whole construct, anchor on its closing line or use `PUT >N*:`."
-						]
+						"text": "mod testing {\n   struct MemStream;\n\n   impl Stream for MemStream {\n      fn clone_box(&self) -> u32 {\n\n\tmod stdout_policy {\n\t\tuse super::MemStream;\n\n\t\t#[test]\n\t\tfn line_policy() {\n\t\t\tassert!(true);\n\t\t}\n\t}\n         1\n      }\n\n      fn try_borrow(&self) -> u32 {\n         7\n      }\n   }\n}\n",
+						"firstChangedLine": 5
 					}
 				}
 			]
@@ -393,7 +378,7 @@
 			]
 		},
 		{
-			"name": "abandons the escape when the relocated result does not parse",
+			"name": "applies a gap insert as written when no landing parses",
 			"parse": [
 				{
 					"input": "PUT >5:\n+   Some(1) => {\n+   }",
@@ -412,7 +397,7 @@
 						"text": "mod testing {\n   struct MemStream;\n\n   impl Stream for MemStream {\n      fn clone_box(&self) -> u32 {\n   Some(1) => {\n   }\n         1\n      }\n\n      fn try_borrow(&self) -> u32 {\n         7\n      }\n   }\n}\n",
 						"firstChangedLine": 5,
 						"warnings": [
-							"This edit introduced a syntax error near line 5: the file parsed before the patch and no longer does. It was applied exactly as written, so a line number or range endpoint is likely wrong — re-read the touched region and re-issue a correcting edit."
+							"Tree-sitter parsed this file before the edit but reports a syntax error near line 6 after it, within the edited lines. Re-read that region and fix it if the edit broke it; if the code is valid, this is a parser limitation and needs no action."
 						]
 					}
 				}
@@ -441,7 +426,7 @@
 			]
 		},
 		{
-			"name": "escapes a shallower function body past a class in TypeScript",
+			"name": "keeps a shallower function body after its anchor inside a class method",
 			"parse": [
 				{
 					"input": "PUT >2:\n+function helper() {\n+   return 2;\n+}",
@@ -457,11 +442,8 @@
 					"input": "PUT >2:\n+function helper() {\n+   return 2;\n+}",
 					"path": "fixture.ts",
 					"expect": {
-						"text": "class A {\n   method() {\n      return 1;\n   }\n}\nfunction helper() {\n   return 2;\n}\n",
-						"firstChangedLine": 5,
-						"warnings": [
-							"PUT >2: line 2 opens a block, and the body's indentation claims a position outside it, so the body was landed after line 5 (verified by the syntax probe). To insert after a whole construct, anchor on its closing line or use `PUT >N*:`."
-						]
+						"text": "class A {\n   method() {\nfunction helper() {\n   return 2;\n}\n      return 1;\n   }\n}\n",
+						"firstChangedLine": 2
 					}
 				}
 			]
@@ -497,35 +479,31 @@
 			]
 		},
 		{
-			"name": "still slides a shallower statement past the closer when the shifted result parses",
+			"name": "keeps a shallower statement after its anchor when the as-written result parses",
 			"apply": [
 				{
 					"text": "package p\n\nfunc f(x bool) int {\n\tif x {\n\t\tx = false\n\t}\n\treturn 0\n}\n",
 					"input": "PUT >5:\n+\tx = true",
 					"path": "fixture.go",
 					"expect": {
-						"text": "package p\n\nfunc f(x bool) int {\n\tif x {\n\t\tx = false\n\t}\n\tx = true\n\treturn 0\n}\n",
-						"firstChangedLine": 6,
-						"warnings": [
-							"PUT >5: body indented shallower than the anchor, so the landing moved past 1 closing line to after line 6. For the deeper position inside the block, re-issue with the body indented to match."
-						]
+						"text": "package p\n\nfunc f(x bool) int {\n\tif x {\n\t\tx = false\n\tx = true\n\t}\n\treturn 0\n}\n",
+						"firstChangedLine": 5
 					}
 				}
 			]
 		},
 		{
-			"name": "still slides a shallower statement when an unrelated edit in the batch breaks the parse",
+			"name": "keeps a shallower statement after its anchor when an unrelated edit breaks the parse",
 			"apply": [
 				{
 					"text": "package p\n\nfunc f(x bool) int {\n\tif x {\n\t\tx = false\n\t}\n\treturn 0\n}\n",
 					"input": "PUT >5:\n+\tx = true\nPUT >7:\n+\ty := (",
 					"path": "fixture.go",
 					"expect": {
-						"text": "package p\n\nfunc f(x bool) int {\n\tif x {\n\t\tx = false\n\t}\n\tx = true\n\treturn 0\n\ty := (\n}\n",
-						"firstChangedLine": 6,
+						"text": "package p\n\nfunc f(x bool) int {\n\tif x {\n\t\tx = false\n\tx = true\n\t}\n\treturn 0\n\ty := (\n}\n",
+						"firstChangedLine": 5,
 						"warnings": [
-							"PUT >5: body indented shallower than the anchor, so the landing moved past 1 closing line to after line 6. For the deeper position inside the block, re-issue with the body indented to match.",
-							"This edit introduced a syntax error near line 6: the file parsed before the patch and no longer does. It was applied exactly as written, so a line number or range endpoint is likely wrong — re-read the touched region and re-issue a correcting edit."
+							"Tree-sitter parsed this file before the edit but reports a syntax error near line 9 after it, within the edited lines. Re-read that region and fix it if the edit broke it; if the code is valid, this is a parser limitation and needs no action."
 						]
 					}
 				}

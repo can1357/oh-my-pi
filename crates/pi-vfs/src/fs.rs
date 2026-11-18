@@ -720,6 +720,19 @@ impl Fs {
 		}
 	}
 
+	/// The same view (cancellation, creation mask, descriptor overlays) over
+	/// `provider` in place of this filesystem's own: how a provider layers
+	/// over the one it wraps ([`Fs::provider`]).
+	pub fn with_provider(&self, provider: Arc<dyn FileSystem>) -> Self {
+		let mut fs = self.clone();
+		fs.provider = Some(provider);
+		// A provider's files close in the background: the view tracks them.
+		if fs.scope.closes.is_none() {
+			fs.scope.closes = Some(Arc::new(CloseTracker::default()));
+		}
+		fs
+	}
+
 	/// Synchronous view; captures the current tokio runtime (if any) to drive
 	/// provider calls from threads outside it.
 	pub fn blocking(&self) -> BlockingFs {

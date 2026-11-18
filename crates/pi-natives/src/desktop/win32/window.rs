@@ -299,6 +299,14 @@ fn depth_below(ancestor: HWND, descendant: HWND) -> Option<usize> {
 	(current == ancestor).then_some(depth)
 }
 
+/// The process that owns `hwnd`, if the window still exists.
+pub(super) fn process_id(hwnd: HWND) -> Option<u32> {
+	let mut pid = 0;
+	// SAFETY: `pid` is writable; Win32 validates the handle.
+	unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+	(pid != 0).then_some(pid)
+}
+
 /// Refuses higher-integrity targets and unreadable tokens. An OS enqueue
 /// result is not evidence that a higher-integrity application consumed input.
 pub(super) fn uipi_block(hwnd: HWND) -> Option<String> {

@@ -39,7 +39,7 @@ describe.each([
 	},
 	{
 		label: "wire-stripped",
-		provider: "deepseek",
+		provider: "fireworks",
 		id: "deepseek-v4-flash",
 		reason: "deepseek-v4-flash's provider strips image input",
 	},

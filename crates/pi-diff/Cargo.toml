@@ -9,3 +9,6 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+xutf.workspace = true

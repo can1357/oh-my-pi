@@ -52,7 +52,7 @@ use std::{
 
 use bstr::{BStr, BString, ByteSlice};
 use parking_lot::Mutex;
-use pi_builtins::extras::{ExtraKind, Fd, Invocation};
+use pi_builtins::extras::{ExtraKind, Fd, Invocation, SpeechHost};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -179,6 +179,26 @@ impl ReportedError {
 	}
 }
 
+/// The application's speech synthesizer, which `say` speaks through, as of
+/// the last command run; background jobs that command left keep it.
+///
+/// Cheap to clone; clones share the slot.
+#[derive(Clone, Default)]
+pub struct Speech(Arc<Mutex<Option<Arc<dyn SpeechHost>>>>);
+
+impl Speech {
+	/// Hand `host` to the extras started from now on (`None`: `say` uses the
+	/// system's synthesizer).
+	pub fn set(&self, host: Option<Arc<dyn SpeechHost>>) {
+		*self.0.lock() = host;
+	}
+
+	/// The synthesizer extras started now speak through.
+	pub fn get(&self) -> Option<Arc<dyn SpeechHost>> {
+		self.0.lock().clone()
+	}
+}
+
 /// The invocation of an extra with command line `argv` (named by `argv[0]`),
 /// environment `env`, working directory `cwd`, descriptors `stdio` and
 /// `extra_fds` and the shell's file-creation mask `umask`, on the filesystem
@@ -212,6 +232,7 @@ pub(crate) fn invocation(
 		.map(|(number, fd)| (*number, open_fd(fd, false)))
 		.collect();
 	invocation.reported_error = config.reported_error.get();
+	invocation.speech = config.speech.get();
 	invocation
 }
 

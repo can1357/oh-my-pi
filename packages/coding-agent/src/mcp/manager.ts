@@ -412,6 +412,8 @@ export class MCPManager implements MCPManagerApi {
 	#startupUpdates = new Map<string, Promise<void>>();
 	#startupServers = new Set<string>();
 	#startupFailures = new Map<string, string>();
+	/** Newest connect/reconnect failure per server, cleared when it connects; explains "not connected". */
+	#lastConnectErrors = new Map<string, string>();
 	#sources = new Map<string, SourceMeta>();
 	#authStorage: AuthStorage | null = null;
 	#authHandler?: MCPAuthHandler;
@@ -486,6 +488,15 @@ export class MCPManager implements MCPManagerApi {
 	) {}
 
 	/**
+	 * Re-point project config discovery and the advertised `roots/list` at `cwd`
+	 * after the owning session moved. Connected servers keep the roots they were
+	 * given (roots are advertised without `listChanged`), so callers reconnect.
+	 */
+	setCwd(cwd: string): void {
+		this.cwd = cwd;
+	}
+
+	/**
 	 * Register a listener for MCP connection lifecycle events
 	 * (`connecting` / `connected` / `failed`).
 	 *
@@ -500,6 +511,8 @@ export class MCPManager implements MCPManagerApi {
 	}
 
 	#emitConnectionStatus(event: McpConnectionStatusEvent): void {
+		if (event.type === "failed") this.#lastConnectErrors.set(event.serverName, event.error);
+		else if (event.type === "connected") this.#lastConnectErrors.delete(event.serverName);
 		if (event.type === "failed" && this.#startupServers.has(event.serverName)) {
 			this.#startupFailures.set(event.serverName, event.error);
 		} else if (event.type === "connected") {
@@ -1509,7 +1522,24 @@ export class MCPManager implements MCPManagerApi {
 			const result = await reconnecting;
 			if (result) return result;
 		}
-		throw new Error(`MCP server not connected: ${name}`);
+		throw new Error(this.#describeNotConnected(name));
+	}
+
+	/** Why `name` has no connection and what happens next, for the failing call. */
+	#describeNotConnected(name: string): string {
+		const parts = [`MCP server not connected: ${name}`];
+		const lastError = this.#lastConnectErrors.get(name);
+		if (lastError) parts.push(`last connect error: ${lastError}`);
+		const now = Date.now();
+		const recentCrashes = (this.#reconnectHistory.get(name) ?? []).filter(ts => now - ts < RECONNECT_BURST_WINDOW_MS);
+		if (recentCrashes.length > RECONNECT_BURST_LIMIT) {
+			parts.push(`automatic reconnects are suspended after repeated failures; run /mcp reconnect ${name}`);
+		} else if (this.#lostRemoteServers.has(name)) {
+			parts.push("a reconnect is scheduled");
+		} else if (!this.#serverConfigs.has(name)) {
+			parts.push("the server is not configured in this session");
+		}
+		return parts.join("; ");
 	}
 
 	/**
@@ -1883,6 +1913,7 @@ export class MCPManager implements MCPManagerApi {
 				}
 
 				const msg = error instanceof Error ? error.message : String(error);
+				this.#lastConnectErrors.set(name, msg);
 				if (attempt < delays.length) {
 					logger.debug("MCP reconnect attempt failed, retrying", {
 						path: `mcp:${name}`,

@@ -34,8 +34,8 @@ pub(super) struct Keymap {
 
 /// Virtual key codes of Return and Tab, which are the same on every layout;
 /// the layout maps them to control characters.
-const RETURN: u16 = 36;
-const TAB: u16 = 48;
+pub(super) const RETURN: u16 = 36;
+pub(super) const TAB: u16 = 48;
 /// Highest virtual key code a keyboard layout defines.
 const MAX_KEY_CODE: u16 = 127;
 /// `UCKeyTranslate` modifier bits (`EventModifiers` shifted right by 8).

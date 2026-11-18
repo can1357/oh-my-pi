@@ -1,3 +1,6 @@
+#[cfg(unix)]
+use tokio::task::JoinHandle;
+
 use super::*;
 
 /// Brace expansion must not turn a large sequence into one literal word or
@@ -741,7 +744,7 @@ async fn live_background_job_count_tracks_external_background_jobs() {
 	// An external background process is tracked while it runs.
 	shell
 		.run(
-			ShellRunOptions { command: "sh -c 'sleep 30' &".into(), ..Default::default() },
+			ShellRunOptions { command: "/bin/sh -c 'sleep 30' &".into(), ..Default::default() },
 			None,
 			CancelToken::default(),
 		)
@@ -763,7 +766,10 @@ async fn timeout_spares_background_jobs_of_earlier_commands() {
 	let shell = Shell::new(None);
 	shell
 		.run(
-			ShellRunOptions { command: "sh -c 'sleep 30' & early=$!".into(), ..Default::default() },
+			ShellRunOptions {
+				command: "/bin/sh -c 'sleep 30' & early=$!".into(),
+				..Default::default()
+			},
 			None,
 			CancelToken::default(),
 		)
@@ -772,7 +778,10 @@ async fn timeout_spares_background_jobs_of_earlier_commands() {
 
 	let timed_out = shell
 		.run(
-			ShellRunOptions { command: "sh -c 'sleep 30' & sleep 30".into(), ..Default::default() },
+			ShellRunOptions {
+				command: "/bin/sh -c 'sleep 30' & sleep 30".into(),
+				..Default::default()
+			},
 			None,
 			CancelToken::new(Some(300)),
 		)
@@ -1057,33 +1066,68 @@ async fn pids_reports_in_flight_children_until_run_returns() {
 	assert!(shell.pids().is_empty(), "pids cleared once the run returns");
 }
 
+/// Run `command` on `shell`, which must succeed; its output.
+#[cfg(unix)]
+async fn run_ok(shell: &Shell, command: &str) -> String {
+	let (tx, rx) = flume::unbounded();
+	let result = shell
+		.run(
+			ShellRunOptions { command: command.into(), ..Default::default() },
+			Some(tx),
+			CancelToken::default(),
+		)
+		.await
+		.expect("run");
+	assert_eq!(result.exit_code, Some(0), "{command}");
+	rx.drain().collect()
+}
+
+/// Start `command` on `shell`, then hold the run until `gate` exists;
+/// returns once it is held.
+#[cfg(unix)]
+async fn run_held(shell: &Arc<Shell>, command: &str, gate: &Path) -> JoinHandle<String> {
+	let started = gate.with_extension("started");
+	let owner = tokio::spawn({
+		let shell = shell.clone();
+		let command = format!(
+			"{command}; : > {}; while [ ! -e {} ]; do sleep 0.01; done",
+			quote_arg(&started.to_string_lossy()),
+			quote_arg(&gate.to_string_lossy())
+		);
+		async move { run_ok(&shell, &command).await }
+	});
+	time::timeout(Duration::from_secs(5), async {
+		while !started.exists() {
+			time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("held command never started");
+	owner
+}
+
+/// Open `gate` and wait for the run [`run_held`] holds on it to end.
+#[cfg(unix)]
+async fn release_held(owner: JoinHandle<String>, gate: &Path) {
+	fs::write(gate, "").expect("open gate");
+	time::timeout(Duration::from_secs(5), owner)
+		.await
+		.expect("held command finishes")
+		.expect("held command task");
+}
+
 /// A fork taken while a command runs starts from the state that command
 /// started from (variables, functions, cwd), without waiting for it; what the
 /// fork sets stays in the fork; sibling forks draw different `$RANDOM`s.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn fork_starts_from_the_state_before_the_running_command() {
-	async fn run(shell: &Shell, command: &str) -> String {
-		let (tx, rx) = flume::unbounded();
-		let result = shell
-			.run(
-				ShellRunOptions { command: command.into(), ..Default::default() },
-				Some(tx),
-				CancelToken::default(),
-			)
-			.await
-			.expect("run");
-		assert_eq!(result.exit_code, Some(0), "{command}");
-		rx.drain().collect()
-	}
-
 	let _guard = shell_test_lock().lock().await;
 	let dir = tempfile::tempdir().expect("scratch directory");
 	let dir_path = dir.path().canonicalize().expect("canonical dir");
-	let started = dir_path.join("started");
 	let gate = dir_path.join("gate");
 	let shell = Arc::new(Shell::new(None));
-	run(
+	run_ok(
 		&shell,
 		&format!(
 			"PI_FORK_VAR=before; pi_fork_fn() {{ printf 'fn:%s' \"$1\"; }}; cd {}; RANDOM=7",
@@ -1092,27 +1136,11 @@ async fn fork_starts_from_the_state_before_the_running_command() {
 	)
 	.await;
 
-	let owner = tokio::spawn({
-		let shell = shell.clone();
-		let command = format!(
-			"PI_FORK_VAR=during; : > {}; while [ ! -e {} ]; do sleep 0.01; done",
-			quote_arg(&started.to_string_lossy()),
-			quote_arg(&gate.to_string_lossy())
-		);
-		async move { run(&shell, &command).await }
-	});
-	time::timeout(Duration::from_secs(5), async {
-		while !started.exists() {
-			time::sleep(Duration::from_millis(10)).await;
-		}
-	})
-	.await
-	.expect("owner command never started");
-
+	let owner = run_held(&shell, "PI_FORK_VAR=during", &gate).await;
 	let fork = shell.fork();
 	let seen = time::timeout(
 		Duration::from_secs(5),
-		run(
+		run_ok(
 			&fork,
 			"printf '%s|%s|%s' \"$PI_FORK_VAR\" \"$(pi_fork_fn x)\" \"$PWD\"; PI_FORK_VAR=fork",
 		),
@@ -1121,14 +1149,43 @@ async fn fork_starts_from_the_state_before_the_running_command() {
 	.expect("fork waited for the running command");
 	assert_eq!(seen, format!("before|fn:x|{}", dir_path.display()));
 	let random = "echo $RANDOM $RANDOM $RANDOM";
-	assert_ne!(run(&shell.fork(), random).await, run(&shell.fork(), random).await);
+	assert_ne!(run_ok(&shell.fork(), random).await, run_ok(&shell.fork(), random).await);
 
-	fs::write(&gate, "").expect("open gate");
-	time::timeout(Duration::from_secs(5), owner)
-		.await
-		.expect("owner finishes")
-		.expect("owner task");
-	assert_eq!(run(&shell, "printf %s \"$PI_FORK_VAR\"").await, "during");
+	release_held(owner, &gate).await;
+	assert_eq!(run_ok(&shell, "printf %s \"$PI_FORK_VAR\"").await, "during");
+}
+
+/// `adopt` carries what a fork of a busy shell set back into it: forks taken
+/// afterwards see it at once, the shell takes it when its command ends, a
+/// name both changed keeps the value of the command that ended last, and the
+/// working directory stays the shell's.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn adopt_carries_a_fork_back_and_the_last_command_to_end_wins() {
+	let _guard = shell_test_lock().lock().await;
+	let dir = tempfile::tempdir().expect("scratch directory");
+	let dir_path = dir.path().canonicalize().expect("canonical dir");
+	fs::create_dir(dir_path.join("sub")).expect("subdirectory");
+	let gate = dir_path.join("gate");
+	let shell = Arc::new(Shell::new(None));
+	let setup = format!("cd {}; PI_A=base; PI_B=base", quote_arg(&dir_path.to_string_lossy()));
+	run_ok(&shell, &setup).await;
+
+	let owner = run_held(&shell, "PI_B=owner", &gate).await;
+	let fork = shell.fork();
+	run_ok(&fork, "PI_A=fork; PI_B=fork; pi_fn() { printf fn; }; cd sub").await;
+	assert!(shell.adopt(&fork));
+	let read = "printf '%s|%s|%s|%s' \"$PI_A\" \"$PI_B\" \"$(pi_fn)\" \"$PWD\"";
+	let cwd = dir_path.display();
+	assert_eq!(run_ok(&shell.fork(), read).await, format!("fork|fork|fn|{cwd}"));
+
+	release_held(owner, &gate).await;
+	assert_eq!(run_ok(&shell, read).await, format!("fork|owner|fn|{cwd}"));
+
+	let fork = shell.fork();
+	run_ok(&fork, "PI_B=late").await;
+	assert!(shell.adopt(&fork));
+	assert_eq!(run_ok(&shell, "printf %s \"$PI_B\"").await, "late");
 }
 
 #[cfg(unix)]
@@ -1631,7 +1688,7 @@ async fn embedded_external_command_runs_in_its_own_session() {
 	let shell_handle = tokio::spawn(async move {
 		// `printf '%d\n' "$$"` then `sleep 0.5`. Long enough for our `getsid`.
 		let exec = session
-			.run_test("sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'", &stdio)
+			.run_test("/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'", &stdio)
 			.await
 			.expect("run_test");
 		drop(stdio);
@@ -1694,7 +1751,7 @@ async fn cancellation_allows_background_term_cleanup_while_builtin_is_running() 
 		shell
 			.run(
 				ShellRunOptions {
-					command: "sh cleanup.sh & sleep 30".into(),
+					command: "/bin/sh cleanup.sh & sleep 30".into(),
 					cwd: Some(cwd),
 					..Default::default()
 				},
@@ -1742,7 +1799,7 @@ async fn cancellation_keeps_output_open_for_a_term_trap_that_writes() {
 		shell
 			.run(
 				ShellRunOptions {
-					command: "sh cleanup.sh".into(),
+					command: "/bin/sh cleanup.sh".into(),
 					cwd: Some(cwd),
 					..Default::default()
 				},
@@ -1786,7 +1843,7 @@ async fn termination_returns_early_after_the_child_exits() {
 		shell
 			.run(
 				ShellRunOptions {
-					command: "sh -c ': > ready; exec sleep 30'".into(),
+					command: "/bin/sh -c ': > ready; exec sleep 30'".into(),
 					cwd: Some(cwd),
 					..Default::default()
 				},
@@ -1830,7 +1887,7 @@ async fn cancelling_one_run_spares_a_concurrent_runs_child() {
 		shell_b
 			.run(
 				ShellRunOptions {
-					command: "sh -c 'printf \"ready\\n\"; sleep 30'".into(),
+					command: "/bin/sh -c 'printf \"ready\\n\"; sleep 30'".into(),
 					..Default::default()
 				},
 				Some(tx_b),
@@ -1862,7 +1919,7 @@ async fn cancelling_one_run_spares_a_concurrent_runs_child() {
 		shell_a
 			.run(
 				ShellRunOptions {
-					command: "sh -c 'printf \"%d\\n\" \"$$\"; sleep 2'".into(),
+					command: "/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 2'".into(),
 					..Default::default()
 				},
 				Some(tx_a),
@@ -1923,7 +1980,7 @@ async fn cancelling_while_sourcing_snapshot_kills_snapshot_foreground_child() {
 	let escaped_pid_path = pid_path.to_string_lossy().replace('\'', "'\\''");
 	std::fs::write(
 		&snapshot_path,
-		format!("sh -c 'printf \"%d\\n\" \"$$\" > \"$1\"; sleep 30' sh '{escaped_pid_path}'\n"),
+		format!("/bin/sh -c 'printf \"%d\\n\" \"$$\" > \"$1\"; sleep 30' sh '{escaped_pid_path}'\n"),
 	)
 	.expect("write snapshot file");
 
@@ -2067,7 +2124,7 @@ async fn embedded_pipeline_stage_runs_in_its_own_session() {
 		// leads the pipeline's process group, while the second stage is the
 		// join-or-detach process that would EPERM without the wiring fix.
 		let exec = session
-			.run_test("sh -c 'printf \"%d\\n\" \"$$\"; sleep 1' | sh -c cat", &stdio)
+			.run_test("/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 1' | /bin/sh -c cat", &stdio)
 			.await
 			.expect("run_test");
 		drop(stdio);
@@ -2555,4 +2612,46 @@ async fn pipe_tap_forwards_every_byte_and_counts_them() {
 	assert_eq!(read.data.len(), written.min(1 << 20));
 	assert!(read.data.ends_with(format!("\n{LAST}\n").as_bytes()));
 	assert!(!read.open);
+}
+
+/// A process's own shell ([`Shell::for_process`]) is the bash tool's shell on
+/// the process's streams: pi's utilities run ahead of `PATH`, and an external
+/// stays in the process's group instead of leading a session of its own, so
+/// it shares the terminal the process leads.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn process_shell_runs_pi_utilities_and_keeps_externals_in_its_group() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("output directory");
+	let empty = root.path().join("empty");
+	std::fs::create_dir(&empty).expect("empty search path");
+	let (sum, group) = (root.path().join("sum"), root.path().join("group"));
+	// Nothing reaches the test's own streams: every command redirects.
+	let command = format!(
+		"PATH={}; echo '{{\"a\":[40,2]}}' | jq '.a | add' > {}; /bin/sh -c '/bin/ps -o pgid= -p $$' \
+		 > {} 2>&1",
+		quote_arg(&empty.to_string_lossy()),
+		quote_arg(&sum.to_string_lossy()),
+		quote_arg(&group.to_string_lossy()),
+	);
+	let shell = Shell::for_process(ShellOptions::default());
+
+	let result = time::timeout(
+		Duration::from_secs(20),
+		shell.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default()),
+	)
+	.await
+	.expect("process shell timed out")
+	.expect("process shell run");
+
+	assert_eq!(result.exit_code, Some(0));
+	assert_eq!(std::fs::read_to_string(&sum).expect("jq output"), "42\n");
+	// SAFETY: `getpgrp` only reads this process's group id.
+	let own_group = unsafe { libc::getpgrp() };
+	let child_group: i32 = std::fs::read_to_string(&group)
+		.expect("ps output")
+		.trim()
+		.parse()
+		.expect("a process group id");
+	assert_eq!(child_group, own_group);
 }

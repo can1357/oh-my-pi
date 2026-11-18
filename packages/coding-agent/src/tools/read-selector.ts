@@ -69,10 +69,9 @@ function invalidSelector(sel: string): ToolError {
 
 /** Parse a bare (non-compound) chunk as a line-range list, a tail count, or a list mixing both. */
 function parseRangeOrTail(chunk: string, raw: boolean): ParsedSelector | null {
-	const ranges = parseLineRanges(chunk, raw ? "single" : "onward");
+	const ranges = parseLineRanges(chunk);
 	if (ranges) return raw ? { kind: "lines", ranges, raw } : { kind: "lines", ranges };
-	// A list with tails (`1-12,-15`, `-15`) keeps the longest tail; in a list of
-	// several chunks a bare `N` stays that one line, as in a plain range list.
+	// A list with tails (`1-12,-15`, `-15`) keeps the longest tail.
 	const parts = chunk.split(",");
 	let count = 0;
 	const listed: string[] = [];
@@ -82,8 +81,7 @@ function parseRangeOrTail(chunk: string, raw: boolean): ParsedSelector | null {
 		else listed.push(part);
 	}
 	if (count === 0) return null;
-	// Beside a tail the list has several chunks, so a lone listed `N` is still one line.
-	const listedRanges = listed.length > 0 ? parseLineRanges(listed.join(","), "single") : undefined;
+	const listedRanges = listed.length > 0 ? parseLineRanges(listed.join(",")) : undefined;
 	if (listedRanges === null) return null;
 	return { kind: "tail", count, ...(listedRanges && { ranges: listedRanges }), ...(raw && { raw }) };
 }

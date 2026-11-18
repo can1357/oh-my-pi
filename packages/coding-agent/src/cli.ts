@@ -27,7 +27,13 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
 
-import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
+import { raiseInteractiveQos } from "@oh-my-pi/pi-utils/process-qos";
+import {
+	declareWorkerHostEntry,
+	installWorkerInbox,
+	isWorkerHostSelector,
+	SHELL_PROCESS_SELECTOR,
+} from "@oh-my-pi/pi-utils/worker-host";
 import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
 import { isNativeShell, runNativeShell } from "./cli/native-shell";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
@@ -36,7 +42,7 @@ import {
 	BLOB_BROKER_WORKER_ARG,
 	COMPUTER_WORKER_ARG,
 	DAEMON_BROKER_WORKER_ARG,
-	IDA_HOST_WORKER_ARG,
+	DISASM_HOST_WORKER_ARG,
 	LSP_MUX_WORKER_ARG,
 	MNEMOPI_EMBED_SERVER_WORKER_ARG,
 	PARENT_WATCHDOG_WORKER_ARG,
@@ -158,7 +164,7 @@ async function runSmokeTest(): Promise<void> {
 	// Other smoke dependencies stay lazy so normal CLI startup does not load their worker clients.
 	const { smokeTestDaemonBroker } = await import("./launch/client");
 	const { smokeTestLspMux } = await import("./lsp/mux/daemon");
-	const { smokeTestIdaHost } = await import("./ida/client");
+	const { smokeTestDisasmHost } = await import("./disasm/client");
 	const { smokeTestBlobBroker } = await import("./blob-broker/daemon");
 	const { smokeTestTerminalOutputWorker } = await import("./launch/terminal-output-worker-client");
 	const { smokeTestTextPredictDaemon } = await import("./predict/client");
@@ -188,7 +194,7 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestMnemopiEmbedWorker();
 	await smokeTestDaemonBroker();
 	await smokeTestLspMux();
-	await smokeTestIdaHost();
+	await smokeTestDisasmHost();
 	await smokeTestBlobBroker();
 	await smokeTestTerminalOutputWorker();
 	await smokeTestTextPredictDaemon();
@@ -329,9 +335,9 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		await startLspMuxFromEnvironment();
 		return true;
 	}
-	if (arg === IDA_HOST_WORKER_ARG) {
-		const { startIdaHostFromEnvironment } = await import("./ida/host");
-		await startIdaHostFromEnvironment();
+	if (arg === DISASM_HOST_WORKER_ARG) {
+		const { startDisasmHostFromEnvironment } = await import("./disasm/host");
+		await startDisasmHostFromEnvironment();
 		return true;
 	}
 	if (arg === BLOB_BROKER_WORKER_ARG) {
@@ -478,6 +484,14 @@ export async function runCli(argv: string[]): Promise<void> {
 	if (isNativeShell(argv[0])) {
 		await runNativeShell(argv);
 	}
+	// A shell process (a named service, a pty command): the argv after the
+	// selector is its own, its command's flags included, so it dispatches
+	// before anything reads flags out of it.
+	if (argv[0] === SHELL_PROCESS_SELECTOR) {
+		// Command boundary: only shell processes load the engine entry here.
+		const { runShellProcess } = await import("./exec/shell-process-worker");
+		await runShellProcess(argv.slice(1));
+	}
 	let resolvedArgv = argv;
 	try {
 		const extracted = extractProfileFlags(resolvedArgv);
@@ -548,6 +562,11 @@ export async function runCli(argv: string[]): Promise<void> {
 		}
 		return;
 	}
+
+	// The user waits on this process (startup, typing, redraws), not on its
+	// workers: on macOS its main thread runs above the default class a busy
+	// machine's builds compete in.
+	if (isProcessEntry) raiseInteractiveQos();
 
 	if (resolvedArgv[0] === "--license") {
 		// Command boundary: bundled notices are read only when requested.

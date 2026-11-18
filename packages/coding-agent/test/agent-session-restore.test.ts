@@ -222,6 +222,10 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 		const stops: Array<{ label: string; stop: (session: AgentSession) => Promise<void>; restored: boolean }> = [
 			// Lifecycle teardown of a running revived agent: the dispose itself cuts the request off.
 			{ label: "process-exit dispose", stop: s => s.dispose({ reason: postmortem.Reason.EXIT }), restored: true },
+			// A host ending the process (a terminal restarting its panes, a closed pty).
+			{ label: "SIGTERM dispose", stop: s => s.dispose({ reason: postmortem.Reason.SIGTERM }), restored: true },
+			{ label: "SIGHUP dispose", stop: s => s.dispose({ reason: postmortem.Reason.SIGHUP }), restored: true },
+			{ label: "SIGINT dispose", stop: s => s.dispose({ reason: postmortem.Reason.SIGINT }), restored: false },
 			// Task executor on manager shutdown: the run aborts first, then its session is released.
 			{
 				label: "shutdown abort, then process-exit dispose",

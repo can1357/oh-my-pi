@@ -545,6 +545,21 @@ fn parses_file_ops_and_rejects_invalid_combinations() {
 	);
 }
 
+/// A bare row shaped like an op or a tagged file header is a header that
+/// failed to parse; it used to be auto-prefixed and written into the file.
+#[test]
+fn rejects_header_shaped_bare_rows_instead_of_writing_them() {
+	for (input, row) in [
+		("PUT 2.=3:\n+a\nPUT 789*=821:\n+b", "line 3: \"PUT 789*=821:\""),
+		("PUT >2:\nnew\n  [docs/b.md#2C2B]\nmore", "line 3: \"  [docs/b.md#2C2B]\""),
+	] {
+		let error = parse_patch(input).unwrap_err().to_string();
+		assert!(error.starts_with(row), "{input:?}: {error}");
+		assert!(error.contains("prefix it with `+`"), "{input:?}: {error}");
+	}
+	assert_eq!(parse_patch("PUT >2:\nnew\nrow").unwrap().edits.len(), 2);
+}
+
 #[test]
 fn input_splits_sections_and_normalizes_tags() {
 	let patch = Patch::parse(
@@ -693,9 +708,6 @@ fn section_reports_anchor_scope_and_sorted_lines() {
 	let section = &patch.sections[0];
 	assert!(section.has_anchor_scoped_edit().unwrap());
 	assert_eq!(section.collect_anchor_lines().unwrap(), [2, 5, 6]);
-	let rebased = section.with_path("b.ts");
-	assert_eq!(rebased.path, "b.ts");
-	assert_eq!(rebased.edits().unwrap(), section.edits().unwrap());
 }
 
 #[test]
@@ -773,7 +785,7 @@ fn mismatch_messages_distinguish_stale_and_unrecognized_hashes() {
 	let unknown = MismatchDetails { hash_recognized: false, ..stale };
 	let message = format_mismatch_message(&unknown);
 	assert!(message.contains("hash #1A2B is not from this session"));
-	assert!(message.contains("never invent the tag"));
+	assert!(message.contains("#3C4D"));
 	// When the unrecognized tag was actually issued earlier in this session
 	// for a different path, the rejection names that path so a relative
 	// worktree lane doesn't follow a wrong-tree suggestion.
@@ -791,7 +803,24 @@ fn mismatch_messages_distinguish_stale_and_unrecognized_hashes() {
 	assert!(
 		message.contains("Hash #1A2B was issued in this session for /build/x/wt/crates/a/mcp.rs.")
 	);
-	assert!(message.contains("never invent the tag"));
+	assert!(message.contains("#3C4D"));
+}
+
+#[test]
+fn unknown_tag_rejection_offers_resend_only_for_shown_rows_of_this_file() {
+	let details = |anchors: Vec<u32>, origins: Vec<String>| MismatchDetails {
+		path:               Some("a.ts".into()),
+		expected_file_hash: "7E21".into(),
+		actual_file_hash:   "3C4D".into(),
+		file_lines:         vec!["one".into(), "two".into()],
+		anchor_lines:       anchors,
+		hash_recognized:    false,
+		tag_origin_paths:   origins,
+	};
+	let offers_resend = |message: &str| message.contains("resend the edit under #3C4D");
+	assert!(offers_resend(&format_mismatch_message(&details(vec![1], Vec::new()))));
+	assert!(!offers_resend(&format_mismatch_message(&details(Vec::new(), Vec::new()))));
+	assert!(!offers_resend(&format_mismatch_message(&details(vec![1], vec!["/w/b.ts".into()]))));
 }
 
 #[test]

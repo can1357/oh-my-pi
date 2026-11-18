@@ -108,7 +108,7 @@ async fn timeout_expires_with_124_and_leaves_no_process() {
 
 	let dir = tempfile::tempdir().unwrap();
 	let file = dir.path().join("pid");
-	let command = format!("timeout 0.2 sh -c 'echo $$ > {}; exec sleep 5'", file.display());
+	let command = format!("timeout 0.2 /bin/sh -c 'echo $$ > {}; exec sleep 5'", file.display());
 	let r = run(&mut s, &command).await;
 	assert_eq!(r.status, 124, "{}", r.stderr);
 	let pid = pid_in(&file).await;
@@ -164,7 +164,7 @@ async fn kill_after_ends_a_command_that_ignores_the_signal() {
 	let dir = tempfile::tempdir().unwrap();
 	let file = dir.path().join("pid");
 	let command = format!(
-		"timeout -k 0.2 0.1 sh -c 'trap \"\" TERM; sleep 5 & echo $! > {}; wait'",
+		"timeout -k 0.2 0.1 /bin/sh -c 'trap \"\" TERM; sleep 5 & echo $! > {}; wait'",
 		file.display()
 	);
 	let r = run(&mut s, &command).await;
@@ -194,7 +194,7 @@ async fn cancel_reaches_the_timed_command() {
 	let dir = tempfile::tempdir().unwrap();
 	let file = dir.path().join("pid");
 	let cancel = CancellationToken::new();
-	let command = format!("timeout 30 sh -c 'echo $$ > {}; exec sleep 30'", file.display());
+	let command = format!("timeout 30 /bin/sh -c 'echo $$ > {}; exec sleep 30'", file.display());
 	let trigger = cancel.clone();
 	let probe = async {
 		let pid = pid_in(&file).await;

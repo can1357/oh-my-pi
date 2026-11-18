@@ -137,7 +137,7 @@ describe("python prelude", () => {
 					session: "test-session",
 					run: null,
 					name: "read",
-					args: { path: "mcp://server/resource:10-14" },
+					args: { path: "mcp://server/resource:raw:10-14" },
 				},
 			]);
 		} finally {

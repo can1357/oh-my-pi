@@ -54,6 +54,7 @@ import ida_lines  # noqa: E402
 import ida_loader  # noqa: E402
 import ida_nalt  # noqa: E402
 import ida_name  # noqa: E402
+import ida_pro  # noqa: E402
 import ida_segment  # noqa: E402
 import ida_typeinf  # noqa: E402
 import ida_ua  # noqa: E402
@@ -83,6 +84,52 @@ _NS_MODULES = (
     ida_loader,
     idautils,
 )
+# IDA 9.5 deprecated the func_t/segment_t pointer APIs (the first call of each prints a
+# DeprecationWarning into exec output) for ea-based ones that older IDA lacks; bind once here.
+if ida_pro.IDA_SDK_VERSION >= 950:
+    _Func = ida_funcs.func_entry_info_t
+
+    def _get_func(ea):
+        info = _Func()
+        return info if ida_funcs.get_func_entry_info(info, ea) else None
+
+    def _getn_func(n):
+        info = _Func()
+        return info if ida_funcs.get_func_entry_info_by_num(info, n) else None
+
+    _set_func_cmt = ida_funcs.set_func_cmt_ea
+
+    def _segments():
+        """(name, start_ea, end_ea, perm, class) per segment."""
+        info = ida_segment.segment_info_t()
+        for n in range(ida_segment.get_segm_qty()):
+            if ida_segment.get_segment_info_by_num(info, n):
+                ea = info.start_ea
+                yield (
+                    ida_segment.get_segment_name(ea),
+                    ea,
+                    info.end_ea,
+                    info.get_perm(),
+                    ida_segment.get_segment_class(ea),
+                )
+
+else:
+    _Func = ida_funcs.func_t
+    _get_func = ida_funcs.get_func
+    _getn_func = ida_funcs.getn_func
+
+    def _set_func_cmt(ea, cmt, repeatable):
+        f = ida_funcs.get_func(ea)
+        return f is not None and ida_funcs.set_func_cmt(f, cmt, repeatable)
+
+    def _segments():
+        """(name, start_ea, end_ea, perm, class) per segment."""
+        for n in range(ida_segment.get_segm_qty()):
+            s = ida_segment.getnseg(n)
+            if s is not None:
+                yield ida_segment.get_segm_name(s), s.start_ea, s.end_ea, s.perm, ida_segment.get_segm_class(s)
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -142,11 +189,11 @@ def resolve(t):
 
 
 def func(t):
-    """Return the ida_funcs.func_t containing the target."""
-    if isinstance(t, ida_funcs.func_t):
+    """The function containing the target (start_ea, end_ea, size()): func_entry_info_t on IDA 9.5+, func_t before."""
+    if isinstance(t, _Func):
         return t
     ea = resolve(t)
-    f = ida_funcs.get_func(ea)
+    f = _get_func(ea)
     if f is None:
         raise LookupError(f"no function at 0x{ea:x}")
     return f
@@ -181,7 +228,7 @@ def pseudocode(t):
     f = func(t)
     header = f"// {ida_funcs.get_func_name(f.start_ea)} @ 0x{f.start_ea:x}-0x{f.end_ea:x}"
     try:
-        body = _db().pseudocode.decompile(f).to_text()
+        body = _db().pseudocode.decompile(f.start_ea).to_text()
     except Exception as e:
         _arm_sigint()
         return _text([header, f"// decompilation failed: {e}; showing disassembly", *_asm_lines(f)])
@@ -196,7 +243,7 @@ def _xrefs_to(ea):
 
 def _xrefs_from(t):
     ea = resolve(t)
-    f = ida_funcs.get_func(ea)
+    f = _get_func(ea)
     sources = idautils.FuncItems(f.start_ea) if f is not None and f.start_ea == ea else (ea,)
     db = _db()
     for src in sources:
@@ -227,7 +274,7 @@ def callers(t):
 
 def _callee_name(x, own):
     if x.is_code:
-        target = ida_funcs.get_func(x.to_ea)
+        target = _get_func(x.to_ea)
         if target is None:
             return name_of(x.to_ea) if x.is_call else None
         if target.start_ea == own.start_ea or (not x.is_call and target.start_ea != x.to_ea):
@@ -247,7 +294,8 @@ def callees(t):
 
 
 def _funcs():
-    return _db().functions.get_all()
+    _db()
+    return (f for f in map(_getn_func, range(ida_funcs.get_func_qty())) if f is not None)
 
 
 def functions(pattern=None):
@@ -317,9 +365,9 @@ def comment(t, text, repeatable=False):
     rpt = bool(repeatable)
     if not ida_bytes.set_cmt(ea, text, rpt):
         raise ValueError(f"comment failed at 0x{ea:x}")
-    f = ida_funcs.get_func(ea)
+    f = _get_func(ea)
     if f is not None and f.start_ea == ea:
-        ida_funcs.set_func_cmt(f, text, rpt)
+        _set_func_cmt(ea, text, rpt)
     return {"ea": _hex(ea)}
 
 
@@ -399,8 +447,8 @@ _HELPERS = (
 # ---------------------------------------------------------------------------
 
 
-def _perm(seg):
-    return "".join(c if seg.perm & bit else "-" for c, bit in (("r", 4), ("w", 2), ("x", 1)))
+def _perm(perm):
+    return "".join(c if perm & bit else "-" for c, bit in (("r", 4), ("w", 2), ("x", 1)))
 
 
 # Neutral names for processor modules whose ids leak the backend.
@@ -409,7 +457,7 @@ _ARCH_NAMES = {"metapc": "x86"}
 
 def _view_overview():
     db = _db()
-    segs = list(db.segments.get_all())
+    segs = list(_segments())
     entries = list(db.entries.get_all())
     funcs = list(_funcs())
     n_imports = sum(1 for _ in db.imports.get_all_imports())
@@ -420,10 +468,8 @@ def _view_overview():
         f"md5 {db.md5} sha256 {db.sha256}",
         f"segments ({len(segs)}):",
     ]
-    for s in segs:
-        lines.append(
-            f"  {ida_segment.get_segm_name(s)} 0x{s.start_ea:x}-0x{s.end_ea:x} {_perm(s)} {ida_segment.get_segm_class(s)}"
-        )
+    for name, start, end, perm, sclass in segs:
+        lines.append(f"  {name} 0x{start:x}-0x{end:x} {_perm(perm)} {sclass}")
     lines.append(f"entry points ({len(entries)}):")
     for e in entries[:_OVERVIEW_ENTRY_LIMIT]:
         lines.append(f"  0x{e.address:x} {e.name}")

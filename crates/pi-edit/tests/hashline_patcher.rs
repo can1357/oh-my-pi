@@ -442,10 +442,6 @@ async fn header_only_input_gets_the_current_tag() {
 			)),
 			"{header}: {error}"
 		);
-		assert!(
-			error.contains(&format!("The current file hashes to #{current}.")),
-			"{header}: {error}"
-		);
 		assert!(writer.requests.lock().is_empty(), "{header}");
 	}
 }
@@ -538,33 +534,50 @@ fn completed_preview_surfaces_the_current_tag_for_an_untagged_section() {
 }
 
 #[tokio::test]
-async fn recovered_rem_reports_authored_and_deleted_paths() {
+async fn missing_path_with_a_known_name_and_tag_is_rejected_not_rebound() {
 	let workspace = common::Workspace::new(EditMode::Hashline);
 	let target = workspace.write("correct/target.ts", "const value = 1;\n");
 	let tag = workspace.snapshot("correct/target.ts", "const value = 1;\n", None);
 	let input = format!("[wrong/target.ts#{tag}]\nREM\n");
-	let outcome = workspace
+	let error = workspace
 		.apply_json(&json!({ "input": input }), &common::DiskWriter::default())
 		.await
-		.expect("recovered delete");
+		.expect_err("a missing header path must not rebind onto another file");
 
-	assert!(!target.exists());
-	let deleted = pi_edit::path_policy::canonical_key(&target);
+	assert!(target.exists());
+	let issued_for = pi_edit::path_policy::canonical_key(&target);
 	assert!(
-		outcome
-			.text
-			.contains(&format!("Deleted {}", deleted.display())),
-		"{}",
-		outcome.text
-	);
-	assert!(
-		outcome.text.contains(&format!(
-			"Warnings:\nPath \"wrong/target.ts\" does not exist; matched its filename and snapshot \
-			 tag #{tag} to {}",
-			deleted.display()
+		error.to_string().contains(&format!(
+			"File not found: wrong/target.ts. Hash #{tag} was issued in this session for {}",
+			issued_for.display()
 		)),
-		"{}",
-		outcome.text
+		"{error}"
+	);
+}
+
+#[tokio::test]
+async fn identical_file_that_never_held_the_tag_is_rejected() {
+	let workspace = common::Workspace::new(EditMode::Hashline);
+	let text = "const shared = 1;\n";
+	let read = workspace.write("wt/x.ts", text);
+	workspace.write("x.ts", text);
+	let tag = workspace.snapshot("wt/x.ts", text, None);
+	let writer = common::DiskWriter::default();
+	let error = workspace
+		.apply_json(
+			&json!({ "input": format!("[x.ts#{tag}]\nPUT 1.=1:\n+const shared = 2;\n") }),
+			&writer,
+		)
+		.await
+		.expect_err("a tag issued only for wt/x.ts must not edit x.ts");
+
+	assert_eq!(workspace.read("x.ts").as_deref(), Some(text));
+	let origin = pi_edit::path_policy::canonical_key(&read);
+	assert!(
+		error
+			.to_string()
+			.contains(&format!("hash #{tag} was issued in this session for {}", origin.display())),
+		"{error}"
 	);
 }
 

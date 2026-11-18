@@ -1377,6 +1377,7 @@ pub struct CustomMessage {
 	pub timestamp: Option<f64>,
 	pub details: Option<Value>,
 	pub attribution: Option<Attribution>,
+	pub exclude_from_context: Option<bool>,
 	/// Every key not decoded into a declared field.
 	pub extra: Map<String, Value>,
 }
@@ -1405,6 +1406,9 @@ impl Serialize for CustomMessage {
 		if let Some(value) = &self.attribution {
 			map.serialize_entry("attribution", value)?;
 		}
+		if let Some(value) = &self.exclude_from_context {
+			map.serialize_entry("excludeFromContext", value)?;
+		}
 		for (key, value) in &self.extra {
 			match key.as_str() {
 				"role" if self.role.is_some() => continue,
@@ -1414,6 +1418,7 @@ impl Serialize for CustomMessage {
 				"timestamp" if self.timestamp.is_some() => continue,
 				"details" if self.details.is_some() => continue,
 				"attribution" if self.attribution.is_some() => continue,
+				"excludeFromContext" if self.exclude_from_context.is_some() => continue,
 				_ => {}
 			}
 			map.serialize_entry(key, value)?;
@@ -1433,6 +1438,7 @@ impl<'de> Deserialize<'de> for CustomMessage {
 			timestamp: take(&mut extra, "timestamp"),
 			details: take(&mut extra, "details"),
 			attribution: take(&mut extra, "attribution"),
+			exclude_from_context: take(&mut extra, "excludeFromContext"),
 			extra,
 		})
 	}
@@ -3136,7 +3142,7 @@ pub struct SessionState {
 	pub message_count: i64,
 	#[serde(rename = "queuedMessageCount", default = "default_session_state_queued_message_count")]
 	pub queued_message_count: i64,
-	/// Background jobs or deliveries can still inject a follow-up and wake the session.
+	/// Background jobs, their deliveries, child agents or queued peer messages can still wake the session.
 	#[serde(rename = "hasPendingAsyncWork", default = "default_session_state_has_pending_async_work")]
 	pub has_pending_async_work: bool,
 	/// Idle with nothing queued or pending; same predicate as `session_settled`.
@@ -3208,6 +3214,17 @@ pub struct BashResult {
 	/// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub trace: Option<Map<String, Value>>,
+	/// Set when the command overlapped another one on the session's persistent shell and ran in a fork of it.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub fork: Option<ShellForkOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShellForkOutcome {
+	/// What the command set carried back into the session's shell; `false`: it stayed in the fork.
+	pub carried: bool,
+	/// It left background jobs running in the fork, where later commands' `jobs`, `wait` and `%N` miss them.
+	pub jobs: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

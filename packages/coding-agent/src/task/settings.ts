@@ -130,7 +130,7 @@ export const cfgWorktreeOnExit = register({
 	id: "worktree.onExit",
 	protocolDefault: ["rpc", "acp"],
 	type: "enum",
-	values: ["keep", "ask", "remove"] as const,
+	values: ["keep", "ask", "remove", "force"] as const,
 	default: "keep",
 	ui: {
 		tab: "tasks",
@@ -145,6 +145,12 @@ export const cfgWorktreeOnExit = register({
 				label: "Remove",
 				description:
 					"Remove clean worktrees; ask when they have uncommitted changes or new commits. Gitignored files (e.g. `.env`) are deleted too",
+			},
+			{
+				value: "force",
+				label: "Force Remove",
+				description:
+					"Remove every worktree without asking, even with uncommitted changes. Uncommitted work, gitignored files (e.g. `.env`), and commits only on a detached HEAD are lost; new commits on the branch are kept",
 			},
 		],
 	},
@@ -333,7 +339,7 @@ export const cfgTaskStructured = register({
 		group: "Subagents",
 		label: "Structured Task Results",
 		description:
-			"Expose outputSchema/schemaMode on the task tool and return subagent results through the yield tool, validated against caller or agent output schemas. Off: task subagents have no yield tool and return their final message as plain text, except agents whose definition sets structured: true. Eval agent()/workpool spawns always keep structured results.",
+			"Expose outputSchema/schemaMode on the task tool and honor agent output schemas; a subagent with a schema returns its result through the yield tool, validated against it. Off: task subagents ignore schemas, except agents whose definition sets structured: true. A subagent without a schema has no yield tool and returns its final message. Eval agent()/workpool spawns always honor schemas.",
 	},
 });
 
@@ -493,9 +499,9 @@ export const cfgTaskEnableLsp = register({
 	ui: {
 		tab: "tasks",
 		group: "Subagents",
-		label: "LSP in Subagents",
+		label: "LSP Edit Checks in Subagents",
 		description:
-			"Allow subagents spawned via the task tool to use the lsp tool. Off by default to keep subagents cheap; enable when LSP-aware delegation is worth the extra tokens.",
+			"Run LSP formatting and diagnostics on subagent edits. Off by default to keep subagents cheap; the lsp tool stays available to them either way.",
 	},
 });
 
@@ -680,6 +686,13 @@ export const cfgTaskAgentAccountPools = register({
 
 export const cfgTaskAgentPrewalk = register({
 	id: "task.agentPrewalk",
+	protocolDefault: ["rpc", "acp"],
+	type: "record",
+	default: {} as Record<string, string>,
+});
+
+export const cfgTaskAgentPrewalkAuto = register({
+	id: "task.agentPrewalkAuto",
 	protocolDefault: ["rpc", "acp"],
 	type: "record",
 	default: {} as Record<string, string>,

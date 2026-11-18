@@ -4,9 +4,10 @@
 //! read there. Input aimed at an app the user has used since the session last
 //! read it waits for them to pause, then fails without sending, so the agent
 //! reads the window again before acting; input already being sent stops at the
-//! user's first key or click.
+//! user's first key or click. A takeover brings its target in front of the
+//! user's keyboard, so it first waits until the user has paused in every app.
 use std::{
-	cell::RefCell,
+	cell::{Cell, RefCell},
 	collections::HashMap,
 	marker::PhantomData,
 	rc::Rc,
@@ -16,14 +17,17 @@ use std::{
 
 use parking_lot::Mutex;
 
-use super::{DEADLINE_MARGIN, OperationToken, macos::UserInputMonitor};
-use crate::desktop::error::{CoreResult, DesktopError};
+use super::{DEADLINE_MARGIN, OperationToken, USER_QUIET as QUIET, macos::UserInputMonitor};
+use crate::desktop::{
+	error::{CoreResult, DesktopError},
+	macos::ClickJournal,
+};
 
-/// How long the user leaves an app alone before a read of it shows what they
-/// left there.
-const QUIET: Duration = Duration::from_secs(5);
 const READ_AGAIN: &str =
 	"read the window again (win.ax(), win.observe() or win.screenshot()) before acting on it";
+/// How often a takeover waiting on a key or button the user holds checks
+/// whether they have let go.
+const HELD_POLL: Duration = Duration::from_millis(50);
 
 struct App {
 	name:    String,
@@ -46,21 +50,34 @@ struct Route {
 
 #[derive(Default)]
 struct State {
-	apps:   HashMap<libc::pid_t, App>,
+	apps:       HashMap<libc::pid_t, App>,
 	/// Processes that take input for a watched app's windows, by id. A
 	/// process takes one app's input at a time: the latest route wins.
-	routes: HashMap<libc::pid_t, Route>,
+	routes:     HashMap<libc::pid_t, Route>,
+	/// The user's key presses and clicks, in any app.
+	presses:    u64,
+	/// When the latest of them was.
+	last_press: Option<Instant>,
+}
+
+impl State {
+	fn pressed(&mut self, at: Instant) {
+		self.presses += 1;
+		self.last_press = self.last_press.max(Some(at));
+	}
 }
 
 /// When process `pid` started, or `None` when that cannot be told.
 type Started = fn(libc::pid_t) -> Option<u64>;
 
 /// The user's input into each app this session has read or sent input to,
-/// shared by the tap thread and the session worker.
+/// shared by the tap thread and the session worker, with where the user's
+/// clicks went.
 pub(crate) struct UserInputs(
 	Mutex<State>,
 	/// Tells a route's process from a later one under the same id.
 	Started,
+	Arc<ClickJournal>,
 );
 
 impl Default for UserInputs {
@@ -71,7 +88,11 @@ impl Default for UserInputs {
 
 impl UserInputs {
 	fn new(started: Started) -> Self {
-		Self(Mutex::default(), started)
+		Self(Mutex::default(), started, Arc::default())
+	}
+
+	pub(super) fn clicks(&self) -> &ClickJournal {
+		&self.2
 	}
 
 	/// Starts recording the user's input into `pid`, which started at
@@ -103,6 +124,24 @@ impl UserInputs {
 			let started = (self.1)(input);
 			self.0.lock().routes.insert(input, Route { app, started });
 		}
+	}
+
+	/// The user pressed a key or clicked on their own keyboard or pointer at
+	/// `at`, in whichever app: it holds a takeover back
+	/// ([`Self::pause_before_takeover`]). Keys another program posts do not,
+	/// as they do not stop a takeover's hand-back.
+	pub(super) fn pressed(&self, at: Instant) {
+		self.0.lock().pressed(at);
+	}
+
+	/// The tap started at `at` and has seen none of the user's earlier
+	/// presses, so the HID system's idle time `idle` stands in for the latest
+	/// of them, or the start itself when it cannot be read. That time counts
+	/// input other programs post too, this session's included, so it can hold
+	/// back only a takeover within one quiet period of the start, never admit
+	/// one early.
+	pub(super) fn tap_started(&self, at: Instant, idle: Option<Duration>) {
+		self.pressed(idle.and_then(|idle| at.checked_sub(idle)).unwrap_or(at));
 	}
 
 	/// The user pressed a key or clicked in `pid` at `at`.
@@ -151,17 +190,14 @@ impl UserInputs {
 		now: impl Fn() -> Instant,
 		mut wait: impl FnMut(Duration) -> CoreResult<()>,
 	) -> CoreResult<InputWatch> {
-		let limit = deadline.map_or_else(
-			|| now() + QUIET,
-			|deadline| deadline.checked_sub(DEADLINE_MARGIN).unwrap_or(deadline),
-		);
+		let limit = wait_limit(now(), deadline);
 		loop {
 			let (baseline, unread) =
 				self.0.lock().apps.get(&pid).map_or((0, None), |app| {
 					(app.inputs, app.unread.map(|last| (last, app.name.clone())))
 				});
 			let Some((last, name)) = unread else {
-				return Ok(InputWatch::enter(Arc::clone(self), pid, baseline));
+				return Ok(InputWatch::enter(Arc::clone(self), pid, baseline, deadline));
 			};
 			let now = now();
 			let idle = now.saturating_duration_since(last);
@@ -181,6 +217,53 @@ impl UserInputs {
 			wait((last + QUIET).min(limit).saturating_duration_since(now))?;
 		}
 	}
+
+	/// Before a takeover brings its target in front of the user's keyboard:
+	/// waits until the user has pressed no key and clicked nowhere for
+	/// [`QUIET`], since every key they type once it is there lands in the
+	/// target, and fails without sending anything once `limit` comes first. A
+	/// key or button they still hold (`held`) makes no new presses, so the
+	/// quiet period runs from when it is let go, read every [`HELD_POLL`].
+	/// Returns the press count the takeover compares against
+	/// ([`takeover_admitted`]).
+	fn pause_before_takeover(
+		&self,
+		limit: Instant,
+		now: impl Fn() -> Instant,
+		held: impl Fn() -> bool,
+		mut wait: impl FnMut(Duration) -> CoreResult<()>,
+	) -> CoreResult<u64> {
+		let mut held_at = None;
+		loop {
+			let (presses, last) = {
+				let state = self.0.lock();
+				(state.presses, state.last_press)
+			};
+			let now = now();
+			let holding = held();
+			if holding {
+				held_at = Some(now);
+			}
+			let Some(last) = last.max(held_at) else {
+				return Ok(presses);
+			};
+			let idle = now.saturating_duration_since(last);
+			if idle >= QUIET {
+				return Ok(presses);
+			}
+			if now >= limit {
+				return Err(super::still_active_refusal(idle));
+			}
+			let quiet = (last + QUIET).min(limit).saturating_duration_since(now);
+			wait(if holding { HELD_POLL.min(quiet) } else { quiet })?;
+		}
+	}
+}
+
+/// Shortly before `deadline`, or one quiet period from `now` without one.
+fn wait_limit(now: Instant, deadline: Option<Instant>) -> Instant {
+	deadline
+		.map_or(now + QUIET, |deadline| deadline.checked_sub(DEADLINE_MARGIN).unwrap_or(deadline))
 }
 
 /// What the current thread's input call compares before each key press.
@@ -188,6 +271,10 @@ struct Watch {
 	inputs:   Arc<UserInputs>,
 	pid:      libc::pid_t,
 	baseline: u64,
+	/// When the call must have answered.
+	deadline: Option<Instant>,
+	/// The press count, in any app, when its takeover was admitted.
+	takeover: Cell<Option<u64>>,
 }
 
 thread_local! {
@@ -201,9 +288,15 @@ pub(crate) struct InputWatch {
 }
 
 impl InputWatch {
-	fn enter(inputs: Arc<UserInputs>, pid: libc::pid_t, baseline: u64) -> Self {
-		let previous =
-			WATCH.with_borrow_mut(|current| current.replace(Watch { inputs, pid, baseline }));
+	fn enter(
+		inputs: Arc<UserInputs>,
+		pid: libc::pid_t,
+		baseline: u64,
+		deadline: Option<Instant>,
+	) -> Self {
+		let previous = WATCH.with_borrow_mut(|current| {
+			current.replace(Watch { inputs, pid, baseline, deadline, takeover: Cell::new(None) })
+		});
 		Self { previous, _thread: PhantomData }
 	}
 }
@@ -225,6 +318,12 @@ pub(crate) fn input_goes_to(pid: libc::pid_t) {
 	});
 }
 
+/// Where the user's clicks went, as the current input call's session saw
+/// them; `None` outside an admitted input call.
+pub(in crate::desktop) fn clicks() -> Option<Arc<ClickJournal>> {
+	WATCH.with_borrow(|watch| watch.as_ref().map(|watch| Arc::clone(&watch.inputs.2)))
+}
+
 /// Before a key or pointer press, or an accessibility action or write, of the
 /// current input call: refuses once the user has pressed a key or clicked in
 /// its app since the call was admitted, so at most the press already under way
@@ -243,6 +342,91 @@ pub(crate) fn check_press() -> CoreResult<()> {
 			_ => Ok(()),
 		}
 	})
+}
+
+/// Before the current input call's takeover takes the input lease: waits
+/// until the user has paused in every app
+/// ([`UserInputs::pause_before_takeover`]), at most until shortly before the
+/// call's deadline, or one quiet period without one; cancelling the operation
+/// ends the wait.
+pub(crate) fn admit_takeover() -> CoreResult<()> {
+	admit_takeover_with(Instant::now, crate::desktop::macos::input_held, super::wait, true)
+}
+
+/// [`admit_takeover`] with its clock, held-input reading and wait given.
+/// Without `waits`, as with the input lease already held, it refuses at once
+/// while the user is still active instead of keeping other sessions' input
+/// out while it waits.
+fn admit_takeover_with(
+	now: impl Fn() -> Instant,
+	held: impl Fn() -> bool,
+	wait: impl FnMut(Duration) -> CoreResult<()>,
+	waits: bool,
+) -> CoreResult<()> {
+	let Some((inputs, deadline)) = WATCH.with_borrow(|watch| {
+		watch.as_ref().map(|watch| {
+			watch.takeover.set(None);
+			(Arc::clone(&watch.inputs), watch.deadline)
+		})
+	}) else {
+		return Ok(());
+	};
+	let limit = if waits {
+		wait_limit(now(), deadline)
+	} else {
+		now()
+	};
+	let presses = inputs.pause_before_takeover(limit, now, held, wait)?;
+	WATCH.with_borrow(|watch| {
+		if let Some(watch) = watch {
+			watch.takeover.set(Some(presses));
+		}
+	});
+	Ok(())
+}
+
+/// With the input lease held: whether the user has pressed nothing since
+/// [`admit_takeover`] and holds no key or button. Outside an input call there
+/// is nothing to wait for.
+pub(crate) fn takeover_admitted() -> bool {
+	takeover_admitted_with(crate::desktop::macos::input_held)
+}
+
+fn takeover_admitted_with(held: impl FnOnce() -> bool) -> bool {
+	WATCH.with_borrow(|watch| {
+		watch.as_ref().is_none_or(|watch| {
+			watch
+				.takeover
+				.get()
+				.is_some_and(|presses| presses == watch.inputs.0.lock().presses)
+				&& !held()
+		})
+	})
+}
+
+/// As the current input call's takeover starts, and again just before it
+/// brings its target forward: fails once the user has pressed a key or
+/// clicked since its admission, or holds one. A takeover the worker did not
+/// admit before taking the lease is admitted here without waiting: the lease
+/// is held, so a user still typing refuses it at once.
+pub(crate) fn start_takeover() -> CoreResult<()> {
+	start_takeover_with(Instant::now, crate::desktop::macos::input_held, super::wait)
+}
+
+fn start_takeover_with(
+	now: impl Fn() -> Instant,
+	held: impl Fn() -> bool,
+	wait: impl FnMut(Duration) -> CoreResult<()>,
+) -> CoreResult<()> {
+	match WATCH.with_borrow(|watch| watch.as_ref().map(|watch| watch.takeover.get())) {
+		None => Ok(()),
+		Some(None) => admit_takeover_with(now, held, wait, false),
+		Some(Some(_)) if takeover_admitted_with(&held) => Ok(()),
+		Some(Some(_)) => Err(DesktopError::user_intervened(
+			"the user pressed or is holding a key or button as the takeover was starting, so none \
+			 started; nothing was sent; try again once they pause",
+		)),
+	}
 }
 
 enum Tap {
@@ -275,6 +459,7 @@ impl Listener {
 		if let Tap::Stopped(start) = self.tap
 			&& let Ok(tap) = start(Arc::clone(&self.inputs))
 		{
+			self.inputs.clicks().start();
 			self.tap = Tap::Running(tap);
 		}
 		!matches!(self.tap, Tap::Stopped(_))
@@ -445,6 +630,199 @@ mod tests {
 		assert_eq!(error.code, ErrorCode::UserIntervened);
 		assert_eq!(waits, [Duration::from_millis(1_750)]);
 		assert!(error.message.contains("still using TextEdit"));
+	}
+
+	#[test]
+	fn a_takeover_waits_until_the_user_stops_typing_in_their_own_app() {
+		let inputs = UserInputs::default();
+		let start = Instant::now();
+		let at = |seconds| start + Duration::from_secs(seconds);
+		inputs.touch(7, Some(1), || "Safari".to_string());
+		// Nothing pressed yet: the takeover starts at once.
+		assert!(
+			inputs
+				.pause_before_takeover(at(60), || start, || false, |_| panic!("no wait"))
+				.is_ok()
+		);
+		// The user types on their keyboard in their own app, which the
+		// session never touched.
+		inputs.pressed(at(0));
+		inputs.record(9, at(0));
+		let clock = Cell::new(at(1));
+		let mut waits = Vec::new();
+		inputs
+			.pause_before_takeover(
+				at(60),
+				|| clock.get(),
+				|| false,
+				|duration| {
+					// They type once more while the takeover waits.
+					if waits.is_empty() {
+						inputs.pressed(at(3));
+					}
+					waits.push(duration);
+					clock.update(|v| v + duration);
+					Ok(())
+				},
+			)
+			.unwrap();
+		assert_eq!(waits, [Duration::from_secs(4), Duration::from_secs(3)]);
+		// Their typing elsewhere is not input into the target.
+		assert_eq!(state(&inputs, 7), Some((0, None)));
+	}
+
+	#[test]
+	fn a_takeover_the_user_keeps_typing_through_fails_without_sending() {
+		let inputs = UserInputs::default();
+		let start = Instant::now();
+		inputs.pressed(start);
+		let clock = Cell::new(start + Duration::from_secs(1));
+		let mut waits = Vec::new();
+		let error = inputs
+			.pause_before_takeover(
+				start + Duration::from_secs(3),
+				|| clock.get(),
+				|| false,
+				|duration| {
+					waits.push(duration);
+					clock.update(|v| v + duration);
+					Ok(())
+				},
+			)
+			.unwrap_err();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert_eq!(waits, [Duration::from_secs(2)]);
+		assert!(error.message.contains("still typing"), "{}", error.message);
+		assert!(error.message.contains("nothing was sent"));
+	}
+
+	#[test]
+	fn the_hid_idle_time_stands_in_for_presses_before_the_tap_started() {
+		let start = Instant::now();
+		let at = |seconds| start + Duration::from_secs(seconds);
+		let waits = |idle| {
+			let inputs = UserInputs::default();
+			inputs.tap_started(at(10), idle);
+			let clock = Cell::new(at(10));
+			let mut waits = Vec::new();
+			inputs
+				.pause_before_takeover(
+					at(60),
+					|| clock.get(),
+					|| false,
+					|duration| {
+						waits.push(duration);
+						clock.update(|v| v + duration);
+						Ok(())
+					},
+				)
+				.unwrap();
+			waits
+		};
+		// The user last pressed 2 s before the tap started: 3 s more to wait.
+		assert_eq!(waits(Some(Duration::from_secs(2))), [Duration::from_secs(3)]);
+		// Idle for a minute: the takeover starts at once.
+		assert!(waits(Some(Duration::from_secs(60))).is_empty());
+		// Unreadable: the start itself counts as their latest press.
+		assert_eq!(waits(None), [Duration::from_secs(5)]);
+	}
+
+	#[test]
+	fn a_held_key_or_button_counts_as_input_until_it_is_let_go() {
+		let inputs = UserInputs::default();
+		let start = Instant::now();
+		let at = |millis| start + Duration::from_millis(millis);
+		// Their last press was a minute ago, but they still hold it: no new
+		// presses come, and the takeover waits until 5 s after they let go.
+		inputs.pressed(start);
+		let clock = Cell::new(at(60_000));
+		let held_until = at(61_000);
+		let mut waits = Vec::new();
+		inputs
+			.pause_before_takeover(
+				at(120_000),
+				|| clock.get(),
+				|| clock.get() < held_until,
+				|duration| {
+					waits.push(duration);
+					clock.update(|v| v + duration);
+					Ok(())
+				},
+			)
+			.unwrap();
+		// 5 s after the last reading that saw it held.
+		assert_eq!(clock.get() + HELD_POLL, held_until + QUIET);
+		assert_eq!(waits.len(), 20 + 1);
+		assert!(waits[..20].iter().all(|wait| *wait == HELD_POLL));
+		// Held through the whole call: refused at the limit, nothing sent.
+		let clock = Cell::new(at(0));
+		let error = inputs
+			.pause_before_takeover(
+				at(8_000),
+				|| clock.get(),
+				|| true,
+				|duration| {
+					clock.update(|v| v + duration);
+					Ok(())
+				},
+			)
+			.unwrap_err();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert_eq!(clock.get(), at(8_000));
+		assert!(error.message.contains("holding input"), "{}", error.message);
+		assert!(error.message.contains("nothing was sent"));
+	}
+
+	#[test]
+	fn a_takeover_admitted_before_the_lease_stops_at_a_press_since() {
+		let inputs = Arc::new(UserInputs::default());
+		inputs.touch(7, Some(1), || "Safari".to_string());
+		let admitted = Instant::now();
+		let watch = inputs
+			.admit(7, Some(admitted + Duration::from_millis(400)), || admitted, |_| panic!("no wait"))
+			.unwrap();
+		let free = || false;
+		let start = || start_takeover_with(|| admitted, free, |_| panic!("no wait"));
+		// Before its admission the lease's recheck sends it back to wait.
+		assert!(!takeover_admitted_with(free));
+		admit_takeover_with(|| admitted, free, |_| panic!("no wait"), true).unwrap();
+		assert!(takeover_admitted_with(free));
+		assert!(start().is_ok());
+		// A key or button held since the admission stops it as a press does.
+		assert!(!takeover_admitted_with(|| true));
+		let error = start_takeover_with(|| admitted, || true, |_| panic!("no wait")).unwrap_err();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert!(error.message.contains("holding"), "{}", error.message);
+		// The user types in another app once it was admitted: the second check,
+		// right before the target is brought forward, refuses.
+		inputs.pressed(admitted);
+		assert!(!takeover_admitted_with(free));
+		assert_eq!(start().unwrap_err().code, ErrorCode::UserIntervened);
+		// Admitted again, it waits only until shortly before the call's deadline.
+		let clock = Cell::new(admitted);
+		let mut waits = Vec::new();
+		let error = admit_takeover_with(
+			|| clock.get(),
+			free,
+			|duration| {
+				waits.push(duration);
+				clock.update(|v| v + duration);
+				Ok(())
+			},
+			true,
+		)
+		.unwrap_err();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert_eq!(waits, [Duration::from_millis(150)]);
+		// A takeover the worker did not admit, starting with the lease held,
+		// refuses at once while the user is active rather than waiting.
+		let error = start_takeover_with(|| clock.get(), free, |_| panic!("no wait under the lease"))
+			.unwrap_err();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		drop(watch);
+		// Outside an input call nothing waits, held or not.
+		assert!(admit_takeover_with(|| admitted, || true, |_| panic!("no wait"), true).is_ok());
+		assert!(takeover_admitted_with(|| true));
 	}
 
 	#[test]

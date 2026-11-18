@@ -32,14 +32,9 @@ import {
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
-import {
-	cfgIdaAvailable,
-	EXECUTABLE_SNIFF_BYTES,
-	isExecutableFile,
-	isExecutableHeader,
-	isIdaDatabasePath,
-} from "../ida";
+import { cfgDisasmBackend, DISASM_BACKENDS, isExecutableFile } from "../disasm";
 import { normalizeToLF } from "../edit/normalize";
+import { isRemoteTextWritable, writeRemoteMirror } from "../edit/remote-mirror";
 import { getEditStore, recordFullySeenRows } from "../edit/store";
 import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveContext } from "../internal-urls";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
@@ -64,7 +59,13 @@ import {
 } from "../utils/block-context";
 import { isCpuProfilePath, renderCpuProfile } from "../utils/cpuprofile";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import { loadHeifImageInput, loadImageInput, loadSvgImageInput } from "../utils/image-loading";
+import {
+	loadHeifImageInput,
+	loadImageInput,
+	loadSvgImageInput,
+	loadTranscodedImageInput,
+	parseTranscodedImageMimeType,
+} from "../utils/image-loading";
 import {
 	ImageInputTooLargeError,
 	InvalidImageDataError,
@@ -84,7 +85,7 @@ import {
 	scanConflictLines,
 	scanFileForConflicts,
 } from "./conflict-detect";
-import { executeReadUrl, fetchReadUrl, parseReadUrlTarget } from "./fetch";
+import { executeReadUrl, fetchReadUrl, parseReadUrlTarget, type ReadUrlEntry } from "./fetch";
 import { approvalDirectoryKey } from "./approval-cache";
 import { approvalTargetKey, approvalTargetNamesFile, isApprovalPublicUrl } from "./approval-targets";
 import {
@@ -192,7 +193,7 @@ import {
 	routeReadThroughBridge,
 	trySummarize,
 } from "./read-summary";
-import { parseSqlitePathCandidates } from "./sqlite-reader";
+import { isSqliteFile, parseSqlitePathCandidates } from "./sqlite-reader";
 import { formatBytes, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { getToolConversationState, ToolConversationState } from "./tool-state";
@@ -918,6 +919,48 @@ const kSpotlightWindow = Symbol("read.spotlightWindow");
  */
 const kSpotlightWide = Symbol("read.spotlightWide");
 
+/** Split `text` on `;` outside quotes and `()`/`[]`/`{}` nesting, where a jq filter keeps its own `;`. */
+function splitTopLevelSemicolons(text: string): string[] {
+	const parts: string[] = [];
+	let depth = 0;
+	let quoted = false;
+	let start = 0;
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+		if (quoted) {
+			if (ch === "\\") i++;
+			else if (ch === '"') quoted = false;
+		} else if (ch === '"') quoted = true;
+		else if (ch === "(" || ch === "[" || ch === "{") depth++;
+		else if ((ch === ")" || ch === "]" || ch === "}") && depth > 0) depth--;
+		else if (ch === ";" && depth === 0) {
+			parts.push(text.slice(start, i).trim());
+			start = i + 1;
+		}
+	}
+	parts.push(text.slice(start).trim());
+	return parts.filter(part => part.length > 0);
+}
+
+/**
+ * Split a `;` list whose parts carry `?q=` queries (`a.json?q=.x;b.json?q=.y`) before query routing claims the
+ * rest of the list as one filter. Every part must name an existing file or a routed URL.
+ */
+async function splitQueryPathList(readPath: string, cwd: string): Promise<string[] | null> {
+	if (!readPath.includes("?") || !readPath.includes(";")) return null;
+	if ((await probeLiteralPathExists(readPath, cwd)) !== "missing") return null;
+	const parts = splitTopLevelSemicolons(readPath);
+	if (parts.length < 2) return null;
+	const router = InternalUrlRouter.instance();
+	for (const part of parts) {
+		if (router.canResolve(part)) continue;
+		const query = part.indexOf("?");
+		const filePath = splitPathAndSel(query < 0 ? part : part.slice(0, query)).path;
+		if ((await probeLiteralPathExists(filePath, cwd)) !== "exists") return null;
+	}
+	return parts;
+}
+
 /**
  * A `;`/`,` path list's structure, on its joined result: {@link ReadTool.execute} shapes its parts as blocks of one
  * call and joins them again ({@link joinReadList}).
@@ -1070,8 +1113,8 @@ function repeatReadNotice(
 
 /**
  * Whether `path` takes a trailing `:A-B` line selector: filesystem paths, web
- * URLs and `lines` schemes do; selector-free devices (`xd://`), opaque MCP
- * resources and unregistered schemes would read the tail as part of the URL.
+ * URLs and `lines` schemes do; selector-free schemes (`out://`, `attachment://`),
+ * opaque MCP resources and unregistered schemes would read the tail as part of the URL.
  */
 function acceptsLineSelector(path: string): boolean {
 	const router = InternalUrlRouter.instance();
@@ -1257,7 +1300,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	get description(): string {
 		return prompt.render(readDescription, {
 			IS_HL_MODE: resolveFileDisplayMode(this.session).hashLines,
-			BINARY_VIEWS: cfgIdaAvailable.get(this.session.settings),
+			BINARY_VIEWS: cfgDisasmBackend.get(this.session.settings) !== undefined,
 		});
 	}
 	/**
@@ -1266,7 +1309,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	 */
 	docTopics(): Record<string, string> {
 		return {
-			sources: prompt.render(readSourcesDoc, { BINARY_VIEWS: cfgIdaAvailable.get(this.session.settings) }),
+			sources: prompt.render(readSourcesDoc, {
+				BINARY_VIEWS: cfgDisasmBackend.get(this.session.settings) !== undefined,
+			}),
 			urls: InternalUrlRouter.instance()
 				.reference()
 				.map(line => `- ${line}`)
@@ -1678,7 +1723,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		mimeType: string;
 		imageMetadata: ImageMetadata | null;
 		fileSize: number;
-		imageKind?: "svg" | "heif";
+		imageKind?: "svg" | "heif" | "transcoded";
 		question?: string;
 		questionPath?: string;
 		signal?: AbortSignal;
@@ -1726,7 +1771,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					? await loadSvgImageInput(imageLoadOptions)
 					: imageKind === "heif"
 						? await loadHeifImageInput({ ...imageLoadOptions, detectedMimeType: mimeType }, signal)
-						: await loadImageInput({ ...imageLoadOptions, detectedMimeType: mimeType });
+						: imageKind === "transcoded"
+							? await loadTranscodedImageInput({ ...imageLoadOptions, detectedMimeType: mimeType })
+							: await loadImageInput({ ...imageLoadOptions, detectedMimeType: mimeType });
 			if (!imageInput) {
 				throw new ToolError(
 					imageKind === "svg"
@@ -1842,7 +1889,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// mode keeps CR bytes, so it slices the original segments instead.
 			let collectedLines: string[];
 			let totalFileLines: number;
-			let endsAtTerminalNewline = false;
+			let endsTerminated = false;
 			let prefixLines: Map<number, number> | undefined;
 			let stoppedInRange = false;
 			const maxBytesForRead = Math.max(DEFAULT_MAX_BYTES, maxLines * 512);
@@ -1864,22 +1911,19 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				stoppedInRange =
 					window.stoppedByByteLimit &&
 					rangeStart + collectedLines.length < Math.min(rangeStart + maxLines, totalFileLines);
-				// An open raw range that reaches EOF keeps the file's terminal newline, as single-range reads do.
-				endsAtTerminalNewline =
-					range.endLine === undefined &&
-					window.reachedEof &&
-					window.hasTrailingNewline &&
-					rangeStart + collectedLines.length === totalFileLines;
+				// A raw range keeps its last line's terminator: every line has one but an unterminated final line.
+				endsTerminated =
+					!window.reachedEof || rangeStart + collectedLines.length < totalFileLines || window.hasTrailingNewline;
 			}
 
-			const bound = range.endLine !== undefined ? `${range.startLine}-${range.endLine}` : `${range.startLine}`;
+			const bound = range.endLine !== undefined ? `${range.startLine}-${range.endLine}` : `${range.startLine}-`;
 			if (rangeStart >= totalFileLines) {
 				notices.push(`[Range ${bound} is beyond end of file (${totalFileLines} lines total); skipped]`);
 				continue;
 			}
 			if (stoppedInRange) {
 				const nextLine = range.startLine + collectedLines.length;
-				const rest = range.endLine !== undefined ? `${nextLine}-${range.endLine}` : `${nextLine}`;
+				const rest = range.endLine !== undefined ? `${nextLine}-${range.endLine}` : `${nextLine}-`;
 				notices.push(
 					`[Range ${bound} stopped before line ${nextLine} at the ${formatBytes(maxBytesForRead)} read budget. Use ${selectorBase}:${rest} to continue]`,
 				);
@@ -1913,7 +1957,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					displayLineByNumber.set(range.startLine + i, displayLines[i] ?? "");
 				}
 				if (!fullLines || rawSelector) {
-					const blockText = displayLines.join("\n") + (rawSelector && endsAtTerminalNewline ? "\n" : "");
+					const blockText = displayLines.join("\n") + (rawSelector && endsTerminated ? "\n" : "");
 					blocks.push(formatTextWithMode(blockText, range.startLine, shouldAddHashLines, shouldAddLineNumbers));
 				}
 			}
@@ -1955,7 +1999,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			};
 			outputText = formatLineEntriesWithMode(entries, shouldAddHashLines, shouldAddLineNumbers);
 		} else {
-			outputText = blocks.join(rawSelector ? "\n" : "\n\n…\n\n");
+			// Raw blocks carry their own terminators, so they concatenate to the selected bytes.
+			outputText = blocks.join(rawSelector ? "" : "\n\n…\n\n");
 		}
 		if (shouldAddHashLines && outputText) {
 			const tag = buffered
@@ -2098,6 +2143,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			part => parseReadUrlTarget(part) !== null || InternalUrlRouter.instance().canResolve(part),
 		);
 		if (mixedParts) return this.#readDelimitedParts(mixedParts, signal, toolContext);
+		const queryParts = await splitQueryPathList(readPath, this.session.cwd);
+		if (queryParts) return this.#readDelimitedParts(queryParts, signal, toolContext);
 		// Filesystem-backed reads choose JSON versus image questions after resolving
 		// the literal file and sniffing its content, not from its final extension.
 		// A `local://`/`artifact://` URL is resolved by its handler first, so a question
@@ -2118,15 +2165,30 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			const urlSel = parsedUrlTarget.sel;
 			const urlRaw = isRawSelector(urlSel);
 			if (urlSel.kind === "lines" || urlSel.kind === "tail") {
-				const entry = await fetchReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal, {
-					ensureArtifact: true,
-				});
-				return buildInMemorySelectorResult(this.session, entry.content, urlSel, {
-					details: { ...entry.details },
-					sourceUrl: entry.details.finalUrl,
-					entityLabel: "URL output",
-					immutable: true,
-				});
+				// `…/A8:A1:59` or `?pid=diva2:2075459` names a resource, not line 59 of what precedes the colon.
+				const literal = () => executeReadUrl(this.session, { path: readPath, raw: false }, signal);
+				let entry: ReadUrlEntry;
+				try {
+					entry = await fetchReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal, {
+						ensureArtifact: true,
+					});
+				} catch (error) {
+					if (error instanceof ToolAbortError || signal?.aborted) throw error;
+					return await literal().catch(() => {
+						throw error;
+					});
+				}
+				const selected = () =>
+					buildInMemorySelectorResult(this.session, entry.content, urlSel, {
+						details: { ...entry.details },
+						sourceUrl: entry.details.finalUrl,
+						entityLabel: "URL output",
+						immutable: true,
+					});
+				if (urlSel.kind === "lines" && urlSel.ranges[0].startLine > entry.content.split("\n").length) {
+					return await literal().catch(selected);
+				}
+				return selected();
 			}
 			return executeReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal);
 		}
@@ -2139,11 +2201,20 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (delimitedInternalResult) return delimitedInternalResult;
 
 		let located: LocatedRead | undefined;
-		const normalizedPath = internalRouter.normalize(readPath);
+		let normalizedPath = internalRouter.normalize(readPath);
+		// Eval's read() asks every delegated URL for `:raw`; a scheme that takes no selectors (mcp://) reads whole.
+		const normalizedScheme = extractUriScheme(normalizedPath);
+		const schemeSpec = normalizedScheme ? internalRouter.spec(normalizedScheme) : undefined;
+		const selectorFreeRaw =
+			toolContext?.programmatic === true &&
+			/:raw$/i.test(normalizedPath) &&
+			schemeSpec !== undefined &&
+			schemeSpec.selectors !== "lines";
+		if (selectorFreeRaw) normalizedPath = normalizedPath.slice(0, -":raw".length);
 		if (internalRouter.canResolve(normalizedPath)) {
 			// Reject a malformed peeled selector before any handler resolves the URL.
 			const peeled = internalRouter.split(normalizedPath);
-			const parsed = parseSel(peeled.sel);
+			const parsed: ParsedSelector = selectorFreeRaw ? { kind: "raw" } : parseSel(peeled.sel);
 			if (peeled.sel !== undefined && parsed.kind === "none") {
 				throw new ToolError(
 					`Invalid selector ':${peeled.sel}' on '${peeled.path}'. Use :N, :N-M, :N+K, :N- (open-ended), :-N (last N lines), a comma-separated list of ranges, :raw, :img for SVG rendering, or a range combined with raw (e.g. :raw:50-100).`,
@@ -2179,7 +2250,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				}
 				if (target.kind === "resource") {
 					try {
-						return await this.#handleInternalUrl(url, target.spec, parsed, question, signal);
+						return await this.#handleInternalUrl(
+							url,
+							target.spec,
+							parsed,
+							question,
+							signal,
+							toolContext?.programmatic === true,
+						);
 					} catch (error) {
 						// An opaque `name:rest` that no MCP server advertises is most likely a plain
 						// path (`Dockerfile:5`), so read it as one instead of reporting an MCP miss.
@@ -2262,6 +2340,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		} = options;
 		let { question } = options;
 		const rawImages = toolContext?.rawImages === true;
+		const programmatic = toolContext?.programmatic === true;
 		const immutable = located?.spec.immutable === true;
 		const displayMode = resolveFileDisplayMode(this.session, { immutable });
 		// In-body continuation hints name the URL for located reads, so paging stays on the URL.
@@ -2302,6 +2381,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					archiveSubPath.sel,
 					{ ...archivePath, archiveSubPath: archiveSubPath.path },
 					options => this.#readPdfPageScreenshot(options),
+					async options => {
+						const { content, details, sourcePath } = await this.#loadImageContent(options);
+						return toolResult(details).content(content).sourcePath(sourcePath).done();
+					},
 					signal,
 				);
 			}
@@ -2342,8 +2425,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 
 			// `bin:main`, `bin:imports`, `bin:main:10-40`: an executable/IDB prefix
-			// routes to an IDA view; `:raw` keeps the byte-verbatim escape hatch.
-			if (question === undefined) {
+			// routes to a disassembler view; `:raw` keeps the byte-verbatim escape hatch.
+			// Video frame selectors (`:0`) are no line selectors, and a video is no executable.
+			if (question === undefined && !isVideoPath(literalSplit.path)) {
 				const binaryParsed = parseSel(literalSplit.sel);
 				if (!isRawSelector(binaryParsed)) {
 					const binaryView = await resolveBinaryViewPath(this.session, literalSplit.path);
@@ -2391,7 +2475,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 			// A located file vanished after routing: the handler owns the canonical not-found error.
 			if (located && isNotFoundError(error)) {
-				return this.#handleInternalUrl(located.url, located.spec, parsed, question, signal);
+				return this.#handleInternalUrl(located.url, located.spec, parsed, question, signal, programmatic);
 			}
 			if (isNotFoundError(error)) {
 				// Attempt unique suffix resolution before falling back to the approved-plan
@@ -2457,7 +2541,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (isDirectory) {
 			if (question !== undefined) throw new ToolError(IMAGE_QUESTION_SELECTOR_ERROR);
 			// A located directory lists through its handler, which names entries by URL.
-			if (located) return this.#handleInternalUrl(located.url, located.spec, parsed, undefined, signal);
+			if (located)
+				return this.#handleInternalUrl(located.url, located.spec, parsed, undefined, signal, programmatic);
 			if (isMultiRange(parsed)) {
 				throw new ToolError("Multi-range line selectors are not supported for directory listings.");
 			}
@@ -2489,7 +2574,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		// Located files are often large session storage (spilled tool output): a bare
 		// `:raw` read inlines one only below the budget; bigger ones page with ranges.
-		if (located && !located.spec.unbounded && parsed.kind === "raw" && fileSize > MAX_URL_RAW_INLINE_BYTES) {
+		if (
+			located &&
+			!located.spec.unbounded &&
+			!programmatic &&
+			parsed.kind === "raw" &&
+			fileSize > MAX_URL_RAW_INLINE_BYTES
+		) {
 			return toolResult<ReadToolDetails>({ resolvedPath: absolutePath })
 				.text(formatLocatedFileNotice(located.url, absolutePath, fileSize, true))
 				.done();
@@ -2501,6 +2592,19 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			ternShowsMedia(absolutePath)
 		) {
 			media.path = absolutePath;
+		}
+
+		// Metadata inspection precedes whole-file snapshots and never starts analysis.
+		// Raw/image and speculative reads retain their existing safety/fallback routes.
+		if (
+			question === undefined &&
+			!isRawSelector(parsed) &&
+			parsed.kind !== "image" &&
+			lexicalAbsolutePath === undefined &&
+			(DISASM_BACKENDS.ida.isDatabasePath(absolutePath) || (await isExecutableFile(absolutePath)))
+		) {
+			const backend = cfgDisasmBackend.get(this.session.settings);
+			return readBinary(this.session, { backend, absolutePath, view: "" }, parsed, signal);
 		}
 
 		const ext = path.extname(renderAbsolutePath).toLowerCase();
@@ -2521,6 +2625,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const mimeType = imageMetadata?.mimeType;
 		// HEIC, AVIF and other HEIF stills reach the model decoded by ffmpeg instead of as binary.
 		const heifMimeType = imageHeader && !mimeType ? parseHeifImageMimeType(imageHeader) : null;
+		// BMP and TIFF reach the model transcoded to PNG.
+		const transcodedMimeType =
+			imageHeader && !mimeType && !heifMimeType ? parseTranscodedImageMimeType(imageHeader) : null;
 		const resolvedDisplayPath = located?.url ?? formatPathRelativeToCwd(renderAbsolutePath, this.session.cwd);
 		const shouldConvertWithMarkit = CONVERTIBLE_EXTENSIONS.has(ext);
 		// Profiler reports (macOS `sample` call trees, V8 `.cpuprofile` JSON):
@@ -2601,6 +2708,18 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				questionPath,
 				signal,
 			}));
+		} else if (transcodedMimeType) {
+			({ content, details, sourcePath } = await this.#loadImageContent({
+				readPath,
+				absolutePath,
+				mimeType: transcodedMimeType,
+				imageMetadata: null,
+				fileSize,
+				imageKind: "transcoded",
+				question,
+				questionPath,
+				signal,
+			}));
 		} else if (question !== undefined) {
 			throw new ToolError(IMAGE_QUESTION_SELECTOR_ERROR);
 		} else if (renderAbsolutePath.toLowerCase().endsWith(".ipynb") && !isRawSelector(parsed)) {
@@ -2655,21 +2774,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				(wholeFileBytes
 					? isProbablyBinaryHeader(wholeFileBytes.subarray(0, BINARY_SNIFF_BYTES))
 					: await isProbablyBinary(absolutePath));
-			// Executables and IDBs open in IDA instead of being refused. Speculative
-			// reads (lexicalAbsolutePath set) never launch IDA; they fall back to an
-			// ordinary execution that does.
-			if (
-				looksBinary &&
-				lexicalAbsolutePath === undefined &&
-				cfgIdaAvailable.get(this.session.settings) &&
-				(isIdaDatabasePath(absolutePath) ||
-					(wholeFileBytes
-						? isExecutableHeader(wholeFileBytes.subarray(0, EXECUTABLE_SNIFF_BYTES))
-						: await isExecutableFile(absolutePath)))
-			) {
-				return readBinary(this.session, { absolutePath, view: "" }, parsed, signal);
-			}
 			if (looksBinary) {
+				// A database without a `.db`/`.sqlite` name (`state.vscdb`, Chrome's `History`) lists its tables.
+				if (parsed.kind === "none" && (await isSqliteFile(absolutePath))) {
+					return readSqlite({ absolutePath, sqliteSubPath: "", queryString: "", suffixResolution }, signal);
+				}
 				return toolResult<ReadToolDetails>({ resolvedPath: renderAbsolutePath, suffixResolution })
 					.text(
 						prependSuffixResolutionNotice(
@@ -2685,7 +2794,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			if (buffered) onBufferedFile?.(buffered.bytes);
 
 			// Unbounded schemes (instruction documents) read whole: no summary, no result limits.
-			if (located?.spec.unbounded) {
+			// So does a program's `:raw` read: it parses the bytes, so a page or a cut line would corrupt them.
+			if (located?.spec.unbounded || (programmatic && isRawSelector(parsed))) {
 				const text = buffered?.strippedText ?? (await Bun.file(absolutePath).text());
 				return buildInMemorySelectorResult(this.session, text, parsed, {
 					details: { resolvedPath: renderAbsolutePath },
@@ -2931,7 +3041,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						const suggestion =
 							totalFileLines === 0
 								? "The file is empty."
-								: `Use ${selectorBase}:1 to read from the start, or ${selectorBase}:${totalFileLines} to read the last line.`;
+								: `Use ${selectorBase}:1- to read from the start, or ${selectorBase}:${totalFileLines} to read the last line.`;
 						const boundsDetails: ReadToolDetails = {
 							resolvedPath: renderAbsolutePath,
 							suffixResolution,
@@ -2980,12 +3090,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const displayedEndLine = startLineDisplay + Math.max(0, displayLines.length - 1);
 
 					let selectedContent = displayLines.join("\n");
+					// Raw output keeps the last line's terminator, so consecutive ranges concatenate to the file:
+					// every line has one but an unterminated final line.
 					if (
 						rawSelector &&
-						limit === undefined &&
-						reachedEof &&
-						hasTrailingNewline &&
-						startLine + displayLines.length === totalFileLines
+						displayLines.length > 0 &&
+						(!reachedEof || startLine + displayLines.length < totalFileLines || hasTrailingNewline)
 					) {
 						selectedContent += "\n";
 					}
@@ -3172,7 +3282,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						} else if (!rawSelector || limit === undefined || userLimitedLines < limit) {
 							outputText += `\n\n[More lines in file (${formatBytes(
 								fileSize,
-							)} total; not scanned to EOF). Use ${selectorBase}:${nextOffset} to continue]`;
+							)} total; not scanned to EOF). Use ${selectorBase}:${nextOffset}- to continue]`;
 						}
 						details = {};
 						sourcePath = renderAbsolutePath;
@@ -3204,7 +3314,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						outputText = formatBracketAwareText() ?? formatText(selectedContent, startLineDisplay);
 						outputText += `\n\n[${
 							totalFileLines - (startLine + userLimitedLines)
-						} more lines in file. Use ${selectorBase}:${nextOffset} to continue]`;
+						} more lines in file. Use ${selectorBase}:${nextOffset}- to continue]`;
 						details = {};
 						sourcePath = renderAbsolutePath;
 					} else {
@@ -3419,6 +3529,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		parsedSel: ParsedSelector,
 		question: string | undefined,
 		signal?: AbortSignal,
+		programmatic = false,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		if (parsedSel.kind === "image") {
 			// A file-backed URL that locate deferred to a remote resolve (an unknown skill:// while
@@ -3446,13 +3557,20 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			return toolResult(details).text(resource.content).sourceInternal(url).done();
 		}
 
+		// A remote file `edit` can patch is tagged through its local mirror, under its URL.
+		const mirror =
+			isRemoteTextWritable(spec) && !resource.isDirectory && resource.immutable !== true
+				? await writeRemoteMirror(url, resource.content)
+				: undefined;
 		return buildInMemorySelectorResult(this.session, resource.content, parsedSel, {
 			details,
-			sourcePath: resource.sourcePath,
+			sourcePath: mirror ?? resource.sourcePath,
+			hashlinePath: mirror ? url : undefined,
 			sourceStartLine: resource.sourceStartLine,
 			sourceInternal: url,
 			entityLabel: "resource",
-			ignoreResultLimits: resource.unbounded ?? spec.unbounded === true,
+			ignoreResultLimits:
+				(resource.unbounded ?? spec.unbounded === true) || (programmatic && isRawSelector(parsedSel)),
 			immutable: resource.immutable,
 		});
 	}
@@ -3509,7 +3627,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				const suggestion =
 					allLines.length === 0
 						? "The listing is empty."
-						: `Use :1 to read from the start, or :${allLines.length} to read the last line.`;
+						: `Use :1- to read from the start, or :${allLines.length} to read the last line.`;
 				return toolResult(details)
 					.text(`Line ${start + 1} is beyond end of listing (${allLines.length} lines total). ${suggestion}`)
 					.sourcePath(tree.rootPath)
@@ -3521,7 +3639,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			let text = sliced;
 			if (end < allLines.length) {
 				const remaining = allLines.length - end;
-				text += `\n\n[${remaining} more lines in listing. Use :${end + 1} to continue]`;
+				text += `\n\n[${remaining} more lines in listing. Use :${end + 1}- to continue]`;
 			}
 			return resultBuilder.text(text).done();
 		}

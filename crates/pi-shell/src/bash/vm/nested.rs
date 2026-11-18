@@ -46,7 +46,7 @@ fn st(vp: &mut Vproc) -> &mut ExecState {
 }
 
 /// Whether `vp` is a nested shell's own vproc (not one of its subshells).
-fn is_nested_root(store: &mut dyn StateStore, vp: &Vproc) -> bool {
+pub(super) fn is_nested_root(store: &mut dyn StateStore, vp: &Vproc) -> bool {
 	matches!(
 		state::record(store, vp, Key::Misc(MiscKey::NestedShell)),
 		Ok(Some(Record::Misc(v))) if v.as_slice() == vp.vpid.0.to_string().as_bytes()
@@ -113,14 +113,28 @@ pub fn start(
 		return None;
 	}
 	let pairs = env_pairs(env);
-	let dollar0 = args.dollar0_in(&pairs);
+	let mut dollar0 = args.dollar0_in(&pairs);
 	// What the shell reads: `-c`, the script (bash's `open_shell_script`
 	// messages and statuses) or its standard input.
 	let (src, stdin, origin) = match &args.input {
 		Input::Command(cmd) => (cmd.clone(), false, "c"),
 		Input::Stdin => (BString::default(), true, "s"),
 		Input::Script(name) => {
-			let path = probe::absolute(&vp.cwd, name);
+			let mut path = probe::absolute(&vp.cwd, name);
+			// A `scheme://` script that is an alias of a host file runs as
+			// that file: `$0` is a path the script can take the directory of
+			// and hand to any program (`. "$(dirname "$0")/lib.sh"`). One the
+			// filesystem only serves is read through it, `$0` the URL.
+			if crate::bash::fs::url_root_len(&path).is_some() {
+				match command_probe(k, cx, vp, &Probe::Backing { path: path.clone() }) {
+					Err(key) => return Some(Flow::Block(key)),
+					Ok(ProbeResult::Path(Some(file))) => {
+						dollar0.clone_from(&file);
+						path = file;
+					},
+					Ok(_) => {},
+				}
+			}
 			match command_probe(k, cx, vp, &Probe::Read { path }) {
 				Err(key) => return Some(Flow::Block(key)),
 				Ok(ProbeResult::Bytes(Ok(text))) => {
@@ -416,6 +430,11 @@ fn fresh_shell(
 		})
 	};
 	for (name, var, forced) in values {
+		// bash leaves `HOME` unset when the environment has none (`env -i
+		// bash -c …`, `env -u HOME sh -c …`); zsh sets it.
+		if name == b"HOME" && !zsh {
+			continue;
+		}
 		if forced || image.var(name).is_none() {
 			image.set_var(name, Some(var));
 		}

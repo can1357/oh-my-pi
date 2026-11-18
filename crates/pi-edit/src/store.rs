@@ -1,7 +1,7 @@
 //! Session-scoped snapshots, clipboard registers, and no-op loop state.
 
 use std::{
-	collections::{BTreeSet, HashMap},
+	collections::{BTreeSet, HashMap, VecDeque},
 	path::{Path, PathBuf},
 	sync::{Arc, LazyLock},
 };
@@ -18,10 +18,17 @@ pub const DEFAULT_MAX_VERSIONS_PER_PATH: usize = 4;
 /// bytes. Hash-map buckets, allocator rounding, and caller-held snapshots are
 /// outside this budget.
 pub const DEFAULT_MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
-/// Files larger than this are never snapshotted from disk.
+/// Files larger than this are never snapshotted from disk: they get a tag
+/// (up to [`MAX_TAGGED_FILE_BYTES`]) but no retained text.
 pub const MAX_SNAPSHOT_FILE_BYTES: u64 = 4 * 1024 * 1024;
+/// Files larger than this get no tag at all: hashing them on every read
+/// costs more than anchored edits on them are worth.
+pub const MAX_TAGGED_FILE_BYTES: u64 = 64 * 1024 * 1024;
 /// Consecutive identical no-ops before the guard escalates.
 pub const NOOP_HARD_LIMIT: u32 = 3;
+/// Displayed-line ranges kept, across all evicted versions, so a version
+/// recorded again after eviction regains what the session displayed of it.
+const MAX_RETIRED_RANGES: usize = 64 * 1024;
 /// Added plus removed lines past which a version change stops aligning the two
 /// texts to carry seen lines (a formatter pass, a wholesale rewrite); only the
 /// unchanged leading lines, and trailing ones when the line count holds, carry.
@@ -173,9 +180,24 @@ impl PathHistory {
 	}
 }
 
+/// Provenance of an evicted version: what the session displayed of one exact
+/// text, kept after its text is dropped. Recording that text again (a re-read
+/// after eviction) restores the lines instead of starting from the new
+/// display alone, which would narrow what earlier reads showed.
+#[derive(Clone)]
+struct RetiredProvenance {
+	path:      PathBuf,
+	/// 64-bit hash of the full text; the 16-bit tag is too weak to key on.
+	text_hash: u64,
+	/// Displayed lines as inclusive ranges.
+	seen:      Vec<(u32, u32)>,
+}
+
 #[derive(Clone)]
 struct StoreState {
 	histories:       HashMap<PathBuf, PathHistory>,
+	retired:         VecDeque<RetiredProvenance>,
+	retired_ranges:  usize,
 	clipboard:       Clipboard,
 	noop:            HashMap<PathBuf, (u64, u32)>,
 	clock:           u64,
@@ -189,6 +211,8 @@ impl Default for StoreState {
 	fn default() -> Self {
 		Self {
 			histories:       HashMap::new(),
+			retired:         VecDeque::new(),
+			retired_ranges:  0,
 			clipboard:       Clipboard::default(),
 			noop:            HashMap::new(),
 			clock:           0,
@@ -263,6 +287,7 @@ impl EditStore {
 		state.clock = state.clock.wrapping_add(1);
 		let touched = state.clock;
 		let max_versions = state.max_versions;
+		let restored = take_retired(&mut state, path, text);
 		let mut previous_bytes = 0;
 		let entry = state.histories.entry(path.to_owned());
 		let path_bytes = entry.key().capacity();
@@ -294,6 +319,7 @@ impl EditStore {
 			None
 		};
 		if let Some(stored) = stored {
+			merge_seen(stored, restored.as_deref());
 			merge_seen(stored, seen_lines);
 			if parent.is_some() && !carried.is_empty() {
 				merge_seen(stored, Some(&carried));
@@ -343,16 +369,22 @@ impl EditStore {
 	}
 
 	/// Read, normalize, and record a file if it is readable and at most 4 MiB.
+	///
+	/// A larger file (up to [`MAX_TAGGED_FILE_BYTES`]) only gets its tag: no
+	/// text or provenance is retained, so an edit under that tag applies while
+	/// the live file still hashes to it, with no stale-tag recovery and no
+	/// seen-line check beyond the display column cap.
 	pub fn record_file(&self, absolute: &Path, seen_lines: Option<&[u32]>) -> Option<String> {
-		if std::fs::metadata(absolute).ok()?.len() > MAX_SNAPSHOT_FILE_BYTES {
+		let size = std::fs::metadata(absolute).ok()?.len();
+		if size > MAX_TAGGED_FILE_BYTES {
 			return None;
 		}
 		let raw = std::fs::read_to_string(absolute).ok()?;
-		if raw.len() as u64 > MAX_SNAPSHOT_FILE_BYTES {
-			return None;
-		}
 		let (_, without_bom) = crate::text::strip_bom(&raw);
 		let normalized = crate::text::normalize_to_lf(without_bom);
+		if raw.len() as u64 > MAX_SNAPSHOT_FILE_BYTES {
+			return Some(file_hash(&normalized));
+		}
 		let key = crate::path_policy::canonical_key(absolute);
 		Some(self.record(&key, &normalized, seen_lines))
 	}
@@ -466,6 +498,15 @@ impl EditStore {
 		if let Some((path, history)) = state.histories.remove_entry(path) {
 			state.retained_bytes -= history.retained_bytes(path.capacity());
 		}
+		let mut dropped = 0;
+		state.retired.retain(|retired| {
+			let keep = retired.path != path;
+			if !keep {
+				dropped += retired.seen.len();
+			}
+			keep
+		});
+		state.retired_ranges -= dropped;
 	}
 
 	/// Move source history and provenance to a destination path.
@@ -535,8 +576,20 @@ impl EditStore {
 
 /// Union displayed lines into a version; held-back carried lines join once the
 /// set restricts anchors.
+///
+/// An empty set is authored content (a `write`): the model knows every line,
+/// so a later partial display of the same content must not narrow it to the
+/// rows that display showed.
 fn merge_seen(stored: &mut StoredSnapshot, lines: Option<&[u32]>) {
 	let Some(lines) = lines else { return };
+	if stored
+		.snapshot
+		.seen_lines
+		.as_ref()
+		.is_some_and(|seen| seen.is_empty())
+	{
+		return;
+	}
 	// Copies the set only while a lookup still holds the previous version.
 	let seen = Arc::make_mut(stored.snapshot.seen_lines.get_or_insert_default());
 	seen.extend(lines.iter().copied());
@@ -546,14 +599,16 @@ fn merge_seen(stored: &mut StoredSnapshot, lines: Option<&[u32]>) {
 }
 
 /// Credit a version with lines carried from the version it replaced: into a
-/// restricted seen set directly, held back on an unrestricted one.
+/// restricted seen set directly, held back on a version with no provenance
+/// yet, dropped on authored content (an empty set), which stays unrestricted.
 fn carry_into(stored: &mut StoredSnapshot, carried: Vec<u32>) {
 	if carried.is_empty() {
 		return;
 	}
 	match stored.snapshot.seen_lines.as_mut() {
 		Some(seen) if !seen.is_empty() => Arc::make_mut(seen).extend(carried),
-		_ => {
+		Some(_) => {},
+		None => {
 			stored.carried.extend(carried);
 			stored.carried.sort_unstable();
 			stored.carried.dedup();
@@ -638,8 +693,67 @@ fn evict(state: &mut StoreState) {
 		};
 		if let Some((path, history)) = state.histories.remove_entry(&oldest) {
 			state.retained_bytes -= history.retained_bytes(path.capacity());
+			retire(state, &path, &history);
 		}
 	}
+}
+
+/// Keep what the session displayed of each version of an evicted history.
+fn retire(state: &mut StoreState, path: &Path, history: &PathHistory) {
+	for version in &history.versions {
+		let Some(seen) = version
+			.snapshot
+			.seen_lines
+			.as_ref()
+			.filter(|seen| !seen.is_empty())
+		else {
+			continue;
+		};
+		let mut ranges: Vec<(u32, u32)> = Vec::new();
+		for &line in seen.iter() {
+			match ranges.last_mut() {
+				Some((_, end)) if *end + 1 == line => *end = line,
+				_ => ranges.push((line, line)),
+			}
+		}
+		if ranges.len() > MAX_RETIRED_RANGES {
+			continue;
+		}
+		state.retired_ranges += ranges.len();
+		state.retired.push_back(RetiredProvenance {
+			path:      path.to_owned(),
+			text_hash: xxh64(version.snapshot.text.as_bytes(), 0),
+			seen:      ranges,
+		});
+	}
+	while state.retired_ranges > MAX_RETIRED_RANGES {
+		let Some(oldest) = state.retired.pop_front() else {
+			break;
+		};
+		state.retired_ranges -= oldest.seen.len();
+	}
+}
+
+/// Displayed lines an evicted version of exactly `text` at `path` kept, taken
+/// out of the retired list.
+fn take_retired(state: &mut StoreState, path: &Path, text: &str) -> Option<Vec<u32>> {
+	if !state.retired.iter().any(|retired| retired.path == path) {
+		return None;
+	}
+	let text_hash = xxh64(text.as_bytes(), 0);
+	let index = state
+		.retired
+		.iter()
+		.position(|retired| retired.path == path && retired.text_hash == text_hash)?;
+	let retired = state.retired.remove(index)?;
+	state.retired_ranges -= retired.seen.len();
+	Some(
+		retired
+			.seen
+			.into_iter()
+			.flat_map(|(start, end)| start..=end)
+			.collect(),
+	)
 }
 
 #[cfg(test)]
@@ -736,18 +850,53 @@ mod tests {
 	}
 
 	#[test]
-	fn unrestricted_version_holds_carried_lines_until_it_is_restricted() {
+	fn version_without_provenance_holds_carried_lines_until_it_is_restricted() {
 		let store = EditStore::new();
 		let path = Path::new("f.txt");
 		store.record(path, &lines(10, |_| None), Some(&[5]));
 		let changed = lines(10, |n| (n == 9).then(|| "line NINE".into()));
-		let tag = store.record(path, &changed, Some(&[]));
+		let tag = store.record(path, &changed, None);
 		assert!(
-			store.head(path).unwrap().seen_lines.unwrap().is_empty(),
-			"carrying must not restrict an unrestricted version"
+			store.head(path).unwrap().seen_lines.is_none(),
+			"carrying must not restrict a version before it is displayed"
 		);
 		store.record_seen_lines(path, &tag, &[9]);
 		assert_eq!(*store.head(path).unwrap().seen_lines.unwrap(), BTreeSet::from([5, 9]));
+	}
+
+	#[test]
+	fn rereading_an_evicted_version_restores_what_earlier_reads_displayed() {
+		let store = EditStore::with_limits(1, 4, DEFAULT_MAX_TOTAL_BYTES);
+		let path = Path::new("read.txt");
+		let text = lines(100, |_| None);
+		store.record(path, &text, Some(&(1..=60).collect::<Vec<_>>()));
+		store.record(Path::new("other.txt"), "other", Some(&[1]));
+		assert!(store.head(path).is_none(), "the one-path limit evicts read.txt");
+		store.record(path, &text, Some(&[90]));
+		let seen = store.head(path).unwrap().seen_lines.unwrap();
+		assert!(seen.contains(&1) && seen.contains(&60) && seen.contains(&90));
+		assert!(!seen.contains(&61));
+
+		let changed = lines(100, |n| (n == 5).then(|| "line FIVE".into()));
+		store.record(Path::new("other.txt"), "other", Some(&[1]));
+		store.record(path, &changed, Some(&[90]));
+		assert_eq!(
+			*store.head(path).unwrap().seen_lines.unwrap(),
+			BTreeSet::from([90]),
+			"other content regains nothing"
+		);
+	}
+
+	#[test]
+	fn authored_version_stays_unrestricted_after_a_partial_display() {
+		let store = EditStore::new();
+		let path = Path::new("f.txt");
+		store.record(path, &lines(10, |_| None), Some(&[5]));
+		let written = lines(10, |n| (n == 9).then(|| "line NINE".into()));
+		let tag = store.record(path, &written, Some(&[]));
+		store.record_seen_lines(path, &tag, &[2, 3]);
+		store.record(path, &written, Some(&[4]));
+		assert!(store.head(path).unwrap().seen_lines.unwrap().is_empty());
 	}
 
 	#[test]
@@ -988,11 +1137,26 @@ mod tests {
 	}
 
 	#[test]
-	fn oversized_file_is_not_read() {
+	fn oversized_file_is_tagged_without_a_snapshot() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("large.txt");
+		let text = "row\n".repeat(MAX_SNAPSHOT_FILE_BYTES as usize / 4 + 1);
+		std::fs::write(&path, &text).unwrap();
+		let store = EditStore::new();
+		assert_eq!(store.record_file(&path, Some(&[1])), Some(file_hash(&text)));
+		assert!(
+			store
+				.head(&crate::path_policy::canonical_key(&path))
+				.is_none()
+		);
+	}
+
+	#[test]
+	fn file_past_the_tag_limit_is_not_read() {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("large");
 		let file = std::fs::File::create(&path).unwrap();
-		file.set_len(MAX_SNAPSHOT_FILE_BYTES + 1).unwrap();
+		file.set_len(MAX_TAGGED_FILE_BYTES + 1).unwrap();
 		assert!(EditStore::new().record_file(&path, None).is_none());
 	}
 }
