@@ -187,6 +187,12 @@
 - TTSR rules that cannot interrupt streaming are evaluated at the end of the relevant response, reasoning, or tool call, reducing unnecessary work while preserving matches and reminders.
 - Eval `completion()` now accepts user-tagged model agents, such as models pinned with `^model`, and uses their tagged effort level.
 - `read` recognizes SQLite-backed `.i64` and `.idb` files as IDA databases and reports disassembler-backend mismatches clearly.
+- Cache warming refreshes first-party Anthropic entries with a `max_tokens: 0` pre-warm that bills no output, replaying for the rest of the session where the endpoint rejects it, and prices replays with the output this session's replays were actually billed
+- Task subagents keep their prompt cache warm through long tool calls (`streaming` mode; still off when `providers.cacheWarming` is `off`)
+- Skill descriptions and MCP namespace hints are generated once per machine instead of once per omp process: while one window asks the model, the others wait for its answer and their progress rows follow along
+- Switching models keeps your thinking level, moving it only as far as the new model's effort ladder requires; a model's own default level now applies only when no level is set, and picking a model no longer borrows the level of a role that names it (quick-role picks still apply their role's level)
+- A reply wait or a subagent's wait for its parent blocks up to the session's prompt-cache lifetime less a minute (4m to 30m) once it is back-to-back, instead of always 4m
+- Isolated the `antigravity-cli` ACP workspace directory by default and added `providers.antigravity-cli.isolateWorkspace` (`PI_AGY_ISOLATE_WORKSPACE`) to opt out when debugging native `agy` workspace behavior ([#19328](https://github.com/can1357/oh-my-pi/pull/19328) by [@0xprincess](https://github.com/0xprincess))
 
 ### Fixed
 
@@ -518,9 +524,6 @@
 ### Removed
 
 - Hashline no longer re-indents replacement bodies that omit their base indent
-### Changed
-
-- Isolated the `antigravity-cli` ACP workspace directory by default and added `providers.antigravity-cli.isolateWorkspace` (`PI_AGY_ISOLATE_WORKSPACE`) to opt out when debugging native `agy` workspace behavior ([#19328](https://github.com/can1357/oh-my-pi/pull/19328) by [@0xprincess](https://github.com/0xprincess))
 
 ## [18.22.2] - 2026-11-18
 
