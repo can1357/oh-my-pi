@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.22.2] - 2026-11-18
+
 ### Added
 
 - `TtyWriter` now works on Windows consoles: it writes off the JS thread in 16 KiB `WriteFile` chunks, restores the UTF-8 console code pages that child processes change, and `stop()` cancels a blocked write

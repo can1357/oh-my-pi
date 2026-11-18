@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.22.2] - 2026-11-18
+
 ### Added
 
 - Added Kiro to the model catalog with automatic discovery of every model available to the signed-in Kiro account ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
