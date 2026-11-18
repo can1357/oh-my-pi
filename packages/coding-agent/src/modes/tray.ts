@@ -1,8 +1,8 @@
 /**
  * The tray: on a native host whose `hello` advertises `tray`, a row of live
  * cards over the composer, one per running subagent and background job, in
- * place of the HUD pill. The status row above it is its header (caption and
- * counts). Tern owns selection, order, paging and motion; this module owns the
+ * place of the HUD pill. The status row above it is its header (its caption
+ * while the main agent is idle). Tern owns selection, order, paging and motion; this module owns the
  * data, the words, and which card is looked at closer.
  *
  * {@link buildTrayItems} turns plain inputs into flat item faces; the
@@ -55,9 +55,6 @@ const TRAY_DONE_NAMES = 3;
 /** Finished agents the done card's closer look lists before `+N earlier`. */
 const TRAY_DONE_LIST_LIMIT = 50;
 
-/** Cards above which the header carries the per-state counts. */
-const TRAY_COUNTS_MIN_CARDS = 4;
-
 /** Output lines a job card shows, and its closer look with and without a widget. */
 const TRAY_OUT_LINES = 2;
 const TRAY_PEEK_OUT_LINES = 3;
@@ -82,7 +79,12 @@ export interface TrayAgentItem extends TrayCardFace {
 	/** The call's tool name; empty when the line is plain text. */
 	readonly tool: string;
 	readonly text: string;
+	/** Its agent type (`m2`, `task`), when it says more than the name; on the closer look and the aria only. */
+	readonly type: string;
 	readonly model: string;
+	/** Tool calls so far; undefined before its first progress frame. */
+	readonly tools: number | undefined;
+	/** `22%` (context fill), else `12K tok`; empty when neither is known. */
 	readonly stats: string;
 	/** Epoch ms its run clock counts from. */
 	readonly start: number;
@@ -339,14 +341,36 @@ function agentModel(session: ObservableSession | undefined, ref: AgentRecordLike
 	return line(level ? `${chip.text} · ${level}` : chip.text, TRUNCATE_LENGTHS.TITLE);
 }
 
-/** `38 tools · 22%`: tool count, then context fill when known, else tokens. */
+/** `22%` (context fill) when known, else `12K tok`; empty when neither is. */
 function agentStats(progress: AgentProgress | undefined): string {
 	if (!progress) return "";
-	const tools = formatCount("tool", progress.toolCount);
 	const { contextTokens, contextWindow, tokens } = progress;
-	if (contextTokens !== undefined && contextWindow)
-		return `${tools} · ${Math.round((contextTokens / contextWindow) * 100)}%`;
-	return tokens > 0 ? `${tools} · ${formatNumber(tokens)} tok` : tools;
+	if (contextTokens !== undefined && contextWindow) return `${Math.round((contextTokens / contextWindow) * 100)}%`;
+	return tokens > 0 ? `${formatNumber(tokens)} tok` : "";
+}
+
+/**
+ * What a card calls agent `id`: its id, the unique name the agent was spawned
+ * under (the registry's display name is its type, shared by every agent of
+ * that type). A `/tan` clone's id is a generated handle, so it goes by its
+ * job's label (`/tan <its request>`).
+ */
+function agentTitle(id: string, job: AsyncJob | undefined): string {
+	return line(job?.request !== undefined ? job.label : id, TRUNCATE_LENGTHS.TITLE);
+}
+
+/** The agent's type when it says more than its name: the registry's display name, else what spawned it. */
+function agentType(
+	id: string,
+	session: ObservableSession | undefined,
+	ref: AgentRecordLike | undefined,
+	title: string,
+): string {
+	const declared = ref && ref.displayName !== id ? ref.displayName : undefined;
+	const type = declared ?? session?.progress?.agent ?? session?.agent ?? ref?.history?.agent;
+	if (!type) return "";
+	const shown = line(type, TRUNCATE_LENGTHS.SHORT);
+	return shown === title ? "" : shown;
 }
 
 /** When the agent's current run started: its last progress frame's age, else its start event. */
@@ -420,20 +444,31 @@ function agentItem(
 	} else if (memory.dismissed.has(key) || agentResultReached(job, input.consumed)) {
 		return undefined;
 	}
-	const name = line(ref?.displayName ?? id, TRUNCATE_LENGTHS.TITLE);
+	const name = agentTitle(id, job);
+	const type = agentType(id, session, ref, name);
 	const doing = agentDoing(status, session, ref, job);
+	const tools = session?.progress?.toolCount;
+	const aria = [
+		name,
+		type,
+		status,
+		`${doing.tool ? `${doing.tool} · ` : ""}${doing.text}`,
+		tools !== undefined ? formatCount("tool", tools) : "",
+	];
 	return {
 		item: "agent",
 		key,
 		ref: id,
 		name,
 		status,
-		aria: `${name}, ${status}, ${doing.tool ? `${doing.tool} · ` : ""}${doing.text}`,
+		aria: aria.filter(Boolean).join(", "),
 		acted: remembered.acted,
 		unread: input.unread(id),
 		tool: doing.tool,
 		text: doing.text,
+		type,
 		model: agentModel(session, ref),
+		tools,
 		stats: agentStats(session?.progress),
 		start: remembered.start,
 		duration: remembered.duration,
@@ -514,7 +549,7 @@ function doneEntry(input: TrayInput, ref: AgentRecordLike, session: ObservableSe
 	const outcome = progress?.recentOutput.find(part => part.trim()) ?? ref.activity ?? "";
 	return {
 		id: ref.id,
-		name: line(ref.displayName, TRUNCATE_LENGTHS.TITLE),
+		name: agentTitle(ref.id, input.agentJob(ref.id)),
 		status,
 		meta,
 		line: outcome ? line(firstLine(outcome)) : "",
@@ -539,7 +574,7 @@ function doneItem(
 	const entries = done.slice(0, TRAY_DONE_LIST_LIMIT).map(ref => doneEntry(input, ref, sessions.get(ref.id)));
 	const key = JSON.stringify(entries);
 	if (memory.doneEntries?.key !== key) memory.doneEntries = { key, entries };
-	const names = done.map(ref => line(ref.displayName, TRUNCATE_LENGTHS.TITLE));
+	const names = done.map(ref => agentTitle(ref.id, input.agentJob(ref.id)));
 	const shown = names.slice(0, TRAY_DONE_NAMES).join(", ");
 	const summary = names.length > TRAY_DONE_NAMES ? `${shown} +${names.length - TRAY_DONE_NAMES}` : shown;
 	const name = `${done.length} done`;
@@ -593,7 +628,9 @@ export function buildTrayItems(input: TrayInput, memory: TrayMemory): TrayItem[]
 		const item = jobItem(input, memory, job);
 		if (item) items.push(item);
 	}
-	return items;
+	// Nothing live and nothing failed: finished work alone is not worth the room, so the tray hides.
+	// The memory (clocks, dismissals) stays, so the tray comes back whole when work starts again.
+	return items.some(item => isLive(item.status) || item.status === "failed") ? items : [];
 }
 
 /** Whether two builds show the same cards, in the same order, with the same faces. */
@@ -670,6 +707,22 @@ export function describeTrayAgentCard(item: TrayAgentItem, now: number): NativeN
 			item.unread > 0 &&
 				node("badge", { role: "omp.tray.unread", text: String(item.unread), tone: "warning" }, undefined, "unread"),
 			describeTime(item.start, item.duration, now),
+			// `/6⚙` beside the clock: its tool calls so far.
+			item.tools !== undefined &&
+				node(
+					"row",
+					{ role: "omp.tray.tools", align: "center" },
+					[
+						node(
+							"text",
+							{ spans: [span("/", "dim"), span(String(item.tools))], wrap: "none" },
+							undefined,
+							"count",
+						),
+						node("icon", { name: "gear", tone: "muted" }, undefined, "icon"),
+					],
+					"tools",
+				),
 		]),
 		"head",
 	);
@@ -928,7 +981,9 @@ function describeDoneList(item: TrayDoneItem): NativeNode {
 function peekMeta(item: TrayItem): string {
 	switch (item.item) {
 		case "agent":
-			return [item.model, item.stats].filter(Boolean).join(" · ");
+			return [item.type, item.model, item.tools !== undefined ? formatCount("tool", item.tools) : "", item.stats]
+				.filter(Boolean)
+				.join(" · ");
 		case "job":
 			return item.command;
 		default:
@@ -1012,54 +1067,15 @@ export function trayCaption(items: readonly TrayItem[]): string {
 	let liveJobs = 0;
 	let settledAgents = 0;
 	let settledJobs = 0;
-	let done: TrayDoneItem | undefined;
 	for (const item of items) {
-		if (item.item === "done") done = item;
-		else if (item.item === "agent") isLive(item.status) ? liveAgents++ : settledAgents++;
-		else isLive(item.status) ? liveJobs++ : settledJobs++;
+		if (item.item === "agent") isLive(item.status) ? liveAgents++ : settledAgents++;
+		else if (item.item === "job") isLive(item.status) ? liveJobs++ : settledJobs++;
 	}
 	const parts = (agents: number, jobs: number): string =>
 		[agents > 0 && formatCount("agent", agents), jobs > 0 && formatCount("job", jobs)].filter(Boolean).join(", ");
+	// The tray shows only while something is live or failed, so settled cards stand for that failure.
 	if (liveAgents + liveJobs > 0) return `${parts(liveAgents, liveJobs)} in the background`;
-	if (settledAgents + settledJobs > 0) return `${parts(settledAgents, settledJobs)} finished`;
-	return done ? `${formatCount("agent", done.count)} done` : "";
-}
-
-/** Card counts per state for the header; undefined while the tray holds at most four cards and none failed. */
-export function trayCounts(items: readonly TrayItem[]): { failed: number; running: number; done: number } | undefined {
-	let failed = 0;
-	let running = 0;
-	let done = 0;
-	for (const item of items) {
-		if (item.status === "failed") failed++;
-		else if (item.status === "running") running++;
-		else if (item.status === "done") done += item.item === "done" ? item.count : 1;
-	}
-	if (items.length <= TRAY_COUNTS_MIN_CARDS && failed === 0) return undefined;
-	return { failed, running, done };
-}
-
-function describeCounts(counts: { failed: number; running: number; done: number }): NativeNode {
-	const chips: NativeNode[] = [];
-	for (const status of ["failed", "running", "done"] as const) {
-		const count = counts[status];
-		if (count === 0) continue;
-		chips.push(
-			node(
-				"text",
-				{
-					role: "omp.tray.count",
-					status,
-					text: `${count} ${status}`,
-					tone: status === "failed" ? "error" : "muted",
-					wrap: "none",
-				},
-				undefined,
-				status,
-			),
-		);
-	}
-	return node("row", { role: "omp.tray.counts", gap: "xs", align: "center" }, chips, "counts");
+	return `${parts(settledAgents, settledJobs)} finished`;
 }
 
 // =============================================================================
@@ -1171,16 +1187,6 @@ export interface TrayHost {
 	requestRender(): void;
 }
 
-/** The header parts the status row carries on a tray host. */
-export interface TrayHeader {
-	/** In place of the status rows while the main agent is idle and the tray has cards. */
-	readonly caption: NativeNode | undefined;
-	/** Before the todo while the tray holds more than four cards or a failed one. */
-	readonly counts: NativeNode | undefined;
-}
-
-const NO_HEADER: TrayHeader = { caption: undefined, counts: undefined };
-
 /**
  * The tray's state and its dock component (native-only: it renders no rows,
  * and the composer docks it only on a host advertising `tray`).
@@ -1209,7 +1215,6 @@ export class Tray implements Component {
 		  }
 		| undefined;
 	#caption: { text: string; node: NativeNode } | undefined;
-	#counts: { key: string; node: NativeNode } | undefined;
 
 	constructor(host: TrayHost) {
 		this.#host = host;
@@ -1262,36 +1267,23 @@ export class Tray implements Component {
 		return this.#root?.main !== this.#host.main();
 	}
 
-	/** The status row's tray parts; `idle` when the main agent shows no status rows. */
-	header(idle: boolean): TrayHeader {
-		if (!this.#onHost) return NO_HEADER;
+	/**
+	 * The status row's caption, in place of its status rows while the main
+	 * agent shows none (`idle`) and the tray has cards, so the row the tray
+	 * hangs from stays; undefined otherwise.
+	 */
+	caption(idle: boolean): NativeNode | undefined {
+		if (!this.#onHost) return undefined;
 		this.refresh();
-		const items = this.#items;
-		if (items.length === 0) return NO_HEADER;
-		let caption: NativeNode | undefined;
-		if (idle) {
-			const text = trayCaption(items);
-			if (this.#caption?.text !== text) {
-				this.#caption = {
-					text,
-					node: node(
-						"text",
-						{ role: "omp.tray.caption", text, wrap: "none", truncate: "end" },
-						undefined,
-						"caption",
-					),
-				};
-			}
-			caption = this.#caption.node;
+		if (!idle || this.#items.length === 0) return undefined;
+		const text = trayCaption(this.#items);
+		if (this.#caption?.text !== text) {
+			this.#caption = {
+				text,
+				node: node("text", { role: "omp.tray.caption", text, wrap: "none", truncate: "end" }, undefined, "caption"),
+			};
 		}
-		const counts = trayCounts(items);
-		let countsNode: NativeNode | undefined;
-		if (counts) {
-			const key = `${counts.failed}:${counts.running}:${counts.done}`;
-			if (this.#counts?.key !== key) this.#counts = { key, node: describeCounts(counts) };
-			countsNode = this.#counts.node;
-		}
-		return { caption, counts: countsNode };
+		return this.#caption.node;
 	}
 
 	/** Ask the terminal to move keyboard focus into the tray; false when it shows no cards. */

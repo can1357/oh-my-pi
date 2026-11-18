@@ -297,8 +297,6 @@ export interface TspTextProps {
 	truncate?: TspTruncate;
 	lines?: number;
 	measure?: "prose" | "fill";
-	/** On `omp.tray.count`: the card state the count is of. */
-	status?: "failed" | "running" | "done";
 }
 export interface TspMarkdownProps {
 	text?: string;

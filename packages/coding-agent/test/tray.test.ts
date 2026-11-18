@@ -197,6 +197,73 @@ describe("tray items", () => {
 		expect(cards(f)).toEqual(["job:bg_2:failed"]);
 	});
 
+	it("sends no cards while nothing is live or failed, and keeps the memory for when work starts again", () => {
+		const f = fixture();
+		const memory = new TrayMemory();
+		f.refs.push(ref("Old", "idle"));
+		// Only the done card: nothing to show.
+		expect(cards(f, memory)).toEqual([]);
+		// Beside a running job it shows.
+		f.jobs.push(job("bg_1"));
+		expect(cards(f, memory)).toEqual(["done:done:done", "job:bg_1:running"]);
+
+		// A settled agent whose result still waits, beside the running job; dismiss it, and let its clock run.
+		f.sessions.push({ ...observed("Scout", "completed"), lastUpdate: 90_000 });
+		f.refs.push(ref("Scout", "idle", 5));
+		f.agentJobs.set("Scout", job("Scout", { type: "task", agentId: "Scout", status: "completed" }));
+		expect(cards(f, memory)).toEqual(["agent:Scout:done", "done:done:done", "job:bg_1:running"]);
+		memory.dismissed.add("job:bg_2");
+
+		// The job finishes, its result delivered: only finished work is left, so the tray hides.
+		f.jobs[0] = job("bg_1", { status: "completed", endTime: 95_000, resultText: "ok" });
+		f.consumed.add("bg_1");
+		expect(cards(f, memory)).toEqual([]);
+		expect(memory.dismissed.has("job:bg_2")).toBe(true);
+		expect(memory.agents.get("Scout")).toMatchObject({ live: false, acted: 90_000 });
+
+		// A failure alone keeps it up.
+		f.jobs.push(job("bg_2", { status: "failed", endTime: 96_000, errorText: "boom" }));
+		memory.dismissed.delete("job:bg_2");
+		expect(cards(f, memory)).toEqual(["agent:Scout:done", "done:done:done", "job:bg_2:failed"]);
+	});
+
+	it("titles an agent's card with its id, keeping its type for the closer look and the aria", () => {
+		const f = fixture();
+		f.sessions.push(
+			observed("ScanAuth", "active", { agent: "m2", toolCount: 6, contextTokens: 22_000, contextWindow: 100_000 }),
+		);
+		// The registry's display name for a task subagent is its agent type.
+		f.refs.push({ ...ref("ScanAuth", "running"), displayName: "m2" }, { ...ref("Old", "idle"), displayName: "m2" });
+		const [card, done] = buildTrayItems(input(f), new TrayMemory());
+		expect(card).toMatchObject({
+			name: "ScanAuth",
+			type: "m2",
+			tools: 6,
+			stats: "22%",
+			aria: "ScanAuth, m2, running, Thinking, 6 tools",
+		});
+		expect(done).toMatchObject({ names: "Old" });
+		expect(done?.item === "done" && done.entries[0]?.name).toBe("Old");
+	});
+
+	it("titles a /tan clone by its job's label, its generated id being no name", () => {
+		const f = fixture();
+		f.refs.push({ ...ref("Tan-0190a1b2c3d4e5f6", "running"), displayName: "tan" });
+		f.agentJobs.set(
+			"Tan-0190a1b2c3d4e5f6",
+			job("Tan-0190a1b2c3d4e5f6", {
+				type: "task",
+				agentId: "Tan-0190a1b2c3d4e5f6",
+				label: "/tan fix the flaky test",
+				request: "fix the flaky test",
+			}),
+		);
+		expect(buildTrayItems(input(f), new TrayMemory())[0]).toMatchObject({
+			name: "/tan fix the flaky test",
+			type: "tan",
+		});
+	});
+
 	it("hides agent cards and the done card under display.pinnedAgents off, keeping the jobs", () => {
 		const f = fixture();
 		f.sessions.push(observed("Running", "active"));
@@ -228,7 +295,9 @@ describe("tray items", () => {
 		f.sessions[0] = observed("Scout", "active", { currentTool: "grep", currentToolStartMs: 45_000 });
 		expect(acted(80_000)).toBe(45_000);
 
-		// It settles: `acted` is the moment it did; its job's result still waits, so it keeps its card.
+		// It settles: `acted` is the moment it did; its job's result still waits, so it keeps its card
+		// (a running job keeps the tray up).
+		f.jobs.push(job("bg_1"));
 		f.sessions[0] = { ...observed("Scout", "completed"), lastUpdate: 90_000 };
 		f.refs[0] = ref("Scout", "idle");
 		f.agentJobs.set("Scout", job("Scout", { type: "task", agentId: "Scout", status: "completed" }));
@@ -343,24 +412,22 @@ describe("Tray", () => {
 		expect(root.p && Reflect.get(root.p, "peek")).toBeUndefined();
 	});
 
-	it("puts the counts in the header past four cards or with a failed one, and the caption only while idle", () => {
+	it("captions the idle status row while the tray shows cards, and stays silent without them", () => {
 		const f = fixture();
 		f.jobs.push(job("bg_1"), job("bg_2", { status: "failed", endTime: 2_000, errorText: "boom" }));
 		const { tray } = setup(f);
-		const header = tray.header(true);
-		expect(header.caption?.p).toMatchObject({ role: "omp.tray.caption", text: "1 job in the background" });
-		expect(children(header.counts).map(node => node.p)).toEqual([
-			{ role: "omp.tray.count", status: "failed", text: "1 failed", tone: "error", wrap: "none" },
-			{ role: "omp.tray.count", status: "running", text: "1 running", tone: "muted", wrap: "none" },
-		]);
-		expect(tray.header(false).caption).toBeUndefined();
-
-		f.jobs.splice(1, 1);
-		expect(tray.header(true).counts).toBeUndefined();
-		f.jobs.push(job("bg_3"), job("bg_4"), job("bg_5"), job("bg_6"));
-		expect(children(tray.header(true).counts).map(node => node.p && Reflect.get(node.p, "text"))).toEqual([
-			"5 running",
-		]);
+		expect(tray.caption(true)?.p).toEqual({
+			role: "omp.tray.caption",
+			text: "1 job in the background",
+			wrap: "none",
+			truncate: "end",
+		});
+		expect(tray.caption(false)).toBeUndefined();
+		// A failure alone is still worth the row.
+		f.jobs.splice(0, 1);
+		expect(tray.caption(true)?.p).toMatchObject({ text: "1 job finished" });
+		f.jobs.splice(0, 1);
+		expect(tray.caption(true)).toBeUndefined();
 	});
 
 	it("describes nothing in the header off a tray host, and focuses the tray only while it shows cards", () => {
@@ -375,12 +442,14 @@ describe("Tray", () => {
 		expect(host.requestRender).toHaveBeenCalled();
 
 		tray.setOnHost(false);
-		expect(tray.header(true)).toEqual({ caption: undefined, counts: undefined });
+		expect(tray.caption(true)).toBeUndefined();
 		expect(tray.focus()).toBe(false);
 	});
 
 	it("lists the done card's agents in its closer look, newest first, capped, each opening its transcript", () => {
 		const f = fixture();
+		// Something live, so the tray shows.
+		f.jobs.push(job("bg_1"));
 		for (let i = 0; i < 53; i++) f.refs.push(ref(`Old${i}`, "idle", i));
 		// Finished in this run: the observer knows how it went and what it last said.
 		f.refs.push({ ...ref("Fresh", "idle", 100), sessionFile: "/tmp/fresh.jsonl" });

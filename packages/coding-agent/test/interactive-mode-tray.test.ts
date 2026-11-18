@@ -185,7 +185,8 @@ describe("InteractiveMode tray", () => {
 		const registry = AgentRegistry.global();
 		registry.register({
 			id: "TrayScan",
-			displayName: "TrayScan",
+			// A task subagent's display name is its agent type.
+			displayName: "m2",
 			kind: "sub",
 			parentId: "Main",
 			session: null,
@@ -287,16 +288,36 @@ describe("InteractiveMode tray", () => {
 		]);
 		const [scan, review, done, widgetJob, bareJob] = cards;
 
-		expect(scan!.p).toMatchObject({ role: "omp.tray.card", status: "running", tone: "accent", acted: callStart });
+		expect(scan!.p).toMatchObject({
+			role: "omp.tray.card",
+			status: "running",
+			tone: "accent",
+			acted: callStart,
+			aria: "TrayScan, m2, running, read · Reading the config, 3 tools",
+		});
 		expect(children(scan).map(role)).toEqual(["omp.tray.head", "omp.tray.doing", "omp.tray.meta"]);
-		expect(children(children(scan)[0]).map(role)).toEqual(["omp.tray.dot", "omp.tray.name", "omp.tray.time"]);
+		const scanHead = children(children(scan)[0]);
+		// Its own name, not its type; the tool count beside the clock.
+		expect(scanHead.map(role)).toEqual(["omp.tray.dot", "omp.tray.name", "omp.tray.time", "omp.tray.tools"]);
+		expect(scanHead[1]!.p).toMatchObject({ text: "TrayScan" });
+		expect(scanHead[3]).toEqual({
+			k: "row",
+			p: { role: "omp.tray.tools", align: "center" },
+			c: [
+				{ k: "text", p: { spans: [{ t: "/", s: "dim" }, { t: "3" }], wrap: "none" }, key: "count" },
+				{ k: "icon", p: { name: "gear", tone: "muted" }, key: "icon" },
+			],
+			key: "tools",
+		});
 		expect(children(scan)[1]!.p).toMatchObject({
 			spans: [{ t: "read", s: "dim" }, { t: " · ", s: "dim" }, { t: "Reading the config" }],
 		});
 		expect(children(children(scan)[2]).map(node => node.p && Reflect.get(node.p, "text"))).toEqual([
 			"claude-sonnet-4-5 · low",
-			"3 tools · 22%",
+			"22%",
 		]);
+		// The status row carries only the caption: no counts.
+		expect(children(described[activity]!.node!).map(role)).toEqual(["omp.tray.caption"]);
 
 		expect(review!.p).toMatchObject({ status: "done", tone: "success" });
 		expect(children(review)[1]!.p).toMatchObject({ spans: [{ t: "Cross-check regressions" }] });
@@ -354,7 +375,7 @@ describe("InteractiveMode tray", () => {
 		});
 		expect(children(head)[2]!.p).toEqual({
 			role: "omp.tray.peek.meta",
-			text: "claude-sonnet-4-5 · low · 3 tools · 22%",
+			text: "m2 · claude-sonnet-4-5 · low · 3 tools · 22%",
 			wrap: "none",
 			truncate: "end",
 			grow: 1,
@@ -430,6 +451,54 @@ describe("InteractiveMode tray", () => {
 		mode.showAgentHub({ trayFirst: true });
 		expect(hub).toHaveBeenCalledTimes(1);
 		expect(trayOf(cx).node.p).toMatchObject({ focus: 1 });
+	});
+
+	it("hides the tray with a frame of its own once everything has finished, and the hub key then does nothing", () => {
+		vi.useFakeTimers();
+		try {
+			const hub = spyOn(SelectorController.prototype, "showAgentHub").mockImplementation(() => {});
+			const registry = AgentRegistry.global();
+			registry.register({
+				id: "TrayScan",
+				displayName: "m2",
+				kind: "sub",
+				parentId: "Main",
+				session: null,
+				status: "running",
+			});
+			registry.register({
+				id: "TrayOld",
+				displayName: "m2",
+				kind: "sub",
+				parentId: "Main",
+				session: null,
+				status: "idle",
+			});
+			setNativeRendering(true);
+			const cx = context(true);
+			// Live: the agent's card and the done card.
+			expect(children(trayOf(cx).node).map(card => card.p && Reflect.get(card.p, "item"))).toEqual([
+				"agent",
+				"done",
+			]);
+
+			const renders = spyOn(mode.ui, "requestRender");
+			// It finishes without a background job: nothing live is left.
+			registry.setStatus("TrayScan", "idle");
+			vi.advanceTimersByTime(100);
+			expect(renders).toHaveBeenCalled();
+			const hidden = trayOf(cx).node;
+			expect(hidden.p).toEqual({ role: "omp.tray", hidden: true });
+			expect(hidden.c).toEqual([]);
+			// No caption in the idle status row either.
+			const activity = dock(cx).find(entry => role(entry.node ?? undefined) === "omp.hud.activity");
+			expect(activity).toBeUndefined();
+
+			mode.showAgentHub({ trayFirst: true });
+			expect(hub).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("leaves the agents-hub key inert on a tray host with no cards, unless the tray's agents are turned off", () => {

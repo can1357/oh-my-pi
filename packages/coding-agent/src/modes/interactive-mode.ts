@@ -1616,7 +1616,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				children: readonly Component[];
 				todo: NativeNode | undefined;
 				caption: NativeNode | undefined;
-				counts: NativeNode | undefined;
 				node: NativeNode;
 		  }
 		| undefined;
@@ -1735,8 +1734,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * other rows describe themselves) in an `omp.hud.status` column, then the
 	 * todo HUD, so the todo holds its place as the turn starts and ends.
 	 * Nothing to show describes the empty HUD. On a host with the tray, the
-	 * row is the tray's header: its counts go before the todo, and while the
-	 * main agent is idle its caption stands in for the status rows.
+	 * row is the tray's header: while the main agent is idle its caption
+	 * stands in for the status rows.
 	 */
 	describeStatusHud(children: readonly Component[], cx: DescribeContext): NativeNode {
 		const hud = this.#todoHudNative;
@@ -1748,24 +1747,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		} else if (this.#tray.onHost) {
 			this.#releaseTray();
 		}
-		const { caption, counts } = this.#tray.header(children.length === 0);
+		const caption = this.#tray.caption(children.length === 0);
 		const memo = this.#statusHudNative;
-		if (
-			memo &&
-			memo.todo === todo &&
-			memo.caption === caption &&
-			memo.counts === counts &&
-			sameItems(memo.children, children)
-		)
+		if (memo && memo.todo === todo && memo.caption === caption && sameItems(memo.children, children))
 			return memo.node;
 		const parts: NativeChild[] = [];
 		if (children.length > 0) parts.push(node("col", { role: "omp.hud.status" }, children.slice(), "status"));
 		else if (caption) parts.push(caption);
-		if (counts) parts.push(counts);
 		if (todo) parts.push(todo);
 		const described =
 			parts.length === 0 ? EMPTY_HUD : row(parts, { role: "omp.hud.activity", align: "center", gap: "sm" });
-		this.#statusHudNative = { children: children.slice(), todo, caption, counts, node: described };
+		this.#statusHudNative = { children: children.slice(), todo, caption, node: described };
 		return described;
 	}
 	/**
