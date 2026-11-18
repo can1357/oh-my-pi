@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Wayland screenshots each failing after 30 s while the screen-share picker waited for the user: the call now waits for the picker until its deadline, as input waits for the RemoteDesktop dialog, and ends with a `Timeout` naming the picker if nobody answers ([#19616](https://github.com/can1357/oh-my-pi/pull/19616) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.1.0] - 2026-11-21
 
 ### Added
@@ -42,10 +46,6 @@
 - Fixed Wayland input operations on desktops without an available input route to fail immediately with a clear `PermissionDenied` error instead of attempting unnecessary screen capture first.
 - Fixed macOS `computer` interactions so background clicks, key presses, pop-up menu actions, and takeover calls restore the previously active window within the call.
 - Fixed macOS pop-up menu reads immediately after typing so they reflect the option selected by the entered letters.
-
-### Fixed
-
-- Fixed Wayland screenshots each failing after 30 s while the screen-share picker waited for the user: the call now waits for the picker until its deadline, as input waits for the RemoteDesktop dialog, and ends with a `Timeout` naming the picker if nobody answers
 
 ## [18.22.2] - 2026-11-18
 
