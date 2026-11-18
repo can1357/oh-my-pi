@@ -15,16 +15,19 @@ use std::{
 use omp_agent::HookPhase;
 use omp_core::{ArtifactDigest, Hash32, Provenance, Str, sf};
 use omp_envd::{
+	exec_settings::ExecSandboxMode,
 	exthost::{
 		DeclarationSet, ExtensionManifest, HookDeclarationKey, ServiceManifest, ToolDeclarationKey,
 	},
-	policy::Grants,
+	policy::{CONTROL_CAPABILITIES, Grants},
 	worker::{ExtHostSpec, HostKey},
 };
 use omp_ext::{
+	Layer, TrustTier,
 	config::{
 		CliSettingOverride, DeploymentManifest, StaticDeclarations, resolve_extension_settings,
 	},
+	trust::{GrantsFile, grant_covers, grants_path, native_path_publisher, path_grant_digest},
 	workspace_trust::inventory::EXTENSIONS_DIR,
 };
 use thiserror::Error;
@@ -56,6 +59,37 @@ pub struct NativeAdmissionOptions<'a> {
 	/// [`super::CL_DISABLED_EXTENSIONS`]); explicit roots are still honored
 	/// because the operator named them on this invocation.
 	pub disabled:          &'a [Str],
+}
+
+/// Host facts required before an operator path grant can admit CONTROL.
+#[derive(Clone, Copy, Debug)]
+pub struct NativeControlGrantOptions<'a> {
+	/// The host data directory containing the ext/grants.toml path.
+	pub data_dir:          &'a Path,
+	/// The effective command sandbox posture.
+	pub sandbox_mode:      ExecSandboxMode,
+	/// Additional exec-writable roots from the effective sandbox settings.
+	pub writable_roots:    &'a [PathBuf],
+	/// Whether this host can enforce a kernel-backed exec sandbox.
+	pub sandbox_available: bool,
+}
+
+/// Rechecks the sandbox facts after journaled class convars are applied.
+pub(crate) fn control_grant_sandbox_matches(
+	admitted: &NativeControlGrantOptions<'_>,
+	ctx: &omp_con::Ctx,
+	workspace_root: &Path,
+) -> bool {
+	let writable_roots = omp_envd::exec_settings::SV_SANDBOX_WRITABLE_ROOTS
+		.get(ctx)
+		.into_iter()
+		.map(|path| PathBuf::from(path.as_str()))
+		.collect::<Vec<_>>();
+	let mode = omp_envd::exec_settings::SV_SANDBOX_MODE.get(ctx);
+	let sandbox_available = omp_envd::admission::probe_sandbox(ctx, workspace_root).confines();
+	admitted.sandbox_mode == mode
+		&& admitted.writable_roots == writable_roots.as_slice()
+		&& admitted.sandbox_available == sandbox_available
 }
 
 /// An admitted extension and the source root that produced it.
@@ -239,12 +273,10 @@ struct LoadedManifest {
 	manifest: DeploymentManifest,
 }
 
-/// Discovers and admits the effective local Python extension set.
-///
-/// This compatibility entry point preserves fail-fast callers. Production
-/// composition uses [`admit_native_extensions_contained`] so one broken
-/// package cannot suppress independent extensions.
-pub fn admit_native_extensions(
+/// Test-only compatibility admission helper; production uses host-verified
+/// control grants.
+#[cfg(test)]
+fn admit_native_extensions(
 	project_root: &Path,
 	home: &Path,
 	options: NativeAdmissionOptions<'_>,
@@ -257,15 +289,48 @@ pub fn admit_native_extensions(
 	}
 }
 
-/// Discovers extensions while containing every package-local failure.
-///
-/// Explicit roots retain precedence over user and workspace roots. Automatic
-/// symlink escapes are reported and skipped rather than allowing one hostile
-/// directory entry to hide the remaining trusted children.
-pub fn admit_native_extensions_contained(
+/// Fail-fast native admission with host-verified operator path grants.
+pub fn admit_native_extensions_with_control(
 	project_root: &Path,
 	home: &Path,
 	options: NativeAdmissionOptions<'_>,
+	control: &NativeControlGrantOptions<'_>,
+) -> Result<Vec<AdmittedNativeExtension>, NativeExtensionError> {
+	let mut report =
+		admit_native_extensions_contained_with_control(project_root, home, options, control);
+	if report.errors.is_empty() {
+		Ok(report.extensions)
+	} else {
+		Err(report.errors.remove(0))
+	}
+}
+
+/// Test-only contained discovery without control grants.
+#[cfg(test)]
+fn admit_native_extensions_contained(
+	project_root: &Path,
+	home: &Path,
+	options: NativeAdmissionOptions<'_>,
+) -> NativeAdmissionReport {
+	admit_native_extensions_inner(project_root, home, options, None)
+}
+
+/// Discovers extensions and admits CONTROL only when a matching operator grant
+/// is safe under this host's effective exec sandbox.
+pub fn admit_native_extensions_contained_with_control(
+	project_root: &Path,
+	home: &Path,
+	options: NativeAdmissionOptions<'_>,
+	control: &NativeControlGrantOptions<'_>,
+) -> NativeAdmissionReport {
+	admit_native_extensions_inner(project_root, home, options, Some(control))
+}
+
+fn admit_native_extensions_inner(
+	project_root: &Path,
+	home: &Path,
+	options: NativeAdmissionOptions<'_>,
+	control: Option<&NativeControlGrantOptions<'_>>,
 ) -> NativeAdmissionReport {
 	if options.mode == NativeLoadMode::Disabled {
 		return NativeAdmissionReport::default();
@@ -307,7 +372,7 @@ pub fn admit_native_extensions_contained(
 			tracing::debug!(id = %loaded.manifest.id, "extension disabled by cl_disabled_extensions");
 			continue;
 		}
-		match lower_manifest(loaded, origin, options.setting_overrides) {
+		match lower_manifest(loaded, origin, options.setting_overrides, project_root, home, control) {
 			Ok(extension) => report.extensions.push(extension),
 			Err(error) => report.errors.push(error),
 		}
@@ -513,6 +578,9 @@ fn lower_manifest(
 	loaded: LoadedManifest,
 	origin: RootOrigin,
 	overrides: &[CliSettingOverride],
+	project_root: &Path,
+	home: &Path,
+	control: Option<&NativeControlGrantOptions<'_>>,
 ) -> Result<AdmittedNativeExtension, NativeExtensionError> {
 	let LoadedManifest { root, path, text, manifest } = loaded;
 	let selected = manifest
@@ -523,6 +591,19 @@ fn lower_manifest(
 	let projection = manifest
 		.project(&selected)
 		.map_err(|source| NativeExtensionError::Manifest { path: path.clone(), source })?;
+	let declared_capabilities = projection.capabilities.iter().cloned().collect::<Vec<_>>();
+	let control_grants = control.map_or_else(BTreeSet::new, |control| {
+		admitted_control_grants(
+			&manifest.id,
+			&root,
+			&text,
+			&declared_capabilities,
+			origin,
+			project_root,
+			home,
+			control,
+		)
+	});
 	let mut properties = BTreeMap::new();
 	properties.insert(
 		Str::new_static("declarations"),
@@ -574,7 +655,7 @@ fn lower_manifest(
 	});
 	let runtime_declarations = DeclarationSet::new(tools, hooks);
 	let digest = ArtifactDigest::new(Hash32::sum(text.as_bytes()).into_bytes());
-	let publisher = sf!("unsigned:path:{}", Hash32::sum(root.to_string_lossy().as_bytes()).to_hex());
+	let publisher = native_path_publisher(&root);
 	let layer = origin.layer();
 	let provenance = Provenance::new(
 		publisher,
@@ -602,11 +683,104 @@ fn lower_manifest(
 	let key = HostKey::new(layer, "sandboxed", manifest.id.clone());
 	let mut spec = ExtHostSpec::new(key, runtime_manifest);
 	spec.data_grants = Grants::supported(projection.capabilities);
+	spec.control_grants = control_grants;
 	spec.python_site = Some(python_site);
 	spec.entry_path = Some(entry_path);
 	spec.settings = settings;
 	spec.watch_root = Some(root.clone());
 	Ok(AdmittedNativeExtension { root, spec })
+}
+/// Checks the protected grant store and extension root before admitting any
+/// CONTROL.
+fn admitted_control_grants(
+	id: &Str,
+	canonical_root: &Path,
+	manifest_text: &str,
+	declared_capabilities: &[Str],
+	origin: RootOrigin,
+	workspace_root: &Path,
+	home: &Path,
+	options: &NativeControlGrantOptions<'_>,
+) -> BTreeSet<Str> {
+	if !matches!(origin, RootOrigin::User) {
+		return BTreeSet::new();
+	}
+	let wanted = declared_capabilities
+		.iter()
+		.filter(|capability| CONTROL_CAPABILITIES.contains(&capability.as_str()))
+		.cloned()
+		.collect::<BTreeSet<_>>();
+	if wanted.is_empty() {
+		return wanted;
+	}
+	if options.sandbox_mode == ExecSandboxMode::Off || !options.sandbox_available {
+		tracing::warn!(
+			extension = %id,
+			mode = %options.sandbox_mode,
+			sandbox_available = options.sandbox_available,
+			"withholding extension CONTROL grants because no kernel-enforced exec sandbox is active"
+		);
+		return BTreeSet::new();
+	}
+
+	let config_root = match omp_core::dirs::profile_config_dir(home) {
+		Ok(path) => path,
+		Err(error) => {
+			tracing::warn!(extension = %id, path = %home.display(), reason = %error, "withholding extension CONTROL grants");
+			return BTreeSet::new();
+		},
+	};
+	let extension_root = config_root.join("agent/extensions");
+	let store_root = options.data_dir.join("ext");
+	let grants_file = grants_path(options.data_dir);
+	let writable_roots =
+		super::protected::exec_writable_roots(workspace_root, options.writable_roots);
+	for protected in [&store_root, &grants_file, &extension_root] {
+		if let Err(error) = super::protected::check_protected_location(protected, &writable_roots) {
+			tracing::warn!(
+				extension = %id,
+				path = %protected.display(),
+				reason = %error,
+				"withholding extension CONTROL grants because a protected location is unsafe"
+			);
+			return BTreeSet::new();
+		}
+	}
+	let grants = match GrantsFile::read(&grants_file) {
+		Ok(grants) => grants,
+		Err(error) => {
+			tracing::warn!(
+				extension = %id,
+				path = %grants_file.display(),
+				reason = %error,
+				"withholding extension CONTROL grants because the grant store is unreadable"
+			);
+			return BTreeSet::new();
+		},
+	};
+	let manifest_digest = Hash32::sum(manifest_text.as_bytes()).into_bytes();
+	let digest = path_grant_digest(declared_capabilities.iter().cloned(), &manifest_digest);
+	let publisher = native_path_publisher(canonical_root);
+	let ship = Str::new_static("path");
+	if grant_covers(
+		&grants,
+		id,
+		&publisher,
+		Layer::Client,
+		None,
+		&digest,
+		TrustTier::Sandboxed,
+		&ship,
+	) {
+		wanted
+	} else {
+		BTreeSet::new()
+	}
+}
+
+/// Protected path spellings used by the environment exec sandbox.
+pub fn protected_write_paths(data_dir: &Path, home: &Path) -> Vec<PathBuf> {
+	omp_envd::exec_settings::protected_write_paths(data_dir, home)
 }
 
 fn resolve_entry(
@@ -653,6 +827,503 @@ default = {default}
 			),
 		)
 		.expect("manifest");
+	}
+
+	fn security_test_tree() -> tempfile::TempDir {
+		let home = std::env::var_os("HOME")
+			.map(PathBuf::from)
+			.expect("test home");
+		tempfile::tempdir_in(home).expect("temporary tree outside TMPDIR")
+	}
+
+	fn control_extension(root: &Path, id: &str) {
+		extension(root, id, false);
+		fs::write(
+			root.join("omp.toml"),
+			format!(
+				r#"id = "{id}"
+entry = "demo"
+capabilities = ["agents.continuation", "policy.write"]
+
+[settings.enabled]
+type = "boolean"
+default = false
+"#
+			),
+		)
+		.expect("control manifest");
+	}
+
+	fn persist_control_grant(data_dir: &Path, root: &Path, id: &Str) {
+		use omp_ext::trust::{Grant, GrantDuration, GrantScope};
+
+		let manifest = fs::read_to_string(root.join("omp.toml")).expect("manifest");
+		let declared = [sf!("agents.continuation"), sf!("policy.write")];
+		let manifest_digest = Hash32::sum(manifest.as_bytes()).into_bytes();
+		let capability_digest = path_grant_digest(declared, &manifest_digest);
+		let canonical_root = fs::canonicalize(root).expect("canonical extension root");
+		let grant = Grant {
+			id: id.clone(),
+			publisher: native_path_publisher(&canonical_root),
+			layer: Layer::Client,
+			workspace: None,
+			scope: GrantScope::Exact,
+			capability_digest,
+			tier: TrustTier::Sandboxed,
+			ship: sf!("path"),
+			granted_at: sf!("2026-11-17T00:00:00Z"),
+			granted_by: sf!("explicit-grant"),
+			duration: GrantDuration::Persistent,
+		};
+		let file = grants_path(data_dir);
+		fs::create_dir_all(file.parent().expect("grant parent")).expect("grant directory");
+		GrantsFile::update(&file, |store| store.grants.push(grant)).expect("persist grant");
+	}
+
+	fn user_control_admission(
+		project: &Path,
+		home: &Path,
+		data_dir: &Path,
+		mode: ExecSandboxMode,
+		sandbox_available: bool,
+		writable_roots: &[PathBuf],
+	) -> NativeAdmissionReport {
+		admit_native_extensions_contained_with_control(
+			project,
+			home,
+			NativeAdmissionOptions {
+				explicit_roots:    &[],
+				mode:              NativeLoadMode::Merge,
+				include_workspace: true,
+				setting_overrides: &[],
+				disabled:          &[],
+			},
+			&NativeControlGrantOptions {
+				data_dir,
+				sandbox_mode: mode,
+				writable_roots,
+				sandbox_available,
+			},
+		)
+	}
+
+	fn user_fixture(tree: &Path, id: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+		let home = tree.join("home");
+		let project = tree.join("workspace");
+		let data_dir = tree.join("data");
+		let extension_root = home.join(".o2/agent/extensions").join(id);
+		fs::create_dir_all(&project).expect("workspace");
+		fs::create_dir_all(&data_dir).expect("data dir");
+		control_extension(&extension_root, id);
+		(home, project, data_dir, extension_root)
+	}
+
+	fn assert_no_control_grant(report: &NativeAdmissionReport, id: &str) {
+		let extension = report
+			.extensions
+			.iter()
+			.find(|item| item.spec.key.extension().as_str() == id)
+			.expect("extension admitted");
+		assert!(extension.spec.control_grants.is_empty());
+	}
+
+	#[test]
+	fn class_sandbox_off_invalidates_admission_context() {
+		let ctx = omp_con::Ctx::new();
+		let tree = security_test_tree();
+		let workspace = tree.path().join("workspace");
+		fs::create_dir_all(&workspace).expect("workspace");
+		let data_dir = tree.path().join("data");
+		let writable_roots = Vec::new();
+		let admitted = NativeControlGrantOptions {
+			data_dir:          &data_dir,
+			sandbox_mode:      omp_envd::exec_settings::SV_SANDBOX_MODE.get(&ctx),
+			writable_roots:    &writable_roots,
+			sandbox_available: omp_envd::admission::probe_sandbox(&ctx, &workspace).confines(),
+		};
+		assert!(control_grant_sandbox_matches(&admitted, &ctx, &workspace));
+		omp_envd::exec_settings::SV_SANDBOX_MODE
+			.set(&ctx, ExecSandboxMode::Off)
+			.expect("class sandbox override");
+		assert!(!control_grant_sandbox_matches(&admitted, &ctx, &workspace));
+	}
+
+	#[test]
+	fn user_layer_declared_without_grant_gets_none() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		let report = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			true,
+			&[],
+		);
+		let extension = report
+			.extensions
+			.iter()
+			.find(|item| item.spec.key.extension().as_str() == "test.user")
+			.expect("user extension admitted");
+		assert!(extension.spec.control_grants.is_empty());
+		assert!(root.exists());
+	}
+
+	#[test]
+	fn user_layer_matching_grant_yields_control_grant() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		persist_control_grant(&data_dir, &root, &sf!("test.user"));
+		let report = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			true,
+			&[],
+		);
+		let extension = report
+			.extensions
+			.iter()
+			.find(|item| item.spec.key.extension().as_str() == "test.user")
+			.expect("user extension admitted");
+		assert_eq!(
+			extension.spec.control_grants,
+			BTreeSet::from([sf!("agents.continuation"), sf!("policy.write")])
+		);
+	}
+
+	#[test]
+	fn changed_manifest_voids_grant() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		persist_control_grant(&data_dir, &root, &sf!("test.user"));
+		let mut manifest = fs::read_to_string(root.join("omp.toml")).expect("manifest");
+		manifest.push_str("# changed after approval\n");
+		fs::write(root.join("omp.toml"), manifest).expect("change manifest");
+		let report = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			true,
+			&[],
+		);
+		let extension = report
+			.extensions
+			.iter()
+			.find(|item| item.spec.key.extension().as_str() == "test.user")
+			.expect("user extension admitted");
+		assert!(extension.spec.control_grants.is_empty());
+	}
+
+	#[test]
+	fn grant_for_other_root_does_not_cover() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		let other = tree.path().join("other-root");
+		fs::create_dir_all(&other).expect("other root");
+		control_extension(&other, "test.user");
+		persist_control_grant(&data_dir, &other, &sf!("test.user"));
+		let report = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			true,
+			&[],
+		);
+		let extension = report
+			.extensions
+			.iter()
+			.find(|item| item.spec.key.extension().as_str() == "test.user")
+			.expect("user extension admitted");
+		assert!(extension.spec.control_grants.is_empty());
+		assert!(root.exists());
+	}
+
+	#[test]
+	fn workspace_layer_never_gets_control_grant() {
+		let tree = security_test_tree();
+		let home = tree.path().join("home");
+		let project = tree.path().join("workspace");
+		let data_dir = tree.path().join("data");
+		let root = project.join(EXTENSIONS_DIR).join("test.workspace");
+		fs::create_dir_all(&project).expect("workspace");
+		fs::create_dir_all(&data_dir).expect("data dir");
+		control_extension(&root, "test.workspace");
+		persist_control_grant(&data_dir, &root, &sf!("test.workspace"));
+		let report = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			true,
+			&[],
+		);
+		let extension = report
+			.extensions
+			.iter()
+			.find(|item| item.spec.key.extension().as_str() == "test.workspace")
+			.expect("workspace extension admitted");
+		assert!(extension.spec.control_grants.is_empty());
+	}
+
+	#[test]
+	fn explicit_root_never_gets_control_grant() {
+		let tree = security_test_tree();
+		let home = tree.path().join("home");
+		let project = tree.path().join("workspace");
+		let data_dir = tree.path().join("data");
+		let root = tree.path().join("explicit");
+		fs::create_dir_all(&project).expect("workspace");
+		fs::create_dir_all(&data_dir).expect("data dir");
+		control_extension(&root, "test.explicit");
+		persist_control_grant(&data_dir, &root, &sf!("test.explicit"));
+		let report = admit_native_extensions_contained_with_control(
+			&project,
+			&home,
+			NativeAdmissionOptions {
+				explicit_roots:    std::slice::from_ref(&root),
+				mode:              NativeLoadMode::ExplicitOnly,
+				include_workspace: false,
+				setting_overrides: &[],
+				disabled:          &[],
+			},
+			&NativeControlGrantOptions {
+				data_dir:          &data_dir,
+				sandbox_mode:      ExecSandboxMode::WorkspaceWrite,
+				writable_roots:    &[],
+				sandbox_available: true,
+			},
+		);
+		let extension = report
+			.extensions
+			.iter()
+			.find(|item| item.spec.key.extension().as_str() == "test.explicit")
+			.expect("explicit extension admitted");
+		assert!(extension.spec.control_grants.is_empty());
+	}
+
+	#[test]
+	fn sandbox_off_yields_no_control_grants() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		persist_control_grant(&data_dir, &root, &sf!("test.user"));
+		let report =
+			user_control_admission(&project, &home, &data_dir, ExecSandboxMode::Off, true, &[]);
+		let extension = report
+			.extensions
+			.iter()
+			.find(|item| item.spec.key.extension().as_str() == "test.user")
+			.expect("user extension admitted");
+		assert!(extension.spec.control_grants.is_empty());
+	}
+
+	#[test]
+	fn no_sandbox_backend_yields_no_control_grants() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		persist_control_grant(&data_dir, &root, &sf!("test.user"));
+		let report = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			false,
+			&[],
+		);
+		let extension = report
+			.extensions
+			.iter()
+			.find(|item| item.spec.key.extension().as_str() == "test.user")
+			.expect("user extension admitted");
+		assert!(extension.spec.control_grants.is_empty());
+	}
+
+	#[test]
+	fn unreadable_store_fails_closed() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		let grants_file = grants_path(&data_dir);
+		fs::create_dir_all(grants_file.parent().expect("grant parent")).expect("grant directory");
+		fs::create_dir(&grants_file).expect("unreadable grants path as a directory");
+		let report = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			true,
+			&[],
+		);
+		let extension = report
+			.extensions
+			.iter()
+			.find(|item| item.spec.key.extension().as_str() == "test.user")
+			.expect("user extension admitted");
+		assert!(extension.spec.control_grants.is_empty());
+		assert!(root.exists());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn symlinked_store_is_denied_during_admission() {
+		use std::os::unix::fs::symlink;
+
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		persist_control_grant(&data_dir, &root, &sf!("test.user"));
+		let store = data_dir.join("ext");
+		let target = tree.path().join("store-target");
+		fs::rename(&store, &target).expect("move store");
+		symlink(&target, &store).expect("store symlink");
+		let report = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			true,
+			&[],
+		);
+		assert_no_control_grant(&report, "test.user");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn symlinked_grant_file_is_denied_during_admission() {
+		use std::os::unix::fs::symlink;
+
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		persist_control_grant(&data_dir, &root, &sf!("test.user"));
+		let file = grants_path(&data_dir);
+		let target = tree.path().join("grants-target.toml");
+		fs::rename(&file, &target).expect("move grants file");
+		symlink(&target, &file).expect("grant-file symlink");
+		let report = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			true,
+			&[],
+		);
+		assert_no_control_grant(&report, "test.user");
+	}
+
+	#[test]
+	fn store_inside_workspace_is_denied_during_admission() {
+		let tree = security_test_tree();
+		let (home, project, _, root) = user_fixture(tree.path(), "test.user");
+		let data_dir = project.join(".o2/data");
+		fs::create_dir_all(&data_dir).expect("workspace data dir");
+		persist_control_grant(&data_dir, &root, &sf!("test.user"));
+		let report = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			true,
+			&[],
+		);
+		assert_no_control_grant(&report, "test.user");
+	}
+
+	#[test]
+	fn extension_root_inside_writable_root_is_denied_during_admission() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		persist_control_grant(&data_dir, &root, &sf!("test.user"));
+		let report = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			true,
+			std::slice::from_ref(&home),
+		);
+		assert_no_control_grant(&report, "test.user");
+	}
+
+	#[test]
+	fn writable_root_inside_store_is_denied_during_admission() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		persist_control_grant(&data_dir, &root, &sf!("test.user"));
+		let writable = grants_path(&data_dir)
+			.parent()
+			.expect("store root")
+			.join("scratch");
+		fs::create_dir_all(&writable).expect("writable child");
+		let report = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			true,
+			std::slice::from_ref(&writable),
+		);
+		assert_no_control_grant(&report, "test.user");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn foreign_owned_extension_root_is_denied_during_admission() {
+		use std::{ffi::CString, os::unix::ffi::OsStrExt as _};
+
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		persist_control_grant(&data_dir, &root, &sf!("test.user"));
+		let extension_root = home.join(".o2/agent/extensions");
+		let c_path = CString::new(extension_root.as_os_str().as_bytes()).expect("path has no nul");
+		// SAFETY: geteuid has no preconditions.
+		let uid = unsafe { libc::geteuid() };
+		let foreign_uid = if uid == 0 { 1 } else { 0 };
+		// SAFETY: c_path is NUL-terminated and both ids are plain integers.
+		if unsafe { libc::chown(c_path.as_ptr(), foreign_uid, u32::MAX) } != 0 {
+			eprintln!("skip: cannot create a foreign-owned extension root on this host");
+			return;
+		}
+		let report = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			true,
+			&[],
+		);
+		assert_no_control_grant(&report, "test.user");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn symlinked_extension_root_is_denied_during_admission() {
+		use std::os::unix::fs::symlink;
+
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		let extension_base = home.join(".o2/agent/extensions");
+		let target = tree.path().join("extension-base-target");
+		fs::rename(&extension_base, &target).expect("move extension root");
+		symlink(&target, &extension_base).expect("extension-root symlink");
+		persist_control_grant(&data_dir, &root, &sf!("test.user"));
+		let report = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			true,
+			&[],
+		);
+		if let Some(extension) = report
+			.extensions
+			.iter()
+			.find(|item| item.spec.key.extension().as_str() == "test.user")
+		{
+			assert!(extension.spec.control_grants.is_empty());
+		} else {
+			assert!(!report.errors.is_empty(), "symlinked extension root was silently admitted");
+		}
 	}
 
 	#[test]

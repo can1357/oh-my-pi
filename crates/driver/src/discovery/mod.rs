@@ -6,6 +6,7 @@ pub mod active_repo;
 pub mod models;
 pub mod native;
 pub mod prompts;
+pub mod protected;
 pub mod roles;
 pub mod rules;
 pub mod skills;

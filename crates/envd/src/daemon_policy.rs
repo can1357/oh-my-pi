@@ -85,6 +85,24 @@ pub fn from_con(ctx: &Ctx, trust: WorkspaceTrust) -> DaemonPolicy {
 	)
 }
 
+/// Resolves the policy with extra session-protected paths merged into the
+/// host defaults. Paths already present leave the digest unchanged, so a
+/// session whose paths match the host defaults still joins the shared daemon.
+#[must_use]
+pub fn from_con_with_protected_write_paths(
+	ctx: &Ctx,
+	trust: WorkspaceTrust,
+	protected_write_paths: &[std::path::PathBuf],
+) -> DaemonPolicy {
+	let mut sandbox = SandboxSettings::from_con(ctx);
+	for path in protected_write_paths {
+		if !sandbox.protected_write_paths.contains(path) {
+			sandbox.protected_write_paths.push(path.clone());
+		}
+	}
+	of(&sandbox, &ToolSettings::from_con(ctx), &ShellSettings::from_con(ctx), trust)
+}
+
 /// Digests the policy of resolved `sandbox`, `tools` and `shell` settings,
 /// before any composition-level approval-mode override, under the workspace
 /// `trust`.
@@ -209,6 +227,22 @@ mod tests {
 					.set(ctx, true)
 					.expect("read setting");
 			})
+		);
+	}
+	/// Host-protected paths participate in daemon identity through shared
+	/// settings.
+	#[test]
+	fn protected_paths_participate_in_daemon_identity() {
+		let ctx = Ctx::new();
+		let trust = WorkspaceTrust::Untrusted;
+		let config_policy = from_con(&ctx, trust);
+		let mut sandbox = SandboxSettings::from_con(&ctx);
+		sandbox
+			.protected_write_paths
+			.push(std::path::PathBuf::from("/var/run/omp-protected-test"));
+		assert_ne!(
+			config_policy,
+			of(&sandbox, &ToolSettings::from_con(&ctx), &ShellSettings::from_con(&ctx), trust)
 		);
 	}
 }

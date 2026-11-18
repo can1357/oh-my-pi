@@ -32,8 +32,15 @@ use super::{
 
 pub(in crate::server) fn execution_settings(
 	ctx: &Ctx,
+	protected_write_paths: &[PathBuf],
 ) -> (HostSettings, ShellSettings, SandboxSettings) {
-	(HostSettings::from_con(ctx), ShellSettings::from_con(ctx), SandboxSettings::from_con(ctx))
+	let mut sandbox = SandboxSettings::from_con(ctx);
+	for path in protected_write_paths {
+		if !sandbox.protected_write_paths.contains(path) {
+			sandbox.protected_write_paths.push(path.clone());
+		}
+	}
+	(HostSettings::from_con(ctx), ShellSettings::from_con(ctx), sandbox)
 }
 
 /// Ensures production URL resolvers and FREEZE share one [`SchemeGeneration`].
@@ -341,7 +348,7 @@ impl EnvServer {
 			&crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id),
 			blobs.store().clone(),
 		)?;
-		let (mut host_settings, shell_settings, sandbox_settings) = execution_settings(con);
+		let (mut host_settings, shell_settings, sandbox_settings) = execution_settings(con, &[]);
 		#[cfg(feature = "cap-browser")]
 		let browser_settings = BrowserSettings::from_con(con);
 		host_settings.tools = host_settings.tools.with_workspace_trust(workspace_trust);
@@ -485,6 +492,38 @@ impl EnvServer {
 	/// leave detached-process recovery to the daemon. An approval-mode override
 	/// affects only this composition's in-memory tool settings.
 	#[cfg(any(unix, windows))]
+	pub async fn open_project(
+		root: &Path,
+		state_dir: &Path,
+		docserver_socket: &Path,
+		registry: Registry,
+		ext_host_config: ExtHostConfig,
+		doc_connections: Option<watch::Sender<usize>>,
+		require_document_ownership: bool,
+		approval_mode: Option<crate::tool_settings::ApprovalMode>,
+		con: &Ctx,
+		convars: Arc<dyn ControlAuthorityFactory>,
+		bridges: RegistryBridges,
+	) -> Result<Self, EnvdError> {
+		Self::open_project_with_protected_write_paths(
+			root,
+			state_dir,
+			docserver_socket,
+			registry,
+			ext_host_config,
+			doc_connections,
+			require_document_ownership,
+			approval_mode,
+			con,
+			convars,
+			bridges,
+			Vec::new(),
+		)
+		.await
+	}
+
+	/// Opens a project environment with additional owner-protected write paths.
+	#[cfg(any(unix, windows))]
 	#[tracing::instrument(
 		name = "environment_open",
 		level = "debug",
@@ -496,7 +535,7 @@ impl EnvServer {
 			daemon = doc_connections.is_some()
 		)
 	)]
-	pub async fn open_project(
+	pub async fn open_project_with_protected_write_paths(
 		root: &Path,
 		state_dir: &Path,
 		docserver_socket: &Path,
@@ -508,6 +547,7 @@ impl EnvServer {
 		con: &Ctx,
 		convars: Arc<dyn ControlAuthorityFactory>,
 		mut bridges: RegistryBridges,
+		protected_write_paths: Vec<PathBuf>,
 	) -> Result<Self, EnvdError> {
 		let scheme_generation = install_scheme_generation(&mut bridges, &mut ext_host_config);
 		let workspace = WorkspaceHost::open(root)?;
@@ -656,7 +696,8 @@ impl EnvServer {
 			&crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id),
 			blobs.store().clone(),
 		)?;
-		let (mut host_settings, shell_settings, sandbox_settings) = execution_settings(con);
+		let (mut host_settings, shell_settings, sandbox_settings) =
+			execution_settings(con, &protected_write_paths);
 		#[cfg(feature = "cap-browser")]
 		let browser_settings = BrowserSettings::from_con(con);
 		let enforced = crate::daemon_policy::of(
@@ -798,13 +839,40 @@ impl EnvServer {
 
 	/// Opens the session-owned half without composing project authorities or
 	/// environment tool executors.
+	pub async fn open_session_host(
+		root: &Path,
+		state_dir: &Path,
+		registry: Registry,
+		ext_host_config: ExtHostConfig,
+		approval_mode: Option<crate::tool_settings::ApprovalMode>,
+		con: &Ctx,
+		convars: Arc<dyn ControlAuthorityFactory>,
+		bridges: RegistryBridges,
+		owner: EnvClient,
+	) -> Result<Self, EnvdError> {
+		Self::open_session_host_with_protected_write_paths(
+			root,
+			state_dir,
+			registry,
+			ext_host_config,
+			approval_mode,
+			con,
+			convars,
+			bridges,
+			owner,
+			Vec::new(),
+		)
+		.await
+	}
+
+	/// Opens a session host with additional owner-protected sandbox paths.
 	#[tracing::instrument(
 		name = "environment_open",
 		level = "debug",
 		skip_all,
 		fields(mode = "session", root = %root.display(), state_dir = %state_dir.display())
 	)]
-	pub async fn open_session_host(
+	pub async fn open_session_host_with_protected_write_paths(
 		root: &Path,
 		state_dir: &Path,
 		registry: Registry,
@@ -814,6 +882,7 @@ impl EnvServer {
 		convars: Arc<dyn ControlAuthorityFactory>,
 		mut bridges: RegistryBridges,
 		owner: EnvClient,
+		protected_write_paths: Vec<PathBuf>,
 	) -> Result<Self, EnvdError> {
 		let scheme_generation = install_scheme_generation(&mut bridges, &mut ext_host_config);
 		let owner_info = owner.info().ok_or(EnvdError::MissingOwnerHello)?;
@@ -909,7 +978,8 @@ impl EnvServer {
 			&crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id),
 			blobs.store().clone(),
 		)?;
-		let (mut host_settings, shell_settings, sandbox_settings) = execution_settings(con);
+		let (mut host_settings, shell_settings, sandbox_settings) =
+			execution_settings(con, &protected_write_paths);
 		#[cfg(feature = "cap-browser")]
 		let browser_settings = BrowserSettings::from_con(con);
 		let enforced = crate::daemon_policy::of(
@@ -2260,5 +2330,19 @@ impl EnvServer {
 			failure: None,
 			checked_at_ms,
 		}
+	}
+}
+
+#[cfg(test)]
+mod protected_path_settings_tests {
+	use super::*;
+
+	#[test]
+	fn execution_settings_merge_owner_protected_paths() {
+		let ctx = Ctx::new();
+		let extra = PathBuf::from("/opt/omp-extra-protected");
+		let (_, _, settings) = execution_settings(&ctx, std::slice::from_ref(&extra));
+		assert!(settings.protected_write_paths.contains(&extra));
+		assert!(!settings.protected_write_paths.is_empty());
 	}
 }

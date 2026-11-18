@@ -2,6 +2,7 @@
 
 use std::{
 	collections::BTreeMap,
+	fs, io,
 	path::{Path, PathBuf},
 };
 
@@ -521,10 +522,62 @@ impl SandboxSettings {
 			read_mode:             SV_SANDBOX_READ_MODE.get(ctx),
 			read_deny_globs:       SV_SANDBOX_READ_DENY_GLOBS.get(ctx),
 			write_deny:            SV_SANDBOX_WRITE_DENY.get(ctx),
-			protected_write_paths: Vec::new(),
+			protected_write_paths: host_protected_write_paths(),
 			explicit:              ctx
 				.vars()
 				.any(|var| var.name.starts_with("sv_sandbox_") && ctx.is_user_set(var.name)),
+		}
+	}
+}
+
+/// Returns the same protected paths for both the launching process and its
+/// envd.
+pub fn protected_write_paths(data_dir: &Path, home: &Path) -> Vec<PathBuf> {
+	let mut candidates = vec![data_dir.join("ext")];
+	if let Ok(config_root) = omp_core::dirs::profile_config_dir(home) {
+		candidates.push(config_root.join("agent/extensions"));
+	}
+	let mut paths = candidates
+		.into_iter()
+		.map(|path| {
+			canonical_protected_location(&path)
+				.unwrap_or_else(|_| std::path::absolute(&path).unwrap_or(path))
+		})
+		.collect::<Vec<_>>();
+	paths.sort_unstable();
+	paths.dedup();
+	paths
+}
+
+fn host_protected_write_paths() -> Vec<PathBuf> {
+	match (omp_core::dirs::data_dir(None), omp_core::dirs::home_dir()) {
+		(Ok(data_dir), Some(home)) => protected_write_paths(&data_dir, &home),
+		(Ok(data_dir), None) => vec![data_dir.join("ext")],
+		(Err(_), _) => Vec::new(),
+	}
+}
+
+/// Canonicalizes a protected path even if its final components do not exist.
+pub fn canonical_protected_location(path: &Path) -> io::Result<PathBuf> {
+	let absolute = std::path::absolute(path)?;
+	let mut probe = absolute.as_path();
+	let mut missing = Vec::new();
+	loop {
+		match fs::canonicalize(probe) {
+			Ok(mut canonical) => {
+				for component in missing.into_iter().rev() {
+					canonical.push(component);
+				}
+				return Ok(canonical);
+			},
+			Err(source) if source.kind() == io::ErrorKind::NotFound => {
+				let name = probe.file_name().ok_or(source)?;
+				missing.push(name.to_os_string());
+				probe = probe.parent().ok_or_else(|| {
+					io::Error::new(io::ErrorKind::NotFound, "protected path has no existing ancestor")
+				})?;
+			},
+			Err(source) => return Err(source),
 		}
 	}
 }
@@ -738,7 +791,10 @@ mod tests {
 	#[test]
 	fn default_sandbox_is_workspace_write_with_scoped_network() {
 		let settings = SandboxSettings::from_con(&Ctx::new());
-		assert_eq!(settings, SandboxSettings::default());
+		// Host-protected paths come from the machine, not the convars; the rest
+		// is the shipped posture.
+		let posture = SandboxSettings { protected_write_paths: Vec::new(), ..settings.clone() };
+		assert_eq!(posture, SandboxSettings::default());
 		assert_eq!(settings.mode, ExecSandboxMode::WorkspaceWrite);
 		assert_eq!(ExecSandboxMode::default(), ExecSandboxMode::WorkspaceWrite);
 		assert_eq!(settings.network_mode, SandboxNetworkMode::Scoped);
@@ -935,6 +991,15 @@ mod tests {
 				.set(&ctx, vec![Str::new_static("[")])
 				.is_err()
 		);
+	}
+
+	#[test]
+	fn from_con_includes_shared_host_protected_paths() {
+		let data_dir = omp_core::dirs::data_dir(None).expect("data directory");
+		let home = omp_core::dirs::home_dir().expect("home directory");
+		let expected = protected_write_paths(&data_dir, &home);
+		let actual = SandboxSettings::from_con(&Ctx::new()).protected_write_paths;
+		assert_eq!(actual, expected);
 	}
 
 	/// Settings without protected paths serialize exactly as before the field

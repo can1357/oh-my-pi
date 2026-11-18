@@ -10,6 +10,7 @@ pub(crate) use sandbox::{
 };
 pub use sandbox::{
 	ExecSandboxMode, NetworkConfinement, SV_SANDBOX_MODE, SV_SANDBOX_NETWORK_MODE,
-	SandboxNetworkMode, network_confinement,
+	SV_SANDBOX_WRITABLE_ROOTS, SandboxNetworkMode, canonical_protected_location,
+	network_confinement, protected_write_paths,
 };
 pub(crate) use shell::{DirenvMode, ShellSettings};
