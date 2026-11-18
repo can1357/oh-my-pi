@@ -1540,6 +1540,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	pendingPythonComponents: PresentedBlock<EvalExecutionComponent>[] = [];
 	pythonComponent: EvalExecutionComponent | undefined = undefined;
 	isPythonMode = false;
+	isBtwMode = false;
 	streamingComponent: AssistantMessageComponent | undefined = undefined;
 	streamingMessage: AssistantMessage | undefined = undefined;
 	lastAssistantUsage: Usage | undefined = undefined;
@@ -4821,6 +4822,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.editor.borderColor = theme.getBashModeBorderColor();
 		} else if (this.isPythonMode) {
 			this.editor.borderColor = theme.getPythonModeBorderColor();
+		} else if (this.isBtwMode) {
+			this.editor.borderColor = theme.getBtwModeBorderColor();
 		} else if (vimMode === "visual" || vimMode === "visual-line") {
 			this.editor.borderColor = (str: string) => theme.fg("warning", str);
 		} else if (vimMode === "normal" || vimMode === "replace") {
@@ -4920,7 +4923,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				? { kind: "bash", excluded: draft.startsWith("!!") }
 				: this.isPythonMode
 					? { kind: "python", excluded: draft.startsWith("$$") }
-					: undefined,
+					: this.isBtwMode
+						? { kind: "btw", excluded: false }
+						: undefined,
 			thinking: thinkingLevelWord(this.viewSession),
 			thinkingInModel: cfgStatusLineCompactThinkingLevel.get(settings),
 			rate: this.#nativeTokenRate(),

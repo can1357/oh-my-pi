@@ -8,6 +8,7 @@
 
 ### Added
 
+- `btwMode` theme color, defined in every bundled theme, and a `btw` kind for the composer mode chip (role `omp.editor.btw-ask`)
 - Custom message payloads accept `excludeFromContext`, kept through normalization and when a saved entry is restored ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
 ### Changed
 
