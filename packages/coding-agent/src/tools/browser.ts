@@ -57,6 +57,7 @@ import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
 import {
+	cfgBrowserCdpNewTabs,
 	cfgBrowserCdpUrl,
 	cfgBrowserCmux,
 	cfgBrowserHeadless,
@@ -723,6 +724,7 @@ async function openOnKind(
 					downloadsPath,
 					userAgent: params.user_agent,
 					insecure: params.insecure,
+					newTab: cfgBrowserCdpNewTabs.get(session.settings),
 					visible: params.headed ?? !cfgBrowserHeadless.get(session.settings),
 					signal: openSignal,
 					ownerSessionId: tabOwnerId(session),

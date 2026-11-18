@@ -806,6 +806,58 @@ describe("pickElectronTarget", () => {
 		30_000,
 	);
 
+	// Launches real headless Chromium; skipped where Chrome's system libraries are absent.
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"browser.cdpNewTabs opens its own page on a connected browser and closes it on release",
+		async () => {
+			const launched = sharedHeadless;
+			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
+			const endpoint = new URL(launched.wsEndpoint);
+			const session: ToolSession = {
+				...makeSession(),
+				settings: Settings.isolated({
+					"browser.webkit": false,
+					"browser.enabled": true,
+					"browser.headless": true,
+					"browser.cdpNewTabs": true,
+				}),
+			};
+			const prelude = createBrowserPrelude(session);
+			const context = { session, toolCallId: "browser-attach-new-tab" };
+			const tabName = `attach-new-tab-${process.pid}-${Math.random().toString(36).slice(2)}`;
+			const requested = "data:text/html,<title>own-connected-tab</title>";
+			const userPage = (await launched.browser.pages())[0];
+			if (!userPage) throw new Error("Expected the launched browser to expose a page target");
+			const userUrl = userPage.url();
+			const pagesBefore = (await launched.browser.pages()).length;
+			let opened = false;
+
+			try {
+				await prelude.invoke(
+					{ action: "open", name: tabName, url: requested, app: `http://${endpoint.host}` },
+					context,
+				);
+				opened = true;
+				const title = await prelude.invoke(
+					{ action: "run", name: tabName, code: "return await tab.title();" },
+					context,
+				);
+				expect(title.details).toMatchObject({ value: "own-connected-tab" });
+				// The page in view is left alone: the tab is a new page, not the adopted one.
+				expect(userPage.url()).toBe(userUrl);
+				expect(await launched.browser.pages()).toHaveLength(pagesBefore + 1);
+
+				await prelude.invoke({ action: "close", name: tabName }, context);
+				opened = false;
+				expect(await launched.browser.pages()).toHaveLength(pagesBefore);
+				expect(userPage.isClosed()).toBe(false);
+			} finally {
+				if (opened) await prelude.invoke({ action: "close", name: tabName }, context);
+			}
+		},
+		30_000,
+	);
+
 	test.skipIf(!CHROMIUM_AVAILABLE)(
 		"does not retry an attached navigation failure as worker startup",
 		async () => {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `browser.cdpNewTabs`: with it on, the browser tool opens its own page on a `browser.cdpUrl` or `app` CDP endpoint and closes it on release, instead of adopting the page in view, so it can drive engines like Lightpanda that keep pages per CDP connection
+
 ### Fixed
 
 - Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy

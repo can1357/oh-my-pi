@@ -224,6 +224,11 @@ export interface AcquireTabOptions {
 	/** Ignore invalid HTTPS certificates for this page. */
 	insecure?: boolean;
 	/**
+	 * Open a new omp-owned page on a connected CDP endpoint instead of adopting the
+	 * one in view (`browser.cdpNewTabs`). An explicit `target` still adopts.
+	 */
+	newTab?: boolean;
+	/**
 	 * Whether the tab should have a window, for a browser that can give or take
 	 * one while the tab lives (omp's WebKit host). Omitted leaves a reused tab
 	 * as it is; other browsers decide visibility when they launch.
@@ -2308,6 +2313,10 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 	} else if (browser.kind.kind === "spawned" && !opts.target && isChromiumBrowserExecutable(browser.kind.path)) {
 		// A dedicated Chrome profile can start with no pages; never navigate its
 		// welcome tab (or another user's tab on a reused endpoint).
+		page = { kind: "create" };
+	} else if (browser.kind.kind === "connected" && !opts.target && opts.newTab) {
+		// Engines such as Lightpanda keep pages per CDP connection: a page another
+		// connection created is invisible to the tab worker, so it creates its own.
 		page = { kind: "create" };
 	} else {
 		// A connected browser without a target adopts the tab the user is looking at

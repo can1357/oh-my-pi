@@ -29,6 +29,19 @@ export const cfgBrowserCdpUrl = register({
 	},
 });
 
+export const cfgBrowserCdpNewTabs = register({
+	id: "browser.cdpNewTabs",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Grep & Browser",
+		label: "Browser CDP New Tabs",
+		description:
+			"Open each tab as a new page on a CDP endpoint (Browser CDP URL or an app URL) and close it on release, instead of adopting the page in view. Needed for engines that keep pages per CDP connection, such as Lightpanda. An open with a target still adopts that page.",
+	},
+});
+
 export const cfgBrowserRelay = register({
 	id: "browser.relay",
 	type: "boolean",
