@@ -7667,6 +7667,8 @@ describe("AgentSession retry fallback", () => {
 		// explicit Low survives the swap.
 		expect(session.thinkingLevel).toBe(Effort.Low);
 		expect(session.configuredThinkingLevel()).toBe(Effort.Low);
+		// Only the initial fall forward applied a fallback; the restore did not.
+		expect(fallbackAppliedEvents).toHaveLength(1);
 
 		now += 240;
 		await session.prompt("Third prompt stays on the restored primary with the same thinking level");
@@ -7679,6 +7681,8 @@ describe("AgentSession retry fallback", () => {
 		]);
 		expect(session.thinkingLevel).toBe(Effort.Low);
 		expect(session.configuredThinkingLevel()).toBe(Effort.Low);
+		// Past the cooldown the already-active primary is not restored again.
+		expect(fallbackAppliedEvents).toHaveLength(1);
 	});
 
 	it("preserves an effort override across repeated failed restores", async () => {
