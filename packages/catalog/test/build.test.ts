@@ -136,6 +136,19 @@ describe("buildModel", () => {
 		});
 	});
 
+	it("keeps the native Codex prompt-window correction on custom-named deployments", () => {
+		const model = buildModel({
+			...responsesSpec({
+				id: "gpt-5.1-codex",
+				provider: "workbench",
+				contextWindow: 400_000,
+			}),
+			api: "openai-codex-responses",
+		});
+
+		expect(model.contextWindow).toBe(272_000);
+	});
+
 	it("resolves a complete compat record for an openai-completions spec with no compat", () => {
 		const model = buildModel(completionsSpec());
 

@@ -12,6 +12,10 @@
 
 - `readModelCache()` parses a payload once per process: cache files holding identical rows return the same shared row objects
 
+### Fixed
+
+- Fixed Codex models behind OpenAI-compatible proxies ignoring their deployment's reported context window.
+
 ## [18.22.1] - 2026-11-17
 
 ### Fixed
