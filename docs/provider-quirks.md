@@ -685,6 +685,7 @@ The native Kiro provider (`kiro-api`) streams AWS event-stream frames from the K
 ### Auth & usage
 
 - **Token usage**: Usage comes only from `metadataEvent.tokenUsage`; when none arrives, usage is zero, never estimated.
+- **Identity Center routing**: IAM Identity Center logins (OIDC client + org profile) encode `service: "q"` so chat and `GetUsageLimits` go to Amazon Q (`q.<region>.amazonaws.com`). Profile and model listing stay on `management.*.kiro.dev`, which already accepts those IdC bearers. Builder ID, Google/GitHub, and API keys stay on the Kiro runtime. Sending an IdC bearer to `runtime.*.kiro.dev` is rejected with HTTP 403. Existing stored IdC rows pick this up on the next request: `getApiKey` re-encodes from `kiroClientId` + `kiroProfileArn`.
 
 ### Catalog model handling
 

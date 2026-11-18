@@ -109,6 +109,26 @@ describe("kiroUsageProvider", () => {
 		expect(JSON.stringify(report)).not.toContain("someone@example.com");
 	});
 
+	it("sends Identity Center GetUsageLimits to Amazon Q, not management.*.kiro.dev", async () => {
+		const captured: Captured[] = [];
+		await kiroUsageProvider.fetchUsage(
+			{
+				provider: "kiro",
+				credential: {
+					type: "oauth",
+					accessToken: "idc-access",
+					expiresAt: Date.now() + 3_600_000,
+					kiroProfileArn: PROFILE_ARN,
+					kiroClientId: "client-id",
+					region: "eu-central-1",
+				},
+			},
+			context(() => json(livePayload()), captured),
+		);
+		expect(captured).toHaveLength(1);
+		expect(captured[0]?.url).toBe("https://q.eu-central-1.amazonaws.com/");
+	});
+
 	it("marks a spent plan exhausted only when no bonus or overage remains, and flags paid overage", () => {
 		const spent = { used: 638, limit: 638 };
 		expect(parseKiroUsage(livePayload({ ...spent, bonus: false }))?.limits.map(limit => limit.status)).toEqual([

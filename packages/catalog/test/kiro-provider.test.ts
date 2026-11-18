@@ -82,6 +82,27 @@ describe("Kiro model discovery", () => {
 		expect(models?.[2]).not.toHaveProperty("thinking");
 	});
 
+	test("Identity Center credentials list models on management.*.kiro.dev and pin chat to Amazon Q", async () => {
+		const urls: string[] = [];
+		const credential: KiroCredential = {
+			kind: "oauth",
+			token: "access",
+			region: "eu-central-1",
+			loginId: "login-idc",
+			profileArn: "arn:aws:codewhisperer:eu-central-1:123456789012:profile/p",
+			service: "q",
+		};
+		const models = await fetchKiroModels({
+			credential,
+			fetch: async input => {
+				urls.push(String(input));
+				return Response.json(catalog(model("claude")));
+			},
+		});
+		expect(urls).toEqual(["https://management.eu-central-1.kiro.dev/"]);
+		expect(models?.[0]?.baseUrl).toBe("https://q.eu-central-1.amazonaws.com/");
+	});
+
 	test("follows nextToken with the login's profile ARN and returns null when discovery fails", async () => {
 		const bodies: unknown[] = [];
 		const fetch: FetchImpl = async (_input, init) => {

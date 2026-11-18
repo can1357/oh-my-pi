@@ -131,6 +131,7 @@ describe("Kiro device login", () => {
 			region: "eu-central-1",
 			loginId: row.accountId!,
 			profileArn: PROFILE_EU,
+			service: "q",
 		});
 	});
 
@@ -141,6 +142,12 @@ describe("Kiro device login", () => {
 		expect(calls.every(call => call.url.startsWith("https://oidc.us-east-1.amazonaws.com/"))).toBe(true);
 		expect(row).toMatchObject({ region: "us-east-1", kiroOidcRegion: "us-east-1" });
 		expect(row.kiroProfileArn).toBeUndefined();
+		expect(decodeKiroCredential(encodeKiroOAuthRow(row), {})).toEqual({
+			kind: "oauth",
+			token: "access-token",
+			region: "us-east-1",
+			loginId: row.accountId!,
+		});
 	});
 });
 
@@ -156,6 +163,13 @@ describe("Kiro social login", () => {
 		]);
 		expect(row).toMatchObject({ kiroProfileArn: PROFILE_EU, region: "eu-central-1", orgName: "Google" });
 		expect(row.kiroClientId).toBeUndefined();
+		expect(decodeKiroCredential(encodeKiroOAuthRow(row), {})).toEqual({
+			kind: "oauth",
+			token: "social-access",
+			region: "eu-central-1",
+			loginId: row.accountId!,
+			profileArn: PROFILE_EU,
+		});
 	});
 
 	it("without a poll ARN, takes a listed profile, the default only when every region lists none, else fails", async () => {
