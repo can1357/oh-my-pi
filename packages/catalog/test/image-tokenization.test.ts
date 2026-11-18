@@ -145,8 +145,9 @@ describe("resolveImageTokenization", () => {
 			expect(ruleFor("google-antigravity", id)).toEqual({ regime: "fixed", verified: true, tokens: 1089 });
 		}
 		expect(ruleFor("google", "gemini-3.8-flash")).toEqual({ regime: "fixed", tokens: 1120 });
-		// Devin bills the two Gemini models measured across sizes 1,089; the rest keep the unverified lineage rule.
-		for (const id of ["gemini-3-7-flash", "gemini-4-carbon"]) {
+		// Devin bills the two Gemini models measured across sizes 1,089 (raw effort uids included); the rest keep the
+		// unverified lineage rule.
+		for (const id of ["gemini-3-7-flash", "gemini-4-carbon", "gemini-4-carbon-high"]) {
 			expect(ruleFor("devin", id)).toEqual({ regime: "fixed", verified: true, tokens: 1089 });
 		}
 		expect(ruleFor("devin", "gemini-3-8-flash")).toEqual({ regime: "fixed", tokens: 1120 });

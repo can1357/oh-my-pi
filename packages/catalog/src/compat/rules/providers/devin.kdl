@@ -279,9 +279,23 @@ provider "devin" {
 	// Devin bills Gemini images at a fixed ~1,089 tokens from 512 px to 4,096 px
 	// (Google's fixed `media_resolution` budget passed through), under the
 	// lineage's unverified 1,120. verified: billing matched across 8 sizes on
-	// these two; 3.5/3.8 Flash and 4 Hydrogen/Argon billed 1,089-1,091 in a
-	// single two-point check and stay on the lineage rule until measured.
-	models "gemini-4-carbon" "gemini-3-7-flash" {
+	// Gemini 3.7 Flash and 4 Carbon; 3.5/3.8 Flash and 4 Hydrogen/Argon billed
+	// 1,089-1,091 in a single two-point check and stay on the lineage rule until
+	// measured.
+	class "gemini" {
+		family "flash" {
+			revision ">=3.7 <3.8" {
+				image-tokenization {
+					regime "fixed"
+					verified #true
+					tokens 1089
+				}
+			}
+		}
+	}
+	// residue: Carbon shares its class rank with Argon and Hydrogen and has no
+	// family; the list names the logical id plus its raw effort uids.
+	models "gemini-4-carbon" "gemini-4-carbon-low" "gemini-4-carbon-medium" "gemini-4-carbon-high" {
 		image-tokenization {
 			regime "fixed"
 			verified #true
