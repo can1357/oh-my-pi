@@ -155,7 +155,7 @@ function facts(values: readonly (string | undefined)[]): TspSpan[] {
 
 /**
  * Render a `launch-completion` custom message (terminal supervised-process
- * exits from the launch broker) as a transcript block of one compact
+ * exits reported by the daemon) as a transcript block of one compact
  * "Supervised process ..." row per daemon, matching background-job rows.
  */
 export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolActivityContainer {

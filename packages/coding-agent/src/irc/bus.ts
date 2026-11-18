@@ -60,8 +60,6 @@ const MAILBOX_CAP = 100;
 /** Longest message excerpt the bus keeps per sender → recipient pair. */
 const EXCERPT_MAX_CHARS = 280;
 
-/** A message awaiting delivery; local-only sends never fall through to a peer tunnel. */
-export type IrcSend = Omit<IrcMessage, "id" | "ts"> & { localOnly?: boolean };
 /** `body` on one line, cut to {@link EXCERPT_MAX_CHARS}. */
 function excerptOf(body: string): string {
 	const text = body.replace(/\s+/g, " ").trim();
@@ -81,6 +79,9 @@ export interface UnansweredSend {
 	/** Opening text of the agent's latest progress note since, when `promised`. */
 	promise?: string;
 }
+
+/** A message awaiting delivery; local-only sends never fall through to a peer tunnel. */
+export type IrcSend = Omit<IrcMessage, "id" | "ts"> & { localOnly?: boolean };
 
 /** Public surface of the process-global IRC bus, implemented locally on main and by a proxy in workers. */
 export interface IrcBusApi {

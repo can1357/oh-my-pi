@@ -1141,7 +1141,9 @@ export class UnitTable {
 				continue;
 			}
 			const detached =
-				entry.snapshot.policy.survive === "detached" && !runtime?.stopRequested && !isTerminal(entry.snapshot.state);
+				entry.snapshot.policy.survive === "detached" &&
+				!runtime?.stopRequested &&
+				!isTerminal(entry.snapshot.state);
 			if (detached) {
 				// Outlives this daemon; the next one re-adopts it. Retire this launch's callbacks.
 				if (runtime) {
@@ -1793,7 +1795,8 @@ export class UnitTable {
 
 	#readDetachedOutput(entry: UnitEntry, launch: number, report = true): Promise<void> {
 		const runtime = entry.procRuntime;
-		if (!runtime || entry.snapshot.policy.survive !== "detached" || launch !== runtime.launch) return Promise.resolve();
+		if (!runtime || entry.snapshot.policy.survive !== "detached" || launch !== runtime.launch)
+			return Promise.resolve();
 		const read = (runtime.detachedRead ?? Promise.resolve()).then(async () => {
 			if (launch !== runtime.launch) return;
 			const logPath = path.join(unitLogDir(entry.snapshot.id), LOG_FILE);
@@ -1878,7 +1881,8 @@ export class UnitTable {
 	#skipUnwatchedOutput(owner: string): void {
 		for (const entry of this.#units.values()) {
 			const runtime = entry.procRuntime;
-			if (entry.snapshot.owner !== owner || !runtime?.notify || entry.snapshot.policy.survive !== "detached") continue;
+			if (entry.snapshot.owner !== owner || !runtime?.notify || entry.snapshot.policy.survive !== "detached")
+				continue;
 			void this.#readDetachedOutput(entry, runtime.launch).catch(error =>
 				logger.warn("Failed to read detached unit output", { id: entry.snapshot.id, error: errorMessage(error) }),
 			);
