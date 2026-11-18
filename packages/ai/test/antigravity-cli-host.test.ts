@@ -388,6 +388,22 @@ describe("AgyHost stateful steps", () => {
 		expect(run.writer.output.content).toEqual([{ type: "text", text: "continued" }]);
 	});
 
+	it("routes a same-named announcement to the current continuation", async () => {
+		const state = await fixture({ maxContinuations: 1 });
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		const stale = fake.options.onCall("read", { path: "old.txt" }, fake.currentId);
+		prompt.response.resolve({ stopReason: "max_turn_requests" });
+		await fake.prompts.next();
+		const current = fake.call("read", { path: "new.txt" });
+		void current.catch(() => undefined);
+		await expect(stale).resolves.toMatchObject({ isError: true });
+		expect(state.host.hasPendingTurn).toBe(true);
+		const call = run.writer.output.content.find(block => block.type === "toolCall");
+		expect(call).toMatchObject({ type: "toolCall", name: "read", arguments: { path: "new.txt" } });
+	});
+
 	it("keeps an end_turn stop as a normal stop", async () => {
 		const state = await fixture();
 		const run = step(state.host, [user("hello")]);

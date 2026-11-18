@@ -218,7 +218,7 @@ export class AgyHost implements ProviderSessionState {
 	/** Sessions this host replaced or forked away from; a late call from one is stale, not foreign. */
 	readonly #abandonedConversations = new Set<string>();
 	#announced = new Map<string, number>();
-	#announcementWaiters = new Set<{ name: string; finish(announced: boolean): void }>();
+	#announcementWaiters = new Set<{ name: string; generation: number; finish(announced: boolean): void }>();
 	#loggedGeneration = 0;
 
 	/** geminiDir is the account-scoped agy configuration and conversation directory. */
@@ -649,6 +649,9 @@ export class AgyHost implements ProviderSessionState {
 			generation: 0,
 		};
 		turn.generation++;
+		for (const waiter of [...this.#announcementWaiters]) {
+			if (waiter.generation !== turn.generation) waiter.finish(false);
+		}
 		if (continuing) turn.response = Promise.withResolvers<PromptResponse>();
 		else {
 			turn.stopped.promise.catch(() => undefined);
@@ -901,6 +904,7 @@ export class AgyHost implements ProviderSessionState {
 		const result = Promise.withResolvers<boolean>();
 		const waiter = {
 			name,
+			generation: this.#turn?.generation ?? 0,
 			finish: (announced: boolean) => {
 				timer.cancel();
 				this.#announcementWaiters.delete(waiter);
@@ -933,7 +937,9 @@ export class AgyHost implements ProviderSessionState {
 			case "tool_call": {
 				const name = MCP_TOOL_NAME.exec(update.title)?.[1];
 				if (!name) return;
-				const waiter = [...this.#announcementWaiters].find(candidate => candidate.name === name);
+				const waiter = [...this.#announcementWaiters].find(
+					candidate => candidate.name === name && candidate.generation === this.#turn?.generation,
+				);
 				if (waiter) waiter.finish(true);
 				else this.#announced.set(name, (this.#announced.get(name) ?? 0) + 1);
 				return;
