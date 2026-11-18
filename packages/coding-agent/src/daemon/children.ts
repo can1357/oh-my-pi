@@ -43,12 +43,23 @@ class OutputChannel {
 	}
 }
 
+// The pause pair is Unix-only in the natives; Windows never re-execs, so there is nothing to pause.
+function pauseStream(stream: FdStream): Promise<void> {
+	return typeof stream.pause === "function" ? stream.pause() : Promise.resolve();
+}
+
+function resumeStream(stream: FdStream): void {
+	if (typeof stream.resume === "function") stream.resume();
+}
+
 class RawManagedChild implements ManagedChild {
 	readonly pid: number;
 	readonly exited: Promise<ChildExit>;
 	readonly #startedAt: number;
 	readonly #fds: { stdin: number; stdout: number; stderr: number };
 	readonly #stdin: FdStream;
+	readonly #stdoutStream: FdStream;
+	readonly #stderrStream: FdStream;
 	readonly #stdout = new OutputChannel();
 	readonly #stderr = new OutputChannel();
 	#done = false;
@@ -62,6 +73,8 @@ class RawManagedChild implements ManagedChild {
 		this.#stdin = stdin;
 		const stdout = new FdStream(state.stdout);
 		const stderr = new FdStream(state.stderr);
+		this.#stdoutStream = stdout;
+		this.#stderrStream = stderr;
 		const stdoutClosed = Promise.withResolvers<void>();
 		const stderrClosed = Promise.withResolvers<void>();
 		stdout.start(
@@ -110,6 +123,15 @@ class RawManagedChild implements ManagedChild {
 
 	onStderr(sink: (chunk: Uint8Array) => void): void {
 		this.#stderr.attach(sink);
+	}
+
+	async pauseOutput(): Promise<void> {
+		await Promise.all([pauseStream(this.#stdoutStream), pauseStream(this.#stderrStream)]);
+	}
+
+	resumeOutput(): void {
+		resumeStream(this.#stdoutStream);
+		resumeStream(this.#stderrStream);
 	}
 
 	kill(signal: NodeJS.Signals = "SIGTERM"): void {

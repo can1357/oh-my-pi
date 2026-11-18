@@ -424,15 +424,22 @@ class Daemon {
 			daemonHandoverPath(),
 			JSON.stringify({ pid: process.pid, startedAt: processStartTime(process.pid), at: Date.now() }),
 		);
+		// Output read from here on would have no log to land in: leave it in the pipes for the successor.
+		await this.#units.pauseOutput();
+		// Last await.
+		await this.#units.releaseLogs();
 		// From here to the exec nothing awaits: no callback of this image can run in between.
 		const keepFds = this.#units.reexecFds();
-		this.#store.close();
-		this.#lock.release();
 		logger.debug("omp daemon re-exec", { from: daemonBuildId(), to: hello.client.build, keepFds });
 		try {
+			// Closed explicitly so no store fd crosses the exec, whatever its close-on-exec flag.
+			this.#store.close();
+			this.#lock.release();
 			execReplace(application, [command, ...rest, DAEMON_WORKER_ARG], env, keepFds);
 		} catch (error) {
 			logger.error("Daemon re-exec failed; resuming service", { application, error: errorMessage(error) });
+			// Idempotent; still held when the store failed to close.
+			this.#lock.release();
 			await this.#resumeAfterFailedExec();
 		}
 	}

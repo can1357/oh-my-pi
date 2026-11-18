@@ -30,9 +30,11 @@ beforeEach(async () => {
 	harness = await IsolatedDaemon.create();
 });
 
+// Past the harness's 10s lock wait: a daemon stuck mid-exec is killed before the next test swaps
+// `OMP_DAEMON_DIR`, instead of a timed-out teardown restoring the env and removing the dir under it.
 afterEach(async () => {
 	await harness.dispose();
-});
+}, 30_000);
 
 function parentEnv(): Record<string, string> {
 	const env: Record<string, string> = {};
@@ -124,6 +126,20 @@ async function waitForLog(client: DaemonClient, id: string, needle: string): Pro
 
 async function byId(client: DaemonClient, id: string): Promise<UnitSnapshot> {
 	return (await client.request({ op: "describe", unit: id })).unit;
+}
+
+/** Counter values of the `tick:N` lines in `text`, in log order. */
+function ticks(text: string): number[] {
+	const values: number[] = [];
+	for (const line of text.split("\n")) {
+		const match = /^tick:(\d+)\r?$/.exec(line);
+		if (match) values.push(Number(match[1]));
+	}
+	return values;
+}
+
+async function lastTick(client: DaemonClient, id: string): Promise<number> {
+	return ticks(await logText(client, id)).at(-1) ?? 0;
 }
 
 describe.skipIf(process.platform === "win32")("daemon in-place re-exec", () => {
@@ -222,6 +238,59 @@ describe.skipIf(process.platform === "win32")("daemon in-place re-exec", () => {
 				expect(still?.welcome.daemon.startedAt).toBe(after.welcome.daemon.startedAt);
 			} finally {
 				still?.close();
+			}
+		} finally {
+			after.close();
+		}
+	}, 90_000);
+
+	it("loses and repeats no output of a streaming unit across the exec", async () => {
+		const client = await daemonClient();
+		harness.track(client.welcome.daemon.pid);
+		const policy = { hold: "persist" as const, survive: "exec" as const };
+		const script = 'n=0; while :; do n=$((n+1)); echo "tick:$n"; sleep 0.002; done';
+		const units: UnitSnapshot[] = [];
+		for (const pty of [false, true]) {
+			const { unit } = await client.open({
+				kind: "proc",
+				scope: GLOBAL_SCOPE,
+				key: pty ? "ticker-pty" : "ticker-pipe",
+				proc: shProc(script, pty),
+				policy,
+			});
+			harness.track(...unit.pids);
+			units.push(unit);
+		}
+		for (const unit of units) await waitFor(async () => (await lastTick(client, unit.id)) >= 20, "ticks before");
+		await closeDaemonClient();
+
+		// Upgrade while both units keep printing.
+		const newer = await WireClient.connect("999.0.0+1");
+		try {
+			expect(await newer.request<{ reexec: boolean }>({ op: "upgrade" })).toEqual({ reexec: true });
+			await newer.closed;
+		} finally {
+			newer.close();
+		}
+
+		const after = await waitFor(() => probeDaemon(), "the re-exec'd daemon to answer");
+		try {
+			for (const unit of units) {
+				const resumedAt = await lastTick(after, unit.id);
+				// Output printed after the exec reaches the log too.
+				await waitFor(async () => (await lastTick(after, unit.id)) >= resumedAt + 20, "ticks after");
+			}
+			for (const unit of units) {
+				await after.request({ op: "stop", unit: unit.id, timeoutMs: 5_000 });
+				await waitFor(
+					async () => ["exited", "failed"].includes((await byId(after, unit.id)).state),
+					"the unit to stop",
+				);
+			}
+			for (const unit of units) {
+				const values = ticks(await fs.readFile(path.join(unitLogDir(unit.id), "output.log"), "utf8"));
+				expect(values.length).toBeGreaterThan(40);
+				expect(values).toEqual(Array.from({ length: values.length }, (_, index) => index + 1));
 			}
 		} finally {
 			after.close();

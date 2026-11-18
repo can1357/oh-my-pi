@@ -526,7 +526,7 @@ impl IpcConnection {
 	/// strings (UTF-8) / `Uint8Array` written as-is, without an LF. The
 	/// `onClose` given to `start` still fires exactly once, last.
 	/// `maxFrameBytes` stops applying once the switch reaches the reader. Throws
-	/// `TypeError` on a `raw` connection, ERR_INVALID_STATE before `start` or
+	/// `TypeError` on a `raw` connection, `ERR_INVALID_STATE` before `start` or
 	/// when already upgraded.
 	#[napi(js_name = "upgradeRaw", ts_args_type = "onChunk: (chunk: Uint8Array) => void")]
 	pub fn upgrade_raw(

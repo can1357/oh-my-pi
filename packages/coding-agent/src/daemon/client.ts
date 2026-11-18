@@ -1054,19 +1054,23 @@ export async function isolateDaemonForSmokeTest(): Promise<() => Promise<void>> 
 	delete process.env[DAEMON_TCP_ENV];
 	return async () => {
 		await closeDaemonClient();
-		const probe = await probeDaemon();
-		if (probe) {
-			try {
-				await probe.request({ op: "shutdown" });
-			} catch (error) {
-				logger.debug("Smoke-test daemon shutdown failed", { error: toError(error).message });
-			} finally {
-				probe.close();
+		// The probe follows the env: once something else repointed it, the daemon
+		// it would reach is not this one, and shutting that down is never ours to do.
+		if (process.env[DAEMON_DIR_ENV] === root) {
+			const probe = await probeDaemon();
+			if (probe) {
+				try {
+					await probe.request({ op: "shutdown" });
+				} catch (error) {
+					logger.debug("Smoke-test daemon shutdown failed", { error: toError(error).message });
+				} finally {
+					probe.close();
+				}
 			}
+			if (previousDir === undefined) delete process.env[DAEMON_DIR_ENV];
+			else process.env[DAEMON_DIR_ENV] = previousDir;
+			if (previousTcp !== undefined) process.env[DAEMON_TCP_ENV] = previousTcp;
 		}
-		if (previousDir === undefined) delete process.env[DAEMON_DIR_ENV];
-		else process.env[DAEMON_DIR_ENV] = previousDir;
-		if (previousTcp !== undefined) process.env[DAEMON_TCP_ENV] = previousTcp;
 		await fs.rm(root, { recursive: true, force: true });
 	};
 }

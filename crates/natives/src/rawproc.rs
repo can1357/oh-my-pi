@@ -30,7 +30,7 @@ use napi::{
 };
 use napi_derive::napi;
 use parking_lot::Mutex;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::task;
@@ -275,6 +275,7 @@ fn wait_child(pid: i32) -> io::Result<RawExit> {
 /// `CLOEXEC` flags are restored and a JS error whose `code` is the errno name
 /// is thrown.
 #[napi(ts_return_type = "never")]
+#[allow(clippy::implicit_hasher, reason = "napi marshals a JS object into the default-hasher HashMap")]
 pub fn exec_replace(
 	js_env: &Env,
 	path: String,
@@ -342,6 +343,9 @@ pub fn exec_replace(
 enum Event {
 	Chunk(Vec<u8>),
 	Close(Option<String>),
+	/// The reader stopped for `pause()`: every earlier chunk has been
+	/// delivered, so the pause promises resolve.
+	Paused(Vec<oneshot::Sender<()>>),
 }
 
 /// Ordered event channel into JavaScript.
@@ -463,6 +467,35 @@ struct FdShared {
 	write_wake:     Notify,
 	drained:        Notify,
 	cancel:         CancellationToken,
+	reader:         Mutex<ReaderState>,
+}
+
+/// Read side of an [`FdStream`], guarded by [`FdShared::reader`].
+struct ReaderState {
+	/// Kept while the stream can still emit events; dropped with `Close`.
+	sink:  Option<Arc<EventSink>>,
+	phase: ReadPhase,
+}
+
+#[cfg_attr(not(unix), allow(dead_code, reason = "`pause()` never stops the Windows reader"))]
+enum ReadPhase {
+	/// `start` not called yet.
+	Idle,
+	/// The read loop runs; cancelling the token pauses it.
+	Running(CancellationToken),
+	/// `pause()` cancelled the loop; these promises resolve once it stops.
+	Pausing(Vec<oneshot::Sender<()>>),
+	/// Stopped by `pause()`; the fd stays open and unread bytes stay in the
+	/// kernel.
+	Paused,
+	/// `Close` was emitted.
+	Done,
+}
+
+/// Why a read loop stopped.
+enum ReadExit {
+	Paused,
+	Close(Option<String>),
 }
 
 impl FdShared {
@@ -498,6 +531,7 @@ impl FdStream {
 				write_wake:     Notify::new(),
 				drained:        Notify::new(),
 				cancel:         CancellationToken::new(),
+				reader:         Mutex::new(ReaderState { sink: None, phase: ReadPhase::Idle }),
 			}),
 		})
 	}
@@ -534,30 +568,87 @@ impl FdStream {
 					.call(Uint8Array::from(chunk))
 					.map(drop),
 				Event::Close(reason) => on_close.borrow_back(&ctx.env)?.call(reason).map(drop),
+				Event::Paused(waiters) => {
+					for waiter in waiters {
+						let _ = waiter.send(());
+					}
+					Ok(())
+				},
 			})?;
 		let Some(io) = self.shared.io.lock().clone() else {
 			sink.call(Event::Close(None), ThreadsafeFunctionCallMode::NonBlocking);
+			self.shared.reader.lock().phase = ReadPhase::Done;
 			return Ok(());
 		};
-		let cancel = self.shared.cancel.clone();
-		napi::bindgen_prelude::spawn(async move {
-			let mut buf = vec![0u8; READ_CHUNK];
-			let reason = loop {
-				tokio::select! {
-					() = cancel.cancelled() => break None,
-					read = io.read(&mut buf) => match read {
-						Ok(0) => break None,
-						Ok(n) => {
-							sink.call(Event::Chunk(buf[..n].to_vec()), ThreadsafeFunctionCallMode::NonBlocking);
-						},
-						Err(error) => break Some(format!("{}: {error}", errno_code(&error))),
-					},
-				}
-			};
-			drop(io);
-			sink.call(Event::Close(reason), ThreadsafeFunctionCallMode::NonBlocking);
-		});
+		let sink = Arc::new(sink);
+		let pause = CancellationToken::new();
+		{
+			let mut reader = self.shared.reader.lock();
+			reader.sink = Some(Arc::clone(&sink));
+			reader.phase = ReadPhase::Running(pause.clone());
+		}
+		spawn_reader(Arc::clone(&self.shared), io, sink, pause);
 		Ok(())
+	}
+
+	/// Stop reading without closing the fd. Resolves once every chunk read
+	/// before the pause has been delivered to `onChunk`; unread bytes stay in
+	/// the kernel buffer. Writes are unaffected. No-op (resolved) when not
+	/// reading (not started, already paused, or closed).
+	///
+	/// Windows: the blocking pipe read cannot be interrupted without losing its
+	/// bytes, so this resolves immediately and reading continues.
+	#[napi(ts_return_type = "Promise<void>")]
+	pub fn pause<'env>(&self, env: &'env Env) -> Result<PromiseRaw<'env, ()>> {
+		#[cfg(unix)]
+		let stopped = {
+			let mut guard = self.shared.reader.lock();
+			let reader = &mut *guard;
+			match &mut reader.phase {
+				ReadPhase::Running(token) => {
+					// The read happens inside `try_io`, so cancelling while the loop
+					// awaits readiness consumes nothing.
+					token.cancel();
+					let (tx, rx) = oneshot::channel();
+					reader.phase = ReadPhase::Pausing(vec![tx]);
+					Some(rx)
+				},
+				ReadPhase::Pausing(waiters) => {
+					let (tx, rx) = oneshot::channel();
+					waiters.push(tx);
+					Some(rx)
+				},
+				ReadPhase::Idle | ReadPhase::Paused | ReadPhase::Done => None,
+			}
+		};
+		#[cfg(not(unix))]
+		let stopped: Option<oneshot::Receiver<()>> = None;
+		task::future(env, "rawproc.fd_stream.pause", async move {
+			if let Some(stopped) = stopped {
+				// A dropped sender means the stream went away; nothing is left to
+				// deliver either way.
+				let _ = stopped.await;
+			}
+			Ok(())
+		})
+	}
+
+	/// Restart the read loop after `pause()` with the callbacks given to
+	/// `start`. No-op when not paused.
+	#[napi]
+	pub fn resume(&self) {
+		let shared = &self.shared;
+		let mut reader = shared.reader.lock();
+		if !matches!(reader.phase, ReadPhase::Paused) {
+			return;
+		}
+		let (Some(io), Some(sink)) = (shared.io.lock().clone(), reader.sink.clone()) else {
+			return;
+		};
+		let pause = CancellationToken::new();
+		reader.phase = ReadPhase::Running(pause.clone());
+		drop(reader);
+		spawn_reader(Arc::clone(shared), io, sink, pause);
 	}
 
 	/// Queue `data`; false once more than 1 MiB is unwritten (or the stream is
@@ -580,7 +671,8 @@ impl FdStream {
 		let total = shared.queued.fetch_add(len, Ordering::AcqRel) + len;
 		shared.write_wake.notify_one();
 		if !shared.writer_running.swap(true, Ordering::AcqRel) {
-			if let Some(io) = shared.io.lock().clone() {
+			let io = shared.io.lock().clone();
+			if let Some(io) = io {
 				napi::bindgen_prelude::spawn(run_writer(Arc::clone(shared), io));
 			}
 		}
@@ -611,7 +703,65 @@ impl FdStream {
 		shared.io.lock().take();
 		shared.cancel.cancel();
 		shared.discard();
+		// A running loop emits `Close` itself; a paused one is gone.
+		let mut reader = shared.reader.lock();
+		if matches!(reader.phase, ReadPhase::Paused) {
+			reader.phase = ReadPhase::Done;
+			if let Some(sink) = reader.sink.take() {
+				sink.call(Event::Close(None), ThreadsafeFunctionCallMode::NonBlocking);
+			}
+		}
 	}
+}
+
+/// Deliver chunks read from `io` until EOF, an error, `close()` (all emit
+/// `Close`) or `pause` (emits `Paused`, keeps the fd).
+fn spawn_reader(
+	shared: Arc<FdShared>,
+	io: Arc<FdIo>,
+	sink: Arc<EventSink>,
+	pause: CancellationToken,
+) {
+	napi::bindgen_prelude::spawn(async move {
+		let cancel = shared.cancel.clone();
+		let mut buf = vec![0u8; READ_CHUNK];
+		let exit = loop {
+			tokio::select! {
+				biased;
+				() = cancel.cancelled() => break ReadExit::Close(None),
+				() = pause.cancelled() => break ReadExit::Paused,
+				read = io.read(&mut buf) => match read {
+					Ok(0) => break ReadExit::Close(None),
+					Ok(n) => {
+						sink.call(Event::Chunk(buf[..n].to_vec()), ThreadsafeFunctionCallMode::NonBlocking);
+					},
+					Err(error) => break ReadExit::Close(Some(format!("{}: {error}", errno_code(&error)))),
+				},
+			}
+		};
+		drop(io);
+		let mut reader = shared.reader.lock();
+		// `close()` cancels before taking this lock, so a pause that raced it
+		// still ends in `Close`.
+		let reason = match exit {
+			ReadExit::Paused if !cancel.is_cancelled() => {
+				if let ReadPhase::Pausing(waiters) =
+					std::mem::replace(&mut reader.phase, ReadPhase::Paused)
+				{
+					sink.call(Event::Paused(waiters), ThreadsafeFunctionCallMode::NonBlocking);
+				}
+				return;
+			},
+			ReadExit::Paused => None,
+			ReadExit::Close(reason) => reason,
+		};
+		let phase = std::mem::replace(&mut reader.phase, ReadPhase::Done);
+		reader.sink = None;
+		sink.call(Event::Close(reason), ThreadsafeFunctionCallMode::NonBlocking);
+		if let ReadPhase::Pausing(waiters) = phase {
+			sink.call(Event::Paused(waiters), ThreadsafeFunctionCallMode::NonBlocking);
+		}
+	});
 }
 
 /// Write queued frames in order until closed or the fd fails.

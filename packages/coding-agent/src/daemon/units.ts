@@ -251,6 +251,8 @@ class UnitLog {
 	#queue: Promise<void> = Promise.resolve();
 	#closed = false;
 	#closing: Promise<void> | undefined;
+	/** Set by {@link release}: the handle is closed and appends go straight to the file, holding no fd. */
+	#released = false;
 
 	private constructor(dir: string, handle: fsp.FileHandle, currentBytes: number) {
 		this.#dir = dir;
@@ -295,13 +297,66 @@ class UnitLog {
 	append(text: string): void {
 		if (text.length === 0 || this.#closed) return;
 		const data = Buffer.from(text, "utf8");
+		if (this.#released) {
+			this.#writeSync(data);
+			return;
+		}
 		this.#queue = this.#queue
 			.then(async () => {
+				// Queued while `release` closed the handle.
+				if (this.#released) return this.#writeSync(data);
 				if (this.#currentBytes > 0 && this.#currentBytes + data.byteLength > MAX_LOG_BYTES) await this.#rotate();
 				await this.#handle.write(data);
 				this.#currentBytes += data.byteLength;
 			})
 			.catch(error => logger.warn("Unit log write failed", { dir: this.#dir, error: errorMessage(error) }));
+	}
+
+	/**
+	 * Close the handle ahead of a re-exec but keep the output: once this resolves
+	 * every append so far is on disk and later ones are written synchronously
+	 * (open, write, close), so output delivered up to the exec lands in the log
+	 * and no log fd crosses it. {@link reacquire} undoes it.
+	 */
+	async release(): Promise<void> {
+		if (this.#released || this.#closed) return;
+		this.#queue = this.#queue.then(async () => {
+			try {
+				await this.#handle.close();
+			} catch (error) {
+				logger.warn("Unit log close failed", { dir: this.#dir, error: errorMessage(error) });
+			}
+			this.#released = true;
+		});
+		// Appends queued behind the close write synchronously once it is done; wait for those too.
+		let queue: Promise<void>;
+		do {
+			queue = this.#queue;
+			await queue;
+		} while (queue !== this.#queue);
+	}
+
+	/** The re-exec failed: reopen the file and go back to queued appends. */
+	async reacquire(): Promise<void> {
+		if (!this.#released || this.#closed) return;
+		const handle = await fsp.open(this.#path, "a", 0o600);
+		try {
+			this.#currentBytes = (await handle.stat()).size;
+		} catch (error) {
+			await handle.close();
+			throw error;
+		}
+		this.#handle = handle;
+		this.#released = false;
+	}
+
+	#writeSync(data: Buffer): void {
+		try {
+			fs.appendFileSync(this.#path, data, { mode: 0o600 });
+			this.#currentBytes += data.byteLength;
+		} catch (error) {
+			logger.warn("Unit log write failed", { dir: this.#dir, error: errorMessage(error) });
+		}
 	}
 
 	/** Resolves once every queued append is on disk. */
@@ -321,7 +376,7 @@ class UnitLog {
 
 	close(): Promise<void> {
 		this.#closed = true;
-		this.#closing ??= this.#queue.then(() => this.#handle.close());
+		this.#closing ??= this.#queue.then(() => (this.#released ? undefined : this.#handle.close()));
 		return this.#closing;
 	}
 
@@ -890,11 +945,12 @@ export class UnitTable {
 	}
 
 	/**
-	 * First half of an in-place re-exec: flush every module unit, snapshot the
-	 * surviving ones, stop the rest along with `survive: "none"` processes, and
-	 * close the logs of surviving processes (the successor appends to them).
-	 * Follow with {@link reexecFds} right before the exec, and with
-	 * {@link abortReexec} when the exec fails.
+	 * First step of an in-place re-exec: flush every module unit, snapshot the
+	 * surviving ones, and stop the rest along with `survive: "none"` processes.
+	 * Surviving processes keep logging until {@link pauseOutput}, then
+	 * {@link releaseLogs} is the last awaited step; {@link reexecFds} runs
+	 * synchronously right before the exec,
+	 * and {@link abortReexec} undoes all of it when the exec fails.
 	 */
 	async prepareReexec(): Promise<void> {
 		this.#shuttingDown = true;
@@ -917,15 +973,46 @@ export class UnitTable {
 			}
 			const runtime = entry.procRuntime;
 			if (!runtime) continue;
-			if (survive === "none") {
-				await this.#stopEntry(entry, 2_000, "daemon replaced");
-				continue;
+			if (survive === "none") await this.#stopEntry(entry, 2_000, "daemon replaced");
+			else if (runtime.restartTimer) {
+				// A relaunch racing the exec opens fds this image never records; the successor (or abortReexec) relaunches.
+				clearTimeout(runtime.restartTimer);
+				runtime.restartTimer = undefined;
 			}
-			const log = runtime.log;
-			runtime.log = undefined;
-			await log?.close();
 		}
 		await this.#disposeModules();
+	}
+
+	/**
+	 * Re-exec step after {@link prepareReexec}: stop reading the output of every
+	 * process and module child. Resolves once each has delivered what it already
+	 * read; what it has not read stays in the pipe or pty for the successor, so
+	 * no byte is lost or logged twice across the exec.
+	 */
+	async pauseOutput(): Promise<void> {
+		const paused: Promise<void>[] = [];
+		for (const entry of this.#units.values()) {
+			const runtime = entry.procRuntime;
+			if (runtime?.child) paused.push(runtime.child.pauseOutput());
+			// The pty pause is Unix-only in the natives; Windows never re-execs.
+			else if (typeof runtime?.pty?.pauseOutput === "function") paused.push(runtime.pty.pauseOutput());
+		}
+		for (const child of this.#moduleChildren) paused.push(child.pauseOutput());
+		const results = await Promise.allSettled(paused);
+		for (const result of results) {
+			if (result.status === "rejected") {
+				logger.warn("Failed to pause child output before re-exec", { error: errorMessage(result.reason) });
+			}
+		}
+	}
+
+	/**
+	 * Last awaited step of a re-exec, after {@link pauseOutput}: take every unit
+	 * log off its fd. The successor continues the files in place, and no log fd
+	 * crosses the exec whatever its close-on-exec flag.
+	 */
+	async releaseLogs(): Promise<void> {
+		await Promise.all(Array.from(this.#units.values(), entry => entry.procRuntime?.log?.release()));
 	}
 
 	/**
@@ -974,19 +1061,28 @@ export class UnitTable {
 		for (const entry of this.#units.values()) {
 			entry.childFds = undefined;
 			const runtime = entry.procRuntime;
-			if (runtime && !isTerminal(entry.snapshot.state)) {
-				if (entry.snapshot.policy.hold === "detached") this.#monitorDetached(entry, runtime.launch);
-				else if (!runtime.log) {
-					try {
-						runtime.log = await UnitLog.resume(unitLogDir(entry.snapshot.id));
-					} catch (error) {
-						logger.warn("Failed to reopen unit log", { id: entry.snapshot.id, error: errorMessage(error) });
-					}
+			if (runtime?.log) {
+				try {
+					await runtime.log.reacquire();
+				} catch (error) {
+					// The log keeps appending synchronously.
+					logger.warn("Failed to reopen unit log", { id: entry.snapshot.id, error: errorMessage(error) });
 				}
+			}
+			if (runtime && !isTerminal(entry.snapshot.state) && entry.snapshot.policy.hold === "detached") {
+				this.#monitorDetached(entry, runtime.launch);
+			}
+			if (runtime?.child) runtime.child.resumeOutput();
+			else if (typeof runtime?.pty?.resumeOutput === "function") runtime.pty.resumeOutput();
+			if (runtime && entry.snapshot.state === "restarting" && !runtime.restartTimer) {
+				void this.#relaunch(entry).catch(error =>
+					logger.warn("Service restart failed", { id: entry.snapshot.id, error: errorMessage(error) }),
+				);
 			}
 			this.#persist(entry);
 			this.#evaluateIdle(entry);
 		}
+		for (const child of this.#moduleChildren) child.resumeOutput();
 	}
 
 	/** Stop everything except units that outlive the daemon; used by `shutdown`, the Windows `upgrade`, and daemon exit. */
@@ -2090,6 +2186,14 @@ export class UnitTable {
 		}
 		if (alive && survive === "exec" && this.#resumed && stored.childFds) {
 			if (await this.#adoptExec(entry, stored.childFds, pid)) return;
+		}
+		if (survive === "exec" && this.#resumed && stored.snapshot.state === "restarting") {
+			// prepareReexec held this pending restart across the exec.
+			this.#persist(entry);
+			void this.#relaunch(entry).catch(error =>
+				logger.warn("Service restart failed", { id: stored.id, error: errorMessage(error) }),
+			);
+			return;
 		}
 		if (wasLive && pid !== undefined && isSameProcess(pid, stored.pidStartedAt)) {
 			await Process.fromPid(pid)?.terminate({ group: true, gracefulMs: 500, timeoutMs: 2_000 });

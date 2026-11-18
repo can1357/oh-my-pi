@@ -77,7 +77,9 @@ export class IsolatedDaemon {
 	async dispose(): Promise<void> {
 		try {
 			await closeDaemonClient();
-			const probe = await probeDaemon();
+			// A dispose that outlived its test must never reach another test's daemon,
+			// or the user's: the probe follows the env, so only probe while it is ours.
+			const probe = process.env[DAEMON_DIR_ENV] === this.dir ? await probeDaemon() : undefined;
 			if (probe) {
 				this.#pids.add(probe.welcome.daemon.pid);
 				try {
@@ -89,7 +91,9 @@ export class IsolatedDaemon {
 				}
 			}
 			const deadline = Date.now() + TEARDOWN_TIMEOUT_MS;
-			while (daemonLockHeld() && Date.now() < deadline) await Bun.sleep(25);
+			while (process.env[DAEMON_DIR_ENV] === this.dir && daemonLockHeld() && Date.now() < deadline) {
+				await Bun.sleep(25);
+			}
 			for (const pid of this.#pids) {
 				if (pid !== process.pid && isAlive(pid)) {
 					try {
@@ -100,9 +104,11 @@ export class IsolatedDaemon {
 				}
 			}
 		} finally {
-			if (this.#previousDir === undefined) delete process.env[DAEMON_DIR_ENV];
-			else process.env[DAEMON_DIR_ENV] = this.#previousDir;
-			if (this.#previousTcp !== undefined) process.env[DAEMON_TCP_ENV] = this.#previousTcp;
+			if (process.env[DAEMON_DIR_ENV] === this.dir) {
+				if (this.#previousDir === undefined) delete process.env[DAEMON_DIR_ENV];
+				else process.env[DAEMON_DIR_ENV] = this.#previousDir;
+				if (this.#previousTcp !== undefined) process.env[DAEMON_TCP_ENV] = this.#previousTcp;
+			}
 			await fs.rm(this.dir, { recursive: true, force: true });
 		}
 	}

@@ -225,7 +225,7 @@ fn start_time_ms(pid: i32) -> Option<f64> {
 #[cfg(target_os = "macos")]
 fn start_time_ms(pid: i32) -> Option<f64> {
 	let info = omp_builtins::proc_sys::bsdinfo(pid)?;
-	Some(info.pbi_start_tvsec as f64 * 1000.0 + info.pbi_start_tvusec as f64 / 1000.0)
+	Some((info.pbi_start_tvsec as f64).mul_add(1000.0, info.pbi_start_tvusec as f64 / 1000.0))
 }
 
 /// Start time of `pid` in milliseconds since the Unix epoch.

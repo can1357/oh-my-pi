@@ -189,6 +189,9 @@ struct PtyHandles {
 	/// Master adopted by [`PtySession::adopt`], consumed by `resume`.
 	#[cfg(unix)]
 	pending:   Option<std::os::fd::OwnedFd>,
+	/// Output pause control of the running session.
+	#[cfg(unix)]
+	output:    Option<Arc<OutputGate>>,
 }
 
 /// Stateful PTY session for interactive stdin/stdout passthrough.
@@ -234,8 +237,12 @@ impl PtySession {
 				}
 			}
 			let session = Self::new();
-			*session.handles.lock() =
-				PtyHandles { master_fd: Some(master_fd), pid: Some(pid), pending: Some(fd) };
+			*session.handles.lock() = PtyHandles {
+				master_fd: Some(master_fd),
+				pid:       Some(pid),
+				pending:   Some(fd),
+				output:    None,
+			};
 			Ok(session)
 		}
 		#[cfg(not(unix))]
@@ -357,6 +364,43 @@ impl PtySession {
 	pub fn kill(&self) -> Result<()> {
 		self.send_control(ControlMessage::Kill)
 	}
+
+	/// Stop reading output without closing the master. Resolves once every
+	/// chunk read before the pause has been delivered to `onChunk`, including
+	/// partial UTF-8 held by the decoder (flushed lossily); unread bytes stay in
+	/// the kernel buffer. Input, resize, kill and child-exit handling keep
+	/// working. No-op (resolved) when no session runs or output is already
+	/// paused. A run whose child exits while paused stops waiting for output
+	/// as for a slave held open elsewhere, leaving the unread bytes unread.
+	///
+	/// Windows: `ConPTY` output is a blocking pipe read that cannot be
+	/// interrupted without losing its bytes, so this resolves immediately and
+	/// reading continues.
+	#[napi(ts_return_type = "Promise<void>")]
+	pub fn pause_output<'env>(&self, env: &'env Env) -> Result<PromiseRaw<'env, ()>> {
+		#[cfg(unix)]
+		let stopped = self.handles.lock().output.clone().and_then(|gate| gate.pause());
+		#[cfg(not(unix))]
+		let stopped: Option<tokio::sync::oneshot::Receiver<()>> = None;
+		task::future(env, "pty.pause_output", async move {
+			if let Some(stopped) = stopped {
+				// A dropped sender means the run ended; nothing is left to deliver.
+				let _ = stopped.await;
+			}
+			Ok(())
+		})
+	}
+
+	/// Restart reading output after `pauseOutput()`. No-op when not paused.
+	#[napi]
+	pub fn resume_output(&self) {
+		#[cfg(unix)]
+		let gate = self.handles.lock().output.clone();
+		#[cfg(unix)]
+		if let Some(gate) = gate {
+			gate.resume();
+		}
+	}
 }
 
 impl PtySession {
@@ -466,10 +510,211 @@ impl PtyMaster {
 	}
 }
 
+/// Output side of the master. Unix keeps the fd so the reader can poll it
+/// alongside the pause wakeup before each read.
+#[cfg(unix)]
+type PtyReader = std::fs::File;
+#[cfg(not(unix))]
+type PtyReader = Box<dyn Read + Send>;
+
+/// Pause control for the PTY output reader thread.
+///
+/// The reader polls the master together with a wake pipe and only reads once
+/// the master is readable and no pause is pending, so nothing is consumed past
+/// the pause point. Pause promises resolve once the bytes read before the
+/// pause (`sent`) have reached `on_chunk` (`delivered`); coalescing in the
+/// pump only concatenates text, so byte counts line up.
+#[cfg(unix)]
+struct OutputGate {
+	state:   Mutex<GateState>,
+	resumed: parking_lot::Condvar,
+	wake_rx: std::os::fd::OwnedFd,
+	wake_tx: std::os::fd::OwnedFd,
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct GateState {
+	/// Waiters of a pause the reader has not reached yet.
+	requested:     Option<Vec<tokio::sync::oneshot::Sender<()>>>,
+	/// The reader is parked until `resume`/`close`.
+	paused:        bool,
+	/// Text bytes the reader had queued when it last paused.
+	paused_at:     u64,
+	/// Text bytes `on_chunk` has accepted.
+	delivered:     u64,
+	/// Paused waiters still waiting for `delivered` to reach their target.
+	draining:      Vec<(u64, tokio::sync::oneshot::Sender<()>)>,
+	/// Nothing more reaches `on_chunk` (pump gone): waiters resolve at once.
+	undeliverable: bool,
+	/// The run is over: pauses resolve at once, a parked reader exits.
+	closed:        bool,
+}
+
+#[cfg(unix)]
+impl OutputGate {
+	fn new() -> std::io::Result<Self> {
+		use std::os::fd::{FromRawFd, OwnedFd};
+		let mut fds = [0; 2];
+		// SAFETY: `pipe` writes two fds into the valid two-element array.
+		if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+			return Err(std::io::Error::last_os_error());
+		}
+		// SAFETY: `pipe` just returned these fds; nothing else owns them.
+		let (wake_rx, wake_tx) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+		for fd in fds {
+			// SAFETY: fcntl with scalar arguments on the fds owned above. Both
+			// ends stay out of exec'd images and never block.
+			unsafe {
+				libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+				let flags = libc::fcntl(fd, libc::F_GETFL);
+				if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+					return Err(std::io::Error::last_os_error());
+				}
+			}
+		}
+		Ok(Self { state: Mutex::default(), resumed: parking_lot::Condvar::new(), wake_rx, wake_tx })
+	}
+
+	/// Interrupt the reader's poll.
+	fn wake(&self) {
+		use std::os::fd::AsRawFd;
+		// SAFETY: one-byte write from a valid buffer; a full pipe already
+		// guarantees a pending wakeup.
+		unsafe { libc::write(self.wake_tx.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
+	}
+
+	/// Request a pause; `None` when there is nothing to wait for.
+	fn pause(&self) -> Option<tokio::sync::oneshot::Receiver<()>> {
+		let mut state = self.state.lock();
+		if state.closed {
+			return None;
+		}
+		let (tx, rx) = tokio::sync::oneshot::channel();
+		if let Some(waiters) = &mut state.requested {
+			waiters.push(tx);
+		} else if state.paused {
+			if state.undeliverable || state.delivered >= state.paused_at {
+				return None;
+			}
+			let target = state.paused_at;
+			state.draining.push((target, tx));
+		} else {
+			state.requested = Some(vec![tx]);
+			drop(state);
+			self.wake();
+		}
+		Some(rx)
+	}
+
+	fn resume(&self) {
+		let mut state = self.state.lock();
+		if state.paused {
+			state.paused = false;
+			self.resumed.notify_all();
+		}
+	}
+
+	/// `on_chunk` accepted `bytes` more text bytes.
+	fn delivered(&self, bytes: usize) {
+		let mut state = self.state.lock();
+		state.delivered += bytes as u64;
+		let delivered = state.delivered;
+		state.draining.retain(|(target, _)| *target > delivered);
+		// Dropping a sender resolves its pause promise.
+	}
+
+	/// The pump stopped: no later byte reaches `on_chunk`.
+	fn undeliverable(&self) {
+		let mut state = self.state.lock();
+		state.undeliverable = true;
+		state.draining.clear();
+	}
+
+	/// End of the run: resolve every pause and release a parked reader.
+	fn close(&self) {
+		let mut state = self.state.lock();
+		state.closed = true;
+		state.requested = None;
+		state.draining.clear();
+		self.resumed.notify_all();
+	}
+
+	fn pause_requested(&self) -> bool {
+		self.state.lock().requested.is_some()
+	}
+
+	/// Reader side of a pause: record the pause point `sent`, then park until
+	/// `resume` (true) or `close` (false). `forwarding` false means nothing
+	/// queued will ever be delivered.
+	fn hold(&self, sent: u64, forwarding: bool) -> bool {
+		let mut state = self.state.lock();
+		let waiters = state.requested.take().unwrap_or_default();
+		if forwarding && !state.undeliverable && state.delivered < sent {
+			state.draining.extend(waiters.into_iter().map(|tx| (sent, tx)));
+		} else {
+			// Everything sent is delivered (or never will be): resolve now, not
+			// when this frame ends after the park below.
+			drop(waiters);
+		}
+		state.paused = true;
+		state.paused_at = sent;
+		while state.paused && !state.closed {
+			self.resumed.wait(&mut state);
+		}
+		state.paused = false;
+		!state.closed
+	}
+
+	/// Block until `fd` is readable (true) or the gate was woken (false).
+	fn wait_readable(&self, fd: i32) -> std::io::Result<bool> {
+		use std::os::fd::AsRawFd;
+		let wake_fd = self.wake_rx.as_raw_fd();
+		let mut fds = [
+			libc::pollfd { fd, events: libc::POLLIN, revents: 0 },
+			libc::pollfd { fd: wake_fd, events: libc::POLLIN, revents: 0 },
+		];
+		loop {
+			// SAFETY: polls the two valid `pollfd` entries above.
+			if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } >= 0 {
+				break;
+			}
+			let error = std::io::Error::last_os_error();
+			if error.kind() != std::io::ErrorKind::Interrupted {
+				return Err(error);
+			}
+		}
+		if fds[1].revents != 0 {
+			let mut sink = [0u8; 64];
+			// SAFETY: reads into the valid local buffer; the pipe is nonblocking.
+			while unsafe { libc::read(wake_fd, sink.as_mut_ptr().cast(), sink.len()) } > 0 {}
+			// Re-check the gate before reading so a pending pause wins.
+			return Ok(false);
+		}
+		// POLLHUP/POLLERR also land here: the read reports EOF or the error.
+		Ok(fds[0].revents != 0)
+	}
+}
+
+/// Clears the session's output gate and closes it when [`drive_pty`] returns.
+#[cfg(unix)]
+struct GateGuard<'a> {
+	gate:    Arc<OutputGate>,
+	handles: &'a Mutex<PtyHandles>,
+}
+
+#[cfg(unix)]
+impl Drop for GateGuard<'_> {
+	fn drop(&mut self) {
+		self.handles.lock().output = None;
+		self.gate.close();
+	}
+}
+
 /// Everything [`drive_pty`] needs from a spawned or adopted PTY child.
 struct PtyIo {
 	master:    PtyMaster,
-	reader:    Box<dyn Read + Send>,
+	reader:    PtyReader,
 	writer:    Box<dyn Write + Send>,
 	child_pid: Option<i32>,
 	/// Blocks until the child exits; returns its exit code.
@@ -496,7 +741,7 @@ fn run_adopted_sync(
 	let writer = clone("writer")?;
 	let io = PtyIo {
 		master:    PtyMaster::Adopted(fd),
-		reader:    Box::new(reader),
+		reader,
 		writer:    Box::new(writer),
 		child_pid: Some(pid),
 		wait:      Box::new(move || wait_pid_exit_code(pid)),
@@ -648,6 +893,19 @@ fn run_pty_sync(
 		let _ = writer.write_all(b"\x1b[1;1R");
 		let _ = writer.flush();
 	}
+	#[cfg(unix)]
+	let reader = {
+		let fd = master
+			.as_raw_fd()
+			.ok_or_else(|| Error::from_reason("Failed to create PTY reader: no master fd"))?;
+		// SAFETY: `master` owns `fd` and outlives this borrow; the dup (made
+		// CLOEXEC, like portable-pty's own reader clone) is owned separately.
+		unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }
+			.try_clone_to_owned()
+			.map(std::fs::File::from)
+			.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))?
+	};
+	#[cfg(not(unix))]
 	let reader = master
 		.try_clone_reader()
 		.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))?;
@@ -676,11 +934,22 @@ fn drive_pty(
 	handles: &Mutex<PtyHandles>,
 ) -> Result<PtyRunResult> {
 	let PtyIo { master, mut reader, mut writer, child_pid, wait } = io;
+	#[cfg(unix)]
+	let gate = Arc::new(
+		OutputGate::new()
+			.map_err(|err| Error::from_reason(format!("Failed to create PTY output gate: {err}")))?,
+	);
 	{
 		let mut handles = handles.lock();
 		handles.master_fd = master.raw_fd();
 		handles.pid = child_pid;
+		#[cfg(unix)]
+		{
+			handles.output = Some(Arc::clone(&gate));
+		}
 	}
+	#[cfg(unix)]
+	let _gate_guard = GateGuard { gate: Arc::clone(&gate), handles };
 
 	// The reader→JS queue is bounded like the bash bridge (#4078): a full queue
 	// parks the reader's `send`, filling the OS PTY buffer and backpressuring
@@ -688,6 +957,8 @@ fn drive_pty(
 	// waits on JS (input/resize/kill/exit stay live).
 	let (reader_tx, reader_rx) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
 	let queued = reader_tx.clone();
+	#[cfg(unix)]
+	let reader_gate = Arc::clone(&gate);
 	let reader_thread = std::thread::spawn(move || {
 		const BUF: usize = 65536;
 		let mut buf = vec![0u8; BUF];
@@ -696,12 +967,50 @@ fn drive_pty(
 		// stall timeout) keep reading and discard: the child must not block on
 		// a full PTY buffer that nothing drains (#12657).
 		let mut forwarding = true;
+		// Text bytes handed to the pump, for pause delivery tracking.
+		#[cfg(unix)]
+		let mut sent = 0u64;
 		loop {
+			#[cfg(unix)]
+			{
+				use std::os::fd::AsRawFd;
+				if reader_gate.pause_requested() {
+					if forwarding {
+						let rest = decoder.finish();
+						if !rest.is_empty() {
+							sent += rest.len() as u64;
+							forwarding = reader_tx.send(ReaderEvent::Chunk(rest)).is_ok();
+						}
+					}
+					if !reader_gate.hold(sent, forwarding) {
+						// The run ended while paused: leave the rest unread.
+						return;
+					}
+					continue;
+				}
+				match reader_gate.wait_readable(reader.as_raw_fd()) {
+					Ok(true) => {},
+					Ok(false) => continue,
+					Err(_) => break,
+				}
+			}
 			match reader.read(&mut buf) {
-				Ok(0) | Err(_) => break,
+				Ok(0) => break,
+				Err(error)
+					if matches!(
+						error.kind(),
+						std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+					) => {},
+				Err(_) => break,
 				Ok(n) if forwarding => {
 					let text = decoder.push(&buf[..n]);
-					forwarding = text.is_empty() || reader_tx.send(ReaderEvent::Chunk(text)).is_ok();
+					if !text.is_empty() {
+						#[cfg(unix)]
+						{
+							sent += text.len() as u64;
+						}
+						forwarding = reader_tx.send(ReaderEvent::Chunk(text)).is_ok();
+					}
 				},
 				Ok(_) => {},
 			}
@@ -748,23 +1057,34 @@ fn drive_pty(
 	let (pump_done_tx, pump_done_rx) = flume::bounded::<()>(1);
 	let pump_task = {
 		let in_js = Arc::clone(&in_js);
+		#[cfg(unix)]
+		let gate = Arc::clone(&gate);
+		#[cfg(unix)]
+		let pump_gate = Arc::clone(&gate);
 		napi::tokio::spawn(async move {
 			pump_chunks(
 				reader_rx,
 				FORWARD_STALL_TIMEOUT,
 				Some(in_js.as_ref()),
 				async move |payload| {
-					let Some(callback) = on_chunk.as_ref() else {
-						return true;
+					#[cfg(unix)]
+					let len = payload.len();
+					let ok = match on_chunk.as_ref() {
+						Some(callback) => callback.call_async(Ok(payload)).await.is_ok(),
+						None => true,
 					};
-					let ok = callback.call_async(Ok(payload)).await.is_ok();
 					if !ok {
 						let _ = control_tx.send(ControlMessage::JsGone);
+						return false;
 					}
-					ok
+					#[cfg(unix)]
+					pump_gate.delivered(len);
+					true
 				},
 			)
 			.await;
+			#[cfg(unix)]
+			gate.undeliverable();
 			let _ = pump_done_tx.send(());
 		})
 	};
@@ -1106,6 +1426,36 @@ mod reader_queue_tests {
 			start.elapsed() < POST_CANCEL_DRAIN_TIMEOUT,
 			"after stop disconnects the pump, cancel must not sit out the full drain timeout",
 		);
+	}
+}
+
+#[cfg(all(test, unix))]
+mod output_gate_tests {
+	use std::{
+		sync::Arc,
+		time::{Duration, Instant},
+	};
+
+	use super::OutputGate;
+
+	/// A pause whose output is already delivered resolves while the reader is
+	/// parked, not only once `resume` lets it go.
+	#[test]
+	fn delivered_pause_resolves_while_reader_is_held() {
+		let gate = Arc::new(OutputGate::new().unwrap());
+		gate.delivered(5);
+		let mut stopped = gate.pause().expect("a running reader has a pause to wait for");
+		let reader = {
+			let gate = Arc::clone(&gate);
+			std::thread::spawn(move || gate.hold(5, true))
+		};
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while matches!(stopped.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)) {
+			assert!(Instant::now() < deadline, "pause never resolved while the reader was held");
+			std::thread::sleep(Duration::from_millis(5));
+		}
+		gate.resume();
+		assert!(reader.join().unwrap(), "resume releases the reader");
 	}
 }
 

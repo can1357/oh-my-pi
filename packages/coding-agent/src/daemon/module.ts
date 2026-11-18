@@ -53,6 +53,13 @@ export interface ManagedChild {
 	readonly exited: Promise<ChildExit>;
 	/** Signal the process group. */
 	kill(signal?: NodeJS.Signals): void;
+	/**
+	 * Stop reading stdout and stderr without closing them; resolves once every
+	 * chunk read so far reached its sink. Unread output stays in the pipes.
+	 */
+	pauseOutput(): Promise<void>;
+	/** Read again after {@link pauseOutput}; no-op when not paused. */
+	resumeOutput(): void;
 	/** Serializable handle (pid, start time, fds) for {@link ModuleContext.adoptChild}. */
 	state(): ManagedChildState;
 }

@@ -279,6 +279,21 @@ export declare class FdStream {
    */
   start(onChunk: (chunk: Uint8Array) => void, onClose: (reason: string | null) => void): void
   /**
+   * Stop reading without closing the fd. Resolves once every chunk read
+   * before the pause has been delivered to `onChunk`; unread bytes stay in
+   * the kernel buffer. Writes are unaffected. No-op (resolved) when not
+   * reading (not started, already paused, or closed).
+   *
+   * Windows: the blocking pipe read cannot be interrupted without losing its
+   * bytes, so this resolves immediately and reading continues.
+   */
+  pause(): Promise<void>
+  /**
+   * Restart the read loop after `pause()` with the callbacks given to
+   * `start`. No-op when not paused.
+   */
+  resume(): void
+  /**
    * Queue `data`; false once more than 1 MiB is unwritten (or the stream is
    * closed).
    */
@@ -368,7 +383,7 @@ export declare class IpcConnection {
    * strings (UTF-8) / `Uint8Array` written as-is, without an LF. The
    * `onClose` given to `start` still fires exactly once, last.
    * `maxFrameBytes` stops applying once the switch reaches the reader. Throws
-   * `TypeError` on a `raw` connection, ERR_INVALID_STATE before `start` or
+   * `TypeError` on a `raw` connection, `ERR_INVALID_STATE` before `start` or
    * when already upgraded.
    */
   upgradeRaw(onChunk: (chunk: Uint8Array) => void): void
@@ -693,6 +708,22 @@ export declare class PtySession {
   resize(cols: number, rows: number): void
   /** Force-kill the active PTY command. */
   kill(): void
+  /**
+   * Stop reading output without closing the master. Resolves once every
+   * chunk read before the pause has been delivered to `onChunk`, including
+   * partial UTF-8 held by the decoder (flushed lossily); unread bytes stay in
+   * the kernel buffer. Input, resize, kill and child-exit handling keep
+   * working. No-op (resolved) when no session runs or output is already
+   * paused. A run whose child exits while paused stops waiting for output
+   * as for a slave held open elsewhere, leaving the unread bytes unread.
+   *
+   * Windows: `ConPTY` output is a blocking pipe read that cannot be
+   * interrupted without losing its bytes, so this resolves immediately and
+   * reading continues.
+   */
+  pauseOutput(): Promise<void>
+  /** Restart reading output after `pauseOutput()`. No-op when not paused. */
+  resumeOutput(): void
 }
 
 /**
