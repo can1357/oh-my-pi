@@ -69,6 +69,7 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 				provider: "anthropic",
 				account: { email: "policy@example.com" },
 				reservePct: 25,
+				reservePctByLimit: { "anthropic:7d:fable": 40 },
 				reclaimAbovePct: 60,
 			},
 		] satisfies AuthAccountPolicies;
@@ -244,6 +245,19 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 					"",
 				].join("\n"),
 				error: "auth.accountPolicies[0].reservePct must be between 0 and 100",
+			},
+			{
+				yaml: [
+					"auth:",
+					"  accountPolicies:",
+					"    - provider: anthropic",
+					"      account:",
+					"        email: preferred@example.com",
+					"      reservePctByLimit:",
+					"        anthropic:7d:fable: high",
+					"",
+				].join("\n"),
+				error: 'auth.accountPolicies[0].reservePctByLimit["anthropic:7d:fable"] must be between 0 and 100',
 			},
 			{
 				yaml: [
