@@ -6,8 +6,8 @@ import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
 import { rescopeSessionToCwd } from "../session/cwd-rescope";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import { continuesConversation } from "../modes/utils/conversation-position";
-import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
-import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
+import type { FreshSessionResult } from "../session/agent-session";
+import { COMPACT_MODES, findCompactMode, type ParsedCompactArgs, parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveResumableSession, resolveResumeTarget } from "../session/session-listing";
 import { toggleSessionPin, unpinSession } from "../session/session-pins";
@@ -29,6 +29,84 @@ import type {
 	SlashCommandSpec,
 	TuiSlashCommandRuntime,
 } from "./types";
+
+function parseCompactionCommand(command: ParsedSlashCommand): ParsedCompactArgs | { error: string } {
+	return command.name === "handoff"
+		? { mode: "handoff", instructions: command.args || undefined }
+		: parseCompactArgs(command.args);
+}
+
+async function handleCompact(command: ParsedSlashCommand, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
+	const parsed = parseCompactionCommand(command);
+	if ("error" in parsed) return usage(parsed.error, runtime);
+	let failed = false;
+	const run = async (): Promise<void> => {
+		const before = runtime.session.getContextUsage?.()?.tokens;
+		try {
+			const { mode, instructions } = parsed;
+			await runtime.session.compact(
+				instructions,
+				runtime.signal ? { mode, signal: runtime.signal } : mode ? { mode } : undefined,
+			);
+		} catch (err) {
+			// Don't append an out-of-turn notice after the host already reported its interrupt.
+			if (
+				err instanceof CompactionCancelledError &&
+				(err.cause === USER_INTERRUPT_LABEL || runtime.signal?.aborted)
+			) {
+				return;
+			}
+			const message = errorMessage(err);
+			logger.error("Compaction failed", { error: message });
+			failed = true;
+			await runtime.output(`Compaction failed: ${message}`);
+			return;
+		}
+		const after = runtime.session.getContextUsage?.()?.tokens;
+		await runtime.output(
+			before == null || after == null
+				? "Compaction complete."
+				: `Compaction complete. Tokens: ${before} -> ${after} (saved ${before - after}).`,
+		);
+	};
+	if (runtime.runCommandInBackground) {
+		runtime.runCommandInBackground(run);
+		return commandConsumed();
+	}
+	await run();
+	return commandConsumed({ failed });
+}
+
+async function handleCompactTui(command: ParsedSlashCommand, runtime: TuiSlashCommandRuntime): Promise<void> {
+	const parsed = parseCompactionCommand(command);
+	if (!("error" in parsed) && parsed.mode === "handoff" && refuseImages(command, runtime)) return;
+	clearSubmittedText(runtime);
+	if ("error" in parsed) {
+		runtime.ctx.showWarning(parsed.error);
+		return;
+	}
+	const { ctx } = runtime;
+	const origin = runtime.followUp;
+	// A switch still applying (or rolling back) decides which conversation is live.
+	if (origin && ctx.session.isSessionTransitioning) await ctx.session.waitForSessionTransition();
+	if (origin && !continuesConversation(ctx.sessionManager, origin)) {
+		restoreDetachedDraft(ctx.editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
+		ctx.showWarning(`Conversation changed before /${command.name} ran; returned it to the editor`);
+		return;
+	}
+	const background = parsed.mode && findCompactMode(parsed.mode)?.background;
+	if (background) {
+		// Background compaction doesn't hold the submission slot or its follow-ups.
+		void ctx.handleCompactCommand(parsed.instructions, parsed.mode);
+	} else if (origin && ctx.session.isStreaming) {
+		ctx.yieldCompaction = { ...origin, text: command.text, instructions: parsed.instructions, mode: parsed.mode };
+		ctx.updatePendingMessagesDisplay();
+		ctx.showStatus("Queued compaction for when the agent yields");
+		ctx.runYieldCompaction();
+	} else {
+		await ctx.handleCompactCommand(parsed.instructions, parsed.mode);
+	}
+}
 
 function formatFreshSessionResult(result: FreshSessionResult): string {
 	const stateLabel = result.closedProviderSessions === 1 ? "provider state" : "provider states";
@@ -237,83 +315,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			const usage = runtime.ctx.session.getContextUsage();
 			return usage ? `Compact: context ${Math.round(usage.percent)}% used` : "Compact: context unavailable";
 		},
-		handle: async (command, runtime) => {
-			const parsed = parseCompactArgs(command.args);
-			if ("error" in parsed) return usage(parsed.error, runtime);
-			// Print mode turns a failed compaction into a nonzero exit; the
-			// flag is closure state because the background-dispatch branch
-			// (RPC) returns before `runCompact` settles.
-			let compactFailed = false;
-			const runCompact = async (): Promise<void> => {
-				const before = runtime.session.getContextUsage?.();
-				const beforeTokens = before?.tokens;
-				try {
-					await runtime.session.compact(parsed.instructions, parsed.mode ? { mode: parsed.mode } : undefined);
-				} catch (err) {
-					// RPC `abort` and ACP `session/cancel` propagate their explicit
-					// USER_INTERRUPT_LABEL through the compaction abort signal. The client
-					// already saw the interrupt it sent; emitting anything here would
-					// append an out-of-turn chunk. Other cancellations (including an
-					// extension veto) remain visible.
-					if (err instanceof CompactionCancelledError && err.cause === USER_INTERRUPT_LABEL) return;
-					// Compaction precondition failures (no model, already compacted, too
-					// small) and provider errors propagate as plain Errors; surface them
-					// via runtime.output so they don't fail the ACP prompt turn.
-					compactFailed = true;
-					await runtime.output(`Compaction failed: ${errorMessage(err)}`);
-					return;
-				}
-				const after = runtime.session.getContextUsage?.();
-				const afterTokens = after?.tokens;
-				if (beforeTokens != null && afterTokens != null) {
-					const saved = beforeTokens - afterTokens;
-					await runtime.output(`Compaction complete. Tokens: ${beforeTokens} -> ${afterTokens} (saved ${saved}).`);
-				} else {
-					await runtime.output("Compaction complete.");
-				}
-			};
-			// Provider-backed: background-dispatch under RPC so the serialized command
-			// queue stays free for `abort` (SlashCommandRuntime.runCommandInBackground).
-			// ACP/TUI have no such hook and keep the inline await.
-			if (runtime.runCommandInBackground) {
-				runtime.runCommandInBackground(runCompact);
-				return commandConsumed();
-			}
-			await runCompact();
-			return commandConsumed({ failed: compactFailed });
-		},
-		handleTui: async (command, runtime) => {
-			const parsed = parseCompactArgs(command.args);
-			clearSubmittedText(runtime);
-			if ("error" in parsed) {
-				runtime.ctx.showWarning(parsed.error);
-				return;
-			}
-			const { ctx } = runtime;
-			const origin = runtime.followUp;
-			// A switch still applying (or rolling back) decides which conversation is live; judge after it.
-			if (origin && ctx.session.isSessionTransitioning) await ctx.session.waitForSessionTransition();
-			if (origin && !continuesConversation(ctx.sessionManager, origin)) {
-				// Input hooks ran while the conversation changed: never compact one it was not sent in.
-				restoreDetachedDraft(ctx.editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
-				ctx.showWarning("Conversation changed before /compact ran; returned it to the editor");
-				return;
-			}
-			if (origin && ctx.session.isStreaming) {
-				ctx.yieldCompaction = {
-					...origin,
-					text: command.text,
-					instructions: parsed.instructions,
-					mode: parsed.mode,
-				};
-				ctx.updatePendingMessagesDisplay();
-				ctx.showStatus("Queued compaction for when the agent yields");
-				// A prompt still in setup may bail without an agent run, and so without the settle that runs this.
-				ctx.runYieldCompaction();
-				return;
-			}
-			await ctx.handleCompactCommand(parsed.instructions, parsed.mode);
-		},
+		handle: handleCompact,
+		handleTui: handleCompactTui,
 	},
 	{
 		name: "shake",
@@ -347,75 +350,11 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "handoff",
 		icon: "handoff",
-		description: "Summarize the session into a handoff document and compact in place",
-		acpDescription: "Summarize the session into a handoff document and compact in place",
+		description: "Compact in the background with a handoff summary (alias for /compact handoff)",
 		inlineHint: "[focus instructions]",
 		allowArgs: true,
-		handle: async (command, runtime) => {
-			if (runtime.session.isStreaming) {
-				return usage("Wait for the current response to finish or abort it before handing off.", runtime);
-			}
-			if (runtime.session.isGeneratingHandoff) {
-				return usage("Handoff generation is already in progress.", runtime);
-			}
-			// Print mode turns a failed handoff into a nonzero exit; closure
-			// state because the background-dispatch branch (RPC) returns
-			// before `runHandoff` settles.
-			let handoffFailed = false;
-			const runHandoff = async (): Promise<void> => {
-				let result: HandoffResult | undefined;
-				try {
-					result = await runtime.session.handoff(command.args || undefined);
-				} catch (err) {
-					const message = errorMessage(err);
-					// A user interrupt (ACP `session/cancel`, TUI Esc) already settled the
-					// owning turn: `AgentSession.abort()` forwards its reason into the
-					// handoff abort controller, and `throwIfHandoffAborted` rethrows a
-					// reasoned abort verbatim — so the throw arrives as
-					// `USER_INTERRUPT_LABEL`, not "Handoff cancelled". Emitting anything
-					// here would append an out-of-turn chunk after the client already saw
-					// `stopReason: "cancelled"`, so consume silently.
-					if (message === USER_INTERRUPT_LABEL) {
-						return;
-					}
-					// `session.handoff()` normalizes an unreasoned cancellation to this
-					// exact message; every other throw is a real failure (no model
-					// selected, nothing to hand off, already compacted, provider error)
-					// and is surfaced verbatim behind the same "<verb> failed:" prefix
-					// `/compact` uses.
-					if (message === "Handoff cancelled") {
-						await runtime.output("Handoff cancelled.");
-						return;
-					}
-					// Persist the real failure so it stays debuggable after the client
-					// message scrolls away (same rationale as the TUI path, #7993).
-					logger.error("Handoff failed", { error: message });
-					handoffFailed = true;
-					await runtime.output(`Handoff failed: ${message}`);
-					return;
-				}
-				if (!result) {
-					await runtime.output("Handoff cancelled.");
-					return;
-				}
-				// `savedPath` is deliberately not reported: `SessionHandoff` only writes
-				// the document to disk when `options.autoTriggered` is set, which the
-				// user-invoked path never passes.
-				await runtime.output("Context handed off and compacted in place.");
-			};
-			if (runtime.runCommandInBackground) {
-				runtime.runCommandInBackground(runHandoff);
-				return commandConsumed();
-			}
-			await runHandoff();
-			return commandConsumed({ failed: handoffFailed });
-		},
-		handleTui: async (command, runtime) => {
-			if (refuseImages(command, runtime)) return;
-			const customInstructions = command.args || undefined;
-			clearSubmittedText(runtime);
-			await runtime.ctx.handleHandoffCommand(customInstructions);
-		},
+		handle: handleCompact,
+		handleTui: handleCompactTui,
 	},
 	{
 		name: "resume",

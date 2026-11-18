@@ -9568,10 +9568,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleCompactCommand(customInstructions, mode, beforeFlush, options);
 	}
 
-	handleHandoffCommand(customInstructions?: string): Promise<void> {
-		return this.#commandController.handleHandoffCommand(customInstructions);
-	}
-
 	handleShakeCommand(mode: ShakeMode): Promise<void> {
 		return this.#commandController.handleShakeCommand(mode);
 	}

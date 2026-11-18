@@ -166,7 +166,6 @@ export interface SessionViewState {
 	compactionSpeculation: "idle" | "running" | "armed";
 	contextUsageRevision: number;
 	contextUsage: ContextUsage | undefined;
-	isGeneratingHandoff: boolean;
 	isRetrying: boolean;
 	retryAttempt: number;
 	isTtsrAbortPending: boolean;
@@ -254,7 +253,6 @@ export type SessionHostProtocol = {
 	retry: RpcMethod<[], boolean>;
 	abortRetry: RpcMethod<[], void>;
 	abortCompaction: RpcMethod<[reason?: unknown], void>;
-	abortHandoff: RpcMethod<[], void>;
 	setModelTemporary: RpcMethod<
 		[model: Model, thinkingLevel?: ConfiguredThinkingLevel, options?: { ephemeral?: boolean }],
 		void

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- SDK: use `session.compact(focus, { mode: "handoff" })` instead of `session.handoff(focus)`, and cancel it with `abortCompaction()`.
+
 ### Added
 
 - Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
@@ -34,6 +38,7 @@
 
 ### Changed
 
+- `/handoff` now runs as `/compact handoff` in the background, keeping the current response and any new messages.
 - In Tern, a question from the `ask` tool shows inline at the end of the conversation with every question in one scrolling card instead of over the composer one tab at a time: the question you're on is open, the others fold to their answer or a few option pills you can click. The composer stays below it; a message you send from there skips the questions, and the model gets whatever you answered before it
 - Subagent completion probes ask for the task's progress by its deliverables instead of the agent's own current step, and side requests to Claude (probes, `/btw`) no longer copy thinking that is still streaming into their history as plain text
 - Composer predictions (`composer.predictions`) are on by default: after each completed turn the active model suggests your next message as ghost text in the empty composer (one extra billed request per turn, counted in /stats); turn it off in `/settings` → Interaction → "Composer Predictions"

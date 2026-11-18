@@ -190,7 +190,6 @@ function emptyViewState(): SessionViewState {
 		compactionSpeculation: "idle",
 		contextUsageRevision: 0,
 		contextUsage: undefined,
-		isGeneratingHandoff: false,
 		isRetrying: false,
 		retryAttempt: 0,
 		isTtsrAbortPending: false,
@@ -468,10 +467,6 @@ export class RemoteAgentSession implements AgentViewSession {
 
 	get contextUsageRevision(): number {
 		return this.#view.contextUsageRevision;
-	}
-
-	get isGeneratingHandoff(): boolean {
-		return this.#view.isGeneratingHandoff;
 	}
 
 	get isRetrying(): boolean {
@@ -764,10 +759,6 @@ export class RemoteAgentSession implements AgentViewSession {
 
 	abortCompaction(reason?: unknown): void {
 		this.#notify("abortCompaction", toWireData(reason));
-	}
-
-	abortHandoff(): void {
-		this.#notify("abortHandoff");
 	}
 
 	runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
