@@ -136,8 +136,9 @@ export const cfgTtsrGateTimeoutMs = register({
 	default: 10_000,
 	validate: raw => {
 		if (raw === undefined || raw === null) return;
-		if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) {
-			throw new Error("ttsr.gateTimeoutMs must be a positive number");
+		// AbortSignal.timeout throws above 2^53-1; 2^31-1 ms (24 days) is already past any judge.
+		if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0 || raw > 2_147_483_647) {
+			throw new Error("ttsr.gateTimeoutMs must be a positive number of milliseconds up to 2147483647");
 		}
 	},
 });
