@@ -9,7 +9,7 @@
 
 ### Added
 
-- `spotlight.ranker` (**Spotlight Ranker**) lets the Spotlight experiment rank shaped tool output with the `judge` role instead of Stencil, one `noul` question per line over chunks of 48 items, so shaping has a ranker without a Stencil credential ([#19281](https://github.com/can1357/oh-my-pi/pull/19281) by [@Xytronix](https://github.com/Xytronix))
+- `spotlight.ranker` (**Spotlight Ranker**) lets the Spotlight experiment rank shaped tool output with the `judge` role instead of Stencil, one `noul` question per line over chunks of 32 items, so shaping has a ranker without a Stencil credential ([#19281](https://github.com/can1357/oh-my-pi/pull/19281) by [@Xytronix](https://github.com/Xytronix))
 - `omp usage` and `/usage` show each Claude account's subscription plan (e.g. `Max 20x`) beside its organization
 - Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
 

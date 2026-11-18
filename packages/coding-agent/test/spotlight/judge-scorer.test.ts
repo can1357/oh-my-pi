@@ -70,7 +70,7 @@ function fakeJudge(answer: (state: Record<string, unknown>, key: string) => numb
 }
 
 describe("judge scorer", () => {
-	it("scores every item in order across chunks of at most 48", async () => {
+	it("scores every item in order across chunks of at most 32", async () => {
 		const { judge, requests } = fakeJudge((state, key) => {
 			const line = (state.lines as Record<string, string>)[key]!;
 			return line.includes("needle") ? 1 : 0;
@@ -82,14 +82,14 @@ describe("judge scorer", () => {
 		expect(scores).toHaveLength(120);
 		expect(scores![77]).toBe(1);
 		expect(scores!.filter(score => score === 1)).toHaveLength(1);
-		expect(requests).toHaveLength(3);
+		expect(requests).toHaveLength(4);
 		for (const request of requests) expect(request.items).toBeLessThanOrEqual(JUDGE_CHUNK_ITEMS);
-		expect(requests[0]!.items).toBe(JUDGE_CHUNK_ITEMS);
-		expect(requests[2]!.items).toBe(120 - 2 * JUDGE_CHUNK_ITEMS);
-		expect(scorer.usage.calls).toBe(3);
+		expect(requests[0]!.items).toBe(32);
+		expect(requests[3]!.items).toBe(24);
+		expect(scorer.usage.calls).toBe(4);
 		expect(scorer.usage.failures).toBe(0);
-		expect(scorer.usage.tokens).toBe(300);
-		expect(scorer.usage.costUsd).toBeCloseTo(0.003);
+		expect(scorer.usage.tokens).toBe(400);
+		expect(scorer.usage.costUsd).toBeCloseTo(0.004);
 	});
 
 	it("counts chunks the judgment cache answered whole apart from the requests it sent", async () => {
@@ -113,11 +113,11 @@ describe("judge scorer", () => {
 			authStorage.keys.setRuntime("typesafe", "ts-key");
 			const registry = new ModelRegistry(authStorage, "/nonexistent/spotlight-judge-models.yml");
 			vi.spyOn(registry, "getAvailable").mockReturnValue([model]);
-			let sent = 0;
+			const sent: number[] = [];
 			vi.spyOn(globalThis, "fetch").mockImplementation(
 				asGlobalFetch(async (_url, init) => {
-					sent++;
 					const body = JSON.parse(String(init?.body)) as { questions: Record<string, NoulQuestion> };
+					sent.push(Object.keys(body.questions).length);
 					const answers: Record<string, { type: "noul"; noul: number }> = {};
 					for (const id in body.questions) answers[id] = { type: "noul", noul: 0.5 };
 					return Response.json({ model: "jev-1.13.0", answers, usage: { input_tokens: 100 } });
@@ -132,14 +132,15 @@ describe("judge scorer", () => {
 			const lines = Array.from({ length: 120 }, (_, i) => `line ${i}`);
 			// An earlier result ranked the first chunk's lines, so the cache holds every answer for that chunk.
 			await new JudgeScorer(judge, 5_000).score(lines.slice(0, JUDGE_CHUNK_ITEMS), context());
-			sent = 0;
+			sent.length = 0;
 
 			const scorer = new JudgeScorer(judge, 5_000);
 			expect(await scorer.score(lines, context())).toHaveLength(120);
 
-			// Hosted jev takes at most 32 questions a request, so the second 48-line chunk goes out as two requests.
-			expect(sent).toBe(3);
-			expect(scorer.usage.calls).toBe(3);
+			// Hosted jev takes at most 32 questions a request, so each uncached chunk is exactly one request: a larger
+			// chunk would split into several requests that each resend the whole state.
+			expect(sent.toSorted((a, b) => b - a)).toEqual([32, 32, 24]);
+			expect(scorer.usage.calls).toBe(4);
 			expect(scorer.usage.cached).toBe(1);
 			expect(scorer.usage.tokens).toBe(300);
 		} finally {
@@ -164,12 +165,12 @@ describe("judge scorer", () => {
 		expect((request!.state.lines as Record<string, string>)[lineKey(1)]).toBe("beta");
 	});
 
-	it("states the rubric once, not on every one of the 48 questions", async () => {
+	it("states the rubric once, not on every one of the 32 questions", async () => {
 		const { judge, requests } = fakeJudge(() => 0.5);
 		const items = Array.from({ length: JUDGE_CHUNK_ITEMS }, (_, i) => `line ${i}`);
 		await new JudgeScorer(judge, 5_000).score(items, context());
 		const [request] = requests;
-		// A request carries up to 48 questions; repeating the rubric in each costs more than the lines it ranks.
+		// A request carries up to 32 questions; repeating the rubric in each costs more than the lines it ranks.
 		const rewritten = JSON.stringify(request!.questions);
 		expect(rewritten).not.toContain("Routine or incidental");
 		expect(JSON.stringify(request!.state)).toContain("Routine or incidental");
