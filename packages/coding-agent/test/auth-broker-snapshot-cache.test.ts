@@ -183,74 +183,73 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 		},
 		{
 			name: "drops the connection mid-body",
-			firstReply:
-				'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{"generation":',
+			firstReply: 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{"generation":',
 			status: undefined,
 		},
 	];
-	test.each(interruptions)("retries the initial snapshot when the broker $name, reporting the retry", async ({
-		firstReply,
-		status,
-	}) => {
-		const brokerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "broker.db"));
-		await brokerStore.saveApiKey(PROVIDER, "broker-api-key");
-		const brokerStorage = new AuthStorage(brokerStore);
-		await brokerStorage.credentials.reload();
-		const handle = startAuthBroker({
-			storage: brokerStorage,
-			bind: "127.0.0.1:0",
-			bearerTokens: [TOKEN],
-			disableRefresher: true,
-		});
-		const brokerPort = Number(new URL(handle.url).port);
-		let connections = 0;
-		const proxy = Bun.listen<{ first: boolean; upstream?: Promise<Bun.Socket> }>({
-			hostname: "127.0.0.1",
-			port: 0,
-			socket: {
-				open(client) {
-					client.data = { first: ++connections === 1 };
-					if (client.data.first) return;
-					client.data.upstream = Bun.connect({
-						hostname: "127.0.0.1",
-						port: brokerPort,
-						socket: {
-							data: (_upstream, chunk) => {
-								client.write(chunk);
+	test.each(interruptions)(
+		"retries the initial snapshot when the broker $name, reporting the retry",
+		async ({ firstReply, status }) => {
+			const brokerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "broker.db"));
+			await brokerStore.saveApiKey(PROVIDER, "broker-api-key");
+			const brokerStorage = new AuthStorage(brokerStore);
+			await brokerStorage.credentials.reload();
+			const handle = startAuthBroker({
+				storage: brokerStorage,
+				bind: "127.0.0.1:0",
+				bearerTokens: [TOKEN],
+				disableRefresher: true,
+			});
+			const brokerPort = Number(new URL(handle.url).port);
+			let connections = 0;
+			const proxy = Bun.listen<{ first: boolean; upstream?: Promise<Bun.Socket> }>({
+				hostname: "127.0.0.1",
+				port: 0,
+				socket: {
+					open(client) {
+						client.data = { first: ++connections === 1 };
+						if (client.data.first) return;
+						client.data.upstream = Bun.connect({
+							hostname: "127.0.0.1",
+							port: brokerPort,
+							socket: {
+								data: (_upstream, chunk) => {
+									client.write(chunk);
+								},
+								close: () => {
+									client.end();
+								},
 							},
-							close: () => {
-								client.end();
-							},
-						},
-					});
+						});
+					},
+					async data(client, chunk) {
+						if (client.data.first) client.end(firstReply);
+						else (await client.data.upstream)?.write(chunk);
+					},
+					async close(client) {
+						(await client.data.upstream)?.end();
+					},
 				},
-				async data(client, chunk) {
-					if (client.data.first) client.end(firstReply);
-					else (await client.data.upstream)?.write(chunk);
-				},
-				async close(client) {
-					(await client.data.upstream)?.end();
-				},
-			},
-		});
-		const proxyUrl = `http://127.0.0.1:${proxy.port}/`;
-		let storage: AuthStorage | undefined;
-		try {
-			process.env.OMP_AUTH_BROKER_URL = proxyUrl;
-			process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
-			process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "0";
-			const retries: AuthBrokerStartupRetry[] = [];
-			storage = await discoverAuthStorage(tempDir, { onBrokerRetry: retry => retries.push(retry) });
-			expect(await storage.keys.get(PROVIDER)).toBe("broker-api-key");
-			expect(retries).toMatchObject([{ url: proxyUrl, error: { status }, delayMs: 500, budgetMs: 30_000 }]);
-		} finally {
-			storage?.close();
-			proxy.stop(true);
-			await handle.close();
-			brokerStorage.close();
-			brokerStore.close();
-		}
-	});
+			});
+			const proxyUrl = `http://127.0.0.1:${proxy.port}/`;
+			let storage: AuthStorage | undefined;
+			try {
+				process.env.OMP_AUTH_BROKER_URL = proxyUrl;
+				process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
+				process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "0";
+				const retries: AuthBrokerStartupRetry[] = [];
+				storage = await discoverAuthStorage(tempDir, { onBrokerRetry: retry => retries.push(retry) });
+				expect(await storage.keys.get(PROVIDER)).toBe("broker-api-key");
+				expect(retries).toMatchObject([{ url: proxyUrl, error: { status }, delayMs: 500, budgetMs: 30_000 }]);
+			} finally {
+				storage?.close();
+				proxy.stop(true);
+				await handle.close();
+				brokerStorage.close();
+				brokerStore.close();
+			}
+		},
+	);
 
 	test("fails at once on a rejected token, and on any failure when switching brokers at runtime", async () => {
 		let status = 401;

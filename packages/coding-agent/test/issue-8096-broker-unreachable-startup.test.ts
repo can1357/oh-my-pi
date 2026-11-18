@@ -116,43 +116,44 @@ describe("runRootCommand — unreachable auth broker at startup", () => {
 	it.each([
 		{ composer: false, notice: true },
 		{ composer: true, notice: false },
-	])("prints the broker wait line unless a startup composer owns the terminal (composer: $composer)", async ({
-		composer,
-		notice,
-	}) => {
-		const previous = setInteractiveHost(false);
-		const parsed = parseArgs([]);
-		parsed.noExtensions = true;
-		const originalIsTTY = process.stdin.isTTY;
-		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
-		if (composer) beginStartupComposer({ terminal: new VirtualTerminal(80, 24), cache: false });
+	])(
+		"prints the broker wait line unless a startup composer owns the terminal (composer: $composer)",
+		async ({ composer, notice }) => {
+			const previous = setInteractiveHost(false);
+			const parsed = parseArgs([]);
+			parsed.noExtensions = true;
+			const originalIsTTY = process.stdin.isTTY;
+			Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+			if (composer) beginStartupComposer({ terminal: new VirtualTerminal(80, 24), cache: false });
 
-		let stderr = "";
-		vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
-			throw new ProcessExitSignal(code ?? 0);
-		}) as typeof process.exit);
-		vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
-			stderr += String(chunk);
-			return true;
-		});
-
-		try {
-			await runRootCommand(parsed, [], {
-				discoverAuthStorage: async (_agentDir, options) => {
-					const error = new AuthBrokerError("Auth broker request failed after 2 attempt(s)");
-					options?.onBrokerRetry?.({ url: "http://127.0.0.1:1", error, delayMs: 500, budgetMs: 30_000 });
-					throw error;
-				},
+			let stderr = "";
+			vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+				throw new ProcessExitSignal(code ?? 0);
+			}) as typeof process.exit);
+			vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+				stderr += String(chunk);
+				return true;
 			});
-		} catch {
-			// The broker error exits 1 through the mocked process.exit.
-		} finally {
-			vi.restoreAllMocks();
-			stopPendingStartupComposer();
-			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
-			setInteractiveHost(previous);
-		}
 
-		expect(stderr.includes("Waiting for auth broker at http://127.0.0.1:1")).toBe(notice);
-	}, 15_000);
+			try {
+				await runRootCommand(parsed, [], {
+					discoverAuthStorage: async (_agentDir, options) => {
+						const error = new AuthBrokerError("Auth broker request failed after 2 attempt(s)");
+						options?.onBrokerRetry?.({ url: "http://127.0.0.1:1", error, delayMs: 500, budgetMs: 30_000 });
+						throw error;
+					},
+				});
+			} catch {
+				// The broker error exits 1 through the mocked process.exit.
+			} finally {
+				vi.restoreAllMocks();
+				stopPendingStartupComposer();
+				Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+				setInteractiveHost(previous);
+			}
+
+			expect(stderr.includes("Waiting for auth broker at http://127.0.0.1:1")).toBe(notice);
+		},
+		15_000,
+	);
 });
