@@ -707,6 +707,7 @@
 
 - `/usage` and `omp usage` show LiteLLM key and user budgets for the built-in `litellm` provider and every models.yml provider with `discovery.type: litellm`, unless listed in `disabledProviders` ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
 - Extensions can ask the operator before an interactive quit, or cancel it, with `session_before_shutdown`; a further `/exit` or Ctrl+D skips the pending prompts and closes ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
+- Browser tabs and frames can wait for a condition in the page with `waitForFunction(fnOrExpression, { timeout?, polling? })`, which resolves with the condition's first truthy value, instead of a loop of `evaluate` calls and sleeps; passing a function to `waitFor` now points at it
 
 ### Changed
 

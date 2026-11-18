@@ -18,8 +18,8 @@ navigation: url title goto back forward reload pushState
 inspection: observe({selector?, compact?, viewportOnly?, includeAll?}) ariaSnapshot(selector?, {interactive?, compact?, urls?, diff?}) a11y extract(format?, {selector?, outline?, filter?}) text html value attr count box styles isVisible isEnabled isChecked
 capture: screenshot({selector?, fullPage?, silent?, annotate?, format?, quality?, ifChanged?, threshold?}) diffScreenshot(baselinePath, {threshold?, output?}) pdf({path?, format?, landscape?, scale?, printBackground?, margin?, pageRanges?})
 interaction: click(selector, {button?, count?}) dblclick hover focus check uncheck type(selector, text) fill(selector, text) press(key, {selector?}) keyDown keyUp mouseMove(x, y, {steps?, css?}) mouseDown mouseUp clickAt(x, y, {button?, count?, css?}) wheel scroll(dx, dy) drag(from, to) highlight scrollIntoView select(selector, …values) uploadFile(selector, …paths)
-waiting: waitFor waitForSelector waitForUrl(urlPattern, {timeout?}) waitForText
-frames: frames() → frame tree; frame(selectorOrNameOrUrl) → handle with click fill type press text html value attr count isVisible ariaSnapshot evaluate waitFor waitForSelector screenshot
+waiting: waitFor waitForSelector waitForUrl(urlPattern, {timeout?}) waitForText waitForFunction(fnOrExpression, {timeout?, polling?})
+frames: frames() → frame tree; frame(selectorOrNameOrUrl) → handle with click fill type press text html value attr count isVisible ariaSnapshot evaluate waitFor waitForSelector waitForFunction screenshot
 dialogs: dialog handleDialog setDialogs
 emulation: emulate(options?) devices()
 clipboard: clipboardRead() → {text, source}; clipboardWrite(text) clipboardCopy() clipboardPaste() → {source}; source: page, or the write/read-only shim fallback
@@ -51,6 +51,7 @@ selectors: CSS, or Puppeteer aria/… text/… xpath/… pierce/… label/… pl
   - That is viewport CSS pixels, unless the screenshot's line says it is scaled.
   - After a scaled screenshot, pass values measured on the page (`box`, `evaluate`) with `css: true` instead of scaling them: `clickAt(x, y, {css: true})`, `{x, y, css: true}`.
 - `waitFor*` resolve as soon as the condition holds: after a click or navigation wait for the expected text, URL, or selector, never a fixed sleep.
+- `waitForFunction(fnOrExpression, {timeout?, polling?})` waits for a condition in the page: it evaluates a function (cell variables are not in scope) or an expression string (the only form from Python) every `polling` ms and resolves with its first truthy value. Use it instead of a loop of `evaluate` and sleeps.
 - The cell's own `wait(handles)` waits for agents and completions, not time; `wait(ms | predicate)` sleeps or polls only inside `tab.run`.
 - URL patterns (`waitForUrl`, `waitForResponse`, `requests({filter})`): a string with `*` is a glob (`*` within a path segment, `**` across: `"**/cart.php"`), any other string a substring; or a RegExp. `route` strings are always globs.
 - `route` is declarative: matching requests are aborted or fulfilled from its options; it takes no handler.

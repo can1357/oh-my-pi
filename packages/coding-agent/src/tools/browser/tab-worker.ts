@@ -121,6 +121,7 @@ import {
 	queryValue,
 	queryVisible,
 	waitForPageText,
+	waitForPagePredicate,
 } from "./queries";
 import { DownloadManager, type BrowserDownload } from "./downloads";
 import { InitScriptManager, type InitScriptInfo } from "./init-scripts";
@@ -465,6 +466,11 @@ interface TabApi {
 	select(selector: string, ...values: SelectOptionInput[]): Promise<string[]>;
 	uploadFile(selector: string, ...filePaths: (string | string[])[]): Promise<void>;
 	waitForUrl(pattern: string | RegExp, opts?: { timeout?: number }): Promise<string>;
+	/** Wait until a page-world function or expression returns a truthy value, and resolve with that value. */
+	waitForFunction(
+		predicate: string | (() => unknown),
+		opts?: { timeout?: number; polling?: number },
+	): Promise<unknown>;
 	waitForResponse(
 		pattern: string | RegExp | ((response: HTTPResponse) => boolean | Promise<boolean>),
 		opts?: { timeout?: number },
@@ -3432,6 +3438,16 @@ export class WorkerCore {
 				return documentOp("tab.waitForUrl()", w, sig => this.#waitForUrl(resolved, w, sig), {
 					timeoutNote: () => `the URL is ${page.url()}`,
 				});
+			},
+			waitForFunction: (predicate, opts) => {
+				const w = waitMs(opts?.timeout);
+				return act("tab.waitForFunction()", w, sig =>
+					waitForPagePredicate(page.mainFrame(), "tab.waitForFunction()", predicate, {
+						timeout: w,
+						polling: opts?.polling,
+						signal: sig,
+					}),
+				);
 			},
 			waitForResponse: (pattern, opts) => {
 				const w = waitMs(opts?.timeout);

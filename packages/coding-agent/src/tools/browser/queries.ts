@@ -1,6 +1,6 @@
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import type { ElementHandle, Page } from "puppeteer-core";
+import type { ElementHandle, Frame, Page } from "puppeteer-core";
 import { isNavigatedContextError } from "./navigation";
 
 /** Default computed-style properties returned by `tab.styles()`. */
@@ -310,4 +310,48 @@ export async function waitForPageText(
 		await untilAborted(opts.signal, () => Bun.sleep(Math.min(100, Math.max(1, deadline - Date.now()))));
 	}
 	throw new ToolError(`tab.waitForText(${JSON.stringify(text)}) timed out after ${opts.timeout}ms`);
+}
+
+/** Options for {@link waitForPagePredicate}. */
+export interface PagePredicateWaitOptions {
+	/** Give up after this many ms. */
+	timeout: number;
+	/** Poll interval in ms (default 100, floor 10). */
+	polling?: number;
+	signal: AbortSignal;
+}
+
+/**
+ * Poll a page-world predicate (a function, or an expression's source) in `frame`'s main world, where the
+ * page's own globals live, until it returns a truthy value, and resolve with that value. Polls on a timer
+ * rather than animation frames, which a background tab does not run; a predicate that throws fails the wait.
+ */
+export async function waitForPagePredicate(
+	frame: Frame,
+	label: string,
+	predicate: unknown,
+	opts: PagePredicateWaitOptions,
+): Promise<unknown> {
+	if (!isPagePredicate(predicate)) {
+		throw new ToolError(`${label} expects a function or an expression string; got ${typeof predicate}`);
+	}
+	const interval = Math.max(10, opts.polling ?? 100);
+	const deadline = Date.now() + opts.timeout;
+	while (Date.now() <= deadline) {
+		let value: unknown;
+		try {
+			value = await untilAborted(opts.signal, () => frame.mainRealm().evaluate(predicate));
+		} catch (error) {
+			// The condition may well hold on the page a navigation is bringing in; check that one on the next poll.
+			if (opts.signal.aborted || !isNavigatedContextError(error)) throw error;
+			value = undefined;
+		}
+		if (value) return value;
+		await untilAborted(opts.signal, () => Bun.sleep(Math.min(interval, Math.max(1, deadline - Date.now()))));
+	}
+	throw new ToolError(`${label} timed out after ${opts.timeout}ms`);
+}
+
+function isPagePredicate(value: unknown): value is string | (() => unknown) {
+	return typeof value === "string" || typeof value === "function";
 }

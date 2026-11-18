@@ -6,6 +6,7 @@ import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supe
 import { TERN_KIT_SOURCE } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/page-kit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { chromiumAvailable } from "./chromium-probe";
+import { rejectionOf } from "../helpers/rejection";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 const session: ToolSession = {
@@ -388,5 +389,22 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 		}`)) as { name: string; message: string } | null;
 		expect(timeout?.name).toBe("ToolError");
 		expect(timeout?.message).toContain("tab.waitForText");
+	}, 60_000);
+
+	it("waits for a page predicate, resolves with its value, and reports a named timeout", async () => {
+		await call("evaluate", ["setTimeout(() => { window.__job = { status: 'done', result: 'EXP-1' }; }, 200), 0"]);
+		expect(
+			await call("waitForFunction", [
+				{ __omp_fn: "() => window.__job?.status === 'done' && window.__job.result" },
+				{ timeout: 10_000, polling: 20 },
+			]),
+		).toBe("EXP-1");
+		expect(String(await rejectionOf(call("waitForFunction", ["window.__never", { timeout: 150 }])))).toContain(
+			"tab.waitForFunction() timed out after 150ms",
+		);
+		// A predicate handed to `waitFor` names the helper that takes one.
+		expect(String(await rejectionOf(call("waitFor", [{ __omp_fn: "() => true" }])))).toContain(
+			"tab.waitForFunction(fn",
+		);
 	}, 60_000);
 });

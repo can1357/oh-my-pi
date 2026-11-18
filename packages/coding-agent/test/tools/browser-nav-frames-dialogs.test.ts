@@ -466,6 +466,22 @@ return { blocked, fast: blockedMs < 2000, answered: await tab.evaluate(() => glo
 				}),
 			),
 		).toBe("direct");
+		// The predicate runs in the frame's document: the top page has no `#out`.
+		expect(
+			valueOf(
+				await invoke({
+					action: "call",
+					name: "frames",
+					chain: [
+						{ method: "frame", args: ["#f"] },
+						{
+							method: "waitForFunction",
+							args: ["document.querySelector('#out')?.textContent", { timeout: 5_000 }],
+						},
+					],
+				}),
+			),
+		).toBe("direct");
 	}, 30_000);
 
 	test("observes controls inside iframes and acts on them by id", async () => {

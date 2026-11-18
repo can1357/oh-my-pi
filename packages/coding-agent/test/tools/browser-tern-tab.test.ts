@@ -609,6 +609,19 @@ describe("TernTab", () => {
 		expect(() => tab.page.once("console", () => {})).toThrow(/tab\.console\(\)/);
 	});
 
+	it("polls a frame's predicate in that frame's page world and names the frame helper on timeout", async () => {
+		const fake = await startPage({ eventBatches: [], kit: { frameOf: () => "0.1" } });
+		const tab = await openTab(fake);
+		const frame = await tab.frame("#pay");
+		const before = fake.requests.length;
+		await expect(frame.waitForFunction("window.paid", { timeout: 50, polling: 10 })).rejects.toThrow(
+			"frame.waitForFunction() timed out after 50ms",
+		);
+		const polls = fake.requests.slice(before).map(request => request.op);
+		expect(polls.length).toBeGreaterThan(0);
+		for (const op of polls) expect(op).toMatchObject({ op: "eval", world: "page", frame: "0.1" });
+	});
+
 	it("names the Tern backend and the reason for helpers it cannot provide", async () => {
 		const fake = await startPage({ eventBatches: [], kit: {} });
 		const tab = await openTab(fake);

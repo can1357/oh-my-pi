@@ -19,6 +19,7 @@ import {
 	withLiveElement,
 } from "./interactions";
 import { readPageViewport } from "./launch";
+import { waitForPagePredicate } from "./queries";
 import { emitScreenshot, type ScreenshotRun, whileDrawing } from "./screenshot";
 import { optionalSelectorArgs, pressArgs } from "./tab-arguments";
 import { selectorWaitOptions, type SelectorWaitOptions, waitForDetached, waitForSelectorHandle } from "./selector-wait";
@@ -79,6 +80,11 @@ export interface BrowserFrameApi {
 	waitFor(selector: string, options?: FrameWaitOptions): Promise<boolean>;
 	/** Wait for a selector and report whether it appeared. */
 	waitForSelector(selector: string, options?: FrameWaitOptions): Promise<boolean>;
+	/** Wait until a function or expression evaluated in this frame returns a truthy value, and resolve with it. */
+	waitForFunction(
+		predicate: string | (() => unknown),
+		options?: { timeout?: number; polling?: number },
+	): Promise<unknown>;
 	/** Capture a matching element inside this frame; without a selector, the whole frame. */
 	screenshot(selector?: string): Promise<string>;
 }
@@ -410,6 +416,16 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 			)) as BrowserFrameApi["evaluate"],
 		waitFor: waitForSelector,
 		waitForSelector,
+		waitForFunction: (predicate, options) => {
+			const deadline = hooks.waitMs(options?.timeout);
+			return hooks.op("frame.waitForFunction()", deadline, signal =>
+				waitForPagePredicate(frame, "frame.waitForFunction()", predicate, {
+					timeout: deadline,
+					polling: options?.polling,
+					signal,
+				}),
+			);
+		},
 		screenshot: selector =>
 			hooks.op(
 				selector === undefined ? "frame.screenshot()" : `frame.screenshot(${JSON.stringify(selector)})`,
