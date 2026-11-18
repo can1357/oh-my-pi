@@ -707,6 +707,33 @@ async fn gitignore_skips_ignored_files_and_directories() {
 	assert_eq!(res.files_searched, 1);
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn follow_links_searches_linked_files_and_directories_only_when_requested() {
+	let dir = TempDir::new();
+	dir.write("shared/SKILL.md", "needle in linked file\n");
+	dir.write("shared/scripts/run.sh", "needle in linked dir\n");
+	fs::create_dir_all(dir.path().join("skill")).expect("create skill");
+	std::os::unix::fs::symlink(
+		dir.path().join("shared/SKILL.md"),
+		dir.path().join("skill/SKILL.md"),
+	)
+	.expect("link file");
+	std::os::unix::fs::symlink(dir.path().join("shared/scripts"), dir.path().join("skill/scripts"))
+		.expect("link directory");
+	std::os::unix::fs::symlink(dir.path().join("skill"), dir.path().join("shared/scripts/cycle"))
+		.expect("link ancestor cycle");
+	let engine = needle();
+	let root = dir.path().join("skill");
+	assert!(run(&root, &options(&engine)).await.matches.is_empty());
+	let mut follow = options(&engine);
+	follow.walk.follow_links = true;
+	assert_eq!(paths(&run(&root, &follow).await), ["SKILL.md", "scripts/run.sh"]);
+	// The budgeted walk (a result cap) follows the same links.
+	let capped = GrepOptions { max_count: Some(10), ..follow };
+	assert_eq!(paths(&run(&root, &capped).await), ["SKILL.md", "scripts/run.sh"]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn non_recursive_glob_matches_only_direct_children() {
 	let dir = TempDir::new();

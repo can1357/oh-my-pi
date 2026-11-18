@@ -8,9 +8,17 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { cfgJudgmentAttemptTimeoutMs, cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ChainJudge, hasNativeJudge, JudgmentCache, journalJudgmentUsage } from "@oh-my-pi/pi-coding-agent/judgment";
+import {
+	ChainJudge,
+	hasNativeJudge,
+	JudgmentCache,
+	journalJudgmentUsage,
+	nativeJudgeRejection,
+	onJudgeRejection,
+} from "@oh-my-pi/pi-coding-agent/judgment";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import { FindTool, isFindEnabled } from "@oh-my-pi/pi-coding-agent/tools/jfind";
 import * as imageResize from "@oh-my-pi/pi-coding-agent/utils/image-resize";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -544,7 +552,7 @@ describe("ChainJudge", () => {
 		expect(online).not.toHaveBeenCalled();
 	});
 
-	it("fails instead of degrading to a prompted model, and skips a rejected account on later calls", async () => {
+	it("fails instead of degrading to a prompted model, and skips a rejected account for the session", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },
 			"retry.fallbackChains": { judge: [`${ONLINE.provider}/${ONLINE.id}`] },
@@ -557,15 +565,35 @@ describe("ChainJudge", () => {
 			);
 		const online = vi.spyOn(ai, "completeSimple");
 		const onUsage = vi.fn();
+		const onRejection = vi.fn();
+		onJudgeRejection(registry, onRejection);
 		const request = { state: "rename a local", questions: { level: TIER_QUESTION } };
+		expect(hasNativeJudge(settings, registry)).toBe(true);
 
 		await expect(
 			new ChainJudge({ settings, registry, purpose: "test", sessionModel: ONLINE, onUsage }).judge(request),
 		).rejects.toThrow("402");
+		// Billing does not recover on a timer: hours later the route is still skipped, and judge-gated tools stay off.
+		vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6 * 60 * 60 * 1000);
 		await expect(new ChainJudge({ settings, registry, purpose: "test", onUsage }).judge(request)).rejects.toThrow(
-			"rejected the account recently",
+			"rejected the account (402) recently",
 		);
 
+		expect(onRejection).toHaveBeenCalledTimes(1);
+		expect(hasNativeJudge(settings, registry)).toBe(false);
+		expect(nativeJudgeRejection(settings, registry)).toBe("typesafe/jev-preview rejected the account (402)");
+		const findSession = {
+			cwd: process.cwd(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings,
+			modelRegistry: registry,
+		};
+		expect(isFindEnabled(findSession)).toBe(false);
+		await expect(new FindTool(findSession).execute("x", { query: "renames", grep_keywords: [] })).rejects.toThrow(
+			"find is disabled for this session: judge typesafe/jev-preview rejected the account (402). Use grep.",
+		);
 		expect(typesafeCalls).toHaveBeenCalledTimes(1);
 		expect(online).not.toHaveBeenCalled();
 		expect(onUsage).toHaveBeenCalledTimes(1);

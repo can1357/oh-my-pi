@@ -158,6 +158,7 @@ import {
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionStateApi } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions, outRepliesActive } from "./internal-urls";
+import { onJudgeRejection } from "./judgment";
 import { stripXdUnderscorePrefix, stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { holdSharedLsp } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
@@ -5601,6 +5602,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// `find.enabled: auto` follows the judge role; a role change only touches
 			// the prompt when it actually adds or removes `find`.
 			cfgModelRoles.listen(session, () => reconcileGatedTools({ refreshPrompt: false }));
+			// A judge rejecting the account withdraws `find` (and its hints) once no native judge is left.
+			session.addDisposer(onJudgeRejection(modelRegistry, () => void reconcileGatedTools({ refreshPrompt: false })));
 		}
 		// Backfill the resumed advisor spend without blocking startup: the scan
 		// runs after the session is live, so `--resume` no longer scales with the

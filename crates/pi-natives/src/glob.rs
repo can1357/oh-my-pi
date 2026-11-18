@@ -5,8 +5,8 @@
 //! Resolves a search root, runs `pi_walker::glob`, and optionally streams each
 //! returned match through a callback.
 //!
-//! `pi_walker::glob` never yields `.git`, and skips `node_modules` unless the
-//! pattern or options request it.
+//! `pi_walker::glob` yields `.git` only when a pattern segment names it, and
+//! skips `node_modules` unless the pattern or options request it.
 //!
 //! # Example
 //! ```ignore

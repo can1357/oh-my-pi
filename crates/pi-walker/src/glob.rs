@@ -36,6 +36,8 @@ pub struct Selector {
 	/// The glob looks beyond base names, so subtrees can be pruned.
 	prune:        bool,
 	node_modules: bool,
+	/// A path segment of the pattern is `.git`, so walks must not prune it.
+	git:          bool,
 }
 
 /// pi's normalisation: backslashes become `/`, a recursive pattern without
@@ -67,14 +69,15 @@ fn is_exact_brace_union(pattern: &str) -> bool {
 }
 
 impl Selector {
-	fn compile(glob: Glob, node_modules: bool) -> Self {
-		Self { prune: !glob.basename_only(), glob, node_modules }
+	fn compile(glob: Glob, node_modules: bool, git: bool) -> Self {
+		Self { prune: !glob.basename_only(), glob, node_modules, git }
 	}
 
 	/// Entries whose walk-relative path matches `pattern` (the glob tool).
 	pub fn new(pattern: &str, recursive: bool) -> Result<Self, PatternError> {
 		let built = build_pattern(pattern, recursive);
-		Ok(Self::compile(Glob::new(&built)?, built.contains("node_modules")))
+		let git = built.split('/').any(|segment| segment == ".git");
+		Ok(Self::compile(Glob::new(&built)?, built.contains("node_modules"), git))
 	}
 
 	/// Files a content search scoped by `pattern` reads (grep, ast-grep):
@@ -90,7 +93,7 @@ impl Selector {
 		} else {
 			Glob::union([glob, Glob::new(&format!("{base}/**"))?])
 		};
-		Ok(Self::compile(glob, built.contains("node_modules")))
+		Ok(Self::compile(glob, built.contains("node_modules"), false))
 	}
 
 	/// Entries a content search leaves out (grep's `exclude`): a pattern
@@ -120,7 +123,7 @@ impl Selector {
 		if globs.is_empty() {
 			return Ok(None);
 		}
-		Ok(Some(Self::compile(Glob::union(globs), false)))
+		Ok(Some(Self::compile(Glob::union(globs), false, false)))
 	}
 
 	/// Whether the walk-relative `path` is selected.
@@ -142,6 +145,12 @@ impl Selector {
 	/// The pattern names `node_modules`, so walks must descend into it.
 	pub const fn mentions_node_modules(&self) -> bool {
 		self.node_modules
+	}
+
+	/// A segment of the glob tool's pattern is `.git` (`*/.git`,
+	/// `repo/.git/config`), so walks must not prune `.git` entries.
+	pub const fn mentions_git(&self) -> bool {
+		self.git
 	}
 }
 
@@ -166,8 +175,9 @@ pub struct GlobOptions {
 	/// Descend into `node_modules`; `None` does so when the pattern names it.
 	pub include_node_modules: Option<bool>,
 	/// Traversal: `hidden`, `gitignore`, `follow_links`, `cache`, `workers`
-	/// are honoured; `.git` is always pruned, and detail, depth, and
-	/// `node_modules` pruning follow the pattern and the options above.
+	/// are honoured; `.git` is pruned unless a pattern segment is `.git`, and
+	/// detail, depth, and `node_modules` pruning follow the pattern and the
+	/// options above.
 	pub walk:                 walk::Options,
 }
 
@@ -227,7 +237,7 @@ pub async fn glob(fs: &Fs, root: &Path, opts: &GlobOptions) -> Result<Vec<GlobMa
 		(a, b) => a.or(b),
 	};
 	let wopts = walk::Options {
-		skip_git: true,
+		skip_git: !selector.git,
 		skip_node_modules: !opts.include_node_modules.unwrap_or(selector.node_modules),
 		detail: if opts.sort_by_mtime {
 			Detail::Full
@@ -491,6 +501,22 @@ mod tests {
 			Selector::new("node_modules/*", true)
 				.expect("compile")
 				.mentions_node_modules()
+		);
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn git_entries_are_listed_only_when_a_segment_names_them() {
+		let dir = TempDir::new();
+		dir.write("repo/.git/config");
+		dir.write("worktree/.git");
+		dir.write("repo/.gitignore");
+		assert_eq!(paths(&run(dir.path(), &options("**/config")).await), Vec::<&str>::new());
+		assert_eq!(paths(&run(dir.path(), &options("*/.git")).await), ["repo/.git", "worktree/.git"]);
+		assert_eq!(paths(&run(dir.path(), &options("repo/.git/*")).await), ["repo/.git/config"]);
+		assert!(
+			!Selector::new("**/.gitignore", true)
+				.expect("compile")
+				.mentions_git()
 		);
 	}
 

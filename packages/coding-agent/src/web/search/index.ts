@@ -31,7 +31,7 @@ import {
 	type SearchProviderFailure,
 } from "./provider";
 import { rankXAIProviders, targetsX, xaiModelChain, xSearchAvailable } from "./providers/xai";
-import { applyQueryConstraints, parseSearchQuery } from "./query";
+import { applyQueryConstraints, parseSearchQuery, scopeConstraints } from "./query";
 import {
 	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
 	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
@@ -142,6 +142,15 @@ function fallbackNotes(failed: readonly SearchFailureDetail[], served: { label: 
 	if (failed.length === 0) return [];
 	return [`answered by ${served.label} after ${failed.map(f => `${f.label} failed (${f.reason})`).join(" and ")}`];
 }
+
+/** How long an engine that answered HTTP 429 is skipped by the automatic chain. */
+const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
+/**
+ * Engines (`provider/id`) that answered HTTP 429, with when the automatic chain may
+ * try them again. A keyless engine's free tier (Parallel, Exa) rate-limits for minutes,
+ * so retrying it on every call only adds the 429's latency before the fallback answers.
+ */
+const rateLimitedUntil = new Map<string, number>();
 
 function hasRenderableSearchContent(response: SearchResponse): boolean {
 	if (response.answer?.trim()) return true;
@@ -268,6 +277,9 @@ async function executeSearch(
 	let availableProviderCount = 0;
 	let lastProvider: { id: string; label: string } | undefined;
 	let failedResponseProvider: SearchResponse["provider"] = "none";
+	const scope = parsedQuery.hasConstraints ? scopeConstraints(parsedQuery) : undefined;
+	/** Engines that answered, but with nothing inside the query's scope directives. */
+	const scopeMisses: { id: SearchResponse["provider"]; label: string }[] = [];
 	for (const candidate of expanded) {
 		if (cfgOffline.get(options.settings ?? settings)) {
 			const activeProvider = options.sessionModel?.provider;
@@ -284,6 +296,19 @@ async function executeSearch(
 		let provider: SearchProvider | undefined;
 		const candidateMeta = { id: candidate.model.id, label: candidate.model.name };
 		lastProvider = candidateMeta;
+		const engineKey = `${candidate.model.provider}/${candidate.model.id}`;
+		const cooldownEnds = rateLimitedUntil.get(engineKey);
+		if (cooldownEnds !== undefined && !params.model) {
+			if (cooldownEnds > Date.now()) {
+				const minutes = RATE_LIMIT_COOLDOWN_MS / 60_000;
+				failures.push({
+					provider: candidateMeta,
+					error: new Error(`skipped: rate-limited (429) within the last ${minutes} minutes`),
+				});
+				continue;
+			}
+			rateLimitedUntil.delete(engineKey);
+		}
 		try {
 			const model = candidate.model;
 			if (isHostedPlaceholder(model)) {
@@ -345,20 +370,47 @@ async function executeSearch(
 				);
 			}
 
-			// Lenient constraint pass over whatever the provider returned: enforce
-			// site:/inurl:/intitle:/filetype:/date directives the provider could
-			// not (or only partially) honor natively, relaxing any dimension that
-			// would wipe out every result. Citations/answer text stay untouched.
+			// Constraint pass over whatever the provider returned: enforce the
+			// directives the provider could not (or only partially) honor natively.
+			// Scope directives (site:/inurl:/exclusions) hold even when nothing is
+			// left, and also filter citations; intitle:/filetype:/date relax when they
+			// would wipe out every result. Answer text cannot be filtered, so it is
+			// flagged when sources it may draw on were removed.
 			let finalResponse = response;
 			const constraintNotes: string[] = [];
-			if (parsedQuery.hasConstraints && response.sources.length > 0) {
+			if (parsedQuery.hasConstraints && (response.sources.length > 0 || response.citations?.length)) {
 				const filtered = applyQueryConstraints(response.sources, parsedQuery);
-				if (filtered.sources.length !== response.sources.length) {
-					finalResponse = { ...response, sources: filtered.sources };
+				const citations = scope ? response.citations?.filter(scope.matches) : response.citations;
+				if (filtered.sources.length !== response.sources.length || citations !== response.citations) {
+					finalResponse = {
+						...response,
+						sources: filtered.sources,
+						...(citations === undefined ? {} : { citations }),
+					};
 				}
 				for (const label of filtered.dropped) {
 					constraintNotes.push(`no results matched \`${label}\`; the constraint was relaxed`);
 				}
+				if (scope) {
+					if (filtered.sources.length === 0 && !citations?.length) {
+						scopeMisses.push({ id: provider.id, label: provider.label });
+						continue;
+					}
+					const offScope =
+						response.sources.filter(source => !scope.matches(source)).length +
+						(response.citations?.length ?? 0) -
+						(citations?.length ?? 0);
+					if (response.answer?.trim() && offScope > 0) {
+						constraintNotes.push(
+							`removed ${formatCount("source", offScope)} outside \`${scope.label}\`; the answer text is unfiltered and may draw on them`,
+						);
+					}
+				}
+			}
+			if (modelKind(model) !== "search" && finalResponse.answer?.trim()) {
+				constraintNotes.unshift(
+					`synthesized answer by ${model.provider}/${model.id} hosted search, not a result list; check claims against the cited sources`,
+				);
 			}
 
 			if (!hasRenderableSearchContent(finalResponse)) {
@@ -381,7 +433,24 @@ async function executeSearch(
 			throwIfAborted(signal);
 			failedResponseProvider = provider?.id ?? "none";
 			failures.push({ provider: provider ?? candidateMeta, error });
+			if (error instanceof SearchProviderError && error.status === 429) {
+				rateLimitedUntil.set(engineKey, Date.now() + RATE_LIMIT_COOLDOWN_MS);
+			}
 		}
+	}
+
+	if (scope && scopeMisses.length > 0) {
+		// Engines answered, just not inside the requested scope: an empty result, not an error.
+		const searched = scopeMisses.map(miss => miss.label).join(", ");
+		const notes = fallbackNotes(failureDetails(failures), { label: searched });
+		const text = [
+			...notes.map(note => `Note: ${note}`),
+			`No results from ${searched} matched \`${scope.label}\`.`,
+		].join("\n");
+		return {
+			content: [{ type: "text" as const, text }],
+			details: { response: { provider: scopeMisses[0]!.id, sources: [] } },
+		};
 	}
 
 	if (availableProviderCount === 0 && failures.length === 0) {
