@@ -9,6 +9,7 @@ import {
 	type TrayMain,
 	TrayMainActivity,
 	TrayMemory,
+	trayQuiet,
 } from "@oh-my-pi/pi-coding-agent/modes/tray";
 import type { NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import type { AgentRecordLike } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
@@ -197,34 +198,32 @@ describe("tray items", () => {
 		expect(cards(f)).toEqual(["job:bg_2:failed"]);
 	});
 
-	it("sends no cards while nothing is live or failed, and keeps the memory for when work starts again", () => {
+	it("keeps every card while nothing is live, calling the tray quiet unless something runs or failed", () => {
 		const f = fixture();
 		const memory = new TrayMemory();
+		const quiet = (): boolean => trayQuiet(buildTrayItems(input(f), memory));
 		f.refs.push(ref("Old", "idle"));
-		// Only the done card: nothing to show.
-		expect(cards(f, memory)).toEqual([]);
-		// Beside a running job it shows.
+		// Only the done card: still there, but quiet.
+		expect(cards(f, memory)).toEqual(["done:done:done"]);
+		expect(quiet()).toBe(true);
+		// Beside a running job it is not.
 		f.jobs.push(job("bg_1"));
-		expect(cards(f, memory)).toEqual(["done:done:done", "job:bg_1:running"]);
+		expect(quiet()).toBe(false);
 
-		// A settled agent whose result still waits, beside the running job; dismiss it, and let its clock run.
+		// A settled agent whose result still waits keeps its card once the job is done and delivered.
 		f.sessions.push({ ...observed("Scout", "completed"), lastUpdate: 90_000 });
 		f.refs.push(ref("Scout", "idle", 5));
 		f.agentJobs.set("Scout", job("Scout", { type: "task", agentId: "Scout", status: "completed" }));
-		expect(cards(f, memory)).toEqual(["agent:Scout:done", "done:done:done", "job:bg_1:running"]);
-		memory.dismissed.add("job:bg_2");
-
-		// The job finishes, its result delivered: only finished work is left, so the tray hides.
 		f.jobs[0] = job("bg_1", { status: "completed", endTime: 95_000, resultText: "ok" });
 		f.consumed.add("bg_1");
-		expect(cards(f, memory)).toEqual([]);
-		expect(memory.dismissed.has("job:bg_2")).toBe(true);
-		expect(memory.agents.get("Scout")).toMatchObject({ live: false, acted: 90_000 });
+		expect(cards(f, memory)).toEqual(["agent:Scout:done", "done:done:done"]);
+		expect(quiet()).toBe(true);
 
-		// A failure alone keeps it up.
+		// A failure alone is worth the room.
 		f.jobs.push(job("bg_2", { status: "failed", endTime: 96_000, errorText: "boom" }));
-		memory.dismissed.delete("job:bg_2");
-		expect(cards(f, memory)).toEqual(["agent:Scout:done", "done:done:done", "job:bg_2:failed"]);
+		expect(quiet()).toBe(false);
+		memory.dismissed.add("job:bg_2");
+		expect(quiet()).toBe(true);
 	});
 
 	it("titles an agent's card with its id, keeping its type for the closer look and the aria", () => {
@@ -426,6 +425,10 @@ describe("Tray", () => {
 		// A failure alone is still worth the row.
 		f.jobs.splice(0, 1);
 		expect(tray.caption(true)?.p).toMatchObject({ text: "1 job finished" });
+		// Only finished work: the tray is quiet, and a caption over it would announce nothing.
+		f.jobs[0] = job("bg_2", { status: "completed", endTime: 2_000, resultText: "ok" });
+		expect(tray.caption(true)).toBeUndefined();
+		expect(tray.describe().p).toMatchObject({ role: "omp.tray", quiet: true, main: "working" });
 		f.jobs.splice(0, 1);
 		expect(tray.caption(true)).toBeUndefined();
 	});
@@ -545,51 +548,105 @@ describe("TrayMainActivity", () => {
 		toolName,
 	});
 	const end = (toolCallId: string) => ({ type: "tool_execution_end" as const, toolCallId });
+	const none = (): boolean => false;
 
-	it("reads working, then waiting while a wait call executes, then working, then idle once the turn ends", () => {
+	it("stays waiting after a wait returns, while the model thinks and writes, until another call starts or it yields", () => {
 		const main = new TrayMainActivity(false);
-		const state = () => main.state(() => false);
+		const state = () => main.state(none);
 		expect(state()).toBe("idle");
-		main.handle({ type: "agent_start" }, true);
+		main.handle({ type: "agent_start" }, true, none);
 		expect(state()).toBe("working");
-		main.handle(start("call-1", "wait"), true);
+		main.handle(start("call-1", "wait"), true, none);
 		expect(state()).toBe("waiting");
-		main.handle(end("call-1"), true);
+		// The wait returns; the model thinks and streams text (no call executes).
+		main.handle(end("call-1"), true, none);
+		expect(state()).toBe("waiting");
+		// Another kind of call ends the wait.
+		main.handle(start("call-2", "bash"), true, none);
 		expect(state()).toBe("working");
-		main.handle({ type: "agent_end" }, false);
+		main.handle(end("call-2"), true, none);
+		expect(state()).toBe("working");
+
+		main.handle(start("call-3", "wait"), true, none);
+		main.handle(end("call-3"), true, none);
+		// The turn ends after the wait.
+		main.handle({ type: "agent_end" }, false, none);
 		expect(state()).toBe("idle");
+		// The next turn starts working.
+		main.handle({ type: "agent_start" }, true, none);
+		expect(state()).toBe("working");
 	});
 
-	it("stays working while another call runs beside the wait, and idles when the turn yields to background work", () => {
+	it("keeps wait, return, wait as one unbroken waiting, with no frame asked of the tray", () => {
+		const f = fixture();
+		f.jobs.push(job("bg_1"));
 		const main = new TrayMainActivity(true);
-		const state = () => main.state(() => false);
-		main.handle(start("call-1", "wait"), true);
-		main.handle(start("call-2", "bash"), true);
+		const host = {
+			input: () => input(f),
+			main: () => main.state(none),
+			focusAgent: vi.fn(),
+			showJobsSheet: vi.fn(),
+			stopAgent: vi.fn(),
+			cancelJob: vi.fn(),
+			requestRender: vi.fn(),
+		} satisfies TrayHost;
+		const tray = new Tray(host);
+		tray.setOnHost(true);
+		main.handle(start("call-1", "wait"), true, none);
+		expect(tray.describe().p).toMatchObject({ main: "waiting" });
+		for (const event of [end("call-1"), start("call-2", "wait"), end("call-2"), start("call-3", "vibe_wait")]) {
+			main.handle(event, true, none);
+			expect(tray.mainChanged()).toBe(false);
+		}
+		expect(tray.describe().p).toMatchObject({ main: "waiting" });
+	});
+
+	it("stays working when a wait ends beside another call, and idles when the turn yields to background work", () => {
+		const main = new TrayMainActivity(true);
+		const state = () => main.state(none);
+		main.handle(start("call-1", "wait"), true, none);
+		main.handle(start("call-2", "bash"), true, none);
 		expect(state()).toBe("working");
-		main.handle(end("call-2"), true);
-		expect(state()).toBe("waiting");
-		// A vibe worker wait blocks the same way.
-		main.handle(start("call-3", "vibe_wait"), true);
+		// The wait ends first: the bash still runs, and once it ends nothing was waiting.
+		main.handle(end("call-1"), true, none);
+		main.handle(end("call-2"), true, none);
+		expect(state()).toBe("working");
+
+		main.handle(start("call-3", "wait"), true, none);
+		main.handle(end("call-3"), true, none);
 		expect(state()).toBe("waiting");
 		// The run stays open on background jobs, but the model yielded.
-		main.handle({ type: "agent_pause", yielded: true }, true);
+		main.handle({ type: "agent_pause", yielded: true }, true, none);
 		expect(state()).toBe("idle");
-		// A pause the session continues on its own is still the turn's work.
-		main.handle({ type: "agent_start" }, true);
-		main.handle({ type: "agent_pause", yielded: false }, true);
+		main.handle({ type: "agent_start" }, true, none);
 		expect(state()).toBe("working");
+	});
+
+	it("keeps its state through a pause the session continues on its own", () => {
+		const main = new TrayMainActivity(true);
+		const state = () => main.state(none);
+		main.handle(start("call-1", "wait"), true, none);
+		main.handle(end("call-1"), true, none);
+		main.handle({ type: "agent_pause", yielded: false }, true, none);
+		expect(state()).toBe("waiting");
+		main.handle({ type: "agent_start" }, true, none);
+		expect(state()).toBe("waiting");
 	});
 
 	it("counts a task call as waiting only while it runs an agent inline", () => {
 		const main = new TrayMainActivity(true);
-		main.handle(start("call-1", "task"), true);
 		const sessions: ObservableSession[] = [];
-		const state = () => main.state(id => runsInlineAgent(sessions, id));
+		const inline = (id: string): boolean => runsInlineAgent(sessions, id);
+		main.handle(start("call-1", "task"), true, inline);
+		const state = () => main.state(inline);
 		expect(state()).toBe("working");
 		// A background spawn of the same call blocks nothing.
 		sessions.push({ ...observed("Bg", "active"), parentToolCallId: "call-1", detached: true });
 		expect(state()).toBe("working");
 		sessions.push({ ...observed("Inline", "active"), parentToolCallId: "call-1", detached: false });
+		expect(state()).toBe("waiting");
+		// It returns while running its agent inline: still waiting until something else starts.
+		main.handle(end("call-1"), true, inline);
 		expect(state()).toBe("waiting");
 	});
 });

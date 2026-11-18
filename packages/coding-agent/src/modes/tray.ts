@@ -628,9 +628,15 @@ export function buildTrayItems(input: TrayInput, memory: TrayMemory): TrayItem[]
 		const item = jobItem(input, memory, job);
 		if (item) items.push(item);
 	}
-	// Nothing live and nothing failed: finished work alone is not worth the room, so the tray hides.
-	// The memory (clocks, dismissals) stays, so the tray comes back whole when work starts again.
-	return items.some(item => isLive(item.status) || item.status === "failed") ? items : [];
+	return items;
+}
+
+/**
+ * Whether the tray holds only finished work: nothing queued, running or
+ * failed. A host keeps a quiet tray out of sight until the user asks for it.
+ */
+export function trayQuiet(items: readonly TrayItem[]): boolean {
+	return !items.some(item => isLive(item.status) || item.status === "failed");
 }
 
 /** Whether two builds show the same cards, in the same order, with the same faces. */
@@ -1073,7 +1079,7 @@ export function trayCaption(items: readonly TrayItem[]): string {
 	}
 	const parts = (agents: number, jobs: number): string =>
 		[agents > 0 && formatCount("agent", agents), jobs > 0 && formatCount("job", jobs)].filter(Boolean).join(", ");
-	// The tray shows only while something is live or failed, so settled cards stand for that failure.
+	// A quiet tray gets no caption, so settled cards stand beside a failure.
 	if (liveAgents + liveJobs > 0) return `${parts(liveAgents, liveJobs)} in the background`;
 	return `${parts(settledAgents, settledJobs)} finished`;
 }
@@ -1103,40 +1109,65 @@ export type TrayMainEvent =
 
 /**
  * What the main agent is doing, for the tray: `idle` once it has yielded (no
- * turn runs, or the run waits only on outside work), `waiting` while every
- * call it executes only blocks on agents or jobs, `working` otherwise.
+ * turn runs, or the run waits only on outside work); `waiting` while every
+ * call it executes only blocks on agents or jobs, and after such calls end
+ * until it starts another call or yields (a `wait` returns at intervals, and
+ * the model mostly waits again); `working` otherwise.
  */
 export class TrayMainActivity {
 	/** A model loop is running: from `agent_start` until it yields or the run ends. */
 	#looping: boolean;
 	/** Executing calls (from `tool_execution_start` to their end) by id: their tool names. */
 	readonly #calls = new Map<string, string>();
+	/** The last executing calls ended while it was waiting, and it has started nothing since. */
+	#stillWaiting = false;
+	/** The loop paused for the session's own continuation: the next `agent_start` resumes its state. */
+	#resuming = false;
 
 	constructor(looping: boolean) {
 		this.#looping = looping;
 	}
 
-	/** Follow one session event; true when it can change {@link state}. */
-	handle(event: TrayMainEvent, runActive: boolean): boolean {
+	/**
+	 * Follow one session event; true when it can change {@link state}.
+	 * `inlineTask` is {@link state}'s, read as the last calls end.
+	 */
+	handle(event: TrayMainEvent, runActive: boolean, inlineTask: (callId: string) => boolean): boolean {
 		switch (event.type) {
 			case "agent_start":
 				this.#looping = true;
+				// A new turn starts working; the session continuing its own loop keeps what it was.
+				if (!this.#resuming) this.#stillWaiting = false;
+				this.#resuming = false;
 				return true;
 			case "agent_pause":
 				// A pause the session itself continues (a retry, a reminder) is still the turn's work.
 				this.#looping = !event.yielded;
+				this.#resuming = !event.yielded;
+				if (event.yielded) this.#stillWaiting = false;
 				this.#calls.clear();
 				return true;
 			case "agent_end":
 				// A superseded end reaches subscribers after the next run opened: that run's `agent_start` decides.
-				if (!runActive) this.#looping = false;
+				if (!runActive) {
+					this.#looping = false;
+					this.#stillWaiting = false;
+					this.#resuming = false;
+				}
 				this.#calls.clear();
 				return true;
 			case "tool_execution_start":
+				// Anything but another waiting call ends the wait.
+				if (WAITING_TOOLS[event.toolName] !== true) this.#stillWaiting = false;
 				this.#calls.set(event.toolCallId, event.toolName);
 				return true;
-			case "tool_execution_end":
-				return this.#calls.delete(event.toolCallId);
+			case "tool_execution_end": {
+				if (!this.#calls.has(event.toolCallId)) return false;
+				const waiting = this.state(inlineTask) === "waiting";
+				this.#calls.delete(event.toolCallId);
+				if (this.#calls.size === 0) this.#stillWaiting = waiting;
+				return true;
+			}
 		}
 	}
 
@@ -1147,7 +1178,7 @@ export class TrayMainActivity {
 	 */
 	state(inlineTask: (callId: string) => boolean): TrayMain {
 		if (!this.#looping) return "idle";
-		if (this.#calls.size === 0) return "working";
+		if (this.#calls.size === 0) return this.#stillWaiting ? "waiting" : "working";
 		for (const [id, tool] of this.#calls) {
 			if (WAITING_TOOLS[tool] === true) continue;
 			if (tool === "task" && inlineTask(id)) continue;
@@ -1211,6 +1242,7 @@ export class Tray implements Component {
 				focus: number;
 				peek: string | undefined;
 				main: TrayMain | undefined;
+				quiet: boolean;
 				node: NativeNode;
 		  }
 		| undefined;
@@ -1275,7 +1307,8 @@ export class Tray implements Component {
 	caption(idle: boolean): NativeNode | undefined {
 		if (!this.#onHost) return undefined;
 		this.refresh();
-		if (!idle || this.#items.length === 0) return undefined;
+		// A quiet tray is out of sight: a caption over it would announce nothing.
+		if (!idle || this.#items.length === 0 || trayQuiet(this.#items)) return undefined;
 		const text = trayCaption(this.#items);
 		if (this.#caption?.text !== text) {
 			this.#caption = {
@@ -1331,11 +1364,13 @@ export class Tray implements Component {
 		const peek = peeked?.ref;
 		// No cards, no node to send: the hidden tray does not follow the main agent.
 		const main = children.length > 0 ? this.#host.main() : undefined;
+		const quiet = children.length > 0 && trayQuiet(this.#items);
 		if (
 			root &&
 			root.focus === this.#focus &&
 			root.peek === peek &&
 			root.main === main &&
+			root.quiet === quiet &&
 			sameItems(root.children, children)
 		)
 			return root.node;
@@ -1344,13 +1379,14 @@ export class Tray implements Component {
 			{
 				role: "omp.tray",
 				...(children.length === 0 ? { hidden: true } : {}),
+				...(quiet ? { quiet: true } : {}),
 				...(main !== undefined ? { main } : {}),
 				...(this.#focus > 0 ? { focus: this.#focus } : {}),
 				...(peek !== undefined ? { peek } : {}),
 			},
 			children,
 		);
-		this.#root = { children, focus: this.#focus, peek, main, node: described };
+		this.#root = { children, focus: this.#focus, peek, main, quiet, node: described };
 		return described;
 	}
 

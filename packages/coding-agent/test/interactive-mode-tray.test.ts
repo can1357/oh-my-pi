@@ -124,7 +124,7 @@ describe("InteractiveMode tray", () => {
 	let eventBus: EventBus;
 	let manager: AsyncJobManager;
 	const pending: Array<() => void> = [];
-	const agentIds = ["TrayScan", "TrayReview", "TrayOld"];
+	const agentIds = ["TrayScan", "TrayReview", "TrayOld", "TrayNext"];
 	/** When TrayScan's current call started: 12s before {@link seed}, so the closer look times it. */
 	let callStart = 0;
 
@@ -453,7 +453,7 @@ describe("InteractiveMode tray", () => {
 		expect(trayOf(cx).node.p).toMatchObject({ focus: 1 });
 	});
 
-	it("hides the tray with a frame of its own once everything has finished, and the hub key then does nothing", () => {
+	it("turns the tray quiet with a frame of its own once everything has finished, still reachable on the hub key", () => {
 		vi.useFakeTimers();
 		try {
 			const hub = spyOn(SelectorController.prototype, "showAgentHub").mockImplementation(() => {});
@@ -482,20 +482,42 @@ describe("InteractiveMode tray", () => {
 				"done",
 			]);
 
+			expect(trayOf(cx).node.p && Reflect.get(trayOf(cx).node.p!, "quiet")).toBeUndefined();
+
 			const renders = spyOn(mode.ui, "requestRender");
-			// It finishes without a background job: nothing live is left.
+			// It finishes without a background job: nothing live is left, so it joins the done card.
 			registry.setStatus("TrayScan", "idle");
 			vi.advanceTimersByTime(100);
 			expect(renders).toHaveBeenCalled();
-			const hidden = trayOf(cx).node;
-			expect(hidden.p).toEqual({ role: "omp.tray", hidden: true });
-			expect(hidden.c).toEqual([]);
-			// No caption in the idle status row either.
-			const activity = dock(cx).find(entry => role(entry.node ?? undefined) === "omp.hud.activity");
-			expect(activity).toBeUndefined();
+			const quiet = trayOf(cx).node;
+			expect(quiet.p).toEqual({ role: "omp.tray", quiet: true, main: "idle" });
+			expect(children(quiet).map(card => card.p && Reflect.get(card.p, "item"))).toEqual(["done"]);
+			// No caption in the idle status row over a quiet tray.
+			expect(dock(cx).some(entry => role(entry.node ?? undefined) === "omp.hud.activity")).toBe(false);
 
+			// The hub key asks Tern to show it: a focus bump, not the hub.
 			mode.showAgentHub({ trayFirst: true });
 			expect(hub).not.toHaveBeenCalled();
+			expect(trayOf(cx).node.p).toMatchObject({ quiet: true, focus: 1 });
+			// Every finished agent is reachable from there.
+			const tray = trayOf(cx);
+			tray.component.handleNativeEvent?.({ type: "action", key: "", act: "tray.peek", value: "done", mods: [] });
+			const rows = children(children(children(trayOf(cx).node).at(-1))[1]);
+			expect(rows.map(row => row.p && Reflect.get(row.p, "ref"))).toEqual(["TrayScan", "TrayOld"]);
+
+			// The next agent starting brings the tray back.
+			renders.mockClear();
+			registry.register({
+				id: "TrayNext",
+				displayName: "m2",
+				kind: "sub",
+				parentId: "Main",
+				session: null,
+				status: "running",
+			});
+			vi.advanceTimersByTime(100);
+			expect(renders).toHaveBeenCalled();
+			expect(trayOf(cx).node.p && Reflect.get(trayOf(cx).node.p!, "quiet")).toBeUndefined();
 		} finally {
 			vi.useRealTimers();
 		}
@@ -552,13 +574,15 @@ describe("InteractiveMode tray: the main agent across a real turn", () => {
 		};
 	}
 
-	it("sends working while the model streams, waiting while the wait call executes, then working, then idle", async () => {
+	it("sends working while the model streams, waiting from the wait call until another call starts, then idle", async () => {
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-tray-main-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path(), overrides: { "startup.quiet": true } });
 		const firstCall = gate();
 		const waitCall = gate();
 		const secondCall = gate();
+		const bashCall = gate();
+		const thirdCall = gate();
 		const mock = createMockModel({
 			responses: [
 				async () => {
@@ -567,10 +591,24 @@ describe("InteractiveMode tray: the main agent across a real turn", () => {
 				},
 				async () => {
 					await secondCall.wait();
+					return { content: [{ type: "toolCall", id: "call-bash", name: "bash", arguments: {} }] };
+				},
+				async () => {
+					await thirdCall.wait();
 					return { content: ["done"] };
 				},
 			],
 		});
+		const bashTool: AgentTool = {
+			name: "bash",
+			label: "Bash",
+			description: "Runs a command",
+			parameters: type({}),
+			execute: async () => {
+				await bashCall.wait();
+				return { content: [{ type: "text", text: "ok" }], details: {} };
+			},
+		};
 		const waitTool: AgentTool = {
 			name: "wait",
 			label: "Wait",
@@ -586,7 +624,7 @@ describe("InteractiveMode tray: the main agent across a real turn", () => {
 		session = new AgentSession({
 			agent: new Agent({
 				getApiKey: () => "test-key",
-				initialState: { model: mock.model, systemPrompt: [], tools: [waitTool] },
+				initialState: { model: mock.model, systemPrompt: [], tools: [waitTool, bashTool] },
 				streamFn: mock.stream,
 			}),
 			sessionManager: SessionManager.inMemory(tempDir.path()),
@@ -633,14 +671,23 @@ describe("InteractiveMode tray: the main agent across a real turn", () => {
 		expect(renders).toHaveBeenCalled();
 		expect(main()).toBe("waiting");
 
-		renders.mockClear();
+		// The wait returns and the model thinks again: still waiting, as it mostly waits again.
 		waitCall.open();
 		await secondCall.reached;
+		await delivered();
+		expect(main()).toBe("waiting");
+
+		// Another kind of call ends it.
+		renders.mockClear();
+		secondCall.open();
+		await bashCall.reached;
 		await delivered();
 		expect(renders).toHaveBeenCalled();
 		expect(main()).toBe("working");
 
-		secondCall.open();
+		bashCall.open();
+		await thirdCall.reached;
+		thirdCall.open();
 		await prompt;
 		await session.waitForIdle();
 		await delivered();

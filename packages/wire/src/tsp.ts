@@ -233,6 +233,11 @@ export interface TspColProps {
 	peek?: string;
 	/** On `omp.tray` (sent while it has cards): what the main agent is doing. */
 	main?: TspTrayMain;
+	/**
+	 * On `omp.tray`: it holds only finished work (nothing queued, running or failed). The host keeps a
+	 * quiet tray out of sight until the user asks for it.
+	 */
+	quiet?: boolean;
 	/** On `omp.tray.card`: what the card stands for. */
 	item?: TspTrayItem;
 	/** On `omp.tray.card` and `omp.tray.peek`: the item's id (an agent id, a job id, or `done`). */
@@ -248,8 +253,9 @@ export type TspTrayItem = "agent" | "job" | "done";
 export type TspTrayStatus = "queued" | "running" | "done" | "failed" | "stopped";
 /**
  * The main agent on `omp.tray`: `idle` once it has yielded (no turn runs, or the run waits only on
- * outside work), `waiting` while every call it executes only blocks on its agents or jobs (a `wait`,
- * a `vibe_wait`, a `task` call running an agent inline), `working` otherwise.
+ * outside work); `waiting` while every call it executes only blocks on its agents or jobs (a `wait`,
+ * a `vibe_wait`, a `task` call running an agent inline), or its last calls were such and it has
+ * started nothing else since; `working` otherwise.
  */
 export type TspTrayMain = "idle" | "working" | "waiting";
 export interface TspRowProps {

@@ -1808,7 +1808,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			case "agent_end":
 			case "tool_execution_start":
 			case "tool_execution_end":
-				if (this.#trayMain.handle(event, this.session.isRunActive) && this.#trayShown() && this.#tray.mainChanged())
+				if (
+					this.#trayMain.handle(event, this.session.isRunActive, id =>
+						runsInlineAgent(this.#observerRegistry.getSessions(), id),
+					) &&
+					this.#trayShown() &&
+					this.#tray.mainChanged()
+				)
 					this.ui.requestRender();
 		}
 	}
