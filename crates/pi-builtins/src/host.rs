@@ -96,6 +96,13 @@ pub(crate) trait Utility: clap::Parser + Send + Sync + 'static {
 	/// handle on stdout's identity; every other utility skips the dup.
 	const CHECKS_STDOUT_PATH: bool = false;
 
+	/// Whether an option this utility does not implement is handed to `PATH`'s
+	/// program of the same name (`ps --forest`, `tar --hard-dereference`). Set
+	/// `false` when the utility implements the complete option set of its
+	/// command, so the host program can only be a different tool (BSD
+	/// `basename` on macOS) and the utility reports the option itself.
+	const DEFERS_TO_PATH: bool = true;
+
 	/// Rewrites raw `argv` before clap parses it.
 	///
 	/// A few utilities accept syntax clap cannot model — GNU's obsolete

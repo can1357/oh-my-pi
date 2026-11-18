@@ -172,8 +172,9 @@ fn unknown_argument<T: clap::Parser>(argv: &[std::ffi::OsString]) -> bool {
 }
 
 fn utility_lacks<U: Utility>(argv: Vec<String>) -> bool {
-	U::rewrite_argv(argv.into_iter().map(Into::into).collect())
-		.is_ok_and(|argv| unknown_argument::<U>(&argv))
+	U::DEFERS_TO_PATH
+		&& U::rewrite_argv(argv.into_iter().map(Into::into).collect())
+			.is_ok_and(|argv| unknown_argument::<U>(&argv))
 }
 
 fn async_utility_lacks<U: AsyncUtility>(argv: Vec<String>) -> bool {
@@ -326,6 +327,16 @@ mod tests {
 		assert!(!lacks_option("cat", argv(&["cat", "-n", "file"])));
 		assert!(!lacks_option("cat", argv(&["cat", "--help"])));
 		assert!(!lacks_option("git", argv(&["git", "--no-such-option"])));
+	}
+
+	/// Failure mode: on macOS, `basename --foo` deferred to BSD `basename`,
+	/// which printed `illegal option -- -` plus its own usage. `basename` implements
+	/// GNU's full option set, so unknown options must stay in-process.
+	#[cfg(feature = "util.basename")]
+	#[test]
+	fn basename_reports_unknown_options_itself() {
+		assert!(!lacks_option("basename", argv(&["basename", "--foo"])));
+		assert!(!lacks_option("basename", argv(&["basename", "-x", "a"])));
 	}
 
 	#[cfg(feature = "util.sort")]
