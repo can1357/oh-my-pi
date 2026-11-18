@@ -284,6 +284,9 @@
 ### Removed
 
 - Hashline no longer re-indents replacement bodies that omit their base indent
+### Fixed
+
+- Stopping `omp auth-broker serve` with SIGTERM or Ctrl-C no longer exits before a login refresh in flight saves its rotated token, which left the store with a spent refresh token and disabled the login ([#19599](https://github.com/can1357/oh-my-pi/pull/19599) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 
