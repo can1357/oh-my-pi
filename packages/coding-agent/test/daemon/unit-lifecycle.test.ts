@@ -1,11 +1,12 @@
 /**
  * What keeps a unit — and the daemon — alive, against a real daemon isolated
  * in a temp dir: explicit release, lease loss on disconnect and its reconnect
- * grace, `hold: "persist"`, per-scope caps, idle daemon exit, and the unit env.
+ * grace, `hold: "persist"`, `survive: "detached"` lease units across a daemon
+ * crash, per-scope caps, idle daemon exit, and the unit env.
  */
 import { afterEach, describe, expect, it } from "bun:test";
 import { DAEMON_RESUME_LEASE_GRACE_MS } from "../../src/daemon/protocol";
-import { type DaemonConn, pidAlive, shProc, TestDaemon, until } from "../fixtures/daemon-proc-harness";
+import { type DaemonConn, pidAlive, rejection, shProc, TestDaemon, until } from "../fixtures/daemon-proc-harness";
 
 const TEST_TIMEOUT_MS = 30_000;
 /** `IDLE_EXIT_GRACE_MS` of `src/daemon/server.ts`: how long an idle daemon lingers. */
@@ -24,6 +25,17 @@ async function startDaemon(
 	const started = await TestDaemon.start({ env });
 	daemon = started.daemon;
 	return { ...started, root: started.daemon.root };
+}
+
+/** Prints `tick N` every 50 ms, forever. */
+const TICKER = 'i=0; while :; do i=$((i+1)); echo "tick $i"; sleep 0.05; done';
+const DETACHED_LEASES = { hold: "leases", survive: "detached", idleMs: 0 } as const;
+
+async function lastTick(conn: DaemonConn, key: string): Promise<number> {
+	const { text } = await conn.request({ op: "logs", unit: key, lines: 5, head: false, follow: false, timeoutMs: 0 });
+	let last = 0;
+	for (const match of text.matchAll(/tick (\d+)/g)) last = Math.max(last, Number(match[1]));
+	return last;
 }
 
 async function liveKeys(conn: DaemonConn): Promise<string[]> {
@@ -121,6 +133,87 @@ describe.skipIf(process.platform === "win32")("daemon unit lifecycle", () => {
 			await back.close();
 			const exited = await Promise.race([d.exited.then(() => true), Bun.sleep(15_000).then(() => false)]);
 			expect(exited).toBe(true);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"a hold: leases, survive: detached unit keeps its process and growing log across a daemon crash, and a returning client retakes its lease",
+		async () => {
+			const { daemon: d, conn, root } = await startDaemon();
+			const proc = shProc(TICKER, root);
+			const opened = await conn.openProc("crash-leased", proc, { policy: DETACHED_LEASES });
+			expect(opened.lease).toBeDefined();
+			const ticksBefore = await until(async () => {
+				const tick = await lastTick(conn, "crash-leased");
+				return tick >= 3 ? tick : undefined;
+			}, "output before the crash");
+
+			await d.kill();
+			expect(pidAlive(opened.unit.pids[0])).toBe(true);
+			const next = await d.spawn();
+
+			const after = await next.describe("crash-leased");
+			expect(after.state).toBe("running");
+			expect(after.pids[0]).toBe(opened.unit.pids[0]);
+			await until(
+				async () => ((await lastTick(next, "crash-leased")) > ticksBefore + 5 ? true : undefined),
+				"output after the restart",
+			);
+
+			const again = await next.openProc("crash-leased", proc, { policy: DETACHED_LEASES });
+			expect(again.created).toBe(false);
+			expect(again.unit.pids).toEqual(opened.unit.pids);
+			expect(again.unit.leases).toBe(1);
+			expect(again.unit.idleAt).toBeUndefined();
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"a hold: leases, survive: detached unit no client retakes after a daemon crash is idle-stopped once the reconnect grace passes",
+		async () => {
+			const { daemon: d, conn, root } = await startDaemon();
+			const opened = await conn.openProc("crash-orphan", shProc(TICKER, root), { policy: DETACHED_LEASES });
+
+			await d.kill();
+			const restartedAt = Date.now();
+			const next = await d.spawn();
+			const held = await next.describe("crash-orphan");
+			expect(held.state).toBe("running");
+			expect(held.pids[0]).toBe(opened.unit.pids[0]);
+			expect(held.idleAt).toBeGreaterThanOrEqual(restartedAt + DAEMON_RESUME_LEASE_GRACE_MS);
+
+			const exit = await next.request({
+				op: "wait",
+				unit: "crash-orphan",
+				for: "exit",
+				timeoutMs: DAEMON_RESUME_LEASE_GRACE_MS + 10_000,
+			});
+			expect(exit.matched).toBe(true);
+			expect(exit.unit.exitReason).toBe("idle");
+			expect(exit.unit.exitedAt! - restartedAt).toBeGreaterThanOrEqual(DAEMON_RESUME_LEASE_GRACE_MS);
+			await until(() => (pidAlive(opened.unit.pids[0]) ? undefined : true), "idle-stopped process to exit");
+		},
+		DAEMON_RESUME_LEASE_GRACE_MS + TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"a survive: detached unit refuses a PTY at open and stdin data on send, yet takes signals",
+		async () => {
+			const { conn, root } = await startDaemon();
+			const ptyError = await rejection(
+				conn.openProc("detached-pty", shProc("exec sleep 30", root, { pty: true }), { policy: DETACHED_LEASES }),
+			);
+			expect(ptyError).toContain("cannot allocate a PTY");
+
+			await conn.openProc("detached-stdin", shProc("exec sleep 30", root), { policy: DETACHED_LEASES });
+			const sendError = await rejection(conn.request({ op: "send", unit: "detached-stdin", data: "hello\n" }));
+			expect(sendError).toContain("has no stdin");
+
+			await conn.request({ op: "send", unit: "detached-stdin", signal: "SIGTERM" });
+			const exit = await conn.request({ op: "wait", unit: "detached-stdin", for: "exit", timeoutMs: 5_000 });
+			expect(exit.matched).toBe(true);
 		},
 		TEST_TIMEOUT_MS,
 	);

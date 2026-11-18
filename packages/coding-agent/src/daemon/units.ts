@@ -639,7 +639,12 @@ export class UnitTable {
 		}
 		const policy = entry.snapshot.policy;
 		if (operation.mode === "detached") {
-			if (policy.hold !== "detached") {
+			if (policy.survive === "detached") {
+				// Already launched in its own session: only the hold changes.
+				entry.snapshot.policy = { ...policy, hold: "detached" };
+				this.#transition(entry);
+				this.#evaluateIdle(entry);
+			} else {
 				entry.proc = { ...proc, pty: false };
 				entry.snapshot.policy = { ...policy, hold: "detached", survive: "detached" };
 				await this.#restartEntry(entry);
@@ -745,6 +750,9 @@ export class UnitTable {
 			throw new Error("send requires data or signal");
 		}
 		if (operation.data !== undefined) {
+			if (entry.snapshot.policy.survive === "detached") {
+				throw new Error(`Unit ${entry.snapshot.key} runs detached and has no stdin; only signals can be sent`);
+			}
 			if (runtime.pty) runtime.pty.write(operation.data);
 			else if (runtime.child) {
 				// PTYs interpret Enter as CR; pipe-backed programs need LF to end a line.
@@ -1069,7 +1077,7 @@ export class UnitTable {
 					logger.warn("Failed to reopen unit log", { id: entry.snapshot.id, error: errorMessage(error) });
 				}
 			}
-			if (runtime && !isTerminal(entry.snapshot.state) && entry.snapshot.policy.hold === "detached") {
+			if (runtime && !isTerminal(entry.snapshot.state) && entry.snapshot.policy.survive === "detached") {
 				this.#monitorDetached(entry, runtime.launch);
 			}
 			if (runtime?.child) runtime.child.resumeOutput();
@@ -1107,7 +1115,7 @@ export class UnitTable {
 				continue;
 			}
 			const detached =
-				entry.snapshot.policy.hold === "detached" && !runtime?.stopRequested && !isTerminal(entry.snapshot.state);
+				entry.snapshot.policy.survive === "detached" && !runtime?.stopRequested && !isTerminal(entry.snapshot.state);
 			if (detached) {
 				// Outlives this daemon; the next one re-adopts it. Retire this launch's callbacks.
 				if (runtime) {
@@ -1317,7 +1325,7 @@ export class UnitTable {
 		}
 		const policy: UnitPolicy = { ...defaultProcPolicy(proc, request.policy?.hold), ...request.policy };
 		if (policy.hold === "detached") policy.survive = "detached";
-		if (policy.hold === "detached" && proc.pty) throw new Error("A detached service cannot allocate a PTY");
+		if (policy.survive === "detached" && proc.pty) throw new Error("A detached service cannot allocate a PTY");
 		if (
 			proc.pty &&
 			process.platform === "win32" &&
@@ -1575,7 +1583,7 @@ export class UnitTable {
 		runtime.notify = this.#armNotify(entry);
 		this.#transition(entry);
 		try {
-			if (snapshot.policy.hold === "detached") await this.#launchDetached(entry, launch);
+			if (snapshot.policy.survive === "detached") await this.#launchDetached(entry, launch);
 			else if (proc.pty) await this.#launchPty(entry, launch);
 			else this.#launchPipe(entry, launch);
 			if (proc.ready?.port !== undefined) void this.#pollPort(entry, launch, proc.ready);
@@ -1759,7 +1767,7 @@ export class UnitTable {
 
 	#readDetachedOutput(entry: UnitEntry, launch: number, report = true): Promise<void> {
 		const runtime = entry.procRuntime;
-		if (!runtime || entry.snapshot.policy.hold !== "detached" || launch !== runtime.launch) return Promise.resolve();
+		if (!runtime || entry.snapshot.policy.survive !== "detached" || launch !== runtime.launch) return Promise.resolve();
 		const read = (runtime.detachedRead ?? Promise.resolve()).then(async () => {
 			if (launch !== runtime.launch) return;
 			const logPath = path.join(unitLogDir(entry.snapshot.id), LOG_FILE);
@@ -1844,7 +1852,7 @@ export class UnitTable {
 	#skipUnwatchedOutput(owner: string): void {
 		for (const entry of this.#units.values()) {
 			const runtime = entry.procRuntime;
-			if (entry.snapshot.owner !== owner || !runtime?.notify || entry.snapshot.policy.hold !== "detached") continue;
+			if (entry.snapshot.owner !== owner || !runtime?.notify || entry.snapshot.policy.survive !== "detached") continue;
 			void this.#readDetachedOutput(entry, runtime.launch).catch(error =>
 				logger.warn("Failed to read detached unit output", { id: entry.snapshot.id, error: errorMessage(error) }),
 			);
@@ -1854,7 +1862,7 @@ export class UnitTable {
 	/** Catch up a detached unit's output and notice its exit when no process handle reports it. */
 	async #refreshDetached(entry: UnitEntry): Promise<void> {
 		const runtime = entry.procRuntime;
-		if (!runtime || entry.snapshot.policy.hold !== "detached" || isSettled(entry.snapshot.state)) return;
+		if (!runtime || entry.snapshot.policy.survive !== "detached" || isSettled(entry.snapshot.state)) return;
 		const launch = runtime.launch;
 		await this.#readDetachedOutput(entry, launch);
 		if (launch !== runtime.launch || (runtime.detached && !runtime.detached.exited)) return;
@@ -1946,7 +1954,7 @@ export class UnitTable {
 
 	async #relaunch(entry: UnitEntry): Promise<void> {
 		const runtime = entry.procRuntime!;
-		if (entry.snapshot.policy.hold !== "detached") {
+		if (entry.snapshot.policy.survive !== "detached") {
 			await runtime.log?.close();
 			runtime.log = await UnitLog.open(unitLogDir(entry.snapshot.id), false);
 		}
@@ -2052,7 +2060,7 @@ export class UnitTable {
 		await this.#stopEntry(entry, 2_000, "restarting");
 		await runtime.log?.close();
 		runtime.log =
-			entry.snapshot.policy.hold === "detached"
+			entry.snapshot.policy.survive === "detached"
 				? undefined
 				: await UnitLog.open(unitLogDir(entry.snapshot.id), false);
 		runtime.stopRequested = false;
@@ -2176,6 +2184,8 @@ export class UnitTable {
 				logger.warn("Failed to read recovered detached output", { id: stored.id, error: errorMessage(error) });
 			}
 			entry.snapshot.supervised = false;
+			// Its clients' leases died with the last daemon: give them time to reconnect and retake them.
+			entry.idleNotBefore = Date.now() + DAEMON_RESUME_LEASE_GRACE_MS;
 			runtime.notify = this.#armNotify(entry);
 			if (proc.ready?.port !== undefined && entry.snapshot.state !== "ready") {
 				void this.#pollPort(entry, runtime.launch, proc.ready);

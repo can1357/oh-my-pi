@@ -6,7 +6,7 @@
  * per project directory — sessions and subagents each open their own tabs in
  * it. Every attached omp process holds a lease on the unit; the daemon stops
  * Chrome shortly after the last lease is released (or its connection closes),
- * so Chrome never outlives omp, while a daemon upgrade re-exec keeps it.
+ * so Chrome never outlives omp, while a daemon crash or upgrade keeps it.
  * `open` is find-or-start in the daemon, so concurrent
  * acquisitions across processes converge on a single launch.
  */
@@ -39,17 +39,18 @@ const PROBE_TIMEOUT_MS = 1_500;
 /** Lines of Chrome's output a failed start reports. */
 const OUTPUT_TAIL_LINES = 6;
 /**
- * Chrome dies shortly after the last omp client in the project lets go. It is
- * a pipe child of the daemon, so `survive` keeps the daemon's default: an
- * upgrade re-exec keeps its pipes (`exec`) where the platform can re-exec.
- * `survive: "detached"` is reserved for `hold: "detached"` units, which never
- * idle-stop.
+ * Chrome dies shortly after the last omp client in the project lets go
+ * (`hold: "leases"`). It runs in its own session with output to its unit log
+ * (`survive: "detached"`), so a daemon crash or upgrade leaves it running: the
+ * next daemon re-adopts it and stops it once no returning client retakes a
+ * lease within the reconnect grace.
  */
 const SHARED_BROWSER_POLICY: Partial<UnitPolicy> = {
 	hold: "leases",
 	idleMs: 3_000,
 	onIdle: "stop",
 	restart: "no",
+	survive: "detached",
 };
 /**
  * Longest one client holds the profile claim through a cold start: the

@@ -6,8 +6,8 @@
  * the user run `omp browser-relay` by hand, the relay kind lazily starts one
  * as a global `proc` unit of the omp daemon. Every relay consumer holds a
  * lease on it, so one project exiting cannot tear down the fixed-port
- * singleton while another project still uses it; a daemon upgrade re-exec
- * keeps it (the daemon's default `survive` for pipe services).
+ * singleton while another project still uses it; it runs detached from the
+ * daemon, so a daemon crash or upgrade keeps it.
  *
  * A manually started relay may already own the port; consumers adopt that
  * external server without attempting another bind (and hold no lease).
@@ -51,15 +51,18 @@ const READY_TIMEOUT_MS = 15_000;
 const PROBE_TIMEOUT_MS = 1_500;
 const STOP_TIMEOUT_MS = 5_000;
 /**
- * The relay dies shortly after its last consumer lets go. `survive` keeps the
- * daemon's default for pipe services (`exec`: kept across an upgrade re-exec);
- * `detached` belongs to `hold: "detached"` units only.
+ * The relay dies shortly after its last consumer lets go (`hold: "leases"`).
+ * It runs in its own session with output to its unit log (`survive:
+ * "detached"`), so a daemon crash or upgrade leaves it serving: the next daemon
+ * re-adopts it and stops it once no returning consumer retakes a lease within
+ * the reconnect grace.
  */
 const RELAY_POLICY: Partial<UnitPolicy> = {
 	hold: "leases",
 	idleMs: 3_000,
 	onIdle: "stop",
 	restart: "no",
+	survive: "detached",
 };
 
 /** True when the relay HTTP server answers /json/version at all (200 = extension connected, 503 = waiting for it). */
