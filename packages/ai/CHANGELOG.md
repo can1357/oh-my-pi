@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `reservePctByLimit` to account policies: a reserve for one usage limit, keyed by its report `id` (`anthropic:7d:fable`), that account ranking, reserve moves and model usage health use instead of the account's `reservePct` ([#19700](https://github.com/can1357/oh-my-pi/pull/19700) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - With several Devin logins, omp now prefers a login with daily or weekly quota left; a login past its quota that its on-demand balance still funds comes next, and one with no balance is skipped until its quota resets ([#19929](https://github.com/can1357/oh-my-pi/pull/19929) by [@will-bogusz](https://github.com/will-bogusz))
@@ -21,10 +25,6 @@
 - The Cursor provider forwards `bash` instead of `write` so staged previews can be finalized
 - Increased provider stream watchdog defaults from 5 to 15 minutes, preventing slow one-shot completions from being interrupted prematurely.
 - Extended Gemini reasoning-stream protection to allow longer planning sequences before interruption.
-- `prewarm` stream option: Anthropic Messages sends the request as built, non-streaming with `max_tokens: 0`, to refresh its prompt cache without billing output; it refuses budget thinking, forced tool choice and structured output before sending
-- Claude usage reports now carry the account's subscription plan (`Max 5x`, `Max 20x`, `Pro`, `Team`, `Enterprise`) in `metadata.subscriptionPlan`, read from the OAuth profile on every fetch, so an auth broker serves it to its clients with the rest of the report. Added `usageSubscriptionPlan` and `claudeProfilePlan`
-- Added `retryUnreachableBroker` (default on) and `onBrokerRetry` to `discoverAuthStorage`, so a host chooses whether startup retries an unreachable broker and can show that it is waiting ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
-- Added `reservePctByLimit` to account policies: a reserve for one usage limit, keyed by its report `id` (`anthropic:7d:fable`), that account ranking, reserve moves and model usage health use instead of the account's `reservePct`
 
 ### Fixed
 

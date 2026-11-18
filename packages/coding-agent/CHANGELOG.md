@@ -6,6 +6,7 @@
 
 - `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
 - `OMP_MCP_SHUTDOWN_STEP_MS` sets how long a stdio MCP server gets to exit after its input closes before SIGTERM, and again before SIGKILL (default `1000`)
+- `auth.accountPolicies` entries take `reservePctByLimit`, a reserve for one usage limit: `anthropic:7d:fable: 30` keeps Fable and Mythos off an account's last 30% of Fable weekly quota while Opus keeps using it; `omp usage` shows these reserves on the policy line ([#19700](https://github.com/can1357/oh-my-pi/pull/19700) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
@@ -52,18 +53,6 @@
 - Added live visibility into output redirected to files by background bash jobs, including job streams, the jobs sheet, job widgets, and command cards; selecting a command shows the output for its relevant pipeline or redirected stream.
 - Added Binary Ninja as a disassembler backend for read analysis views and the `dsm` namespace. Select it with `disassembler.backend = binja` and configure its installation with `binja.installDir` or `$BN_INSTALL_DIR`.
 - Clicking the usage-limit segment in native terminal hosts such as Tern now opens `/usage`. Changing Tern's Agents tray setting immediately switches between tray cards and the running-agent and job counters without restarting omp.
-- Cache warming bridges long tool calls: it keeps refreshing while the refresh spend since the last request stays under the cheaper buy-out, then compacts a large prompt a minute before the cache expires (committed when the tool returns) or lets the entry expire, replacing the fixed one-hour cap. `providers.cacheWarmingStrategy` (`auto`, `keepalive`, `compact`) picks the policy; compaction needs a prompt of at least the lower of `providers.cacheWarmingCompactPercent` (60%) of the window and `providers.cacheWarmingCompactTokens` (150k)
-- `cache_warming_decision` carries the refresh `method`, `compactCost` and `spentCost`, and accepts a `"compact"` action; `cache_warming_start`/`cache_warming_end` events carry `method` (`prewarm` or `replay`)
-- Enable `task.crossInstance` (off by default) to list same-folder omp instances with `agent://peers` and read or message their agents by PID. While enabled, digit-only task names get an `Agent` prefix.
-- A draft starting with `?` enters btw mode (its own `btwMode` border and chip) and submits as `/btw <question>`
-- In Tern, running subagents and background jobs show as a tray of live cards over the composer instead of the agents/jobs pill: each card shows what its agent or job is doing, a click looks closer (Open, Stop or Cancel, Dismiss), finished agents fold into one done card, and the agents-hub key moves focus into the tray
-- The daemon survives updates: a newer omp re-execs it in place, keeping running services, PTYs and language servers; `OMP_DAEMON_TCP=host:port` serves it over TCP instead of the local socket
-- Speech-to-text and text-to-speech models are loaded once per machine and unloaded after 15 minutes idle instead of once per session
-- `/wt` uses ovnfs when available with `isolation.backend: auto`. The project resume picker and `omp worktree list` and `clear` handle both Git and ovnfs worktrees, even after switching backends. Sessions remain resumable from the source repository after their managed checkout is removed.
-- `omp usage` and `/usage` show each Claude account's subscription plan (e.g. `Max 20x`) beside its organization
-- Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
-- CLI and print-mode commands (`omp -p`, `omp login`, `omp models`, `omp commit`, `omp usage`, …) wait up to 30 s for an auth broker that is restarting or briefly unreachable, saying so on stderr; interactive omp still fails at once ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
-- `auth.accountPolicies` entries take `reservePctByLimit`, a reserve for one usage limit: `anthropic:7d:fable: 30` keeps Fable and Mythos off an account's last 30% of Fable weekly quota while Opus keeps using it; `omp usage` shows these reserves on the policy line
 
 ### Changed
 
