@@ -366,11 +366,7 @@ class SharedAgyBackend {
 		}
 	}
 
-	async #onToolCall(
-		name: string,
-		args: unknown,
-		conversationId: string | undefined,
-	): Promise<McpToolOutput> {
+	async #onToolCall(name: string, args: unknown, conversationId: string | undefined): Promise<McpToolOutput> {
 		const owner = conversationId ? this.#sessionOwners.get(conversationId) : undefined;
 		if (!owner || owner.closed) {
 			return { content: [{ type: "text", text: "Tool call belongs to a closed session." }], isError: true };
