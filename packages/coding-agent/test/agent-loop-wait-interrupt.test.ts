@@ -143,6 +143,7 @@ describe("agent-loop wait wake delivery", () => {
 					throw new Error("Daemon broker request aborted");
 				},
 				onCompletion: () => () => {},
+				onNotify: () => () => {},
 			} as unknown as DaemonBrokerClient;
 			vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(broker);
 		}

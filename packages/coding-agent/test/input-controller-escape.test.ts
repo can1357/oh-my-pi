@@ -165,6 +165,7 @@ function createContext(): {
 				return () => {};
 			}),
 			addStartListener: vi.fn(),
+			getFocused: () => editor,
 		} as unknown as InteractiveModeContext["ui"],
 		loadingAnimation: undefined,
 		autoCompactionLoader: undefined,

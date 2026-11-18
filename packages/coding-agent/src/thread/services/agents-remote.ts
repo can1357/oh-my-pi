@@ -263,6 +263,10 @@ export class RemoteIrcBus implements IrcBusApi {
 		return this.#remote.callSync("take", agentId, from);
 	}
 
+	park(msg: Omit<IrcMessage, "id" | "ts">): IrcMessage {
+		return this.#remote.callSync("park", msg);
+	}
+
 	unreadCount(agentId: string): number {
 		return this.#remote.callSync("unreadCount", agentId);
 	}

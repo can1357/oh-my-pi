@@ -9,23 +9,19 @@
  * backlog.
  *
  * Contract this test defends:
- * 1. A due render against a deep backlog emits nothing and re-arms a retry
- *    instead, preserving the pending request.
- * 2. Once the backlog drains, the retry paints exactly the LATEST component
+ * 1. A due render against a deep backlog emits nothing and waits for a drain
+ *    notification without a retry timer, preserving the pending request.
+ * 2. Once the backlog drains, the next frame paints exactly the LATEST component
  *    state — frames produced mid-stall never reach the terminal.
  * 3. Terminals that do not report `pendingOutputBytes` are never gated.
  */
 import { describe, expect, it } from "bun:test";
 import { type RenderTimer, Text, TUI } from "@oh-my-pi/pi-tui";
+import { BackloggedTerminal } from "./backlogged-terminal";
 import { VirtualTerminal } from "./virtual-terminal";
 
-class BackloggedTerminal extends VirtualTerminal {
-	pendingBytes = 0;
+class RecordingTerminal extends BackloggedTerminal {
 	written: string[] = [];
-
-	get pendingOutputBytes(): number {
-		return this.pendingBytes;
-	}
 
 	override write(data: string): void {
 		this.written.push(data);
@@ -69,7 +65,7 @@ function stepRender(scheduler: DeferredRenderScheduler): number | null {
 
 describe("TUI output-backpressure render gate", () => {
 	it("skips stale frames while the terminal backlog is deep and paints the latest state on drain", () => {
-		const term = new BackloggedTerminal(40, 6);
+		const term = new RecordingTerminal(40, 6);
 		const scheduler = new DeferredRenderScheduler();
 		const text = new Text("initial", 0, 0);
 		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
@@ -80,21 +76,23 @@ describe("TUI output-backpressure render gate", () => {
 			stepRender(scheduler);
 			term.written.length = 0;
 
-			// Deep backlog: due renders must emit nothing and re-arm a retry.
+			// Deep backlog: due renders must emit nothing without a retry timer.
 			term.pendingBytes = 8 * 1024 * 1024;
 			text.setText("frame-A");
 			tui.requestRender();
 			stepRender(scheduler);
 			expect(term.written).toEqual([]);
-			expect(scheduler.timers.length).toBeGreaterThan(0);
+			expect(scheduler.timers).toEqual([]);
+			expect(term.drainListeners.size).toBe(1);
 
 			// Still stalled; newer state supersedes frame-A without a paint.
 			text.setText("frame-B");
 			tui.requestRender();
-			stepRender(scheduler);
+			expect(stepRender(scheduler)).toBeNull();
 			expect(term.written).toEqual([]);
+			expect(scheduler.timers).toEqual([]);
 
-			// Backlog drained: the retry paints exactly the latest state.
+			// The drain event schedules exactly the latest state.
 			term.pendingBytes = 0;
 			while (stepRender(scheduler) !== null) {
 				if (term.written.length > 0) break;
@@ -102,6 +100,125 @@ describe("TUI output-backpressure render gate", () => {
 			const output = term.written.join("");
 			expect(output).toContain("frame-B");
 			expect(output).not.toContain("frame-A");
+			expect(term.drainListeners.size).toBe(0);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("preserves forced repaint and scrollback clearing while waiting without a timer", () => {
+		const term = new RecordingTerminal(40, 6);
+		const scheduler = new DeferredRenderScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		tui.addChild(new Text("unchanged", 0, 0));
+		try {
+			tui.start();
+			stepRender(scheduler);
+			term.written.length = 0;
+			term.pendingBytes = 8 * 1024 * 1024;
+			tui.requestRender();
+			stepRender(scheduler);
+
+			tui.requestRender(true, { clearScrollback: true });
+			stepRender(scheduler);
+			expect(term.written).toEqual([]);
+			expect(scheduler.timers).toEqual([]);
+			expect(term.drainListeners.size).toBe(1);
+
+			term.pendingBytes = 0;
+			stepRender(scheduler);
+			expect(term.written.join("")).toContain("\x1b[3J");
+			expect(term.written.join("")).toContain("unchanged");
+		} finally {
+			tui.stop();
+		}
+	});
+
+	for (const synchronousNotification of [false, true]) {
+		it(`closes the subscribe/drain race with${synchronousNotification ? "" : "out"} an initial notification`, () => {
+			const term = new (class extends RecordingTerminal {
+				override onOutputDrain(callback: () => void): () => void {
+					// The queue emptied between the renderer's read and subscribing.
+					this.pendingBytes = 0;
+					const unsubscribe = super.onOutputDrain(callback);
+					if (synchronousNotification) callback();
+					return unsubscribe;
+				}
+			})(40, 6);
+			const scheduler = new DeferredRenderScheduler();
+			const text = new Text("initial", 0, 0);
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			tui.addChild(text);
+			try {
+				tui.start();
+				stepRender(scheduler);
+				term.written.length = 0;
+				term.pendingBytes = 8 * 1024 * 1024;
+				text.setText("raced drain");
+				tui.requestRender();
+				stepRender(scheduler);
+				expect(term.drainListeners.size).toBe(0);
+				expect(scheduler.timers).toHaveLength(1);
+				stepRender(scheduler);
+				expect(term.written.join("")).toContain("raced drain");
+			} finally {
+				tui.stop();
+			}
+		});
+	}
+
+	it("ignores queued drain notifications from a stopped session after restart", () => {
+		const term = new RecordingTerminal(40, 6);
+		const scheduler = new DeferredRenderScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		tui.addChild(new Text("restarted", 0, 0));
+		try {
+			tui.start();
+			stepRender(scheduler);
+			term.pendingBytes = 8 * 1024 * 1024;
+			tui.requestRender();
+			stepRender(scheduler);
+			const oldDrain = [...term.drainListeners][0]!;
+			tui.stop();
+			expect(term.drainListeners.size).toBe(0);
+			oldDrain();
+			expect(scheduler.timers).toEqual([]);
+
+			tui.start();
+			stepRender(scheduler);
+			term.written.length = 0;
+			const currentDrain = [...term.drainListeners][0]!;
+			// Deliver the old queued event while the new session's event is pending.
+			term.drainListeners.delete(currentDrain);
+			term.pendingBytes = 0;
+			oldDrain();
+			expect(scheduler.timers).toEqual([]);
+			expect(term.written).toEqual([]);
+			currentDrain();
+			stepRender(scheduler);
+			expect(term.written.join("")).toContain("restarted");
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("ignores a forced-render immediate queued before stop when the TUI restarts", () => {
+		const term = new RecordingTerminal(40, 6);
+		const scheduler = new DeferredRenderScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		tui.addChild(new Text("current session", 0, 0));
+		try {
+			tui.start();
+			stepRender(scheduler);
+			tui.requestRender(true);
+			const oldImmediate = scheduler.immediates.shift()!;
+			tui.stop();
+			tui.start();
+			term.written.length = 0;
+			oldImmediate();
+			expect(term.written).toEqual([]);
+			stepRender(scheduler);
+			expect(term.written.join("")).toContain("current session");
 		} finally {
 			tui.stop();
 		}

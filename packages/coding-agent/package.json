@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "18.20.3",
+	"version": "18.22.2",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"keywords": [
 		"agent",
@@ -279,6 +279,22 @@
 		"./extensibility/plugins/marketplace/*": {
 			"types": "./src/extensibility/plugins/marketplace/*.ts",
 			"import": "./src/extensibility/plugins/marketplace/*.ts"
+		},
+		"./disasm": {
+			"types": "./src/disasm/index.ts",
+			"import": "./src/disasm/index.ts"
+		},
+		"./disasm/*": {
+			"types": "./src/disasm/*.ts",
+			"import": "./src/disasm/*.ts"
+		},
+		"./ghidra": {
+			"types": "./src/ghidra/index.ts",
+			"import": "./src/ghidra/index.ts"
+		},
+		"./ghidra/*": {
+			"types": "./src/ghidra/*.ts",
+			"import": "./src/ghidra/*.ts"
 		},
 		"./ida": {
 			"types": "./src/ida/index.ts",

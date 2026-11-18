@@ -689,7 +689,7 @@ pub async fn grep(fs: &Fs, root: &Path, mut opts: GrepOptions) -> Result<GrepRes
 			.scope
 			.as_ref()
 			.is_some_and(Selector::mentions_node_modules),
-		follow_links: false,
+		follow_links: shared.opts.walk.follow_links,
 		detail: Detail::Minimal,
 		max_depth: shared.filter.scope.as_ref().and_then(Selector::max_depth),
 		workers: shared.opts.walk.workers,

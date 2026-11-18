@@ -158,7 +158,9 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
 	if (!options.quiet) {
 		console.log(`HEAD is now at ${shortSha} ${subject}`);
 		if (result.clonedWith != null) {
-			console.log(`Cloned from ${repository.info().repoRoot} via ${formatIsolationBackend(result.clonedWith)}`);
+			console.log(
+				`Cloned from ${repository.info().repoRoot} via ${formatIsolationBackend(result.clonedWith)}, leaving out .git, other worktrees, and untracked .env files`,
+			);
 		}
 	}
 	if (result.cloneError) {

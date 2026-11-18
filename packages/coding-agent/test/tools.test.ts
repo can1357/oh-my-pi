@@ -762,7 +762,7 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Line 1");
 			expect(output).toContain(`Line ${defaultLimit}`);
 			expect(output).not.toContain(`Line ${defaultLimit + 1}`);
-			expect(output).toContain(`[Showing lines 1-${defaultLimit} of 3500. Use :${defaultLimit + 1} to continue]`);
+			expect(output).toContain(`[Showing lines 1-${defaultLimit} of 3500. Use :${defaultLimit + 1}- to continue]`);
 		});
 
 		it("applies a read.defaultLimit change made after the tool was built", async () => {
@@ -791,7 +791,7 @@ describe("Coding Agent Tools", () => {
 
 			expect(output).toContain("Line 1:");
 			// Should show byte limit message
-			expect(output).toMatch(/\[Showing lines 1-\d+ of 1000 \(\d+(\.\d+)?\s*KB limit\)\. Use :\d+ to continue\]/);
+			expect(output).toMatch(/\[Showing lines 1-\d+ of 1000 \(\d+(\.\d+)?\s*KB limit\)\. Use :\d+- to continue\]/);
 		});
 
 		it("should handle offset parameter (with leading context expansion)", async () => {
@@ -799,7 +799,7 @@ describe("Coding Agent Tools", () => {
 			const lines = Array.from({ length: 100 }, (_, i) => `Line ${i + 1}`);
 			fs.writeFileSync(testFile, lines.join("\n"));
 
-			const result = await readTool.execute("test-call-5", { path: `${testFile}:L51` });
+			const result = await readTool.execute("test-call-5", { path: `${testFile}:L51-` });
 			const output = getTextOutput(result);
 
 			// Read tool widens by 1 leading + 3 trailing unanchored context lines
@@ -827,7 +827,7 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Line 10");
 			expect(output).toContain("Line 13");
 			expect(output).not.toContain("Line 14");
-			expect(output).toContain("[Showing lines 1-13 of 100. Use :14 to continue]");
+			expect(output).toContain("[Showing lines 1-13 of 100. Use :14- to continue]");
 		});
 
 		it("does not expand on the leading side when offset is 1 or unspecified", async () => {
@@ -846,7 +846,7 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Line 5");
 			expect(output).toContain("Line 8");
 			expect(output).not.toContain("Line 9");
-			expect(output).toContain("[Showing lines 1-8 of 50. Use :9 to continue]");
+			expect(output).toContain("[Showing lines 1-8 of 50. Use :9- to continue]");
 		});
 
 		it("clamps leading context at file start without errors", async () => {
@@ -884,7 +884,7 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Line 60");
 			expect(output).toContain("Line 63");
 			expect(output).not.toContain("Line 64");
-			expect(output).toContain("[Showing lines 40-63 of 100. Use :64 to continue]");
+			expect(output).toContain("[Showing lines 40-63 of 100. Use :64- to continue]");
 		});
 
 		it("should show error when offset is beyond file length", async () => {
@@ -895,7 +895,7 @@ describe("Coding Agent Tools", () => {
 			const output = getTextOutput(result);
 
 			expect(output).toContain("Line 100 is beyond end of file (3 lines total)");
-			expect(output).toContain("Use :1 to read from the start, or :3 to read the last line.");
+			expect(output).toContain("Use :1- to read from the start, or :3 to read the last line.");
 		});
 
 		it("should refuse binary files (NUL or invalid UTF-8) instead of emitting mojibake", async () => {
@@ -979,7 +979,7 @@ describe("Coding Agent Tools", () => {
 			const output = getTextOutput(result);
 
 			expect(output).toContain("not scanned to EOF");
-			expect(output).toContain("Use :7 to continue");
+			expect(output).toContain("Use :7- to continue");
 			expect(output).not.toMatch(/\[Showing lines 1-6 of \d+/);
 			expect(result.details?.meta?.truncation).toBeUndefined();
 			expect(result.details?.truncation).toBeUndefined();
@@ -1005,12 +1005,12 @@ describe("Coding Agent Tools", () => {
 			expect(output).not.toContain("Showing line 1");
 		});
 
-		it("raw tail selects the last two addressable lines, not the terminal newline", async () => {
+		it("raw tail selects the last two addressable lines verbatim, with no empty line after them", async () => {
 			const testFile = path.join(testDir, "tail-raw.txt");
 			fs.writeFileSync(testFile, "alpha\nbeta\ngamma\n");
 
 			const raw = getTextOutput(await readTool.execute("test-tail-raw", { path: `${testFile}:raw:-2` }));
-			expect(raw).toBe("beta\ngamma");
+			expect(raw).toBe("beta\ngamma\n");
 
 			const clamped = getTextOutput(await readTool.execute("test-tail-clamp", { path: `${testFile}:-50` }));
 			expect(clamped).toContain("alpha");
@@ -1052,7 +1052,7 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("[Showing lines 2-2 of 4 (50.0KB limit)]");
 			expect(output).toContain("Line 3 is 60.0KB");
 			expect(output).toContain("artifact://7:raw:3-3");
-			expect(output).not.toContain("Use :3 to continue");
+			expect(output).not.toContain("Use :3- to continue");
 		});
 
 		it("pages oversized file reads at the spill threshold instead of eliding their middle (#16277)", async () => {
@@ -1104,7 +1104,7 @@ describe("Coding Agent Tools", () => {
 					expect(truncation.outputBytes).toBeLessThanOrEqual(20 * 1024);
 					for (let n = firstRow; n <= lastRow; n++) expect(output).toContain(row(n));
 					expect(output).not.toContain(row(lastRow + 1));
-					expect(output).toContain(`Use :${truncation.nextOffset} to continue`);
+					expect(output).toContain(`Use :${truncation.nextOffset}- to continue`);
 
 					// The named continuation picks up exactly where the page stopped.
 					const next = getTextOutput(
@@ -1161,7 +1161,7 @@ describe("Coding Agent Tools", () => {
 				const nextOffset = page.details?.meta?.truncation?.nextOffset;
 				expect(page.details?.meta?.truncation?.artifactId).toBeUndefined();
 				expect(getTextOutput(page)).not.toContain("elided");
-				expect(getTextOutput(page)).toContain(`Use :${nextOffset} to continue`);
+				expect(getTextOutput(page)).toContain(`Use :${nextOffset}- to continue`);
 
 				// Block context is unbounded by the line budget, so that page still spills.
 				const closers = await read(`${nested}:${depth + 1}-${depth * 2}`);
@@ -1233,7 +1233,7 @@ describe("Coding Agent Tools", () => {
 					const truncation = result.details?.meta?.truncation;
 					expect(truncation?.artifactId).toBeUndefined();
 					expect(truncation?.outputBytes).toBeLessThanOrEqual(20 * 1024);
-					expect(getTextOutput(result)).toContain(`Use :${truncation?.nextOffset} to continue`);
+					expect(getTextOutput(result)).toContain(`Use :${truncation?.nextOffset}- to continue`);
 				}
 
 				const artifactId = await spillManager.saveArtifact(payload, "read");

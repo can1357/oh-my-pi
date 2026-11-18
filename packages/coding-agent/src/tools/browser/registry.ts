@@ -1,11 +1,11 @@
 import * as path from "node:path";
-import { getLogsDir, isCompiledBinary, logger, untilAborted, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { isCompiledBinary, logger, untilAborted, workerHostEntry } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import type { Browser, CDPSession } from "puppeteer-core";
 import { ToolAbortError } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { findFreeCdpPort, findReusableCdp, gracefulKillTreeOnce, resolveSpawnArgs, waitForCdp } from "./attach";
-import type { CmuxKind } from "./cmux/rpc";
+import { type CmuxKind, CmuxUnavailableError } from "./cmux/rpc";
 import { CmuxSocketClient } from "./cmux/socket-client";
 import {
 	BROWSER_PROTOCOL_TIMEOUT_MS,
@@ -54,6 +54,7 @@ export interface PuppeteerBrowserHandle extends BrowserHandleCommon {
 	/** Browser-level WebSocket endpoint tab workers attach through. */
 	wsEndpoint: string;
 	cdpUrl?: string;
+	/** The browser's main process, which owns its windows on screen; unknown for connected endpoints and the relay. */
 	pid?: number;
 	/** OMP-owned temp Chromium profile directory removed on dispose (process-local headless launches). */
 	userDataDir?: string;
@@ -231,7 +232,12 @@ export function normalizeConnectedCdpUrl(rawCdpUrl: string): string {
 async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions): Promise<BrowserHandle> {
 	if (kind.kind === "cmux") {
 		const client = new CmuxSocketClient({ socketPath: kind.socketPath, password: kind.password });
-		await client.connect();
+		await client.connect().catch((error: unknown) => {
+			if (error instanceof ToolError && !(error instanceof ToolAbortError)) {
+				throw new CmuxUnavailableError(error.message);
+			}
+			throw error;
+		});
 		return {
 			key: browserKey(kind),
 			kind,
@@ -246,7 +252,12 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		return { key: browserKey(kind), kind, tern, refCount: 0 };
 	}
 	if (kind.kind === "webkit") {
-		return { key: browserKey(kind), kind, webkit: await WebKitHost.launch(kind.path, kind.viewer), refCount: 0 };
+		return {
+			key: browserKey(kind),
+			kind,
+			webkit: await WebKitHost.launch(kind.path, kind.viewer, opts.signal),
+			refCount: 0,
+		};
 	}
 	if (kind.kind === "headless") {
 		// Every real omp process (session, subagent, worker — anything with a CLI
@@ -267,6 +278,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			kind,
 			browser,
 			wsEndpoint,
+			pid: browser.process()?.pid,
 			userDataDir,
 			refCount: 0,
 			stealth: { browserSession: null, override: null },
@@ -466,7 +478,9 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 			}
 			return;
 		}
-		if (handle.browser.connected) await closeLaunchedBrowser(handle.browser);
+		if (handle.browser.connected) {
+			await closeLaunchedBrowser({ browser: handle.browser, userDataDir: handle.userDataDir });
+		}
 		// OMP owns the profile directory (puppeteer's temp cleanup is disabled by
 		// our explicit --user-data-dir), so remove it now the process tree has
 		// exited. Tolerant of the Windows lock-held window (issue #7058).
@@ -515,11 +529,6 @@ async function openSharedHeadlessHandle(
 			viewport: vp,
 			signal: opts.signal,
 		});
-		if (!shared) {
-			throw new ToolError(
-				`Shared browser daemon unavailable (broker start or Chromium launch failed); check \`omp ps\` for omp.browser.* daemons and ${getLogsDir()} for details`,
-			);
-		}
 		const puppeteer = await loadPuppeteer();
 		const browser = await connectPuppeteer(puppeteer, {
 			browserWSEndpoint: shared.wsEndpoint,
@@ -542,6 +551,7 @@ async function openSharedHeadlessHandle(
 			kind,
 			browser,
 			wsEndpoint: shared.wsEndpoint,
+			pid: shared.pid,
 			sharedDaemon: { name: shared.daemonName, projectDir: shared.projectDir },
 			refCount: 0,
 			stealth: { browserSession: null, override: null },

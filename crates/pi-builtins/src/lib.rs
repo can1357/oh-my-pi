@@ -20,6 +20,8 @@ mod host;
 #[cfg(unix)]
 pub use host::read_process_umask;
 mod openfile;
+/// The embedding application's speech synthesizer, as `say` reaches it.
+mod speech;
 mod stdio;
 /// The shell's locale categories, shared by the locale-aware utilities.
 #[cfg(any(
@@ -39,7 +41,10 @@ mod quoting_style;
 #[cfg(any(
 	feature = "util.awk",
 	feature = "util.date",
+	feature = "util.direnv",
 	feature = "util.du",
+	feature = "util.file",
+	feature = "util.fswatch",
 	feature = "util.ls",
 	feature = "util.rsync",
 	feature = "util.tar",
@@ -112,20 +117,30 @@ mod dd;
 mod df;
 #[cfg(feature = "util.diff")]
 mod diff;
+#[cfg(feature = "util.direnv")]
+mod direnv;
 #[cfg(feature = "util.dirname")]
 mod dirname;
 #[cfg(feature = "util.du")]
 mod du;
+#[cfg(all(feature = "util.entr", any(unix, windows)))]
+mod entr;
 #[cfg(feature = "util.env")]
 mod env;
 #[cfg(all(feature = "util.errno", unix))]
 mod errno;
 #[cfg(feature = "util.fd")]
 mod fd;
+#[cfg(all(feature = "util.file", any(unix, windows)))]
+mod file;
 #[cfg(feature = "util.find")]
 mod find;
+#[cfg(all(feature = "util.flock", any(unix, windows)))]
+mod flock;
 #[cfg(feature = "util.fold")]
 mod fold;
+#[cfg(all(feature = "util.fswatch", any(unix, windows)))]
+mod fswatch;
 #[cfg(feature = "util.grep")]
 mod grep;
 #[cfg(feature = "util.head")]
@@ -161,6 +176,8 @@ mod nl;
 mod nproc;
 #[cfg(feature = "util.od")]
 mod od;
+#[cfg(all(feature = "util.open", any(target_os = "macos", target_os = "linux", windows)))]
+mod open;
 #[cfg(feature = "util.paste")]
 mod paste;
 #[cfg(feature = "util.pgrep")]
@@ -198,6 +215,8 @@ mod rm;
 mod rmdir;
 #[cfg(all(feature = "util.rsync", any(unix, windows)))]
 mod rsync;
+#[cfg(feature = "util.say")]
+mod say;
 #[cfg(feature = "util.sd")]
 mod sd;
 #[cfg(feature = "util.sed")]
@@ -234,6 +253,8 @@ mod uname;
 mod uniq;
 #[cfg(feature = "util.uptime")]
 mod uptime;
+#[cfg(all(feature = "util.watchexec", any(unix, windows)))]
+mod watchexec;
 #[cfg(feature = "util.wc")]
 mod wc;
 #[cfg(feature = "util.which")]

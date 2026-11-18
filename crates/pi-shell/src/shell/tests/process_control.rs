@@ -870,7 +870,7 @@ async fn kill_builtin_signals_every_process_in_a_jobspec_pipeline() {
 	let second_script = "trap 'exit 43' TERM; echo $$ > \"$1\"; : > \"$2\"; kill -STOP $$; while \
 	                     :; do sleep 0.05; done";
 	let command = format!(
-		"sh -c {} sh {} {} | sh -c {} sh {} {} &",
+		"/bin/sh -c {} sh {} {} | /bin/sh -c {} sh {} {} &",
 		quote_arg(first_script),
 		quote_arg(first_pidfile.to_str().expect("utf8 first pidfile")),
 		quote_arg(first_ready.to_str().expect("utf8 first ready path")),
@@ -948,7 +948,7 @@ async fn stopped_later_pipeline_stage_finishes_once_continued() {
 	let pidfile = dir.path().join("stage.pid");
 	let _cleanup = PidfileProcessCleanup(vec![pidfile.clone()]);
 	let command = format!(
-		"/usr/bin/yes | sh -c {} sh {}",
+		"/usr/bin/yes | /bin/sh -c {} sh {}",
 		quote_arg("echo $$ > \"$1\"; kill -STOP $$"),
 		quote_arg(pidfile.to_str().expect("utf8 pidfile")),
 	);
@@ -992,7 +992,7 @@ async fn stopped_interactive_job_stops_every_pipeline_stage() {
 	let pidfiles = [dir.path().join("first.pid"), dir.path().join("second.pid")];
 	let _cleanup = PidfileProcessCleanup(pidfiles.to_vec());
 	let command = format!(
-		"sh -c {} sh {} | sh -c {} sh {} &",
+		"/bin/sh -c {} sh {} | /bin/sh -c {} sh {} &",
 		quote_arg("echo $$ > \"$1\"; exec /usr/bin/yes"),
 		quote_arg(pidfiles[0].to_str().expect("utf8 first pidfile")),
 		quote_arg("echo $$ > \"$1\"; exec cat > /dev/null"),
@@ -1066,7 +1066,7 @@ async fn resumed_pipeline_drains_every_selected_stop_report() {
 				.map(|stage| {
 					let stopped = usize::from(stopped_subset & (1 << stage) != 0);
 					format!(
-						"sh -c {} sh {} {} {stopped} {}",
+						"/bin/sh -c {} sh {} {} {stopped} {}",
 						quote_arg(script),
 						quote_arg(pidfiles[stage].to_str().expect("utf8 pidfile")),
 						quote_arg(readyfiles[stage].to_str().expect("utf8 readyfile")),
@@ -1167,7 +1167,7 @@ async fn wait_reports_a_stop_that_precedes_the_wait() {
 	let started = session
 		.run_test(
 			format!(
-				"set -m; sh -c {} sh {} &",
+				"set -m; /bin/sh -c {} sh {} &",
 				quote_arg("echo $$ > \"$1\"; exec sleep 30"),
 				quote_arg(pidfile.to_str().expect("utf8 pidfile")),
 			),
@@ -1220,7 +1220,7 @@ async fn stopped_background_job_does_not_stop_foreground_process() {
 	let background = session
 		.run_test(
 			format!(
-				"sh -c {} sh {} &",
+				"/bin/sh -c {} sh {} &",
 				quote_arg("echo $$ > \"$1\"; kill -STOP $$"),
 				quote_arg(pidfile.to_str().expect("utf8 pidfile")),
 			),

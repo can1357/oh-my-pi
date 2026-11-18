@@ -144,6 +144,13 @@ pub trait Fs {
 	fn readlink(&mut self, path: &BStr) -> FsPoll<BString>;
 	/// Canonical physical path (`pwd -P`, `cd -P`).
 	fn realpath(&mut self, path: &BStr) -> FsPoll<BString>;
+	/// The host file a `scheme://` path is an alias of (`skill://x/run.sh`
+	/// stored at `/home/u/skills/x/run.sh`): the file a nested shell runs a
+	/// URL script as. `Unsupported` (the default) when `path` aliases none:
+	/// the filesystem only serves it, or has no such paths.
+	fn backing_path(&mut self, _path: &BStr) -> FsPoll<BString> {
+		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
+	}
 	/// Create a FIFO or temp file (`<( )` on Windows, here-document spill).
 	fn mkfifo_or_temp(&mut self, purpose: TempPurpose) -> FsPoll<TempNode>;
 	/// Validate a `cd` target; the engine itself owns the cwd.

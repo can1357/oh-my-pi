@@ -5,6 +5,7 @@
 use std::borrow::Cow;
 
 use grep_matcher::Matcher;
+use xutf::Text;
 
 /// `bytes` as text without trailing Unicode whitespace, invalid UTF-8
 /// replaced per maximal subpart. Borrowed when `bytes` is valid UTF-8.
@@ -49,7 +50,7 @@ pub fn window_matched_line(
 		return (head(), None);
 	};
 	let start = line.floor_char_boundary(start);
-	let column = Some(u32::try_from(line[..start].chars().count() + 1).unwrap_or(u32::MAX));
+	let column = Some(u32::try_from(line[..start].transcoded_len::<u32>() + 1).unwrap_or(u32::MAX));
 	let body = max.saturating_sub(6);
 	if end <= head_end || body == 0 {
 		return (head(), column);

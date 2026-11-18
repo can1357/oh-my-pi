@@ -326,12 +326,22 @@ pub fn build_changes<'a, T: ?Sized, V>(
 
 /// jsdiff line tokenization over UTF-16 code units.
 pub fn line_tokens_u16(text: &[u16]) -> Vec<&[u16]> {
-	text.split_inclusive(|&unit| unit == LF).collect()
+	if text.len() < 64 {
+		return text.split_inclusive(|&unit| unit == LF).collect();
+	}
+	xutf::lines::<xutf::Utf16>(text, xutf::LineEnds::Lf)
+		.map(|line| line.with_end())
+		.collect()
 }
 
 /// jsdiff line tokenization over UTF-8 text.
 pub fn line_tokens_str(text: &str) -> Vec<&str> {
-	text.split_inclusive('\n').collect()
+	if text.len() < 64 {
+		return text.split_inclusive('\n').collect();
+	}
+	xutf::lines_str(text, xutf::LineEnds::Lf)
+		.map(|line| line.with_end())
+		.collect()
 }
 
 /// Myers runs over pre-split line tokens, so callers that also need the token
@@ -1000,6 +1010,20 @@ mod tests {
 			.into_iter()
 			.map(|change| (String::from_utf16(&change.value).unwrap(), change.added, change.removed))
 			.collect()
+	}
+
+	#[test]
+	fn line_tokens_keep_terminators_and_unpaired_surrogates() {
+		let mut text = vec![b'a' as u16; 64];
+		text.extend([0xd800, b'\r' as u16, LF, LF, b'z' as u16]);
+		assert_eq!(
+			line_tokens_u16(&text),
+			text.split_inclusive(|&unit| unit == LF).collect::<Vec<_>>()
+		);
+		let text = format!("{}\r\n\nz", "a".repeat(64));
+		assert_eq!(line_tokens_str(&text), text.split_inclusive('\n').collect::<Vec<_>>());
+		assert!(line_tokens_u16(&[]).is_empty());
+		assert!(line_tokens_str("").is_empty());
 	}
 
 	#[test]

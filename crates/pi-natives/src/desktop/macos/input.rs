@@ -1,4 +1,5 @@
 use std::{
+	cell::Cell,
 	ptr,
 	time::{Duration, Instant},
 };
@@ -27,7 +28,7 @@ use super::{
 	},
 	ax,
 	capture::{self, MacCapture},
-	keymap::{Keymap, Keystroke, is_keypad},
+	keymap::{Keymap, Keystroke, RETURN, TAB, is_keypad},
 	process::{self, RemoteScreen},
 	release::{self, Route},
 	release_guard, route, skylight,
@@ -354,13 +355,16 @@ impl MacInput {
 					entry_front,
 					|to, guard| {
 						element_keys(pid, element, || {
-							press_chord(&self.source, &chord, gap, |event| {
-								let guard = || {
-									guard()?;
-									physical.as_mut().map_or(Ok(()), |check| check())
-								};
-								post_guarded(event, guard, |event| skylight::post_keyboard(to, event))
-							})
+							let press = || {
+								press_chord(&self.source, &chord, gap, |event| {
+									let guard = || {
+										guard()?;
+										physical.as_mut().map_or(Ok(()), |check| check())
+									};
+									post_guarded(event, guard, |event| skylight::post_keyboard(to, event))
+								})
+							};
+							guard_key_menu(window, keys, (pid, to), press)
 						})
 					},
 				)?;
@@ -443,6 +447,12 @@ impl MacInput {
 							&window,
 							entry_front,
 							|to, guard| {
+								refuse_key_menu_hold(
+									&window,
+									keys,
+									|| skylight::front_pid() != Some(pid),
+									|| ax::open_menu::focused_role(to),
+								)?;
 								hold_presses(
 									&self.source,
 									&held,
@@ -1607,9 +1617,117 @@ enum FrontTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct EntryFront(Option<libc::pid_t>);
 
+thread_local! {
+	/// The front process a request read before its first call to the target's
+	/// application, which every [`EntryFront`] of the request takes as its own
+	/// ([`pin_entry_front`]).
+	static PINNED_FRONT: Cell<Option<EntryFront>> = const { Cell::new(None) };
+}
+
+/// Holds the front process [`pin_entry_front`] read until it drops.
+pub(crate) struct PinnedFront(());
+
+impl Drop for PinnedFront {
+	fn drop(&mut self) {
+		PINNED_FRONT.set(None);
+	}
+}
+
+/// Reads the user's front process now, for a request that asks the target's
+/// application something before its input begins: following a rebuilt row
+/// probes the ref's element, which blocks while the app is busy, and the
+/// user may pick the target meanwhile. Each [`EntryFront`] of the request
+/// is this read until the returned guard drops.
+pub(crate) fn pin_entry_front() -> PinnedFront {
+	pin_front_with(skylight::front_pid)
+}
+
+fn pin_front_with(front: impl FnOnce() -> Option<libc::pid_t>) -> PinnedFront {
+	PINNED_FRONT.set(Some(EntryFront(front())));
+	PinnedFront(())
+}
+
+/// Whether a request's front process is pinned ([`pin_entry_front`]).
+#[cfg(test)]
+pub(crate) fn entry_front_pinned() -> bool {
+	PINNED_FRONT.get().is_some()
+}
+
+thread_local! {
+	/// The table row an element click aims at, with its process, held until
+	/// the click is posted ([`aim_at_element`]).
+	static AIMED: std::cell::RefCell<Option<(CFRetained<AXUIElement>, libc::pid_t)>> =
+		const { std::cell::RefCell::new(None) };
+}
+
+/// Holds the row [`aim_at_element`] took until it drops.
+pub(super) struct Aimed(());
+
+impl Drop for Aimed {
+	fn drop(&mut self) {
+		AIMED.with_borrow_mut(Option::take);
+	}
+}
+
+/// Makes each press of the click this request posts check, right before it
+/// is posted, that its point still hits the table row `element` sits in
+/// ([`aimed_row_check`]): readying a background click asks the app for its
+/// windows and focus, and a double click spans two presses, long enough for
+/// an app that sorts its rows as it refreshes, as Activity Monitor does, to
+/// move another row into the point. Read with the element's frame; an
+/// element outside a row aims at none.
+pub(super) fn aim_at_element(element: &AXUIElement) -> CoreResult<Aimed> {
+	let row = ax::aimed_row(element)?;
+	AIMED.with_borrow_mut(|aimed| *aimed = row);
+	Ok(Aimed(()))
+}
+
+/// [`aim_at_element`]'s check for each press of `event`: `StaleRef` before
+/// the first press, with nothing sent, and `InputFailed` before a later one,
+/// once earlier presses went out, when another row is under the point.
+fn aimed_row_check(event: &PointerEvent) -> impl Fn(bool) -> CoreResult<()> + use<> {
+	let point = match *event {
+		PointerEvent::Click { x, y, .. } => Some((x, y)),
+		_ => None,
+	};
+	row_press_check(move || {
+		point.is_none_or(|(x, y)| {
+			AIMED.with_borrow(|aimed| {
+				aimed
+					.as_ref()
+					.is_none_or(|(row, pid)| ax::row_at(row, *pid, x, y))
+			})
+		})
+	})
+}
+
+fn row_press_check(lands: impl Fn() -> bool) -> impl Fn(bool) -> CoreResult<()> {
+	let pressed = Cell::new(false);
+	move |target_press| {
+		let lands = lands();
+		let later = pressed.get();
+		if lands {
+			pressed.set(later || target_press);
+			return Ok(());
+		}
+		Err(if later {
+			DesktopError::input_failed(
+				"another row moved under the click's point after its first press went out; the rest \
+				 of the click was not sent",
+			)
+		} else {
+			DesktopError::stale_ref(
+				"another row is now where the clicked element's row was read; nothing was sent",
+			)
+		})
+	}
+}
+
 impl EntryFront {
 	pub(super) fn now() -> Self {
-		Self(skylight::front_pid())
+		PINNED_FRONT
+			.get()
+			.unwrap_or_else(|| Self(skylight::front_pid()))
 	}
 
 	/// Whether `pid` was behind another application as the input began.
@@ -1634,7 +1752,7 @@ impl EntryFront {
 		front: impl FnOnce() -> Option<libc::pid_t>,
 		probe: impl FnOnce() -> CoreResult<T>,
 	) -> CoreResult<(Self, T)> {
-		let entry = Self(front());
+		let entry = PINNED_FRONT.get().unwrap_or_else(|| Self(front()));
 		probe().map(|value| (entry, value))
 	}
 
@@ -1924,7 +2042,7 @@ const DRAG_RELEASE_GAP: Duration = Duration::from_millis(50);
 /// Key pacing for a device that samples HID report state, which loses a key
 /// transition shorter than its report interval; a search field that reacts
 /// to every key needs more than one interval.
-const REPORT_KEY_GAP: Duration = Duration::from_millis(120);
+const REPORT_KEY_GAP: Duration = Duration::from_millis(60);
 /// Press length, and pointer settle, of a tap on such a device.
 const TAP_HOLD: Duration = Duration::from_millis(60);
 /// How long raising an occluded target may take to become visible to
@@ -2180,6 +2298,116 @@ fn menu_watch(
 	Ok((menu || on_control).then_some(ax::open_menu::CONTROL_MENU_TIMEOUT))
 }
 
+/// Runs `press`, background keys for `window` of `pid` that go to process
+/// `to` ([`key_process`]), with the element holding keyboard focus as the
+/// guard for a menu they open ([`key_menu_guarded`]).
+fn guard_key_menu(
+	window: &DesktopWindow,
+	keys: &[KeyName],
+	(pid, to): (libc::pid_t, libc::pid_t),
+	press: impl FnOnce() -> CoreResult<()>,
+) -> CoreResult<()> {
+	key_menu_guarded(
+		window,
+		keys,
+		|| skylight::front_pid() != Some(pid),
+		|| ax::open_menu::focused_role(to),
+		|| capture::menu_windows(to),
+		press,
+		|before| {
+			ax::open_menu::settle(to, pid, before, None, ax::open_menu::KEY_MENU_TIMEOUT, || Ok(()))
+		},
+	)
+}
+
+/// Background keys never leave a menu open, as a background click on a menu
+/// button or popup button does not: Space or an up or down arrow on such a
+/// control (`role`, read only for those keys) opens its menu, which takes the
+/// user's keyboard while it is open. When another application is frontmost
+/// (`background`), the target's menu windows are listed (`menus`) before
+/// `press` and a menu it opened is closed again (`settle`); the call then
+/// fails as a partial delivery that lists the items and names the press or
+/// click that chooses one, since keys carry no item path. A frontmost
+/// application's menu stays open for the next call, as the user's would, and
+/// every other key is posted as before, with nothing read.
+fn key_menu_guarded(
+	window: &DesktopWindow,
+	keys: &[KeyName],
+	background: impl FnOnce() -> bool,
+	role: impl FnOnce() -> Option<String>,
+	menus: impl FnOnce() -> Option<Vec<u32>>,
+	press: impl FnOnce() -> CoreResult<()>,
+	settle: impl FnOnce(&[u32]) -> CoreResult<ax::open_menu::Settled>,
+) -> CoreResult<()> {
+	// A missing focus or unreadable role is not proof that no menu can open.
+	let mut unknown_role = false;
+	let may_open = ax::open_menu::keys_may_open(keys, || {
+		if !background() {
+			return None;
+		}
+		let role = role();
+		unknown_role = role.is_none();
+		role
+	});
+	if !may_open && !unknown_role {
+		return press();
+	}
+	let before = menus().ok_or_else(|| {
+		DesktopError::background_unavailable(format!(
+			"cannot list the open menus of window {} ({}), so a menu this key press opens could not \
+			 be closed; nothing was sent",
+			window.id, window.app,
+		))
+	})?;
+	let chord = chord_label(keys);
+	ax::open_menu::guard(
+		ax::open_menu::Press::Keys { chord: &chord, window },
+		Some(&before),
+		None,
+		press,
+		|before, _| settle(before),
+	)
+}
+
+/// `keys` as a chord's name in errors, such as "alt+down".
+fn chord_label(keys: &[KeyName]) -> String {
+	keys
+		.iter()
+		.map(|key| match key {
+			KeyName::Char(' ') => "space".to_string(),
+			KeyName::Char(character) => character.to_string(),
+			key => format!("{key:?}").to_lowercase(),
+		})
+		.collect::<Vec<_>>()
+		.join("+")
+}
+
+/// Keys held in the background on a focused menu button or popup button
+/// would open its menu on the first press and keep the keyboard from the
+/// user's app until the hold ends, as a mouse hold on one would
+/// ([`menu_watch`]): such a hold (`keys` that can open the menu of the
+/// focused control's `role`, read only when another application is frontmost,
+/// `background`) is refused before anything is sent.
+fn refuse_key_menu_hold(
+	window: &DesktopWindow,
+	keys: &[KeyName],
+	background: impl FnOnce() -> bool,
+	role: impl FnOnce() -> Option<String>,
+) -> CoreResult<()> {
+	if !ax::open_menu::keys_may_open(keys, || if background() { role() } else { None }) {
+		return Ok(());
+	}
+	Err(DesktopError::background_unavailable(format!(
+		"window {} ({}) has keyboard focus on a menu button or popup button, and holding {} would \
+		 open its menu on the first press and keep the keyboard from the user's app until the hold \
+		 ends, so nothing was sent; to choose an item in the background, click the control once \
+		 with the item's path as the menu option, e.g. menu: [\"<item>\"]",
+		window.id,
+		window.app,
+		chord_label(keys),
+	)))
+}
+
 /// Roles of controls that track a left-button drag themselves and never begin
 /// a drag-and-drop session.
 const DRAG_TRACKING_ROLES: [&str; 5] =
@@ -2355,13 +2583,19 @@ fn background_gesture(
 	post: Post<'_>,
 ) -> CoreResult<()> {
 	// Every pointer kind goes through the same check right before it posts.
-	let before_post = pointer_rechecks(
+	let rechecks = pointer_rechecks(
 		(prepared, rechecks_report_sent(&event)),
 		entry_front,
 		(pid, wid, &window.app),
 		skylight::front_pid,
 		|| visit.happened(),
 	);
+	// A click aimed at a table row checks the row is still under its point.
+	let rows = aimed_row_check(&event);
+	let before_post = || {
+		rechecks()?;
+		rows(true)
+	};
 	match event {
 		PointerEvent::Click { x, y, button: MouseButton::Left, count, modifiers } => {
 			background_left_click(
@@ -2371,12 +2605,15 @@ fn background_gesture(
 				window,
 				(x, y, count),
 				modifier_flags(modifiers),
-				before_post,
+				|target_press| {
+					rechecks()?;
+					rows(target_press)
+				},
 				skylight::post_routed,
 			)
 		},
 		PointerEvent::Click { x, y, button, count, modifiers } => {
-			before_post()?;
+			rechecks()?;
 			background_button_click(
 				source,
 				to,
@@ -2821,7 +3058,7 @@ fn picked_up_refusal(window: &DesktopWindow) -> DesktopError {
 
 /// Change count of the drag pasteboard, which a drag source clears and
 /// writes as it begins a drag-and-drop session.
-fn drag_pasteboard_count() -> isize {
+pub(super) fn drag_pasteboard_count() -> isize {
 	// SAFETY: `NSPasteboardNameDrag` is an immutable AppKit string constant.
 	NSPasteboard::pasteboardWithName(unsafe { NSPasteboardNameDrag }).changeCount()
 }
@@ -2926,7 +3163,7 @@ fn background_left_click(
 	window: &DesktopWindow,
 	(x, y, count): (f64, f64, u32),
 	flags: CGEventFlags,
-	before_press: impl Fn() -> CoreResult<()>,
+	before_press: impl Fn(bool) -> CoreResult<()>,
 	post_event: impl Fn(libc::pid_t, &CGEvent) -> CoreResult<()>,
 ) -> CoreResult<()> {
 	let target = CGPoint::new(x, y);
@@ -2958,7 +3195,7 @@ fn background_left_click(
 	let unmodified = CGEventFlags::empty();
 	post(CGEventType::MouseMoved, target, local, 2, 0, flags)?;
 	control::wait(Duration::from_millis(15))?;
-	before_press()?;
+	before_press(false)?;
 	post(CGEventType::LeftMouseDown, offscreen, offscreen, 1, 1, unmodified)?;
 	let result = control::wait(Duration::from_millis(1));
 	let release =
@@ -2967,7 +3204,7 @@ fn background_left_click(
 	control::wait(Duration::from_millis(100))?;
 	let count = count.max(1);
 	for click_state in 1..=count {
-		before_press()?;
+		before_press(true)?;
 		post(CGEventType::LeftMouseDown, target, local, 3, i64::from(click_state), flags)?;
 		let result = control::sent_gap_wait(Duration::from_millis(1), click_state == count);
 		let release = control::cleanup(|| {
@@ -3109,8 +3346,7 @@ fn background_scroll(
 	dx: f64,
 	dy: f64,
 ) -> CoreResult<()> {
-	let wheel_x = finite_i32(dx, "horizontal scroll delta")?;
-	let wheel_y = finite_i32(dy, "vertical scroll delta")?;
+	let (wheel_x, wheel_y) = quartz_scroll_deltas(dx, dy)?;
 	// A stale hover location makes a nested scroller miss the wheel even though
 	// the event reaches the process.
 	post_hover(source, pid, wid, window, x, y)?;
@@ -3308,12 +3544,25 @@ fn remote_layout<S>(
 	})
 }
 
-/// `text` as Unicode payloads on virtual key 0, grapheme by grapheme.
+/// `text` as Unicode payloads on virtual key 0, grapheme by grapheme. Line
+/// breaks and tabs go out as their own keys: an application that reads the key
+/// code (web content in a background window) would type key 0's `a` for them.
 fn unicode_keys(text: &str) -> Vec<TypedKey<'_>> {
-	graphemes_str(text)
-		.flat_map(unicode_runs)
-		.map(TypedKey::Unicode)
-		.collect()
+	let mut keys = Vec::new();
+	for grapheme in graphemes_str(text) {
+		let code = match grapheme {
+			"\r" | "\n" | "\r\n" => Some(RETURN),
+			"\t" => Some(TAB),
+			_ => None,
+		};
+		match code {
+			Some(code) => {
+				keys.push(TypedKey::Layout(Keystroke { code, shift: false, option: false }, grapheme));
+			},
+			None => keys.extend(unicode_runs(grapheme).map(TypedKey::Unicode)),
+		}
+	}
+	keys
 }
 
 /// The layout keys that type `text` into `window`, from `stroke`'s lookup.
@@ -4375,35 +4624,21 @@ fn global_pointer(source: &CGEventSource, event: PointerEvent) -> CoreResult<()>
 					)?;
 					control::wait(Duration::from_millis(12))?;
 				}
-				let count = count.max(1);
-				for click_state in 1..=count {
-					post_global_mouse(
-						source,
-						down,
-						cg_button,
-						point,
-						i64::from(click_state),
-						number,
-						flags,
-					)?;
-					let result = control::sent_gap_wait(PRESS_GAP, click_state == count);
-					let release = control::cleanup(|| {
+				global_click_presses(
+					count,
+					aimed_row_check(&PointerEvent::Click { x, y, button, count, modifiers }),
+					|pressed, click_state| {
 						post_global_mouse(
 							source,
-							up,
+							if pressed { down } else { up },
 							cg_button,
 							point,
-							i64::from(click_state),
+							click_state,
 							number,
 							flags,
 						)
-					});
-					skylight::after_cleanup(result, release)?;
-					if click_state < count {
-						control::wait(MULTI_CLICK_GAP)?;
-					}
-				}
-				Ok(())
+					},
+				)
 			});
 			result.inspect(|()| control::settle(POINTER_SETTLE))
 		},
@@ -4447,6 +4682,16 @@ fn global_pointer(source: &CGEventSource, event: PointerEvent) -> CoreResult<()>
 	}
 }
 
+/// Recheck the aimed row immediately before every takeover press, retaining
+/// the release of each press that already went out.
+fn global_click_presses(
+	count: u32,
+	before_press: impl Fn(bool) -> CoreResult<()>,
+	post: impl Fn(bool, i64) -> CoreResult<()>,
+) -> CoreResult<()> {
+	button_presses(count, || before_press(true), post)
+}
+
 /// HID wheel scroll at `(x, y)` with the real pointer primed there from the
 /// `approach` side (`1.0` right, `-1.0` left).
 ///
@@ -4464,10 +4709,7 @@ fn global_scroll(
 	mut before_wheel: impl FnMut() -> CoreResult<()>,
 ) -> CoreResult<()> {
 	let point = point(x, y)?;
-	let steps = wheel_steps(
-		finite_i32(dx, "horizontal scroll delta")?,
-		finite_i32(dy, "vertical scroll delta")?,
-	);
+	let steps = scroll_plan(dx, dy)?;
 	if steps.is_empty() {
 		return Ok(());
 	}
@@ -4518,6 +4760,20 @@ fn prime_pointer(source: &CGEventSource, point: CGPoint, side: f64) -> CoreResul
 	}
 	control::wait(PRIMER_SETTLE)?;
 	Ok(())
+}
+
+/// API deltas reveal content down/right; Quartz wheel axes point up/left.
+fn quartz_scroll_deltas(dx: f64, dy: f64) -> CoreResult<(i32, i32)> {
+	Ok((
+		finite_i32(dx, "horizontal scroll delta")?.saturating_neg(),
+		finite_i32(dy, "vertical scroll delta")?.saturating_neg(),
+	))
+}
+
+/// The wheel events of a paced scroll by `(dx, dy)` ([`wheel_steps`]).
+fn scroll_plan(dx: f64, dy: f64) -> CoreResult<Vec<(i32, i32)>> {
+	let (wheel_x, wheel_y) = quartz_scroll_deltas(dx, dy)?;
+	Ok(wheel_steps(wheel_x, wheel_y))
 }
 
 /// Splits a pixel scroll into at most `MAX_WHEEL_EVENTS` wheel events whose
@@ -4835,6 +5091,26 @@ mod tests {
 			flags.contains(CGEventFlags::MaskAlternate),
 			String::from_utf16_lossy(&units[..length]),
 		)
+	}
+
+	#[test]
+	fn unicode_text_sends_line_breaks_and_tabs_as_their_keys() {
+		let keys = unicode_keys("a\nb\r\n\tc");
+		let codes: Vec<_> = keys
+			.iter()
+			.map(|key| match key {
+				TypedKey::Layout(stroke, text) => (Some(stroke.code), *text),
+				TypedKey::Unicode(text) => (None, *text),
+			})
+			.collect();
+		assert_eq!(codes, [
+			(None, "a"),
+			(Some(36), "\n"),
+			(None, "b"),
+			(Some(36), "\r\n"),
+			(Some(48), "\t"),
+			(None, "c"),
+		]);
 	}
 
 	#[test]
@@ -6230,7 +6506,7 @@ mod tests {
 		let front = std::cell::Cell::new(Some(9));
 		let posted = std::cell::RefCell::new(Vec::new());
 		let before_press =
-			|| recheck_background(true, 7581, 554, || front.get(), || false, || Ok(()));
+			|_| recheck_background(true, 7581, 554, || front.get(), || false, || Ok(()));
 		let post = |_, event: &CGEvent| {
 			let kind = CGEvent::r#type(Some(event));
 			if matches!(kind, CGEventType::LeftMouseUp) {
@@ -7351,7 +7627,7 @@ mod tests {
 			&window,
 			(10.0, 10.0, 2),
 			CGEventFlags::empty(),
-			|| Ok(()),
+			|_| Ok(()),
 			|_, event: &CGEvent| {
 				// SAFETY: `event` is a live CGEvent.
 				let stamp =
@@ -7521,6 +7797,195 @@ mod tests {
 			menu_watch(&window, &right, false, true, unasked).expect("front with menu"),
 			Some(ax::open_menu::CONTEXT_MENU_TIMEOUT)
 		);
+	}
+
+	#[test]
+	fn a_background_key_that_opens_a_menu_closes_it_and_fails_listing_its_items() {
+		use ax::open_menu::Settled;
+		let window = background_window("Fixture");
+		let pressed = std::cell::Cell::new(0);
+		let settled = std::cell::Cell::new(false);
+		let error = key_menu_guarded(
+			&window,
+			&[KeyName::Down],
+			|| true,
+			|| Some("AXPopUpButton".to_string()),
+			|| Some(vec![7]),
+			|| {
+				pressed.set(pressed.get() + 1);
+				Ok(())
+			},
+			|before| {
+				assert_eq!(before, [7]);
+				settled.set(true);
+				Ok(Settled::Unchosen {
+					refusal: None,
+					items:   "\"Alpha\", \"Beta\"".to_string(),
+					closed:  true,
+				})
+			},
+		)
+		.expect_err("the menu was closed");
+		assert_eq!((pressed.get(), settled.get()), (1, true));
+		// The key was delivered, so it is a partial delivery, never one a
+		// takeover rerun would repeat.
+		assert_eq!(error.code.as_str(), "InputFailed");
+		assert!(
+			error.message.starts_with(
+				"the key press down reached window 42 (Fixture) and opened a menu, which takes the \
+				 keyboard from the user's app, so it was closed with nothing chosen"
+			),
+			"{}",
+			error.message
+		);
+		assert!(
+			error
+				.message
+				.contains("press or click the control instead of sending keys")
+		);
+		assert!(error.message.ends_with("Items: \"Alpha\", \"Beta\"."), "{}", error.message);
+		// A menu Escape could not close fails whatever the keys returned.
+		let error = key_menu_guarded(
+			&window,
+			&[KeyName::Alt, KeyName::Up],
+			|| true,
+			|| Some("AXMenuButton".to_string()),
+			|| Some(Vec::new()),
+			|| Err(DesktopError::cancelled("cancelled")),
+			|_| Ok(Settled::Unchosen { refusal: None, items: String::new(), closed: false }),
+		)
+		.expect_err("left open");
+		assert!(
+			error
+				.message
+				.starts_with("the key press alt+up reached window 42"),
+			"{}",
+			error.message
+		);
+		assert!(error.message.contains("that is still open"), "{}", error.message);
+	}
+
+	#[test]
+	fn a_menu_key_lists_no_menus_off_a_menu_control_or_with_its_app_in_front() {
+		let window = background_window("Fixture");
+		// The focused element opens no menu, or the user's app is not in front.
+		for (background, focused) in [(true, Some("AXTextField")), (false, Some("AXPopUpButton"))] {
+			let role = || {
+				assert!(background, "the role is read only behind the user's app");
+				focused.map(str::to_string)
+			};
+			key_menu_guarded(
+				&window,
+				&[KeyName::Space],
+				|| background,
+				role,
+				|| panic!("no menu listing"),
+				|| Ok(()),
+				|_| panic!("nothing to settle"),
+			)
+			.expect("posted");
+		}
+	}
+
+	#[test]
+	fn an_unreadable_focused_role_watches_down_but_leaves_letters_unwatched() {
+		let window = background_window("Fixture");
+		let pressed = std::cell::Cell::new(0);
+		let settled = std::cell::Cell::new(false);
+		key_menu_guarded(
+			&window,
+			&[KeyName::Down],
+			|| true,
+			|| None,
+			|| Some(Vec::new()),
+			|| {
+				pressed.set(pressed.get() + 1);
+				Ok(())
+			},
+			|_| {
+				settled.set(true);
+				Ok(ax::open_menu::Settled::NoMenu)
+			},
+		)
+		.expect("posted and watched");
+		assert_eq!((pressed.get(), settled.get()), (1, true));
+		key_menu_guarded(
+			&window,
+			&[KeyName::Char('a')],
+			|| panic!("letters do not check the front application"),
+			|| panic!("letters do not read the focused role"),
+			|| panic!("letters do not list menus"),
+			|| {
+				pressed.set(pressed.get() + 1);
+				Ok(())
+			},
+			|_| panic!("letters do not settle menus"),
+		)
+		.expect("letter posted");
+		assert_eq!(pressed.get(), 2);
+	}
+
+	#[test]
+	fn a_background_hold_of_a_menu_key_on_a_menu_control_is_refused_before_anything_is_sent() {
+		let window = background_window("Fixture");
+		let error = refuse_key_menu_hold(
+			&window,
+			&[KeyName::Space],
+			|| true,
+			|| Some("AXPopUpButton".to_string()),
+		)
+		.expect_err("refused");
+		assert_eq!(error.code.as_str(), "BackgroundUnavailable");
+		assert!(error.message.contains("holding space"), "{}", error.message);
+		assert!(error.message.contains("nothing was sent"), "{}", error.message);
+		// Off a menu control, with the user's app behind the target, or for a
+		// key that opens no menu, the hold goes ahead.
+		for (keys, background, role) in [
+			(vec![KeyName::Down], true, Some("AXTextField")),
+			(vec![KeyName::Down], false, Some("AXMenuButton")),
+			(vec![KeyName::Shift], true, Some("AXPopUpButton")),
+		] {
+			refuse_key_menu_hold(
+				&window,
+				&keys,
+				|| background,
+				|| {
+					assert!(background, "the role is read only behind the user's app");
+					role.map(str::to_string)
+				},
+			)
+			.expect("held");
+		}
+	}
+
+	#[test]
+	fn a_menu_key_on_a_control_that_opens_nothing_succeeds_and_an_unlisted_one_sends_nothing() {
+		use ax::open_menu::Settled;
+		let window = background_window("Fixture");
+		for key in [KeyName::Space, KeyName::Up, KeyName::Down, KeyName::Char(' ')] {
+			key_menu_guarded(
+				&window,
+				&[key],
+				|| true,
+				|| Some("AXPopUpButton".to_string()),
+				|| Some(Vec::new()),
+				|| Ok(()),
+				|_| Ok(Settled::NoMenu),
+			)
+			.expect("no menu opened");
+		}
+		let error = key_menu_guarded(
+			&window,
+			&[KeyName::Down],
+			|| true,
+			|| Some("AXPopUpButton".to_string()),
+			|| None,
+			|| panic!("nothing is sent when its menu could not be closed"),
+			|_| panic!("nothing to settle"),
+		)
+		.expect_err("refused");
+		assert_eq!(error.code.as_str(), "BackgroundUnavailable");
+		assert!(error.message.ends_with("nothing was sent"), "{}", error.message);
 	}
 
 	#[test]
@@ -8007,6 +8472,72 @@ mod tests {
 	}
 
 	#[test]
+	fn a_click_lands_in_its_row_unless_another_row_is_found_first_above_the_hit() {
+		// The aimed row is 1; each hit's ancestry is listed from the hit up,
+		// marked where it is a row.
+		let lands = |ancestry: &[(u32, bool)]| ax::lands_in_row(&1, ancestry.iter().copied());
+		assert!(lands(&[(12, false), (11, false), (1, true)]));
+		// A web table's text under a link under a cell, deeper than the
+		// element side is read.
+		assert!(lands(&[(14, false), (13, false), (12, false), (1, true)]));
+		// The neighbouring row was sorted into the point, or the old row was
+		// rebuilt there as a new element.
+		assert!(!lands(&[(22, false), (21, false), (2, true), (1, true)]));
+		// A point outside any row lands as it would without the check.
+		assert!(lands(&[(30, false), (31, false)]));
+	}
+
+	#[test]
+	fn row_action_takeover_rechecks_each_press() {
+		let lands = Cell::new(true);
+		let posted = std::cell::RefCell::new(Vec::new());
+		let error = global_click_presses(2, row_press_check(|| lands.get()), |pressed, state| {
+			posted.borrow_mut().push((pressed, state));
+			if !pressed {
+				lands.set(false);
+			}
+			Ok(())
+		})
+		.unwrap_err();
+		assert_eq!(error.code, crate::desktop::error::ErrorCode::InputFailed);
+		assert_eq!(*posted.borrow(), [(true, 1), (false, 1)]);
+	}
+
+	#[test]
+	fn row_action_primer_does_not_count_as_a_target_press() {
+		let source = source().expect("event source");
+		let window = background_window("Electron");
+		let lands = Cell::new(true);
+		let rows = row_press_check(|| lands.get());
+		let posted = std::cell::RefCell::new(Vec::new());
+		let error = background_left_click(
+			&source,
+			7,
+			42,
+			&window,
+			(10.0, 10.0, 1),
+			CGEventFlags::empty(),
+			rows,
+			|_, event| {
+				let kind = CGEvent::r#type(Some(event));
+				posted.borrow_mut().push(kind);
+				if kind == CGEventType::LeftMouseUp {
+					lands.set(false);
+				}
+				Ok(())
+			},
+		)
+		.unwrap_err();
+		assert_eq!(error.code, crate::desktop::error::ErrorCode::StaleRef);
+		assert!(error.message.contains("nothing was sent"));
+		assert_eq!(*posted.borrow(), [
+			CGEventType::MouseMoved,
+			CGEventType::LeftMouseDown,
+			CGEventType::LeftMouseUp,
+		]);
+	}
+
+	#[test]
 	fn a_drag_target_picked_while_its_selection_probes_block_is_left_to_the_user() {
 		use crate::desktop::error::ErrorCode;
 		// The drag began with the user's app (9) in front, and they bring the
@@ -8209,6 +8740,21 @@ mod tests {
 		// input once the bound has passed.
 		activate_then_await(Some(false), Duration::ZERO, || Ok(()), || Some(false), no_wait)
 			.expect("an unreported activation is not an error");
+	}
+
+	#[test]
+	fn scroll_deltas_map_down_and_right_to_negative_quartz_axes() {
+		assert_eq!(quartz_scroll_deltas(40.0, 300.0).unwrap(), (-40, -300));
+		assert_eq!(quartz_scroll_deltas(-40.0, -300.0).unwrap(), (40, 300));
+		assert_eq!(quartz_scroll_deltas(0.0, 0.0).unwrap(), (0, 0));
+		let error = quartz_scroll_deltas(0.0, -3e9).unwrap_err();
+		assert!(error.message.contains("vertical scroll delta -3000000000"), "{}", error.message);
+	}
+
+	#[test]
+	fn paced_scrolls_go_down_and_right_as_negative_wheel_steps() {
+		assert_eq!(scroll_plan(40.0, 300.0).unwrap(), vec![(-4, -30); 10]);
+		assert_eq!(scroll_plan(-40.0, -300.0).unwrap(), vec![(4, 30); 10]);
 	}
 
 	#[test]

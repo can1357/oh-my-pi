@@ -211,7 +211,8 @@ pub struct GrepOptions {
 	pub max_count:          Option<u64>,
 	/// Keep at most this many matches per file ([`Mode::Content`]).
 	pub max_count_per_file: Option<u64>,
-	/// Traversal: `hidden`, `gitignore`, `workers`, `cache` are honoured;
+	/// Traversal: `hidden`, `gitignore`, `follow_links`, `workers`, `cache`
+	/// are honoured;
 	/// `.git` is always pruned and `node_modules` unless the glob names it.
 	pub walk:               walk::Options,
 	/// Deliver results per file (batches of at most 1024 entries, all from

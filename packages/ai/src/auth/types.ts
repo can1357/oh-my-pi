@@ -1,4 +1,5 @@
 import type { ApiKeyResolver, ResolvedApiKey } from "../auth-retry";
+import type { SessionCredential } from "./affinity";
 import type {
 	OAuthAuthInfo,
 	OAuthController,
@@ -209,6 +210,8 @@ export type CompletionProbeCredential =
 	| {
 			type: "oauth";
 			accessToken: string;
+			/** The request key built by the provider's `getApiKey` hook, when it owns one; send it as-is. */
+			apiKey?: string;
 			refreshToken?: string;
 			expiresAt?: number;
 			accountId?: string;
@@ -276,9 +279,10 @@ export const REMOTE_REFRESH_SENTINEL = "__remote__" as const;
 /** Opaque marker for OAuth refresh tokens retained by a broker. */
 export type RemoteRefreshSentinel = typeof REMOTE_REFRESH_SENTINEL;
 
-/** OAuth credential with refresh token replaced by the broker sentinel. */
-export type RemoteOAuthCredential = Omit<OAuthCredential, "refresh"> & {
+/** OAuth credential with refresh token replaced by the broker sentinel and refresh-capable client secrets removed. */
+export type RemoteOAuthCredential = Omit<OAuthCredential, "refresh" | "kiroClientSecret"> & {
 	refresh: RemoteRefreshSentinel;
+	kiroClientSecret?: never;
 };
 
 /** Discriminated credential payload as published by the broker. */
@@ -1264,6 +1268,14 @@ export interface SessionsApi {
 	 * headroom, before considering a model/provider fallback.
 	 */
 	release(provider: string, sessionId: string): boolean;
+	/**
+	 * Read-only display and usage-attribution surface: the credential row that
+	 * most recently served `sessionId` for `provider`, including API-key rows
+	 * (which carry no OAuth identity). Selection, ranking, and rotation never
+	 * consult it. Optional because worker/broker seams may not expose it;
+	 * callers must treat its absence as "unknown attribution".
+	 */
+	sticky?(provider: string, sessionId: string | undefined): SessionCredential | undefined;
 }
 
 /** Usage reporting, observation, and provider configuration. */

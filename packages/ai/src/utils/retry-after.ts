@@ -3,12 +3,13 @@ import { extractRetryHint } from "@oh-my-pi/pi-utils";
 
 export type HeadersLike = Headers | Record<string, string | undefined> | undefined | null;
 
-/** Extracts retry timing using the provider's catalog-declared timestamp timezone. */
+/** Extracts retry timing using the provider or its upstream's declared timestamp timezone. */
 export function extractProviderRetryHint(
 	provider: string | undefined,
 	message: string | undefined,
+	baseUrl?: string,
 ): number | undefined {
-	const naiveResetTimezoneOffset = provider === undefined ? undefined : retryResetTimezoneOffsetFor(provider);
+	const naiveResetTimezoneOffset = provider === undefined ? undefined : retryResetTimezoneOffsetFor(provider, baseUrl);
 	return extractRetryHint(undefined, message, { naiveResetTimezoneOffset });
 }
 

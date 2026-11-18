@@ -551,6 +551,14 @@ export function outcomeToSummary(outcome: PrCheckoutOutcome): GhPrCheckoutSummar
 	};
 }
 
+/** The local branch `pr_checkout` made for `pr` (a number, `#N` or PR URL): `pr-N`, which its worktree holds. */
+function prCheckoutBranch(pr: string | string[] | undefined): string | undefined {
+	const [ref] = normalizePrIdentifierList(pr);
+	if (!ref) return undefined;
+	const number = /^#?(\d+)$/.exec(ref)?.[1] ?? parsePullRequestUrl(ref).prNumber;
+	return number === undefined ? undefined : `pr-${number}`;
+}
+
 export async function executePrPush(
 	session: ToolSession,
 	params: GithubInput,
@@ -558,7 +566,10 @@ export async function executePrPush(
 ): Promise<AgentToolResult<GhToolDetails>> {
 	const repoRoot = await requireGitRepoRoot(session.cwd, signal);
 	const repository = vcs.requireGit(repoRoot);
-	const localBranch = normalizeOptionalString(params.branch) ?? (await requireCurrentGitBranch(repoRoot, signal));
+	const localBranch =
+		normalizeOptionalString(params.branch) ??
+		prCheckoutBranch(params.pr) ??
+		(await requireCurrentGitBranch(repoRoot, signal));
 	const refExists = await repository.refExists(toLocalBranchRef(localBranch), signal);
 	if (!refExists) {
 		throw new ToolError(`local branch ${localBranch} does not exist`);

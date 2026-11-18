@@ -2524,7 +2524,7 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		} as never);
 		for (const result of [legacy, modern]) {
 			expect(result.isError).toBe(false);
-			expect(result.content).toEqual([{ type: "text", text: "line997\nline998" }]);
+			expect(result.content).toEqual([{ type: "text", text: "line997\nline998\n" }]);
 		}
 		const last = await handlers.piRead({
 			toolCallId: "last-line",

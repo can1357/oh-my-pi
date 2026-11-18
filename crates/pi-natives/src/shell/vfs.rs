@@ -1535,11 +1535,18 @@ fn stat_fs_from_wire(wire: ShellFsStatFs) -> io::Result<StatFs> {
 
 /// Map a provider errno name to the matching `io::Error`. Unix keeps the real
 /// errno so kinds, messages, and `raw_os_error` checks match native failures;
-/// elsewhere the kind carries the provider message.
+/// elsewhere the kind carries the provider message. `EIO` is the provider's
+/// catch-all (an ssh failure, a remote command's stderr): its message is the
+/// only account of what failed, so it stays in place of "Input/output error".
 fn error_from_wire(error: ShellFsError) -> io::Error {
 	#[cfg(unix)]
 	if let Some(errno) = errno_for_code(&error.code) {
-		return io::Error::from_raw_os_error(errno);
+		match error.message {
+			Some(message) if errno == libc::EIO && !message.is_empty() => {
+				return io::Error::other(message);
+			},
+			_ => return io::Error::from_raw_os_error(errno),
+		}
 	}
 	#[cfg(not(unix))]
 	if error.code == "ECANCELED" {
@@ -1632,5 +1639,24 @@ fn kind_for_code(code: &str) -> io::ErrorKind {
 		"EDQUOT" => ErrorKind::QuotaExceeded,
 		"EPIPE" => ErrorKind::BrokenPipe,
 		_ => ErrorKind::Other,
+	}
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn a_provider_io_error_keeps_its_message() {
+		let error = error_from_wire(ShellFsError {
+			code:    "EIO".to_string(),
+			message: Some("ssh: connect to host box port 22: Connection refused".to_string()),
+		});
+		assert_eq!(error.to_string(), "ssh: connect to host box port 22: Connection refused");
+		let missing = error_from_wire(ShellFsError {
+			code:    "ENOENT".to_string(),
+			message: Some("gone".to_string()),
+		});
+		assert_eq!(missing.raw_os_error(), Some(libc::ENOENT));
 	}
 }

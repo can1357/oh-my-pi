@@ -360,6 +360,30 @@ async fn command_running_utilities_dispatch_builtins_that_open_urls() {
 	assert_eq!(run.stdout, "alpha\nbeta\nbeta\nalpha\n");
 }
 
+/// `file` runs in process, so it identifies what a provider URL names by
+/// reading it through the provider: a file by its contents, a directory by
+/// its type, and a URL that names nothing as unopenable.
+#[tokio::test]
+async fn file_identifies_what_provider_urls_name() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	fs::create_dir(directory.path().join("docs")).expect("provider directory");
+	fs::write(directory.path().join("docs/a.txt"), b"alpha\n").expect("text document");
+	fs::write(directory.path().join("docs/i.gif"), b"GIF89a\x40\x01\xc8\x00\x80\0\0;")
+		.expect("image");
+	let run = run_virtual(
+		directory.path(),
+		"file -b virtual://docs/a.txt virtual://docs/i.gif virtual://docs virtual://docs/absent && \
+		 file --mime-type virtual://docs/a.txt",
+	)
+	.await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	assert_eq!(
+		run.stdout,
+		"ASCII text\nGIF image data, version 89a, 320 x 200\ndirectory\ncannot open \
+		 `virtual://docs/absent' (No such file or directory)\nvirtual://docs/a.txt: text/plain\n"
+	);
+}
+
 /// An external program cannot open a provider URL, so one it is handed must
 /// name the file that URL aliases, in the bare spelling and in the
 /// attached-value spelling a tool's own flags use. A scheme the filesystem
@@ -413,20 +437,174 @@ async fn external_commands_receive_host_paths_for_backed_url_arguments() {
 	);
 }
 
-/// A URL the provider cannot resolve fails the command with the provider's
-/// reason instead of reaching the child, which could only fail on it later
-/// with no hint why.
+/// A URL the provider cannot resolve is as likely an identifier or message
+/// text the program wants as written (`bm read memory://notes/x`), so the
+/// child runs and receives it untouched. A program the provider rejects
+/// cannot run at all.
 #[tokio::test]
-async fn external_commands_refuse_url_arguments_the_provider_rejects() {
+async fn external_commands_keep_url_arguments_the_provider_rejects() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
 	#[cfg(unix)]
-	let script = "/bin/sh -c 'printf ran' virtual://../escape";
+	let script = "/bin/sh -c 'printf \"ran %s\" \"$1\"' sh virtual://../escape";
 	#[cfg(windows)]
 	let script = "cmd.exe /c echo ran virtual://../escape";
 	let run = run_virtual(directory.path(), script).await;
-	assert_ne!(run.status, Some(0), "a rejected url reached the child");
-	assert!(!run.stdout.contains("ran"), "the child ran: {}", run.stdout);
-	assert!(run.stderr.contains("outside mount"), "the provider's reason was lost: {}", run.stderr);
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	assert!(
+		run.stdout.contains("ran virtual://../escape"),
+		"a rejected url did not reach the child as written: {}",
+		run.stdout
+	);
+
+	let run = run_virtual(directory.path(), "virtual://../escape").await;
+	assert_ne!(run.status, Some(0), "a rejected program ran: {}", run.stdout);
+}
+
+/// Prints each of its arguments on a line of its own, prefixed with `$0`.
+#[cfg(unix)]
+const PROBE: &str = r#"/bin/sh -c 'for arg; do printf "%s:%s\n" "$0" "$arg"; done'"#;
+
+/// The spellings that attach a path to an option reach the child with the
+/// path resolved and the rest of the argument intact: a short option letter,
+/// curl's and gh's `@file`, and both after a name. Message text that merely
+/// starts with a URL is not a path unless a file has exactly that name.
+#[cfg(unix)]
+#[tokio::test]
+async fn external_commands_receive_host_paths_for_attached_url_spellings() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	let docs = directory.path().join("docs");
+	fs::create_dir(&docs).expect("provider directory");
+	fs::write(docs.join("a.txt"), b"alpha\n").expect("document");
+	fs::write(docs.join("my notes.txt"), b"spaced\n").expect("document with a space");
+	let script = format!(
+		"{PROBE} arg -ovirtual://docs/a.txt @virtual://docs/a.txt body=@virtual://docs/a.txt \
+		 -d@virtual://docs/a.txt --data-binary=@virtual://docs/a.txt 'virtual://docs/my notes.txt' \
+		 'virtual://docs/a.txt shows the failure' 'evidence=virtual://docs/a.txt; more' \
+		 -xvirtual://rendered/page"
+	);
+	let run = run_virtual(directory.path(), &script).await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	let file = docs.join("a.txt").display().to_string();
+	let expected = [
+		format!("arg:-o{file}"),
+		format!("arg:@{file}"),
+		format!("arg:body=@{file}"),
+		format!("arg:-d@{file}"),
+		format!("arg:--data-binary=@{file}"),
+		format!("arg:{}", docs.join("my notes.txt").display()),
+		"arg:virtual://docs/a.txt shows the failure".to_owned(),
+		"arg:evidence=virtual://docs/a.txt; more".to_owned(),
+		"arg:-xvirtual://rendered/page".to_owned(),
+	];
+	assert_eq!(run.stdout.lines().collect::<Vec<_>>(), expected);
+}
+
+/// A variable handed to a child (assigned on its command, by `env`, or
+/// exported earlier) names the file its URL aliases, while the shell's own
+/// copy keeps the URL. A web address and a URL the provider rejects are the
+/// child's as written.
+#[cfg(unix)]
+#[tokio::test]
+async fn external_commands_receive_host_paths_for_url_environment_values() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	let docs = directory.path().join("docs");
+	fs::create_dir(&docs).expect("provider directory");
+	fs::write(docs.join("a.txt"), b"alpha\n").expect("document");
+	let script = "LEAF=virtual://docs/a.txt WEB=https://example.com/x GONE=virtual://../escape \
+	              /bin/sh -c 'printf \"%s\\n\" \"$LEAF\" \"$WEB\" \"$GONE\"'; env \
+	              VIA_ENV=virtual://docs /usr/bin/printenv VIA_ENV; export \
+	              KEPT=virtual://docs/a.txt; /usr/bin/printenv KEPT; printf 'shell:%s\\n' \"$KEPT\"";
+	let run = run_virtual(directory.path(), script).await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	let file = docs.join("a.txt").display().to_string();
+	let expected = [
+		file.clone(),
+		"https://example.com/x".to_owned(),
+		"virtual://../escape".to_owned(),
+		docs.display().to_string(),
+		file,
+		"shell:virtual://docs/a.txt".to_owned(),
+	];
+	assert_eq!(run.stdout.lines().collect::<Vec<_>>(), expected);
+}
+
+/// A command that runs another one hands it the same resolved paths as the
+/// shell would: the utilities that run their operands (`env`, `xargs`,
+/// `find -exec`, `timeout`, `nohup`), the shell's own prefixes (`time`,
+/// `command`, `exec`), and a program that execs its arguments (`nice`).
+#[cfg(unix)]
+#[tokio::test]
+async fn commands_run_through_a_wrapper_receive_host_paths_for_url_arguments() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	let docs = directory.path().join("docs");
+	fs::create_dir(&docs).expect("provider directory");
+	fs::write(docs.join("a.txt"), b"alpha\n").expect("document");
+	let probe = |name: &str| format!("{PROBE} {name}");
+	let script = format!(
+		"env {env} virtual://docs/a.txt\nprintf 'virtual://docs/a.txt\\n' | xargs {xargs}\nfind \
+		 virtual://docs -name a.txt -exec {find} {{}} \\;\ntimeout 30 {timeout} \
+		 virtual://docs/a.txt\nnohup {nohup} virtual://docs/a.txt\ntime {time} \
+		 virtual://docs/a.txt\ncommand {command} virtual://docs/a.txt\n(exec {exec} \
+		 virtual://docs/a.txt)\nnice {nice} virtual://docs/a.txt\n",
+		env = probe("env"),
+		xargs = probe("xargs"),
+		find = probe("find"),
+		timeout = probe("timeout"),
+		nohup = probe("nohup"),
+		time = probe("time"),
+		command = probe("command"),
+		exec = probe("exec"),
+		nice = probe("nice"),
+	);
+	let run = run_virtual(directory.path(), &script).await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	let file = docs.join("a.txt").display().to_string();
+	let expected: Vec<String> =
+		["env", "xargs", "find", "timeout", "nohup", "time", "command", "exec", "nice"]
+			.iter()
+			.map(|name| format!("{name}:{file}"))
+			.collect();
+	assert_eq!(run.stdout.lines().collect::<Vec<_>>(), expected);
+}
+
+/// `omp` resolves the URLs it is given itself, selectors included, so its
+/// arguments and environment reach it as written: run by name, by path, or
+/// through a program that execs it.
+#[cfg(unix)]
+#[tokio::test]
+async fn omp_receives_its_url_arguments_as_written() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	let docs = directory.path().join("docs");
+	fs::create_dir(&docs).expect("provider directory");
+	fs::write(docs.join("a.txt"), b"alpha\n").expect("document");
+	let bin = tempfile::tempdir().expect("program directory");
+	let omp = bin.path().join("omp");
+	fs::write(&omp, b"#!/bin/sh\nprintf '%s\\n' \"$@\" \"ref=$REF\"\n").expect("stand-in omp");
+	fs::set_permissions(&omp, fs::Permissions::from_mode(0o755)).expect("executable stand-in");
+	let script = format!(
+		"PATH='{bin}':$PATH; REF=virtual://docs/a.txt omp read virtual://docs/a.txt:1-2 \
+		 --from=virtual://docs/a.txt; nice omp read virtual://docs; '{omp}' read \
+		 @virtual://docs/a.txt",
+		bin = bin.path().display(),
+		omp = omp.display(),
+	);
+	let run = run_virtual(directory.path(), &script).await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	let expected = [
+		"read",
+		"virtual://docs/a.txt:1-2",
+		"--from=virtual://docs/a.txt",
+		"ref=virtual://docs/a.txt",
+		"read",
+		"virtual://docs",
+		"ref=",
+		"read",
+		"@virtual://docs/a.txt",
+		"ref=",
+	];
+	assert_eq!(run.stdout.lines().collect::<Vec<_>>(), expected);
 }
 
 /// A provider directory that aliases a real one is a usable working directory
@@ -897,4 +1075,27 @@ async fn url_spawn_and_output_pumps_run_on_a_current_thread_runtime() {
 	.expect("a URL spawn and its output pump progress on the only runtime thread");
 	assert_eq!(run.status, Some(0), "{}", run.stderr);
 	assert!(run.stdout.ends_with("a.txt\nlate\n"), "{}", run.stdout);
+}
+
+/// `direnv exec` runs its command in the shell, not as a program of its own:
+/// the command it starts from an allowed `.envrc`'s environment still opens
+/// provider URLs, which no spawned process could.
+#[cfg(unix)]
+#[tokio::test]
+async fn direnv_exec_commands_open_provider_urls() {
+	let provider_root = tempfile::tempdir().expect("isolated provider filesystem");
+	fs::write(provider_root.path().join("a.txt"), b"alpha\n").expect("document");
+	let host = tempfile::tempdir().expect("host working directory");
+	fs::write(host.path().join(".envrc"), "export GREETING=hello\n").expect(".envrc");
+	let run = run_script(
+		provider(provider_root.path(), true),
+		Some(host.path()),
+		"export HOME=\"$PWD/home\" XDG_DATA_HOME=\"$PWD/data\" XDG_CONFIG_HOME=\"$PWD/config\" \
+		 XDG_CACHE_HOME=\"$PWD/cache\"\nunset DIRENV_DIFF DIRENV_DIR DIRENV_FILE DIRENV_WATCHES \
+		 DIRENV_CONFIG DIRENV_EXE_PATH\ndirenv allow && direnv exec . cat virtual://a.txt && direnv \
+		 exec . printenv GREETING",
+	)
+	.await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	assert_eq!(run.stdout, "alpha\nhello\n");
 }

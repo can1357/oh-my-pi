@@ -51,6 +51,7 @@ import type { GitLabDuoWorkflowOptions } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
+import type { KiroOptions } from "./providers/kiro/stream";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICodexResponsesOptions } from "./providers/openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
@@ -84,6 +85,7 @@ export interface ApiOptionsMap {
 	"google-generative-ai": GoogleOptions;
 	"google-gemini-cli": GoogleGeminiCliOptions;
 	"google-vertex": GoogleVertexOptions;
+	"kiro-api": KiroOptions;
 	"ollama-chat": OllamaChatOptions;
 	"cursor-agent": CursorOptions;
 	"factory-droid-agent": FactoryDroidOptions;
@@ -526,6 +528,11 @@ export interface StreamOptions {
 	 */
 	anthropicPrefixMismatchBehavior?: "drop_block" | "error";
 	/**
+	 * Leave other models' reasoning, which would replay as text, out of the
+	 * request. Anthropic Messages only; other providers ignore it.
+	 */
+	omitDemotedReasoning?: boolean;
+	/**
 	 * Anthropic on-demand compaction (`compact-2026-09-04` beta). Sends a
 	 * top-level `compaction: { type: "summarize", instructions? }` request; the
 	 * signed summary arrives as an {@link AnthropicCompactionPayload}.
@@ -629,6 +636,8 @@ export interface StreamOptions {
 	 * Providers can use this to persist transport/session state between turns.
 	 */
 	providerSessionState?: Map<string, ProviderSessionState>;
+	/** @internal Registry-scoped models.db for persistent unknown-model thinking probes. */
+	thinkingCapabilityDbPath?: string;
 	/**
 	 * Session a side request branches from, so it can read the parent's cached
 	 * prefix. Providers that keep per-conversation request controls (OpenAI
@@ -899,10 +908,16 @@ export type StreamFunction<TApi extends Api> = (
 	options: OptionsForApi<TApi>,
 ) => AssistantMessageEventStream;
 
+/**
+ * Responses API assistant message phase. `partial_answer` (Codex 0.162+) marks
+ * answer text that more output or tool calls may follow; `final_answer` ends the turn.
+ */
+export type AssistantMessagePhase = "commentary" | "final_answer" | "partial_answer";
+
 export interface TextSignatureV1 {
 	v: 1;
 	id: string;
-	phase?: "commentary" | "final_answer";
+	phase?: AssistantMessagePhase;
 }
 
 export interface TextContent {
@@ -1424,6 +1439,8 @@ export interface AssistantMessage {
 	providerPayload?: ProviderPayload;
 	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */
 	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
+	/** On a refusal: how many of other models' reasoning blocks the refused request replayed as text. */
+	demotedReasoningBlocks?: number;
 	timestamp: number; // Unix timestamp in milliseconds
 	duration?: number; // Request duration in milliseconds
 	ttft?: number; // Time to first token in milliseconds
@@ -1800,4 +1817,6 @@ export interface AnthropicFallbackCreditHandle {
 	expiresAt: number;
 	/** The refused response's content, in `AssistantMessage` block form. */
 	refusedContent?: AssistantMessage["content"];
+	/** How many of other models' reasoning blocks the refused request replayed as text. */
+	demotedReasoningBlocks?: number;
 }

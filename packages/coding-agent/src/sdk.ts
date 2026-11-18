@@ -1,6 +1,8 @@
 import * as path from "node:path";
-import { type CallRecord, ChangeJournal, callLabel } from "./commit/selective/journal";
+import { type CallRecord, ChangeJournal, callDetails } from "./commit/selective/journal";
 import { createCommitPrelude } from "./commit/selective/prelude-definition";
+import { cfgDisasmBackend } from "./disasm/active";
+import { createDsmPrelude, releaseDsmReferences } from "./disasm/prelude-definition";
 import {
 	Agent,
 	type AgentEvent,
@@ -38,7 +40,7 @@ import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { syncOpenAIResponsesHistoryTexts } from "@oh-my-pi/pi-ai/utils";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { $env } from "@oh-my-pi/pi-utils/env";
+import { $env, isInteractiveHost } from "@oh-my-pi/pi-utils/env";
 import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
@@ -156,6 +158,7 @@ import {
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionStateApi } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions, outRepliesActive } from "./internal-urls";
+import { onJudgeRejection } from "./judgment";
 import { stripXdUnderscorePrefix, stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { holdSharedLsp } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
@@ -252,12 +255,14 @@ import {
 import { describeUsageFallback } from "./session/retry-fallback-reason";
 import { kUsageLimitRequestProvider } from "./session/turn-recovery";
 import { getReadableCompactionEntry, getRestorableSessionModels } from "./session/session-context";
+import { completionRecord } from "./session/model-usage-journal";
 import { SessionManager } from "./session/session-manager";
 import { cfgOffline } from "./config/auxiliary-model-policy";
 import { SHAPE_RULE } from "./spotlight/shape";
 import { buildCallContext } from "./spotlight/context";
 import { type CalledToolShaper, shapeCalledTool } from "./spotlight";
 import {
+	accessDeniedNotice,
 	NO_CREDENTIAL_NOTICE,
 	SPOTLIGHT_INTENT_DESCRIPTION,
 	SPOTLIGHT_INTENT_GUIDANCE,
@@ -339,7 +344,6 @@ import {
 	warmupLspServers,
 	xdevEntries,
 } from "./tools";
-import { resolveYieldReportText } from "./tools/yield";
 import {
 	createModelJobCaptionWriter,
 	createModelJobWidgetAuthor,
@@ -441,6 +445,7 @@ import {
 	cfgTuiReactions,
 	cfgTuiAutoGraph,
 	cfgTuiRenderMermaid,
+	cfgTuiRenderEmbeds,
 	cfgTuiRenderSvg,
 } from "./modes/settings";
 import { cfgLspEnabled, cfgLspLazy, cfgLspShared } from "./lsp/settings";
@@ -465,6 +470,16 @@ const cfgToolCallSwitches = combine({
 	intentTracing: cfgToolsIntentTracing,
 	abortOnFabricatedResult: cfgToolsAbortOnFabricatedResult,
 });
+
+/**
+ * Whether tool calls carry {@link INTENT_FIELD}: an explicit `tools.intentTracing` (any settings layer
+ * or `PI_INTENT_TRACING`) wins; unset, it follows {@link isInteractiveHost} — on in the interactive TUI
+ * and its subagents, whose transcript and task progress show intents, off in print, RPC, ACP, and SDK
+ * processes, where the field only costs tokens.
+ */
+function intentTracingActive(settings: Settings): boolean {
+	return cfgToolsIntentTracing.isConfigured(settings) ? cfgToolsIntentTracing.get(settings) : isInteractiveHost();
+}
 
 /** Settings skill and file slash-command discovery reads (foreign sources gated by the provider lists). */
 const cfgSkillsAndCommandsDiscovery = combine({
@@ -661,8 +676,11 @@ export interface CreateAgentSessionOptions {
 	/** Raw model pattern(s) (e.g. from --model CLI flag) to resolve after extensions load.
 	 * Used when model lookup is deferred because extension-provided models aren't registered yet. */
 	modelPattern?: string | string[];
-	/** Authenticated fallback selector for deferred subagent model patterns. */
-	modelPatternAuthFallback?: string;
+	/**
+	 * Parent model selector a subagent falls back to when its deferred patterns
+	 * resolve to no model, or to one without credentials.
+	 */
+	modelPatternParentFallback?: string;
 	/** Role name used to install retry fallbacks after deferred subagent patterns resolve. */
 	modelPatternFallbackRole?: string;
 	/** Validated inherited retry chain for a deferred singleton pattern; empty explicitly disables fallbacks. */
@@ -2563,7 +2581,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	if (asyncJobManager) {
 		const usagePurpose =
 			(purpose: string): ModelJobWidgetAuthorOptions["onUsage"] =>
-			message => {
+			(message, userPrompt) => {
 				if (!message.usage) return;
 				sessionManager.appendModelUsage(
 					{
@@ -2574,6 +2592,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						usage: message.usage,
 						stopReason: message.stopReason,
 						errorMessage: message.errorMessage,
+						duration: message.duration,
+						ttft: message.ttft,
+						completion: completionRecord(userPrompt, message),
 					},
 					{ sessionId: sessionManager.getSessionId(), parentId: sessionManager.getLeafId() },
 				);
@@ -2761,6 +2782,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			emitBeforeSubagentSpawn: (event, signal) =>
 				session?.extensionRunner?.emitBeforeSubagentSpawn(event, signal) ?? Promise.resolve(undefined),
 			queueDeferredDiagnostics: entry => session?.yieldQueue.enqueue(LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE, entry),
+			openAsyncNotify: job => session?.openAsyncNotify(job) ?? (() => {}),
+			queueServiceNotify: entry => session?.queueServiceNotify(entry),
 			queueLaunchCompletion: notification =>
 				session?.queueLaunchCompletion(notification) ??
 				Promise.reject(new Error("Session unavailable for launch completion delivery")),
@@ -2794,14 +2817,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			setTodoPhases: phases => session.setTodoPhases(phases),
 			commitTodoPhases: phases => session.commitTodoPhases(phases),
 			getWorkPoolYieldItems: () => session?.getWorkPoolYieldItems() ?? [],
-			getLastAssistantText: () => session?.getLastAssistantText(),
-			getYieldReportText: toolCallId => resolveYieldReportText(session?.messages ?? [], toolCallId),
 			getToolCallIntent: toolCallId => resolveToolCallIntent(session?.messages ?? [], toolCallId),
 			getCallContext: (toolCallId, source) => {
 				const messages = session?.messages ?? [];
 				return buildCallContext(messages, toolCallId, source, resolveToolCallIntent(messages, toolCallId));
 			},
 			getContextMessages: () => convertToLlm(session?.messages ?? []),
+			noteEvalPreludeCall: name => session?.noteEvalPreludeCall(name),
 			setWorkPoolYieldItems: items => session.setWorkPoolYieldItems(items),
 			getCheckpointState: () => session.getCheckpointState(),
 			setCheckpointState: state => session.setCheckpointState(state ?? undefined),
@@ -2854,6 +2876,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let ratchetPrelude: EvalPreludeDefinition | undefined;
 		let archivePrelude: EvalPreludeDefinition | undefined;
 		let commitPrelude: EvalPreludeDefinition | undefined;
+		let dsmPrelude: EvalPreludeDefinition | undefined;
 		const getEvalPreludes = (): readonly EvalPreludeDefinition[] => {
 			if (restrictToolNames || !toolRegistry.has("eval") || !activeToolNames.has("eval")) return [];
 			const builtins: EvalPreludeDefinition[] = [];
@@ -2876,6 +2899,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (cfgCommitEnabled.get(settings)) {
 				commitPrelude ??= createCommitPrelude(toolSession);
 				builtins.push(commitPrelude);
+			}
+			if (cfgDisasmBackend.get(settings) !== undefined) {
+				dsmPrelude ??= createDsmPrelude(toolSession);
+				builtins.push(dsmPrelude);
 			}
 			return getEnabledEvalPreludes(builtins);
 		};
@@ -3541,11 +3568,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					selectedExplicitThinkingLevel = true;
 				}
 				let authFallbackUsed = false;
-				if (options.modelPatternAuthFallback) {
+				if (options.modelPatternParentFallback) {
 					const primaryKey = await modelRegistry.getApiKey(primary.model);
 					if (primaryKey !== kNoAuth && !isAuthenticated(primaryKey)) {
 						const fallback = parseModelPattern(
-							options.modelPatternAuthFallback,
+							options.modelPatternParentFallback,
 							resolutionModels,
 							matchPreferences,
 						);
@@ -3621,6 +3648,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const hint =
 					deferredModelPatterns.length === 1 ? providerModelHint(deferredModelPatterns[0], allEnabledModels) : "";
 				modelFallbackMessage = `Model ${requested} not found${hint ? `.${hint}` : ""}`;
+				// A subagent whose own patterns match nothing runs on its parent's model
+				// rather than starting with none; the message names the substitution.
+				const parentFallback = options.modelPatternParentFallback
+					? parseModelPattern(options.modelPatternParentFallback, availableModels, matchPreferences)
+					: undefined;
+				if (parentFallback?.model) {
+					model = parentFallback.model;
+					if (parentFallback.explicitThinkingLevel) restoredSessionThinkingLevel = parentFallback.thinkingLevel;
+					adoptThinkingForModel(parentFallback.model);
+					void prewarmModelConnection(parentFallback.model);
+					modelFallbackMessage += `. Using parent model ${parentFallback.model.provider}/${parentFallback.model.id}`;
+				}
 			}
 		}
 
@@ -4338,6 +4377,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			deferCompression: true,
 			compress: createSkillDescriptionCompressor(modelRegistry, settings, {
 				getCostGate: currentCostGate,
+				usageLedger: sessionManager,
 				getTelemetry: () =>
 					agent
 						? resolveTelemetry(agent.telemetry, agent.sessionId)
@@ -4567,7 +4607,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				skillsSettings: cfgSkills.get(settings),
 				inlineToolDescriptors,
 				nativeTools,
-				intentField: cfgToolsIntentTracing.get(settings) ? INTENT_FIELD : undefined,
+				intentField: intentTracingActive(settings) ? INTENT_FIELD : undefined,
 				// Spotlight ranks output against the call's intent: experiment sessions ask what each call's output is for.
 				intentGuidance: spotlightExperiment ? SPOTLIGHT_INTENT_GUIDANCE : undefined,
 				// task.eager steers the top-level agent only; subagents keep the model's own delegation policy.
@@ -4596,6 +4636,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				subagent: agentKind === "sub",
 				renderMermaid: tuiTranscript && cfgTuiRenderMermaid.get(settings),
 				renderSvg: tuiTranscript && cfgTuiRenderSvg.get(settings),
+				renderEmbeds: tuiTranscript && cfgTuiRenderEmbeds.get(settings),
 				autoGraph: tuiTranscript && cfgTuiAutoGraph.get(settings) !== "off",
 				reactions: agentKind === "main" && options.hasUI === true && cfgTuiReactions.get(settings),
 				encourageEdits: cfgEncourageEdits.get(settings),
@@ -4950,7 +4991,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return Promise.reject(new Error("Offline mode restricts model calls to the active session provider."));
 			}
 			return withCredentialRedaction(cfgSecretsEnabled.get(settings), () =>
-				settingsBoundStreamFn(streamModel, context, streamOptions),
+				settingsBoundStreamFn(streamModel, context, {
+					...streamOptions,
+					thinkingCapabilityDbPath: modelRegistry.modelsDbPath,
+				}),
 			);
 		};
 		// Primary-agent (and its auto-learn capture twin) provider options read per
@@ -5055,6 +5099,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					...streamOptions,
 					promptCacheKey: streamOptions?.promptCacheKey ?? session?.getPromptCacheKeyForModel(streamModel),
 					forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
+					omitDemotedReasoning: session?.omitsDemotedReasoning(streamModel) || streamOptions?.omitDemotedReasoning,
 				};
 				// The provider calls `onPayload` as it sends, past any wait for an in-flight
 				// slot: the prompt cache entry's lifetime starts there, not here.
@@ -5116,7 +5161,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			transformAssistantMessagePreservesToolCalls: true,
 			resolveFallbackTool: resolveDeviceTool,
 			suggestFallbackToolNames: suggestDeviceToolNames,
-			intentTracing: cfgToolsIntentTracing.get(settings),
+			intentTracing: intentTracingActive(settings),
 			intentDescription: spotlightExperiment ? SPOTLIGHT_INTENT_DESCRIPTION : undefined,
 			pruneToolDescriptions: resolveInlineToolDescriptors(),
 			// Per request against the model actually requested, so `tools.format`
@@ -5145,12 +5190,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		});
 		// Shell-like calls bound the windows in which scripts, formatters, and codegen changed
-		// files on this agent's behalf; selective commits match file mtimes against them.
+		// files on this agent's behalf; selective commits match file ctimes against them, and the
+		// paths their scripts name against deleted files.
 		const shellCalls = new Map<string, Omit<CallRecord, "type" | "agent" | "parent" | "end">>();
 		agent.subscribe(event => {
 			if (event.type === "tool_execution_start") {
 				if (event.toolName !== "bash" && event.toolName !== "eval") return;
-				shellCalls.set(event.toolCallId, { tool: event.toolName, start: Date.now(), label: callLabel(event.args) });
+				shellCalls.set(event.toolCallId, { tool: event.toolName, start: Date.now(), ...callDetails(event.args) });
 			} else if (event.type === "tool_execution_end") {
 				const call = shellCalls.get(event.toolCallId);
 				if (!call) return;
@@ -5238,6 +5284,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// their own configured tool slate, so a selected write is always full.
 			deviceOnlyWrite: undefined,
 			pendingFullWriteDescription: undefined,
+			// An advisor is a conversation of its own with no hidden-message channel: its preludes stay read-first.
+			noteEvalPreludeCall: undefined,
 			get cwd() {
 				return sessionManager.getCwd();
 			},
@@ -5257,6 +5305,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			queueLaunchCompletion: notification =>
 				session?.queueLaunchCompletion(notification) ??
 				Promise.reject(new Error("Session unavailable for launch completion delivery")),
+			// An advisor's job or service is not the primary's: its matches have no transcript to land in.
+			openAsyncNotify: undefined,
+			queueServiceNotify: undefined,
 			getAgentId: () => advisorAgent.id,
 			// The primary's availability signals are wrong for advisors: their tool
 			// slate is filtered separately at runtime (default read/grep/glob, no
@@ -5519,8 +5570,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// change callbacks, so start a fresh one there. Stale hashline tags would
 		// otherwise surface as "issued in this session" in mismatch diagnostics
 		// (#13370), and conflict ids, already-shown diagnostics and repeat-read
-		// counts would leak into the new conversation. The tools keep their state
-		// on THIS session, not the AgentSession's own lazy mention store.
+		// counts would leak into the new conversation. The tools and @file
+		// mentions keep their state on THIS session.
 		session.registerSessionChangeCallback(() => {
 			toolSession.state = new ToolConversationState();
 		});
@@ -5562,8 +5613,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Agent-level tool-call switches: the loop snapshots them per prompt run, so a
 		// change applies from the next run without splitting one response's schema/strip.
 		// The prompt listener above republishes the intent-field guidance.
-		cfgToolCallSwitches.listen(session, ({ intentTracing, abortOnFabricatedResult }) => {
-			agent.intentTracing = intentTracing;
+		cfgToolCallSwitches.listen(session, ({ abortOnFabricatedResult }) => {
+			agent.intentTracing = intentTracingActive(settings);
 			agent.abortOnFabricatedToolResult = abortOnFabricatedResult;
 		});
 		// Tool-gating settings add or remove the tools they gate and refresh the
@@ -5581,6 +5632,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// `find.enabled: auto` follows the judge role; a role change only touches
 			// the prompt when it actually adds or removes `find`.
 			cfgModelRoles.listen(session, () => reconcileGatedTools({ refreshPrompt: false }));
+			// A judge rejecting the account withdraws `find` (and its hints) once no native judge is left.
+			session.addDisposer(onJudgeRejection(modelRegistry, () => void reconcileGatedTools({ refreshPrompt: false })));
 		}
 		// Backfill the resumed advisor spend without blocking startup: the scan
 		// runs after the session is live, so `--resume` no longer scales with the
@@ -5591,6 +5644,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			session.registerSessionChangeCallback(() => spotlightExperiment.onSessionChange());
 			spotlightExperiment.client.onCredentialMissing = () =>
 				session.emitNotice("warning", NO_CREDENTIAL_NOTICE, SPOTLIGHT_NOTICE_SOURCE);
+			spotlightExperiment.client.onAccessDenied = reason =>
+				session.emitNotice("warning", accessDeniedNotice(reason), SPOTLIGHT_NOTICE_SOURCE);
 		}
 		// Extension factories normally register tools before session construction,
 		// but Pi-compatible extensions may discover them asynchronously from a
@@ -6020,8 +6075,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					restoreProviderToggles?.();
 					unsubscribeMcpNotifications?.();
 					unregisterMcpPostmortem?.();
-					for (const callback of disposeCallbacks) callback();
-					disposeCallbacks.clear();
+					try {
+						for (const callback of disposeCallbacks) callback();
+					} finally {
+						disposeCallbacks.clear();
+						await releaseDsmReferences(toolSession);
+					}
 					// Drop refs so the process-global postmortem list doesn't retain
 					// the bridge closure past explicit dispose.
 					unsubscribeMcpNotifications = undefined;

@@ -380,6 +380,8 @@ export class InputController {
 			this.ctx.ui.addInputListener(data => {
 				if (!this.ctx.focusedAgentId) return undefined;
 				if (!matchesKey(data, "left")) return undefined;
+				// An open overlay (the model picker's thinking slider) owns ←.
+				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
 				if (this.ctx.editor.getText().trim()) return undefined;
 				this.#handleFocusedLeftTap();
 				return { consume: true };
@@ -704,6 +706,8 @@ export class InputController {
 		this.ctx.editor.onSuspend = () => this.handleCtrlZ();
 		this.ctx.editor.setActionKeys("app.thinking.cycle", this.ctx.keybindings.getKeys("app.thinking.cycle"));
 		this.ctx.editor.onCycleThinkingLevel = () => {
+			// Shift+Tab, Tab's way back: from the composer to the ask waiting above it (Tern).
+			if (this.ctx.focusInlineAsk()) return;
 			hintUsage.record("effort");
 			this.cycleThinkingLevel();
 		};
@@ -1103,6 +1107,18 @@ export class InputController {
 			text = this.#compactDraftImages(text.trim());
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if ((!isSettingsInitialized() || cfgEmojiAutocomplete.get(settings)) && text) text = expandEmoticons(text);
+
+			// A `/btw` note the composer talks to takes plain drafts as its follow-ups (an empty
+			// Enter does nothing); commands and shell drafts run as usual.
+			if (
+				this.ctx.isBtwFocused &&
+				!text.startsWith("/") &&
+				!text.startsWith("!") &&
+				parsePythonCommandInput(text) === undefined
+			) {
+				if (text) await this.#submitBtwFollowUp(text);
+				return;
+			}
 
 			// Focused subagent session: the editor is a plain chat box for it.
 			// Everything below (slash/bash/python, loop,
@@ -1599,6 +1615,16 @@ export class InputController {
 		const args = invocation.args.trim();
 		await this.ctx.handleBtwCommand(question, undefined, args ? `/${command.name} ${args}` : `/${command.name}`);
 		return true;
+	}
+
+	/** Sends a draft (and its attachments) to the focused `/btw` note's topic; gives it back when none started. */
+	async #submitBtwFollowUp(text: string): Promise<void> {
+		const editor = this.ctx.editor;
+		const images = editor.pendingImages.length > 0 ? [...editor.pendingImages] : undefined;
+		const imageLinks = editor.pendingImageLinks.length > 0 ? [...editor.pendingImageLinks] : undefined;
+		editor.clearDraft();
+		if (await this.ctx.submitBtwFollowUp(text, images)) return;
+		restoreDetachedDraft(editor, text, images, imageLinks);
 	}
 
 	/** Put back a submission the editor reset on Enter, unless a newer draft took its place. */

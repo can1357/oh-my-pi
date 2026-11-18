@@ -56,7 +56,7 @@ fn spawn(real: bool, dir: &Path, rc: &str) -> Spawn {
 		.env("PS1", "%# ")
 		.env("RPS1", "[%?]")
 		.cwd(dir)
-		.rc_file(".zshrc", rc)
+		.rc_file(".zshrc", format!("{rc}\nprint -r -- RCDONE\n"))
 		.size(24, 80)
 }
 
@@ -71,8 +71,10 @@ fn keys(pty: &mut Pty, text: &str) -> io::Result<()> {
 fn same(name: &str, rc: &str, drive: &str) {
 	let dir = fixture(name);
 	let run = |pty: &mut Pty| -> io::Result<()> {
-		pty.settle(QUIET, TIMEOUT)?;
-		keys(pty, ". ~/.zshrc\r")?;
+		pty.wait_raw(TIMEOUT)?;
+		pty.type_keys(". ~/.zshrc\r", KEY)?;
+		pty.read_until("RCDONE", TIMEOUT)?;
+		pty.wait_raw(TIMEOUT)?;
 		keys(pty, "\x0c")?;
 		keys(pty, drive)
 	};

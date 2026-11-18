@@ -11,6 +11,7 @@ import {
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonCompletionNotification,
+	type DaemonNotifyNotification,
 	type DaemonOperation,
 	type DaemonRpcResult,
 	type DaemonWireMessage,
@@ -57,6 +58,11 @@ export interface DaemonBrokerClient {
 		owner: string,
 		sink: (notification: DaemonCompletionNotification) => Promise<void> | void,
 	): (options?: DaemonCompletionUnregisterOptions) => void;
+	/**
+	 * Receive the `notify` matches of daemons `owner` owns, as the broker sends them while this client
+	 * is connected. One sink per owner; returns its unregister.
+	 */
+	onNotify(owner: string, sink: (notification: DaemonNotifyNotification) => void): () => void;
 	/** Canonical project directory or synthetic directory identifying a global scope. */
 	readonly projectDir: string;
 	request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult>;
@@ -65,6 +71,9 @@ export interface DaemonBrokerClient {
 
 /** A request reached the broker and the broker rejected the operation. */
 export class DaemonBrokerRejectedError extends Error {}
+
+/** A request got no answer from the broker in time; the broker may still be carrying it out. */
+export class DaemonBrokerTimeoutError extends Error {}
 
 async function readOrCreateToken(runtimeDir: string): Promise<string> {
 	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
@@ -120,6 +129,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	readonly #idleGraceMs: number | undefined;
 	readonly #pending = new Map<string, PendingRequest>();
 	readonly #completionSinks = new Map<string, (notification: DaemonCompletionNotification) => Promise<void> | void>();
+	readonly #notifySinks = new Map<string, (notification: DaemonNotifyNotification) => void>();
 	readonly #completionUnsubscribes = new Set<string>();
 	readonly #preservedCompletionOwners = new Set<string>();
 	readonly #completionReplays = new Set<string>();
@@ -154,7 +164,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			if (!pending) return;
 			this.#pending.delete(id);
 			pending.removeAbort?.();
-			reject(new Error(`Daemon ${operation.op} request timed out`));
+			reject(new DaemonBrokerTimeoutError(`Daemon ${operation.op} request timed out`));
 		}, requestTimeoutMs(operation));
 		const pending: PendingRequest = { operation, resolve, reject, timer };
 		if (signal) {
@@ -188,6 +198,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				completionUnsubscribes,
 				completionReplays,
 				completionSubscriptionId: this.#completionSubscriptionId,
+				notifyEvents: true,
 				operation,
 			}),
 		);
@@ -208,6 +219,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#completionReconnectTimer = undefined;
 		this.#socket?.destroy();
 		this.#completionSinks.clear();
+		this.#notifySinks.clear();
 		this.#preservedCompletionOwners.clear();
 		this.#completionReplays.clear();
 		this.#socket = undefined;
@@ -236,6 +248,13 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				this.#completionReconnectTimer = undefined;
 			}
 			this.#publishCompletionOwners();
+		};
+	}
+
+	onNotify(owner: string, sink: (notification: DaemonNotifyNotification) => void): () => void {
+		this.#notifySinks.set(owner, sink);
+		return () => {
+			if (this.#notifySinks.get(owner) === sink) this.#notifySinks.delete(owner);
 		};
 	}
 
@@ -347,20 +366,18 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			message = parseDaemonWireMessage(decoded);
 		} catch (error) {
 			const parseError = toError(error);
-			if (
-				typeof decoded === "object" &&
-				decoded !== null &&
-				"event" in decoded &&
-				decoded.event === "daemon-completed"
-			) {
-				logger.warn("Ignoring malformed daemon completion", { error: parseError.message });
+			// An event this client cannot read (malformed, or a kind a newer broker
+			// added) is dropped: only a response settles a pending request.
+			if (typeof decoded === "object" && decoded !== null && "event" in decoded) {
+				logger.warn("Ignoring unreadable daemon event", { event: decoded.event, error: parseError.message });
 				return;
 			}
 			this.#rejectPending(parseError);
 			return;
 		}
 		if ("event" in message) {
-			void this.#deliverCompletion(message);
+			if (message.event === "daemon-completed") void this.#deliverCompletion(message);
+			else this.#deliverNotify(message);
 			return;
 		}
 		const response = message;
@@ -377,6 +394,18 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			pending.resolve(parseDaemonRpcResult(pending.operation, response.result));
 		} catch (error) {
 			pending.reject(toError(error));
+		}
+	}
+
+	#deliverNotify(message: DaemonNotifyNotification): void {
+		try {
+			this.#notifySinks.get(message.owner)?.(message);
+		} catch (error) {
+			logger.warn("Daemon notify sink failed", {
+				owner: message.owner,
+				daemon: message.daemon.name,
+				error: error instanceof Error ? error.message : String(error),
+			});
 		}
 	}
 

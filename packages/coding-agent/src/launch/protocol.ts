@@ -15,6 +15,9 @@ export { DAEMON_BROKER_WORKER_ARG } from "../cli/worker-selectors";
 export const DAEMON_PTY_COLUMNS = 120;
 export const DAEMON_PTY_ROWS = 40;
 
+/** Readiness and wait regexes match line anchors within accumulated process output. */
+export const DAEMON_OUTPUT_PATTERN_FLAGS = "mu";
+
 /** Environment key carrying the broker's canonical project or synthetic global scope directory. */
 export const DAEMON_PROJECT_DIR_ENV = "OMP_DAEMON_PROJECT_DIR";
 
@@ -70,7 +73,13 @@ export type DaemonOperation =
 /** Typed broker result decoded before it reaches tool code. */
 export type DaemonRpcResult =
 	| { op: "ping"; projectDir: string }
-	| { op: "start"; daemon: DaemonSnapshot; readyTimedOut: boolean }
+	| {
+			op: "start";
+			daemon: DaemonSnapshot;
+			readyTimedOut: boolean;
+			/** The broker matches the spec's `notify` regex; absent from a broker that predates it or without a regex. */
+			notifyArmed?: boolean;
+	  }
 	| { op: "list"; daemons: DaemonSnapshot[] }
 	| {
 			op: "logs";
@@ -104,6 +113,8 @@ export interface DaemonWireRequest {
 	completionUnsubscribes?: string[];
 	completionReplays?: string[];
 	completionSubscriptionId?: string;
+	/** This client reads {@link DaemonNotifyNotification}s; a broker never sends one to a socket that did not say so. */
+	notifyEvents?: boolean;
 	operation: DaemonOperation;
 }
 
@@ -118,7 +129,27 @@ export interface DaemonCompletionNotification {
 	daemon: DaemonSnapshot;
 }
 
-export type DaemonWireMessage = DaemonWireResponse | DaemonCompletionNotification;
+/**
+ * Unsolicited report of output lines matching a daemon's `notify` regex, sent
+ * to the socket that owns it. Best effort: sent only while that socket is
+ * connected, never queued or replayed.
+ */
+export interface DaemonNotifyNotification {
+	event: "daemon-notify";
+	owner: string;
+	/** The daemon as it was when the lines matched. */
+	daemon: DaemonSnapshot;
+	/** Source of the `notify` regex. */
+	pattern: string;
+	/** Matching lines, oldest first. */
+	lines: string[];
+	/** Matching lines of the batch left out of `lines`. */
+	omitted: number;
+	/** The daemon matched too often: this is its last report until it is started again. */
+	stopped: boolean;
+}
+
+export type DaemonWireMessage = DaemonWireResponse | DaemonCompletionNotification | DaemonNotifyNotification;
 
 function record(value: unknown, label: string): Record<string, unknown> {
 	if (!isRecord(value)) throw new Error(`${label} must be an object`);
@@ -225,6 +256,7 @@ export function parseDaemonSpec(value: unknown): DaemonSpec {
 		cwd: stringValue(source.cwd, "spec.cwd"),
 		pty: booleanValue(source.pty, "spec.pty"),
 		ready: source.ready === undefined ? undefined : readySpec(source.ready),
+		notify: optionalString(source.notify, "spec.notify"),
 		restart: restartPolicy(source.restart),
 		persist: booleanValue(source.persist, "spec.persist") || detached,
 		detached,
@@ -282,6 +314,8 @@ export function parseDaemonWireRequest(value: unknown): DaemonWireRequest {
 			source.completionSubscriptionId === undefined
 				? undefined
 				: stringValue(source.completionSubscriptionId, "request.completionSubscriptionId"),
+		notifyEvents:
+			source.notifyEvents === undefined ? undefined : booleanValue(source.notifyEvents, "request.notifyEvents"),
 		operation: parseDaemonOperation(source.operation),
 	};
 }
@@ -295,9 +329,20 @@ export function parseDaemonWireResponse(value: unknown): DaemonWireResponse {
 	throw new Error("response.ok must be a boolean");
 }
 
-/** Decode one broker response or unsolicited completion notification. */
+/** Decode one broker response or unsolicited notification. */
 export function parseDaemonWireMessage(value: unknown): DaemonWireMessage {
 	const source = record(value, "daemon message");
+	if (source.event === "daemon-notify") {
+		return {
+			event: "daemon-notify",
+			owner: stringValue(source.owner, "notify.owner"),
+			daemon: parseDaemonSnapshot(source.daemon),
+			pattern: stringValue(source.pattern, "notify.pattern"),
+			lines: stringArray(source.lines, "notify.lines"),
+			omitted: numberValue(source.omitted, "notify.omitted"),
+			stopped: booleanValue(source.stopped, "notify.stopped"),
+		};
+	}
 	if (source.event === "daemon-completed") {
 		return {
 			event: "daemon-completed",
@@ -393,6 +438,7 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 				op: "start",
 				daemon: parseDaemonSnapshot(source.daemon),
 				readyTimedOut: booleanValue(source.readyTimedOut, "result.readyTimedOut"),
+				notifyArmed: source.notifyArmed === true,
 			};
 		case "list": {
 			if (!Array.isArray(source.daemons)) throw new Error("result.daemons must be an array");

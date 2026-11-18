@@ -286,21 +286,22 @@ pub fn utf16_append(value: JsString<'_>, out: &mut Vec<u16>) -> Result<Range<usi
 		unsafe { sys::napi_get_value_string_utf16(raw.env, raw.value, ptr::null_mut(), 0, &mut len) };
 	napi::check_status!(status, "Failed to measure JavaScript string")?;
 
-	out.resize(start + len + 1, 0);
+	out.reserve(len + 1);
 	let mut written = 0;
-	// SAFETY: same string, and the tail from `start` holds the measured length
-	// plus the NUL slot Node-API writes.
+	// SAFETY: the spare capacity holds the measured length plus Node-API's
+	// NUL terminator. The initialized length remains unchanged on failure.
 	let status = unsafe {
 		sys::napi_get_value_string_utf16(
 			raw.env,
 			raw.value,
-			out[start..].as_mut_ptr(),
+			out.spare_capacity_mut().as_mut_ptr().cast(),
 			len + 1,
 			&mut written,
 		)
 	};
 	napi::check_status!(status, "Failed to read JavaScript string")?;
-	out.truncate(start + written);
+	// SAFETY: Node-API initialized `written` units after the original contents.
+	unsafe { out.set_len(start + written) };
 	Ok(start..out.len())
 }
 

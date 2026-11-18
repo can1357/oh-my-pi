@@ -16,6 +16,7 @@ rayon.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+xutf.workspace = true
 zstd.workspace = true
 
 # SmolLM2 runs on the GPU through candle's Metal backend on macOS; the

@@ -1,0 +1,68 @@
+Open, inspect, edit, and script binary analysis databases.
+
+The `dsm` object exists in JavaScript and Python Eval; it is not a standalone tool. `disassembler.backend` selects IDA or Ghidra.
+
+<instruction>
+- Bare `read <binary>` shows on-disk Mach-O/ELF/PE metadata only; it never opens an analysis database or downloads a backend.
+- Start analysis explicitly with `await dsm.open(path)` or a `read` analysis selector: `binary:overview`, `binary:<func|0xaddr>`, `binary:<func>:asm`, `:imports`, `:exports`, `:strings`, `:xrefs:<func|0xaddr>`.
+- Universal Mach-O: host architecture by default; `binary:@<arch>` selects a slice. Without a following analysis view, this still shows metadata only.
+- Ghidra may provision Ghidra, a JDK, PyGhidra, and native tools on first analysis. An installation-in-progress error means it continues; retry later.
+- `dsm.open(path)` accepts an executable, a universal slice reference, an existing IDA `.i64`/`.idb`, or a portable string returned by `db.handle()`; Ghidra project paths do not open in place.
+- Executables are analyzed in managed databases; source binaries are never modified. IDA `.i64`/`.idb` files open in place.
+- `dsm.list()` returns database descriptors with portable `handle` strings and live reference counts. `dsm.get(id)` attaches to an already-open database; omit `id` only when exactly one is open.
+- Every `open` or `get` owns one independent reference. `close()` releases only that reference; the final release closes the database. Child close/disposal cannot close another owner's live reference.
+- `db.handle()` returns a printable reference bound to this live database incarnation. Pass that exact string in a child's task/context; the child MUST `await dsm.open(handle)` and close its returned handle in `finally`. Keep the parent's reference until the children finish.
+- Portable handles route to the originating project on the same machine, even when a child's cwd/worktree differs. The selected backend must match; an expired handle never creates or reopens a database.
+- Databases appear in `omp ps` as `omp.ida.<id>` or `omp.ghidra.<id>`. Owner references are saved/released on session disposal or conversation/backend change; resumable children retain theirs until explicit close or disposal.
+- Handles expose `id`, `backend`, `ref`, `path`, and `info`. Closed references require another `dsm.open(path or handle)` or `dsm.get(id)`.
+
+JavaScript:
+```javascript
+const db = await dsm.open("./program");
+await dsm.list();
+const other = await dsm.get(db.id);
+await other.close();
+print(db.handle());                 // copy this exact string into child context
+await db.view("overview");
+await db.view("main");             // pseudocode
+await db.view("main:asm");
+await db.exec("functions('crypt|aes')", { timeout: 120 });
+await db.rename("sub_401000", "parse_header");
+await db.comment("parse_header", "Validates the frame header", { repeatable: true });
+await db.setType("parse_header", "int parse_header(const unsigned char *buf, unsigned long len)");
+await db.makeFunction("0x401000");
+await db.save();
+await db.close({ save: true });
+```
+
+Python uses the same methods except `set_type` and `make_function`; options are keyword arguments:
+```python
+db = await dsm.open("./program")
+c = await db.view("main")
+result = await db.exec("[(hex(ea), name) for ea, name in functions('crypt|aes')]", timeout=120)
+print(result["output"], result["value"], result["error"])
+await db.comment("main", "Entry point", repeatable=True)
+await db.close(save=True)
+```
+
+- `view()` defaults to `overview`; other values use the same suffix grammar as `read`. Reserved view names win over symbols; use an address for a same-named symbol.
+- `exec` always runs Python in the backend worker, even when called from JavaScript Eval. Its result is `{output, value, error}`: captured text, the last expression's Python repr (or null), and a traceback/interrupt message (or null).
+- The Python namespace persists per database and is shared across agents, not per handle. Reopening after idle-close resets it.
+- Both backends preload helpers accepting a name, `0x` string, or integer address:
+  - `resolve(t)`, `func(t)`, `name_of(ea)`
+  - `pseudocode(t)`, `asm(t)` → str
+  - `xrefs_to(t)`, `xrefs_from(t)` → dicts; `callers(t)`, `callees(t)` → names
+  - `functions(pattern)`, `strings(pattern)`, `imports(pattern)` → tuples (optional case-insensitive regex)
+  - `hexdump(t, size=64)`, `read_bytes(t, size)`
+  - `rename(t, name)`, `comment(t, text, repeatable=False)`, `set_type(t, decl)`, `make_function(t)`
+- IDA additionally preloads `db` (ida_domain Database), `ida_domain`, `ida_*`, `idautils`; `help_ida()` lists its helpers. `setType`/`set_type` accepts a C declaration.
+- Ghidra additionally preloads `program` / `currentProgram`, `project`, `flat`, `monitor`, `pyghidra`, `jpype`; `help_ghidra()` lists its helpers. Types are C prototypes at function entries and type expressions (`char[16]`, `uint32_t *`) elsewhere.
+- Default exec timeout is 120 s; an unresponsive worker is killed after cancellation. Ghidra pseudocode falls back to disassembly when its decompiler is unavailable.
+- Retained references pin against idle-close and LRU eviction; close every owned handle when done. `disassembler.maxOpen` bounds databases across both backends; unreferenced idle databases may be evicted or closed by `disassembler.idleCloseSec`.
+</instruction>
+
+<critical>
+- Ghidra exec database changes roll back on error or interruption; Python variables do not. IDA changes made before an exec failure remain.
+- Dirty databases autosave after ~10 s idle; `save()` forces it. `close()` requests saving by default; the final release honors any owner's save request. Unsaved changes are discarded only if every released reference chose `save: false`.
+- Orderly `omp ps stop` saves; a crash, forced kill, or unresponsive timeout loses changes since the last save.
+</critical>

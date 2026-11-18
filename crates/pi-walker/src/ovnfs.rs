@@ -46,11 +46,12 @@ pub(crate) async fn glob(
 	selector: &Selector,
 	opts: &GlobOptions,
 ) -> Option<Vec<GlobMatch>> {
-	// The daemon never follows links, cannot see a caller's stop flag, and
-	// descends into `node_modules` whenever the pattern names it; a zero
-	// depth is unlimited to it.
+	// The daemon never follows links, cannot see a caller's stop flag,
+	// descends into `node_modules` whenever the pattern names it, and always
+	// prunes `.git`; a zero depth is unlimited to it.
 	if opts.walk.follow_links
 		|| opts.walk.stop.is_some()
+		|| selector.mentions_git()
 		|| opts.walk.max_depth == Some(0)
 		|| (opts.include_node_modules == Some(false) && selector.mentions_node_modules())
 	{
@@ -258,6 +259,7 @@ async fn call<R: DeserializeOwned>(socket: &Path, dir: &Path, op: Op<'_>) -> Opt
 
 /// Without Unix sockets there is no daemon to ask.
 #[cfg(not(unix))]
+#[expect(clippy::unused_async, reason = "same signature as the Unix daemon call")]
 async fn call<R: DeserializeOwned>(_socket: &Path, _dir: &Path, _op: Op<'_>) -> Option<R> {
 	None
 }

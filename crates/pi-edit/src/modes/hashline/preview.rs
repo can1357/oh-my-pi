@@ -128,7 +128,7 @@ fn preview_section(
 	let mut result = PreviewFile { display: section.path.clone(), ..PreviewFile::default() };
 	let outcome = (|| {
 		let initial = files.resolve(&section.path, false)?;
-		let recovered = recover_target(section, &initial, files, store);
+		let recovered = recover_target(section, &initial, files, store)?;
 		let (target, resolved) = recovered
 			.as_ref()
 			.map_or((section, &initial), |(target, resolved)| (target, resolved));
@@ -175,13 +175,16 @@ fn preview_section(
 		if target.file_hash.is_none() {
 			return Err(mismatch(target, &read.canonical, &read.text, "", store));
 		}
-		let edits = if matches!(parsed.file_op, Some(FileOp::Rem)) {
-			&[][..]
-		} else {
-			parsed.edits.as_slice()
-		};
-		let applied =
-			apply_with_recovery(target, &read.canonical, &read.text, edits, clipboard, store, None)?;
+		// A `REM` section holds only bodyless `CUT`s, which still fill registers.
+		let applied = apply_with_recovery(
+			target,
+			&read.canonical,
+			&read.text,
+			&parsed.edits,
+			clipboard,
+			store,
+			None,
+		)?;
 		result.op = Some(if matches!(parsed.file_op, Some(FileOp::Rem)) {
 			EngineFileOp::Delete
 		} else {
@@ -191,7 +194,7 @@ fn preview_section(
 			Some(FileOp::Move { dest }) => Some(dest.clone()),
 			_ => None,
 		};
-		if applied.text == read.text {
+		if applied.text == read.text || matches!(parsed.file_op, Some(FileOp::Rem)) {
 			if parsed.file_op.is_some() {
 				result.diff = Some(String::new());
 				return Ok(());

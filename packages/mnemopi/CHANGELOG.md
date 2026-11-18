@@ -2,9 +2,17 @@
 
 ## [Unreleased]
 
+## [18.22.1] - 2026-11-17
+
+### Fixed
+
+- Fixed embedding requests failing when oversized inputs were clipped in the middle of an emoji or other Unicode character.
+
+## [18.21.0] - 2026-11-16
+
 ### Changed
 
-- File memory banks sync their WAL at checkpoints instead of on every commit (`synchronous=NORMAL`), cutting the disk syncs each turn makes on banks shared by every omp process ([#17973](https://github.com/can1357/oh-my-pi/pull/17973) by [@sjawhar](https://github.com/sjawhar))
+- Improved file memory bank performance by reducing unnecessary disk synchronization during checkpointing, lowering per-turn I/O overhead for banks shared across multiple processes.
 
 ## [18.20.3] - 2026-11-16
 

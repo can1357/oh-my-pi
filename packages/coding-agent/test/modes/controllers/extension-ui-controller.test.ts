@@ -8,6 +8,7 @@ import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
+import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { ExtensionUiController } from "../../../src/modes/controllers/extension-ui-controller";
 import { InputController } from "../../../src/modes/controllers/input-controller";
 import { getEditorTheme, getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
@@ -35,6 +36,7 @@ function makeHarness() {
 	const editor = new CustomEditor(getEditorTheme());
 	const editorContainer = new Container();
 	editorContainer.addChild(editor);
+	const askContainer = new Container();
 	const requestRender = vi.fn();
 	let focused: Component | null = editor;
 	editor.focused = true;
@@ -66,6 +68,7 @@ function makeHarness() {
 			terminal: { rows: 40, columns: 120 },
 		},
 		editorContainer,
+		askContainer,
 		sessionManager: { getCwd: () => process.cwd() },
 		session: {
 			agent,
@@ -97,6 +100,7 @@ function makeHarness() {
 		requestRender,
 		addAutocompleteProvider,
 		editorContainer,
+		askContainer,
 		getFocused,
 		setFocus,
 		showOverlay,
@@ -394,6 +398,67 @@ describe("ExtensionUiController form dialog", () => {
 		expect(await pending).toEqual({ data: { db: "postgres" } });
 		expect(harness.editor.getText()).toBe("half typed!");
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
+	});
+
+	describe("natively", () => {
+		beforeEach(() => setNativeRendering(true));
+		afterEach(() => setNativeRendering(false));
+		const act = (dialog: Component | null, name: string) => {
+			if (!(dialog instanceof HtmlFormDialog)) throw new Error("Expected the form dialog");
+			dialog.handleNativeEvent({ type: "action", key: "x", act: name, mods: [] });
+		};
+
+		it("waits inline above the composer with the keys; a draft there would skip it", async () => {
+			const harness = makeHarness();
+			const pending = harness.controller.showFormDialog(html);
+			const dialog = harness.getFocused();
+			expect(dialog).toBeInstanceOf(HtmlFormDialog);
+			expect(harness.askContainer.children).toEqual([dialog!]);
+			expect(harness.editorContainer.children).toEqual([harness.editor]);
+			expect(harness.controller.composerAsk()).toBe("pending");
+
+			// A click into the composer, then a message: sending it would skip the ask.
+			harness.setFocus(harness.editor);
+			harness.editor.setText("use the managed one");
+			expect(harness.controller.composerAsk()).toBe("skip");
+			harness.editor.setText("/model");
+			expect(harness.controller.composerAsk()).toBe("pending");
+
+			// A click on the card takes the keys back.
+			act(dialog, "pick:0:1");
+			expect(harness.getFocused()).toBe(dialog);
+			act(dialog, "submit");
+
+			expect(await pending).toEqual({ data: { db: "postgres" } });
+			expect(harness.askContainer.children).toEqual([]);
+			expect(harness.getFocused()).toBe(harness.editor);
+			expect(harness.controller.composerAsk()).toBeUndefined();
+		});
+
+		it("leaves the keys with a draft the user is typing when the form lands", async () => {
+			const harness = makeHarness();
+			harness.editor.setText("half typed");
+			const pending = harness.controller.showFormDialog(html);
+			expect(harness.getFocused()).toBe(harness.editor);
+			expect(harness.editorContainer.children).toEqual([harness.editor]);
+			expect(harness.controller.composerAsk()).toBe("skip");
+			expect(harness.controller.focusInlineAsk()).toBe(true);
+			harness.handleInput("\x1b");
+			expect(await pending).toBeUndefined();
+		});
+
+		it("reports what was answered when a message closes the form", async () => {
+			const harness = makeHarness();
+			const abort = new AbortController();
+			const onAbandon = vi.fn();
+			const pending = harness.controller.showFormDialog(html, { signal: abort.signal, onAbandon });
+			act(harness.getFocused(), "pick:0:1");
+			abort.abort();
+
+			expect(await pending).toBeUndefined();
+			expect(onAbandon).toHaveBeenCalledWith({ data: { db: "postgres" }, notes: [] });
+			expect(harness.askContainer.children).toEqual([]);
+		});
 	});
 
 	it("owns the composer for a form only while its draft guard holds the keyboard", async () => {

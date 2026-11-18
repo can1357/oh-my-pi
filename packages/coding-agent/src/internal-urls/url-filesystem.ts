@@ -16,6 +16,10 @@
  * skill directory everywhere (its instructions are `skill://<name>/SKILL.md`),
  * and a symlink whose target is a URL is followed through this filesystem
  * while `readlink` keeps its literal spelling.
+ *
+ * A URL ending in a read selector names what `read` shows for it: `:raw` is the
+ * entry itself, and a line selector (`:10-20`, `:raw:5`, `:-30`) is a read-only
+ * file holding exactly those lines. An existing entry spelled that way wins.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -32,6 +36,7 @@ import {
 } from "@oh-my-pi/pi-natives";
 import { isFsError } from "@oh-my-pi/pi-utils";
 import { resolveApproval, TIER_RANK } from "../tools/approval";
+import { type ParsedSelector, parseSel, resolveTailSelector } from "../tools/read-selector";
 import { cfgToolsApproval } from "../tools/settings";
 import { UrlContainmentError } from "./filesystem-resource";
 import { parseInternalUrl } from "./parse";
@@ -246,6 +251,32 @@ function childEntries(leaves: Iterable<string>, url: string): Map<string, ShellF
 		}
 	}
 	return entries;
+}
+
+/** A read selector naming lines of its resource, pinned to absolute lines or counted from the end. */
+type LineSelector = Extract<ParsedSelector, { kind: "lines" | "tail" }>;
+
+/**
+ * Bytes of the lines `selector` names in `bytes`, each with its terminator, in
+ * file order. Lines past the end select nothing, as `sed -n` prints nothing for them.
+ */
+function selectLines(bytes: Uint8Array, selector: LineSelector): Uint8Array {
+	const starts: number[] = [];
+	if (bytes.length > 0) {
+		starts.push(0);
+		for (let at = bytes.indexOf(10); at !== -1 && at + 1 < bytes.length; at = bytes.indexOf(10, at + 1)) {
+			starts.push(at + 1);
+		}
+	}
+	const resolved = resolveTailSelector(selector, starts.length);
+	if (resolved.kind !== "lines") return bytes;
+	const chunks: Uint8Array[] = [];
+	for (const { startLine, endLine } of resolved.ranges) {
+		if (startLine > starts.length) break;
+		const end = endLine === undefined || endLine >= starts.length ? bytes.length : starts[endLine];
+		chunks.push(bytes.subarray(starts[startLine - 1], end));
+	}
+	return chunks.length === 1 ? chunks[0] : Buffer.concat(chunks);
 }
 
 async function isHostDirectory(hostPath: string): Promise<boolean> {
@@ -748,6 +779,10 @@ export class InternalUrlFilesystem {
 		if (!isUrlPath(input)) return { kind: "native", path: input };
 		if (hops > MAX_SYMLINK_HOPS) throw new UrlFsError("ELOOP", `Too many levels of symbolic links: ${input}`);
 		const route = this.#route(input);
+		if (!create) {
+			const selected = await this.#selectedNode(route, input, follow, hops);
+			if (selected) return selected;
+		}
 		const { handler, spec } = route;
 		const target = parseUrlPath(input, spec);
 		const url = formatUrlPath(target);
@@ -799,6 +834,42 @@ export class InternalUrlFilesystem {
 		if (create) throw this.#readOnly({ url, spec });
 		// No backing file (agent://<id>/<json-path>) or a missing entry: the handler renders it or reports why not.
 		return this.#virtualNode(route, target, url);
+	}
+
+	/**
+	 * The node a URL ending in a read selector names: the selector-free URL's own
+	 * node for `:raw`, a read-only file of the selected lines for a line selector.
+	 * Undefined when `input` ends in neither, or spells an existing entry.
+	 */
+	async #selectedNode(route: Route, input: string, follow: boolean, hops: number): Promise<FsNode | undefined> {
+		const { path: bare, sel } = this.#router.split(input);
+		if (sel === undefined) return undefined;
+		let selector: ParsedSelector;
+		try {
+			selector = parseSel(sel);
+		} catch (error) {
+			throw new UrlFsError("EINVAL", error instanceof Error ? error.message : String(error));
+		}
+		if (selector.kind !== "raw" && selector.kind !== "lines" && selector.kind !== "tail") return undefined;
+		if (await this.#entryExists(route, input)) return undefined;
+		if (selector.kind === "raw") return this.#node(bare, follow, false, hops);
+		const node = await this.#node(bare, true, false, hops);
+		if (node.kind === "virtual" && node.directory) throw new UrlFsError("EISDIR", `Is a directory: ${node.url}`);
+		const bytes = node.kind === "virtual" ? node.bytes : await Bun.file(node.path).bytes();
+		return { kind: "virtual", url: input, spec: route.spec, directory: false, bytes: selectLines(bytes, selector) };
+	}
+
+	/** Whether a file-backed scheme holds an entry spelled exactly `input`. */
+	async #entryExists(route: Route, input: string): Promise<boolean> {
+		if (!route.handler?.locate || route.spec.backing !== "file") return false;
+		try {
+			const located = await this.#locate(route, formatUrlPath(parseUrlPath(input, route.spec)), false);
+			if (located === null) return false;
+			await fs.lstat(located);
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	/**

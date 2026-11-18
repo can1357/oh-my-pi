@@ -4,9 +4,11 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { FileLock, IpcConnection, IpcServer, Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
-import { isEnoent, isRecord, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, logger, postmortem, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
+import { compileNotifyPattern, type NotifyBatch, OutputNotifier } from "../async/notify";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
+import { TextTap } from "../job-widgets/text-tap";
 import { replaceFileWithRetry } from "../utils/atomic-file";
 import {
 	truncateHead,
@@ -26,11 +28,13 @@ import type { DaemonReadySpec, DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-t
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
+	DAEMON_OUTPUT_PATTERN_FLAGS,
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_PTY_COLUMNS,
 	DAEMON_PTY_ROWS,
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonCompletionNotification,
+	type DaemonNotifyNotification,
 	type DaemonOperation,
 	type DaemonRpcResult,
 	type DaemonSignal,
@@ -42,7 +46,6 @@ import {
 } from "./protocol";
 import { resolveDaemonSpawnOptions } from "./spawn-options";
 import { renderTerminalOutput } from "./terminal-output";
-import { quotePosixArgv } from "../utils/shell-quote";
 
 const DEFAULT_IDLE_GRACE_MS = 3_000;
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -107,7 +110,16 @@ interface ManagedDaemon {
 	portReady: boolean;
 	readinessBuffer: string;
 	outputOffset: number;
+	/** The detached-output read in flight; later reads queue behind it so no byte is tracked twice. */
+	detachedRead?: Promise<void>;
 	readyPattern?: RegExp;
+	/**
+	 * Reports output lines matching `spec.notify` to the owner. Armed per launch;
+	 * absent without a regex, once the launch ends, and once it matched too often.
+	 * `watching`: a loop reads a freshly launched detached daemon's log for it (see
+	 * `#watchNotify`).
+	 */
+	notify?: { tap: TextTap; notifier: OutputNotifier; watching: boolean };
 	restartTimer?: NodeJS.Timeout;
 	consecutiveFailures: number;
 	completionCapable: boolean;
@@ -424,6 +436,20 @@ function connectPort(host: string, port: number): Promise<boolean> {
 	return promise;
 }
 
+/**
+ * Hosts the port readiness probe tries: the configured one, else both loopbacks, since `localhost`
+ * servers (Vite, Node ≥17) may bind only `::1`.
+ */
+function readinessHosts(ready: DaemonReadySpec): readonly string[] {
+	return ready.host === undefined ? ["127.0.0.1", "::1"] : [ready.host];
+}
+
+/** The first of `hosts` where `port` accepts a connection. */
+async function listeningHost(hosts: readonly string[], port: number): Promise<string | undefined> {
+	const connected = await Promise.all(hosts.map(host => connectPort(host, port)));
+	return hosts[connected.indexOf(true)];
+}
+
 class DaemonBroker {
 	readonly #projectDir: string;
 	readonly #runtimeDir: string;
@@ -444,7 +470,15 @@ class DaemonBroker {
 	 */
 	readonly #startingNames = new Set<string>();
 	readonly #clients = new Set<IpcConnection>();
-	readonly #ownerSockets = new Map<string, { socket: IpcConnection; subscriptionId: string | undefined }>();
+	readonly #ownerSockets = new Map<
+		string,
+		{
+			socket: IpcConnection;
+			subscriptionId: string | undefined;
+			/** The client reads `daemon-notify` events; one that predates them would fail its pending requests on one. */
+			notifyEvents: boolean;
+		}
+	>();
 	readonly #completionSubscriptions = new Map<string, string | undefined>();
 	readonly #pendingCompletions = new Map<string, Map<string, DaemonCompletionNotification>>();
 	readonly #finished = Promise.withResolvers<void>();
@@ -499,6 +533,7 @@ class DaemonBroker {
 			// metadata. Retire this broker's generation so a late exit or readiness
 			// callback cannot settle the stale record over the new owner's metadata.
 			if (detached) record.generation++;
+			record.notify?.notifier.stop();
 			clearTimeout(record.restartTimer);
 			await record.log?.close();
 			await record.persistQueue;
@@ -606,10 +641,16 @@ class DaemonBroker {
 					this.#completionSubscriptions.set(owner, request.completionSubscriptionId);
 					await this.#setRecordCompletionCapability(owner, true);
 					const previous = this.#ownerSockets.get(owner);
+					// An owner coming back: what its detached services printed while nobody
+					// read their logs is read past while it is still unregistered, so it is
+					// not reported now.
+					if (previous?.socket !== socket) await this.#skipUnwatchedOutput(owner);
 					this.#ownerSockets.set(owner, {
 						socket,
 						subscriptionId: request.completionSubscriptionId,
+						notifyEvents: request.notifyEvents === true,
 					});
+					for (const record of this.#unwatchedNotify(owner)) this.#watchNotify(record);
 					if (previous?.socket === socket && !replayOwners.has(owner)) continue;
 					for (const completion of this.#pendingCompletions.get(owner)?.values() ?? []) {
 						socket.send(JSON.stringify(completion));
@@ -724,13 +765,24 @@ class DaemonBroker {
 			await existing?.log?.close();
 			if (spec.ready?.log) {
 				try {
-					new RegExp(spec.ready.log, "u");
+					new RegExp(spec.ready.log, DAEMON_OUTPUT_PATTERN_FLAGS);
 				} catch (error) {
 					throw new Error(`Invalid readiness regex: ${error instanceof Error ? error.message : String(error)}`);
 				}
 			}
+			if (spec.notify) compileNotifyPattern(spec.notify);
 			const stat = await fs.stat(spec.cwd);
 			if (!stat.isDirectory()) throw new Error(`Daemon cwd is not a directory: ${spec.cwd}`);
+			// A listener already on the port would satisfy the readiness probe before this
+			// daemon binds it (and the daemon itself then fails with "address in use").
+			if (spec.ready?.port !== undefined) {
+				const busy = await listeningHost(readinessHosts(spec.ready), spec.ready.port);
+				if (busy !== undefined) {
+					throw new Error(
+						`Port ${spec.ready.port} already accepts connections on ${busy} before ${spec.name} started; another process holds it, so ready.port cannot tell when ${spec.name} is ready. Stop that process or use another port.`,
+					);
+				}
+			}
 			const dir = path.join(this.#runtimeDir, "daemons", spec.name);
 			const now = Date.now();
 			record = {
@@ -755,7 +807,7 @@ class DaemonBroker {
 				portReady: spec.ready?.port === undefined,
 				readinessBuffer: "",
 				outputOffset: 0,
-				readyPattern: spec.ready?.log ? new RegExp(spec.ready.log, "u") : undefined,
+				readyPattern: spec.ready?.log ? new RegExp(spec.ready.log, DAEMON_OUTPUT_PATTERN_FLAGS) : undefined,
 				consecutiveFailures: 0,
 				persistQueue: Promise.resolve(),
 				completionCapable: owner !== undefined && this.#completionSubscriptions.has(owner),
@@ -783,7 +835,7 @@ class DaemonBroker {
 			readyTimedOut = !ready;
 		}
 		await record.persistQueue;
-		return { op: "start", daemon: record.snapshot, readyTimedOut };
+		return { op: "start", daemon: record.snapshot, readyTimedOut, notifyArmed: spec.notify !== undefined };
 	}
 
 	async #launch(record: ManagedDaemon): Promise<void> {
@@ -806,11 +858,14 @@ class DaemonBroker {
 		syncReadyPending(record);
 		record.readinessBuffer = "";
 		record.outputOffset = 0;
+		record.notify?.notifier.stop();
+		record.notify = this.#armNotify(record);
 		this.#persist(record);
 		try {
 			if (record.spec.detached) await this.#launchDetached(record, generation);
 			else if (record.spec.pty) await this.#launchPty(record, generation);
 			else this.#launchPipe(record, generation);
+			this.#watchNotify(record);
 			if (record.spec.ready?.port !== undefined) void this.#pollPort(record, generation, record.spec.ready);
 			this.#markReady(record);
 		} catch (error) {
@@ -868,23 +923,11 @@ class DaemonBroker {
 			}
 			started.resolve(Number.isSafeInteger(pid) && pid > 0 ? pid : undefined);
 		};
-		let run: Promise<PtyRunResult>;
-		if (process.platform === "win32") {
-			run = session.startArgv(
-				{
-					application: record.spec.application,
-					args: record.spec.args,
-					...options,
-				},
-				onChunk,
-				onStart,
-			);
-		} else {
-			const argv = [record.spec.application, ...record.spec.args];
-			const command = `exec ${quotePosixArgv(argv)}`;
-			const shell = procmgr.getShellConfig().shell;
-			run = session.start({ command, shell, ...options }, onChunk, onStart);
-		}
+		const run: Promise<PtyRunResult> = session.startArgv(
+			{ application: record.spec.application, args: record.spec.args, ...options },
+			onChunk,
+			onStart,
+		);
 		void run.then(
 			async result => {
 				await this.#onPtyExit(record, generation, result);
@@ -974,7 +1017,21 @@ class DaemonBroker {
 		this.#trackOutput(record, generation, sanitizeText(text));
 	}
 
-	async #readDetachedOutput(record: ManagedDaemon, generation: number): Promise<void> {
+	/**
+	 * Track what a detached daemon wrote since the last read. Reads run one at a
+	 * time: a poll overlapping a client request would otherwise both see the same
+	 * unread bytes and track them twice.
+	 */
+	#readDetachedOutput(record: ManagedDaemon, generation: number): Promise<void> {
+		if (!record.spec.detached || generation !== record.generation) return Promise.resolve();
+		const read = (record.detachedRead ?? Promise.resolve()).then(() =>
+			this.#readDetachedOutputOnce(record, generation),
+		);
+		record.detachedRead = read.catch(() => undefined);
+		return read;
+	}
+
+	async #readDetachedOutputOnce(record: ManagedDaemon, generation: number): Promise<void> {
 		if (!record.spec.detached || generation !== record.generation) return;
 		const logPath = path.join(record.dir, LOG_FILE);
 		let size: number;
@@ -1006,6 +1063,65 @@ class DaemonBroker {
 			}
 		}
 		this.#markReady(record);
+		// Output printed while the owner is away is read past, so it is neither
+		// reported nor counted against the notifier's allowance, and a line it cut
+		// short is not later joined to the next one.
+		if (record.notify) {
+			record.notify.tap.append(text);
+			if (this.#notifySocket(record)) record.notify.notifier.poll();
+			else record.notify.notifier.skip();
+		}
+	}
+
+	/**
+	 * The notifier for `record`'s new launch, or nothing without a `notify` regex.
+	 * A regex that does not compile (a spec recovered from disk) arms nothing:
+	 * the daemon itself still runs.
+	 */
+	#armNotify(record: ManagedDaemon): ManagedDaemon["notify"] {
+		const pattern = record.spec.notify;
+		if (pattern === undefined) return undefined;
+		try {
+			const tap = new TextTap("out", record.spec.name);
+			// A service has no deadline: without refill its matches stop after one burst per start.
+			const notifier = new OutputNotifier(
+				compileNotifyPattern(pattern),
+				tap,
+				batch => this.#publishNotify(record, pattern, batch),
+				{ refill: false },
+			);
+			return { tap, notifier, watching: false };
+		} catch (error) {
+			logger.warn("Daemon notify regex does not compile", {
+				name: record.spec.name,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return undefined;
+		}
+	}
+
+	/** The socket of `record`'s owner, when it is connected and reads notify events. */
+	#notifySocket(record: ManagedDaemon): IpcConnection | undefined {
+		const owner = record.snapshot.owner;
+		const registration = owner === undefined ? undefined : this.#ownerSockets.get(owner);
+		return registration?.notifyEvents && !registration.socket.closed ? registration.socket : undefined;
+	}
+
+	/** Send one batch of `record`'s matching output to its owner; dropped when the owner went away meanwhile. */
+	#publishNotify(record: ManagedDaemon, pattern: string, batch: NotifyBatch): void {
+		// A notifier that sent its last batch ignores further output.
+		if (batch.stopped) record.notify = undefined;
+		const owner = record.snapshot.owner;
+		const socket = this.#notifySocket(record);
+		if (owner === undefined || !socket) return;
+		const notification: DaemonNotifyNotification = {
+			event: "daemon-notify",
+			owner,
+			daemon: { ...record.snapshot },
+			pattern,
+			...batch,
+		};
+		socket.send(JSON.stringify(notification));
 	}
 
 	async #refreshDetached(record: ManagedDaemon): Promise<void> {
@@ -1018,6 +1134,31 @@ class DaemonBroker {
 		await this.#settle(record, generation);
 	}
 
+	/**
+	 * Resume a detached daemon recovered from an earlier broker. Its saved offset
+	 * lags what that broker read and reported, so the log is read up to its end
+	 * before `notify` is armed: the output there is not reported a second time.
+	 */
+	async #resumeDetached(record: ManagedDaemon): Promise<void> {
+		const generation = record.generation;
+		try {
+			await this.#readDetachedOutput(record, generation);
+		} catch (error) {
+			logger.warn("Failed to read recovered detached daemon output", {
+				name: record.snapshot.name,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		if (generation === record.generation && !settledState(record.snapshot.state)) {
+			record.notify = this.#armNotify(record);
+		}
+		await this.#monitorRecoveredDetached(record, generation);
+	}
+
+	/**
+	 * Poll a recovered detached daemon until it settles: no process handle reports
+	 * its exit. Each read also feeds its `notify` matches.
+	 */
 	async #monitorRecoveredDetached(record: ManagedDaemon, generation: number): Promise<void> {
 		while (!this.#shuttingDown && generation === record.generation && !settledState(record.snapshot.state)) {
 			await Bun.sleep(100);
@@ -1026,12 +1167,74 @@ class DaemonBroker {
 		}
 	}
 
+	/**
+	 * Read a freshly launched detached daemon's log every 100 ms while its owner can
+	 * receive its `notify` matches: the daemon writes the log itself, so nothing
+	 * else sees the lines as they land. The loop ends once the owner goes away or
+	 * the notices end; a returning owner starts it again (`#handleLine`). A
+	 * recovered daemon is read by {@link #monitorRecoveredDetached} instead.
+	 */
+	#watchNotify(record: ManagedDaemon): void {
+		const notify = record.notify;
+		if (!record.spec.detached || !record.process || !notify || notify.watching || !this.#notifySocket(record)) return;
+		notify.watching = true;
+		const generation = record.generation;
+		const watched = (): boolean =>
+			record.notify === notify &&
+			generation === record.generation &&
+			!this.#shuttingDown &&
+			!settledState(record.snapshot.state) &&
+			this.#notifySocket(record) !== undefined;
+		void (async () => {
+			try {
+				for (;;) {
+					await Bun.sleep(100);
+					if (!watched()) return;
+					await this.#refreshDetached(record);
+				}
+			} finally {
+				// Cleared in the same tick the loop decides to stop, so a returning owner restarts it.
+				notify.watching = false;
+			}
+		})().catch(error => {
+			logger.warn("Failed to read detached daemon output", {
+				name: record.snapshot.name,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+	}
+
+	/** Freshly launched detached daemons of `owner` with `notify` armed whose log no loop reads. */
+	#unwatchedNotify(owner: string): ManagedDaemon[] {
+		return [...this.#records.values()].filter(
+			record =>
+				record.snapshot.owner === owner &&
+				record.spec.detached &&
+				record.process !== undefined &&
+				record.notify?.watching === false,
+		);
+	}
+
+	/** Read past what `owner`'s unwatched detached daemons wrote; called while `owner` is unregistered, so nothing is reported. */
+	async #skipUnwatchedOutput(owner: string): Promise<void> {
+		await Promise.all(
+			this.#unwatchedNotify(owner).map(record =>
+				this.#readDetachedOutput(record, record.generation).catch(error => {
+					logger.warn("Failed to read detached daemon output", {
+						name: record.snapshot.name,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}),
+			),
+		);
+	}
+
 	async #pollPort(record: ManagedDaemon, generation: number, ready: DaemonReadySpec): Promise<void> {
-		const host = ready.host ?? "127.0.0.1";
+		const hosts = readinessHosts(ready);
 		const port = ready.port;
 		if (port === undefined) return;
 		while (generation === record.generation && !terminalState(record.snapshot.state)) {
-			if (await connectPort(host, port)) {
+			if ((await listeningHost(hosts, port)) !== undefined) {
 				record.portReady = true;
 				syncReadyPending(record);
 				this.#markReady(record);
@@ -1071,6 +1274,10 @@ class DaemonBroker {
 		await this.#readDetachedOutput(record, generation);
 		// The output read yields, so a concurrent refresh may settle this generation first.
 		if (generation !== record.generation || settledState(record.snapshot.state)) return;
+		// The exit notice carries no output: the last matches, the line the process left
+		// unterminated included, go out ahead of it. A stop already dropped them.
+		record.notify?.notifier.finish();
+		record.notify = undefined;
 		record.process = undefined;
 		record.input = undefined;
 		record.pty = undefined;
@@ -1202,7 +1409,7 @@ class DaemonBroker {
 		let pattern: RegExp | undefined;
 		if (operation.pattern) {
 			try {
-				pattern = new RegExp(operation.pattern, "u");
+				pattern = new RegExp(operation.pattern, DAEMON_OUTPUT_PATTERN_FLAGS);
 			} catch (error) {
 				throw new Error(`Invalid wait regex: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -1284,6 +1491,8 @@ class DaemonBroker {
 		await this.#refreshDetached(record);
 		if (terminalState(record.snapshot.state)) return;
 		record.stopRequested = true;
+		// A daemon being stopped reports nothing more, even while it shuts down.
+		record.notify?.notifier.stop();
 		if (record.restartTimer) {
 			clearTimeout(record.restartTimer);
 			record.restartTimer = undefined;
@@ -1472,7 +1681,7 @@ class DaemonBroker {
 					portReady: detached && (spec.ready?.port === undefined || snapshot.state === "ready"),
 					readinessBuffer: "",
 					outputOffset: detached ? snapshot.outputBytes : 0,
-					readyPattern: spec.ready?.log ? new RegExp(spec.ready.log, "u") : undefined,
+					readyPattern: spec.ready?.log ? new RegExp(spec.ready.log, DAEMON_OUTPUT_PATTERN_FLAGS) : undefined,
 					consecutiveFailures: 0,
 					persistQueue: Promise.resolve(),
 					// Legacy files are rewritten once into the split layout.
@@ -1487,7 +1696,9 @@ class DaemonBroker {
 						if ("pendingCompletions" in decoded && Array.isArray(decoded.pendingCompletions)) {
 							return decoded.pendingCompletions.map(value => {
 								const message = parseDaemonWireMessage(value);
-								if (!("event" in message)) throw new Error("Pending daemon completion is not an event");
+								if (!("event" in message) || message.event !== "daemon-completed") {
+									throw new Error("Pending daemon completion is not a completion event");
+								}
 								return message;
 							});
 						}
@@ -1529,7 +1740,7 @@ class DaemonBroker {
 					void this.#pollPort(record, record.generation, spec.ready);
 				}
 				if (detached) {
-					void this.#monitorRecoveredDetached(record, record.generation).catch(error => {
+					void this.#resumeDetached(record).catch(error => {
 						logger.warn("Failed to monitor recovered detached daemon", {
 							name: record.snapshot.name,
 							error: error instanceof Error ? error.message : String(error),

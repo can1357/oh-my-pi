@@ -150,39 +150,41 @@ fn check_apply(source: &str, case_name: &str, call: &Value) {
 			path: call["path"].as_str(),
 			on_empty_paste,
 		});
+	// The whole outcome in fixture shape, so a mismatch shows every field.
+	let outcome = match &result {
+		Ok(actual) => json!({ "expect": {
+			"text": actual.text,
+			"firstChangedLine": actual.first_changed_line,
+			"warnings": actual.warnings,
+		} }),
+		Err(error) => json!({ "error": error.to_string() }),
+	};
 	match (result, call["error"].as_str()) {
 		(Ok(actual), None) => {
 			let expected = &call["expect"];
-			assert_eq!(
-				actual.text,
-				expected["text"].as_str().expect("expected text"),
-				"{source}: {case_name}: applied text for {input:?}"
-			);
-			assert_eq!(
-				actual.first_changed_line.map(u64::from),
-				expected["firstChangedLine"].as_u64(),
-				"{source}: {case_name}: first changed line for {input:?}"
-			);
 			let expected_warnings = expected
 				.get("warnings")
 				.cloned()
 				.unwrap_or_else(|| json!([]));
-			assert_eq!(
-				json!(actual.warnings),
-				expected_warnings,
-				"{source}: {case_name}: apply warnings for {input:?}"
+			assert!(
+				actual.text == expected["text"].as_str().expect("expected text")
+					&& actual.first_changed_line.map(u64::from) == expected["firstChangedLine"].as_u64()
+					&& json!(actual.warnings) == expected_warnings,
+				"{source}: {case_name}: apply outcome for {input:?}\nactual: {outcome}"
 			);
 		},
-		(Err(error), Some(expected)) => assert_eq!(
-			error.to_string(),
-			legacy_error(expected),
-			"{source}: {case_name}: apply error for {input:?}"
+		(Err(error), Some(expected)) => assert!(
+			error.to_string() == legacy_error(expected),
+			"{source}: {case_name}: apply error for {input:?}\nactual: {outcome}"
 		),
-		(Err(error), None) => {
-			panic!("{source}: {case_name}: unexpected apply error for {input:?}: {error}")
+		(Err(_), None) => {
+			panic!("{source}: {case_name}: unexpected apply error for {input:?}\nactual: {outcome}")
 		},
-		(Ok(actual), Some(expected)) => {
-			panic!("{source}: {case_name}: expected apply error {expected:?}, got {:?}", actual.text)
+		(Ok(_), Some(expected)) => {
+			panic!(
+				"{source}: {case_name}: expected apply error {expected:?} for {input:?}\nactual: \
+				 {outcome}"
+			)
 		},
 	}
 }
@@ -194,6 +196,23 @@ fn legacy_parser_and_applier_cases_match_byte_for_byte() {
 	pi_ast::language::wasm_grammars::LUA.register(tree_sitter_lua::LANGUAGE.into());
 	let mut covered_names = 0_usize;
 	let mut calls = 0_usize;
+	// Every mismatch is collected, so one run reports all of them.
+	let mut failures = Vec::new();
+	let mut run = |check: &dyn Fn()| {
+		if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(check)) {
+			failures.push(
+				panic
+					.downcast_ref::<String>()
+					.cloned()
+					.or_else(|| {
+						panic
+							.downcast_ref::<&str>()
+							.map(|message| (*message).to_owned())
+					})
+					.unwrap_or_default(),
+			);
+		}
+	};
 	for fixture_name in FIXTURES {
 		let root = fixture(fixture_name);
 		let source = root["source"].as_str().expect("fixture source");
@@ -202,14 +221,20 @@ fn legacy_parser_and_applier_cases_match_byte_for_byte() {
 			let case_name = case["name"].as_str().expect("case name");
 			for call in case["parse"].as_array().into_iter().flatten() {
 				calls += 1;
-				check_parse(source, case_name, call);
+				run(&|| check_parse(source, case_name, call));
 			}
 			for call in case["apply"].as_array().into_iter().flatten() {
 				calls += 1;
-				check_apply(source, case_name, call);
+				run(&|| check_apply(source, case_name, call));
 			}
 		}
 	}
+	assert!(
+		failures.is_empty(),
+		"{} fixture call(s) failed:\n\n{}",
+		failures.len(),
+		failures.join("\n\n")
+	);
 	assert!(
 		covered_names >= 249,
 		"expected at least the assigned 249 named TS cases, found {covered_names}"
@@ -955,6 +980,129 @@ async fn block_cut_on_leading_go_statement_keeps_following_siblings() {
 }
 
 #[tokio::test]
+async fn block_ops_on_a_first_rust_attribute_or_doc_comment_cover_the_item() {
+	let source = "impl S {\n    #[inline]\n    fn f(&self) -> u32 {\n        1\n    }\n\n    fn \
+	              g(&self) {}\n}\n";
+	let put = Workspace::new(EditMode::Hashline);
+	put.write("x.rs", source);
+	let tag = put.snapshot("x.rs", source, None);
+	let args = json!({
+		"input": format!(
+			"[x.rs#{tag}]\nPUT 2*:\n+    #[inline]\n+    fn f(&self) -> u32 {{\n+        2\n+    }}"
+		)
+	});
+	let result = put
+		.apply_json(&args, &common::DiskWriter::default())
+		.await
+		.expect("replaces the attribute and the method it annotates");
+	assert_eq!(
+		put.read("x.rs").as_deref(),
+		Some(
+			"impl S {\n    #[inline]\n    fn f(&self) -> u32 {\n        2\n    }\n\n    fn g(&self) \
+			 {}\n}\n"
+		)
+	);
+	assert!(
+		result
+			.text
+			.contains("PUT 2*: → resolved lines 2-5 (4 lines)"),
+		"{}",
+		result.text
+	);
+
+	let documented = "/// Docs.\n#[derive(Debug)]\n#[serde(default)]\nstruct S {\n    x: \
+	                  u32,\n}\n\nfn next() {}\n";
+	let cut = Workspace::new(EditMode::Hashline);
+	cut.write("s.rs", documented);
+	let tag = cut.snapshot("s.rs", documented, None);
+	let args = json!({ "input": format!("[s.rs#{tag}]\nCUT 1*") });
+	let result = cut
+		.apply_json(&args, &common::DiskWriter::default())
+		.await
+		.expect("deletes the doc comment, the attributes and the struct they annotate");
+	assert_eq!(cut.read("s.rs").as_deref(), Some("\nfn next() {}\n"));
+	assert!(
+		result
+			.text
+			.contains("CUT 1* → resolved lines 1-6 (6 lines)"),
+		"{}",
+		result.text
+	);
+}
+
+#[tokio::test]
+async fn block_ops_refuse_a_rust_line_that_opens_no_item() {
+	let cases = [
+		("impl S {\n    fn f() {}\n    #[allow(dead_code)]\n}\n", "CUT 3*"),
+		("#![allow(dead_code)]\nfn f() {\n    work();\n}\n", "PUT 1*:\n+#![allow(unused)]"),
+		("impl S {\n    fn f() {}\n    /// Dangling docs.\n}\n", "CUT 3*"),
+		("//! Crate docs.\nfn f() {\n    work();\n}\n", "PUT 1*:\n+//! New docs."),
+		("// Note.\nfn f() {\n    work();\n}\n", "CUT 1*"),
+	];
+	for (source, op) in cases {
+		let workspace = Workspace::new(EditMode::Hashline);
+		workspace.write("x.rs", source);
+		let tag = workspace.snapshot("x.rs", source, None);
+		let error = workspace
+			.apply_json(
+				&json!({ "input": format!("[x.rs#{tag}]\n{op}") }),
+				&common::DiskWriter::default(),
+			)
+			.await
+			.expect_err("a line that annotates no following item is a single line");
+		assert!(error.to_string().contains("resolved a single-line block"), "{op}: {error}");
+		assert_eq!(workspace.read("x.rs").as_deref(), Some(source), "{op}");
+	}
+}
+
+/// `CUT 2*` on a later annotation of a Rust item: the refusal, after checking
+/// that the file is unchanged.
+async fn cut_later_rust_annotation(source: &str) -> String {
+	let workspace = Workspace::new(EditMode::Hashline);
+	workspace.write("x.rs", source);
+	let tag = workspace.snapshot("x.rs", source, None);
+	let error = workspace
+		.apply_json(
+			&json!({ "input": format!("[x.rs#{tag}]\nCUT 2*") }),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.expect_err("a later annotation of an item opens no block of its own")
+		.to_string();
+	assert_eq!(workspace.read("x.rs").as_deref(), Some(source));
+	error
+}
+
+#[tokio::test]
+async fn block_op_on_a_later_rust_attribute_points_at_the_first() {
+	let error =
+		cut_later_rust_annotation("/// Docs.\n#[derive(Debug)]\nstruct S {\n    x: u32,\n}\n").await;
+	assert!(error.contains("resolved a single-line block"), "{error}");
+	assert!(error.contains("begins at line 1 and ends at line 5"), "{error}");
+}
+
+#[tokio::test]
+async fn block_op_on_a_later_multi_line_rust_attribute_is_refused() {
+	let error = cut_later_rust_annotation(
+		"#[derive(Debug)]\n#[cfg_attr(\n    feature = \"serde\",\n    derive(Serialize)\n)]\nstruct \
+		 S {\n    x: u32,\n}\n",
+	)
+	.await;
+	assert!(error.contains("resolved a single-line block"), "{error}");
+	assert!(error.contains("begins at line 1 and ends at line 8"), "{error}");
+}
+
+#[tokio::test]
+async fn block_op_on_a_later_multi_line_rust_doc_comment_is_refused() {
+	let error = cut_later_rust_annotation(
+		"#[derive(Debug)]\n/**\n * Docs.\n */\nstruct S {\n    x: u32,\n}\n",
+	)
+	.await;
+	assert!(error.contains("resolved a single-line block"), "{error}");
+	assert!(error.contains("begins at line 1 and ends at line 7"), "{error}");
+}
+
+#[tokio::test]
 async fn seen_line_guard_rejects_hidden_anchors_and_accepts_seen_anchors() {
 	let root = fixture("parity_seen_line_guard.json");
 	assert_eq!(root["cases"].as_array().expect("seen line cases").len(), 15);
@@ -1335,24 +1483,18 @@ fn hashline_streaming_preview_cases_preserve_partial_and_final_contracts() {
 	let nested_tag = recovered.snapshot("nested/a.ts", text_a, None);
 	let batch =
 		preview_for(&recovered, format!("[a.ts#{nested_tag}]\nPUT 1-1:\n+const a = 99;"), false);
-	assert_eq!(batch.files.len(), 1, "{}", scenarios["path-recovery-stream"]);
-	assert!(batch.files[0].error.is_none());
-	assert!(
-		batch.files[0]
-			.diff
-			.as_deref()
-			.is_some_and(|diff| diff.contains("const a = 99;"))
-	);
+	assert!(batch.files.is_empty(), "{}", scenarios["path-recovery-stream"]);
 
 	let batch =
 		preview_for(&recovered, format!("[a.ts#{nested_tag}]\nPUT 1-1:\n+const a = 99;\n"), true);
 	assert_eq!(batch.files.len(), 1, "{}", scenarios["path-recovery-final"]);
-	assert!(batch.files[0].error.is_none());
 	assert!(
 		batch.files[0]
-			.diff
+			.error
 			.as_deref()
-			.is_some_and(|diff| diff.contains("const a = 99;"))
+			.is_some_and(|error| error.contains("File not found: a.ts. Hash #")),
+		"{}",
+		scenarios["path-recovery-final"]
 	);
 
 	let batch = preview_for(&recovered, "[missing.ts#FFFF]\nPUT 1-1:\n+x\n".into(), true);

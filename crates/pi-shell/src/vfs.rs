@@ -96,6 +96,7 @@ use crate::{
 		DirEntry, DirIter, File, FileKind, Fs, FsPending, FsPoll, OpenFlags, OsHandle, Stat,
 		fs::{Access, SeekFrom, StatKind, TempNode, TempPurpose},
 	},
+	mounts::Mounts,
 	sys::{StdFile, StdFs},
 };
 
@@ -112,14 +113,41 @@ const SYNTHETIC_DEV: u64 = u64::MAX;
 /// to operations every clone starts afterwards.
 #[derive(Clone)]
 pub struct VfsFs {
-	fs: Arc<RwLock<pi_vfs::Fs>>,
-	rt: Handle,
+	/// What operations run on: `installed` behind the session's mounts.
+	fs:        Arc<RwLock<pi_vfs::Fs>>,
+	/// The filesystem as [`VfsFs::set_filesystem`] gave it.
+	installed: Arc<RwLock<pi_vfs::Fs>>,
+	/// URL paths the session maps onto host entries (`urlmap`).
+	mounts:    Mounts,
+	rt:        Handle,
 }
 
 impl VfsFs {
 	/// Serve `fs`, running provider operations on `rt`.
 	pub fn new(fs: pi_vfs::Fs, rt: Handle) -> Self {
-		Self { fs: Arc::new(RwLock::new(fs)), rt }
+		Self::with_mounts(fs, rt, Mounts::default())
+	}
+
+	/// [`VfsFs::new`] with `mounts` in front of every filesystem it serves.
+	pub fn with_mounts(fs: pi_vfs::Fs, rt: Handle, mounts: Mounts) -> Self {
+		Self {
+			fs: Arc::new(RwLock::new(mounts.over(&fs))),
+			installed: Arc::new(RwLock::new(fs)),
+			mounts,
+			rt,
+		}
+	}
+
+	/// The session's URL mounts. After changing them, [`VfsFs::remount`].
+	pub const fn mounts(&self) -> &Mounts {
+		&self.mounts
+	}
+
+	/// Put the mounts as they are now in front of the installed filesystem,
+	/// for operations started from now on.
+	pub fn remount(&self) {
+		let installed = self.installed.read().clone();
+		*self.fs.write() = self.mounts.over(&installed);
 	}
 
 	/// The filesystem operations start on.
@@ -130,7 +158,8 @@ impl VfsFs {
 	/// Replace the filesystem for operations started from now on (operations
 	/// in flight keep the one they started with).
 	pub fn set_filesystem(&self, fs: pi_vfs::Fs) {
-		*self.fs.write() = fs;
+		*self.fs.write() = self.mounts.over(&fs);
+		*self.installed.write() = fs;
 	}
 
 	/// Whether `path` is a plain host object of the current filesystem
@@ -252,6 +281,19 @@ impl Fs for VfsFs {
 			path,
 			|| StdFs::default().realpath(path),
 			|fs, path| async move { Ok(os_bytes(fs.canonicalize(&path).await?.as_os_str())) },
+		)
+	}
+
+	fn backing_path(&mut self, path: &BStr) -> FsPoll<BString> {
+		self.route(
+			path,
+			|| FsPoll::Ready(Err(io::ErrorKind::Unsupported.into())),
+			|fs, path| async move {
+				let file = fs.backing_path(&path).await?;
+				file
+					.map(|file| os_bytes(file.as_os_str()))
+					.ok_or_else(|| io::ErrorKind::Unsupported.into())
+			},
 		)
 	}
 

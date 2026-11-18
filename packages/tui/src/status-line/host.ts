@@ -10,6 +10,13 @@ export interface StatusAccountIdentity {
 	email?: string;
 	projectId?: string;
 	orgId?: string;
+	/**
+	 * Durable credential row id, set when the identity is credential-scoped
+	 * rather than OAuth-scoped (an API-key account carries no email/account
+	 * identifiers to attribute by). Usage reports probed from stored rows
+	 * carry the matching `metadata.credentialId`.
+	 */
+	credentialId?: number;
 }
 
 /** Nested repository selected as the active workspace context. */

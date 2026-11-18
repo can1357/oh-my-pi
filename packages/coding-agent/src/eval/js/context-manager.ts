@@ -1,4 +1,6 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { MessageChannel, type MessagePort, receiveMessageOnPort } from "node:worker_threads";
 import { isRecord, logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
@@ -402,6 +404,11 @@ export async function runIfSnapshotMatches(options: {
 	}
 }
 
+/** Whether `sessionKey` has a retained, live JS worker. */
+export function hasLiveVmContext(sessionKey: string): boolean {
+	return sessions.get(sessionKey)?.state === "alive";
+}
+
 export async function resetVmContext(sessionKey: string): Promise<void> {
 	lostSessions.delete(sessionKey);
 	const session = sessions.get(sessionKey) ?? (await startingSessions.get(sessionKey)?.promise.catch(() => undefined));
@@ -455,7 +462,10 @@ export async function disposeVmContextsByOwner(ownerId: string, options?: Dispos
 		if (ownerIds.delete(ownerId) && ownerIds.size === 0) lostSessions.delete(sessionKey);
 	}
 	for (const session of toKill) {
-		if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
+		if (sessions.get(session.sessionKey) !== session) continue;
+		sessions.delete(session.sessionKey);
+		// The owner may return to this session id (switch back): its next cell must hear the VM state is gone.
+		lostSessions.set(session.sessionKey, new Set(session.ownerIds));
 	}
 	const started = await Promise.allSettled(startingToKill.map(starting => starting.promise));
 	for (const result of started) {
@@ -1018,12 +1028,23 @@ function spawnJsWorker(): JsEvalWorkerHandle {
 	return workerFactories.spawnWorker();
 }
 
+const SOURCE_WORKER_ENTRY = new URL("./worker-entry.ts", import.meta.url);
+
+/**
+ * Without a declared host (the CLI was not the process entry, e.g. an npm/nvm shim), source
+ * checkouts start `worker-entry.ts` directly. A bundled `dist/cli.js` has no such sibling, but this
+ * module is the CLI bundle itself, which dispatches the worker argv like the declared host.
+ */
+function bundledHostEntry(): string | null {
+	return fs.existsSync(fileURLToPath(SOURCE_WORKER_ENTRY)) ? null : fileURLToPath(import.meta.url);
+}
+
 function spawnBunWorker(): JsEvalWorkerHandle {
 	try {
-		const hostEntry = workerHostEntry();
+		const hostEntry = workerHostEntry() ?? bundledHostEntry();
 		const worker = hostEntry
 			? new Worker(hostEntry, { type: "module", argv: ["__omp_worker_js_eval"] })
-			: new Worker(new URL("./worker-entry.ts", import.meta.url).href, { type: "module" });
+			: new Worker(SOURCE_WORKER_ENTRY.href, { type: "module" });
 		const channel = new MessageChannel();
 		const outbox: WorkerOutboxMessage = { type: "outbox", port: channel.port2 };
 		worker.postMessage(outbox, [channel.port2]);

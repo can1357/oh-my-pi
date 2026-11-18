@@ -97,8 +97,8 @@ fn zsh_history_files_and_recording() {
 }
 
 /// An interactive bash: the tool's records nothing, `history -r/-w` fail,
-/// and it has no programmable completion (`compgen`, `complete`) or
-/// readline bindings (`bind`), as a bash built without readline.
+/// and it has no programmable completion (`complete`) or readline bindings
+/// (`bind`), as a bash built without readline; `compgen` still lists names.
 #[test]
 fn bash_history_and_completion() {
 	let src = "set -o history\necho a\nhistory -w /home/b; echo st=$?\nhistory -r /home/hist; echo \
@@ -111,9 +111,9 @@ fn bash_history_and_completion() {
 
 	let tool = home();
 	let ran = run(ModeId::Bash, Profile::Tool, &tool, true, src);
-	assert_eq!(ran.out, "a\nst=1\nst=1\nst=127\n");
+	assert_eq!(ran.out, "a\nst=1\nst=1\nxy\nst=127\n");
 	assert!(tool.read("/home/b").is_none());
-	for cmd in ["compgen", "complete", "bind"] {
+	for cmd in ["complete", "bind"] {
 		assert!(ran.err.contains(&format!("{cmd}: command not found")), "{}", ran.err);
 	}
 }

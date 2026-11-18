@@ -198,7 +198,8 @@ describe("github-cache db layer", () => {
 			kind: "issue",
 			number: 314,
 			includeComments: true,
-			payload: issuePayload(314, "old-body"),
+			// Closed, so the short revalidation window for open issues does not apply.
+			payload: { ...issuePayload(314, "old-body"), state: "CLOSED" },
 			rendered: "fourteen-days-old",
 			fetchedAt: fourteenDaysAgo,
 		});
@@ -326,6 +327,36 @@ describe("getOrFetchView (TTL semantics)", () => {
 		expect(result.status).toBe("fresh");
 		expect(result.rendered).toBe("cached");
 		expect(fetchFresh).not.toHaveBeenCalled();
+	});
+
+	it("revalidates an open PR within the soft TTL but serves a merged one from cache", async () => {
+		for (const state of ["OPEN", "MERGED"]) {
+			const fetchFresh = vi.fn(async () => ({
+				rendered: "live",
+				sourceUrl: undefined,
+				payload: { number: 60, state: "MERGED" },
+			}));
+			putCached({
+				repo: TEST_REPO,
+				kind: "pr",
+				number: 60,
+				includeComments: true,
+				payload: { number: 60, state },
+				rendered: "cached",
+				fetchedAt: Date.now() - 60_000, // within the default soft TTL
+			});
+			const result = await getOrFetchView({
+				repo: TEST_REPO,
+				kind: "pr",
+				number: 60,
+				includeComments: true,
+				fetchFresh,
+			});
+			expect({ state, rendered: result.rendered }).toEqual({
+				state,
+				rendered: state === "OPEN" ? "live" : "cached",
+			});
+		}
 	});
 
 	it("refreshes issue rows synchronously past soft TTL", async () => {

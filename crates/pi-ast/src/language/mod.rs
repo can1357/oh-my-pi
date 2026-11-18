@@ -484,6 +484,19 @@ impl SupportLang {
 		from_extension(path)
 	}
 
+	/// Whether a file whose name maps to `self` parses as `explicit` too, so
+	/// an explicit language keeps it: the same language, C under C++ or
+	/// Objective-C (`.h` is either), JavaScript under TypeScript, and either
+	/// under TSX.
+	pub fn parses_as(self, explicit: Self) -> bool {
+		use SupportLang::{C, Cpp, JavaScript, ObjC, Tsx, TypeScript};
+		self == explicit
+			|| matches!(
+				(self, explicit),
+				(C, Cpp | ObjC) | (JavaScript, TypeScript | Tsx) | (TypeScript, Tsx)
+			)
+	}
+
 	pub fn sorted_aliases() -> &'static [&'static str] {
 		&SORTED_ALIASES
 	}
@@ -501,6 +514,16 @@ impl SupportLang {
 impl fmt::Display for SupportLang {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		write!(f, "{self:?}")
+	}
+}
+
+/// A rule file's `language:` field: any alias [`SupportLang::from_alias`]
+/// accepts (`TypeScript`, `ts`, `rust`, …).
+impl<'de> serde::Deserialize<'de> for SupportLang {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let alias = <Cow<'de, str>>::deserialize(deserializer)?;
+		Self::from_alias(&alias)
+			.ok_or_else(|| serde::de::Error::custom(format!("unsupported language `{alias}`")))
 	}
 }
 

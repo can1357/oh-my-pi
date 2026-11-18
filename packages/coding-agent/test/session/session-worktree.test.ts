@@ -15,22 +15,24 @@ import {
 	removeSessionWorktree,
 	type SessionWorktreeState,
 	type WorktreeExitAction,
+	type WorktreeExitPolicy,
 } from "../../src/session/session-worktree";
 
 const clean: SessionWorktreeState = { dirty: false, moved: false, offBranch: false };
 
-const rows: [
-	name: string,
-	policy: "keep" | "ask" | "remove",
-	state: SessionWorktreeState,
-	expected: WorktreeExitAction,
-][] = [
+const rows: [name: string, policy: WorktreeExitPolicy, state: SessionWorktreeState, expected: WorktreeExitAction][] = [
 	["keep ignores state", "keep", { dirty: true, moved: true, offBranch: true }, "keep"],
 	["ask prompts even when clean", "ask", clean, "prompt"],
 	["remove removes a clean worktree", "remove", clean, "remove"],
 	["remove prompts when dirty", "remove", { ...clean, dirty: true }, "prompt"],
 	["remove prompts when the branch moved", "remove", { ...clean, moved: true }, "prompt"],
 	["remove prompts when HEAD left the branch", "remove", { ...clean, offBranch: true }, "prompt"],
+	[
+		"force removes without prompting whatever the state",
+		"force",
+		{ dirty: true, moved: true, offBranch: true },
+		"remove",
+	],
 ];
 
 describe("decideWorktreeExit", () => {
@@ -270,6 +272,26 @@ describe("session worktree helpers (real git)", () => {
 		expect(await removeExitWorktrees(plan)).toEqual([
 			`Removed worktree ${shortenPath(wt.path)}. Resuming opens in the directory you launch omp from; its commits are on branch ${branch}.`,
 		]);
+		expect(await exists(wt.path)).toBe(false);
+		expect(branchSha(repo, branch)).toBe(tip);
+	});
+
+	it("force-removes a dirty worktree without prompting, even after late edits, and keeps a moved branch", async () => {
+		const wt = await create();
+		await commitFile(wt.path, "work.txt");
+		const tip = git(wt.path, "rev-parse", "HEAD");
+		await Bun.write(path.join(wt.path, "dirty.txt"), "d\n");
+		const plan = await planWorktreeExit(
+			[wt],
+			"force",
+			async () => {
+				throw new Error("force must not prompt");
+			},
+			() => {},
+		);
+		expect(plan.map(p => p.worktree)).toEqual([wt]);
+		await Bun.write(path.join(wt.path, "dirty.txt"), "written during teardown\n");
+		expect(await removeExitWorktrees(plan)).toEqual([]);
 		expect(await exists(wt.path)).toBe(false);
 		expect(branchSha(repo, branch)).toBe(tip);
 	});
