@@ -2003,12 +2003,14 @@ const STASH_LOOKBACK = 64;
 /**
  * What the `git stash` commands that have succeeded by the time `command` runs (earlier in its `&&`
  * chain) saved in the repository and work tree `target` works on and still hold, or `undefined` for
- * none. `releases` counts the top-level commands anywhere in the command line that take saved work
- * back out of the stash (`pop`, `drop`, `clear`, `branch`, in any pipeline stage). A stash holds
- * its work only when every one of them is a link of its chain before it, known to have run first;
- * any other may run between it and `command`. When the line can run one the guard does not see
- * (`"unseen"`: a part it does not read, such as the first nested part where reading stops, or a
- * shell or `eval`), no stash counts.
+ * none. `releases` counts the top-level commands of the command line that take saved work back out
+ * of the stash (`pop`, `drop`, `clear`, `branch`, in any pipeline stage) and may run before
+ * `command` finishes: all but those in the later pipelines that wait for its pipeline, the rest of
+ * its and-or list and, unless `&` runs that list in the background, the rest of the line
+ * ({@link stashReleases}). A stash holds its work only when every one of them is a link of its
+ * chain before it, known to have run first; any other may run between it and `command`. When the
+ * line can run one the guard does not see (`"unseen"`: a part it does not read, such as the first
+ * nested part where reading stops, or a shell or `eval`, wherever it is), no stash counts.
  * Only stashes are visited, at most {@link STASH_LOOKBACK} of them.
  */
 function stashedBefore(
@@ -2288,9 +2290,10 @@ function killsHarness(command: ShellCommand, scope: GuardScope, budget: GuardPro
 // -- entry points ------------------------------------------------------------------------------------
 
 /**
- * The commands of a command line that take saved work back out of the stash (`git stash pop`,
- * `drop`, `clear`, `branch`; see {@link stashedBefore}): how many top-level ones it has, or
- * `"unseen"` when part of it can run one the guard does not see ({@link stashReleases}).
+ * The commands that take saved work back out of the stash (`git stash pop`, `drop`, `clear`,
+ * `branch`; see {@link stashedBefore}) that may run before a command finishes: how many top-level
+ * ones, or `"unseen"` when part of its command line can run one the guard does not see
+ * ({@link stashReleases}).
  */
 type StashReleases = number | "unseen";
 
@@ -2334,19 +2337,29 @@ const SHELL_CODE_RUNNERS: Record<string, true> = {
 };
 
 /**
- * The commands of `line` that take saved work back out of the stash ({@link releasesStash}), or
+ * The commands of `line` that take saved work back out of the stash ({@link releasesStash}): for
+ * each of its pipelines, by index, how many may run before it finishes, those in it or before it
+ * and those in the later pipelines that do not wait for it ({@link ShellLine.overlapFrom}). Or
  * `"unseen"` when one can run where the guard does not look: the line has a part it does not read
  * ({@link ShellLine.nested}), the first nested part where reading stops among them, or a command
  * that runs shell code ({@link SHELL_CODE_RUNNERS}).
  */
-function stashReleases(line: ShellLine, home: string): StashReleases {
+function stashReleases(line: ShellLine, home: string): readonly number[] | "unseen" {
 	if (line.nested) return "unseen";
-	let count = 0;
-	for (const command of line.pipelines.flat()) {
-		if (Object.hasOwn(SHELL_CODE_RUNNERS, command.argv[0])) return "unseen";
-		if (releasesStash(command, home)) count++;
+	const { pipelines, overlapFrom } = line;
+	// The releases in the pipelines before each index.
+	const before = [0];
+	for (const pipeline of pipelines) {
+		let count = before[before.length - 1];
+		for (const command of pipeline) {
+			if (Object.hasOwn(SHELL_CODE_RUNNERS, command.argv[0])) return "unseen";
+			if (releasesStash(command, home)) count++;
+		}
+		before.push(count);
 	}
-	return count;
+	const total = before[pipelines.length];
+	// All but those from the next pipeline up to the first that may start before it finishes.
+	return pipelines.map((_, index) => total - before[overlapFrom[index] ?? pipelines.length] + before[index + 1]);
 }
 
 /**
@@ -2396,7 +2409,7 @@ function pipelineProbes(
 		budget.results.set(key, kept);
 	}
 	const results = kept;
-	let probed: { line: ShellLine; releases: StashReleases } | undefined;
+	let probed: { line: ShellLine; releases: readonly number[] | "unseen" } | undefined;
 	return index => {
 		if (results.has(index)) return results.get(index);
 		if (!probed) {
@@ -2404,8 +2417,9 @@ function pipelineProbes(
 			probed = { line: read, releases: stashReleases(read, scope.home) };
 		}
 		let found: GuardHit | undefined;
+		const releases = probed.releases === "unseen" ? "unseen" : probed.releases[index];
 		for (const simple of probed.line.pipelines[index]) {
-			found = discardChanges(simple, scope, budget, probed.releases) ?? killsHarness(simple, scope, budget);
+			found = discardChanges(simple, scope, budget, releases) ?? killsHarness(simple, scope, budget);
 			if (found) break;
 		}
 		results.set(index, found);

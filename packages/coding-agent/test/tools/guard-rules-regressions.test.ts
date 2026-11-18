@@ -1300,6 +1300,32 @@ describe("guard rule review regressions", () => {
 		}
 	});
 
+	it("keeps crediting a stash past a release that can run only after the discard", async () => {
+		await dirtyRepo(cwd);
+		for (const command of [
+			"git stash && git reset --hard && git stash pop",
+			"git stash && git reset --hard; git stash pop",
+			"git stash && git reset --hard\ngit stash pop",
+			"git stash && git reset --hard || git stash pop",
+			// A list run in the background still runs its own pipelines in order.
+			"git stash && git reset --hard && git stash pop &",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: undefined });
+		}
+		// One that may run first: before the discard, beside it in its pipeline, anywhere after a list
+		// `&` runs in the background, or in a part the guard does not read.
+		for (const command of [
+			"git stash pop & git stash && git reset --hard",
+			"git stash && git stash pop && git reset --hard",
+			"git stash && { git stash pop; } ; git reset --hard",
+			"git stash && git reset --hard & git stash pop",
+			"git stash && git reset --hard & true; git stash pop",
+			"git stash && git reset --hard | git stash pop",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "discard_changes" });
+		}
+	});
+
 	it("keeps a stash after an `||` earlier in the list, and one run elsewhere in the same work tree", async () => {
 		await dirtyRepo(cwd);
 		fs.mkdirSync(path.join(cwd, "sub"));

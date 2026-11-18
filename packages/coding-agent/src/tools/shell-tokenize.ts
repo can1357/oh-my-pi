@@ -1050,6 +1050,12 @@ export interface ShellLine {
 	 */
 	pipelines: ShellCommand[][];
 	/**
+	 * For each pipeline, by index, the first later one that may start before it finishes, from
+	 * which on the rest of the line may run while it does: the first after its and-or list when `&`
+	 * runs that list in the background. `undefined` when every later pipeline waits for it.
+	 */
+	overlapFrom: (number | undefined)[];
+	/**
 	 * Whether it has a part the guard does not read as commands, where commands can run unseen: a
 	 * nested part, where reading stops ({@link nestedAt}: a substitution, any `(`, a heredoc), a
 	 * compound command or function definition, or an `env -S` string.
@@ -1815,11 +1821,15 @@ function shellCommand(
  * `{ }`, `if`, loop or `case`, or an `eval` or `source`, each of which can change the directory, the
  * directory is unknown. It is a tokenizer, not a shell: variables other than a leading `$HOME`,
  * aliases, and calls to functions are not followed. Also tracks which commands are known to have
- * succeeded before each one ({@link ShellCommand.succeeded}), and whether the line has a part it
- * does not read ({@link ShellLine.nested}).
+ * succeeded before each one ({@link ShellCommand.succeeded}), which later pipelines wait for each
+ * one to finish ({@link ShellLine.overlapFrom}), and whether the line has a part it does not read
+ * ({@link ShellLine.nested}).
  */
 export function parseShellCommands(command: string, scope: ShellScope): ShellLine {
 	const pipelines: ShellCommand[][] = [];
+	const overlapFrom: (number | undefined)[] = [];
+	// The first pipeline of the current and-or list.
+	let listStart = 0;
 	let dirs: ShellDirectories = { cwd: boundedDirectory(scope.cwd), previous: undefined, stack: undefined };
 	const done = new SucceededCommands();
 	let nested = false;
@@ -1873,6 +1883,11 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellLin
 		changesShell = false;
 		negated = false;
 	};
+	// An and-or list ended; `&` runs it in the background, so what comes after it can start before it
+	// finishes.
+	const endList = (background: boolean) => {
+		for (; listStart < pipelines.length; listStart++) overlapFrom.push(background ? pipelines.length : undefined);
+	};
 	const { tokens, cut } = lexCommandLine(command);
 	for (const token of tokens) {
 		if (token.operator && token.text === "\n" && continued) continue;
@@ -1923,10 +1938,12 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellLin
 			if (!Object.hasOwn(SHELL_PIPES, op)) {
 				endPipeline();
 				done.operator(op);
+				if (op !== "&&" && op !== "||") endList(op === "&");
 			}
 		}
 	}
 	if (!cut) endStage();
 	endPipeline();
-	return { pipelines, nested: nested || cut };
+	endList(false);
+	return { pipelines, overlapFrom, nested: nested || cut };
 }
