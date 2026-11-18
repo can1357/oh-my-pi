@@ -725,35 +725,38 @@ describe("LoopWatchdog with the JSC sampler", () => {
 			// another test file left running would keep it sampling: run in a fresh process.
 			const watchdogModule = Bun.resolveSync("@oh-my-pi/pi-tui/loop-watchdog", import.meta.dir);
 			const script = [
-				'import * as jsc from "bun:jsc";',
-				'import { spyOn } from "bun:test";',
+				'import { samplingProfilerStackTraces } from "bun:jsc";',
 				`import { LoopWatchdog } from ${JSON.stringify(watchdogModule)};`,
 				blockLoopInSamplerProbe.toString(),
-				'const startProfiler = spyOn(jsc, "startSamplingProfiler");',
-				'const pauseProfiler = spyOn(jsc, "profile");',
+				// Bounded, so a profiler that never records fails the test instead of hanging the child.
+				"function recordsWhileBlocking() {",
+				"	for (let i = 0; i < 100; i++) {",
+				"		blockLoopInSamplerProbe(10);",
+				"		if (samplingProfilerStackTraces().traces.length > 0) return true;",
+				"	}",
+				"	return false;",
+				"}",
 				"const schedule = () => ({});",
 				"const first = new LoopWatchdog({ schedule });",
 				"const second = new LoopWatchdog({ schedule });",
 				"first.start();",
 				"second.start();",
-				"const startsForTwo = startProfiler.mock.calls.length;",
 				"first.stop();",
-				"const pausesAfterFirstStop = pauseProfiler.mock.calls.length;",
+				"const recordsWhileSecondRuns = recordsWhileBlocking();",
 				"second.stop();",
-				"const pausesAfterLastStop = pauseProfiler.mock.calls.length;",
 				// A sample left in the buffer keeps the functions on its stack from being collected.
 				"blockLoopInSamplerProbe(50);",
-				"const samplesAfterLastStop = jsc.samplingProfilerStackTraces().traces.length;",
+				"const samplesAfterLastStop = samplingProfilerStackTraces().traces.length;",
 				"first.start();",
-				"const startsAfterRestart = startProfiler.mock.calls.length;",
-				// A paused profiler records again once restarted.
-				"while (jsc.samplingProfilerStackTraces().traces.length === 0) blockLoopInSamplerProbe(10);",
+				"const recordsAfterRestart = recordsWhileBlocking();",
 				"first.stop();",
-				"process.stdout.write(JSON.stringify({ startsForTwo, pausesAfterFirstStop, pausesAfterLastStop, samplesAfterLastStop, startsAfterRestart }));",
+				"process.stdout.write(JSON.stringify({ recordsWhileSecondRuns, samplesAfterLastStop, recordsAfterRestart }));",
 			].join("\n");
 			const proc = Bun.spawn([process.execPath, "--no-env-file", "--no-install", "--eval", script], {
 				stdout: "pipe",
 				stderr: "pipe",
+				timeout: 4_000,
+				killSignal: "SIGKILL",
 			});
 			const [stdout, stderr, exitCode] = await Promise.all([
 				new Response(proc.stdout).text(),
@@ -763,11 +766,9 @@ describe("LoopWatchdog with the JSC sampler", () => {
 
 			expect(exitCode, stderr).toBe(0);
 			expect(JSON.parse(stdout)).toEqual({
-				startsForTwo: 1,
-				pausesAfterFirstStop: 0,
-				pausesAfterLastStop: 1,
+				recordsWhileSecondRuns: true,
 				samplesAfterLastStop: 0,
-				startsAfterRestart: 2,
+				recordsAfterRestart: true,
 			});
 		},
 	);
