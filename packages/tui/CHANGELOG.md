@@ -22,6 +22,7 @@
 - Fixed long tool-approval prompts in Tern growing past the window and pushing the choices and Approve/Deny buttons off screen; the details now scroll within a few rows, as in the terminal view ([#19617](https://github.com/can1357/oh-my-pi/pull/19617) by [@c-w-z](https://github.com/c-w-z))
 - Table charts read `402.7 → 13.3 µs` with the unit on both sides; the change factor was off by the unit's scale (30,278,195× instead of 30×)
 - Enter on a checkbox group with nothing checked checks the focused box before moving on
+- Ask forms open each question on its preselected answer (at start, Tab/Enter to the next question, ←/→ between questions), so Enter accepts the recommendation instead of replacing it with the first option ([#19657](https://github.com/can1357/oh-my-pi/issues/19657))
 
 ## [18.22.2] - 2026-11-18
 
