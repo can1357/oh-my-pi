@@ -5,7 +5,12 @@
 ### Fixed
 
 - Fixed the Spotlight headline's holdout baseline mixing results plain showed whole with results plain truncated, whose cuts get fetched beyond plain's page anyway ([#19380](https://github.com/can1357/oh-my-pi/pull/19380) by [@Xytronix](https://github.com/Xytronix))
-- The stats Gain tab counts the context snapcompact compactions free, beside imaged tool results, so sessions that compact with snapcompact no longer show zero savings; the first sync after upgrading re-reads transcripts written since 2026-08-20 once to fill in that history ([#19120](https://github.com/can1357/oh-my-pi/pull/19120) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.22.1] - 2026-11-17
+
+### Fixed
+
+- Fixed the Gain tab undercounting savings for sessions that use snapcompact context compaction, including backfilling recent compaction history after upgrading.
 
 ## [18.20.1] - 2026-11-14
 
