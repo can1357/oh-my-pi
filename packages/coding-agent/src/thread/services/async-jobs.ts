@@ -241,6 +241,8 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 		isJobResultConsumed: (manager, jobId) => manager.isJobResultConsumed(jobId),
 		cancelAll: (manager, filter, reason) => manager.cancelAll(filter, fromWireReason(reason)),
 		evictCompletedJobs: (manager, filter) => manager.evictCompletedJobs(filter),
+		getEvictedJob: (manager, id, filter) => manager.getEvictedJob(id, filter),
+		getEvictedJobs: (manager, filter) => manager.getEvictedJobs(filter),
 		waitForAll: manager => manager.waitForAll(),
 		registerDeliverySink: (manager, ownerId, sink) =>
 			cleanups.track(

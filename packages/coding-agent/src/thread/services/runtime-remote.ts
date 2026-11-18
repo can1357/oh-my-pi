@@ -46,10 +46,9 @@ export type EventBusProtocol = {
 /** Protocol of kind {@link ARTIFACT_MANAGER_KIND}. */
 export type ArtifactManagerProtocol = {
 	dir: RpcMethod<[], string>;
-	allocateId: RpcMethod<[], number>;
-	allocatePath: RpcMethod<[toolType: string], { id: string; path: string }>;
+	sessionDir: RpcMethod<[], string | null>;
+	allocatePath: RpcMethod<[], { id: string; path: string }>;
 	exists: RpcMethod<[id: string], boolean>;
-	listFiles: RpcMethod<[], string[]>;
 	getPath: RpcMethod<[id: string], string | null>;
 };
 
@@ -237,6 +236,7 @@ export class RemoteEventBus extends EventBus {
 export class RemoteArtifactManager implements ArtifactManagerApi {
 	readonly #remote: RemoteObject<ArtifactManagerProtocol>;
 	#dir: string | undefined;
+	#sessionDir: string | null | undefined;
 
 	constructor(remote: RemoteObject<ArtifactManagerProtocol>) {
 		this.#remote = remote;
@@ -247,26 +247,23 @@ export class RemoteArtifactManager implements ArtifactManagerApi {
 		return this.#dir;
 	}
 
-	allocateId(): number {
-		return this.#remote.callSync("allocateId");
+	get sessionDir(): string | null {
+		if (this.#sessionDir === undefined) this.#sessionDir = this.#remote.callSync("sessionDir");
+		return this.#sessionDir;
 	}
 
-	allocatePath(toolType: string): Promise<{ id: string; path: string }> {
-		return this.#remote.call("allocatePath", toolType);
+	allocatePath(): Promise<{ id: string; path: string }> {
+		return this.#remote.call("allocatePath");
 	}
 
-	async save(content: string, toolType: string): Promise<string> {
-		const { id, path } = await this.allocatePath(toolType);
+	async save(content: string): Promise<string> {
+		const { id, path } = await this.allocatePath();
 		await writeArtifact(path, content);
 		return id;
 	}
 
 	exists(id: string): Promise<boolean> {
 		return this.#remote.call("exists", id);
-	}
-
-	listFiles(): Promise<string[]> {
-		return this.#remote.call("listFiles");
 	}
 
 	getPath(id: string): Promise<string | null> {

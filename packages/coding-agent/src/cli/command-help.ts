@@ -146,9 +146,9 @@ export const setupHelp = {
 export const shellHelp = { description: "Interactive shell console" } satisfies CommandMetadata;
 
 const NATIVE_SHELL_DESCRIPTIONS = {
-	zsh: "Run zsh 5.9 on the built-in pi-shell engine (all arguments go to zsh)",
-	bash: "Run bash 5.3 on the built-in pi-shell engine (all arguments go to bash)",
-	sh: "Run a POSIX sh on the built-in pi-shell engine (all arguments go to sh)",
+	zsh: "Run zsh 5.9 on the built-in shell engine (all arguments go to zsh)",
+	bash: "Run bash 5.3 on the built-in shell engine (all arguments go to bash)",
+	sh: "Run a POSIX sh on the built-in shell engine (all arguments go to sh)",
 } as const;
 
 /** `omp zsh|bash|sh`: the whole command line after the word goes to the shell. */

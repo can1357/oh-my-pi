@@ -371,6 +371,7 @@ class CustomMessage(TypedDict):
     timestamp: float
     details: NotRequired[JsonValue]
     attribution: NotRequired[Attribution]
+    excludeFromContext: NotRequired[bool]
 
 
 class HookMessage(TypedDict):
@@ -1111,7 +1112,7 @@ class AutoCompactionEndEvent:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class ManualCompactionStartEvent:
-    """A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted."""
+    """A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle."""
     type: Literal["manual_compaction_start"] = "manual_compaction_start"
     mode: str | None = None
     """The `/compact <mode>` subcommand, when one was given."""
@@ -3959,7 +3960,7 @@ class WireClient:
         return self._listen("auto_compaction_end", listener)
 
     def on_manual_compaction_start(self, listener: Callable[[ManualCompactionStartEvent], None]) -> Callable[[], None]:
-        """Subscribe to `manual_compaction_start`: A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted."""
+        """Subscribe to `manual_compaction_start`: A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle."""
         return self._listen("manual_compaction_start", listener)
 
     def on_manual_compaction_end(self, listener: Callable[[ManualCompactionEndEvent], None]) -> Callable[[], None]:

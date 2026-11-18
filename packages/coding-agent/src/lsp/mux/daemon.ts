@@ -27,8 +27,11 @@ import {
 	MUX_CONNECT_METHOD,
 	MUX_PING_METHOD,
 	MUX_PING_RESULT,
+	MUX_SERVER_EXIT_STDERR_BYTES,
 	type MuxConnectParams,
 	type MuxConnectResult,
+	type MuxServerExit,
+	parseMuxServerExit,
 } from "./protocol";
 
 const CONNECT_TIMEOUT_MS = 3_000;
@@ -37,6 +40,8 @@ const PROBE_TIMEOUT_MS = 1_500;
 const READY_TIMEOUT_MS = 15_000;
 /** probe→describe→start rounds; bounds cross-process start races and wedged-mux replacement. */
 const ENSURE_ATTEMPTS = 3;
+/** Final link bytes kept to find the mux's server-exit frame; well above its size. */
+const EXIT_TAIL_BYTES = 4 * MUX_SERVER_EXIT_STDERR_BYTES;
 
 interface MuxLinkReader {
 	data(chunk: Uint8Array): void;
@@ -136,27 +141,42 @@ function requestOnLink(
 
 /**
  * Wrap a connected, handshaken mux link as an {@link LspTransport}.
- * Connection close maps to a clean "process exit" (code 0) so the LSP client's
- * crash-recovery path treats a dead mux exactly like a dead server.
+ * Connection close maps to a "process exit" so the LSP client's crash-recovery
+ * path treats a dead mux exactly like a dead server: with the server's real
+ * exit code and stderr when the mux's final frame reports them, else code 0
+ * (the mux itself went away).
  */
 function linkTransport(link: MuxLink, leftover: Buffer, pid: number | undefined): LspTransport {
 	const { connection } = link;
 	const exited = Promise.withResolvers<number>();
 	let exitCode: number | null = null;
+	let serverExit: MuxServerExit | undefined;
 	let needDrain = false;
+	const tail: Uint8Array[] = [];
+	let tailBytes = 0;
 	const stdout = new ReadableStream<Uint8Array>({
 		start(controller) {
 			if (leftover.byteLength > 0) controller.enqueue(new Uint8Array(leftover));
 			link.attach({
-				data: chunk => controller.enqueue(chunk),
+				data: chunk => {
+					controller.enqueue(chunk);
+					tail.push(chunk);
+					tailBytes += chunk.byteLength;
+					while (tail.length > 1 && tailBytes - tail[0]!.byteLength >= EXIT_TAIL_BYTES) {
+						tailBytes -= tail.shift()!.byteLength;
+					}
+				},
 				close: () => {
 					try {
 						controller.close();
 					} catch {
 						// already errored/closed
 					}
-					exitCode = 0;
-					exited.resolve(0);
+					serverExit = parseMuxServerExit(Buffer.concat(tail).toString("utf-8"));
+					tail.length = 0;
+					connection.destroy();
+					exitCode = serverExit?.code ?? 0;
+					exited.resolve(exitCode);
 				},
 			});
 		},
@@ -186,7 +206,7 @@ function linkTransport(link: MuxLink, leftover: Buffer, pid: number | undefined)
 			connection.destroy();
 		},
 		peekStderr() {
-			return "";
+			return serverExit?.stderr ?? "";
 		},
 	};
 }

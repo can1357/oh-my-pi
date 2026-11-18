@@ -411,7 +411,7 @@ describe("AgentSession owner-routed async delivery", () => {
 				)
 				.find(text => text.includes("preview-only"));
 			expect(delivered?.match(/not saved completely/g)).toHaveLength(1);
-			expect(delivered).not.toContain("Full output: artifact://");
+			expect(delivered).not.toContain("Full output: local://");
 			expect(allocate).not.toHaveBeenCalled();
 			const custom = agent.state.messages.find(
 				message => message.role === "custom" && message.customType === "async-result",
@@ -447,7 +447,9 @@ describe("AgentSession owner-routed async delivery", () => {
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
 		const store = SessionManager.inMemory(temp.path());
-		store.adoptArtifactManager(new ArtifactManager(path.join(temp.path(), "artifacts")));
+		store.adoptArtifactManager(
+			new ArtifactManager(path.join(temp.path(), "artifacts", "local"), path.join(temp.path(), "artifacts")),
+		);
 		const settings = Settings.isolated();
 		session = new AgentSession({
 			agent,
@@ -490,7 +492,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			expect(manager.isJobResultConsumed(failedId)).toBe(true);
 			expect(manager.isJobResultConsumed(completeId)).toBe(true);
 			expect(manager.getJob(failedId)?.status).toBe("completed");
-			const artifactUrl = text.match(/artifact:\/\/\d+/)?.[0];
+			const artifactUrl = text.match(/local:\/\/\d+\.log/)?.[0];
 			if (!artifactUrl) throw new Error("Expected complete job recovery artifact");
 			const readSession: ToolSession = {
 				cwd: temp.path(),
@@ -531,7 +533,9 @@ describe("AgentSession owner-routed async delivery", () => {
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
 		const store = SessionManager.inMemory(temp.path());
-		store.adoptArtifactManager(new ArtifactManager(path.join(temp.path(), "artifacts")));
+		store.adoptArtifactManager(
+			new ArtifactManager(path.join(temp.path(), "artifacts", "local"), path.join(temp.path(), "artifacts")),
+		);
 		const settings = Settings.isolated({
 			"async.enabled": true,
 			"bashInterceptor.enabled": false,
@@ -551,7 +555,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			getSessionFile: () => null,
 			getSessionSpawns: () => null,
 			getAgentId: () => "RawCaptureOwner",
-			allocateOutputArtifact: toolType => store.allocateArtifactPath(toolType),
+			allocateOutputArtifact: () => store.allocateArtifactPath(),
 			asyncJobManager: manager,
 			settings,
 		};
@@ -578,7 +582,7 @@ describe("AgentSession owner-routed async delivery", () => {
 						: message.content.map(block => (block.type === "text" ? block.text : "")).join("\n"),
 				)
 				.join("\n");
-			expect(followUp).toContain(`Full output: artifact://${rawArtifactId}`);
+			expect(followUp).toContain(`Full output: local://${rawArtifactId}.log`);
 			// The raw capture holds only the stream; the exit notice the tool appended
 			// after it must survive in the preview's tail.
 			expect(followUp).toContain("Command exited with code 3");

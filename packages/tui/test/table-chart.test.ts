@@ -263,6 +263,7 @@ describe("parseCell", () => {
 		expect(parseCell("**4** ✅ (2 attempts)")).toMatchObject({ value: 4, emphasis: true, fit: "note" });
 		expect(parseCell("24–72 h")).toMatchObject({ value: 86_400, upper: 259_200, fit: "range" });
 		expect(parseCell("2,049 → 1,973")).toMatchObject({ value: 2049, to: 1973, toFigure: "1,973" });
+		expect(parseCell("402.7 → 13.3 µs")).toMatchObject({ value: 402.7e-6, to: 13.3e-6, dim: "duration" });
 		expect(parseCell("5/8")).toMatchObject({ value: 5, denominator: 8, dim: "fraction" });
 		expect(parseCell("-33pp")).toMatchObject({ value: -33, dim: "percent", signed: true });
 	});

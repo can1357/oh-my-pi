@@ -43,10 +43,10 @@ function createSession(cwd: string, overrides: Record<string, unknown> = {}): To
 		getSessionFile: () => sessionFile,
 		getSessionSpawns: () => "*",
 		getArtifactsDir: () => sessionDir,
-		allocateOutputArtifact: async (toolType: string) => {
+		allocateOutputArtifact: async () => {
 			await fs.mkdir(sessionDir, { recursive: true });
 			const id = `artifact-${++artifactCounter}`;
-			return { id, path: path.join(sessionDir, `${id}.${toolType}.log`) };
+			return { id, path: path.join(sessionDir, `${id}.log`) };
 		},
 		settings,
 	};

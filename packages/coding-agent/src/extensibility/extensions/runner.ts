@@ -1872,6 +1872,8 @@ export class ExtensionRunner {
 						const onTextDelta = options.onTextDelta;
 						const request = {
 							...options,
+							// Unnamed extension turns still journal their spend.
+							purpose: options.purpose ?? "extension",
 							onTextDelta: onTextDelta
 								? (delta: string) => this.#ephemeralTurnBlocker.exit(() => onTextDelta(delta))
 								: undefined,
