@@ -247,6 +247,20 @@ pub enum NativeExtensionError {
 		#[source]
 		source: serde_json::Error,
 	},
+	/// A tool declaration's key was not the canonical `name@family.rev`.
+	#[error(
+		"tool declaration {id} in {path} has key `{key}`; a tool key must have the form \
+		 `name@family.rev`"
+	)]
+	ToolKey {
+		/// Manifest path.
+		path: PathBuf,
+		/// Declaration identity.
+		id:   Str,
+		/// The key, or the identity when the declaration has none, that was
+		/// refused.
+		key:  Str,
+	},
 	/// Manifest settings or invocation overrides were invalid.
 	#[error("extension settings are invalid: {path}")]
 	Settings {
@@ -583,6 +597,19 @@ fn validate_manifest(
 	Ok(())
 }
 
+/// Splits a canonical tool key `name@family.rev` (the family may be empty, as
+/// in `ci@.1`) into the identity the Python worker registers. The revision is
+/// the tool's own, never the declaration's API level. Any other shape is not a
+/// tool key and admission refuses it.
+fn parse_tool_key(key: &str) -> Option<(&str, &str, u16)> {
+	let (name, tail) = key.rsplit_once('@')?;
+	let (family, rev) = tail.rsplit_once('.')?;
+	if name.is_empty() {
+		return None;
+	}
+	Some((name, family, rev.parse().ok()?))
+}
+
 fn lower_manifest(
 	loaded: LoadedManifest,
 	origin: RootOrigin,
@@ -637,22 +664,24 @@ fn lower_manifest(
 			});
 		}
 	}
-	let tools = declarations.tools.iter().filter_map(|row| {
-		let rev = u16::try_from(row.api.max(1)).ok()?;
-		Some(ToolDeclarationKey::new(
-			if row.key.is_empty() {
-				row.id.clone()
+	let tools = declarations
+		.tools
+		.iter()
+		.map(|row| {
+			let key = if row.key.is_empty() {
+				&row.id
 			} else {
-				row.key.clone()
-			},
-			row.properties
-				.get("family")
-				.and_then(serde_json::Value::as_str)
-				.map(Str::new)
-				.unwrap_or_default(),
-			rev,
-		))
-	});
+				&row.key
+			};
+			let (name, family, rev) =
+				parse_tool_key(key.as_str()).ok_or_else(|| NativeExtensionError::ToolKey {
+					path: path.clone(),
+					id:   row.id.clone(),
+					key:  key.clone(),
+				})?;
+			Ok(ToolDeclarationKey::new(Str::new(name), Str::new(family), rev))
+		})
+		.collect::<Result<Vec<_>, NativeExtensionError>>()?;
 	let hooks = declarations.hooks.iter().filter_map(|row| {
 		let (event, phase) = row
 			.key
@@ -1043,6 +1072,193 @@ default = false
 			.find(|item| item.spec.key.extension().as_str() == id)
 			.expect("extension admitted");
 		assert!(extension.spec.control_grants.is_empty());
+	}
+
+	#[test]
+	fn tool_keys_parse_as_name_family_rev() {
+		assert_eq!(parse_tool_key("set_policy@grantproof.1"), Some(("set_policy", "grantproof", 1)));
+		assert_eq!(parse_tool_key("ci@.1"), Some(("ci", "", 1)));
+		assert_eq!(parse_tool_key("hello@qaext-id.2"), Some(("hello", "qaext-id", 2)));
+		assert_eq!(parse_tool_key("legacy_tool"), None);
+		assert_eq!(parse_tool_key("a@b"), None);
+		assert_eq!(parse_tool_key("a@b.x"), None);
+		assert_eq!(parse_tool_key("a@b.70000"), None);
+		assert_eq!(parse_tool_key("@b.1"), None);
+	}
+
+	fn admit_demo_rows(rows: &str) -> Result<Vec<AdmittedNativeExtension>, NativeExtensionError> {
+		let tree = tempfile::tempdir().expect("tree");
+		let root = tree.path().join("ext");
+		fs::create_dir_all(root.join("src/demo")).expect("module directory");
+		fs::write(root.join("src/demo/__init__.py"), "# inert test extension\n").expect("module");
+		fs::write(root.join("omp.toml"), format!("id = \"demo\"\nentry = \"demo\"\n\n{rows}"))
+			.expect("manifest");
+		admit_native_extensions(tree.path(), tree.path(), NativeAdmissionOptions {
+			explicit_roots:    &[root],
+			mode:              NativeLoadMode::ExplicitOnly,
+			include_workspace: false,
+			setting_overrides: &[],
+			disabled:          &[],
+		})
+	}
+
+	#[test]
+	fn native_tool_declarations_lower_as_name_family_rev() {
+		let admitted = admit_demo_rows(
+			r#"[[declarations]]
+id = "set_policy"
+kind = "soft"
+module = "demo"
+key = "set_policy@grantproof.1"
+trigger = "lazy"
+api = 1
+failure = "fault"
+
+[[declarations]]
+id = "ci"
+kind = "soft"
+module = "demo"
+key = "ci@.1"
+trigger = "lazy"
+api = 3
+failure = "fault"
+
+[[declarations]]
+id = "hello"
+kind = "hard"
+module = "demo"
+key = "hello@qaext.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[[declarations]]
+id = "review"
+kind = "soft"
+module = "demo"
+key = "review@rv.2"
+trigger = "lazy"
+api = 1
+failure = "fault"
+
+[[declarations]]
+id = "moonshot"
+kind = "provider"
+module = "demo"
+key = "moonshot@0"
+trigger = "lazy"
+api = 1
+failure = "fault"
+"#,
+		)
+		.expect("admitted");
+		let tools = admitted[0]
+			.spec
+			.manifest
+			.declarations
+			.tools()
+			.map(|tool| (tool.name.as_str().to_owned(), tool.family.as_str().to_owned(), tool.rev))
+			.collect::<BTreeSet<_>>();
+		assert_eq!(
+			tools,
+			BTreeSet::from([
+				("set_policy".to_owned(), "grantproof".to_owned(), 1),
+				("ci".to_owned(), String::new(), 1),
+				("hello".to_owned(), "qaext".to_owned(), 1),
+				("review".to_owned(), "rv".to_owned(), 2),
+			]),
+			"the worker registers (name, family, rev); a canonical name@family.rev key must lower to \
+			 exactly that, with the revision taken from the key and never from the manifest API \
+			 level; a provider row keeps its own key and is not a tool"
+		);
+	}
+
+	#[test]
+	fn non_canonical_tool_keys_are_refused_with_a_typed_error() {
+		for (key, refused) in [
+			("legacy_tool", "legacy_tool"),
+			("", "legacy_tool"),
+			("review@rv", "review@rv"),
+			("review@rv.x", "review@rv.x"),
+			("@rv.1", "@rv.1"),
+			("review@rv.70000", "review@rv.70000"),
+		] {
+			let rows = format!(
+				"[[declarations]]\nid = \"legacy_tool\"\nkind = \"soft\"\nmodule = \"demo\"\nkey = \
+				 \"{key}\"\ntrigger = \"lazy\"\napi = 1\nfailure = \"fault\"\n"
+			);
+			let Err(error) = admit_demo_rows(&rows) else {
+				panic!("a tool key of {key:?} must be refused");
+			};
+			assert!(
+				matches!(
+					&error,
+					NativeExtensionError::ToolKey { id, key: refused_key, .. }
+						if id.as_str() == "legacy_tool" && refused_key.as_str() == refused
+				),
+				"{key:?} must be refused as ToolKey({refused:?}), got {error:?}"
+			);
+		}
+	}
+
+	#[test]
+	fn bundled_and_fixture_tool_rows_have_canonical_keys() {
+		fn manifests_below(dir: &Path, depth: usize) -> Vec<PathBuf> {
+			let mut found = Vec::new();
+			for entry in fs::read_dir(dir).expect("manifest directory") {
+				let path = entry.expect("directory entry").path();
+				if depth > 0 && path.is_dir() {
+					found.extend(manifests_below(&path, depth - 1));
+				} else if path.file_name().is_some_and(|name| name == "omp.toml") {
+					found.push(path);
+				}
+			}
+			found
+		}
+		let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+		for (root, depth) in [("extensions", 1), ("scripts/qa/fixtures/extensions", 2)] {
+			let mut checked = 0;
+			for path in manifests_below(&repo.join(root), depth) {
+				let manifest =
+					toml::from_str::<toml::Table>(&fs::read_to_string(&path).expect("manifest text"))
+						.expect("manifest toml");
+				let features = manifest.get("features").and_then(toml::Value::as_table);
+				let rows = manifest
+					.get("declarations")
+					.into_iter()
+					.chain(features.into_iter().flat_map(|features| {
+						features
+							.values()
+							.filter_map(|feature| feature.get("declarations"))
+					}))
+					.filter_map(toml::Value::as_array)
+					.flatten()
+					.filter_map(toml::Value::as_table);
+				for row in rows {
+					let text = |field: &str| {
+						row.get(field)
+							.and_then(toml::Value::as_str)
+							.unwrap_or_default()
+					};
+					if !matches!(text("kind"), "soft" | "hard" | "tool") {
+						continue;
+					}
+					let key = if text("key").is_empty() {
+						text("id")
+					} else {
+						text("key")
+					};
+					assert!(
+						parse_tool_key(key).is_some(),
+						"{}: tool declaration {:?} has key {key:?}, which admission refuses",
+						path.display(),
+						text("id"),
+					);
+					checked += 1;
+				}
+			}
+			assert!(checked > 0, "no tool declarations found below {root}");
+		}
 	}
 
 	#[test]
