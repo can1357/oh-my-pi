@@ -2384,6 +2384,52 @@ test("keeps the LiteLLM conversation session header on V1 compaction unless conf
 	expect(sessionHeaders).toEqual(["session-1", "run-42"]);
 });
 
+test("sends a registered model's resolved headers on V1 and V2 compaction", async () => {
+	// models.yml and extension providers keep their headers in `resolveHeaders` only.
+	const model = {
+		...makeOpenAiModel({
+			provider: "gateway",
+			baseUrl: "https://gateway.example/openai",
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+		}),
+		headers: undefined,
+		resolveHeaders: async () => ({ "cf-access-token": "minted" }),
+	};
+	const tokens: (string | null)[] = [];
+	const input = [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }];
+
+	await requestOpenAiRemoteCompaction(model, "test-key", input, "instructions", undefined, {
+		fetch: async (_url, init) => {
+			tokens.push(new Headers(init?.headers).get("cf-access-token"));
+			return Response.json({ output: [{ type: "compaction_summary", summary: "compacted" }] });
+		},
+	});
+	await requestCompactionV2Streaming(
+		model,
+		"test-key",
+		buildCompactionV2Request(model, input, "instructions"),
+		undefined,
+		{
+			fetch: async (_url, init) => {
+				tokens.push(new Headers(init?.headers).get("cf-access-token"));
+				return sseResponse([
+					{
+						type: "response.output_item.done",
+						output_index: 0,
+						item: { type: "compaction", encrypted_content: "enc" },
+					},
+					{
+						type: "response.completed",
+						response: { usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } },
+					},
+				]);
+			},
+		},
+	);
+
+	expect(tokens).toEqual(["minted", "minted"]);
+});
+
 test("uses Azure request shape for Azure Responses remote compaction", async () => {
 	const previousDeploymentMap = Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP;
 	Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP = "gpt-5-compact=azure-gpt-5-compact";
