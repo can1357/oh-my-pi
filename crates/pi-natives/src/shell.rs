@@ -233,6 +233,11 @@ pub struct ShellOptions {
 	pub minimizer:     Option<MinimizerOptions>,
 	/// Filesystem backing every run of this session (native when absent).
 	pub filesystem:    Option<ShellFilesystem>,
+	/// The shell is this process's own: every run reads the process's stdin
+	/// and writes its stdout and stderr directly (`run` streams no chunks and
+	/// minimizes nothing), and externals stay in the process's session and
+	/// process group, sharing its controlling terminal.
+	pub process:       Option<bool>,
 }
 
 impl From<ShellOptions> for CoreShellOptions {
@@ -508,7 +513,11 @@ impl Shell {
 	/// The options set session-scoped environment variables and a snapshot path.
 	#[napi(constructor)]
 	pub fn new(options: Option<ShellOptions>) -> Self {
-		Self { inner: Arc::new(CoreShell::new(options.map(Into::into))) }
+		let inner = match options {
+			Some(options) if options.process == Some(true) => CoreShell::for_process(options.into()),
+			options => CoreShell::new(options.map(Into::into)),
+		};
+		Self { inner: Arc::new(inner) }
 	}
 
 	/// A new shell with this one's options whose session starts from this

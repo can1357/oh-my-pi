@@ -42,6 +42,7 @@
 - A hashline header naming a missing working-tree path is rejected with the path its tag was issued for instead of being silently rebound to a same-named file (plan-sandbox files still rebind)
 - MCP tool calls default to a 10-minute deadline (handshakes and listings keep 30 s), never shorter than the wait the tool's own `timeout`/`timeout_ms`/`*_seconds` argument requests; without a configured timeout, progress notifications extend it up to one hour
 - A bare `:N` line selector now reads line N (with the usual 1-before/3-after context) in every read, grep and URL selector; `:N-` reads from line N onward, and every "Use :N- to continue" hint uses the open-ended form
+- Named services and `pty: true` commands now run in omp's own shell, as a process of their own, instead of your login shell: the in-process utilities (`jq`, `rg`, `sd`, `timeout`, `xargs`, …) resolve first, internal URLs (`local://…`, `skill://…`, a URL `cwd`) work as in every other bash call, and the command starts from the session shell's exports, functions and aliases. A pty command's programs still own a real terminal (`/dev/tty`, Ctrl-C, resize)
 
 ### Fixed
 
@@ -227,6 +228,8 @@
 - External programs resolve internal URLs in more argument forms: `@local://body.json` (curl), `-F body=@local://b.md` (gh), `-olocal://out`, and environment values (`ENV_FILE=skill://x/.env cmd`, `env KEY=local://x cmd`, exported variables)
 - An internal-URL-looking argument that cannot be resolved (`bm read memory://notes/x`, `log.sh 'agent://A; artifact://12'`, prose that starts with a URL) reaches the program as written instead of failing the command with "cannot resolve … for an external command"
 - `omp` commands run from bash (`omp read 'skill://name:1-20'`, also behind `nice`/`npx`/`sudo`) receive their URL arguments untouched
+- Bash builtins now accept internal URIs that carry a read selector, as `read` does: `jq . artifact://12:raw` opens the artifact itself and `jq . artifact://12:raw:21-21`, `head local://log.txt:-50` or `cat agent://Id:5-9` read exactly those lines (they failed with "Invalid argument" or "Input/output error")
+- `jq: command not found` (and other in-process utilities missing) in named services and `pty: true` commands
 
 ### Removed
 

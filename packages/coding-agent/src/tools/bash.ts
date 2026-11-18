@@ -30,6 +30,7 @@ import {
 	resolveAutoBackgroundWaitMs,
 } from "../async";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
+import { grantShellUrls, shellProcessCommand } from "../exec/shell-process";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
 import {
@@ -53,6 +54,7 @@ import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
 import { applyPatchShellInput } from "./bash-apply-patch";
+import { hostCommandUrls, urlBacking } from "./bash-host-urls";
 import { checkBashInterception } from "./bash-interceptor";
 import { rewriteGitWorktreeAdd } from "./bash-worktree-rewrite";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
@@ -947,19 +949,24 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	}
 
 	/**
-	 * What the session's persistent shell exports, read from a copy of it, so a service sees the
-	 * variables (PATH included) earlier calls exported, as a child of that shell would. Shell
-	 * bookkeeping variables stay with the service's own shell.
+	 * Where the session's persistent shell stands, read from a copy of it, for a shell process
+	 * (a service, a pty command) to start from: `env` holds what it exports (PATH included), as a
+	 * child of that shell would see in the host directory `cwd` (its direnv environment
+	 * included), and `script` defines its functions and aliases. Shell bookkeeping variables
+	 * stay with the process's own shell.
 	 */
-	async #sessionExports(
+	async #sessionSeed(
 		sessionId: string | undefined,
 		cwd: string,
 		signal: AbortSignal | undefined,
-	): Promise<Record<string, string>> {
-		const dumpPath = path.join(os.tmpdir(), `omp-service-env-${crypto.randomUUID()}`);
+	): Promise<{ env: Record<string, string>; script: string }> {
+		const dumpPath = path.join(os.tmpdir(), `omp-shell-env-${crypto.randomUUID()}`);
+		const scriptPath = `${dumpPath}.sh`;
+		const quote = (file: string): string => `'${file.replaceAll("'", `'\\''`)}'`;
 		try {
 			const sessionKey = sessionId ?? "";
-			const result = await executeBash(`env -0 > '${dumpPath.replaceAll("'", `'\\''`)}'`, {
+			const dump = `env -0 > ${quote(dumpPath)} && { shopt -p expand_aliases; declare -f; alias -p; } > ${quote(scriptPath)} 2>/dev/null`;
+			const result = await executeBash(dump, {
 				cwd,
 				// The same shell options as the session's calls, so the copy is of that session's shell.
 				sessionKey: `${sessionKey}:async:service-env:${crypto.randomUUID()}`,
@@ -971,22 +978,68 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				signal,
 			});
 			if (result.exitCode !== 0) throw new Error(result.output || `env exited ${result.exitCode}`);
-			const exports: Record<string, string> = {};
-			for (const entry of (await Bun.file(dumpPath).text()).split("\0")) {
+			const [dumped, script] = await Promise.all([Bun.file(dumpPath).text(), Bun.file(scriptPath).text()]);
+			const env: Record<string, string> = {};
+			for (const entry of dumped.split("\0")) {
 				const eq = entry.indexOf("=");
 				if (eq <= 0) continue;
 				const key = entry.slice(0, eq);
 				if (key === "PWD" || key === "OLDPWD" || key === "SHLVL" || key === "_") continue;
-				exports[key] = entry.slice(eq + 1);
+				env[key] = entry.slice(eq + 1);
 			}
-			return exports;
+			return { env, script };
 		} catch (error) {
-			logger.warn("Could not read the session shell's exports for a service", {
+			logger.warn("Could not read the session shell's state for a shell process", {
 				error: error instanceof Error ? error.message : String(error),
 			});
-			return {};
+			return { env: {}, script: "" };
 		} finally {
-			await fs.promises.rm(dumpPath, { force: true });
+			await Promise.all([fs.promises.rm(dumpPath, { force: true }), fs.promises.rm(scriptPath, { force: true })]);
+		}
+	}
+
+	/**
+	 * Run `command` as a shell process on a pseudo-terminal the user drives: the session's shell
+	 * (its exports, functions, aliases and URL paths, served through `filesystem`) leading a
+	 * terminal of its own, so its programs own that terminal.
+	 */
+	async #runOnTerminal(
+		ui: Pick<NonNullable<AgentToolContext["ui"]>, "custom">,
+		run: {
+			command: string;
+			/** Host directory the process starts in. */
+			hostCwd: string;
+			/** URL directory its shell enters first. */
+			urlCwd: string | undefined;
+			sessionId: string | undefined;
+			sessionEnv: Record<string, string>;
+			timeoutMs: number | undefined;
+			signal: AbortSignal | undefined;
+			filesystem: InternalUrlFilesystem;
+			artifactPath: string | undefined;
+			artifactId: string | undefined;
+		},
+	): Promise<BashInteractiveResult> {
+		const [seed, grant] = await Promise.all([
+			this.#sessionSeed(run.sessionId, run.hostCwd, run.signal),
+			grantShellUrls(run.filesystem),
+		]);
+		const source = seed.script ? path.join(os.tmpdir(), `omp-shell-seed-${crypto.randomUUID()}.sh`) : undefined;
+		try {
+			if (source !== undefined) await fs.promises.writeFile(source, seed.script, { mode: 0o600 });
+			return await runInteractiveBashPty(ui, {
+				command: run.command,
+				...shellProcessCommand({ command: run.command, urls: grant?.urls, source, cwd: run.urlCwd }),
+				cwd: run.hostCwd,
+				env: { ...seed.env, ...run.sessionEnv },
+				timeoutMs: run.timeoutMs,
+				signal: run.signal,
+				artifactPath: run.artifactPath,
+				artifactId: run.artifactId,
+			});
+		} finally {
+			grant?.revoke();
+			if (source !== undefined) await fs.promises.rm(source, { force: true });
 		}
 	}
 
@@ -1641,20 +1694,17 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		// URL paths resolve through the embedded shell's filesystem, within the
 		// tier this command was approved at. A URL cwd stays a URL: only that
-		// filesystem can enter it, so external backends (service, PTY, client
-		// terminal) never run there.
+		// filesystem can enter it, so a service's or pty command's shell process
+		// starts on the host and enters it, and the client terminal never runs there.
 		const approval = this.approval({ command: rawCommand });
 		const approvalTier = typeof approval === "string" ? approval : approval.tier;
 		const router = InternalUrlRouter.instance();
 		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;
 		const commandCwd = virtualCwd ?? resolveCommandCwd(cwd, this.session.cwd, hoistedShellCwd);
 		if (cwd) ran.cwd = commandCwd;
+		// Where a process for this command starts: a URL directory has none of its own.
+		const hostCwd = virtualCwd === undefined ? commandCwd : this.session.cwd;
 		if (virtualCwd !== undefined) {
-			if (name !== undefined || canUseInteractiveBashPty(pty === true, ctx)) {
-				throw new ToolError(
-					`Working directory ${virtualCwd} exists only in the embedded shell; ${name !== undefined ? "services" : "pty commands"} run external processes and need a host directory.`,
-				);
-			}
 			const cwdStat = await this.#urlFilesystem(signal, { tier: approvalTier })
 				.stat(virtualCwd)
 				.catch((err: unknown) => {
@@ -1684,6 +1734,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 
 		if (name !== undefined) {
+			// The service is the session's shell as a process of its own: it starts from this
+			// shell's exports, functions and aliases, and its URL paths are served here.
+			const seed = await this.#sessionSeed(sessionId, hostCwd, signal);
 			// Only a readiness wait can outlast a steer; without `ready` the start
 			// returns once the process spawns.
 			const service = await startService(
@@ -1695,6 +1748,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					pty: pty ?? true,
 					ready,
 					notify: notifySource,
+					env: { ...seed.env, ...sessionEnv },
+					// Not bound to this call's signal: the service outlives it.
+					urls: this.#urlFilesystem(undefined, { tier: approvalTier }),
+					seed: seed.script,
 				},
 				signal,
 				ready === undefined ? undefined : ctx?.toolCall?.steeringSignal,
@@ -1868,24 +1925,34 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			});
 		}
 
-		// Fold direnv/devenv env into (command, env) ONCE for the two backends
-		// that bypass `executeBash` — the ACP client terminal and the PTY. The
+		// Fold direnv/devenv env into (command, env) ONCE for the one backend
+		// that runs outside the engine: the ACP client terminal. The
 		// `executeBash` branch below is intentionally excluded: it runs its own
 		// preflight internally, so routing the pre-applied command there too
 		// would double-apply the unset prefix. No
 		// `commandPrefix` here: ACP applies the shell prefix via
-		// `wrapShellLineForClientTerminal`, and the PTY path never wrapped one.
+		// `wrapShellLineForClientTerminal`.
 		// `callerTimeoutMs` clamps the direnv load to a positive command timeout
 		// (the backend's own timeout is installed only after this await), matching
 		// the executeBash branch so a cold `.envrc` can't outlast a short call.
-		const backendPreflight =
-			bridgeTerminalAvailable || canUseInteractiveBashPty(pty === true, ctx)
+		const backendPreflight = bridgeTerminalAvailable
+			? await applyDirenvPreflight(
+					// The client's shell knows no internal URL.
+					await hostCommandUrls(
+						command,
+						urlBacking(this.#urlFilesystem(signal, { tier: approvalTier })),
+						this.session.settings.getShellConfig().shell,
+					),
+					commandCwd,
+					{
 						callerEnv: sessionEnv,
 						signal,
 						timeoutMs: cfgBashDirenvLoadTimeoutMs.get(this.session.settings),
 						callerTimeoutMs: timeoutMs,
 						direnvSetting: cfgBashDirenv.get(this.session.settings),
-				: undefined;
+					},
+				)
+			: undefined;
 
 		// Route through the client terminal when the client advertises the terminal capability.
 		// Skip when pty=true (PTY needs the local terminal UI) or the cwd is a URL
@@ -2194,15 +2261,23 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					})
 			: undefined;
 		const result: BashResult | BashInteractiveResult = interactiveUi
-			? await runInteractiveBashPty(interactiveUi, {
-					// PTY bypasses executeBash, so feed it the direnv-transformed
-					// command + direnv env (backendPreflight is defined whenever this
-					// branch runs, since both gate on canUseInteractiveBashPty).
-					command: backendPreflight?.command ?? command,
-					cwd: commandCwd,
+			? await this.#runOnTerminal(interactiveUi, {
+					command,
+					hostCwd,
+					urlCwd: virtualCwd,
+					sessionId,
+					sessionEnv,
 					timeoutMs,
 					signal,
-					env: backendPreflight?.env,
+					filesystem: this.#urlFilesystem(signal, {
+						tier: approvalTier,
+						onReply: text => {
+							replies.push(text);
+							emitFrame?.();
+						},
+						onWrite: noticeUrlWrites(pendingNotices),
+						toolCallId,
+					}),
 					artifactPath,
 					artifactId,
 				})

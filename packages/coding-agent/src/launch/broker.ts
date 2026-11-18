@@ -4,7 +4,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { FileLock, IpcConnection, IpcServer, Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
-import { isEnoent, isRecord, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, logger, postmortem, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { compileNotifyPattern, type NotifyBatch, OutputNotifier } from "../async/notify";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
@@ -46,7 +46,6 @@ import {
 } from "./protocol";
 import { resolveDaemonSpawnOptions } from "./spawn-options";
 import { renderTerminalOutput } from "./terminal-output";
-import { quotePosixArgv } from "../utils/shell-quote";
 
 const DEFAULT_IDLE_GRACE_MS = 3_000;
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -924,23 +923,11 @@ class DaemonBroker {
 			}
 			started.resolve(Number.isSafeInteger(pid) && pid > 0 ? pid : undefined);
 		};
-		let run: Promise<PtyRunResult>;
-		if (process.platform === "win32") {
-			run = session.startArgv(
-				{
-					application: record.spec.application,
-					args: record.spec.args,
-					...options,
-				},
-				onChunk,
-				onStart,
-			);
-		} else {
-			const argv = [record.spec.application, ...record.spec.args];
-			const command = `exec ${quotePosixArgv(argv)}`;
-			const shell = procmgr.getShellConfig().shell;
-			run = session.start({ command, shell, ...options }, onChunk, onStart);
-		}
+		const run: Promise<PtyRunResult> = session.startArgv(
+			{ application: record.spec.application, args: record.spec.args, ...options },
+			onChunk,
+			onStart,
+		);
 		void run.then(
 			async result => {
 				await this.#onPtyExit(record, generation, result);

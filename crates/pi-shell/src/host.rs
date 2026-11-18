@@ -433,12 +433,23 @@ impl PiHost {
 	/// Externals lead their own sessions; one abandoned while running (a
 	/// cancel) gets TERM, then KILL after [`TERM_GRACE`].
 	pub fn new(fs: Box<dyn Fs + Send>, runtime: tokio::runtime::Handle) -> Self {
+		Self::with_sessions(fs, runtime, Sessions::Detach)
+	}
+
+	/// [`Self::new`], with externals placed as `sessions` says:
+	/// [`Sessions::Inherit`] for a process that is the shell of its own
+	/// terminal ([`Session::for_process`](crate::session::Session::for_process)).
+	pub fn with_sessions(
+		fs: Box<dyn Fs + Send>,
+		runtime: tokio::runtime::Handle,
+		sessions: Sessions,
+	) -> Self {
 		Self {
 			fs,
 			launcher: Launcher {
 				spawner:  NativeSpawner::new(SpawnConfig {
 					grace:    TERM_GRACE,
-					sessions: Sessions::Detach,
+					sessions,
 					// The session driver is an async task: exits wake its waker
 					// from waiter threads.
 					exits:    Exits::Thread,

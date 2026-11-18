@@ -1,4 +1,5 @@
 /** Session-scoped service supervision through the shared project broker. */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TERMINAL_STATES } from "@oh-my-pi/pi-tui/apps/ps-data";
 import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
@@ -6,6 +7,8 @@ import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-util
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { compileNotifyPattern } from "../async/notify";
+import { grantShellUrls, type ShellUrlGrant, shellProcessCommand } from "../exec/shell-process";
+import { type InternalUrlFilesystem, isUrlPath } from "../internal-urls/url-filesystem";
 import { type DaemonBrokerClient, DaemonBrokerTimeoutError, daemonClientForProject } from "./client";
 import { canonicalProjectDir } from "./paths";
 import { DAEMON_OUTPUT_PATTERN_FLAGS, type DaemonOperation, type DaemonRpcResult } from "./protocol";
@@ -32,6 +35,10 @@ export interface ServiceStart {
 	notify?: string;
 	/** Overlay on the configured shell env; wins over it. */
 	env?: Record<string, string>;
+	/** Serves the URL paths the command names (`local://…`, a URL `cwd`) while this session lives. */
+	urls?: InternalUrlFilesystem;
+	/** Script the service's shell sources first: the functions and aliases of the session starting it. */
+	seed?: string;
 }
 
 const serviceStateKey = Symbol("ownedServices");
@@ -40,6 +47,8 @@ interface ServiceSession extends ToolSession {
 		owned: Map<string, { id: string; startedAt: number }>;
 		listeners: Set<() => void>;
 		subscribed: Set<DaemonBrokerClient>;
+		/** The URL filesystem lent to each service this session started, by service name. */
+		urls?: Map<string, ShellUrlGrant>;
 	};
 }
 function serviceState(session: ToolSession): NonNullable<ServiceSession[typeof serviceStateKey]> {
@@ -48,6 +57,40 @@ function serviceState(session: ToolSession): NonNullable<ServiceSession[typeof s
 		listeners: new Set(),
 		subscribed: new Set(),
 	});
+}
+
+/**
+ * Lend `filesystem` to the service `name` is about to run as, replacing what an
+ * earlier start under that name was lent. The grants end with the session.
+ */
+async function lendServiceUrls(
+	session: ToolSession,
+	name: string,
+	filesystem: InternalUrlFilesystem,
+): Promise<ShellUrlGrant | undefined> {
+	const state = serviceState(session);
+	if (!state.urls) {
+		const lent = new Map<string, ShellUrlGrant>();
+		state.urls = lent;
+		session.registerDisposeCallback?.(() => {
+			for (const grant of lent.values()) grant.revoke();
+			lent.clear();
+		});
+	}
+	state.urls.get(name)?.revoke();
+	state.urls.delete(name);
+	const grant = await grantShellUrls(filesystem);
+	if (grant) state.urls.set(name, grant);
+	return grant;
+}
+
+/** Write the script `name`'s shell sources at each start, beside the broker's records of it. */
+async function writeServiceSeed(session: ToolSession, name: string, seed: string): Promise<string> {
+	const dir = path.join(getDaemonRuntimeDir(await canonicalProjectDir(session.cwd)), "seeds");
+	await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+	const file = path.join(dir, `${name}.sh`);
+	await fs.writeFile(file, seed, { mode: 0o600 });
+	return file;
 }
 
 export function hasLiveOwnedService(session: ToolSession): boolean {
@@ -268,12 +311,23 @@ export async function startService(
 	}
 	if (params.notify) compileNotifyPattern(params.notify);
 	const shell = session.settings.getShellConfig();
+	// The service is a shell process: the bash tool's shell, with omp's utilities and the
+	// session's URL paths. A URL directory is entered by that shell; the process starts on the host.
+	const urlCwd = params.cwd !== undefined && isUrlPath(params.cwd) ? params.cwd : undefined;
+	const [grant, source] = await Promise.all([
+		params.urls ? lendServiceUrls(session, params.name, params.urls) : undefined,
+		params.seed ? writeServiceSeed(session, params.name, params.seed) : undefined,
+	]);
 	const spec: DaemonSpec = {
 		name: params.name,
-		application: shell.shell,
-		args: [...shell.args, `${shell.prefix ? `${shell.prefix} ` : ""}${params.command}`],
+		...shellProcessCommand({
+			command: `${shell.prefix ? `${shell.prefix} ` : ""}${params.command}`,
+			urls: grant?.urls,
+			source,
+			cwd: urlCwd,
+		}),
 		env: { ...shell.env, ...params.env },
-		cwd: serviceDirectory(params.cwd, session.cwd),
+		cwd: serviceDirectory(urlCwd === undefined ? params.cwd : undefined, session.cwd),
 		pty: params.pty ?? true,
 		ready: ready
 			? {

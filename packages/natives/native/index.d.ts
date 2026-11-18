@@ -4100,6 +4100,13 @@ export interface ShellOptions {
   minimizer?: MinimizerOptions
   /** Filesystem backing every run of this session (native when absent). */
   filesystem?: ShellFilesystem
+  /**
+   * The shell is this process's own: every run reads the process's stdin
+   * and writes its stdout and stderr directly (`run` streams no chunks and
+   * minimizes nothing), and externals stay in the process's session and
+   * process group, sharing its controlling terminal.
+   */
+  process?: boolean
 }
 
 /** Options for running a shell command. */

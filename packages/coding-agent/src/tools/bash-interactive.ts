@@ -4,6 +4,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
 import { loadXtermTerminal } from "@oh-my-pi/pi-tui/tools/terminal-output";
 import { Settings } from "../config/settings";
+import { buildNonInteractiveEnv } from "../exec/non-interactive-env";
 import { OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
@@ -16,14 +17,41 @@ export interface BashInteractiveResult extends OutputSummary {
 	images?: ImageContent[];
 }
 
+/**
+ * The environment of a command with a user at its terminal, from the session
+ * shell's exports. Those carry the guards unattended commands run under
+ * (pagers and editors off, `CI`, `NO_COLOR`, a dumb `TERM`, a pinned locale):
+ * each one still at its guard value is left out, which hands the command the
+ * value omp itself was launched with, and a `TERM` left out that way names the
+ * terminal the command gets. A value the session set itself stays.
+ */
+function terminalEnv(exports: Record<string, string>): Record<string, string> {
+	const env = { ...exports };
+	const guards = buildNonInteractiveEnv();
+	for (const name in guards) {
+		if (env[name] === guards[name]) delete env[name];
+	}
+	// procmgr's spawn env marks the session's stdin as no terminal.
+	if (env.GPG_TTY === "not a tty") delete env.GPG_TTY;
+	env.TERM ??= "xterm-256color";
+	return env;
+}
+
+/**
+ * Run `application` with `args` on a pseudo-terminal the user drives through
+ * an overlay; `command` is what the overlay shows it as.
+ */
 export async function runInteractiveBashPty(
 	ui: Pick<NonNullable<AgentToolContext["ui"]>, "custom">,
 	options: {
 		command: string;
+		application: string;
+		args: string[];
 		cwd: string;
 		timeoutMs?: number;
 		signal?: AbortSignal;
-		env?: Record<string, string>;
+		/** The session shell's exports the program starts from. */
+		env: Record<string, string>;
 		artifactPath?: string;
 		artifactId?: string;
 	},
@@ -31,14 +59,6 @@ export async function runInteractiveBashPty(
 	const settings = await Settings.init();
 	// Load the xterm Terminal ctor here (async boundary) — the ui.custom factory below is sync.
 	const XtermTerminal = await loadXtermTerminal();
-	const { shell: resolvedShell, env: shellEnv } = settings.getShellConfig();
-	// The native PTY starts from the process's C environ, which Bun's
-	// `process.env` writes never reach, so it is handed the spawn env. A pty call
-	// has a user at the keyboard, so it gets the spawn env minus its
-	// non-interactive guards (GIT_EDITOR, GPG_TTY, CI; added by procmgr's
-	// `buildSpawnEnv`, and a guard added there belongs here too) and NO_COLOR, a
-	// monochrome marker. A key left out keeps the inherited launch value.
-	const { GIT_EDITOR: _gitEditor, GPG_TTY: _gpgTty, CI: _ci, NO_COLOR: _noColor, ...interactiveShellEnv } = shellEnv;
 	const graphics = new TerminalGraphicsDecoder();
 	const sink = new OutputSink({
 		artifactPath: options.artifactPath,
@@ -104,18 +124,16 @@ export async function runInteractiveBashPty(
 					},
 				);
 				void session
-					.start(
+					.startArgv(
 						{
-							command: options.command,
+							application: options.application,
+							args: options.args,
 							cwd: options.cwd,
 							timeoutMs: options.timeoutMs,
-							// A real TERM so editors, pagers, and TUIs behave like a normal
-							// terminal; direnv's values win over everything.
-							env: { ...interactiveShellEnv, TERM: "xterm-256color", ...options.env },
+							env: terminalEnv(options.env),
 							signal: options.signal,
 							cols,
 							rows,
-							shell: resolvedShell,
 						},
 						(err, chunk) => {
 							if (finished || err || !chunk) return;

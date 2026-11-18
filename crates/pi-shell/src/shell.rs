@@ -238,6 +238,8 @@ pub struct Shell {
 	abort_state: ShellAbortState,
 	config:      ShellConfig,
 	active:      ActiveSession,
+	/// The shell is this process's own ([`Shell::for_process`]).
+	process:     bool,
 }
 
 impl Shell {
@@ -268,12 +270,35 @@ impl Shell {
 		Self::with_config(config)
 	}
 
+	/// A shell that is this process's own: a process that exists to run its
+	/// commands, as a service or on a pseudo-terminal it leads.
+	///
+	/// Every command reads the process's stdin and writes its stdout and
+	/// stderr directly: nothing is captured, streamed or minimized. Externals
+	/// stay in the process's session and process group, so they share its
+	/// controlling terminal and the signals the terminal sends. Everything
+	/// else is [`Shell::new`]'s: pi's utilities and tools resolve first and
+	/// `options.filesystem` serves URL paths.
+	#[must_use]
+	pub fn for_process(options: ShellOptions) -> Self {
+		let mut shell = Self::with_config(ShellConfig {
+			session_env:   options.session_env,
+			snapshot_path: options.snapshot_path,
+			minimizer:     None,
+			filesystem:    options.filesystem,
+			seed:          None,
+		});
+		shell.process = true;
+		shell
+	}
+
 	fn with_config(config: ShellConfig) -> Self {
 		Self {
 			session: Arc::new(TokioMutex::new(None)),
 			abort_state: ShellAbortState::default(),
 			config,
 			active: ActiveSession::default(),
+			process: false,
 		}
 	}
 
@@ -340,6 +365,7 @@ impl Shell {
 			self.abort_state.clone(),
 			self.active.clone(),
 			self.config.clone(),
+			self.process,
 			run_config,
 			on_chunk,
 			&mut cancel_token,
@@ -515,6 +541,7 @@ async fn run_shell_session(
 	abort_state: ShellAbortState,
 	active: ActiveSession,
 	config: ShellConfig,
+	process: bool,
 	run_config: ShellRunConfig,
 	on_chunk: Option<Sender<String>>,
 	ct: &mut CancelToken,
@@ -531,12 +558,16 @@ async fn run_shell_session(
 			let core = if let Some(core) = &mut *session_guard {
 				core
 			} else {
-				let core = create_session_for_run(&config, Some(&tokio_cancel)).await?;
+				let core = create_session_as(&config, Some(&tokio_cancel), process).await?;
 				*active.lock() = Some(SessionHandles::of(&core.session));
 				session_guard.insert(core)
 			};
 			abort_state.set(at).await;
-			run_shell_command(core, &run_config, on_chunk, tokio_cancel).await
+			if process {
+				run_process_command(core, &run_config, tokio_cancel).await
+			} else {
+				run_shell_command(core, &run_config, on_chunk, tokio_cancel).await
+			}
 		}
 	});
 
@@ -881,6 +912,16 @@ async fn create_session_for_run(
 	config: &ShellConfig,
 	cancel_token: Option<&CancellationToken>,
 ) -> Result<ShellSessionCore> {
+	create_session_as(config, cancel_token, false).await
+}
+
+/// [`create_session_for_run`]; with `process`, the session of a process's own
+/// shell ([`Shell::for_process`]).
+async fn create_session_as(
+	config: &ShellConfig,
+	cancel_token: Option<&CancellationToken>,
+	process: bool,
+) -> Result<ShellSessionCore> {
 	let cancel = cancel_token.cloned().unwrap_or_default();
 	let runtime = tokio::runtime::Handle::current();
 	let slot = VfsFs::new(config.filesystem.with_cancellation(cancel.clone()), runtime.clone());
@@ -905,6 +946,7 @@ async fn create_session_for_run(
 	};
 	let session = match &config.seed {
 		Some(image) => Session::restore(session_config, image),
+		None if process => Session::for_process(session_config),
 		None => Session::new(session_config),
 	}
 	.map_err(|err| Error::msg(format!("Failed to initialize shell: {err}")))?;
@@ -929,6 +971,86 @@ async fn create_session_for_run(
 		return Err(Error::msg("Shell setup was cancelled"));
 	}
 	Ok(core)
+}
+
+/// This process's standard streams, duplicated for one command; a stream the
+/// process does not have reads as the null device.
+fn process_stdio() -> RunStdio {
+	#[cfg(unix)]
+	fn duplicate(stream: &impl std::os::fd::AsFd) -> Option<fs::File> {
+		use std::os::fd::AsRawFd as _;
+		let file = fs::File::from(stream.as_fd().try_clone_to_owned().ok()?);
+		// A runtime hosting this process may have made its streams
+		// non-blocking, and the flag belongs to the open file, shared by every
+		// duplicate and by the programs that inherit it: a command writing a
+		// full pipe would fail with `EAGAIN` instead of waiting. The shell owns
+		// the streams now, as blocking ones.
+		let fd = file.as_raw_fd();
+		// SAFETY: `fd` is owned by `file` and stays valid for both `fcntl` calls,
+		// which only read and clear `O_NONBLOCK`.
+		unsafe {
+			let flags = libc::fcntl(fd, libc::F_GETFL);
+			if flags >= 0 && flags & libc::O_NONBLOCK != 0 {
+				libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+			}
+		}
+		Some(file)
+	}
+	#[cfg(windows)]
+	fn duplicate(stream: &impl std::os::windows::io::AsHandle) -> Option<fs::File> {
+		stream
+			.as_handle()
+			.try_clone_to_owned()
+			.ok()
+			.map(fs::File::from)
+	}
+	RunStdio {
+		stdin:  duplicate(&io::stdin()),
+		stdout: duplicate(&io::stdout()),
+		stderr: duplicate(&io::stderr()),
+	}
+}
+
+/// Run one command of a process's own shell ([`Shell::for_process`]) over
+/// the process's standard streams.
+async fn run_process_command(
+	session: &mut ShellSessionCore,
+	options: &ShellRunConfig,
+	cancel_token: CancellationToken,
+) -> Result<CommandResult> {
+	install_run_filesystem(session, options, &cancel_token);
+	let result: Result<CommandResult> = async {
+		let cwd = requested_cwd(session, options.cwd.as_deref()).await?;
+		let scope = CommandScope {
+			options,
+			env: command_env(options.env.as_ref()),
+			cancel: cancel_token.clone(),
+		};
+		let mut command = options.command.clone();
+		ensure_trailing_newline_for_heredoc(&mut command);
+		let run = scope.run_options(command, cwd, None);
+		let mut result = session
+			.session
+			.run_with(run, process_stdio(), cancel_token.clone())
+			.await;
+		if let Ok(outcome) = &result {
+			session.cwd.clone_from(&outcome.cwd);
+		}
+		if let Err(err) = drain_dropped_files(&session.slot, &cancel_token).await
+			&& let Some(mut stderr) = process_stdio().stderr
+		{
+			report_close_failure(&mut stderr, &err, &mut result);
+		}
+		let outcome = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
+		Ok(CommandResult {
+			status:      outcome.status,
+			minimized:   None,
+			working_dir: session.cwd.to_str_lossy().into_owned(),
+		})
+	}
+	.await;
+	restore_session_filesystem(session);
+	result
 }
 
 /// Run a setup command of a new session with null stdio.

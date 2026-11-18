@@ -8,6 +8,7 @@
 ### Added
 
 - `VcsGitRepo.worktreeToGit()` converts worktree content to the blob `git add` would store
+- `ShellOptions.process` makes a `Shell` the process's own shell: its commands run over the process's stdin, stdout and stderr, and externals stay in its session and terminal
 
 ## [18.22.2] - 2026-11-18
 

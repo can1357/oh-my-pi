@@ -1151,6 +1151,11 @@ export function getMnemopiEmbedRuntimeDir(): string {
 	return dirs.rootSubdir(path.join("run", "mnemopi"), "state");
 }
 
+/** Get the private runtime directory of the URL servers omp processes run for their shell processes (~/.omp/run/shell; XDG default: $XDG_STATE_HOME/omp/run/shell). */
+export function getShellRuntimeDir(): string {
+	return dirs.rootSubdir(path.join("run", "shell"), "state");
+}
+
 /** Root directory containing every per-project daemon runtime scope (~/.omp/run/daemons; XDG default: $XDG_STATE_HOME/omp/run/daemons). */
 export function getDaemonRuntimeRoot(): string {
 	return dirs.rootSubdir(path.join("run", "daemons"), "state");

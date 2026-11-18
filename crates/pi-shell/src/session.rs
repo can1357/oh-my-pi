@@ -81,7 +81,7 @@ use crate::{
 		store::{BlobSlot, Key, MiscKey, Record, Table},
 	},
 	host::{PiHost, SpawnObserver, TERM_GRACE},
-	sys::OutputDecoding,
+	sys::{OutputDecoding, Sessions},
 	tools::{ToolCalls, ToolConfig},
 	vfs::VfsFs,
 };
@@ -536,7 +536,20 @@ impl Session {
 	///
 	/// [`SessionError::Create`] when the engine refuses the initial state.
 	pub fn new(config: SessionConfig) -> Result<Self, SessionError> {
-		Self::start(config, None)
+		Self::start(config, None, Sessions::Detach)
+	}
+
+	/// [`Session::new`] for a process that exists to run this shell (a
+	/// service, a command on a pseudo-terminal the process leads): externals
+	/// stay in the process's session and process group
+	/// ([`Sessions::Inherit`]), so they share its controlling terminal and
+	/// the signals the terminal sends its foreground group.
+	///
+	/// # Errors
+	///
+	/// [`SessionError::Create`] when the engine refuses the initial state.
+	pub fn for_process(config: SessionConfig) -> Result<Self, SessionError> {
+		Self::start(config, None, Sessions::Inherit)
 	}
 
 	/// Start a shell from `image` (a fork of the session it came from): its
@@ -550,17 +563,21 @@ impl Session {
 	///
 	/// [`SessionError::Restore`] when the engine refuses the image.
 	pub fn restore(config: SessionConfig, image: &Image) -> Result<Self, SessionError> {
-		Self::start(config, Some(image))
+		Self::start(config, Some(image), Sessions::Detach)
 	}
 
-	fn start(config: SessionConfig, image: Option<&Image>) -> Result<Self, SessionError> {
+	fn start(
+		config: SessionConfig,
+		image: Option<&Image>,
+		sessions: Sessions,
+	) -> Result<Self, SessionError> {
 		let SessionConfig { env, cwd, fs, vfs, runtime, output_decoding } = config;
 		let (jobs, rx) = flume::unbounded();
 		let children = Children::default();
 		let bell = Arc::new(Bell::default());
 		let waker = Waker::from(Arc::clone(&bell));
 		let tools = ToolConfig::from_env(&env, vfs.clone(), runtime.clone());
-		let mut host = PiHost::new(fs, runtime.clone());
+		let mut host = PiHost::with_sessions(fs, runtime.clone(), sessions);
 		if output_decoding.is_some() {
 			host.set_output_decoding(output_decoding);
 		}
