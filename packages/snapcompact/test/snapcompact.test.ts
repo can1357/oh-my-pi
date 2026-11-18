@@ -399,16 +399,21 @@ describe("shape resolution", () => {
 		expect(claudeOnVertex.frameSize).toBe(1932);
 		expect(claudeOnVertex.frameTokenEstimate).toBe(4761);
 
-		// A built model's identity decides where its id alone classifies as
-		// nothing: a Devin Fusion pairing reads as its Fable lead.
-		const fusion = snapcompact.resolveShape({
-			api: "devin-agent",
-			provider: "devin",
-			id: "fusion-claude-fable-5-1-high-sidekick-gpt-6-1-terra-high-priority",
-			identity: { class: "anthropic", family: "fable", revision: "5.1.0" },
-		});
-		expect(fusion.cellWidth).toBe(11);
-		expect(fusion.frameSize).toBe(1932);
+		// A custom model gets the shape of the lineage the catalog classifies it
+		// as, even when its own id names none: an Opus 5.5 behind a gateway alias
+		// reads Opus's 1932px frames.
+		const customOpus = snapcompact.resolveShape(
+			buildModel({
+				...toModelSpec(getBundledModel("anthropic", "claude-opus-5-5")),
+				provider: "custom-gateway",
+				api: "openai-completions",
+				baseUrl: "https://gateway.example/v1",
+				id: "my-opus",
+				requestModelId: "claude-opus-5-5",
+			}),
+		);
+		expect(customOpus.cellWidth).toBe(11);
+		expect(customOpus.frameSize).toBe(1932);
 
 		// High-res frames are reserved for the lines that read them natively;
 		// older Claude lines keep the safe 1568px family default.
