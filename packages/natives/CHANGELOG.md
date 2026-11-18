@@ -45,7 +45,7 @@
 
 ### Fixed
 
-- Fixed Wayland screenshots of a still screen failing after 5 s with `PipeWire frame timed out` on Hyprland and other wlroots compositors: the screen share now stays open between screenshots and closes 120 s after the last one, so on GNOME and KDE the sharing indicator stays on while omp is capturing instead of flashing for each screenshot
+- Fixed Wayland screenshots of a still screen failing after 5 s with `PipeWire frame timed out` on Hyprland and other wlroots compositors: the screen share now stays open between screenshots and closes 120 s after the last one, so on GNOME and KDE the sharing indicator stays on while omp is capturing instead of flashing for each screenshot ([#19615](https://github.com/can1357/oh-my-pi/pull/19615) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 
