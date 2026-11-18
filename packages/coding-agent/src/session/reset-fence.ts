@@ -49,13 +49,14 @@ export interface ResetSpendAttempt {
 	error?: string;
 }
 
-/** Log every saved-reset spend attempt at info, so the log names who spent an account's reset and why. */
+/**
+ * Log every saved-reset spend attempt at info, so the log names who spent an account's reset and why.
+ * The account is named by its credential id, never its email: `/debug` report bundles copy the log.
+ */
 export function logResetSpend(attempt: ResetSpendAttempt): void {
 	const { target, creditId, ...rest } = attempt;
 	logger.info("reset spend", {
 		provider: target.provider,
-		account: target.email ?? target.accountId,
-		orgId: target.orgId,
 		credentialId: target.credentialId,
 		creditId: creditId ?? target.creditId,
 		...rest,
