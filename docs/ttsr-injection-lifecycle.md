@@ -357,9 +357,10 @@ Never delete files outside the working directory; ask the user first.
 
 - `TtsrCoordinator.gateToolCall()` builds the call's outputs with `TtsrToolInspector.gateOutputs()`: the outputs of §10 (per file for `matcherEntries` tools, else the digest or JSON arguments) plus, for a `matcherEntries` tool, the whole call's arguments once more, whose paths are every file the call touches (`matcherPaths`, including moved-to paths). Per-file digests hold only added lines, so a file the call deletes, moves or only removes lines from is judged through that whole-call output. `TtsrManager.gateCandidates()` selects gate rules that pass scope, `globs`, and the `condition`/`astCondition` prefilter. There is no repeat policy: a refused call retried unchanged is judged again.
 - The judge is the same as §10 (`ttsr.judge`, `judge` role, purpose `ttsr`, cost cap). Each output with candidates gets one request; a yes-probability ≥ 0.7 refuses. The first refusing rule, in output and rule order, is reported.
+- Each request carries at most the first 32,000 Jev tokens of the output (§10). A yes about that prefix still refuses; otherwise a gate does not count a cut output as judged, and the candidate's `onJudgeError` decides it as below.
 - The wait is bounded by `ttsr.gateTimeoutMs` (default 10000 ms), read from the operator layers only, and by the call's abort signal. An abort ends the wait without a verdict: the call neither runs nor is refused, emits no `ttsr_triggered`, and does not count toward the stop rule.
 - Only that timeout is operator-only. `ttsr.enabled`, `ttsr.judge`, `ttsr.disabledRules` and the judge model come from merged settings, so a project layer can still turn a gate or its judge off.
-- When the judge is off, fails, times out, or returns no number, each candidate's `onJudgeError` decides: `allow` (default) logs a warning and runs the call, `block` refuses it. A session whose gate rules have no judge logs a warning at startup.
+- When the judge is off, fails, times out, returns no number, or could read only a prefix of the output, each candidate's `onJudgeError` decides: `allow` (default) logs a warning and runs the call, `block` refuses it. A session whose gate rules have no judge logs a warning at startup.
 
 ### Refusal
 

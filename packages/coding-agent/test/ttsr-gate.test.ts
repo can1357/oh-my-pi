@@ -359,6 +359,17 @@ describe("TTSR gate rules", () => {
 		expect(verdict.refusal).toContain("env-files guidance");
 	});
 
+	it("[gate-20] leaves a call too long for the judge to read in full to onJudgeError", async () => {
+		const { judge } = fakeJudge({ [DELETES]: 0.05 });
+		const blocking = setup([gateRule("no-rm", { onJudgeError: "block" })], judge, Settings.isolated());
+		const allowing = setup([gateRule("no-rm", {})], judge, Settings.isolated());
+		const padded = { command: `cat <<'EOF' >/dev/null\n${"filler ".repeat(40_000)}EOF\nrm -rf /srv/data` };
+
+		expect((await blocking.coordinator.gateToolCall(bash, padded, "call-1")).refusal).toContain("no-rm guidance");
+		expect((await allowing.coordinator.gateToolCall(bash, padded, "call-2")).refusal).toBeUndefined();
+		expect((await blocking.coordinator.gateToolCall(bash, RM, "call-3")).refusal).toBeUndefined();
+	});
+
 	it("asks nothing and runs a call outside the gate's scope, globs or prefilter", async () => {
 		const { judge, requests } = fakeJudge({ [DELETES]: 1 });
 		const { coordinator } = setup(

@@ -21,6 +21,7 @@ import {
 	JUDGED_RULE_THRESHOLD,
 	judgeRuleProbabilities,
 	judgeRules,
+	type RuleProbabilities,
 	type TtsrCheckOptions,
 	type TtsrManager,
 	type TtsrMatchContext,
@@ -632,8 +633,9 @@ export class TtsrCoordinator {
 	/**
 	 * Judges a call against `gate: before` rules before it runs: the refusal shown in place of its
 	 * result, or none to run it, and whether any gate rule covered the call at all. When the judge is
-	 * off, fails, outlasts `ttsr.gateTimeoutMs` or answers no number, each rule's `onJudgeError`
-	 * decides. Rejects when `signal` aborts the wait: an aborted call is neither refused nor run.
+	 * off, fails, outlasts `ttsr.gateTimeoutMs`, answers no number or can read only part of the call,
+	 * each rule's `onJudgeError` decides. Rejects when `signal` aborts the wait: an aborted call is
+	 * neither refused nor run.
 	 */
 	async gateToolCall(tool: AgentTool, args: unknown, toolCallId: string, signal?: AbortSignal): Promise<GateVerdict> {
 		const manager = this.#manager;
@@ -649,7 +651,7 @@ export class TtsrCoordinator {
 		const covered = verdicts.some(verdict => verdict !== undefined);
 		const refused = verdicts.find(verdict => verdict?.rule !== undefined);
 		if (!refused?.rule) return { covered };
-		const { rule, output, unjudged } = refused;
+		const { rule, output, unjudged, truncated } = refused;
 		this.#host.emitSessionEvent({ type: "ttsr_triggered", rules: [rule] }).catch(() => {});
 		return {
 			covered,
@@ -659,27 +661,29 @@ export class TtsrCoordinator {
 				subject: output.subject,
 				content: rule.content,
 				unjudged,
+				truncated,
 			}),
 		};
 	}
 
 	/**
 	 * Undefined when no gate rule covers `output`; else the first gate rule, in rule order, that refuses
-	 * it (`unjudged` when the judge gave no answer), or no rule when every one allows it.
+	 * it (`unjudged` when the judge gave no answer, `truncated` when it read only a prefix of `output`),
+	 * or no rule when every one allows it.
 	 */
 	async #gateOutput(
 		manager: TtsrManager,
 		output: TtsrOutput,
 		signal: AbortSignal | undefined,
 		deadline: AbortSignal,
-	): Promise<{ output: TtsrOutput; rule?: Rule; unjudged?: boolean } | undefined> {
+	): Promise<{ output: TtsrOutput; rule?: Rule; unjudged?: boolean; truncated?: boolean } | undefined> {
 		const candidates = await manager.gateCandidates(output.content, output.context);
 		if (candidates.length === 0) return undefined;
 		const judge = this.#host.ruleJudge();
-		let probabilities: number[] | undefined;
+		let judged: RuleProbabilities | undefined;
 		if (judge) {
 			try {
-				probabilities = await untilAborted(deadline, () =>
+				judged = await untilAborted(deadline, () =>
 					judgeRuleProbabilities(judge, output, candidates, { signal: deadline }),
 				);
 			} catch (error) {
@@ -691,13 +695,20 @@ export class TtsrCoordinator {
 				});
 			}
 		}
+		const truncated = judged?.truncated === true;
 		for (const [index, { rule }] of candidates.entries()) {
-			const probability = probabilities?.[index];
-			if (probability !== undefined && Number.isFinite(probability)) {
-				if (probability >= JUDGED_RULE_THRESHOLD) return { rule, output, unjudged: false };
-			} else if (rule.onJudgeError === "block") {
-				return { rule, output, unjudged: true };
-			} else if (probabilities) {
+			const probability = judged?.probabilities[index];
+			const answered = probability !== undefined && Number.isFinite(probability);
+			// A yes about the part the judge read refuses; a no covers only that part.
+			if (answered && probability >= JUDGED_RULE_THRESHOLD) return { rule, output, unjudged: false };
+			if (answered && !truncated) continue;
+			if (rule.onJudgeError === "block") return { rule, output, unjudged: true, truncated };
+			if (truncated) {
+				logger.warn("TTSR gate judge read only part of the call; running it", {
+					rule: rule.name,
+					subject: output.subject,
+				});
+			} else if (judged) {
 				logger.warn("TTSR gate judge gave no answer; running the call", { rule: rule.name });
 			}
 		}

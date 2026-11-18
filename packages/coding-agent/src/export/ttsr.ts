@@ -80,26 +80,35 @@ function jevPrefix(text: string, maxTokens: number): string {
 	return text.slice(0, last >= 0xd800 && last <= 0xdbff ? lo - 1 : lo);
 }
 
+/** Each candidate's yes-probability from one judge request, and whether the judge read all of the content. */
+export interface RuleProbabilities {
+	/** Index for index with the candidates. */
+	probabilities: number[];
+	/** The content passed {@link JUDGED_CONTENT_MAX_TOKENS}: the judge read only its prefix. */
+	truncated: boolean;
+}
+
 /**
  * Ask every candidate's question about `output` in one request (Jev bills the
- * shared state once) and return each candidate's yes-probability, index for
- * index. Judge failures propagate to the caller.
+ * shared state once) and return each candidate's yes-probability. Judge
+ * failures propagate to the caller.
  */
 export async function judgeRuleProbabilities(
 	judge: Judge,
 	output: TtsrOutput,
 	candidates: readonly JudgedCandidate[],
 	options?: JudgeOptions,
-): Promise<number[]> {
+): Promise<RuleProbabilities> {
 	const questions: Record<string, NoulQuestion> = {};
 	for (const [index, candidate] of candidates.entries()) {
 		questions[`q${index}`] = { type: "noul", instructions: candidate.question };
 	}
-	const { answers } = await judge.judge(
-		{ state: { output: output.subject, content: jevPrefix(output.content, JUDGED_CONTENT_MAX_TOKENS) }, questions },
-		options,
-	);
-	return candidates.map((_, index) => answers[`q${index}`].noul);
+	const content = jevPrefix(output.content, JUDGED_CONTENT_MAX_TOKENS);
+	const { answers } = await judge.judge({ state: { output: output.subject, content }, questions }, options);
+	return {
+		probabilities: candidates.map((_, index) => answers[`q${index}`].noul),
+		truncated: content.length < output.content.length,
+	};
 }
 
 /** The candidates {@link judgeRuleProbabilities} judges violated. */
@@ -109,7 +118,7 @@ export async function judgeRules(
 	candidates: readonly JudgedCandidate[],
 	options?: JudgeOptions,
 ): Promise<Rule[]> {
-	const probabilities = await judgeRuleProbabilities(judge, output, candidates, options);
+	const { probabilities } = await judgeRuleProbabilities(judge, output, candidates, options);
 	return candidates
 		.filter((_, index) => probabilities[index] >= JUDGED_RULE_THRESHOLD)
 		.map(candidate => candidate.rule);
