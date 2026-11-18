@@ -557,12 +557,12 @@ export class ToolGuard {
 	#consecutive = 0;
 	#total = 0;
 	/**
-	 * The last call that ended a run of refusals, and how long that run was. A device call (`write
-	 * xd://<tool>`, a shell redirect to one) passes the guard twice under one id: its carrier, then
-	 * the device's tool. When the device's tool is refused, its carrier ran nothing and ended no run.
+	 * The runs of refusals each call ended, by tool call id, kept while the call's device tool may still
+	 * be refused. A device call (`write xd://<tool>`, a shell redirect to one) passes the guard twice
+	 * under one id: its carrier, then the device's tool. When the device's tool is refused, its carrier
+	 * ran nothing and ended no run. Keyed per call, since device calls can be in flight at once.
 	 */
-	#endedBy: string | undefined;
-	#endedRun = 0;
+	readonly #endedRuns = new Map<string, number>();
 	/** Non-synthetic user messages when the counts last restarted; one more starts a new run. */
 	#runKey: number | undefined;
 	/** Judgments in a row that failed or timed out. */
@@ -584,7 +584,7 @@ export class ToolGuard {
 			this.#runKey = runKey;
 			this.#consecutive = 0;
 			this.#total = 0;
-			this.#endedBy = undefined;
+			this.#endedRuns.clear();
 		}
 		// Rule gates never consult the judge breaker below: a failing judge must not open them.
 		const gate = await this.#host.gate?.(tool, args, toolCall.toolCallId, signal);
@@ -644,17 +644,17 @@ export class ToolGuard {
 
 	/** Ends the current run of refusals at an allowed call. */
 	#endRefusals(toolCallId: string): void {
-		this.#endedBy = toolCallId;
-		this.#endedRun = this.#consecutive;
+		if (this.#consecutive > 0) this.#endedRuns.set(toolCallId, this.#consecutive);
 		this.#consecutive = 0;
 	}
 
 	/** Counts one refusal, stopping the run after too many, and returns it. */
 	#refused(toolCallId: string, refusal: string): string {
 		// The device's tool of a call whose carrier ended the run: the carrier ran nothing, so the run goes on.
-		if (this.#endedBy === toolCallId) {
-			this.#endedBy = undefined;
-			this.#consecutive += this.#endedRun;
+		const endedRun = this.#endedRuns.get(toolCallId);
+		if (endedRun !== undefined) {
+			this.#endedRuns.delete(toolCallId);
+			this.#consecutive += endedRun;
 		}
 		this.#consecutive++;
 		this.#total++;

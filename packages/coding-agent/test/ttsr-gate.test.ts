@@ -89,6 +89,44 @@ function guardOver(coordinator: TtsrCoordinator, settings: Settings, stops: stri
 	});
 }
 
+/** A `write` tool whose `xd://ast_edit` device is behind a gate rule that refuses every call. */
+function gatedDeviceWrite() {
+	const REWRITES = "Does the call rewrite code?";
+	const { judge } = fakeJudge({ [REWRITES]: 0.9 });
+	const settings = Settings.isolated({ "tools.approvalMode": "yolo" });
+	const rule = judgedRule("no-rewrite", { gate: "before", question: REWRITES, scope: ["tool:ast_edit"] });
+	const { coordinator, events } = setup([rule], judge, settings);
+	const runner = new ExtensionRunner(
+		[],
+		new ExtensionRuntime(),
+		"/work",
+		SessionManager.inMemory(),
+		{} as ModelRegistry,
+	);
+	const stops: string[] = [];
+	runner.setToolGuard(guardOver(coordinator, settings, stops));
+	const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "rewrote" }] }));
+	const device = {
+		name: "ast_edit",
+		label: "ast_edit",
+		description: "structural rewrite",
+		parameters: type({ pattern: "string" }),
+		approval: "write",
+		execute,
+	} as AgentTool;
+	const xdev: XdevState = {
+		tools: new Map([["ast_edit", new ExtensionToolWrapper(device, runner) as unknown as Tool]]),
+		mountedNames: new Set(["ast_edit"]),
+		builtInNames: new Set(),
+		isActive: () => false,
+		resolve: name => resolveXdevTool(xdev, name),
+	};
+	const session = { cwd: "/work", hasUI: false, getSessionFile: () => null, settings, xdev } as ToolSession;
+	const write = new ExtensionToolWrapper(new WriteTool(session) as unknown as AgentTool, runner);
+	const call = { path: "xd://ast_edit", content: JSON.stringify({ pattern: "foo($A)" }) };
+	return { write, call, settings, execute, events, stops };
+}
+
 describe("TTSR gate rules", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -323,39 +361,7 @@ describe("TTSR gate rules", () => {
 	});
 
 	it("[gate-21] stops the run after three refused device calls, though each one's write carrier passes", async () => {
-		const REWRITES = "Does the call rewrite code?";
-		const { judge } = fakeJudge({ [REWRITES]: 0.9 });
-		const settings = Settings.isolated({ "tools.approvalMode": "yolo" });
-		const rule = judgedRule("no-rewrite", { gate: "before", question: REWRITES, scope: ["tool:ast_edit"] });
-		const { coordinator, events } = setup([rule], judge, settings);
-		const runner = new ExtensionRunner(
-			[],
-			new ExtensionRuntime(),
-			"/work",
-			SessionManager.inMemory(),
-			{} as ModelRegistry,
-		);
-		const stops: string[] = [];
-		runner.setToolGuard(guardOver(coordinator, settings, stops));
-		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "rewrote" }] }));
-		const device = {
-			name: "ast_edit",
-			label: "ast_edit",
-			description: "structural rewrite",
-			parameters: type({ pattern: "string" }),
-			approval: "write",
-			execute,
-		} as AgentTool;
-		const xdev: XdevState = {
-			tools: new Map([["ast_edit", new ExtensionToolWrapper(device, runner) as unknown as Tool]]),
-			mountedNames: new Set(["ast_edit"]),
-			builtInNames: new Set(),
-			isActive: () => false,
-			resolve: name => resolveXdevTool(xdev, name),
-		};
-		const session = { cwd: "/work", hasUI: false, getSessionFile: () => null, settings, xdev } as ToolSession;
-		const write = new ExtensionToolWrapper(new WriteTool(session) as unknown as AgentTool, runner);
-		const call = { path: "xd://ast_edit", content: JSON.stringify({ pattern: "foo($A)" }) };
+		const { write, call, settings, execute, events, stops } = gatedDeviceWrite();
 
 		for (let i = 0; i < 3; i++) {
 			const result = await write.execute(`call-${i}`, call, undefined, undefined, { settings } as AgentToolContext);
@@ -366,6 +372,21 @@ describe("TTSR gate rules", () => {
 		expect(execute).not.toHaveBeenCalled();
 		expect(events.filter(event => event.type === "ttsr_triggered")).toHaveLength(3);
 		expect(stops).toEqual(["The tool guard refused 3 tool calls in a row; the run stopped."]);
+	});
+
+	it("[gate-22] stops the run after three refused device calls, though two of them are in flight at once", async () => {
+		const { write, call, settings, execute, stops } = gatedDeviceWrite();
+
+		for (let round = 0; round < 2; round++) {
+			await Promise.all(
+				["a", "b"].map(id =>
+					write.execute(`call-${round}${id}`, call, undefined, undefined, { settings } as AgentToolContext),
+				),
+			);
+		}
+
+		expect(execute).not.toHaveBeenCalled();
+		expect(stops[0]).toBe("The tool guard refused 3 tool calls in a row; the run stopped.");
 	});
 
 	it("[gate-18] judges the whole edit call, so a file it deletes beside an added line cannot slip past", async () => {
