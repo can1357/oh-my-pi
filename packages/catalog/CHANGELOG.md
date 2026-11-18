@@ -11,6 +11,7 @@
 - Hosted jev (TypeSafe, OpenRouter, Command Code, OpenCode Zen) splits judgment requests at 32 questions, ending `400 questions must map 1 through 32 ids` find failures
 - Fixed Devin models seeing only the newest 5 images of a conversation: Devin's own host now takes up to 60 (20 for Claude models) within 24 MB of image data and a custom Devin base URL up to 40, and snapcompact plans Gemini 4 Carbon and Gemini 3.7 Flash archive frames at the 1,089 tokens Devin bills instead of about 5,000 ([#19619](https://github.com/can1357/oh-my-pi/pull/19619) by [@will-bogusz](https://github.com/will-bogusz))
 - Devin's Gemini 3.7 Flash, 3.8 Flash, 4 Argon and 4 Carbon now switch from promo to list price when each promotion ends, instead of showing and billing the promo price indefinitely ([#19601](https://github.com/can1357/oh-my-pi/pull/19601) by [@will-bogusz](https://github.com/will-bogusz))
+- Kiro API keys (`KIRO_API_KEY` / `ksk_…`) now list models, chat, and report `/usage` instead of failing with HTTP 400 `Invalid profileArn` ([#19689](https://github.com/can1357/oh-my-pi/issues/19689))
 
 ## [18.22.2] - 2026-11-18
 
