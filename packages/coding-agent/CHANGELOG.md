@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the shell's `rm -r` failing with `Permission denied` on a Windows junction or directory symlink inside the tree; it is now removed without following it ([#19572](https://github.com/can1357/oh-my-pi/pull/19572) by [@zhivko-kocev](https://github.com/zhivko-kocev))
+
+## [18.22.1] - 2026-11-17
+
 ### Breaking Changes
 
 - SDK: `createAgentSession`'s `cacheWarming` option is a mode cap (`"off" | "streaming" | "idle"`, the lower of it and `providers.cacheWarming` applies) instead of a boolean; pass `"off"` where you passed `false`
