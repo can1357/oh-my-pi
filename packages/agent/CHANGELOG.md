@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional `AgentTool.matcherSections(args)` hook returning each touched file's section of a multi-file payload, so pre-execution TTSR gates judge each file on its own ([#19670](https://github.com/can1357/oh-my-pi/pull/19670) by [@Xytronix](https://github.com/Xytronix))
+
 ## [18.22.1] - 2026-11-17
 
 ### Added
