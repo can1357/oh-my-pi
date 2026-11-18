@@ -1,6 +1,6 @@
 # Manifest tool declarations cannot register
 
-Status: open. Investigated against `origin/omp2` at `8fd17dee2aa3c995142bf5435b121ac237118527`. This record proposes a fix; it makes no runtime changes.
+Status: partly resolved. The Rust lowering is fixed by `fix(driver): lower native tool keys as name@family.rev`: admission parses `name@family.rev`, takes the revision from the key, and refuses any other tool key with `NativeExtensionError::ToolKey`. Still open: the documented `[[tools]]` authoring format, and end-to-end coverage of soft and hard tools through the manifest path on Linux (`crates/e2e/tests/p9_continuation_grants.rs` covers a soft tool on macOS only). The record below was investigated against `origin/omp2` at `8fd17dee2aa3c995142bf5435b121ac237118527` and describes the defect as found.
 
 ## Impact and verdict
 
@@ -71,6 +71,6 @@ The probe records the refused invocation and returns success; its exit status al
 
 The tracked `omp.toml` files found by `rg --files --hidden -g omp.toml` are under `scripts/qa/fixtures/extensions`. These are production-shaped test fixtures, not evidence of a shipped extension successfully registering (`scripts/qa/README.md:73-76`). For example, `scripts/qa/fixtures/extensions/root/hard-tool/omp.toml:6-13` declares `key = "hello@qaext.1"`, and `scripts/qa/cases/test_py_root.py:262-270` expects a tool round trip. No successful run of that fixture was found or performed in this investigation. No tracked shipped extension with a successful manifest-based tool registration was identified. [INFERENCE] The path may never have worked end to end; the repository census and the Phase 0 failures do not establish its entire history or rule out external extensions.
 
-## Proposed fix, not applied
+## Proposed fix (parse and validate applied; the rest open)
 
 Parse and validate the normalized `name@family.rev` key once in Rust admission, preserving its name, family, and revision independently of `api`. Keep Python's rejection of an extra `family` field and preserve authenticated-manifest versus registry comparison. Reconcile the documented `[[tools]]` authoring format with the actual deployment parser and lowering, or document the normalized format as the supported input. Add end-to-end native admission and invocation coverage for soft and hard tools, a tool revision different from its API level, malformed keys, and publication mismatch. Exercise the shipped QA fixture through the actual manifest path. Do not use the trusted-module route as proof of manifest registration.
