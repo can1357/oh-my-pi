@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the macOS native typing tests to expect Return and Tab key codes while preserving Unicode payload and remote-screen layout coverage.
+
 ## [19.0.0] - 2026-11-18
 
 ### Added
