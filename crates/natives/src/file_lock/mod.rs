@@ -2,7 +2,8 @@
 //!
 //! Windows uses named mutexes, so it leaves no filesystem artifact. Unix
 //! platforms lock a persistent sidecar: Linux takes an open-file-description
-//! record lock, other Unix platforms `flock(2)`.
+//! record lock, other Unix platforms `flock(2)`. Linux also treats a path as
+//! held while an older build still binds its abstract-socket name.
 
 use std::{io, path::Path};
 
@@ -11,6 +12,8 @@ use napi_derive::napi;
 
 use crate::js;
 
+#[cfg(target_os = "linux")]
+mod legacy_abstract;
 #[cfg(unix)]
 mod unix;
 #[cfg(target_os = "windows")]
@@ -24,7 +27,7 @@ use windows as platform;
 #[cfg(not(any(unix, target_os = "windows")))]
 compile_error!("omp-natives file locks require Unix or Windows");
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn memory_lock_name(path: &str) -> String {
 	const HIGH_SEED: u64 = 0x4f4d_502d_4c4f_434b;
 	const LOW_SEED: u64 = 0x5049_2d46_494c_454c;
@@ -54,7 +57,21 @@ impl FileLock {
 		let path = path.to_str().ok_or_else(|| {
 			io::Error::new(io::ErrorKind::InvalidInput, "lock path is not valid UTF-8")
 		})?;
-		platform::try_acquire(path).map(|inner| Self { inner })
+		let inner = platform::try_acquire(path)?;
+		#[cfg(target_os = "linux")]
+		let inner = if inner.is_some() && legacy_abstract::is_bound(path)? {
+			None
+		} else {
+			inner
+		};
+		Ok(Self { inner })
+	}
+
+	pub(crate) fn is_held_path(path: &str) -> io::Result<bool> {
+		let held = platform::is_held(path)?;
+		#[cfg(target_os = "linux")]
+		let held = held || legacy_abstract::is_bound(path)?;
+		Ok(held)
 	}
 
 	/// Try to acquire `path` without blocking.
@@ -71,13 +88,14 @@ impl FileLock {
 
 	/// Whether any handle, in any process including this one, holds `path`.
 	///
-	/// Observes without locking or opening the lock: an `F_OFD_GETLK` query on
-	/// Linux, an `F_GETLK` query on other Unix platforms, a `\BaseNamedObjects`
-	/// directory listing on Windows. A concurrent `tryAcquire()` never meets it.
+	/// Observes without taking the lock: an `F_OFD_GETLK` query plus a
+	/// `connect(2)` probe of the older abstract-socket name on Linux, an
+	/// `F_GETLK` query on other Unix platforms, a `\BaseNamedObjects` directory
+	/// listing on Windows. A concurrent `tryAcquire()` never meets it.
 	#[napi]
 	pub fn is_held(path: JsString) -> napi::Result<bool> {
 		let path = js::utf8(path)?;
-		platform::is_held(&path).map_err(|error| {
+		Self::is_held_path(&path).map_err(|error| {
 			napi::Error::from_reason(format!(
 				"Failed to probe native file lock for {}: {error}",
 				&*path
@@ -133,15 +151,20 @@ mod tests {
 
 	use super::platform::{is_held, try_acquire};
 
-	#[test]
-	fn probe_sees_holder_without_taking_the_lock() {
+	fn unique_lock_path(label: &str) -> String {
 		let nonce = SystemTime::now()
 			.duration_since(UNIX_EPOCH)
 			.expect("system clock")
 			.as_nanos();
 		let path =
-			std::env::temp_dir().join(format!("omp-file-lock-probe-{}-{nonce}", std::process::id()));
-		let path = path.to_str().expect("utf-8 temp path");
+			std::env::temp_dir().join(format!("omp-file-lock-{label}-{}-{nonce}", std::process::id()));
+		path.to_str().expect("utf-8 temp path").to_owned()
+	}
+
+	#[test]
+	fn probe_sees_holder_without_taking_the_lock() {
+		let path = unique_lock_path("probe");
+		let path = path.as_str();
 		assert!(!is_held(path).expect("probe unlocked path"));
 		let mut lease = try_acquire(path).expect("acquire").expect("free lease");
 		assert!(is_held(path).expect("probe held path"));
@@ -153,5 +176,35 @@ mod tests {
 			.expect("probe left the lease free");
 		successor.release().expect("release successor");
 		let _ = std::fs::remove_file(path);
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn lock_held_by_an_older_build_is_respected() {
+		use std::{
+			os::{
+				linux::net::SocketAddrExt,
+				unix::net::{SocketAddr, UnixDatagram},
+			},
+			path::Path,
+		};
+
+		use super::FileLock;
+
+		let path = unique_lock_path("legacy");
+		let name = super::memory_lock_name(&path);
+		let address = SocketAddr::from_abstract_name(name.as_bytes()).expect("abstract name");
+		let older_build = UnixDatagram::bind_addr(&address).expect("bind the older build's name");
+
+		let refused = FileLock::try_acquire_path(Path::new(&path)).expect("acquire attempt");
+		assert!(!refused.is_acquired());
+		assert!(FileLock::is_held_path(&path).expect("probe while the older build holds it"));
+
+		drop(older_build);
+		assert!(!FileLock::is_held_path(&path).expect("probe after the older build exits"));
+		let mut lock = FileLock::try_acquire_path(Path::new(&path)).expect("acquire");
+		assert!(lock.is_acquired());
+		lock.release_native().expect("release");
+		let _ = std::fs::remove_file(&path);
 	}
 }
