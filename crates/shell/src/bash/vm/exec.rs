@@ -2338,7 +2338,7 @@ pub fn start_sub(
 			// Its externals stay in the shell's process group.
 			super::jobctl::set_leader(k, child.vpid, None);
 			let vpid = child.vpid;
-			k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
+			k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid, script_file: false });
 			k.spawned.push(Box::new(child));
 			sc.sub = Some(PendingSub::Fork { vpid, capture });
 			Flow::Block(WaitKey::Proc(vpid))
@@ -2413,7 +2413,7 @@ pub fn start_zsh_sub(
 	// `ESUB_NOMONITOR`).
 	super::jobctl::set_leader(k, child.vpid, None);
 	let vpid = child.vpid;
-	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
+	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid, script_file: false });
 	k.spawned.push(Box::new(child));
 	sc.sub = Some(PendingSub::Fork { vpid, capture });
 	Flow::Block(WaitKey::Proc(vpid))
@@ -2459,7 +2459,7 @@ pub fn start_zsh_procsub(
 	// Not a job: its externals stay in the shell's group, without the
 	// terminal (zsh `ESUB_ASYNC`).
 	super::jobctl::set_leader(k, vpid, None);
-	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
+	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid, script_file: false });
 	k.spawned.push(Box::new(child));
 	vp.fds.set(fd, Some(mine));
 	vp.procsubs.push((vp.frames.len() as u32, fd));
@@ -2609,7 +2609,7 @@ pub fn start_procsub(
 	// Not a job: its externals stay in the shell's group, without the
 	// terminal.
 	super::jobctl::set_leader(k, vpid, None);
-	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
+	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid, script_file: false });
 	k.spawned.push(Box::new(child));
 	vp.fds.set(fd, Some(mine));
 	vp.procsubs.push((vp.frames.len() as u32, fd));
@@ -4104,7 +4104,10 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					vp.status = 0;
 					return Flow::Jump(info.end);
 				}
-				k.emit_op(cx, vp, op.node, EventData::Subshell { child: vpid });
+				k.emit_op(cx, vp, op.node, EventData::Subshell {
+					child:       vpid,
+					script_file: false,
+				});
 			},
 			SpawnKind::Coproc { name } => {
 				let name = unit.names[name as usize].clone();

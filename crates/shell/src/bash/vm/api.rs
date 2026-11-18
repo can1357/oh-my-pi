@@ -199,7 +199,7 @@ impl ShellApi<'_, '_> {
 		self
 			.shell
 			.k
-			.emit_op(self.cx, vp, node, EventData::Subshell { child });
+			.emit_op(self.cx, vp, node, EventData::Subshell { child, script_file: false });
 		run
 	}
 

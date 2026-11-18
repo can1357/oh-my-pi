@@ -395,6 +395,36 @@ async fn callout_scripts_are_drawn_by_their_command_but_eval_code_gets_a_frame()
 	assert_eq!(frames(&present(&trace, &Options::default())), 1);
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn executed_script_files_are_drawn_by_their_command() {
+	use std::os::unix::fs::PermissionsExt;
+	// The shape of an npm bin shim. Without `#!` the OS refuses it
+	// (`ENOEXEC`, as Windows refuses any `#!` file) and the engine runs it.
+	let root = tempfile::tempdir().unwrap();
+	let shim = root.path().join("shim");
+	std::fs::write(
+		&shim,
+		"basedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")\ncase `uname` in\n  *CYGWIN*) \
+		 basedir=`cygpath -w \"$basedir\"`;;\nesac\nif [ -x \"$basedir/node\" ]; then\n  exec \
+		 \"$basedir/node\" \"$@\"\nelse\n  exec true \"$@\"\nfi\n",
+	)
+	.unwrap();
+	std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+	let shell = Shell::new(None);
+	let trace = run(&shell, &format!("'{}' --version", shim.display())).await;
+	for options in [Options::default(), Options { view: View::Raw, ..Options::default() }] {
+		let live = present(&trace, &options);
+		assert_eq!(rows(&live).len(), 1, "{live}");
+		assert_eq!(live["watches"], serde_json::json!([]), "{live}");
+		let stored = StoredVisualization::from_snapshot_json(&trace.snapshot_json()).unwrap();
+		let restored: Value =
+			serde_json::from_str(&stored.presentation_json(&options).unwrap()).unwrap();
+		assert_eq!(rows(&restored).len(), 1, "{restored}");
+		assert_eq!(restored["watches"], serde_json::json!([]), "{restored}");
+	}
+}
+
 #[test]
 fn legacy_boundary_includes_heredoc_without_parsing_unannounced_future_syntax() {
 	use crate::bash::{

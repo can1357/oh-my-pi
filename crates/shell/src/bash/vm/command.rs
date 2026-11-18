@@ -4983,7 +4983,7 @@ fn not_found_hook(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) ->
 	text.push(b'\n');
 	let child = vp.child_text(k, cx.store, &text, line, vp.fds.clone());
 	let vpid = child.vpid;
-	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
+	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid, script_file: false });
 	k.spawned.push(Box::new(child));
 	let s = st(vp);
 	s.wait_for = vec![vpid];

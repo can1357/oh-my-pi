@@ -81,6 +81,7 @@
 - Fixed MCP OAuth reauthentication errors to expose registration endpoints, status details, and remedies, and fixed auth-broker shutdown so refreshed tokens are saved safely.
 - Fixed Spotlight retry and account handling, including waitlisted accounts, rate limits, outages, and request identification.
 - Fixed cross-platform shell and desktop behavior, including macOS startup and redraw performance, Windows file operations and application lookup, speech output, and desktop opening.
+- Fixed the bash card expanding a script file the command ran (e.g. an npm global bin shim on Windows) into "built at runtime · not in the command text" frames; the invocation row now stands for it ([#19627](https://github.com/can1357/oh-my-pi/issues/19627))
 
 ## [18.22.2] - 2026-11-18
 
