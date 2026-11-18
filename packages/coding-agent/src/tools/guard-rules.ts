@@ -293,6 +293,32 @@ function pathNames(absPath: string): string[] {
 	return path.resolve(absPath).split(path.sep).filter(Boolean);
 }
 
+/** A credential file's names, root first ({@link pathNames}), with how an approval names it. */
+interface CredentialFileNames {
+	names: readonly string[];
+	shown: string;
+}
+
+/** The system credential files, each with its names read once, as {@link credentialLocation} compares them. */
+const SYSTEM_CREDENTIAL_NAMES: readonly CredentialFileNames[] = Object.keys(SYSTEM_CREDENTIAL_FILES).map(file => ({
+	names: pathNames(file),
+	shown: file,
+}));
+
+/** The credential files of a home directory (`~/.netrc`), as {@link credentialLocation} compares them. */
+const CREDENTIAL_FILE_NAMES: readonly string[] = Object.keys(CREDENTIAL_FILES);
+
+/** A credential folder of a home directory, with its names and the files in it that are not secret. */
+const CREDENTIAL_FOLDERS: readonly {
+	folder: string;
+	names: readonly string[];
+	publicFiles: readonly string[];
+}[] = Object.entries(CREDENTIAL_DIRS).map(([folder, publicFiles]) => ({
+	folder,
+	names: folder.split("/"),
+	publicFiles,
+}));
+
 /** The longest word {@link expandBraces} expands, and the most words it makes of one; the rest is not checked. */
 const MAX_BRACE_WORD_LENGTH = 4096;
 const MAX_BRACE_WORDS = 1024;
@@ -448,30 +474,49 @@ function wordPaths(command: ShellCommand, word: string, cwd: string | undefined,
 }
 
 /**
- * The credential location an absolute path is in, for display; `undefined` when it holds no
+ * The credential names a guard evaluation compares paths with, read once for it: the names of the
+ * home directory `~` names, and of every fixed credential file. Reading them per word makes a
+ * command with hundreds of thousands of words take seconds.
+ */
+interface CredentialIndex {
+	/** `~`, as {@link resolveShellWordPath} expands it. */
+	home: string;
+	/** The names of `home`, root first ({@link pathNames}). */
+	homeNames: readonly string[];
+	/** The system credential files and omp's own credential stores. */
+	fixed: readonly CredentialFileNames[];
+}
+
+/** The credential names of a call's `home` and environment ({@link CredentialIndex}). */
+function credentialIndex(home: string): CredentialIndex {
+	return {
+		home,
+		homeNames: pathNames(home),
+		fixed: [
+			...SYSTEM_CREDENTIAL_NAMES,
+			...ompCredentialStores().map(file => ({ names: pathNames(file), shown: `omp's credential store ${file}` })),
+		],
+	};
+}
+
+/**
+ * The credential location a path's names are in, for display; `undefined` when they hold no
  * credentials. Public files in a credential folder (`~/.ssh/config`, `*.pub`) do not count. A
  * component that is a pathname pattern (`~/.ss?/id_*`, `~/.netr[c]`) counts when it can name the
  * location, and names are compared without regard to case where the file system does so
  * ({@link foldsCase}). Paths are compared as written: a symlink to a location is not followed.
  */
-function credentialLocation(absPath: string, home: string): string | undefined {
-	const names = pathNames(absPath);
-	const fixed = [
-		...Object.keys(SYSTEM_CREDENTIAL_FILES).map(file => ({ file, shown: file })),
-		...ompCredentialStores().map(file => ({ file, shown: `omp's credential store ${file}` })),
-	];
-	for (const { file, shown } of fixed) {
-		const fileNames = pathNames(file);
+function credentialLocation(names: readonly string[], index: CredentialIndex): string | undefined {
+	for (const { names: fileNames, shown } of index.fixed) {
 		if (names.length === fileNames.length && fileNames.every((name, k) => namesFile(names[k], name))) return shown;
 	}
-	const homeNames = pathNames(home);
+	const { homeNames } = index;
 	if (names.length <= homeNames.length || !homeNames.every((name, k) => namesFile(names[k], name))) return undefined;
 	const rest = names.slice(homeNames.length);
-	for (const file of Object.keys(CREDENTIAL_FILES)) {
+	for (const file of CREDENTIAL_FILE_NAMES) {
 		if (rest.length === 1 && namesFile(rest[0], file)) return `~/${file}`;
 	}
-	for (const [folder, publicFiles] of Object.entries(CREDENTIAL_DIRS)) {
-		const folderNames = folder.split("/");
+	for (const { folder, names: folderNames, publicFiles } of CREDENTIAL_FOLDERS) {
 		if (rest.length < folderNames.length || !folderNames.every((name, k) => namesFile(rest[k], name))) continue;
 		// Bare wildcards for every component (`~/*/*/package.json`) name any folder, not this one.
 		if (!folderNames.some((_, k) => /[^*?]/.test(rest[k]))) continue;
@@ -488,18 +533,23 @@ function credentialLocation(absPath: string, home: string): string | undefined {
  * credential file, a `.env`, or a process environment, also through braces and pathname patterns
  * (`.env*`, `~/.{netrc,x}`). From an unknown `cwd`, a relative `.env` still counts by its name.
  */
-function sentSecret(command: ShellCommand, word: string, cwd: string | undefined, home: string): string | undefined {
-	for (const target of wordPaths(command, word, cwd, home)) {
+function sentSecret(
+	command: ShellCommand,
+	word: string,
+	cwd: string | undefined,
+	credentials: CredentialIndex,
+): string | undefined {
+	for (const target of wordPaths(command, word, cwd, credentials.home)) {
 		const names = pathNames(target);
 		if (namesDotenv(names.at(-1) ?? "")) return path.basename(target);
 		if (names.length === 3 && namesFile(names[0], "proc") && namesFile(names[2], "environ")) {
 			return "the process environment";
 		}
-		const found = credentialLocation(target, home);
+		const found = credentialLocation(names, credentials);
 		if (found) return found;
 	}
 	if (cwd === undefined) {
-		for (const target of wordPaths(command, word, path.sep, home)) {
+		for (const target of wordPaths(command, word, path.sep, credentials.home)) {
 			if (namesDotenv(path.basename(target))) return path.basename(target);
 		}
 	}
@@ -1165,7 +1215,7 @@ function printsKeychainPassword(argv: readonly string[]): boolean {
 	return false;
 }
 
-function credentialRead(command: ShellCommand, scope: GuardScope): GuardHit | undefined {
+function credentialRead(command: ShellCommand, credentials: CredentialIndex): GuardHit | undefined {
 	const name = command.argv[0];
 	const first = command.argv[1] ?? "";
 	if (name === "security" && (first === "dump-keychain" || first === "export")) {
@@ -1179,13 +1229,13 @@ function credentialRead(command: ShellCommand, scope: GuardScope): GuardHit | un
 	}
 	// Its arguments are read from where it runs, its `<` redirections from where the shell opens them.
 	const sources = [
-		{ words: readWords(command, scope.home), cwd: command.cwd },
+		{ words: readWords(command, credentials.home), cwd: command.cwd },
 		{ words: command.reads, cwd: command.shellCwd },
 	];
 	for (const { words, cwd } of sources) {
 		for (const word of words) {
-			for (const target of wordPaths(command, word, cwd, scope.home)) {
-				const found = credentialLocation(target, scope.home);
+			for (const target of wordPaths(command, word, cwd, credentials.home)) {
+				const found = credentialLocation(pathNames(target), credentials);
 				if (found) return hit("credential_read", `it reads your credentials in ${found}`);
 			}
 		}
@@ -1355,10 +1405,10 @@ function firstSecret(
 	command: ShellCommand,
 	words: readonly string[],
 	cwd: string | undefined,
-	home: string,
+	credentials: CredentialIndex,
 ): string | undefined {
 	for (const word of words) {
-		const found = sentSecret(command, word, cwd, home);
+		const found = sentSecret(command, word, cwd, credentials);
 		if (found) return found;
 	}
 	return undefined;
@@ -1368,20 +1418,27 @@ function firstSecret(
  * The secret a command puts on its output: the environment, or a credential or `.env` file it
  * reads, through its arguments from where it runs or its `<` redirections from where the shell opens them.
  */
-function secretOutput(command: ShellCommand, home: string): string | undefined {
+function secretOutput(command: ShellCommand, credentials: CredentialIndex): string | undefined {
 	if (dumpsEnvironment(command)) return "the environment";
-	const words = command.argv[0] === "source" ? args(command) : readWords(command, home);
-	return firstSecret(command, command.reads, command.shellCwd, home) ?? firstSecret(command, words, command.cwd, home);
+	const words = command.argv[0] === "source" ? args(command) : readWords(command, credentials.home);
+	return (
+		firstSecret(command, command.reads, command.shellCwd, credentials) ??
+		firstSecret(command, words, command.cwd, credentials)
+	);
 }
 
 /**
  * A network command sending a secret: on its input from a `<` redirection, in a file it uploads, or
  * `upstream`, the secret an earlier stage of its pipeline puts on its output.
  */
-function secretSend(command: ShellCommand, upstream: string | undefined, home: string): GuardHit | undefined {
+function secretSend(
+	command: ShellCommand,
+	upstream: string | undefined,
+	credentials: CredentialIndex,
+): GuardHit | undefined {
 	const found =
-		firstSecret(command, command.reads, command.shellCwd, home) ??
-		firstSecret(command, sentFiles(command), command.cwd, home) ??
+		firstSecret(command, command.reads, command.shellCwd, credentials) ??
+		firstSecret(command, sentFiles(command), command.cwd, credentials) ??
 		upstream;
 	return found ? hit("secret_send", `it sends ${found} over the network (\`${command.argv[0]}\`)`) : undefined;
 }
@@ -1396,18 +1453,19 @@ function secretSend(command: ShellCommand, upstream: string | undefined, home: s
  */
 export function findPipelineGuardHits(command: string, scope: GuardScope): (GuardHit | undefined)[] {
 	braceTextLeft = MAX_BRACE_TEXT;
+	const credentials = credentialIndex(scope.home);
 	return parseShellCommands(command, scope).map(pipeline => {
 		// The first secret a stage before the sender being checked puts out; each stage is read once.
 		let upstream: string | undefined;
 		let read = 0;
 		for (const [index, sender] of pipeline.entries()) {
 			if (!Object.hasOwn(SENDERS, sender.argv[0])) continue;
-			for (; read < index && upstream === undefined; read++) upstream = secretOutput(pipeline[read], scope.home);
-			const found = secretSend(sender, upstream, scope.home);
+			for (; read < index && upstream === undefined; read++) upstream = secretOutput(pipeline[read], credentials);
+			const found = secretSend(sender, upstream, credentials);
 			if (found) return found;
 		}
 		for (const reader of pipeline) {
-			const found = credentialRead(reader, scope);
+			const found = credentialRead(reader, credentials);
 			if (found) return found;
 		}
 		return undefined;
@@ -1434,7 +1492,7 @@ export function findShellGuardHit(command: string, scope: GuardScope): GuardHit 
  */
 export function fileToolApproval(tier: ToolTier, rawPaths: readonly string[], cwd: string): ToolApprovalDecision {
 	const router = InternalUrlRouter.instance();
-	const home = os.homedir();
+	const credentials = credentialIndex(os.homedir());
 	braceTextLeft = MAX_BRACE_TEXT;
 	for (const rawPath of rawPaths) {
 		const filePaths = [
@@ -1445,7 +1503,7 @@ export function fileToolApproval(tier: ToolTier, rawPaths: readonly string[], cw
 			if (filePath === "" || router.canHandle(filePath) || isReadableUrlPath(filePath)) continue;
 			let found: string | undefined;
 			try {
-				found = credentialLocation(resolveToCwd(filePath, cwd), home);
+				found = credentialLocation(pathNames(resolveToCwd(filePath, cwd)), credentials);
 			} catch {
 				continue;
 			}
