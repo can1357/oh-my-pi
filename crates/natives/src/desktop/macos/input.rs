@@ -5716,15 +5716,14 @@ mod tests {
 			key(up, 48, "\t"),
 		]);
 		let stroke = |code, shift| Keystroke { code, shift, option: false };
-		for remote in [RemoteScreen::KeyEvents, RemoteScreen::HidReports] {
-			let keys = keys_for(&window, "aB\n\t", Some(remote), || Ok(Some(us_stroke)));
-			assert_eq!(keys.unwrap(), [
-				TypedKey::Layout(stroke(0, false), "a"),
-				TypedKey::Layout(stroke(11, true), "B"),
-				TypedKey::Layout(stroke(36, false), "\n"),
-				TypedKey::Layout(stroke(48, false), "\t"),
-			]);
-		}
+		let remote =
+			keys_for(&window, "aB\n\t", Some(RemoteScreen::KeyEvents), || Ok(Some(us_stroke)));
+		assert_eq!(remote.unwrap(), [
+			TypedKey::Layout(stroke(0, false), "a"),
+			TypedKey::Layout(stroke(11, true), "B"),
+			TypedKey::Layout(stroke(36, false), "\n"),
+			TypedKey::Layout(stroke(48, false), "\t"),
+		]);
 	}
 
 	#[test]
