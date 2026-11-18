@@ -368,7 +368,7 @@ class SharedAgyBackend {
 
 	async #onToolCall(
 		name: string,
-		args: Record<string, unknown>,
+		args: unknown,
 		conversationId: string | undefined,
 	): Promise<McpToolOutput> {
 		const owner = conversationId ? this.#sessionOwners.get(conversationId) : undefined;
