@@ -35,6 +35,7 @@ import {
 	readConversationCheckpoint,
 } from "./conversation-store";
 import { agyCredentialEnv } from "./credentials";
+import { Diagnostics } from "./diagnostics";
 import { type McpCallHandler, McpBridge, type McpToolDefinition, type McpToolOutput } from "./mcp-bridge";
 import { inputBlocks, type Ledger, lateToolResultPrompt, planTurn, replayPrompt, transcriptDigest } from "./reconcile";
 import type { StepWriter } from "./step-writer";
@@ -102,6 +103,8 @@ export interface AgyHostOptions {
 	announcementTimeoutMs?: number;
 	startupTimeoutMs?: number;
 	schedule?: AgyScheduler;
+	/** Opt-in stage timings; tests inject their own instance and clock. */
+	diagnostics?: Diagnostics;
 }
 
 interface AgyProcess extends AgyTransport {
@@ -165,6 +168,9 @@ export class AgyHost implements ProviderSessionState {
 	#contextTokens = 0;
 	#announced = new Map<string, number>();
 	#announcementWaiters = new Set<{ name: string; finish(announced: boolean): void }>();
+	#loggedGeneration = 0;
+	#disposal: Promise<void> | undefined;
+	#diagnosticsSettled: Promise<void> | undefined;
 
 	/** geminiDir is the account-scoped agy configuration and conversation directory. */
 	constructor(geminiDir: string, options: AgyHostOptions = {}) {
@@ -176,6 +182,7 @@ export class AgyHost implements ProviderSessionState {
 			announcementTimeoutMs: options.announcementTimeoutMs ?? ANNOUNCEMENT_TIMEOUT_MS,
 			startupTimeoutMs: options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS,
 			schedule: options.schedule ?? scheduleTimer,
+			diagnostics: options.diagnostics ?? new Diagnostics(),
 		};
 		if (
 			this.#options.holdLimitMs <= 0 ||
@@ -198,6 +205,10 @@ export class AgyHost implements ProviderSessionState {
 
 	/** Emit one assistant step, parking at a tool call or finishing at the ACP turn end. */
 	async step(model: Model, context: Context, options: AgyStepOptions, writer: StepWriter): Promise<void> {
+		return this.#options.diagnostics.measure("step.total", () => this.#runStep(model, context, options, writer));
+	}
+
+	async #runStep(model: Model, context: Context, options: AgyStepOptions, writer: StepWriter): Promise<void> {
 		if (this.#step) throw new Error("Antigravity CLI is already running a request for this session");
 		const step: ActiveStep = {
 			writer,
@@ -245,7 +256,9 @@ export class AgyHost implements ProviderSessionState {
 				this.#process.cwd !== cwd ||
 				this.#process.credentialVersion !== options.credentialVersion
 			) {
-				await this.#startProcess(tools, toolsKey, cwd, step, options.credentialVersion);
+				await this.#options.diagnostics.measure("process.start", () =>
+					this.#startProcess(tools, toolsKey, cwd, step, options.credentialVersion),
+				);
 			}
 			let loadId: string | undefined;
 			if (plan.kind === "resume") {
@@ -265,20 +278,29 @@ export class AgyHost implements ProviderSessionState {
 				} else plan = { kind: "fresh", replay: [...context.messages] };
 			}
 			if (loadId) {
+				const id = loadId;
 				try {
-					await this.#setup(this.#loadConversation(loadId, system, systemKey, cwd));
+					await this.#setup(
+						this.#options.diagnostics.measure("session.load", () =>
+							this.#loadConversation(id, system, systemKey, cwd),
+						),
+					);
 				} catch (error) {
 					if (step.controller.signal.aborted) throw error;
 					// A store can outlive an incompatible native CLI version. Do not reuse a partial load.
 					this.#stopProcess();
-					await this.#startProcess(tools, toolsKey, cwd, step, options.credentialVersion);
+					await this.#options.diagnostics.measure("process.start", () =>
+						this.#startProcess(tools, toolsKey, cwd, step, options.credentialVersion),
+					);
 					plan = { kind: "fresh", replay: [...context.messages] };
 				}
 			}
 			if (plan.kind === "fresh") {
 				await this.#setup(this.#unloadConversation());
 				const created = await this.#setup(
-					this.#requireProcess().connection.newSession({ cwd, mcpServers: [], _meta: systemMeta(system) }),
+					this.#options.diagnostics.measure("session.new", () =>
+						this.#requireProcess().connection.newSession({ cwd, mcpServers: [], _meta: systemMeta(system) }),
+					),
 				);
 				conversationStorePath(this.#geminiDir, created.sessionId);
 				this.#ownedConversations.add(created.sessionId);
@@ -340,10 +362,16 @@ export class AgyHost implements ProviderSessionState {
 	close(): void {
 		this.#fail(new Error("Antigravity CLI session closed"));
 		this.#conversation = undefined;
+		void this.#logDiagnostics();
 	}
 
 	/** Stop first, await process exit, then remove only conversations this host created (never fork sources). */
-	async dispose(): Promise<void> {
+	dispose(): Promise<void> {
+		this.#disposal ??= this.#dispose();
+		return this.#disposal;
+	}
+
+	async #dispose(): Promise<void> {
 		this.close();
 		await withTimeout(
 			Promise.all(this.#exits),
@@ -353,6 +381,7 @@ export class AgyHost implements ProviderSessionState {
 		);
 		await Promise.all([...this.#ownedConversations].map(id => deleteConversation(this.#geminiDir, id)));
 		this.#ownedConversations.clear();
+		await this.#logDiagnostics();
 	}
 
 	async #setup<T>(operation: Promise<T>): Promise<T> {
@@ -553,13 +582,10 @@ export class AgyHost implements ProviderSessionState {
 				},
 			)
 			.catch(error => this.#fail(error));
-		try {
-			void this.#requireProcess()
-				.connection.prompt({ sessionId: conversation.id, prompt: blocks })
-				.then(turn.response.resolve, turn.response.reject);
-		} catch (error) {
-			turn.response.reject(error);
-		}
+		const dispatched = this.#options.diagnostics.measure("prompt", () =>
+			this.#requireProcess().connection.prompt({ sessionId: conversation.id, prompt: blocks }),
+		);
+		void dispatched.then(turn.response.resolve, turn.response.reject);
 	}
 
 	#releasePending(): PendingCall | undefined {
@@ -729,8 +755,14 @@ export class AgyHost implements ProviderSessionState {
 			this.#fail(new Error("Antigravity CLI cancelled the request"));
 			return;
 		}
+		if (response.stopReason === "refusal") {
+			this.#fail(new Error("Antigravity CLI refused the request"));
+			return;
+		}
 		const writer = step.writer;
+		const truncated = response.stopReason === "max_tokens" || response.stopReason === "max_turn_requests";
 		if (
+			!truncated &&
 			!writer.output.content.some(
 				block => (block.type === "text" && block.text.trim().length > 0) || block.type === "toolCall",
 			)
@@ -748,7 +780,7 @@ export class AgyHost implements ProviderSessionState {
 				logger.debug("Antigravity CLI has no durable turn checkpoint; live continuation remains available");
 			}
 		}
-		writer.finish(response.stopReason === "max_tokens" ? "length" : "stop", {
+		writer.finish(truncated ? "length" : "stop", {
 			type: "antigravityCli",
 			conversationId: turn.conversationId,
 			digest,
@@ -767,6 +799,23 @@ export class AgyHost implements ProviderSessionState {
 			step.done.reject(error);
 		}
 		this.#stopProcess();
+	}
+
+	/** Debug-only rollup: stage names and durations only, never prompts, output, accounts, or session IDs. */
+	async #logDiagnostics(): Promise<void> {
+		const diagnostics = this.#options.diagnostics;
+		if (!diagnostics.enabled) return;
+		this.#diagnosticsSettled ??= withTimeout(
+			diagnostics.settled(),
+			DIAGNOSTICS_SETTLE_TIMEOUT_MS,
+			"Antigravity CLI diagnostics did not settle",
+			this.#options.schedule,
+		).catch(() => undefined);
+		await this.#diagnosticsSettled;
+		const summary = diagnostics.summary();
+		if (summary.samples === 0 || diagnostics.generation === this.#loggedGeneration) return;
+		this.#loggedGeneration = diagnostics.generation;
+		logger.debug("Antigravity CLI diagnostics", summary);
 	}
 }
 
@@ -873,6 +922,7 @@ function errorOutput(text: string): McpToolOutput {
 	return { content: [{ type: "text", text }], isError: true };
 }
 
+const DIAGNOSTICS_SETTLE_TIMEOUT_MS = 250;
 const MAX_DIAGNOSTIC_ISSUES = 8;
 const MAX_DIAGNOSTIC_PATH_SEGMENTS = 8;
 const MAX_DIAGNOSTIC_PATH_SEGMENT = 64;

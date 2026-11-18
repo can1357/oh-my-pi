@@ -1,10 +1,11 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
+import { Diagnostics } from "@oh-my-pi/pi-ai/providers/antigravity-cli/diagnostics";
 import {
 	AgyHost,
 	describeToolArguments,
@@ -20,6 +21,7 @@ import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-write
 import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { ContentBlock, PromptRequest, PromptResponse, SessionConfigOption } from "@oh-my-pi/pi-utils/acp";
 
 const model = buildModel({
@@ -95,6 +97,7 @@ class FakeAgy implements AgyTransport {
 	cancelMode: "ack" | "hold" | "reject" = "ack";
 	autoSteer = true;
 	failLoad = false;
+	failPrompt = false;
 	configureGate: Promise<void> | undefined;
 	currentId = "";
 	#pending = new Set<FakePrompt>();
@@ -135,6 +138,7 @@ class FakeAgy implements AgyTransport {
 				return { configOptions };
 			},
 			prompt: request => {
+				if (this.failPrompt) throw new Error("prompt dispatch failed");
 				if (this.autoSteer) for (const old of this.#pending) old.response.resolve({ stopReason: "end_turn" });
 				const prompt = { request, response: Promise.withResolvers<PromptResponse>() };
 				this.#pending.add(prompt);
@@ -163,6 +167,14 @@ class FakeAgy implements AgyTransport {
 			update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
 		});
 	}
+
+	thinking(text: string): void {
+		this.options.onUpdate({
+			sessionId: this.currentId,
+			update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text } },
+		});
+	}
+
 	call(name = "read", args: Record<string, unknown> = { path: "a.txt" }, id = this.currentId): Promise<McpToolOutput> {
 		this.options.onUpdate({
 			sessionId: id,
@@ -299,6 +311,69 @@ describe("AgyHost stateful steps", () => {
 			additionalProperties: false,
 			properties: { data: { anyOf: [{ type: "object" }, { type: "string" }] } },
 		});
+	});
+	it("fails a refused turn with an explicit provider error instead of an empty stop", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("I cannot help with that.");
+		prompt.response.resolve({ stopReason: "refusal" });
+		await expect(run.done).rejects.toThrow("Antigravity CLI refused the request");
+		expect(state.host.hasPendingTurn).toBe(false);
+		expect(fake.closed).toBe(true);
+	});
+	it("finishes a max_turn_requests stop as length and continues the same conversation", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("1 2 3");
+		prompt.response.resolve({ stopReason: "max_turn_requests" });
+		await run.done;
+		expect(run.writer.output.stopReason).toBe("length");
+		expect(run.writer.output.content).toEqual([{ type: "text", text: "1 2 3" }]);
+		const next = step(state.host, [user("count to one hundred"), run.writer.output, user("continue")]);
+		const continuation = await fake.prompts.next();
+		expect(textOf(continuation.request.prompt)).toBe("continue");
+		expect(fake.created).toHaveLength(1);
+		fake.text("4 5 6");
+		continuation.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.stopReason).toBe("stop");
+	});
+	it("reports an empty max_turn_requests stop as length", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		prompt.response.resolve({ stopReason: "max_turn_requests" });
+		await run.done;
+		expect(run.writer.output.stopReason).toBe("length");
+		expect(run.writer.output.content).toEqual([]);
+	});
+
+	it("reports a thinking-only max_turn_requests stop as length", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.thinking("still thinking");
+		prompt.response.resolve({ stopReason: "max_turn_requests" });
+		await run.done;
+		expect(run.writer.output.stopReason).toBe("length");
+		expect(run.writer.output.content).toEqual([{ type: "thinking", thinking: "still thinking" }]);
+	});
+	it("keeps an end_turn stop as a normal stop", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Hello.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		expect(run.writer.output.stopReason).toBe("stop");
+		expect(fake.closed).toBe(false);
 	});
 	it("parks and resumes multiple serial tool steps under exactly one ACP prompt", async () => {
 		const state = await parked();
@@ -826,5 +901,152 @@ describe("AgyHost stateful steps", () => {
 		fake.text("Done.");
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await first.done;
+	});
+});
+
+describe("AgyHost diagnostics", () => {
+	it("records the startup, session, prompt and step stages when enabled", async () => {
+		const diagnostics = new Diagnostics(true);
+		const state = await fixture({ diagnostics });
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Hello.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		const summary = diagnostics.summary();
+		expect(summary.enabled).toBe(true);
+		expect(summary.stages["process.start"]?.count).toBe(1);
+		expect(summary.stages["session.new"]?.count).toBe(1);
+		expect(summary.stages.prompt?.count).toBe(1);
+		expect(summary.stages["step.total"]?.count).toBe(1);
+		expect(summary.stages["session.load"]).toBeUndefined();
+		for (const stats of Object.values(summary.stages)) {
+			expect(stats.maxMs).toBeGreaterThanOrEqual(0);
+			expect(Number.isFinite(stats.medianMs)).toBe(true);
+		}
+	});
+
+	it("bounds the close-time wait when diagnostics never settle", async () => {
+		const diagnostics = new Diagnostics(true);
+		diagnostics.settled = () => new Promise(() => {});
+		const state = await fixture({ diagnostics });
+		const disposed = state.host.dispose();
+		for (let i = 0; i < 100 && ![...state.clock.timers.values()].some(timer => timer.ms === 250); i++) {
+			await Promise.resolve();
+		}
+		expect([...state.clock.timers.values()].some(timer => timer.ms === 250)).toBe(true);
+		state.clock.fire(250);
+		await expect(disposed).resolves.toBeUndefined();
+		expect(state.clock.timers.size).toBe(0);
+	});
+
+	it("records nothing when diagnostics are disabled", async () => {
+		const diagnostics = new Diagnostics(false);
+		const state = await fixture({ diagnostics });
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Hello.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		expect(diagnostics.summary().samples).toBe(0);
+	});
+
+	it("logs one debug rollup when the host closes", async () => {
+		const debug = spyOn(logger, "debug").mockImplementation(() => {});
+		try {
+			const diagnostics = new Diagnostics(true);
+			const state = await fixture({ diagnostics });
+			const run = step(state.host, [user("hello")]);
+			const fake = await state.started.next();
+			const prompt = await fake.prompts.next();
+			fake.text("Hello.");
+			prompt.response.resolve({ stopReason: "end_turn" });
+			await run.done;
+			await state.host.dispose();
+			const rollups = debug.mock.calls.filter(([message]) => message === "Antigravity CLI diagnostics");
+			expect(rollups).toHaveLength(1);
+			expect(rollups[0][1]).toEqual(diagnostics.summary());
+			expect(diagnostics.summary().stages["step.total"]?.count).toBe(1);
+		} finally {
+			debug.mockRestore();
+		}
+	});
+
+	it("enables diagnostics from OMP_ACP_DIAGNOSTICS=1 without an injected seam", async () => {
+		const previous = Bun.env.OMP_ACP_DIAGNOSTICS;
+		const debug = spyOn(logger, "debug").mockImplementation(() => {});
+		try {
+			Bun.env.OMP_ACP_DIAGNOSTICS = "1";
+			const state = await fixture();
+			const run = step(state.host, [user("hello")]);
+			const fake = await state.started.next();
+			const prompt = await fake.prompts.next();
+			fake.text("Hello.");
+			prompt.response.resolve({ stopReason: "end_turn" });
+			await run.done;
+			await state.host.dispose();
+			const rollups = debug.mock.calls.filter(([message]) => message === "Antigravity CLI diagnostics");
+			expect(rollups).toHaveLength(1);
+		} finally {
+			debug.mockRestore();
+			if (previous === undefined) delete Bun.env.OMP_ACP_DIAGNOSTICS;
+			else Bun.env.OMP_ACP_DIAGNOSTICS = previous;
+		}
+	});
+
+	it("retains a prompt sample when dispatch throws synchronously", async () => {
+		const diagnostics = new Diagnostics(true);
+		const state = await fixture({ diagnostics });
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		fake.failPrompt = true;
+		await expect(run.done).rejects.toThrow("prompt dispatch failed");
+		const { stages } = diagnostics.summary();
+		expect(stages.prompt?.count).toBe(1);
+		expect(stages["step.total"]?.count).toBe(1);
+	});
+
+	it("includes in-flight prompt and step samples in the rollup after closing mid-turn", async () => {
+		const debug = spyOn(logger, "debug").mockImplementation(() => {});
+		try {
+			const diagnostics = new Diagnostics(true);
+			const state = await fixture({ diagnostics });
+			step(state.host, [user("hello")]);
+			const fake = await state.started.next();
+			await fake.prompts.next();
+			state.host.close();
+			await state.host.dispose();
+			const rollups = debug.mock.calls.filter(([message]) => message === "Antigravity CLI diagnostics");
+			expect(rollups).toHaveLength(1);
+			const summary = diagnostics.summary();
+			expect(summary.stages.prompt?.count).toBe(1);
+			expect(summary.stages["step.total"]?.count).toBe(1);
+			expect(rollups[0][1]).toEqual(summary);
+		} finally {
+			debug.mockRestore();
+		}
+	});
+
+	it("logs exactly one rollup across close and repeated dispose", async () => {
+		const debug = spyOn(logger, "debug").mockImplementation(() => {});
+		try {
+			const diagnostics = new Diagnostics(true);
+			const state = await fixture({ diagnostics });
+			const run = step(state.host, [user("hello")]);
+			const fake = await state.started.next();
+			const prompt = await fake.prompts.next();
+			fake.text("Hello.");
+			prompt.response.resolve({ stopReason: "end_turn" });
+			await run.done;
+			state.host.close();
+			await state.host.dispose();
+			await state.host.dispose();
+			const rollups = debug.mock.calls.filter(([message]) => message === "Antigravity CLI diagnostics");
+			expect(rollups).toHaveLength(1);
+		} finally {
+			debug.mockRestore();
+		}
 	});
 });
