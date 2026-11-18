@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { bytesMatchAscii, readUInt16BE, readUInt16LE, readUInt32BE, readUInt32LE } from "./bytes";
 import { upsertArchiveEntry } from "./entries";
 import { ArchiveError } from "./error";
-import { type ArchiveLimits, assertArchiveMemberSize, assertEntryCount, assertIndexSize } from "./limits";
+import { type ArchiveLimits, assertArchiveMemberSizeField, assertEntryCount, assertIndexSize } from "./limits";
 import { assertArchivePathBytes, normalizeArchiveEntryPath, normalizeArchiveLookupPath } from "./paths";
 import type { ByteSource } from "./source";
 import type { ArchiveIndexEntry, FormatReader, MemberSource } from "./types";
@@ -666,7 +666,7 @@ async function readIsoImpl(source: ByteSource, options: Parameters<FormatReader>
 			}
 			let totalSize = 0;
 			for (const part of parts) totalSize = safeAdd(totalSize, part.size, "multi-extent member size");
-			assertArchiveMemberSize(totalSize, normalizedPath, options.limits);
+			assertArchiveMemberSizeField(totalSize, normalizedPath);
 			// Zero-length members never read their extents, and writers record
 			// junk locations for them (bsdtar's Joliet records for Rock Ridge
 			// symlinks, empty files at unallocated blocks) — 7-Zip and bsdtar

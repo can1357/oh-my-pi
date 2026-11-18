@@ -32,6 +32,7 @@ import {
 	getNeverAbortSignal,
 	isMCPTimeoutEnabled,
 	type MCPTimeoutOperation,
+	resolveMCPRequestDeadline,
 	resolveMCPTimeoutMs,
 } from "../timeout";
 import { type MCPFetchInit, mcpFetch, withoutHeader } from "./header-policy";
@@ -477,13 +478,20 @@ export class HttpTransport implements MCPTransport {
 			}
 			callerSignal = controller.signal;
 		}
-		const timeout = resolveMCPTimeoutMs(this.config.timeout);
-		const operation = createMCPTimeout(timeout, this.#operationSignal(callerSignal));
+		const { timeoutMs: timeout, maxTotalMs } = resolveMCPRequestDeadline(this.config.timeout, method, params);
+		const operation = createMCPTimeout(timeout, this.#operationSignal(callerSignal), maxTotalMs);
 		let stage: MCPFailureStage = "send";
 		let traceId: string | undefined;
 
 		try {
-			if (options?.onProgress) this.#progressCallbacks.set(id, options.onProgress);
+			const progressSink = options?.onProgress;
+			if (progressSink) {
+				// Progress shows the server is still working: restart the deadline.
+				this.#progressCallbacks.set(id, progress => {
+					operation.refresh();
+					progressSink(progress);
+				});
+			}
 			const response = await this.#fetch(
 				{ method: "POST", body: JSON.stringify(body), signal: operation.signal },
 				generated,

@@ -33,8 +33,8 @@ log = logging.getLogger(__name__)
 # Paths whose git tree-hash feeds the cache key. Order is significant — the
 # hash incorporates the (path, tree_hash) pairs in this exact order so a
 # different ordering would produce a different key. Cover every input the
-# napi build reads: all workspace crates (pi-natives transitively depends on
-# pi-ast/pi-iso/pi-shell), the workspace Cargo manifest + lock, the rust
+# napi build reads: all workspace crates (omp-natives transitively depends on
+# omp-ast/pi-iso/pi-shell), the workspace Cargo manifest + lock, the rust
 # toolchain pin, and the natives package itself (build script + scripts/* +
 # package.json with napi config).
 CACHE_KEY_PATHS: tuple[str, ...] = (
@@ -267,7 +267,7 @@ class CacheHit:
 
 
 class NativesCache:
-    """Per-repo content-addressed cache of pi-natives build outputs."""
+    """Per-repo content-addressed cache of omp-natives build outputs."""
 
     def __init__(
         self,

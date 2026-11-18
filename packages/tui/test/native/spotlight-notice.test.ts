@@ -49,7 +49,7 @@ const SAVED: SpotlightDetails = {
 	outTokens: 12_000,
 	savedTokens: 40_000,
 	original: {
-		url: "artifact://7",
+		url: "local://7.log",
 		lines: 5,
 		start: 1,
 		heat: "1-29",
@@ -147,7 +147,7 @@ const RICH: SpotlightDetails = {
 	outTokens: 150,
 	savedTokens: 150,
 	original: {
-		url: "artifact://9",
+		url: "local://9.log",
 		lines: 10,
 		start: 40,
 		path: "src/ingest.ts",
@@ -558,7 +558,7 @@ describe("spotlight notice", () => {
 		const shown = [...why].map(c => reasonShows(c as SpotlightReason));
 		const spotlight: SpotlightDetails = {
 			...RICH,
-			original: { url: "artifact://3", lines: 240, start: 1, heat, why, kept: keptRanges(shown) },
+			original: { url: "local://3.log", lines: 240, start: 1, heat, why, kept: keptRanges(shown) },
 		};
 		const card = new SpotlightNotice("c1", spotlight, "").describe().p?.hovercard as TspPropNode | undefined;
 		expect(card?.k).toBe("col");
@@ -582,7 +582,7 @@ describe("spotlight notice", () => {
 		// A long result shares bars; one without reasons draws plain bars and only what was kept.
 		const long: SpotlightDetails = {
 			...SAVED,
-			original: { url: "artifact://4", lines: 1_000, start: 1, heat: "5".repeat(1_000), kept: [[1, 10]] },
+			original: { url: "local://4.log", lines: 1_000, start: 1, heat: "5".repeat(1_000), kept: [[1, 10]] },
 		};
 		const plain = new SpotlightNotice("c2", long, "").describe().p?.hovercard as TspPropNode | undefined;
 		const plainChart = plain?.c?.[0]?.p as TspChartProps | undefined;
@@ -599,7 +599,7 @@ describe("spotlight notice", () => {
 		const heldOut: SpotlightDetails = {
 			...RICH,
 			holdout: true,
-			original: { ...RICH.original!, shapedUrl: "artifact://10" },
+			original: { ...RICH.original!, shapedUrl: "local://10.log" },
 		};
 		const notice = new SpotlightNotice("c1", heldOut, RICH_ORIGINAL).describe();
 		expect(notice.p).toMatchObject({
@@ -636,7 +636,7 @@ describe("spotlight notice", () => {
 			// A gated trace saves nothing; what it would have saved is `plain`'s tokens less the would-be cut's.
 			savedTokens: 0,
 			plainTokens: RICH.outTokens + 150,
-			original: { ...RICH.original!, shapedUrl: "artifact://10" },
+			original: { ...RICH.original!, shapedUrl: "local://10.log" },
 		};
 		const notice = new SpotlightNotice("c1", gated, RICH_ORIGINAL).describe();
 		expect(notice.p).toMatchObject({
@@ -662,7 +662,7 @@ describe("spotlight notice", () => {
 			...SAVED,
 			tool: "read",
 			original: {
-				url: "artifact://11",
+				url: "local://11.log",
 				lines: 7,
 				start: 1,
 				windows: [
@@ -754,7 +754,7 @@ describe("spotlight notice", () => {
 			...SAVED,
 			tool: "read",
 			original: {
-				url: "artifact://12",
+				url: "local://12.log",
 				lines: 5_013,
 				start: 1,
 				windows: [

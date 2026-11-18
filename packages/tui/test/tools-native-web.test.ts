@@ -43,6 +43,41 @@ describe("web_search native view", () => {
 		expect(title?.p).toMatchObject({ spans: [{ href: "https://www.example.com/a" }] });
 		expect(meta?.p).toMatchObject({ spans: [{ t: "example.com · 3d" }] });
 	});
+
+	it("without a synthesized answer lists each source once with its cleaned excerpt, not the numbered text", () => {
+		const sources = [
+			{
+				url: "https://bun.com/docs/valid-expect",
+				title: "valid-expect | Bun Docs",
+				snippet:
+					"valid-expect\n\n  Require   expect\tto get a value\n```\nexpect ( x )\n```\nlast line\nnever shown",
+			},
+			{ url: "https://github.com/oven-sh/bun/issues/1", title: "Issue #1", ageSeconds: 86400 },
+		];
+		const listing =
+			"[1] valid-expect | Bun Docs\n    https://bun.com/docs/valid-expect\n    valid-expect\n\n```\nexpect ( x )\n```\n[2] Issue #1 (1d ago)\n    https://github.com/oven-sh/bun/issues/1";
+		const view = webSearchToolRenderer.describeResult(
+			{
+				content: [{ type: "text", text: listing }],
+				details: { response: { provider: "parallel", sources } } as never,
+			},
+			opts,
+			{ query: "bun expect" },
+		);
+		const body = JSON.stringify(view?.body);
+		expect(body).not.toContain('"k":"md"');
+		expect(body).not.toContain("[1]");
+		const hits = nodes(nodes(view?.body)[0]?.c);
+		expect(hits).toHaveLength(2);
+		const [row, excerpt] = nodes(hits[0]!.c);
+		expect(row?.p).toMatchObject({ role: "omp.tool.source", href: sources[0]!.url });
+		expect(excerpt?.p).toMatchObject({
+			spans: [{ t: "valid-expect\nRequire expect to get a value\nexpect ( x )" }],
+			lines: 3,
+		});
+		expect(nodes(hits[1]!.c).map(n => n.p?.role)).toEqual(["omp.tool.source"]);
+		for (const { url } of sources) expect(body.split(`"href":"${url}"`).length - 1).toBe(2);
+	});
 });
 
 describe("ask native view", () => {

@@ -222,7 +222,7 @@ describe("read tool .sample.txt dispatch", () => {
 			const result = await tool.execute("read-busy", { path: filePath }, undefined, undefined, context);
 			const output = textOutput(result);
 			expect(output).toContain("macOS sample profile: demo (pid 42)");
-			expect(output).not.toMatch(/Use :\d+ to continue/);
+			expect(output).not.toMatch(/Use :\d+-? to continue/);
 			const artifactId = result.details?.meta?.truncation?.artifactId;
 			expect(artifactId).toBeDefined();
 			const artifactPath = await sessionManager.getArtifactPath(artifactId ?? "");

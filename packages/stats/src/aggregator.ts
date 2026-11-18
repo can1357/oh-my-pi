@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getAgentDbPath, getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getStatsDbPath, isRecord, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import {
 	applySessionParseResults,
@@ -31,7 +31,6 @@ import {
 	getOverallStats,
 	getProviderHourlyBurn,
 	getProviderTimeSeries,
-	getStatsByAgentType,
 	getStatsByFolder,
 	getStatsByModel,
 	getStatsByProvider,
@@ -39,6 +38,7 @@ import {
 	getToolStats,
 	getToolStatsByModel,
 	getToolTimeSeries,
+	getUsageAttribution,
 	type RangeWindow,
 } from "./rollup";
 import { spotlightRowCount } from "./spotlight-ingest";
@@ -54,6 +54,8 @@ import type {
 	ProviderDashboardStats,
 	ProviderWindowStats,
 	RequestDetails,
+	SessionEntry,
+	SessionModelUsageEntry,
 	ToolDashboardStats,
 } from "./types";
 import { computeUsageWindowStats, fetchUsageData, type UsageDataSnapshot } from "./usage-windows";
@@ -527,7 +529,7 @@ export async function getDashboardStats(range?: string | null): Promise<Dashboar
 		overall: getOverallStats(window.cutoff),
 		byModel: getStatsByModel(window.cutoff),
 		byFolder: getStatsByFolder(window.cutoff, FOLDER_LIMIT),
-		byAgentType: getStatsByAgentType(window.cutoff),
+		...getUsageAttribution(window.cutoff),
 		timeSeries: getTimeSeries(window),
 		modelSeries: getModelTimeSeries(window),
 		modelPerformanceSeries: getModelPerformanceSeries(window),
@@ -537,12 +539,12 @@ export async function getDashboardStats(range?: string | null): Promise<Dashboar
 
 export async function getOverviewStats(
 	range?: string | null,
-): Promise<Pick<DashboardStats, "overall" | "byAgentType" | "timeSeries">> {
+): Promise<Pick<DashboardStats, "overall" | "byAgentType" | "bySideChannel" | "timeSeries">> {
 	await initDb();
 	const window = getTimeRangeConfig(range);
 	return {
 		overall: getOverallStats(window.cutoff),
-		byAgentType: getStatsByAgentType(window.cutoff),
+		...getUsageAttribution(window.cutoff),
 		timeSeries: getTimeSeries(window),
 	};
 }
@@ -579,15 +581,27 @@ export async function getRecentErrors(range?: string | null, limit?: number): Pr
 	return dbGetRecentErrors(limit, getTimeRangeConfig(range).cutoff);
 }
 
+/**
+ * What a `model_usage` entry journaled of its response: the reply of a text
+ * completion, else the answers of a native judgment, else nothing. The entry is
+ * read back from a transcript, so the shapes are checked, not assumed.
+ */
+function modelUsageOutput(entry: SessionEntry): unknown {
+	const { completion, judgment } = entry as Partial<SessionModelUsageEntry>;
+	if (isRecord(completion) && typeof completion.reply === "string") return completion.reply;
+	if (isRecord(judgment) && isRecord(judgment.answers)) return judgment.answers;
+	return null;
+}
+
 export async function getRequestDetails(id: number): Promise<RequestDetails | null> {
 	await initDb();
 	const msg = getMessageById(id);
 	if (!msg) return null;
 
 	const entry = await getSessionEntry(msg.sessionFile, msg.entryId);
-	// Role-model attempts (judge, auto-thinking, …) journal only a `model_usage`
-	// record: usage and outcome, no request or response payload.
-	if (entry?.type === "model_usage") return { ...msg, messages: [entry], output: null };
+	// Off-transcript model calls (judge, auto-thinking, title, …) journal only a
+	// `model_usage` record: usage, outcome, and for some the reply or answers.
+	if (entry?.type === "model_usage") return { ...msg, messages: [entry], output: modelUsageOutput(entry) };
 	if (entry?.type !== "message" || !("message" in entry)) return null;
 
 	return {

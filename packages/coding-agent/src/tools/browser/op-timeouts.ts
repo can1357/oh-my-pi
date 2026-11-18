@@ -6,8 +6,8 @@
  *
  * - `QUICK_OP_TIMEOUT_MS`: page-coupled reads that should resolve fast (`observe`,
  *   `screenshot`, `extract`, `ariaSnapshot`).
- * - `ACTION_OP_TIMEOUT_MS`: interactive point actions (`click`, `fill`, `type`, …) and
- *   the default for wait helpers when no explicit `{ timeout }` is given. Selector ops
+ * - `ACTION_OP_TIMEOUT_MS`: interactive point actions (`click`, `fill`, `type`, …). Wait
+ *   helpers without an explicit `{ timeout }` get the cell budget instead. Selector ops
  *   additionally fail fast after `ZERO_MATCH_FAIL_FAST_MS` of confirmed zero matches,
  *   so the full ceiling is only spent on elements that exist but are not yet actionable.
  *
@@ -36,7 +36,7 @@ export interface OpTimeouts {
 	budgetBound: number;
 	/** Ceiling for quick page reads. */
 	quickOpMs: number;
-	/** Ceiling for interactive actions + default for waits. */
+	/** Ceiling for interactive actions. */
 	actionOpMs: number;
 }
 
@@ -53,14 +53,14 @@ export function resolveOpTimeouts(cellTimeoutMs: number): OpTimeouts {
 /**
  * Effective timeout for a wait helper (`waitFor*`). A positive explicit `{ timeout }` is
  * honored but clamped to the cell budget so it still fails fast + named; raising the tool
- * `timeout` raises that cap, so a longer budget stays meaningful. No `{ timeout }` → the
- * action ceiling. Puppeteer's `{ timeout: 0 }` / `Infinity` ("disable") maps to the largest
+ * `timeout` raises that cap, so a longer budget stays meaningful. No `{ timeout }` → the cell
+ * budget, as for any direct helper; a selector that matches nothing still fails fast. Puppeteer's `{ timeout: 0 }` / `Infinity` ("disable") maps to the largest
  * bounded wait (`budgetBound`) — the harness never permits an unbounded wait. Garbage input
  * (negative, `NaN`) falls back to the action ceiling rather than the longest wait.
  */
 export function resolveWaitTimeout(cellTimeoutMs: number, explicit?: number): number {
 	const { budgetBound, actionOpMs } = resolveOpTimeouts(cellTimeoutMs);
-	if (explicit === undefined) return actionOpMs;
+	if (explicit === undefined) return budgetBound;
 	// Puppeteer "disable" sentinels — still bounded by the budget here.
 	if (explicit === 0 || explicit === Number.POSITIVE_INFINITY) return budgetBound;
 	// Positive finite → honored + clamped. Negative/NaN garbage → default, not the longest wait.
