@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed `idealShapeVariant()` and `IdealShape`: for a model without a configured `snapcompactShape`, `resolveShape()` reads its frame shape from the catalog's `snapcompact-variant` rules
+
+### Changed
+
+- Snapcompact frame shapes follow the catalog's classification of the reading model: every catalog model keeps its shape, and a custom model now gets its classified lineage's (a gateway alias of Claude Opus 5.5 gets Opus's 1932px frames). A model's configured `snapcompactShape` still replaces the catalog's shape, and an explicit `snapcompact.shape` setting wins over both
+
 ## [19.0.1] - 2026-11-19
 
 ### Added

@@ -6,6 +6,7 @@
  */
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import { classifyModel } from "../identity";
+import { SNAPCOMPACT_VARIANTS } from "./axes";
 import { resolveCascade } from "./cascade";
 import type { ModelIdentity } from "./types";
 
@@ -117,6 +118,30 @@ export function resolveImageTokenization(target: ImageTokenizationTarget): Image
 export function resolveImageMaxEdge(target: ImageTokenizationTarget): number | undefined {
 	const edge = resolveImageAxes(target).imageMaxEdge;
 	return typeof edge === "number" && edge > 0 ? edge : undefined;
+}
+
+/** One of `SNAPCOMPACT_VARIANTS`: a snapcompact frame layout's research name. */
+export type SnapcompactVariant = (typeof SNAPCOMPACT_VARIANTS)[number];
+
+function isSnapcompactVariant(value: unknown): value is SnapcompactVariant {
+	return typeof value === "string" && (SNAPCOMPACT_VARIANTS as readonly string[]).includes(value);
+}
+
+/** The reader's snapcompact frame policy; each field is unset when no rule assigns it. */
+export interface SnapcompactShapePolicy {
+	/** `snapcompact-variant`: the layout of the archive's edge frames. */
+	variant?: SnapcompactVariant;
+	/** `snapcompact-frame-size`: frame edge in pixels, replacing the variant's own. */
+	frameSize?: number;
+}
+
+/** The snapcompact frame shape the reader's lineage, host and wire rules assign. */
+export function resolveSnapcompactShape(target: ImageTokenizationTarget): SnapcompactShapePolicy {
+	const { snapcompactVariant: variant, snapcompactFrameSize: frameSize } = resolveImageAxes(target);
+	return {
+		...(isSnapcompactVariant(variant) && { variant }),
+		...(typeof frameSize === "number" && frameSize > 0 && { frameSize }),
+	};
 }
 
 /**

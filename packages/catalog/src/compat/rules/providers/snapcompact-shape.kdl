@@ -1,0 +1,78 @@
+// Snapcompact frame variant for readers whose lineage has no
+// `snapcompact-variant` rule in classes/*.kdl, by the wire API carrying the
+// request. priority=-1: a fallback, so a class-wide lineage rule (same
+// specificity) always wins. Anthropic wires get Claude's `11on16-bw`; every
+// other wire keeps the unassigned `8on22-bw`.
+on-api "anthropic-messages" "bedrock-converse-stream" priority=-1 {
+	snapcompact-variant "11on16-bw"
+}
+
+// residue: rows the taxonomy leaves unclassified, whose names state a Kimi or
+// GLM lineage (or, for DeepClaude, a Claude answerer): they keep that
+// lineage's variant rather than their wire's fallback.
+provider "amazon-bedrock" {
+	models "*kimi-*" {
+		snapcompact-variant "8on22-bw"
+	}
+	models "*zai.glm-*" {
+		snapcompact-variant "8on16-bw"
+	}
+}
+provider "umans" {
+	models "umans-kimi-*" {
+		snapcompact-variant "8on22-bw"
+	}
+	models "umans-glm-*" {
+		snapcompact-variant "8on16-bw"
+	}
+}
+provider "venice" {
+	models token="glm" {
+		snapcompact-variant "8on16-bw"
+	}
+}
+provider "nanogpt" {
+	models "orca/orcacyber-glm-*" {
+		snapcompact-variant "8on16-bw"
+	}
+	models "deepclaude" {
+		snapcompact-variant "11on16-bw"
+	}
+}
+provider "novita" {
+	models "zai-org/autoglm-*" {
+		snapcompact-variant "8on16-bw"
+	}
+}
+
+// residue: parity with the pre-migration id regex; corrected in the follow-up
+// that gives each reader its lead model's shape. Devin fusion pairings led by
+// Opus keep 1568px frames, those led by GPT with a Claude sidekick keep
+// Claude's variant, OpenAI o-series on Anthropic wires keep the wire fallback,
+// and Abliteration's GLM-classed rows keep the generic `8on22-bw`.
+class "anthropic" {
+	on "devin" {
+		family "opus" {
+			models "fusion-*" {
+				snapcompact-frame-size 1568
+			}
+		}
+	}
+}
+class "openai" {
+	on "devin" {
+		models "fusion-*-sidekick-claude-*" {
+			snapcompact-variant "11on16-bw"
+		}
+	}
+	on-api "anthropic-messages" "bedrock-converse-stream" {
+		family "o-series" {
+			snapcompact-variant "11on16-bw"
+		}
+	}
+}
+class "glm" {
+	on "abliteration" {
+		snapcompact-variant "8on22-bw"
+	}
+}

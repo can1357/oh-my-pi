@@ -386,6 +386,17 @@ describe("shape resolution", () => {
 		expect(claudeOnVertex.frameSize).toBe(1932);
 		expect(claudeOnVertex.frameTokenEstimate).toBe(4761);
 
+		// A built model's identity decides where its id alone classifies as
+		// nothing: a Devin Fusion pairing reads as its Fable lead.
+		const fusion = snapcompact.resolveShape({
+			api: "devin-agent",
+			provider: "devin",
+			id: "fusion-claude-fable-5-1-high-sidekick-gpt-6-1-terra-high-priority",
+			identity: { class: "anthropic", family: "fable", revision: "5.1.0" },
+		});
+		expect(fusion.cellWidth).toBe(11);
+		expect(fusion.frameSize).toBe(1932);
+
 		// High-res frames are reserved for the lines that read them natively;
 		// older Claude lines keep the safe 1568px family default.
 		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-8" }).frameSize).toBe(1932);
@@ -445,7 +456,6 @@ describe("shape resolution", () => {
 		expect(snapcompact.resolveShape({ api: "openai-completions", id: "qwen/qwen3-vl" })).toEqual(
 			snapcompact.SHAPES.openai,
 		);
-		expect(snapcompact.idealShapeVariant("qwen/qwen3-vl")).toBeUndefined();
 
 		// An explicit variant wins over identity detection, at the variant's
 		// own research frame size.
