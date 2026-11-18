@@ -32,6 +32,7 @@ import {
 	agentLoop,
 	agentLoopContinue,
 	createSyntheticToolResultMessage,
+	lastContextMessage,
 	normalizeMessagesForProvider,
 	normalizeTools,
 	resolveOwnedDialectFromEnv,
@@ -1825,11 +1826,25 @@ export class Agent {
 		try {
 			const dequeueSignal = this.#continuationDequeueSignal(signal) ?? continuationAbortController.signal;
 			const messages = this.#state.messages;
-			if (messages.length === 0) {
+			const literalTail = messages.at(-1);
+			// Rows kept out of context (`!!` runs, excluded extension rows) may trail the last message the
+			// model sees. A queued steer/follow-up is delivered as if they were absent; with nothing queued,
+			// continue from them as before and leave the tail to the caller's recovery.
+			const tail = lastContextMessage(messages);
+			if (!tail || tail.role === "assistant") {
+				// A tail with unpaired runnable tool calls resumes by re-executing
+				// them (see `unpairedToolCallTail` in agent-loop). This must win over
+				// queued-message delivery: injecting a message between the tool_use
+				// blocks and their results would break the provider's pairing
+				// invariant. Queued messages drain inside the resumed loop instead.
+				if (tail && unpairedToolCallTail([tail])) {
+					await this.#runLoop(undefined, undefined, signal, true);
+					return;
+				}
 				// An empty transcript has nothing to resume, but a queued steer/follow-up
-				// must still be delivered as the opening turn — mirroring the assistant-tail
-				// branch below. Throwing here leaves the message undeliverable, and idle-drain
-				// callers (AgentSession#scheduleQueuedMessageDrain) re-arm continue() on every
+				// must still be delivered as the opening turn. Throwing here leaves the
+				// message undeliverable, and idle-drain callers
+				// (AgentSession#scheduleQueuedMessageDrain) re-arm continue() on every
 				// microtask because hasQueuedMessages() never clears, spinning an unbounded
 				// allocation loop until OOM (issue #6344).
 				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
@@ -1838,30 +1853,6 @@ export class Agent {
 					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, true);
 					return;
 				}
-				const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
-				if (this.#abortController !== continuationAbortController) return;
-				if (queuedFollowUp.length > 0) {
-					await this.#runLoop(queuedFollowUp, undefined, signal, true);
-					return;
-				}
-				throw new Error("No messages to continue from");
-			}
-			if (messages[messages.length - 1].role === "assistant") {
-				// A tail with unpaired runnable tool calls resumes by re-executing
-				// them (see `unpairedToolCallTail` in agent-loop). This must win over
-				// queued-message delivery: injecting a message between the tool_use
-				// blocks and their results would break the provider's pairing
-				// invariant. Queued messages drain inside the resumed loop instead.
-				if (unpairedToolCallTail(messages)) {
-					await this.#runLoop(undefined, undefined, signal, true);
-					return;
-				}
-				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
-				if (this.#abortController !== continuationAbortController) return;
-				if (queuedSteering.length > 0) {
-					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, true);
-					return;
-				}
 
 				const queuedFollowUp = await this.#dequeueFollowUpMessagesAfterHooks(dequeueSignal);
 				if (this.#abortController !== continuationAbortController) return;
@@ -1870,7 +1861,8 @@ export class Agent {
 					return;
 				}
 
-				throw new Error("Cannot continue from message role: assistant");
+				if (!literalTail) throw new Error("No messages to continue from");
+				if (literalTail === tail) throw new Error("Cannot continue from message role: assistant");
 			}
 
 			await this.#runLoop(undefined, undefined, signal, true);

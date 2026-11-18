@@ -284,7 +284,7 @@ export function nativeLibraryPathOverlay(
 
 /**
  * Env for an ONNX inference worker: the parent env plus the native library
- * path. Only these workers get it — the daemon broker spawns user PTY sessions
+ * path. Only these workers get it — the daemon spawns user PTY sessions
  * and eval kernels through {@link workerEnvFromParent}, and rewriting the
  * loader search path of arbitrary user commands risks a `GLIBCXX` mismatch.
  */

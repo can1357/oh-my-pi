@@ -847,12 +847,13 @@ func (v PythonExecutionMessage) MarshalJSON() ([]byte, error) {
 }
 
 type CustomMessage struct {
-	CustomType  string          `json:"customType"`
-	Content     MessageContent  `json:"content"`
-	Display     bool            `json:"display"`
-	Timestamp   float64         `json:"timestamp"`
-	Details     json.RawMessage `json:"details,omitempty"`
-	Attribution *Attribution    `json:"attribution,omitempty"`
+	CustomType         string          `json:"customType"`
+	Content            MessageContent  `json:"content"`
+	Display            bool            `json:"display"`
+	Timestamp          float64         `json:"timestamp"`
+	Details            json.RawMessage `json:"details,omitempty"`
+	Attribution        *Attribution    `json:"attribution,omitempty"`
+	ExcludeFromContext *bool           `json:"excludeFromContext,omitempty"`
 	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
 	// Encoding writes them back, over a declared field with the same key.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -872,6 +873,7 @@ func (v *CustomMessage) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("timestamp", &out.Timestamp)
 	d.optional("details", &out.Details)
 	d.optional("attribution", &out.Attribution)
+	d.optional("excludeFromContext", &out.ExcludeFromContext)
 	out.Extra = d.rest()
 	if d.err != nil {
 		return d.err
@@ -3613,6 +3615,26 @@ func (v *CacheWarmingPhase) UnmarshalJSON(data []byte) error {
 	return unknownValue("CacheWarmingPhase", s)
 }
 
+type CacheWarmingMethod string
+
+const (
+	CacheWarmingMethodPrewarm CacheWarmingMethod = "prewarm"
+	CacheWarmingMethodReplay  CacheWarmingMethod = "replay"
+)
+
+func (v *CacheWarmingMethod) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "CacheWarmingMethod")
+	if err != nil {
+		return err
+	}
+	switch value := CacheWarmingMethod(s); value {
+	case CacheWarmingMethodPrewarm, CacheWarmingMethodReplay:
+		*v = value
+		return nil
+	}
+	return unknownValue("CacheWarmingMethod", s)
+}
+
 type CacheWarmingOutcome string
 
 const (
@@ -4044,7 +4066,7 @@ func (v AutoCompactionEndEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"auto_compaction_end"`, nil)
 }
 
-// A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted.
+// A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle.
 type ManualCompactionStartEvent struct {
 	// The `/compact <mode>` subcommand, when one was given.
 	Mode *string `json:"mode,omitempty"`
@@ -4173,9 +4195,10 @@ func (v AutoRetryEndEvent) MarshalJSON() ([]byte, error) {
 
 // A prompt-cache refresh was handed to the provider.
 type CacheWarmingStartEvent struct {
-	Phase    CacheWarmingPhase `json:"phase"`
-	Provider string            `json:"provider"`
-	Model    string            `json:"model"`
+	Phase    CacheWarmingPhase  `json:"phase"`
+	Method   CacheWarmingMethod `json:"method"`
+	Provider string             `json:"provider"`
+	Model    string             `json:"model"`
 }
 
 func (v *CacheWarmingStartEvent) UnmarshalJSON(data []byte) error {
@@ -4187,6 +4210,7 @@ func (v *CacheWarmingStartEvent) decodeFrom(raw map[string]json.RawMessage) erro
 	d := fieldDecoder{raw: raw, owner: "CacheWarmingStartEvent"}
 	d.constant("type", "cache_warming_start")
 	d.required("phase", &out.Phase)
+	d.required("method", &out.Method)
 	d.required("provider", &out.Provider)
 	d.required("model", &out.Model)
 	if d.err != nil {
@@ -4204,6 +4228,7 @@ func (v CacheWarmingStartEvent) MarshalJSON() ([]byte, error) {
 // Outcome of the refresh announced by the matching `cache_warming_start`.
 type CacheWarmingEndEvent struct {
 	Phase    CacheWarmingPhase   `json:"phase"`
+	Method   CacheWarmingMethod  `json:"method"`
 	Provider string              `json:"provider"`
 	Model    string              `json:"model"`
 	Outcome  CacheWarmingOutcome `json:"outcome"`
@@ -4222,6 +4247,7 @@ func (v *CacheWarmingEndEvent) decodeFrom(raw map[string]json.RawMessage) error 
 	d := fieldDecoder{raw: raw, owner: "CacheWarmingEndEvent"}
 	d.constant("type", "cache_warming_end")
 	d.required("phase", &out.Phase)
+	d.required("method", &out.Method)
 	d.required("provider", &out.Provider)
 	d.required("model", &out.Model)
 	d.required("outcome", &out.Outcome)

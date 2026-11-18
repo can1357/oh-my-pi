@@ -8,7 +8,8 @@
  *   helpers swallow open/IO failures and degrade to "no cache" so a corrupt or
  *   unreadable DB never blocks a `gh` call.
  *
- *   Soft TTL → return cached row directly.
+ *   Soft TTL → return cached row directly. An open issue/PR row stays fresh for at
+ *     most OPEN_STATE_SOFT_TTL_MS, since a merge or close can land at any moment.
  *   Stateful issue/PR rows past soft TTL but within hard TTL → refresh
  *     synchronously, falling back to the cached row if the live fetch fails.
  *   Expensive PR diff rows past soft TTL but within hard TTL → return cached
@@ -844,6 +845,19 @@ function scheduleBackgroundRefresh<T>(
 	});
 }
 
+/**
+ * How long a cached issue or PR that was still open stays fresh. It can be merged, closed or reopened at any
+ * moment (often by the agent itself, outside this tool), so it is revalidated well before the configured soft TTL.
+ */
+const OPEN_STATE_SOFT_TTL_MS = 15_000;
+
+/** Whether `payload` is an open issue/PR view, whose state can still change. */
+function isOpenView(kind: CacheKind, payload: unknown): boolean {
+	if (kind !== "issue" && kind !== "pr") return false;
+	const state = payload !== null && typeof payload === "object" ? (payload as { state?: unknown }).state : undefined;
+	return typeof state === "string" && state.toUpperCase() === "OPEN";
+}
+
 export async function getOrFetchView<T>(options: CacheLookupOptions<T>): Promise<CacheLookupResult<T>> {
 	const ttl = resolveCacheTtl(options.settings);
 	const now = options.now ?? Date.now();
@@ -869,12 +883,15 @@ export async function getOrFetchView<T>(options: CacheLookupOptions<T>): Promise
 
 	if (cached) {
 		const age = now - cached.fetchedAt;
+		const softMs = isOpenView(options.kind, cached.payload)
+			? Math.min(ttl.softMs, OPEN_STATE_SOFT_TTL_MS)
+			: ttl.softMs;
 		if (age > ttl.hardMs) {
 			// Past hard TTL: drop the row eagerly so the on-disk exposure window
 			// is bounded even if `fetchFresh()` then fails (network down, gh
 			// auth lapse, etc.) and we never get to overwrite it.
 			invalidate(options.repo, options.kind, options.number, options.includeComments, authKey);
-		} else if (age <= ttl.softMs) {
+		} else if (age <= softMs) {
 			return {
 				rendered: cached.rendered,
 				sourceUrl: cached.sourceUrl,

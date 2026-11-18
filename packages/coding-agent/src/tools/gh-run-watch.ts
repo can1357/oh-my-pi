@@ -845,7 +845,6 @@ export async function executeRunWatch(
 				});
 				const artifactId = await saveArtifactText(
 					session,
-					toolName,
 					formatRunWatchResult(repo, run, failedJobLogs, tail, { mode: "full" }),
 				);
 				return buildTextResult(
@@ -958,7 +957,6 @@ export async function executeRunWatch(
 			});
 			const artifactId = await saveArtifactText(
 				session,
-				toolName,
 				formatCommitRunWatchResult(repo, headSha, branch, runs, failedJobLogs, tail, { mode: "full" }),
 			);
 			return buildTextResult(

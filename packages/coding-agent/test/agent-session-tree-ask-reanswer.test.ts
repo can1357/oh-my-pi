@@ -242,12 +242,8 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			const { session, sessionManager } = ctx;
 
 			sessionManager.appendMessage(userMsg("please deploy"));
-			// Legacy persisted args from the `questions[]` contract carry no form `html`.
-			sessionManager.appendMessage(
-				toolCallMsg("ask-call-bad", "ask", {
-					questions: [{ id: "deploy_target", question: "Which deploy target?", options: [{ label: "staging" }] }],
-				}),
-			);
+			// Neither form `html` nor a legacy `questions[]` entry with its question text.
+			sessionManager.appendMessage(toolCallMsg("ask-call-bad", "ask", { questions: [{ id: "deploy_target" }] }));
 			const trBadId = sessionManager.appendMessage(toolResultMsg("ask-call-bad", "ask", "User selected: staging"));
 			sessionManager.appendMessage(assistantMsg("deploying to staging"));
 

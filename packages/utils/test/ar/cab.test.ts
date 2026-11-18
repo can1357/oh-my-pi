@@ -5,7 +5,7 @@ import { ArchiveError } from "../../src/ar/error";
 import { DEFAULT_ARCHIVE_LIMITS } from "../../src/ar/limits";
 import { type ByteSource, memoryByteSource } from "../../src/ar/source";
 import type { ArchiveIndexEntry } from "../../src/ar/types";
-import { arFixture as fixtureBytes } from "./fixtures";
+import { arFixture as fixtureBytes, extractLargestMember } from "./fixtures";
 
 const textDecoder = new TextDecoder();
 
@@ -192,9 +192,9 @@ test("enforces index, entry, member, path, and in-memory folder limits", async (
 	await expect(
 		readCab(memoryByteSource(fixture), { limits: { ...DEFAULT_ARCHIVE_LIMITS, maxEntries: 2 } }),
 	).rejects.toThrow("too many entries");
-	await expect(
-		readCab(memoryByteSource(fixture), { limits: { ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 16 } }),
-	).rejects.toThrow("too large to extract");
+	const memberLimits = { ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 16 };
+	const memberIndex = await readCab(memoryByteSource(fixture), { limits: memberLimits });
+	await expect(extractLargestMember("cab", memberIndex, memberLimits)).rejects.toThrow("too large to extract");
 	await expect(
 		readCab(memoryByteSource(fixture), { limits: { ...DEFAULT_ARCHIVE_LIMITS, maxPathBytes: 7 } }),
 	).rejects.toThrow("member path exceeds 7 bytes");
