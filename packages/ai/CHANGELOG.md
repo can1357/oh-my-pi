@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Kiro IAM Identity Center logins send GenerateAssistantResponse to Amazon Q (`q.<region>.amazonaws.com`) instead of the Kiro runtime, which rejects those tokens with HTTP 403
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

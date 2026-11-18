@@ -260,10 +260,20 @@ test("routes to the credential's region with its profile ARN, else to the discov
 	};
 	const profileArn = "arn:aws:codewhisperer:eu-central-1:123456789012:profile/p";
 	const oauth = encodeKiroCredential({ kind: "oauth", token: "t", region: "eu-central-1", loginId: "l", profileArn });
+	const idc = encodeKiroCredential({
+		kind: "oauth",
+		token: "t",
+		region: "eu-central-1",
+		loginId: "l",
+		profileArn,
+		service: "q",
+	});
 	await run(recovered, { apiKey: oauth, fetch, sessionId: "session-a" });
+	await run(recovered, { apiKey: idc, fetch, sessionId: "session-idc" });
 	await run(recovered, { fetch });
 	expect(sent.map(([url, body]) => [url, body.profileArn, body.conversationState.conversationId])).toEqual([
 		["https://runtime.eu-central-1.kiro.dev/", profileArn, "session-a"],
+		["https://q.eu-central-1.amazonaws.com/", profileArn, "session-idc"],
 		[MODEL_ENDPOINT, undefined, expect.any(String)],
 	]);
 });

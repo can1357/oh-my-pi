@@ -14,6 +14,7 @@ import {
 	type KiroCredential,
 	kiroManagementBaseUrl,
 	kiroProfileRegion,
+	kiroRequestBaseUrl,
 	kiroRuntimeBaseUrl,
 } from "../wire/kiro";
 import { kiroCliServiceHeaders } from "../wire/kiro-cli";
@@ -39,6 +40,8 @@ interface ManagementOptions {
 	token: string;
 	fetch?: FetchImpl;
 	signal?: AbortSignal;
+	/** Identity Center tokens are accepted by Amazon Q, not `management.*.kiro.dev`. */
+	service?: "q";
 }
 
 /** A non-2xx Kiro management response; `status` tells auth loss from transient failure. */
@@ -57,7 +60,7 @@ export async function kiroManagementRequest(
 	options: ManagementOptions & { target: KiroManagementTarget; body: unknown },
 ): Promise<unknown> {
 	const timeout = AbortSignal.timeout(TIMEOUT_MS);
-	const response = await discoveryFetch(options.fetch)(kiroManagementBaseUrl(options.region), {
+	const response = await discoveryFetch(options.fetch)(kiroManagementBaseUrl(options.region, options.service), {
 		method: "POST",
 		headers: kiroCliServiceHeaders(options.target, options.token, { attempt: 1, maxAttempts: 1 }),
 		body: JSON.stringify(options.body),
@@ -250,7 +253,8 @@ export async function fetchKiroModels(options: {
 			}
 			({ region, page: first } = probed);
 		}
-		const baseUrl = kiroRuntimeBaseUrl(region);
+		const service = credential.kind === "oauth" ? credential.service : undefined;
+		const baseUrl = kiroRequestBaseUrl(credential) ?? kiroRuntimeBaseUrl(region);
 		const profileArn = credential.kind === "oauth" ? credential.profileArn : undefined;
 		const models = new Map<string, ModelSpec<"kiro-api">>();
 		for await (const page of listPages({
@@ -258,6 +262,7 @@ export async function fetchKiroModels(options: {
 			token: credential.token,
 			fetch,
 			signal,
+			service,
 			target: "ListAvailableModels",
 			body: { origin: "KIRO_CLI", ...(profileArn ? { profileArn } : {}) },
 			first,

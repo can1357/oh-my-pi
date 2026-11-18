@@ -28,16 +28,35 @@ export function kiroRuntimeBaseUrl(region: string): string {
 	return `https://runtime.${region}.kiro.dev/`;
 }
 
-export function kiroManagementBaseUrl(region: string): string {
-	return `https://management.${region}.kiro.dev/`;
+/** Amazon Q inference/management host used by IAM Identity Center (enterprise) tokens. */
+export function kiroQBaseUrl(region: string): string {
+	return `https://q.${region}.amazonaws.com/`;
+}
+
+export function kiroManagementBaseUrl(region: string, service?: "q"): string {
+	return service === "q" ? kiroQBaseUrl(region) : `https://management.${region}.kiro.dev/`;
+}
+
+/**
+ * Chat host for a decoded credential. Identity Center rows (`service: "q"`) go
+ * to Amazon Q; Builder ID, social, and API keys stay on the Kiro runtime.
+ * Sending an IdC bearer to `runtime.*.kiro.dev` is rejected with HTTP 403.
+ */
+export function kiroRequestBaseUrl(credential: KiroCredential): string | undefined {
+	if (!credential.region) return undefined;
+	return credential.kind === "oauth" && credential.service === "q"
+		? kiroQBaseUrl(credential.region)
+		: kiroRuntimeBaseUrl(credential.region);
 }
 
 export type KiroCredential =
 	/**
 	 * A device or social login. `loginId` is minted at login and survives refresh;
 	 * Builder ID logins have no profile ARN and route by region alone.
+	 * `service: "q"` marks IAM Identity Center (OIDC client + org profile): those
+	 * bearers are accepted by Amazon Q, not by the Kiro runtime.
 	 */
-	| { kind: "oauth"; token: string; region: string; loginId: string; profileArn?: string }
+	| { kind: "oauth"; token: string; region: string; loginId: string; profileArn?: string; service?: "q" }
 	/** A `ksk_…` key; `region` is absent for an env key with no `KIRO_API_REGION`. */
 	| { kind: "api_key"; token: string; region?: string };
 
@@ -61,6 +80,8 @@ export interface KiroOAuthRow {
 	/** The login id minted at sign-in. */
 	accountId?: string;
 	kiroProfileArn?: string;
+	/** Present on IAM Identity Center and Builder ID (SSO-OIDC) logins, not on Google/GitHub. */
+	kiroClientId?: string;
 }
 
 /** The request key for a stored Kiro OAuth row (`ProviderDefinition.getApiKey`). */
@@ -68,12 +89,16 @@ export function encodeKiroOAuthRow(row: KiroOAuthRow): string {
 	if (!isKiroRegion(row.region) || !row.accountId) {
 		throw new KiroCredentialError("Kiro login is incomplete; run /login kiro again");
 	}
+	// OIDC client + org profile → Identity Center. Builder ID has a client but
+	// no profile; Google/GitHub have a profile but no OIDC client.
+	const service = row.kiroClientId && row.kiroProfileArn ? ("q" as const) : undefined;
 	return encodeKiroCredential({
 		kind: "oauth",
 		token: row.access,
 		region: row.region,
 		loginId: row.accountId,
 		...(row.kiroProfileArn ? { profileArn: row.kiroProfileArn } : {}),
+		...(service ? { service } : {}),
 	});
 }
 
@@ -102,12 +127,16 @@ function decodeEncoded(value: string): KiroCredential {
 	if (profileArn !== undefined && kiroProfileRegion(profileArn) === undefined) {
 		throw new KiroCredentialError("Kiro credential has an invalid profile ARN");
 	}
+	if (parsed.service !== undefined && parsed.service !== "q") {
+		throw new KiroCredentialError("Kiro credential has an unknown service");
+	}
 	return {
 		kind: "oauth",
 		token,
 		region,
 		loginId: parsed.loginId,
 		...(profileArn ? { profileArn: profileArn as string } : {}),
+		...(parsed.service === "q" ? { service: "q" as const } : {}),
 	};
 }
 

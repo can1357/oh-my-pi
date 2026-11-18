@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Kiro IAM Identity Center credentials are encoded with `service: "q"` so discovery and inference use Amazon Q rather than `runtime.*.kiro.dev`
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

@@ -1,5 +1,5 @@
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { decodeKiroCredential, kiroRuntimeBaseUrl } from "@oh-my-pi/pi-catalog/wire/kiro";
+import { decodeKiroCredential, kiroRequestBaseUrl } from "@oh-my-pi/pi-catalog/wire/kiro";
 import { kiroCliServiceHeaders } from "@oh-my-pi/pi-catalog/wire/kiro-cli";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { readBoundedBody } from "@oh-my-pi/pi-utils/bounded-json";
@@ -366,7 +366,7 @@ export function streamKiro(model: Model, context: Context, options: KiroOptions 
 			if (!options.apiKey) throw new AIError.ProviderHttpError("Kiro credential is missing", 401);
 			const credential = decodeKiroCredential(options.apiKey);
 			// An API key without a pinned region uses the runtime discovery resolved for this model.
-			const url = credential.region ? kiroRuntimeBaseUrl(credential.region) : model.baseUrl;
+			const url = kiroRequestBaseUrl(credential) ?? model.baseUrl;
 			// Built once: a retry replays byte-identical bytes and never reruns a stateful payload hook.
 			let payload = transformKiroRequest(model, context, {
 				reasoning: options.reasoning,
