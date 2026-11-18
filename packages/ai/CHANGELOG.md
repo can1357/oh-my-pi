@@ -4,11 +4,11 @@
 
 ### Added
 
-- Added `groupResetCreditsByClears`, which groups an account's spendable saved-reset credits by the limits they clear
+- Added `groupResetCreditsByClears`, which groups an account's spendable saved-reset credits by the limits they clear ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
-- `resets.redeem` no longer spends the Claude grant offered next when the target names no credit and the account holds grants that clear different limits; it returns `credit_choice_required` and spends nothing
+- `resets.redeem` no longer spends the Claude grant offered next when the target names no credit and the account holds grants that clear different limits; it returns `credit_choice_required` and spends nothing ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.22.2] - 2026-11-18
 
