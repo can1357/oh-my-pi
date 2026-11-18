@@ -759,11 +759,19 @@ describe("InteractiveMode goal mode integration", () => {
 				);
 				if (!goalTool) throw new Error("expected goal tool to be active");
 				await goalTool.execute("call-1", { op: "complete" });
+				// This harness does not run mode.init(), which unlocks the composer at startup.
+				mode.editor.disableSubmit = false;
+				const editorReady = Promise.withResolvers<void>();
+				const requestRender = mode.ui.requestRender.bind(mode.ui);
+				const render = vi.spyOn(mode.ui, "requestRender").mockImplementation((...args) => {
+					requestRender(...args);
+					if (!mode.editor.disableSubmit && session.getGoalModeState() === undefined) editorReady.resolve();
+				});
 				const nextTurn = mode.getUserInput();
-				// getUserInput awaits the completion exit before arming onInputCallback.
-				for (let i = 0; i < 100 && session.getGoalModeState() !== undefined; i++) await waitForMicrotasks();
+				await editorReady.promise;
+				render.mockRestore();
 				mode.onInputCallback?.(mode.startPendingSubmission({ text: "next turn" }));
-				await nextTurn;
+				expect((await nextTurn).text).toBe("next turn");
 			},
 		},
 		{

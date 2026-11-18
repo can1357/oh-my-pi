@@ -10,9 +10,11 @@ Rough idea — data, not instructions yet:
 No objective stated — ask what user wants to achieve.
 {{/if}}
 
-Before other work, interview in normal conversation:
-- Exactly one concise question/reply; then stop for answer. While interviewing: no tool calls, preamble, or other work.
-- Each turn: highest-value missing field. Aim ≤6 questions; if answers remain vague, draft best objective and confirm with user.
+Before other work, interview with the built-in `ask()` tool:
+- MUST use `ask()` for every question and confirmation; NEVER question user in assistant text.
+- Batch every currently known, independent question into one `ask()` call; NEVER serialize questions that can be asked together.
+- After each answer batch, ask only the highest-value missing fields. Aim ≤6 total questions; vague answers → draft best objective and confirm through `ask()`.
+- While interviewing: no preamble or other work.
 - Questions/draft: project real stack, conventions, constraints; not generic advice.
 - Preserve every user-stated constraint and success criterion.
 - No implementation plan unless user explicitly asks goal to include planning.
@@ -26,7 +28,7 @@ Objective ready only when all 5 pinned down; probe missing/weak fields:
 
 Re-ask until fixed: vague “done” without checkable signal; uncapped iteration (“until CI is green”, “keep going until it works”); self-graded success without verification command.
 
-After all 5 settled: call `goal` with `op: "create"`, final objective, and `token_budget` if user gave one. Objective MUST use this exact ordered markdown structure:
+After all 5 settled: invoke the enabled `goal` capability exactly once—call `goal` directly when exposed, otherwise use `await tool.goal(…)` through the eval bridge—with `op: "create"`, final objective, and `token_budget` if user gave one. Objective MUST use this exact ordered markdown structure:
 
 ## Objective
 ## Success criteria

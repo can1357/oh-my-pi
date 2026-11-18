@@ -1674,10 +1674,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// the still-old context (the transition hasn't reached agent.reset() yet), start a
 		// stale provider turn that races the reset, and — once reconnected — append its
 		// output to the fresh session (issue #5800). A disconnected session never owns the
-		// queue: the transition does. newSession/switchSession drop the queue (reset /
-		// clearAllQueues), so nothing survives; compaction preserves it and re-drains itself
-		// after #reconnectToAgent (see compact()'s finally); an explicit prompt flushes it
-		// in every case.
+		// queue: successful newSession/switchSession transitions drop it (reset /
+		// clearAllQueues), while cancelled transitions reconnect and explicitly re-drain it.
+		// Compaction preserves it and re-drains itself after #reconnectToAgent (see
+		// compact()'s finally); an explicit prompt flushes it in every case.
 		if (this.#unsubscribeAgent === undefined) return;
 		// A concern steered into a resumed streaming run after a user interrupt can
 		// strand at the turn tail (steered past the loop's final boundary poll). While
@@ -3560,15 +3560,33 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#planProposalHandler = handler ? title => this.waitForUser(() => handler(title)) : undefined;
 	}
 
-	#sessionBeforeSwitchReconciler: (() => Promise<void>) | undefined;
+	#sessionBeforeSwitchReconciler: ((reason: "new" | "resume") => Promise<boolean>) | undefined;
 
-	setSessionBeforeSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
+	setSessionBeforeSwitchReconciler(reconciler: ((reason: "new" | "resume") => Promise<boolean>) | null): void {
 		this.#sessionBeforeSwitchReconciler = reconciler ?? undefined;
 	}
 
-	#sessionSwitchReconciler: (() => Promise<void>) | undefined;
+	#resumeAfterCancelledSessionTransition(): void {
+		this.#reconnectToAgent();
+		this.#drainStrandedQueuedMessages();
+	}
 
-	setSessionSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
+	async #reconcileBeforeSessionTransition(reason: "new" | "resume"): Promise<boolean> {
+		try {
+			if ((await this.#sessionBeforeSwitchReconciler?.(reason)) === false) {
+				this.#resumeAfterCancelledSessionTransition();
+				return false;
+			}
+			return true;
+		} catch (error) {
+			this.#resumeAfterCancelledSessionTransition();
+			throw error;
+		}
+	}
+
+	#sessionSwitchReconciler: ((outcome: "committed" | "rolled-back") => Promise<void>) | undefined;
+
+	setSessionSwitchReconciler(reconciler: ((outcome: "committed" | "rolled-back") => Promise<void>) | null): void {
 		this.#sessionSwitchReconciler = reconciler ?? undefined;
 	}
 
@@ -3584,7 +3602,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	async #reconcileModeAfterTransition(): Promise<void> {
 		try {
-			await this.#sessionSwitchReconciler?.();
+			await this.#sessionSwitchReconciler?.("committed");
 		} catch (error) {
 			logger.warn("Failed to reconcile session mode after session transition", {
 				sessionFile: this.sessionFile,
@@ -12628,6 +12646,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#disconnectFromAgent();
 		let advisorRecordersDetached = false;
 		await this.abort();
+		if (!(await this.#reconcileBeforeSessionTransition("new"))) return false;
 		this.#cancelOwnAsyncJobs();
 		this.#closeAllProviderSessions("new session");
 		await this.#bash.flushPending();
@@ -14402,7 +14421,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
-		await this.#sessionBeforeSwitchReconciler?.();
+		if (!(await this.#reconcileBeforeSessionTransition("resume"))) return false;
 
 		await this.#bash.flushPending();
 		this.#flushExcludedRows();
@@ -14656,7 +14675,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			this.#reconnectToAgent();
 			try {
-				await this.#sessionSwitchReconciler?.();
+				await this.#sessionSwitchReconciler?.("committed");
 			} catch (error) {
 				logger.warn("Failed to reconcile session mode after switch", {
 					targetSessionFile: sessionPath,
@@ -14758,9 +14777,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#modelMentions.syncFromBranch();
 			this.#advisors.resetAllRuntimes();
 			this.#advisors.reattachRecorderFeeds();
-			this.#reconnectToAgent();
+			let modeReconciled = false;
 			try {
-				await this.#sessionSwitchReconciler?.();
+				await this.#sessionSwitchReconciler?.("rolled-back");
+				modeReconciled = true;
 			} catch (reconcileError) {
 				logger.warn("Failed to reconcile session mode after switch rollback", {
 					targetSessionFile: sessionPath,
@@ -14785,6 +14805,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 			}
 			this.#bash.finishSessionTransition(bashTransition, false);
+			// Don't admit restored follow-ups until their source mode and cwd are back.
+			// If reconciliation failed, leave them parked for the next explicit input.
+			if (modeReconciled) {
+				this.#resumeAfterCancelledSessionTransition();
+			} else {
+				this.#queuedMessageDrainBlocked ||= this.agent.hasQueuedMessages();
+				this.#reconnectToAgent();
+			}
 			if (error === SESSION_CWD_CHANGE_REJECTED) return false;
 			throw error;
 		}
