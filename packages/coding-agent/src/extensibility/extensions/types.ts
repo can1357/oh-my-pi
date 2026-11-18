@@ -236,6 +236,11 @@ export interface ExtensionUIDialogOptions {
 	/** Invoked when user input resets a UI-managed timeout countdown */
 	onTimeoutReset?: () => void;
 	/**
+	 * Form dialogs: invoked when `signal` closes the form before a submit (a message the user sent
+	 * instead), with the answers the user changed from the form's defaults and their option notes.
+	 */
+	onAbandon?: (given: ExtensionFormDialogResult) => void;
+	/**
 	 * Host hint to mask entered characters in `input` dialogs.
 	 * Enforced by the interactive TUI (masked as bullets), forwarded on RPC `input`
 	 * requests for hosts that honor it, and rejected (`undefined`) in ACP mode where

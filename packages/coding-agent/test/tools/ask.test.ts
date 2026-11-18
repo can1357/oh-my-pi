@@ -291,6 +291,36 @@ describe("AskTool form dialog", () => {
 		expect((await irc.outcome).details?.answers[0]).toMatchObject({ name: "store", answer: "SQLite" });
 	});
 
+	it("tells the model what the user answered before a message closed the form", async () => {
+		const steering = new AbortController();
+		const formDialog: FormDialog = async (_html, options) => {
+			options?.onAbandon?.({
+				data: { store: "postgres" },
+				notes: [{ name: "store", question: "Store", option: "Postgres", value: "postgres", text: "managed  one" }],
+			});
+			steering.abort("user");
+			return undefined;
+		};
+		const outcome = new AskTool(createSession()).execute(
+			"call-given",
+			{ html: DB_FORM },
+			undefined,
+			undefined,
+			createContext({ formDialog, steeringSignal: steering.signal }),
+		);
+
+		const error = await outcome.then(
+			() => undefined,
+			(rejection: unknown) => rejection,
+		);
+		expect(error).toBeInstanceOf(ToolAbortError);
+		const message = (error as Error).message;
+		expect(message).toContain("Ask interrupted by message");
+		expect(message).toContain('"store": "postgres"');
+		expect(message).toContain("Store: Postgres");
+		expect(message).toContain("managed one");
+	});
+
 	it("delivers queued steering while the form is open without cancelling the turn", async () => {
 		const abort = vi.fn();
 		const wake = Promise.withResolvers<void>();

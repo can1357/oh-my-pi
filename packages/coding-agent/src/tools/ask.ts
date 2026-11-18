@@ -40,7 +40,12 @@ import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import type { ExtensionUIContext, ExtensionUIDialogOptions, ExtensionUISelectItem } from "../extensibility/extensions";
+import type {
+	ExtensionFormDialogResult,
+	ExtensionUIContext,
+	ExtensionUIDialogOptions,
+	ExtensionUISelectItem,
+} from "../extensibility/extensions";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { askTimeoutMs, cfgAskNotify } from "../modes/settings";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
@@ -516,8 +521,23 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		if (steeringSignal?.aborted) onSteer();
 		else steeringSignal?.addEventListener("abort", onSteer, { once: true });
 		const dialogSignal = signal ? AbortSignal.any([signal, userSteering.signal]) : userSteering.signal;
-		const abortError = (): ToolAbortError =>
-			new ToolAbortError(userSteering.signal.aborted ? "Ask interrupted by message" : "Ask input was cancelled");
+		// What the user answered before a message closed the form; the model gets it with the interruption.
+		let given: ExtensionFormDialogResult | undefined;
+		const abortError = (): ToolAbortError => {
+			if (!userSteering.signal.aborted) return new ToolAbortError("Ask input was cancelled");
+			if (!given) return new ToolAbortError("Ask interrupted by message");
+			const notes = given.notes?.map(({ images: _images, ...note }) => ({
+				...note,
+				text: note.text.replace(/\s+/g, " ").trim(),
+			}));
+			return new ToolAbortError(
+				prompt.render(askResultTemplate, {
+					interrupted: true,
+					json: JSON.stringify(given.data, null, 2),
+					notes: notes?.length ? notes : undefined,
+				}),
+			);
+		};
 		const cancelAsk = (): never => {
 			if (userSteering.signal.aborted) throw abortError();
 			context.abort();
@@ -539,7 +559,14 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			if (extensionUi.formDialog) {
 				const formDialog = extensionUi.formDialog.bind(extensionUi);
 				answered = await untilAborted(dialogSignal, () =>
-					formDialog(html, { timeout, signal: dialogSignal, acceptImages: true }),
+					formDialog(html, {
+						timeout,
+						signal: dialogSignal,
+						acceptImages: true,
+						onAbandon: partial => {
+							given = partial;
+						},
+					}),
 				);
 			} else {
 				answered = await askFieldByField(extensionUi, form, timeout, dialogSignal);

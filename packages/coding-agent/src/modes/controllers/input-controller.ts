@@ -706,6 +706,8 @@ export class InputController {
 		this.ctx.editor.onSuspend = () => this.handleCtrlZ();
 		this.ctx.editor.setActionKeys("app.thinking.cycle", this.ctx.keybindings.getKeys("app.thinking.cycle"));
 		this.ctx.editor.onCycleThinkingLevel = () => {
+			// Shift+Tab, Tab's way back: from the composer to the ask waiting above it (Tern).
+			if (this.ctx.focusInlineAsk()) return;
 			hintUsage.record("effort");
 			this.cycleThinkingLevel();
 		};

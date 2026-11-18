@@ -1399,6 +1399,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	chatContainer: TranscriptContainer;
 	/** `!`/`$` runs started while the agent streams; {@link flushPendingBashComponents} moves them into the transcript. */
 	pendingShellContainer: Container;
+	askContainer: Container;
 	pendingMessagesContainer: Container;
 	/** Judge-batch and automatic-download progress rows above the working line. */
 	progressHudContainer: Container;
@@ -2232,6 +2233,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 		this.chatContainer = new TranscriptContainer();
 		this.pendingShellContainer = new AnchoredLiveContainer();
+		this.askContainer = new Container();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.progressHudContainer = new AnchoredLiveContainer();
 		this.progressHudContainer.addChild(this.#judgmentBatchProgressHud);
@@ -2582,6 +2584,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.attachmentChipsContainer,
 				this.editorTopGapContainer,
 				this.hookWidgetContainerAbove,
+				// Natively an ask waits in the transcript tail; it lands here only if rows take over meanwhile.
+				this.askContainer,
 				this.editorContainer,
 				this.hookWidgetContainerBelow,
 			],
@@ -2595,6 +2599,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// in. Classify every new root that can collapse on its own.
 				transientChrome: [
 					this.editorContainer,
+					this.askContainer,
 					this.attachmentChipsContainer,
 					this.reportContainer,
 					this.pendingShellContainer,
@@ -2640,7 +2645,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				],
 				// Deferred shell runs are transcript output: natively they flow at its
 				// end, where they stay when they move in, not pinned over the composer.
-				nativeTail: [this.pendingShellContainer],
+				// An ask waiting for answers follows them, right above the composer.
+				nativeTail: [this.pendingShellContainer, this.askContainer],
 			},
 		);
 		this.ui.setFocus(this.editor);
@@ -4914,6 +4920,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					: undefined,
 			viewing: this.#viewingLineage(),
 			btw: this.#btwController.isFocused(),
+			ask: this.#extensionUiController.composerAsk(),
 			title: this.sessionManager.getSessionName(),
 		};
 	}
@@ -9745,6 +9752,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleBtwEscape(): boolean {
 		return this.#btwController.handleEscape();
+	}
+
+	focusInlineAsk(): boolean {
+		return this.#extensionUiController.focusInlineAsk();
 	}
 
 	get isBtwFocused(): boolean {
