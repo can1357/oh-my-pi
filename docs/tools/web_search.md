@@ -31,6 +31,7 @@
    - `packages/coding-agent/src/web/search/providers/jina.ts` — Jina Reader search adapter.
    - `packages/coding-agent/src/web/search/providers/kagi.ts` — Kagi provider wrapper.
    - `packages/coding-agent/src/web/search/providers/kimi.ts` — Kimi search adapter.
+   - `packages/coding-agent/src/web/search/providers/kiro.ts` — Kiro runtime MCP `web_search` adapter.
    - `packages/coding-agent/src/web/search/providers/mojeek.ts` — Mojeek browser-backed scraper (independent index).
    - `packages/coding-agent/src/web/search/providers/parallel.ts` — Parallel provider wrapper.
    - `packages/coding-agent/src/web/search/providers/perplexity.ts` — Perplexity API / OAuth adapter.
@@ -250,6 +251,11 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - Querying: POST to `MOONSHOT_SEARCH_BASE_URL` / `KIMI_SEARCH_BASE_URL` / default `https://api.kimi.com/coding/v1/search` with `text_query`, `limit`, `enable_page_crawling`, `timeout_seconds: 30`.
       - `limit` / `num_search_results`: `params.numSearchResults ?? params.limit`, clamped to `1..20`, default `10`.
       - Output: `sources`, `requestId`.
+   - **Kiro** — `packages/coding-agent/src/web/search/providers/kiro.ts`
+      - Availability: a stored `kiro` login (`/login kiro`) or `KIRO_API_KEY`. An API key needs a region (stored by `/login kiro`, or `KIRO_API_REGION`); search never probes for one.
+      - Querying: POST `https://runtime.<region>.kiro.dev/mcp`, JSON-RPC `tools/call` of the `web_search` tool with `{ query }` and the bearer; logins add `x-amzn-kiro-profile-arn`, API keys `tokentype: API_KEY`. Quoted phrases, exclusions, `site:` and `filetype:` stay in the query; dates are left to the post-filter. Queries over 200 characters (the tool's limit) fail before the request. `recency` is ignored.
+      - `limit` / `num_search_results`: the tool returns one page of up to `10` results, which is sliced locally.
+      - Output: `sources` (`publishedDate` from the epoch-millisecond date), `authMode: "oauth"` or `"api_key"`. Per-source reuse limits (`maxVerbatimWordLimit`) are not carried.
    - **Parallel** — `packages/coding-agent/src/web/search/providers/parallel.ts`, `packages/coding-agent/src/web/parallel.ts`
       - Availability: always available and first in the automatic chain, using authenticated search when configured and the credential-free MCP otherwise. A configured credential that fails to resolve errors instead of downgrading to the MCP.
       - Querying: authenticated requests POST `https://api.parallel.ai/v1beta/search` with `objective`, one search query, `mode:"fast"`, `excerpts.max_chars_per_result:10000`, and beta header `search-extract-2025-10-10`. Domain filters and `after:`/recency map to `source_policy`; explicit `after:` wins. Keyless requests call `web_search` at `https://search.parallel.ai/mcp` with only `objective` and `search_queries`, retaining query operators and a recency-derived date hint; no session or model identifiers are sent. The client identifies as `omp/<version>`.
@@ -330,6 +336,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - Tavily result count: default `5`, max `20` (`packages/coding-agent/src/web/search/providers/tavily.ts`).
 - Firecrawl result count: default `10`, max `100` (`packages/coding-agent/src/web/search/providers/firecrawl.ts`).
 - Kimi result count: default `10`, max `20`; request timeout field fixed to `30` seconds (`packages/coding-agent/src/web/search/providers/kimi.ts`).
+- Kiro result count: at most `10` (one tool page); query length max `200` characters (`packages/coding-agent/src/web/search/providers/kiro.ts`).
 - Parallel result count: default `10`, max `40`; per-result excerpt cap `10_000` chars (`packages/coding-agent/src/web/search/providers/parallel.ts`, `packages/coding-agent/src/web/parallel.ts`).
 - Kagi result count: default `10`, max `40` (`packages/coding-agent/src/web/search/providers/kagi.ts`).
 - SearXNG result count: default `10`, max `20` (`packages/coding-agent/src/web/search/providers/searxng.ts`).

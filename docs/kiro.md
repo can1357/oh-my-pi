@@ -29,6 +29,10 @@ export KIRO_API_REGION=us-east-1
 
 The model roster is discovered per credential and never bundled into OMP's catalog, because it depends on the signed-in account. Kiro defaults to `auto` until you pick a model. The model cache is scoped per login for Identity Center, Builder ID, Google, and GitHub, and per key and region for API keys, so one account's roster is never reused for another.
 
+## Web search
+
+A Kiro login also searches the web: select `web/kiro` in the `web` model role, or run `omp q --model web/kiro <query>`. It calls the `web_search` tool of the Kiro runtime with the same credential and region as chat.
+
 ## Accounts and usage
 
 Each `/login kiro` adds an account, like every other provider, so logging the same person in again adds a second entry; remove the old one with `/logout`.

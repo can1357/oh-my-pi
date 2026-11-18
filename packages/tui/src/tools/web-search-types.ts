@@ -30,6 +30,7 @@ export const SEARCH_PROVIDER_LABELS = {
 	brave: "Brave",
 	deepseek: "DeepSeek",
 	kimi: "Kimi",
+	kiro: "Kiro",
 	synthetic: "Synthetic",
 	ollama: "Ollama",
 	searxng: "SearXNG",
