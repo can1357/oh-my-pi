@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `VcsGitRepo.worktreeToGit()` to preview the blob Git would stage from worktree bytes without changing the checkout, index or HEAD.
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

@@ -6,7 +6,11 @@
 //! checkout under `core.autocrlf=true` — the Git for Windows default — read as
 //! modified and makes LF patches fail to apply.
 
-use std::{collections::BTreeSet, io::Read, path::Path};
+use std::{
+	collections::BTreeSet,
+	io::Read,
+	path::{Component, Path},
+};
 
 use gix::{
 	bstr::ByteSlice,
@@ -16,9 +20,31 @@ use gix::{
 	},
 };
 
-use super::open::load_index_or_empty;
+use super::{GitRepo, mutate::normalize_stage_path, open::load_index_or_empty};
 use crate::error::{Error, Result};
 
+impl GitRepo {
+	/// Convert worktree bytes for a repo-relative path to the blob bytes `git
+	/// add` would store. Reads attributes and the index without changing the
+	/// worktree, index, or HEAD.
+	pub fn worktree_to_git(&self, file: &str, content: Vec<u8>) -> Result<Vec<u8>> {
+		let path = normalize_stage_path(file);
+		if path.is_empty()
+			|| path.contains('\0')
+			|| Path::new(&path).components().any(|part| {
+				matches!(part, Component::Prefix(_) | Component::RootDir | Component::ParentDir)
+			})
+			|| path
+				.split('/')
+				.any(|part| part.is_empty() || part == "." || part.eq_ignore_ascii_case(".git"))
+		{
+			return Err(Error::backend("git add", format!("unsafe repository path: {file}")));
+		}
+		let repo = self.gix()?;
+		let mut filter = WorktreeFilter::staging(&repo, "git add")?;
+		filter.worktree_to_git(&path, content)
+	}
+}
 pub(crate) struct WorktreeFilter<'repo> {
 	pipeline: gix::filter::Pipeline<'repo>,
 	/// Index consulted by the safer-autocrlf rule: a path whose index blob

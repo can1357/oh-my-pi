@@ -1158,6 +1158,22 @@ impl VcsGitRepo {
 		blocking("vcs.stageFiles", self.inner.clone(), signal, move |r| r.stage_files(&files))
 	}
 
+	/// Convert worktree bytes to the blob bytes Git would stage for this
+	/// repo-relative path. Reads the index and attributes; does not change the
+	/// worktree, index, or HEAD.
+	#[napi]
+	pub fn worktree_to_git(
+		&self,
+		file: String,
+		content: Buffer,
+		signal: Option<Unknown>,
+	) -> Promise<Buffer> {
+		let content = content.to_vec();
+		blocking("vcs.worktreeToGit", self.inner.clone(), signal, move |r| {
+			r.worktree_to_git(&file, content).map(Buffer::from)
+		})
+	}
+
 	/// Unstage paths.
 	#[napi]
 	pub fn unstage(&self, files: Vec<String>, signal: Option<Unknown>) -> Promise<()> {

@@ -1519,7 +1519,7 @@ fn collect_stage_paths(
 	Ok(untracked.into_iter().collect())
 }
 
-fn normalize_stage_path(path: &str) -> String {
+pub(super) fn normalize_stage_path(path: &str) -> String {
 	let normalized = path.replace('\\', "/");
 	let mut relative = normalized.as_str();
 	while let Some(stripped) = relative.strip_prefix("./") {
@@ -2831,6 +2831,29 @@ mod tests {
 		repo.stage_files(&["run.cmd".into()]).unwrap();
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "M  run.cmd");
 		assert_eq!(git(temp.path(), &["show", ":run.cmd"]), "echo one\necho three");
+	}
+
+	#[test]
+	fn draft_clean_conversion_preserves_index_crlf_and_git_state() {
+		let (temp, repo) = fixture();
+		fs::write(temp.path().join(".gitattributes"), "*.txt -text\n").unwrap();
+		fs::write(temp.path().join("legacy.txt"), "one\r\ntwo\r\n").unwrap();
+		git(temp.path(), &["add", "."]);
+		git(temp.path(), &["commit", "-qm", "legacy crlf"]);
+		fs::write(temp.path().join(".gitattributes"), "*.txt text=auto\n").unwrap();
+		let head = git(temp.path(), &["rev-parse", "HEAD"]);
+		let tree = git(temp.path(), &["write-tree"]);
+
+		assert_eq!(
+			repo
+				.worktree_to_git("legacy.txt", b"one\r\ntwo\r\nthree\r\n".to_vec())
+				.unwrap(),
+			b"one\r\ntwo\r\nthree\r\n",
+			"text=auto keeps CRLF when the index blob already has it"
+		);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), head);
+		assert_eq!(git(temp.path(), &["write-tree"]), tree);
+		assert_eq!(git(temp.path(), &["show", ":legacy.txt"]), "one\r\ntwo");
 	}
 
 	#[test]

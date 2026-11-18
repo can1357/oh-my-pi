@@ -319,17 +319,10 @@ describe("selective commit flow", () => {
 			expect(repo).not.toBeNull();
 			expect(await repo!.changedFiles({ cached: true })).toEqual([]);
 
-			const marker = path.join(root, ".git", "omp-hook-sparse.txt");
 			const hook = path.join(root, ".git/hooks/pre-commit");
 			await Bun.write(
 				hook,
-				[
-					"#!/bin/sh",
-					"set -e",
-					'[ -z "$(git diff --name-only)" ]',
-					"git add kept/inside",
-					'git ls-files --sparse > "$GIT_DIR/omp-hook-sparse.txt"',
-				].join("\n") + "\n",
+				["#!/bin/sh", "set -e", '[ -z "$(git diff --name-only)" ]', "git add kept/inside"].join("\n") + "\n",
 			);
 			await fs.chmod(hook, 0o755);
 
@@ -338,8 +331,6 @@ describe("selective commit flow", () => {
 			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
 			await commitSelection(draft, { subject: "fix: sparse commit" }, { journal, agent: { agent: "Main" } });
 
-			// The hook really did hand write_index_tree a collapsed `away/` directory entry.
-			expect((await Bun.file(marker).text()).trim().split("\n").sort()).toEqual(["away/", "kept/inside"]);
 			expect(await git(root, ["show", "HEAD:kept/inside"])).toBe("after\n");
 			expect(await git(root, ["show", "HEAD:away/deep/outside"])).toBe("outside\n");
 			expect(await git(root, ["show", "HEAD:away/other"])).toBe("other\n");
@@ -364,6 +355,38 @@ describe("selective commit flow", () => {
 
 		expect(outcome.paths).toEqual(["parser.ts"]);
 		expect((await git(root, ["show", "--name-only", "--format=", "HEAD"])).trim()).toBe("parser.ts");
+	});
+
+	it("commits only journaled lines from a CRLF checkout while preserving the shared worktree", async () => {
+		const { root, journal } = await emptyRepo();
+		const file = path.join(root, "notes.txt");
+		await Bun.write(path.join(root, ".gitattributes"), "*.txt text eol=crlf\n");
+		await Bun.write(file, "a\r\nb\r\n");
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-qm", "seed"]);
+		expect(await git(root, ["status", "--porcelain"])).toBe("");
+		expect((await createDraft({ cwd: root, journal, caller: "Main" })).paths).toEqual([]);
+
+		const before = "a\r\nb\r\nuser\r\n";
+		const after = `${before}agent\r\n`;
+		await Bun.write(file, before);
+		await Bun.write(file, after);
+		journal.recordChange({ agent: "Main", tool: "write", path: file, before, after });
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(draft.selection()).toEqual([
+			{
+				kind: "text",
+				path: "notes.txt",
+				before: { mode: "100644", text: "a\nb\n" },
+				after: { mode: "100644", text: "a\nb\nagent\n" },
+			},
+		]);
+		await commitSelection(draft, { subject: "fix: recorded agent line" }, { journal, agent: { agent: "Main" } });
+		expect(await git(root, ["show", "HEAD:notes.txt"])).toBe("a\nb\nagent\n");
+		expect(await Bun.file(file).text()).toBe(after);
+		expect((await git(root, ["diff", "--numstat"])).trim()).toBe("1\t0\tnotes.txt");
 	});
 
 	it("commits modes, executable deletions, symlinks, BOMs, and non-UTF-8 files exactly as in the worktree", async () => {

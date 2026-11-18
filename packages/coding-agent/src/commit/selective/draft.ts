@@ -260,12 +260,22 @@ async function loadEdits(
 	journal: ChangeJournal,
 	records: readonly ChangeRecord[],
 	calls: CallEvidence,
+	repo: VcsGitRepo,
+	file: string,
+	signal?: AbortSignal,
 ): Promise<RecordedEdit[] | undefined> {
 	const edits: RecordedEdit[] = [];
 	for (const record of records) {
 		if (record.before === undefined || record.after === undefined) return undefined;
-		const before = record.before === null ? null : await journal.blob(record.before);
-		const after = record.after === null ? null : await journal.blob(record.after);
+		const [before, after] = await Promise.all(
+			[record.before, record.after].map(async oid => {
+				if (oid === null || oid === undefined) return oid;
+				const text = await journal.blob(oid);
+				return text === undefined
+					? undefined
+					: decodeText(await repo.worktreeToGit(file, Buffer.from(text), signal));
+			}),
+		);
 		if (before === undefined || after === undefined) return undefined;
 		edits.push({
 			actor: record.agent,
@@ -389,6 +399,7 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 			byPath.get(entry.path) ?? [],
 			source.journal,
 			evidence,
+			source.signal,
 		);
 		if (result === "skip") skipped.push(entry.path);
 		else if (result) files.push(result);
@@ -437,6 +448,7 @@ async function loadFile(
 	records: readonly ChangeRecord[],
 	journal: ChangeJournal | null,
 	calls: CallEvidence,
+	signal?: AbortSignal,
 ): Promise<FileChange | "skip" | undefined> {
 	const absolute = path.join(root, file);
 	if (head.mode === "160000") {
@@ -462,7 +474,7 @@ async function loadFile(
 			editors: [],
 		};
 	}
-	let workBytes: Uint8Array | null = null;
+	let workBytes: Buffer | null = null;
 	let changedMs: number | undefined;
 	let mode: string | null = null;
 	try {
@@ -500,12 +512,15 @@ async function loadFile(
 	if (head.mode === SYMLINK_MODE || mode === SYMLINK_MODE) return whole("symlink");
 	const headBytes = head.sha && head.mode ? (await repo.showBlob(`${head.sha}:${file}`)).data : null;
 	const headText = headBytes === null ? null : decodeText(headBytes);
-	const workText = workBytes === null ? null : decodeText(workBytes);
-	if (headText === undefined || workText === undefined) return whole("content");
+	// Opaque worktree content remains a whole-file change even if a clean driver produces text.
+	if (headText === undefined || (workBytes !== null && decodeText(workBytes) === undefined)) return whole("content");
+	const workText = workBytes === null ? null : decodeText(await repo.worktreeToGit(file, workBytes, signal));
+	if (workText === undefined) return whole("content");
 	if (headText === workText) return head.mode === mode ? undefined : whole("mode");
 	const headLines = toLines(headText);
 	const workLines = toLines(workText);
-	const edits = journal && records.length > 0 ? await loadEdits(journal, records, calls) : undefined;
+	const edits =
+		journal && records.length > 0 ? await loadEdits(journal, records, calls, repo, file, signal) : undefined;
 	const steps = historySteps(headLines, edits ?? [], workLines, lastCall?.agent);
 	return {
 		...base,

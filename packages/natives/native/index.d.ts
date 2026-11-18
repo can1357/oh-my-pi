@@ -904,6 +904,11 @@ export declare class VcsGitRepo {
   diffTree(base: string, head: string, binary: boolean, signal?: unknown | undefined | null): Promise<string>
   /** Stage paths. */
   stageFiles(files: Array<string>, signal?: unknown | undefined | null): Promise<undefined>
+  /**
+   * Convert worktree bytes to the blob bytes Git would stage for this repo-relative path.
+   * Reads the index and attributes; does not change the worktree, index, or HEAD.
+   */
+  worktreeToGit(file: string, content: Buffer, signal?: unknown | undefined | null): Promise<Buffer>
   /** Unstage paths. */
   unstage(files: Array<string>, signal?: unknown | undefined | null): Promise<undefined>
   /** Stage selected hunks. */

@@ -92,6 +92,42 @@ describe("in-process VCS bindings", () => {
 		expect(sha).toBe(await git(root, "rev-parse", "HEAD"));
 	});
 
+	test("cleans CRLF and custom-filter content without mutating Git state", async () => {
+		const root = await repository();
+		const repo = vcsGitDiscover(root)!;
+		await writeFile(join(root, ".gitattributes"), "*.txt text eol=crlf\n*.flt filter=trim\n*.raw -text\n");
+		await git(root, "config", "filter.trim.clean", "git stripspace");
+		await git(root, "add", ".gitattributes");
+		await git(root, "commit", "-m", "attributes");
+		const head = await git(root, "rev-parse", "HEAD");
+		const tree = await git(root, "write-tree");
+
+		expect((await repo.worktreeToGit("tracked.txt", Buffer.from("one\r\ntwo\r\nnew\r\n"))).toString()).toBe(
+			"one\ntwo\nnew\n",
+		);
+		expect((await repo.worktreeToGit("note.flt", Buffer.from("line   \n"))).toString()).toBe("line\n");
+		expect((await repo.worktreeToGit("note.raw", Buffer.from("one\r\ntwo\r\n"))).toString()).toBe("one\r\ntwo\r\n");
+		expect((await repo.worktreeToGit("note.raw", Buffer.alloc(0))).byteLength).toBe(0);
+		expect(await git(root, "rev-parse", "HEAD")).toBe(head);
+		expect(await git(root, "write-tree")).toBe(tree);
+		expect(await git(root, "status", "--porcelain")).toBe("");
+	});
+
+	test("rejects paths escaping the checkout during clean conversion", async () => {
+		const root = await repository();
+		const repo = vcsGitDiscover(root)!;
+		for (const file of ["../outside", "/outside", ".git/config", "sub\\..\\outside", "sub//outside", "file\0name"]) {
+			await expect(repo.worktreeToGit(file, Buffer.from("value\n"))).rejects.toThrow(/unsafe repository path/);
+		}
+	});
+
+	test("cleans core.autocrlf worktree content without attributes", async () => {
+		const root = await repository();
+		await git(root, "config", "core.autocrlf", "true");
+		const repo = vcsGitDiscover(root)!;
+		expect((await repo.worktreeToGit("tracked.txt", Buffer.from("one\r\ntwo\r\n"))).toString()).toBe("one\ntwo\n");
+	});
+
 	test("throws rich VcsError objects", async () => {
 		const root = await repository();
 		const repo = vcsGitDiscover(root)!;
