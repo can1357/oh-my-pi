@@ -84,14 +84,21 @@ export interface KiroOAuthRow {
 	kiroClientId?: string;
 }
 
+/**
+ * Host family for a stored OAuth row. OIDC client + org profile is Identity
+ * Center → Amazon Q. Builder ID has a client but no profile; Google/GitHub
+ * have a profile but no OIDC client; those stay on the Kiro runtime.
+ */
+export function kiroOAuthService(row: Pick<KiroOAuthRow, "kiroClientId" | "kiroProfileArn">): "q" | undefined {
+	return row.kiroClientId && row.kiroProfileArn ? "q" : undefined;
+}
+
 /** The request key for a stored Kiro OAuth row (`ProviderDefinition.getApiKey`). */
 export function encodeKiroOAuthRow(row: KiroOAuthRow): string {
 	if (!isKiroRegion(row.region) || !row.accountId) {
 		throw new KiroCredentialError("Kiro login is incomplete; run /login kiro again");
 	}
-	// OIDC client + org profile → Identity Center. Builder ID has a client but
-	// no profile; Google/GitHub have a profile but no OIDC client.
-	const service = row.kiroClientId && row.kiroProfileArn ? ("q" as const) : undefined;
+	const service = kiroOAuthService(row);
 	return encodeKiroCredential({
 		kind: "oauth",
 		token: row.access,

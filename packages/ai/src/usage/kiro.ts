@@ -6,7 +6,7 @@
  */
 import { KiroManagementHttpError, kiroManagementRequest } from "@oh-my-pi/pi-catalog/discovery/kiro";
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
-import { decodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro";
+import { decodeKiroCredential, kiroOAuthService } from "@oh-my-pi/pi-catalog/wire/kiro";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { ProviderHttpError } from "../error";
 import type {
@@ -30,7 +30,7 @@ const MONTH_MS = 30 * DAY_MS;
 /** Region, bearer and (OAuth only) profile ARN to ask for usage; undefined when the credential has no region. */
 function usageRoute(
 	credential: UsageCredential,
-): { region: string; token: string; profileArn?: string; apiKey: boolean } | undefined {
+): { region: string; token: string; profileArn?: string; apiKey: boolean; service?: "q" } | undefined {
 	if (credential.type === "oauth") {
 		if (!credential.accessToken || !credential.region) return undefined;
 		return {
@@ -38,6 +38,7 @@ function usageRoute(
 			token: credential.accessToken,
 			profileArn: credential.kiroProfileArn,
 			apiKey: false,
+			service: kiroOAuthService(credential),
 		};
 	}
 	try {
@@ -188,6 +189,7 @@ export const kiroUsageProvider: UsageProvider = {
 				},
 				fetch: ctx.fetch,
 				signal: params.signal,
+				service: route.service,
 			});
 		} catch (error) {
 			// A rejected login has lost access: drop its cached quota. An API key

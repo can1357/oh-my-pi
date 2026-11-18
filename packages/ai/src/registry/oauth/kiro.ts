@@ -192,6 +192,8 @@ function profileRow(profileArn: string, orgName: string): Partial<OAuthCredentia
  * region may hold the account's only profile.
  */
 async function listBootstrapProfiles(ctx: RequestContext, token: string): Promise<KiroProfile[]> {
+	// ListAvailableProfiles on management.*.kiro.dev accepts IdC bearers: login
+	// already completes there. The 403 is GenerateAssistantResponse on runtime.
 	const results = await Promise.allSettled(
 		KIRO_BOOTSTRAP_REGIONS.map(region => listKiroProfiles({ region, token, fetch: ctx.fetch, signal: ctx.signal })),
 	);

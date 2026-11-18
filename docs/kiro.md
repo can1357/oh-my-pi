@@ -56,7 +56,3 @@ Check that the selected model is under the `kiro` provider, wait for online disc
 ### Builder ID login does not start
 
 Confirm the device code page opens in a browser, then check whether a network policy blocks `oidc.us-east-1.amazonaws.com`.
-
-### Identity Center requests return HTTP 403
-
-IAM Identity Center (organization) tokens are served by Amazon Q (`q.<region>.amazonaws.com`), not the Kiro runtime (`runtime.<region>.kiro.dev`). A 403 after `/login kiro` with Identity Center usually means an old credential was stored without that routing; run `/logout`, then `/login kiro` again and choose Identity Center.

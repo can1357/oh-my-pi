@@ -253,7 +253,10 @@ export async function fetchKiroModels(options: {
 			}
 			({ region, page: first } = probed);
 		}
-		const service = credential.kind === "oauth" ? credential.service : undefined;
+		// ListAvailableProfiles / ListAvailableModels already succeed for IdC on
+		// management.*.kiro.dev (login completes). Chat and GetUsageLimits do not:
+		// those hosts are Amazon Q. Discovered model.baseUrl still follows the
+		// credential so GenerateAssistantResponse goes to Q.
 		const baseUrl = kiroRequestBaseUrl(credential) ?? kiroRuntimeBaseUrl(region);
 		const profileArn = credential.kind === "oauth" ? credential.profileArn : undefined;
 		const models = new Map<string, ModelSpec<"kiro-api">>();
@@ -262,7 +265,6 @@ export async function fetchKiroModels(options: {
 			token: credential.token,
 			fetch,
 			signal,
-			service,
 			target: "ListAvailableModels",
 			body: { origin: "KIRO_CLI", ...(profileArn ? { profileArn } : {}) },
 			first,

@@ -393,6 +393,8 @@ export interface UsageCredential {
 	apiEndpoint?: string;
 	/** Kiro profile ARN the login routes by (see OAuthCredentials.kiroProfileArn). */
 	kiroProfileArn?: string;
+	/** Kiro SSO-OIDC client id; with `kiroProfileArn` this is an Identity Center login. */
+	kiroClientId?: string;
 }
 
 /** Parameters provided to a usage fetcher. */

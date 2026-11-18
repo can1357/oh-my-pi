@@ -98,6 +98,7 @@ export function buildUsageCredential(credential: AuthCredential): UsageCredentia
 		enterpriseUrl: credential.enterpriseUrl,
 		apiEndpoint: credential.apiEndpoint,
 		kiroProfileArn: credential.kiroProfileArn,
+		kiroClientId: credential.kiroClientId,
 		region: credential.region,
 		inferenceRegion: credential.inferenceRegion,
 		activeOrganizationId: credential.activeOrganizationId,

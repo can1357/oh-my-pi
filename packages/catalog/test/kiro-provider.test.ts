@@ -82,7 +82,7 @@ describe("Kiro model discovery", () => {
 		expect(models?.[2]).not.toHaveProperty("thinking");
 	});
 
-	test("Identity Center credentials discover and stream against Amazon Q, not the Kiro runtime", async () => {
+	test("Identity Center credentials list models on management.*.kiro.dev and pin chat to Amazon Q", async () => {
 		const urls: string[] = [];
 		const credential: KiroCredential = {
 			kind: "oauth",
@@ -99,7 +99,7 @@ describe("Kiro model discovery", () => {
 				return Response.json(catalog(model("claude")));
 			},
 		});
-		expect(urls).toEqual(["https://q.eu-central-1.amazonaws.com/"]);
+		expect(urls).toEqual(["https://management.eu-central-1.kiro.dev/"]);
 		expect(models?.[0]?.baseUrl).toBe("https://q.eu-central-1.amazonaws.com/");
 	});
 
