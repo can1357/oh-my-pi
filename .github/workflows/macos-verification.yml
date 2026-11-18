@@ -18,7 +18,7 @@ permissions:
 jobs:
   native:
     name: Native macOS objective
-    runs-on: ${{ inputs.pool == 'self-hosted' && fromJSON(vars.CI_MACOS_FALLBACK_LABELS || '["macos-15"]') || 'macos-15' }}
+    runs-on: ${{ inputs.pool == 'self-hosted' && fromJSON(vars.CI_MACOS_FALLBACK_LABELS || '["self-hosted","macOS","ARM64"]') || 'macos-15' }}
     timeout-minutes: ${{ fromJSON(inputs.request_json).objective == 'rust' && 120 || 45 }}
     env:
       REQUEST_JSON: ${{ inputs.request_json }}

@@ -88,6 +88,14 @@ class HostedRunnerPolicy(unittest.TestCase):
         self.assertEqual([failure[0] for failure in native_runner_failures(redirected)], ['rust'])
 
     @unittest.skipIf(yaml is None, 'PyYAML is unavailable')
+    def test_fallback_default_runner_labels_match_admission_and_hosted_stays_first(self):
+        worker = yaml.load((ROOT / '.github/workflows/macos-verification.yml').read_text(), Loader=yaml.BaseLoader)
+        job = worker['jobs']['native']
+        labels = '\'["self-hosted","macOS","ARM64"]\''
+        self.assertEqual(job['runs-on'], "${{ inputs.pool == 'self-hosted' && fromJSON(vars.CI_MACOS_FALLBACK_LABELS || " + labels + ") || 'macos-15' }}")
+        self.assertEqual(job['env']['CI_MACOS_FALLBACK_LABELS'], '${{ vars.CI_MACOS_FALLBACK_LABELS || ' + labels + ' }}')
+
+    @unittest.skipIf(yaml is None, 'PyYAML is unavailable')
     def test_control_changes_keep_pinned_hosted_first_fallback_without_admin_variables(self):
         ci = yaml.load(self.ci, Loader=yaml.BaseLoader)
         self.assertEqual(ci['env']['CI_MACOS_CONTROL_POLICY'], 'source-bound')
