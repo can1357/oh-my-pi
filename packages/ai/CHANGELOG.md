@@ -120,6 +120,14 @@
 - Improved authentication broker compatibility across client and broker versions by tolerating unknown credential, usage, and observed-usage fields and values.
 - Fixed Codex Spark usage meters so reports that identify the meter only by `metered_feature` remain correctly scoped to the Spark model.
 - Fixed Antigravity CLI requests for models whose available IDs include effort suffixes, such as resolving `gemini-4-hydrogen` when only `gemini-4-hydrogen-high` is offered.
+- Fixed a Claude account staying blocked for Fable and Mythos after the shared weekly limit behind their 429 recovered, when `/usage` reported only that weekly window, so failover could not return to it ([#19600](https://github.com/can1357/oh-my-pi/pull/19600) by [@will-bogusz](https://github.com/will-bogusz))
+- Startup with an auth broker and no fresh snapshot cache no longer fails when the broker is restarting or briefly unreachable, including a connection dropped mid-response; it retries for up to 30 seconds, while a rejected token or a malformed snapshot still fails at once ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
+- A Codex additional meter (Spark) reported with only a `metered_feature` now carries that codename as `scope.modelId`, as it already did with a `limit_name`, so it stays scoped to its own model ([#19606](https://github.com/can1357/oh-my-pi/pull/19606) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed auth-broker clients failing to read credentials or usage from a newer broker that adds a field or a usage unit or status; unknown fields are ignored and unknown values read as `unknown`. The broker likewise accepts observed-usage reports carrying fields from newer clients ([#19602](https://github.com/can1357/oh-my-pi/pull/19602) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Antigravity CLI requests failing with `Unknown model ID` (e.g. `gemini-4-hydrogen`) when `agy` only offers effort-suffixed models such as `gemini-4-hydrogen-high` ([#19638](https://github.com/can1357/oh-my-pi/issues/19638))
+### Changed
+
+- Isolated the `antigravity-cli` ACP child working directory in an empty managed workspace by default (`isolateWorkspace` / `antigravityIsolateWorkspace`, env `PI_AGY_ISOLATE_WORKSPACE`), preventing `agy` from indexing large host repositories into memory while host tools continue executing in the real session directory ([#19328](https://github.com/can1357/oh-my-pi/pull/19328) by [@0xprincess](https://github.com/0xprincess))
 
 ## [18.22.2] - 2026-11-18
 
