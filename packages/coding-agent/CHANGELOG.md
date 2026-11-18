@@ -203,6 +203,10 @@
 - Fixed Spotlight retry and account handling, including waitlisted accounts, rate limits, outages, and request identification.
 - Fixed cross-platform shell and desktop behavior, including macOS startup and redraw performance, Windows file operations and application lookup, speech output, and desktop opening.
 
+### Fixed
+
+- Fixed a snapcompact archive keeping the frame shape of the model that compacted it after a model switch: a model that reads another shape best (a Gemini model after Claude) now gets the archive re-rendered in its own shape, and switching back sends the original frames
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

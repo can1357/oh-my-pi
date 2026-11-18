@@ -8,6 +8,10 @@
 
 - `resolveShape()` uses a model's configured `snapcompactShape` in place of its model-line default; an explicit variant still wins and billing still follows the model ([#19591](https://github.com/can1357/oh-my-pi/pull/19591) by [@ryanskidmore](https://github.com/ryanskidmore))
 
+### Added
+
+- Added `archiveInShape()`, which tells whether an archive's frames are drawn in a given shape
+
 ## [18.20.0] - 2026-11-12
 
 ### Added
