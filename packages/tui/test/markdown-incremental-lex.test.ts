@@ -20,9 +20,9 @@ import { defaultMarkdownTheme } from "./test-themes.js";
 
 const THEME = defaultMarkdownTheme;
 
-function renderCold(text: string, width: number): readonly string[] {
+function renderCold(text: string, width: number, markdownTheme: MarkdownTheme = THEME): readonly string[] {
 	clearRenderCache();
-	const out = new Markdown(text, 0, 0, THEME).render(width);
+	const out = new Markdown(text, 0, 0, markdownTheme).render(width);
 	clearRenderCache();
 	return out;
 }
@@ -38,20 +38,20 @@ function renderColdTransient(text: string, width: number, markdownTheme: Markdow
 
 /** Reveal `full` in `step`-char increments through ONE reused (streaming) instance
  *  and assert each step matches a cold full-lex render of the same prefix. */
-function assertIdenticalGrowth(full: string, width = 60, step = 13): void {
-	const streaming = new Markdown("", 0, 0, THEME);
+function assertIdenticalGrowth(full: string, width = 60, step = 13, markdownTheme: MarkdownTheme = THEME): void {
+	const streaming = new Markdown("", 0, 0, markdownTheme);
 	for (let len = 1; len <= full.length; len += step) {
 		const slice = full.slice(0, len);
 		clearRenderCache();
 		streaming.setText(slice);
 		const streamLines = streaming.render(width);
-		const oracle = renderCold(slice, width);
+		const oracle = renderCold(slice, width, markdownTheme);
 		expect(streamLines).toEqual(oracle);
 	}
 	clearRenderCache();
 	streaming.setText(full);
 	const streamLines = streaming.render(width);
-	expect(streamLines).toEqual(renderCold(full, width));
+	expect(streamLines).toEqual(renderCold(full, width, markdownTheme));
 }
 
 /** Same as {@link assertIdenticalGrowth} but with a TRANSIENT streaming instance,
@@ -514,6 +514,12 @@ describe("Markdown incremental streaming lex (E2)", () => {
 
 	it("transient render-prefix cache: table growing in the tail is byte-identical", () => {
 		assertIdenticalGrowthTransient(TABLE, 60, 7);
+	});
+
+	// A settled stream prefix republished in final mode reuses its frozen rows;
+	// they go to scrollback, so they must match a cold full-fidelity render.
+	it("final-mode growth through a frozen table and highlighted fence is byte-identical", () => {
+		assertIdenticalGrowth(`${TABLE}\n\n${FENCED}`, 60, 7, getMarkdownTheme());
 	});
 
 	it("a width change mid-stream still matches a cold render at the new width", () => {
