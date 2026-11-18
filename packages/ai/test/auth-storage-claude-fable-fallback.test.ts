@@ -435,4 +435,36 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 
 		expect(key).toBe("oat-3");
 	});
+
+	it("moves only Fable requests off an account whose Fable row is inside its per-limit reserve", async () => {
+		storage.close();
+		store = makeStore([oauthRow(1, "a@example.com"), oauthRow(2, "b@example.com")]);
+		storage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
+			accountPolicies: [
+				{
+					provider: "anthropic",
+					account: { email: "a@example.com" },
+					priority: 10,
+					reservePct: 2,
+					reservePctByLimit: { "anthropic:7d:fable": 30 },
+				},
+				{ provider: "anthropic", account: { email: "b@example.com" }, priority: 5 },
+			],
+		});
+		await storage.credentials.reload();
+		const reportsByAccess: Record<string, UsageReport> = {
+			"oat-1": withFable(baseReport("a@example.com"), 0.75),
+			"oat-2": withFable(baseReport("b@example.com"), 0.5),
+		};
+		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async params => {
+			const access = params.credential.type === "oauth" ? params.credential.accessToken : undefined;
+			return access ? (reportsByAccess[access] ?? null) : null;
+		});
+
+		// The Fable row does not meter Opus, so the higher-priority account serves it under its 2% reserve.
+		expect(await storage.keys.get("anthropic", "session-1", { modelId: "claude-opus-4-8" })).toBe("oat-1");
+		// 25% Fable left is inside the 30% Fable reserve: the warm pin moves to the sibling.
+		expect(await storage.keys.get("anthropic", "session-1", { modelId: "claude-fable-5" })).toBe("oat-2");
+	});
 });
