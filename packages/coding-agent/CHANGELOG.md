@@ -39,6 +39,7 @@
 ### Fixed
 
 - MCP tool results that link to a resource show it as `[Resource: <uri>]` instead of dropping it
+- Binary MCP resources read like files instead of as a `[Binary content…]` placeholder: `read` shows images, converts documents (PDF, DOCX, …) and reports other binaries as binary files, and shell commands (`cp test://logo logo.png`) get the real bytes
 - `commit` drafts committed through a `pre-commit` hook that restages files (e.g. a formatter) leave the index matching the commit instead of staging the pre-hook content as an inverse change that later drafts reported as "Staged by others"
 - An agent that promised another a later reply, or whose subagent waits for its next message, and ends its turn with nothing left to wake it gets one notice naming each waiter (what it asked, what was promised, for how long) instead of leaving it blocked until someone notices
 - `wait` returns at once, naming the agent, when one that promised the caller a reply (or the caller's parent) is idle with nothing to wake it, or when any agent it would block on (asked agent, parent, or subagent whose result it waits for) is itself waiting on the caller, with the chain it waits through (e.g. "`B` is waiting on you (via `C`)"); a top-level session's wait no longer says to end the turn while an agent is blocked on it and nothing else will wake it

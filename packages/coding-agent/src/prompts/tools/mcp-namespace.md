@@ -4,7 +4,7 @@ MCP server {{#each servers}}`{{this}}`{{#unless @last}}, {{/unless}}{{/each}} as
 - A call resolves to the tool's structured content when the server sends it, else its text. A tool error throws.
 - A result that also carries images, audio or resources resolves to `{ text, structured?, images?, audio?, resources? }`:
   - `images`/`audio`: `local://mcp/…` files; see an image with `await tool.read({ path })` or the `read` tool.
-  - `resources`: `{ uri, name?, description?, mimeType? }` plus `text` (embedded text) or `path` (embedded binary, saved under `local://mcp/`); a link has neither: `await read("mcp://<uri>")`.
+  - `resources`: `{ uri, name?, description?, mimeType? }` plus `text` (embedded text) or `path` (embedded binary, saved under `local://mcp/`); a link has neither: `await read("mcp://<uri>")` returns its text, `await tool.read({ path: "mcp://<uri>" })` shows an image or document.
 - Each method runs the session tool it is listed with; that tool's approval policy applies.
 
 {{#each methods}}

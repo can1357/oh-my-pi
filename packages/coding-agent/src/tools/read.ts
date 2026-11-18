@@ -35,6 +35,7 @@ import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
 import { cfgDisasmBackend, DISASM_BACKENDS, isExecutableFile } from "../disasm";
 import { normalizeToLF } from "../edit/normalize";
 import { isRemoteTextWritable, writeRemoteMirror } from "../edit/remote-mirror";
+import { writeResourceBackingFile } from "../internal-urls/filesystem-resource";
 import { getEditStore, recordFullySeenRows } from "../edit/store";
 import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveContext } from "../internal-urls";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
@@ -2241,22 +2242,18 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const resource = await internalRouter.resolve(url, sessionResolveContext(this.session, { signal }));
 					if (resource.isDirectory)
 						throw new ToolError("JSON selectors require a regular SSH file, not a directory.");
-					return readJson(
-						this.session,
-						{ url: peeled.path, content: resource.content, selector: sshSelector },
-						peeled.sel,
-						signal,
-					);
+					const content =
+						typeof resource.content === "string" ? resource.content : resource.content.toString("utf-8");
+					return readJson(this.session, { url: peeled.path, content, selector: sshSelector }, peeled.sel, signal);
 				}
 				if (target.kind === "resource") {
 					try {
 						return await this.#handleInternalUrl(
-							url,
-							target.spec,
+							{ url, spec: target.spec, sel: selectorFreeRaw ? "raw" : target.sel },
 							parsed,
 							question,
 							signal,
-							toolContext?.programmatic === true,
+							toolContext,
 						);
 					} catch (error) {
 						// An opaque `name:rest` that no MCP server advertises is most likely a plain
@@ -2475,7 +2472,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 			// A located file vanished after routing: the handler owns the canonical not-found error.
 			if (located && isNotFoundError(error)) {
-				return this.#handleInternalUrl(located.url, located.spec, parsed, question, signal, programmatic);
+				return this.#handleInternalUrl(located, parsed, question, signal, toolContext);
 			}
 			if (isNotFoundError(error)) {
 				// Attempt unique suffix resolution before falling back to the approved-plan
@@ -2541,8 +2538,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (isDirectory) {
 			if (question !== undefined) throw new ToolError(IMAGE_QUESTION_SELECTOR_ERROR);
 			// A located directory lists through its handler, which names entries by URL.
-			if (located)
-				return this.#handleInternalUrl(located.url, located.spec, parsed, undefined, signal, programmatic);
+			if (located) return this.#handleInternalUrl(located, parsed, undefined, signal, toolContext);
 			if (isMultiRange(parsed)) {
 				throw new ToolError("Multi-range line selectors are not supported for directory listings.");
 			}
@@ -3521,16 +3517,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	 * Read a routed URL through its handler: virtual, remote, and device schemes,
 	 * plus located URLs whose target is a directory or has no local file.
 	 * Discrete values (`shape: "value"`) return as-is; documents page through
-	 * line selectors.
+	 * line selectors; byte content reads as a file of the same name and type.
 	 */
 	async #handleInternalUrl(
-		url: string,
-		spec: SchemeSpec,
+		target: Pick<LocatedRead, "url" | "spec" | "sel">,
 		parsedSel: ParsedSelector,
 		question: string | undefined,
 		signal?: AbortSignal,
-		programmatic = false,
+		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
+		const { url, spec } = target;
+		const programmatic = toolContext?.programmatic === true;
 		if (parsedSel.kind === "image") {
 			// A file-backed URL that locate deferred to a remote resolve (an unknown skill:// while
 			// MCP is available) reports its local miss (`Unknown skill`), not the selector refusal.
@@ -3542,6 +3539,20 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			throw new ToolError("The ':img' selector requires a file-backed path.");
 		}
 		const resource = await InternalUrlRouter.instance().resolve(url, sessionResolveContext(this.session, { signal }));
+		if (typeof resource.content !== "string") {
+			// Bytes take the file pipeline under the URL's identity: images and documents by their
+			// content and type, anything else as a binary file (`:raw` reads it verbatim).
+			const backing = await writeResourceBackingFile(url, resource.content, resource.contentType);
+			const result = await this.#readFilesystemPath(backing, {
+				located: { ...target, path: backing },
+				question,
+				signal,
+				toolContext,
+			});
+			const details: ReadToolDetails = result.details ?? {};
+			details.meta = { ...details.meta, source: { type: "internal", value: url } };
+			return { ...result, details };
+		}
 		if (question !== undefined) throw new ToolError(IMAGE_QUESTION_SELECTOR_ERROR);
 		const details: ReadToolDetails = {
 			resolvedPath: resource.sourcePath,
