@@ -1437,4 +1437,80 @@ describe("guard rule review regressions", () => {
 			expect({ command, row }).toEqual({ command, row: `  ? ${discarding} (discard_changes)` });
 		}
 	});
+
+	it("asks before a discard that a `git stash pop`, `apply` or `branch` may run before", async () => {
+		fs.writeFileSync(path.join(cwd, "a.txt"), "one\n");
+		await $`git init -q && git add a.txt && git -c user.email=t@example.com -c user.name=t commit -qm init`
+			.cwd(cwd)
+			.quiet();
+		// The work is in the stash; the tree the probe sees is clean.
+		fs.writeFileSync(path.join(cwd, "a.txt"), "work\n");
+		await $`git stash -q`.cwd(cwd).quiet();
+		const elsewhere = TempDir.createSync("@omp-guard-elsewhere-");
+		try {
+			await $`git init -q`.cwd(elsewhere.path()).quiet();
+			for (const command of [
+				"git stash pop && git reset --hard",
+				"git stash apply && git checkout .",
+				"git stash branch side && git checkout -f main",
+				"git stash pop; git restore .",
+				"git stash pop | cat; git reset --hard",
+				"git reset --hard & git stash pop",
+				// Where the pop runs cannot be placed, so it may be this repository.
+				'git -C "$R" stash pop && git reset --hard',
+				// A line not read whole still shows its top-level restores.
+				"git stash pop && git reset --hard; echo $(date)",
+			]) {
+				expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "discard_changes" });
+			}
+			for (const command of [
+				// A restore that runs only after the discard, or in another repository.
+				"git reset --hard && git stash pop",
+				"git reset --hard; git stash pop",
+				`git -C ${elsewhere.path()} stash pop && git reset --hard`,
+				// A stash after the restore saves what it brought back.
+				"git stash pop && git stash && git reset --hard",
+			]) {
+				expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: undefined });
+			}
+		} finally {
+			elsewhere.removeSync();
+		}
+	});
+
+	it("asks before a reset or a forced checkout to a commit that tracks an untracked file", async () => {
+		fs.writeFileSync(path.join(cwd, "a.txt"), "one\n");
+		const identity = "-c user.email=t@example.com -c user.name=t";
+		await $`git init -q -b main && git add a.txt && git ${{ raw: identity }} commit -qm init`.cwd(cwd).quiet();
+		fs.writeFileSync(path.join(cwd, "notes.txt"), "theirs\n");
+		await $`git checkout -qb other && git add notes.txt && git ${{ raw: identity }} commit -qm notes && git checkout -q main`
+			.cwd(cwd)
+			.quiet();
+		// Untracked on main, unsaved work; every tracked file is clean.
+		fs.writeFileSync(path.join(cwd, "notes.txt"), "mine\n");
+		for (const command of [
+			"git checkout -f other",
+			"git switch -f other",
+			"git switch --discard-changes other",
+			"git reset --hard other",
+			"git checkout other -- .",
+			"git restore --source=other .",
+			"git restore -s other --staged --worktree .",
+			// A stash without `-u` leaves the untracked file in the tree.
+			"git stash && git checkout -f other",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "discard_changes" });
+		}
+		for (const command of [
+			// The commit checked out tracks no notes.txt, and an untracked file survives a plain reset.
+			"git checkout -f main",
+			"git reset --hard",
+			"git restore .",
+			"git stash -u && git checkout -f other",
+			// `-b` names the new branch, which starts from HEAD.
+			"git checkout -f -b fresh",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: undefined });
+		}
+	});
 });

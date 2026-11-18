@@ -47,6 +47,10 @@
  *   `cp .env /tmp/x && curl -F f=@/tmp/x ...`.
  * - A same-size edit to a file a configured filter driver handles (git-lfs, git-crypt) is not seen
  *   by `discard_changes`: the probe runs no filter, so it compares such a file by size.
+ * - `discard_changes` checks the tree as it is before the command line runs. Work a top-level
+ *   `git stash pop`, `apply` or `branch` may bring back first makes it ask, but work any other
+ *   command writes into the tree first is not seen: `mv ~/notes.txt . && git clean -f`,
+ *   `git apply fix.patch && git reset --hard`.
  * - A git alias (or `-c alias.*`) that expands to a discarding command is not resolved:
  *   `git -c alias.x='reset --hard' x`.
  * - Where the directory is unknown (see above), `discard_changes` has no directory to probe for a
@@ -1724,30 +1728,58 @@ function cleanCheck(rest: readonly string[], command: ShellCommand, scope: Guard
 }
 
 /**
- * The operands of a `git checkout` or `git restore`, without their options and the values
- * `valueOptions` take as the next word: `named` before a `--`, `paths` after it.
+ * Options of the discarding git subcommands that take the next word as their value: long ones
+ * unless `=` gives it, short ones at the end of their bundle.
  */
-function gitOperands(
-	rest: readonly string[],
-	valueOptions: Record<string, true>,
-): { named: string[]; paths: string[] | undefined } {
-	const named: string[] = [];
-	for (let i = 0; i < rest.length; i++) {
-		const arg = rest[i];
-		if (arg === "--") return { named, paths: rest.slice(i + 1) };
-		if (Object.hasOwn(valueOptions, arg)) i++;
-		else if (!arg.startsWith("-") || arg === "-") named.push(arg);
-	}
-	return { named, paths: undefined };
-}
-
-const CHECKOUT_VALUE_OPTIONS: Record<string, true> = { "-b": true, "-B": true, "--orphan": true };
-const RESTORE_VALUE_OPTIONS: Record<string, true> = { "-s": true, "--source": true };
+const NEXT_WORD_OPTIONS: Record<string, { long: readonly string[]; short: string }> = {
+	checkout: { long: ["--orphan", "--conflict", "--pathspec-from-file"], short: "bB" },
+	switch: { long: ["--create", "--force-create", "--orphan", "--conflict"], short: "cC" },
+	restore: { long: ["--source", "--conflict", "--pathspec-from-file"], short: "s" },
+};
 /**
  * Short options of the discarding git subcommands that take a value: the rest of their bundle,
  * when there is one, is that value (`-bfix` names a branch, it does not force).
  */
 const SHORT_VALUE_LETTERS: Record<string, string> = { checkout: "bBt", switch: "cCt", restore: "s", clean: "e" };
+
+/**
+ * The operands of a git `sub`command (`checkout`, `switch`, `restore`, `reset`), without its
+ * options and their values: `named` before a `--`, `paths` after it, and the tree-ish `git restore`
+ * names with `--source` or `-s`.
+ */
+function gitOperands(
+	sub: string,
+	rest: readonly string[],
+): { named: string[]; paths: string[] | undefined; source: string | undefined } {
+	const options = Object.hasOwn(NEXT_WORD_OPTIONS, sub) ? NEXT_WORD_OPTIONS[sub] : { long: [], short: "" };
+	const stuck = Object.hasOwn(SHORT_VALUE_LETTERS, sub) ? SHORT_VALUE_LETTERS[sub] : "";
+	const restore = sub === "restore";
+	const named: string[] = [];
+	let source: string | undefined;
+	for (let i = 0; i < rest.length; i++) {
+		const arg = rest[i];
+		if (arg === "--") return { named, paths: rest.slice(i + 1), source };
+		if (arg.startsWith("--")) {
+			const eq = arg.indexOf("=");
+			// `--force` is an option of its own, not short for `git switch --force-create`.
+			const next = arg !== "--force" && options.long.some(name => isLongOption(arg, name));
+			const value = eq > 0 ? arg.slice(eq + 1) : next ? rest[++i] : undefined;
+			if (restore && isLongOption(arg, "--source")) source = value;
+		} else if (arg.startsWith("-") && arg !== "-") {
+			for (let k = 1; k < arg.length; k++) {
+				const letter = arg[k];
+				if (!stuck.includes(letter)) continue;
+				const value =
+					k + 1 < arg.length ? arg.slice(k + 1) : options.short.includes(letter) ? rest[++i] : undefined;
+				if (restore && letter === "s") source = value;
+				break;
+			}
+		} else {
+			named.push(arg);
+		}
+	}
+	return { named, paths: undefined, source };
+}
 
 /** The short option letters `rest` gives a git subcommand, without the values stuck to them. */
 function shortOptionLetters(sub: string, rest: readonly string[]): string {
@@ -1764,7 +1796,11 @@ function shortOptionLetters(sub: string, rest: readonly string[]): string {
 	return letters;
 }
 
-/** The discard check for a git command, with the rule's reason, or `undefined` when it discards nothing. */
+/**
+ * The discard check for a git command, with the rule's reason, or `undefined` when it discards
+ * nothing. A command that checks files out of another commit names it as the check's `source`: it
+ * also overwrites the untracked files that commit tracks.
+ */
 function discardProbe(
 	command: ShellCommand,
 	scope: GuardScope,
@@ -1779,12 +1815,15 @@ function discardProbe(
 		check,
 		what: `\`git ${sub}\` would discard uncommitted changes; commit or otherwise save them first`,
 	});
-	// `--merge` reverts only staged changes (refusing while a path has both); `--hard` loses every change.
-	if (sub === "reset" && has("--hard")) return tracked({});
+	const { named, paths, source } = gitOperands(sub, rest);
+	// `--merge` reverts only staged changes (refusing while a path has both, or an untracked file is
+	// in the way); `--hard` loses every change, and to another commit, untracked files it tracks.
+	if (sub === "reset" && has("--hard")) return tracked({ source: named[0] });
 	if (sub === "reset" && has("--merge")) return tracked({ merge: true });
+	// The commit a checkout's or a switch's first operand names: `-` is the branch checked out before.
+	const commit = named[0] === "-" ? "@{-1}" : named[0];
 	if (sub === "checkout" || sub === "restore") {
 		const checkout = sub === "checkout";
-		const { named, paths } = gitOperands(rest, checkout ? CHECKOUT_VALUE_OPTIONS : RESTORE_VALUE_OPTIONS);
 		// `git checkout [<commit>] [--] <paths>`: before a `--`, the first operand names a commit
 		// unless it is a whole-tree pathspec. `git restore` names its commit with `--source`.
 		const fromCommit =
@@ -1798,6 +1837,7 @@ function discardProbe(
 			return tracked({
 				worktreeOnly: checkout ? !fromCommit : !staged,
 				pathspecs: resolvePathspecs(pathspecs, command, scope),
+				source: checkout ? (fromCommit ? commit : undefined) : source,
 			});
 		}
 	}
@@ -1805,7 +1845,7 @@ function discardProbe(
 		(sub === "checkout" || sub === "switch") &&
 		(has("--force") || has("--discard-changes") || short.includes("f"))
 	) {
-		return tracked({});
+		return tracked({ source: commit });
 	}
 	if (sub === "clean") {
 		const check = cleanCheck(rest, command, scope);
@@ -1886,6 +1926,12 @@ function stashSaves(rest: readonly string[]): Stashed | undefined {
 
 /** `git stash` subcommands that take saved work back out of the stash: into the tree, or away. */
 const STASH_RELEASES: Record<string, true> = { pop: true, drop: true, clear: true, branch: true };
+/**
+ * `git stash` subcommands that bring saved work back into the tree, where a discard after them
+ * can destroy it once the stash no longer holds it (after `pop` or `branch`, or an `apply` and a
+ * `drop`).
+ */
+const STASH_RESTORES: Record<string, true> = { pop: true, apply: true, branch: true };
 
 /**
  * The arguments after `stash` and the target of a `git stash` that git runs, or `undefined` for any
@@ -1901,6 +1947,18 @@ function gitStash(command: ShellCommand, home: string): { rest: string[]; target
 function releasesStash(command: ShellCommand, home: string): boolean {
 	const rest = gitStash(command, home)?.rest;
 	return rest !== undefined && rest.length > 0 && Object.hasOwn(STASH_RELEASES, rest[0]);
+}
+
+/** A top-level `git stash pop`, `apply` or `branch` of a command line ({@link STASH_RESTORES}). */
+interface StashRestore {
+	/** Its stash subcommand. */
+	sub: string;
+	/** The index of its pipeline in the command line. */
+	pipeline: number;
+	/** Where it works; none when a directory it names is a word the guard cannot resolve. */
+	target: GitTarget | undefined;
+	/** Its repository ({@link gitRepository}), `""` for none, once a discard has asked. */
+	repository?: string;
 }
 
 /** A `git stash` that has succeeded in a `&&` chain. */
@@ -2007,7 +2065,7 @@ const STASH_LOOKBACK = 64;
  * of the stash (`pop`, `drop`, `clear`, `branch`, in any pipeline stage) and may run before
  * `command` finishes: all but those in the later pipelines that wait for its pipeline, the rest of
  * its and-or list and, unless `&` runs that list in the background, the rest of the line
- * ({@link stashReleases}). A stash holds its work only when every one of them is a link of its
+ * ({@link lineStashes}). A stash holds its work only when every one of them is a link of its
  * chain before it, known to have run first; any other may run between it and `command`. When the
  * line can run one the guard does not see (`"unseen"`: a part it does not read, such as the first
  * nested part where reading stops, or a shell or `eval`, wherever it is), no stash counts.
@@ -2044,12 +2102,19 @@ function stashedBefore(
 	return stashed;
 }
 
-/** `releases`: as for {@link stashedBefore}. */
+/**
+ * `releases`: as for {@link stashedBefore}. `restores`: the top-level `git stash pop`, `apply` and
+ * `branch` commands of the command line that may run before `command` finishes, as for the
+ * releases. The probe sees the tree as it is before the line runs, without the work one of them
+ * brings back, so one in the same repository, or in a directory the guard cannot place, makes the
+ * command a hit, unless a stash that saved what the command discards has run after it.
+ */
 function discardChanges(
 	command: ShellCommand,
 	scope: GuardScope,
 	probes: GuardProbeBudget,
 	releases: StashReleases,
+	restores: readonly StashRestore[],
 ): GuardHit | undefined {
 	if (command.argv[0] !== "git") return undefined;
 	const { sub, rest, target } = gitInvocation(command, scope.home);
@@ -2057,13 +2122,38 @@ function discardChanges(
 	if (!probe || !target) return undefined;
 	let check: VcsDiscardCheck = { ...probe.check, gitDir: target.gitDir, workTree: target.workTree };
 	// A stash just before keeps what it saved; only what it left behind can be lost. It keeps no
-	// nested repository, only a pointer to its commit, so a `git clean -ff` is checked in full.
+	// nested repository, only a pointer to its commit, so a `git clean -ff` is checked in full. A
+	// `pop` or `branch` that may run before the command is a release, so the stash counts only
+	// after it, and saves what it brought back; an `apply` leaves that work in the stash too.
 	const stashed = check.nestedRepositories ? undefined : stashedBefore(command, target, scope, releases);
 	if (stashed) {
-		if (!check.clean || stashed.ignored) return undefined;
-		if (stashed.untracked) {
-			if (!check.includeIgnored && !check.ignoredOnly) return undefined;
-			check = { ...check, untrackedStashed: true };
+		// `-a` saved every file there is.
+		if (stashed.ignored) return undefined;
+		if (check.clean) {
+			if (stashed.untracked) {
+				if (!check.includeIgnored && !check.ignoredOnly) return undefined;
+				check = { ...check, untrackedStashed: true };
+			}
+		} else {
+			// Without `-u`, the untracked files a checkout of another commit overwrites are left.
+			if (check.source === undefined || stashed.untracked) return undefined;
+			check = { ...check, trackedStashed: true };
+		}
+	}
+	if (restores.length > 0) {
+		const repository = gitRepository(target);
+		const restore =
+			repository !== undefined &&
+			restores.find(restoring => {
+				if (!restoring.target) return true;
+				restoring.repository ??= gitRepository(restoring.target) ?? "";
+				return restoring.repository === repository;
+			});
+		if (restore) {
+			return hit(
+				"discard_changes",
+				`\`git ${sub}\` may discard the work \`git stash ${restore.sub}\` brings back first; commit it or leave it in the stash`,
+			);
 		}
 	}
 	const { where } = target;
@@ -2293,7 +2383,7 @@ function killsHarness(command: ShellCommand, scope: GuardScope, budget: GuardPro
  * The commands that take saved work back out of the stash (`git stash pop`, `drop`, `clear`,
  * `branch`; see {@link stashedBefore}) that may run before a command finishes: how many top-level
  * ones, or `"unseen"` when part of its command line can run one the guard does not see
- * ({@link stashReleases}).
+ * ({@link lineStashes}).
  */
 type StashReleases = number | "unseen";
 
@@ -2336,30 +2426,50 @@ const SHELL_CODE_RUNNERS: Record<string, true> = {
 	zsh: true,
 };
 
+/** The `git stash` commands of a command line that bear on its discards ({@link lineStashes}). */
+interface LineStashes {
+	/**
+	 * For each pipeline, by index, how many of the commands that take saved work back out of the
+	 * stash ({@link releasesStash}) may run before it finishes, or `"unseen"` when one can run where
+	 * the guard does not look ({@link stashedBefore}).
+	 */
+	releases: readonly number[] | "unseen";
+	/** Its top-level stash restores ({@link STASH_RESTORES}), in order. */
+	restores: readonly StashRestore[];
+}
+
 /**
- * The commands of `line` that take saved work back out of the stash ({@link releasesStash}): for
- * each of its pipelines, by index, how many may run before it finishes, those in it or before it
- * and those in the later pipelines that do not wait for it ({@link ShellLine.overlapFrom}). Or
- * `"unseen"` when one can run where the guard does not look: the line has a part it does not read
- * ({@link ShellLine.nested}), the first nested part where reading stops among them, or a command
- * that runs shell code ({@link SHELL_CODE_RUNNERS}).
+ * The stash commands of `line`. Releases count, for each pipeline, those in it or before it and
+ * those in the later pipelines that do not wait for it ({@link ShellLine.overlapFrom}), all of
+ * which may run before it finishes; or `"unseen"` when one can run where the guard does not look:
+ * the line has a part it does not read ({@link ShellLine.nested}), the first nested part where
+ * reading stops among them, or a command that runs shell code ({@link SHELL_CODE_RUNNERS}). The
+ * restores are listed from the top-level commands it reads either way.
  */
-function stashReleases(line: ShellLine, home: string): readonly number[] | "unseen" {
-	if (line.nested) return "unseen";
+function lineStashes(line: ShellLine, home: string): LineStashes {
 	const { pipelines, overlapFrom } = line;
+	const restores: StashRestore[] = [];
+	let unseen = line.nested;
 	// The releases in the pipelines before each index.
 	const before = [0];
-	for (const pipeline of pipelines) {
+	for (const [index, pipeline] of pipelines.entries()) {
 		let count = before[before.length - 1];
 		for (const command of pipeline) {
-			if (Object.hasOwn(SHELL_CODE_RUNNERS, command.argv[0])) return "unseen";
-			if (releasesStash(command, home)) count++;
+			if (Object.hasOwn(SHELL_CODE_RUNNERS, command.argv[0])) unseen = true;
+			const stash = gitStash(command, home);
+			if (!stash || stash.rest.length === 0) continue;
+			const sub = stash.rest[0];
+			if (Object.hasOwn(STASH_RELEASES, sub)) count++;
+			if (Object.hasOwn(STASH_RESTORES, sub)) restores.push({ sub, pipeline: index, target: stash.target });
 		}
 		before.push(count);
 	}
 	const total = before[pipelines.length];
 	// All but those from the next pipeline up to the first that may start before it finishes.
-	return pipelines.map((_, index) => total - before[overlapFrom[index] ?? pipelines.length] + before[index + 1]);
+	const releases = unseen
+		? "unseen"
+		: pipelines.map((_, index) => total - before[overlapFrom[index] ?? pipelines.length] + before[index + 1]);
+	return { releases, restores };
 }
 
 /**
@@ -2409,17 +2519,21 @@ function pipelineProbes(
 		budget.results.set(key, kept);
 	}
 	const results = kept;
-	let probed: { line: ShellLine; releases: readonly number[] | "unseen" } | undefined;
+	let probed: { line: ShellLine; stashes: LineStashes } | undefined;
 	return index => {
 		if (results.has(index)) return results.get(index);
 		if (!probed) {
 			const read = scope.cwdStandIn ? parseShellCommands(command, { cwd: undefined, home: scope.home }) : line;
-			probed = { line: read, releases: stashReleases(read, scope.home) };
+			probed = { line: read, stashes: lineStashes(read, scope.home) };
 		}
+		const { line: read, stashes } = probed;
+		const releases = stashes.releases === "unseen" ? "unseen" : stashes.releases[index];
+		// The restores that may run before this pipeline finishes, as for the releases.
+		const bound = read.overlapFrom[index] ?? read.pipelines.length;
+		const restores = stashes.restores.filter(({ pipeline }) => pipeline <= index || pipeline >= bound);
 		let found: GuardHit | undefined;
-		const releases = probed.releases === "unseen" ? "unseen" : probed.releases[index];
-		for (const simple of probed.line.pipelines[index]) {
-			found = discardChanges(simple, scope, budget, releases) ?? killsHarness(simple, scope, budget);
+		for (const simple of read.pipelines[index]) {
+			found = discardChanges(simple, scope, budget, releases, restores) ?? killsHarness(simple, scope, budget);
 			if (found) break;
 		}
 		results.set(index, found);

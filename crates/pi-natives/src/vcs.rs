@@ -272,6 +272,16 @@ pub struct VcsDiscardCheck {
 	/// `git reset --merge`: count the staged changes it reverts (see
 	/// `TrackedCheck`), not the work tree's.
 	pub merge:               Option<bool>,
+	/// Tracked changes: the tree-ish the command checks the files out of
+	/// when it is neither the index nor `HEAD` (`git reset --hard <commit>`,
+	/// `git checkout -f <branch>`): also count the untracked, not ignored
+	/// files it overwrites. A name that resolves to nothing is looked up
+	/// among the remote-tracking branches, as `git switch` guesses a new
+	/// branch.
+	pub source:              Option<String>,
+	/// Tracked changes: a `git stash` ran before the command, so count only
+	/// the untracked files `source` overwrites.
+	pub tracked_stashed:     Option<bool>,
 	/// A `git stash -u` ran before the command: count only the ignored files
 	/// the untracked preview leaves, as the stash keeps the untracked ones.
 	pub untracked_stashed:   Option<bool>,
@@ -453,9 +463,11 @@ impl From<VcsDiscardCheck> for core::DiscardCheck {
 	fn from(v: VcsDiscardCheck) -> Self {
 		if !v.clean.unwrap_or(false) {
 			return Self::Tracked(core::TrackedCheck {
-				worktree_only: v.worktree_only.unwrap_or(false),
-				pathspecs:     v.pathspecs.unwrap_or_default(),
-				merge:         v.merge.unwrap_or(false),
+				worktree_only:   v.worktree_only.unwrap_or(false),
+				pathspecs:       v.pathspecs.unwrap_or_default(),
+				merge:           v.merge.unwrap_or(false),
+				source:          v.source,
+				tracked_stashed: v.tracked_stashed.unwrap_or(false),
 			});
 		}
 		Self::Clean(core::CleanCheck {

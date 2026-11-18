@@ -350,7 +350,8 @@ pub struct CleanOptions {
 #[derive(Debug, Clone)]
 pub enum DiscardCheck {
 	/// Uncommitted changes to tracked files (`reset --hard`, `checkout .`,
-	/// `restore .`).
+	/// `restore .`), and the untracked files a checkout from another commit
+	/// overwrites.
 	Tracked(TrackedCheck),
 	/// The untracked files a `git clean` with these options would delete.
 	Clean(CleanCheck),
@@ -369,8 +370,20 @@ pub struct TrackedCheck {
 	/// `git reset --merge`: it reverts the staged changes, conflicted paths
 	/// included, and refuses while a path has a staged change and a work-tree
 	/// modification (then it loses nothing). Counts the staged changes only;
-	/// `worktree_only` does not apply.
-	pub merge:         bool,
+	/// `worktree_only` and `source` do not apply.
+	pub merge:           bool,
+	/// The tree-ish the command checks the files out of when it is neither
+	/// the index nor `HEAD` (`git reset --hard <commit>`, `git checkout -f
+	/// <branch>`, `git checkout <commit> .`, `git restore --source=<tree>
+	/// .`): it also overwrites the untracked, not ignored files under the
+	/// pathspecs that it tracks, that are where it tracks a directory, or that
+	/// are under a path it tracks as a file. A name that resolves to nothing
+	/// is looked up as `git switch` and `git checkout` guess a new branch:
+	/// among the remote-tracking branches of that name.
+	pub source:          Option<String>,
+	/// A `git stash` before the command saved every change to tracked files:
+	/// count only the untracked files `source` overwrites.
+	pub tracked_stashed: bool,
 }
 
 /// The options of a `git clean` that [`DiscardCheck::Clean`] previews.

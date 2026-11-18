@@ -2,7 +2,7 @@
 //! before the command is approved.
 
 use std::{
-	collections::HashSet,
+	collections::{BTreeSet, HashSet},
 	ffi::OsStr,
 	path::{Path, PathBuf},
 	time::{Duration, Instant},
@@ -20,13 +20,15 @@ use crate::{
 ///
 /// That is uncommitted changes to tracked files under the check's pathspecs
 /// (`git status --porcelain --untracked-files=no`; with `worktree_only`, only
-/// those the work tree holds beyond the index), or the untracked files `git
-/// clean` with the check's options would delete (`git clean --dry-run`), with
-/// pathspecs relative to `dir`, in the repository and work tree the command
-/// names in `repository` (`--git-dir`, `--work-tree`), or else the ones git
-/// discovers from `dir`. `false` outside a repository. `timeout` bounds the
-/// whole check, every git call it makes included: it runs synchronously while
-/// a tool call waits for approval.
+/// those the work tree holds beyond the index), and with a `source`, the
+/// untracked files that are not ignored and that checking the files out of
+/// it overwrites; or the untracked files `git clean` with the check's options
+/// would delete (`git clean --dry-run`), with pathspecs relative to `dir`, in
+/// the repository and work tree the command names in `repository`
+/// (`--git-dir`, `--work-tree`), or else the ones git discovers from `dir`.
+/// `false` outside a repository. `timeout` bounds the whole check, every git
+/// call it makes included: it runs synchronously while a tool call waits for
+/// approval.
 ///
 /// The question is asked while the command awaits approval, about a
 /// repository the agent may have just rewritten, so git runs through
@@ -60,7 +62,12 @@ pub fn discards_work(
 		DiscardCheck::Tracked(tracked) if tracked.merge => {
 			loses_staged_changes(&git, dir, tracked, deadline)
 		},
-		DiscardCheck::Tracked(tracked) => loses_tracked_changes(&git, dir, tracked, deadline),
+		DiscardCheck::Tracked(tracked) => {
+			if !tracked.tracked_stashed && loses_tracked_changes(&git, dir, tracked, deadline)? {
+				return Ok(true);
+			}
+			overwrites_untracked_files(&git, dir, tracked, deadline)
+		},
 		DiscardCheck::Clean(clean) => deletes_untracked_files(&git, dir, clean, deadline),
 	}
 }
@@ -240,6 +247,117 @@ fn changed_behind_filters(
 	}))
 }
 
+/// Whether checking the files `check` names out of its `source` would
+/// overwrite an untracked file that is not ignored (git overwrites ignored
+/// files even without `--force`): one the source tracks, one where it tracks
+/// a directory, or one under a path it tracks as a file or a submodule. Only
+/// tree objects are read, so a partial clone needs no blob it lacks.
+fn overwrites_untracked_files(
+	git: &cli::InertGit,
+	dir: &Path,
+	check: &TrackedCheck,
+	deadline: Instant,
+) -> Result<bool> {
+	let Some(source) = &check.source else {
+		return Ok(false);
+	};
+	let mut args: Vec<String> =
+		["ls-files", "-z", "--others", "--exclude-standard", "--full-name", "--"]
+			.map(str::to_owned)
+			.to_vec();
+	if check.pathspecs.is_empty() {
+		// A checkout without pathspecs covers the whole work tree, wherever
+		// it runs.
+		args.push(":/".to_owned());
+	} else {
+		args.extend(check.pathspecs.iter().cloned());
+	}
+	let listed = run_checked(git, dir, &args, &[], deadline)?;
+	if cli::is_truncated(&listed) {
+		return Ok(true);
+	}
+	// An untracked nested repository is listed as its directory, with a
+	// trailing slash.
+	let untracked: Vec<&str> = listed
+		.split('\0')
+		.filter(|path| !path.is_empty())
+		.map(|path| path.trim_end_matches('/'))
+		.collect();
+	if untracked.is_empty() {
+		return Ok(false);
+	}
+	for tree in source_trees(git, dir, source, deadline)? {
+		let args: Vec<String> = ["ls-tree", "-r", "-z", "--name-only", "--full-tree", tree.as_str()]
+			.map(str::to_owned)
+			.to_vec();
+		let listing = run_checked(git, dir, &args, &[], deadline)?;
+		if cli::is_truncated(&listing) {
+			return Ok(true);
+		}
+		let tracked: BTreeSet<&str> = listing
+			.split('\0')
+			.filter(|path| !path.is_empty())
+			.collect();
+		if untracked.iter().any(|path| is_in_the_way(path, &tracked)) {
+			return Ok(true);
+		}
+	}
+	Ok(false)
+}
+
+/// Whether a checkout of a tree that tracks the files `tracked` writes over
+/// `path`: it tracks `path`, a file under it, or a file at a directory above
+/// it.
+fn is_in_the_way(path: &str, tracked: &BTreeSet<&str>) -> bool {
+	let below = format!("{path}/");
+	tracked.contains(path)
+		|| tracked
+			.range::<&str, _>(below.as_str()..)
+			.next()
+			.is_some_and(|next| next.starts_with(&below))
+		|| path
+			.match_indices('/')
+			.any(|(at, _)| tracked.contains(&path[..at]))
+}
+
+/// The trees a checkout of `source` takes the files from: the one `source`
+/// names, or else, as `git switch` and `git checkout` guess a new branch from
+/// a remote-tracking branch of that name, the trees of those (git refuses
+/// when several remotes have one, unless configured to pick one of them).
+fn source_trees(
+	git: &cli::InertGit,
+	dir: &Path,
+	source: &str,
+	deadline: Instant,
+) -> Result<Vec<String>> {
+	// `cat-file` reads the name from its input, where it cannot be taken for
+	// an option; a name with a line break in it would be two names there.
+	if !source.contains('\n') {
+		let args: Vec<String> = ["cat-file", "--batch-check=%(objectname)"]
+			.map(str::to_owned)
+			.to_vec();
+		let query = format!("{source}^{{tree}}\n");
+		let output = run_checked(git, dir, &args, query.as_bytes(), deadline)?;
+		// A name that resolves to no tree comes back as `<name> missing`.
+		let tree = output.trim_end_matches('\n');
+		if !tree.is_empty() && tree.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+			return Ok(vec![tree.to_owned()]);
+		}
+	}
+	// `%(tree)` for a commit, `%(*tree)` for an annotated tag.
+	let args = [
+		"for-each-ref".to_owned(),
+		"--format=%(tree)%(*tree)".to_owned(),
+		format!("refs/remotes/*/{source}"),
+	];
+	let output = run_checked(git, dir, &args, &[], deadline)?;
+	Ok(output
+		.lines()
+		.filter(|tree| !tree.is_empty())
+		.map(str::to_owned)
+		.collect())
+}
+
 /// The arguments of the `git clean` dry run `check` describes.
 fn clean_preview_args(check: &CleanCheck) -> Vec<String> {
 	let mut args: Vec<String> = ["clean", "--dry-run"].map(str::to_owned).to_vec();
@@ -366,9 +484,11 @@ mod tests {
 	const DISCOVERED: RepositoryPaths = RepositoryPaths { git_dir: None, work_tree: None };
 	/// Every uncommitted change to a tracked file, as `git reset --hard` loses.
 	const HARD_RESET: DiscardCheck = DiscardCheck::Tracked(TrackedCheck {
-		worktree_only: false,
-		pathspecs:     Vec::new(),
-		merge:         false,
+		worktree_only:   false,
+		pathspecs:       Vec::new(),
+		merge:           false,
+		source:          None,
+		tracked_stashed: false,
 	});
 
 	/// Sets `path`'s modification time a minute ahead without changing its
@@ -415,8 +535,8 @@ mod tests {
 		let from_index = |pathspec: &str| {
 			DiscardCheck::Tracked(TrackedCheck {
 				worktree_only: true,
-				pathspecs:     vec![pathspec.to_owned()],
-				merge:         false,
+				pathspecs: vec![pathspec.to_owned()],
+				..TrackedCheck::default()
 			})
 		};
 
@@ -433,9 +553,8 @@ mod tests {
 			"the index keeps a staged change"
 		);
 		let from_head = DiscardCheck::Tracked(TrackedCheck {
-			worktree_only: false,
-			pathspecs:     vec![".".to_owned()],
-			merge:         false,
+			pathspecs: vec![".".to_owned()],
+			..TrackedCheck::default()
 		});
 		assert!(discards_work(root, &DISCOVERED, &from_head)?);
 		assert!(!discards_work(&docs, &DISCOVERED, &from_head)?);
@@ -507,6 +626,73 @@ mod tests {
 		fs::write(root.join("a.txt"), "changed\n")?;
 		assert!(discards_work(root, &DISCOVERED, &HARD_RESET)?);
 		assert!(!marker.exists(), "a repository-configured program ran");
+		Ok(())
+	}
+
+	/// `git reset --hard <commit>` and `git checkout -f <branch>` overwrite
+	/// the untracked files the commit tracks, those where it tracks a
+	/// directory, and those under a path it tracks as a file; ignored files
+	/// count for none, as git overwrites them without `--force`. A branch
+	/// name only a remote has is looked up there, as `git switch` guesses it.
+	#[test]
+	fn a_checkout_of_another_commit_overwrites_the_untracked_files_it_tracks() -> TestResult {
+		let identity = ["-c", "user.name=t", "-c", "user.email=t@example.com"];
+		let dir = repo()?;
+		let root = dir.path();
+		git(root, &["checkout", "-qb", "other"])?;
+		fs::create_dir(root.join("d"))?;
+		fs::write(root.join("notes.txt"), "theirs\n")?;
+		fs::write(root.join("d").join("f"), "theirs\n")?;
+		fs::write(root.join("e"), "theirs\n")?;
+		git(root, &["add", "notes.txt", "d", "e"])?;
+		git(root, &[&identity[..], &["commit", "-qm", "other"]].concat())?;
+		git(root, &["checkout", "-q", "main"])?;
+		git(root, &["update-ref", "refs/remotes/origin/remote-only", "other"])?;
+		let checkout = |source: &str, tracked_stashed: bool| {
+			DiscardCheck::Tracked(TrackedCheck {
+				source: Some(source.to_owned()),
+				tracked_stashed,
+				..TrackedCheck::default()
+			})
+		};
+		let clear = |root: &Path| -> TestResult {
+			for path in ["notes.txt", "d", "e"] {
+				let path = root.join(path);
+				if path.is_dir() {
+					fs::remove_dir_all(path)?;
+				} else if path.exists() {
+					fs::remove_file(path)?;
+				}
+			}
+			Ok(())
+		};
+
+		fs::write(root.join("notes.txt"), "mine\n")?;
+		assert!(!discards_work(root, &DISCOVERED, &HARD_RESET)?, "HEAD tracks no notes.txt");
+		assert!(discards_work(root, &DISCOVERED, &checkout("other", false))?);
+		assert!(discards_work(root, &DISCOVERED, &checkout("remote-only", false))?);
+		assert!(discards_work(root, &DISCOVERED, &checkout("other", true))?, "a stash leaves it");
+		assert!(!discards_work(root, &DISCOVERED, &checkout("main", false))?);
+		assert!(!discards_work(root, &DISCOVERED, &checkout("no-such-branch", false))?);
+		fs::create_dir_all(root.join(".git").join("info"))?;
+		fs::write(root.join(".git").join("info").join("exclude"), "notes.txt\n")?;
+		assert!(!discards_work(root, &DISCOVERED, &checkout("other", false))?, "ignored");
+		fs::remove_file(root.join(".git").join("info").join("exclude"))?;
+		clear(root)?;
+
+		// A file where it tracks a directory, a directory where it tracks a file.
+		fs::write(root.join("d"), "mine\n")?;
+		assert!(discards_work(root, &DISCOVERED, &checkout("other", false))?);
+		clear(root)?;
+		fs::create_dir(root.join("e"))?;
+		fs::write(root.join("e").join("x"), "mine\n")?;
+		assert!(discards_work(root, &DISCOVERED, &checkout("other", false))?);
+		clear(root)?;
+
+		// A tracked change counts unless a stash saved it.
+		fs::write(root.join("a.txt"), "changed\n")?;
+		assert!(discards_work(root, &DISCOVERED, &checkout("other", false))?);
+		assert!(!discards_work(root, &DISCOVERED, &checkout("other", true))?);
 		Ok(())
 	}
 
