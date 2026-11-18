@@ -158,9 +158,9 @@ describe("mcpNamespaceValue", () => {
 
 	it("keeps text-only and structured-only results bare", async () => {
 		const local = localOptions();
-		expect(await mcpNamespaceValue("github.search", { content: [{ type: "text", text: "plain" }] }, local)).toBe(
-			"plain",
-		);
+		expect(
+			await mcpNamespaceValue("github.search", { content: [{ type: "text", text: "plain" }] }, local),
+		).toBe("plain");
 		expect(
 			await mcpNamespaceValue(
 				"github.search",
