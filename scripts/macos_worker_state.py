@@ -166,11 +166,13 @@ def prepare(env=None, run=subprocess.run):
         raise VerificationError("unrecognized native execution pool")
     if not Path("vendor/python/pyo3-config.txt").is_file():
         raise VerificationError("embedded Python was not prepared")
-    linker = run(["/opt/homebrew/bin/ld64.lld", "--version"], check=True, env=env,
+    # Check the linker the build invokes. The shim prefers the keg-only lld@22
+    # because Homebrew's unversioned lld drifts to newer majors, so probing
+    # /opt/homebrew/bin/ld64.lld refused hosts whose build would link correctly.
+    linker = run(["bash", "crates/py/scripts/ld64.lld", "--version"], check=True, env=env,
                  capture_output=True, text=True)
     if not re.search(r"\b(?:LLD|LLVM)\s+22(?:\.|\b)", linker.stdout):
         raise VerificationError("native LLVM22 linker required")
-    run(["bash", "crates/py/scripts/ld64.lld", "--version"], check=True, env=env)
     return env
 
 
