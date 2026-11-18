@@ -270,6 +270,24 @@ describe("YieldTool", () => {
 		});
 	});
 
+	it("treats an array-wrapped `result` type as the finalize marker", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: { findings: { type: "array", items: { type: "string" } } },
+					required: ["findings"],
+				},
+			}),
+		);
+		await expect(
+			tool.execute("call-whole-array", { type: ["findings"], data: ["one", "two"] } as never),
+		).rejects.toThrow("Send one element per call.");
+		await tool.execute("call-section", { type: ["findings"], data: "one finding" } as never);
+		const finalize = await tool.execute("call-finalize", { type: ["result"] } as never);
+		expect(finalize.details).toMatchObject({ status: "success", type: "result" });
+	});
+
 	it("parses JSON-string data when the schema rejects the string form", async () => {
 		const tool = new YieldTool(
 			createSession({

@@ -80,8 +80,24 @@ describe("GrepTool external URL selectors", () => {
 		const ranged = getResultText(await read.execute("range", { path: `${url}:11-13:raw` }));
 
 		expect(match).toContain("*12|REMAINING_TARGET_LINE");
-		expect(selected).toBe("REMAINING_TARGET_LINE");
-		expect(ranged).toBe("BODY_LINE_11\nREMAINING_TARGET_LINE\nBODY_LINE_13");
+		expect(selected).toBe("REMAINING_TARGET_LINE\n");
+		expect(ranged).toBe("BODY_LINE_11\nREMAINING_TARGET_LINE\nBODY_LINE_13\n");
+	});
+
+	it("searches a URL in a session without an artifacts dir", async () => {
+		const { getArtifactsDir: _, ...session } = createSession();
+		const result = await new GrepTool(session).execute("no-session", { pattern: '"needle":"x"', path: `${url}:raw` });
+		expect(getResultText(result)).toContain(MINIFIED_JSON);
+	});
+
+	it("reports a failed fetch instead of searching the error page", async () => {
+		server?.stop(true);
+		server = Bun.serve({ port: 0, fetch: () => new Response("needle: page not found", { status: 404 }) });
+		url = `http://127.0.0.1:${server.port}/missing`;
+
+		await expect(new GrepTool(createSession()).execute("404", { pattern: "needle", path: url })).rejects.toThrow(
+			`Cannot search ${url}: Failed to fetch URL (HTTP 404)`,
+		);
 	});
 
 	it("searches the whole fetched resource when the URL carries the :conflicts selector", async () => {

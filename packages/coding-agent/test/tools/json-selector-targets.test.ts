@@ -96,7 +96,7 @@ describe("JSON selector target admission", () => {
 			const queryLine = await tool.execute("archive-query-line", {
 				path: `${archivePath}:nested/receipt.json?q=.items[]:raw:2`,
 			});
-			expect(textOf(queryLine)).toBe("2");
+			expect(textOf(queryLine)).toBe("2\n");
 		});
 
 		it("prefers a literal question-mark member over its query-shaped suffix", async () => {

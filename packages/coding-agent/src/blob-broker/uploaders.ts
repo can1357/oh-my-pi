@@ -6,7 +6,13 @@ import * as path from "node:path";
 import { directoryIsEnterableSync, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import { type BlobDestinationId, type BlobDestinationMetadata, BUILTIN_BLOB_DESTINATIONS } from "./destinations";
 import type { BlobPublication, BlobUploader, BlobUploadRequest } from "./publication";
-import { type DestinationRuntimeConfig, DestinationUnavailableError, optionString } from "./uploader-runtime";
+import {
+	type DestinationProcessContext,
+	type DestinationRuntimeConfig,
+	DestinationUnavailableError,
+	destinationSpawnContext,
+	optionString,
+} from "./uploader-runtime";
 import { createAnonymousUploader } from "./uploaders-anonymous";
 import { createCloudDriveUploader } from "./uploaders-cloud-drives";
 import { createDiscordUploader } from "./uploaders-discord";
@@ -84,7 +90,7 @@ export function extractUploadUrl(stdout: string): string | null {
  * splitting (paths with spaces stay one argument): `{file}` temp file path,
  * `{mime}` MIME type, `{ext}` bare extension.
  */
-export function createCommandUploader(template: string): BlobUploader {
+export function createCommandUploader(template: string, spawnContext?: DestinationProcessContext): BlobUploader {
 	const argvTemplate = splitCommandTemplate(template);
 	if (argvTemplate.length === 0) throw new Error("images.urls.command is empty");
 	if (!argvTemplate.some(arg => arg.includes("{file}"))) {
@@ -100,11 +106,17 @@ export function createCommandUploader(template: string): BlobUploader {
 				const argv = argvTemplate.map(arg =>
 					arg.replaceAll("{file}", file).replaceAll("{mime}", mimeType).replaceAll("{ext}", extension),
 				);
-				const cwd = getProjectDir();
+				const cwd = spawnContext?.cwd ?? getProjectDir();
 				if (!directoryIsEnterableSync(cwd)) {
 					throw new Error(`Project directory is not accessible: ${cwd}`);
 				}
-				const proc = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", cwd });
+				const proc = Bun.spawn(argv, {
+					stdin: "ignore",
+					stdout: "pipe",
+					stderr: "pipe",
+					env: { ...destinationSpawnContext(spawnContext).env },
+					cwd,
+				});
 				const timeout = setTimeout(() => proc.kill(), UPLOAD_TIMEOUT_MS);
 				const [stdout, stderr, exitCode] = await Promise.all([
 					new Response(proc.stdout as ReadableStream<Uint8Array>).text(),
@@ -148,7 +160,7 @@ export function createConfiguredUploader(
 		if (!command) {
 			throw new DestinationUnavailableError(destination, "an upload command containing {file} is required");
 		}
-		return createCommandUploader(command);
+		return createCommandUploader(command, config.spawn);
 	}
 
 	const uploader =

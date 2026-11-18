@@ -103,6 +103,19 @@ export class AuthBrokerStreamUnsupportedError extends AuthBrokerError {
 	}
 }
 
+/**
+ * Read a response body. A connection that drops mid-body is a transport
+ * failure like a refused connection, so it carries no HTTP status (callers
+ * retry those) even though the status line arrived.
+ */
+async function readResponseBody(response: Response): Promise<string> {
+	try {
+		return await response.text();
+	} catch (cause) {
+		throw new AuthBrokerError("Auth broker response body was cut off", { cause });
+	}
+}
+
 export interface FetchSnapshotOptions {
 	ifGenerationGt?: number;
 	waitMs?: number;
@@ -162,7 +175,7 @@ export class AuthBrokerClient {
 		if (response.status === 304) {
 			return { status: 304, generation: etagGeneration ?? opts.ifGenerationGt ?? 0 };
 		}
-		const text = await response.text();
+		const text = await readResponseBody(response);
 		const raw = this.#parseJson(text, response.status);
 		const validated = snapshotResponseSchema(raw);
 		if (validated instanceof type.errors) {
@@ -421,7 +434,7 @@ export class AuthBrokerClient {
 		},
 	): Promise<t> {
 		const response = await this.#fetchRaw(method, path, opts);
-		const text = await response.text();
+		const text = await readResponseBody(response);
 		const raw = this.#parseJson(text, response.status);
 		const validated = RESPONSE_SCHEMAS[opts.schema](raw);
 		if (validated instanceof type.errors) {

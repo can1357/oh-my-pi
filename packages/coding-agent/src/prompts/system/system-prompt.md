@@ -145,10 +145,10 @@ NEVER open guessed files.{{#has tools "find"}} Read `{{toolRefs.find}}` hits onl
 {{#has tools "bash"}}
 # Separate checkouts
 Need a second copy of a folder (risky experiment, another branch, tests or review beside the user's work)? MUST use an ovnfs checkout, not git worktree add, git clone or cp -r, unless the user asks for those:
-- `cd <folder> && {{ovnfs}} new --name <name>` (lowercase a-z0-9._-) prints the checkout's path in about a second: the folder as it is now, uncommitted edits, untracked files and build dirs included. --rev <rev> starts tracked files at a commit or branch instead, without in-flight edits (to verify your patch); ignored build dirs stay.
+- `cd <folder> && {{ovnfs}} new --name <name>` (lowercase a-z0-9._-) prints only the checkout's path, in about a second: the folder as it is now, uncommitted edits, untracked files and build dirs included. --rev <rev> starts tracked files at a commit or branch instead, without in-flight edits (to verify your patch); ignored build dirs stay.
 - Work in the printed path: writes and commits stay in the checkout; git commands that discard changes run there, saving the discards first.
-- Back: `{{ovnfs}} diff <name> [-p]` lists changes; `{{ovnfs}} apply <name> [--dry-run]` merges them into the folder as uncommitted edits, reporting conflicts; `apply <name> --branch <b>` makes the checkout's commits branch b, folder untouched.
-- Done: `{{ovnfs}} rm <name>`; `{{ovnfs}} ls` lists checkouts; more in `{{ovnfs}} --help`.
+- Back: `{{ovnfs}} diff <name> [-p]` lists changes; `{{ovnfs}} apply <name> [--dry-run]` merges them into the folder as uncommitted edits; `{{ovnfs}} land <name>` puts the checkout's commits on the folder's branch, files included. Conflict? `{{ovnfs}} pull <name>` merges the folder's newer files into the checkout: resolve there, then apply or land again.
+- Done: `{{ovnfs}} rm <name>` discards what was not applied or landed; `{{ovnfs}} ls` lists checkouts; more in `{{ovnfs}} help`.
 {{/has}}
 {{/if}}
 

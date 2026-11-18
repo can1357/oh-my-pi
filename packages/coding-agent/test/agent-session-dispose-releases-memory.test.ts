@@ -105,7 +105,7 @@ describe("AgentSession dispose releases retained memory", () => {
 
 	it("rejects late artifact writes while dispose is waiting for its final close", async () => {
 		const current = createSession();
-		expect(await current.sessionManager.saveArtifact("live spill", "read")).toBe("0");
+		expect(await current.sessionManager.saveArtifact("live spill")).toBe("0");
 		const reachedClose = Promise.withResolvers<void>();
 		const finishClose = Promise.withResolvers<void>();
 		const close = current.sessionManager.close.bind(current.sessionManager);
@@ -117,7 +117,7 @@ describe("AgentSession dispose releases retained memory", () => {
 		const disposing = current.dispose();
 		try {
 			await reachedClose.promise;
-			expect(await current.sessionManager.saveArtifact(`late-${crypto.randomUUID()}`, "read")).toBeUndefined();
+			expect(await current.sessionManager.saveArtifact(`late-${crypto.randomUUID()}`)).toBeUndefined();
 		} finally {
 			finishClose.resolve();
 			await disposing;

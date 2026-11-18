@@ -1,0 +1,30 @@
+import { describe, expect, it } from "bun:test";
+import { SHELL_PROCESS_SELECTOR } from "@oh-my-pi/pi-utils";
+import { formatCommand } from "../src/apps/ps-data";
+import type { ProcSpec } from "../src/tools/daemon";
+
+const spec = (application: string, args: string[]): ProcSpec => ({
+	application,
+	args,
+	env: {},
+	cwd: "/work",
+	pty: true,
+});
+
+describe("formatCommand", () => {
+	it("shows a service by the command its shell process runs, not by the worker's command line", () => {
+		const service = spec("/usr/local/bin/omp", [
+			SHELL_PROCESS_SELECTOR,
+			"--source",
+			"/run/daemons/dev/shell.sh",
+			"--",
+			"npm run dev -- --port 3000",
+		]);
+
+		expect(formatCommand(service)).toBe("npm run dev -- --port 3000");
+		expect(formatCommand(spec("/usr/bin/chrome", ["--headless", "--remote-debugging-port=0"]))).toBe(
+			"/usr/bin/chrome --headless --remote-debugging-port=0",
+		);
+		expect(formatCommand(undefined)).toBeUndefined();
+	});
+});
