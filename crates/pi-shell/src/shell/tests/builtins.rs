@@ -362,6 +362,8 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		"nl",
 		"nproc",
 		"od",
+		#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+		"open",
 		"paste",
 		"printenv",
 		"readlink",
@@ -383,6 +385,8 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		"shasum",
 		"sort",
 		"sponge",
+		#[cfg(windows)]
+		"start",
 		"stat",
 		"strings",
 		"tac",
@@ -400,6 +404,8 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		"which",
 		"whoami",
 		"xargs",
+		#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+		"xdg-open",
 		"yes",
 	];
 	let mut names: Vec<&'static str> = pi_builtins::extras::extras()

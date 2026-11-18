@@ -6517,6 +6517,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "bigdecimal",
+ "block2",
  "bstr",
  "bzip2",
  "chrono",
@@ -6560,6 +6561,9 @@ dependencies = [
  "notify",
  "num-bigint",
  "num-traits",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "onig",
  "os_display",
  "parking_lot",
@@ -6592,6 +6596,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "xutf",
  "xxhash-rust",
+ "zbus",
  "zstd",
 ]
 

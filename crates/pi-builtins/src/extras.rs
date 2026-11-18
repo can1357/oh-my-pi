@@ -78,6 +78,15 @@ macro_rules! for_each_extra {
 			utility [feature = "util.nl"] "nl" nl::Nl;
 			utility [feature = "util.nproc"] "nproc" nproc::Nproc;
 			utility [feature = "util.od"] "od" od::Od;
+			utility [all(
+				feature = "util.open",
+				any(target_os = "macos", target_os = "linux", windows)
+			)] "open" open::Open;
+			utility [all(
+				feature = "util.open",
+				any(target_os = "macos", target_os = "linux", windows)
+			)] "xdg-open" open::Open;
+			utility [all(feature = "util.open", windows)] "start" open::windows::Start;
 			utility [feature = "util.paste"] "paste" paste::Paste;
 			utility [feature = "util.printenv"] "printenv" printenv::Printenv;
 			utility [feature = "util.readlink"] "readlink" readlink::Readlink;

@@ -163,6 +163,8 @@ mod nl;
 mod nproc;
 #[cfg(feature = "util.od")]
 mod od;
+#[cfg(all(feature = "util.open", any(target_os = "macos", target_os = "linux", windows)))]
+mod open;
 #[cfg(feature = "util.paste")]
 mod paste;
 #[cfg(feature = "util.pgrep")]

@@ -174,6 +174,17 @@ notify = { version = "=8.2.0", features = ["macos_kqueue"] }
 rustix = { version = "1.1.4", features = ["fs", "process", "system", "time"] }
 uucore = { version = "0.8.0", features = ["fsxattr", "safe-traversal"] }
 
+# `open`: NSWorkspace.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "=0.6.2", optional = true }
+objc2 = { version = "=0.6.4", optional = true }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSRunningApplication", "NSWorkspace", "block2", "libc"], optional = true }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSObject", "NSString", "NSURL"], optional = true }
+
+# `open`: D-Bus activation, the desktop portal and the file manager.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"], optional = true }
+
 [target."cfg(windows)".dependencies]
 notify = "=8.2.0"
 rustix = { version = "1.1.4", features = ["fs", "process", "time"] }
@@ -182,10 +193,17 @@ windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Networking_WinSock",
   "Win32_Storage_FileSystem",
+  "Win32_System_Com",
   "Win32_System_IO",
+  "Win32_System_Registry",
+  "Win32_System_StationsAndDesktops",
   "Win32_System_SystemInformation",
   "Win32_System_SystemServices",
+  "Win32_System_Threading",
   "Win32_System_WindowsProgramming",
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]
@@ -252,6 +270,8 @@ default = ["utils"]
 "util.nl" = ["util.bre"]
 "util.nproc" = []
 "util.od" = []
+# Hands files and URLs to the desktop: macos, linux and windows targets.
+"util.open" = ["dep:block2", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:zbus"]
 "util.paste" = []
 "util.pgrep" = ["util.proc-match"]
 "util.pidwait" = ["util.proc-match"]
@@ -349,6 +369,7 @@ utils = [
   "util.nl",
   "util.nproc",
   "util.od",
+  "util.open",
   "util.paste",
   "util.pgrep",
   "util.pidwait",
