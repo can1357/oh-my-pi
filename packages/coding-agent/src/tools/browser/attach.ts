@@ -676,29 +676,53 @@ function selectRelayEntry(entries: RelayJsonEntry[], options: PickTargetOptions)
 	return usable.find(e => e.active === "true") ?? usable[0] ?? null;
 }
 
+/** Fetch `/json` entries, waiting a moment for a tab the caller just opened to appear. */
+async function relayEntriesForSelection(
+	relayJson: string,
+	options: PickTargetOptions,
+): Promise<RelayJsonEntry[] | null> {
+	let entries = await fetchRelayEntries(relayJson, options.signal);
+	const matcher = options.matcher;
+	const settleDeadline = Date.now() + RELAY_MATCH_SETTLE_MS;
+	while (
+		matcher &&
+		entries?.some(e => e.type === "page") &&
+		!entries.some(e => e.type === "page" && relayEntryMatches(e, matcher)) &&
+		Date.now() < settleDeadline
+	) {
+		await abortable(options.signal, () => Bun.sleep(Math.min(RELAY_MATCH_POLL_MS, settleDeadline - Date.now())));
+		const polled = await fetchRelayEntries(relayJson, options.signal, Math.max(1, settleDeadline - Date.now()));
+		throwIfAborted(options.signal);
+		entries = polled ?? entries;
+	}
+	return entries;
+}
+
+/**
+ * The relay target id to adopt, chosen from `/json` metadata alone.
+ *
+ * The supervisor must not attach the tab. Chrome shows its debugger infobar for every
+ * `chrome.debugger` attachment, so materializing pages just to enumerate them marks tabs the session never
+ * uses; the tab worker attaches the tab it claims when it connects.
+ */
+export async function pickRelayTargetId(relayJson: string, options: PickTargetOptions = {}): Promise<string> {
+	throwIfAborted(options.signal);
+	const entries = await relayEntriesForSelection(relayJson, options);
+	const pageEntries = entries?.filter(e => e.type === "page") ?? [];
+	const selected = pageEntries.length > 0 ? selectRelayEntry(pageEntries, options) : null;
+	if (!selected) {
+		throw new ToolError(
+			`omp browser relay at ${relayJson} lists no page to adopt. Pass a target id, URL or title substring, or omit target to open omp's own tab.`,
+		);
+	}
+	return selected.id;
+}
+
 /** Select relay pages from /json metadata before probing pages; enumerate targets when metadata offers no selection. */
 export async function pickElectronTarget(browser: Browser, options: PickTargetOptions = {}): Promise<Page> {
 	throwIfAborted(options.signal);
 	if (options.relayJson) {
-		let entries = await fetchRelayEntries(options.relayJson, options.signal);
-		const matcher = options.matcher;
-		const settleDeadline = Date.now() + RELAY_MATCH_SETTLE_MS;
-		// Without page metadata, target enumeration below decides at once, as before.
-		while (
-			matcher &&
-			entries?.some(e => e.type === "page") &&
-			!entries.some(e => e.type === "page" && relayEntryMatches(e, matcher)) &&
-			Date.now() < settleDeadline
-		) {
-			await abortable(options.signal, () => Bun.sleep(Math.min(RELAY_MATCH_POLL_MS, settleDeadline - Date.now())));
-			const polled = await fetchRelayEntries(
-				options.relayJson,
-				options.signal,
-				Math.max(1, settleDeadline - Date.now()),
-			);
-			throwIfAborted(options.signal);
-			entries = polled ?? entries;
-		}
+		const entries = await relayEntriesForSelection(options.relayJson, options);
 		if (entries) {
 			const pageEntries = entries.filter(e => e.type === "page");
 			const selected = pageEntries.length > 0 ? selectRelayEntry(pageEntries, options) : null;

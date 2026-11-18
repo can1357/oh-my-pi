@@ -70,6 +70,7 @@
 ### Fixed
 
 - Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
+- Fixed the browser relay raising Chrome's "started debugging this browser" infobar on tabs omp never used: a relay target is picked from the relay's tab metadata instead of materializing every discovered page, and only tabs a client claims get a debugger attachment
 
 ## [19.1.1] - 2026-11-23
 
