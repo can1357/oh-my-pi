@@ -617,7 +617,8 @@ describe("provider context image budgets", () => {
 		expect(kept.length).toBeGreaterThan(5);
 		expect(kept.length).toBeLessThan(60);
 		expect(clamped.messages.at(-1)?.content).toHaveLength(2);
-		expect(clamped.messages[0].content).toHaveLength(1);
+		// The oldest result loses its screenshot, with or without a notice in its place.
+		expect(clamped.messages[0].content).not.toContainEqual(image(resized));
 		expect(JSON.stringify(clamped).length).toBeLessThan(33_554_432);
 	});
 
