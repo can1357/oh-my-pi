@@ -13,7 +13,6 @@ MCP server {{#each servers}}`{{this}}`{{#unless @last}}, {{/unless}}{{/each}} as
 ```ts
 type Args = {{{schema}}};
 ```
-
 {{/each}}
 {{#if resources.length}}
 ## Resources
