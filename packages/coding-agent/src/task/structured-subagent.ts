@@ -685,7 +685,9 @@ export async function reserveStructuredSubagentId(
 	identity: StructuredSubagentIdentity | undefined,
 ): Promise<string> {
 	if (identity?.id) return identity.id;
-	const manager = session.agentOutputManager ?? new AgentOutputManager(session.getArtifactsDir ?? (() => null));
+	const manager =
+		session.agentOutputManager ??
+		new AgentOutputManager(session.getArtifactsDir ?? (() => null), { settings: session.settings });
 	session.agentOutputManager ??= manager;
 	return manager.allocate(sanitizeAgentId(identity?.label) ?? generateTaskName());
 }

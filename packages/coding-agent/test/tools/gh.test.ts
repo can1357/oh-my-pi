@@ -26,7 +26,14 @@ import type { GhToolDetails } from "@oh-my-pi/pi-tui/tools/github";
 import { withRepoLock } from "@oh-my-pi/pi-coding-agent/utils/repo-lock";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getAgentDir, hashPath, normalizePathForComparison, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDir,
+	hashPath,
+	normalizePathForComparison,
+	removeWithRetries,
+	setAgentDir,
+	spillFileName,
+} from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "../helpers/mock-scheduler-clock";
 
 const TINY_PNG_BASE64 =
@@ -66,11 +73,11 @@ function createSession(
 		getSessionFile: () => null,
 		getArtifactsDir: () => artifactsDir ?? null,
 		allocateOutputArtifact: artifactsDir
-			? async toolType => {
+			? async () => {
 					const artifactId = String(nextArtifactId++);
 					return {
 						id: artifactId,
-						path: path.join(artifactsDir, `${artifactId}-${toolType}.md`),
+						path: path.join(artifactsDir, spillFileName(artifactId)),
 					};
 				}
 			: undefined,
@@ -1463,14 +1470,14 @@ echo ok
 			expect(text).toContain("zeta");
 			expect(text).not.toContain("alpha");
 			expect(text).toContain("Run failed.");
-			expect(text).toContain("Full failed-job logs: artifact://0");
+			expect(text).toContain("Full failed-job logs: local://0.log");
 			expect(result.details?.artifactId).toBe("0");
 			expect(result.details?.watch?.mode).toBe("run");
 			expect(result.details?.watch?.state).toBe("completed");
 			expect(result.details?.watch?.failedLogs?.[0]?.jobName).toBe("test");
 			expect(result.details?.watch?.failedLogs?.[0]?.tail).toContain("zeta");
 
-			const artifactText = await Bun.file(path.join(artifactsDir, "0-github.md")).text();
+			const artifactText = await Bun.file(path.join(artifactsDir, spillFileName(0))).text();
 			expect(artifactText).toContain("# GitHub Actions Run #77");
 			expect(artifactText).toContain("Full log:");
 			expect(artifactText).toContain("alpha");

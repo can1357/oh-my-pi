@@ -17,6 +17,7 @@ import {
 } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
 import { logger } from "@oh-my-pi/pi-utils";
+import { formatRawOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
@@ -116,8 +117,8 @@ export interface BashExecutorOptions {
 	/**
 	 * Invoked when the native minimizer rewrote the command's output, giving
 	 * the caller a chance to persist the lossless original capture (typically
-	 * via the session's `ArtifactManager`). The returned id is spliced into
-	 * the sink output as `artifact://<id>` so the agent can retrieve the raw
+	 * via the session's `ArtifactManager`). The returned spill id is spliced
+	 * into the sink output as its spill URL so the agent can retrieve the raw
 	 * bytes. Return `undefined` to skip the footer.
 	 */
 	onMinimizedSave?: (
@@ -1053,7 +1054,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 		// When the native minimizer rewrote the output, persist the original and
 		// swap the sink's accumulated raw stream for the minimized text with an
-		// `artifact://<id>` footer so the agent can retrieve the raw bytes
+		// `[raw output: <spill url>]` footer so the agent can retrieve the raw bytes
 		// losslessly. The minimized text is a lossy summary, so substitute it
 		// only once the original is addressable — a caller that returns no id
 		// (or an unavailable allocator) must keep the raw stream rather than
@@ -1080,7 +1081,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				const sep = minimizedText.endsWith("\n") ? "" : "\n";
 				// The label keeps its own line so the `[raw output: …]` line stays parseable.
 				sink.push(
-					`${sep}[output summarized by the ${minimized.filter} filter; pipe through \`| cat\` for verbatim output]\n[raw output: artifact://${artifactId}]\n`,
+					`${sep}[output summarized by the ${minimized.filter} filter; pipe through \`| cat\` for verbatim output]\n${formatRawOutputNotice(artifactId)}\n`,
 				);
 			}
 		}

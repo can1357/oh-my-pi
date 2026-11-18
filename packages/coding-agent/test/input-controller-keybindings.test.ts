@@ -237,6 +237,7 @@ async function createContext() {
 		updatePendingMessagesDisplay,
 		isBashMode: false,
 		isPythonMode: false,
+		isBtwMode: false,
 		hideToolActivity: false,
 		toolOutputExpanded: false,
 		settings: Settings.isolated(),

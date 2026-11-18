@@ -228,7 +228,7 @@ export function splitPathAndSel(
  * grammar. That rule is right for filesystem paths (a file named `a:1-50` is
  * legal) but wrong for internal URLs, where any trailing `:<chunk>` after the
  * scheme is unambiguously a read-tool selector — even if malformed (e.g.
- * `artifact://3:raw:-100-5`).
+ * `local://3.log:raw:-100-5`).
  *
  * This function iteratively peels selector-shaped chunks (well-formed plus
  * common malformed shapes like `:-N-M`) so the rest of the read tool can pass a
@@ -262,7 +262,7 @@ export function splitInternalUrlSel(
 		const colon = path.lastIndexOf(":");
 		// Stop before crossing into the scheme separator `://`.
 		if (colon < schemeEnd) break;
-		// `artifact://7:1-30,:-30`, `artifact://7:20:40,85:100`: chunks split off
+		// `local://7.log:1-30,:-30`, `local://7.log:20:40,85:100`: chunks split off
 		// by a colon inside one list join the list peeled after them.
 		if (chunks.length > 0 && FILE_LINE_RANGE_ONLY_RE.test(chunks[0])) {
 			const folded = foldListColons(path, chunks[0], schemeEnd);

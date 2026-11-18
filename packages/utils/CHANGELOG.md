@@ -6,6 +6,10 @@
 
 - Added `pathIdentityKey()` to group filesystem aliases without merging distinct-case directories on case-sensitive filesystems. It follows symlinks/junctions through device/inode identity and falls back to a case-preserving resolved path when identity is unavailable; existing path-spelling and containment normalization is unchanged ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+### Added
+
+- `spillUrl`, `parseSpillUrl` and `spillUrlIds` format and parse a session spill's `local://N.log` URL
+
 ### Fixed
 
 - Windows shell discovery skips the WSL `bash.exe` launcher, so services no longer run in WSL

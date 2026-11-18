@@ -607,7 +607,7 @@ describe("OutputSink", () => {
 		expect(summary.artifactElidedBytes).toBeUndefined();
 		expect(await Bun.file(artifactPath).text()).toBe(payload);
 		const notice = formatOutputNotice(outputMeta().truncationFromSummary(summary, { direction: "tail" }).get());
-		expect(notice).toContain("Read artifact://art-small-default for full output");
+		expect(notice).toContain("Read local://art-small-default.log for full output");
 	});
 
 	test("a small cap without an explicit head budget still keeps the most recent output", async () => {
@@ -655,7 +655,7 @@ describe("OutputSink", () => {
 		// Both the truncation and the column-cap notices carry the reference.
 		expect(
 			notice.match(
-				/Read artifact:\/\/art-sampled for a head\/tail sample of the output; 104B from its middle was not saved/g,
+				/Read local:\/\/art-sampled\.log for a head\/tail sample of the output; 104B from its middle was not saved/g,
 			),
 		).toHaveLength(2);
 		expect(notice).not.toContain("for full output");
@@ -883,16 +883,16 @@ describe("OutputSink head-retain mode", () => {
 		await sink.push(noisy);
 
 		sink.replace("OK\n");
-		await sink.push("[raw output: artifact://8]\n");
+		await sink.push("[raw output: local://8.log]\n");
 
 		const dumped = await sink.dump();
-		expect(dumped.output).toBe("OK\n[raw output: artifact://8]\n");
+		expect(dumped.output).toBe("OK\n[raw output: local://8.log]\n");
 		expect(dumped.output).not.toContain("elided");
 		expect(dumped.elidedBytes).toBeUndefined();
 		expect(dumped.elidedLines).toBeUndefined();
 		expect(dumped.truncated).toBe(false);
 		// Counters realign to the authoritative buffer + the subsequent push.
-		expect(dumped.totalBytes).toBe(byteLength("OK\n[raw output: artifact://8]\n"));
+		expect(dumped.totalBytes).toBe(byteLength("OK\n[raw output: local://8.log]\n"));
 	});
 
 	test("middle-elided dump body fits the inline budget (no double truncation)", async () => {
@@ -900,7 +900,7 @@ describe("OutputSink head-retain mode", () => {
 		// so an elided dump body could reach headBytes + spillThreshold and
 		// re-trip enforceInlineByteCap at the tool-result boundary — truncating
 		// a second time and saving a duplicate artifact whose id disagreed with
-		// the truncation notice's `Read artifact://N for full output`.
+		// the truncation notice's `Read local://N.log for full output`.
 		const spillThreshold = 1000;
 		const sink = new OutputSink({ spillThreshold, headBytes: 400 });
 		const lines = Array.from({ length: 400 }, (_, i) => `line ${i}`).join("\n");
@@ -975,7 +975,7 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 	test("column-cap-only output surfaces a column notice, not a window/byte truncation footer", async () => {
 		// Regression for #4735: fully-shown output whose only trimming was the
 		// per-line column cap must not emit "Showing lines X-Y of Z (…B limit).
-		// Read artifact://… for full output" — every line is present.
+		// Read local://….log for full output" — every line is present.
 		const sink = new OutputSink({ maxColumns: 8, spillThreshold: 100_000 });
 		const lines = ["a", "b", "c", "x".repeat(50), "d"];
 		await sink.push(`${lines.join("\n")}\n`);
@@ -990,7 +990,7 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 		expect(notice).toContain("Some lines truncated to 8 bytes");
 		expect(notice).not.toContain("Showing lines");
 		expect(notice).not.toContain("limit");
-		expect(notice).not.toContain("artifact://");
+		expect(notice).not.toMatch(/local:\/\/\d+\.log/);
 	});
 
 	test("column-cap notice advertises the mirrored artifact when one exists", async () => {
@@ -1016,7 +1016,7 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 
 		const notice = formatOutputNotice(meta);
 		expect(notice).toContain("Some lines truncated to 8 bytes");
-		expect(notice).toContain("Read artifact://77 for full output");
+		expect(notice).toContain("Read local://77.log for full output");
 	});
 
 	test("column-cap notice names a raw artifact line per cut line", async () => {
@@ -1033,7 +1033,7 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 
 		const meta = outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get();
 		expect(formatOutputNotice(meta)).toContain(
-			"Some lines truncated to 8 bytes. Use artifact://77:raw:2-2 to read line 2 whole; cut lines run to line 4, each read the same way",
+			"Some lines truncated to 8 bytes. Use local://77.log:raw:2-2 to read line 2 whole; cut lines run to line 4, each read the same way",
 		);
 		// The named lines are the cut lines, whole, in the artifact.
 		const artifactLines = (await Bun.file(artifactPath).text()).split("\n");
@@ -1055,7 +1055,7 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 		expect(dumped.columnTruncatedRange).toEqual({ first: 1, last: 8000 });
 
 		const notice = formatOutputNotice(outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get());
-		expect(notice).toContain("Use artifact://77:raw:1-1 to read line 1 whole; cut lines run to line 8000");
+		expect(notice).toContain("Use local://77.log:raw:1-1 to read line 1 whole; cut lines run to line 8000");
 		expect(notice).not.toContain(":raw:1-8000");
 	});
 
@@ -1080,7 +1080,7 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 			.get();
 		const notice = formatOutputNotice(meta);
 		expect(notice).not.toContain(":raw:");
-		expect(notice).toContain("Read artifact://77 for a head/tail sample");
+		expect(notice).toContain("Read local://77.log for a head/tail sample");
 	});
 
 	test("replace() withholds the cut-line range because the artifact keeps the original stream", async () => {

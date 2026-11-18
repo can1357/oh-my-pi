@@ -12,6 +12,12 @@
 //! and the close notification share that function, so they arrive in order and
 //! the close comes last. Lines become JS strings on the JS thread straight
 //! from the batch buffer (Latin-1 for ASCII, so most lines are one memcpy).
+//!
+//! `upgradeRaw` switches a started `lines` connection to raw delivery without
+//! losing bytes: the JS side flips first (so batches already queued, and the
+//! rest of the batch being delivered, go out as raw chunks of their original
+//! bytes), then the actor hands over its partial-line buffer and reads raw
+//! from then on. Both steps travel the same ordered paths as frames.
 
 use std::{
 	collections::VecDeque,
@@ -25,6 +31,7 @@ use std::{
 	},
 };
 
+use memchr::memchr;
 use napi::{
 	Env, Error, JsValue, Result, Status,
 	bindgen_prelude::{Function, FunctionRef, ToNapiValue, Uint8Array, Unknown},
@@ -34,15 +41,19 @@ use napi::{
 	},
 };
 use parking_lot::Mutex;
-use tokio::sync::{
-	Notify,
-	mpsc::{UnboundedReceiver, UnboundedSender},
+use tokio::{
+	net::TcpStream,
+	sync::{
+		Notify,
+		mpsc::{UnboundedReceiver, UnboundedSender},
+	},
 };
 
 use super::{
 	IpcError,
 	lines::{FrameTooLarge, LineBatch, LineReader, READ_CHUNK, Text},
-	platform::{self, Stream, WriteFinish},
+	platform::{self, WriteFinish},
+	tcp,
 };
 
 /// Queued-but-unwritten bytes above which `send` reports backpressure.
@@ -70,10 +81,58 @@ pub enum Framing {
 	Raw,
 }
 
+/// Connected byte stream: the local transport (Unix socket / named pipe) or
+/// TCP.
+pub enum Stream {
+	Local(platform::Stream),
+	Tcp(TcpStream),
+}
+
+impl Stream {
+	async fn readable(&self) -> io::Result<()> {
+		match self {
+			Self::Local(stream) => stream.readable().await,
+			Self::Tcp(stream) => stream.readable().await,
+		}
+	}
+
+	/// Read into `buf`'s spare capacity without initializing it first.
+	fn try_read_buf(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
+		match self {
+			Self::Local(stream) => stream.try_read_buf(buf),
+			Self::Tcp(stream) => stream.try_read_buf(buf),
+		}
+	}
+
+	async fn writable(&self) -> io::Result<()> {
+		match self {
+			Self::Local(stream) => stream.writable().await,
+			Self::Tcp(stream) => stream.writable().await,
+		}
+	}
+
+	fn try_write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+		match self {
+			Self::Local(stream) => stream.try_write_vectored(bufs),
+			Self::Tcp(stream) => stream.try_write_vectored(bufs),
+		}
+	}
+
+	/// Shut the write side once everything queued was written.
+	fn finish_write(&self) -> io::Result<WriteFinish> {
+		match self {
+			Self::Local(stream) => stream.finish_write(),
+			Self::Tcp(stream) => tcp::shutdown_write(stream).map(|()| WriteFinish::HalfClosed),
+		}
+	}
+}
+
 /// Instruction from JavaScript to the connection actor.
 pub enum Command {
 	/// Begin reading and delivering frames.
 	Start,
+	/// Stop line framing: hand over the partial-line buffer, then read raw.
+	UpgradeRaw,
 	/// Close immediately, dropping queued writes.
 	Destroy,
 }
@@ -87,6 +146,34 @@ pub enum Event {
 
 /// Ordered event channel into JavaScript; holds the loop unless unref'd.
 type EventSink = ThreadsafeFunction<Event, (), (), Status, false>;
+
+type ChunkCallback = FunctionRef<Uint8Array, UnknownReturnValue>;
+
+/// Raw delivery installed by `upgradeRaw` on a `lines` connection. Written
+/// and read on the JS thread only; the lock never spans a JS call.
+#[derive(Default)]
+pub struct RawUpgrade {
+	/// Set once `on_chunk` is installed: sends go out raw, lines become chunks.
+	active:   AtomicBool,
+	on_chunk: Mutex<Option<ChunkCallback>>,
+}
+
+impl RawUpgrade {
+	pub fn is_active(&self) -> bool {
+		self.active.load(Ordering::Acquire)
+	}
+
+	/// The installed chunk callback as a handle in the current scope.
+	fn callback(&self, env: &Env) -> Result<Option<sys::napi_value>> {
+		if !self.is_active() {
+			return Ok(None);
+		}
+		match self.on_chunk.lock().as_ref() {
+			Some(callback) => Ok(Some(callback.borrow_back(env)?.value().value)),
+			None => Ok(None),
+		}
+	}
+}
 
 /// JavaScript frame callback for the connection's framing.
 pub enum FrameCallback {
@@ -215,6 +302,8 @@ impl WriteState {
 /// State shared between the JavaScript handle and the connection actor.
 pub struct Shared {
 	pub framing: Framing,
+	/// Raw delivery after `upgradeRaw` (lines connections).
+	pub upgrade: Arc<RawUpgrade>,
 	commands:    UnboundedSender<Command>,
 	write:       Mutex<WriteState>,
 	/// Wakes the actor when JavaScript queued bytes or called `end()`.
@@ -232,6 +321,7 @@ impl Shared {
 	pub fn new(framing: Framing, commands: UnboundedSender<Command>, stream: Arc<Stream>) -> Self {
 		Self {
 			framing,
+			upgrade: Arc::new(RawUpgrade::default()),
 			commands,
 			write: Mutex::new(WriteState {
 				stream:        Some(stream),
@@ -372,7 +462,7 @@ impl Shared {
 		on_frame: FrameCallback,
 		on_close: &Function<'_, Option<String>, UnknownReturnValue>,
 	) -> Result<()> {
-		let mut sink = build_sink(env, on_frame, on_close.create_ref()?)?;
+		let mut sink = build_sink(env, on_frame, Arc::clone(&self.upgrade), on_close.create_ref()?)?;
 		let mut js = self.js.lock();
 		if !js.refed {
 			#[allow(deprecated, reason = "explicit loop ref toggling is the documented intent")]
@@ -385,6 +475,19 @@ impl Shared {
 		js.delivery = Delivery::Started(sink);
 		let _ = self.commands.send(Command::Start);
 		Ok(())
+	}
+
+	/// Switch a started `lines` connection to raw delivery (JS thread). The
+	/// caller checked framing, start, and that no upgrade happened yet.
+	///
+	/// The JS side flips first: every batch the actor queued before it sees
+	/// the command is dispatched after this returns and goes to `on_chunk` as
+	/// raw bytes. The actor then emits its partial-line buffer and reads raw,
+	/// so the byte order through the single event sink is the wire order.
+	pub fn upgrade_raw(&self, on_chunk: ChunkCallback) {
+		*self.upgrade.on_chunk.lock() = Some(on_chunk);
+		self.upgrade.active.store(true, Ordering::Release);
+		let _ = self.commands.send(Command::UpgradeRaw);
 	}
 
 	/// Toggle whether this connection keeps the event loop alive.
@@ -468,47 +571,83 @@ fn concat_from(parts: &[&[u8]], mut skip: usize) -> Vec<u8> {
 fn build_sink(
 	env: &Env,
 	on_frame: FrameCallback,
+	upgrade: Arc<RawUpgrade>,
 	on_close: FunctionRef<Option<String>, UnknownReturnValue>,
 ) -> Result<EventSink> {
 	let dispatcher = env.create_function_from_closure::<(), (), _>("ipcDispatch", |_| Ok(()))?;
 	dispatcher
 		.build_threadsafe_function::<Event>()
 		.build_callback(move |ctx: ThreadsafeCallContext<Event>| {
-			dispatch(&ctx.env, &on_frame, &on_close, ctx.value)
+			dispatch(&ctx.env, &on_frame, &upgrade, &on_close, ctx.value)
 		})
 }
 
 fn dispatch(
 	env: &Env,
 	on_frame: &FrameCallback,
+	upgrade: &RawUpgrade,
 	on_close: &FunctionRef<Option<String>, UnknownReturnValue>,
 	event: Event,
 ) -> Result<()> {
 	match (event, on_frame) {
 		(Event::Lines(batch), FrameCallback::Lines(callback)) => {
 			let callback = callback.borrow_back(env)?;
-			deliver_lines(env.raw(), callback.value().value, &batch)
+			deliver_lines(env, callback.value().value, upgrade, batch)
 		},
 		(Event::Chunk(chunk), FrameCallback::Raw(callback)) => {
 			let callback = callback.borrow_back(env)?;
 			deliver_chunk(env.raw(), callback.value().value, chunk)
 		},
+		// Upgraded lines connection: the actor reads raw now.
+		(Event::Chunk(chunk), FrameCallback::Lines(_)) => match upgrade.callback(env)? {
+			Some(on_chunk) => deliver_chunk(env.raw(), on_chunk, chunk),
+			None => Ok(()),
+		},
 		(Event::Close(reason), _) => on_close.borrow_back(env)?.call(reason).map(drop),
-		_ => Ok(()),
+		(Event::Lines(_), FrameCallback::Raw(_)) => Ok(()),
 	}
 }
 
-/// Call `callback(line)` for every line of `batch`, creating each string
+/// Call `on_line(line)` for every line of `batch`, creating each string
 /// directly from the batch buffer. A throwing callback must not swallow the
 /// rest of the batch; the first exception is rethrown once every line was
-/// delivered.
-fn deliver_lines(env: sys::napi_env, callback: sys::napi_value, batch: &LineBatch) -> Result<()> {
-	let receiver = undefined(env)?;
+/// delivered. Once `upgradeRaw` ran (before this batch or from inside one of
+/// its callbacks), the batch's bytes after the last delivered line — line
+/// terminators and empty lines included — go to the chunk callback instead.
+fn deliver_lines(
+	env: &Env,
+	on_line: sys::napi_value,
+	upgrade: &RawUpgrade,
+	mut batch: LineBatch,
+) -> Result<()> {
+	let raw_env = env.raw();
+	let receiver = undefined(raw_env)?;
 	let mut first_error = None;
+	// Start of the bytes not yet delivered as a line.
+	let mut consumed = 0;
+	let mut on_chunk = upgrade.callback(env)?;
 	for &span in &batch.spans {
-		let delivered = js_string(env, batch.line(span), span.text)
-			.and_then(|line| call(env, receiver, callback, line));
+		if on_chunk.is_some() {
+			break;
+		}
+		let delivered = js_string(raw_env, batch.line(span), span.text)
+			.and_then(|line| call(raw_env, receiver, on_line, line));
 		if let Err(error) = delivered {
+			first_error.get_or_insert(error);
+		}
+		consumed =
+			memchr(b'\n', &batch.bytes[span.end..]).map_or(batch.bytes.len(), |at| span.end + at + 1);
+		on_chunk = upgrade.callback(env)?;
+	}
+	if let Some(on_chunk) = on_chunk
+		&& consumed < batch.bytes.len()
+	{
+		let rest = if consumed == 0 {
+			mem::take(&mut batch.bytes)
+		} else {
+			batch.bytes[consumed..].to_vec()
+		};
+		if let Err(error) = deliver_chunk(raw_env, on_chunk, rest) {
 			first_error.get_or_insert(error);
 		}
 	}
@@ -657,6 +796,16 @@ async fn drive(
 			command = commands.recv() => match command {
 				None | Some(Command::Destroy) => return None,
 				Some(Command::Start) => reading = true,
+				// Commands are handled between read bursts, so the line
+				// buffer holds exactly the bytes after the last emitted batch.
+				Some(Command::UpgradeRaw) => {
+					if let Reader::Lines(lines) = mem::replace(&mut reader, Reader::Raw(Vec::new())) {
+						let rest = lines.into_rest();
+						if !rest.is_empty() {
+							shared.emit(Event::Chunk(rest));
+						}
+					}
+				},
 			},
 			() = shared.write_wake.notified() => {},
 			ready = stream.writable(), if write_pending => {

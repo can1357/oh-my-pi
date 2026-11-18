@@ -22,8 +22,8 @@ use std::{
 };
 
 use bstr::{BStr, BString, ByteSlice};
-use parking_lot::Mutex;
 use omp_builtins::extras::SpeechHost;
+use parking_lot::Mutex;
 
 use crate::{
 	bash::{

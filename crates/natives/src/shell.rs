@@ -440,9 +440,9 @@ pub struct ShellExecuteOptions<'env> {
 /// Telemetry for a single minimization.
 ///
 /// Surfaced when the minimizer actually rewrote the command's output. The
-/// session layer is expected to persist `original_text` via its
-/// `ArtifactManager`, splice the resulting `artifact://<id>` reference
-/// into `text`, and replace any previously streamed raw output with the
+/// session layer is expected to persist `original_text` as a session
+/// spill, splice the spill's URL (formatted only on the JS side) into
+/// `text`, and replace any previously streamed raw output with the
 /// minimized text.
 #[napi(object)]
 pub struct MinimizerResult {
@@ -485,8 +485,8 @@ pub struct ShellRunResult {
 
 	/// When the minimizer rewrote the captured output, this carries the
 	/// original buffer + telemetry so the session layer can persist it as
-	/// an artifact and splice an `artifact://<id>` reference into the
-	/// minimized text shown to the agent. `None` when nothing was rewritten.
+	/// a spill and splice the spill's URL into the minimized text shown to
+	/// the agent. `None` when nothing was rewritten.
 	pub minimized:   Option<MinimizerResult>,
 	/// Shell working directory after command completion.
 	pub working_dir: Option<String>,

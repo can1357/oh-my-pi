@@ -10,11 +10,11 @@ use std::{
 };
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
 use omp_vfs::{
 	DirEntry, File, FileHandle, FileKind, FileSystem, FileType, Fs, Metadata, OpenOptions,
 	Permissions, ReadDir,
 };
+use parking_lot::Mutex;
 
 /// Device number every [`MemFs`] identity carries.
 const MEM_DEV: u64 = 7;

@@ -274,6 +274,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		pythonComponent: undefined,
 		isBashMode: false,
 		isPythonMode: false,
+		isBtwMode: false,
 		streamingComponent: undefined,
 		streamingMessage: undefined,
 		lastAssistantUsage: undefined,

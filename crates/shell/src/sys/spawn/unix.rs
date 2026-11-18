@@ -52,8 +52,8 @@ use std::{
 };
 
 use bstr::BString;
-use parking_lot::{Condvar, Mutex, MutexGuard};
 use omp_builtins::read_process_umask as process_umask;
+use parking_lot::{Condvar, Mutex, MutexGuard};
 
 use super::{Dir, Leftover, Sessions, Shared, child_end};
 use crate::{

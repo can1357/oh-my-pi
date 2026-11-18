@@ -362,7 +362,7 @@ export interface SpotlightToolRow extends SpotlightToolTotals {
 
 /**
  * How the model got back output a shortened result hid:
- * - `artifact`: a later call read or searched an artifact the shortened result named (`artifact://N`);
+ * - `artifact`: a later call read or searched a spill the shortened result named (`local://N.log`, or `artifact://N` in older transcripts);
  * - `reread`: a later `read` of the same file whose selection overlaps the hidden lines, or the whole file again;
  * - `rerun`: a later call of the same tool repeating the shortened one: a bash command with a pipe, redirect or
  *   changed flags; any other tool with near-identical arguments (same tool, argument tokens' Jaccard ≥ 0.6).

@@ -3,7 +3,7 @@
 //!
 //! An external has no view of the shell's virtual filesystem, so a
 //! `scheme://` path handed to one means nothing there. File-backed schemes
-//! (`skill://`, `local://`, `artifact://`, …) alias a real file and resolve
+//! (`skill://`, `local://`, `attachment://`, …) alias a real file and resolve
 //! to it; rendered ones and schemes no provider serves alias nothing and keep
 //! their spelling. So does anything the provider cannot resolve in an
 //! argument or an environment value: a program is as often handed a URL as
@@ -204,8 +204,8 @@ pub(super) async fn resolve(fs: &omp_vfs::Fs, names: &Names) -> io::Result<Names
 		Some(cwd) => match host_path(fs, cwd).await? {
 			// A child may write anywhere under its working directory, so it must
 			// not start in one the shell itself refuses to change (`skill://`,
-			// `artifact://`). Arguments still translate: those name single files
-			// the program was asked to use.
+			// a read-only `local://`). Arguments still translate: those name
+			// single files the program was asked to use.
 			Some(backing) => match fs.access(cwd, false, true, false).await {
 				Ok(()) => Some(backing),
 				Err(err) if err.kind() == io::ErrorKind::ReadOnlyFilesystem => {
@@ -310,7 +310,7 @@ fn unresolved(path: &Path, err: &io::Error) -> io::Error {
 /// untouched. A bare scheme root (`local://`), or one followed by words
 /// (`skill:// external command`), is far likelier a search pattern or message
 /// text than a path, so it stays literal too, as does a URL with words after
-/// it (`artifact://12 shows the failure`) unless a file has exactly that name.
+/// it (`local://12.log shows the failure`) unless a file has exactly that name.
 async fn host_arg(fs: &omp_vfs::Fs, arg: &BStr) -> Option<BString> {
 	let text = arg.to_str().ok()?;
 	let (lead, url) = text.split_at(url_start(text)?);

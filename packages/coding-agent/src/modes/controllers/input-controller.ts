@@ -256,6 +256,12 @@ function pythonCommandPrefixLength(trimmedText: string): 0 | 1 | 2 {
 	return next === 32 || next === 9 || next === 10 || next === 13 ? prefixLength : 0;
 }
 
+/** The question after a `?` draft's sigil (the `/btw` shortcut), or undefined when the draft is not one. */
+function parseBtwShortcutInput(text: string): string | undefined {
+	const trimmed = text.trimStart();
+	return trimmed.startsWith("?") ? trimmed.slice(1).trim() : undefined;
+}
+
 function parsePythonCommandInput(text: string): { code: string; isExcluded: boolean } | undefined {
 	const trimmed = text.trimStart();
 	const prefixLength = pythonCommandPrefixLength(trimmed);
@@ -665,6 +671,10 @@ export class InputController {
 				this.ctx.editor.setText("");
 				this.ctx.isPythonMode = false;
 				this.ctx.updateEditorBorderColor();
+			} else if (this.ctx.isBtwMode) {
+				this.ctx.editor.setText("");
+				this.ctx.isBtwMode = false;
+				this.ctx.updateEditorBorderColor();
 			} else if (awaitingAsyncWork) {
 				// End the wait: the run ends now. The jobs keep running; their results
 				// land in context for the next prompt instead of starting a turn.
@@ -805,12 +815,12 @@ export class InputController {
 		for (const key of this.ctx.keybindings.getKeys("app.btw.inject")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.handleBtwInjectKey());
 		}
-		const hubKeys = new Set([
-			...this.ctx.keybindings.getKeys("app.agents.hub"),
-			...this.ctx.keybindings.getKeys("app.session.observe"),
-		]);
+		const agentsHubKeys = new Set(this.ctx.keybindings.getKeys("app.agents.hub"));
+		const hubKeys = new Set([...agentsHubKeys, ...this.ctx.keybindings.getKeys("app.session.observe")]);
 		for (const key of hubKeys) {
-			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showAgentHub());
+			this.ctx.editor.setCustomKeyHandler(key, () =>
+				this.ctx.showAgentHub(agentsHubKeys.has(key) ? { trayFirst: true } : undefined),
+			);
 		}
 
 		// Double-tap left arrow on an empty editor: opens the agent hub from the
@@ -827,7 +837,7 @@ export class InputController {
 			}
 			if (this.#detectLeftDoubleTap()) {
 				hintUsage.record("agents");
-				this.ctx.showAgentHub({ requireContent: true, armCloseTap: true });
+				this.ctx.showAgentHub({ requireContent: true, armCloseTap: true, trayFirst: true });
 			}
 		};
 		// The native composer's viewing header: an ancestor crumb, or back to main.
@@ -844,10 +854,16 @@ export class InputController {
 			if (wasComposing !== (text.trim() !== "")) this.ctx.syncIdleMaintenanceView();
 			const wasBashMode = this.ctx.isBashMode;
 			const wasPythonMode = this.ctx.isPythonMode;
+			const wasBtwMode = this.ctx.isBtwMode;
 			const trimmed = text.trimStart();
 			this.ctx.isBashMode = trimmed.startsWith("!");
 			this.ctx.isPythonMode = parsePythonCommandInput(trimmed) !== undefined;
-			if (wasBashMode !== this.ctx.isBashMode || wasPythonMode !== this.ctx.isPythonMode) {
+			this.ctx.isBtwMode = parseBtwShortcutInput(trimmed) !== undefined;
+			if (
+				wasBashMode !== this.ctx.isBashMode ||
+				wasPythonMode !== this.ctx.isPythonMode ||
+				wasBtwMode !== this.ctx.isBtwMode
+			) {
 				this.ctx.updateEditorBorderColor();
 			}
 			// Editor input repaints through the scoped fast path (only the editor
@@ -1119,6 +1135,9 @@ export class InputController {
 			text = this.#compactDraftImages(text.trim());
 			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
 			if ((!isSettingsInitialized() || cfgEmojiAutocomplete.get(settings)) && text) text = expandEmoticons(text);
+			// `? <question>` is the `/btw` shortcut: it runs as the slash command it stands for.
+			const btwQuestion = parseBtwShortcutInput(text);
+			if (btwQuestion) text = `/btw ${btwQuestion}`;
 
 			// A `/btw` note the composer talks to takes plain drafts as its follow-ups (an empty
 			// Enter does nothing); commands and shell drafts run as usual.

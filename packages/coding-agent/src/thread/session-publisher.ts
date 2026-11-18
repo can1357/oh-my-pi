@@ -83,6 +83,7 @@ export function captureSessionState(session: AgentSession): SessionMirrorState {
 		isStreaming: read.isStreaming(session),
 		runStartedAt: read.runStartedAt(session),
 		ircWakesPending: read.ircWakesPending(session),
+		hasPendingWake: read.hasPendingWake(session),
 		ircQueuedFrom: session.queuedIrcSenders(),
 		isPaused: read.isPaused(session),
 		streamMessage: read.streamMessage(session),
@@ -220,7 +221,7 @@ export class SessionPublisher {
 	readonly #gate: QueuedMessageGate;
 	readonly #unsubscribe: () => void;
 	readonly #unsubscribeRunState: () => void;
-	readonly #unsubscribeIrcWakeHolds: () => void;
+	readonly #unsubscribeWakeState: () => void;
 
 	constructor(session: AgentSession, bridge: SessionBridgeClient) {
 		this.session = session;
@@ -251,8 +252,8 @@ export class SessionPublisher {
 		session.agent.queuedMessageGate = this.#gate;
 		this.#unsubscribe = session.subscribe(event => this.#onEvent(event));
 		this.#unsubscribeRunState = session.subscribeRunState(state => this.#onRunState(state));
-		// `ircWakesPending` gates main's idle parking and changes without an event.
-		this.#unsubscribeIrcWakeHolds = session.subscribeIrcWakeHolds(() => this.schedule());
+		// `ircWakesPending` gates main's idle parking and, like `hasPendingWake`, changes without an event.
+		this.#unsubscribeWakeState = session.subscribeWakeState(() => this.schedule());
 		session.addDisposer(() => this.close());
 	}
 
@@ -299,7 +300,7 @@ export class SessionPublisher {
 		if (this.session.agent.queuedMessageGate === this.#gate) this.session.agent.queuedMessageGate = undefined;
 		this.#unsubscribe();
 		this.#unsubscribeRunState();
-		this.#unsubscribeIrcWakeHolds();
+		this.#unsubscribeWakeState();
 		this.#bridge.remote.notify("closed", this.#key);
 	}
 
@@ -590,7 +591,6 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 	flushSession: async publisher => settle(publisher, publisher.session.sessionManager.flush()),
 	ensureOnDisk: async publisher => settle(publisher, publisher.session.sessionManager.ensureOnDisk()),
 	getArtifactPath: (publisher, id) => publisher.session.sessionManager.getArtifactPath(id),
-	getArtifactContent: (publisher, id) => publisher.session.sessionManager.getArtifactContent(id),
 	resume: async publisher => settle(publisher, publisher.session.resume()),
 	retry: async publisher => settle(publisher, publisher.session.retry()),
 	abortRetry: publisher => {

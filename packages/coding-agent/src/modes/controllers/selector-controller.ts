@@ -455,7 +455,17 @@ export class SelectorController {
 					usageModelSelectors,
 					unavailableAccounts,
 				),
-			loadActivity: loadDailyActivity,
+			// A rejection leaves the dashboard up with "History unavailable" in place of the heatmap.
+			loadActivity: async (push, signal) => {
+				try {
+					await loadDailyActivity(push, signal);
+				} catch (error) {
+					logger.warn("Usage activity history unavailable", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+					throw error;
+				}
+			},
 			refresh: () => this.ctx.session.fetchUsageReports(),
 			requestRender: () => this.ctx.ui.requestRender(),
 			onClose: done,
@@ -896,8 +906,9 @@ export class SelectorController {
 				quickRoles: quickRoleCycle?.models,
 				quickRoleOrder,
 				currentQuickRole: quickRoleCycle?.models[quickRoleCycle.currentIndex]?.role,
-				// What #applySessionModel applies without a slider level; the slider clamps it per model.
-				thinkingLevelFor: () => viewed.configuredThinkingLevel(),
+				// The level the session runs at, auto's resolved effort once a turn settles it (as the
+				// status line shows); an untouched slider still carries the selection, auto included.
+				thinkingLevelFor: () => viewed.autoResolvedThinkingLevel() ?? viewed.configuredThinkingLevel(),
 			},
 		);
 		this.#mountMenu(menu, picker, () => {
@@ -1907,6 +1918,7 @@ export class SelectorController {
 					this.ctx.sessionManager.getSessionDir(),
 					undefined,
 					cfgSessionWorktreeScope.get(this.ctx.settings),
+					this.ctx.settings,
 				),
 				loadPinnedSessionIds(),
 			]);
@@ -2143,7 +2155,8 @@ export class SelectorController {
 		const cwd = sessionManager.getCwd();
 		const sessionDir = sessionManager.getSessionDir();
 		const info = await readSessionInfo(sessionPath);
-		if (!info || !(await SessionManager.isStrandedIn(info, cwd, sessionDir))) return { sessionPath };
+		if (!info || !(await SessionManager.isStrandedIn(info, cwd, sessionDir, this.ctx.settings)))
+			return { sessionPath };
 		try {
 			const relocated = await SessionManager.openRelocated(sessionPath, info.cwd, cwd, sessionDir);
 			const movedPath = relocated.getSessionFile() ?? sessionPath;

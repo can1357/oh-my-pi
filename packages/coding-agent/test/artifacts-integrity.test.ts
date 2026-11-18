@@ -21,12 +21,10 @@ describe("ArtifactManager write integrity", () => {
 	});
 
 	it("rejects a short write instead of publishing an unreadable artifact id", async () => {
-		const manager = new ArtifactManager(freshDir());
+		const manager = new ArtifactManager(freshDir(), null);
 		vi.spyOn(Bun, "write").mockResolvedValue(1);
 
-		await expect(manager.save("complete report", "task")).rejects.toThrow(
-			"Artifact write incomplete: wrote 1 of 15 bytes",
-		);
+		await expect(manager.save("complete report")).rejects.toThrow("Artifact write incomplete: wrote 1 of 15 bytes");
 	});
 
 	it("preserves the write failure when staging cleanup also fails", async () => {
@@ -61,7 +59,7 @@ describe("ArtifactManager write integrity", () => {
 		await expect(writeArtifact(destination, "full report body")).rejects.toThrow("Artifact write incomplete");
 
 		// Neither the destination nor a leftover staging file survives, so
-		// agent:// / artifact:// scans cannot resolve a truncated artifact.
+		// agent:// scans and local:// spill reads cannot resolve a truncated artifact.
 		expect(await fs.promises.readdir(dir)).toEqual([]);
 	});
 

@@ -401,12 +401,8 @@ async fn grep_async(
 			..Default::default()
 		},
 		sink,
-		..omp_xfs::grep::GrepOptions::compile(
-			request.pattern,
-			request.ignore_case,
-			request.multiline,
-		)
-		.map_err(Error::from_reason)?
+		..omp_xfs::grep::GrepOptions::compile(request.pattern, request.ignore_case, request.multiline)
+			.map_err(Error::from_reason)?
 	};
 	let search = omp_xfs::grep::grep(&fs, &root, opts);
 	let result = match batches {

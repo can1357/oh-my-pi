@@ -922,7 +922,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	#outputManager(): AgentOutputManager {
 		let manager = this.session.agentOutputManager;
 		if (!manager) {
-			manager = new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
+			manager = new AgentOutputManager(this.session.getArtifactsDir ?? (() => null), {
+				settings: this.session.settings,
+			});
 			this.session.agentOutputManager = manager;
 		}
 		return manager;

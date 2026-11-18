@@ -51,8 +51,8 @@ pub struct MinimizerOutput {
 	pub filter:        &'static str,
 	/// Original (un-minimized) capture, surfaced only when the filter
 	/// actually rewrote the output. The caller (JS session layer) is expected
-	/// to persist this via its session-scoped `ArtifactManager` and splice an
-	/// `artifact://<id>` reference into [`text`](Self::text) before
+	/// to persist this as a session spill and splice the spill's URL (which
+	/// only the JS layer formats) into [`text`](Self::text) before
 	/// presenting it to the agent. The minimizer itself does not hold onto
 	/// the original past this struct.
 	pub original_text: Option<String>,
@@ -90,8 +90,8 @@ impl MinimizerOutput {
 	}
 
 	/// Record the original capture buffer on this output so the caller can
-	/// persist it as a session artifact and surface an `artifact://<id>`
-	/// reference in [`text`](Self::text). No-op on passthrough outputs.
+	/// persist it as a session spill and surface the spill's URL in
+	/// [`text`](Self::text). No-op on passthrough outputs.
 	#[must_use]
 	pub fn with_original(mut self, original: impl Into<String>) -> Self {
 		if self.changed {

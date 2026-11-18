@@ -79,8 +79,8 @@ import {
 	createSessionWorktree,
 	defaultSessionWorktreeBranch,
 	formatSessionWorktreeSummary,
-	type SessionWorktree,
 } from "../../session/session-worktree";
+import type { SessionWorktree } from "../../worktree/backend";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
 import {
 	codexUsagePlan,
@@ -1743,7 +1743,8 @@ export class CommandController {
 	}
 
 	/**
-	 * `/wt [<branch>]` — fork the checkout into a new linked git worktree on
+	 * `/wt [<branch>]` — fork the checkout into a new worktree (an ovnfs
+	 * checkout when ovnfs is found, else a linked git worktree) on
 	 * `branch` (default `wt/<timestamp>`), carrying uncommitted changes along
 	 * unless `keepChanges` is false, then relocate the session there like `/move`.
 	 * Returns the worktree only when the session now lives in it.

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `prompt-cache-prewarm` compat axis, read through `isPromptCachePrewarmSupported`: the first-party Anthropic endpoint accepts a `max_tokens: 0` prompt-cache pre-warm
+
 ### Fixed
 
 - Hosted jev (TypeSafe, OpenRouter, Command Code, OpenCode Zen) splits judgment requests at 32 questions, ending `400 questions must map 1 through 32 ids` find failures

@@ -469,13 +469,18 @@ describe("notify delivery", () => {
 			stopped: false,
 		});
 		const exited = active.queueLaunchCompletion({
-			event: "daemon-completed",
+			ev: "completed",
 			completionId: "web-exit",
 			owner,
-			daemon: {
-				name: "web",
+			unit: {
 				id: "web-1",
+				kind: "proc",
+				scope: { kind: "session", id: owner },
+				key: "web",
+				label: "web",
+				generation: "1",
 				state: "failed",
+				pids: [],
 				exitCode: 1,
 				createdAt: 1,
 				startedAt: 1,
@@ -483,8 +488,9 @@ describe("notify delivery", () => {
 				restartCount: 0,
 				outputBytes: 0,
 				owner,
-				persist: false,
-				detached: false,
+				leases: 0,
+				policy: { hold: "leases", idleMs: 0, onIdle: "stop", restart: "no", survive: "none" },
+				supervised: true,
 			},
 		});
 		await exited;

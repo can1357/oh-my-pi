@@ -308,7 +308,7 @@ pub fn compact_listing(input: &str, max_lines: usize) -> String {
 /// distinguish minimizer truncation from genuine `…` in the source data
 /// (see issue #1046), and gives a concrete count so the agent can decide
 /// whether the missing tail is recoverable inline or needs the
-/// `artifact://<id>` footer surfaced by the bash wrapper.
+/// `[raw output: …]` spill footer surfaced by the bash wrapper.
 ///
 /// `max_chars == 0` is treated as "drop the line"; no marker is emitted in
 /// that case since the caller asked for an empty result.

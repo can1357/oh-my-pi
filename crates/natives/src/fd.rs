@@ -370,9 +370,7 @@ async fn fuzzy_find_async(
 	let entries =
 		omp_xfs::walk::collect(&omp_xfs::Fs::new(fs, &root), &root, &opts, false, |_, entry| {
 			match entry.file_type {
-				omp_xfs::FileType::File | omp_xfs::FileType::Dir => {
-					omp_xfs::walk::Action::Continue
-				},
+				omp_xfs::FileType::File | omp_xfs::FileType::Dir => omp_xfs::walk::Action::Continue,
 				omp_xfs::FileType::Symlink => omp_xfs::walk::Action::Skip,
 			}
 		})

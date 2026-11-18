@@ -2147,11 +2147,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (queryParts) return this.#readDelimitedParts(queryParts, signal, toolContext);
 		// Filesystem-backed reads choose JSON versus image questions after resolving
 		// the literal file and sniffing its content, not from its final extension.
-		// A `local://`/`artifact://` URL is resolved by its handler first, so a question
+		// A `local://` URL is resolved by its handler first, so a question
 		// on a media target (`:img`, an image, video or PDF page) is peeled here as before.
 		const scheme = extractUriScheme(readPath);
 		const imageQuestion =
-			!scheme || ((scheme === "local" || scheme === "artifact") && !isMediaQuestionTarget(readPath))
+			!scheme || (scheme === "local" && !isMediaQuestionTarget(readPath))
 				? { path: readPath }
 				: splitImageQuestionTarget(readPath);
 		readPath = imageQuestion.path;
@@ -2393,12 +2393,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			if (sqlitePath) {
 				return readSqlite(sqlitePath, signal);
 			}
-			// local:// and artifact:// locate backing files without their URL query;
+			// local:// locates backing files without its URL query;
 			// restore it only for JSON reads, leaving other schemes' query semantics alone.
 			const jsonQuery = located?.url.indexOf("?") ?? -1;
 			const jsonScheme = jsonQuery >= 0 && located ? extractUriScheme(located.url) : null;
 			const jsonReadPath =
-				located && (jsonScheme === "local" || jsonScheme === "artifact")
+				located && jsonScheme === "local"
 					? `${literalSplit.path}${located.url.slice(jsonQuery)}`
 					: literalSplit.path;
 			const jsonPath =
@@ -2947,12 +2947,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					// spill also stop at the spill threshold: past it the page would be middle-elided
 					// into an artifact, while stopping here pages at a line boundary with an exact
 					// `:N` continuation. Row prefixes (`N|`/`N:`) count against that threshold, so
-					// their worst-case width is reserved (at most half the threshold). Artifact-storage
-					// pages never spill, so they keep the full budget.
+					// their worst-case width is reserved (at most half the threshold). Pages of a scheme
+					// whose files never spill (`unspilledPages`) keep the full budget.
 					const budgetFor = (firstLine: number, lineCount: number): number => {
 						if (wholeFileShaping) return MAX_SUMMARY_BYTES;
 						const scaled = Math.max(DEFAULT_MAX_BYTES, lineCount * 512);
-						if (located?.spec.artifactStore) return scaled;
+						if (located?.spec.unspilledPages) return scaled;
 						const threshold = resolveArtifactSpillThreshold(this.session.settings);
 						const prefixWidth =
 							!rawSelector && displayMode.lineNumbers ? String(firstLine + lineCount).length + 1 : 0;
@@ -3426,9 +3426,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						Buffer.byteLength(outputText, "utf-8") <= resolveInlineByteCapBudget(this.session.settings);
 				}
 			}
-			// A page of artifact storage is re-readable with selectors: spilling it would only
-			// duplicate it into another artifact. Every other unpaged located read spills like a plain file.
-			if (located?.spec.artifactStore) pagedSource = true;
+			// A page of `unspilledPages` storage is re-readable with selectors: spilling it would only
+			// duplicate it into another spill. Every other unpaged located read spills like a plain file.
+			if (located?.spec.unspilledPages) pagedSource = true;
 			// Immutable sources have no write path, so the hint never lands in a written-back file.
 			if (located && immutable && !isRawSelector(parsed) && fileSize > MAX_URL_RAW_INLINE_BYTES) {
 				const firstText = content.find((c): c is TextContent => c.type === "text");
@@ -3463,7 +3463,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 		if (columnCut) {
 			// A `:raw:N-N` read gets the budget of a one-line raw page; a cut line past it comes back byte-capped.
-			const rawLineBudget = located?.spec.artifactStore
+			const rawLineBudget = located?.spec.unspilledPages
 				? DEFAULT_MAX_BYTES
 				: Math.min(DEFAULT_MAX_BYTES, resolveArtifactSpillThreshold(this.session.settings));
 			resultBuilder.limits({
