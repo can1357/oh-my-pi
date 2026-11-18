@@ -5,6 +5,7 @@
 ### Added
 
 - Claude usage reports now carry the account's subscription plan (`Max 5x`, `Max 20x`, `Pro`, `Team`, `Enterprise`) in `metadata.subscriptionPlan`, read from the OAuth profile on every fetch, so an auth broker serves it to its clients with the rest of the report. Added `usageSubscriptionPlan` and `claudeProfilePlan`
+- Added `ImageContent.source` (`kitty` or `sixel`), naming the terminal graphics protocol an image decoded from subprocess output came from ([#15327](https://github.com/can1357/oh-my-pi/pull/15327) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.22.2] - 2026-11-18
 

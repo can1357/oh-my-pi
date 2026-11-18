@@ -36,6 +36,16 @@ type EncodedImage =
 	| { kind: "sixel"; bytes: Uint8Array };
 
 /**
+ * Which terminal graphics protocol produced a decoded image. A PTY command
+ * can emit both raw SIXEL frames (rendered verbatim through passthrough)
+ * and Kitty frames (consumed by the replay terminal): the display layer
+ * suppresses only the decoded copies of frames it already rendered raw.
+ */
+export type TerminalImageSource = FrameKind;
+
+/** A decoded terminal image with the protocol its frame arrived in. */
+export type TerminalImage = ImageContent & { source: TerminalImageSource };
+/**
  * Incrementally removes terminal image control strings from subprocess output
  * and retains their images independently of the text sink's truncation policy.
  * Feed raw output here before ANSI sanitization or OutputSink buffering.
@@ -49,7 +59,7 @@ export class TerminalGraphicsDecoder {
 	#kittyTransfer?: KittyTransfer;
 	#encodedImages: EncodedImage[] = [];
 	#queuedBytes = 0;
-	#decodedImages: ImageContent[] = [];
+	#decodedImages: TerminalImage[] = [];
 	#decodedImageBytes = 0;
 	#decodedCount = 0;
 	#decodeChain: Promise<void> = Promise.resolve();
@@ -129,7 +139,7 @@ export class TerminalGraphicsDecoder {
 	}
 
 	/** Decode every completed image in stream order. Invalid frames are omitted. */
-	images(): Promise<ImageContent[]> {
+	images(): Promise<TerminalImage[]> {
 		const through = this.#encodedImages.length;
 		const run = this.#decodeChain.then(() => this.#decodeThrough(through));
 		this.#decodeChain = run;
@@ -314,7 +324,7 @@ export class TerminalGraphicsDecoder {
 				const bytes = Buffer.from(image.data, "base64").length;
 				if (bytes > MAX_IMAGE_INPUT_BYTES || this.#decodedImageBytes + bytes > MAX_TOTAL_IMAGE_BYTES) continue;
 				this.#decodedImageBytes += bytes;
-				this.#decodedImages.push(image);
+				this.#decodedImages.push({ ...image, source: encoded.kind });
 			} catch {
 				// Graphics in command output is untrusted. A bad frame is omitted while
 				// surrounding text and later valid frames remain usable.

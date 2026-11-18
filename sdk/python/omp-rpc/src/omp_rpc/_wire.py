@@ -230,6 +230,7 @@ class ImageContent(TypedDict):
     detail: NotRequired[Literal["auto", "low", "high", "original"]]
     url: NotRequired[str]
     providerFile: NotRequired[JsonObject]
+    source: NotRequired[Literal["kitty", "sixel"]]
 
 
 class ToolCall(TypedDict):
