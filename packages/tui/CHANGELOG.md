@@ -5,7 +5,7 @@
 ### Fixed
 
 - In Tern, typing `->` or `=>` in the composer no longer moves the caret to a new line; the queued message continues on the same line
-
+- Fixed long tool-approval prompts in Tern growing past the window and pushing the choices and Approve/Deny buttons off screen; the details now scroll within a few rows, as in the terminal view ([#19617](https://github.com/can1357/oh-my-pi/pull/19617) by [@c-w-z](https://github.com/c-w-z))
 
 ## [18.22.2] - 2026-11-18
 
