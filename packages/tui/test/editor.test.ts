@@ -410,26 +410,48 @@ describe("Editor component", () => {
 			// Re-seeding here would both drop the draft and re-hit storage on every keypress.
 			expect(loads).toBe(1);
 		});
+		it("hands Up on the first line to the host when it takes it (an ask above), else recalls history", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.addToHistory("earlier prompt");
+			let askWaits = true;
+			const taken: string[] = [];
+			editor.onUpFromTop = () => {
+				if (askWaits) taken.push(editor.getText());
+				return askWaits;
+			};
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("");
+			editor.setText("draft\nsecond line");
+			editor.handleInput("\x1b[A"); // second line → first line: the cursor moves
+			editor.handleInput("\x1b[A"); // on the first line: out to the ask
+			expect(taken).toEqual(["", "draft\nsecond line"]);
+
+			askWaits = false;
+			editor.setText("");
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("earlier prompt");
+		});
 
 		it("cycles through history entries on repeated Up arrow", () => {
-			const editor = new Editor(defaultEditorTheme);
+		const editor = new Editor(defaultEditorTheme);
 
-			editor.addToHistory("first");
-			editor.addToHistory("second");
-			editor.addToHistory("third");
+		editor.addToHistory("first");
+		editor.addToHistory("second");
+		editor.addToHistory("third");
 
-			editor.handleInput("\x1b[A"); // Up - shows "third"
-			expect(editor.getText()).toBe("third");
+		editor.handleInput("\x1b[A"); // Up - shows "third"
+		expect(editor.getText()).toBe("third");
 
-			editor.handleInput("\x1b[A"); // Up - shows "second"
-			expect(editor.getText()).toBe("second");
+		editor.handleInput("\x1b[A"); // Up - shows "second"
+		expect(editor.getText()).toBe("second");
 
-			editor.handleInput("\x1b[A"); // Up - shows "first"
-			expect(editor.getText()).toBe("first");
+		editor.handleInput("\x1b[A"); // Up - shows "first"
+		expect(editor.getText()).toBe("first");
 
-			editor.handleInput("\x1b[A"); // Up - stays at "first" (oldest)
-			expect(editor.getText()).toBe("first");
-		});
+		editor.handleInput("\x1b[A"); // Up - stays at "first" (oldest)
+		expect(editor.getText()).toBe("first");
+	});
 
 		it("navigates forward through history with Down arrow", () => {
 			const editor = new Editor(defaultEditorTheme);

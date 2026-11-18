@@ -20,7 +20,7 @@
    - `packages/coding-agent/src/registry/agent-registry.ts` — process-global agent directory (`running | idle | parked | aborted`).
    - `packages/coding-agent/src/async/job-manager.ts` — background job registration, progress, and result delivery.
    - `packages/coding-agent/src/task/parallel.ts` — `Semaphore` used for the session-scoped concurrency bound.
-   - `@oh-my-pi/pi-natives` (`crates/pi-iso`) — isolation PAL: `isoResolve` / `isoStart` / `isoStop` backend resolution and fallback.
+   - `@oh-my-pi/pi-natives` (`crates/iso`) — isolation PAL: `isoResolve` / `isoStart` / `isoStop` backend resolution and fallback.
    - `packages/coding-agent/src/task/worktree.ts` — isolation backend mapping (`parseIsolationBackend`) and lifecycle (`ensureIsolation`/`cleanupIsolation`), patch capture, branch merge.
    - `packages/coding-agent/src/task/output-manager.ts` — session-scoped `agent://` id allocation.
    - `packages/coding-agent/src/task/name-generator.ts` — default AdjectiveNoun agent ids.
@@ -174,7 +174,7 @@ Artifacts and side channels:
    - Child sessions may use whichever networked tools/models their active tool set permits.
    - MCP proxy tools reuse parent connections and their configured transport deadlines, including `OMP_MCP_TIMEOUT_MS` overrides and `timeout: 0`; no separate subagent deadline caps a tool call.
 - Subprocesses / native bindings
-   - Isolation backends run through the `pi-natives` PAL (`crates/pi-iso`): kernel `overlay` with `fuse-overlayfs`/`fusermount[3]` fallback on Linux, APFS/Btrfs/ZFS/reflink clones, ProjFS on Windows, recursive copy as last resort.
+   - Isolation backends run through the `omp-natives` PAL (`crates/iso`): kernel `overlay` with `fuse-overlayfs`/`fusermount[3]` fallback on Linux, APFS/Btrfs/ZFS/reflink clones, ProjFS on Windows, recursive copy as last resort.
    - Git operations for baseline capture, patch apply, worktrees, branches, stash, cherry-pick, commits.
 - Session state (transcript, memory, jobs, checkpoints, registries)
    - Creates child `AgentSession` instances with isolated settings snapshots; finished sessions stay registered in the process-global `AgentRegistry` as `idle`/`parked` until process teardown or explicit release.

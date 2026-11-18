@@ -278,8 +278,6 @@ export interface AgentViewSession extends AgentSessionHandle {
 	readonly compactionSpeculation: "idle" | "running" | "armed";
 	/** Bumped whenever context usage changes. */
 	readonly contextUsageRevision: number;
-	/** Whether a handoff is being generated. */
-	readonly isGeneratingHandoff: boolean;
 	/** Whether a retry is pending. */
 	readonly isRetrying: boolean;
 	/** Current retry attempt (0 when not retrying). */
@@ -306,8 +304,6 @@ export interface AgentViewSession extends AgentSessionHandle {
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist?: boolean): void;
 	/** Advance to the next thinking level. */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined;
-	/** Thinking level a temporary switch to `model` would use. */
-	resolveTemporaryModelThinkingLevel(model: Model): ConfiguredThinkingLevel | undefined;
 	/** Switch model without persisting it as the default. */
 	setModelTemporary(
 		model: Model,
@@ -373,8 +369,6 @@ export interface AgentViewSession extends AgentSessionHandle {
 	abortRetry(): void;
 	/** Cancel an in-progress compaction. */
 	abortCompaction(reason?: unknown): void;
-	/** Cancel an in-progress handoff. */
-	abortHandoff(): void;
 	/** Run a side turn (e.g. /btw) against the session's model without touching its transcript. */
 	runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult>;
 	/** Whether an ephemeral turn's `maxTokens` reaches the provider unchanged. */

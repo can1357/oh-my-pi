@@ -222,6 +222,11 @@ export type TspPreview = { lines: number } | "auto";
 export interface TspColProps {
 	gap?: TspSpace;
 	align?: "start" | "center" | "end" | "stretch";
+	/**
+	 * On a dock composer's container: fold it to its compact row now, as an unfocused pane's composer folds,
+	 * while the keys are elsewhere in the document (a question above it).
+	 */
+	folded?: boolean;
 }
 export interface TspRowProps {
 	gap?: TspSpace;

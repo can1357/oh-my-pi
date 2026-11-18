@@ -225,6 +225,7 @@ async function makeHarness(opts?: { readOnly?: boolean; rejectWith?: unknown }):
 		loadingAnimation: undefined,
 		statusLine: {
 			setCollabStatus: () => {},
+			setAwaitingAnswer: () => {},
 			invalidate: () => {},
 			resetActiveTime: () => {},
 			markActivityStart: () => {},
@@ -491,6 +492,7 @@ function makeHostContext(): InteractiveModeContext {
 		eventBus: undefined,
 		statusLine: {
 			setCollabStatus: () => {},
+			setAwaitingAnswer: () => {},
 			invalidate: () => {},
 			getCachedContextBreakdown: () => ({ usedTokens: 0, contextWindow: 0 }),
 		},
@@ -813,14 +815,15 @@ describe("guest ask unavailable literal answer (#4375)", () => {
  *  Reuses makeHostContext for the CollabHost-facing members. */
 function makeAskHostContext(): InteractiveModeContext {
 	const base = makeHostContext();
-	// Stub only the surface the local ask-dialog mount path calls: container
-	// clear/addChild, ui focus/render, and editor (dispose path). The real
+	// Stub only the surface the local ask-dialog mount path calls: the ask's and
+	// composer's containers, ui focus/render, the composer's border, and editor. The real
 	// InteractiveModeContext has many more members; the double-cast below is
 	// the established test pattern in this file (see makeHostContext) for a
 	// complex interface that is only partially exercised.
 	const stub = {
 		...base,
 		editorContainer: { clear: () => {}, addChild: () => {} },
+		askContainer: { addChild: () => {}, removeChild: () => {} },
 		editor: { getText: () => "", setText: () => {} },
 		closeLinkBrowser: () => {},
 		ui: {

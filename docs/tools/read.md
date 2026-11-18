@@ -15,7 +15,7 @@
    - `packages/coding-agent/src/tools/sqlite-reader.ts` — detect SQLite targets, parse selectors, render tables.
    - `packages/coding-agent/src/tools/fetch.ts` — URL parsing, fetch/render pipeline, URL cache/artifacts.
    - `packages/coding-agent/src/internal-urls/router.ts` — built-in internal-resource registry, including `ssh://` and `xd://`; MCP may advertise additional schemes.
-   - `crates/pi-natives/src/edit.rs` (`notebook_to_editable_text`, exposed as `notebookToEditableText`) — convert `.ipynb` to editable cell text.
+   - `crates/natives/src/edit.rs` (`notebook_to_editable_text`, exposed as `notebookToEditableText`) — convert `.ipynb` to editable cell text.
    - `packages/coding-agent/src/utils/cpuprofile.ts` / `sample-profile.ts` — summarize recognized profiler reports.
    - `packages/coding-agent/src/utils/file-display-mode.ts` — decide hashline vs line-number vs raw display.
    - `packages/coding-agent/src/workspace-tree.ts` — render directory trees.

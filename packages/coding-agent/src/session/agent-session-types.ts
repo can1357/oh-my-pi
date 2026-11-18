@@ -566,18 +566,6 @@ export interface SendUserMessageOptions {
 	attribution?: MessageAttribution;
 }
 
-/** Result from a handoff operation. */
-export interface HandoffResult {
-	document: string;
-	savedPath?: string;
-}
-
-/** Options controlling handoff generation. */
-export interface SessionHandoffOptions {
-	autoTriggered?: boolean;
-	signal?: AbortSignal;
-}
-
 /** Result from cycleModel(). */
 export interface ModelCycleResult {
 	model: Model;

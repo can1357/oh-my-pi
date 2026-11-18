@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- SDK: use `session.compact(focus, { mode: "handoff" })` instead of `session.handoff(focus)`, and cancel it with `abortCompaction()`.
+
 ### Added
 
 - Added `history.scope` (`session` | `cwd` | `repo` | `global`, default `global`) to scope what the `Up` arrow recalls to a conversation, a folder or a repository, and `history.searchScope` (default `global`) for what `Ctrl+R` opens on, with `Tab`/`Shift+Tab` changing scope inside the history panel ([#4331](https://github.com/can1357/oh-my-pi/issues/4331); [#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
@@ -37,7 +41,12 @@
 
 ### Added
 
+- `omp usage` and `/usage` show each Claude account's subscription plan (e.g. `Max 20x`) beside its organization
 - Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
+
+### Changed
+
+- Switching models keeps your thinking level, moving it only as far as the new model's effort ladder requires; a model's own default level now applies only when no level is set, and picking a model no longer borrows the level of a role that names it (quick-role picks still apply their role's level)
 
 ### Fixed
 
@@ -63,7 +72,8 @@
 
 ### Changed
 
-- In Tern, a question from the `ask` tool shows inline at the end of the conversation with every question in one scrolling card instead of over the composer one tab at a time: the question you're on is open, the others fold to their answer or a few option pills you can click. The composer stays below it; a message you send from there skips the questions, and the model gets whatever you answered before it
+- `/handoff` now runs as `/compact handoff` in the background, keeping the current response and any new messages.
+- The `ask` tool's questions show in one scrolling list instead of one tab or page at a time: the question you're on is open and the others fold to your answer or a few options. The list sits above the composer, which stays (faint in the terminal, showing the questions' keys, and folded in Tern, where the list is a card at the end of the conversation whose options you can click): a draft you were typing keeps the keys, and Esc, Shift+Tab or Tab past Submit moves between the two, as ↑ on the composer's first line does (Esc in the composer stops the turn as before). While the questions wait, the status line shows a question mark instead of the spinner. Sending a message instead of answering skips the questions, and the model now gets whatever you answered before it. In the terminal the pending ask no longer adds a transcript entry repeating the form
 - Subagent completion probes ask for the task's progress by its deliverables instead of the agent's own current step, and side requests to Claude (probes, `/btw`) no longer copy thinking that is still streaming into their history as plain text
 - Composer predictions (`composer.predictions`) are on by default: after each completed turn the active model suggests your next message as ghost text in the empty composer (one extra billed request per turn, counted in /stats); turn it off in `/settings` → Interaction → "Composer Predictions"
 - Tool-call intent tracing is off by default in print (`-p`), RPC, ACP, and SDK sessions; set `tools.intentTracing: true` or `PI_INTENT_TRACING=1` to turn it on there

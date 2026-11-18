@@ -560,8 +560,7 @@ export class InputController {
 
 			// Side-channel panels own Esc for cancellation or closing before
 			// loop mode, maintenance, or the underlying main turn.
-			// Active context maintenance owns Esc: auto/manual compaction,
-			// handoff generation, and auto-retry backoff all advertise
+			// Active context maintenance owns Esc: compaction and retry backoff advertise
 			// "(esc to cancel)". Dispatch on live session state instead of
 			// swapping onEscape handlers — interleaved start/end events used
 			// to clobber the single saved-handler slot (auto-compaction start
@@ -573,8 +572,7 @@ export class InputController {
 			// accidentally killing a focused subagent's compaction on the way out
 			// was #2819. The auto-maintenance loaders relabel their hint to match
 			// (see EventController). Main-session maintenance still owns Esc and
-			// stays cancellable from the main view (focused submit gates /compact
-			// and handoff, so manual maintenance is main-only anyway).
+			// stays cancellable from the main view (manual compaction is main-only).
 			if (this.ctx.hasActiveBtw() && this.ctx.handleBtwEscape()) {
 				return;
 			}
@@ -591,12 +589,8 @@ export class InputController {
 			if (!this.ctx.focusedAgentId) {
 				const viewSession = this.ctx.viewSession;
 				let aborted = false;
-				if (viewSession.isCompacting) {
+				if (viewSession.isCompacting || this.ctx.session.isBackgroundCompacting) {
 					safeAbort("compaction", () => viewSession.abortCompaction());
-					aborted = true;
-				}
-				if (viewSession.isGeneratingHandoff) {
-					safeAbort("handoff", () => viewSession.abortHandoff());
 					aborted = true;
 				}
 				if (viewSession.isRetrying) {
@@ -724,8 +718,8 @@ export class InputController {
 		this.ctx.editor.onSuspend = () => this.handleCtrlZ();
 		this.ctx.editor.setActionKeys("app.thinking.cycle", this.ctx.keybindings.getKeys("app.thinking.cycle"));
 		this.ctx.editor.onCycleThinkingLevel = () => {
-			// Shift+Tab, Tab's way back: from the composer to the ask waiting above it (Tern).
-			if (this.ctx.focusInlineAsk()) return;
+			// Shift+Tab, Tab's way back: from the composer to the ask waiting above it.
+			if (this.ctx.focusAsk()) return;
 			hintUsage.record("effort");
 			this.cycleThinkingLevel();
 		};
@@ -1940,8 +1934,8 @@ export class InputController {
 			// children that must survive the suspend (Linux/other POSIX MCP stdio
 			// servers via the platform-specific `detached: true` spawn in
 			// `mcp/transports/stdio.ts`, every external the embedded bash engine
-			// runs via `Sessions::Detach` in `crates/pi-shell/src/host.rs`, which
-			// `setsid`s the child in `crates/pi-shell/src/sys/spawn/unix.rs`) are
+			// runs via `Sessions::Detach` in `crates/shell/src/host.rs`, which
+			// `setsid`s the child in `crates/shell/src/sys/spawn/unix.rs`) are
 			// their own sessions, so pgid=0 does not reach them.
 			process.kill(0, "SIGSTOP");
 		} catch (err) {

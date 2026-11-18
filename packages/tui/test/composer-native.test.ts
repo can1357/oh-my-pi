@@ -116,6 +116,32 @@ describe("native composer", () => {
 		expect(editor.onEscape).toHaveBeenCalledTimes(1);
 	});
 
+	it("folds while an ask above holds the keys, and marks a draft that would skip it", () => {
+		let ask: ComposerNativeState["ask"] = "pending";
+		const editor = new CustomEditor(getEditorTheme());
+		editor.composerState = () => ({ running: true, ask });
+		editor.onSubmit = vi.fn();
+
+		const away = editor.describe(cx);
+		expect(away.p).toMatchObject({ folded: true });
+		expect(nodes(away).find(n => n.k === "editor")?.p).toMatchObject({
+			placeholder: "Answer above, or type here to skip the questions",
+		});
+		expect(byRole(away, "omp.composer.stop")).toBeDefined();
+
+		editor.focused = true;
+		expect(editor.describe(cx).p).not.toHaveProperty("folded");
+
+		ask = "skip";
+		editor.setText("drop them instead");
+		const skipping = editor.describe(cx);
+		expect(nodes(byRole(skipping, "omp.composer.mode")!).some(n => n.k === "text")).toBe(true);
+		expect(byRole(skipping, "omp.composer.stop")).toBeUndefined();
+		expect(byRole(skipping, "omp.composer.skip")?.p).toMatchObject({ actions: { click: "submit" } });
+		editor.handleNativeEvent({ type: "action", key: "bar/skip", act: "submit", mods: [] });
+		expect(editor.onSubmit).toHaveBeenCalledWith("drop them instead");
+	});
+
 	it("routes a picked thinking level (`thinking.set` with the level as value)", () => {
 		const editor = new CustomEditor(getEditorTheme());
 		editor.composerState = () => ({ running: false, thinking: "high" });

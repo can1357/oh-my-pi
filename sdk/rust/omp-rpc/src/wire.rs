@@ -3843,7 +3843,7 @@ pub struct AutoCompactionEndEvent {
 	pub skipped: Option<bool>,
 }
 
-/// A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted.
+/// A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ManualCompactionStartEvent {
 	/// The `/compact <mode>` subcommand, when one was given.
@@ -4019,7 +4019,7 @@ pub enum RpcAgentEvent {
 	ToolExecutionEnd(ToolExecutionEndEvent),
 	AutoCompactionStart(AutoCompactionStartEvent),
 	AutoCompactionEnd(AutoCompactionEndEvent),
-	/// A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted.
+	/// A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle.
 	ManualCompactionStart(ManualCompactionStartEvent),
 	/// Outcome of the compaction announced by the matching `manual_compaction_start`.
 	ManualCompactionEnd(ManualCompactionEndEvent),

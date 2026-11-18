@@ -15,7 +15,7 @@ import { BracketedPasteHandler, decodeReencodedPasteControls } from "../brackete
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
 import { extractPrintableText, matchesKey, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
-import type { TspEditorDecoration, TspEditorProps, TspMark, TspText, TspTone } from "@oh-my-pi/pi-wire";
+import type { TspEditorDecoration, TspEditorProps, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { col, node } from "../native/describe";
 import { sameItems, sameProps } from "../native/memo";
 import { plainText } from "../native/spans";
@@ -78,8 +78,8 @@ export interface NativeEditorLayout {
 	readonly role: string;
 	/** Tone of the root (`pending` while a turn runs). */
 	readonly tone?: TspTone;
-	/** Mark of the root: `drop` dims a composer the keys are away from (an ask waits above it). */
-	readonly mark?: TspMark;
+	/** Folds the root to its compact row while the keys are elsewhere in the document (an ask above it). */
+	readonly folded?: boolean;
 	readonly children: readonly NativeChild[];
 	/** Keypath of the `editor` node inside the root (the autocomplete's caret anchor). */
 	readonly caret: string;
@@ -818,7 +818,7 @@ export class Editor implements Component, Focusable {
 	#nativeRoot?: {
 		role: string;
 		tone: TspTone | undefined;
-		mark: TspMark | undefined;
+		folded: boolean | undefined;
 		children: readonly NativeChild[];
 		node: NativeNode;
 	};
@@ -955,6 +955,11 @@ export class Editor implements Component, Focusable {
 	 */
 	#pinnedUndo: UndoMark | null = null;
 
+	/**
+	 * ↑ on the first line, not browsing history: true when the host took the keys (to an ask waiting above
+	 * the composer); false lets ↑ recall history or move the cursor as usual.
+	 */
+	onUpFromTop?: () => boolean;
 	onSubmit?: (text: string) => void | Promise<void>;
 	onAltEnter?: (text: string) => void;
 	onChange?: (text: string) => void;
@@ -2109,7 +2114,7 @@ export class Editor implements Component, Focusable {
 			root &&
 			root.role === layout.role &&
 			root.tone === layout.tone &&
-			root.mark === layout.mark &&
+			root.folded === layout.folded &&
 			sameItems(root.children, children)
 		) {
 			return root.node;
@@ -2117,9 +2122,9 @@ export class Editor implements Component, Focusable {
 		const described = col(children, {
 			role: layout.role,
 			...(layout.tone ? { tone: layout.tone } : {}),
-			...(layout.mark ? { mark: layout.mark } : {}),
+			...(layout.folded ? { folded: true } : {}),
 		});
-		this.#nativeRoot = { role: layout.role, tone: layout.tone, mark: layout.mark, children, node: described };
+		this.#nativeRoot = { role: layout.role, tone: layout.tone, folded: layout.folded, children, node: described };
 		return described;
 	}
 
@@ -2629,8 +2634,10 @@ export class Editor implements Component, Focusable {
 		}
 		// Arrow keys
 		else if (kb.matchesCanonical(canonical, "tui.editor.cursorUp")) {
-			// Up - history navigation or cursor movement
-			if (this.#isEditorEmpty()) {
+			// Up - out to what waits above (an ask), else history navigation or cursor movement
+			if (this.#historyIndex === -1 && this.#isOnFirstVisualLine() && this.onUpFromTop?.()) {
+				// The host took the keys.
+			} else if (this.#isEditorEmpty()) {
 				this.#navigateHistory(-1); // Start browsing history
 			} else if (this.#historyIndex > -1 && this.#isOnFirstVisualLine()) {
 				this.#navigateHistory(-1); // Navigate to older history entry

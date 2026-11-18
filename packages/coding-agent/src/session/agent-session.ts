@@ -330,7 +330,6 @@ import type {
 	EphemeralTurnResult,
 	FollowUpOptions,
 	FreshSessionResult,
-	HandoffResult,
 	ModelCycleResult,
 	Prewalk,
 	PromptOptions,
@@ -340,7 +339,6 @@ import type {
 	RoleModelCycle,
 	RoleModelCycleResult,
 	SendUserMessageOptions,
-	SessionHandoffOptions,
 	SessionOAuthAccountList,
 	SessionStats,
 	SteerOptions,
@@ -3049,7 +3047,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			isDisposed: () => this.#isDisposed,
 			modelFallbackDisabled: () => this.#disableModelFallback,
 			isStreaming: () => this.isStreaming,
-			isGeneratingHandoff: () => this.isGeneratingHandoff,
+			isSessionTransitioning: () => this.isSessionTransitioning,
+			waitForIdle: () => this.waitForIdle(),
 			promptGeneration: () => this.#promptGeneration,
 			sessionId: () => this.sessionId,
 			messages: () => this.messages,
@@ -3163,7 +3162,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				await this.#models.setModelTemporary(model, thinkingLevel, options, "automatic");
 			},
 			abort: options => this.abort(options),
-			abortHandoff: () => this.abortHandoff(),
 		};
 		this.#maintenance = new SessionMaintenance(maintenanceHost);
 		this.addDisposer(
@@ -3194,15 +3192,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			modelRegistry: this.#modelRegistry,
 			sideStreamFn: this.#sideStreamFn,
 			obfuscator: () => this.#obfuscator,
-			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
 			sessionId: () => this.sessionId,
 			getPromptCacheKeyForModel: model => this.getPromptCacheKeyForModel(model),
 			baseSystemPrompt: () => this.#tools.baseSystemPrompt,
-			setSkipPostTurnMaintenance: timestamp => {
-				this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = timestamp;
-				if (timestamp === undefined) this.#skippedPostTurnSpeculationCompletion = undefined;
-			},
 			obfuscateTextForProvider: text => this.#obfuscateTextForProvider(text),
 			deobfuscateFromProvider: text => this.#deobfuscateFromProvider(text),
 			convertMessagesToLlm: (messages, signal, model) => this.convertMessagesToLlm(messages, signal, model),
@@ -5125,9 +5118,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					);
 				}
 				this.#ttsr.onAssistantMessageEnd(assistantMsg);
-				if (this.#handoff.isGeneratingHandoff) {
+				const speculativeHandoff = this.#maintenance.speculationCompletion("handoff");
+				if (speculativeHandoff) {
 					this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = assistantMsg.timestamp;
-					this.#skippedPostTurnSpeculationCompletion = this.#maintenance.speculationCompletion;
+					this.#skippedPostTurnSpeculationCompletion = speculativeHandoff;
 				}
 				await this.#recovery.onAssistantSettledSuccessfully(assistantMsg);
 				// Broker deployments: report this request's burn so the broker can
@@ -5723,13 +5717,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					});
 					await this.agent.waitForIdle();
 					await this.#drainInFlightEventHandlers();
-					if (
-						signal.aborted ||
-						this.#isDisposed ||
-						this.#abortInProgress ||
-						this.isCompacting ||
-						this.isGeneratingHandoff
-					) {
+					if (signal.aborted || this.#isDisposed || this.#abortInProgress || this.isCompacting) {
 						return { status: "skipped", reason: "session-unavailable" };
 					}
 					if (request.options.generation !== undefined && this.#promptGeneration !== request.options.generation) {
@@ -5763,18 +5751,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		this.#schedulePostPromptTask(
 			async signal => {
-				// Defense in depth: if compaction/handoff slipped onto the post-prompt queue
-				// alongside us (e.g. via a scheduler we don't own), refuse to start a fresh
-				// streaming turn — agent.continue() here would race the handoff's session
-				// reset. The first-class fix is in #checkCompaction/the agent_end handler,
-				// but this guard catches anything that bypasses that path.
-				if (
-					signal.aborted ||
-					this.#isDisposed ||
-					this.#abortInProgress ||
-					this.isCompacting ||
-					this.isGeneratingHandoff
-				) {
+				// Foreground compaction may be replacing history or reconnecting persistence.
+				if (signal.aborted || this.#isDisposed || this.#abortInProgress || this.isCompacting) {
 					this.#skipAgentContinue("session-unavailable", request);
 					return;
 				}
@@ -5801,7 +5779,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					// A request made by the active turn's agent_end is its next step,
 					// not a duplicate of that turn. Wait until it settles before starting.
 					await active.promise;
-					if (signal.aborted || this.#isDisposed || this.isCompacting || this.isGeneratingHandoff) {
+					if (signal.aborted || this.#isDisposed || this.isCompacting) {
 						this.#skipAgentContinue("session-unavailable", request);
 						return;
 					}
@@ -8116,9 +8094,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#tools.refreshRpcHostTools(rpcTools);
 	}
 
-	/** Whether compaction or manual handoff is active, for prompt admission and UI queuing. */
+	/** Whether compaction blocks prompt admission and holds new input in the UI. */
 	get isCompacting(): boolean {
 		return this.#maintenance.isCompacting;
+	}
+
+	/** Whether a manual compaction is pending without blocking turns. */
+	get isBackgroundCompacting(): boolean {
+		return this.#maintenance.isBackgroundCompacting;
 	}
 
 	/** Background speculative-compaction state, for UI indicators. */
@@ -8140,7 +8123,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#inLogContext(() => this.#maintenance.compact(customInstructions, options));
 	}
 
-	/** Cancel active manual, automatic, and handoff maintenance, preserving an optional source reason. */
+	/** Cancel active context maintenance, preserving an optional source reason. */
 	abortCompaction(reason?: unknown): void {
 		void this.#maintenance.abortCompaction(reason);
 	}
@@ -8493,7 +8476,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * True while a turn, user bash/eval, compaction, handoff, or retry could still write
+	 * True while a turn, user bash/eval, compaction, or retry could still write
 	 * into the transcript, so a snapshot of it would miss or split that work.
 	 */
 	get isBusyForSnapshot(): boolean {
@@ -8502,7 +8485,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.isBashRunning ||
 			this.isEvalRunning ||
 			this.isCompacting ||
-			this.isGeneratingHandoff ||
+			this.isBackgroundCompacting ||
 			this.isRetrying
 		);
 	}
@@ -8678,14 +8661,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	resolveRoleModelWithThinking(role: string): ResolvedModelRoleValue {
 		return this.#models.resolveRoleModelWithThinking(role);
-	}
-
-	/**
-	 * Resolve the explicit thinking suffix that should apply when a temporary
-	 * picker selects a model already assigned to a configured role.
-	 */
-	resolveTemporaryModelThinkingLevel(model: Model): ConfiguredThinkingLevel | undefined {
-		return this.#models.resolveTemporaryModelThinkingLevel(model);
 	}
 
 	get promptTemplates(): ReadonlyArray<PromptTemplate> {
@@ -9090,10 +9065,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const followUps = this.#createPromptFollowUps(options?.followUps);
 		try {
 			this.#rejectQueuedExtensionCommands(options?.followUps);
-			// Idle compaction rewrites history without owning a prompt. Manual `/compact`
-			// reconnects the agent after preserving queues; `/handoff` commits a new
-			// history. Prompt setup waits for all three, and a prompt parked by a manual
-			// pass supersedes its interrupted-turn resume only if it claims the session.
+			// Blocking compaction rewrites history before the next prompt. A prompt
+			// parked by a manual pass supersedes its interrupted-turn resume only if
+			// it claims the session.
 			// Locally handled commands and failed dispatches release that claim.
 			const release = await this.#maintenance.waitForMaintenanceCleanup();
 			const outcome: PromptDispatchOutcome = { sessionClaimed: false };
@@ -9437,8 +9411,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		try {
 			this.#rejectQueuedExtensionCommands(options?.followUps);
 			// Same barrier/claim protocol as prompt(): skill invocations, collab peer
-			// prompts and the CLI initial message must not start during idle/manual
-			// compaction or before a handoff commits its history.
+			// prompts and the CLI initial message must not start during a blocking compaction.
 			const release = await this.#maintenance.waitForMaintenanceCleanup();
 			const outcome: PromptDispatchOutcome = { sessionClaimed: false };
 			try {
@@ -12649,9 +12622,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// admitted submission unwinds now instead of at the recall timeout (#12668).
 			this.#promptSetupAbortController?.abort(options?.reason);
 			this.#scheduledHiddenNextTurnGeneration = undefined;
-			// Abort the handoff first so generic compaction cancellation cannot replace
-			// the harness reason with an unreasoned "Handoff cancelled".
-			this.#handoff.abortHandoff(new Error(options?.reason ?? "Handoff aborted by session"));
 			let manualCompactionCleanup: Promise<void> | undefined;
 			if (options?.preserveCompaction) {
 				// Manual `/compact` installed its own #compactionAbortController before
@@ -13406,33 +13376,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	abortBranchSummary(): void {
 		this.#branchSummaryAbortController?.abort();
-	}
-
-	/**
-	 * Cancel in-progress handoff generation.
-	 */
-	abortHandoff(): void {
-		this.#handoff.abortHandoff();
-	}
-
-	/**
-	 * Check if handoff generation is in progress.
-	 */
-	get isGeneratingHandoff(): boolean {
-		return this.#handoff.isGeneratingHandoff;
-	}
-
-	/**
-	 * Generate a handoff document with a oneshot LLM call and commit it as a
-	 * compaction entry on the current session (the document becomes the summary;
-	 * recent history is kept).
-	 *
-	 * @param customInstructions Optional focus for the handoff document
-	 * @param options Handoff execution options
-	 * @returns The handoff document text, or undefined if cancelled/failed
-	 */
-	handoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined> {
-		return this.#inLogContext(() => this.#maintenance.handoff(customInstructions, options));
 	}
 
 	#isTerminalYieldToolResult(event: { toolName: string; isError?: boolean; result?: { details?: unknown } }): boolean {

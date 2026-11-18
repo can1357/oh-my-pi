@@ -1696,7 +1696,7 @@ describe("executeBash :async: background retention", () => {
 			if (!sleepBin) throw new Error("sleep executable not found");
 			let pid: number | undefined;
 			try {
-				// pi's `nohup` tool (crates/pi-shell/src/tools/nohup.rs) runs the operand
+				// pi's `nohup` tool (crates/shell/src/tools/nohup.rs) runs the operand
 				// in a detached tree that session cancel and teardown leave running,
 				// independently of the retain map. `$!` names the background job, not
 				// the external that survives — the operand writes its own pid before

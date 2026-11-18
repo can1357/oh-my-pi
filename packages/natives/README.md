@@ -130,7 +130,7 @@ bun run check
 platform-specific optional dependency packages:
 
 ```
-crates/pi-natives/       # Rust source (workspace member)
+crates/natives/       # Rust source (workspace member)
   src/lib.rs             # N-API exports
   src/sixel.rs           # SIXEL terminal-image encoding
   Cargo.toml             # Rust dependencies

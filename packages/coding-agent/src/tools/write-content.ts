@@ -134,7 +134,7 @@ export function stripWriteContent(
  * after a successful edit — the model gets a tag without an extra `read` —
  * but with EMPTY seen-line provenance: the model authored every line, so the
  * tag is unrestricted, and a later partial read of the same content does not
- * narrow it (see `merge_seen` in pi-edit's store).
+ * narrow it (see `merge_seen` in omp-edit's store).
  */
 export function maybeWriteSnapshotHeader(
 	session: ToolSession,

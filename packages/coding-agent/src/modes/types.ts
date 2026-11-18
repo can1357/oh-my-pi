@@ -181,7 +181,7 @@ export interface InteractiveModeContext {
 	chatContainer: TranscriptContainer;
 	/** `!`/`$` runs started while the agent streams, until {@link flushPendingBashComponents} moves them into the transcript. */
 	pendingShellContainer: Container;
-	/** Natively (Tern), the ask waiting for answers, inline at the transcript's end above the composer. */
+	/** The ask waiting for answers above the composer: natively at the transcript's end, in rows just over it. */
 	askContainer: Container;
 	pendingMessagesContainer: Container;
 	statusContainer: Container;
@@ -611,7 +611,6 @@ export interface InteractiveModeContext {
 		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
 		options?: Pick<CompactOptions, "internalGuidance" | "readerModel">,
 	): Promise<CompactionOutcome>;
-	handleHandoffCommand(customInstructions?: string): Promise<void>;
 	handleShakeCommand(mode: ShakeMode): Promise<void>;
 	handleMoveCommand(targetPath?: string): Promise<void>;
 	/** `/wt`: fork the checkout into a new worktree (keeping changes unless `keepChanges` is false) and move there. */
@@ -696,8 +695,8 @@ export interface InteractiveModeContext {
 	handleTanCommand(work: string, images?: ImageContent[]): Promise<boolean>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;
-	/** Natively (Tern), gives the keys to the ask waiting inline above the composer; false when none waits. */
-	focusInlineAsk(): boolean;
+	/** Gives the keys to the ask waiting above the composer; false when none waits. */
+	focusAsk(): boolean;
 	/** The composer talks to a `/btw` note (Tern): plain drafts go to its topic as follow-ups. */
 	readonly isBtwFocused: boolean;
 	/** Sends a draft to the focused `/btw` note's topic; false when no follow-up started. */
