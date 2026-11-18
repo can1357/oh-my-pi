@@ -180,6 +180,22 @@ describe("FileSessionStorage writer", () => {
 		void writer.close();
 	});
 
+	it("lands a fire-and-forget append before a size-checked rewrite in the same turn", () => {
+		const sessionPath = path.join(tempDir, "submit.jsonl");
+		fs.writeFileSync(sessionPath, "header\n");
+		const writer = storage.openWriter(sessionPath);
+		// The session manager counts a line durable once append returns and hands
+		// that size to its next synchronous rewrite (exit flush, recovery) as the
+		// conflict check. A line still in flight then would fail the check, or land
+		// on the inode the rewrite replaced and be lost.
+		void writer.append("prompt\n");
+		storage.writeTextSync(sessionPath, "header\nprompt\nreply\n", {
+			expectedSize: Buffer.byteLength("header\nprompt\n"),
+		});
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("header\nprompt\nreply\n");
+		void writer.close();
+	});
+
 	it("appends without creating or removing a lockfile beside the session", () => {
 		const sessionPath = path.join(tempDir, "no-lockfile.jsonl");
 		const writer = storage.openWriter(sessionPath, { flags: "w" });

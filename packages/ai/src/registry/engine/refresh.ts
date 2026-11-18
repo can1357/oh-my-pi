@@ -6,6 +6,7 @@
 import type { CompiledAuthProvider, CompiledRefresh } from "@oh-my-pi/pi-catalog/compat/types";
 import * as AIError from "../../error";
 import { claudeCodeSdkVersion } from "../../providers/claude-code-fingerprint";
+import type { OAuthRefreshReason } from "../../auth/types";
 import type { OAuthCredentials } from "../oauth/types";
 import {
 	applyAfterExchange,
@@ -20,7 +21,20 @@ import {
 } from "./common";
 
 type RequestRefresh = Extract<CompiledRefresh, { kind: "request" }>;
-type Refresher = (credentials: OAuthCredentials, signal?: AbortSignal) => Promise<OAuthCredentials>;
+type Refresher = (
+	credentials: OAuthCredentials,
+	signal?: AbortSignal,
+	reason?: OAuthRefreshReason,
+) => Promise<OAuthCredentials>;
+
+/**
+ * The `{refresh_reason}` template value, in OpenAI AuthAPI vocabulary (codex-rs
+ * `RefreshReason`, openai/codex#53991): a 401 recovery is `unauthorized_recovery`;
+ * every other refresh here is driven by the access token nearing expiry.
+ */
+function refreshReasonParam(reason: OAuthRefreshReason | undefined): string {
+	return reason === "auth-recovery" ? "unauthorized_recovery" : "proactive_expiry";
+}
 
 async function loginClient(policy: CompiledAuthProvider, signal?: AbortSignal) {
 	const login = policy.login;
@@ -49,7 +63,7 @@ async function loginClient(policy: CompiledAuthProvider, signal?: AbortSignal) {
 
 function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider): Refresher {
 	const provider = policy.id;
-	return async (credentials, signal) => {
+	return async (credentials, signal, reason) => {
 		for (const field of rule.require) {
 			if (!credentials[field as keyof OAuthCredentials]) {
 				throw new AIError.OAuthError(`${provider} credentials are missing ${field}; sign in again`, {
@@ -70,6 +84,7 @@ function createRequestRefresh(rule: RequestRefresh, policy: CompiledAuthProvider
 			base: client.base,
 			auth: client.auth,
 			claude_code_sdk_version: claudeCodeSdkVersion,
+			refresh_reason: refreshReasonParam(reason),
 		};
 		const { body } = await postTokenRequest(
 			rule.token,

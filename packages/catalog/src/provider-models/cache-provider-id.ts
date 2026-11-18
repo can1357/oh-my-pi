@@ -1,8 +1,10 @@
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
-import { CODEX_BASE_URL, CODEX_CLIENT_VERSION } from "../wire/codex";
+import { CODEX_BASE_URL } from "../wire/codex";
+import { getCodexClientVersion } from "../wire/codex-version";
 import { CURSOR_DEFAULT_BASE_URL } from "../wire/cursor";
 import { type AccountScope, factoryDroidModelCacheProviderId } from "../wire/factory-droid";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
+import { decodeKiroCredential, kiroCredentialCacheScope } from "../wire/kiro";
 import { normalizeModalBaseUrl } from "../wire/modal";
 import {
 	SINGULARITYAPI_DEV_API_BASE_URL,
@@ -36,6 +38,10 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	otari: true,
 	// LiteLLM virtual keys have different /v1/models rosters on the same proxy.
 	litellm: true,
+	// Kiro's namespace is scoped per login route (OAuth) or per key and region
+	// (API key), so a synchronous bare-provider read would leak another
+	// credential's catalog or hide the scoped one.
+	kiro: true,
 	// Bifrost virtual keys can restrict the gateway's /v1/models roster per key.
 	bifrost: true,
 	// OpenRouter's keyed roster is the set of models the key's workspace
@@ -123,8 +129,19 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// namespace must follow the endpoint. The official backend keeps the
 			// unhashed namespace so existing caches stay valid.
 			const baseUrl = options.baseUrl?.trim().replace(/\/+$/, "");
-			if (!baseUrl || baseUrl === CODEX_BASE_URL) return `${providerId}:${CODEX_CLIENT_VERSION}`;
-			return `${providerId}:${CODEX_CLIENT_VERSION}:${Bun.hash(baseUrl).toString(36)}`;
+			if (!baseUrl || baseUrl === CODEX_BASE_URL) return `${providerId}:${getCodexClientVersion()}`;
+			return `${providerId}:${getCodexClientVersion()}:${Bun.hash(baseUrl).toString(36)}`;
+		}
+		case "kiro": {
+			// An undecodable credential gets its own namespace, never a shared one.
+			if (!options.apiKey) return providerId;
+			let scope: string;
+			try {
+				scope = kiroCredentialCacheScope(decodeKiroCredential(options.apiKey));
+			} catch {
+				scope = `invalid:${options.apiKey}`;
+			}
+			return `kiro:models-v2:${Bun.hash(scope).toString(36)}`;
 		}
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);

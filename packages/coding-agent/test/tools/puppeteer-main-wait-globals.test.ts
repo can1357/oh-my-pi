@@ -29,7 +29,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("main-world Puppeteer waits", () => {
 			expect(await match?.evaluate(element => element.tagName)).toBe("BUTTON");
 			await match?.dispose();
 		} finally {
-			await closeLaunchedBrowser(browser);
+			await closeLaunchedBrowser({ browser, userDataDir });
 			if (userDataDir) await removeUserDataDir(userDataDir);
 		}
 	});
