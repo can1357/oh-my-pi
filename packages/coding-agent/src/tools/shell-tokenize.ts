@@ -1000,6 +1000,12 @@ export interface ShellCommand {
 	 */
 	shellCwd: string | undefined;
 	/**
+	 * Whether a process wrapper (`sudo`, `env`, `timeout`, `nohup`, ...) runs the command, so a
+	 * directory builtin in it does not move the shell. `command`, `builtin`, `time` and `!` run it
+	 * in the shell and leave this false.
+	 */
+	spawned: boolean;
+	/**
 	 * Commands known to have succeeded by the time this one starts, latest first (see
 	 * {@link SucceededLink}): the last command of each earlier pipeline in its `&&` chain, none once
 	 * an `||` makes them optional.
@@ -1541,6 +1547,12 @@ const SHELL_WRAPPERS: Record<string, readonly string[]> = {
 	unbuffer: [],
 };
 /**
+ * Wrappers that run the command in this shell, so a directory builtin behind them still moves it.
+ * `time` is a reserved word and `!` is skipped before the wrapper loop; every other
+ * {@link SHELL_WRAPPERS} entry starts a process, and a `cd` there never reaches this shell.
+ */
+const SHELL_LEVEL_WRAPPERS: Record<string, true> = { command: true, builtin: true, time: true };
+/**
  * Wrappers that run their command in another directory, with the option that names it: its letter
  * and its long form, which may be abbreviated down to `shortest` (`sudo --ch` is also `--chroot`).
  */
@@ -1560,6 +1572,7 @@ const WRAPPER_ASSIGNMENT_RE = /^[^=-][^=]*=/;
 interface UnwrappedCommand {
 	argv: string[];
 	moved: boolean;
+	spawned: boolean;
 	assignments: string[];
 }
 
@@ -1567,11 +1580,12 @@ interface UnwrappedCommand {
  * The command a wrapper chain runs in `words` (`sudo env X=1 timeout 5 rm ...` runs `rm ...`), after
  * the shell's own assignments (an identifier name only: bash runs `A-B=1 cmd` as a command named
  * `A-B=1`) and a `!`, whether a wrapper's directory option ({@link SHELL_WRAPPER_CHDIRS}) moves it
- * to another directory, and the variable assignments it runs with, the shell's own and those env
- * and sudo set ({@link WRAPPER_ASSIGNMENT_RE}), in order. A long option may be abbreviated, as getopt
- * allows (`--us root`); in a bundle of short options (`-nu root`), the first that takes a value takes
- * the rest of the word, or the next word when it ends the bundle. `undefined` when env runs the
- * command an `env -S` string holds, which the guard does not split.
+ * to another directory, whether a process wrapper ran it ({@link ShellCommand.spawned}), and the
+ * variable assignments it runs with, the shell's own and those env and sudo set
+ * ({@link WRAPPER_ASSIGNMENT_RE}), in order. A long option may be abbreviated, as getopt allows
+ * (`--us root`); in a bundle of short options (`-nu root`), the first that takes a value takes the
+ * rest of the word, or the next word when it ends the bundle. `undefined` when env runs the command
+ * an `env -S` string holds, which the guard does not split.
  */
 function unwrapShellCommand(words: readonly string[]): UnwrappedCommand | undefined {
 	let i = 0;
@@ -1581,6 +1595,7 @@ function unwrapShellCommand(words: readonly string[]): UnwrappedCommand | undefi
 	}
 	let moved = false;
 	let wrapper: string | undefined;
+	let spawned = false;
 	while (i < words.length) {
 		const name = path.posix.basename(words[i]);
 		const valued = Object.hasOwn(SHELL_WRAPPERS, name) ? SHELL_WRAPPERS[name] : undefined;
@@ -1588,6 +1603,7 @@ function unwrapShellCommand(words: readonly string[]): UnwrappedCommand | undefi
 		const chdir = Object.hasOwn(SHELL_WRAPPER_CHDIRS, name) ? SHELL_WRAPPER_CHDIRS[name] : undefined;
 		const assigns = name === "env" || name === "sudo";
 		wrapper = name;
+		spawned ||= !Object.hasOwn(SHELL_LEVEL_WRAPPERS, name);
 		let positional = name === "timeout" ? 1 : 0; // timeout's duration
 		let options = true;
 		for (i++; i < words.length; i++) {
@@ -1626,7 +1642,7 @@ function unwrapShellCommand(words: readonly string[]): UnwrappedCommand | undefi
 	const argv = words.slice(i);
 	// `env` alone prints the environment.
 	if (argv.length === 0 && wrapper !== undefined) argv.push(wrapper);
-	return { argv, moved, assignments };
+	return { argv, moved, spawned, assignments };
 }
 
 /** Directories `pushd` saved, the one `popd` returns to first; what is below them is unknown. */
@@ -1776,6 +1792,7 @@ function shellCommand(
 		fedInput: piped || segment.input,
 		cwd: unwrapped?.moved ? undefined : cwd,
 		shellCwd: cwd,
+		spawned: unwrapped?.spawned === true,
 		succeeded,
 		literalTildes: segment.literalTildes,
 		literalBraces: segment.literalBraces,
@@ -1788,7 +1805,9 @@ function shellCommand(
  * (`$'...'` and `$"..."` included), escapes, comments, `;`/`&&`/`||`/`|` chains (continued on the
  * next line after `|`, `&&` or `||`), redirections, wrappers (`sudo`, `env`, `timeout`, `xargs`,
  * `nohup`, `nice`, ..., with the directory `env -C` or `sudo -D` runs the command in unknown), and
- * `cd`, `cd -`, `pushd` and `popd` between commands. It reads into nothing nested: a compound command
+ * `cd`, `cd -`, `pushd` and `popd` between commands, only when the shell itself runs them (bare, or
+ * behind `command`, `builtin`, `time` or `!`; a `cd` behind `sudo`, `env` or `timeout` does not move
+ * it). It reads into nothing nested: a compound command
  * (`{ }`, `if`, a loop, `case`, `[[ ]]`) or a function definition is a pipeline stage with no
  * command in it, and it stops at the first nested part ({@link nestedAt}: a substitution, any `(`,
  * a heredoc), leaving out the command that part is in, whose words after it are unknown; `bash -c`,
@@ -1842,7 +1861,7 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellLin
 	};
 	const endPipeline = () => {
 		if (stages > 0) pipelines.push(pipeline);
-		if (stages === 1 && last && Object.hasOwn(DIRECTORY_CHANGERS, last.argv[0])) {
+		if (stages === 1 && last && !last.spawned && Object.hasOwn(DIRECTORY_CHANGERS, last.argv[0])) {
 			dirs = changeDirectory(last, dirs, scope.home);
 		} else if (stages === 1 && (changesShell || (last && Object.hasOwn(SHELL_EVALUATORS, last.argv[0])))) {
 			dirs = UNKNOWN_DIRECTORIES;

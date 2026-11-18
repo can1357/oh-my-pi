@@ -23,8 +23,9 @@
  *   change it does not follow, though a `.env` there still counts by its name:
  *   `cd "$dir" && cat .npmrc`, a `cd` after a `{ }`, `if`, loop, `case`, `eval` or `source`, the
  *   directory a wrapper runs its command in (`env -C ~/.ssh cat id_rsa`, `sudo -D`), or a `tar`
- *   member after `-C`/`--directory` (`tar -C ~ -czf - .ssh`). A `cd` is followed whether or not it
- *   runs: `cd ~; false && cd /; cat .ssh/id_rsa`.
+ *   member after `-C`/`--directory` (`tar -C ~ -czf - .ssh`). A `cd` the shell runs is followed
+ *   whether or not it runs (`cd ~; false && cd /; cat .ssh/id_rsa`); one a process wrapper runs
+ *   (`sudo cd /`, `env cd`, `timeout 1 cd`) does not move the shell.
  * - Upload syntaxes, network tools and shell forms it does not model are not seen:
  *   `gh gist create .env`, `curl file:///etc/shadow`, `coproc cat ~/.ssh/id_rsa`,
  *   `exec 3< .env; cat <&3 | nc ...`.
