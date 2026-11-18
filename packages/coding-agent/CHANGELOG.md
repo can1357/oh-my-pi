@@ -328,6 +328,199 @@
 - Fixed MCP OAuth reauthentication errors to expose registration endpoints, status details, and remedies, and fixed auth-broker shutdown so refreshed tokens are saved safely.
 - Fixed Spotlight retry and account handling, including waitlisted accounts, rate limits, outages, and request identification.
 - Fixed cross-platform shell and desktop behavior, including macOS startup and redraw performance, Windows file operations and application lookup, speech output, and desktop opening.
+- Commit drafts no longer show a committed block as deleted in one hunk and re-added in the next (left out vs. selected) when part of the work was committed earlier and the block sits among repeated lines such as `return;` or `}`; committing the preselection duplicated those lines
+- A `reasoning_extraction` refusal that cuts off a turn mid-stream is retried once on the same model instead of failing the turn (subagents died on it and needed a manual resume)
+- `omp --restore` goes on with a turn cut off by SIGTERM or SIGHUP (a terminal such as Tern restarting its panes) instead of leaving it at "Operation aborted"; only its subagents went on before
+- A subagent (or a resumed session) running on auto thinking without a user turn of its own, such as one woken by IRC, shows the level it thinks at in the composer and status line instead of auto as still pending
+- Agent Hub rows of a subagent whose model you switched no longer show a "temporary" role badge, which crowded the model out of narrow rows
+- ← in the model switcher (alt+p, `/switch`) steps the thinking level while viewing a subagent instead of being taken as the ←← gesture back to the main session
+- Closing the model switcher with Esc keeps a thinking level you moved on the current model instead of discarding it
+- The model switcher's thinking slider opens on the level the session (or the viewed subagent) runs at, and re-picking the current model keeps it, instead of swapping in the level its model role assigns
+- Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy
+- Fixed the Spotlight experiment re-asking Stencil Cloud on every tool call for an account without Cloud access (waitlisted): omp now warns once and pauses Spotlight for that account for a few hours, honors `Retry-After` on rate limits and outages, and sends its `omp/<version>` User-Agent on every Spotlight request
+- Subagents whose agent model pattern (e.g. `@smol`) matches no available model now run on the parent's model instead of failing with "No model selected"; when no model resolves at all, the error names the agent and the `modelRoles`/`task.agentModelOverrides` setting to fix
+- `wait` called in the same tool batch as `task`/`bash` now waits on the job that call starts instead of returning "Nothing to wait for"
+- Messages written to a spawned agent that is still queued for a spawn slot or starting are held and delivered when it starts, instead of failing with "Unknown agent"; `proc://` lists such jobs as `queued`
+- `agent://parent` and miscased agent ids (e.g. `agent://main`) now reach the registered agent
+- A task's follow-up hint only offers `write agent://<id>` when the agent can actually be messaged
+- `yield` accepts `type: ["result"]` as the finalize marker, and the yield doc no longer names a literal `"section"` label
+- The spawn tip for a batch of mixed generic workers names each type (`sonic`, `task`) instead of calling them all one type
+- A workpool worker whose background job finishes after it submitted its items is no longer told to resubmit them, nor failed for not doing so
+- `proc://<id>/streams` on a service, an agent, or a job without `|` stages now says so and points at `proc://<id>`
+- Reading `agent://<id>` for a run that published an empty output shows the agent's status and progress instead of a blank result
+- Bare `history://current` (with or without line selectors) reads the session's own full history like `history://current/full` when no agent is named `current`
+- Killing a task job via `proc://<id>/kill` also kills its agent, so it no longer keeps working or restarts on a queued message; killed agents stay registered and resumable by message instead of turning into "Unknown agent"
+- `proc://<id>`, `proc://<id>/kill` and `wait` now say what became of a background job whose row was evicted (when it finished, whether its result was delivered, why it is gone) instead of "not found"
+- Clone-first `git worktree add` no longer copies the destination into itself or drags other worktrees along when the new worktree sits inside the checkout, and leaves untracked `.env` files out of the clone
+- A service with `ready.port` refuses to start when another process already listens on that port instead of reporting ready on the foreign listener
+- `ready.port` without `ready.host` probes both 127.0.0.1 and ::1, so `localhost` dev servers bound only to IPv6 become ready
+- Async bash jobs start from a copy of the session shell, so they see variables and functions earlier calls set
+- Services started from bash inherit the variables (PATH included) the session shell exported
+- A Codex-style `apply_patch <<'EOF' … EOF` bash call applies the patch through the apply_patch tool instead of failing with "command not found"
+- An async result follow-up links the raw output of minimized commands instead of re-saving the summarized text as "Full output"
+- A service start that times out at the broker reports the service's state instead of a bare "request timed out"
+- After the host slept, a running bash command is no longer reported timed out with "shell backend did not respond" well before its deadline
+- `sha256sum -c` and the other checksum checks hash files byte for byte, so CRLF files no longer FAIL on Windows
+- Builtins given an option they lack (`ps --forest`, `tar --hard-dereference`, …) run the host program of that name when PATH has one
+- Builtins on Windows can open process-substitution paths (`diff <(a) <(b)`)
+- `compgen` is available in the bash tool's shell
+- `tab.screenshot()` no longer hangs to the 20 s op timeout when the page's renderer stops drawing frames; it captures from the view after 1.5 s or fails within 5 s with a named error
+- Clicks whose handlers re-render or replace the element, change the DOM, submit a form or navigate are no longer reported as "not delivered"; an unconfirmed click now says to check the page before clicking again
+- `fill` inserts the whole value in one input instead of typing key by key, so newlines no longer press Enter, controlled inputs are replaced rather than appended to, and long text no longer times out
+- `tab.id(n).click()` and `tab.ref(...)` methods work inside `tab.run` without an extra `await`
+- `ariaSnapshot({compact: true})` (and Python keyword calls) treat a leading options object as options; a non-string selector error names options objects and points to `wait(ms)` in `tab.run`
+- URL waits and request filters treat a `*` at either end as spanning `/`, so `*title=X*` matches a full URL
+- `tab.requests()` redacts Cookie, Set-Cookie, Authorization and Proxy-Authorization header values (`tab.request(id)` keeps them); `browser.tabs()`/`browser.targets()` no longer print page URLs into cell output
+- RegExps and functions nested inside helper option objects (`requests({filter: /x/})`) reach the tab intact
+- `observe({selector})` lists the interactive elements under a plain div or section root instead of returning nothing or "Accessibility snapshot unavailable"; `p-button`-style custom element selectors are accepted
+- `uploadFile(selector, [paths])` accepts an array, and `scroll`/`wheel` accept `{x, y}` and reject non-numeric deltas
+- `frame.screenshot()` without a selector captures the whole frame; `frame.ariaSnapshot({...})` takes options first
+- `setDialogs` rejects policies other than "accept", "dismiss" or null instead of silently dismissing, and a dialog already answered by a raw Puppeteer handler no longer errors
+- `tab.route()` rejects unknown option keys such as `{action: "abort"}`, which previously registered a route that let every request through
+- `focus()` works on focusable SVG elements
+- `waitFor*` helpers without `{timeout}` wait up to the Eval cell's timeout, as documented (a selector matching nothing still fails fast)
+- `role/button[name="Save exact"]` is read as an exact-name match, like `[name="Save" exact]`
+- `browser.open({wait_until: "networkidle"})` is accepted and waits for network idle
+- `tab.press(selector, key)` and `frame.press(selector, key)` press the key on that element instead of throwing
+- Uploading a folder to a `webkitdirectory` input in a background tab omp opened brings that tab to the front so Chrome expands the folder
+- A new tab name on a CDP endpoint (`app` URL or `browser.cdpUrl`) opens its own page instead of adopting (and navigating) one already open there, so two names no longer drive the same page; `target` still borrows a page, and borrowing a page another tab already drives is refused
+- An endpoint with no pages yet no longer fails the open with "No page targets available"
+- A tab whose page connection went stale ("Attempted to use detached Frame", "Session closed") reattaches to the same page on a new worker and runs the call, instead of failing every call until closed; `browser.tabs()` drops tabs whose page closed outside omp
+- Reopening a managed Chromium tab without `headed` keeps it in the mode it opened in instead of failing as "bound to a different browser"
+- `browser.targets()` lists the pages of a CDP endpoint instead of refusing it
+- "Shared browser daemon unavailable" now says why (Chrome exited with its code and last output, never printed a DevTools endpoint, the profile was held by another omp, the broker refused) and where Chrome's log is
+- `viewport` on `open` and `tab.emulate()` honors Puppeteer's `deviceScaleFactor`, `isMobile` and `hasTouch` on Chromium (an `open` that would get WebKit opens Chromium), and `tab.emulate()` accepts `reducedMotion: "reduce" | "no-preference"` and `media: "screen" | "print"`; unknown emulate keys now throw instead of being ignored
+- The object `app` form of older releases (`{tern: false}`, `{relay: true, target}`, `{cdp_url}`, `{path, args}`) is read as the equivalent string `app`
+- `insecure` opens that would land on omp's WebKit browser (which always checks certificates) open managed Chromium instead, and a WebKit engine without TLS support falls back to Chromium for the open
+- An open whose automatic cmux split fails goes on to omp's own browser instead of failing
+- An open result names a Tern picture-in-picture that Tern sized smaller than the requested viewport
+- `clipboardCopy`/`clipboardPaste` work through the relay, and a paste after a shim-only `clipboardWrite` inserts that text
+- Relay `traceStart`/`profileStart` fail at once naming the missing Chrome debugger domain
+- Concurrent `tab.run`/helper calls on several WebKit, Tern or cmux tabs (Promise.all, parallel subagents) take turns instead of failing with "another same-realm JS runtime is running", and a run that never settles no longer blocks every other tab until restart
+- Windows app lookup and launch skip a Start-menu shortcut whose target cannot be read (drive not ready, inaccessible WindowsApps alias) instead of failing
+- A window screenshot taken while the window resizes captures it again instead of failing with InvalidCoordinateFrame
+- MacOS background typing sends line breaks and tabs as Return and Tab instead of a literal "a" in apps that read key codes
+- JavaScript `commit` drafts accept the positional arguments Python takes (`commit.draft("ParserFix")`, `d.only("a", "b")`, `d.take(path, "2a", "3")`, `d.commit(subject, ["- body"], { fixes })`) instead of throwing or dropping them; `print(d)` shows the summary
+- Python `commit` `only()`/`take()`/`drop()` accept a list of globs or units as well as separate arguments
+- `commit(..., amend=True)` reports the amended commit's real parent, all paths it changes, and the commit it replaced, instead of the replaced HEAD as parent
+- `d.show()` lists every file the draft summary puts under Review (e.g. binary files edited in scope) instead of "Nothing is partially selected or needs review"
+- Commit drafts compare and commit worktree content in its git form (`core.autocrlf`, `.gitattributes` `text`/`eol`, clean filters such as Git LFS), so CRLF checkouts no longer show whole-file rewrites or commit CRLF/smudged content
+- A commit draft in a session without a change journal (`--no-session`, in-memory) says nothing can be attributed instead of silently listing every change as not yours
+- A hashline body row that repeats a neighbouring line which another hunk in the same patch deletes (an `.await`, a closer) is kept instead of dropped
+- A hashline replacement that starts on the empty row after a trailing newline (`PUT 29.=29:` on a 28-line file) is rejected as out of range instead of appending its body
+- The post-edit syntax warning reports tree-sitter's error line, fires only when the error touches the edited lines, and no longer claims the edit was applied exactly as written
+- Hashline rows shaped like a mistyped op (`PUT 789*=821:`) or a tagged file header are rejected instead of being written into the file
+- A hashline section may `CUT` lines into a register before `REM`, so code can be moved out of a file that the same patch deletes
+- Hashline edits no longer apply to a file that only matches the tag by content (a sibling checkout or copied file under a relative header); the edit is rejected and names the file the tag was issued for
+- A partial read of a file you wrote no longer marks the rest of it as unseen for hashline edits
+- Lines shown through @file mentions count as displayed for hashline edits
+- Lines displayed before a file's snapshot was evicted from the session store count as displayed again when the same content is re-read
+- Files between 4 MiB and 64 MiB now get a `[PATH#TAG]` header from read/grep and can be edited with hashline
+- `MV` reports the absolute destination when a file moves out of its directory
+- The generated-file guard no longer blocks hand-written `*.mock.ts`/`*.mocks.js` files and PocketBase `*.pb.js` hooks without a generated marker
+- `write` keeps numbered content (TSV index columns, numbered notes) instead of stripping it as copied read prefixes unless the content carries a `[path#TAG]` header or repeats the file's displayed lines
+- An edit or write routed through an ACP editor that never reaches disk now fails instead of reporting success
+- `ast_edit` reports overlapping replacements at preview time and never applies some targets before another fails
+- `ast_edit`/`ast_grep` results for explicit file paths no longer show doubled paths like `session.html/session.html`
+- `ast_grep`/`ast_edit` with `lang` on a directory search only that language's files instead of parsing every file as it
+- The device-only `write` description no longer claims agent:// messages and proc:// kills are rejected
+- A lone carriage return (progress-bar logs) is no longer a line break for read and edit, so their line numbers match grep and editors and edits keep those characters
+- Python eval now prefers `python3` over `python` and rejects interpreters older than 3.9, naming the rejected version instead of failing in the runner
+- Python eval kernels run in UTF-8 mode (`PYTHONUTF8=1`), so `subprocess.run(..., text=True)` on Windows no longer returns `stdout=None` for UTF-8 output
+- Eval kernels replaced after a session switch or owner release now emit the kernel-loss notice instead of silently dropping state (Python and JS)
+- `%bun add` restarts a retained JS worker so the new package is importable in the next cell; imports of packages installed after the worker first looked now explain the stale resolver and suggest `reset`
+- Nested `tool.*` calls (bash, edit, write, …) from eval no longer count against the cell timeout and kill the JS VM; MCP calls stay bounded by the cell
+- `tool.edit(patchString)` and other FREEFORM tools accept their raw text from eval (JS and Python)
+- Python bridge helpers (`sh`, `read`, `tool.*`) work from `ThreadPoolExecutor` threads; calls after their cell ended get a clear error
+- Python `write()` routes `agent://`, `out://`, `ssh://` and other root-less schemes through the write tool (JS too) and no longer converts LF to CRLF on Windows
+- Messages whose images were dropped by the provider image budget now say how many images were omitted
+- The JS eval worker starts from a bundled `dist/cli.js` when the CLI was not the process entry (npm/nvm shims)
+- `%pip` explains how to get pip when the interpreter has neither ensurepip nor `uv`
+- Python cells keep running with a warning when the session cwd was moved or deleted
+- Eval `sh()` builtins resolve internal URLs (`cat local://x.md`, `artifact://N`) like the bash tool
+- Python prelude helpers no longer break when cell code rebinds `asyncio` or `inspect`
+- MCP timeout errors name the per-server `timeout` setting and `OMP_MCP_TIMEOUT_MS`
+- "MCP server not connected" errors include the last connect error and whether a reconnect is scheduled or suspended
+- MCP calls that fail on an expired HTTP session (`-32001 Unknown or expired session`) reconnect and retry once
+- `xd://report_issue` accepts JSON bodies (`{"tool": …, "description": …}`) instead of recording `{"tool"` as the tool name
+- `archive.sessions()`, `archive.projects()` and `archive.session()` report each session's full message count instead of a count from the first 4 KB
+- A broker-shared language server that dies now reports its real exit code and stderr (e.g. rustup's "Unknown binary 'rust-analyzer'") instead of "exited unexpectedly (code 0)"
+- `lsp status` reports a rustup proxy whose toolchain lacks the component as unusable, with rustup's message
+- Lsp position actions go to a server that advertises the method (e.g. pyright over ruff), and a file whose servers lack it gets "No configured language server for .py supports references" instead of "-32601 Unknown request"; workspace symbol search skips servers without workspace/symbol
+- Language servers whose root marker sits in a subdirectory of the session cwd (monorepo packages) now serve files under it, and "no language server" answers say which server is missing a binary or a root marker
+- Clangd handles .hh, .inl, .ipp, .tpp, .cppm and .ixx files
+- The lsp project-load wait ends after progress has been quiet briefly, not at the first gap between indexing phases; results note when the server is still indexing
+- Lsp `rename_file` keeps a bare `new_name` next to the source, syncs open documents before asking servers, and says when no server rewrote imports
+- Lsp `symbols` with a `file` filters by `query`; a `symbol` without `line` uses its first (or #Nth) occurrence in the file
+- Lsp diagnostics say "no issues from X" while another server is still pending, accept `;`-separated paths, and no longer crash with `e.status` outside the TUI
+- Lsp `code_actions` with `apply: true` and no `query` applies the only or preferred action, and a failing `codeAction/resolve` is reported instead of "no workspace edit"
+- Lsp results for a file in another checkout note when the server cannot load that checkout
+- Debug attach picks the adapter from the target (node → js-debug, python → debugpy; a port serving a V8 inspector → js-debug), a closing adapter's stderr is reported instead of "transport ended", and gdb's "notStopped" pause refusal is explained
+- Minimized `grep`/`rg` output now comes back verbatim when it is under 16 KB, all in one file, uses context (`-A`/`-B`/`-C`) or an explicit format (`--json`, `--vimgrep`, `-c`, `-l`, `-o`), or has lines that are not `file:line:text` matches, so context rows, timestamps and `::` paths are no longer read as file names
+- `ls -l`/`-la`/`--format=long` listings under 16 KB keep their metadata columns instead of being replaced by a names-only summary
+- The `git commit` summary takes its hash and file/insertion counts only from git's own commit and diffstat lines, not from hook output such as lint-staged `[STARTED]` or a formatter's "7 files left unchanged"
+- The `cargo test` summary reports the summed suite time instead of the last suite's, skips nested `cargo test` runs printed by tests, and counts `generated N warning(s) (run cargo fix …)` rollups
+- `aws` output requested with `--output` or `--query` is returned as-is instead of being reshaped into a table
+- `git status --short`, `git diff --stat` and `git diff --name-only/--name-status/--numstat` output under 16 KB is returned as-is; larger listings no longer count git `warning:` lines as files, and a failing `git diff --stat` keeps its error text
+- Minimized `git status` counts `AA`/`DD` as conflicts and keeps type-change (`T`) entries
+- Binaries whose names end in `_test`/`-tests` but print no GoogleTest banners are no longer summarized as "gtest: ok"
+- Custom Gradle tasks whose names contain "dependencies" are no longer summarized as "ok ✓ no dependencies"
+- Lint summaries keep tsc diagnostics in paths that contain parentheses, stop counting build-log rows (Vite asset sizes, `@scope/pkg check:` prefixes) as diagnostics, and group eslint stylish output from `npm`/`pnpm`/`yarn`/`bun` lint scripts
+- Todo `done`/`drop`/`rm` given `items` act on those tasks, and with no task, items or phase they fail instead of completing or deleting every task
+- The todo summary's "Active phase" is the phase holding the in-progress task
+- `ask` accepts a bare HTML string or the older `questions` list (rebuilt as a form) instead of failing
+- An `ask` form that times out with a required field still empty returns no answer instead of submitting empty values
+- Writing to `xd://propose` while plan mode is active no longer fails with "No plan is awaiting approval" when the host installed no proposal handler
+- `generate_image` fails when the provider returns no image, and returns images at the requested `image_size`
+- Github `pr_push` with `pr` pushes the branch `pr_checkout` created for that PR instead of the current branch
+- `pr://`/`issue://` and github view reads of an open issue or PR revalidate after 15 s instead of serving the cached state for the full soft TTL, so merges and closes show up
+- `:raw` line ranges keep their last line's terminator, so consecutive raw ranges (and comma-list raw windows) concatenate byte-for-byte to the source
+- Comma lists with `:raw` on each range (`file:1-32:raw,48-50:raw`) read as one raw list instead of splitting into separate paths
+- Eval `tool.<name>()` calls return the tool's whole result: no artifact spill, middle-elision marker or display notice inside the text (truncation stays structured in `details.meta`), so large MCP/xd JSON results parse
+- Eval `read()` of protocol paths (agent://, skill://, artifact:// selectors, …) returns the raw content whole, without row prefixes, page footers, 300-line pages or 50 KB line cuts; `read()` of a directory returns its listing instead of failing
+- A `;` list whose parts carry their own `?q=` filter (`a.json?q=.x;b.json?q=.y`) reads each file with its filter instead of failing with a jq syntax error
+- SQLite files without a `.db`/`.sqlite` name (`state.vscdb`, Chrome `History`) are recognized by their header for table listings, `:table` and `?q=` queries
+- Archive member reads route ZIP-container documents (`report.docx:word/document.xml`), return image members as images, and no longer treat a text `.lib` file as an `ar` archive
+- Archive listings past 500 entries name a `:N-` continuation instead of a nonexistent `limit=` parameter
+- Video reads find ffmpeg/ffprobe in Homebrew and WinGet bin dirs when they are missing from PATH, and a `:0` frame selector reaches the video reader
+- A URL whose trailing `:N` belongs to the URL (`…/A8:A1:59`, `?pid=diva2:2075459`) is read whole when the selector reading fails or starts past the end
+- Reading a web page renders the page itself; its RSS/Atom alternate is used only when the page renders to nothing, and comment and site-wide feeds are never taken for it
+- Terraform Registry provider doc URLs (`/providers/<ns>/<type>/<version>/docs/<category>/<slug>`) return that doc instead of the provider overview, honouring the version
+- Semantic Scholar API URLs and paper URLs without an id are read as fetched instead of failing with "Failed to extract paper ID"; pkg.go.dev standard-library packages are labelled module `std`; pub.dev package subpages (changelog, versions…) render as pages
+- GitHub issue and pull-request list URLs honour their `q` filter (state, labels, `sort:`) and `page`, and tree URLs say why GitHub could not list a directory, resolve branch names containing `/`, and show the file a tree URL names
+- `xd://eval/<topic>` reads in a session without the eval tool (reviewer subagents, nested reads) instead of failing with "has no doc topics"
+- `?q=<jq filter>` on an http(s) URL runs the filter over the JSON response instead of sending it to the server; a `q` that is no jq filter still goes to the server
+- `https://…/archive.zip:path/in/archive` reads that member (or lists that directory) of the downloaded archive instead of fetching the literal URL
+- A URL document whose download or conversion fails says why in the `[Binary content…]` notice itself, and binary downloads retry with other user agents when a site refuses one
+- `ssh://` directory reads work on hosts whose login shell is fish or csh
+- `ssh://` and other provider I/O failures keep the provider's message instead of a bare "Input/output error"
+- `find` turns itself off for the session (tool and its hints in grep/glob/bash/system prompt) once the native judges reject the account (401/402/403) or region (451); later calls fail fast with "find is disabled for this session: judge <route> rejected the account (402). Use grep." instead of paying 20–30 failing judge requests
+- Judge account (401/402/403) and region (451) rejections now last for the session instead of a 5-minute cooldown, and every judge-gated feature skips a rejected native judge
+- `find` hitting its 20 s deadline before verifying anything returns the unranked literal keyword matches instead of an error
+- `find` names http(s) URLs and `;` path lists as unsupported instead of "Path not found", and says when a scope has no eligible files
+- `web_search` enforces `site:`, `inurl:` and exclusion directives instead of relaxing them into off-site results; a search with no in-scope result returns an empty result, and off-scope citations are dropped
+- `web_search` skips an engine that answered HTTP 429 for 5 minutes instead of waiting on the rate limit every call, and labels a hosted model's answer as a synthesized answer
+- `grep` on a URL works in sessions without a session file, and reports a failed (404/blocked) fetch instead of "No matches found"
+- `grep` on `skill://` follows linked skill files and directories, as `read` does (needs rebuilt natives)
+- `grep` with no matches says when gitignored files under the scope would match
+- `grep` searches notebooks' cell text, with line numbers and edit anchors matching `read`
+- `glob` takes a `pattern` argument as the glob scoped under `path` instead of dropping it, rejects other unknown arguments, and bounds `limit` (1–200) in its schema
+- `glob` lists `.git` entries when the pattern names `.git`, descends nested `node_modules` under a `node_modules` base, and lists each missing path when none exist
+- `pty: true` commands, named services, and client-terminal commands now receive the real files behind internal URLs (`node local://f.mjs`, `cat local://x`, `< local://in`, `> local://log`, `--env-file=local://a.env`, `"$(cat local://prompt.txt)"`), the same as ordinary bash calls
+- External programs resolve internal URLs in more argument forms: `@local://body.json` (curl), `-F body=@local://b.md` (gh), `-olocal://out`, and environment values (`ENV_FILE=skill://x/.env cmd`, `env KEY=local://x cmd`, exported variables)
+- An internal-URL-looking argument that cannot be resolved (`bm read memory://notes/x`, `log.sh 'agent://A; artifact://12'`, prose that starts with a URL) reaches the program as written instead of failing the command with "cannot resolve … for an external command"
+- `omp` commands run from bash (`omp read 'skill://name:1-20'`, also behind `nice`/`npx`/`sudo`) receive their URL arguments untouched
+- Bash builtins now accept internal URIs that carry a read selector, as `read` does: `jq . artifact://12:raw` opens the artifact itself and `jq . artifact://12:raw:21-21`, `head local://log.txt:-50` or `cat agent://Id:5-9` read exactly those lines (they failed with "Invalid argument" or "Input/output error")
+- `jq: command not found` (and other in-process utilities missing) in named services and `pty: true` commands
+- `bash local://run.sh` and `sh skill://name/scripts/x.sh` run the script (with `$0` its real path, so it finds the files next to it) instead of failing with "No such file or directory"
+- `kill`, `timeout` and a cancelled command reach a child shell's `trap` handlers (and bash's `EXIT` trap) when the shell runs in the background, in a pipeline or under `timeout`
+
+### Removed
+
+- Hashline no longer re-indents replacement bodies that omit their base indent
+### Changed
+
+- Isolated the `antigravity-cli` ACP workspace directory by default and added `providers.antigravity-cli.isolateWorkspace` (`PI_AGY_ISOLATE_WORKSPACE`) to opt out when debugging native `agy` workspace behavior ([#19328](https://github.com/can1357/oh-my-pi/pull/19328) by [@0xprincess](https://github.com/0xprincess))
 
 ## [18.22.2] - 2026-11-18
 
@@ -570,9 +763,6 @@
 - Fixed Tern and WebKit browser calls that incorrectly exposed unsupported page event-listener APIs; errors now identify the supported alternatives.
 - Fixed browser timeout and busy-page errors to include the current URL, affected tab, and actionable recovery guidance.
 - Fixed Mnemopi embedding failures being silently downgraded to keyword search; provider errors now produce a warning, including in print mode on stderr.
-### Changed
-
-- Isolated the `antigravity-cli` ACP workspace directory by default and added `providers.antigravity-cli.isolateWorkspace` (`PI_AGY_ISOLATE_WORKSPACE`) to opt out when debugging native `agy` workspace behavior ([#19328](https://github.com/can1357/oh-my-pi/pull/19328) by [@0xprincess](https://github.com/0xprincess))
 
 ## [18.20.2] - 2026-11-14
 
