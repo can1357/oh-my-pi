@@ -77,10 +77,12 @@ describe("StreamEndpointer segmentation", () => {
 		expect(segments[0]!.length).toBeGreaterThanOrEqual(speech.length);
 	});
 
-	it("discards an isolated click after a pause", () => {
-		// A key click is one loud frame; the pre-roll before it is not speech.
-		const segments = segmentsOf(concat(roomNoise(40), framesAt([0.3]), roomNoise(30)));
-		expect(segments).toHaveLength(0);
+	it("ignores an isolated click after a pause, without a preview", () => {
+		// A key click is one loud frame; the pre-roll before it is not speech. A preview of it would
+		// be decoded (often as "Yeah.") and stay on screen, since no segment ever replaces it.
+		const endpointer = new StreamEndpointer();
+		const events = [...endpointer.push(concat(roomNoise(40), framesAt([0.3]), roomNoise(30))), ...endpointer.flush()];
+		expect(events).toHaveLength(0);
 	});
 
 	it("discards a click that is still open when the stream ends", () => {

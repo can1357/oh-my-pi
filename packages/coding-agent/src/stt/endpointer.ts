@@ -225,11 +225,8 @@ export class StreamEndpointer {
 			this.#segmentMs += (this.#leftoverLen / this.#cfg.sampleRate) * 1000;
 		}
 		this.#leftoverLen = 0;
-		if (this.#inSpeech) {
-			const speechMs = this.#segmentMs - this.#leadMs - this.#silenceMs;
-			if (speechMs >= this.#cfg.minSpeechMs) {
-				events.push({ kind: "segment", audio: this.#segment.take(this.#endpointKeep()) });
-			}
+		if (this.#inSpeech && this.#speechMs() >= this.#cfg.minSpeechMs) {
+			events.push({ kind: "segment", audio: this.#segment.take(this.#endpointKeep()) });
 		}
 		this.#reset();
 		return events;
@@ -279,7 +276,14 @@ export class StreamEndpointer {
 			this.#partialDirty = false;
 			return;
 		}
-		if (this.partialsEnabled && this.#partialDirty && this.#msSincePartial >= this.#cfg.partialIntervalMs) {
+		// Preview only a run long enough to commit. Speech time never shrinks within a segment, so
+		// a previewed segment always commits and replaces its preview; a click never shows one.
+		if (
+			this.partialsEnabled &&
+			this.#partialDirty &&
+			this.#msSincePartial >= this.#cfg.partialIntervalMs &&
+			this.#speechMs() >= this.#cfg.minSpeechMs
+		) {
 			events.push({ kind: "partial", audio: this.#segment.take() });
 			this.#msSincePartial = 0;
 			this.#partialDirty = false;
@@ -300,8 +304,7 @@ export class StreamEndpointer {
 	}
 
 	#finalizeSegment(events: EndpointerEvent[]): void {
-		const speechMs = this.#segmentMs - this.#leadMs - this.#silenceMs;
-		if (speechMs >= this.#cfg.minSpeechMs) {
+		if (this.#speechMs() >= this.#cfg.minSpeechMs) {
 			events.push({ kind: "segment", audio: this.#segment.take(this.#endpointKeep()) });
 		}
 		this.#inSpeech = false;
@@ -311,6 +314,11 @@ export class StreamEndpointer {
 		this.#leadMs = 0;
 		this.#msSincePartial = 0;
 		this.#partialDirty = false;
+	}
+
+	/** Onset frame through the last voiced frame: excludes the pre-roll and trailing silence. */
+	#speechMs(): number {
+		return this.#segmentMs - this.#leadMs - this.#silenceMs;
 	}
 
 	/** Samples to keep when committing on silence: drop most of the trailing
