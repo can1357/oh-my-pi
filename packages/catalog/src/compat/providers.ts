@@ -7,7 +7,7 @@
  */
 import rules from "./rules.json";
 import type { Api, ModelSpec } from "../types";
-import type { CompiledProvider } from "./types";
+import type { CompiledProvider, CompiledSeedBackendRefusal } from "./types";
 
 const EMPTY: readonly ModelSpec<Api>[] = [];
 
@@ -29,4 +29,14 @@ export function seedModels<TApi extends Api = Api>(provider: string): readonly M
 	// Compile-time validated JSON; the only untyped edge is `thinking`/`compat`
 	// arriving as resolved-key records rather than the spec interfaces.
 	return (rules.providers[provider]?.seed?.models ?? EMPTY) as unknown as readonly ModelSpec<TApi>[];
+}
+
+/**
+ * Backends that cannot load one authored seed row, with the reviewed reason
+ * (`unsupported` nodes in `providers/<id>.kdl`). Empty for rows every backend
+ * can serve, and for ids the provider does not author.
+ */
+export function seedBackendRefusals(provider: string, modelId: string): readonly CompiledSeedBackendRefusal[] {
+	const row = rules.providers[provider]?.seed?.models.find(model => model.id === modelId);
+	return row?.unsupportedBackends ?? [];
 }

@@ -74,6 +74,7 @@ provider "local" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits
 			supports-tools #false
+			unsupported "onnx" reason="onnxruntime-node does not support Qwen3 RotaryEmbedding cache updates in onnx-community/Qwen3-1.7B-ONNX"
 		}
 		model "llama3.2:3b" name="Llama 3.2 3B" {
 			reasoning #false
@@ -102,6 +103,14 @@ provider "local" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits
 			supports-tools #false
+		}
+		model "lfm3-1.7b" name="LFM3 1.7B" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+			unsupported "mlx" reason="mlx-lm has no lfm3 architecture, so LiquidAI/LFM3-1.7B-MLX-4bit cannot load"
 		}
 	}
 

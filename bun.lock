@@ -102,6 +102,7 @@
       },
       "devDependencies": {
         "@types/bun": "catalog:",
+        "onnxruntime-node": "catalog:",
       },
     },
     "packages/collab-web": {
