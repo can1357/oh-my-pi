@@ -1248,7 +1248,7 @@ providers:
               cacheWrite: 3.75
 ```
 
-`disableStrictTools` is a provider-level flag that applies to all models in the provider. It disables the Anthropic `strict` marker only for tools that OMP would otherwise mark strict; it does not change runtime tool argument validation. OMP can automatically retry without strict tools after Anthropic reports a strict-grammar-too-large error before the first streamed token, but proxies that reject the `strict` field for other reasons should set this flag explicitly.
+`disableStrictTools` is a provider-level flag that applies to all models in the provider. It disables the Anthropic `strict` marker only for tools that OMP would otherwise mark strict; it does not change runtime tool argument validation. OMP can automatically retry without strict tools after Anthropic reports a strict-grammar-too-large error before the first streamed token, but proxies that reject the `strict` field for other reasons should set this flag explicitly. Claude on `google-vertex` can also reject strict tools when the GCP organization policy `vertexai.allowedPartnerModelFeatures` disallows `structured_outputs`; OMP retries once without `strict` and pins `strictToolsDisabled` for the session. Set `disableStrictTools: true` for `google-vertex` to skip that failed first request.
 
 Tool schemas going on the wire are normalized by the unified flow in
 `packages/ai/src/utils/schema/normalize.ts` (Google/CCA/MCP dispatchers
