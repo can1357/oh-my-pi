@@ -3438,9 +3438,9 @@ enum AfterWebDrag {
 
 fn slider_direction_refusal(window: &DesktopWindow, role: &str, before: f64) -> DesktopError {
 	DesktopError::input_failed(format!(
-		"the drag reached window {} ({}), but its outcome could not be confirmed: the {role} \
-		 still reads {before} after the release. It was not stepped on because it exposes no \
-		 thumb position and its direction could not be established. Read the target before retrying; \
+		"the drag reached window {} ({}), but its outcome could not be confirmed: the {role} still \
+		 reads {before} after the release. It was not stepped on because it exposes no thumb \
+		 position and its direction could not be established. Read the target before retrying; \
 		 focus the slider and press arrow keys, or use its AXIncrement/AXDecrement accessibility \
 		 actions; takeover (takeover: true) drags it with the pointer",
 		window.id, window.app,
