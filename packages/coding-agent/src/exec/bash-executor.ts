@@ -1,7 +1,7 @@
 /**
  * Bash command execution with streaming support and cancellation.
  *
- * Uses the embedded bash engine (pi-shell) through native bindings for shell
+ * Uses the embedded bash engine through native bindings for shell
  * execution.
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -13,6 +13,7 @@ import {
 	Shell,
 	type ShellFilesystem,
 	type ShellRunResult,
+	type ShellSpeech,
 } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -56,6 +57,11 @@ export interface BashExecutorOptions {
 	signal?: AbortSignal;
 	/** Session key suffix to isolate shell sessions per agent */
 	sessionKey?: string;
+	/**
+	 * Session key whose persistent shell a new shell for `sessionKey` starts as a copy of
+	 * (variables, functions, aliases, options); what the run sets stays in the copy.
+	 */
+	seedSessionKey?: string;
 	/** Additional environment variables to inject */
 	env?: Record<string, string>;
 	/** Run through the configured user shell instead of the embedded shell parsing directly. */
@@ -74,13 +80,15 @@ export interface BashExecutorOptions {
 	 * `cwd` included). External shells and processes never see it.
 	 */
 	filesystem?: ShellFilesystem;
+	/** Speech synthesizer the embedded shell's `say` speaks through when the session has one set up. */
+	speech?: ShellSpeech;
 	/**
 	 * Receives a copy of every byte crossing the command's pipes in the
 	 * embedded shell (`proc://<id>/streams`). The user-shell paths ignore it.
 	 */
 	streams?: PipeStreams;
 	/**
-	 * Receives the embedded shell's live trace of the command (pi-shell's
+	 * Receives the embedded shell's live trace of the command (omp-shell's
 	 * `RunTrace` snapshot) every {@link TRACE_POLL_MS} while it changed, and
 	 * once more after the run settles. The PTY path never calls it.
 	 */
@@ -863,7 +871,13 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const sessionBusy = shellSessionsInUse.has(sessionKey);
 	let shellSession = sessionBusy ? undefined : shellSessions.get(sessionKey);
 	if (!shellSession && !sessionBusy) {
-		shellSession = new Shell(shellOptions);
+		const seed =
+			options?.seedSessionKey === undefined
+				? undefined
+				: shellSessions.get(
+						buildSessionKey(shell, prefix, snapshotPath, sessionEnv, options.seedSessionKey, minimizer),
+					);
+		shellSession = seed?.fork() ?? new Shell(shellOptions);
 		shellSessions.set(sessionKey, shellSession);
 	}
 	const busyShell = sessionBusy ? shellSessions.get(sessionKey) : undefined;
@@ -911,15 +925,26 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		const fallbackTimeoutMs = nativeOwnsTimeout
 			? deadlineTimeoutMs + NATIVE_TIMEOUT_FALLBACK_GRACE_MS
 			: deadlineTimeoutMs;
-		timeoutTimer = setTimeout(() => {
-			// Explicit timeouts are enforced inside pi-natives via `timeoutMs`.
+		const fallbackAt = performance.now() + fallbackTimeoutMs;
+		const onDeadline = (): void => {
+			// A timer can fire early by the clock the deadline and wall time use: after the
+			// host slept, timers count the sleep while the native deadline does not. Wait out
+			// the rest, or a running command is reported timed out (and the backend hung)
+			// with wall time well under its deadline.
+			const remainingMs = fallbackAt - performance.now();
+			if (remainingMs > 0) {
+				timeoutTimer = setTimeout(onDeadline, remainingMs);
+				return;
+			}
+			// Explicit timeouts are enforced inside omp-natives via `timeoutMs`.
 			// Give native cancellation time to flush pipeline output and drain the
 			// N-API bridge before this result-only watchdog gives up on the run.
 			if (!nativeOwnsTimeout) {
 				abortCurrentExecution();
 			}
 			timeoutDeferred.resolve("timeout");
-		}, fallbackTimeoutMs);
+		};
+		timeoutTimer = setTimeout(onDeadline, fallbackTimeoutMs);
 	}
 
 	let resetSession = false;
@@ -945,6 +970,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				timeoutMs: nativeTimeoutMs,
 				signal: runAbortController.signal,
 				filesystem: options?.filesystem,
+				speech: options?.speech,
 				streams: options?.streams,
 				trace: runTrace,
 			},
@@ -1052,7 +1078,10 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				const minimizedText = minimizedGraphics.push(minimized.text) + minimizedGraphics.finish();
 				sink.replace(minimizedText);
 				const sep = minimizedText.endsWith("\n") ? "" : "\n";
-				sink.push(`${sep}[raw output: artifact://${artifactId}]\n`);
+				// The label keeps its own line so the `[raw output: …]` line stays parseable.
+				sink.push(
+					`${sep}[output summarized by the ${minimized.filter} filter; pipe through \`| cat\` for verbatim output]\n[raw output: artifact://${artifactId}]\n`,
+				);
 			}
 		}
 

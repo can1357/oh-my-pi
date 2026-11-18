@@ -189,6 +189,7 @@ export interface CustomMessage {
 	timestamp: number;
 	details?: unknown;
 	attribution?: Attribution;
+	excludeFromContext?: boolean;
 }
 
 export interface HookMessage {
@@ -923,7 +924,7 @@ export interface AutoCompactionEndEvent {
 	skipped?: boolean;
 }
 
-/** A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted. */
+/** A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle. */
 export interface ManualCompactionStartEvent {
 	type: "manual_compaction_start";
 	/** The `/compact <mode>` subcommand, when one was given. */

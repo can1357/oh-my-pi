@@ -640,7 +640,11 @@ export class SelectorController {
 	 */
 	async showGitTui(revision?: string): Promise<void> {
 		try {
-			await showGitOverlay(this.ctx.ui, { cwd: getProjectDir(), revision });
+			await showGitOverlay(this.ctx.ui, {
+				cwd: getProjectDir(),
+				revision,
+				usageLedger: this.ctx.sessionManager,
+			});
 		} catch (error) {
 			this.ctx.showStatus(error instanceof Error ? error.message : String(error));
 		}
@@ -755,8 +759,8 @@ export class SelectorController {
 		const target = this.ctx.viewSession;
 		const focusedAgentId = this.ctx.focusedAgentId;
 		const apply = async () => {
-			const level = thinkingLevel ?? target.resolveTemporaryModelThinkingLevel(model);
-			await target.setModelTemporary(model, level);
+			// Without a slider level, the session's level carries over (clamped to the model).
+			await target.setModelTemporary(model, thinkingLevel);
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorBorderColor();
 			if (focusedAgentId) {
@@ -854,6 +858,12 @@ export class SelectorController {
 					this.ctx.showStatus(`Task subagent model (session-only): ${selector}. Use /agents to persist.`);
 					done();
 				},
+				onKeepThinking: level => {
+					if (!isCurrent() || level === viewed.configuredThinkingLevel()) return;
+					viewed.setThinkingLevel(level);
+					this.ctx.statusLine.invalidate();
+					this.ctx.updateEditorBorderColor();
+				},
 				onCancel: done,
 			},
 			{
@@ -864,15 +874,8 @@ export class SelectorController {
 				quickRoles: quickRoleCycle?.models,
 				quickRoleOrder,
 				currentQuickRole: quickRoleCycle?.models[quickRoleCycle.currentIndex]?.role,
-				// What #applySessionModel applies without a slider level: the model's role
-				// level, else the session's (auto carries over; a fixed level yields to the
-				// model's own default, as setModelTemporary re-applies it).
-				thinkingLevelFor: model => {
-					const roleLevel = viewed.resolveTemporaryModelThinkingLevel(model);
-					if (roleLevel !== undefined) return roleLevel;
-					const configured = viewed.configuredThinkingLevel();
-					return configured === AUTO_THINKING ? configured : (model.thinking?.defaultLevel ?? configured);
-				},
+				// What #applySessionModel applies without a slider level; the slider clamps it per model.
+				thinkingLevelFor: () => viewed.configuredThinkingLevel(),
 			},
 		);
 		this.#mountMenu(menu, picker, () => {

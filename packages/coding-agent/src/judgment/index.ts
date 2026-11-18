@@ -67,11 +67,12 @@ import {
 import { roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import type { CostGateApi } from "../session/cost-gate";
-import type { SessionManager } from "../session/session-manager";
+import type { JudgmentRecord, JudgmentRecordAnswer } from "../session/session-entries";
+import { isModelUsageLedger, type ModelUsageLedger } from "../session/model-usage-journal";
 import { getTinyLocalModelSpec } from "../tiny/models";
 import localPromptTemplate from "../prompts/system/judgment-local.md" with { type: "text" };
 import { tinyModelClient } from "../tiny/title-client";
-import { type JudgmentCache, sharedJudgmentCache } from "./cache";
+import { type JudgmentCache, judgmentStateId, sharedJudgmentCache } from "./cache";
 
 export * from "./cache";
 
@@ -87,6 +88,10 @@ export interface JudgmentUsage {
 	usage: Usage;
 	stopReason: AssistantMessage["stopReason"];
 	errorMessage?: string;
+	/** Wall time of the provider request in milliseconds. */
+	duration?: number;
+	/** What a native judge was asked and answered; prompted backends report usage only. */
+	judgment?: JudgmentRecord;
 }
 
 export interface JudgeDeps {
@@ -100,7 +105,8 @@ export interface JudgeDeps {
 	purpose: string;
 	/**
 	 * Receives every billed attempt exactly once — failed ones included, cache
-	 * hits never. Wire {@link journalJudgmentUsage} here to bill the session.
+	 * hits never — and every answered on-device completion with zero usage.
+	 * Wire {@link journalJudgmentUsage} here to bill the session.
 	 */
 	onUsage?: (usage: JudgmentUsage) => void;
 	/** Host telemetry; every attempt, cache hits included, emits one `judgment` span. */
@@ -134,15 +140,6 @@ interface PreparedImages {
 	fitted?: FittedImage[];
 }
 
-/** Session journal surface that records off-transcript model cost; journal-only managers omit it. */
-export type JudgmentUsageLedger = Pick<SessionManager, "appendModelUsage" | "getSessionId" | "getLeafId">;
-
-function isUsageLedger(manager: Partial<JudgmentUsageLedger>): manager is JudgmentUsageLedger {
-	return (
-		manager.appendModelUsage !== undefined && manager.getSessionId !== undefined && manager.getLeafId !== undefined
-	);
-}
-
 /**
  * Build a {@link JudgeDeps.onUsage} that journals every billed judgment attempt
  * as a `model_usage` entry beneath the session leaf at record time, so
@@ -150,8 +147,8 @@ function isUsageLedger(manager: Partial<JudgmentUsageLedger>): manager is Judgme
  * the session changes are dropped by the ledger. Returns `undefined` when the
  * journal cannot record usage.
  */
-export function journalJudgmentUsage(manager: Partial<JudgmentUsageLedger> | undefined): JudgeDeps["onUsage"] {
-	if (!manager || !isUsageLedger(manager)) return undefined;
+export function journalJudgmentUsage(manager: Partial<ModelUsageLedger> | undefined): JudgeDeps["onUsage"] {
+	if (!isModelUsageLedger(manager)) return undefined;
 	const sessionId = manager.getSessionId();
 	return usage => {
 		manager.appendModelUsage(usage, { sessionId, parentId: manager.getLeafId() });
@@ -164,12 +161,13 @@ const LOCAL_ANSWER_MAX_TOKENS = 16;
 const LOCAL_REASONING_MAX_TOKENS = 1024;
 
 /**
- * How long a candidate stays skipped after a rejection that persists until
- * something changes out of band: 401/403 credential, 402 billing cap, 404
- * for a model the route no longer serves, or a gateway's 502
- * `upstream_credentials_exhausted`. Every judgment rebuilds the chain,
+ * How long a candidate stays skipped after a rejection that may clear on the
+ * route's side: a 404 for a model the route no longer serves, or a gateway's
+ * 502 `upstream_credentials_exhausted`. Every judgment rebuilds the chain,
  * so without this each call re-pays the rejected request (plus a
  * credential-rotation round trip) before reaching the next candidate.
+ * Account (401/402/403) and region (451) rejections last for the process:
+ * they clear only when the user changes credentials, billing, or network.
  */
 const CANDIDATE_REJECTION_COOLDOWN_MS = 5 * 60 * 1000;
 /** A transient hang should not consume the next judgment's budget in the same session. */
@@ -184,11 +182,13 @@ const CANDIDATE_TIMEOUT_COOLDOWN_MS = 30_000;
 const CANDIDATE_TTL_MS = 1_000;
 /** Skip-until timestamps and reasons keyed by routed model identity, carried by the registry that produced the rejection. */
 const kRejections = Symbol("judgment.rejections");
+const kRejectionListeners = Symbol("judgment.rejectionListeners");
 const kTimeouts = Symbol("judgment.timeouts");
 /** Last resolved judge role chain, carried by the registry it was drawn from. */
 const kRoleChain = Symbol("judgment.roleChain");
 interface RegistryWithRejections extends ModelRegistry {
 	[kRejections]?: Map<string, CandidateRejection>;
+	[kRejectionListeners]?: Set<() => void>;
 	[kTimeouts]?: Map<string, number>;
 	[kRoleChain]?: {
 		settings: Settings;
@@ -386,15 +386,62 @@ function judgeRoleChain(settings: Settings, registry: ModelRegistry): RoleChainC
 	return textJudgeRoleChain(resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry)));
 }
 
+/** The candidate's rejection while it is still in force. */
+function activeRejection(
+	registry: RegistryWithRejections,
+	candidate: RoleChainCandidate,
+): CandidateRejection | undefined {
+	const rejection = registry[kRejections]?.get(formatModelStringWithRouting(candidate.model));
+	return rejection !== undefined && rejection.until > Date.now() ? rejection : undefined;
+}
+
 /**
  * Whether the `judge` role resolves first to a native judgment backend
  * (TypeSafe jev, OpenRouter or OpenAI Decisions, Workers AI Clef) rather than a
- * prompted on-device or chat model. Judge-heavy features gate on it, e.g. the `find`
- * tool under `find.enabled: auto`.
+ * prompted on-device or chat model. Candidates under an active rejection
+ * ({@link nativeJudgeRejection}) are skipped, as a judgment would skip them.
+ * Judge-heavy features gate on it, e.g. the `find` tool under `find.enabled: auto`.
  */
 export function hasNativeJudge(settings: Settings, registry: ModelRegistry, sessionModel?: Model): boolean {
-	const [primary] = allowedJudgeCandidates(judgeRoleChain(settings, registry), settings, sessionModel);
+	const primary = allowedJudgeCandidates(judgeRoleChain(settings, registry), settings, sessionModel).find(
+		candidate => activeRejection(registry, candidate) === undefined,
+	);
 	return primary !== undefined && kindOf(primary) === "native";
+}
+
+/**
+ * Why the `judge` role, which routes to a native backend, has no usable candidate left: every candidate
+ * is under an active rejection (a native chain gets no session fallback), rendered as `<route> <reason>`
+ * for the first native one. Undefined when the chain has no native candidate or any candidate still works.
+ */
+export function nativeJudgeRejection(
+	settings: Settings,
+	registry: ModelRegistry,
+	sessionModel?: Model,
+): string | undefined {
+	// Skip resolving the role chain until some candidate was rejected.
+	if (!(registry as RegistryWithRejections)[kRejections]?.size) return undefined;
+	let first: string | undefined;
+	for (const candidate of allowedJudgeCandidates(judgeRoleChain(settings, registry), settings, sessionModel)) {
+		const rejection = activeRejection(registry, candidate);
+		if (!rejection) return undefined;
+		if (kindOf(candidate) === "native") {
+			first ??= `${formatModelStringWithRouting(candidate.model)} ${rejection.reason}`;
+		}
+	}
+	return first;
+}
+
+/**
+ * Call `listener` whenever a judge candidate drawn from `registry` is newly rejected, so judge-gated
+ * tools (`find` under `find.enabled: auto`) can be withdrawn. Returns the unsubscribe function.
+ */
+export function onJudgeRejection(registry: ModelRegistry, listener: () => void): () => void {
+	const listeners = ((registry as RegistryWithRejections)[kRejectionListeners] ??= new Set());
+	listeners.add(listener);
+	return () => {
+		listeners.delete(listener);
+	};
 }
 
 /** Restrict auxiliary judgments to the active provider when requested; an unknown provider fails closed. */
@@ -607,9 +654,11 @@ export class ChainJudge implements Judge {
 				const timedOut =
 					timeout !== undefined && (timeout.aborted || (error instanceof Error && error.name === "TimeoutError"));
 				if (!timedOut && isAbortOrTimeout(error)) throw error;
-				const rejected = rejectionReason(error);
+				const rejected = rejectionOf(error);
 				if (rejected) {
-					rejections.set(identity, { until: Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS, reason: rejected });
+					const fresh = !rejections.has(identity);
+					rejections.set(identity, { until: Date.now() + rejected.cooldownMs, reason: rejected.reason });
+					if (fresh) this.#notifyRejection();
 				}
 				if (timedOut) {
 					timeouts.set(timeoutKey, Date.now() + CANDIDATE_TIMEOUT_COOLDOWN_MS);
@@ -621,7 +670,9 @@ export class ChainJudge implements Judge {
 					status: AIError.status(error),
 					error: lastFailure,
 					skippedForMs: rejected
-						? CANDIDATE_REJECTION_COOLDOWN_MS
+						? Number.isFinite(rejected.cooldownMs)
+							? rejected.cooldownMs
+							: "session"
 						: timedOut
 							? CANDIDATE_TIMEOUT_COOLDOWN_MS
 							: undefined,
@@ -666,6 +717,17 @@ export class ChainJudge implements Judge {
 	#rejections(): Map<string, CandidateRejection> {
 		const registry: RegistryWithRejections = this.#deps.registry;
 		return (registry[kRejections] ??= new Map());
+	}
+
+	#notifyRejection(): void {
+		const registry: RegistryWithRejections = this.#deps.registry;
+		for (const listener of registry[kRejectionListeners] ?? []) {
+			try {
+				listener();
+			} catch (error) {
+				logger.warn("judgment rejection listener failed", { error: String(error) });
+			}
+		}
 	}
 
 	#timeouts(): Map<string, number> {
@@ -728,7 +790,9 @@ export class ChainJudge implements Judge {
 
 	async #createJudge(candidate: RoleChainCandidate, signal: AbortSignal | undefined): Promise<Judge | undefined> {
 		const model = candidate.model;
-		if (model.api === "local-inference") return new TextJudge(new LocalTextBackend(model.id));
+		if (model.api === "local-inference") {
+			return new TextJudge(new LocalTextBackend(model.id, attempt => this.#report(attempt)));
+		}
 		if (!(await this.#deps.registry.getApiKey(model, this.#deps.sessionId, { signal }))) return undefined;
 		const apiKey = this.#deps.registry.resolver(model, this.#deps.sessionId);
 		if (isJudgmentApi(model.api)) {
@@ -756,6 +820,7 @@ export class ChainJudge implements Judge {
 					usage: attempt.usage,
 					stopReason: attempt.stopReason,
 					errorMessage: attempt.errorMessage,
+					duration: attempt.duration,
 					startedAt: attempt.timestamp,
 				}),
 		});
@@ -770,15 +835,18 @@ class LocalTextBackend implements TextBackend {
 	readonly guardState = false;
 	readonly model: string;
 	readonly #reasoning: boolean;
+	readonly #report: (attempt: JudgmentAttempt) => void;
 
-	constructor(modelId: string) {
+	constructor(modelId: string, report: (attempt: JudgmentAttempt) => void) {
 		this.model = modelId;
+		this.#report = report;
 		this.#reasoning = getTinyLocalModelSpec(modelId)?.reasoning === true;
 	}
 
 	async complete(judgment: TextPrompt, options: JudgeOptions): Promise<TextCompletion> {
 		// Sub-2B models answer a bare user message as a question (or echo the
 		// system prompt); one merged turn ending in `Answer:` keeps them classifying.
+		const startedAt = Date.now();
 		const text = await tinyModelClient.complete(
 			this.model,
 			prompt.render(localPromptTemplate, { system: judgment.system, state: judgment.user }),
@@ -788,6 +856,18 @@ class LocalTextBackend implements TextBackend {
 			},
 		);
 		if (!text) throw new Error(`judgment: local model ${this.model} returned no output`);
+		// On-device work bills nothing. An empty result may never have reached the worker, so only a
+		// produced answer is reported.
+		this.#report({
+			role: "judge",
+			api: this.api,
+			provider: this.provider,
+			model: this.model,
+			usage: tokenUsage(0, 0),
+			stopReason: "stop",
+			duration: Date.now() - startedAt,
+			startedAt,
+		});
 		return { text };
 	}
 }
@@ -811,11 +891,35 @@ function withCandidateSignal(judge: Judge, parent: AbortSignal | undefined): Jud
 	};
 }
 
+/** `answers` reduced to the headline values a `model_usage` entry journals. */
+function journaledAnswers(answers: Readonly<Record<string, Answer>>): Record<string, JudgmentRecordAnswer> {
+	const journaled: Record<string, JudgmentRecordAnswer> = {};
+	for (const id in answers) {
+		const answer = answers[id];
+		switch (answer.type) {
+			case "noul":
+				journaled[id] = answer.noul;
+				break;
+			case "choice":
+				journaled[id] = [answer.choice, answer.confidence];
+				break;
+			case "score":
+				journaled[id] = [answer.score, answer.confidence];
+				break;
+			case "box":
+				journaled[id] = [answer.box.top, answer.box.bottom, answer.box.left, answer.box.right, answer.confidence];
+				break;
+		}
+	}
+	return journaled;
+}
+
 /**
  * Native judgment backend. Questions already answered about the same state
  * under this model come from `cache`; only the rest reach the provider (none
  * when every answer is cached). Each call reports exactly one attempt — failed
- * requests included so the ledger shows why a judgment errored. Most judgment
+ * requests included so the ledger shows why a judgment errored — carrying the
+ * state's identity and the answers the provider produced. Most judgment
  * APIs report tokens only, so a response without a billed amount is priced from
  * the catalog model; a route that bills (OpenRouter) keeps its reported cost.
  * Attempts and results carry the catalog id, not the wire id the judge sends.
@@ -865,9 +969,18 @@ function nativeJudge(
 				questions,
 				cachedQuestions: questions - pendingCount,
 			};
+			// Journaled with the attempt's usage; a failed request has no answers to add.
+			const judgment: JudgmentRecord = {
+				state: cached?.stateId ?? judgmentStateId(cacheRequest),
+				answers: {},
+				...(pendingCount < questions ? { cached: questions - pendingCount } : {}),
+			};
 			let fresh: JudgmentResult | undefined;
+			// Provider round trip only; a judgment answered wholly from the cache sends nothing.
+			let duration = 0;
 			if (pendingCount > 0 || questions === 0) {
 				let partial = tokenUsage(0, 0);
+				const sentAt = Date.now();
 				try {
 					fresh = await judge.judge(
 						{
@@ -890,14 +1003,24 @@ function nativeJudge(
 						usage: partial,
 						stopReason: isAbortOrTimeout(error) ? "aborted" : "error",
 						errorMessage: error instanceof Error ? error.message : String(error),
+						duration: Date.now() - sentAt,
+						judgment,
 					});
 					throw error;
 				}
+				duration = Date.now() - sentAt;
 				if (fresh.usage.cost.total === 0) calculateCost(model, fresh.usage);
 				if (cache && cached) cache.record(cacheModel, cached, pending, fresh);
 			}
 			const usage = fresh?.usage ?? tokenUsage(0, 0);
-			report({ ...attempt, usage, stopReason: "stop", responseModel: fresh?.model });
+			report({
+				...attempt,
+				usage,
+				stopReason: "stop",
+				responseModel: fresh?.model,
+				duration,
+				judgment: fresh ? { ...judgment, answers: journaledAnswers(fresh.answers) } : judgment,
+			});
 			const answers: Record<string, Answer> = {};
 			for (const id in request.questions) {
 				const answer = known[id] ?? fresh?.answers[id];
@@ -923,19 +1046,25 @@ interface CandidateRejection {
 }
 
 /**
- * Reason for a rejection the route keeps answering until something changes out of band — a credential or
- * billing rejection of the account, a 404 for a model the route does not serve, or a gateway 502 saying
- * every upstream key for the model failed — else `undefined`.
+ * A rejection the route keeps answering until something changes out of band, with how long to skip the
+ * candidate: a credential or billing rejection of the account and a regional block (451) for the rest of
+ * the process; a 404 for a model the route does not serve, or a gateway 502 saying every upstream key for
+ * the model failed, for {@link CANDIDATE_REJECTION_COOLDOWN_MS}. Else `undefined`.
  */
-function rejectionReason(error: unknown): string | undefined {
-	if (isGatewayCredentialsExhausted(error)) return "had no usable gateway credentials";
-	switch (AIError.status(error)) {
+function rejectionOf(error: unknown): { reason: string; cooldownMs: number } | undefined {
+	if (isGatewayCredentialsExhausted(error)) {
+		return { reason: "had no usable gateway credentials", cooldownMs: CANDIDATE_REJECTION_COOLDOWN_MS };
+	}
+	const status = AIError.status(error);
+	switch (status) {
 		case 401:
 		case 402:
 		case 403:
-			return "rejected the account";
+			return { reason: `rejected the account (${status})`, cooldownMs: Number.POSITIVE_INFINITY };
+		case 451:
+			return { reason: "is unavailable in this region (451)", cooldownMs: Number.POSITIVE_INFINITY };
 		case 404:
-			return "did not serve the model";
+			return { reason: "did not serve the model", cooldownMs: CANDIDATE_REJECTION_COOLDOWN_MS };
 		default:
 			return undefined;
 	}

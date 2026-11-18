@@ -18,7 +18,7 @@ import {
 } from "../errors";
 import { RequestIdAllocator } from "../request-id";
 import { routeProgressNotification, withProgressToken } from "../progress";
-import { createMCPTimeout, getNeverAbortSignal, resolveMCPTimeoutMs } from "../timeout";
+import { createMCPTimeout, getNeverAbortSignal, resolveMCPRequestDeadline, resolveMCPTimeoutMs } from "../timeout";
 import { type MCPFetchInit, mcpFetch } from "./header-policy";
 
 interface MCPTimeoutOperation {
@@ -260,8 +260,9 @@ export class LegacySseTransport implements MCPTransport {
 			method,
 			params: options?.onProgress ? withProgressToken(params, id) : (params ?? {}),
 		};
-		const timeout = resolveMCPTimeoutMs(this.#config.timeout);
-		const operation = createMCPTimeout(timeout, this.#operationSignal(options?.signal));
+		const { timeoutMs: timeout, maxTotalMs } = resolveMCPRequestDeadline(this.#config.timeout, method, params);
+		const operation = createMCPTimeout(timeout, this.#operationSignal(options?.signal), maxTotalMs);
+		const progressSink = options?.onProgress;
 		const deferred = Promise.withResolvers<unknown>();
 		// Observe the response promise synchronously so a stream-close rejection
 		// from `#rejectPending` that lands while `request()` is still awaiting the
@@ -272,7 +273,13 @@ export class LegacySseTransport implements MCPTransport {
 			resolve: deferred.resolve,
 			reject: deferred.reject,
 			operation,
-			onProgress: options?.onProgress,
+			// Progress shows the server is still working: restart the deadline.
+			onProgress: progressSink
+				? progress => {
+						operation.refresh();
+						progressSink(progress);
+					}
+				: undefined,
 		};
 		if (operation.signal) {
 			pending.abortHandler = () => {

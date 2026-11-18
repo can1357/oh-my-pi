@@ -4,7 +4,27 @@
 
 ### Added
 
+- Custom message payloads accept `excludeFromContext`, kept through normalization and when a saved entry is restored ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
+### Changed
+
+- Asks (`HtmlFormDialog`, `AskDialogComponent`) stack every question, the focused one open and the rest folded to their answer or up to four option pills, instead of question tabs, a Review tab and pages: in rows a scrolling panel (`chrome/ask-fold.ts`), natively one inline card (`native/ask-card.ts`, role `omp.ask.card`) whose pills a click picks, gliding between folded and open (`transition: "layout"`), without Hide. Both take `skipNotice`, `claimKeys` and `releaseKeys` (Esc and Tab past the last stop call it) and expose `keyHints()` for the host's composer in place of their rows footer, cap their rows panel at `terminal.rows - ASK_RESERVED_ROWS`, and no longer take `inputGuard` (`AskDialogInputGuard` is gone: the host keeps a draft's keys in the composer); `HtmlFormDialog.givenAnswers()` reports what changed from the defaults. Folded choices keep their options in view as pills, the chosen ones marked. The ask tool's pending call paints nothing in rows
+- `CustomEditor.faint` draws the rows composer faint (an ask above it holds the keys), `Editor.onUpFromTop` lets the host take ↑ on the first line; `StatusLineComponent.setAwaitingAnswer` turns the brand's spinner into a question mark
+- The composer's `ask` state (`ComposerNativeState.ask`): while an ask waits above it the placeholder says typing there skips it, it folds to its compact row away from the keys (`NativeEditorLayout.folded`, the composer `col`'s `folded`), and a draft that would skip it gets a `skips ask` chip and Skip & send
+- Model search treats `provider/model` specially: the text before `/` prefixes the provider (an exact provider first), the rest searches that provider's model ids, and those rows list ahead of other matches — `ol/` now shows Ollama models first instead of recent `…-sol` models
+
+### Fixed
+
+- In Tern, typing `->` or `=>` in the composer no longer moves the caret to a new line; the queued message continues on the same line
+- Fixed long tool-approval prompts in Tern growing past the window and pushing the choices and Approve/Deny buttons off screen; the details now scroll within a few rows, as in the terminal view ([#19617](https://github.com/can1357/oh-my-pi/pull/19617) by [@c-w-z](https://github.com/c-w-z))
+- Table charts read `402.7 → 13.3 µs` with the unit on both sides; the change factor was off by the unit's scale (30,278,195× instead of 30×)
+- Enter on a checkbox group with nothing checked checks the focused box before moving on
+
+## [18.22.2] - 2026-11-18
+
+### Added
+
 - `ui.loop-blocked` log records now name what held the event loop (`cause`, `causeShare`, `top`), sampled by an always-on profiler; `PI_LOOP_SAMPLER=0` turns it off
+- Added the `async-notify` transcript block, which shows the output lines a running background job or service reported
 
 ### Changed
 

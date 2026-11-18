@@ -23,6 +23,8 @@ export interface DaemonSpec {
 	cwd: string;
 	pty: boolean;
 	ready?: DaemonReadySpec;
+	/** Regex; the broker reports each matching output line to the owner while the daemon runs. */
+	notify?: string;
 	restart: DaemonRestartPolicy;
 	persist: boolean;
 	detached: boolean;

@@ -363,7 +363,7 @@ Advisor runtimes retain native `preserveData` for subsequent maintenance and att
 
 `packages/agent/src/compaction/compaction.ts` exports `generateHandoff(...)` and `generateHandoffFromContext(...)`. Coding-agent uses the context-aware function through `SessionHandoff`: the side request uses the base system prompt, normalized tools, transformed live history, and live prompt-cache key, with a unique side session id and trailing agent-attributed `user` handoff prompt. It starts with `toolChoice: "none"` and retries once with `"auto"` only after an explicit-tool-choice compatibility rejection. Only joined text blocks are returned; tools are never dispatched. See [the handoff pipeline](./handoff-generation-pipeline.md).
 
-Handoff commits a regular `CompactionEntry` on the current session: `SessionMaintenance.handoff()` (manual `/handoff`) and the auto-maintenance `handoff` method both generate the document via `SessionHandoff.generateDocument()` and store it as the compaction summary with `firstKeptEntryId` from `prepareCompaction`, so recent history is kept and the session id, transcript, and provider cache key are unchanged.
+`/handoff [focus]` aliases `/compact handoff [focus]`. It prepares a handoff summary from a transcript snapshot without interrupting the live response or holding follow-ups. Once ready, it applies through the standard `CompactionEntry` commit at a tool-turn boundary or when idle. `firstKeptEntryId` stays anchored to the snapshot, so the current branch's recent history and all messages appended during generation survive verbatim. A reset, branch change that removes the snapshot, or newer compaction invalidates the result.
 
 When `compaction.handoffSaveToDisk` is enabled, an **automatically triggered** handoff also writes `handoff-<ISO timestamp>.md` in the persisted session's artifact directory. Manual handoffs are not written by this setting, and non-persisted sessions have no artifact directory.
 
@@ -535,7 +535,7 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `compaction.autoContinue` = `true`
 - `compaction.midTurnEnabled` = `true`; a `false` value applies to the session that configured it, not to spawned subagents — each subagent keeps mid-run checks so its single-turn assignment still compacts at the configured threshold.
 - `compaction.handoffSaveToDisk` = `false`
-- The `handoff` method generates a handoff document through the live-cache side-request pipeline and commits it as a compaction entry on the current session (no new session is created); `/handoff` does the same manually.
+- The `handoff` method generates a handoff document through the live-cache side-request pipeline and commits it on the current session. `/handoff` and `/compact handoff` select it manually.
 - `compaction.remoteEndpoint` = `undefined`
 - `compaction.remoteStreamingV2Enabled` = `true`
 - `compaction.v2RetainedMessageBudget` = `64000`

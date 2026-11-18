@@ -499,9 +499,9 @@ export const cfgTaskEnableLsp = register({
 	ui: {
 		tab: "tasks",
 		group: "Subagents",
-		label: "LSP in Subagents",
+		label: "LSP Edit Checks in Subagents",
 		description:
-			"Allow subagents spawned via the task tool to use the lsp tool. Off by default to keep subagents cheap; enable when LSP-aware delegation is worth the extra tokens.",
+			"Run LSP formatting and diagnostics on subagent edits. Off by default to keep subagents cheap; the lsp tool stays available to them either way.",
 	},
 });
 

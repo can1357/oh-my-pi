@@ -27,7 +27,13 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
 
-import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
+import { raiseInteractiveQos } from "@oh-my-pi/pi-utils/process-qos";
+import {
+	declareWorkerHostEntry,
+	installWorkerInbox,
+	isWorkerHostSelector,
+	SHELL_PROCESS_SELECTOR,
+} from "@oh-my-pi/pi-utils/worker-host";
 import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
 import { isNativeShell, runNativeShell } from "./cli/native-shell";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
@@ -478,6 +484,14 @@ export async function runCli(argv: string[]): Promise<void> {
 	if (isNativeShell(argv[0])) {
 		await runNativeShell(argv);
 	}
+	// A shell process (a named service, a pty command): the argv after the
+	// selector is its own, its command's flags included, so it dispatches
+	// before anything reads flags out of it.
+	if (argv[0] === SHELL_PROCESS_SELECTOR) {
+		// Command boundary: only shell processes load the engine entry here.
+		const { runShellProcess } = await import("./exec/shell-process-worker");
+		await runShellProcess(argv.slice(1));
+	}
 	let resolvedArgv = argv;
 	try {
 		const extracted = extractProfileFlags(resolvedArgv);
@@ -548,6 +562,11 @@ export async function runCli(argv: string[]): Promise<void> {
 		}
 		return;
 	}
+
+	// The user waits on this process (startup, typing, redraws), not on its
+	// workers: on macOS its main thread runs above the default class a busy
+	// machine's builds compete in.
+	if (isProcessEntry) raiseInteractiveQos();
 
 	if (resolvedArgv[0] === "--license") {
 		// Command boundary: bundled notices are read only when requested.
