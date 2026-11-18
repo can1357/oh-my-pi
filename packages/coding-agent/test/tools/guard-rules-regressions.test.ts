@@ -1313,11 +1313,14 @@ describe("guard rule review regressions", () => {
 			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: undefined });
 		}
 		// One that may run first: before the discard, beside it in its pipeline, anywhere after a list
-		// `&` runs in the background, or in a part the guard does not read.
+		// `&` runs in the background, or anywhere in a line with a part the guard does not read. After
+		// a `{ }` the directory is unknown, so the discard there names it with `-C`.
 		for (const command of [
 			"git stash pop & git stash && git reset --hard",
 			"git stash && git stash pop && git reset --hard",
-			"git stash && { git stash pop; } ; git reset --hard",
+			`git stash && { git stash pop; } ; git -C ${cwd} reset --hard`,
+			`git stash && { git stash pop; } && git -C ${cwd} reset --hard`,
+			"git stash && git reset --hard; { git stash pop; }",
 			"git stash && git reset --hard & git stash pop",
 			"git stash && git reset --hard & true; git stash pop",
 			"git stash && git reset --hard | git stash pop",
