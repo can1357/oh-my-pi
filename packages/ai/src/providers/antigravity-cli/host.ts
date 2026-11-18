@@ -217,7 +217,8 @@ export class AgyHost implements ProviderSessionState {
 	#contextTokens = 0;
 	/** Sessions this host replaced or forked away from; a late call from one is stale, not foreign. */
 	readonly #abandonedConversations = new Set<string>();
-	#announced = new Map<string, number>();
+	#announced = new Map<string, { generation: number; count: number }>();
+	#promptGeneration = 0;
 	#announcementWaiters = new Set<{ name: string; generation: number; finish(announced: boolean): void }>();
 	#loggedGeneration = 0;
 
@@ -648,8 +649,11 @@ export class AgyHost implements ProviderSessionState {
 			continuations: 0,
 			generation: 0,
 		};
-		turn.generation++;
-		for (const waiter of [...this.#announcementWaiters]) {
+		turn.generation = ++this.#promptGeneration;
+		for (const [name, entry] of this.#announced) {
+			if (entry.generation !== turn.generation) this.#announced.delete(name);
+		}
+		for (const waiter of this.#announcementWaiters) {
 			if (waiter.generation !== turn.generation) waiter.finish(false);
 		}
 		if (continuing) turn.response = Promise.withResolvers<PromptResponse>();
@@ -896,15 +900,17 @@ export class AgyHost implements ProviderSessionState {
 	}
 
 	#awaitAnnouncement(name: string): Promise<boolean> {
-		const count = this.#announced.get(name) ?? 0;
-		if (count > 0) {
-			this.#announced.set(name, count - 1);
+		const generation = this.#turn?.generation ?? 0;
+		const announced = this.#announced.get(name);
+		if (announced?.generation === generation && announced.count > 0) {
+			announced.count--;
+			if (announced.count === 0) this.#announced.delete(name);
 			return Promise.resolve(true);
 		}
 		const result = Promise.withResolvers<boolean>();
 		const waiter = {
 			name,
-			generation: this.#turn?.generation ?? 0,
+			generation,
 			finish: (announced: boolean) => {
 				timer.cancel();
 				this.#announcementWaiters.delete(waiter);
@@ -937,11 +943,16 @@ export class AgyHost implements ProviderSessionState {
 			case "tool_call": {
 				const name = MCP_TOOL_NAME.exec(update.title)?.[1];
 				if (!name) return;
+				const generation = this.#turn?.generation ?? 0;
 				const waiter = [...this.#announcementWaiters].find(
-					candidate => candidate.name === name && candidate.generation === this.#turn?.generation,
+					candidate => candidate.name === name && candidate.generation === generation,
 				);
 				if (waiter) waiter.finish(true);
-				else this.#announced.set(name, (this.#announced.get(name) ?? 0) + 1);
+				else {
+					const announced = this.#announced.get(name);
+					if (announced?.generation === generation) announced.count++;
+					else this.#announced.set(name, { generation, count: 1 });
+				}
 				return;
 			}
 		}

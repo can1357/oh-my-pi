@@ -182,7 +182,7 @@ class FakeAgy implements AgyTransport {
 		});
 	}
 
-	call(name = "read", args: Record<string, unknown> = { path: "a.txt" }, id = this.currentId): Promise<McpToolOutput> {
+	announce(name = "read", id = this.currentId): void {
 		this.options.onUpdate({
 			sessionId: id,
 			update: {
@@ -192,6 +192,10 @@ class FakeAgy implements AgyTransport {
 				status: "in_progress",
 			},
 		});
+	}
+
+	call(name = "read", args: Record<string, unknown> = { path: "a.txt" }, id = this.currentId): Promise<McpToolOutput> {
+		this.announce(name, id);
 		return this.options.onCall(name, args, id);
 	}
 	close(): void {
@@ -402,6 +406,42 @@ describe("AgyHost stateful steps", () => {
 		expect(state.host.hasPendingTurn).toBe(true);
 		const call = run.writer.output.content.find(block => block.type === "toolCall");
 		expect(call).toMatchObject({ type: "toolCall", name: "read", arguments: { path: "new.txt" } });
+	});
+
+	it("does not let a previous turn's waiter consume a new turn's announcement", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("read a.txt")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		const stale = fake.options.onCall("read", { path: "old.txt" }, fake.currentId);
+		fake.text("done");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		const second = step(state.host, [user("read b.txt")]);
+		await fake.prompts.next();
+		const current = fake.call("read", { path: "new.txt" });
+		void current.catch(() => undefined);
+		await expect(stale).resolves.toMatchObject({ isError: true });
+		const call = second.writer.output.content.find(block => block.type === "toolCall");
+		expect(call).toMatchObject({ type: "toolCall", name: "read", arguments: { path: "new.txt" } });
+	});
+
+	it("does not reuse a pre-continuation announcement in the next generation", async () => {
+		const state = await fixture({ maxContinuations: 1 });
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("1 2 3");
+		fake.announce("read");
+		prompt.response.resolve({ stopReason: "max_turn_requests" });
+		await fake.prompts.next();
+		const pending = fake.options.onCall("read", { path: "new.txt" }, fake.currentId);
+		void pending.catch(() => undefined);
+		await Promise.resolve();
+		expect(run.writer.output.content.some(block => block.type === "toolCall")).toBe(false);
+		fake.announce("read");
+		await Promise.resolve();
+		expect(run.writer.output.content.some(block => block.type === "toolCall")).toBe(true);
 	});
 
 	it("keeps an end_turn stop as a normal stop", async () => {
