@@ -759,21 +759,21 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	}
 	/**
 	 * Where the fixed guard rules see a call run: its `cwd` argument (resolved like execution
-	 * resolves it) or the session cwd. An internal-URL cwd has no host directory to probe, and a `cwd`
-	 * execution cannot resolve (`@local://notes`) is left for execution to report: the rules see the
-	 * session cwd for both.
+	 * resolves it) or the session cwd. An internal-URL cwd, and a `cwd` execution cannot resolve
+	 * (`@local://notes`, left for execution to report), have no host directory the guard can place:
+	 * the rules that read paths see the session cwd for both, and the probing rules an unknown
+	 * directory ({@link GuardScope.cwdStandIn}).
 	 */
 	#guardScope(cwd: unknown): GuardScope {
 		const sessionCwd = this.session.cwd ?? process.cwd();
-		let commandCwd = sessionCwd;
-		if (typeof cwd === "string" && cwd !== "" && !InternalUrlRouter.instance().canHandle(cwd)) {
-			try {
-				commandCwd = resolveToCwd(cwd, sessionCwd);
-			} catch {
-				commandCwd = sessionCwd;
-			}
+		const scope: GuardScope = { cwd: sessionCwd, home: os.homedir() };
+		if (typeof cwd !== "string" || cwd === "") return scope;
+		if (InternalUrlRouter.instance().canHandle(cwd)) return { ...scope, cwdStandIn: true };
+		try {
+			return { ...scope, cwd: resolveToCwd(cwd, sessionCwd) };
+		} catch {
+			return { ...scope, cwdStandIn: true };
 		}
-		return { cwd: commandCwd, home: os.homedir() };
 	}
 	/**
 	 * `bash.patterns` rules and env allowlist for the session (`session`) and for the operator layers

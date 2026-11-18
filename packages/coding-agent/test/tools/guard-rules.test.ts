@@ -286,6 +286,8 @@ describe("discard_changes", () => {
 			]) {
 				expect({ command, decision: bashApproval(repo, command) }).toEqual({ command, decision: "exec" });
 			}
+			// A call `cwd` the guard cannot place leaves the start unknown to the probes.
+			expect(bashApproval(repo, "git reset --hard", { cwd: "@local://notes" })).toBe("exec");
 			expect(ask).not.toHaveBeenCalled();
 			// An absolute `-C` names its directory wherever the command runs.
 			expect(ruleOf(bashApproval(repo, `env -C /tmp git -C ${repo} reset --hard`))).toBe("discard_changes");

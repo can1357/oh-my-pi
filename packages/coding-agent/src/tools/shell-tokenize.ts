@@ -1027,9 +1027,12 @@ export interface SucceededLink {
 	readonly before: SucceededLink | undefined;
 }
 
-/** Where a command line runs: its starting directory and the home `~` and `$HOME` expand to. */
+/**
+ * Where a command line runs: its starting directory, `undefined` when the guard cannot place it,
+ * and the home `~` and `$HOME` expand to.
+ */
 export interface ShellScope {
-	cwd: string;
+	cwd: string | undefined;
 	home: string;
 }
 

@@ -51,7 +51,8 @@
  * - Where the directory is unknown (see above), `discard_changes` has no directory to probe for a
  *   git command there, unless its `-C` names one by an absolute path, `~` or `$HOME`, and
  *   `kills_harness` no executable for a relative `killall` path: `cd "$d" && git reset --hard`,
- *   `env -C repo git reset --hard`.
+ *   `env -C repo git reset --hard`. A bash `cwd` that is an internal URL or does not resolve makes
+ *   the starting directory unknown to them.
  * - The probes of one call share {@link PROBE_BUDGET_MS}; in a command that asks more than fit, such
  *   as many distinct `pkill` patterns, the ones left without time count as no match.
  * - Brace expansion is followed only in words up to 4096 characters and for their first 1024
@@ -112,6 +113,12 @@ export interface GuardHit {
 export interface GuardScope {
 	cwd: string;
 	home: string;
+	/**
+	 * Set when `cwd` only stands in for a directory the guard cannot place, such as a bash `cwd` that
+	 * is an internal URL or does not resolve: the probing rules then start from an unknown directory
+	 * ({@link pipelineProbes}), so that none probes a directory guessed from `cwd`.
+	 */
+	cwdStandIn?: boolean;
 }
 
 function hit(rule: GuardRule, why: string): GuardHit {
@@ -2371,7 +2378,8 @@ function fixedPipelineHits(pipelines: readonly ShellCommand[][], home: string): 
  * What the probing rules `discard_changes` and `kills_harness` find in each pipeline of `line`,
  * the parse of `command` from `scope`, asked by the pipeline's index: the first simple command in
  * it that breaks one. A pipeline is probed once for the call: what it found is kept in the call's
- * budget ({@link GuardProbeBudget.results}).
+ * budget ({@link GuardProbeBudget.results}). From a stand-in directory ({@link GuardScope.cwdStandIn})
+ * the line is read again from an unknown one, so that no probe runs in a directory derived from it.
  */
 function pipelineProbes(
 	command: string,
@@ -2380,20 +2388,23 @@ function pipelineProbes(
 	options: ShellGuardOptions,
 ): (index: number) => GuardHit | undefined {
 	const budget = options.budget ?? new GuardProbeBudget();
-	const key = `${scope.cwd}\0${scope.home}\0${command}`;
+	const key = `${scope.cwd}\0${scope.cwdStandIn === true}\0${scope.home}\0${command}`;
 	let kept = budget.results.get(key);
 	if (!kept) {
 		kept = new Map();
 		budget.results.set(key, kept);
 	}
 	const results = kept;
-	let releases: StashReleases | undefined;
+	let probed: { line: ShellLine; releases: StashReleases } | undefined;
 	return index => {
 		if (results.has(index)) return results.get(index);
-		releases ??= stashReleases(line, scope.home);
+		if (!probed) {
+			const read = scope.cwdStandIn ? parseShellCommands(command, { cwd: undefined, home: scope.home }) : line;
+			probed = { line: read, releases: stashReleases(read, scope.home) };
+		}
 		let found: GuardHit | undefined;
-		for (const simple of line.pipelines[index]) {
-			found = discardChanges(simple, scope, budget, releases) ?? killsHarness(simple, scope, budget);
+		for (const simple of probed.line.pipelines[index]) {
+			found = discardChanges(simple, scope, budget, probed.releases) ?? killsHarness(simple, scope, budget);
 			if (found) break;
 		}
 		results.set(index, found);
