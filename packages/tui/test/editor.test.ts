@@ -434,24 +434,24 @@ describe("Editor component", () => {
 		});
 
 		it("cycles through history entries on repeated Up arrow", () => {
-		const editor = new Editor(defaultEditorTheme);
+			const editor = new Editor(defaultEditorTheme);
 
-		editor.addToHistory("first");
-		editor.addToHistory("second");
-		editor.addToHistory("third");
+			editor.addToHistory("first");
+			editor.addToHistory("second");
+			editor.addToHistory("third");
 
-		editor.handleInput("\x1b[A"); // Up - shows "third"
-		expect(editor.getText()).toBe("third");
+			editor.handleInput("\x1b[A"); // Up - shows "third"
+			expect(editor.getText()).toBe("third");
 
-		editor.handleInput("\x1b[A"); // Up - shows "second"
-		expect(editor.getText()).toBe("second");
+			editor.handleInput("\x1b[A"); // Up - shows "second"
+			expect(editor.getText()).toBe("second");
 
-		editor.handleInput("\x1b[A"); // Up - shows "first"
-		expect(editor.getText()).toBe("first");
+			editor.handleInput("\x1b[A"); // Up - shows "first"
+			expect(editor.getText()).toBe("first");
 
-		editor.handleInput("\x1b[A"); // Up - stays at "first" (oldest)
-		expect(editor.getText()).toBe("first");
-	});
+			editor.handleInput("\x1b[A"); // Up - stays at "first" (oldest)
+			expect(editor.getText()).toBe("first");
+		});
 
 		it("navigates forward through history with Down arrow", () => {
 			const editor = new Editor(defaultEditorTheme);
