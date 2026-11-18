@@ -1522,4 +1522,15 @@ describe("guard rule review regressions", () => {
 		}
 		expect(ruleOf(bashApproval(cwd, "git --exec-path=/usr/lib/git-core reset --hard"))).toBe("discard_changes");
 	});
+
+	it("passes a `git clean` without `-f` or `-i`, which git refuses by default", async () => {
+		await dirtyRepo(cwd);
+		fs.writeFileSync(path.join(cwd, "scratch.txt"), "x\n");
+		for (const command of ["git clean", "git clean -d", "git clean -dx -e '*.log'"]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: undefined });
+		}
+		for (const command of ["git clean -f", "git clean -i", "git clean --interactive -d"]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "discard_changes" });
+		}
+	});
 });

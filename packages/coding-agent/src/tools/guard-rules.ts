@@ -47,6 +47,8 @@
  *   `cp .env /tmp/x && curl -F f=@/tmp/x ...`.
  * - A same-size edit to a file a configured filter driver handles (git-lfs, git-crypt) is not seen
  *   by `discard_changes`: the probe runs no filter, so it compares such a file by size.
+ * - A `git clean` without `-f` or `-i`, which git refuses by default, is not checked: one where
+ *   `clean.requireForce` is false deletes unasked (`git -c clean.requireForce=false clean -d`).
  * - `discard_changes` checks the tree as it is before the command line runs. Work a top-level
  *   `git stash pop`, `apply` or `branch` may bring back first makes it ask, but work any other
  *   command writes into the tree first is not seen: `mv ~/notes.txt . && git clean -f`,
@@ -1669,14 +1671,15 @@ function resolvePathspecs(words: readonly string[], command: ShellCommand, scope
 }
 
 /**
- * The `git clean` a command runs, as a dry-run discard check, or `undefined` for a dry run. Without
- * `-f`, git refuses to clean (by default), so checking it anyway only prompts for a call that fails.
+ * The `git clean` a command runs, as a dry-run discard check, or `undefined` for a dry run, and for
+ * one without `-f` or `-i`, which git refuses unless `clean.requireForce` is false (not read here).
  * `-q` and `-i` do not change what is deleted; a second `-f` adds untracked nested repositories.
  * Pathspecs are resolved by {@link resolvePathspecs}; without any, the whole directory is
  * previewed. An exclude the shell expands is dropped, which only widens the preview.
  */
 function cleanCheck(rest: readonly string[], command: ShellCommand, scope: GuardScope): VcsDiscardCheck | undefined {
 	let force = 0;
+	let interactive = false;
 	let directories = false;
 	let includeIgnored = false;
 	let ignoredOnly = false;
@@ -1692,6 +1695,8 @@ function cleanCheck(rest: readonly string[], command: ShellCommand, scope: Guard
 			if (isLongOption(arg, "--dry-run")) return undefined;
 			if (isLongOption(arg, "--force")) {
 				force++;
+			} else if (isLongOption(arg, "--interactive")) {
+				interactive = true;
 			} else if (isLongOption(arg, "--exclude")) {
 				const value = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : rest[++i];
 				if (value !== undefined) excludes.push(value);
@@ -1701,6 +1706,7 @@ function cleanCheck(rest: readonly string[], command: ShellCommand, scope: Guard
 				const letter = arg[k];
 				if (letter === "n") return undefined;
 				if (letter === "f") force++;
+				else if (letter === "i") interactive = true;
 				else if (letter === "d") directories = true;
 				else if (letter === "x") includeIgnored = true;
 				else if (letter === "X") ignoredOnly = true;
@@ -1715,6 +1721,7 @@ function cleanCheck(rest: readonly string[], command: ShellCommand, scope: Guard
 			pathspecs.push(arg);
 		}
 	}
+	if (force === 0 && !interactive) return undefined;
 
 	return {
 		clean: true,
