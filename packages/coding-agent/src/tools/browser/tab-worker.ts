@@ -77,7 +77,7 @@ import {
 	readPageViewport,
 } from "./launch";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "./readable";
-import { assertTabPressArgs } from "./tab-arguments";
+import { assertTabPressArgs, assertTabScrollArgs } from "./tab-arguments";
 import { selectorWaitOptions, type SelectorWaitOptions, waitForDetached, waitForSelectorHandle } from "./selector-wait";
 import {
 	type BrowserCookie,
@@ -3173,6 +3173,7 @@ export class WorkerCore {
 				),
 			scroll: (deltaX, deltaY, opts) =>
 				act("tab.scroll()", actionOpMs, async sig => {
+					assertTabScrollArgs(deltaX, deltaY, opts);
 					if (!opts?.selector) {
 						await untilAborted(sig, () => dispatchScroll(() => page.mouse.wheel({ deltaX, deltaY })));
 						return;

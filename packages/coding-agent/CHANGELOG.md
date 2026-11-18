@@ -6,6 +6,7 @@
 
 - Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy
 - Fixed the Spotlight experiment re-asking Stencil Cloud on every tool call for an account without Cloud access (waitlisted): omp now warns once and pauses Spotlight for that account for a few hours, honors `Retry-After` on rate limits and outages, and sends its `omp/<version>` User-Agent on every Spotlight request
+- Fixed `tab.scroll()` passing a non-numeric delta, such as a guessed `{ direction, amount }` object, through to Chrome as an opaque `Failed to deserialize params.deltaX` protocol error; it now fails with a hint naming the `(dx, dy, { selector? })` form and the matching call ([#19637](https://github.com/can1357/oh-my-pi/pull/19637) by [@Vayz0001](https://github.com/Vayz0001))
 
 ### Changed
 
