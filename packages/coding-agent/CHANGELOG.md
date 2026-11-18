@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Set `goal.guidedAsk` to batch independent `/guided-goal` questions in a form when the built-in `ask` tool is active. Conversational interviews remain the default ([#19654](https://github.com/can1357/oh-my-pi/pull/19654) by [@Thinkscape](https://github.com/Thinkscape)).
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes

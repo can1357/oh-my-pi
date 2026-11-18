@@ -760,10 +760,12 @@ describe("InteractiveMode goal mode integration", () => {
 				if (!goalTool) throw new Error("expected goal tool to be active");
 				await goalTool.execute("call-1", { op: "complete" });
 				const nextTurn = mode.getUserInput();
-				// getUserInput awaits the completion exit before arming onInputCallback.
-				for (let i = 0; i < 100 && session.getGoalModeState() !== undefined; i++) await waitForMicrotasks();
+				// Wait for the roster update rather than spinning promises while it can do I/O.
+				await session.runToolRegistryMutation(async () => {});
+				await waitForMicrotasks();
+				expect(mode.onInputCallback).toBeFunction();
 				mode.onInputCallback?.(mode.startPendingSubmission({ text: "next turn" }));
-				await nextTurn;
+				expect((await nextTurn).text).toBe("next turn");
 			},
 		},
 		{

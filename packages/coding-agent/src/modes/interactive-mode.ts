@@ -473,13 +473,13 @@ import {
 	cfgTuiVimMode,
 	cfgTuiVimModeDisplay,
 } from "./settings";
-import { cfgTasksTodoClearDelay } from "../tools/settings";
+import { cfgAskEnabled, cfgTasksTodoClearDelay } from "../tools/settings";
 import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../task/settings";
 import { cfgExpandThinkingBlocks, cfgProseOnlyThinking } from "../session/settings";
 import { cfgDefaultThinkingLevel, cfgHideThinkingBlock } from "../session/settings";
 import { cfgCycleOrder, cfgModelRoles } from "../config/model-settings";
 import { cfgExtensionHandlersModeControl } from "../extensibility/settings";
-import { cfgGoalContinuationModes, cfgGoalEnabled } from "../goals/settings";
+import { cfgGoalContinuationModes, cfgGoalEnabled, cfgGoalGuidedAsk } from "../goals/settings";
 import { goalContinuationActivity, goalFromModeData } from "../goals/state";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
 import { cfgStreamRedactPatterns } from "../stream/settings";
@@ -577,6 +577,11 @@ const DEFAULT_WORKING_MESSAGE = "Working…";
 const ASK_COMPOSER_HINT = "↑ answer the questions above, or type here to skip them";
 /** Native working-message shimmer under a session accent: the hue itself is the terminal's `accent`. */
 const NATIVE_ACCENT_SHIMMER: ShimmerPalette = { low: "dim", mid: "accent", high: "accent", bold: true };
+
+interface GuidedGoalAskInterview {
+	/** Identity of the queued kickoff, so a preceding run ending doesn't clean it up. */
+	kickoff?: AgentMessage;
+}
 
 interface WorkingMessageAccent {
 	main: string;
@@ -1950,12 +1955,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[]; registered: string[] } | undefined;
 	/** True while goal mode owns the `goal` tool in the live roster; exit strips only that tool. */
 	#goalToolAddedByMode = false;
-	// True from `/guided-goal` kickoff until the interview ends: a goal record
-	// appears, a turn makes tool calls (the interview itself is tool-free, so
-	// tool use means it was abandoned for real work), the kickoff fails, or the
-	// session switches. While set, short replies like "c" are answers, not
-	// continue shortcuts.
-	#guidedGoalInterviewActive = false;
+	/** Keep short answers like "c" out of the continue shortcut during an interview. */
+	#guidedGoalInterview: "conversation" | GuidedGoalAskInterview | undefined;
 	#vibeModePreviousTools: string[] | undefined;
 	#vibeModeOwnerScope: VibeOwnerScope | undefined;
 	// In-flight #enterVibeMode promise: set before the activateVibeTools await
@@ -5909,6 +5910,24 @@ export class InteractiveMode implements InteractiveModeContext {
 		return state;
 	}
 
+	#isGuidedGoalKickoffQueued(kickoff?: AgentMessage): boolean {
+		if (!kickoff) return false;
+		const agent = this.session.agent;
+		return (
+			agent.peekFollowUpQueue().includes(kickoff) ||
+			agent.peekSteeringQueue().includes(kickoff) ||
+			agent.peekUndeliveredQueuedMessages().includes(kickoff)
+		);
+	}
+
+	async #finishGuidedGoalAskInterview(interview: GuidedGoalAskInterview): Promise<void> {
+		if (this.#guidedGoalInterview !== interview) return;
+		if (!this.session.getGoalModeState()?.goal) {
+			await this.#removeGoalToolPreservingRoster();
+		}
+		if (this.#guidedGoalInterview === interview) this.#guidedGoalInterview = undefined;
+	}
+
 	async #handleGoalSessionEvent(event: AgentSessionEvent): Promise<void> {
 		if (event.type === "agent_start") {
 			this.#cancelGoalContinuation();
@@ -5919,7 +5938,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		if (event.type === "goal_updated") {
-			if (event.state) this.#guidedGoalInterviewActive = false;
+			if (event.state) this.#guidedGoalInterview = undefined;
 			// Handle drop before clearing goalModeEnabled so #exitGoalMode can
 			// still restore the previous tool set while the flag is true.
 			if (event.state?.goal?.status === "dropped") {
@@ -5937,8 +5956,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (event.type !== "agent_end") {
 			return;
 		}
-		if (this.#guidedGoalInterviewActive && event.messages.some(hasAssistantToolCall)) {
-			this.#guidedGoalInterviewActive = false;
+		const interview = this.#guidedGoalInterview;
+		if (interview === "conversation") {
+			if (event.messages.some(hasAssistantToolCall)) this.#guidedGoalInterview = undefined;
+		} else if (interview?.kickoff && !this.#isGuidedGoalKickoffQueued(interview.kickoff)) {
+			await this.#finishGuidedGoalAskInterview(interview);
 		}
 		if (this.#pendingGoalContinuationTurns > 0) {
 			this.#pendingGoalContinuationTurns--;
@@ -6125,7 +6147,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		using _hold = this.#holdModeChanges();
 		const vibeScopeAlreadySuspended = this.#vibeScopeSuspendedForSwitch;
 		this.#vibeScopeSuspendedForSwitch = false;
-		this.#guidedGoalInterviewActive = false;
+		const interview = this.#guidedGoalInterview;
+		if (interview === "conversation") {
+			this.#guidedGoalInterview = undefined;
+		} else if (interview && !this.#isGuidedGoalKickoffQueued(interview.kickoff)) {
+			await this.#finishGuidedGoalAskInterview(interview);
+		}
 		const sessionContext = this.sessionManager.buildSessionContext();
 		const vibeSession = this.#vibeParentSession();
 		const targetVibeScope = VibeSessionRegistry.global().ownerScope(vibeSession);
@@ -6533,9 +6560,18 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Undo only goal mode's own tool change; tools registered or enabled after entry stay live. */
 	async #removeGoalToolPreservingRoster(): Promise<void> {
 		if (!this.#goalToolAddedByMode) return;
-		const liveTools = this.session.getEnabledToolNames();
-		if (liveTools.includes("goal")) {
-			await this.session.setActiveToolsByName(liveTools.filter(name => name !== "goal"));
+		try {
+			await this.session.runToolRegistryMutation(async () => {
+				if (!this.#goalToolAddedByMode) return;
+				const liveTools = this.session.getEnabledToolNames();
+				if (liveTools.includes("goal")) {
+					await this.session.setActiveToolsByName(liveTools.filter(name => name !== "goal"));
+				}
+				this.#goalToolAddedByMode = false;
+			});
+		} catch (error) {
+			logger.warn("Failed to remove the temporary goal tool", { error: String(error) });
+			this.showWarning("Could not remove the temporary goal tool. Use /tools to change the current tool selection.");
 		}
 	}
 
@@ -7603,6 +7639,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		rest?: string,
 		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
 	): Promise<boolean> {
+		let interview: "conversation" | GuidedGoalAskInterview | undefined;
 		try {
 			if (this.planModeEnabled || this.planModePaused) {
 				this.#warnPlanModeBlocks();
@@ -7624,41 +7661,64 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.showWarning("Resume the current goal first, or drop it before setting a new objective.");
 				return false;
 			}
+			interview = await this.session.runToolRegistryMutation(async () => {
+				if (this.#guidedGoalInterview && this.#guidedGoalInterview !== "conversation") return undefined;
 
-			// Expose the goal tool for the interview so the agent can finish by
-			// calling `goal create`. Remember that this mode added the tool: the
-			// tool-driven create flips goalModeEnabled via `goal_updated`, and the
-			// eventual goal exit drops only that tool from the live roster.
-			const enabledTools = this.session.getEnabledToolNames();
-			if (!enabledTools.includes("goal")) {
-				this.#goalToolAddedByMode = true;
-				await this.session.setActiveToolsByName([...enabledTools, "goal"]);
+				// Only add goal for goal create. Retain ownership on success so the
+				// normal goal-mode exit can remove it without resetting the roster.
+				const enabledTools = this.session.getEnabledToolNames();
+				if (!enabledTools.includes("goal")) {
+					await this.session.setActiveToolsByName([...enabledTools, "goal"]);
+					this.#goalToolAddedByMode = this.session.getEnabledToolNames().includes("goal");
+				}
+
+				// Never add ask to the roster, including when the user disabled it in /tools.
+				const askAvailable =
+					cfgGoalGuidedAsk.get(this.session.settings) &&
+					cfgAskEnabled.get(this.session.settings) &&
+					this.session.hasBuiltInTool("ask") &&
+					this.session.getActiveToolNames().includes("ask");
+				const nextInterview: "conversation" | GuidedGoalAskInterview = askAvailable ? {} : "conversation";
+				this.#guidedGoalInterview = nextInterview;
+				return nextInterview;
+			});
+			if (!interview) {
+				this.showStatus("A guided goal interview is already in progress.");
+				return false;
 			}
-			this.#guidedGoalInterviewActive = true;
 
-			// The interview is a normal conversation: the kickoff rides in as a
-			// hidden developer message, the agent asks its questions as regular
-			// assistant turns, and the user answers in the ordinary editor. Queue
-			// behind an in-flight run instead of aborting it.
+			// Queue the synthetic developer message behind an in-flight run instead of aborting it.
 			const kickoff = prompt.render(guidedGoalInterviewPrompt, {
 				initial: rest?.trim() || undefined,
+				askAvailable: interview !== "conversation",
 			});
 			const images = input?.images?.length ? input.images : undefined;
-			if (this.session.isStreaming) {
-				await this.session.followUp(kickoff, images, { synthetic: true });
-			} else {
+			if (!this.session.isStreaming) {
 				try {
 					await this.session.prompt(kickoff, images ? { synthetic: true, images } : { synthetic: true });
+					return true;
 				} catch (error) {
 					if (!(error instanceof AgentBusyError)) throw error;
-					await this.session.followUp(kickoff, images, { synthetic: true });
 				}
 			}
+			const askInterview = interview === "conversation" ? undefined : interview;
+			await this.session.followUp(kickoff, images, {
+				synthetic: true,
+				...(askInterview && {
+					onPromptQueued: messages => {
+						askInterview.kickoff = messages.at(-1);
+					},
+				}),
+			});
 			return true;
 		} catch (error) {
-			this.#guidedGoalInterviewActive = false;
+			if (interview === "conversation") this.#guidedGoalInterview = undefined;
 			this.showError(error instanceof Error ? error.message : String(error));
 			return false;
+		} finally {
+			if (interview && interview !== "conversation" && !interview.kickoff) {
+				await this.#finishGuidedGoalAskInterview(interview);
+			}
 		}
 	}
 
@@ -9989,7 +10049,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	isGuidedGoalInterviewActive(): boolean {
-		return this.#guidedGoalInterviewActive && !this.goalModeEnabled && !this.goalModePaused;
+		return this.#guidedGoalInterview !== undefined && !this.goalModeEnabled && !this.goalModePaused;
 	}
 
 	handleBtwCopyKey(): Promise<boolean> {
