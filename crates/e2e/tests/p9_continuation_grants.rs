@@ -15,12 +15,6 @@
 //! is a `sandboxed`-tier host launched under the OS sandbox with an exact
 //! Unix-socket grant that only Seatbelt enforces, so the proofs skip off macOS
 //! and, as in P12, fail on macOS when Seatbelt is unavailable.
-//!
-//! Both proofs are ignored. Observed on Linux with the host sandbox bypassed,
-//! the admitted extension's registry freeze fails with "registry publication
-//! differs from authenticated manifest", so its tool never registers. Run them
-//! with `--run-ignored all` once that is fixed.
-
 #![cfg(unix)]
 
 use std::{collections::BTreeSet, time::Duration};
@@ -152,8 +146,6 @@ async fn call_set_policy(client: &EnvClient) -> Result<Value> {
 }
 
 #[tokio::test]
-#[ignore = "blocked: an admitted user extension's registry freeze fails (ManifestDrift), so its \
-            tool never registers; see crates/e2e/README.md"]
 async fn granted_user_extension_sets_continuation_policy() -> Result<()> {
 	if !runs_user_extension_hosts()? {
 		return Ok(());
@@ -201,8 +193,6 @@ async fn granted_user_extension_sets_continuation_policy() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "blocked: an admitted user extension's registry freeze fails (ManifestDrift), so its \
-            tool never registers; see crates/e2e/README.md"]
 async fn ungranted_user_extension_gets_policy_denied() -> Result<()> {
 	if !runs_user_extension_hosts()? {
 		return Ok(());
