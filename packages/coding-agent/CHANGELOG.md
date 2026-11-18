@@ -290,6 +290,9 @@
 ### Added
 
 - Startup prints `Waiting for auth broker at <url> …` to stderr while it retries an unreachable auth broker, in CLI commands (`omp login`, `omp models`, `omp commit`, `omp usage`, …) and in interactive launches that start without the prepaint composer (`--model`, `--resume`, …) ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- `omp usage` judges an account's policy state and percent left by its account-wide windows, so a Claude account at 100% of its Fable weekly (or a Codex account with a spent Spark meter) with room left in its shared windows no longer shows as exhausted; the policy line names the spent row (`· Claude 7 Day (Fable) exhausted`) and `--json` lists its limit ids in `policy.scopedExhausted` ([#19606](https://github.com/can1357/oh-my-pi/pull/19606) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 
