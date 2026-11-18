@@ -374,7 +374,9 @@ describe("shared Chromium session-restore state", () => {
 			// cannot prepare the profile and must not launch Chrome on it.
 			await Bun.write(path.join(sessionsDir, "Session_13435785841408923"), "previous chrome");
 			holdClaimElsewhere();
-			expect(await ensureSharedBrowser({ projectDir, headless: true })).toBeNull();
+			await expect(ensureSharedBrowser({ projectDir, headless: true })).rejects.toThrow(
+				"another omp process held the shared browser profile",
+			);
 			expect(broker.starts).toBe(0);
 			releaseClaim();
 
