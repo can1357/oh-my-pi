@@ -723,29 +723,27 @@ fn admitted_control_grants(
 		return BTreeSet::new();
 	}
 
-	let config_root = match omp_core::dirs::profile_config_dir(home) {
+	let extension_root = match user_extension_root(home) {
 		Ok(path) => path,
 		Err(error) => {
 			tracing::warn!(extension = %id, path = %home.display(), reason = %error, "withholding extension CONTROL grants");
 			return BTreeSet::new();
 		},
 	};
-	let extension_root = config_root.join("agent/extensions");
-	let store_root = options.data_dir.join("ext");
-	let grants_file = grants_path(options.data_dir);
-	let writable_roots =
-		super::protected::exec_writable_roots(workspace_root, options.writable_roots);
-	for protected in [&store_root, &grants_file, &extension_root] {
-		if let Err(error) = super::protected::check_protected_location(protected, &writable_roots) {
-			tracing::warn!(
-				extension = %id,
-				path = %protected.display(),
-				reason = %error,
-				"withholding extension CONTROL grants because a protected location is unsafe"
-			);
-			return BTreeSet::new();
-		}
+	if let Err(error) = check_grant_locations(
+		options.data_dir,
+		&extension_root,
+		workspace_root,
+		options.writable_roots,
+	) {
+		tracing::warn!(
+			extension = %id,
+			reason = %error,
+			"withholding extension CONTROL grants because a protected location is unsafe"
+		);
+		return BTreeSet::new();
 	}
+	let grants_file = grants_path(options.data_dir);
 	let grants = match GrantsFile::read(&grants_file) {
 		Ok(grants) => grants,
 		Err(error) => {
@@ -758,24 +756,135 @@ fn admitted_control_grants(
 			return BTreeSet::new();
 		},
 	};
-	let manifest_digest = Hash32::sum(manifest_text.as_bytes()).into_bytes();
-	let digest = path_grant_digest(declared_capabilities.iter().cloned(), &manifest_digest);
-	let publisher = native_path_publisher(canonical_root);
-	let ship = Str::new_static("path");
+	let identity = path_grant_identity(id, canonical_root, manifest_text, declared_capabilities);
 	if grant_covers(
 		&grants,
 		id,
-		&publisher,
+		&identity.publisher,
 		Layer::Client,
 		None,
-		&digest,
+		&identity.capability_digest,
 		TrustTier::Sandboxed,
-		&ship,
+		&Str::new_static(PATH_GRANT_SHIP),
 	) {
 		wanted
 	} else {
 		BTreeSet::new()
 	}
+}
+
+/// `ship` recorded on every operator path grant for an unsigned native
+/// extension.
+pub const PATH_GRANT_SHIP: &str = "path";
+
+/// Exact operator path-grant identity that admission matches for one
+/// user-layer extension. `omp ext grant` writes a record built from it, so the
+/// issued grant and the admitted one cannot drift.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PathGrantIdentity {
+	/// Extension manifest id.
+	pub id:                Str,
+	/// Canonical extension root.
+	pub root:              PathBuf,
+	/// Path publisher derived from the canonical root.
+	pub publisher:         Str,
+	/// Path-grant digest over the full declared set and the manifest text.
+	pub capability_digest: Str,
+	/// The CONTROL subset of the declared capabilities.
+	pub control:           BTreeSet<Str>,
+}
+
+fn path_grant_identity(
+	id: &Str,
+	canonical_root: &Path,
+	manifest_text: &str,
+	declared_capabilities: &[Str],
+) -> PathGrantIdentity {
+	let manifest_digest = Hash32::sum(manifest_text.as_bytes()).into_bytes();
+	PathGrantIdentity {
+		id:                id.clone(),
+		root:              canonical_root.to_path_buf(),
+		publisher:         native_path_publisher(canonical_root),
+		capability_digest: path_grant_digest(declared_capabilities.iter().cloned(), &manifest_digest),
+		control:           declared_capabilities
+			.iter()
+			.filter(|capability| CONTROL_CAPABILITIES.contains(&capability.as_str()))
+			.cloned()
+			.collect(),
+	}
+}
+
+/// The automatic user-layer extension root, `<config>/agent/extensions`.
+///
+/// # Errors
+///
+/// [`NativeExtensionError::Profile`] when the profile config dir is invalid.
+pub fn user_extension_root(home: &Path) -> Result<PathBuf, NativeExtensionError> {
+	Ok(omp_core::dirs::profile_config_dir(home)?.join("agent/extensions"))
+}
+
+/// Store checks shared by admission and `omp ext grant`: `<data>/ext`, its
+/// grant file and the user extension root must not be symlinks, must be owned
+/// by the effective user, and must not overlap an exec-writable root.
+///
+/// # Errors
+///
+/// The first [`ProtectedLocationError`] found.
+pub fn check_grant_locations(
+	data_dir: &Path,
+	extension_root: &Path,
+	workspace_root: &Path,
+	configured_writable_roots: &[PathBuf],
+) -> Result<(), super::protected::ProtectedLocationError> {
+	let writable = super::protected::exec_writable_roots(workspace_root, configured_writable_roots);
+	for location in [data_dir.join("ext"), grants_path(data_dir), extension_root.to_path_buf()] {
+		super::protected::check_protected_location(&location, &writable)?;
+	}
+	Ok(())
+}
+
+/// Finds the extension `id` installed under the user extension root and
+/// returns the grant identity admission would match. `Ok(None)` means `id` is
+/// not a user-layer extension.
+///
+/// # Errors
+///
+/// A profile, scan or manifest failure for the user root or the named package.
+pub fn user_extension_grant_identity(
+	home: &Path,
+	id: &str,
+) -> Result<Option<PathGrantIdentity>, NativeExtensionError> {
+	let root = user_extension_root(home)?;
+	let mut found = Vec::new();
+	let mut errors = Vec::new();
+	collect_automatic_contained(&root, RootOrigin::User, &mut found, &mut errors);
+	for (loaded, _) in found {
+		if loaded.manifest.id.as_str() == id {
+			let declared = default_declared_capabilities(&loaded.manifest, &loaded.path)?;
+			return Ok(Some(path_grant_identity(
+				&loaded.manifest.id,
+				&loaded.root,
+				&loaded.text,
+				&declared,
+			)));
+		}
+	}
+	errors.into_iter().next().map_or(Ok(None), Err)
+}
+
+fn default_declared_capabilities(
+	manifest: &DeploymentManifest,
+	path: &Path,
+) -> Result<Vec<Str>, NativeExtensionError> {
+	let selected = manifest
+		.features
+		.iter()
+		.filter_map(|(name, feature)| feature.default.then(|| name.clone()))
+		.collect::<Vec<_>>();
+	let projection = manifest
+		.project(&selected)
+		.map_err(|source| NativeExtensionError::Manifest { path: path.to_path_buf(), source })?;
+	Ok(projection.capabilities.iter().cloned().collect())
 }
 
 /// Protected path spellings used by the environment exec sandbox.

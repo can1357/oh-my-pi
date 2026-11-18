@@ -297,6 +297,8 @@ pub enum ExtCommand {
 	Doctor(ExtDoctorArgs),
 	/// Inspect or change an extension trust grant.
 	Trust(ExtTrustArgs),
+	/// Issue or revoke the operator control grant of a user-layer extension.
+	Grant(ExtGrantArgs),
 	/// Recheck artifact integrity, signatures, and revocations.
 	Verify(ExtVerifyArgs),
 	/// Build an air-gap extension bundle.
@@ -556,6 +558,19 @@ pub struct ExtDoctorArgs {
 	/// Repair mechanically repairable integrity and site-tree failures.
 	#[arg(long)]
 	pub fix: bool,
+}
+
+/// Options for `omp ext grant`.
+#[derive(Clone, Debug, Args)]
+pub struct ExtGrantArgs {
+	/// Extension id installed under `<config>/agent/extensions`.
+	pub id:     Str,
+	/// Remove the extension's operator control grant.
+	#[arg(long)]
+	pub revoke: bool,
+	/// Consent without an interactive prompt.
+	#[arg(long)]
+	pub yes:    bool,
 }
 
 /// Options for `omp ext trust`.
@@ -823,6 +838,7 @@ pub async fn run(args: ExtArgs) -> miette::Result<()> {
 		ExtCommand::Gc(args) => gc(&state, args),
 		ExtCommand::Doctor(args) => doctor(&scoped_state, args),
 		ExtCommand::Trust(args) => trust(&state, &data_dir, args),
+		ExtCommand::Grant(args) => ext_grant(&state, &data_dir, args),
 		ExtCommand::Verify(args) => {
 			if environment.offline != OfflineMode::Online && args.revocations {
 				Err(miette!("cannot refresh revocations while extension networking is offline"))
@@ -1982,6 +1998,119 @@ async fn bundle(state: &StatePaths, args: ExtBundleArgs) -> miette::Result<()> {
 	}
 	fs::write(args.output, encoded).into_diagnostic()
 }
+
+/// `omp ext grant`: issue or revoke the operator path grant that admits a
+/// user-layer extension's declared CONTROL capabilities.
+fn ext_grant(state: &StatePaths, data_dir: &Path, args: ExtGrantArgs) -> miette::Result<()> {
+	let home = omp_core::dirs::home_dir()
+		.ok_or(omp_core::dirs::DataDirError::HomeUnset)
+		.into_diagnostic()?;
+	let ctx = crate::process_ctx(&state.project)?;
+	let writable_roots = omp_envd::exec_settings::SV_SANDBOX_WRITABLE_ROOTS
+		.get(&ctx)
+		.into_iter()
+		.map(|path| PathBuf::from(path.as_str()))
+		.collect::<Vec<_>>();
+	let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
+	grant_with(state, data_dir, &home, &writable_roots, &args, |prompt| {
+		if args.yes {
+			return Ok(true);
+		}
+		if !interactive {
+			return Ok(false);
+		}
+		eprint!("{prompt} [y/N] ");
+		let mut answer = String::new();
+		std::io::stdin().read_line(&mut answer).into_diagnostic()?;
+		Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
+	})
+}
+
+fn grant_with(
+	state: &StatePaths,
+	data_dir: &Path,
+	home: &Path,
+	writable_roots: &[PathBuf],
+	args: &ExtGrantArgs,
+	consent: impl FnOnce(&str) -> miette::Result<bool>,
+) -> miette::Result<()> {
+	let ship = Str::new_static(omp_driver::discovery::native::PATH_GRANT_SHIP);
+	let is_path_grant = |grant: &Grant| {
+		grant.id == args.id
+			&& grant.layer == BackendLayer::Client
+			&& grant.workspace.is_none()
+			&& grant.ship == ship
+	};
+	let extension_root = omp_driver::discovery::native::user_extension_root(home)
+		.map_err(|error| miette!("{error}"))?;
+	// Grant and revoke both rewrite grants.toml: refuse either on an unsafe store.
+	omp_driver::discovery::native::check_grant_locations(
+		data_dir,
+		&extension_root,
+		&state.project,
+		writable_roots,
+	)
+	.map_err(|error| miette!("refusing to change control grants for `{}`: {error}", args.id))?;
+	if args.revoke {
+		let removed = GrantsFile::update(&state.grants, |grants| {
+			let before = grants.grants.len();
+			grants.grants.retain(|grant| !is_path_grant(grant));
+			before - grants.grants.len()
+		})
+		.map_err(grants_update_failure)?;
+		println!("{}: removed {removed} control grant(s)", args.id);
+		return Ok(());
+	}
+	let identity =
+		omp_driver::discovery::native::user_extension_grant_identity(home, args.id.as_str())
+			.map_err(|error| miette!("{error}"))?
+			.ok_or_else(|| {
+				miette!(
+					"control grants are user-layer only: `{}` is not installed under {}",
+					args.id,
+					extension_root.display()
+				)
+			})?;
+	if identity.control.is_empty() {
+		return Err(miette!("`{}` declares no control capabilities", args.id));
+	}
+	let capabilities = identity
+		.control
+		.iter()
+		.map(Str::as_str)
+		.collect::<Vec<_>>()
+		.join(", ");
+	if !consent(&format!("Grant {capabilities} to `{}` at {}?", args.id, identity.root.display()))? {
+		return Err(miette!(
+			"control grant for `{}` needs consent: pass --yes or answer the prompt in a terminal",
+			args.id
+		));
+	}
+	if let Some(parent) = state.grants.parent() {
+		fs::create_dir_all(parent).into_diagnostic()?;
+	}
+	let record = Grant {
+		id:                identity.id.clone(),
+		publisher:         identity.publisher.clone(),
+		layer:             BackendLayer::Client,
+		workspace:         None,
+		scope:             omp_ext::trust::GrantScope::Exact,
+		capability_digest: identity.capability_digest.clone(),
+		tier:              omp_ext::TrustTier::Sandboxed,
+		ship:              ship.clone(),
+		granted_at:        Str::new(jiff::Timestamp::now().to_string()),
+		granted_by:        Str::new_static("explicit-grant"),
+		duration:          omp_ext::trust::GrantDuration::Persistent,
+	};
+	GrantsFile::update(&state.grants, |grants| {
+		grants.grants.retain(|grant| !is_path_grant(grant));
+		grants.grants.push(record);
+	})
+	.map_err(grants_update_failure)?;
+	println!("{}: granted {capabilities}", args.id);
+	Ok(())
+}
+
 fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Result<()> {
 	if args.approve_commands || !args.approve_command.is_empty() {
 		return approve_plugin_commands(state, data_dir, &args);
@@ -4455,5 +4584,176 @@ mod tests {
 			["review.dist-info", "review/__init__.py"]
 		);
 		assert!(files.iter().all(|file| file.blob_hash.len() == 32));
+	}
+}
+
+#[cfg(test)]
+mod grant_tests {
+	use std::path::{Path, PathBuf};
+
+	use omp_core::Str;
+
+	use super::{ExtGrantArgs, GrantsFile, StatePaths, grant_with};
+
+	struct Fixture {
+		_tree:   tempfile::TempDir,
+		home:    PathBuf,
+		project: PathBuf,
+		data:    PathBuf,
+		root:    PathBuf,
+	}
+
+	/// A tree outside TMPDIR and /tmp, which are exec-writable roots.
+	fn fixture(id: &str) -> Fixture {
+		let base = std::env::var_os("HOME")
+			.map(PathBuf::from)
+			.expect("test home");
+		let tree = tempfile::tempdir_in(base).expect("tree outside TMPDIR");
+		let home = tree.path().join("home");
+		let project = tree.path().join("workspace");
+		let data = tree.path().join("data");
+		let root = home.join(".o2/agent/extensions").join(id);
+		std::fs::create_dir_all(root.join("src/demo")).expect("module");
+		std::fs::write(root.join("src/demo/__init__.py"), "# inert\n").expect("entry");
+		std::fs::write(
+			root.join("omp.toml"),
+			format!(
+				"id = \"{id}\"\nentry = \"demo\"\ncapabilities = [\"agents.continuation\", \
+				 \"policy.write\"]\n"
+			),
+		)
+		.expect("manifest");
+		std::fs::create_dir_all(&project).expect("workspace");
+		std::fs::create_dir_all(data.join("ext")).expect("store");
+		Fixture { _tree: tree, home, project, data, root }
+	}
+
+	fn args(id: &str, revoke: bool) -> ExtGrantArgs {
+		ExtGrantArgs { id: Str::new(id), revoke, yes: true }
+	}
+
+	fn run(f: &Fixture, args: &ExtGrantArgs, consent: bool) -> miette::Result<()> {
+		let state = StatePaths::new(&f.data, &f.project);
+		grant_with(&state, &f.data, &f.home, &[], args, |_| Ok(consent))
+	}
+
+	fn stored(f: &Fixture) -> usize {
+		GrantsFile::read(&omp_ext::trust::grants_path(&f.data))
+			.expect("grants")
+			.grants
+			.len()
+	}
+
+	fn admitted_control(f: &Fixture, id: &str) -> std::collections::BTreeSet<Str> {
+		use omp_driver::discovery::native::{
+			NativeAdmissionOptions, NativeControlGrantOptions, NativeLoadMode,
+			admit_native_extensions_contained_with_control,
+		};
+		let report = admit_native_extensions_contained_with_control(
+			&f.project,
+			&f.home,
+			NativeAdmissionOptions {
+				explicit_roots:    &[],
+				mode:              NativeLoadMode::Merge,
+				include_workspace: false,
+				setting_overrides: &[],
+				disabled:          &[],
+			},
+			&NativeControlGrantOptions {
+				data_dir:          &f.data,
+				sandbox_mode:      omp_envd::exec_settings::ExecSandboxMode::WorkspaceWrite,
+				writable_roots:    &[],
+				sandbox_available: true,
+			},
+		);
+		report
+			.extensions
+			.into_iter()
+			.find(|extension| extension.spec.key.extension().as_str() == id)
+			.expect("user extension admitted")
+			.spec
+			.control_grants
+	}
+
+	#[test]
+	fn grant_writes_record_admission_accepts() {
+		let f = fixture("test.user");
+		assert!(admitted_control(&f, "test.user").is_empty());
+		run(&f, &args("test.user", false), true).expect("grant");
+		assert_eq!(stored(&f), 1);
+		assert_eq!(
+			admitted_control(&f, "test.user"),
+			[Str::new_static("agents.continuation"), Str::new_static("policy.write")].into()
+		);
+	}
+
+	#[test]
+	fn revoke_removes_record() {
+		let f = fixture("test.user");
+		run(&f, &args("test.user", false), true).expect("grant");
+		run(&f, &args("test.user", true), true).expect("revoke");
+		assert_eq!(stored(&f), 0);
+		assert!(admitted_control(&f, "test.user").is_empty());
+	}
+
+	#[test]
+	fn grant_refuses_non_user_layer() {
+		let f = fixture("test.user");
+		let workspace_ext = f.project.join(".omp/extensions/test.workspace");
+		std::fs::create_dir_all(&workspace_ext).expect("workspace ext");
+		std::fs::copy(f.root.join("omp.toml"), workspace_ext.join("omp.toml")).expect("copy");
+		let error = run(&f, &args("test.workspace", false), true).expect_err("refused");
+		assert!(error.to_string().contains("user-layer only"), "{error}");
+		assert_eq!(stored(&f), 0);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn grant_refuses_bad_store() {
+		let f = fixture("test.user");
+		let store = f.data.join("ext");
+		let target = f.data.join("ext-target");
+		std::fs::rename(&store, &target).expect("move store");
+		std::os::unix::fs::symlink(&target, &store).expect("store symlink");
+		assert!(run(&f, &args("test.user", false), true).is_err());
+		assert!(!target.join("grants.toml").exists(), "no record written through the link");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn revoke_refuses_bad_store() {
+		let f = fixture("test.user");
+		run(&f, &args("test.user", false), true).expect("grant");
+		let store = f.data.join("ext");
+		let target = f.data.join("ext-target");
+		std::fs::rename(&store, &target).expect("move store");
+		std::os::unix::fs::symlink(&target, &store).expect("store symlink");
+		let before = std::fs::read(target.join("grants.toml")).expect("granted record");
+		assert!(run(&f, &args("test.user", true), true).is_err());
+		assert_eq!(
+			std::fs::read(target.join("grants.toml")).expect("record still there"),
+			before,
+			"revoke must not rewrite grants.toml through the link"
+		);
+	}
+
+	#[test]
+	fn grant_refuses_bad_extension_root() {
+		let f = fixture("test.user");
+		let state = StatePaths::new(&f.data, &f.project);
+		let writable: Vec<PathBuf> = vec![f.home.clone()];
+		let result =
+			grant_with(&state, &f.data, &f.home, &writable, &args("test.user", false), |_| Ok(true));
+		assert!(result.is_err(), "extension root inside a writable root must be refused");
+		assert_eq!(stored(&f), 0);
+	}
+
+	#[test]
+	fn grant_without_consent_refuses() {
+		let f = fixture("test.user");
+		let error = run(&f, &args("test.user", false), false).expect_err("no consent");
+		assert!(error.to_string().contains("consent"), "{error}");
+		assert_eq!(stored(&f), 0);
+		let _: &Path = &f.root;
 	}
 }
