@@ -151,7 +151,7 @@ async function launchRelayFixture(
 		// A failed test may leave a held download open; end it so the browser and server can stop.
 		for (const release of held) release.resolve();
 		try {
-			await Promise.all(browsers.map(browser => closeLaunchedBrowser(browser)));
+			await Promise.all(browsers.map(browser => closeLaunchedBrowser({ browser })));
 		} finally {
 			server.stop();
 			pages.stop(true);

@@ -8,7 +8,7 @@ function isCompactionCapableModel(model: Model<"anthropic-messages">): boolean {
 	return model.compat.supportsServerCompaction === true && model.remoteCompaction?.enabled !== false;
 }
 
-/** Supported Anthropic Messages deployments; gateways require an explicit opt-in. */
+/** Anthropic Messages deployments known to implement on-demand compaction. */
 function isSupportedCompactionEndpoint(baseUrl: string | undefined): boolean {
 	if (isOfficialAnthropicApiUrl(baseUrl)) return true;
 	if (!baseUrl) return false;
@@ -30,6 +30,17 @@ export function resolvesToOfficialAnthropicEndpoint(model: Model<"anthropic-mess
 	const baseUrl =
 		model.provider === "anthropic" ? resolveDirectAnthropicBaseUrl(model) : normalizeAnthropicBaseUrl(model.baseUrl);
 	return isOfficialAnthropicApiUrl(baseUrl);
+}
+
+/**
+ * Whether a model declares that its configured endpoint serves Anthropic
+ * Messages on-demand compaction: `remoteCompaction: { api: "anthropic-messages",
+ * enabled: true }`, `api` naming the compaction endpoint's adapter family as it
+ * does for the OpenAI lanes. This is the opt-in for a gateway outside the known
+ * deployments, and for a custom api that dispatches to Anthropic Messages.
+ */
+export function declaresAnthropicCompactionEndpoint(model: Model): boolean {
+	return model.remoteCompaction?.api === "anthropic-messages" && model.remoteCompaction.enabled === true;
 }
 
 /** Whether model policy and the effective deployment support on-demand compaction. */
@@ -54,6 +65,12 @@ export function supportsAnthropicCompaction(model: Model<"anthropic-messages">, 
 		model.compat.bedrockMessagesApi === true &&
 		(isBedrockAnthropicRoute(route) || route === normalizeAnthropicBaseUrl(model.baseUrl))
 	) {
+		return true;
+	}
+	// A gateway outside the known deployments qualifies only by declaring that its own
+	// endpoint serves the compaction protocol; `enabled` alone keeps it excluded, and a
+	// reroute away from the configured endpoint still has to reach a known deployment.
+	if (declaresAnthropicCompactionEndpoint(model) && route === normalizeAnthropicBaseUrl(model.baseUrl)) {
 		return true;
 	}
 	return (
