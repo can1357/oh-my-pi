@@ -10,8 +10,8 @@
  * resolves without touching anything. `sql` reads the connection string from
  * the named file (trimmed; the file, not the environment, carries the
  * credential), opens it with `Bun.SQL` — the dialect follows the URL scheme —
- * and awaits {@link SqlSessionStorage.create}, whose `CREATE TABLE` round trip
- * is where an unreachable database fails. Every refusal names the variable or
+ * and awaits {@link SqlSessionStorage.create}, whose first round trip is
+ * where an unreachable database fails. Every refusal names the variable or
  * setting that supplied the value and the path it named, never the connection
  * string: an unreadable or empty file, contents the driver cannot parse as a
  * connection URL (the driver's own error embeds the string, so it is not
