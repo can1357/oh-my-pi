@@ -411,7 +411,14 @@ export interface RoutingHintRequest {
 	render(): string;
 }
 
-/** Store, compressor and deferral shared by every {@link RoutingHintCatalog}. */
+/**
+ * Takes the machine-wide lock of one compression job (`<store path>:<hint key>`) and resolves with
+ * its release, so one omp process asks the model for a hint and the others read its answer from
+ * the store.
+ */
+export type RoutingHintLock = (job: string) => Promise<() => void>;
+
+/** Store, compressor, deferral and lock shared by every {@link RoutingHintCatalog}. */
 export interface RoutingHintCatalogOptions {
 	/** Defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep placeholders. */
 	store?: SkillDescriptionStore;
@@ -421,6 +428,8 @@ export interface RoutingHintCatalogOptions {
 	 * cost gate exists, and off a startup path (resolving the compression model composes the catalog).
 	 */
 	deferCompression?: boolean;
+	/** Without one, every omp process compresses its own misses. */
+	lock?: RoutingHintLock;
 }
 
 /**
@@ -432,6 +441,7 @@ export interface RoutingHintCatalogOptions {
 export class RoutingHintCatalog {
 	readonly #store: SkillDescriptionStore | undefined;
 	readonly #compress?: SkillDescriptionCompressor;
+	readonly #lock: RoutingHintLock | undefined;
 	readonly #snapshot = new Map<string, string>();
 	/** Misses rendered before {@link startCompression}; `undefined` once compression runs. */
 	#deferred: Map<string, RoutingHintRequest> | undefined;
@@ -439,6 +449,7 @@ export class RoutingHintCatalog {
 	constructor(options: RoutingHintCatalogOptions = {}) {
 		this.#store = options.store ?? sharedSkillDescriptionStore();
 		this.#compress = options.compress;
+		this.#lock = options.lock;
 		if (options.deferCompression) this.#deferred = new Map();
 	}
 
@@ -497,12 +508,15 @@ export class RoutingHintCatalog {
 		// One resolution serves the whole batch: each composes the available model catalog, and a
 		// miss that model already answered unusably needs nothing more. Deferred until the current
 		// synchronous prompt rendering has finished.
+		const lock = this.#lock;
 		let batchModel: Promise<string | undefined> | undefined;
 		for (const [key, request] of misses) {
 			const job = `${store.path}:${key}`;
 			if (inFlight.has(job)) continue;
 			batchModel ??= Promise.resolve().then(() => compressor.modelKey());
-			const pending = compressHint(store, compressor, batchModel, request).finally(() => inFlight.delete(job));
+			const pending = compressHint(store, compressor, batchModel, request, lock && (() => lock(job))).finally(() =>
+				inFlight.delete(job),
+			);
 			inFlight.set(job, pending);
 		}
 	}
@@ -565,13 +579,15 @@ export class SkillDescriptionCatalog {
 
 /**
  * Compress one routing hint into `store`. `batchModel` filters out requests that model already
- * answered unusably (and everything when no model is available) before taking a slot.
+ * answered unusably (and everything when no model is available) before taking a slot. `lock` makes
+ * the request wait its turn among omp processes; a hint one of them stored meanwhile is not requested.
  */
 async function compressHint(
 	store: SkillDescriptionStore,
 	compressor: SkillDescriptionCompressor,
 	batchModel: Promise<string | undefined>,
 	request: RoutingHintRequest,
+	lock: (() => Promise<() => void>) | undefined,
 ): Promise<void> {
 	const { key, name } = request;
 	// A request that goes on to the model is counted in its `activity` row until it settles.
@@ -582,8 +598,11 @@ async function compressHint(
 		if (candidate === undefined || store.isClosing || store.get(unusableKey(key, candidate)) !== undefined) return;
 		if (request.activity !== undefined) settle = trackStep(request.activity);
 		await compressionSlots.acquire();
+		let unlock: (() => void) | undefined;
 		try {
 			if (store.isClosing) return;
+			unlock = await lock?.();
+			if (store.isClosing || store.get(key) !== undefined) return;
 			// Unusable answers are remembered per model: that model is not asked again, a newly selected one is.
 			// Re-resolved because the role can change while this job waits behind running requests.
 			const model = compressor.modelKey();
@@ -606,6 +625,7 @@ async function compressHint(
 				store.put(unusable, request.placeholder);
 			}
 		} finally {
+			unlock?.();
 			compressionSlots.release();
 		}
 	} catch (error) {

@@ -454,6 +454,49 @@ describe("skill description failure caching and shutdown", () => {
 		}
 	});
 
+	it("does not ask the model for a hint another process stored while it waited for the lock", async () => {
+		using store = SkillDescriptionStore.open(path.join(tempDir, "cache.db"));
+		const entry = skill();
+		const elsewhere = "Use for migrations, as another process condensed it.";
+		let released = 0;
+		const compress = vi.fn<SkillDescriptionCompressor["compress"]>(async () => compressed);
+		const catalog = new SkillDescriptionCatalog({
+			store,
+			compress: fast(compress),
+			// The process that held the lock stored its answer before letting go.
+			lock: async job => {
+				store.put(job.slice(store.path.length + 1), elsewhere);
+				return () => {
+					released++;
+				};
+			},
+		});
+		catalog.render([entry]);
+		await catalog.waitForPending();
+
+		expect(compress).toHaveBeenCalledTimes(0);
+		expect(released).toBe(1);
+		expect(new SkillDescriptionCatalog({ store }).render([entry])[0].description).toBe(elsewhere);
+	});
+
+	it("gives the lock back after a request that failed", async () => {
+		using store = SkillDescriptionStore.open(path.join(tempDir, "cache.db"));
+		let released = 0;
+		const catalog = new SkillDescriptionCatalog({
+			store,
+			compress: fast(async () => {
+				throw new Error("connection reset");
+			}),
+			lock: async () => () => {
+				released++;
+			},
+		});
+		catalog.render([skill()]);
+		await catalog.waitForPending();
+
+		expect(released).toBe(1);
+	});
+
 	it("ends the Optimizing skills activity as failed with the reason a request gave", async () => {
 		using store = SkillDescriptionStore.open(path.join(tempDir, "cache.db"));
 		const seen: DownloadActivity[] = [];

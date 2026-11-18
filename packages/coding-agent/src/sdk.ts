@@ -95,6 +95,7 @@ import { bindEffects, combine } from "./config/registry";
 import { Settings } from "./config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
+import { daemonMutex } from "./daemon/modules/mutex";
 import "./discovery";
 import { LiveImageUrlService } from "./blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
@@ -4405,12 +4406,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					? resolveTelemetry(agent.telemetry, agent.sessionId)
 					: resolveTelemetry(options.telemetry, providerSessionId),
 		};
+		// One omp process asks the model for a hint; the others wait on the daemon and read its answer.
+		const hintLock = (job: string) => daemonMutex("routing-hints").lock(job);
 		const skillDescriptions = new SkillDescriptionCatalog({
 			store: ownedSkillDescriptionStore,
 			// Held until AgentSession exists: before then the root cost gate does not, so a request
 			// sent from the startup prompt render could go out ungated (see `startCompression` below).
 			deferCompression: true,
 			compress: createSkillDescriptionCompressor(modelRegistry, settings, hintCompressorOptions),
+			lock: hintLock,
 		});
 		mcpNamespaces = new MCPEvalNamespaceCatalog({
 			store: ownedSkillDescriptionStore,
@@ -4421,6 +4425,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				purpose: "mcp-namespace-hint",
 				oneshotKind: "mcp_namespace_hint",
 			}),
+			lock: hintLock,
 		});
 		// Instructions from MCP servers the host connects outside `mcpManager`
 		// (ACP client-declared servers); installed via
