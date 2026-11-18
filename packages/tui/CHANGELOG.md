@@ -18,6 +18,8 @@
 - Table charts read `402.7 → 13.3 µs` with the unit on both sides; the change factor was off by the unit's scale (30,278,195× instead of 30×)
 - Enter on a checkbox group with nothing checked checks the focused box before moving on
 
+- Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
