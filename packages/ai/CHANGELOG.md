@@ -7,7 +7,7 @@
 - `prewarm` stream option: Anthropic Messages sends the request as built, non-streaming with `max_tokens: 0`, to refresh its prompt cache without billing output; it refuses budget thinking, forced tool choice and structured output before sending
 - Claude usage reports now carry the account's subscription plan (`Max 5x`, `Max 20x`, `Pro`, `Team`, `Enterprise`) in `metadata.subscriptionPlan`, read from the OAuth profile on every fetch, so an auth broker serves it to its clients with the rest of the report. Added `usageSubscriptionPlan` and `claudeProfilePlan`
 - Added `retryUnreachableBroker` (default on) and `onBrokerRetry` to `discoverAuthStorage`, so a host chooses whether startup retries an unreachable broker and can show that it is waiting ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
-- `AuthAccountPolicy` takes `autoRedeem5h`, `autoRedeemWeekly` and `autoRedeemFable` (`yes` or `no`), and auth-broker gateway configs accept them
+- `AuthAccountPolicy` takes `autoRedeem5h`, `autoRedeemWeekly` and `autoRedeemFable` (`yes` or `no`), and auth-broker gateway configs accept them ([#19701](https://github.com/can1357/oh-my-pi/pull/19701) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
@@ -16,7 +16,7 @@
 - A Codex additional meter (Spark) reported with only a `metered_feature` now carries that codename as `scope.modelId`, as it already did with a `limit_name`, so it stays scoped to its own model ([#19606](https://github.com/can1357/oh-my-pi/pull/19606) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed auth-broker clients failing to read credentials or usage from a newer broker that adds a field or a usage unit or status; unknown fields are ignored and unknown values read as `unknown`. The broker likewise accepts observed-usage reports carrying fields from newer clients ([#19602](https://github.com/can1357/oh-my-pi/pull/19602) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Antigravity CLI requests failing with `Unknown model ID` (e.g. `gemini-4-hydrogen`) when `agy` only offers effort-suffixed models such as `gemini-4-hydrogen-high` ([#19638](https://github.com/can1357/oh-my-pi/issues/19638))
-- A saved-reset spend planned for one account no longer lands on another account that a replaced credential store keeps under the same row id
+- A saved-reset spend planned for one account no longer lands on another account that a replaced credential store keeps under the same row id ([#19701](https://github.com/can1357/oh-my-pi/pull/19701) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 

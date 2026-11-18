@@ -23,7 +23,7 @@
 - `omp usage` and `/usage` show each Claude account's subscription plan (e.g. `Max 20x`) beside its organization
 - Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
 - CLI and print-mode commands (`omp -p`, `omp login`, `omp models`, `omp commit`, `omp usage`, …) wait up to 30 s for an auth broker that is restarting or briefly unreachable, saying so on stderr; interactive omp still fails at once ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
-- `auth.accountPolicies` entries take `autoRedeem5h`, `autoRedeemWeekly` and `autoRedeemFable` (`yes` or `no`), deciding that one account's saved-reset spending over `codexResets.*`/`claudeResets.*`; `omp usage` shows them on the account's policy line and in the expiring-reset banner
+- `auth.accountPolicies` entries take `autoRedeem5h`, `autoRedeemWeekly` and `autoRedeemFable` (`yes` or `no`), deciding that one account's saved-reset spending over `codexResets.*`/`claudeResets.*`; `omp usage` shows them on the account's policy line and in the expiring-reset banner ([#19701](https://github.com/can1357/oh-my-pi/pull/19701) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
