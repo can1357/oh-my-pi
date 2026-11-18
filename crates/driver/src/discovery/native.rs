@@ -621,7 +621,8 @@ fn validate_manifest(
 fn parse_tool_key(key: &str) -> Option<(&str, &str, u16)> {
 	let (name, tail) = key.rsplit_once('@')?;
 	let (family, rev) = tail.rsplit_once('.')?;
-	if name.is_empty() {
+	// Same grammar as the Python host: the revision is ASCII digits only.
+	if name.is_empty() || rev.is_empty() || !rev.bytes().all(|byte| byte.is_ascii_digit()) {
 		return None;
 	}
 	Some((name, family, rev.parse().ok()?))
@@ -1096,6 +1097,9 @@ default = false
 		assert_eq!(parse_tool_key("set_policy@grantproof.1"), Some(("set_policy", "grantproof", 1)));
 		assert_eq!(parse_tool_key("ci@.1"), Some(("ci", "", 1)));
 		assert_eq!(parse_tool_key("hello@qaext-id.2"), Some(("hello", "qaext-id", 2)));
+		assert_eq!(parse_tool_key("a@b.+1"), None, "a sign is not a revision");
+		assert_eq!(parse_tool_key("a@b."), None, "an empty revision is refused");
+		assert_eq!(parse_tool_key("a@b. 1"), None, "whitespace is not a revision");
 		assert_eq!(parse_tool_key("legacy_tool"), None);
 		assert_eq!(parse_tool_key("a@b"), None);
 		assert_eq!(parse_tool_key("a@b.x"), None);
