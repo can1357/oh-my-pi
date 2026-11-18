@@ -710,6 +710,13 @@ describe("guard rule regressions", () => {
 			});
 		}
 		expect(performance.now() - started).toBeLessThan(1_000);
+		// A word of many empty alternatives makes a thousand strings per part, and every one made is
+		// charged, the strings made on the way to the words included: the call fails closed too.
+		const empty = `{,}`.repeat(1_365);
+		const startedEmpty = performance.now();
+		const expanded = `cat ${Array.from({ length: 256 }, () => empty).join(" ")}`;
+		expect(ruleOf(bashApproval(cwd, expanded))).toBe("size_limit");
+		expect(performance.now() - startedEmpty).toBeLessThan(1_000);
 		// A rule broken before the bound still names itself; ordinary brace lists stay under it.
 		expect(ruleOf(bashApproval(cwd, `cat ~/.{netrc,x} ${word}`))).toBe("credential_read");
 		expect(bashApproval(cwd, "cat src/{a,b,c}/file{1..1000}.test.ts{,.snap} | grep -c x")).toBe("exec");

@@ -324,16 +324,18 @@ const MAX_BRACE_WORD_LENGTH = 4096;
 const MAX_BRACE_WORDS = 1024;
 /**
  * The most characters {@link expandBraces} makes while the guard checks one command line or one
- * file tool call, each word counted with one for the space after it. Every rule checks each word
- * made, so this bounds the guard's work on brace lists however many of them a call has; past it no
- * more words are made and the call fails closed ({@link SIZE_LIMIT_HIT}).
+ * file tool call, each string it makes counted with one for the space after it, the strings it
+ * makes on the way to the words it returns included: the work of a list of many empty alternatives
+ * is what that list makes, not the few characters it ends with. Every rule checks each word made,
+ * so this bounds the guard's work on brace lists however many of them a call has; past it no more
+ * words are made and the call fails closed ({@link SIZE_LIMIT_HIT}).
  */
-const MAX_BRACE_TEXT = 256 * 1024;
+const MAX_BRACE_TEXT = 1024 * 1024;
 /** What is left of {@link MAX_BRACE_TEXT} for the call being checked, below 0 once passed; each entry point resets it. */
 let braceTextLeft = MAX_BRACE_TEXT;
 const SIZE_LIMIT_HIT = hit(
 	"size_limit",
-	`its brace lists expand to more than ${MAX_BRACE_TEXT / 1024}K characters, past what the guard can check`,
+	`its brace lists make more than ${MAX_BRACE_TEXT / 1024 / 1024}M characters of expansions, past what the guard can check`,
 );
 
 /** A word read for brace expansion: literal text, and braces, each the list of its alternatives. */
@@ -402,12 +404,11 @@ function expandBraces(word: string): string[] {
 		return read;
 	}
 	if (braceTextLeft < 0) return [word];
-	const words = braceWords(parts(0, word.length), braceTextLeft);
+	const words = braceWords(parts(0, word.length));
 	if (words === undefined) {
 		braceTextLeft = -1;
 		return [word];
 	}
-	for (const made of words) braceTextLeft -= made.length + 1;
 	return words;
 }
 
@@ -421,34 +422,33 @@ function shellBraces(command: ShellCommand, word: string): string[] {
 }
 
 /**
- * The words read `parts` stand for, at most {@link MAX_BRACE_WORDS}, or `undefined` once they, or
- * the alternatives of one brace, come to more than `maxText` characters.
+ * The words read `parts` stand for, at most {@link MAX_BRACE_WORDS}, or `undefined` once the
+ * strings made for them, the ones for their parts included, pass the {@link braceTextLeft} budget:
+ * a part of many empty alternatives (`{,}`) makes a thousand strings and charges each of them.
  */
-function braceWords(parts: readonly BracePart[], maxText: number): string[] | undefined {
+function braceWords(parts: readonly BracePart[]): string[] | undefined {
 	let words = [""];
 	for (const part of parts) {
 		const options: string[] = [];
 		if (typeof part === "string") options.push(part);
 		else {
-			let optionsText = 0;
 			for (const alternative of part) {
-				const made = braceWords(alternative, maxText);
+				const made = braceWords(alternative);
 				if (made === undefined) return undefined;
 				for (const option of made) {
 					if (options.length === MAX_BRACE_WORDS) break;
 					options.push(option);
-					optionsText += option.length + 1;
-					if (optionsText > maxText) return undefined;
+					braceTextLeft -= option.length + 1;
+					if (braceTextLeft < 0) return undefined;
 				}
 			}
 		}
 		const next: string[] = [];
-		let text = 0;
 		for (const prefix of words) {
 			for (const option of options) {
 				next.push(prefix + option);
-				text += prefix.length + option.length + 1;
-				if (text > maxText) return undefined;
+				braceTextLeft -= prefix.length + option.length + 1;
+				if (braceTextLeft < 0) return undefined;
 				if (next.length === MAX_BRACE_WORDS) break;
 			}
 			if (next.length === MAX_BRACE_WORDS) break;
