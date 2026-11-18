@@ -94,3 +94,32 @@ describe("StreamEndpointer segmentation", () => {
 		expect(segments).toHaveLength(1);
 	});
 });
+
+describe("StreamEndpointer previews", () => {
+	/** Feeds continuous speech in 100 ms recorder chunks, "decoding" each preview in `decodeMs(audioMs)`; returns each preview's length in ms. */
+	function previewLengths(seconds: number, decodeMs: (audioMs: number) => number): number[] {
+		const endpointer = new StreamEndpointer();
+		const speech = framesAt(Array(Math.round((seconds * 1000) / 30)).fill(0.1));
+		const lengths: number[] = [];
+		for (let offset = 0; offset < speech.length; offset += 1600) {
+			for (const event of endpointer.push(speech.subarray(offset, offset + 1600))) {
+				if (event.kind !== "partial") continue;
+				const audioMs = event.audio.length / 16;
+				lengths.push(audioMs);
+				endpointer.notePartialDecode(decodeMs(audioMs), audioMs);
+			}
+		}
+		return lengths;
+	}
+
+	it("keeps previewing a long segment whose decode cost grows with its length", () => {
+		// Parakeet on a busy CPU: ~100 ms per second of audio, so an 11 s preview takes ~1.1 s.
+		const lengths = previewLengths(11, audioMs => audioMs * 0.1);
+		expect(lengths.at(-1)!).toBeGreaterThan(10_000);
+	});
+
+	it("stops previews when every decode takes seconds", () => {
+		// Whisper on CPU decodes a fixed 30 s window, ~3 s whatever the audio length.
+		expect(previewLengths(11, () => 3000)).toHaveLength(2);
+	});
+});

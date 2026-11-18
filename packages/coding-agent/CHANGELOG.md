@@ -20,6 +20,7 @@
 
 - Local live dictation no longer cuts a sentence short when you speak more softly: quiet speech stopped raising the speech threshold, which ended the segment mid-sentence, dropped the rest of the utterance and replaced the on-screen preview with the shorter text
 - Local live dictation no longer commits a key click or other brief noise (often transcribed as `Yeah.`): the audio kept before speech starts no longer counts toward the minimum speech length, and the first frame of each segment is no longer duplicated
+- Local live dictation with Parakeet keeps showing live text through long uninterrupted speech: previews stop only when decoding them falls behind both their cadence and real time, not as soon as a long segment takes longer than 450 ms to decode (Whisper's fixed-cost decodes still stop previews right away)
 - `urlmap` shell builtin maps a URL path onto a host directory or file for the shell and the programs it runs (`urlmap [-r] [-e] URL PATH`, `urlmap -d URL`, bare `urlmap` lists the mounts as commands); named services and `pty` commands get the session's `local://`, `skill://`, `artifact://` and `attachment://` paths through it
 - `tab.screenshot({path})` saves the capture to a chosen file and `format: "webp"` is supported on Chromium; unknown screenshot options are rejected
 - Session files now account for side-channel model calls such as compaction, recaps, memory extraction, commit drafts, image generation, and web search, with timing and compact replies where available

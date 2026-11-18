@@ -7,7 +7,7 @@
  * splits the continuous 16 kHz mono float stream into speech segments at natural
  * pauses — each segment is decoded and committed as it finalizes, and the
  * in-progress segment is re-decoded periodically for a volatile live preview.
- * Previews stop once decoding them cannot keep up with their cadence.
+ * Previews stop once decoding them falls behind both their cadence and real time.
  *
  * Segmentation is pure short-time-energy VAD with an adaptive noise floor, so it
  * needs no extra model and is engine-agnostic (it runs the same way whether the
@@ -31,6 +31,14 @@ export interface EndpointerConfig {
 	preRollMs: number;
 	/** Cadence of volatile partial emissions for the in-progress segment. */
 	partialIntervalMs: number;
+	/**
+	 * A preview decode counts as slow when it takes longer than the cadence and
+	 * longer than this fraction of the audio it covers. Two slow decodes in a row
+	 * stop previews. A model whose cost is fixed per call (Whisper's 30 s window)
+	 * trips this on the first short previews. A model whose cost grows with the
+	 * audio (Parakeet) keeps previewing long segments it decodes faster than real time.
+	 */
+	maxPartialDecodeRatio: number;
 	/** Speech threshold is `max(minThreshold, noiseFloor * energyRatio)`. */
 	energyRatio: number;
 	/** EMA weight tracking the ambient noise floor on non-speech frames between segments. */
@@ -47,6 +55,7 @@ export const DEFAULT_ENDPOINTER_CONFIG: EndpointerConfig = {
 	maxSegmentMs: 12_000,
 	preRollMs: 240,
 	partialIntervalMs: 450,
+	maxPartialDecodeRatio: 0.5,
 	energyRatio: 2.5,
 	floorAttack: 0.05,
 	minThreshold: 0.008,
@@ -172,14 +181,15 @@ export class StreamEndpointer {
 		this.#noiseFloor = this.#cfg.minThreshold;
 	}
 
-	/** Whether previews are still produced: off after two consecutive decodes slower than their cadence (the first may be a cold model). */
+	/** Whether previews are still produced: off after two consecutive slow decodes (the first may be a cold model). */
 	get partialsEnabled(): boolean {
 		return this.#slowPartials < 2;
 	}
 
-	/** Records how long a preview took to decode. */
-	notePartialDecode(ms: number): void {
-		this.#slowPartials = ms >= this.#cfg.partialIntervalMs ? this.#slowPartials + 1 : 0;
+	/** Records how long a preview of `audioMs` of audio took to decode. */
+	notePartialDecode(decodeMs: number, audioMs: number): void {
+		const slow = decodeMs >= this.#cfg.partialIntervalMs && decodeMs >= audioMs * this.#cfg.maxPartialDecodeRatio;
+		this.#slowPartials = slow ? this.#slowPartials + 1 : 0;
 	}
 
 	/** Feed newly-captured samples; returns ordered partial/segment events. */

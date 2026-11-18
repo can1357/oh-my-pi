@@ -596,7 +596,10 @@ async function pumpSession(session: StreamingSession, transport: SttTransport): 
 				const startedAt = performance.now();
 				const text = await runOnModel(() => decodeSegment(model, session.spec, audio, session.language));
 				if (session.cancelled) return;
-				session.endpointer.notePartialDecode(performance.now() - startedAt);
+				session.endpointer.notePartialDecode(
+					performance.now() - startedAt,
+					(audio.length / ASR_SAMPLE_RATE) * 1000,
+				);
 				if (!session.endpointer.partialsEnabled) session.pendingPartial = null;
 				// Skip a now-stale preview if a segment finalized mid-decode.
 				if (text.length > 0 && session.segmentQueue.length === 0) {
