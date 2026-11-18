@@ -13,12 +13,13 @@ import { effect, register } from "../config/registry";
 export const cfgSecretsEnabled = register({
 	id: "secrets.enabled",
 	type: "boolean",
-	default: false,
+	default: true,
 	ui: {
 		tab: "providers",
 		group: "Privacy",
 		label: "Hide Secrets",
-		description: "Obfuscate configured secrets and redact credential-shaped tokens before sending to AI providers",
+		description:
+			"Obfuscate configured secrets and redact credential-shaped tokens before sending to AI providers (on by default)",
 	},
 });
 // Process-wide fallback for requests outside a session; a session's own requests redact per its

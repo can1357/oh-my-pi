@@ -29,6 +29,7 @@
 - Task subagents keep their prompt cache warm through long tool calls (`streaming` mode; still off when `providers.cacheWarming` is `off`)
 - Switching models keeps your thinking level, moving it only as far as the new model's effort ladder requires; a model's own default level now applies only when no level is set, and picking a model no longer borrows the level of a role that names it (quick-role picks still apply their role's level)
 - A reply wait or a subagent's wait for its parent blocks up to the session's prompt-cache lifetime less a minute (4m to 30m) once it is back-to-back, instead of always 4m
+- Secret obfuscation is now enabled by default, so configured secrets and credential-shaped tokens are redacted before provider requests without any setup; disable it with **Hide Secrets** in `/settings` or `secrets.enabled: false` ([#19251](https://github.com/can1357/oh-my-pi/pull/19251) by [@javierbits](https://github.com/javierbits)).
 
 ### Fixed
 
