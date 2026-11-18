@@ -108,7 +108,11 @@ export class SessionHandoff {
 					timestamp: Date.now(),
 				},
 			];
-			const journal = journalCompletion(this.#host.sessionManager, { purpose: "handoff", usageOnly: true });
+			// Every handoff document is committed as a compaction entry.
+			const journal = journalCompletion(this.#host.sessionManager, {
+				purpose: "compaction:handoff",
+				usageOnly: true,
+			});
 			const apiKey = await this.#host.modelRegistry.getApiKey(model, cacheSessionId);
 			if (!apiKey) throw new Error(`No API key for ${model.provider}`);
 			const handoffLlmMessages = await this.#host.convertMessagesToLlm(handoffSnapshot, signal, model);

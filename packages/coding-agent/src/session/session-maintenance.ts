@@ -107,7 +107,7 @@ import {
 	isUserAuthoredMessage,
 	stripImagesFromMessage,
 } from "./messages";
-import { journalCompletion } from "./model-usage-journal";
+import { type CompletionJournal, journalCompletion } from "./model-usage-journal";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
 	resolveCompactionConfiguredTarget,
@@ -1667,6 +1667,7 @@ export class SessionMaintenance {
 				// of the result-derived locals are reachable only on success.
 				try {
 					const result = await this.#compactWithFallbackModel(
+						selectedMethod,
 						preparation,
 						options?.internalGuidance ?? customInstructions,
 						compactionSignal,
@@ -2570,6 +2571,7 @@ export class SessionMaintenance {
 				phase: "standalone_turn",
 			});
 			const result = await this.#compactWithFallbackModel(
+				method,
 				preparation,
 				undefined,
 				signal,
@@ -3861,7 +3863,16 @@ export class SessionMaintenance {
 		);
 	}
 
+	/**
+	 * Reporter for the spend of one compaction attempt under `method`. Only the
+	 * spend needs journaling: the summary lands on the compaction entry.
+	 */
+	#journalCompaction(method: CompactionMethod): CompletionJournal | undefined {
+		return journalCompletion(this.#host.sessionManager, { purpose: `compaction:${method}`, usageOnly: true });
+	}
+
 	async #compactWithFallbackModel(
+		method: CompactionMethod,
 		preparation: CompactionPreparation,
 		customInstructions: string | undefined,
 		signal: AbortSignal,
@@ -3872,8 +3883,7 @@ export class SessionMaintenance {
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
-		// The summary lands on the compaction entry; only the spend needs journaling.
-		const journal = journalCompletion(this.#host.sessionManager, { purpose: "compaction", usageOnly: true });
+		const journal = this.#journalCompaction(method);
 
 		for (const candidate of candidates) {
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
@@ -3936,6 +3946,7 @@ export class SessionMaintenance {
 							journal?.(message);
 							return message;
 						},
+						onRemoteUsage: journal,
 					},
 				);
 			} catch (error) {
@@ -6033,8 +6044,7 @@ export class SessionMaintenance {
 				let compactResult: CompactionResult | undefined;
 				let lastError: unknown;
 				let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
-				// The summary lands on the compaction entry; only the spend needs journaling.
-				const journal = journalCompletion(this.#host.sessionManager, { purpose: "compaction", usageOnly: true });
+				const journal = this.#journalCompaction(method);
 				codexCompaction = createCodexCompactionContext({
 					trigger: "auto",
 					reason: "context_limit",
@@ -6105,6 +6115,7 @@ export class SessionMaintenance {
 										journal?.(message);
 										return message;
 									},
+									onRemoteUsage: journal,
 								},
 							);
 							break;
