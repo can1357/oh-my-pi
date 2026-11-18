@@ -1,3 +1,4 @@
+import { getProviderDefinition } from "../registry";
 import { providerPauseReason } from "../registry/oauth";
 import type { Provider } from "../types";
 import { isWithinUsageReserve, resolveUsedFraction } from "../usage";
@@ -16,7 +17,7 @@ import type { CredentialBlocks } from "./blocks";
 import type { KeyCascade, KeyOverrides } from "./cascade";
 import type { AccountPolicies } from "./policy";
 import type { CredentialPool, StoredCredential } from "./pool";
-import type { OAuthRefresher } from "./refresh";
+import { mergeRefreshedCredential, type OAuthRefresher } from "./refresh";
 import type { AuthCredentialStore } from "./store";
 import type {
 	CheckCredentialsOptions,
@@ -62,7 +63,7 @@ export class CredentialHealth implements HealthApi {
 	 * credential lacks any usable bearer bytes (e.g. an API-key row with an
 	 * empty key, or an OAuth row that never had an `access` token written).
 	 */
-	#buildCompletionProbeCredential(credential: UsageCredential): CompletionProbeCredential | null {
+	#buildCompletionProbeCredential(credential: UsageCredential, apiKey?: string): CompletionProbeCredential | null {
 		if (credential.type === "api_key") {
 			return credential.apiKey ? { type: "api_key", apiKey: credential.apiKey } : null;
 		}
@@ -70,6 +71,7 @@ export class CredentialHealth implements HealthApi {
 		return {
 			type: "oauth",
 			accessToken: credential.accessToken,
+			...(apiKey !== undefined ? { apiKey } : {}),
 			refreshToken: credential.refreshToken,
 			expiresAt: credential.expiresAt,
 			accountId: credential.accountId,
@@ -326,6 +328,8 @@ export class CredentialHealth implements HealthApi {
 				signal: probeSignal,
 			};
 			let refreshError: string | undefined;
+			// The stored OAuth row, refreshed below when expired: a provider `getApiKey` hook builds the probe key from it.
+			let oauthCredential = cred.type === "oauth" ? cred : undefined;
 
 			// Refresh expired OAuth before probing — without this an expired access
 			// token reports as `false` when the credential is actually healthy
@@ -349,6 +353,7 @@ export class CredentialHealth implements HealthApi {
 							probeSignal,
 						);
 						const refreshedCredential = mergeRefreshedUsageCredential(initialRequest.credential, refreshed);
+						oauthCredential = mergeRefreshedCredential(cred, refreshed);
 						this.#deps.usage.persistRefreshedCredential(
 							row.provider as Provider,
 							initialRequest.credential,
@@ -403,30 +408,29 @@ export class CredentialHealth implements HealthApi {
 			}
 
 			if (completionProbe) {
-				const probeCred = this.#buildCompletionProbeCredential(params.credential);
-				if (!probeCred) {
+				const completionTimeoutSignal = AbortSignal.timeout(completionTimeoutMs);
+				const completionSignal = options?.signal
+					? AbortSignal.any([options.signal, completionTimeoutSignal])
+					: completionTimeoutSignal;
+				try {
+					// A provider `getApiKey` hook may reject an incomplete row; that surfaces as a failed probe.
+					const probeCred = this.#buildCompletionProbeCredential(
+						params.credential,
+						oauthCredential && getProviderDefinition(row.provider)?.getApiKey?.(oauthCredential),
+					);
+					base.completion = probeCred
+						? await completionProbe({
+								provider: row.provider as Provider,
+								credentialId: row.id,
+								credential: probeCred,
+								signal: completionSignal,
+							})
+						: { ok: null, reason: `no bearer bytes available for ${row.credential.type} credential` };
+				} catch (error) {
 					base.completion = {
-						ok: null,
-						reason: `no bearer bytes available for ${row.credential.type} credential`,
+						ok: false,
+						reason: error instanceof Error ? error.message : String(error),
 					};
-				} else {
-					const completionTimeoutSignal = AbortSignal.timeout(completionTimeoutMs);
-					const completionSignal = options?.signal
-						? AbortSignal.any([options.signal, completionTimeoutSignal])
-						: completionTimeoutSignal;
-					try {
-						base.completion = await completionProbe({
-							provider: row.provider as Provider,
-							credentialId: row.id,
-							credential: probeCred,
-							signal: completionSignal,
-						});
-					} catch (error) {
-						base.completion = {
-							ok: false,
-							reason: error instanceof Error ? error.message : String(error),
-						};
-					}
 				}
 			}
 
