@@ -385,8 +385,10 @@ describe("snapcompact archive read by another model", () => {
 
 		await session.setModel(gemini);
 		await session.prompt("Continue.");
-		const forGemini = requestContent(mock.calls[0]?.context.messages).images;
+		const { text, images: forGemini } = requestContent(mock.calls[0]?.context.messages);
 		expect(forGemini.length).toBeGreaterThan(0);
+		// Claude compacted without reasoning, so the legend declares no `¶think:` scope.
+		expect(text).not.toContain("¶think:");
 		// PNG IHDR width: frames are square.
 		expect(forGemini.map(data => Buffer.from(data, "base64").readUInt32BE(16))).toEqual(
 			forGemini.map(() => geminiEdge),
