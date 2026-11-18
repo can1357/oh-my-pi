@@ -1,0 +1,466 @@
+# file(1) magic database: the Magdir sources of Apple's file 5.41 (apple-oss-distributions/file, as macOS installs them in /usr/share/file/magic) that differ from upstream, comments and blank
+# lines removed. Each `# Magdir/<name>` line starts that source file's rules.
+# Copyright (c) Ian F. Darwin 1986-1995, maintained by Christos Zoulas and
+# others; BSD 2-clause, see crates/pi-builtins/LICENSE.
+# Magdir/c-lang
+0	search/8192	"libhdr"	BCPL source text
+!:mime	text/x-bcpl
+0	search/8192	"LIBHDR"	BCPL source text
+!:mime	text/x-bcpl
+0	search/8192	#include
+>0	regex	\^#include			c
+>>0	regex	\^class[[:space:]]+
+>>>&0	regex 	\\{[\.\*]\\}(;)?$			\b++
+>>&0	clear	x				program text
+!:mime	text/x-c
+0	search/8192	pragma
+>0	regex	\^#[[:space:]]*pragma	c program text
+!:mime	text/x-c
+0	search/8192	endif
+>0	regex	\^#[[:space:]]*(if\|ifn)def
+>>&0	regex	\^#[[:space:]]*endif$	c program text
+!:mime	text/x-c
+0	search/8192	define
+>0	regex	\^#[[:space:]]*(if\|ifn)def
+>>&0	regex	\^#[[:space:]]*define	c program text
+!:mime	text/x-c
+0	search/8192	char
+>0	regex	\^[[:space:]]*char(\ \\*|\\*)(.+)(=.*)?;[[:space:]]*$			c program text
+!:mime	text/x-c
+0	search/8192	double
+>0	regex	\^[[:space:]]*double(\ \\*|\\*)(.+)(=.*)?;[[:space:]]*$			c program text
+!:mime	text/x-c
+0	search/8192	extern
+>0	regex	\^[[:space:]]*extern[[:space:]]+		c program text
+!:mime	text/x-c
+0	search/8192	float
+>0	regex	\^[[:space:]]*float(\ \\*|\\*)(.+)(=.*)?;[[:space:]]*$			c program text
+!:mime	text/x-c
+0	search/8192	struct
+>0	regex	\^struct[[:space:]]+		c program text
+!:mime	text/x-c
+0	search/8192	union
+>0	regex	\^union[[:space:]]+		c program text
+!:mime	text/x-c
+0	search/8192	main(
+>&0	search/64	String			Java source text
+!:mime	text/x-java
+>&0	default		x
+>>&0 regex	\\)[[:space:]]*\\{		c program text
+!:mime	text/x-c
+0	search/8192	namespace
+>0	regex	\^namespace[[:space:]]+[_[:alpha:]]{1,30}[[:space:]]*\\{	C++ source text
+!:strength + 5
+!:mime	text/x-c++
+0	search/8192	using
+>0	regex	\^using[[:space:]]+(namespace\ )?std(::)?[[:alpha:]]*[[:space:]]*;		C++ source text
+!:strength + 5
+!:mime	text/x-c++
+0	search/8192	template
+>0	regex	\^[[:space:]]*template[[:space:]]*<.*>[[:space:]]*$	C++ source text
+!:strength + 5
+!:mime	text/x-c++
+0	search/8192	virtual
+>0	regex	\^[[:space:]]*virtual[[:space:]]+.*[};][[:space:]]*$		C++ source text
+!:strength + 5
+!:mime	text/x-c++
+0	search/8192	class
+>0	regex	\^[[:space:]]*class[[:space:]]+[[:digit:][:alpha:]:_]+[[:space:]]*\\{(.*[\n]*)*\\}(;)?$		C++ source text
+!:strength + 5
+!:mime	text/x-c++
+0	search/8192	public
+>0	regex	\^[[:space:]]*public:		C++ source text
+!:strength + 5
+!:mime	text/x-c++
+0	search/8192	private
+>0	regex	\^[[:space:]]*private:		C++ source text
+!:strength + 5
+!:mime	text/x-c++
+0	search/8192	protected
+>0	regex	\^[[:space:]]*protected:		C++ source text
+!:strength + 5
+!:mime	text/x-c++
+0	search/8192	#import
+>0	regex	\^#import			Objective-C source text
+!:strength + 25
+!:mime	text/x-objective-c
+0	string		cscope		cscope reference data
+>7	string		x		version %.2s
+>7	string		>14
+>>10	search/100	\ -q\ 		with inverted index
+>10	search/100	\ -c\ 		text (non-compressed)
+# Magdir/cafebabe
+0	belong		0xcafebabe
+>4	ubelong		>30		compiled Java class data,
+!:mime	application/x-java-applet
+!:ext	class
+>>6	ubeshort	x	        version %d.
+>>4	ubeshort	x       	\b%d
+>>4	belong		0x002e		(Java 1.2)
+>>4	belong		0x002f		(Java 1.3)
+>>4	belong		0x0030		(Java 1.4)
+>>4	belong		0x0031		(Java 1.5)
+>>4	belong		0x0032		(Java 1.6)
+>>4	belong		0x0033		(Java 1.7)
+>>4	belong		0x0034		(Java 1.8)
+>>4	belong		0x0035		(Java SE 9)
+>>4	belong		0x0036		(Java SE 10)
+>>4	belong		0x0037		(Java SE 11)
+>>4	belong		0x0038		(Java SE 12)
+>>4	belong		0x0039		(Java SE 13)
+>>4	belong		0x003A		(Java SE 14)
+0	belong		0xcafed00d	JAR compressed with pack200,
+>5	byte		x		version %d.
+>4	byte		x		\b%d
+!:mime	application/x-java-pack200
+0	belong		0xcafed00d	JAR compressed with pack200,
+>5	byte		x		version %d.
+>4	byte		x		\b%d
+!:mime	application/x-java-pack200
+0	name		mach-o		\b [
+>0	use		mach-o-cpu	\b
+>(8.L)	indirect	x		\b:
+>0	belong		x		\b]
+0	belong		0xcafebabe
+>4	belong		1		Mach-O universal binary with 1 architecture:
+!:mime application/x-mach-binary
+>>8	use		mach-o		\b
+>4	ubelong		>1
+>>4	ubelong		<25		Mach-O universal binary with %d architectures:
+!:mime application/x-mach-binary
+>>>8	use		mach-o		\b
+>>>4	ubelong		>1
+>>>>28	use		mach-o		\b
+>>>4	ubelong		>2
+>>>>48	use		mach-o		\b
+>>>4	ubelong		>3
+>>>>68	use		mach-o		\b
+>>>4	ubelong		>4
+>>>>88	use		mach-o		\b
+>>>4	ubelong		>5
+>>>>108	use		mach-o		\b
+# Magdir/dyld
+0       string		dyld_v		Dyld shared cache
+>6		byte		x			version %c
+>>7		byte		32
+>>>8    string/T    x           %s
+>>7		string		arm64ex		arm64e with extensions
+>>>14	byte		x	version %c
+>>7		string		arm64_32	arm64_32
+# Magdir/gpu-fat
+0	belong		0xcbfebabe
+>4	belong		1		GPU Mach-O universal binary with 1 architecture:
+>>8	use		mach-o		\b
+>4	ubelong		>1
+>>8	use		mach-o		\b
+>>4	ubelong		>1
+>>>28	use		mach-o		\b
+>>4	ubelong		>2
+>>>48	use		mach-o		\b
+>>4	ubelong		>3
+>>>68	use		mach-o		\b
+>>4	ubelong		>4
+>>>88	use		mach-o		\b
+>>4	ubelong		>5
+>>>108	use		mach-o		\b
+# Magdir/kcdata
+0	lelong		0x59a25807		kcdata: stackshot
+0	lelong		0xDEADF157		kcdata: crashinfo
+0	lelong		0xDE17A59A		kcdata: delta stackshot
+0	lelong		0x53A20900		kcdata: os reason
+0	lelong		0x1e21c09f		kcdata: xnupost config
+# Magdir/kernelcache
+0	string		complzvn			Compressed kernel cache
+0	string		complzss			Compressed kernel cache
+# Magdir/mach
+0	name	mach-o-cpu
+>0	belong&0x03000000	0
+>>0	belong&0x00ffffff	1
+>>>4		belong&0x00ffffff	0	vax
+>>>4		belong&0x00ffffff	1	vax11/780
+>>>4		belong&0x00ffffff	2	vax11/785
+>>>4		belong&0x00ffffff	3	vax11/750
+>>>4		belong&0x00ffffff	4	vax11/730
+>>>4		belong&0x00ffffff	5	uvaxI
+>>>4		belong&0x00ffffff	6	uvaxII
+>>>4		belong&0x00ffffff	7	vax8200
+>>>4		belong&0x00ffffff	8	vax8500
+>>>4		belong&0x00ffffff	9	vax8600
+>>>4		belong&0x00ffffff	10	vax8650
+>>>4		belong&0x00ffffff	11	vax8800
+>>>4		belong&0x00ffffff	12	uvaxIII
+>>>4		belong&0x00ffffff	>12	vax subarchitecture=%d
+>>0	belong&0x00ffffff	2	romp
+>>0	belong&0x00ffffff	3	architecture=3
+>>0	belong&0x00ffffff	4	ns32032
+>>0	belong&0x00ffffff	5	ns32332
+>>0	belong&0x00ffffff	6	m68k
+>>0	belong&0x00ffffff	7
+>>>4	belong&0x0000000f	3		i386
+>>>4	belong&0x0000000f	4		i486
+>>>>4	belong&0x00fffff0	0
+>>>>4	belong&0x00fffff0	0x80		\bsx
+>>>4	belong&0x0000000f	5		i586
+>>>4	belong&0x0000000f	6
+>>>>4	belong&0x00fffff0	0		p6
+>>>>4	belong&0x00fffff0	0x10		pentium_pro
+>>>>4	belong&0x00fffff0	0x20		pentium_2_m0x20
+>>>>4	belong&0x00fffff0	0x30		pentium_2_m3
+>>>>4	belong&0x00fffff0	0x40		pentium_2_m0x40
+>>>>4	belong&0x00fffff0	0x50		pentium_2_m5
+>>>>4	belong&0x00fffff0	>0x50		pentium_2_m%#x
+>>>4	belong&0x0000000f	7		celeron
+>>>>4	belong&0x00fffff0	0x00		\b_m%#x
+>>>>4	belong&0x00fffff0	0x10		\b_m%#x
+>>>>4	belong&0x00fffff0	0x20		\b_m%#x
+>>>>4	belong&0x00fffff0	0x30		\b_m%#x
+>>>>4	belong&0x00fffff0	0x40		\b_m%#x
+>>>>4	belong&0x00fffff0	0x50		\b_m%#x
+>>>>4	belong&0x00fffff0	0x60
+>>>>4	belong&0x00fffff0	0x70		\b_mobile
+>>>>4	belong&0x00fffff0	>0x70		\b_m%#x
+>>>4	belong&0x0000000f	8		pentium_3
+>>>>4	belong&0x00fffff0	0x00
+>>>>4	belong&0x00fffff0	0x10		\b_m
+>>>>4	belong&0x00fffff0	0x20		\b_xeon
+>>>>4	belong&0x00fffff0	>0x20		\b_m%#x
+>>>4	belong&0x0000000f	9		pentiumM
+>>>>4	belong&0x00fffff0	0x00
+>>>>4	belong&0x00fffff0	>0x00		\b_m%#x
+>>>4	belong&0x0000000f	10		pentium_4
+>>>>4	belong&0x00fffff0	0x00
+>>>>4	belong&0x00fffff0	0x10		\b_m
+>>>>4	belong&0x00fffff0	>0x10		\b_m%#x
+>>>4	belong&0x0000000f	11		itanium
+>>>>4	belong&0x00fffff0	0x00
+>>>>4	belong&0x00fffff0	0x10		\b_2
+>>>>4	belong&0x00fffff0	>0x10		\b_m%#x
+>>>4	belong&0x0000000f	12		xeon
+>>>>4	belong&0x00fffff0	0x00
+>>>>4	belong&0x00fffff0	0x10		\b_mp
+>>>>4	belong&0x00fffff0	>0x10		\b_m%#x
+>>>4	belong&0x0000000f	>12		ia32 family=%d
+>>>>4	belong&0x00fffff0	0x00
+>>>>4	belong&0x00fffff0	>0x00		model=%x
+>>0	belong&0x00ffffff	8	mips
+>>>4		belong&0x00ffffff	1	R2300
+>>>4		belong&0x00ffffff	2	R2600
+>>>4		belong&0x00ffffff	3	R2800
+>>>4		belong&0x00ffffff	4	R2000a
+>>>4		belong&0x00ffffff	5	R2000
+>>>4		belong&0x00ffffff	6	R3000a
+>>>4		belong&0x00ffffff	7	R3000
+>>>4		belong&0x00ffffff	>7	subarchitecture=%d
+>>0	belong&0x00ffffff	9	ns32532
+>>0	belong&0x00ffffff	10	mc98000
+>>0	belong&0x00ffffff	11	hppa
+>>>4		belong&0x00ffffff	0	7100
+>>>4		belong&0x00ffffff	1	7100LC
+>>>4		belong&0x00ffffff	>1	subarchitecture=%d
+>>0	belong&0x00ffffff	12	arm
+>>>4		belong&0x00ffffff	0
+>>>4		belong&0x00ffffff	1	subarchitecture=%d
+>>>4		belong&0x00ffffff	2	subarchitecture=%d
+>>>4		belong&0x00ffffff	3	subarchitecture=%d
+>>>4		belong&0x00ffffff	4	subarchitecture=%d
+>>>4		belong&0x00ffffff	5	\b_v4t
+>>>4		belong&0x00ffffff	6	\b_v6
+>>>4		belong&0x00ffffff	7	\b_v5tej
+>>>4		belong&0x00ffffff	8	\b_xscale
+>>>4		belong&0x00ffffff	9	\b_v7
+>>>4		belong&0x00ffffff	10	\b_v7f
+>>>4		belong&0x00ffffff	11	\b_v7s
+>>>4		belong&0x00ffffff	12	\b_v7k
+>>>4		belong&0x00ffffff	>12	subarchitecture=%d
+>>0	belong&0x00ffffff	13
+>>>4		belong&0x00ffffff	0	mc88000
+>>>4		belong&0x00ffffff	1	mc88100
+>>>4		belong&0x00ffffff	2	mc88110
+>>>4		belong&0x00ffffff	>2	mc88000 subarchitecture=%d
+>>0	belong&0x00ffffff	14	SPARC
+>>0	belong&0x00ffffff	15	i860g
+>>0	belong&0x00ffffff	16	alpha
+>>0	belong&0x00ffffff	17	rs6000
+>>0	belong&0x00ffffff	18	ppc
+>>>4		belong&0x00ffffff	0
+>>>4		belong&0x00ffffff	1	\b_601
+>>>4		belong&0x00ffffff	2	\b_602
+>>>4		belong&0x00ffffff	3	\b_603
+>>>4		belong&0x00ffffff	4	\b_603e
+>>>4		belong&0x00ffffff	5	\b_603ev
+>>>4		belong&0x00ffffff	6	\b_604
+>>>4		belong&0x00ffffff	7	\b_604e
+>>>4		belong&0x00ffffff	8	\b_620
+>>>4		belong&0x00ffffff	9	\b_650
+>>>4		belong&0x00ffffff	10	\b_7400
+>>>4		belong&0x00ffffff	11	\b_7450
+>>>4		belong&0x00ffffff	100	\b_970
+>>>4		belong&0x00ffffff	>100	subarchitecture=%d
+>>0	belong&0x00ffffff	>18	architecture=%d
+>0	belong&0x01000000	0x01000000
+>>0	belong&0x00ffffff	0	64-bit architecture=%d
+>>0	belong&0x00ffffff	1	64-bit architecture=%d
+>>0	belong&0x00ffffff	2	64-bit architecture=%d
+>>0	belong&0x00ffffff	3	64-bit architecture=%d
+>>0	belong&0x00ffffff	4	64-bit architecture=%d
+>>0	belong&0x00ffffff	5	64-bit architecture=%d
+>>0	belong&0x00ffffff	6	64-bit architecture=%d
+>>0	belong&0x00ffffff	7	x86_64
+>>>4		belong&0x00ffffff	0	subarchitecture=%d
+>>>4		belong&0x00ffffff	1	subarchitecture=%d
+>>>4		belong&0x00ffffff	2	subarchitecture=%d
+>>>4		belong&0x00ffffff	3
+>>>4		belong&0x00ffffff	4	\b_arch1
+>>>4		belong&0x00ffffff	5	subarchitecture=%d
+>>>4		belong&0x00ffffff	6	subarchitecture=%d
+>>>4		belong&0x00ffffff	7	subarchitecture=%d
+>>>4		belong&0x00ffffff	8	\bh
+>>>4		belong&0x00ffffff	>8	subarchitecture=%d
+>>0	belong&0x00ffffff	8	64-bit architecture=%d
+>>0	belong&0x00ffffff	9	64-bit architecture=%d
+>>0	belong&0x00ffffff	10	64-bit architecture=%d
+>>0	belong&0x00ffffff	11	64-bit architecture=%d
+>>0	belong&0x00ffffff	12	arm64
+>>>4		belong&0x00ffffff	0
+>>>4		belong&0x00ffffff	1	\b_v8
+>>>4		belong&0x00ffffff	2	\be
+>>>4		belong&0x00ffffff	12	\be.x1
+>>0	belong&0x00ffffff	13	64-bit architecture=%d
+>>0	belong&0x00ffffff	14	64-bit architecture=%d
+>>0	belong&0x00ffffff	15	64-bit architecture=%d
+>>0	belong&0x00ffffff	16	64-bit architecture=%d
+>>0	belong&0x00ffffff	17	64-bit architecture=%d
+>>0	belong&0x00ffffff	18	ppc64
+>>>4		belong&0x00ffffff	0
+>>>4		belong&0x00ffffff	1		\b_601
+>>>4		belong&0x00ffffff	2		\b_602
+>>>4		belong&0x00ffffff	3		\b_603
+>>>4		belong&0x00ffffff	4		\b_603e
+>>>4		belong&0x00ffffff	5		\b_603ev
+>>>4		belong&0x00ffffff	6		\b_604
+>>>4		belong&0x00ffffff	7		\b_604e
+>>>4		belong&0x00ffffff	8		\b_620
+>>>4		belong&0x00ffffff	9		\b_650
+>>>4		belong&0x00ffffff	10		\b_7400
+>>>4		belong&0x00ffffff	11		\b_7450
+>>>4		belong&0x00ffffff	100		\b_970
+>>>4		belong&0x00ffffff	>100		subarchitecture=%d
+>>0	belong&0x00ffffff	19	applegpu
+>>>4		belong&0x00ffffff	32		\b_gx2
+>>>4		belong&0x00ffffff	17		\b_g4p
+>>>4		belong&0x00ffffff	49		\b_g4g
+>>>4		belong&0x00ffffff	65		\b_g5p
+>>>4		belong&0x00ffffff	81		\b_g9p
+>>>4		belong&0x00ffffff	97		\b_g9g
+>>>4		belong&0x00ffffff	34		\b_g10p
+>>>4		belong&0x00ffffff	114		\b_g11p
+>>>4		belong&0x00ffffff	82		\b_g11m
+>>>4		belong&0x00ffffff	130		\b_g11g
+>>>4		belong&0x00ffffff	1602		\b_g11g_8fstp
+>>>4		belong&0x00ffffff	210		\b_g12p
+>>>4		belong&0x00ffffff	290		\b_g13p
+>>>4		belong&0x00ffffff	322		\b_g13g
+>>>4		belong&0x00ffffff	530		\b_g13s
+>>>4		belong&0x00ffffff	562		\b_g13c
+>>>4		belong&0x00ffffff	594		\b_g13d
+>>>4		belong&0x00ffffff	370		\b_g14p
+>>>4		belong&0x00ffffff	402		\b_g14g
+>>>4		belong&0x00ffffff	434		\b_g14s
+>>>4		belong&0x00ffffff	498		\b_g14d
+>>>4		belong&0x00ffffff	610		\b_g15p
+>>>4		belong&0x00ffffff	275		\b_g15g
+>>>4		belong&0x00ffffff	419		\b_g15s
+>>>4		belong&0x00ffffff	435		\b_g16p
+>>0	belong&0x00ffffff	20	amdgpu
+>>>4		belong&0x00ffffff	4000		\b_gfx600
+>>>4		belong&0x00ffffff	4001		\b_gfx600_nwh
+>>>4		belong&0x00ffffff	4002		\b_gfx701
+>>>4		belong&0x00ffffff	4003		\b_gfx704
+>>>4		belong&0x00ffffff	4004		\b_gfx803
+>>>4		belong&0x00ffffff	4005		\b_gfx802
+>>>4		belong&0x00ffffff	5000		\b_gfx900
+>>>4		belong&0x00ffffff	5001		\b_gfx904
+>>>4		belong&0x00ffffff	5002		\b_gfx906
+>>>4		belong&0x00ffffff	6000		\b_gfx1010_nsgc
+>>>4		belong&0x00ffffff	6001		\b_gfx1010
+>>>4		belong&0x00ffffff	6002		\b_gfx1011
+>>>4		belong&0x00ffffff	6003		\b_gfx1012
+>>>4		belong&0x00ffffff	6004		\b_gfx1030
+>>>4		belong&0x00ffffff	6005		\b_gfx1032
+>>0	belong&0x00ffffff	21	intelgpu
+>>>4		belong&0x00ffffff	590342		\b_skl_gt2r6
+>>>4		belong&0x00ffffff	590343		\b_skl_gt2r7
+>>>4		belong&0x00ffffff	590602		\b_skl_gt3r10
+>>>4		belong&0x00ffffff	9765376		\b_kbl_gt2r0
+>>>4		belong&0x00ffffff	9765378		\b_kbl_gt2r2
+>>>4		belong&0x00ffffff	9765380		\b_kbl_gt2r4
+>>>4		belong&0x00ffffff	9765633		\b_kbl_gt3r1
+>>>4		belong&0x00ffffff	9765638		\b_kbl_gt3r6
+>>>4		belong&0x00ffffff	1115655		\b_icl_1x6x8r7
+>>>4		belong&0x00ffffff	1116167		\b_icl_1x8x8r7
+>>0	belong&0x00ffffff	23	air64
+>>>4		belong&0x00ffffff	1		\b_v16
+>>>4		belong&0x00ffffff	2		\b_v18
+>>>4		belong&0x00ffffff	3		\b_v111
+>>>4		belong&0x00ffffff	4		\b_v20
+>>>4		belong&0x00ffffff	5		\b_v21
+>>>4		belong&0x00ffffff	6		\b_v22
+>>>4		belong&0x00ffffff	7		\b_v23
+>>>4		belong&0x00ffffff	8		\b_v24
+>>>4		belong&0x00ffffff	9		\b_v25
+>>0	belong&0x00ffffff	>23	64-bit architecture=%d
+>0	belong&0x02000000	0x02000000
+>>0	belong&0x00ffffff	12	arm64_32
+>>>4		belong&0x00ffffff	1	\b_v8
+0	name		mach-o-be
+>0	byte		0xcf		64-bit
+>12	belong		1		object
+>12	belong		2		executable
+>12	belong		3		fixed virtual memory shared library
+>12	belong		4		core
+>12	belong		5		preload executable
+>12	belong		6		dynamically linked shared library
+>12	belong		7		dynamic linker
+>12	belong		8		bundle
+>12	belong		9		dynamically linked shared library stub
+>12	belong		10		dSYM companion file
+>12	belong		11		kext bundle
+>12	belong		13		GPU executable
+>12	belong		14		GPU dynamically linked shared library
+>12	belong		>14
+>>12	belong		x		filetype=%d
+>4	use		mach-o-cpu
+0	lelong&0xfffffffe	0xfeedface	Mach-O
+!:strength +2
+!:mime application/x-mach-binary
+>0	use	\^mach-o-be
+0	belong&0xfffffffe	0xfeedface	Mach-O
+!:strength +2
+!:mime application/x-mach-binary
+>0	use	mach-o-be
+# Magdir/metallib
+0       string          MTLB           MetalLib
+!:strength +2
+>6      uleshort        >0x1
+>8      uleshort        >0x3
+>>10    byte&0x7F       =0x0           executable
+>>10    byte&0x7F       =0x1           core image library
+>>10    byte&0x7F       =0x2           dynamically linked shared library
+>>10    byte&0x7F       =0x3           companion
+>6      uleshort        >0x1
+>8      uleshort        >0x5
+>>10    byte&0x80       =0x80          \b stub
+>5      byte&0x80       =0x80          \b (MacOS)
+>4      uleshort&0x7FFF x              \b, version %d
+>6      uleshort        x              \b.%d
+>8      uleshort        x              \b.%d
+# Magdir/symbols
+0 leshort 0xcff1 Compact Type Format data
+0 beshort 0xcff1 Compact Type Format data
+# Magdir/trace
+0 lelong 0x55aa0101 Darwin trace file (v1)
+0 lelong 0x55aa0200 Darwin trace file (v2)
+0 lelong 0x55aa0300 Apple Trace File
+0 belong 0x55aa0101 Darwin trace file (v1)
+0 belong 0x55aa0200 Darwin trace file (v2)
+0 belong 0x55aa0300 Apple Trace File

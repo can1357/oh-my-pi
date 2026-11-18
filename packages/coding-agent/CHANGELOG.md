@@ -18,6 +18,7 @@
 - Turns the provider refuses (e.g. `reasoning_extraction`) are kept in the session file as a `provider_refusal` entry with the category, explanation, usage and whatever streamed before the refusal; the entry never reaches later requests
 - `say` now works in the bash tool on every platform. It speaks through omp's text-to-speech when that is set up (speech vocalization on, a `speech` model role, or the local TTS model installed) and through the system voice otherwise (macOS `say`, `spd-say`/`espeak-ng`/`espeak` on Linux, SAPI on Windows). It takes macOS `say`'s options (`-v` including `-v '?'`, `-r`, `-o` with `--file-format`/`--data-format`/`--channels`/`--bit-rate`/`--quality`, `-f`, `-i`, `--progress`, `-a`, `-n`), reads text from arguments, a file or stdin, and accepts internal URLs such as `local://notes.md` for `-f` and `-o`.
 - `open` and `xdg-open` are now shell builtins on macOS, Linux and Windows (with `start` on Windows): an internal URL such as `local://report.html` opens the file behind it, every macOS `open` option works (`-a`, `-b`, `-e`, `-t`, `-f`, `-F`, `-W`, `-R`, `-n`, `-g`, `-j`, `-h`, `-s`, `-u`, `--args`, `--env`, `--stdin`/`--stdout`/`--stderr`, `--arch`), and a session with no desktop gets a short error instead of hanging
+- `file` runs in the bash tool's shell as a builtin, so it identifies internal URLs (`file local://report.pdf`, `artifact://N`, `skill://…`) as well as paths, and works on Windows where there is no `file` program
 
 ### Changed
 

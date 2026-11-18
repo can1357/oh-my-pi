@@ -42,6 +42,7 @@ mod quoting_style;
 	feature = "util.awk",
 	feature = "util.date",
 	feature = "util.du",
+	feature = "util.file",
 	feature = "util.ls",
 	feature = "util.rsync",
 	feature = "util.tar",
@@ -124,6 +125,8 @@ mod env;
 mod errno;
 #[cfg(feature = "util.fd")]
 mod fd;
+#[cfg(all(feature = "util.file", any(unix, windows)))]
+mod file;
 #[cfg(feature = "util.find")]
 mod find;
 #[cfg(feature = "util.fold")]

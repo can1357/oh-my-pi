@@ -10,6 +10,7 @@
 - `VcsGitRepo.worktreeToGit()` converts worktree content to the blob `git add` would store
 - `ShellOptions.process` makes a `Shell` the process's own shell: its commands run over the process's stdin, stdout and stderr, and externals stay in its session and terminal
 - `ShellRunOptions.speech` bridges the host's speech handler to the shell's `say`.
+- In-process `file` shell builtin, a port of file 5.41 with its magic database that prints what the system tool prints (text encodings and line terminators, scripts, ELF linkage/interpreter/BuildID, Mach-O incl. per-architecture lines on macOS, archives, images, documents), with the flags `-b -i/-I --mime-type --mime-encoding --extension --apple -L -h -z -Z -E -e --exclude-quiet -f -F -0 -N -n -p -r -s -k -m -P -S -d --help -v`
 
 ## [18.22.2] - 2026-11-18
 

@@ -360,6 +360,36 @@ async fn command_running_utilities_dispatch_builtins_that_open_urls() {
 	assert_eq!(run.stdout, "alpha\nbeta\nbeta\nalpha\n");
 }
 
+/// `file` runs in process, so it identifies what a provider URL names by
+/// reading it through the provider: a file by its contents, a directory by
+/// its type, and a URL that names nothing as unopenable.
+#[tokio::test]
+async fn file_identifies_what_provider_urls_name() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	fs::create_dir(directory.path().join("docs")).expect("provider directory");
+	fs::write(directory.path().join("docs/a.txt"), b"alpha\n").expect("text document");
+	fs::write(directory.path().join("docs/i.gif"), b"GIF89a\x40\x01\xc8\x00\x80\0\0;")
+		.expect("image");
+	let run = run_virtual(
+		directory.path(),
+		"file -b virtual://docs/a.txt virtual://docs/i.gif virtual://docs virtual://docs/absent && \
+		 file --mime-type virtual://docs/a.txt",
+	)
+	.await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	assert_eq!(
+		run.stdout,
+		"ASCII text\nGIF image data, version 89a, 320 x 200\ndirectory\ncannot open \
+		 `virtual://docs/absent' (No such file or directory)\nvirtual://docs/a.txt: text/plain\n"
+	);
+}
+
+/// An external program cannot open a provider URL, so one it is handed must
+/// name the file that URL aliases, in the bare spelling and in the
+/// attached-value spelling a tool's own flags use. A scheme the filesystem
+/// does not route is not a path and must reach the child as written, as must a
+/// bare scheme root or one followed by words, which are far likelier a search
+/// pattern than a directory.
 #[tokio::test]
 async fn external_commands_receive_host_paths_for_backed_url_arguments() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");

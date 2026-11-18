@@ -245,6 +245,8 @@ default = ["utils"]
 "util.du" = []
 "util.env" = []
 "util.fd" = []
+# Needs the codecs `-z` decodes with: unix and windows targets.
+"util.file" = []
 "util.find" = []
 "util.fold" = []
 "util.grep" = ["util.bre"]
@@ -345,6 +347,7 @@ utils = [
   "util.du",
   "util.env",
   "util.fd",
+  "util.file",
   "util.find",
   "util.fold",
   "util.grep",
