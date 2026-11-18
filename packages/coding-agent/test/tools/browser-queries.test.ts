@@ -415,6 +415,12 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 		expect(String(await rejectionOf(call("waitForFunction", ["(() => { throw new Error('boom'); })()"])))).toContain(
 			"tab.waitForFunction() threw a JavaScript exception",
 		);
+		// Puppeteer's `polling: "raf"` is not a number of ms: it polls at the default interval, not in a tight loop.
+		await call("evaluate", ["window.__polls = 0"]);
+		await rejectionOf(
+			call("waitForFunction", ["() => { window.__polls++; return false; }", { timeout: 300, polling: "raf" }]),
+		);
+		expect(await call("evaluate", ["window.__polls"])).toBeLessThan(20);
 		// A condition or a sleep handed to `waitFor` names the call and the helper that waits for it.
 		const predicateError = String(await rejectionOf(call("waitFor", [{ __omp_fn: "() => true" }])));
 		expect(predicateError).toContain("tab.waitFor(fn) waits for a selector string");

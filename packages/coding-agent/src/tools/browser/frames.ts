@@ -418,7 +418,11 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 				untilAborted(signal, () => frame.evaluate(fn as never, ...args)),
 			)) as BrowserFrameApi["evaluate"],
 		waitFor: (selector, options) => {
-			assertWaitSelector("frame.waitFor", selector);
+			try {
+				assertWaitSelector("frame.waitFor", selector);
+			} catch (error) {
+				return markHandled(Promise.reject(error));
+			}
 			return waitForSelector(selector, options);
 		},
 		waitForSelector,

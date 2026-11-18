@@ -331,7 +331,7 @@ export async function waitForPageText(
 export interface PagePredicateWaitOptions {
 	/** Give up after this many ms. */
 	timeout: number;
-	/** Poll interval in ms (default 100, floor 10). */
+	/** Poll interval in ms (default 100, floor 10); anything but a positive number, such as Puppeteer's "raf", takes the default. */
 	polling?: number;
 	/** JSON values passed to a function predicate. */
 	args?: unknown[];
@@ -398,7 +398,11 @@ export async function waitForPagePredicate(
 			}
 			return answer?.held ? answer.value : undefined;
 		},
-		{ timeout: opts.timeout, interval: Math.max(10, opts.polling ?? 100), signal: opts.signal },
+		{
+			timeout: opts.timeout,
+			interval: typeof opts.polling === "number" && opts.polling > 0 ? Math.max(10, opts.polling) : 100,
+			signal: opts.signal,
+		},
 		`${label} timed out after ${opts.timeout}ms`,
 	);
 }

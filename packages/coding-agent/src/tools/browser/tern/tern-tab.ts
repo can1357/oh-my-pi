@@ -1089,12 +1089,12 @@ export class TernTab implements InProcessRunTab {
 		fn: unknown,
 		args: unknown[],
 		frame: FramePath,
-		callSource = false,
+		options?: { callSource?: boolean },
 	): Promise<unknown> {
 		try {
 			if (typeof fn === "function") return await this.#eval(fn.toString(), args, "page", frame);
 			if (typeof fn !== "string") throw new ToolError(`${label} expects a function or a source string`);
-			if (callSource) return await this.#eval(fn, args, "page", frame);
+			if (options?.callSource) return await this.#eval(fn, args, "page", frame);
 			return await this.#eval(userSourceFunction(fn), [], "page", frame);
 		} catch (error) {
 			if (error instanceof TernError && error.kind === "js") {
@@ -2893,7 +2893,9 @@ export class TernTab implements InProcessRunTab {
 	return (${PREDICATE_ANSWER_SOURCE})(await (${PREDICATE_CALL_SOURCE})((${String(fn)}\n), args));
 }`;
 		for (;;) {
-			const answer = (await this.#evalUser(label, source, args, frame, true)) as PredicateAnswer | undefined;
+			const answer = (await this.#evalUser(label, source, args, frame, { callSource: true })) as
+				| PredicateAnswer
+				| undefined;
 			if (answer?.held) return answer.value;
 			if (Date.now() >= deadline) {
 				throw new ToolError(`${label} timed out after ${resolveWaitTimeout(this.#cellMs, opts?.timeout)}ms`);
