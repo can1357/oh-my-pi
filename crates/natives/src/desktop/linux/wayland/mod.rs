@@ -237,10 +237,8 @@ impl WaylandBackend {
 	) -> CoreResult<()> {
 		control::check()?;
 		Self::window_input_error(target, kind)?;
+		self.refuse_input()?;
 		if self.input.is_none() {
-			if let Some(reason) = self.input_unavailable() {
-				return Err(DesktopError::permission_denied(reason));
-			}
 			self.input = Some(libei::Libei::new()?);
 		}
 		let input = self.input.as_mut().expect("libei was initialized");
@@ -309,6 +307,15 @@ impl Backend for WaylandBackend {
 			screen_locked: false,
 			display_asleep: false,
 		}
+	}
+
+	fn refuse_input(&mut self) -> CoreResult<()> {
+		if self.input.is_some() {
+			return Ok(());
+		}
+		self
+			.input_unavailable()
+			.map_or(Ok(()), |reason| Err(DesktopError::permission_denied(reason)))
 	}
 
 	fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>> {
