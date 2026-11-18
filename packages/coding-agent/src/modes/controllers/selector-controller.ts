@@ -5,6 +5,7 @@ import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import {
@@ -755,7 +756,12 @@ export class SelectorController {
 		const target = this.ctx.viewSession;
 		const focusedAgentId = this.ctx.focusedAgentId;
 		const apply = async () => {
-			const level = thinkingLevel ?? target.resolveTemporaryModelThinkingLevel(model);
+			// Picking the current model again keeps its level; another model takes its role's.
+			const level =
+				thinkingLevel ??
+				(modelsAreEqual(target.model, model)
+					? target.configuredThinkingLevel()
+					: target.resolveTemporaryModelThinkingLevel(model));
 			await target.setModelTemporary(model, level);
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorBorderColor();
@@ -854,6 +860,12 @@ export class SelectorController {
 					this.ctx.showStatus(`Task subagent model (session-only): ${selector}. Use /agents to persist.`);
 					done();
 				},
+				onKeepThinking: level => {
+					if (!isCurrent() || level === viewed.configuredThinkingLevel()) return;
+					viewed.setThinkingLevel(level);
+					this.ctx.statusLine.invalidate();
+					this.ctx.updateEditorBorderColor();
+				},
 				onCancel: done,
 			},
 			{
@@ -864,10 +876,12 @@ export class SelectorController {
 				quickRoles: quickRoleCycle?.models,
 				quickRoleOrder,
 				currentQuickRole: quickRoleCycle?.models[quickRoleCycle.currentIndex]?.role,
-				// What #applySessionModel applies without a slider level: the model's role
-				// level, else the session's (auto carries over; a fixed level yields to the
-				// model's own default, as setModelTemporary re-applies it).
+				// What #applySessionModel applies without a slider level: the current model
+				// keeps the session's level; another takes its role's level, else the
+				// session's (auto carries over; a fixed level yields to the model's own
+				// default, as setModelTemporary re-applies it).
 				thinkingLevelFor: model => {
+					if (modelsAreEqual(current, model)) return viewed.configuredThinkingLevel();
 					const roleLevel = viewed.resolveTemporaryModelThinkingLevel(model);
 					if (roleLevel !== undefined) return roleLevel;
 					const configured = viewed.configuredThinkingLevel();

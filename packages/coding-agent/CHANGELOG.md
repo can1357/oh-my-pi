@@ -48,6 +48,9 @@
 - `omp --restore` goes on with a turn cut off by SIGTERM or SIGHUP (a terminal such as Tern restarting its panes) instead of leaving it at "Operation aborted"; only its subagents went on before
 - A subagent (or a resumed session) running on auto thinking without a user turn of its own, such as one woken by IRC, shows the level it thinks at in the composer and status line instead of auto as still pending
 - Agent Hub rows of a subagent whose model you switched no longer show a "temporary" role badge, which crowded the model out of narrow rows
+- ← in the model switcher (alt+p, `/switch`) steps the thinking level while viewing a subagent instead of being taken as the ←← gesture back to the main session
+- Closing the model switcher with Esc keeps a thinking level you moved on the current model instead of discarding it
+- The model switcher's thinking slider opens on the level the session (or the viewed subagent) runs at, and re-picking the current model keeps it, instead of swapping in the level its model role assigns
 - Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy
 - Fixed the Spotlight experiment re-asking Stencil Cloud on every tool call for an account without Cloud access (waitlisted): omp now warns once and pauses Spotlight for that account for a few hours, honors `Retry-After` on rate limits and outages, and sends its `omp/<version>` User-Agent on every Spotlight request
 - Subagents whose agent model pattern (e.g. `@smol`) matches no available model now run on the parent's model instead of failing with "No model selected"; when no model resolves at all, the error names the agent and the `modelRoles`/`task.agentModelOverrides` setting to fix
