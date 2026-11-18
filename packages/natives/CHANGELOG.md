@@ -18,6 +18,10 @@
 
 - Fixed Wayland pointer and keyboard calls on a desktop with no input route, such as Hyprland without a RemoteDesktop portal, asking for a screenshot first or opening a screen capture before refusing: every one now refuses at once with `PermissionDenied` naming the missing route ([#19629](https://github.com/can1357/oh-my-pi/pull/19629) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- Fixed macOS `computer` background clicks, keys and pop-up menu actions, and any takeover call, leaving the target window in front of your windows until you moved it: the window you were typing in goes back in front of it within the call (your other windows it covered stay behind it) ([#19532](https://github.com/can1357/oh-my-pi/pull/19532) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

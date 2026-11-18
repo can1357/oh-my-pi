@@ -788,17 +788,29 @@ fn element_at_point(x: f64, y: f64) -> Option<(libc::pid_t, CFRetained<AXUIEleme
 
 /// Raises a known window for explicit takeover or restoration.
 pub(super) fn raise_window_id(pid: libc::pid_t, wid: u32) -> CoreResult<()> {
+	let window = window_by_id(pid, wid)?;
+	MacAx::new().perform(&AxHandle::Mac(window), "AXRaise")
+}
+
+/// Window `wid` of process `pid`, looked up through accessibility, which can
+/// block on a busy app; `WindowNotFound` when accessibility does not list it.
+pub(super) fn window_by_id(pid: libc::pid_t, wid: u32) -> CoreResult<CFRetained<AXUIElement>> {
 	let app = probe_application(pid).ok_or_else(|| {
 		DesktopError::ax_failed(format!("cannot inspect process {pid} for AXRaise"))
 	})?;
 	let windows = copy_elements(&app, "AXWindows")?;
-	let window = windows
+	windows
 		.into_iter()
 		.find(|window| window_id(window) == Some(wid))
 		.ok_or_else(|| {
 			DesktopError::window_not_found(format!("window {wid} is no longer available for AXRaise"))
-		})?;
-	MacAx::new().perform(&AxHandle::Mac(window), "AXRaise")
+		})
+}
+
+/// Sends `AXRaise` to a window from [`window_by_id`] and reads nothing first,
+/// so a check made right before it still holds when the request goes out.
+pub(super) fn raise(window: &AXUIElement) -> CoreResult<()> {
+	perform_action(window, "AXRaise")
 }
 
 fn probe_application(pid: libc::pid_t) -> Option<CFRetained<AXUIElement>> {
