@@ -261,6 +261,8 @@ export interface TspRowProps {
 	state?: "ok" | "err" | "run";
 	/** On `omp.tray.done.item`: the finished agent's id. */
 	ref?: string;
+	/** On `omp.tray.done.item`: how the agent ended, which colors its dot. */
+	status?: "done" | "failed" | "stopped";
 }
 export interface TspCardProps {
 	/** Header content, inline. */

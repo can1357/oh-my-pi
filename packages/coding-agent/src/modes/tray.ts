@@ -885,6 +885,7 @@ function describeDoneEntry(entry: TrayDoneEntry): NativeNode {
 		{
 			role: "omp.tray.done.item",
 			ref: entry.id,
+			status: entry.status,
 			gap: "xs",
 			align: "center",
 			aria,

@@ -423,6 +423,7 @@ describe("Tray", () => {
 		const [fresh, restored, old] = rows;
 		expect(fresh!.p).toMatchObject({
 			role: "omp.tray.done.item",
+			status: "failed",
 			actions: { click: "tray.open=Fresh" },
 			aria: "Fresh, failed, 4m12s · 38 tools · $0.120, Tests fail in auth",
 		});
