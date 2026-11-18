@@ -498,7 +498,12 @@ describe("history search picker", () => {
 		it("updates " + name + " scope chrome when both sources reuse the same empty array", () => {
 			const shared: HistorySearchEntry[] = [];
 			const search = new HistorySearchComponent(
-				["first", "second"].map(label => ({ label, getRecent: () => shared, search: () => shared, delete: () => {} })),
+				["first", "second"].map(label => ({
+					label,
+					getRecent: () => shared,
+					search: () => shared,
+					delete: () => {},
+				})),
 				() => {},
 				() => {},
 			);

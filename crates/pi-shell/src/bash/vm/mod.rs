@@ -2202,44 +2202,44 @@ impl Shell {
 				cx.host.cancel_externals(sig, &mut externals);
 			}
 			for i in (0..self.procs.len()).rev() {
-			if spared.contains(&self.procs[i].vpid) {
-				continue;
-			}
-			let key = crate::bash::store::TrapKey::Signal(sig);
-			let trapped = sig != Signal::Kill
-				&& self.procs[i].has_work()
-				&& exec::start_trap(&mut self.k, &mut self.procs[i], cx, key);
-			// bash runs the EXIT trap when a signal ends it: an untrapped
-			// TERM/INT/… ends the shell's own vprocs through it too.
-			let unwinds = trapped
-				|| (sig != Signal::Kill && self.procs[i].has_work() && !self.procs[i].transient);
-			if unwinds {
-				for frame in &mut self.procs[i].frames {
-					if let Some(sc) = frame.scratch.as_mut() {
-						// A spawn still pending never starts: the cancelled
-						// command is not resumed (the trap is the last action).
-						if matches!(sc.live, Live::Spawn(_)) {
-							sc.live = Live::None;
-						}
-						match &mut sc.live {
-							Live::Task(task) => task.signal(sig),
-							Live::Ext(ext) => {
-								let _ = ext.cont();
-							},
-							_ => {},
+				if spared.contains(&self.procs[i].vpid) {
+					continue;
+				}
+				let key = crate::bash::store::TrapKey::Signal(sig);
+				let trapped = sig != Signal::Kill
+					&& self.procs[i].has_work()
+					&& exec::start_trap(&mut self.k, &mut self.procs[i], cx, key);
+				// bash runs the EXIT trap when a signal ends it: an untrapped
+				// TERM/INT/… ends the shell's own vprocs through it too.
+				let unwinds = trapped
+					|| (sig != Signal::Kill && self.procs[i].has_work() && !self.procs[i].transient);
+				if unwinds {
+					for frame in &mut self.procs[i].frames {
+						if let Some(sc) = frame.scratch.as_mut() {
+							// A spawn still pending never starts: the cancelled
+							// command is not resumed (the trap is the last action).
+							if matches!(sc.live, Live::Spawn(_)) {
+								sc.live = Live::None;
+							}
+							match &mut sc.live {
+								Live::Task(task) => task.signal(sig),
+								Live::Ext(ext) => {
+									let _ = ext.cont();
+								},
+								_ => {},
+							}
 						}
 					}
-				}
-				self.procs[i].stopped = false;
-				if trapped {
-					exec::mark_cancel(&mut self.procs[i], status);
+					self.procs[i].stopped = false;
+					if trapped {
+						exec::mark_cancel(&mut self.procs[i], status);
+					} else {
+						exec::finish_cancel(&mut self.k, cx, &mut self.procs[i], status);
+					}
 				} else {
-					exec::finish_cancel(&mut self.k, cx, &mut self.procs[i], status);
+					self.kill(cx, i, sig, status, false);
 				}
-			} else {
-				self.kill(cx, i, sig, status, false);
 			}
-		}
 			// Calls of the cancelled vprocs are void; the spared ones' go on.
 			let kept: Vec<CallId> = self
 				.k

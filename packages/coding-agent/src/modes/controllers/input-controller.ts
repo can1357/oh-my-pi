@@ -63,7 +63,12 @@ import {
 	guestRefusesSlashCommand,
 	lookupBuiltinSlashCommand,
 } from "../../slash-commands/builtin-registry";
-import { queuedEntryRank, restoreDetachedDraft, restoreQueuedDraft, restoreQueuedDraftOrdered } from "../../slash-commands/helpers/draft";
+import {
+	queuedEntryRank,
+	restoreDetachedDraft,
+	restoreQueuedDraft,
+	restoreQueuedDraftOrdered,
+} from "../../slash-commands/helpers/draft";
 import { parseSlashCommand, parseSubcommand } from "../../slash-commands/helpers/parse";
 import { isTinyLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";

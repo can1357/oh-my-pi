@@ -582,20 +582,24 @@ describe("HistoryStorage scope filtering", () => {
 
 	it("hides a queued prompt with an empty cwd from directory scopes", async () => {
 		const dir = tempDir!;
-		const fixtures = await createFixtures(dir.path());
+		// An empty cwd resolves to process.cwd(), so that is the only scope target
+		// that distinguishes rejecting empty spellings from comparing their identity.
+		const scopedDir = process.cwd();
 		const storage = HistoryStorage.open(dir.join("history.db"));
 
-		// Deferred writes mean the read path merges the queue in memory before the
-		// row lands; empty spellings are excluded there exactly as the SQL side
-		// excludes them, so visibility must not flip at flush time.
-		await storage.add("empty cwd prompt", "", "s1");
-		await storage.add("normal cwd prompt", fixtures.repoA, "s1");
-		expect(storage.getRecent(10, { kind: "cwd", value: fixtures.repoA }).map(entry => entry.prompt)).toEqual([
-			"normal cwd prompt",
+		// Fire-and-forget on purpose: add() only resolves once the deferred write
+		// has flushed, and the pre-flush window is exactly where the in-memory
+		// queue merge must agree with the SQL side — empty spellings are excluded
+		// there exactly as the SQL side excludes them, so visibility must not
+		// flip at flush time.
+		storage.add("empty cwd prompt", "", "s1");
+		storage.add("scoped prompt", scopedDir, "s1");
+		expect(storage.getRecent(10, { kind: "cwd", value: scopedDir }).map(entry => entry.prompt)).toEqual([
+			"scoped prompt",
 		]);
 		await storage.flush();
-		expect(storage.getRecent(10, { kind: "cwd", value: fixtures.repoA }).map(entry => entry.prompt)).toEqual([
-			"normal cwd prompt",
+		expect(storage.getRecent(10, { kind: "cwd", value: scopedDir }).map(entry => entry.prompt)).toEqual([
+			"scoped prompt",
 		]);
 	});
 });

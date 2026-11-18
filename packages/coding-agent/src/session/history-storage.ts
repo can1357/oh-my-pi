@@ -606,8 +606,10 @@ END;
 		const kind = selection.kind;
 		if (kind === undefined) {
 			// Legacy exact-metadata filter: an omitted field matches every prompt.
-			return (selection.cwd === undefined || entry.cwd === selection.cwd) &&
-				(selection.sessionId === undefined || entry.sessionId === selection.sessionId);
+			return (
+				(selection.cwd === undefined || entry.cwd === selection.cwd) &&
+				(selection.sessionId === undefined || entry.sessionId === selection.sessionId)
+			);
 		}
 		switch (kind) {
 			case "global":
@@ -620,7 +622,8 @@ END;
 				// target itself: stored-directory expansion cannot see a queued prompt
 				// whose row has not landed yet. Empty spellings never match — the SQL
 				// side excludes them too.
-				if (entry.cwd === undefined || entry.cwd === "" || selection.value === undefined || selection.value === "") return false;
+				if (entry.cwd === undefined || entry.cwd === "" || selection.value === undefined || selection.value === "")
+					return false;
 				const identity = pathIdentityKey(selection.value);
 				if (kind === "cwd") return pathIdentityKey(entry.cwd) === identity;
 				if (pathIdentityKey(primaryRootOrCwd(selection.value)) !== identity) return false;

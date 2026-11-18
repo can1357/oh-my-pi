@@ -68,15 +68,15 @@ describe("HistoryStorage.search", () => {
 		expect(storage.search("commit", 10).map(entry => entry.prompt)).toEqual(["commit one", "commit two"]);
 	});
 	it("matches across punctuation in the query (FTS token alignment)", async () => {
-	const storage = await freshStorage();
-	await seed(storage, ["run git commit --amend now", "unrelated noise"]);
+		const storage = await freshStorage();
+		await seed(storage, ["run git commit --amend now", "unrelated noise"]);
 
-	// Before the tokenization fix, `git-commit` produced a single FTS phrase
-	// `"git-commit"*` which matched nothing because unicode61 indexed the stored
-	// prompt as `git` and `commit` separately.
-	const results = storage.search("git-commit", 10);
-	expect(results.map(r => r.prompt)).toEqual(["run git commit --amend now"]);
-});
+		// Before the tokenization fix, `git-commit` produced a single FTS phrase
+		// `"git-commit"*` which matched nothing because unicode61 indexed the stored
+		// prompt as `git` and `commit` separately.
+		const results = storage.search("git-commit", 10);
+		expect(results.map(r => r.prompt)).toEqual(["run git commit --amend now"]);
+	});
 
 	it("keeps a punctuated term's parts together instead of matching them anywhere", async () => {
 		const storage = await freshStorage();

@@ -4350,8 +4350,8 @@ fn ignore_async_signals(k: &mut Kernel, cx: &mut Cx<'_>, child: &mut Vproc) {
 	for &sig in sigs {
 		let key = TrapKey::Signal(sig);
 		let record = Record::Trap {
-			mode: child.mode,
-			action: BString::default(),
+			mode:         child.mode,
+			action:       BString::default(),
 			assumed_name: false,
 		};
 		state::store_record(&mut k.root, cx.store, child, KeyBuf::Trap(key), Some(record));

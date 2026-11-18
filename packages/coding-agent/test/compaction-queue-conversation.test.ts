@@ -276,9 +276,7 @@ describe("compaction queue conversation ownership", () => {
 			release[1].resolve();
 			await reports[1].promise;
 			expect(h.ctx.compactionQueuedMessages).toEqual([]);
-			expect(h.editor.getExpandedText()).toBe(
-				"older detached batch\n\nnewer detached batch\n\ncurrent draft",
-			);
+			expect(h.editor.getExpandedText()).toBe("older detached batch\n\nnewer detached batch\n\ncurrent draft");
 		} finally {
 			for (const gate of release) gate.resolve();
 		}
@@ -370,7 +368,11 @@ describe("compaction queue conversation ownership", () => {
 			// controller path first; the three queued batches fail afterwards in
 			// B, A, C order — every restored block must still land oldest-first,
 			// and the flush batches above the controller block.
-			h.ctx.yieldCompaction = { sessionId: h.manager.getSessionId(), leafId: h.manager.getLeafId() ?? "", text: "/compact" };
+			h.ctx.yieldCompaction = {
+				sessionId: h.manager.getSessionId(),
+				leafId: h.manager.getLeafId() ?? "",
+				text: "/compact",
+			};
 			h.input.restoreCompactionQueueToEditor();
 			release[1]!.resolve();
 			await Bun.sleep(20);
