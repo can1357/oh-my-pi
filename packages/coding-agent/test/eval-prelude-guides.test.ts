@@ -10,7 +10,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake, spillUrlIds } from "@oh-my-pi/pi-utils";
 
 function text(context: Context): string {
 	return context.messages
@@ -113,7 +113,9 @@ describe("Eval first-call guide messages", () => {
 			if (message.role !== "toolResult") continue;
 			const output = message.content.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n");
 			expect(output).not.toContain(guide);
-			expect(output.length).toBeLessThan(2000);
+			// Capped at the inline output budget; anything past it spills to a readable `local://` file.
+			expect(Buffer.byteLength(output)).toBeLessThan(64 * 1024);
+			if (Buffer.byteLength(output) > 2000) expect(spillUrlIds(output)).toHaveLength(1);
 		}
 	});
 

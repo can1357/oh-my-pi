@@ -1,25 +1,25 @@
-# Native Rust task execution and cancellation (`pi-natives`)
+# Native Rust task execution and cancellation (`omp-natives`)
 
-This document describes how `crates/pi-natives` schedules native work and how cancellation flows from JS options (`timeoutMs`, `AbortSignal`) into Rust execution.
+This document describes how `crates/natives` schedules native work and how cancellation flows from JS options (`timeoutMs`, `AbortSignal`) into Rust execution.
 
 ## Implementation files
 
-- `crates/pi-natives/src/task.rs`
-- `crates/pi-shell/src/cancel.rs`
-- `crates/pi-shell/src/shell.rs`
-- `crates/pi-natives/src/vcs.rs`
-- `crates/pi-natives/src/grep.rs`
-- `crates/pi-natives/src/glob.rs`
-- `crates/pi-natives/src/fd.rs`
-- `crates/pi-natives/src/ast.rs`
-- `crates/pi-natives/src/workspace.rs`
-- `crates/pi-natives/src/shell.rs`
-- `crates/pi-natives/src/pty.rs`
-- `crates/pi-natives/src/html.rs`
-- `crates/pi-natives/src/sixel.rs`
-- `crates/pi-natives/src/clipboard.rs`
-- `crates/pi-natives/src/text.rs`
-- `crates/pi-natives/src/ps.rs`
+- `crates/natives/src/task.rs`
+- `crates/shell/src/cancel.rs`
+- `crates/shell/src/shell.rs`
+- `crates/natives/src/vcs.rs`
+- `crates/natives/src/grep.rs`
+- `crates/natives/src/glob.rs`
+- `crates/natives/src/fd.rs`
+- `crates/natives/src/ast.rs`
+- `crates/natives/src/workspace.rs`
+- `crates/natives/src/shell.rs`
+- `crates/natives/src/pty.rs`
+- `crates/natives/src/html.rs`
+- `crates/natives/src/sixel.rs`
+- `crates/natives/src/clipboard.rs`
+- `crates/natives/src/text.rs`
+- `crates/natives/src/ps.rs`
 
 ## Core primitives (`task.rs`)
 
@@ -40,11 +40,11 @@ This document describes how `crates/pi-natives` schedules native work and how ca
    - Records a profiling sample through `profile_region(tag)`.
 
 3. `CancelToken` / `AbortToken` / `AbortReason`
-   - `CancelToken::new(timeout_ms, signal)` wraps the shared `pi_shell::cancel::CancelToken`, adding an optional JS `AbortSignal` bridge. Already-aborted signals set the flag immediately; invalid optional signal values are tolerated rather than rejecting the operation.
+   - `CancelToken::new(timeout_ms, signal)` wraps the shared `omp_shell::cancel::CancelToken`, adding an optional JS `AbortSignal` bridge. Already-aborted signals set the flag immediately; invalid optional signal values are tolerated rather than rejecting the operation.
    - `CancelToken::heartbeat()` is cooperative cancellation for blocking loops.
    - `CancelToken::wait()` asynchronously waits for signal or timeout.
    - `CancelToken::abort_token()` returns an abort handle backed by the shared flag when one already exists; without a flag, the handle is inert. `emplace_abort_token()` lazily installs the flag and returns a live handle. `CancelToken::new` uses the latter to bridge a JS `AbortSignal` to `AbortReason::Signal`.
-   - `CancelToken::aborted()` provides a non-blocking signal/deadline check. `abort_reason()` checks only the explicit flag, excluding deadlines; `into_core()` transfers the token to `pi-shell`.
+   - `CancelToken::aborted()` provides a non-blocking signal/deadline check. `abort_reason()` checks only the explicit flag, excluding deadlines; `into_core()` transfers the token to `omp-shell`.
    - `AbortToken::abort(reason)` lets external code request abort. Reasons are `Unknown`, `Timeout`, `Signal`, and `User`.
 
 4. `task::blocking_mapped(tag, cancel_token, reject_hook, cancel_hook, work)`
@@ -92,7 +92,7 @@ Behavior:
 | `astGrep(options)` / `astEdit(options)`                       | ast exports                 | `task::filesystem_future(env, tag, ct, ...)`                   | `CancelToken::new(...)`; work future dropped on abort                                                                                |
 | `astMatch(options)`                                           | `ast_match`                 | `task::blocking(...)` (in-memory `find_source`)                | `CancelToken::cancellation()` passed to `find_source`                                                                                |
 | `listWorkspace(options)`                                      | `list_workspace`            | `task::filesystem_future(env, "listWorkspace", ct, ...)`       | `CancelToken::new(options.timeoutMs, options.signal)`; work future dropped on abort                                                  |
-| `Shell#run(options, onChunk?)`                                | `Shell::run`                | `task::future(env, "shell.run", ...)`                          | JS `CancelToken` is converted into `pi_shell::cancel::CancelToken`; shell races it against command completion and descendant cleanup |
+| `Shell#run(options, onChunk?)`                                | `Shell::run`                | `task::future(env, "shell.run", ...)`                          | JS `CancelToken` is converted into `omp_shell::cancel::CancelToken`; shell races it against command completion and descendant cleanup |
 | `executeShell(options, onChunk?)`                             | `execute_shell`             | `task::future(env, "shell.execute", ...)`                      | same cancellation race and 2s graceful window (5s on Windows)                                                                        |
 | `Process#terminate(options?)`                                 | `Process::terminate`        | `task::future(env, "process.terminate", ...)`                  | optional signal cancels termination waits; grace and hard-kill timeouts are process policy rather than `CancelToken` deadlines       |
 | `Process#waitForExit(options?)`                               | `Process::wait_for_exit`    | `task::future(env, "process.wait_for_exit", ...)`              | optional signal is bridged through `CancelToken`; `timeoutMs` is the wait operation's typed `false` timeout                          |
@@ -141,7 +141,7 @@ Synchronous loops (`task::blocking`, PTY) must call `heartbeat()` at predictable
 
 Observed patterns:
 
-- `grep`, `glob`, `fuzzyFind`, `listWorkspace`, `astGrep`, and `astEdit` run through `task::filesystem_future(env, tag, ct, fs, work)`. On abort/timeout the work future is dropped with the same rejection strings as `task::filesystem`. `pi-walker` has no runtime of its own: its futures spawn tasks with `tokio::spawn` on the current runtime, and dropping the future sets a halt flag (drop guard) that stops them. `walk::Tree` spends tokio's coop budget per entry (`tokio::task::coop::consume_budget`), so raced serial traversals also cancel.
+- `grep`, `glob`, `fuzzyFind`, `listWorkspace`, `astGrep`, and `astEdit` run through `task::filesystem_future(env, tag, ct, fs, work)`. On abort/timeout the work future is dropped with the same rejection strings as `task::filesystem`. `omp-xfs` has no runtime of its own: its futures spawn tasks with `tokio::spawn` on the current runtime, and dropping the future sets a halt flag (drop guard) that stops them. `walk::Tree` spends tokio's coop budget per entry (`tokio::task::coop::consume_budget`), so raced serial traversals also cancel.
 - `grep` streams batches through a bounded `tokio::sync::mpsc::Sender<Vec<Match>>`. The `onMatches` forwarder awaits each JS call (`call_async_catch`) and coalesces queued batches up to 1024 matches; a channel of 4 batches gives end-to-end backpressure.
 - `astMatch` (in-memory `find_source`) stays on `task::blocking` with `CancelToken::cancellation()`.
 - `run_pty_sync` checks every loop tick with a maximum 16ms wait cadence.
@@ -208,7 +208,7 @@ Choose one model per API and document it explicitly.
 1. Classify work correctly:
    - CPU-bound or sync blocking -> `task::blocking`.
    - async I/O / `await` orchestration -> `task::future`.
-   - async filesystem work over a `pi_vfs::Fs` -> `task::filesystem_future` (abort/timeout drops the future).
+   - async filesystem work over a `omp_vfs::Fs` -> `task::filesystem_future` (abort/timeout drops the future).
 
 2. Expose cancel inputs when needed:
    - include `timeoutMs` and `signal` in `#[napi(object)]` options,

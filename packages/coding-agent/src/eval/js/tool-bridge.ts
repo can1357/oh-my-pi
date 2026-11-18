@@ -41,9 +41,6 @@ import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } f
 import type { RuntimeCallIdentity } from "./shared/runtime";
 import type { JsStatusEvent } from "./shared/types";
 
-/** These tools await delegated subagents/jobs, not the cell runtime's own work. */
-const DELEGATED_WORK_TOOLS = new Set(["task", "wait"]);
-
 const NO_REPLY_SINK =
 	"out:// replies do not reach the user from here; write to out:// from a foreground eval cell or reply in your final message.";
 
@@ -301,6 +298,8 @@ async function dispatchSessionTool(name: string, args: unknown, options: ToolBri
 	if (!isEvalBridgeToolCallable(tool)) {
 		throw new ToolError(`\`${name}\` cannot run through the eval bridge; call the direct \`${name}\` tool.`);
 	}
+	// FREEFORM tools (e.g. `edit`) take their raw text as `{ input }`, as providers deliver it.
+	if (typeof args === "string" && tool.customFormat) args = { input: args };
 	const toolCallId = `js-${name}-${crypto.randomUUID()}`;
 	// A schema-owned name stays tool data across alternatives. Deleting an
 	// invalid value to make another branch match could select a different operation.
@@ -343,8 +342,9 @@ async function dispatchSessionTool(name: string, args: unknown, options: ToolBri
 		if (claimed) return bridgeValueFromToolResult(name, validatedArgs, claimed, options.emitStatus);
 	}
 	let settled = false;
+	const isMcpTool = "mcpServerName" in tool && typeof tool.mcpServerName === "string";
 	const onUpdate: AgentToolUpdateCallback | undefined =
-		options.emitStatus && "mcpServerName" in tool && typeof tool.mcpServerName === "string"
+		options.emitStatus && isMcpTool
 			? partial => {
 					if (settled || !isRecord(partial.details)) return;
 					const progress = parseMCPProgress(partial.details.progress);
@@ -352,24 +352,25 @@ async function dispatchSessionTool(name: string, args: unknown, options: ToolBri
 				}
 			: undefined;
 	try {
-		// A delegated-work tool pauses only the cell's runtime-work watchdog; the turn's
-		// signal still reaches it. Without a status sink the pause wrapper is a no-op.
-		const result = await withBridgeTimeoutPause(
-			DELEGATED_WORK_TOOLS.has(name) ? options.emitStatus : undefined,
-			async () => {
-				try {
-					return await tool.execute(
-						toolCallId,
-						validatedArgs,
-						options.signal,
-						onUpdate,
-						options.session.getToolContext?.(),
-					);
-				} finally {
-					settled = true;
-				}
-			},
-		);
+		// An omp session tool bounds its own work (bash/task/wait carry timeouts), so it pauses the cell's
+		// runtime-work watchdog instead of letting a slow call kill the VM; an external MCP server may never
+		// answer, so its calls stay charged to the cell. The turn's signal reaches both. Without a status
+		// sink the pause wrapper is a no-op.
+		const result = await withBridgeTimeoutPause(isMcpTool ? undefined : options.emitStatus, async () => {
+			try {
+				// The script parses the result, so it gets the whole result, not the model's display of it.
+				const context = options.session.getToolContext?.();
+				return await tool.execute(
+					toolCallId,
+					validatedArgs,
+					options.signal,
+					onUpdate,
+					context && { ...context, programmatic: true },
+				);
+			} finally {
+				settled = true;
+			}
+		});
 		if (name === "todo") {
 			// A bridged call emits no `todo` toolResult entry, the only thing branch
 			// rehydration reads; without this the in-memory update is lost on the

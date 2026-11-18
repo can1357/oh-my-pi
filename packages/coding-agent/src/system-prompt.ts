@@ -69,7 +69,7 @@ import {
 	cfgPersonality,
 	cfgSystemPromptTemplates,
 } from "./session/settings";
-import { cfgOvnfsPath, cfgTaskBatch, cfgTaskEager } from "./task/settings";
+import { cfgOvnfsPath, cfgTaskBatch, cfgTaskCrossInstance, cfgTaskEager } from "./task/settings";
 import { cfgBrowserCdpUrl, cfgBrowserRelayUrl } from "./tools/browser/settings";
 import {
 	cfgAsyncEnabled,
@@ -98,6 +98,7 @@ export const cfgSystemPromptInputs = combine({
 	xdevInlineDevices: cfgToolsXdevInlineDevices,
 	vaultEnabled: cfgVaultEnabled,
 	outEnabled: cfgOutEnabled,
+	crossInstanceAgents: cfgTaskCrossInstance,
 	renderMermaid: cfgTuiRenderMermaid,
 	renderSvg: cfgTuiRenderSvg,
 	renderEmbeds: cfgTuiRenderEmbeds,
@@ -614,6 +615,8 @@ export interface BuildSystemPromptOptions {
 	settingsApproval?: boolean;
 	/** Whether `out://` writes reach the user as transcript replies; gates advertising `out://`. */
 	outReplies?: boolean;
+	/** Advertise cross-instance agent addressing. */
+	crossInstanceAgents?: boolean;
 	/**
 	 * Eval preludes advertised by this prompt. Each prelude's `guidance` is
 	 * appended as its own block after the rendered template, so custom templates
@@ -767,6 +770,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		securityEnabled = false,
 		settingsApproval = false,
 		outReplies = false,
+		crossInstanceAgents = false,
 		evalPreludes = [],
 		model,
 		includeModelInPrompt = true,
@@ -1077,6 +1081,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		securityEnabled,
 		settingsApproval,
 		outReplies,
+		crossInstanceAgents,
 		subagent,
 	};
 	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(

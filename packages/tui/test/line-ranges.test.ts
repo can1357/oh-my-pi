@@ -2,9 +2,10 @@ import { describe, expect, it } from "bun:test";
 import { parseLineRangeChunk, parseLineRanges, selectorLineRanges } from "../src/tools/line-ranges";
 
 describe("parseLineRanges bare numbers", () => {
-	it("reads a lone bare number from that line onward", () => {
-		expect(parseLineRanges("50")).toEqual([{ startLine: 50, endLine: undefined }]);
-		expect(parseLineRangeChunk("50")).toEqual({ startLine: 50, endLine: undefined });
+	it("reads a lone bare number as that one line, and N- from that line onward", () => {
+		expect(parseLineRanges("50")).toEqual([{ startLine: 50, endLine: 50 }]);
+		expect(parseLineRangeChunk("50")).toEqual({ startLine: 50, endLine: 50 });
+		expect(parseLineRanges("50-")).toEqual([{ startLine: 50, endLine: undefined }]);
 	});
 
 	it("pins bare numbers in a comma list to single lines", () => {
@@ -29,10 +30,10 @@ describe("parseLineRanges bare numbers", () => {
 		expect(parseLineRanges("5-10,11")).toEqual([{ startLine: 5, endLine: 11 }]);
 	});
 
-	it("pins a lone bare number compounded with raw to that line", () => {
+	it("pins a lone bare number to that line, with or without raw", () => {
 		expect(selectorLineRanges("17:raw")).toEqual([{ startLine: 17, endLine: 17 }]);
 		expect(selectorLineRanges("raw:17")).toEqual([{ startLine: 17, endLine: 17 }]);
 		expect(selectorLineRanges("17-:raw")).toEqual([{ startLine: 17, endLine: undefined }]);
-		expect(selectorLineRanges("17")).toEqual([{ startLine: 17, endLine: undefined }]);
+		expect(selectorLineRanges("17")).toEqual([{ startLine: 17, endLine: 17 }]);
 	});
 });

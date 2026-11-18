@@ -155,12 +155,16 @@ export function createCommitPrelude(session: ToolSession): EvalPreludeDefinition
 				drafts.delete(draft.id);
 				const remaining = await draftFor(context(signal, draft.root), scope);
 				remember(remaining, scope);
-				const lines = [
-					`[${draft.branch ?? "HEAD"} ${outcome.sha.slice(0, 10)}] ${outcome.subject}`,
-					`${outcome.paths.length} path(s): ${outcome.paths.join(", ")}`,
-				];
-				if (outcome.parent && outcome.parent !== draft.head) {
-					lines.push(`HEAD had moved to ${outcome.parent.slice(0, 10)}; the selection applied cleanly on top.`);
+				const lines = [`[${draft.branch ?? "HEAD"} ${outcome.sha.slice(0, 10)}] ${outcome.subject}`];
+				if (outcome.amended) {
+					lines.push(
+						`amended ${outcome.amended.slice(0, 10)} (parent ${outcome.parent?.slice(0, 10) ?? "none, root commit"})`,
+					);
+				}
+				lines.push(`${outcome.paths.length} path(s): ${outcome.paths.join(", ")}`);
+				const placedOn = outcome.amended ?? outcome.parent;
+				if (placedOn && placedOn !== draft.head) {
+					lines.push(`HEAD had moved to ${placedOn.slice(0, 10)}; the selection applied cleanly on top.`);
 				}
 				lines.push(...outcome.indexNotes, "", "Remaining:", remaining.summary());
 				return { text: lines.join("\n"), details: { ...outcome, remaining: describe(remaining) } };

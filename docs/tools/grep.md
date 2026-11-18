@@ -16,7 +16,7 @@
    - `packages/coding-agent/src/edit/store.ts` — session-scoped native `EditStore` snapshots and seen-line tracking.
    - `packages/coding-agent/src/tools/settings.ts` — default context lines.
    - `packages/natives/native/index.d.ts` — native `grep()` types exposed to TS.
-   - `crates/pi-natives/src/grep.rs` — native regex/file search implementation.
+   - `crates/natives/src/grep.rs` — native regex/file search implementation.
    - `docs/natives-text-search-pipeline.md` — native search pipeline overview.
 
 ## Inputs
@@ -71,7 +71,7 @@ The tool returns a single text block in `content[0].text` plus structured `detai
    - one entry: `parseSearchPath()` splits `basePath` and optional glob;
    - multiple entries: `resolveExplicitSearchPaths()` (via `resolveToolSearchScope()`) computes a common base directory, brace-union glob, exact-file list, or per-entry target list over host entries; every internal URL entry is its own target. Targets fan out when the common ancestor is not itself a requested scope, or when a plain-file entry would otherwise be demoted into a directory walk's glob union (`fanOutFileTargets`).
 7. Line-range selectors are validated after path/archive resolution. They are allowed only for single files (host files, archive members, or internal URL files); glob (including internal-URL glob)/directory line-range selectors error.
-8. `resolveToolSearchScope()` stats the resolved base through the URL filesystem to decide file vs directory behavior. A URL that fails carries its handler's diagnosis (`Cannot search artifact://9: Artifact 9 not found. Available: …`); a URL whose scheme needs a higher tier fails with the filesystem's approval error.
+8. `resolveToolSearchScope()` stats the resolved base through the URL filesystem to decide file vs directory behavior. A URL that fails carries its handler's diagnosis (a missing `local://` file, say); a URL whose scheme needs a higher tier fails with the filesystem's approval error.
    File selectors filter match starts and context to the requested line ranges. Existing literal filenames such as `test:1-2` take precedence over selector parsing. Internal URLs also accept `:raw` / `:conflicts` as whole-resource searches, with any accompanying ranges retained; host paths accept line ranges only.
 9. It calls native `grep()` from `@oh-my-pi/pi-natives` with:
    - `pattern`, `ignoreCase`, `multiline`, `gitignore`;
@@ -82,8 +82,8 @@ The tool returns a single text block in `content[0].text` plus structured `detai
    - `maxCountPerFile`: the per-file match cap plus one for ordinary searches. Line-range searches enlarge both native fetch caps before filtering so earlier out-of-range matches do not exhaust the visible in-range budget;
    - `mode: content`;
    - the combined abort `signal` and `timeoutMs: SEARCH_GREP_TIMEOUT_MS` (`30_000`);
-   - `filesystem`: the URL filesystem's `shellFilesystem()`. URL paths resolve through it natively: file-backed schemes (`local://`, `skill://`, `artifact://`) redirect to their host files, virtual schemes (`omp://`, `history://`) serve rendered read-only files and enumerated directories. Host paths never leave native code.
-10.   Native execution happens in `crates/pi-natives/src/grep.rs`:
+   - `filesystem`: the URL filesystem's `shellFilesystem()`. URL paths resolve through it natively: file-backed schemes (`local://`, `skill://`) redirect to their host files, virtual schemes (`omp://`, `history://`) serve rendered read-only files and enumerated directories. Host paths never leave native code.
+10.   Native execution happens in `crates/natives/src/grep.rs`:
 
 - `build_matcher()` sanitizes non-quantifier braces and first tries the Rust regex engine;
 - patterns unsupported by Rust regex (including lookaround/backreferences) retry with PCRE2;
@@ -154,16 +154,16 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - Final text truncation: `truncateHead()` default byte cap `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/tui/src/tools/streaming-output.ts`). `grep.ts` overrides `maxLines` to `Number.MAX_SAFE_INTEGER`, so normal grep output is byte-capped, not line-capped.
 - Context defaults: `grep.contextBefore = 0`, `grep.contextAfter = 0` in `packages/coding-agent/src/tools/settings.ts`.
 - Pagination: `skip` is a file-page offset for multi-file scopes. The result text says `Use skip=<N> for the next page` when more files remain.
-- Native directory-scan cache: disabled natively for this tool — `GrepOptions` has no `cache` field; `build_grep_walk_request` hard-codes `.cache(false)` in `crates/pi-natives/src/grep.rs`.
+- Native directory-scan cache: disabled natively for this tool — `GrepOptions` has no `cache` field; `build_grep_walk_request` hard-codes `.cache(false)` in `crates/natives/src/grep.rs`.
 - Native grep wall-clock budget: `30_000ms` per invocation (`SEARCH_GREP_TIMEOUT_MS` in `packages/coding-agent/src/tools/grep.ts`); hitting it raises `Grep timed out after 30s; ...`.
-- Native per-file search window: `4 * 1024 * 1024` bytes (`MAX_FILE_BYTES` in `crates/pi-natives/src/grep.rs`, mirrored as `NATIVE_GREP_MAX_FILE_BYTES` in `grep.ts`). Oversized host and internal-URL files are searched only over their leading window; directory scans defer them until normal-sized files have been searched and may omit that pass once the match budget is satisfied. Explicit oversized file scopes receive a partial-coverage note; oversized files whose prefix cannot be read contribute a skipped-file count.
+- Native per-file search window: `4 * 1024 * 1024` bytes (`MAX_FILE_BYTES` in `crates/natives/src/grep.rs`, mirrored as `NATIVE_GREP_MAX_FILE_BYTES` in `grep.ts`). Oversized host and internal-URL files are searched only over their leading window; directory scans defer them until normal-sized files have been searched and may omit that pass once the match budget is satisfied. Explicit oversized file scopes receive a partial-coverage note; oversized files whose prefix cannot be read contribute a skipped-file count.
 
 ## Errors
 
 - `Pattern must not be empty` when trimmed `pattern` is empty.
 - `Skip must be a non-negative number` for negative or non-finite `skip`.
 - `Search scope entries must be non-empty paths or globs` when any normalized `path` entry is empty.
-- `Cannot search <url>: <reason>` when an internal URL (or a URL glob's base) cannot be stat'ed through the URL filesystem: the handler's diagnosis (`Artifact 9 not found. Available: …`, `skill:// URL requires a skill name` for `skill://*/SKILL.md`) or the tier refusal (`ssh:// access needs exec approval; …`).
+- `Cannot search <url>: <reason>` when an internal URL (or a URL glob's base) cannot be stat'ed through the URL filesystem: the handler's diagnosis (a missing `local://` file, `skill:// URL requires a skill name` for `skill://*/SKILL.md`) or the tier refusal (`ssh:// access needs exec approval; …`).
 - `… lists only through the read tool` (from native grep) for a directory resource with neither structured entries nor a local path.
 - `Cannot search external URL: ... Use \`read\` to fetch web content, then search the returned text.` for non-fetchable external URL schemes (`ftp`/`ws`/`wss`) or declined fetches.
 - Line-range selector errors include `Line-range selector requires a single file, not a glob: ...`, `Line-range selector requires a single file: ... is a directory`, and `Path not found for line-range selector: ...`.
@@ -185,4 +185,4 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - `gitignore:false` only affects native directory traversal. It does not disable the tool's own path normalization or explicit-file handling.
 - When `path` resolves to multiple exact files, each target gets its own native fetch cap before JS grouping (`2000` ordinarily; enlarged for line-range filters).
 - The section tag in hashline mode is a four-hex opaque snapshot tag from the session snapshot store; `grep` records whole-file snapshots when possible and prints bare line numbers beneath the header.
-- Below an ovnfs checkout, native `grep()` asks the ovnfs daemon serving it instead of walking the NFS mount (`crates/pi-walker/src/ovnfs.rs`): pi-walker finds ovnfs mounts in the host mount table and the daemon's admin socket from the mount source or ovnfs's state directory, and the daemon searches the checkout's overlay in-process. No ovnfs setting or binary is involved. Named files, `onMatches` streaming, and `type` filters always use the native walker; any daemon failure (no daemon, another protocol version, a daemon serving another mount, an error reply) falls back to the native walk, and cancelling the search closes the daemon connection, which cancels its search. Daemon replies carry no binary-match field, so daemon-answered directory searches leave `binaryMatches` unset.
+- Below an ovnfs checkout, native `grep()` asks the ovnfs daemon serving it instead of walking the NFS mount (`crates/xfs/src/ovnfs.rs`): omp-xfs finds ovnfs mounts in the host mount table and the daemon's admin socket from the mount source or ovnfs's state directory, and the daemon searches the checkout's overlay in-process. No ovnfs setting or binary is involved. Named files, `onMatches` streaming, and `type` filters always use the native walker; any daemon failure (no daemon, another protocol version, a daemon serving another mount, an error reply) falls back to the native walk, and cancelling the search closes the daemon connection, which cancels its search. Daemon replies carry no binary-match field, so daemon-answered directory searches leave `binaryMatches` unset.
