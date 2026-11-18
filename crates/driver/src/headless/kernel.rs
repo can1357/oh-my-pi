@@ -2631,12 +2631,11 @@ pub async fn compose_kernel(
 		}
 	};
 
-	let mut trusted_extensions = options.extensions.trusted.clone();
 	// Control grants come only from the operator's grant records, which native
-	// admission has already applied to the specs appended below; a spec the caller
-	// supplied never carries one.
-	crate::discovery::native::withhold_control_grants(&mut trusted_extensions);
-	for extension in &mut trusted_extensions {
+	// admission has already applied to the native specs; the specs the caller
+	// supplied are cleared of any grant when the two lists are assembled below.
+	let mut caller_extensions = options.extensions.trusted.clone();
+	for extension in &mut caller_extensions {
 		omp_ext::config::apply_resolved_setting_overrides(
 			extension.key.extension().as_str(),
 			&extension.manifest.setting_schemas,
@@ -2644,12 +2643,11 @@ pub async fn compose_kernel(
 			&options.extensions.setting_overrides,
 		)?;
 	}
-	trusted_extensions.extend(
-		native_extensions
-			.extensions
-			.into_iter()
-			.map(|extension| extension.spec),
-	);
+	let native_specs: Vec<_> = native_extensions
+		.extensions
+		.into_iter()
+		.map(|extension| extension.spec)
+		.collect();
 	let terminal = terminal_identity();
 	let journal_path = select_journal_path(
 		&sessions_dir,
@@ -2674,17 +2672,22 @@ pub async fn compose_kernel(
 	// The environment fixes its sandbox, approval and workspace trust policy
 	// when it starts, so a resumed child's class is presented before it does.
 	con_journal::present_journaled_class(&ctx, &class_scope, &journal_path);
-	if !crate::discovery::native::control_grant_sandbox_matches(
+	let sandbox_matches = crate::discovery::native::control_grant_sandbox_matches(
 		&control_options,
 		&ctx,
 		&project_root,
-	) {
+	);
+	if !sandbox_matches {
 		tracing::warn!(
 			"withholding extension CONTROL grants because the journaled class changed the exec \
 			 sandbox"
 		);
-		crate::discovery::native::withhold_control_grants(&mut trusted_extensions);
 	}
+	let trusted_extensions = crate::discovery::native::assemble_trusted_specs(
+		caller_extensions,
+		native_specs,
+		sandbox_matches,
+	);
 	let environment_policy = omp_envd::daemon_policy::from_con_with_protected_write_paths(
 		&ctx,
 		workspace_trust.trust(),

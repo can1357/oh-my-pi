@@ -101,6 +101,23 @@ pub(crate) fn withhold_control_grants(specs: &mut [ExtHostSpec]) {
 	}
 }
 
+/// Builds the specs the kernel launches: the caller's specs never carry a
+/// CONTROL grant, the natively admitted specs are appended with the grants
+/// admission applied, and when the journaled class changed the exec sandbox
+/// (`sandbox_matches` is false) no spec keeps one.
+pub(crate) fn assemble_trusted_specs(
+	mut caller: Vec<ExtHostSpec>,
+	native: Vec<ExtHostSpec>,
+	sandbox_matches: bool,
+) -> Vec<ExtHostSpec> {
+	withhold_control_grants(&mut caller);
+	caller.extend(native);
+	if !sandbox_matches {
+		withhold_control_grants(&mut caller);
+	}
+	caller
+}
+
 /// An admitted extension and the source root that produced it.
 #[derive(Clone, Debug)]
 pub struct AdmittedNativeExtension {
@@ -1360,6 +1377,49 @@ failure = "fault"
 			assert_eq!(spec.key.extension(), granted.key.extension());
 		}
 		withhold_control_grants(&mut []);
+	}
+
+	fn granted_spec() -> ExtHostSpec {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		persist_control_grant(&data_dir, &root, &sf!("test.user"));
+		let report = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			true,
+			&[],
+		);
+		let spec = report
+			.extensions
+			.into_iter()
+			.find(|item| item.spec.key.extension().as_str() == "test.user")
+			.expect("user extension admitted")
+			.spec;
+		assert!(!spec.control_grants.is_empty(), "the fixture starts with a grant");
+		spec
+	}
+
+	#[test]
+	fn assemble_trusted_specs_drops_caller_grants_and_keeps_native_ones() {
+		let granted = granted_spec();
+
+		let specs = assemble_trusted_specs(vec![granted.clone()], vec![granted.clone()], true);
+
+		assert_eq!(specs.len(), 2);
+		assert!(specs[0].control_grants.is_empty(), "a caller spec must never carry a grant");
+		assert_eq!(specs[1].control_grants, granted.control_grants);
+	}
+
+	#[test]
+	fn assemble_trusted_specs_drops_every_grant_when_the_sandbox_changed() {
+		let granted = granted_spec();
+
+		let specs = assemble_trusted_specs(vec![granted.clone()], vec![granted], false);
+
+		assert_eq!(specs.len(), 2);
+		assert!(specs.iter().all(|spec| spec.control_grants.is_empty()));
 	}
 
 	#[test]

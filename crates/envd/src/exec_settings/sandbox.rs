@@ -1,7 +1,9 @@
 //! Agent command sandbox posture and policy settings.
 
 use std::{
+	borrow::Cow,
 	collections::BTreeMap,
+	fmt::Write as _,
 	fs, io,
 	path::{Path, PathBuf},
 };
@@ -548,14 +550,29 @@ pub fn protected_write_paths(data_dir: &Path, home: &Path) -> Vec<PathBuf> {
 	paths
 }
 
-/// Serializes paths as strings, replacing bytes that are not UTF-8 with U+FFFD.
-/// Only the daemon policy digest serializes settings, and failing there would
-/// take the session down; enforcement reads the exact [`PathBuf`]s.
+/// Serializes paths as strings. A path that is not valid UTF-8 serializes as
+/// its lossy spelling, a NUL, and the hex of its exact bytes, so two distinct
+/// invalid paths never share one digest input. Valid UTF-8 serializes
+/// unchanged. Only the daemon policy digest serializes settings, and failing
+/// there would take the session down; enforcement reads the exact [`PathBuf`]s.
 fn serialize_paths_lossy<S: serde::Serializer>(
 	paths: &[PathBuf],
 	serializer: S,
 ) -> Result<S::Ok, S::Error> {
-	serializer.collect_seq(paths.iter().map(|path| path.to_string_lossy()))
+	serializer.collect_seq(paths.iter().map(|path| path_digest_spelling(path)))
+}
+
+fn path_digest_spelling(path: &Path) -> Cow<'_, str> {
+	if let Some(text) = path.to_str() {
+		return Cow::Borrowed(text);
+	}
+	let mut spelling = path.to_string_lossy().into_owned();
+	spelling.push('\0');
+	for byte in path.as_os_str().as_encoded_bytes() {
+		// Writing to a `String` never fails.
+		let _ = write!(spelling, "{byte:02x}");
+	}
+	Cow::Owned(spelling)
 }
 
 /// The canonical spelling of a protected location, or its absolute spelling
@@ -1120,8 +1137,9 @@ mod tests {
 		assert_eq!(serde_json::from_value::<SandboxSettings>(value).expect("round trip"), protected);
 	}
 
-	/// A protected path that is not valid UTF-8 serializes lossily, so the
-	/// daemon policy digest never fails on it; the in-memory path stays exact.
+	/// A protected path that is not valid UTF-8 serializes as its lossy spelling
+	/// plus the hex of its bytes, so the daemon policy digest never fails on it
+	/// and distinct invalid paths stay distinct; the in-memory path stays exact.
 	#[cfg(unix)]
 	#[test]
 	fn non_utf8_protected_write_paths_serialize_lossily() {
@@ -1133,9 +1151,10 @@ mod tests {
 			..SandboxSettings::default()
 		};
 		let value = serde_json::to_value(&settings).expect("non-UTF-8 paths still serialize");
-		assert_eq!(value["protected_write_paths"], serde_json::json!(["/srv/\u{fffd}store"]));
+		let spelling = format!("/srv/\u{fffd}store\0{}", "2f7372762fff73746f7265");
+		assert_eq!(value["protected_write_paths"], serde_json::json!([spelling]));
 		assert_eq!(settings.protected_write_paths, [exact], "enforcement keeps the exact path");
 		let restored: SandboxSettings = serde_json::from_value(value).expect("round trip");
-		assert_eq!(restored.protected_write_paths, [PathBuf::from("/srv/\u{fffd}store")]);
+		assert_eq!(restored.protected_write_paths, [PathBuf::from(spelling)]);
 	}
 }

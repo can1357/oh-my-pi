@@ -282,4 +282,31 @@ mod tests {
 		assert_eq!(policy, of(&sandbox, &tools, &shell, trust), "the digest is deterministic");
 		assert_ne!(policy, from_con(&ctx, trust), "the path still keys the daemon");
 	}
+
+	/// Distinct protected paths key distinct daemons even when their lossy
+	/// spellings coincide: two different invalid byte strings and a path that
+	/// holds U+FFFD all digest differently.
+	#[cfg(unix)]
+	#[test]
+	fn protected_paths_with_one_lossy_spelling_digest_differently() {
+		use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _, path::PathBuf};
+
+		let ctx = Ctx::new();
+		let trust = WorkspaceTrust::Untrusted;
+		let tools = ToolSettings::from_con(&ctx);
+		let shell = ShellSettings::from_con(&ctx);
+		let digest = |path: PathBuf| {
+			let mut sandbox = SandboxSettings::from_con(&ctx);
+			sandbox.protected_write_paths.push(path);
+			of(&sandbox, &tools, &shell, trust)
+		};
+
+		let ff = digest(PathBuf::from(OsStr::from_bytes(b"/srv/\xffstore")));
+		let fe = digest(PathBuf::from(OsStr::from_bytes(b"/srv/\xfestore")));
+		let replacement = digest(PathBuf::from("/srv/\u{fffd}store"));
+
+		assert_ne!(ff, fe, "two invalid paths shared one digest");
+		assert_ne!(ff, replacement, "an invalid path shared a digest with its lossy spelling");
+		assert_ne!(fe, replacement, "an invalid path shared a digest with its lossy spelling");
+	}
 }
