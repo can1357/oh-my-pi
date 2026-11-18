@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `browser.cdpNewTabs`: with it on, the browser tool opens its own page on a `browser.cdpUrl` or `app` CDP endpoint and closes it on release, instead of adopting the page in view, so it can drive engines like Lightpanda that keep pages per CDP connection
+- Added `browser.cdpNewTabs`: with it on, the browser tool opens its own page on a `browser.cdpUrl` or `app` CDP endpoint and closes it on release, instead of adopting the page in view, so it can drive engines like Lightpanda that keep pages per CDP connection ([#19649](https://github.com/can1357/oh-my-pi/pull/19649) by [@azais-corentin](https://github.com/azais-corentin))
 
 ### Fixed
 
