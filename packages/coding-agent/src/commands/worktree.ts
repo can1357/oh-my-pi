@@ -1,5 +1,5 @@
 /**
- * List and clean up agent-managed git worktrees under `~/.omp/wt`.
+ * List and clean up agent-managed Git and ovnfs worktrees.
  */
 
 import { getProjectDir } from "@oh-my-pi/pi-utils";
@@ -56,7 +56,7 @@ export default class Worktree extends Command {
 			default: false,
 		}),
 		all: Flags.boolean({
-			description: "Clear every entry, including live PR-checkout worktrees (clear)",
+			description: "Clear managed Git and ovnfs worktrees, including live entries (clear)",
 			default: false,
 		}),
 		"dry-run": Flags.boolean({

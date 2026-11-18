@@ -35,7 +35,7 @@ export interface SpotlightWindow {
 
 /** The original of a result whose text shaping changed. */
 export interface SpotlightOriginal {
-	/** Session artifact holding the original text (`artifact://N`). */
+	/** Session spill holding the original text (`local://N.log`). */
 	url: string;
 	/** Its line count. */
 	lines: number;
@@ -70,7 +70,7 @@ export interface SpotlightOriginal {
 	 * of its own (a shaping note).
 	 */
 	map?: (number | [number, number] | null)[];
-	/** A held-out result's would-be text, the cut the model was not shown (`artifact://N`). */
+	/** A held-out result's would-be text, the cut the model was not shown (`local://N.log`). */
 	shapedUrl?: string;
 }
 

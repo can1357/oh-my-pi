@@ -33,6 +33,7 @@ import type {
 	AsyncJobRun,
 	AsyncJobRunResult,
 	AsyncJobType,
+	EvictedJob,
 } from "../../async/job-manager";
 import type { JobTextSource, JobWidgetInputs, JobWidgetRegistry } from "../../job-widgets/types";
 import type { RemoteObject } from "../rpc";
@@ -235,6 +236,10 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		return localUnsubscribe(this.#remote.callSync("onJobSettled", listener));
 	}
 
+	onJobsChanged(listener: () => void): () => void {
+		return localUnsubscribe(this.#remote.callSync("onJobsChanged", listener));
+	}
+
 	register(type: AsyncJobType, label: string, run: AsyncJobRun, options?: AsyncJobRegisterOptions): string {
 		const local: LocalInputs | undefined =
 			options?.process || options?.widgetInputs
@@ -347,6 +352,14 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 
 	evictCompletedJobs(filter?: AsyncJobFilter): number {
 		return this.#remote.callSync("evictCompletedJobs", filter);
+	}
+
+	getEvictedJob(id: string, filter?: AsyncJobFilter): EvictedJob | undefined {
+		return this.#remote.callSync("getEvictedJob", id, filter);
+	}
+
+	getEvictedJobs(filter?: AsyncJobFilter): EvictedJob[] {
+		return this.#remote.callSync("getEvictedJobs", filter);
 	}
 
 	waitForAll(): Promise<void> {

@@ -118,7 +118,7 @@ describe("TodoCommandController", () => {
 		const ctx = createContext(tempRoot, []);
 		const controller = new TodoCommandController(ctx);
 
-		await controller.handleTodoCommand("import artifact://todo");
+		await controller.handleTodoCommand("import agent://todo");
 
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("Failed to read todos:"));
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("internal scheme"));
@@ -132,7 +132,7 @@ describe("TodoCommandController", () => {
 		const ctx = createContext(tempRoot, phases);
 		const controller = new TodoCommandController(ctx);
 
-		await controller.handleTodoCommand("export artifact://todo");
+		await controller.handleTodoCommand("export agent://todo");
 
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("Failed to write todos:"));
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("internal scheme"));

@@ -85,9 +85,9 @@ const FILES = [
 	"packages/tui/src/fuzzy.ts",
 	"packages/tui/src/autocomplete.ts",
 	"packages/tui/src/utils.ts",
-	"crates/pi-natives/src/grep.rs",
-	"crates/pi-ast/src/summary.rs",
-	"crates/pi-shell/src/shell.rs",
+	"crates/natives/src/grep.rs",
+	"crates/ast/src/summary.rs",
+	"crates/shell/src/shell.rs",
 	"packages/coding-agent/src/tools/write.ts",
 	"packages/coding-agent/src/tools/bash.ts",
 ];

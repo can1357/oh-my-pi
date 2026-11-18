@@ -8,6 +8,7 @@ import tanContextSwitchPrompt from "../../prompts/system/tan-context-switch.md" 
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import * as sdk from "../../sdk";
 import type { AgentSession } from "../../session/agent-session";
+import { escapeHarnessTags } from "../../session/harness-tags";
 import { BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE } from "../../session/messages";
 import { isHiddenUserCompanion } from "../../session/queued-messages";
 import { SessionManager } from "../../session/session-manager";
@@ -339,23 +340,25 @@ export class TanCommandController {
 			return false;
 		}
 
-		const content = prompt.render(backgroundTanDispatchPrompt, { jobId, work: trimmedWork });
-		// /tan is meant to run alongside an active session. While the parent turn is
-		// still streaming, queue the dispatch breadcrumb for the next turn rather than
-		// steering the in-flight response; when idle this same call appends + persists
-		// the entry immediately (identical to omitting deliverAs).
-		const wasStreaming = session.isStreaming;
+		const content = prompt.render(backgroundTanDispatchPrompt, {
+			jobId: escapeHarnessTags(jobId),
+			work: escapeHarnessTags(trimmedWork),
+		});
+		// Steer the notice into a running turn at its next step boundary so the agent
+		// learns of the tangent now, not after it finishes; idle, the same call appends,
+		// persists and paints it without starting a turn. Harness-authored (agent
+		// attribution): no editable queue chip, and an interrupt records it instead of
+		// restoring the raw notice into the editor.
 		await session.sendCustomMessage(
 			{
 				customType: BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
 				content,
 				display: true,
-				attribution: "user",
+				attribution: "agent",
 				details: { jobId, work: trimmedWork, sessionFile: cloneFile },
 			},
-			{ triggerTurn: false, deliverAs: "nextTurn" },
+			{ triggerTurn: false, deliverAs: "steer" },
 		);
-		if (!wasStreaming) this.ctx.rebuildChatFromMessages();
 		this.ctx.showStatus(`Dispatched background tan ${jobId}`);
 		return true;
 	}
