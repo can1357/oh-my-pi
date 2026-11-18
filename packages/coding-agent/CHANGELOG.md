@@ -9,7 +9,7 @@
 ### Added
 
 - Added opt-in `tools.guardRules` setting: best-effort checks that ask before top-level bash commands read credentials or send secrets over the network, and before `read`/`grep` of credential files ([#19293](https://github.com/can1357/oh-my-pi/pull/19293) by [@Xytronix](https://github.com/Xytronix))
-- Added `discard_changes` and `kills_harness` guard rules under `tools.guardRules`: ask before a top-level git command discards uncommitted work or a `pkill`/`killall` would stop omp, confirmed with a read-only probe ([#NEW](https://github.com/can1357/oh-my-pi/pull/NEW) by [@Xytronix](https://github.com/Xytronix))
+- Added `discard_changes` and `kills_harness` guard rules under `tools.guardRules`: ask before a git command would discard uncommitted work or a `pkill`/`killall` would stop omp
 
 ### Changed
 
