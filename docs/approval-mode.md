@@ -137,6 +137,8 @@ Tool approval does not authorize the underlying real-world action. On-screen tex
 
 `tools.guard.enabled` (off by default) adds a judge-backed check after approval allows a call. It is meant for `yolo` and headless subagents, where otherwise only critical bash patterns and `bash.patterns` stop anything. A call the user just approved in a prompt skips it.
 
+[TTSR gate rules](./ttsr-injection-lifecycle.md#11-pre-execution-gates-gate-before) (`gate: before`) run in the same place, before this check, whether or not `tools.guard.enabled` is on, and also on calls the user approved in a prompt. Their refusals count toward the stop rule below, so with the setting off, gate refusals alone can stop a run.
+
 The guard asks the `judge` role (see [models](./models.md)) only about calls that can do harm. These never reach the judge:
 
 - `read`-tier tools, `web_search`, and `task` (a subagent's own calls pass the guard in its session);
