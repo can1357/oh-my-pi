@@ -381,8 +381,9 @@ pub struct TrackedCheck {
 	/// is looked up as `git switch` and `git checkout` guess a new branch:
 	/// among the remote-tracking branches of that name.
 	pub source:          Option<String>,
-	/// A `git stash` before the command saved every change to tracked files:
-	/// count only the untracked files `source` overwrites.
+	/// A `git stash` without `-u` or `-a` before the command saved every
+	/// change to tracked files but left the untracked ones: count only the
+	/// untracked files `source` overwrites.
 	pub tracked_stashed: bool,
 }
 
