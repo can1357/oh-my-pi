@@ -34,7 +34,7 @@ import {
 import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { refreshOAuthToken } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
-import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, logger, VERSION } from "@oh-my-pi/pi-utils";
+import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, logger, postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
@@ -145,6 +145,9 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	// stdout so a process supervisor (pm2, journald, k8s) captures them, and
 	// skip the rotating ~/.omp/logs/ file the TUI default would have used.
 	setLoggerTransports({ console: true, file: false });
+	// SIGTERM/SIGINT are a supervisor's stop or restart, not a failure: exit 0 once
+	// the cleanup pass (which saves an in-flight token refresh) finishes.
+	postmortem.exitCleanlyOnStopSignals();
 
 	const bind = flags.bind ?? DEFAULT_AUTH_BROKER_BIND;
 	const token = await ensureToken();
@@ -163,17 +166,28 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	logger.info("auth-broker listening", { url: handle.url });
 	logger.info("auth-broker bearer token loaded", { path: getTokenFilePath(), mode: "0600" });
 
-	const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
+	// Stopping returns from `serve` and leaves the exit to the process signal handler, which first
+	// waits for a refresh still saving a token the provider already rotated. Exiting here would
+	// drop that save and leave the store with a spent refresh token.
+	const stopped = Promise.withResolvers<void>();
+	const shutdown = (signal: NodeJS.Signals): void => {
 		logger.info("auth-broker shutting down", { signal });
-		await handle.close();
-		storage.close();
-		process.exit(0);
+		void handle
+			.close()
+			.finally(() => storage.close())
+			.then(stopped.resolve, stopped.reject);
 	};
-	process.once("SIGINT", () => void shutdown("SIGINT"));
-	process.once("SIGTERM", () => void shutdown("SIGTERM"));
+	const onSigint = (): void => shutdown("SIGINT");
+	const onSigterm = (): void => shutdown("SIGTERM");
+	process.once("SIGINT", onSigint);
+	process.once("SIGTERM", onSigterm);
 
-	// Block forever; lifecycle is signal-driven.
-	await new Promise<never>(() => {});
+	try {
+		await stopped.promise;
+	} finally {
+		process.off("SIGINT", onSigint);
+		process.off("SIGTERM", onSigterm);
+	}
 }
 
 async function runToken(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {

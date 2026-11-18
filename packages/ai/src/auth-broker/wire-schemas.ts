@@ -6,13 +6,16 @@
  * in `./types.ts` 1:1; the types remain the source of truth for static typing,
  * and `Type` is asserted-compatible with them where possible.
  *
- * Envelope and fixed-shape schemas use `"+": "reject"` so unknown keys are
- * rejected — the previous implementation used a hand-rolled `hasOnlyFields`
- * allowlist for the same effect. The OAuth credential schema is the deliberate
- * exception (standard type keeps extra keys): it preserves provider-specific extension fields so
- * they round-trip through the broker instead of being dropped (see below).
+ * Response schemas accept keys they do not declare, and usage enums read a
+ * value they do not know as `"unknown"`, so a client keeps working against a
+ * newer broker. Request bodies the broker acts on use `"+": "reject"`: a broker
+ * must not apply a write whose fields it cannot read. The observed-usage report
+ * is the exception, since its unknown fields cannot change what gets recorded.
+ * The OAuth credential schema keeps extra keys on writes too: it preserves
+ * provider-specific extension fields so they round-trip through the broker
+ * instead of being dropped (see below).
  */
-import { type FluentType, type } from "@oh-my-pi/omptype";
+import { type FluentType, type Type, type } from "@oh-my-pi/omptype";
 import {
 	type ApiKeyCredential,
 	type AuthCredential,
@@ -23,6 +26,7 @@ import {
 	type RemoteOAuthCredential,
 	type SnapshotCredential,
 } from "../auth-storage";
+import { usageStatusSchema, usageUnitSchema } from "../usage";
 import type {
 	ClientUsageReportRequest,
 	ClientUsageReportResponse,
@@ -115,13 +119,21 @@ export const writableAuthCredentialSchema: FluentType<AuthCredential> =
 	oauthCredentialSchema.or(apiKeyCredentialSchema);
 
 /** Discriminated union returned in snapshots (refresh is sentinel for OAuth). */
-export const snapshotCredentialSchema: FluentType<SnapshotCredential> =
-	remoteOauthCredentialSchema.or(apiKeyCredentialSchema);
+export const snapshotCredentialSchema: FluentType<SnapshotCredential> = remoteOauthCredentialSchema.or(
+	apiKeyCredentialSchema.onUndeclaredKey("ignore"),
+);
+
+/**
+ * Reads an enum a newer broker may extend: a value this client does not know
+ * becomes `"unknown"` instead of failing the whole response.
+ */
+function readEnumOrUnknown<t extends string>(known: Type<t>): FluentType<t | "unknown", string> {
+	return type("string").pipe(value => (known.allows(value) ? value : "unknown"));
+}
 
 // ─── Snapshot ────────────────────────────────────────────────────────────────
 
 export const credentialSnapshotEntrySchema: FluentType<AuthCredentialSnapshotEntry> = type({
-	"+": "reject",
 	id: "number.integer",
 	provider: type("string").atLeastLength(1),
 	credential: snapshotCredentialSchema,
@@ -129,7 +141,6 @@ export const credentialSnapshotEntrySchema: FluentType<AuthCredentialSnapshotEnt
 });
 
 export const credentialBlockSnapshotSchema: FluentType<CredentialBlockSnapshot> = type({
-	"+": "reject",
 	providerKey: type("string").atLeastLength(1),
 	blockScope: "string",
 	blockedUntilMs: "number",
@@ -137,7 +148,6 @@ export const credentialBlockSnapshotSchema: FluentType<CredentialBlockSnapshot> 
 });
 
 export const snapshotEntrySchema: FluentType<SnapshotEntry> = type({
-	"+": "reject",
 	id: "number.integer",
 	provider: type("string").atLeastLength(1),
 	credential: snapshotCredentialSchema,
@@ -147,7 +157,6 @@ export const snapshotEntrySchema: FluentType<SnapshotEntry> = type({
 });
 
 export const refresherScheduleSchema: FluentType<RefresherSchedule> = type({
-	"+": "reject",
 	enabled: "boolean",
 	intervalMs: "number",
 	skewMs: "number",
@@ -155,7 +164,6 @@ export const refresherScheduleSchema: FluentType<RefresherSchedule> = type({
 });
 
 export const snapshotResponseSchema: FluentType<SnapshotResponse> = type({
-	"+": "reject",
 	generation: "number.integer",
 	generatedAt: "number",
 	serverNowMs: "number",
@@ -167,7 +175,6 @@ export const snapshotResponseSchema: FluentType<SnapshotResponse> = type({
 
 /** First frame on connect — full snapshot embedded inline with a `kind` tag. */
 export const snapshotStreamSnapshotEventSchema: FluentType<SnapshotStreamSnapshotEvent> = type({
-	"+": "reject",
 	generation: "number.integer",
 	generatedAt: "number",
 	serverNowMs: "number",
@@ -178,7 +185,6 @@ export const snapshotStreamSnapshotEventSchema: FluentType<SnapshotStreamSnapsho
 
 /** Per-credential upsert/refresh delta. */
 export const snapshotStreamEntryEventSchema: FluentType<SnapshotStreamEntryEvent> = type({
-	"+": "reject",
 	kind: "'entry'",
 	generation: "number.integer",
 	serverNowMs: "number",
@@ -188,7 +194,6 @@ export const snapshotStreamEntryEventSchema: FluentType<SnapshotStreamEntryEvent
 
 /** Per-credential delete delta. */
 export const snapshotStreamRemovedEventSchema: FluentType<SnapshotStreamRemovedEvent> = type({
-	"+": "reject",
 	kind: "'removed'",
 	generation: "number.integer",
 	serverNowMs: "number",
@@ -204,7 +209,6 @@ export const snapshotStreamEventSchema: FluentType<SnapshotStreamEvent> = snapsh
 // ─── Healthz ─────────────────────────────────────────────────────────────────
 
 export const healthzResponseSchema: FluentType<HealthzResponse> = type({
-	"+": "reject",
 	ok: "boolean",
 	"version?": "string",
 });
@@ -224,7 +228,7 @@ const usageAmountSchema = type({
 	"remaining?": "number",
 	"usedFraction?": "number",
 	"remainingFraction?": "number",
-	unit: "'percent' | 'tokens' | 'requests' | 'credits' | 'usd' | 'minutes' | 'bytes' | 'unknown'",
+	unit: readEnumOrUnknown(usageUnitSchema),
 });
 
 const usageScopeSchema = type({
@@ -245,7 +249,7 @@ const usageLimitSchema = type({
 	scope: usageScopeSchema,
 	"window?": usageWindowSchema,
 	amount: usageAmountSchema,
-	"status?": "'ok' | 'warning' | 'exhausted' | 'unknown'",
+	"status?": readEnumOrUnknown(usageStatusSchema),
 	"notes?": "string[]",
 });
 
@@ -288,8 +292,7 @@ const arkUsageReportSchema = type({
  * keep `raw` optional in the underlying schema so a misconfigured broker that
  * forgot to strip still validates.
  */
-export const usageResponseSchema: FluentType<UsageResponse> = type({
-	"+": "reject",
+export const usageResponseSchema: Type<UsageResponse, unknown> = type({
 	generatedAt: "number",
 	reports: arkUsageReportSchema.array(),
 });
@@ -304,13 +307,12 @@ const usageHistoryEntrySchema = type({
 	label: "string",
 	"windowLabel?": "string",
 	"usedFraction?": "number",
-	"status?": "'ok' | 'warning' | 'exhausted' | 'unknown'",
+	"status?": readEnumOrUnknown(usageStatusSchema),
 	"resetsAt?": "number",
 });
 
 /** Broker `/v1/usage/history` response — recorded usage-limit snapshots, oldest first. */
-export const usageHistoryResponseSchema: FluentType<UsageHistoryResponse> = type({
-	"+": "reject",
+export const usageHistoryResponseSchema: Type<UsageHistoryResponse, unknown> = type({
 	generatedAt: "number",
 	entries: usageHistoryEntrySchema.array(),
 });
@@ -329,7 +331,6 @@ const observedUsageEntrySchema = type({
 
 /** Broker `POST /v1/usage/observed` request — one client's batched observed usage. */
 export const clientUsageReportRequestSchema: FluentType<ClientUsageReportRequest> = type({
-	"+": "reject",
 	installId: "string",
 	"hostname?": "string",
 	"app?": "string",
@@ -337,7 +338,6 @@ export const clientUsageReportRequestSchema: FluentType<ClientUsageReportRequest
 });
 
 export const clientUsageReportResponseSchema: FluentType<ClientUsageReportResponse> = type({
-	"+": "reject",
 	ok: "boolean",
 });
 
@@ -360,7 +360,6 @@ const clientUsageClientSummarySchema = type({
 
 /** Broker `GET /v1/usage/clients` response — per-client token burn aggregates. */
 export const clientUsageSummaryResponseSchema: FluentType<ClientUsageSummaryResponse> = type({
-	"+": "reject",
 	generatedAt: "number",
 	clients: clientUsageClientSummarySchema.array(),
 });
@@ -368,7 +367,6 @@ export const clientUsageSummaryResponseSchema: FluentType<ClientUsageSummaryResp
 // ─── Refresh ─────────────────────────────────────────────────────────────────
 
 export const credentialRefreshResponseSchema: FluentType<CredentialRefreshResponse> = type({
-	"+": "reject",
 	entry: credentialSnapshotEntrySchema,
 });
 
@@ -380,13 +378,11 @@ export const credentialDisableRequestSchema: FluentType<{ cause?: string }> = ty
 });
 
 export const credentialDisableResponseSchema: FluentType<CredentialDisableResponse> = type({
-	"+": "reject",
 	ok: "boolean",
 });
 
 /** One disabled-credential tombstone — identity + cause, never token material. */
 export const disabledCredentialSummarySchema: FluentType<DisabledCredentialSummary> = type({
-	"+": "reject",
 	id: "number.integer",
 	provider: type("string").atLeastLength(1),
 	type: "'oauth' | 'api_key'",
@@ -400,14 +396,14 @@ export const disabledCredentialSummarySchema: FluentType<DisabledCredentialSumma
 
 /** Broker `GET /v1/credentials/disabled` response. */
 export const disabledCredentialsResponseSchema: FluentType<DisabledCredentialsResponse> = type({
-	"+": "reject",
 	generatedAt: "number",
 	disabled: disabledCredentialSummarySchema.array(),
 });
 
 // ─── Credential blocks ───────────────────────────────────────────────────────
 
-export const credentialBlockRequestSchema: FluentType<CredentialBlockRequest> = credentialBlockSnapshotSchema;
+export const credentialBlockRequestSchema: FluentType<CredentialBlockRequest> =
+	credentialBlockSnapshotSchema.onUndeclaredKey("reject");
 
 export const credentialBlockDeleteRequestSchema: FluentType<CredentialBlockDeleteRequest> = type({
 	"+": "reject",
@@ -416,17 +412,14 @@ export const credentialBlockDeleteRequestSchema: FluentType<CredentialBlockDelet
 });
 
 export const credentialBlockResponseSchema: FluentType<CredentialBlockResponse> = type({
-	"+": "reject",
 	ok: "boolean",
 });
 
 export const credentialBlocksDeleteResponseSchema: FluentType<CredentialBlocksDeleteResponse> = type({
-	"+": "reject",
 	ok: "boolean",
 });
 
 export const usageStaleResponseSchema: FluentType<UsageStaleResponse> = type({
-	"+": "reject",
 	ok: "boolean",
 });
 
@@ -439,6 +432,5 @@ export const credentialUploadRequestSchema: FluentType<CredentialUploadRequest> 
 });
 
 export const credentialUploadResponseSchema: FluentType<CredentialUploadResponse> = type({
-	"+": "reject",
 	entries: credentialSnapshotEntrySchema.array(),
 });
