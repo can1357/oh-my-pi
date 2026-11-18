@@ -2808,3 +2808,90 @@ describe("CursorExecHandlers passive tool context", () => {
 		}
 	});
 });
+
+describe("CursorExecHandlers toolInterceptor, abort, and preflight", () => {
+	it("blocks native delete and download writes, respects abort signal, and aligns mcpApprovalPreflight", async () => {
+		const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-interceptor-"));
+		try {
+			const keepFile = path.join(workspace, "protected.txt");
+			await Bun.write(keepFile, "keep");
+			const settings = Settings.isolated({
+				"tools.approvalMode": "yolo",
+				"toolInterceptor.enabled": true,
+				"toolInterceptor.rules": [
+					{
+						tools: ["delete", "write"],
+						pattern: "protected\\.txt",
+						message: "Do not mutate protected.txt directly.",
+					},
+					{
+						tools: ["mcp__deploy_*"],
+						pattern: "production",
+						message: "CR ticket required for production.",
+					},
+				],
+			});
+			const mcpTool: Tool = {
+				name: "mcp__deploy_app",
+				label: "Deploy",
+				description: "Deploy",
+				parameters: type({ env: "string" }),
+				approval: "exec",
+				async execute() {
+					return { content: [{ type: "text", text: "deployed" }], details: undefined };
+				},
+			} as unknown as Tool;
+			const handlers = new CursorExecHandlers({
+				cwd: workspace,
+				tools: new Map<string, Tool>([["mcp__deploy_app", mcpTool]]),
+				getToolContext: () => ({ ...yoloToolContext(), settings, toolNames: ["mcp__deploy_app"] }),
+				mcpResources: {
+					serverNames: () => ["files"],
+					getServerResources: async () => undefined,
+					readServerResource: async (_name, uri) => ({ contents: [{ uri, text: "overwrite" }] }),
+				},
+			});
+
+			const delRes = await handlers.delete({ path: "protected.txt", toolCallId: "del-1" });
+			expect(delRes.isError).toBe(true);
+			expect(await Bun.file(keepFile).text()).toBe("keep");
+
+			await expect(
+				handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: "protected.txt" }),
+			).rejects.toThrow("Do not mutate protected.txt directly.");
+			expect(await Bun.file(keepFile).text()).toBe("keep");
+
+			const abortableFile = path.join(workspace, "abortable.txt");
+			await Bun.write(abortableFile, "stay");
+			const controller = new AbortController();
+			controller.abort();
+			await expect(
+				handlers.delete({ path: "abortable.txt", toolCallId: "del-abort" }, { signal: controller.signal }),
+			).rejects.toThrow(/aborted/i);
+			expect(await Bun.file(abortableFile).text()).toBe("stay");
+
+			expect(
+				await handlers.mcpApprovalPreflight({
+					name: "mcp__deploy_app",
+					providerIdentifier: "pi-agent",
+					toolName: "mcp__deploy_app",
+					toolCallId: "mcp-1",
+					args: { env: "production" },
+					rawArgs: {},
+				}),
+			).toBe(false);
+			expect(
+				await handlers.mcpApprovalPreflight({
+					name: "mcp__deploy_app",
+					providerIdentifier: "pi-agent",
+					toolName: "mcp__deploy_app",
+					toolCallId: "mcp-2",
+					args: { env: "staging" },
+					rawArgs: {},
+				}),
+			).toBe(true);
+		} finally {
+			await removeWithRetries(workspace);
+		}
+	});
+});

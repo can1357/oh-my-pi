@@ -28,7 +28,9 @@ import { getApprovalGrants } from "../../tools/approval-cache";
 import { withToolApprovalScope } from "../../tools/approval-scope";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
-import { checkToolInterception } from "../../tools/tool-interceptor";
+import { cfgJudgmentAttemptTimeoutMs } from "../../config/model-settings";
+import type { InterceptionResult } from "../../tools/bash-interceptor";
+import { checkToolInterception, formatInterceptionDenyReason } from "../../tools/tool-interceptor";
 import { cfgToolInterceptorEnabled, cfgToolInterceptorRules } from "../../tools/settings";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { recordToolApprovalRequested, recordToolApprovalResolved } from "../../session/tool-approval-records";
@@ -374,6 +376,13 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// policy and prompts on `effectiveParams`, so the user approves exactly what executes. A revised
 		// input that newly resolves to `deny` is caught here even though the original passed the
 		// short-circuit above.
+		// Compare against `acpApprovedArgs` before `resolveApproval` runs: `EditTool.#inspect`
+		// caches a non-wire `Symbol(edit.inspection)` property on `resolvedArgs`, which
+		// makes `Bun.deepEquals` return `false` even when no extension rewrote the input.
+		const acpBypass =
+			context !== undefined &&
+			Object.hasOwn(context, "acpApprovedArgs") &&
+			Bun.deepEquals(effectiveParams, context.acpApprovedArgs);
 		const resolvedArgs = approvalArgs(effectiveParams, context);
 		this.tool.bindApprovalTargets?.(resolvedArgs);
 		const resolved = resolveApproval(
@@ -390,16 +399,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			cancelPreflight();
 			throw denyError(resolved, this.tool.name);
 		}
-		const xdevBypass = context?.xdevPolicyKey !== undefined && effectiveParams === params;
 		const pendingSafetyChecks = computerSafetyChecks(context);
-		// ACP approval satisfies prompts only for the input the client approved: it compares
-		// against a deep snapshot because handlers can mutate the original argument object in
-		// place. Denies were enforced above, and provider safety checks remain independently
-		// required.
-		const acpBypass =
-			context !== undefined &&
-			Object.hasOwn(context, "acpApprovedArgs") &&
-			Bun.deepEquals(effectiveParams, context.acpApprovedArgs);
 		// Only a prompt `always-ask-cached` itself raised can be remembered by target; provider safety
 		// checks are per-call, so they never offer a grant of any kind.
 		const grantable =
@@ -418,20 +418,28 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			reason: resolved.reason,
 		};
 		const interceptorEnabled = approvalSettings ? cfgToolInterceptorEnabled.get(approvalSettings) : false;
-		if (interceptorEnabled && approvalSettings && !xdevBypass) {
+		if (interceptorEnabled && approvalSettings && !acpBypass) {
 			const aliases = [resolved.policyKey, this.tool.customWireName].filter(
 				(alias): alias is string => typeof alias === "string" && alias.length > 0 && alias !== this.tool.name,
 			);
-			const interception = await untilAborted(signal, () =>
-				checkToolInterception(this.tool.name, resolvedArgs, {
-					availableTools: context?.toolNames,
-					toolAliases: aliases,
-					policy: approvalCheck.required ? "prompt" : "allow",
-					rules: cfgToolInterceptorRules.get(approvalSettings),
-					judge: () => this.runner.getJudge?.("tool-interceptor", approvalSettings),
-					signal,
-				}),
-			);
+			let interception: InterceptionResult;
+			try {
+				interception = await untilAborted(signal, () =>
+					checkToolInterception(this.tool.name, resolvedArgs, {
+						availableTools: context?.toolNames ?? [],
+						toolAliases: aliases,
+						policy: approvalCheck.required ? "prompt" : "allow",
+						rules: cfgToolInterceptorRules.get(approvalSettings),
+						judge: () => this.runner.getJudge("tool-interceptor", approvalSettings),
+						timeoutMs: cfgJudgmentAttemptTimeoutMs.get(approvalSettings),
+						warnScope: approvalSettings,
+						signal,
+					}),
+				);
+			} catch (error) {
+				cancelPreflight();
+				throw error;
+			}
 			if (interception.block) {
 				cancelPreflight();
 				throw denyError(
@@ -440,7 +448,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 						tier: resolved.tier,
 						override: true,
 						source: "tool",
-						reason: interception.message,
+						reason: formatInterceptionDenyReason(interception),
 						...(resolved.policyKey ? { policyKey: resolved.policyKey } : {}),
 					},
 					this.tool.name,

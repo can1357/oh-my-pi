@@ -8,6 +8,7 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldInlineToolDescriptors } from "../config/inline-tool-descriptors-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
+import { cfgJudgmentAttemptTimeoutMs } from "../config/model-settings";
 import type { Settings } from "../config/settings";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import { clearPluginRootsAndCaches } from "../discovery/helpers";
@@ -52,6 +53,7 @@ import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
+import { checkToolInterception, formatInterceptionDenyReason } from "../tools/tool-interceptor";
 import {
 	isMountableAsToolCommand,
 	listToolCommands,
@@ -87,6 +89,8 @@ import {
 } from "./settings";
 import { cfgStartupQuiet } from "../modes/settings";
 import {
+	cfgToolInterceptorEnabled,
+	cfgToolInterceptorRules,
 	cfgToolsApproval,
 	cfgToolsApprovalMode,
 	cfgToolsCommandDocs,
@@ -1273,29 +1277,29 @@ export class SessionTools {
 					const restrictions = approvalRestrictions(this.#host.settings, this.#host.sessionManager.getCwd());
 					// A restricted call is approved per call: a remembered ACP answer never covers it.
 					let cacheable = restrictedFolderReason(target, args, restrictions) === undefined;
+					const explicitAutoApprove = this.#isExplicitAutoApproveMode();
+					const { approvalMode, userPolicies } = resolveApprovalFromContext({
+						autoApprove: this.#autoApprove,
+						settings: this.#host.settings,
+					});
+					const mode = approvalMode === "yolo" && !explicitAutoApprove ? "always-ask" : approvalMode;
+					const acpResolved = resolveApproval(
+						target,
+						isRecord(args) ? { ...args } : args,
+						mode,
+						userPolicies,
+						getApprovalGrants(this.#host.settings.getAgentDir(), this.#host.sessionManager.getSessionId()),
+						restrictions,
+						ctx,
+					);
+					if (acpResolved.policy === "deny") throw denyError(acpResolved, target.name);
 					if (target.name === "bash") {
-						const explicitAutoApprove = this.#isExplicitAutoApproveMode();
-						const { approvalMode, userPolicies } = resolveApprovalFromContext({
-							autoApprove: this.#autoApprove,
-							settings: this.#host.settings,
-						});
-						const mode = approvalMode === "yolo" && !explicitAutoApprove ? "always-ask" : approvalMode;
-						const resolved = resolveApproval(
-							target,
-							args,
-							mode,
-							userPolicies,
-							getApprovalGrants(this.#host.settings.getAgentDir(), this.#host.sessionManager.getSessionId()),
-							restrictions,
-							ctx,
-						);
-						if (resolved.policy === "deny") throw denyError(resolved, target.name);
-						if (resolved.policy === "allow") {
+						if (acpResolved.policy === "allow") {
 							return await target.execute(toolCallId, args as never, signal, onUpdate, ctx as never);
 						}
 						// A prompt forced by a critical command or an explicit pattern
 						// remains per-call, even after the client selects Always allow.
-						cacheable = !resolved.override;
+						cacheable = !acpResolved.override;
 					}
 					const permissionIntent = getPermissionIntent(target.name, args);
 					if (!permissionIntent) {
@@ -1313,14 +1317,44 @@ export class SessionTools {
 						: undefined;
 					// Short-circuit on persisted decisions.
 					const persisted = cacheable ? this.#acpPermissionDecisions.get(permissionIntent.cacheKey) : undefined;
-					if (persisted === "allow_always") {
-						return await target.execute(toolCallId, args as never, signal, onUpdate, approvedCtx);
-					}
 					if (persisted === "reject_always") {
 						throw new ToolError(`Tool call rejected by user (preference)`);
 					}
 					if (signal?.aborted) {
 						throw new ToolAbortError("Permission request cancelled");
+					}
+					if (cfgToolInterceptorEnabled.get(this.#host.settings)) {
+						const aliases = [acpResolved.policyKey, target.customWireName].filter(
+							(alias): alias is string => typeof alias === "string" && alias.length > 0 && alias !== target.name,
+						);
+						const interception = await untilAborted(signal, () =>
+							checkToolInterception(target.name, args, {
+								availableTools: ctx?.toolNames ?? this.getActiveToolNames(),
+								toolAliases: aliases,
+								policy: persisted === "allow_always" ? "allow" : "prompt",
+								rules: cfgToolInterceptorRules.get(this.#host.settings),
+								judge: () => this.#host.extensionRunner()?.getJudge("tool-interceptor", this.#host.settings),
+								timeoutMs: cfgJudgmentAttemptTimeoutMs.get(this.#host.settings),
+								warnScope: this.#host.settings,
+								signal,
+							}),
+						);
+						if (interception.block) {
+							throw denyError(
+								{
+									policy: "deny",
+									tier: acpResolved.tier,
+									override: true,
+									source: "tool",
+									reason: formatInterceptionDenyReason(interception),
+									...(acpResolved.policyKey ? { policyKey: acpResolved.policyKey } : {}),
+								},
+								target.name,
+							);
+						}
+					}
+					if (persisted === "allow_always") {
+						return await target.execute(toolCallId, args as never, signal, onUpdate, approvedCtx);
 					}
 					type PermissionRaceResult =
 						| { kind: "permission"; outcome: ClientBridgePermissionOutcome }

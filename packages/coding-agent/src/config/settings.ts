@@ -4521,7 +4521,11 @@ export class Settings {
 	 * definition: `validate` throws, unknown `items` warn. Defaults to the live layers.
 	 */
 	#validateAll(merged: RawSettings = this.#mergedView(), cwd: string = this.#cwd): void {
-		for (const setting of allSettings()) setting.checkConfigured(this, configuredValue(merged, setting, cwd));
+		for (const setting of allSettings()) {
+			const raw = getByPath(merged, setting.segments);
+			if (raw !== undefined && raw !== null) setting.checkRaw(raw);
+			setting.checkConfigured(this, configuredValue(merged, setting, cwd));
+		}
 	}
 
 	/**

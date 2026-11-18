@@ -1696,6 +1696,8 @@ export interface CursorExecFrameContext {
 	 * the write reports as `edit` with the diff it made.
 	 */
 	editMaterialization?: boolean;
+	/** Caller's cancellation signal for the streaming Cursor turn. */
+	signal?: AbortSignal;
 }
 
 export interface CursorExecHandlers {
@@ -1703,7 +1705,7 @@ export interface CursorExecHandlers {
 	ls?: (args: LsArgs) => Promise<CursorExecHandlerResult<LsResult>>;
 	grep?: (args: GrepArgs) => Promise<CursorExecHandlerResult<GrepResult>>;
 	write?: (args: WriteArgs, frame?: CursorExecFrameContext) => Promise<CursorExecHandlerResult<WriteResult>>;
-	delete?: (args: DeleteArgs) => Promise<CursorExecHandlerResult<DeleteResult>>;
+	delete?: (args: DeleteArgs, frame?: CursorExecFrameContext) => Promise<CursorExecHandlerResult<DeleteResult>>;
 	shell?: (args: ShellArgs) => Promise<CursorExecHandlerResult<ShellResult>>;
 	shellStream?: (
 		args: ShellArgs,
@@ -1757,15 +1759,18 @@ export interface CursorExecHandlers {
 	 * Read one resource. `null` means the server or uri is genuinely unknown,
 	 * which the provider answers as `not_found`; throwing surfaces as `error`.
 	 */
-	readMcpResource?: (args: {
-		server: string;
-		uri: string;
-		/**
-		 * When set, write the resource here (workspace-relative) and return
-		 * `downloadPath` instead of content.
-		 */
-		downloadPath?: string;
-	}) => Promise<CursorMcpResourceContent | null>;
+	readMcpResource?: (
+		args: {
+			server: string;
+			uri: string;
+			/**
+			 * When set, write the resource here (workspace-relative) and return
+			 * `downloadPath` instead of content.
+			 */
+			downloadPath?: string;
+		},
+		frame?: CursorExecFrameContext,
+	) => Promise<CursorMcpResourceContent | null>;
 	/** Mirror Cursor's server-owned todo list into local session state. */
 	todoSync?: CursorTodoSyncHandler;
 	/**

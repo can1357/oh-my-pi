@@ -30,6 +30,7 @@ import {
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
+	Judge,
 	Context,
 	Message,
 	Model,
@@ -539,6 +540,7 @@ export interface SessionAdvisorsHost {
 	abortInProgress(): boolean;
 	planModeState(): PlanModeState | undefined;
 	clientBridge(): ClientBridge | undefined;
+	getJudge?(purpose: string, settingsOverride?: Settings): Judge | undefined;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	sendCustomMessage(message: CustomMessagePayload, options?: AdvisorMessageDeliveryOptions): Promise<boolean>;
@@ -1469,6 +1471,18 @@ export class SessionAdvisors {
 			// swaps in a `replace` instance for the exec channel only — the
 			// advisor's own loop keeps the tool it was given — and only when
 			// `edit` was actually granted.
+			// The primary's context, scoped to this advisor: a tool that cancels
+			// (`ask`) stops the advisor, and `bash` / `toolInterceptor` judge commands
+			// against the tools the advisor has, not the primary's.
+			const getAdvisorScopedToolContext: SessionAdvisorsOptions["getToolContext"] = toolCall => {
+				const context = this.#advisorGetToolContext?.(toolCall);
+				if (!context) return undefined;
+				return {
+					...context,
+					abort: () => advisorAgent.abort(),
+					toolNames: advisorAgent.state.tools.map(tool => tool.name),
+				};
+			};
 			const advisorCursorExecHandlers = async () => {
 				const [{ CursorExecHandlers }, { bridgeToolMap }] = await Promise.all([
 					import("../cursor"),
@@ -1481,7 +1495,8 @@ export class SessionAdvisors {
 					// Approval mode, per-tool policies and `autoApprove` live only on
 					// this context; without it every bridge tool fails closed to
 					// `always-ask`.
-					getToolContext: this.#advisorGetToolContext,
+					getToolContext: () => getAdvisorScopedToolContext(),
+					getJudge: (purpose, s) => this.#host.getJudge?.(purpose, s),
 					allowDirectFileMutation: advisorCanMutateFiles,
 					// Gated on the advisor's own grant: the factory builds a fresh
 					// tool, so handing it over unconditionally would give a roster
@@ -1534,18 +1549,7 @@ export class SessionAdvisors {
 				providerSessionState: this.#host.providerSessionState,
 				cursorExecHandlers: advisorCursorExecHandlers,
 				cwdResolver: () => this.#host.sessionManager.getCwd(),
-				// The primary's context, scoped to this advisor: a tool that cancels
-				// (`ask`) stops the advisor, and `bash` judges commands against the
-				// tools the advisor has, not the primary's.
-				getToolContext: toolCall => {
-					const context = this.#advisorGetToolContext?.(toolCall);
-					if (!context) return undefined;
-					return {
-						...context,
-						abort: () => advisorAgent.abort(),
-						toolNames: advisorAgent.state.tools.map(tool => tool.name),
-					};
-				},
+				getToolContext: getAdvisorScopedToolContext,
 				getApiKey: requestModel => this.#host.modelRegistry.resolver(requestModel, advisorProviderSessionId),
 				streamFn: advisorStreamFn,
 				// Maintenance installs compactionSummary messages; the core Agent's

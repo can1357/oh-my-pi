@@ -371,6 +371,118 @@ it("rejects intercepted bash command before invoking ACP requestPermission", asy
 	expect(permissionSpy).not.toHaveBeenCalled();
 });
 
+it("rejects whenPolicy: 'prompt' toolInterceptor rule before invoking ACP requestPermission", async () => {
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	const bashTool = makeFakeTool("bash");
+	session = await createSession([bashTool as AgentTool], bridge, {
+		"toolInterceptor.enabled": true,
+		"toolInterceptor.rules": [
+			{
+				tools: ["bash"],
+				whenPolicy: "prompt",
+				pattern: "\\becho\\b",
+				message: "Intercepted before ACP permission prompt.",
+			},
+		],
+	});
+
+	await session.setActiveToolsByName(["bash"]);
+	const wrappedBash = session.agent.state.tools.find(t => t.name === "bash");
+	await expect(
+		wrappedBash!.execute(
+			"call-acp-intercepted",
+			{ command: "echo hi" },
+			undefined,
+			undefined as never,
+			{ toolNames: ["bash"] } as AgentToolContext,
+		),
+	).rejects.toThrow("Intercepted before ACP permission prompt.");
+
+	expect(permissionSpy).not.toHaveBeenCalled();
+	expect(bashTool.executeCalls).toBe(0);
+});
+
+it("preserves acpBypass for real EditTool delete patches when whenPolicy: 'allow' interceptor rule is active", async () => {
+	const targetFile = tempDir.join("acp-edit-target.txt");
+	await Bun.write(targetFile, "hello\n");
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	const settings = Settings.isolated({
+		"edit.mode": "apply_patch",
+		"toolInterceptor.enabled": true,
+		"toolInterceptor.rules": [
+			{
+				tools: ["edit", "apply_patch"],
+				whenPolicy: "allow",
+				pattern: "acp-edit-target\\.txt",
+				message: "Allow-only rule should not fire on freshly ACP-approved edit.",
+			},
+		],
+	});
+	const realEditTool = new EditTool({
+		...makeToolSession(bridge),
+		settings,
+	});
+	session = await createSession([realEditTool as unknown as AgentTool], bridge, {
+		"edit.mode": "apply_patch",
+		"toolInterceptor.enabled": true,
+		"toolInterceptor.rules": [
+			{
+				tools: ["edit", "apply_patch"],
+				whenPolicy: "allow",
+				pattern: "acp-edit-target\\.txt",
+				message: "Allow-only rule should not fire on freshly ACP-approved edit.",
+			},
+		],
+	});
+
+	await session.setActiveToolsByName(["edit"]);
+	const wrappedEdit = session.agent.state.tools.find(t => t.name === "edit");
+	await wrappedEdit!.execute(
+		"call-acp-edit",
+		{ input: "*** Begin Patch\n*** Delete File: acp-edit-target.txt\n*** End Patch" },
+		undefined,
+		undefined as never,
+		{ toolNames: ["edit"] } as AgentToolContext,
+	);
+
+	expect(permissionSpy).toHaveBeenCalledTimes(1);
+	expect(await Bun.file(targetFile).exists()).toBe(false);
+});
+
+it("short-circuits non-bash tools.approval deny before toolInterceptor or ACP requestPermission", async () => {
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	const editTool = makeFakeTool("edit");
+	session = await createSession([editTool as AgentTool], bridge, {
+		"tools.approval.edit": "deny",
+		"toolInterceptor.enabled": true,
+		"toolInterceptor.rules": [
+			{
+				tools: ["edit"],
+				pattern: "blocked",
+				message: "Tool interceptor should not run after user deny.",
+			},
+		],
+	});
+
+	await session.setActiveToolsByName(["edit"]);
+	const wrappedEdit = session.agent.state.tools.find(t => t.name === "edit");
+	await expect(
+		wrappedEdit!.execute(
+			"call-acp-deny",
+			{ input: "blocked" },
+			undefined,
+			undefined as never,
+			{ toolNames: ["edit"] } as AgentToolContext,
+		),
+	).rejects.toThrow('Tool "edit" is blocked by user policy.');
+
+	expect(permissionSpy).not.toHaveBeenCalled();
+	expect(editTool.executeCalls).toBe(0);
+});
+
 /**
  * Minimal runner for wrapping a tool exactly as an ACP session does: no
  * interactive UI (so the inner tier gate fails closed) and no event handlers.

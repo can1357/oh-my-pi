@@ -36,7 +36,6 @@ import { MAIN_AGENT_RULE_NAME } from "../../capability/rule";
 import type { ModelRegistry } from "../../config/model-registry";
 import { type Settings, withActiveSettings } from "../../config/settings";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
-import { journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../../judgment";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
@@ -989,19 +988,7 @@ export class ExtensionRunner {
 	 * billed to this session's usage ledger and backed by the shared judgment cache.
 	 */
 	getJudge(purpose = "tool-interceptor", settingsOverride?: Settings): Judge | undefined {
-		const preflightJudge = this.#toolCallPreflight?.judge?.(purpose, settingsOverride);
-		if (preflightJudge) return preflightJudge;
-		const effectiveSettings = settingsOverride ?? this.settings;
-		if (!effectiveSettings || !this.modelRegistry) return undefined;
-		return resolveJudge({
-			settings: effectiveSettings,
-			registry: this.modelRegistry,
-			sessionModel: this.#getModel(),
-			sessionId: this.sessionManager?.getSessionId?.(),
-			purpose,
-			onUsage: journalJudgmentUsage(this.sessionManager),
-			cache: sharedJudgmentCache(),
-		});
+		return this.#toolCallPreflight?.judge?.(purpose, settingsOverride);
 	}
 
 	initialize(

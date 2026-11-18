@@ -1,3 +1,5 @@
+import { judgeQuestions } from "@oh-my-pi/pi-ai";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { combine, register } from "../config/registry";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgBashEnabled } from "../exec/settings";
@@ -5,9 +7,11 @@ import { cfgEditMode } from "../edit/settings";
 import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
 import { cfgEvalJs, cfgEvalPy } from "../eval/settings";
 import { cfgLspEnabled } from "../lsp/settings";
+import toolInterceptorQuestionsFile from "../prompts/judge/tool-interceptor.json" with { type: "json" };
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 
 const EMPTY_STRING_ARRAY: string[] = [];
+const TOOL_INTERCEPTOR_QUESTIONS = judgeQuestions(toolInterceptorQuestionsFile);
 
 /**
  * One tool-interceptor rule (`toolInterceptor.rules`).
@@ -36,63 +40,112 @@ export interface ToolInterceptorRule {
 	message: string;
 }
 
-export const DEFAULT_TOOL_INTERCEPTOR_RULES: ToolInterceptorRule[] = [
-	{
-		tools: ["eval"],
-		pattern: "\\btool\\.(?:read|write|edit|apply_patch|grep|glob|bash)\\s*\\(",
-		question:
-			"Is this code merely wrapping one or a few direct session tool calls (`tool.<name>(...)`, including `xd://` device writes) that could be invoked directly as tool calls, rather than orchestrating them inside a programmatic loop or reusable `@tool` definition?",
-		message:
-			"Do not call dedicated session tools (read, write, edit, grep, glob, bash) through `eval`'s tool bridge when a direct tool call suffices; invoke the tool directly.",
-	},
-	{
-		tools: ["eval"],
-		suggestedTool: "bash",
-		pattern:
-			"(?:^|[^\\w.])sh\\s*(?:\\(|`)|\\bsubprocess\\.|\\bos\\.(?:system|popen)\\s*\\(|\\bBun\\.(?:spawn(?:Sync)?|\\$)|\\bchild_process\\b|\\bexec(?:File)?(?:Sync)?\\s*\\(",
-		question:
-			"Is this code merely running one or a few shell commands that could be executed directly with the bash tool (rather than programmatically parsing or aggregating command output, looping over dynamic inputs, or driving a benchmark or test harness)?",
-		message: "Do not use `eval` to run standalone shell commands; use the `bash` tool directly.",
-	},
-	{
-		tools: ["eval"],
-		suggestedTool: "read",
-		pattern:
-			"^(?=[\\s\\S]*(?:\\bjson\\s*\\.\\s*loads?\\s*\\(|\\bJSON\\s*\\.\\s*parse\\s*\\(|\\bBun\\.JSONL\\b))(?=[\\s\\S]*(?:(?:^|[^\\w.])(?:read|output|(?:io\\.)?open)\\s*\\(|\\.\\s*read_(?:text|bytes)\\s*\\(|\\bBun\\.file\\s*\\(|\\breadFile(?:Sync)?\\s*\\())",
-		question:
-			"Is this code only reading a single JSON or JSONL file or artifact to extract, filter, or inspect fields—without joining multiple sources, computing statistical aggregations, or mutating persistent kernel state—such that a single read tool call with a ?q=<jq filter> selector handles it directly?",
-		message:
-			"Do not use `eval` to parse or filter a single JSON file or artifact; use the `read` tool with a jq query selector (e.g. path: 'file.json?q=<filter>' or 'artifact://<id>?q=<filter>').",
-	},
-	{
-		tools: ["eval"],
-		suggestedTool: "read",
-		pattern:
-			"(?:^|[^\\w.])read\\s*\\(|(?:^|[^\\w.])(?:io\\.)?open\\s*\\(|\\.\\s*read_(?:text|bytes)\\s*\\(|\\bBun\\.file\\s*\\(|\\breadFile(?:Sync)?\\s*\\(",
-		question:
-			"Is this code merely reading, slicing, or printing a file's contents without performing non-trivial computation, statistical aggregation, cross-file analysis, or testing that the read tool cannot do?",
-		message:
-			"Do not use `eval` to read or slice a file; use the `read` tool (with line selectors or query selectors) instead.",
-	},
-	{
-		tools: ["eval"],
-		suggestedTool: "glob",
-		pattern:
-			"\\bglob\\.i?glob\\s*\\(|\\bos\\.(?:walk|listdir|scandir)\\s*\\(|\\.\\s*(?:r?glob|iterdir)\\s*\\(|\\bnew\\s+Bun\\.Glob\\s*\\(|\\breaddir(?:Sync)?\\s*\\(",
-		question:
-			"Is this code merely listing or walking directories to find file paths that the glob tool could find (rather than reading and analyzing or aggregating the contents of many files in bulk)?",
-		message: "Use the `glob` tool instead of listing or walking directories in `eval`.",
-	},
-	{
-		tools: ["eval"],
-		suggestedTool: "write",
-		pattern:
-			"(?:^|[^\\w.])write\\s*\\(|\\.\\s*write_(?:text|bytes)\\s*\\(|(?:^|[^\\w.])(?:io\\.)?open\\s*\\([^()\\n]*,\\s*(?:mode\\s*=\\s*)?(?:[\"'][waxWAX][^\"']*[\"']|[\"'][^\"']*\\+[^\"']*[\"'])|\\bBun\\.write\\s*\\(|\\b(?:writeFile|appendFile)(?:Sync)?\\s*\\(",
-		question:
-			"Is this code writing or modifying text files in the project or workspace that should be written with the write or edit tool (rather than writing to an internal URL such as out://, local://, or agent://, generating binary/plot/image data, or creating an isolated temporary test fixture)?",
-		message: "Use the `write` or `edit` tool instead of writing or modifying workspace text files in `eval`.",
-	},
-];
+type DefaultToolInterceptorRuleId = keyof typeof toolInterceptorQuestionsFile;
+
+export const DEFAULT_TOOL_INTERCEPTOR_RULES: ToolInterceptorRule[] = (
+	Object.keys(toolInterceptorQuestionsFile) as DefaultToolInterceptorRuleId[]
+).map(id => {
+	const spec = toolInterceptorQuestionsFile[id];
+	return {
+		tools: spec.tools,
+		...("suggestedTool" in spec ? { suggestedTool: spec.suggestedTool } : {}),
+		pattern: spec.pattern,
+		question: TOOL_INTERCEPTOR_QUESTIONS[id].instructions,
+		message: spec.message,
+	};
+});
+
+const PATH_SCOPE_KEYS = new Set(["path", "paths", "pathPrefix", "pathPrefixes", "rules", "values", "items"]);
+
+function hasUsablePathScope(entry: Record<string, unknown>): boolean {
+	for (const key of ["path", "paths", "pathPrefix", "pathPrefixes"] as const) {
+		const raw = entry[key];
+		if (typeof raw === "string" && raw.trim().length > 0) return true;
+		if (Array.isArray(raw) && raw.some(item => typeof item === "string" && item.trim().length > 0)) return true;
+	}
+	return false;
+}
+
+function validateToolInterceptorRuleEntry(entry: unknown): void {
+	if (!isRecord(entry)) {
+		throw new Error("toolInterceptor.rules entries must be objects");
+	}
+	for (const nestedKey of ["rules", "values", "items"] as const) {
+		const nested = entry[nestedKey];
+		if (nested !== undefined) {
+			if (!Array.isArray(nested)) {
+				throw new Error(`toolInterceptor.rules scoped '${nestedKey}' must be an array`);
+			}
+			for (const child of nested) validateToolInterceptorRuleEntry(child);
+		}
+	}
+	const hasInlineRuleKeys = Object.keys(entry).some(key => !PATH_SCOPE_KEYS.has(key));
+	const hasNestedList = entry.rules !== undefined || entry.values !== undefined || entry.items !== undefined;
+	if (hasNestedList) {
+		if (!hasUsablePathScope(entry)) {
+			throw new Error(
+				"toolInterceptor.rules nested list container must specify a non-empty 'path', 'paths', 'pathPrefix', or 'pathPrefixes'",
+			);
+		}
+		if (!hasInlineRuleKeys) return;
+	}
+	if (typeof entry.message !== "string" || entry.message.trim().length === 0) {
+		throw new Error("toolInterceptor.rules entry must specify a non-empty string 'message'");
+	}
+	const hasPattern = entry.pattern !== undefined;
+	const hasQuestion = entry.question !== undefined;
+	if (!hasPattern && !hasQuestion) {
+		throw new Error("toolInterceptor.rules entry must specify 'pattern' and/or 'question'");
+	}
+	if (hasPattern) {
+		if (typeof entry.pattern !== "string" || entry.pattern.length === 0) {
+			throw new Error("toolInterceptor.rules 'pattern' must be a non-empty string");
+		}
+		const flags = entry.flags ?? "";
+		if (typeof flags !== "string") {
+			throw new Error("toolInterceptor.rules 'flags' must be a string");
+		}
+		try {
+			new RegExp(entry.pattern, flags);
+		} catch (error) {
+			throw new Error(
+				`toolInterceptor.rules invalid regex '${entry.pattern}': ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+	if (hasQuestion && (typeof entry.question !== "string" || entry.question.trim().length === 0)) {
+		throw new Error("toolInterceptor.rules 'question' must be a non-empty string");
+	}
+	if (entry.threshold !== undefined) {
+		if (
+			typeof entry.threshold !== "number" ||
+			!Number.isFinite(entry.threshold) ||
+			entry.threshold < 0 ||
+			entry.threshold > 1
+		) {
+			throw new Error("toolInterceptor.rules 'threshold' must be a number between 0 and 1");
+		}
+	}
+	if (entry.whenPolicy !== undefined && entry.whenPolicy !== "prompt" && entry.whenPolicy !== "allow") {
+		throw new Error("toolInterceptor.rules 'whenPolicy' must be 'prompt' or 'allow'");
+	}
+	if (
+		entry.suggestedTool !== undefined &&
+		(typeof entry.suggestedTool !== "string" || entry.suggestedTool.trim().length === 0)
+	) {
+		throw new Error("toolInterceptor.rules 'suggestedTool' must be a non-empty string");
+	}
+	if (entry.tools !== undefined) {
+		const validTools =
+			(typeof entry.tools === "string" && entry.tools.trim().length > 0) ||
+			(Array.isArray(entry.tools) &&
+				entry.tools.length > 0 &&
+				entry.tools.every(tool => typeof tool === "string" && tool.trim().length > 0));
+		if (!validTools) {
+			throw new Error("toolInterceptor.rules 'tools' must be a non-empty string or array of non-empty strings");
+		}
+	}
+}
 
 export const cfgToolsArtifactSpillThreshold = register({
 	id: "tools.artifactSpillThreshold",
@@ -469,12 +522,22 @@ export const cfgToolInterceptorEnabled = register({
 	},
 });
 
+function validateToolInterceptorRules(raw: unknown): void {
+	if (raw === undefined) return;
+	if (!Array.isArray(raw)) {
+		throw new Error("toolInterceptor.rules must be an array");
+	}
+	for (const entry of raw) validateToolInterceptorRuleEntry(entry);
+}
+
 export const cfgToolInterceptorRules = register({
 	id: "toolInterceptor.rules",
 	type: "array",
 	default: DEFAULT_TOOL_INTERCEPTOR_RULES,
 	pathScoped: { valuesKey: "rules", itemType: "object" },
 	merge: "prepend",
+	validate: validateToolInterceptorRules,
+	validateRaw: validateToolInterceptorRules,
 });
 
 // Todo tool

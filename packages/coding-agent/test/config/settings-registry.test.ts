@@ -511,6 +511,32 @@ describe("settings registry", () => {
 		}
 	});
 
+	it("rejects malformed scoped toolInterceptor.rules containers on config file load", async () => {
+		const dir = TempDir.createSync("@omp-tool-interceptor-bad-load-");
+		try {
+			const agentDir = path.join(dir.path(), "agent");
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				YAML.stringify({
+					toolInterceptor: {
+						rules: [
+							{
+								pathPrefix: dir.path(),
+								rules: { tools: ["eval"], pattern: "foo", message: "mapping instead of sequence" },
+							},
+						],
+					},
+				}),
+			);
+
+			await expect(Settings.loadIsolated({ cwd: dir.path(), agentDir })).rejects.toThrow(
+				/scoped 'rules' must be an array/,
+			);
+		} finally {
+			await dir.remove();
+		}
+	});
+
 	it("keeps every bash.patterns rule a path-scoped entry carries inside its scope", async () => {
 		const dir = TempDir.createSync("@omp-path-scoped-bash-deny-");
 		try {

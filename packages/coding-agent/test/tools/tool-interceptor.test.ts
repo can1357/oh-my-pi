@@ -4,10 +4,15 @@ import type { Judge, JudgmentRequest, JudgmentResult, Questions } from "@oh-my-p
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
+import { CodingAgentSpeculativeExecutionHost } from "@oh-my-pi/pi-coding-agent/speculation/host";
 import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
-import { DEFAULT_TOOL_INTERCEPTOR_RULES, type ToolInterceptorRule } from "@oh-my-pi/pi-coding-agent/tools/settings";
-import { checkToolInterception } from "@oh-my-pi/pi-coding-agent/tools/tool-interceptor";
+import {
+	cfgToolInterceptorRules,
+	DEFAULT_TOOL_INTERCEPTOR_RULES,
+	type ToolInterceptorRule,
+} from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { checkToolInterception, formatInterceptionDenyReason } from "@oh-my-pi/pi-coding-agent/tools/tool-interceptor";
 
 const ALL_DEDICATED_TOOLS = ["read", "write", "edit", "grep", "glob", "bash"];
 
@@ -115,7 +120,7 @@ describe("judge-backed question rules with optional pattern prefilter", () => {
 		expect(spy).not.toHaveBeenCalled();
 	});
 
-	it("distinguishes single tool.<name> wrappers from @tool/loop orchestration via the judge", async () => {
+	it("routes tool.<name> cells to the judge and blocks only when the score meets threshold", async () => {
 		const { judge, spy } = makeMockJudge((_question, request) => {
 			const state = request.state as { code?: string };
 			return state.code?.includes("for (const target of targets)") ? 0.05 : 0.95;
@@ -140,7 +145,7 @@ describe("judge-backed question rules with optional pattern prefilter", () => {
 		expect(spy).toHaveBeenCalledTimes(2);
 	});
 
-	it("distinguishes trivial JSON filtering from statistical file aggregation via the judge", async () => {
+	it("prefilters file-backed JSON cells for the judge and propagates suggestedTool and message", async () => {
 		const { judge, spy } = makeMockJudge((_question, request) => {
 			const state = request.state as { code?: string };
 			return state.code?.includes("statistics.median") ? 0.1 : 0.95;
@@ -197,6 +202,40 @@ describe("judge-backed question rules with optional pattern prefilter", () => {
 		expect(firstCallQuestions.length).toBeGreaterThanOrEqual(2);
 	});
 
+	it("preserves rule order when an earlier question rule precedes a later pattern-only rule", async () => {
+		const rules: ToolInterceptorRule[] = [
+			{
+				tools: ["eval"],
+				pattern: "\\bdangerousCall\\s*\\(",
+				question: "Is this dangerousCall targeting production?",
+				message: "Earlier judged rule matched.",
+			},
+			{
+				tools: ["eval"],
+				pattern: "\\bdangerousCall\\s*\\(",
+				message: "Later pattern-only fallback matched.",
+			},
+		];
+
+		const { judge: highJudge } = makeMockJudge(() => 0.9);
+		const firstWins = await checkToolInterception(
+			"eval",
+			{ language: "js", code: "dangerousCall('prod')" },
+			{ rules, judge: highJudge },
+		);
+		expect(firstWins.block).toBe(true);
+		expect(firstWins.message).toBe("Earlier judged rule matched.");
+
+		const { judge: lowJudge } = makeMockJudge(() => 0.1);
+		const fallbackWins = await checkToolInterception(
+			"eval",
+			{ language: "js", code: "dangerousCall('dev')" },
+			{ rules, judge: lowJudge },
+		);
+		expect(fallbackWins.block).toBe(true);
+		expect(fallbackWins.message).toBe("Later pattern-only fallback matched.");
+	});
+
 	it("does not block when the suggested replacement tool is unavailable in the session", async () => {
 		const { judge, spy } = makeMockJudge(() => 1.0);
 		const result = await checkToolInterception(
@@ -209,48 +248,26 @@ describe("judge-backed question rules with optional pattern prefilter", () => {
 		expect(spy).not.toHaveBeenCalled();
 	});
 
-	it("unwraps xd://eval JSON payloads (including hashline-wrapped paths) and skips xd:// help queries", async () => {
-		const { judge, spy } = makeMockJudge((_question, request) => {
-			const state = request.state as { tool?: string; language?: string; code?: string };
-			return state.tool === "eval" && state.language === "py" && state.code?.includes("json.loads") ? 0.95 : 0.1;
-		});
-
+	it("matches toolAliases such as customWireName or policyKey against rule tools", async () => {
+		const { judge, spy } = makeMockJudge(() => 0.95);
 		const result = await checkToolInterception(
-			"write",
+			"edit",
+			{ input: "*** Begin Patch\n*** End Patch" },
 			{
-				path: " [xd://eval#1A2B] ",
-				content: JSON.stringify({ language: "py", code: 'import json\nprint(json.loads(output("0")))' }),
-			},
-			{
-				availableTools: ALL_DEDICATED_TOOLS,
-				toolAliases: ["eval", "write_file"],
-				rules: DEFAULT_TOOL_INTERCEPTOR_RULES,
-				judge,
-			},
-		);
-
-		expect(result.block).toBe(true);
-		expect(spy).toHaveBeenCalledTimes(1);
-
-		const helpQueryResult = await checkToolInterception(
-			"write",
-			{
-				path: "xd://mcp__deploy_service",
-				content: "?",
-			},
-			{
-				toolAliases: ["mcp__deploy_service"],
+				toolAliases: ["apply_patch"],
 				rules: [
 					{
-						tools: ["mcp__deploy_*"],
-						question: "Does this deploy to production?",
-						message: "Blocked deploy.",
+						tools: ["apply_patch"],
+						question: "Should this edit use a different tool?",
+						message: "Intercepted via alias.",
 					},
 				],
 				judge,
 			},
 		);
-		expect(helpQueryResult.block).toBe(false);
+
+		expect(result.block).toBe(true);
+		expect(result.message).toBe("Intercepted via alias.");
 		expect(spy).toHaveBeenCalledTimes(1);
 	});
 });
@@ -434,5 +451,222 @@ describe("ExtensionToolWrapper pre-approval interception across tools", () => {
 		).rejects.toThrow("Use the read tool instead of unapproved ad-hoc bash parsing.");
 		expect(judgeSpy).toHaveBeenCalledTimes(1);
 		expect(select).not.toHaveBeenCalled();
+	});
+
+	it("vetoes speculative execution in CodingAgentSpeculativeExecutionHost only for tools targeted by toolInterceptor.rules", async () => {
+		const settings = Settings.isolated({
+			"tools.approvalMode": "yolo",
+			"toolInterceptor.enabled": true,
+			"toolInterceptor.rules": [
+				...DEFAULT_TOOL_INTERCEPTOR_RULES,
+				{
+					tools: ["task"],
+					pattern: "forbiddenTask",
+					message: "Task intercepted.",
+				},
+			],
+		});
+		const toolSession = {
+			cwd: process.cwd(),
+			getToolContext: () => ({ toolNames: [...ALL_DEDICATED_TOOLS, "eval", "task"] }) as unknown as AgentToolContext,
+		} as unknown as ToolSession;
+		const host = new CodingAgentSpeculativeExecutionHost(settings, toolSession, {
+			hasHandlers: () => false,
+		});
+
+		const taskLaunch = host.authorizeLaunch({
+			tool: { name: "task", approval: "exec" },
+			toolCall: { type: "toolCall", id: "call-task", name: "task", arguments: {} },
+			args: { tasks: [] },
+		});
+		expect(taskLaunch).toEqual({ allowed: false, reason: "active tool interceptor rule" });
+
+		const untargetedLaunch = host.authorizeLaunch({
+			tool: { name: "bash", approval: "exec" },
+			toolCall: { type: "toolCall", id: "call-bash", name: "bash", arguments: {} },
+			args: { command: "echo ok" },
+		});
+		expect(untargetedLaunch).toEqual({ allowed: true });
+	});
+
+	it("validates toolInterceptor.rules entries and rejects malformed rules or regexes", () => {
+		const settings = Settings.isolated();
+		expect(() =>
+			cfgToolInterceptorRules.override(settings, [{ tools: ["eval"], pattern: "[unclosed", message: "Bad regex." }]),
+		).toThrow(/invalid regex/);
+		expect(() =>
+			cfgToolInterceptorRules.override(settings, [
+				{ tools: ["eval"], pattern: "foo", threshold: 1.5, message: "Bad threshold." },
+			]),
+		).toThrow(/threshold/);
+		expect(() =>
+			cfgToolInterceptorRules.override(settings, [{ tools: ["eval"], message: "Missing pattern and question." }]),
+		).toThrow(/must specify 'pattern' and\/or 'question'/);
+		expect(() =>
+			cfgToolInterceptorRules.override(settings, [
+				{
+					rules: [{ tools: ["eval"], pattern: "foo", message: "Nested without path." }],
+				} as unknown as ToolInterceptorRule,
+			]),
+		).toThrow(/must specify a non-empty 'path'/);
+		expect(() =>
+			cfgToolInterceptorRules.override(settings, [
+				{
+					pattern: "foo",
+					message: "Mixed inline + nested without path.",
+					rules: [{ tools: ["eval"], pattern: "bar", message: "Nested." }],
+				} as unknown as ToolInterceptorRule,
+			]),
+		).toThrow(/must specify a non-empty 'path'/);
+	});
+
+	it("inspects non-command/code arguments for arbitrary tools and requires availableTools for suggestedTool", async () => {
+		const mcpRules: ToolInterceptorRule[] = [
+			{
+				tools: ["mcp__deploy_*"],
+				pattern: "\\bproduction\\b",
+				message: "Include a CR ticket for production deploys.",
+			},
+		];
+		const mcpResult = await checkToolInterception(
+			"mcp__deploy_service",
+			{ command: "deploy", environment: "production", title: "prod release" },
+			{ rules: mcpRules },
+		);
+		expect(mcpResult.block).toBe(true);
+		const titleResult = await checkToolInterception(
+			"mcp__create_ticket",
+			{ title: "production hotfix", summary: "ok" },
+			{ rules: mcpRules.map(r => ({ ...r, tools: ["mcp__create_ticket"] })) },
+		);
+		expect(titleResult.block).toBe(true);
+
+		const gatedRules: ToolInterceptorRule[] = [
+			{
+				tools: ["eval"],
+				suggestedTool: "read",
+				pattern: "\\bopen\\(",
+				message: "Use read instead.",
+			},
+		];
+		expect((await checkToolInterception("eval", { code: 'open("a")' }, { rules: gatedRules })).block).toBe(false);
+		expect(
+			(await checkToolInterception("eval", { code: 'open("a")' }, { availableTools: ["read"], rules: gatedRules }))
+				.block,
+		).toBe(true);
+	});
+
+	it("fails open on judge errors/timeouts, rethrows caller abort, and cancels preflight in ExtensionToolWrapper", async () => {
+		const rules: ToolInterceptorRule[] = [
+			{
+				tools: ["mcp__*"],
+				question: "Is this risky?",
+				message: "Blocked.",
+			},
+		];
+		const throwingJudge: Judge = {
+			label: "throwing",
+			judge: async () => {
+				throw new Error("provider 503");
+			},
+		};
+		const failedOpen = await checkToolInterception("mcp__op", { x: 1 }, { rules, judge: throwingJudge });
+		expect(failedOpen.block).toBe(false);
+
+		const nonCooperativeJudge: Judge = {
+			label: "hung",
+			judge: async () => {
+				const { promise } = Promise.withResolvers<never>();
+				return await promise;
+			},
+		};
+		const timedOut = await checkToolInterception(
+			"mcp__op",
+			{ x: 1 },
+			{ rules, judge: nonCooperativeJudge, timeoutMs: 15 },
+		);
+		expect(timedOut.block).toBe(false);
+
+		const fallbackWithThrowingResolver = await checkToolInterception(
+			"mcp__op",
+			{ x: 1 },
+			{
+				rules: [...rules, { tools: ["mcp__op"], pattern: "1", message: "Pattern fallback." }],
+				judge: () => {
+					throw new Error("resolver failed");
+				},
+			},
+		);
+		expect(fallbackWithThrowingResolver).toEqual({
+			block: true,
+			message: "Pattern fallback.",
+			suggestedTool: undefined,
+		});
+		const abortController = new AbortController();
+		abortController.abort(new Error("caller cancelled"));
+		await expect(
+			checkToolInterception("mcp__op", { x: 1 }, { rules, judge: throwingJudge, signal: abortController.signal }),
+		).rejects.toThrow();
+
+		const cancelPreflight = vi.fn();
+		const settings = Settings.isolated({
+			"tools.approvalMode": "yolo",
+			"toolInterceptor.enabled": true,
+			"toolInterceptor.rules": [
+				{
+					tools: ["mcp__op"],
+					suggestedTool: "read",
+					pattern: "trigger",
+					message: "Blocked op.",
+				},
+			],
+		});
+		const customTool: AgentTool = {
+			name: "mcp__op",
+			label: "Op",
+			description: "Op",
+			parameters: {} as never,
+			approval: "exec",
+			execute: vi.fn(async () => ({ content: [{ type: "text" as const, text: "ok" }], details: {} })),
+		};
+		const runner = {
+			hasHandlers: () => false,
+			consumeToolCallEmitted: () => false,
+			runToolCallPreflightBefore: async () => undefined,
+			cancelToolCallPreflight: cancelPreflight,
+			hasUI: () => false,
+			hasSessionApproval: () => false,
+			getJudge: () => undefined,
+			sessionSettings: settings,
+			sessionId: "abort-preflight-test",
+			cwd: process.cwd(),
+			runScoped: <T>(fn: () => T): T => fn(),
+		} as unknown as ExtensionRunner;
+		const wrapper = new ExtensionToolWrapper(customTool, runner);
+		const liveAbort = new AbortController();
+		liveAbort.abort();
+		await expect(
+			wrapper.execute("call-abort", { arg: "trigger" } as never, liveAbort.signal, undefined, {
+				settings,
+				toolNames: ["read", "mcp__op"],
+			} as unknown as AgentToolContext),
+		).rejects.toThrow();
+		expect(cancelPreflight).toHaveBeenCalledWith("call-abort");
+
+		await expect(
+			wrapper.execute("call-suggested", { arg: "trigger" } as never, undefined, undefined, {
+				settings,
+				toolNames: ["read", "mcp__op"],
+			} as unknown as AgentToolContext),
+		).rejects.toThrow("Blocked op. (Suggested tool: `read`)");
+		expect(formatInterceptionDenyReason({ block: true, message: "Already handled.", suggestedTool: "read" })).toBe(
+			"Already handled. (Suggested tool: `read`)",
+		);
+		expect(
+			formatInterceptionDenyReason({ block: true, message: "Stop reading files here.", suggestedTool: "read" }),
+		).toBe("Stop reading files here. (Suggested tool: `read`)");
+		expect(
+			formatInterceptionDenyReason({ block: true, message: "Use the `read` tool instead.", suggestedTool: "read" }),
+		).toBe("Use the `read` tool instead.");
 	});
 });

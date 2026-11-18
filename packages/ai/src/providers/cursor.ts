@@ -1661,6 +1661,7 @@ function streamCursorWithWireMode(
 					requestContextRules,
 					onConversationCheckpoint,
 					options?.externalToolExecutor,
+					options?.signal,
 				).catch(error => {
 					log("error", "handleServerMessage", { error: String(error) });
 				});
@@ -2468,6 +2469,7 @@ export async function handleServerMessage(
 	requestContextRules: CursorRule[] = [],
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
 	externalToolExecutor = false,
+	signal?: AbortSignal,
 ): Promise<void> {
 	const msgCase = msg.message.case;
 
@@ -2494,6 +2496,7 @@ export async function handleServerMessage(
 				stream,
 				state,
 				externalToolExecutor,
+				signal,
 			),
 		);
 	} else if (msgCase === "interactionQuery") {
@@ -2955,6 +2958,7 @@ async function handleExecServerMessage(
 	stream: AssistantMessageEventStream,
 	state: BlockState,
 	externalToolExecutor: boolean,
+	signal?: AbortSignal,
 ): Promise<void> {
 	const order = state.execOrder;
 	const execCase = execMsg.message.case;
@@ -2973,6 +2977,7 @@ async function handleExecServerMessage(
 			state,
 			externalToolExecutor,
 			mcp.call,
+			signal,
 		);
 	if (!gated) return run();
 	const callId = execFrameCallId(execMsg);
@@ -2999,6 +3004,7 @@ async function runExecServerMessage(
 	state: BlockState,
 	externalToolExecutor: boolean,
 	predecodedMcpCall?: CursorMcpCall,
+	signal?: AbortSignal,
 ): Promise<void> {
 	const execCase = execMsg.message.case;
 	log("exec", "dispatch", { execCase, execId: execMsg.execId, hasHandlers: !!execHandlers });
@@ -3236,7 +3242,7 @@ async function runExecServerMessage(
 			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "delete", { path: args.path });
 			const { execResult } = await resolveExecHandler(
 				args,
-				execHandlers?.delete?.bind(execHandlers),
+				execHandlers?.delete ? args => execHandlers.delete!(args, signal ? { signal } : undefined) : undefined,
 				onToolResult,
 				toolResult => buildDeleteResultFromToolResult(args.path, toolResult),
 				reason => buildDeleteRejectedResult(args.path, reason),
@@ -3511,11 +3517,14 @@ async function runExecServerMessage(
 				// `null` is the handler's "no such server or uri", which is exactly
 				// `not_found`; a throw is a real failure and must not masquerade as
 				// a missing resource.
-				const content = await execHandlers?.readMcpResource?.({
-					server: args.server,
-					uri: args.uri,
-					downloadPath: args.downloadPath,
-				});
+				const content = await execHandlers?.readMcpResource?.(
+					{
+						server: args.server,
+						uri: args.uri,
+						downloadPath: args.downloadPath,
+					},
+					signal ? { signal } : undefined,
+				);
 				execResult = content
 					? create(ReadMcpResourceExecResultSchema, {
 							result: {

@@ -114,6 +114,11 @@ interface DefinitionBase {
 	 */
 	validate?: (raw: unknown) => void;
 	/**
+	 * Rejects malformed raw layer structures (e.g. non-array scoped containers) before
+	 * {@link configuredValue} flattens path-scoped entries on file load/reload.
+	 */
+	validateRaw?: (raw: unknown) => void;
+	/**
 	 * Canonicalizes a value on its way in — text parsed by {@link Setting.parse} and every
 	 * `set`/`override` — e.g. flooring request limits. May throw like `validate`.
 	 */
@@ -728,6 +733,11 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	 * @throws Error when `raw` fails `validate`. Unknown {@link ArrayDefinition.items} entries only warn,
 	 * once each per instance.
 	 */
+	/** Validates the raw unflattened configured value on file load/reload. */
+	checkRaw(raw: unknown): void {
+		this.definition.validateRaw?.(raw);
+	}
+
 	checkConfigured(settings: Settings, raw: unknown): void {
 		this.definition.validate?.(raw);
 		const unknown = this.#unknownItems(raw);

@@ -18,6 +18,7 @@ import type {
 	CursorMcpCall,
 	CursorMcpResource,
 	CursorMcpResourceContent,
+	Judge,
 	CursorShellStreamCallbacks,
 	CursorTodoSnapshot,
 	CursorExecHandlers as ICursorExecHandlers,
@@ -36,7 +37,9 @@ import {
 	shellDeadlineSeconds,
 } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { editDiffString } from "@oh-my-pi/pi-natives";
-import { isEnoent, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isEnoent, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import { cfgJudgmentAttemptTimeoutMs } from "./config/model-settings";
+import type { Settings } from "./config/settings";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-replace-args";
 import { normalizeToLF, stripBom } from "./edit/normalize";
 import type { MCPResourceReadResult } from "./mcp/types";
@@ -54,6 +57,8 @@ import {
 	resolveToCwd,
 	splitPathAndSelPreferringLiteral,
 } from "./tools/path-utils";
+import { cfgToolInterceptorEnabled, cfgToolInterceptorRules } from "./tools/settings";
+import { checkToolInterception, formatInterceptionDenyReason } from "./tools/tool-interceptor";
 import type { EditToolDetails } from "./tools/details/edit";
 import type { TodoPhase, TodoStatus } from "./tools/details/todo";
 
@@ -100,6 +105,7 @@ interface CursorExecBridgeOptions {
 	 */
 	getEditReplaceTool?: () => CursorBridgeTool | undefined;
 	getToolContext?: () => AgentToolContext | undefined;
+	getJudge?: (purpose: string, settings?: Settings) => Judge | undefined;
 	emitEvent?: (event: AgentEvent) => void;
 	/**
 	 * Whether frames that mutate the filesystem WITHOUT running a registry tool
@@ -426,7 +432,12 @@ function allowsDirectFileMutation(options: CursorExecBridgeOptions): boolean {
  * a file creation or removal belongs to. Returns `null` when the call may
  * proceed, or the refusal text to answer with.
  */
-function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string, pathArg: string): string | null {
+async function refuseByWritePolicy(
+	options: CursorExecBridgeOptions,
+	toolName: string,
+	pathArg: string,
+	signal?: AbortSignal,
+): Promise<string | null> {
 	const context = options.getToolContext?.();
 	const { approvalMode, userPolicies } = resolveApprovalFromContext(context);
 	const approval = resolveApproval(
@@ -436,6 +447,7 @@ function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string,
 		userPolicies,
 		getApprovalGrants(context?.settings?.getAgentDir(), context?.sessionManager?.getSessionId()),
 	);
+	let policy: "allow" | "prompt" = "prompt";
 	if (approval.policy === "allow") {
 		// The frame names its file only in `pathArg`, so the restriction check keys it here.
 		const cwd = options.getCwd?.() ?? options.cwd;
@@ -445,14 +457,41 @@ function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string,
 			undefined,
 			approvalRestrictions(context?.settings, cwd),
 		);
-		if (restriction === undefined) return null;
+		if (restriction === undefined) policy = "allow";
+	} else if (approval.policy === "deny") {
+		return `Tool "${toolName}" is blocked by user policy.`;
 	}
-	return approval.policy === "deny"
-		? `Tool "${toolName}" is blocked by user policy.`
-		: `Tool "${toolName}" requires approval, which this channel cannot request.`;
+	const settings = context?.settings;
+	if (settings && cfgToolInterceptorEnabled.get(settings)) {
+		const interception = await untilAborted(signal, () =>
+			checkToolInterception(
+				toolName,
+				{ path: pathArg },
+				{
+					availableTools: context?.toolNames ?? [],
+					policy,
+					rules: cfgToolInterceptorRules.get(settings),
+					judge: () => options.getJudge?.("tool-interceptor", settings),
+					timeoutMs: cfgJudgmentAttemptTimeoutMs.get(settings),
+					warnScope: settings,
+					signal,
+				},
+			),
+		);
+		if (interception.block) {
+			return formatInterceptionDenyReason(interception) ?? `Tool "${toolName}" was intercepted.`;
+		}
+	}
+	if (policy === "allow") return null;
+	return `Tool "${toolName}" requires approval, which this channel cannot request.`;
 }
 
-async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, toolCallId: string) {
+async function executeDelete(
+	options: CursorExecBridgeOptions,
+	pathArg: string,
+	toolCallId: string,
+	signal?: AbortSignal,
+) {
 	const toolName = "delete";
 
 	if (!allowsDirectFileMutation(options)) {
@@ -464,7 +503,7 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 	// `allowDirectFileMutation` answers "was a mutating tool granted", which is a
 	// different question from "does the user's policy allow this call" — without
 	// this, a configured `deny` or an `always-ask` session still lost the file.
-	const refusal = refuseByWritePolicy(options, toolName, pathArg);
+	const refusal = await refuseByWritePolicy(options, toolName, pathArg, signal);
 	if (refusal) {
 		return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(refusal), true);
 	}
@@ -476,6 +515,9 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 	let result: AgentToolResult<unknown>;
 
 	try {
+		if (signal?.aborted) {
+			throw new Error("Delete operation cancelled");
+		}
 		let fileStat: fs.Stats | undefined;
 		try {
 			fileStat = fs.statSync(absolutePath);
@@ -485,9 +527,11 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 		if (!fileStat.isFile()) {
 			throw new Error(`Path is not a file: ${pathArg}`);
 		}
+		if (signal?.aborted) {
+			throw new Error("Delete operation cancelled");
+		}
 
 		fs.rmSync(absolutePath);
-
 		const sizeText = fileStat.size ? ` (${fileStat.size} bytes)` : "";
 		const message = `Deleted ${pathArg}${sizeText}`;
 		result = { content: [{ type: "text", text: message }], details: { fileSize: fileStat.size } };
@@ -712,9 +756,9 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		});
 	}
 
-	async delete(args: Parameters<NonNullable<ICursorExecHandlers["delete"]>>[0]) {
+	async delete(args: Parameters<NonNullable<ICursorExecHandlers["delete"]>>[0], frame?: CursorExecFrameContext) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
-		const toolResultMessage = await executeDelete(this.options, args.path, toolCallId);
+		const toolResultMessage = await executeDelete(this.options, args.path, toolCallId, frame?.signal);
 		return toolResultMessage;
 	}
 
@@ -1007,21 +1051,27 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * tool, and on the user's `write`-tier policy. The gate runs before the read
 	 * so a refused download never fetches the resource either.
 	 */
-	async readMcpResource({
-		server,
-		uri,
-		downloadPath,
-	}: {
-		server: string;
-		uri: string;
-		downloadPath?: string;
-	}): Promise<CursorMcpResourceContent | null> {
+	async readMcpResource(
+		{
+			server,
+			uri,
+			downloadPath,
+		}: {
+			server: string;
+			uri: string;
+			downloadPath?: string;
+		},
+		frame?: CursorExecFrameContext,
+	): Promise<CursorMcpResourceContent | null> {
 		if (downloadPath) {
 			if (!allowsDirectFileMutation(this.options)) {
 				throw new Error('Tool "write" not available: this session cannot download resources to disk.');
 			}
-			const refusal = refuseByWritePolicy(this.options, "write", downloadPath);
+			const refusal = await refuseByWritePolicy(this.options, "write", downloadPath, frame?.signal);
 			if (refusal) throw new Error(refusal);
+		}
+		if (frame?.signal?.aborted) {
+			throw new Error("Resource read cancelled");
 		}
 		const mcp = this.options.mcpResources;
 		if (!mcp) return null;
@@ -1051,6 +1101,9 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			const cwd = this.options.getCwd?.() ?? this.options.cwd;
 			const absolutePath = confineToWorkspace(downloadPath, cwd);
 			if (!absolutePath) throw new Error(`Refusing to download outside the workspace: ${downloadPath}`);
+			if (frame?.signal?.aborted) {
+				throw new Error("Resource download cancelled");
+			}
 			await writeWithoutFollowingLinks(absolutePath, payload);
 			// The path echoed back is the one the frame asked for; the model
 			// addresses it the same relative way.
@@ -1219,14 +1272,32 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		if (!tool) return false;
 		const context = this.options.getToolContext?.();
 		const { approvalMode, userPolicies } = resolveApprovalFromContext(context);
+		const normalizedArgs = preferReplace ? normalizeCursorReplaceArgs(args) : args;
 		const approval = resolveApproval(
 			tool,
-			preferReplace ? normalizeCursorReplaceArgs(args) : args,
+			normalizedArgs,
 			approvalMode,
 			userPolicies,
 			getApprovalGrants(context?.settings?.getAgentDir(), context?.sessionManager?.getSessionId()),
 			approvalRestrictions(context?.settings, this.options.getCwd?.() ?? this.options.cwd),
 		);
-		return approval.policy === "allow";
+		if (approval.policy !== "allow") return false;
+		const settings = context?.settings;
+		if (settings && cfgToolInterceptorEnabled.get(settings)) {
+			const aliases = [approval.policyKey, tool.customWireName].filter(
+				(alias): alias is string => typeof alias === "string" && alias.length > 0 && alias !== tool.name,
+			);
+			const interception = await checkToolInterception(tool.name, normalizedArgs, {
+				availableTools: context?.toolNames ?? [],
+				toolAliases: aliases,
+				policy: "allow",
+				rules: cfgToolInterceptorRules.get(settings),
+				judge: () => this.options.getJudge?.("tool-interceptor", settings),
+				timeoutMs: cfgJudgmentAttemptTimeoutMs.get(settings),
+				warnScope: settings,
+			});
+			if (interception.block) return false;
+		}
+		return true;
 	}
 }

@@ -2899,9 +2899,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			before: (toolCallId, tool, args) => this.#ttsr.beforeBridgedToolCall(toolCallId, tool, args),
 			after: (toolCallId, result, context) => this.#ttsr.afterBridgedToolCall(toolCallId, result, context),
 			cancel: toolCallId => this.#ttsr.cancelBridgedToolCall(toolCallId),
-			judge: (purpose, settingsOverride) =>
-				resolveJudge({
-					settings: settingsOverride ?? this.settings,
+			judge: (purpose, settingsOverride) => {
+				const judgeSettings = settingsOverride ?? this.settings;
+				if (!hasNativeJudge(judgeSettings, this.#modelRegistry, this.model)) return undefined;
+				const chainJudge = resolveJudge({
+					settings: judgeSettings,
 					registry: this.#modelRegistry,
 					sessionModel: this.model,
 					sessionId: this.sessionId,
@@ -2911,7 +2913,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					telemetry: this.agent.telemetry,
 					cache: sharedJudgmentCache(),
 					costGate: this.#costGate,
-				}),
+				});
+				return {
+					label: chainJudge.label,
+					judge: (request, options) =>
+						chainJudge.withCandidate((candidate, kind) => {
+							if (kind !== "native") throw new Error(`${purpose}: the judge role has no native backend`);
+							return candidate.judge(request, options);
+						}, options),
+				};
+			},
 		});
 		this.agent.setOnBeforeYield(() => this.#ttsr.settleJudgments());
 		this.agent.setOnModelCallSystemPrompt(prompt => {
@@ -3110,6 +3121,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			sessionId: () => this.sessionId,
 			restrictOAuthAccounts: providerSessionId => this.#accountPoolScope?.restrict(providerSessionId),
 			agentKind: () => this.#agentKind,
+			getJudge: (purpose, settingsOverride) => this.#extensionRunner?.getJudge(purpose, settingsOverride),
 		};
 		const sharedTransformProviderContext = config.transformProviderContext;
 		this.#advisors = new SessionAdvisors(advisorsHost, {
