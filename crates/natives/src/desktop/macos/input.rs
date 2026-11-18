@@ -842,10 +842,11 @@ enum KeyboardConflict {
 }
 
 /// Background keyboard delivery to window `wid`: inside the self-activation
-/// guard, makes `wid` its application's key window, then runs `deliver` with
-/// the process to post the keys to and a check to run before every press.
-/// `entry_front` was read as the input began, before this reads the target's
-/// windows and focus ([`EntryFront`]).
+/// guard, makes `wid` its application's key window, without the activating
+/// press when it already is ([`ActivatingPress::UnlessKey`]), then runs
+/// `deliver` with the process to post the keys to and a check to run before
+/// every press. `entry_front` was read as the input began, before this reads
+/// the target's windows and focus ([`EntryFront`]).
 ///
 /// macOS posts key events to a *process*, which hands them to whichever window
 /// it treats as key; unlike pointer events they carry no window id. Keys are
@@ -884,8 +885,16 @@ fn with_background_keyboard<T>(
 	}
 	let in_overlay = focus.in_overlay_of(wid, skylight::window_parent);
 	skylight::with_background_watch(pid, |visit| {
-		let prepared =
-			make_key_in_background(source, pid, wid, window, entry_front, in_overlay, visit)?;
+		let prepared = make_key_in_background(
+			source,
+			pid,
+			wid,
+			window,
+			entry_front,
+			in_overlay,
+			ActivatingPress::UnlessKey,
+			visit,
+		)?;
 		let (to, focus) = await_key_destination(pid, wid, conflict)?;
 		let owner =
 			key_process(to, wid, &focus, || ax::window_content(pid, window), ax::focused_window_id)?;
@@ -1894,7 +1903,8 @@ fn keys_reach(
 /// Finder's inline rename field or a popover: the target then counts as the
 /// frontmost application's key window, and in a background application the
 /// activation goes out without the press, which would make `wid` key and so
-/// end that overlay's editing.
+/// end that overlay's editing. `press` says whether the press also stays out
+/// when `wid` already is the application's key window ([`needs_press`]).
 ///
 /// Returns whether the activation step ran. The user can bring the target app
 /// forward at any moment, which would turn the step into a key-window switch
@@ -1909,6 +1919,7 @@ pub(super) fn make_key_in_background(
 	window: &DesktopWindow,
 	entry_front: EntryFront,
 	focus_in_overlay: bool,
+	press: ActivatingPress,
 	visit: skylight::TargetVisit<'_>,
 ) -> CoreResult<bool> {
 	let takes_keys =
@@ -1921,7 +1932,9 @@ pub(super) fn make_key_in_background(
 	let context = skylight::sender_connection()?;
 	activate_in_background(source, pid, wid, context)?;
 	still_behind_user(pid, wid, visit)?;
-	if focus_in_overlay {
+	let is_key =
+		|| key_without_press(wid, ax::focused_window_id(pid), || ax::window_content(pid, window));
+	if !needs_press(press, focus_in_overlay, is_key) {
 		return Ok(true);
 	}
 	let (location, local) = activating_press(window);
@@ -1944,6 +1957,53 @@ pub(super) fn make_key_in_background(
 	press(CGEventType::LeftMouseDown, 1)?;
 	let release = control::cleanup(|| press(CGEventType::LeftMouseUp, 2));
 	skylight::after_cleanup(Ok(true), release)
+}
+
+/// When [`make_key_in_background`] posts its activating press, the press
+/// that makes the target window key among its application's windows. A
+/// press, even one outside every control, lets the application order that
+/// window in front, over the user's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ActivatingPress {
+	/// Every time: pointer input and menus, which go to the window under the
+	/// press or need it key whatever the application thought before.
+	Always,
+	/// Only while the target is not already its application's key window
+	/// ([`key_without_press`]): keys go to the process, which hands them to
+	/// that window once it believes it is active, so the activation event
+	/// alone delivers them.
+	UnlessKey,
+}
+
+/// Whether keys for window `wid` can go out without the activating press:
+/// its application reports it as the focused window (`focused`), and it
+/// draws its own content. A window another process draws (`content`), a
+/// system Open or Save panel or its sheet, keeps the press, since that
+/// process reports focus only once the panel is key ([`key_process`]).
+fn key_without_press(
+	wid: u32,
+	focused: Option<u32>,
+	content: impl FnOnce() -> ax::WindowContent,
+) -> bool {
+	focused == Some(wid) && matches!(content(), ax::WindowContent::Own)
+}
+
+/// Whether [`make_key_in_background`] posts the activating press for
+/// `press`: never into an overlay holding the focus (`focus_in_overlay`),
+/// and for [`ActivatingPress::UnlessKey`] only when `is_key`, the
+/// application's focused window read after the activation event and the
+/// check that the user did not come to the target, is not the target. It is
+/// read inside the same guard the keys are posted under, and the keys go out
+/// only once [`await_key_destination`] and then, before every press,
+/// [`keys_still_reach`] find the target still key, so a key window that
+/// changes after this read stops the keys rather than sending them to
+/// another window.
+fn needs_press(
+	press: ActivatingPress,
+	focus_in_overlay: bool,
+	is_key: impl FnOnce() -> bool,
+) -> bool {
+	!focus_in_overlay && (press == ActivatingPress::Always || !is_key())
 }
 
 /// Tells background process `pid` it is active with window `wid` key, as
@@ -2234,8 +2294,18 @@ fn background_pointer(
 	in_overlay: bool,
 	visit: skylight::TargetVisit<'_>,
 ) -> CoreResult<()> {
-	let prepare =
-		|| make_key_in_background(source, pid, wid, window, entry_front, in_overlay, visit);
+	let prepare = || {
+		make_key_in_background(
+			source,
+			pid,
+			wid,
+			window,
+			entry_front,
+			in_overlay,
+			ActivatingPress::Always,
+			visit,
+		)
+	};
 	let (prepared, (to, to_wid)) = pointer_owner(&event, prepare, owner)?;
 	let menu_pid = to;
 	let background = skylight::front_pid() != Some(pid);
@@ -2928,7 +2998,18 @@ fn prepare_press(
 		!keys.is_empty(),
 		in_overlay,
 		|| keyboard_conflict_now(pid, wid),
-		|in_overlay| make_key_in_background(source, pid, wid, window, entry_front, in_overlay, visit),
+		|in_overlay| {
+			make_key_in_background(
+				source,
+				pid,
+				wid,
+				window,
+				entry_front,
+				in_overlay,
+				ActivatingPress::Always,
+				visit,
+			)
+		},
 		|| await_key_window(pid, wid).map(drop),
 		|conflict| await_key_destination(pid, wid, conflict).map(|(_, focus)| focus),
 		|| still_behind_user(pid, wid, visit),
@@ -7078,6 +7159,44 @@ mod tests {
 		assert!(!takes_overlay_focus(25579, window(25656), parents));
 		let nothing = focus_in(ax::FocusedWindow::Unreported, None);
 		assert!(!takes_overlay_focus(25579, nothing, parents));
+	}
+
+	#[test]
+	fn keys_into_the_applications_key_window_skip_the_activating_press() {
+		// The press lets the application order its window over the user's;
+		// keys reach the key window through the activation event alone.
+		assert!(!needs_press(ActivatingPress::UnlessKey, false, || true));
+		assert!(key_without_press(7, Some(7), || ax::WindowContent::Own));
+	}
+
+	#[test]
+	fn keys_into_a_panel_another_process_draws_keep_the_activating_press() {
+		// TextEdit's Save sheet is focused, but openAndSavePanelService draws it
+		// and takes focus only once the sheet is key.
+		let panel = || ax::WindowContent::Remote { pid: 900, window: 41 };
+		assert!(!key_without_press(7, Some(7), panel));
+		assert!(!key_without_press(7, Some(8), || ax::WindowContent::Own));
+		assert!(!key_without_press(7, None, || ax::WindowContent::Own));
+	}
+
+	#[test]
+	fn keys_into_a_window_that_is_not_key_keep_the_activating_press() {
+		// Another window of the application is key: without the press the
+		// target never becomes key and the keys wait for it.
+		assert!(needs_press(ActivatingPress::UnlessKey, false, || false));
+	}
+
+	#[test]
+	fn pointer_input_and_menus_keep_the_activating_press_into_the_key_window() {
+		let read = std::cell::Cell::new(false);
+		assert!(needs_press(ActivatingPress::Always, false, || {
+			read.set(true);
+			true
+		}));
+		assert!(!read.get(), "the key window is read only for keys");
+		// An overlay holding the focus takes no press for either.
+		assert!(!needs_press(ActivatingPress::Always, true, || false));
+		assert!(!needs_press(ActivatingPress::UnlessKey, true, || false));
 	}
 
 	#[test]
