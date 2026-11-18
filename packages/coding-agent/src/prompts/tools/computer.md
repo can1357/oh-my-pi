@@ -87,11 +87,14 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
     `press` (no argument: native press; `press("enter")`: a key chord in that element),
     `type(text)`, `click({button?, count?, modifiers?})`, `doubleClick`, `focus`, `parent`, `children`.
   - `ref("e5")` helpers chain without an inner await: `await win.ref("e5").click({count: 2})`.
-- macOS: `await el.selectText(text, {prefix?, suffix?, select?: "text" | "start" | "end"})` selects text in a text element's value
-  (or places a caret before/after it) without focus change or keystrokes, and returns the selection read back `{start, length, text, focused}` in UTF-16 units.
+- macOS, and GTK/Qt text on Linux: `await el.selectText(text, {prefix?, suffix?, select?: "text" | "start" | "end"})` selects text in a text element's value
+  (or places a caret before/after it) without requesting focus or sending keystrokes, and returns the selection read back `{start, length, text, focused}` in UTF-16 units.
   - Missing or ambiguous text throws; add `prefix`/`suffix` context rather than guessing.
-  - In an editable field, a following `el.type(…)` on that element replaces the selection.
-  - In a terminal it selects displayed output only; typing still goes to the shell's input cursor.
+  - On macOS, a following `el.type(…)` in an editable field replaces the selection; in a terminal it still types at the shell's input cursor.
+  - Linux also permits read-only and unfocused text, but selection does not bypass `type`'s editability, focus or toolkit restrictions.
+    A nonempty native selection may replace PRIMARY (middle-click paste); its contents and ownership are not preserved.
+    Native failures after an attempted write are `AxUnconfirmed`. A canceled or timed-out `computer.run` can instead
+    return its usual abort/timeout error; inspect the field before retrying or typing in either case.
   - Prefer it to clicking or arrow keys for editing part of a field's value.
 - JavaScript `await computer.run(fnOrCode, { args?, read_only?, timeout? })` runs a multi-step function or code string.
   - Functions receive `{ desktop, wait, assert }`, then each `args` item as a further argument:

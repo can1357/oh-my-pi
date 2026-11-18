@@ -16,6 +16,7 @@
 
 ### Added
 
+- Linux GTK and Qt text elements now support `selectText` through AT-SPI, including read-only and unfocused text. Results use UTF-16 offsets; selection is read back with unchanged text and target focus, without keys or a focus request. ([#19604](https://github.com/can1357/oh-my-pi/pull/19604) by [@Deftera186](https://github.com/Deftera186))
 - `TtyWriter` now works on Windows consoles: it writes off the JS thread in 16 KiB `WriteFile` chunks, restores the UTF-8 console code pages that child processes change, and `stop()` cancels a blocked write
 - Added `isolateThreadStartsFromConsole()`, which keeps a Windows console whose terminal stopped reading from blocking new threads in the process
 

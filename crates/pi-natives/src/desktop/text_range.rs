@@ -1,14 +1,15 @@
 //! Locating text inside an element's value for `ax_select_text`.
 //!
-//! Accessibility text ranges count UTF-16 code units, so every offset here is
-//! in UTF-16 units, never UTF-8 bytes or Unicode scalars.
-#[cfg(any(target_os = "macos", test))]
+//! Public text-selection offsets count UTF-16 code units, not UTF-8 bytes or
+//! Unicode scalars. Backends convert to their toolkit's native units when
+//! those differ, such as GTK's Unicode-scalar offsets.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 use std::fmt::Write as _;
 
 use super::error::{CoreResult, DesktopError};
 
 /// How many match offsets an ambiguity error lists.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 const LISTED_MATCHES: usize = 8;
 
 /// Which part of the matched text becomes the selection.
@@ -47,14 +48,14 @@ pub struct TextSelectRequest {
 }
 
 /// A selection in UTF-16 code units.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Utf16Range {
 	pub start:  usize,
 	pub length: usize,
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 impl TextSelectRequest {
 	/// The one range of `value` this request names. Refuses when the text does
 	/// not occur, occurs only outside the given context, or occurs more than
@@ -151,22 +152,22 @@ impl TextSelectRequest {
 
 /// The text of `value` in a UTF-16 range, or `None` when the range runs past
 /// the end or splits a surrogate pair.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub fn utf16_slice(value: &str, range: Utf16Range) -> Option<&str> {
 	value.get(utf16_byte_range(value, range)?)
 }
 
 /// The UTF-8 byte range of a UTF-16 range in `value`, or `None` when the range
-/// runs past the end or splits a surrogate pair. AX text ranges count UTF-16
-/// units; every AX read and write converts through here.
-#[cfg(any(target_os = "macos", test))]
+/// runs past the end or splits a surrogate pair. The public text ranges count
+/// UTF-16 units, so every backend read and write converts through here.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub fn utf16_byte_range(value: &str, range: Utf16Range) -> Option<std::ops::Range<usize>> {
 	let start = utf16_byte_offset(value, range.start)?;
 	let end = utf16_byte_offset(value, range.start.checked_add(range.length)?)?;
 	Some(start..end)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn utf16_byte_offset(value: &str, offset: usize) -> Option<usize> {
 	let mut units = 0;
 	for (byte, character) in value.char_indices() {
