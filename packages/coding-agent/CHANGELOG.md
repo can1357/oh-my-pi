@@ -18,6 +18,7 @@
 
 ### Changed
 
+- Composer predictions (`composer.predictions`) are on by default: after each completed turn the active model suggests your next message as ghost text in the empty composer (one extra billed request per turn, counted in /stats); turn it off in `/settings` → Interaction → "Composer Predictions"
 - Tool-call intent tracing is off by default in print (`-p`), RPC, ACP, and SDK sessions; set `tools.intentTracing: true` or `PI_INTENT_TRACING=1` to turn it on there
 - Commit draft `show()` now prints each run of lines from one unit under a single `1a ✓ Main` header instead of repeating the unit, mark, and owner on every line
 - The "Separate checkouts" guidance and the git guard's hint for a refused command now say how work comes back from an ovnfs checkout: `ovnfs land` puts its commits on the folder's branch with their files, `ovnfs pull` brings the folder's newer files in to resolve a conflict there, and `ovnfs rm` discards the rest. They no longer send agents through `apply --branch` and a fast-forward merge of their own, and point at `ovnfs help` for the rest (needs an ovnfs with `land`)
