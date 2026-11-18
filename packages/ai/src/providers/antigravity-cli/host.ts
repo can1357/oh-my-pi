@@ -169,6 +169,8 @@ export class AgyHost implements ProviderSessionState {
 	#announced = new Map<string, number>();
 	#announcementWaiters = new Set<{ name: string; finish(announced: boolean): void }>();
 	#loggedGeneration = 0;
+	#disposal: Promise<void> | undefined;
+	#diagnosticsSettled: Promise<void> | undefined;
 
 	/** geminiDir is the account-scoped agy configuration and conversation directory. */
 	constructor(geminiDir: string, options: AgyHostOptions = {}) {
@@ -364,7 +366,12 @@ export class AgyHost implements ProviderSessionState {
 	}
 
 	/** Stop first, await process exit, then remove only conversations this host created (never fork sources). */
-	async dispose(): Promise<void> {
+	dispose(): Promise<void> {
+		this.#disposal ??= this.#dispose();
+		return this.#disposal;
+	}
+
+	async #dispose(): Promise<void> {
 		this.close();
 		await withTimeout(
 			Promise.all(this.#exits),
@@ -798,12 +805,13 @@ export class AgyHost implements ProviderSessionState {
 	async #logDiagnostics(): Promise<void> {
 		const diagnostics = this.#options.diagnostics;
 		if (!diagnostics.enabled) return;
-		await withTimeout(
+		this.#diagnosticsSettled ??= withTimeout(
 			diagnostics.settled(),
 			DIAGNOSTICS_SETTLE_TIMEOUT_MS,
 			"Antigravity CLI diagnostics did not settle",
 			this.#options.schedule,
 		).catch(() => undefined);
+		await this.#diagnosticsSettled;
 		const summary = diagnostics.summary();
 		if (summary.samples === 0 || diagnostics.generation === this.#loggedGeneration) return;
 		this.#loggedGeneration = diagnostics.generation;
