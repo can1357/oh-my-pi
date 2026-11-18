@@ -608,6 +608,45 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.find("handoff-pending-provider", baseModel.id)).toBeUndefined();
 	});
 
+	test("a provider handed to another source while its fetched discovery waits to land drops its old owner's rows", async () => {
+		const providerName = "handoff-landing-provider";
+		const runtime = {
+			baseUrl: "https://runtime.example.com/v1",
+			apiKey: "RUNTIME_KEY",
+			api: "openai-completions",
+		} satisfies ProviderConfigInput;
+		registry.registerProvider(
+			providerName,
+			{ ...runtime, fetchDynamicModels: async () => [baseModel] },
+			"ext://old-owner",
+		);
+		// Every clock reading spends a whole merge slice, so the fetched pass lands behind macrotasks.
+		let clock = 0;
+		const clockSpy = vi.spyOn(performance, "now").mockImplementation(() => {
+			clock += 10;
+			return clock;
+		});
+		try {
+			let settled = false;
+			const refresh = registry.refreshRuntimeProviders("online").finally(() => {
+				settled = true;
+			});
+			while (!settled && registry.getProviderDiscoveryState(providerName)?.status !== "ok") {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				setImmediate(resolve);
+				await promise;
+			}
+			// Fetched but not landed: the handoff falls between the fetch and the land.
+			expect(settled).toBe(false);
+			expect(registry.find(providerName, baseModel.id)).toBeUndefined();
+			registry.registerProvider(providerName, { ...runtime, fetchDynamicModels: async () => [] }, "ext://new-owner");
+			await refresh;
+		} finally {
+			clockSpy.mockRestore();
+		}
+		expect(registry.find(providerName, baseModel.id)).toBeUndefined();
+	});
+
 	test("failed source preparation rejects its caller without rejecting catalog waiters", async () => {
 		registry.registerProvider(
 			"valid-runtime-provider",
