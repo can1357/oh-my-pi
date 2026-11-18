@@ -146,6 +146,35 @@ describe("accountPolicies startup: pin", () => {
 		expect(await next(auth, "S2")).toBe("b");
 	});
 
+	test("a probe that records no affinity ranks as if pinned but persists nothing", async () => {
+		if (!store) throw new Error("test setup failed");
+		const auth = await setup(pinned, ["a", "b"]);
+		setUsage("a", 0.95, 0.5);
+		setUsage("b", 0, 0);
+		const key = (await auth.keys.get(A, "probe", { recordAffinity: false }))?.replace(/^api-/, "");
+		expect(key).toBe("a");
+		expect(store.getCache(`session:sticky:${A}:probe`)).toBeNull();
+		// The probe did not use up the session's startup pin.
+		expect(await next(auth, "probe")).toBe("a");
+		expect(store.getCache(`session:sticky:${A}:probe`)).not.toBeNull();
+	});
+
+	test("releasing the session's account is final: the startup pin is not applied again", async () => {
+		const auth = await setup(pinned, ["a", "b"]);
+		setUsage("a", 0.3, 0.3);
+		setUsage("b", 0.1, 0.1);
+		expect(await next(auth, "S1")).toBe("a");
+		setUsage("a", 0.95, 0.5);
+		setUsage("b", 0, 0);
+		await auth.usage.invalidate(A);
+		// A usage-aware release moves a session to a healthier sibling, as after a user pin.
+		expect(auth.sessions.release(A, "S1")).toBe(true);
+		expect(await next(auth, "S1")).toBe("b");
+		expect(auth.sessions.sticky?.(A, "S1")?.explicit).toBeUndefined();
+		// A session that never had a startup pin applied still starts on the account.
+		expect(await next(auth, "S2")).toBe("a");
+	});
+
 	test("an account the user already pinned for the session is kept", async () => {
 		const auth = await setup(pinned, ["a", "b"]);
 		const backup = auth.oauth.accounts(A).find(account => account.accountId === "b");
