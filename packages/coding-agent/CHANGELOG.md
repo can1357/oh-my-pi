@@ -212,6 +212,7 @@
 ### Added
 
 - When a session's OAuth account changes, the TUI shows the old and new account and the rule that moved it (reserve, reclaim, blocked, cold pin and so on), the log records it at info level, and RPC clients receive an `account_switched` event
+- When a session's OAuth account changes, the TUI shows the old and new account and the rule that moved it (reserve, reclaim, blocked, cold pin and so on), the log records it at info level, and RPC clients receive an `account_switched` event ([#19623](https://github.com/can1357/oh-my-pi/pull/19623) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 
