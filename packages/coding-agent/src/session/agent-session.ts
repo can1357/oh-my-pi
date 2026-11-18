@@ -5226,12 +5226,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					assistantMsg.provider,
 				);
 				if (accountSwitch) {
+					const { event: switched, fromCredentialId, toCredentialId } = accountSwitch;
 					logger.info("Session OAuth account switched", {
 						sessionId: this.sessionId,
 						model: assistantMsg.model,
-						...accountSwitch,
+						provider: switched.provider,
+						reason: switched.reason,
+						fromCredentialId,
+						toCredentialId,
 					});
-					await this.#emitSessionEvent({ type: "account_switched", model: assistantMsg.model, ...accountSwitch });
+					await this.#emitSessionEvent({ type: "account_switched", model: assistantMsg.model, ...switched });
 				}
 			}
 			if (event.message.role === "toolResult") {

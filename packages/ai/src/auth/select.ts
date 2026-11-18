@@ -755,7 +755,19 @@ export class CredentialSelector {
 		// while a sibling is confirmed better: reserve (sibling measured outside
 		// reserve), spent allowance (unblocked sibling with allowance left), and
 		// opt-in reclaim (the sibling ranking picks next has higher priority and is
-		// measured at or above its `reclaimAbovePct`).
+		// measured at or above its `reclaimAbovePct`). Routing and the switch reason
+		// both read these rules, so a reported reason is the rule that fired.
+		const evictionRules = {
+			reclaim: (pinned: OAuthCandidate, sibling: OAuthCandidate): boolean =>
+				sibling.reclaimReady === true && (sibling.accountPriority ?? 0) > (pinned.accountPriority ?? 0),
+			reserve: (pinned: OAuthCandidate, sibling: OAuthCandidate): boolean =>
+				pinned.inReserve === true && sibling.reserveMeasured === true && sibling.inReserve === false,
+			"allowance-spent": (pinned: OAuthCandidate, sibling: OAuthCandidate): boolean =>
+				pinned.allowanceSpent === true &&
+				sibling.usage !== null &&
+				sibling.allowanceSpent === false &&
+				!this.#deps.blocks.isBlocked(provider, providerKey, sibling.selection.index, blockScopes),
+		};
 		const automaticPinWouldBeEvicted = (excludePreflightFailures: boolean): boolean => {
 			if (sessionPinIsExplicit || preferredCandidate === undefined) return false;
 			const rankedWinner = candidates.find(
@@ -764,29 +776,14 @@ export class CredentialSelector {
 					!(excludePreflightFailures && preflightFailures.has(candidate)) &&
 					!this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes),
 			);
-			if (
-				rankedWinner?.reclaimReady === true &&
-				(rankedWinner.accountPriority ?? 0) > (preferredCandidate.accountPriority ?? 0)
-			) {
-				return true;
-			}
-			return candidates.some(candidate => {
-				if (candidate === preferredCandidate) return false;
-				if (excludePreflightFailures && preflightFailures.has(candidate)) return false;
-				if (
-					preferredCandidate.inReserve === true &&
-					candidate.reserveMeasured === true &&
-					candidate.inReserve === false
-				) {
-					return true;
-				}
-				return (
-					preferredCandidate.allowanceSpent === true &&
-					candidate.usage !== null &&
-					candidate.allowanceSpent === false &&
-					!this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes)
-				);
-			});
+			if (rankedWinner !== undefined && evictionRules.reclaim(preferredCandidate, rankedWinner)) return true;
+			return candidates.some(
+				candidate =>
+					candidate !== preferredCandidate &&
+					!(excludePreflightFailures && preflightFailures.has(candidate)) &&
+					(evictionRules.reserve(preferredCandidate, candidate) ||
+						evictionRules["allowance-spent"](preferredCandidate, candidate)),
+			);
 		};
 		const pinEvictedBeforePreflight = automaticPinWouldBeEvicted(false);
 		if (
@@ -1024,26 +1021,9 @@ export class CredentialSelector {
 			if (!sessionPreferredIsWarm) return "cold";
 			const servedCandidate = candidateFor(served);
 			if (servedCandidate === undefined) return undefined;
-			if (
-				servedCandidate.reclaimReady === true &&
-				(servedCandidate.accountPriority ?? 0) > (pinned.accountPriority ?? 0)
-			) {
-				return "reclaim";
-			}
-			if (
-				pinned.inReserve === true &&
-				servedCandidate.reserveMeasured === true &&
-				servedCandidate.inReserve === false
-			) {
-				return "reserve";
-			}
-			if (
-				pinned.allowanceSpent === true &&
-				servedCandidate.usage !== null &&
-				servedCandidate.allowanceSpent === false
-			) {
-				return "allowance-spent";
-			}
+			if (evictionRules.reclaim(pinned, servedCandidate)) return "reclaim";
+			if (evictionRules.reserve(pinned, servedCandidate)) return "reserve";
+			if (evictionRules["allowance-spent"](pinned, servedCandidate)) return "allowance-spent";
 			return undefined;
 		};
 

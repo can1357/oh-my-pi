@@ -228,13 +228,18 @@ describe("credential pins", () => {
 		const accountB = accounts.find(account => account.accountId === "account-b");
 		storage.sessions.pin("anthropic", sessionId, accountA!.credentialId);
 		recordCredentialPin(storage, manager, sessionId, "anthropic");
+		const pinA = manager.getBranch().find(entry => entry.type === "credential_pin");
 		storage.sessions.pin("anthropic", sessionId, accountB!.credentialId);
 
 		expect(recordCredentialPin(storage, manager, sessionId, "anthropic")).toEqual({
-			provider: "anthropic",
-			from: "a@example.com",
-			to: "b@example.com",
-			reason: "pinned",
+			event: { provider: "anthropic", from: "a@example.com", to: "b@example.com", reason: "pinned" },
+			fromCredentialId: accountA!.credentialId,
+			toCredentialId: accountB!.credentialId,
 		});
+
+		// `/tree` back to a branch pinned to A: the session still runs on B, so the
+		// switch shows again, but no routing moved it this time.
+		manager.branch(pinA!.id);
+		expect(recordCredentialPin(storage, manager, sessionId, "anthropic")?.event.reason).toBeUndefined();
 	});
 });

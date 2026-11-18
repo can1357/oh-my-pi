@@ -28,8 +28,18 @@ export interface AccountSwitch {
 	/** The previous account's label; absent once that account is no longer stored. */
 	from?: string;
 	to: string;
-	/** Absent when this process's auth store holds no rule for it (another process routed the session, or a worker seam without `sessions.sticky`). */
+	/** Absent when no routing rule of this process's auth store moved the session onto `to` since the last report (another process routed it, the branch's last pin predates an earlier switch, or a worker seam without `sessions.takeSwitchReason`). */
 	reason?: AccountSwitchReason;
+}
+
+/**
+ * A recorded {@link AccountSwitch} and the stored credential ids on each side,
+ * which the log records in place of the account labels (emails).
+ */
+export interface RecordedAccountSwitch {
+	event: AccountSwitch;
+	fromCredentialId?: number;
+	toCredentialId?: number;
 }
 
 /** Account fields shared by `OAuthAccountIdentity` and `OAuthAccountSummary`. */
@@ -71,14 +81,16 @@ export function credentialPinHash(provider: string, identity: CredentialPinIdent
  * branch's latest pin, so steady-state sessions add a single entry; the
  * effective last-use time is derived from later assistant turns on read
  * (see `SessionManager.getCredentialPins`). Returns the switch when an earlier
- * pin named another account.
+ * pin named another account. Every call consumes the auth store's switch
+ * reason, so a reason is reported with the turn its switch served or not at all.
  */
 export function recordCredentialPin(
 	authStorage: AuthStorage,
 	sessionManager: SessionManager,
 	sessionId: string,
 	provider: string,
-): AccountSwitch | undefined {
+): RecordedAccountSwitch | undefined {
+	const reason = authStorage.sessions.takeSwitchReason?.(provider, sessionId);
 	const identity = authStorage.oauth.identity(provider, sessionId);
 	if (!identity) return undefined;
 	const hash = credentialPinHash(provider, identity);
@@ -87,14 +99,12 @@ export function recordCredentialPin(
 	sessionManager.appendCredentialPin(provider, hash);
 	const to = formatActiveAccountLabel(identity);
 	if (previousHash === undefined || to === undefined) return undefined;
-	const from = authStorage.oauth
-		.accounts(provider, sessionId)
-		.find(account => credentialPinHash(provider, account) === previousHash);
+	const accounts = authStorage.oauth.accounts(provider, sessionId);
+	const from = accounts.find(account => credentialPinHash(provider, account) === previousHash);
 	return {
-		provider,
-		from: formatActiveAccountLabel(from),
-		to,
-		reason: authStorage.sessions.sticky?.(provider, sessionId)?.switchReason,
+		event: { provider, from: formatActiveAccountLabel(from), to, reason },
+		fromCredentialId: from?.credentialId,
+		toCredentialId: accounts.find(account => account.active)?.credentialId,
 	};
 }
 

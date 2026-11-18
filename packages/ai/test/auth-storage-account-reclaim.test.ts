@@ -309,7 +309,7 @@ describe("account switch reasons", () => {
 		{ provider: A, account: { accountId: "a" }, priority: 10, reservePct: 15, reclaimAbovePct: 40 },
 		{ provider: A, account: { accountId: "b" }, priority: 5 },
 	];
-	const reason = (auth: AuthStorage, session: string) => auth.sessions.sticky?.(A, session)?.switchReason;
+	const reason = (auth: AuthStorage, session: string) => auth.sessions.takeSwitchReason?.(A, session);
 	const credentialId = (auth: AuthStorage, accountId: string): number => {
 		const account = auth.oauth.accounts(A).find(candidate => candidate.accountId === accountId);
 		if (!account) throw new Error(`expected account ${accountId}`);
@@ -326,10 +326,10 @@ describe("account switch reasons", () => {
 		setUsage(A, "a", 0.9, 0.5);
 		expect(await next(auth, A, "S1")).toBe("b");
 		expect(reason(auth, "S1")).toBe("reserve");
-		// Staying put keeps the reason of the switch that led here.
+		// The reason is reported once; staying put reports none.
 		await advance(auth, A, 10 * MIN);
 		expect(await next(auth, A, "S1")).toBe("b");
-		expect(reason(auth, "S1")).toBe("reserve");
+		expect(reason(auth, "S1")).toBeUndefined();
 		await advance(auth, A, 10 * MIN);
 		setUsage(A, "a", 0, 0.45);
 		setUsage(A, "b", 0.2, 0.15);

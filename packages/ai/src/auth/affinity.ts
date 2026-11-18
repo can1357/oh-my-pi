@@ -45,8 +45,9 @@ export type SessionCredential = {
 	/** Set only by the public user-facing pin API; automatic warm affinity leaves it absent. */
 	explicit?: true;
 	/**
-	 * Why this credential replaced the one that served the session before; absent
-	 * for a session's first credential. Kept in memory only, never persisted.
+	 * Why this credential replaced the one that served the session before, until
+	 * `SessionsApi.takeSwitchReason` reads it; absent for a session's first
+	 * credential. Kept in memory only, never persisted.
 	 */
 	switchReason?: AccountSwitchReason;
 };
@@ -239,6 +240,14 @@ export class SessionAffinity implements SessionsApi {
 	noteSwitch(provider: string, sessionId: string, credentialId: number, reason: AccountSwitchReason): void {
 		const live = this.#sessionLastCredential.get(provider)?.get(sessionId);
 		if (live?.credentialId === credentialId) live.switchReason = reason;
+	}
+
+	/** `SessionsApi.takeSwitchReason`: return the session's switch reason and clear it. */
+	takeSwitchReason(provider: string, sessionId: string): AccountSwitchReason | undefined {
+		const live = this.#sessionLastCredential.get(provider)?.get(sessionId);
+		const reason = live?.switchReason;
+		if (live) delete live.switchReason;
+		return reason;
 	}
 
 	/**
