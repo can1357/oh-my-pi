@@ -41,6 +41,7 @@ interface Connection {
 const PROTOCOL_VERSION = "2025-06-18";
 const MAX_FRAME_BYTES = 32 * 1024 * 1024;
 const TOOLS_CHANGED = `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/tools/list_changed" })}\n`;
+const TOOLS_CHANGED_BYTES = Buffer.byteLength(TOOLS_CHANGED);
 
 /** Live tool set shared with every connection; updateTools swaps it without restarting agy. */
 interface ToolSet {
@@ -128,7 +129,7 @@ export class McpBridge {
 		for (const socket of this.#sockets) {
 			if (socket.data.closed) continue;
 			try {
-				socket.write(TOOLS_CHANGED);
+				if (socket.write(TOOLS_CHANGED) !== TOOLS_CHANGED_BYTES) socket.terminate();
 			} catch {
 				socket.terminate();
 			}
