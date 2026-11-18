@@ -141,14 +141,6 @@ pub(crate) fn opens_menu_at(pid: libc::pid_t, x: f64, y: f64) -> bool {
 	false
 }
 
-/// The accessibility role of the element of `pid` at global point `(x, y)`,
-/// or `None` when it cannot be read.
-pub(crate) fn role_at(pid: libc::pid_t, x: f64, y: f64) -> Option<String> {
-	let app = probe_application(pid)?;
-	let element = hit_test(&app, x, y)?;
-	copy_string(&element, "AXRole")
-}
-
 /// The element of `app` at global point `(x, y)`.
 pub(super) fn hit_test(app: &AXUIElement, x: f64, y: f64) -> Option<CFRetained<AXUIElement>> {
 	let mut output: *const AXUIElement = ptr::null();

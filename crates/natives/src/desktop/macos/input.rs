@@ -3292,15 +3292,15 @@ fn drag_session_outcome(
 /// ([`ax::drag_control::Control`]), as [`drag_check`] and
 /// [`tracked_drag_outcome`] judge it.
 struct TrackedDrag<'a> {
-	role:       &'a str,
+	role:   &'a str,
 	/// The control's value before the press.
-	before:     f64,
+	before: f64,
 	/// Its `AXMinValue` and `AXMaxValue`, when it publishes both.
-	range:      Option<(f64, f64)>,
+	range:  Option<(f64, f64)>,
 	/// The value under the release on the control's straight-line scale.
-	target:     Option<f64>,
+	target: Option<f64>,
 	/// The path ends at least a pixel along its track from where it started.
-	moved:      bool,
+	moved:  bool,
 }
 
 /// What a left drag that started on a control publishing its position does
@@ -3320,9 +3320,13 @@ enum DragCheck {
 fn drag_check(drag: &TrackedDrag<'_>, keys_held: bool, steppable: bool) -> DragCheck {
 	// A track press can move a slider even when it starts at its maximum.
 	// Web sliders may run the other way: their thumb is checked after release.
-	let pinned = !steppable && drag.range.zip(drag.target).is_some_and(|((min, max), target)| {
-		(drag.before >= max && target >= max) || (drag.before <= min && target <= min)
-	});
+	let pinned = !steppable
+		&& drag
+			.range
+			.zip(drag.target)
+			.is_some_and(|((min, max), target)| {
+				(drag.before >= max && target >= max) || (drag.before <= min && target <= min)
+			});
 	if !drag.moved || pinned {
 		DragCheck::Done
 	} else if steppable && !keys_held {
@@ -3436,9 +3440,9 @@ fn slider_direction_refusal(window: &DesktopWindow, role: &str, before: f64) -> 
 	DesktopError::input_failed(format!(
 		"the drag reached window {} ({}), but its outcome could not be confirmed: the {role} \
 		 still reads {before} after the release. It was not stepped on because it exposes no \
-		 thumb position and its direction could not be established. Read the target before \
-		 retrying; focus the slider and press arrow keys, or use its AXIncrement/AXDecrement \
-		 accessibility actions; takeover (takeover: true) drags it with the pointer",
+		 thumb position and its direction could not be established. Read the target before retrying; \
+		 focus the slider and press arrow keys, or use its AXIncrement/AXDecrement accessibility \
+		 actions; takeover (takeover: true) drags it with the pointer",
 		window.id, window.app,
 	))
 }
@@ -9291,11 +9295,11 @@ mod tests {
 		// The thumb is at 100, but the press at 20% and release at 30%
 		// should move it down, despite the pointer moving right.
 		let drag = TrackedDrag {
-			role: "AXSlider",
+			role:   "AXSlider",
 			before: 100.0,
-			range: Some((0.0, 100.0)),
+			range:  Some((0.0, 100.0)),
 			target: Some(slider_value_at(frame, (0.0, 100.0), false, CGPoint::new(30.0, 8.0))),
-			moved: true,
+			moved:  true,
 		};
 		assert_eq!(drag_check(&drag, false, false), DragCheck::Confirm);
 		assert_eq!(drag_check(&drag, false, true), DragCheck::StepOn);
