@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `DesktopCapabilities.displayCount` is now `displayCount?: number`, absent while the backend cannot tell how many displays it can use; it was always a number ([#19618](https://github.com/can1357/oh-my-pi/pull/19618) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed Wayland `capabilities()` reporting zero displays before the first capture; the count is now absent until known ([#19618](https://github.com/can1357/oh-my-pi/pull/19618) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.1.0] - 2026-11-21
 
 ### Added
@@ -42,14 +50,6 @@
 - Fixed Wayland input operations on desktops without an available input route to fail immediately with a clear `PermissionDenied` error instead of attempting unnecessary screen capture first.
 - Fixed macOS `computer` interactions so background clicks, key presses, pop-up menu actions, and takeover calls restore the previously active window within the call.
 - Fixed macOS pop-up menu reads immediately after typing so they reflect the option selected by the entered letters.
-
-### Breaking Changes
-
-- `DesktopCapabilities.displayCount` is now `displayCount?: number`, absent while the backend cannot tell how many displays it can use; it was always a number
-
-### Fixed
-
-- Fixed Wayland `capabilities()` reporting zero displays before the first capture; the count is now absent until known
 
 ## [18.22.2] - 2026-11-18
 
