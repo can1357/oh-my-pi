@@ -5721,7 +5721,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				spotlightExperiment.client.onCredentialMissing = () =>
 					session.emitNotice("warning", notice, SPOTLIGHT_NOTICE_SOURCE);
 				spotlightExperiment.client.onAccessDenied = reason =>
-					session.emitNotice("warning", accessDeniedNotice(reason), SPOTLIGHT_NOTICE_SOURCE);
+					session.emitNotice(
+						"warning",
+						accessDeniedNotice(reason, spotlightExperiment.ranker),
+						SPOTLIGHT_NOTICE_SOURCE,
+					);
 			}
 		}
 		// Extension factories normally register tools before session construction,

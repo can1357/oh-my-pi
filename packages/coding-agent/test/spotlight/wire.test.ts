@@ -17,6 +17,7 @@ import { buildCallContext, callSummary } from "@oh-my-pi/pi-coding-agent/spotlig
 import { RecordingScorer } from "@oh-my-pi/pi-coding-agent/spotlight/scorer";
 import { readArtifactText } from "@oh-my-pi/pi-coding-agent/spotlight/sink";
 import {
+	accessDeniedNotice,
 	noCredentialNotice,
 	SpotlightExperiment,
 	type SpotlightExperimentOptions,
@@ -1316,6 +1317,13 @@ describe("spotlight session entry", () => {
 
 	it("warns without a credential that the judge ranks under auto, not that the unranked rules cut", () => {
 		expect(noCredentialNotice("auto")).not.toBe(noCredentialNotice("spotlight"));
+	});
+
+	it("warns on denied access that the judge ranks under auto, not that the unranked rules cut", () => {
+		const reason = "This account is waitlisted.";
+		expect(accessDeniedNotice(reason, "auto")).toContain("judge role ranks tool output");
+		expect(accessDeniedNotice(reason, "auto")).not.toContain("unranked fallback rules");
+		expect(accessDeniedNotice(reason, "spotlight")).toContain("unranked fallback rules");
 	});
 });
 
