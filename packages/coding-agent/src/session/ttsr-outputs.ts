@@ -19,34 +19,52 @@ type MatcherEntries = readonly { path: string; digest: string }[];
 interface ArgumentsInspection {
 	tool: TtsrTool | undefined;
 	/**
-	 * {@link argumentsFingerprint} when inspected. Arguments objects are mutated
-	 * in place (streams append, reused calls are rewritten), so reuse requires
-	 * the full contents to hash the same, not just the same sizes.
+	 * {@link argumentsLeaves} when inspected. Arguments objects are mutated in
+	 * place (streams append, reused calls are rewritten), so reuse requires every
+	 * key and value to be unchanged, not just the same object.
 	 */
-	fingerprint: number | bigint;
+	leaves: readonly unknown[];
 	digest?: { value: string | undefined };
 	entries?: { value: MatcherEntries | undefined };
 	context?: { id: string; name: string; contentIndex: number; cwd: string; value: TtsrMatchContext };
 }
 
-/** Past this depth the fingerprint stops descending; parsed tool arguments are never this deep. */
-const FINGERPRINT_MAX_DEPTH = 32;
+/** Past this depth the snapshot stops descending; parsed tool arguments are never this deep. */
+const LEAVES_MAX_DEPTH = 32;
+const OPEN_OBJECT = Symbol("{");
+const OPEN_ARRAY = Symbol("[");
+const CLOSE = Symbol("}");
+const TRUNCATED = Symbol("…");
 
 /**
- * Content hash over every key and primitive value of the arguments tree,
- * chained through `Bun.hash` seeds so it allocates no serialized copy. Any
- * change a matcher hook could observe — nested, same-length, or appended —
- * changes it.
+ * Every key and primitive value of the arguments tree in walk order, with
+ * container markers. Comparing two snapshots value by value catches any change
+ * a matcher hook could observe — nested, same-length, or appended — at a cost
+ * per value, not per byte: strings compare in constant time unless they are
+ * distinct strings of equal length, where a content change still shows up.
  */
-function argumentsFingerprint(value: unknown, seed: number | bigint = 0, depth = 0): number | bigint {
-	if (typeof value === "string") return Bun.hash(value, Bun.hash("s", seed));
-	if (value === null || typeof value !== "object") return Bun.hash(String(value), Bun.hash(typeof value, seed));
-	if (depth >= FINGERPRINT_MAX_DEPTH) return Bun.hash("…", seed);
-	let hash = Bun.hash(Array.isArray(value) ? "[" : "{", seed);
-	for (const [key, child] of Object.entries(value)) {
-		hash = argumentsFingerprint(child, Bun.hash(key, hash), depth + 1);
+function argumentsLeaves(value: unknown, out: unknown[] = [], depth = 0): unknown[] {
+	if (value === null || typeof value !== "object") {
+		out.push(value);
+		return out;
 	}
-	return Bun.hash(Array.isArray(value) ? "]" : "}", hash);
+	if (depth >= LEAVES_MAX_DEPTH) {
+		out.push(TRUNCATED);
+		return out;
+	}
+	out.push(Array.isArray(value) ? OPEN_ARRAY : OPEN_OBJECT);
+	for (const [key, child] of Object.entries(value)) {
+		out.push(key);
+		argumentsLeaves(child, out, depth + 1);
+	}
+	out.push(CLOSE);
+	return out;
+}
+
+function sameLeaves(a: readonly unknown[], b: readonly unknown[]): boolean {
+	if (a.length !== b.length) return false;
+	for (let index = 0; index < a.length; index++) if (!Object.is(a[index], b[index])) return false;
+	return true;
 }
 
 /** Resolves tool calls against live tool definitions and the session cwd. */
@@ -173,11 +191,11 @@ export class TtsrToolInspector {
 			tools.find(candidate => candidate.name === toolCall.name) ??
 			tools.find(candidate => candidate.customWireName !== undefined && candidate.customWireName === toolCall.name);
 		const args: unknown = toolCall.arguments;
-		if (!isRecord(args)) return { tool, fingerprint: -1 };
-		const fingerprint = argumentsFingerprint(args);
+		if (!isRecord(args)) return { tool, leaves: [] };
+		const leaves = argumentsLeaves(args);
 		const cached = this.#inspections.get(args);
-		if (cached && cached.tool === tool && cached.fingerprint === fingerprint) return cached;
-		const inspection: ArgumentsInspection = { tool, fingerprint };
+		if (cached && cached.tool === tool && sameLeaves(cached.leaves, leaves)) return cached;
+		const inspection: ArgumentsInspection = { tool, leaves };
 		this.#inspections.set(args, inspection);
 		return inspection;
 	}

@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- `CustomMessage` and `custom_message` entries accept `excludeFromContext`: such a message is never sent to the model, and compaction and branch summaries skip it ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
+- `Agent.continue()` delivers a queued steer or follow-up when only messages flagged `excludeFromContext` trail the last assistant reply; `isExcludedFromContext()`, `lastContextIndex()` and `lastContextMessage()` are exported ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
+
+## [18.22.1] - 2026-11-17
+
+### Added
+
+- A model on an extension's custom api can take the Anthropic on-demand compaction lane by declaring `remoteCompaction: { api: "anthropic-messages", enabled: true }`; the request goes through its own stream like any turn ([#19580](https://github.com/can1357/oh-my-pi/pull/19580) by [@ryanskidmore](https://github.com/ryanskidmore))
+
+### Fixed
+
+- Fixed provider-error handling so failed tool calls are no longer fed back to the model as refusal explanations.
+- Fixed one-shot retries and title generation for custom Zhipu Coding Plan providers so Beijing-time quota resets are honored.
+- Fixed OpenAI remote compaction (V1 and V2) dropping configured headers of models.yml and extension-registered models, so header-authenticated gateways returned 401 ([#19579](https://github.com/can1357/oh-my-pi/pull/19579) by [@ryanskidmore](https://github.com/ryanskidmore))
+
 ## [18.20.1] - 2026-11-14
 
 ### Fixed

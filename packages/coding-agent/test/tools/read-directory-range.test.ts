@@ -64,11 +64,11 @@ describe("read tool directory listings honor line selectors (regression: was sil
 		expect(lines.length).toBeLessThanOrEqual(11);
 		// "Use :N to continue" pagination hint when more entries remain.
 		expect(output).toContain("more lines in listing");
-		expect(output).toContain("Use :41 to continue");
+		expect(output).toContain("Use :41- to continue");
 	});
 
-	it("returns from offset to end for `:start`", async () => {
-		const result = await tool.execute("call-offset", { path: `${testDir}:30` });
+	it("returns from offset to end for `:start-`", async () => {
+		const result = await tool.execute("call-offset", { path: `${testDir}:30-` });
 		const output = getTextOutput(result);
 		const lines = output.split("\n").filter(line => line.includes("file-"));
 

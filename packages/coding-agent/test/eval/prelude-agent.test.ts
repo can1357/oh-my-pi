@@ -197,7 +197,7 @@ describe("eval js wait() timeout (issue #12549)", () => {
 });
 
 describe("eval js read() URI delegation", () => {
-	it("appends line selectors to delegated URI paths", async () => {
+	it("asks delegated URI paths for raw content, with line selectors", async () => {
 		const calls: Array<{ name: string; args: unknown }> = [];
 		const sandbox = loadPrelude(async (name, args) => {
 			calls.push({ name, args });
@@ -205,14 +205,13 @@ describe("eval js read() URI delegation", () => {
 		});
 		sandbox.__omp_helpers__ = { hasRoot: () => false };
 
-		const result = await vm.runInContext(`read("mcp://server/resource", { offset: 10, limit: 5 })`, sandbox);
+		const result = await vm.runInContext(`read("skill://demo/notes.md", { offset: 10, limit: 5 })`, sandbox);
+		await vm.runInContext(`read("skill://demo/notes.md")`, sandbox);
 
 		expect(result).toBe("resource contents");
 		expect(calls).toEqual([
-			{
-				name: "read",
-				args: { path: "mcp://server/resource:10-14" },
-			},
+			{ name: "read", args: { path: "skill://demo/notes.md:raw:10-14" } },
+			{ name: "read", args: { path: "skill://demo/notes.md:raw" } },
 		]);
 	});
 
@@ -280,7 +279,7 @@ describe("eval js read() URI delegation", () => {
 		const { calls, sandbox } = loadArtifactPrelude(undefined, artifactReadBridge(tmp.path(), tmp.path()));
 
 		expect(await vm.runInContext(`read("artifact://12")`, sandbox)).toBe(largeArtifact);
-		expect(await vm.runInContext(`read("artifact://12:raw:1-1")`, sandbox)).toBe("head");
+		expect(await vm.runInContext(`read("artifact://12:raw:1-1")`, sandbox)).toBe("head\n");
 		expect(calls).toEqual([
 			{ name: "read", args: { path: "artifact://12:raw:1-1" } },
 			{ name: "read", args: { path: "artifact://12:raw:1-1" } },
@@ -418,7 +417,7 @@ describe("eval js output() options (issue #17455)", () => {
 				id,
 				displayName: id,
 				kind: "sub",
-				session: { isStreaming: true } as AgentSession,
+				session: { isStreaming: true, runStartedAt: Date.now() } as AgentSession,
 				status: "running",
 			});
 		}

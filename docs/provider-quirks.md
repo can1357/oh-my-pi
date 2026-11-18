@@ -667,6 +667,29 @@ The Devin integration (`devin-agent` API) communicates with Codeium Cascade back
 
 * **Dynamic Discovery:** `fetchDevinModels` in `packages/catalog/src/discovery/devin.ts` invokes the unary Connect RPC `GetCliModelConfigs` (`/exa.api_server_pb.ApiServerService/GetCliModelConfigs`) with the native `chisel` discovery metadata from `packages/catalog/src/wire/devin.ts` and every supported display slot. `normalizeDevinModels` drops disabled/internal configs, converts `ClientModelConfig` into `ModelSpec<"devin-agent">` entries (context window from `ClientModelConfig.maxTokens`, else `ModelInfo.maxTokens`, where current catalogs carry it, else 200k; 64k max tokens by default), and preserves server-supplied output caps, pricing dimensions, tool/parallel-tool/image support, description, and `new`/`beta`/`recommended` badges. Exception: `DEVIN_IMAGE_BLIND_UIDS` strips the image modality from `swe-1-6`/`swe-1-6-fast`, whose configs advertise `supports_images` while the backend silently drops the `ChatMessagePrompt.images` field (verified live; every other model reads it). An empty-but-200 catalog response logs a stale-identity-pin warning. Router configs (`displayOption MODEL_ROUTER` or `isModelRouter`) stay standalone with `compat.modelRouter`.
 
+## Kiro
+
+The native Kiro provider (`kiro-api`) streams AWS event-stream frames from the Kiro API. The stream and request mapping live in `packages/ai/src/providers/kiro/` (`stream.ts`, `transform.ts`), login in `packages/ai/src/registry/oauth/kiro.ts`, usage in `packages/ai/src/usage/kiro.ts`, discovery in `packages/catalog/src/discovery/kiro.ts`, and routing plus the credential codec in `packages/catalog/src/wire/kiro.ts`. User-facing setup is in [Kiro](./kiro.md).
+
+### Special casings
+
+- **Request identity**: Every request (chat, model and profile discovery, AWS sign-in, Google/GitHub sign-in) uses the same headers and service targets as the official Kiro CLI 3.2.0. The one intentional difference is `x-amzn-codewhisperer-optout: true`: OMP opts out of content sharing, where the CLI opts in by default.
+- **Tool-result byte budgets**: Each tool result is capped at 800,000 UTF-8 bytes (Kiro's service limit) and ends with a marker stating how much was omitted. The request budget is 850,000 bytes per 200,000 tokens of context window. Over budget, historical tool results are shrunk to 25,000 bytes oldest first, then current-turn results (never below 25,000 bytes). A request still over budget is reported as a context overflow so OMP compacts.
+
+### Stream behavior
+
+- **Transient retry**: A request is retried at most once, with an identical body and a fresh request id, and only before any output, for a `ThrottlingError` with reason `INSUFFICIENT_MODEL_CAPACITY` (over HTTP or as an in-stream exception) and for HTTP 400 `ValidationException: Invalid tool use format.`. A billed request is never replayed; every other failure is terminal.
+- **Stop reasons**: `MAX_TOKENS` maps to `length` and a tool call whose arguments were cut off is dropped. `CONTENT_FILTERED` is reported as a refusal with the service's category and explanation and is not retried.
+- **Context size**: `contextUsageEvent` percentages are reported as context size, scaled to the model's context window.
+
+### Auth & usage
+
+- **Token usage**: Usage comes only from `metadataEvent.tokenUsage`; when none arrives, usage is zero, never estimated.
+
+### Catalog model handling
+
+- **Per-credential discovery**: The roster is discovered per credential and never bundled; default model `auto`. The model cache is scoped per OAuth login (login id, profile, region), or per API key and region.
+
 ## GitLab Duo
 
 GitLab Duo is integrated via two distinct providers in OMP: **GitLab Duo Non-Agentic** (`gitlab-duo`), which proxies LLM requests through GitLab AI Gateway using standard HTTP/SSE sub-providers, and **GitLab Duo Agent** (`gitlab-duo-agent`), which connects to the GitLab Duo Workflow Service (DWS) over a WebSocket-based agent execution protocol. Entry modules for `gitlab-duo` are `packages/ai/src/providers/gitlab-duo.ts` and `packages/catalog/src/compat/rules/auth/gitlab-duo.kdl` (OAuth hooks in `packages/ai/src/registry/oauth/gitlab-duo.ts`), while `gitlab-duo-agent` is implemented in `packages/ai/src/providers/gitlab-duo-workflow.ts`, `packages/catalog/src/compat/rules/auth/gitlab-duo-agent.kdl`, and catalog discovery in `packages/catalog/src/discovery/gitlab-duo-workflow.ts`.
@@ -873,6 +896,27 @@ Baseten provides high-performance infrastructure for hosting open-weight LLMs (i
 - **Model Manager Options**: `basetenModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts` configures model resolution with `defaultBaseUrl: "https://inference.baseten.co/v1"` and `requireApiKey: true`.
 - **Dynamic Model Discovery & Pricing**: `fetchDynamicModels` queries `https://inference.baseten.co/v1/models`. `mapModel` parses raw record metadata including `supported_features`, `input_modalities` (`image` for vision capability), context and completion token bounds (`context_length`, `max_completion_tokens`), and per-million token pricing (`prompt`, `completion`, `input_cache_read`).
 - **Native Reasoning Identification**: Flags `reasoning: true` for `openai/gpt-oss-120b`, `deepseek-ai/DeepSeek-V4-Pro`, and `zai-org/GLM-5.2` when dynamic features list `reasoning` or `reasoning_effort`.
+
+## Bifrost (`bifrost`)
+
+Bifrost is a self-hosted open-source AI gateway that serves every configured upstream provider behind one OpenAI-compatible API (default `http://localhost:8080/v1`). Chat models use the OpenAI Chat Completions transport (`openai-completions`); decision models use the gateway's OpenAI Decisions route (`openai-decisions`, `POST {baseUrl}/decisions`).
+
+### Special casings
+
+- **Gateway roster**: model ids are `<bifrost-provider>/<model>` (`anthropic/claude-opus-5-5`, `openrouter/google/gemini-decision-1`, or a custom provider name such as `custom/drex-max-v1.1`). Nothing is bundled: `bifrost` is in `DISCOVERY_ONLY_PROVIDERS` (`packages/catalog/scripts/generate-models.ts`), and runtime discovery is authoritative (`dynamic-models-authoritative`).
+- **Row mapping (`bifrostModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`)**: Bifrost rows are OpenRouter-shaped where its model datasheet knows the model: `context_length` / `top_provider.context_length` / `max_input_tokens`, `max_output_tokens` / `top_provider.max_completion_tokens`, `architecture.input_modalities`, `supported_parameters` (`tools`, `reasoning`), a `reasoning` capability object, and per-token USD `pricing` (`prompt`, `completion`, `input_cache_read`, `input_cache_write`). A row that sets `pricing.prompt` or `pricing.completion` is authoritative, so an explicit `"0"` stays free. Fields a row omits fall back to the bundled model of the upstream provider named by the id prefix, then to a bundled model with the same bare `<model>` id, then with the same full id; the reference's transport compat is not carried over.
+- **Decision usage**: Bifrost's `/decisions` responses report chat-style `usage.prompt_tokens` / `completion_tokens`; the `openai-decisions` decoder reads them when the Responses-style `input_tokens` / `output_tokens` are absent.
+- **Decision models**: Bifrost answers every upstream's decision models on `/decisions`, but its `/models` rows declare `decisions` output only for OpenRouter's. A row is an `openai-decisions` judge by the most specific evidence: its `architecture.output_modalities` when present; otherwise the upstream provider's bundled row for the same model (so `nanogpt/cloudflare/clef` stays chat); otherwise whether the full id or its `<model>` part is a bundled judge id anywhere (`cloudflare/clef`, `custom/drex-max-v1.1`). Decision ids omp does not bundle (self-hosted `ollama/nimble`, aliased `azure/Microsoft-Decision-1`) are listed as chat models.
+- **Judge retries and fallbacks**: omp sends no `fallbacks` to `/decisions`, but Bifrost can still retry (provider `network_config.max_retries`) and fall back (routing-rule `fallbacks`) on its side. Each native judge candidate also gets up to 3 HTTP attempts within `judgment.attemptTimeoutMs`, then the next `retry.fallbackChains.judge` entry, so the two layers multiply upstream calls during an outage, and omp can give up at its deadline while Bifrost keeps retrying. Keep one fallback layer: either omp's judge chain (Bifrost judge routes with `max_retries` 0 and no rule fallbacks), or Bifrost's (one omp judge candidate with `judgment.attemptTimeoutMs` above the gateway's worst case, and `judgment.hedgeAfterMs` off).
+- **Non-chat rows**: rows whose `architecture.output_modalities` contain neither `text` nor `decisions` are dropped in the mapper; metadata-less embedding, speech, transcription, image, and moderation ids are dropped by `exclude-models provider="bifrost"` in `runtime/behavior.kdl`.
+- **Proxy, not local server**: `bifrost` is in `PROXY_OPENAI_COMPAT_PROVIDERS` (`packages/catalog/src/compat/resolve.ts`), so a loopback base URL does not turn on the local-runtime request shaping (grammar tool schemas, reasoning-content replay, output clamping) meant for llama.cpp, vLLM, and similar servers.
+
+### Auth & usage
+
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/bifrost.kdl` and asks for a Bifrost virtual key (`sk-bf-...`). Environment key: `BIFROST_API_KEY`. A gateway without governance accepts any value.
+- `BIFROST_BASE_URL` sets the gateway's OpenAI-compatible root (`getDefaultModelDiscoveryBaseUrl` in `packages/catalog/src/provider-models/cache-provider-id.ts`); a `models.yml` provider `baseUrl` override wins. Discovery, chat, and judge requests all use it.
+- Discovery does not run without a credential: the default port `8080` is also llama.cpp's default, whose models must not appear as Bifrost models.
+- **Cache scope**: the model cache namespace hashes the API key and base URL (`bifrost` is in `CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS`), since virtual keys can restrict the roster.
 
 ## Cerebras (`cerebras`)
 
@@ -2588,7 +2632,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 ### Catalog model handling
 
 - **Provider entry (`local`)**: `packages/catalog/src/compat/rules/providers/local.kdl` declares default model `lfm2.5-230m`. Model management permits unauthenticated access.
-- **Authored seeds**: `kokoro`, `parakeet-tdt-0.6b-v3`, `whisper-base`, `whisper-small`, `whisper-large-v3-turbo`, `lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`, `qwen3-1.7b`, `llama3.2:3b`, `gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
+- **Authored seeds**: `phonon-31m`, `parakeet-tdt-0.6b-v3`, `whisper-base`, `whisper-small`, `whisper-large-v3-turbo`, `lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`, `qwen3-1.7b`, `llama3.2:3b`, `gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
 - Runtime manager: `localModelManagerOptions` in `packages/catalog/src/provider-models/special.ts`.
 
 ## Muse Code (Subscription) (`muse-code`)

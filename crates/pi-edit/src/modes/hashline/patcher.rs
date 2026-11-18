@@ -18,7 +18,10 @@ use super::{
 		stale_unseen_lines_message, unseen_lines_message, unverified_wide_lines_message,
 		wide_unseen_lines_message,
 	},
-	mismatch::{MismatchDetails, format_header_only_message, mismatch_error},
+	mismatch::{
+		MismatchDetails, format_header_only_message, mismatch_error, tag_from_other_file_error,
+		tag_path_missing_error,
+	},
 	parser::{ParseFailure, parse_patch},
 	recovery::{RecoveryArgs, current_line_map, try_recover},
 	types::{ApplyResult, BlockOpKind, BlockResolution, Edit, FileOp},
@@ -116,12 +119,6 @@ pub(crate) fn mismatch(
 	// session that *did* issue the same tag — so the rejection can name the
 	// file the tag was actually for and the model doesn't follow a wrong-tree
 	// suggestion.
-	let tag_origin_paths: Vec<String> = store
-		.paths_with_hash(expected)
-		.into_iter()
-		.filter(|path| path != canonical)
-		.map(|path| path.to_string_lossy().into_owned())
-		.collect();
 	mismatch_error(&MismatchDetails {
 		path: Some(section.path.clone()),
 		expected_file_hash: expected.to_owned(),
@@ -129,8 +126,22 @@ pub(crate) fn mismatch(
 		file_lines,
 		anchor_lines,
 		hash_recognized: store.has_hash(canonical, expected),
-		tag_origin_paths,
+		tag_origin_paths: tag_origin_paths(store, canonical, expected),
 	})
+}
+
+/// Paths other than `canonical` this session issued `tag` for, sorted and
+/// deduplicated (the store lists one entry per retained version).
+fn tag_origin_paths(store: &EditStore, canonical: &Path, tag: &str) -> Vec<String> {
+	let mut paths: Vec<String> = store
+		.paths_with_hash(tag)
+		.into_iter()
+		.filter(|path| path != canonical)
+		.map(|path| path.to_string_lossy().into_owned())
+		.collect();
+	paths.sort();
+	paths.dedup();
+	paths
 }
 
 /// Answer input that is only a section header (no ops) with the file's
@@ -609,6 +620,21 @@ pub(crate) fn apply_with_recovery(
 ) -> Result<ApplyResult, EditError> {
 	let expected = section.file_hash.as_deref().unwrap_or_default();
 	let live_matches = file_hash(normalized).eq_ignore_ascii_case(expected);
+	// Tags hash content only, so a file identical to one this session read (a
+	// sibling checkout, a copied fixture) matches a tag it never held. When the
+	// tag was issued for other paths and never for this one, the header most
+	// likely resolved to the wrong file (a relative path under another cwd).
+	if live_matches && !store.has_hash(canonical, expected) {
+		let origins = tag_origin_paths(store, canonical, expected);
+		if !origins.is_empty() {
+			return Err(tag_from_other_file_error(
+				&section.path,
+				&canonical.to_string_lossy(),
+				expected,
+				&origins,
+			));
+		}
+	}
 	let stored = store.by_hash(canonical, expected);
 	let mut block_resolutions = Vec::new();
 	let mut resolve_warnings = Vec::new();
@@ -727,19 +753,24 @@ fn format_block_resolution(resolution: &BlockResolution) -> String {
 	format!("{op} → resolved {span} ({lines} line{}){suffix}", if lines == 1 { "" } else { "s" })
 }
 
-/// When the authored path does not exist, rebind the section to the one
-/// stored snapshot with the same content tag and file name. `None` keeps
-/// the authored section and target, which callers use by reference.
+/// When the authored path does not exist but exactly one file this session
+/// read has the same name and tag: rebind the section onto it when it lies in
+/// the session's sandbox
+/// ([`crate::path_policy::PathPolicy::allow_tag_path_recovery`]), else reject
+/// with its path, since a same-named working-tree file may be another checkout'
+/// s copy. `Ok(None)` keeps the authored section and target.
 pub(crate) fn recover_target(
 	section: &PatchSection,
 	initial: &Resolved,
 	files: &mut dyn FileSource,
 	store: &EditStore,
-) -> Option<(PatchSection, Resolved)> {
+) -> Result<Option<(PatchSection, Resolved)>, EditError> {
 	if files.exists(&initial.absolute) {
-		return None;
+		return Ok(None);
 	}
-	let tag = section.file_hash.as_deref()?;
+	let Some(tag) = section.file_hash.as_deref() else {
+		return Ok(None);
+	};
 	let authored_name = initial.absolute.file_name();
 	let mut candidates = store
 		.paths_with_hash(tag)
@@ -748,16 +779,14 @@ pub(crate) fn recover_target(
 		.collect::<Vec<_>>();
 	candidates.sort();
 	candidates.dedup();
-	if candidates.len() != 1
-		|| !files
-			.policy()
-			.allow_tag_path_recovery(&section.path, &candidates[0])
-	{
-		return None;
-	}
-	let path = candidates.remove(0);
+	let [path] = candidates.as_slice() else {
+		return Ok(None);
+	};
 	let display = path.to_string_lossy().into_owned();
-	Some((section.with_path(&display), Resolved { absolute: path, display }))
+	if !files.policy().allow_tag_path_recovery(&section.path, path) {
+		return Err(tag_path_missing_error(&section.path, &display, tag));
+	}
+	Ok(Some((section.with_path(&display), Resolved { absolute: path.clone(), display })))
 }
 /// Stage a whole-file delete for a target whose bytes cannot be decoded:
 /// existence is proven, but there is no content to diff or snapshot.
@@ -877,7 +906,7 @@ fn stage_section(
 	let parsed = parse_with_range_diagnostics(original, files)?;
 	let tag = original.file_hash.as_deref();
 	let initial = files.resolve(&original.path, false)?;
-	let recovered = recover_target(original, &initial, files, store);
+	let recovered = recover_target(original, &initial, files, store)?;
 	let (section, resolved) = recovered
 		.as_ref()
 		.map_or((original, &initial), |(section, resolved)| (section, resolved));
@@ -926,12 +955,8 @@ fn stage_section(
 			return Err(EditError::apply(format!("MV destination is the same as {}.", section.path)));
 		}
 	}
-	let edits = if matches!(parsed.file_op, Some(FileOp::Rem)) {
-		&[][..]
-	} else {
-		parsed.edits.as_slice()
-	};
-	let apply = apply_with_recovery(
+	let edits = parsed.edits.as_slice();
+	let mut apply = apply_with_recovery(
 		section,
 		&read.canonical,
 		&read.text,
@@ -940,6 +965,11 @@ fn stage_section(
 		store,
 		seen_line_guard,
 	)?;
+	// A REM section's cuts only fill registers; the file is deleted whole.
+	if matches!(parsed.file_op, Some(FileOp::Rem)) {
+		apply.text.clone_from(&read.text);
+		apply.first_changed_line = None;
+	}
 	let mut warnings = parsed.warnings.clone();
 	if section.path != original.path {
 		warnings.push(path_recovered_from_tag_message(&original.path, &section.path, tag));

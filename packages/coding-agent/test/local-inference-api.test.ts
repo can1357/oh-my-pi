@@ -214,7 +214,7 @@ describe("local inference API", () => {
 
 	it("rejects non-tiny local models before invoking the worker client", async () => {
 		const chat = vi.spyOn(tinyModelClient, "chat").mockResolvedValue("should not run");
-		const nonTinyModel = getBundledModel("local", "kokoro")!;
+		const nonTinyModel = getBundledModel("local", "phonon-31m")!;
 		const stream = streamSimple(nonTinyModel, { messages: [userMessage("question")] });
 		const result = await stream.result();
 

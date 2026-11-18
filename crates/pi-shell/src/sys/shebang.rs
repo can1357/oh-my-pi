@@ -85,7 +85,9 @@ fn basename(path: &[u8]) -> &[u8] {
 	path.rfind_byteset(b"/\\").map_or(path, |i| &path[i + 1..])
 }
 
-fn is_self_shell(name: &[u8]) -> bool {
+/// Whether `name` (a bare command name, no directory) is a shell the engine
+/// implements itself: `sh`, `bash` or `zsh`.
+pub fn is_self_shell(name: &[u8]) -> bool {
 	SELF_SHELLS.contains(&name)
 }
 

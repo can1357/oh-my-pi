@@ -26,6 +26,7 @@ import type {
 	default as Puppeteer,
 	TimeoutError,
 	Target,
+	Viewport,
 } from "puppeteer-core";
 import stealthTamperingScript from "../puppeteer/00_stealth_tampering.txt" with { type: "text" };
 import stealthActivityScript from "../puppeteer/01_stealth_activity.txt" with { type: "text" };
@@ -44,7 +45,7 @@ import stealthWorkerScript from "../puppeteer/13_stealth_worker.txt" with { type
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withDownload } from "../../downloads/activity";
 import { TOOL_TIMEOUTS } from "../tool-timeouts";
-import { findUserDataDirInArgs, gracefulKillTreeOnce, probeCdpResponse } from "./attach";
+import { findUserDataDirInArgs, gracefulKillTreeOnce, killTreeOnce, probeCdpResponse } from "./attach";
 
 export const DEFAULT_VIEWPORT = { width: 1365, height: 768, deviceScaleFactor: 1.25 };
 
@@ -746,7 +747,7 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 			const wsEndpoint = pipe ? await activePortEndpoint(activePortFile, staleActivePort) : browser.wsEndpoint();
 			return { browser, wsEndpoint, userDataDir };
 		} catch (error) {
-			await closeLaunchedBrowser(browser);
+			await closeLaunchedBrowser({ browser, userDataDir });
 			throw error;
 		}
 	} catch (error) {
@@ -755,14 +756,31 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 	}
 }
 
-/** Close a browser {@link launchHeadlessBrowser} started, force-killing its process tree when the close hangs. */
-export async function closeLaunchedBrowser(browser: Browser): Promise<void> {
-	const proc = browser.process();
+/**
+ * Close a browser {@link launchHeadlessBrowser} started.
+ *
+ * With an omp-owned `userDataDir` (deleted next) a graceful shutdown saves
+ * nothing that survives, so the process tree is killed outright. That also
+ * spares builds whose graceful shutdown never finishes (observed: Chrome for
+ * Testing 150 on macOS 27 outlives both `Browser.close` and SIGTERM) the close
+ * timeout plus the SIGTERM grace on every close. A caller-supplied profile
+ * (`userDataDir` undefined) gets `browser.close()` first, force-killing the
+ * tree when that hangs.
+ */
+export async function closeLaunchedBrowser({
+	browser,
+	userDataDir,
+}: Pick<LaunchHeadlessResult, "browser" | "userDataDir">): Promise<void> {
+	const pid = browser.process()?.pid;
+	if (userDataDir !== undefined && pid !== undefined) {
+		await killTreeOnce(pid).catch(() => undefined);
+		return;
+	}
 	try {
 		await withTimeout(browser.close(), HEADLESS_CLOSE_TIMEOUT_MS, "Timed out closing headless browser");
 	} catch (err) {
 		logger.debug("Failed to close headless browser; force-killing", { error: toError(err).message });
-		if (proc?.pid !== undefined) await gracefulKillTreeOnce(proc.pid).catch(() => undefined);
+		if (pid !== undefined) await gracefulKillTreeOnce(pid).catch(() => undefined);
 	}
 }
 
@@ -919,10 +937,7 @@ export async function removeUserDataDir(dir: string): Promise<void> {
 	}
 }
 
-export async function applyViewport(
-	page: Page,
-	viewport?: { width: number; height: number; deviceScaleFactor?: number },
-): Promise<void> {
+export async function applyViewport(page: Page, viewport?: Viewport): Promise<void> {
 	if (!viewport) {
 		await page.setViewport(DEFAULT_VIEWPORT);
 		return;
@@ -931,6 +946,8 @@ export async function applyViewport(
 		width: viewport.width,
 		height: viewport.height,
 		deviceScaleFactor: viewport.deviceScaleFactor ?? DEFAULT_VIEWPORT.deviceScaleFactor,
+		isMobile: viewport.isMobile,
+		hasTouch: viewport.hasTouch,
 	});
 }
 

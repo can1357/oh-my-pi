@@ -13,11 +13,11 @@ mod pty_support;
 
 use std::{io, time::Duration};
 
-use pty_support::{Pty, Spawn, TIMEOUT, differential, have_real_zsh};
+use pty_support::{Pty, Spawn, TIMEOUT, ZLE_SYNC_SCRIPT, differential, have_real_zsh};
 
 /// The pause between keys.
 const KEY: Duration = Duration::from_millis(60);
-/// How long output must stay quiet before the screen is read.
+/// Incremental searches can remain in a recursive key read.
 const QUIET: Duration = Duration::from_millis(300);
 
 /// The history file every case starts with (oldest first).
@@ -41,7 +41,8 @@ fn spawn(real: bool, rc: &str) -> Spawn {
 		.env("PS1", "%~ %# ")
 		.env("RPS1", "[%?]")
 		.rc_file("hist", HIST)
-		.rc_file(".zshrc", rc)
+		.rc_file(".zshrc", format!("{rc}\n. ~/{ZLE_SYNC_SCRIPT}\nprint -r -- RCDONE\n"))
+		.zle_sync()
 		.cwd("/tmp")
 		.size(24, 80)
 }
@@ -49,7 +50,7 @@ fn spawn(real: bool, rc: &str) -> Spawn {
 /// Type `text` key by key.
 fn keys(pty: &mut Pty, text: &str) -> io::Result<()> {
 	pty.type_keys(text, KEY)?;
-	pty.settle(QUIET, TIMEOUT)
+	pty.zle_sync(TIMEOUT)
 }
 
 /// The final screens of `drive` against both shells after sourcing the rc
@@ -59,8 +60,12 @@ fn screens(
 	drive: impl Fn(&mut Pty) -> io::Result<()>,
 ) -> io::Result<(String, Option<String>)> {
 	let run = |pty: &mut Pty| -> io::Result<()> {
-		pty.settle(QUIET, TIMEOUT)?;
-		keys(pty, ". ~/.zshrc\r")?;
+		// Do not send input until the line editor, rather than the kernel's
+		// canonical/echoing line discipline, owns the terminal.
+		pty.wait_raw(TIMEOUT)?;
+		pty.type_keys(". ~/.zshrc\r", KEY)?;
+		pty.read_until("RCDONE", TIMEOUT)?;
+		pty.zle_sync(TIMEOUT)?;
 		// A clean screen for the case itself.
 		keys(pty, "\x0c")?;
 		drive(pty)
@@ -76,7 +81,18 @@ fn screens(
 
 /// Assert both screens (with the cursor position) are the same.
 fn same(rc: &str, typed: &str) {
-	let (ours, real) = match screens(rc, |pty| keys(pty, typed)) {
+	same_with(rc, typed, false);
+}
+
+fn same_with(rc: &str, typed: &str, returns_to_main: bool) {
+	let (ours, real) = match screens(rc, |pty| {
+		if returns_to_main {
+			keys(pty, typed)
+		} else {
+			pty.type_keys(typed, KEY)?;
+			pty.settle(QUIET, TIMEOUT)
+		}
+	}) {
 		Ok(s) => s,
 		Err(e) => panic!("pty session failed: {e}"),
 	};
@@ -88,7 +104,7 @@ fn same(rc: &str, typed: &str) {
 /// [`same`], then `~/log` shown in place of the line: what the widgets
 /// logged on the way.
 fn same_log(rc: &str, typed: &str) {
-	same(rc, &format!("{typed}\x18q"));
+	same_with(rc, &format!("{typed}\x18q"), true);
 }
 
 /// A widget logging `BUFFER`, `CURSOR` and `HISTNO` to `~/log`, bound to

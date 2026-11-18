@@ -5,7 +5,7 @@
 //! Ports `packages/hashline/src/normalize.ts` and
 //! `packages/coding-agent/src/edit/normalize.ts`.
 
-use xutf::IntoUnicodeNormalized;
+use xutf::{IntoUnicodeNormalized, LineEnds, Text};
 
 /// Line-ending style of a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,24 +35,14 @@ pub fn detect_line_ending(content: &str) -> LineEnding {
 	}
 }
 
-/// Normalize every `\r\n` and lone `\r` to `\n`. Borrows when nothing changes.
+/// Normalize every `\r\n` to `\n`. A lone `\r` (progress-bar logs) stays
+/// content, as grep, `wc -l` and editors count lines. Borrows when nothing
+/// changes.
 pub fn normalize_to_lf(text: &str) -> std::borrow::Cow<'_, str> {
-	if !text.contains('\r') {
+	if !text.contains("\r\n") {
 		return std::borrow::Cow::Borrowed(text);
 	}
-	let mut out = String::with_capacity(text.len());
-	let mut chars = text.chars().peekable();
-	while let Some(ch) = chars.next() {
-		if ch == '\r' {
-			if chars.peek() == Some(&'\n') {
-				chars.next();
-			}
-			out.push('\n');
-		} else {
-			out.push(ch);
-		}
-	}
-	std::borrow::Cow::Owned(out)
+	std::borrow::Cow::Owned(text.replace("\r\n", "\n"))
 }
 
 /// Re-encode LF text with the requested line ending.
@@ -106,7 +96,11 @@ pub fn js_trim_end(text: &str) -> &str {
 
 /// Length in UTF-16 code units — JS `string.length`.
 pub fn utf16_len(text: &str) -> usize {
-	text.encode_utf16().count()
+	if text.len() < 64 {
+		text.encode_utf16().count()
+	} else {
+		text.transcoded_len::<u16>()
+	}
 }
 
 /// Split on `\n` exactly like JS `text.split("\n")` (keeps a trailing empty
@@ -176,7 +170,20 @@ struct IndentProfile<'a> {
 }
 
 fn build_indent_profile(text: &str) -> IndentProfile<'_> {
-	let lines: Vec<&str> = text.split('\n').collect();
+	let lines: Vec<&str> = if text.len() < 64 {
+		text.split('\n').collect()
+	} else {
+		let mut lines: Vec<&str> = xutf::lines_str(text, LineEnds::Lf)
+			.map(|line| {
+				let full = line.with_end();
+				full.strip_suffix('\n').unwrap_or(full)
+			})
+			.collect();
+		if text.ends_with('\n') {
+			lines.push("");
+		}
+		lines
+	};
 	let mut indent_counts = Vec::new();
 	let mut char: Option<char> = None;
 	let mut space_only = true;
@@ -238,23 +245,23 @@ pub fn convert_leading_tabs_to_spaces(text: &str, spaces_per_tab: usize) -> Stri
 	if spaces_per_tab == 0 {
 		return text.to_owned();
 	}
-	let converted: Vec<String> = text
-		.split('\n')
-		.map(|line| {
-			let trimmed = js_trim_start(line);
-			if trimmed.is_empty() {
-				return line.to_owned();
-			}
-			let leading = get_leading_whitespace(line);
-			if !leading.contains('\t') || leading.contains(' ') {
-				return line.to_owned();
-			}
-			let mut out = " ".repeat(leading.len() * spaces_per_tab);
+	let mut out = String::with_capacity(text.len());
+	for line in xutf::lines_str(text, LineEnds::Lf) {
+		let full = line.with_end();
+		let content = full.strip_suffix('\n').unwrap_or(full);
+		let trimmed = js_trim_start(content);
+		let leading = get_leading_whitespace(content);
+		if !trimmed.is_empty() && leading.contains('\t') && !leading.contains(' ') {
+			out.extend(std::iter::repeat_n(' ', leading.len() * spaces_per_tab));
 			out.push_str(trimmed);
-			out
-		})
-		.collect();
-	converted.join("\n")
+			if full.ends_with('\n') {
+				out.push('\n');
+			}
+		} else {
+			out.push_str(full);
+		}
+	}
+	out
 }
 
 const fn replace_unicode_character(ch: char) -> Option<&'static str> {
@@ -449,9 +456,39 @@ mod tests {
 
 	#[test]
 	fn lf_normalization_round_trips() {
-		assert_eq!(normalize_to_lf("a\r\nb\rc\n"), "a\nb\nc\n");
+		assert_eq!(normalize_to_lf("a\r\nb\rc\n"), "a\nb\rc\n");
 		assert_eq!(restore_line_endings("a\nb", LineEnding::CrLf), "a\r\nb");
 		assert_eq!(strip_bom("\u{FEFF}x"), (BOM, "x"));
+	}
+
+	#[test]
+	fn normalization_and_tab_conversion_preserve_line_shapes() {
+		assert!(matches!(normalize_to_lf("a\n"), std::borrow::Cow::Borrowed(_)));
+		assert_eq!(normalize_to_lf("\r\r\n界\r"), "\r\n界\r");
+		assert_eq!(
+			convert_leading_tabs_to_spaces("\t\u{a0}x\r\n \tx\n\t \n\t\tz\n", 2),
+			"  x\r\n \tx\n\t \n    z\n"
+		);
+		assert_eq!(convert_leading_tabs_to_spaces("", 2), "");
+		assert_eq!(convert_leading_tabs_to_spaces("\tx", 0), "\tx");
+	}
+
+	#[test]
+	fn utf16_length_counts_supplementary_characters() {
+		assert_eq!(utf16_len("a😀"), 3);
+		let text = format!("{}😀", "a".repeat(64));
+		assert_eq!(utf16_len(&text), 66);
+	}
+
+	#[test]
+	fn indent_profile_preserves_split_lines_for_long_text() {
+		for text in [
+			format!("{}\r\n\tchild\n", "a".repeat(64)),
+			format!("{}\n\nlast", "a".repeat(64)),
+			"a".repeat(64),
+		] {
+			assert_eq!(build_indent_profile(&text).lines, text.split('\n').collect::<Vec<_>>());
+		}
 	}
 
 	#[test]

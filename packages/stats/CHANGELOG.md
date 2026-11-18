@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- The Overview's Token mix now shows off-transcript model calls (title generation, job captions, judge queries, cache warming, …) as their own categories beside the agents in the By source bar (formerly By agent), each with its request count, tokens and share
+- Added a Decision models card to the Overview showing, per use case, the requests, tokens and share of usage served by native judgment models
+- Request details of a title or judge call now show the reply or the judge's answers it recorded
+
+### Changed
+
+- Main agent, Subagents and Advisor shares in Token mix now count conversation turns only; side-channel calls no longer inflate them. Sessions changed since 2026-08-31 are re-read once after upgrading to attribute past calls
+
+## [18.22.1] - 2026-11-17
+
+### Fixed
+
+- Fixed the Gain tab undercounting savings for sessions that use snapcompact context compaction, including backfilling recent compaction history after upgrading.
+
 ## [18.20.1] - 2026-11-14
 
 ### Fixed

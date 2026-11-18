@@ -161,19 +161,33 @@ fn live_external_jobs_counts_background_jobs_running_an_external() {
 		Ok(Box::new(Sleeper { killed: None, waker: None }) as Box<dyn ExtProc>)
 	}));
 	let mut r = Rig::new(host, skeleton_init(&[]));
-	assert_eq!(r.shell().live_external_jobs(), 0);
+	let live = |r: &mut Rig| {
+		let (shell, _, store) = r.parts();
+		shell.live_external_jobs(store)
+	};
+	assert_eq!(live(&mut r), 0);
 	assert_eq!(run(&mut r, "/fake/sleeper &"), (0, false));
 	// Let the job reach its external.
 	let (shell, host, store) = r.parts();
 	while let Step::Yield | Step::Done { .. } =
 		shell.step(&mut Cx { host: &mut *host, store: &mut *store }, Budget::default())
 	{}
-	assert_eq!(r.shell().live_external_jobs(), 1);
+	assert_eq!(live(&mut r), 1);
 	// A job of in-engine work only is not counted.
 	assert_eq!(run(&mut r, "{ :; } & wait $!"), (0, false));
-	assert_eq!(r.shell().live_external_jobs(), 1);
+	assert_eq!(live(&mut r), 1);
 	assert_eq!(run(&mut r, "kill %1; wait %1"), (143, false));
-	assert_eq!(r.shell().live_external_jobs(), 0);
+	assert_eq!(live(&mut r), 0);
+	// A nested shell stands for the process it would be, whatever it runs.
+	assert_eq!(run(&mut r, "sh -c 'while :; do :; done' &"), (0, false));
+	// Let the job start its shell (the loop never blocks).
+	let (shell, host, store) = r.parts();
+	for _ in 0..4 {
+		let _ = shell.step(&mut Cx { host: &mut *host, store: &mut *store }, Budget::default());
+	}
+	assert_eq!(live(&mut r), 1);
+	assert_eq!(run(&mut r, "kill %1; wait %1"), (143, false));
+	assert_eq!(live(&mut r), 0);
 }
 
 // Failure mode: a host's native utilities create files with the host

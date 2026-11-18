@@ -1570,7 +1570,9 @@ fn compute_and_check_digest_from_file(
 	let file_to_check = get_file_to_check(host, &real_filename_to_check, opts)?;
 	let mut file_reader = BufReader::new(file_to_check);
 	let mut digest = algo.create_digest();
-	let calculated_checksum = match digest_reader(&mut digest, &mut file_reader, ReadingMode::Text) {
+	// The bytes as they are, like the digests this command prints (and GNU's on POSIX):
+	// text mode would turn CRLF into LF on Windows and fail every CRLF file.
+	let calculated_checksum = match digest_reader(&mut digest, &mut file_reader, ReadingMode::Binary) {
 		Ok((result, _)) => result,
 		Err(error) => {
 			drop(file_reader);

@@ -70,7 +70,7 @@ describe("read truncation metadata", () => {
 		await Bun.write(path.join(root, "bytes.txt"), lines.join("\n"));
 
 		const result = persistedResult(await tool.execute("local-bytes", { path: "bytes.txt:raw:1-100" }));
-		const expectedBody = lines.slice(0, 49).join("\n");
+		const expectedBody = `${lines.slice(0, 49).join("\n")}\n`;
 		expect(textOutput(result)).toBe(expectedBody);
 		expect(result.details?.displayContent?.text).toBe(expectedBody);
 		expect(result.details?.truncation).toMatchObject({
@@ -79,7 +79,7 @@ describe("read truncation metadata", () => {
 			totalLines: 100,
 			totalBytes: Buffer.byteLength(lines.join("\n")),
 			outputLines: 49,
-			outputBytes: Buffer.byteLength(expectedBody),
+			outputBytes: Buffer.byteLength(lines.slice(0, 49).join("\n")),
 			firstLineExceedsLimit: false,
 			lastLinePartial: false,
 		} satisfies ReadTruncationStats);
@@ -89,7 +89,7 @@ describe("read truncation metadata", () => {
 		});
 		const meta = result.details?.meta?.truncation;
 		if (!meta) throw new Error("Expected continuation metadata");
-		expect(formatTruncationMetaNotice(meta)).toContain("Use :50 to continue");
+		expect(formatTruncationMetaNotice(meta)).toContain("Use :50- to continue");
 	});
 
 	it("does not turn an oversized local first line into an editable partial hashline", async () => {

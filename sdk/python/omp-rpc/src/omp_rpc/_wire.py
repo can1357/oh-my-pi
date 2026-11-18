@@ -371,6 +371,7 @@ class CustomMessage(TypedDict):
     timestamp: float
     details: NotRequired[JsonValue]
     attribution: NotRequired[Attribution]
+    excludeFromContext: NotRequired[bool]
 
 
 class HookMessage(TypedDict):
@@ -667,7 +668,7 @@ class SessionState:
     message_count: int = 0
     queued_message_count: int = 0
     has_pending_async_work: bool = False
-    """Background jobs or deliveries can still inject a follow-up and wake the session."""
+    """Background jobs, their deliveries, child agents or queued peer messages can still wake the session."""
     is_settled: bool = False
     """Idle with nothing queued or pending; same predicate as `session_settled`."""
     queued_messages: QueuedMessagesState = field(default_factory=lambda: parse_queued_messages_state({"steering": [], "followUp": [], "liveSteered": 0}, "queuedMessages"))
@@ -711,6 +712,16 @@ class BashResult:
     images: tuple[ImageContent, ...] | None = None
     trace: JsonObject | None = None
     """The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."""
+    fork: ShellForkOutcome | None = None
+    """Set when the command overlapped another one on the session's persistent shell and ran in a fork of it."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ShellForkOutcome:
+    carried: bool
+    """What the command set carried back into the session's shell; `false`: it stayed in the fork."""
+    jobs: bool
+    """It left background jobs running in the fork, where later commands' `jobs`, `wait` and `%N` miss them."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -2101,6 +2112,15 @@ def parse_bash_result(value: object, path: str = "BashResult") -> BashResult:
         working_dir=optional(payload, "workingDir", decode_str, path),
         images=optional(payload, "images", array(parse_image_content), path),
         trace=optional(payload, "trace", decode_json_object, path),
+        fork=optional(payload, "fork", parse_shell_fork_outcome, path),
+    )
+
+
+def parse_shell_fork_outcome(value: object, path: str = "ShellForkOutcome") -> ShellForkOutcome:
+    payload = expect_object(value, path)
+    return ShellForkOutcome(
+        carried=required(payload, "carried", decode_bool, path),
+        jobs=required(payload, "jobs", decode_bool, path),
     )
 
 
@@ -4175,6 +4195,7 @@ __all__ = [
     "SetStatusUiRequest",
     "SetTitleUiRequest",
     "SetWidgetUiRequest",
+    "ShellForkOutcome",
     "SlashCommandInput",
     "SlashCommandSource",
     "SlashSubcommand",
@@ -4355,6 +4376,7 @@ __all__ = [
     "parse_set_status_ui_request",
     "parse_set_title_ui_request",
     "parse_set_widget_ui_request",
+    "parse_shell_fork_outcome",
     "parse_slash_command_input",
     "parse_slash_subcommand",
     "parse_subagent_event",

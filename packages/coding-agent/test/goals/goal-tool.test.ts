@@ -281,6 +281,21 @@ describe("GoalTool", () => {
 		expect(result.details?.goal?.objective).toBe("Ship it");
 	});
 
+	it("op=pause stops continuation until the goal is resumed", async () => {
+		const harness = createRuntimeHarness({ enabled: true, mode: "active", goal: createGoal() });
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+			}),
+		);
+		expect(harness.runtime.buildContinuationPrompt()).toBeDefined();
+
+		const result = await tool.execute("call-pause", { op: "pause", objective: undefined, token_budget: undefined });
+		expect(result.details?.goal?.status).toBe("paused");
+		expect(harness.runtime.buildContinuationPrompt()).toBeUndefined();
+	});
+
 	it("op=resume re-activates a paused goal", async () => {
 		const harness = createRuntimeHarness({
 			enabled: false,
@@ -321,7 +336,7 @@ describe("GoalTool", () => {
 
 	it("auto-approves every op in write mode; always-ask prompts only for goal changes (#14368)", () => {
 		const tool = new GoalTool(createToolSession({}));
-		for (const op of ["get", "create", "complete", "resume", "drop"]) {
+		for (const op of ["get", "create", "complete", "pause", "resume", "drop"]) {
 			expect(resolveApproval(tool, { op }, "write").policy).toBe("allow");
 			expect(resolveApproval(tool, { op }, "always-ask").policy).toBe(op === "get" ? "allow" : "prompt");
 		}

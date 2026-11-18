@@ -31,4 +31,14 @@ describe("classifier-cot-extraction", () => {
 		const gpt = spec("openai", "openai-responses", "gpt-5.5");
 		expect(resolveModelPolicy(gpt).catalog.classifierCotExtraction).toBeUndefined();
 	});
+
+	it("is set for the GitLab Duo Claude aliases and unset for its GPT ones", () => {
+		for (const id of ["duo-chat-opus-4-6", "duo-chat-sonnet-4-5", "duo-chat-haiku-4-5"]) {
+			expect(resolveModelPolicy(spec("gitlab-duo", "anthropic-messages", id)).catalog.classifierCotExtraction).toBe(
+				true,
+			);
+		}
+		const gpt = spec("gitlab-duo", "openai-responses", "duo-chat-gpt-5-codex");
+		expect(resolveModelPolicy(gpt).catalog.classifierCotExtraction).toBeUndefined();
+	});
 });

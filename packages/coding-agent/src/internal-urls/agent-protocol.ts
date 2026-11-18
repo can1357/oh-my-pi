@@ -25,6 +25,7 @@ import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import { formatDuration, isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
+import { IrcBus } from "../irc/bus";
 import { executeSend, isIrcEnabled } from "../irc/messaging";
 import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "text" };
 import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with { type: "text" };
@@ -128,7 +129,34 @@ function lastAssistantText(messages: readonly AgentMessage[]): string | undefine
 	return undefined;
 }
 
-/** Whether `<id>`'s published output predates a turn the agent is streaming now. */
+/**
+ * The registered agent a message to `named` means: the id itself when
+ * registered (or `all`), the sender's parent for `parent`, else the one agent
+ * whose id matches ignoring case. Anything else stays as named, and delivery
+ * reports it unknown.
+ */
+function resolveRecipient(registry: AgentRegistryApi, senderId: string, named: string): string {
+	if (named === "all" || registry.get(named)) return named;
+	if (named.toLowerCase() === "parent") {
+		const parentId = registry.get(senderId)?.parentId;
+		if (parentId) return parentId;
+	}
+	const lower = named.toLowerCase();
+	const [match, ...others] = registry.list().filter(ref => ref.kind !== "advisor" && ref.id.toLowerCase() === lower);
+	return match && others.length === 0 ? match.id : named;
+}
+
+/** Largest output still read whole to tell a whitespace-only one from content. */
+const BLANK_PROBE_BYTES = 4096;
+
+/** Whether the published output at `file` has no content (empty or whitespace only). */
+async function isBlankFile(file: string): Promise<boolean> {
+	const blob = Bun.file(file);
+	if (blob.size > BLANK_PROBE_BYTES) return false;
+	return !(await blob.text()).trim();
+}
+
+/** Whether `<id>`'s published output predates the run the agent has open now. */
 function isSuperseded(registry: AgentRegistryApi, outputId: string): boolean {
 	const ref = registry.get(outputId);
 	return ref !== undefined && ref.kind !== "advisor" && registry.isRunning(ref);
@@ -157,8 +185,9 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	/**
 	 * The `<id>.md` output file. JSON-path URLs (`/<json-path>`) render a value
 	 * rather than the file, so they locate to null, as do missing ids. So does an
-	 * output superseded by a running turn: a located file is read directly by
-	 * `read`, which would skip the previous-run banner {@link resolve} adds.
+	 * output superseded by a running turn, or an empty one: a located file is
+	 * read directly by `read`, which would skip what {@link resolve} adds (the
+	 * previous-run banner, the status of a run that published nothing).
 	 */
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
 		const outputId = url.rawHost || url.hostname;
@@ -167,7 +196,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (isSuperseded(context?.agentRegistry ?? AgentRegistry.global(), outputId)) return null;
 		const dirs = await this.#outputDirs(context);
 		if (dirs.length === 0) return null;
-		return (await this.#findOutput(dirs, outputId)).foundPath ?? null;
+		const foundPath = (await this.#findOutput(dirs, outputId)).foundPath;
+		return foundPath && !(await isBlankFile(foundPath)) ? foundPath : null;
 	}
 
 	async write(url: InternalUrl, content: string, context?: WriteContext): Promise<InternalWriteResult> {
@@ -183,14 +213,29 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		) {
 			throw new Error("Peer messaging is unavailable in this session.");
 		}
-		const to = url.rawHost || url.hostname;
-		if (!to) throw new Error("agent:// URL requires a recipient: agent://<id>");
+		const named = url.rawHost || url.hostname;
+		if (!named) throw new Error("agent:// URL requires a recipient: agent://<id>");
 		if (hasPathExtraction(url)) {
 			throw new Error("agent:// message target cannot have a JSON-path suffix.");
 		}
+		const to = resolveRecipient(registry, senderId, named);
 		const progress = url.searchParams.has("progress");
 		if (progress && to === "all") throw new Error("agent://all broadcasts cannot be ?progress updates.");
 		if (!content.trim()) throw new Error("agent:// messages require non-empty content.");
+		// A spawn waiting for a slot (or still opening its session) has a job but
+		// no live session yet: hold the message for its run to take on start.
+		const recipient = registry.get(to);
+		const startingJob =
+			recipient?.session || (recipient && recipient.status !== "running")
+				? undefined
+				: session.asyncJobManager?.getJob(to);
+		if (startingJob?.agentId === to && startingJob.status === "running") {
+			IrcBus.global().park({ from: senderId, to, body: content, ...(progress ? { progress: true } : {}) });
+			return {
+				content: [{ type: "text", text: `Queued for ${to} (not started yet; delivered when it starts).` }],
+				details: { message: { op: "send", from: senderId, to } },
+			};
+		}
 		const result = await executeSend(
 			{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
 			{ to, message: content, progress },
@@ -244,8 +289,16 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		});
 
 		const rawContent = await Bun.file(scan.foundPath).text();
+		// A run that failed or was cancelled can publish an empty output; a blank
+		// read would pass for success, so show what the agent did instead.
+		if (!extraction && !rawContent.trim()) {
+			const ref = registry.get(outputId);
+			if (ref && ref.kind !== "advisor") return this.#resolveProgress(url, ref, false, true);
+		}
 		const notes: string[] = [];
-		let content = rawContent;
+		let content = rawContent.trim()
+			? rawContent
+			: `${outputId} published an empty output. Transcript: history://${outputId}\n`;
 		// A published file belongs to a finished run. If the agent is streaming
 		// again (follow-up or IRC wake), the file is the previous run's result;
 		// unmarked, a reader takes it as the current state.
@@ -320,7 +373,12 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	 * its latest assistant text. Reads the live session's messages, else the
 	 * retained session file. JSON-path extraction needs the published output.
 	 */
-	async #resolveProgress(url: InternalUrl, ref: AgentRef, extraction: boolean): Promise<InternalResource> {
+	async #resolveProgress(
+		url: InternalUrl,
+		ref: AgentRef,
+		extraction: boolean,
+		publishedEmpty = false,
+	): Promise<InternalResource> {
 		if (extraction) {
 			throw new Error(
 				`Output ${ref.id} is not published yet (status: ${ref.status}); read agent://${ref.id} for its progress.`,
@@ -343,13 +401,14 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			sections,
 			lastText,
 			empty: sections.length === 0 && !lastText,
+			publishedEmpty,
 		})}\n`;
 		return {
 			url: url.href,
 			content,
 			contentType: "text/markdown",
 			size: Buffer.byteLength(content, "utf-8"),
-			notes: [`No published output; progress from ${source} (${ref.status})`],
+			notes: [`${publishedEmpty ? "Empty" : "No"} published output; progress from ${source} (${ref.status})`],
 			shape: "document",
 		};
 	}

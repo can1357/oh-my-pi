@@ -89,11 +89,11 @@
    "expect": {"files": {"seen.txt": "one\nTWO\nthree\n"}, "writes": 1}
   },
   {
-   "name": "redirects a bare filename to the full path of the file its tag names",
+   "name": "rejects a bare filename and names the file its tag was issued for",
    "files": {"nested/a.txt": "before\n"},
    "snapshots": [{"path": "nested/a.txt"}],
    "args": {"input": "[a.txt#{{tag:nested/a.txt}}]\nPUT 1.=1:\n+after"},
-   "expect": {"files": {"nested/a.txt": "after\n"}, "writes": 1, "textContains": ["matched its filename and snapshot tag"]}
+   "expect": {"error": "File not found: a.txt. Hash #", "files": {"nested/a.txt": "before\n"}, "writes": 0}
   },
   {
    "name": "preflights every section before writing multi-file edits",

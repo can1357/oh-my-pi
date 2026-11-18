@@ -622,7 +622,8 @@ describe("Python runner request dispatch", () => {
 			// thread processes their `interrupt` requests and then `release`.
 			runner.send({ id: "aborted", code: "seed = 0" });
 			runner.send({ id: "aborted", type: "interrupt" });
-			runner.send({ id: "setup-err", code: "seed = 0", cwd: "/nonexistent/omp-setup-err" });
+			// A NUL byte makes `os.chdir` raise ValueError: a setup error (a missing cwd only warns).
+			runner.send({ id: "setup-err", code: "seed = 0", cwd: "/tmp/omp\u0000setup-err" });
 			runner.send({ id: "setup-err", type: "interrupt" });
 			runner.send({ id: "release", type: "tool", op: "call", name: "release", args: {} });
 
@@ -676,6 +677,27 @@ describe("Python runner request dispatch", () => {
 			runner.send({ id: "verify", code: "assert seed == 44" });
 			const [verify] = await collectDoneOrder(runner, new Set(["verify"]));
 			expect(verify.status).toBe("ok");
+		} finally {
+			await runner.dispose();
+		}
+	});
+
+	it("runs a cell whose session cwd no longer exists, with a warning", async () => {
+		const runner = spawnRunner();
+		try {
+			runner.send({ id: "gone", code: "print('ran')", cwd: "/nonexistent/omp-missing-cwd" });
+			const frames: RunnerFrame[] = [];
+			while (true) {
+				const frame = await runner.nextFrame();
+				if (frame.id !== "gone") continue;
+				frames.push(frame);
+				if (frame.type === "done") break;
+			}
+			expect(frames.find(frame => frame.type === "stderr")?.data).toContain(
+				"session cwd /nonexistent/omp-missing-cwd is unavailable",
+			);
+			expect(frames.find(frame => frame.type === "stdout")?.data).toContain("ran");
+			expect(frames.at(-1)).toMatchObject({ type: "done", status: "ok" });
 		} finally {
 			await runner.dispose();
 		}

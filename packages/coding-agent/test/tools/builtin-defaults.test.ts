@@ -15,7 +15,7 @@ describe("BUILTIN_TOOL_HELP", () => {
 			skipPythonPreflight: true,
 		};
 		const plan = await resolveBuiltinToolPlan(session);
-		// `detected` tools depend on the host (an IDA install, a judge model), not on settings.
+		// `detected` tools depend on host capabilities, such as judge availability.
 		const settled = BUILTIN_TOOL_NAMES.filter(name => BUILTIN_TOOL_HELP[name].defaultState !== "detected");
 		const actual = Object.fromEntries(settled.map(name => [name, plan.isAllowed(name) ? "on" : "off"]));
 		const declared = Object.fromEntries(settled.map(name => [name, BUILTIN_TOOL_HELP[name].defaultState]));

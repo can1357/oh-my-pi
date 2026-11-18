@@ -474,7 +474,7 @@ export class RateLimits implements LimitsApi {
 			// Thread the provider-specified reset window (e.g. Devin "Your limit
 			// will reset in 13 minutes") into the block duration so the credential
 			// is not reselected and hammered while the cap remains active.
-			const retryAfterMs = extractProviderRetryHint(provider, message);
+			const retryAfterMs = extractProviderRetryHint(provider, message, options?.baseUrl);
 			const mark = await this.markReached(provider, sessionId, {
 				retryAfterMs,
 				providerTimed: retryAfterMs !== undefined,

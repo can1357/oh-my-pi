@@ -623,10 +623,9 @@ describe("AskDialogComponent", () => {
 			rowMenuNote(component, 0, "option:1");
 			await flush();
 			expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Beta", question: "Q1?" });
-			component.handleNativeEvent(action("submit")); // Next commits the row the menu highlighted
+			click(component, 0, 1); // Beta, the row the menu highlighted, on to Q2
 			click(component, 1, 0);
-			click(component, 2, 0);
-			component.handleNativeEvent(action("submit"));
+			click(component, 2, 0); // the last question, every one answered: submits
 
 			const [first, second] = onSubmit.mock.calls[0][0].results;
 			expect(first).toMatchObject({ selectedOptions: ["Beta"], note: "why Beta", noteOption: "Beta" });

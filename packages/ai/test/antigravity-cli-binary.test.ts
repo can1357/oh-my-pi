@@ -1,4 +1,4 @@
-import { expect, it } from "bun:test";
+import { afterEach, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { ensureAgyInstalled, updateAgyBinary } from "../src/providers/antigravity-cli/binary";
@@ -24,6 +24,50 @@ async function release(
 	};
 	return { fetch: fetchRelease, requests };
 }
+
+/**
+ * Serves a release body one chunk per read, advancing the fake clock `gapMs` before each chunk.
+ * After `silentAfter` chunks the connection stays open without sending, as a stalled proxy does.
+ */
+async function trickle(gapMs: number, silentAfter = Infinity): Promise<{ fetch: FetchImpl; silent: Promise<void> }> {
+	const payload = await new Bun.Archive({ antigravity: "slow executable" }, { compress: "gzip" }).bytes();
+	const manifest = {
+		version: "1.5.9",
+		url: "https://storage.googleapis.com/antigravity-public/1.5.9/cli.tar.gz",
+		sha512: new Bun.CryptoHasher("sha512").update(payload).digest("hex"),
+	};
+	const silent = Promise.withResolvers<void>();
+	const fetchRelease: FetchImpl = async (input, init) => {
+		const url = input instanceof Request ? input.url : String(input);
+		if (url.endsWith(".json")) return Response.json(manifest);
+		const size = Math.ceil(payload.length / 5);
+		const signal = init?.signal;
+		let chunks = 0;
+		const body = new ReadableStream<Uint8Array>(
+			{
+				start(controller) {
+					signal?.addEventListener("abort", () => controller.error(signal.reason));
+				},
+				pull(controller) {
+					if (chunks >= silentAfter) {
+						silent.resolve();
+						return Promise.withResolvers<void>().promise;
+					}
+					vi.advanceTimersByTime(gapMs);
+					controller.enqueue(payload.subarray(chunks * size, ++chunks * size));
+					if (chunks * size >= payload.length) controller.close();
+				},
+			},
+			{ highWaterMark: 0 },
+		);
+		return new Response(body, { headers: { "content-length": String(payload.length) } });
+	};
+	return { fetch: fetchRelease, silent: silent.promise };
+}
+
+afterEach(() => {
+	vi.useRealTimers();
+});
 
 it("concurrent first-use requests install one verified executable without running the profile installer", async () => {
 	using temp = TempDir.createSync("@omp-agy-download-");
@@ -56,4 +100,25 @@ it("a corrupt update preserves the previous binary and a subsequent valid releas
 	expect(await Bun.file(upgraded).text()).toBe("version two");
 	expect(await Bun.file(original).text()).toBe("version one");
 	expect(await ensureAgyInstalled(directory, valid.fetch)).toBe(upgraded);
+});
+
+it("a slow release that keeps sending installs even when the whole download outlasts the stall window", async () => {
+	vi.useFakeTimers();
+	using temp = TempDir.createSync("@omp-agy-slow-");
+	// Five chunks 50 s apart: 250 s in total, never 60 s without data.
+	const remote = await trickle(50_000);
+	const binary = await ensureAgyInstalled(temp.join("bin"), remote.fetch);
+	expect(await Bun.file(binary).text()).toBe("slow executable");
+});
+
+it("a download that stops sending fails as a stalled download and installs nothing", async () => {
+	vi.useFakeTimers();
+	using temp = TempDir.createSync("@omp-agy-stall-");
+	const directory = temp.join("bin");
+	const remote = await trickle(1_000, 2);
+	const install = ensureAgyInstalled(directory, remote.fetch);
+	await remote.silent;
+	vi.advanceTimersByTime(60_000);
+	await expect(install).rejects.toThrow(/Antigravity CLI download stalled: no data for 60s after .+ of /);
+	expect(await Bun.file(path.join(directory, "install.json")).exists()).toBe(false);
 });

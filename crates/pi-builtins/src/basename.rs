@@ -26,6 +26,9 @@ matches_parser!(Basename, app);
 
 impl Utility for Basename {
 	const NAME: &'static str = "basename";
+	// Every GNU option is implemented here; the host's `basename` (BSD on macOS)
+	// would only print its own usage error for an unknown one.
+	const DEFERS_TO_PATH: bool = false;
 
 	fn run(self, host: &mut Host) -> i32 {
 		let line_ending = LineEnding::from_zero_flag(self.matches.get_flag(options::ZERO));

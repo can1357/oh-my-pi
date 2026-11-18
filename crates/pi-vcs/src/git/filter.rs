@@ -101,3 +101,57 @@ impl<'repo> WorktreeFilter<'repo> {
 		Ok(converted.unwrap_or(bytes))
 	}
 }
+
+impl super::GitRepo {
+	/// Convert worktree `data` found at each repo-relative path to the blob
+	/// `git add` would store: `.gitattributes` `text`/`eol`, `core.autocrlf`
+	/// (a path whose index blob holds CR keeps its CRLFs), `ident`, and clean
+	/// filter drivers such as Git LFS. A reftable repository cannot be opened
+	/// in-process and returns `data` unchanged.
+	pub fn worktree_to_git(&self, entries: Vec<(String, Vec<u8>)>) -> Result<Vec<Vec<u8>>> {
+		if self.is_reftable() {
+			return Ok(entries.into_iter().map(|(_, data)| data).collect());
+		}
+		let repo = self.gix()?;
+		let mut filter = WorktreeFilter::staging(&repo, "git add")?;
+		entries
+			.into_iter()
+			.map(|(path, data)| filter.worktree_to_git(&path, data))
+			.collect()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{fs, process::Command};
+
+	use crate::git::GitRepo;
+
+	fn git(dir: &std::path::Path, args: &[&str]) {
+		let output = Command::new("git")
+			.arg("-C")
+			.arg(dir)
+			.args(args)
+			.output()
+			.unwrap();
+		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+	}
+
+	#[test]
+	fn worktree_to_git_applies_autocrlf_and_eol_attributes() {
+		let temp = tempfile::tempdir().unwrap();
+		git(temp.path(), &["init", "-q", "-b", "main"]);
+		git(temp.path(), &["config", "core.autocrlf", "true"]);
+		fs::write(temp.path().join(".gitattributes"), "*.bin -text\n*.cmd text eol=crlf\n").unwrap();
+		let repo = GitRepo::require(temp.path()).unwrap();
+
+		let converted = repo
+			.worktree_to_git(vec![
+				("a.txt".into(), b"one\r\ntwo\r\n".to_vec()),
+				("run.cmd".into(), b"echo\r\n".to_vec()),
+				("raw.bin".into(), b"keep\r\n".to_vec()),
+			])
+			.unwrap();
+		assert_eq!(converted, vec![b"one\ntwo\n".to_vec(), b"echo\n".to_vec(), b"keep\r\n".to_vec()]);
+	}
+}

@@ -364,6 +364,17 @@ re-exported by `session/messages.ts`): non-object payloads are coerced to string
 content under the default custom type, missing `customType`/`attribution` fields
 are defaulted, and invalid content collapses to an empty string.
 
+Set `excludeFromContext: true` on the payload for a row that is drawn and saved
+but never sent to the model, like a `!!` bash run: per-turn stats or status
+lines. The flag is persisted on the `custom_message` entry, so the row stays out
+of context after resume, compaction and branch summaries. Such a row never
+starts or extends a turn: `triggerTurn` and `"aside"` are ignored. Sent while a
+run is live, it is queued like a `!!` bash row and drawn and saved when the run
+ends or the next prompt starts; a `/new` or session switch that interrupts the
+run saves it to the session being left. Like `!!` and `$$` runs, it leaves a
+shown composer prediction in place and does not hold back a queued follow-up,
+since the model's view is unchanged.
+
 ## 2) Handler context (`ExtensionContext`)
 
 Handlers and tool `execute` receive `ctx` with:
@@ -436,7 +447,7 @@ Use `history` only for detached prior side-turn messages; it is cloned with `str
 
 ### Live voice on your own peer (`ctx.startLive`)
 
-Start a `/live` session whose audio runs on a WebRTC peer the extension owns, for example a browser on a phone, instead of the host's microphone and speakers. omp keeps everything else: Codex signaling with the session's OpenAI Codex sign-in, the bundled live prompt, delegations into this session as ordinary turns, and transcripts. The TUI shows its live visualizer, and `/live` or the stop key ends the call.
+Start a `/live` session whose audio runs on a WebRTC peer the extension owns, for example a browser on a phone, instead of the host's microphone and speakers. omp keeps everything else: signaling (Codex with the session's OpenAI Codex sign-in, or the [custom live endpoint](./rpc.md#custom-live-endpoint) when `live.endpoint` is set), the bundled live prompt, delegations into this session as ordinary turns, and transcripts. The TUI shows its live visualizer, and `/live` or the stop key ends the call.
 
 ```ts
 if (!ctx.startLive) throw new Error("This host does not run live sessions");
@@ -655,7 +666,7 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 
 ### Plan review lifecycle
 
-- `plan_review_requested` reports an interactive plan review with its `reviewId`, session, title, plan path and content, plus the choices in display order. Choice ids are stable (`execute`, `compact`, `keep`, `refine`, `save`); labels may change, and `keep` carries the current token count. An extension can answer it with `ctx.resolvePlanReview(...)` while the terminal picker stays live; the first answer wins. `save` uses the default file name without opening the path prompt.
+- `plan_review_requested` reports an interactive plan review with its `reviewId`, session, title, plan path and content, plus the choices in display order. Choice ids are stable (`execute`, `compact`, `keep`, `refine`, `save`); labels may change, and `keep` carries the current token count. An extension can answer it with `ctx.resolvePlanReview(...)` while the terminal picker stays live; the first answer wins. `save` writes the plan under the default file name without opening the path prompt and leaves the review open, still answerable (it fires no `plan_review_resolved`). The overlay shows Refine only while the plan has comments; `refine` with `input.feedback` is accepted either way.
 - An approval answered by an extension runs on the tier named by `input.role`, or the one currently selected in the overlay's model slider when `role` is omitted; `plan_review_requested` lists the selectable `tiers` (`role`, `provider`, `model`, and `thinkingLevel` when the role pins one; absent when fewer than two resolve). The approval executes the plan as it is at pick time: in-overlay edits if any, otherwise the plan file re-read from disk. That can differ from the reported `planContent`; an extension may write the plan file before answering to execute its own revision.
 - Tier order follows the configured role cycle, not the selected tier. The slider initially selects `default` when available; a remote `input.role` updates the displayed tier and commits the answer, preventing later terminal input from changing it.
 - `plan_review_resolved` reports how that review closed, with the selected choice id (or `undefined` when dismissed or cancelled by a session switch, a replacement review, or shutdown) and `by: "local" | "extension"`. It fires when the overlay actually closes, after every `plan_review_requested` handler has returned, so `plan_review_requested` handlers should hand off long work (a remote round-trip, a `ctx.ui` dialog) instead of awaiting it.
@@ -1440,7 +1451,7 @@ Chooses how each block of the main session's transcript is drawn, in the plain t
 
 - **Blocks.** A presenter receives a read-only `TranscriptBlock`. Later versions add block types: return `undefined` for a `type` you do not know.
   - `{ type: "toolCall", id, toolName, args, result?, isError, isPartial }` for a model tool call, `id` its `toolCallId`; the reads of a grouped read card are asked one by one.
-  - `{ type: "message", id, message }` for a session message drawn as its own block: `custom` messages with `customType` `advisor`, `skill-prompt`, `lsp-late-diagnostic`, `async-result` (background job completions) and `launch-completion` (supervised process exits), and user `!`/`$` runs (`bashExecution`, `pythonExecution`). `id` is `String(message.timestamp)`, the same live and after a resume; messages recorded in the same millisecond share it, as they share `rerenderMessage`'s timestamp. A `!`/`$` run still going has a provisional message and id; it is asked again with the recorded message once the session records the run.
+  - `{ type: "message", id, message }` for a session message drawn as its own block: `custom` messages with `customType` `advisor`, `skill-prompt`, `lsp-late-diagnostic`, `async-result` (background job completions), `async-notify` (output a running background job or service reports) and `launch-completion` (supervised process exits), and user `!`/`$` runs (`bashExecution`, `pythonExecution`). `id` is `String(message.timestamp)`, the same live and after a resume; messages recorded in the same millisecond share it, as they share `rerenderMessage`'s timestamp. A `!`/`$` run still going has a provisional message and id; it is asked again with the recorded message once the session records the run.
   - `{ type: "event", id, event }` for a TTSR rule hit (`ttsr_triggered`) or an incomplete-todo reminder (`todo_reminder`), shaped like the extension event of the same type. These exist only in the session that raised them; `id` is unique within the process.
 
   `args`, `result`, `message` and `event` are not copies: they are the live objects omp draws the block from, often the session's own message data, so never mutate them.

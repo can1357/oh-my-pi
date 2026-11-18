@@ -56,10 +56,10 @@ use parking_lot::Mutex;
 use pi_vfs::{BlockingFs, Metadata, absolute_path};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(unix)]
 use crate::openfile::DescriptorPath;
 use crate::{
 	openfile::{self, Fd, OpenFile},
+	speech::SpeechHost,
 	stdio::{AsyncOut, Source},
 };
 
@@ -96,6 +96,13 @@ pub(crate) trait Utility: clap::Parser + Send + Sync + 'static {
 	/// read the file its own output lands in). Only then does the host keep a
 	/// handle on stdout's identity; every other utility skips the dup.
 	const CHECKS_STDOUT_PATH: bool = false;
+
+	/// Whether an option this utility does not implement is handed to `PATH`'s
+	/// program of the same name (`ps --forest`, `tar --hard-dereference`). Set
+	/// `false` when the utility implements the complete option set of its
+	/// command, so the host program can only be a different tool (BSD
+	/// `basename` on macOS) and the utility reports the option itself.
+	const DEFERS_TO_PATH: bool = true;
 
 	/// Rewrites raw `argv` before clap parses it.
 	///
@@ -197,6 +204,9 @@ pub(crate) struct Host {
 	/// Raised when the utility reports an error yet goes on; `None` when the
 	/// shell asked for no such report.
 	reported_error:        Option<Arc<AtomicBool>>,
+	/// The embedding application's speech synthesizer; `None` when it has
+	/// none.
+	speech:                Option<Arc<dyn SpeechHost>>,
 	/// The memory-backed stdout and stderr of an async utility; `None` for a
 	/// sync one, whose writers deliver on every write.
 	async_out:             Option<AsyncStreams>,
@@ -483,7 +493,6 @@ const UNAVAILABLE_DESCRIPTOR: &str = "/dev/fd/-1";
 pub(crate) struct ShellPaths {
 	cwd:         PathBuf,
 	filesystem:  BlockingFs,
-	#[cfg(unix)]
 	descriptors: Arc<[(i32, OpenFile)]>,
 }
 
@@ -491,7 +500,6 @@ impl std::fmt::Debug for ShellPaths {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		let mut debug = f.debug_struct("ShellPaths");
 		debug.field("cwd", &self.cwd);
-		#[cfg(unix)]
 		debug.field("fds", &self.descriptors.iter().map(|(fd, _)| *fd).collect::<Vec<_>>());
 		debug.finish()
 	}
@@ -516,23 +524,16 @@ impl ShellPaths {
 			Some(token) => filesystem.with_cancellation(token),
 			None => filesystem,
 		};
-		#[cfg(unix)]
 		let descriptors: Arc<[(i32, OpenFile)]> = descriptors.into_iter().collect();
-		#[cfg(not(unix))]
-		drop(descriptors);
-		#[cfg(unix)]
+		// Engine-backed descriptors (a process substitution's pipe) open by path
+		// on every platform; host descriptors only through Unix's `/dev/fd`.
 		let filesystem = descriptors.iter().fold(filesystem, |filesystem, (fd, file)| {
 			match file.as_vfs().and_then(|file| file.try_clone().ok()) {
 				Some(file) => filesystem.mount_file(virtual_descriptor_path(*fd), file),
 				None => filesystem,
 			}
 		});
-		Self {
-			cwd,
-			filesystem,
-			#[cfg(unix)]
-			descriptors,
-		}
+		Self { cwd, filesystem, descriptors }
 	}
 
 	/// A resolver with no descriptors, for tests that exercise path handling
@@ -559,6 +560,15 @@ impl ShellPaths {
 	/// A descriptor path becomes `/dev/fd/<host fd>` for the shell's
 	/// descriptor, or a path that cannot be opened when the shell has none.
 	pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
+		// Windows has no `/dev/fd`: an engine-backed descriptor named as the
+		// shell spells it (`diff <(a) <(b)`) resolves to its mount, before the
+		// spelling becomes a native path.
+		#[cfg(not(unix))]
+		if let Some(DescriptorPath::Fd(fd)) = DescriptorPath::parse(path.as_ref())
+			&& self.file(fd).and_then(OpenFile::as_vfs).is_some()
+		{
+			return virtual_descriptor_path(fd);
+		}
 		let resolved = self.absolute(path.as_ref());
 		#[cfg(unix)]
 		if let Some(descriptor) = DescriptorPath::parse(&resolved) {
@@ -621,8 +631,8 @@ impl ShellPaths {
 		}
 	}
 
-	#[cfg(unix)]
-	fn file(&self, fd: i32) -> Option<&OpenFile> {
+	/// The shell's open descriptor `fd`; `None` when it is closed.
+	pub fn file(&self, fd: i32) -> Option<&OpenFile> {
 		self.descriptors
 			.iter()
 			.find(|(shell_fd, _)| *shell_fd == fd)
@@ -631,7 +641,6 @@ impl ShellPaths {
 }
 
 /// Virtual descriptors cannot share native `/dev/fd` numbers in the overlay.
-#[cfg(unix)]
 fn virtual_descriptor_path(fd: i32) -> PathBuf {
 	PathBuf::from(format!("omp-descriptor://{fd}"))
 }
@@ -944,6 +953,12 @@ impl Host {
 		self.reported_error.clone()
 	}
 
+	/// The embedding application's speech synthesizer, for `say`; `None`
+	/// when the application has none.
+	pub fn speech(&self) -> Option<Arc<dyn SpeechHost>> {
+		self.speech.clone()
+	}
+
 	/// The async facade of the host filesystem, for utilities awaiting
 	/// provider I/O.
 	pub fn vfs(&self) -> pi_vfs::Fs {
@@ -1058,6 +1073,17 @@ impl Host {
 	/// and ends the utility with the SIGPIPE status.
 	pub async fn flush_output(&self) -> io::Result<()> {
 		self.drain_output(false).await
+	}
+
+	/// Delivers all pending output of stdout and stderr, whatever the
+	/// destination: for a utility whose output is read while it runs and waits
+	/// (a watcher's messages and event lines, also in a file).
+	///
+	/// # Errors
+	///
+	/// As for [`Host::flush_output`].
+	pub async fn sync_output(&self) -> io::Result<()> {
+		self.drain_output(true).await
 	}
 
 	/// [`Host::flush_output`] for a loop whose next unit of output follows
@@ -1334,13 +1360,15 @@ impl RunningCommand {
 /// device, as GNU `xargs` and `find -exec` give their children; stdout and
 /// stderr are the utility's own.
 pub struct ShellCommand {
-	argv:  Vec<OsString>,
-	argv0: Option<OsString>,
+	argv:    Vec<OsString>,
+	argv0:   Option<OsString>,
 	/// The source of a command-line command; `argv` is then empty.
-	line:  Option<OsString>,
-	cwd:   Option<PathBuf>,
-	stdin: Option<Fd>,
-	env:   Vec<EnvChange>,
+	line:    Option<OsString>,
+	cwd:     Option<PathBuf>,
+	stdin:   Option<Fd>,
+	env:     Vec<EnvChange>,
+	/// Signal numbers to deliver to the command while it runs.
+	signals: Option<flume::Receiver<i32>>,
 }
 
 /// One environment change a [`ShellCommand`] makes for its own command,
@@ -1359,14 +1387,22 @@ impl ShellCommand {
 	/// A command running `argv`; `argv[0]` names the builtin or program.
 	#[must_use]
 	pub fn new(argv: Vec<OsString>) -> Self {
-		Self { argv, argv0: None, line: None, cwd: None, stdin: None, env: Vec::new() }
+		Self { argv, argv0: None, line: None, cwd: None, stdin: None, env: Vec::new(), signals: None }
 	}
 
 	/// A command line `source` for the invoking shell to parse and run in a
 	/// subshell of its own, with no positional parameters (`sh -c source`).
 	#[must_use]
 	pub fn line(source: impl Into<OsString>) -> Self {
-		Self { argv: Vec::new(), argv0: None, line: Some(source.into()), cwd: None, stdin: None, env: Vec::new() }
+		Self {
+			argv: Vec::new(),
+			argv0: None,
+			line: Some(source.into()),
+			cwd: None,
+			stdin: None,
+			env: Vec::new(),
+			signals: None,
+		}
 	}
 
 	/// The argv; `argv[0]` names the builtin or program to look up. Empty for
@@ -1406,6 +1442,12 @@ impl ShellCommand {
 	/// Takes the command's stdin; `None` means the null device.
 	pub fn take_stdin(&mut self) -> Option<Fd> {
 		self.stdin.take()
+	}
+
+	/// Takes the channel of signals for the command
+	/// ([`ShellCommand::signals`]); `None` when the utility sends none.
+	pub fn take_signals(&mut self) -> Option<flume::Receiver<i32>> {
+		self.signals.take()
 	}
 
 	/// Presents `argv0` to the command as its `argv[0]` (`env -a`); the
@@ -1456,6 +1498,16 @@ impl ShellCommand {
 	/// Feeds `stdin` to the command as fd 0.
 	pub fn stdin(mut self, stdin: Fd) -> Self {
 		self.stdin = Some(stdin);
+		self
+	}
+
+	/// Delivers every signal number sent on `signals` (the platform's
+	/// numbering; Linux's on Windows) to the command while it runs, as a
+	/// signal to its process group would: the command and everything it
+	/// started get it. `watchexec` and `entr -r` stop and restart their
+	/// command this way.
+	pub fn signals(mut self, signals: flume::Receiver<i32>) -> Self {
+		self.signals = Some(signals);
 		self
 	}
 }
@@ -1524,7 +1576,8 @@ fn cancelled_command() -> io::Error {
 /// invocation is cancelled or ends.
 ///
 /// A command runs with the utility's stdout and stderr, its own
-/// [`ShellCommand::take_stdin`] (else the null device), in
+/// [`ShellCommand::take_stdin`] (else the null device), receiving the signals
+/// of [`ShellCommand::take_signals`], in
 /// [`ShellCommand::dir`] (else the invocation's working directory), with
 /// [`ShellCommand::env_changes`] applied to that command only. A command line
 /// ([`ShellCommand::source`]) is parsed and run by the shell itself, with no
@@ -2111,6 +2164,9 @@ pub struct Invocation {
 	/// Raised when the extra reports an error yet goes on (so a caller
 	/// minimizing output knows to keep it); `None` when nobody asks.
 	pub reported_error: Option<Arc<AtomicBool>>,
+	/// The embedding application's speech synthesizer, which `say` speaks
+	/// through; `None` leaves `say` to the system's.
+	pub speech:         Option<Arc<dyn SpeechHost>>,
 }
 
 impl Invocation {
@@ -2129,13 +2185,26 @@ impl Invocation {
 			cancel: None,
 			commands: None,
 			reported_error: None,
+			speech: None,
 		}
 	}
 
 	/// Opens the descriptors as shareable [`OpenFile`]s; `default_name` stands
 	/// in for an empty [`Invocation::name`].
 	pub(crate) fn open(self, default_name: &str) -> Opened {
-		let Self { name, argv, env, cwd, stdio, fds, fs, cancel, commands, reported_error } = self;
+		let Self {
+			name,
+			argv,
+			env,
+			cwd,
+			stdio,
+			fds,
+			fs,
+			cancel,
+			commands,
+			reported_error,
+			speech,
+		} = self;
 		Opened {
 			name: if name.is_empty() { default_name.to_string() } else { name },
 			argv,
@@ -2150,6 +2219,7 @@ impl Invocation {
 			cancel,
 			commands,
 			reported_error,
+			speech,
 		}
 	}
 }
@@ -2167,6 +2237,7 @@ pub(crate) struct Opened {
 	pub cancel:         Option<CancellationToken>,
 	pub commands:       Option<Box<dyn CommandRunner>>,
 	pub reported_error: Option<Arc<AtomicBool>>,
+	pub speech:         Option<Arc<dyn SpeechHost>>,
 }
 
 impl Opened {
@@ -2469,7 +2540,13 @@ fn build_host(invocation: Opened, spec: Spec) -> Result<Host, i32> {
 	let Spec { checks_stdout_path, owns_cancellation, async_io, .. } = spec;
 	let paths = invocation.paths();
 	let Opened {
-		name: invoked, env, stdio: [stdin, stdout, stderr_file], cancel: token, reported_error, ..
+		name: invoked,
+		env,
+		stdio: [stdin, stdout, stderr_file],
+		cancel: token,
+		reported_error,
+		speech,
+		..
 	} = invocation;
 	let (stdin, stdout, stderr_file) = match (or_null(stdin), or_null(stdout), or_null(stderr_file)) {
 		(Ok(stdin), Ok(stdout), Ok(stderr_file)) => (stdin, stdout, stderr_file),
@@ -2572,6 +2649,7 @@ fn build_host(invocation: Opened, spec: Spec) -> Result<Host, i32> {
 		sigpipe,
 		commands: None,
 		reported_error,
+		speech,
 		async_out,
 		stdin_source: None,
 	})
@@ -2624,6 +2702,13 @@ pub(crate) trait Process: clap::Parser + Send + Sync + 'static {
 	/// the identity unless overridden (`top` normalizes its flags).
 	fn rewrite_argv(argv: Vec<String>) -> Vec<String> {
 		argv
+	}
+
+	/// Whether these arguments ask for an option this builtin lacks, for a
+	/// builtin that parses its own options (`ps`); the others rely on clap's
+	/// verdict ([`crate::extras::lacks_option`]).
+	fn lacks_option(&self) -> bool {
+		false
 	}
 
 	/// Runs the builtin to completion, returning its exit status. An error
@@ -3058,6 +3143,7 @@ mod testing {
 				sigpipe,
 				commands:              None,
 				reported_error:        None,
+				speech:                None,
 				async_out,
 				stdin_source:          None,
 			};
@@ -3333,12 +3419,18 @@ mod testing {
 	/// builtins `echo`, `true`, `false`, `pwd`, and `cd`, else as a program
 	/// found on its `PATH`, writing to the invoking utility's stdout and
 	/// stderr; a command line runs as `sh -c <source>`. Environment changes
-	/// apply to that command only.
+	/// apply to that command only. A command given
+	/// [`signals`](super::ShellCommand::signals) leads a process group that
+	/// gets each one (an extra is cancelled by any), and `KILL` once
+	/// [`TestRunner::ending_with`]'s token fires: the shell's cancel of a
+	/// utility ends its commands too.
 	pub(crate) struct TestRunner {
 		env:    HashMap<String, String>,
 		cwd:    PathBuf,
 		stdout: std::fs::File,
 		stderr: std::fs::File,
+		/// Ends the commands that take signals.
+		cancel: Option<tokio_util::sync::CancellationToken>,
 	}
 
 	impl TestRunner {
@@ -3350,7 +3442,14 @@ mod testing {
 			stdout: std::fs::File,
 			stderr: std::fs::File,
 		) -> Self {
-			Self { env, cwd, stdout, stderr }
+			Self { env, cwd, stdout, stderr, cancel: None }
+		}
+
+		/// Kills the commands that take signals once `cancel` fires: pass the
+		/// invocation's own token.
+		pub(crate) fn ending_with(mut self, cancel: tokio_util::sync::CancellationToken) -> Self {
+			self.cancel = Some(cancel);
+			self
 		}
 
 		fn dup(&self) -> io::Result<Self> {
@@ -3359,6 +3458,7 @@ mod testing {
 				cwd:    self.cwd.clone(),
 				stdout: self.stdout.try_clone()?,
 				stderr: self.stderr.try_clone()?,
+				cancel: self.cancel.clone(),
 			})
 		}
 	}
@@ -3406,8 +3506,12 @@ mod testing {
 			};
 			let name = argv.first().cloned().unwrap_or_default();
 			let argv0 = command.presented_argv0().map(|argv0| argv0.to_string_lossy().into_owned());
+			let signals = command.take_signals();
 			Box::pin(async move {
 				let (runner, stdin) = prepared?;
+				let grouped = signals.is_some();
+				let ending = runner.cancel.clone().filter(|_| grouped);
+				let mut signals = Signals { sent: signals, ending };
 				if crate::extras::kind(&name).is_some() {
 					if let (Some(argv0), Some(first)) = (argv0, argv.first_mut()) {
 						*first = argv0;
@@ -3422,7 +3526,16 @@ mod testing {
 						crate::extras::Fd::File(runner.stderr.try_clone()?),
 					];
 					invocation.commands = Some(Box::new(runner));
-					let code = crate::extras::run(invocation).await;
+					let cancel = tokio_util::sync::CancellationToken::new();
+					invocation.cancel = Some(cancel.clone());
+					let run = crate::extras::run(invocation);
+					tokio::pin!(run);
+					let code = loop {
+						tokio::select! {
+							code = &mut run => break code,
+							_ = signals.next() => cancel.cancel(),
+						}
+					};
 					return Ok(CommandStatus::Exited((code & 0xff) as u8));
 				}
 				if let Some(status) = builtin(&runner, &argv)? {
@@ -3445,13 +3558,75 @@ mod testing {
 				if let Some(argv0) = argv0 {
 					std::os::unix::process::CommandExt::arg0(&mut child, argv0);
 				}
+				#[cfg(unix)]
+				if grouped {
+					std::os::unix::process::CommandExt::process_group(&mut child, 0);
+				}
 				let mut child = child.spawn()?;
-				let status = tokio::task::spawn_blocking(move || child.wait())
-					.await
-					.map_err(io::Error::other)??;
+				let pid = child.id();
+				let wait = tokio::task::spawn_blocking(move || child.wait());
+				tokio::pin!(wait);
+				let status = loop {
+					tokio::select! {
+						status = &mut wait => break status.map_err(io::Error::other)??,
+						signal = signals.next() => deliver(pid, signal),
+					}
+				};
 				Ok(CommandStatus::from(status))
 			})
 		}
+	}
+
+	/// The signals of one command of a [`TestRunner`].
+	struct Signals {
+		/// What the utility sends.
+		sent:   Option<flume::Receiver<i32>>,
+		/// Fires when the utility is cancelled.
+		ending: Option<tokio_util::sync::CancellationToken>,
+	}
+
+	impl Signals {
+		/// The next signal for the command: what the utility sends, and `KILL`
+		/// once when the utility is cancelled; never without either.
+		async fn next(&mut self) -> i32 {
+			const KILL: i32 = 9;
+			loop {
+				let sent = async {
+					match &self.sent {
+						Some(sent) => sent.recv_async().await.ok(),
+						None => std::future::pending().await,
+					}
+				};
+				let ending = async {
+					match &self.ending {
+						Some(ending) => ending.cancelled().await,
+						None => std::future::pending().await,
+					}
+				};
+				tokio::select! {
+					signal = sent => match signal {
+						Some(signal) => return signal,
+						// The utility sends no more.
+						None => self.sent = None,
+					},
+					() = ending => {
+						self.ending = None;
+						return KILL;
+					},
+				}
+			}
+		}
+	}
+
+	/// Sends `signal` to the process group `pid` leads.
+	fn deliver(pid: u32, signal: i32) {
+		#[cfg(unix)]
+		if let Ok(pid) = i32::try_from(pid) {
+			// SAFETY: plain syscall without pointer arguments.
+			unsafe { libc::kill(-pid, signal) };
+		}
+		#[cfg(not(unix))]
+		let _ = (pid, signal);
 	}
 
 	/// Runs the shell builtins a test command line may name; `None` for any

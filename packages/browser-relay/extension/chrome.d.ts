@@ -75,10 +75,11 @@ interface ChromeDownloadItem {
 declare const chrome: {
 	scripting: {
 		executeScript<Args extends unknown[], Result>(injection: {
-			target: { tabId: number; allFrames?: boolean };
+			target: { tabId: number; allFrames?: boolean; frameIds?: number[] };
 			func: (...args: Args) => Result;
 			args?: Args;
 			injectImmediately?: boolean;
+			world?: "ISOLATED" | "MAIN";
 		}): Promise<Array<ChromeInjectionResult<Awaited<Result>>>>;
 	};
 	/** Content-script only: reaches shadow roots another extension created closed. */

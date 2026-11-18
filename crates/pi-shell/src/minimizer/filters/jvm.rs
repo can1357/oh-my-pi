@@ -1083,7 +1083,7 @@ pub fn detect_task(command: &str) -> GradleTask {
 				|| a.contains("ktlint")
 				|| a.contains("detekt")
 				|| a == "check"
-				|| a.contains("dependencies")
+				|| is_dependencies_task(a)
 		})
 		.unwrap_or_default();
 
@@ -1103,7 +1103,7 @@ pub fn detect_task(command: &str) -> GradleTask {
 		GradleTask::Lint
 	} else if task == "check" {
 		GradleTask::Test
-	} else if task.contains("dependencies") {
+	} else if is_dependencies_task(&task) {
 		GradleTask::Dependencies
 	} else if had_tokens {
 		// Non-flag non-clean tokens existed but none were recognized →
@@ -1478,6 +1478,13 @@ const fn max_gradle_deps() -> usize {
 /// dependency tree into a per-configuration table of TOP-LEVEL deps only
 /// (transitive `|    +---` / `     \---` rows are dropped), capped at
 /// [`max_gradle_deps`].
+/// Gradle's built-in `dependencies` report task, bare or project-qualified
+/// (`:app:dependencies`). Custom tasks that merely mention dependencies
+/// (`auditJacksonDependencies`) print their own output, not the report tree.
+fn is_dependencies_task(task: &str) -> bool {
+	task.rsplit(':').next() == Some("dependencies")
+}
+
 fn filter_gradle_dependencies(input: &str) -> String {
 	if input.is_empty() {
 		return String::new();
@@ -1541,7 +1548,8 @@ fn filter_gradle_dependencies(input: &str) -> String {
 	}
 
 	if configs.is_empty() {
-		if input.contains("BUILD SUCCESSFUL") {
+		let reports_none = input.lines().any(|line| line.trim() == "No dependencies");
+		if reports_none && input.contains("BUILD SUCCESSFUL") {
 			return "ok ✓ no dependencies".to_string();
 		}
 		return input.trim().to_string();
@@ -2493,6 +2501,13 @@ mod tests {
 	#[test]
 	fn gradle_detect_dependencies_with_module() {
 		assert_eq!(detect_task("gradlew :app:dependencies"), GradleTask::Dependencies);
+	}
+	#[test]
+	fn gradle_custom_dependency_task_is_not_the_dependencies_report() {
+		assert_eq!(
+			detect_task("gradlew -I audit.gradle auditJacksonDependencies"),
+			GradleTask::Other
+		);
 	}
 	#[test]
 	fn gradle_detect_boot_run_routes_to_spring() {

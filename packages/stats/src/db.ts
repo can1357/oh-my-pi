@@ -29,6 +29,7 @@ import type {
 	FrustrationCounts,
 	MessageStats,
 	MessageStatsInput,
+	SnapcompactCompactionStats,
 	ToolCallStats,
 	ToolResultLink,
 	UserMessageLink,
@@ -152,6 +153,18 @@ const SPOTLIGHT_ARG_TOKENS_BACKFILL_KEY = "spotlight_v5_arg_tokens";
 // count only with the arm that shipped. Every transcript that can hold
 // Spotlight entries is re-parsed once by the new rules.
 const SPOTLIGHT_TOGGLE_BACKFILL_KEY = "spotlight_v6_toggle";
+// Snapcompact compactions are filled by the parser; transcripts ingested before
+// the table existed are re-parsed once. Compaction entries carry `method` and
+// `tokensAfter` only since this date, so older cursors stay put.
+const SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY = "snapcompact_compactions_v1";
+const SNAPCOMPACT_COMPACTIONS_SINCE_MS = Date.parse("2026-08-20T00:00:00Z");
+// `messages.purpose` is filled by the parser from `model_usage` entries, which
+// rows ingested before the column existed stored as anonymous assistant rows;
+// their transcripts are re-parsed once, which also picks up the
+// `duration`/`ttft` newer entries carry. Sessions journal `model_usage` only
+// since this date, so older cursors stay put.
+const MODEL_USAGE_PURPOSE_BACKFILL_KEY = "model_usage_purpose_v1";
+const MODEL_USAGE_SINCE_MS = Date.parse("2026-08-31T00:00:00Z");
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -216,6 +229,7 @@ export async function initDb(): Promise<Database> {
 			cost_unpriced INTEGER NOT NULL DEFAULT 0,
 			agent_type TEXT NOT NULL DEFAULT 'main',
 			service_tier TEXT,
+			purpose TEXT,
 			UNIQUE(session_file, entry_id)
 		);
 
@@ -390,6 +404,18 @@ export async function initDb(): Promise<Database> {
 			edit TEXT NOT NULL,
 			PRIMARY KEY (session_file, tool_call_id)
 		) WITHOUT ROWID;
+
+		-- Snapcompact compactions: the session's context estimate before and after each one.
+		CREATE TABLE IF NOT EXISTS snapcompact_compactions (
+			session_file TEXT NOT NULL,
+			entry_id TEXT NOT NULL,
+			folder TEXT NOT NULL,
+			timestamp INTEGER NOT NULL,
+			tokens_before INTEGER NOT NULL,
+			tokens_after INTEGER NOT NULL,
+			PRIMARY KEY (session_file, entry_id)
+		) WITHOUT ROWID;
+		CREATE INDEX IF NOT EXISTS idx_snapcompact_compactions_entry ON snapcompact_compactions(entry_id, timestamp);
 	`);
 
 	const offsetColumns = db.query("PRAGMA table_info(file_offsets)").all() as { name: string }[];
@@ -449,6 +475,12 @@ export async function initDb(): Promise<Database> {
 	// their epoch-sentinel zeros read as free until a re-parse rewrites them.
 	if (!messageColumns.some(column => column.name === "cost_unpriced")) {
 		db.run("ALTER TABLE messages ADD COLUMN cost_unpriced INTEGER NOT NULL DEFAULT 0");
+	}
+	// Off-transcript model calls (`model_usage` entries) keep their raw purpose;
+	// assistant messages stay NULL. Rows ingested before this column existed are
+	// all NULL until the `model_usage_purpose_v1` re-parse below rewrites them.
+	if (!messageColumns.some(column => column.name === "purpose")) {
+		db.run("ALTER TABLE messages ADD COLUMN purpose TEXT");
 	}
 	// Token-usage-by-agent: each message is classified main / subagent / advisor
 	// from its transcript path. A brand-new table gets the column from CREATE
@@ -543,11 +575,13 @@ export async function initDb(): Promise<Database> {
 	backfillMissingCatalogCosts(db);
 	backfillNoCacheInputCosts(db);
 	backfillForkDuplicates(db);
-	backfillSpotlight(db, SPOTLIGHT_BACKFILL_KEY);
+	reparseModifiedSince(db, SPOTLIGHT_BACKFILL_KEY, SPOTLIGHT_SINCE_MS);
 	reparseSpotlightSessions(db, SPOTLIGHT_EDITS_BACKFILL_KEY);
 	reparseSpotlightSessions(db, SPOTLIGHT_NEEDS_BACKFILL_KEY);
 	reparseSpotlightSessions(db, SPOTLIGHT_ARG_TOKENS_BACKFILL_KEY);
-	backfillSpotlight(db, SPOTLIGHT_TOGGLE_BACKFILL_KEY);
+	reparseModifiedSince(db, SPOTLIGHT_TOGGLE_BACKFILL_KEY, SPOTLIGHT_SINCE_MS);
+	reparseModifiedSince(db, SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY, SNAPCOMPACT_COMPACTIONS_SINCE_MS);
+	reparseModifiedSince(db, MODEL_USAGE_PURPOSE_BACKFILL_KEY, MODEL_USAGE_SINCE_MS);
 	ensureRollupSchema(db);
 	return db;
 }
@@ -785,18 +819,20 @@ function backfillNoCacheInputCosts(database: Database): void {
 }
 
 /**
- * Re-parse, once per key, the transcripts that can hold Spotlight entries
- * (modified since {@link SPOTLIGHT_SINCE_MS}) by dropping their cursors; every
- * older cursor stays, so this never triggers a full-history re-parse. The next
- * sync rebuilds those files from byte zero, replacing their Spotlight rows.
- * Keys: {@link SPOTLIGHT_BACKFILL_KEY} (the tables are new),
- * {@link SPOTLIGHT_TOGGLE_BACKFILL_KEY} (the experiment became a toggle).
+ * Re-parse, once per key, the transcripts modified since `sinceMs` (the first
+ * day they can hold the entries the key's rows come from) by dropping their
+ * cursors; every older cursor stays, so this never triggers a full-history
+ * re-parse. The next sync rebuilds those files from byte zero, replacing their
+ * parser-filled rows. Keys: {@link SPOTLIGHT_BACKFILL_KEY} (the Spotlight
+ * tables are new), {@link SPOTLIGHT_TOGGLE_BACKFILL_KEY} (the experiment became
+ * a toggle), {@link SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY} (the table is new),
+ * {@link MODEL_USAGE_PURPOSE_BACKFILL_KEY} (`messages.purpose` is new).
  */
-function backfillSpotlight(database: Database, key: string): void {
+function reparseModifiedSince(database: Database, key: string, sinceMs: number): void {
 	const row = database.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?").get(key);
 	if (row?.value === BACKFILL_COMPLETE) return;
 	database.transaction(() => {
-		database.query("DELETE FROM file_offsets WHERE last_modified >= ?").run(SPOTLIGHT_SINCE_MS);
+		database.query("DELETE FROM file_offsets WHERE last_modified >= ?").run(sinceMs);
 		database.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(key, BACKFILL_COMPLETE);
 	})();
 }
@@ -1064,6 +1100,27 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 					for (const table of SPOTLIGHT_TABLES) {
 						changes += database.query(`DELETE FROM ${table} WHERE session_file = ?`).run(sessionFile).changes;
 					}
+				}
+				// The parse covers the whole transcript: drop compactions it no longer holds or has
+				// rewritten. A removed one may live on in a fork, which only another replay can credit.
+				const parsedCompactions = new Map(result.snapcompactCompactions.map(row => [row.entryId, row]));
+				const storedCompactions = database
+					.query<{ entry_id: string; timestamp: number; tokens_before: number; tokens_after: number }, [string]>(
+						"SELECT entry_id, timestamp, tokens_before, tokens_after FROM snapcompact_compactions WHERE session_file = ?",
+					)
+					.all(sessionFile);
+				for (const stored of storedCompactions) {
+					const parsed = parsedCompactions.get(stored.entry_id);
+					if (parsed?.timestamp !== stored.timestamp) {
+						reconcile = true;
+					} else if (parsed.tokensBefore === stored.tokens_before && parsed.tokensAfter === stored.tokens_after) {
+						continue;
+					}
+					changes += database
+						.query("DELETE FROM snapcompact_compactions WHERE session_file = ? AND entry_id = ?")
+						.run(sessionFile, stored.entry_id).changes;
+				}
+				if (replace) {
 					if (messages.length > 0) {
 						changes += database.query("DELETE FROM messages WHERE session_file = ?").run(sessionFile).changes;
 					}
@@ -1089,6 +1146,7 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 			updateUserMessageLinks(parsedRows(writes, result => result.userLinks)) +
 			insertToolCalls(parsedRows(writes, result => result.toolCalls)) +
 			updateToolResults(parsedRows(writes, result => result.toolResults)) +
+			insertSnapcompactCompactions(parsedRows(writes, result => result.snapcompactCompactions)) +
 			insertSpotlightSessions(parsedRows(writes, result => result.spotlight.sessions)) +
 			updateSpotlightTitles(parsedRows(writes, result => result.spotlight.titles)) +
 			upsertSpotlightShapes(parsedRows(writes, result => result.spotlight.shapes)) +
@@ -1140,7 +1198,10 @@ export function completeSessionSync(reconcile: boolean): void {
  * first-write-wins across the lineage. Same-file re-syncs still hit the
  * `ON CONFLICT(session_file, entry_id)` upsert below, which re-derives the
  * stored cost (orchestration-aware) and keeps `premium_requests` monotonic, so
- * a forced re-parse repairs historical `premium_requests` and cost fix-ups.
+ * a forced re-parse repairs historical `premium_requests` and cost fix-ups. It
+ * also rewrites the parser-derived `purpose`, `duration` and `ttft`, so a row
+ * stored by a build that did not read them from `model_usage` entries is
+ * repaired by the same re-parse.
  */
 export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 	if (!db) return 0;
@@ -1174,9 +1235,13 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			"cost_unpriced",
 			"agent_type",
 			"service_tier",
+			"purpose",
 		],
 		identity: ["entry_id", "timestamp"],
 		upsert: `ON CONFLICT(session_file, entry_id) DO UPDATE SET
+			duration = excluded.duration,
+			ttft = excluded.ttft,
+			purpose = excluded.purpose,
 			premium_requests = MAX(messages.premium_requests, excluded.premium_requests),
 			cost_input = excluded.cost_input,
 			cost_output = excluded.cost_output,
@@ -1221,6 +1286,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 					unpriced ? 1 : 0,
 					s.agentType,
 					s.serviceTier ?? null,
+					s.purpose ?? null,
 				],
 			);
 		}
@@ -1278,6 +1344,7 @@ function rowToMessageStats(row: any): MessageStats {
 			},
 		},
 		agentType: (row.agent_type as AgentType) ?? "main",
+		purpose: (row.purpose as string | null) ?? null,
 		serviceTier: (row.service_tier as ServiceTier | null) ?? null,
 		costUnpriced: row.cost_unpriced === 1,
 	};
@@ -1933,6 +2000,30 @@ export function updateToolResults(links: Iterable<ToolResultLink>): number {
 		}
 	});
 	return updated;
+}
+
+/**
+ * Insert snapcompact compaction rows. Forked transcripts copy compaction
+ * entries verbatim, so the fork guard keeps one row per entry across the lineage.
+ */
+export function insertSnapcompactCompactions(rows: Iterable<SnapcompactCompactionStats>): number {
+	if (!db) return 0;
+	const writer = new ChunkedInsert(db, {
+		verb: "INSERT OR IGNORE",
+		table: "snapcompact_compactions",
+		columns: ["session_file", "entry_id", "folder", "timestamp", "tokens_before", "tokens_after"],
+		identity: ["entry_id", "timestamp"],
+	});
+	return atomically(db, () => {
+		for (const row of rows) {
+			writer.add(
+				row.sessionFile,
+				[row.entryId, row.timestamp],
+				[row.sessionFile, row.entryId, row.folder, row.timestamp, row.tokensBefore, row.tokensAfter],
+			);
+		}
+		return writer.finish();
+	});
 }
 
 /** Tables the parser fills for the Spotlight dashboard, all keyed by `session_file`. */

@@ -4,7 +4,7 @@ import { readIso, sniffIso } from "../../src/ar/iso";
 import { DEFAULT_ARCHIVE_LIMITS } from "../../src/ar/limits";
 import { type ByteSource, memoryByteSource } from "../../src/ar/source";
 import type { ArchiveIndexEntry } from "../../src/ar/types";
-import { arFixture } from "./fixtures";
+import { arFixture, extractLargestMember } from "./fixtures";
 
 const textDecoder = new TextDecoder();
 
@@ -161,9 +161,9 @@ test("enforces metadata, entry, member, and path limits", async () => {
 	await expect(
 		readIso(memoryByteSource(bytes), { limits: { ...DEFAULT_ARCHIVE_LIMITS, maxEntries: 2 } }),
 	).rejects.toThrow("too many entries");
-	await expect(
-		readIso(memoryByteSource(bytes), { limits: { ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 8 } }),
-	).rejects.toThrow("too large to extract");
+	const memberLimits = { ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 8 };
+	const memberIndex = await readIso(memoryByteSource(bytes), { limits: memberLimits });
+	await expect(extractLargestMember("iso", memberIndex, memberLimits)).rejects.toThrow("too large to extract");
 	await expect(
 		readIso(memoryByteSource(bytes), { limits: { ...DEFAULT_ARCHIVE_LIMITS, maxPathBytes: 5 } }),
 	).rejects.toThrow("member name exceeds 5 bytes");

@@ -208,13 +208,23 @@ pub const REPLACE_PAIR_COALESCED_WARNING: &str = "Multiple hunks targeted the sa
                                                   kept only the last. Issue one `PUT` or `CUT` \
                                                   hunk per range.";
 
-/// Replacement body indentation was aligned from unchanged structural rows.
-pub const REPLACEMENT_INDENT_AUTO_SHIFT_WARNING: &str =
-	"Auto-indented a replacement body to match unchanged structural rows in its source range.";
-
 /// Bare body rows auto-converted to literal `+` rows.
 pub const BARE_BODY_AUTO_PIPED_WARNING: &str =
 	"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines.";
+
+/// A bare row shaped like a hunk or file header that did not parse as one.
+///
+/// Auto-prefixing it would write a mistyped op (`PUT 789*=821:`) or a
+/// malformed second-file header into the file as text.
+pub fn malformed_header_row_message(text: &str) -> String {
+	format!(
+		"{} looks like a hunk or file header but does not parse as one, so it was neither run nor \
+		 written. Ops: `PUT N.=M:`, `PUT N*:`, `PUT <N:`, `PUT >N:`, `CUT N.=M`, `CUT N*`, `REM`, \
+		 `MV DEST`; a file header is `[PATH#TAG]` alone at the start of a line. If the row is \
+		 literal file content, prefix it with `+`.",
+		json_quote(text)
+	)
+}
 
 /// Top-level read-output rows recovered as single-line replacements.
 pub const SNAPSHOT_ROWS_AUTO_PUT_WARNING: &str = "Recovered top-level `N:TEXT` snapshot row(s) as \
@@ -295,6 +305,18 @@ pub struct BlockDiagnosticSuggestions {
 	pub enclosing_block: Option<BlockSpan>,
 }
 
+/// How far block locators reach in the target file's language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockCoverage {
+	/// A grammar covers the whole file.
+	Full,
+	/// No tree-sitter grammar for this file type.
+	NoGrammar,
+	/// Single-file components (Vue, Svelte, Astro): the grammar leaves
+	/// embedded `<script>`/`<style>` sections unparsed.
+	NoEmbedded,
+}
+
 /// A block-anchored replace/cut could not resolve to a syntactic block.
 /// Appends a [`format_anchored_context`] preview when `file_lines` is given.
 /// `PUT >N*` never reaches this path; it lowers to `PUT >N`.
@@ -304,6 +326,7 @@ pub fn block_unresolved_message(
 	file_lines: Option<&[&str]>,
 	suggestions: &BlockDiagnosticSuggestions,
 	register: Option<&str>,
+	coverage: BlockCoverage,
 ) -> String {
 	let phrase = block_form_at(op, line, register);
 	let fallback = match op {
@@ -325,21 +348,29 @@ pub fn block_unresolved_message(
 	let anchor_text =
 		file_lines.and_then(|lines| lines.get((line.saturating_sub(1)) as usize).copied());
 	let next_block = suggestions.next_block;
-	let mut message = match (anchor_text.is_some_and(|text| text.trim().is_empty()), next_block) {
-		(true, Some(next)) => {
-			let retry = block_form_at(op, next.start, register);
-			format!(
-				"Line {line} is blank; no syntactic block can begin there. The next multi-line block \
-				 begins at line {} and ends at line {}. Retry `{retry}`.",
-				next.start, next.end
-			)
-		},
-		_ => {
-			format!(
-				"`{phrase}` could not resolve a syntactic block beginning on line {line} (unsupported \
-				 language, blank/closer line, or parse error). Use `{fallback}` with explicit lines."
-			)
-		},
+	let blank_anchor = anchor_text.is_some_and(|text| text.trim().is_empty());
+	let mut message = if let (true, Some(next)) = (blank_anchor, next_block) {
+		let retry = block_form_at(op, next.start, register);
+		format!(
+			"Line {line} is blank; no syntactic block can begin there. The next multi-line block \
+			 begins at line {} and ends at line {}. Retry `{retry}`.",
+			next.start, next.end
+		)
+	} else {
+		let reason = match coverage {
+			BlockCoverage::Full => "(blank/closer line, or parse error)",
+			BlockCoverage::NoGrammar => {
+				"(block locators need a tree-sitter grammar, and this file type has none)"
+			},
+			BlockCoverage::NoEmbedded => {
+				"(blank/closer line, parse error, or a line inside an embedded `<script>`/`<style>` \
+				 section, which block locators do not reach)"
+			},
+		};
+		format!(
+			"`{phrase}` could not resolve a syntactic block beginning on line {line} {reason}. Use \
+			 `{fallback}` with explicit lines."
+		)
 	};
 	if let Some(enclosing_block) = suggestions.enclosing_block {
 		let retry = block_form_at(op, enclosing_block.start, register);
@@ -418,9 +449,8 @@ impl std::fmt::Display for BoundarySide {
 
 /// A one-sided exact boundary echo cannot cover the selected range.
 ///
-/// After the duplicated body rows are removed, applying or dropping it would
-/// lose distinct range content, so the edit is rejected unless a
-/// parse-restoring boundary combination proves another reading. `left_out` is
+/// With the duplicated body rows set aside, applying it would lose distinct
+/// range content, so the edit is rejected. `left_out` is
 /// the inclusive span of range rows the body does not cover when the echo is
 /// read as a range shifted by `count` lines.
 pub fn ambiguous_boundary_echo_message(
@@ -452,7 +482,7 @@ pub fn ambiguous_boundary_echo_message(
 /// One copy is read as the echo of those lines, and the body still opens (or
 /// ends) with them. `left_out` is the inclusive span of range rows the body
 /// leaves out once every row that restates a line outside the range is set
-/// aside; the chosen repair would delete them.
+/// aside; applying the edit would delete them.
 pub fn repeated_boundary_echo_message(
 	start_line: u32,
 	end_line: u32,
@@ -484,7 +514,7 @@ pub fn repeated_boundary_echo_message(
 /// left once the restated rows are set aside are the only content the body
 /// offers, and they are fewer than the range. `repeated`: the body restates
 /// them more than once. `left_out` is the inclusive span of range rows past
-/// those rows; applying or repairing the edit would delete them.
+/// those rows; applying the edit would delete them.
 pub fn two_sided_boundary_echo_message(
 	start_line: u32,
 	end_line: u32,
@@ -505,55 +535,39 @@ pub fn two_sided_boundary_echo_message(
 	)
 }
 
-/// How a patch would repeat a neighbouring line.
+/// What a patch would do to a range whose body restates a neighbouring line.
 ///
-/// Either the span of neighbouring lines whose copy sits at the edge of the
-/// written rows, or a count of extra copies of one neighbouring line found
-/// elsewhere in them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Restated {
-	Span(u32, u32),
-	Copies(u32, u32),
-}
-
-/// What a patch would do to a range whose body restates a neighbouring line,
-/// judged on the rows it would write there.
-///
-/// `above` / `below` say how the result would repeat the neighbouring lines;
-/// `left_out` is the span of range rows past the rows the body supplies once
-/// those copies are set aside. At least one is set.
+/// `above` / `below` are the spans of neighbouring lines the body's edge rows
+/// repeat; `left_out` is the span of range rows past the rows the body
+/// supplies once those copies are set aside. At least one is set.
 pub fn boundary_echo_outcome_message(
 	start_line: u32,
 	end_line: u32,
-	above: Option<Restated>,
-	below: Option<Restated>,
+	above: Option<(u32, u32)>,
+	below: Option<(u32, u32)>,
 	left_out: Option<(u32, u32)>,
 ) -> String {
-	let restated = |restated: Restated, place: &str| match restated {
-		Restated::Span(first, last) => {
-			format!("write {} ({place} the range) a second time", line_span((first, last)))
-		},
-		Restated::Copies(line, 1) => {
-			format!("hold one more copy of line {line} ({place} the range) than the range did")
-		},
-		Restated::Copies(line, extra) => {
-			format!("hold {extra} more copies of line {line} ({place} the range) than the range did")
-		},
-	};
 	let mut effects = Vec::new();
-	if let Some(above) = above {
-		effects.push(restated(above, "just above"));
+	if let Some(span) = above {
+		effects.push(format!("write {} (just above the range) a second time", line_span(span)));
 	}
-	if let Some(below) = below {
-		effects.push(restated(below, "just below"));
+	if let Some(span) = below {
+		effects.push(format!("write {} (just below the range) a second time", line_span(span)));
 	}
 	if let Some(span) = left_out {
 		effects.push(format!("leave out {} of the range, deleting it", line_span(span)));
 	}
+	let extend = match (above, below) {
+		(Some((first, _)), Some((_, last))) => format!("{first}{HL_RANGE_SEP}{last}"),
+		(Some((first, _)), None) => format!("{first}{HL_RANGE_SEP}{end_line}"),
+		(None, Some((_, last))) => format!("{start_line}{HL_RANGE_SEP}{last}"),
+		(None, None) => format!("{start_line}{HL_RANGE_SEP}{end_line}"),
+	};
 	format!(
 		"`PUT {start_line}{HL_RANGE_SEP}{end_line}:` rejected: the body restates lines next to the \
-		 range, and as applied the result would {}. Re-issue with the range covering exactly the \
-		 lines that change and the body as their complete final content.",
+		 range, and as written the result would {}. Nothing was applied. Re-issue with the range \
+		 covering exactly the lines that change and the body as their complete final content; if \
+		 the repeated line is meant to appear twice, use `PUT {extend}:` and write both copies.",
 		effects.join(" and ")
 	)
 }
@@ -566,14 +580,22 @@ fn line_span((first, last): (u32, u32)) -> String {
 	}
 }
 
-/// A syntax-essential selected edge can be retained on either side of the
-/// payload, but indentation does not establish which placement was intended.
-pub fn ambiguous_boundary_placement_message(start_line: u32, end_line: u32) -> String {
+/// Rejection for a selected edge that may stay on either side of the payload.
+///
+/// Indentation does not establish which placement was intended. `error_line`
+/// is where tree-sitter reports the first syntax error in the patch as
+/// written.
+pub fn ambiguous_boundary_placement_message(
+	start_line: u32,
+	end_line: u32,
+	error_line: Option<u32>,
+) -> String {
+	let at = error_line.map_or_default(|line| format!(" (first syntax error near line {line})"));
 	format!(
-		"`PUT {start_line}{HL_RANGE_SEP}{end_line}:` rejected: a selected boundary row is required \
-		 for the file to parse, but the body indentation does not establish whether it belongs \
-		 before or after that row. Re-read the region and re-issue with a range that excludes every \
-		 unchanged boundary row."
+		"`PUT {start_line}{HL_RANGE_SEP}{end_line}:` rejected: as written the file would no longer \
+		 parse{at}. A selected boundary row is required for the file to parse, but the body \
+		 indentation does not establish whether it belongs before or after that row. Re-read the \
+		 region and re-issue with a range that excludes every unchanged boundary row."
 	)
 }
 
@@ -588,61 +610,81 @@ pub fn trailing_comma_replacement_message(start_line: u32, end_line: u32) -> Str
 	)
 }
 
-/// Exact-text boundary rows were removed because the remaining payload covers
-/// the selected range and the same rows already survive immediately outside it.
-pub fn textual_boundary_echo_warning(start_line: u32, leading: u32, trailing: u32) -> String {
-	let mut parts = Vec::new();
-	if leading > 0 {
-		parts.push(format!("{leading} leading"));
-	}
-	if trailing > 0 {
-		parts.push(format!("{trailing} trailing"));
-	}
-	let joined = parts.join(" and ");
+/// One replacement's parse-restoring change, suggested by a rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundaryFix {
+	pub start:         u32,
+	pub end:           u32,
+	/// A selected range row the fix keeps instead of replacing.
+	pub keep:          Option<u32>,
+	/// Leading body rows the fix drops: they repeat the lines just above.
+	pub drop_leading:  u32,
+	/// Trailing body rows the fix drops: they repeat the lines just below.
+	pub drop_trailing: u32,
+}
+
+/// Rejection for a patch that breaks a file a boundary change would keep
+/// parsing.
+///
+/// The boundary change keeps a selected row or drops body rows that repeat a
+/// neighbour. Nothing is applied: the body is never rewritten.
+pub fn boundary_fix_message(fixes: &[BoundaryFix], error_line: Option<u32>) -> String {
+	let at = error_line.map_or_default(|line| format!(" (first syntax error near line {line})"));
+	let clauses = fixes
+		.iter()
+		.map(|fix| {
+			let (start, end) = (fix.start, fix.end);
+			let mut parts = Vec::new();
+			if let Some(line) = fix.keep {
+				let form = if start == end {
+					Some(format!("PUT <{start}:"))
+				} else if line == start {
+					Some(format!("PUT {}{HL_RANGE_SEP}{end}:", start + 1))
+				} else if line == end {
+					Some(format!("PUT {start}{HL_RANGE_SEP}{}:", end - 1))
+				} else {
+					None
+				};
+				parts.push(form.map_or_else(
+					|| format!("line {line} stays after the body"),
+					|form| format!("line {line} stays (use `{form}`)"),
+				));
+			}
+			if fix.drop_leading > 0 {
+				parts.push(format!(
+					"its first {} body row(s), which repeat the line(s) just above the range, are \
+					 dropped",
+					fix.drop_leading
+				));
+			}
+			if fix.drop_trailing > 0 {
+				parts.push(format!(
+					"its last {} body row(s), which repeat the line(s) just below the range, are \
+					 dropped",
+					fix.drop_trailing
+				));
+			}
+			format!("for `PUT {start}{HL_RANGE_SEP}{end}:` {}", parts.join(" and "))
+		})
+		.collect::<Vec<_>>()
+		.join("; ");
 	format!(
-		"Auto-repaired a replacement boundary echo at line {start_line}: dropped {joined} body \
-		 line(s) already present outside the range. Issue the body as final content for the \
-		 selected range only."
+		"Edit rejected: the file parses now but would not after this edit as written{at}. It parses \
+		 if, {clauses}. Nothing was applied. If that is what you meant, re-issue it that way; \
+		 otherwise correct the body so the result parses."
 	)
 }
 
-/// A replacement range's boundary disposition was corrected by the search.
+/// The applied result no longer parses while the pre-edit content did, and a
+/// syntax error touches the edited lines.
 ///
-/// Judged by the syntax probe: syntax-essential source boundary rows were
-/// retained, or exact body echoes of surviving outside rows were removed. The
-/// authored result did not parse and the selected result does.
-pub fn boundary_variant_repair_warning(start_line: u32, kept: u32, dropped: u32) -> String {
-	let kept_part = if kept == 0 {
-		None
-	} else {
-		Some(format!("retained {kept} syntax-essential source boundary row(s) selected by the range"))
-	};
-	let dropped_part = if dropped == 0 {
-		None
-	} else {
-		Some(format!("dropped {dropped} body row(s) duplicated just outside the range"))
-	};
-	let actions: Vec<String> = kept_part.into_iter().chain(dropped_part).collect();
-	let action = actions.join(" and ");
+/// Advisory, never a rejection. Tree-sitter grammars have gaps, so a valid
+/// construct can read as an error; `error_line` is where it reports one.
+pub fn edit_broke_parse_warning(error_line: u32) -> String {
 	format!(
-		"Auto-repaired replacement boundaries at line {start_line}: {action}. The result was \
-		 verified by the syntax probe — re-issue with the range covering exactly the changed lines \
-		 and the body as their complete final content."
-	)
-}
-
-/// The applied result no longer parses while the pre-edit content did.
-///
-/// The patch introduced a syntax error. Advisory, never a rejection — the
-/// applier honors the authored edit — but the breakage is machine-confirmed by
-/// tree-sitter and surfaced in the same response instead of waiting for a
-/// compiler pass.
-pub fn edit_broke_parse_warning(first_changed_line: Option<u32>) -> String {
-	let at = first_changed_line.map_or_default(|line| format!(" near line {line}"));
-	format!(
-		"This edit introduced a syntax error{at}: the file parsed before the patch and no longer \
-		 does. It was applied exactly as written, so a line number or range endpoint is likely \
-		 wrong — re-read the touched region and re-issue a correcting edit."
+		"Tree-sitter parsed this file before the edit but reports a syntax error near line \
+		 {error_line} after it, within the edited lines. Re-read that region and fix it if the edit \
+		 broke it; if the code is valid, this is a parser limitation and needs no action."
 	)
 }
 
@@ -656,10 +698,11 @@ pub const UNRESOLVED_CLIPBOARD_INTERNAL: &str = "internal error: unresolved clip
                                                  reached the applier (resolveClipboardEdits was \
                                                  not run).";
 
-/// `REM` deletes the whole file and takes no body rows or line ops. Issue it
-/// alone under the header.
+/// `REM` deletes the whole file and takes no body rows or line ops beyond
+/// bodyless `CUT`s, which capture lines into a register first.
 pub const REM_TAKES_NO_BODY: &str = "`REM` deletes the whole file and takes no body rows or line \
-                                     ops. Issue it alone under the header.";
+                                     ops other than bodyless `CUT`s. Issue it alone under the \
+                                     header, or after the `CUT`s that capture lines to move.";
 
 /// `MV DEST` does not take body rows. Put line edits above the `MV` row; the
 /// destination path follows `MV` on the same line.
@@ -767,48 +810,47 @@ pub const EMPTY_INSERT: &str = "`PUT <N:` / `PUT >N:` promises body rows and got
                                 `+TEXT` rows, or drop the `:` to paste a register (`PUT >N` = \
                                 anonymous, `PUT >N @name` = named).";
 
-/// `insert after` body indented shallower than the anchor: the landing slid
-/// forward past trailing closer lines — the common "anchored on the last line
-/// I read instead of after the block" mistake.
-pub fn after_insert_landing_shift_warning(
-	anchor_line: u32,
-	landing_line: u32,
-	crossed: u32,
-) -> String {
+/// Rejection for a `PUT >N:` body that only parses after the following closers.
+///
+/// The body is indented shallower than the anchor: the common "anchored on the
+/// last line I read instead of after the block" mistake. Gap inserts never
+/// move.
+pub fn after_insert_landing_message(anchor_line: u32, landing_line: u32, crossed: u32) -> String {
 	let s = if crossed == 1 { "" } else { "s" };
 	format!(
-		"PUT >{anchor_line}: body indented shallower than the anchor, so the landing moved past \
-		 {crossed} closing line{s} to after line {landing_line}. For the deeper position inside the \
-		 block, re-issue with the body indented to match."
+		"`PUT >{anchor_line}:` rejected: with the body after line {anchor_line} the file would no \
+		 longer parse. The body is indented shallower than line {anchor_line} and parses after line \
+		 {landing_line}, past {crossed} closing line{s}. Nothing was applied. If it belongs there, \
+		 re-issue as `PUT >{landing_line}:`; for the deeper position inside the block, indent the \
+		 body to match."
 	)
 }
 
-/// `PUT >N*:` body indented deeper than the block's closer: the landing was
-/// pulled inside the block — a deeper body almost always means "append inside
-/// the block's body".
-pub fn block_insert_landing_shift_warning(
+/// `PUT >N*:` body indented deeper than the block's closer: the patch as
+/// written breaks the parse, and the body parses inside the block. Rejected;
+/// `PUT >N*` always lands after the block.
+pub fn block_insert_landing_message(
 	block_start: u32,
 	closer_line: u32,
 	landing_line: u32,
 ) -> String {
 	format!(
-		"PUT >{block_start}*: body indented deeper than closing line {closer_line}, so it was \
-		 placed inside the block, after line {landing_line}. `PUT >N*` lands AFTER the block at \
-		 sibling depth — if inside was intended, use plain `PUT >{closer_line}:`."
+		"`PUT >{block_start}*:` rejected: it lands after the block's closing line {closer_line}, \
+		 where the file would no longer parse. The body is indented deeper than that closer and \
+		 parses inside the block, after line {landing_line}. Nothing was applied. If inside was \
+		 intended, re-issue as `PUT >{landing_line}:`; otherwise indent the body to sibling depth."
 	)
 }
 
-/// Plain `PUT >N:` anchored on a block-opener line with a shallower body.
-///
-/// The landing was moved past the whole block — anchoring on an opener places
-/// the body between the opener and its first statement, a position a body at
-/// the opener's depth or above never intends.
-pub fn after_insert_opener_escape_warning(anchor_line: u32, landing_line: u32) -> String {
+/// Plain `PUT >N:` anchored on a block-opener line with a shallower body: the
+/// patch as written breaks the parse, and the body parses past the whole
+/// block. Rejected; gap inserts never move.
+pub fn after_insert_opener_message(anchor_line: u32, landing_line: u32) -> String {
 	format!(
-		"PUT >{anchor_line}: line {anchor_line} opens a block, and the body's indentation claims a \
-		 position outside it, so the body was landed after line {landing_line} (verified by the \
-		 syntax probe). To insert after a whole construct, anchor on its closing line or use `PUT \
-		 >N*:`."
+		"`PUT >{anchor_line}:` rejected: line {anchor_line} opens a block, so the body would land \
+		 inside it, where the file would no longer parse. The body's indentation points outside the \
+		 block, and it parses after line {landing_line}, past the whole construct. Nothing was \
+		 applied. If it belongs there, re-issue as `PUT >{landing_line}:` or `PUT >{anchor_line}*:`."
 	)
 }
 
@@ -835,13 +877,9 @@ pub const HEADTAIL_DRIFT_WARNING: &str =
 	"Applied the `PUT <1:`/`PUT >$:` edit despite a stale snapshot tag (file changed since your \
 	 read) — head/tail position is content-independent. Re-read if the drift was unexpected.";
 
-/// Section named a nonexistent path matching an earlier snapshot's name and
-/// tag.
-///
-/// The model gave the bare filename (or wrong directory) for a file it just
-/// read. The edit was rebound to that file's full path. Surfaced as a warning
-/// so the model (and user) learn the corrected path and stop reusing the wrong
-/// one.
+/// Section named a nonexistent path matching a sandbox snapshot's name and
+/// tag; the edit was rebound to that file. Surfaced as a warning so the model
+/// learns the full path.
 pub fn path_recovered_from_tag_message(
 	authored_path: &str,
 	resolved_path: &str,
@@ -1210,20 +1248,7 @@ mod tests {
 	}
 
 	#[test]
-	fn test_boundary_warnings_and_json_quote() {
-		assert_eq!(
-			textual_boundary_echo_warning(10, 1, 2),
-			"Auto-repaired a replacement boundary echo at line 10: dropped 1 leading and 2 trailing \
-			 body line(s) already present outside the range. Issue the body as final content for the \
-			 selected range only."
-		);
-		assert_eq!(
-			boundary_variant_repair_warning(10, 2, 1),
-			"Auto-repaired replacement boundaries at line 10: retained 2 syntax-essential source \
-			 boundary row(s) selected by the range and dropped 1 body row(s) duplicated just outside \
-			 the range. The result was verified by the syntax probe — re-issue with the range \
-			 covering exactly the changed lines and the body as their complete final content."
-		);
+	fn test_json_quote() {
 		assert_eq!(json_quote("hello \"world\"\n\t\\"), "\"hello \\\"world\\\"\\n\\t\\\\\"");
 	}
 }

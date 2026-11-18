@@ -123,6 +123,17 @@ const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
 );
 
 const BARE_LINE_RE = /^\d+$/;
+// A comma list whose chunks carry their own `raw` (`:1-32:raw,48-50:raw`, `:raw:5,raw:9-12`).
+const RAW_CHUNK_SRC = `(?:raw:)?${LIST_CHUNK_SRC}(?::raw)?`;
+const PER_CHUNK_RAW_LIST_RE = new RegExp(`:(${RAW_CHUNK_SRC}(?:,${RAW_CHUNK_SRC})+)$`, "i");
+
+/** Rewrite a list with per-chunk `raw` to its one-raw form: `a:1-3:raw,9:raw` → `a:1-3,9:raw`. */
+function hoistChunkRaw(rawPath: string): string {
+	const match = PER_CHUNK_RAW_LIST_RE.exec(rawPath);
+	if (!match || !/raw/i.test(match[1])) return rawPath;
+	const chunks = match[1].split(",").map(chunk => chunk.replace(/^raw:|:raw$/gi, ""));
+	return `${rawPath.slice(0, match.index)}:${chunks.join(",")}:raw`;
+}
 
 /**
  * Fold the list chunks split off by a colon inside one comma list into the `list`
@@ -172,6 +183,7 @@ export function splitPathAndSel(
 	rawPath: string,
 	options?: { foldListColons?: boolean },
 ): { path: string; sel?: string } {
+	rawPath = hoistChunkRaw(rawPath);
 	const colon = rawPath.lastIndexOf(":");
 	if (colon <= 0) return { path: rawPath };
 
@@ -243,6 +255,7 @@ export function splitInternalUrlSel(
 	if (spec.portAuthority && !url.rest.includes("/")) return { path: rawPath };
 
 	const schemeEnd = rawPath.length - url.rest.length;
+	rawPath = hoistChunkRaw(rawPath);
 	let path = rawPath;
 	const chunks: string[] = [];
 	while (true) {

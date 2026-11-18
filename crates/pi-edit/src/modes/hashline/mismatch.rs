@@ -156,6 +156,43 @@ pub fn format_header_only_message(path: &str, actual_file_hash: &str) -> String 
 	)
 }
 
+/// Rejection for a missing header path whose name and tag match one read file.
+///
+/// The edit never rebinds onto that file; the reply names it so the model
+/// re-issues under its path.
+pub fn tag_path_missing_error(authored: &str, issued_for: &str, tag: &str) -> EditError {
+	EditError::rejected(
+		Rejection::FileNotFound,
+		format!(
+			"File not found: {authored}. Hash #{tag} was issued in this session for {issued_for}; if \
+			 that is the file you mean, re-issue the edit under [{issued_for}#{tag}]. Nothing was \
+			 applied."
+		),
+	)
+}
+
+/// Rejection for a file matching the tag that never held it in this session.
+///
+/// Other paths did: identical files (a sibling checkout, a copied fixture)
+/// share a tag, so the header resolved to a file other than the one read.
+pub fn tag_from_other_file_error(
+	authored: &str,
+	resolved: &str,
+	tag: &str,
+	origins: &[String],
+) -> EditError {
+	EditError::rejected(
+		Rejection::OtherFileTag,
+		format!(
+			"Edit rejected for {authored}: the header resolves to {resolved}, but hash #{tag} was \
+			 issued in this session for {} (identical content shares a tag). Nothing was applied. To \
+			 edit the file you read, put its full path in the header; to edit {resolved}, read it \
+			 first.",
+			origins.join(", ")
+		),
+	)
+}
+
 /// Construct a tag rejection from mismatch details.
 pub fn mismatch_error(details: &MismatchDetails) -> EditError {
 	let reason = if details.hash_recognized {

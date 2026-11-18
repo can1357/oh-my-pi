@@ -59,7 +59,9 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 pub fn condense_lint_output(program: &str, input: &str, exit_code: i32) -> String {
 	let cleaned = primitives::strip_ansi(input);
 	let stripped = strip_lint_noise(program, &cleaned, exit_code);
-	if program == "eslint" {
+	// Package-manager scripts (`npm run lint`) usually run eslint; stylish rows
+	// are recognized structurally, so other output falls through untouched.
+	if matches!(program, "eslint" | "npm" | "pnpm" | "yarn" | "bun" | "bunx") {
 		// eslint's default "stylish" output puts the file path on its own
 		// non-indented header line and the diagnostics on the following indented
 		// `L:C  severity  message  rule-id` rows. group_diagnostics expects the
@@ -571,26 +573,33 @@ fn split_diagnostic(line: &str) -> Option<(&str, &str)> {
 		return Some((file, rest));
 	}
 	let (file, rest) = line.split_once(':')?;
-	if !looks_like_path(file) || !starts_with_line_number(rest) {
+	// A path holding whitespace is prose or a prefixed log row (`dist/a.js
+	// 12.3 kB │ gzip: 4.1 kB`, `@scope/pkg check: …`), not a location.
+	if !looks_like_path(file) || file.contains(char::is_whitespace) || !starts_with_line_number(rest)
+	{
 		return None;
 	}
 	Some((file, rest))
 }
 
+/// `file(line,col): message`. The location is the first parenthesized run of
+/// comma-separated numbers, so a path that itself holds parentheses
+/// (`src/pages/(dashboard)/page.tsx(3,1)`) keeps them.
 fn split_tsc_diagnostic(line: &str) -> Option<(&str, &str)> {
-	let paren = line.find('(')?;
-	let close = line[paren..].find(')')? + paren;
-	let file = &line[..paren];
-	let loc = &line[paren + 1..close];
-	if !looks_like_path(file)
-		|| !loc
-			.split(',')
-			.all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
-	{
-		return None;
-	}
-	let rest = line.get(close + 1..)?.trim_start_matches(':').trim_start();
-	Some((file, rest))
+	line.match_indices('(').find_map(|(paren, _)| {
+		let close = line[paren..].find(')')? + paren;
+		let file = &line[..paren];
+		let loc = &line[paren + 1..close];
+		if !looks_like_path(file)
+			|| !loc
+				.split(',')
+				.all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+		{
+			return None;
+		}
+		let rest = line.get(close + 1..)?.trim_start_matches(':').trim_start();
+		Some((file, rest))
+	})
 }
 
 fn looks_like_path(value: &str) -> bool {
@@ -686,6 +695,32 @@ mod tests {
 		assert!(out.contains("3 diagnostics in 2 files"));
 		assert!(out.contains("src/a.ts (2 diagnostics)"));
 		assert!(out.contains("Top codes:"));
+	}
+
+	#[test]
+	fn tsc_path_with_parentheses_keeps_its_file() {
+		let input = "src/pages/(dashboard)/guests/page.tsx(12,5): error TS2322: bad\nsrc/a.ts(1,2): \
+		             error TS2322: bad\n";
+		let out = group_diagnostics(input);
+		assert!(out.contains("2 diagnostics in 2 files"), "got: {out}");
+		assert!(out.contains("src/pages/(dashboard)/guests/page.tsx (1 diagnostics)"), "got: {out}");
+	}
+
+	#[test]
+	fn build_log_rows_are_not_diagnostics() {
+		let input =
+			"dist/assets/index-4f2a.js   123.45 kB │ gzip: 40.10 kB\n@scope/pkg check: 12 passed\n";
+		assert_eq!(group_diagnostics(input), input);
+	}
+
+	#[test]
+	fn package_manager_lint_reshapes_eslint_stylish() {
+		let input = "\n/repo/src/a.ts\n  1:10  error  Unexpected var  no-var\n  2:1   warning  \
+		             Missing semicolon  semi\n\n/repo/src/b.ts\n  3:5  error  'x' is unused  \
+		             no-unused-vars\n\n✖ 3 problems (2 errors, 1 warning)\n";
+		let out = condense_lint_output("npm", input, 1);
+		assert!(out.contains("3 diagnostics in 2 files"), "got: {out}");
+		assert!(out.contains("Top rules:"), "got: {out}");
 	}
 
 	#[test]

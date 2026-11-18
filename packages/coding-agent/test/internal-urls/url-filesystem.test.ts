@@ -71,13 +71,16 @@ describe("InternalUrlFilesystem local://", () => {
 		await expect(fs.stat(path.join(localRoot, "missing.txt"))).rejects.toThrow();
 	});
 
-	it("keeps a trailing read selector as part of the file name", async () => {
+	it("keeps an existing entry whose name ends like a read selector", async () => {
+		// `:` is illegal in Windows file names.
+		if (process.platform === "win32") return;
 		await fs.mkdir(localRoot, { recursive: true });
-		await fs.writeFile(path.join(localRoot, "notes.md"), "whole\n");
+		await fs.writeFile(path.join(localRoot, "notes.md"), "one\ntwo\n");
+		await fs.writeFile(path.join(localRoot, "notes.md:1"), "literal\n");
 
-		const response = await shellFs().handle({ op: ShellFsOp.Open, path: "local://notes.md:1-2", open: READ });
-
-		expect(response.error?.code).toBe("ENOENT");
+		await expect(shellFs().handle({ op: ShellFsOp.Open, path: "local://notes.md:1", open: READ })).resolves.toEqual({
+			local: path.join(localRoot, "notes.md:1"),
+		});
 	});
 
 	it("follows a symlink whose literal target is a URL while readlink keeps the link itself", async () => {
@@ -136,6 +139,86 @@ describe("InternalUrlFilesystem local://", () => {
 		});
 
 		expect(response.error?.code).toBe("EXDEV");
+	});
+});
+
+describe("InternalUrlFilesystem read selectors", () => {
+	/** Bytes a command reading `url` receives, or the errno its open fails with. */
+	async function readUrl(url: string): Promise<string> {
+		const filesystem = shellFs();
+		const opened = await filesystem.handle({ op: ShellFsOp.Open, path: url, open: READ });
+		if (opened.error) return opened.error.code;
+		if (opened.local !== undefined) return fs.readFile(opened.local, "utf-8");
+		const handle = opened.handle;
+		if (handle === undefined) throw new Error(`open ${url} returned neither a path nor a handle`);
+		const read = await filesystem.handle({ op: ShellFsOp.Read, handle, offset: 0n, length: 1 << 20 });
+		await filesystem.handle({ op: ShellFsOp.Close, handle });
+		return Buffer.from(read.data ?? []).toString("utf-8");
+	}
+
+	beforeEach(async () => {
+		await fs.writeFile(path.join(tempDir, "7.bash.log"), '{"n":1}\n{"n":2}\n{"n":3}\n{"n":4}');
+	});
+
+	it("opens the backing file itself for :raw, so external programs receive its path too", async () => {
+		const filesystem = shellFs();
+		const backing = path.join(tempDir, "7.bash.log");
+
+		await expect(filesystem.handle({ op: ShellFsOp.Open, path: "artifact://7:raw", open: READ })).resolves.toEqual({
+			local: backing,
+			readonly: true,
+		});
+		await expect(filesystem.handle({ op: ShellFsOp.BackingPath, path: "artifact://7:raw" })).resolves.toEqual({
+			path: backing,
+		});
+	});
+
+	it("serves exactly the selected lines, each with its terminator", async () => {
+		expect(await readUrl("artifact://7:2")).toBe('{"n":2}\n');
+		expect(await readUrl("artifact://7:raw:2-3")).toBe('{"n":2}\n{"n":3}\n');
+		expect(await readUrl("artifact://7:2-3:raw")).toBe('{"n":2}\n{"n":3}\n');
+		expect(await readUrl("artifact://7:1,3")).toBe('{"n":1}\n{"n":3}\n');
+		expect(await readUrl("artifact://7:2+2")).toBe('{"n":2}\n{"n":3}\n');
+		// The last line has no terminator in the artifact, so none is invented.
+		expect(await readUrl("artifact://7:3-")).toBe('{"n":3}\n{"n":4}');
+		expect(await readUrl("artifact://7:-2")).toBe('{"n":3}\n{"n":4}');
+		expect(await readUrl("artifact://7:1,-1")).toBe('{"n":1}\n{"n":4}');
+	});
+
+	it("reports the selected bytes as the file's size and refuses to write through a line selector", async () => {
+		const filesystem = shellFs();
+
+		await expect(filesystem.handle({ op: ShellFsOp.Metadata, path: "artifact://7:2-3" })).resolves.toEqual({
+			metadata: { fileType: ShellFsFileType.File, size: 16, mode: 0o444 },
+		});
+		const removed = await filesystem.handle({ op: ShellFsOp.RemoveFile, path: "artifact://7:2-3" });
+		expect(removed.error?.code).toBe("EROFS");
+	});
+
+	it("selects nothing past the end and keeps missing resources missing", async () => {
+		expect(await readUrl("artifact://7:9-12")).toBe("");
+		expect(await readUrl("artifact://404:raw")).toBe("ENOENT");
+		expect(await readUrl("artifact://404:1-2")).toBe("ENOENT");
+		expect(await readUrl("local://missing.json:1-2")).toBe("ENOENT");
+	});
+
+	it("rejects a malformed selector instead of reading the whole resource", async () => {
+		expect(await readUrl("artifact://7:0")).toBe("EINVAL");
+		expect(await readUrl("artifact://7:3-1")).toBe("EINVAL");
+	});
+
+	it("selects lines of local:// files and of rendered resources", async () => {
+		await fs.mkdir(localRoot, { recursive: true });
+		await fs.writeFile(path.join(localRoot, "rows.jsonl"), "a\nb\nc\n");
+		const filesystem = shellFs();
+		const listing = await filesystem.handle({ op: ShellFsOp.ReadDir, path: "omp://" });
+		const entry = listing.entries?.find(item => item.fileType === ShellFsFileType.File);
+		if (!entry) throw new Error("omp:// listed no documents");
+		const whole = await readUrl(`omp://${entry.name}`);
+
+		expect(await readUrl("local://rows.jsonl:raw:2")).toBe("b\n");
+		expect(await readUrl("local://rows.jsonl:-1")).toBe("c\n");
+		expect(await readUrl(`omp://${entry.name}:1`)).toBe(whole.slice(0, whole.indexOf("\n") + 1));
 	});
 });
 

@@ -154,7 +154,6 @@ fn failures_only(input: &str, exit_code: i32) -> String {
 	}
 }
 
-#[derive(Default)]
 struct CargoTestTotals {
 	suites:   usize,
 	passed:   u64,
@@ -163,17 +162,48 @@ struct CargoTestTotals {
 	measured: u64,
 	filtered: u64,
 	warnings: u64,
-	duration: Option<String>,
+	/// Sum of the suites' `finished in` times; `None` once any suite's time
+	/// is missing or unparseable, so a partial sum is never shown as the total.
+	seconds:  Option<f64>,
 }
 
+impl Default for CargoTestTotals {
+	fn default() -> Self {
+		Self {
+			suites:   0,
+			passed:   0,
+			failed:   0,
+			ignored:  0,
+			measured: 0,
+			filtered: 0,
+			warnings: 0,
+			seconds:  Some(0.0),
+		}
+	}
+}
+
+/// One-line summary of a passing `cargo test` run.
+///
+/// Only top-level suites count: a test that runs `cargo test` itself (with
+/// `--nocapture`) prints a nested `running N tests` … `test result:` block
+/// inside its suite, which is tracked by nesting depth and skipped.
 fn summarize_successful_test_run(input: &str) -> String {
 	let mut totals = CargoTestTotals::default();
+	let mut depth = 0usize;
 
 	for line in input.lines() {
 		let trimmed = line.trim();
-		if let Some(summary) = trimmed.strip_prefix("test result: ok.") {
-			totals.suites += 1;
-			collect_cargo_test_summary(summary, &mut totals);
+		if is_running_tests_line(trimmed) {
+			depth += 1;
+			continue;
+		}
+		if let Some(result) = trimmed.strip_prefix("test result: ") {
+			let top_level = depth <= 1;
+			depth = depth.saturating_sub(1);
+			if top_level && let Some(summary) = result.strip_prefix("ok.") {
+				totals.suites += 1;
+				collect_cargo_test_summary(summary, &mut totals);
+			}
 			continue;
 		}
 		if let Some(warnings) = parse_generated_warning_count(trimmed) {
@@ -211,8 +241,10 @@ fn summarize_successful_test_run(input: &str) -> String {
 	if totals.warnings > 0 {
 		details.push(format!("{} warnings", totals.warnings));
 	}
-	if let Some(duration) = totals.duration {
-		details.push(duration);
+	if let Some(seconds) = totals.seconds
+		&& totals.suites > 0
+	{
+		details.push(format!("{seconds:.2}s"));
 	}
 	if !details.is_empty() {
 		out.push_str(" (");
@@ -224,6 +256,7 @@ fn summarize_successful_test_run(input: &str) -> String {
 }
 
 fn collect_cargo_test_summary(summary: &str, totals: &mut CargoTestTotals) {
+	let mut suite_seconds = None;
 	for part in summary.split(';') {
 		let trimmed = part.trim().trim_end_matches('.');
 		if let Some(value) = parse_count_prefix(trimmed, "passed") {
@@ -237,18 +270,41 @@ fn collect_cargo_test_summary(summary: &str, totals: &mut CargoTestTotals) {
 		} else if let Some(value) = parse_count_prefix(trimmed, "filtered out") {
 			totals.filtered += value;
 		} else if let Some(duration) = trimmed.strip_prefix("finished in ") {
-			totals.duration = Some(duration.to_string());
+			suite_seconds = duration
+				.strip_suffix('s')
+				.and_then(|secs| secs.parse::<f64>().ok());
 		}
 	}
+	totals.seconds = totals
+		.seconds
+		.zip(suite_seconds)
+		.map(|(sum, secs)| sum + secs);
 }
 
+/// `running 3 tests` / `running 1 test`: the start of a test binary's run.
+fn is_running_tests_line(trimmed: &str) -> bool {
+	trimmed
+		.strip_prefix("running ")
+		.and_then(|rest| rest.split_once(' '))
+		.is_some_and(|(count, noun)| {
+			count.bytes().all(|byte| byte.is_ascii_digit()) && matches!(noun, "test" | "tests")
+		})
+}
+
+/// The count from cargo's per-target rollup, `warning: `crate` (lib) generated
+/// N warning(s)`, optionally followed by `(run `cargo fix …`)` or `(N
+/// duplicates)`.
 fn parse_generated_warning_count(line: &str) -> Option<u64> {
-	if !line.contains(" generated ") || !line.ends_with(" warnings") {
+	if !line.starts_with("warning: ") {
 		return None;
 	}
-	let before = line.rsplit_once(" warnings")?.0;
-	let count_text = before.rsplit_once(' ')?.1;
-	count_text.parse().ok()
+	let (_, after) = line.rsplit_once(" generated ")?;
+	let (count, rest) = after.split_once(' ')?;
+	let noun = rest.split_once(' ').map_or(rest, |(noun, _)| noun);
+	if !matches!(noun, "warning" | "warnings") {
+		return None;
+	}
+	count.parse().ok()
 }
 
 fn parse_count_prefix(text: &str, label: &str) -> Option<u64> {
@@ -709,6 +765,39 @@ mod tests {
 		             262 passed; 0 failed; 0 ignored; 0 measured\n";
 		let out = summarize_successful_test_run(input);
 		assert_eq!(out, "cargo test: 262 passed (1 suite, 17 warnings)\n");
+	}
+
+	#[test]
+	fn successful_cargo_test_sums_suite_durations() {
+		let input = "\
+warning: `app` (lib) generated 10 warnings (run `cargo fix --lib -p app` to apply 3 suggestions)
+warning: `app` (lib test) generated 1 warning
+running 30 tests
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.67s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+";
+		let out = summarize_successful_test_run(input);
+		assert_eq!(out, "cargo test: 32 passed (3 suites, 11 warnings, 6.91s)\n");
+	}
+
+	#[test]
+	fn successful_cargo_test_skips_nested_cargo_runs() {
+		// A test spawning `cargo test` with --nocapture prints the child's
+		// suite inside its own.
+		let input = "\
+running 2 tests
+running 1 test
+test inner ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+test outer_spawns_cargo ... ok
+test other ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s
+";
+		let out = summarize_successful_test_run(input);
+		assert_eq!(out, "cargo test: 2 passed (1 suite, 1.50s)\n");
 	}
 
 	#[test]

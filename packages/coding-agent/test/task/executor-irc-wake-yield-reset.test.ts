@@ -26,13 +26,13 @@ const wakeAgent: AgentDefinition = {
 };
 
 describe("IRC wake turn yield reset", () => {
-	it("re-arms the empty-last-turn guard at the start of an autonomous wake turn", async () => {
+	it("re-arms the data-less terminal yield guard at the start of an autonomous wake turn", async () => {
 		// The same kept-alive session tool that runSubagentFollowUpTurn reuses is
 		// also driven by autonomous IRC wake turns through this observer. A prior
-		// run that emitted an incremental section leaves #hasIncrementalSections
-		// set; without a per-wake reset a later thinking-only {type:"result"}
-		// would skip the guard and finalize with the null-yield warning.
-		const yieldTool = new YieldTool(toolSession({ getLastAssistantText: () => undefined }));
+		// run that submitted incremental sections leaves #hasIncrementalSections
+		// set; without a per-wake reset a later data-less {type:"result"} would
+		// finalize those stale sections instead of being rejected as empty.
+		const yieldTool = new YieldTool(toolSession({ outputSchema: {} }));
 		let observer: ((records: unknown[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined;
 		const session = {
 			...createSessionDefaults(),
@@ -44,17 +44,17 @@ describe("IRC wake turn yield reset", () => {
 			trackIrcReply: () => {},
 		} as unknown as AgentSession;
 
-		attachIrcWakeTurnMonitor(session, { id: "wake-1", agent: wakeAgent });
+		attachIrcWakeTurnMonitor(session, { id: "wake-1", agent: wakeAgent, outputSchema: {} });
 		if (!observer) throw new Error("wake-turn observer was not registered");
 
-		// A prior run's incremental section sets the flag on the reused tool.
+		// A prior run's incremental section makes a data-less terminal yield valid.
 		await yieldTool.execute("prior-section", { type: ["findings"], data: "one finding" } as never);
+		const finalized = await yieldTool.execute("prior-final", { type: "result" } as never);
+		expect(finalized.details).toMatchObject({ status: "success", type: "result" });
 
-		// Starting the wake turn must clear it.
+		// Starting the wake turn must clear the submitted-sections state.
 		observer([{ role: "user", content: "wake up" }]);
 
-		await expect(yieldTool.execute("wake-empty", { type: "result" } as never)).rejects.toThrow(
-			/no text \(thinking only\)/,
-		);
+		await expect(yieldTool.execute("wake-empty", { type: "result" } as never)).rejects.toThrow(/none were submitted/);
 	});
 });

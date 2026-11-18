@@ -17,6 +17,13 @@ export type FigureSegment =
 const SVG_FENCE = /^ {0,3}(?:`{3,}|~{3,})[ \t]*svg(?:[ \t]|$)/im;
 const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 
+/** The marker run of the code fence `line` opens (≤3-space indent), or undefined when it opens none. */
+export function fenceMarker(line: string): string | undefined {
+	const open = FENCE_OPEN.exec(line);
+	// A backtick fence's info string cannot hold backticks (CommonMark).
+	return open && !(open[1]![0] === "`" && open[2]!.includes("`")) ? open[1] : undefined;
+}
+
 /** Whether `markdown` holds a ```svg fence {@link splitSvgFences} would lift. */
 export function hasSvgFence(markdown: string): boolean {
 	return markdown.includes("svg") && SVG_FENCE.test(markdown);
@@ -75,7 +82,7 @@ export function splitSvgFences(markdown: string): FigureSegment[] {
 }
 
 /** Whether `line` closes a fence opened by `marker`: same character, at least as long, nothing after. */
-function closesFence(line: string, marker: string): boolean {
+export function closesFence(line: string, marker: string): boolean {
 	let index = 0;
 	while (index < 3 && line[index] === " ") index++;
 	let run = 0;

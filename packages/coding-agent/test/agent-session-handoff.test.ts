@@ -1113,12 +1113,12 @@ describe("AgentSession handoff", () => {
 			streamFn: mock.stream,
 		});
 
-		const agentEndWillContinue: Array<boolean | undefined> = [];
+		const extensionAgentEnds: string[] = [];
 		const extensionsResult = await loadExtensions([], tempDir.path());
 		const captureAgentEnd = await loadExtensionFromFactory(
 			pi => {
 				pi.on("agent_end", event => {
-					agentEndWillContinue.push(event.willContinue);
+					extensionAgentEnds.push(event.type);
 				});
 			},
 			tempDir.path(),
@@ -1153,16 +1153,17 @@ describe("AgentSession handoff", () => {
 		const generateHandoffSpy = vi
 			.spyOn(compactionModule, "generateHandoffFromContext")
 			.mockResolvedValue("## Goal\nContinue from here");
-		return { mock, agentEndWillContinue, generateHandoffSpy };
+		return { mock, extensionAgentEnds, generateHandoffSpy };
 	}
 
 	it("completes threshold-triggered auto-handoff while the original prompt is still unwinding", async () => {
-		const { mock, agentEndWillContinue, generateHandoffSpy } = await createThresholdHandoffSession(false);
+		const { mock, extensionAgentEnds, generateHandoffSpy } = await createThresholdHandoffSession(false);
 		await session.prompt("Trigger threshold handoff");
+		await session.waitForRunEnd();
 
 		expect(mock.calls).toHaveLength(1);
 		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
-		expect(agentEndWillContinue).toEqual([undefined]);
+		expect(extensionAgentEnds).toEqual(["agent_end"]);
 		const endEvents = events.filter(event => event.type === "auto_compaction_end");
 		expect(endEvents).toHaveLength(1);
 		expect(endEvents[0]).toMatchObject({ type: "auto_compaction_end", action: "handoff", aborted: false });
@@ -1172,18 +1173,18 @@ describe("AgentSession handoff", () => {
 
 	it("yields the run when a threshold auto-handoff after a final answer schedules no continuation", async () => {
 		// Auto-continue is enabled, but a terminal text answer never auto-continues
-		// after compaction. The settle must say so: a non-yielded agent_end here
-		// promises a run that never starts, so RPC hosts wait forever for the
-		// prompt's `prompt_result`.
-		const { mock, agentEndWillContinue, generateHandoffSpy } = await createThresholdHandoffSession(true);
+		// after compaction. The run must end: a pause here promises a loop that never
+		// starts, so RPC hosts wait forever for the prompt's `prompt_result`.
+		const { mock, extensionAgentEnds, generateHandoffSpy } = await createThresholdHandoffSession(true);
 		await session.prompt("Trigger threshold handoff");
+		await session.waitForRunEnd();
 
 		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
 		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
 		expect(mock.calls).toHaveLength(1);
-		expect(agentEndWillContinue).toEqual([undefined]);
-		expect(events.filter(event => event.type === "agent_end")).toEqual([
-			expect.objectContaining({ type: "agent_end", isTerminal: true, yielded: true }),
+		expect(extensionAgentEnds).toEqual(["agent_end"]);
+		expect(events.filter(event => event.type === "agent_end" || event.type === "agent_pause")).toEqual([
+			expect.objectContaining({ type: "agent_end" }),
 		]);
 	});
 	it("resets to the base system prompt before generating a handoff", async () => {

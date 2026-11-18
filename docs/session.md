@@ -219,6 +219,68 @@ optional `errorMessage`. These records contribute usage accounting, not model
 messages or transcript turns. `appendModelUsage()` attaches the record to the
 initiating session/branch and rejects stale session ownership.
 
+Optional fields describe the call without copying the static prompt, which is
+identified by `purpose`.
+
+- `duration` / `ttft`: request wall time and time to first token, in ms.
+- `judgment`: a native judge query (TypeSafe jev and other judgment APIs).
+  `state` is the `sha256` of the canonical state, which is `states.id` in the
+  judgment answer cache (`~/.omp/cache/judgment-cache.db`): that database holds
+  the state text once and, under `oracle(state, model, name)`, each question's
+  rendered instructions, criteria, and full answer. `answers` keeps the headline
+  of each answer the request produced, by question id: a noul's probability of
+  yes, `[label, confidence]` for a choice, `[score, confidence]` for a score,
+  `[top, bottom, left, right, confidence]` for a box. `cached` counts questions
+  the cache answered instead (not billed, not in `answers`). A judgment answered
+  wholly from the cache writes no entry; a failed request has empty `answers`.
+- `completion`: a text side channel (title generation, recaps, commit
+  messages, memory extraction, …). `prompt` is the dynamic user-turn text the
+  model was sent; it is absent when the request read the conversation at the
+  entry's `parentId` (`title-fork`, `recap`, `btw`). `reply` is the raw reply
+  before parsing, or the tool arguments as JSON when the call answered through
+  a forced tool call. Either side is left out, never truncated, when it exceeds
+  4,000 characters (a diff, a transcript). Calls whose result the session
+  already stores (`compaction`, `branch-summary`, `handoff`, `web-search`,
+  `image-gen`, `image-describe`) journal usage and timing only.
+
+An on-device model call that produced output is journaled with zero usage, so
+its count and `duration` are still visible.
+
+```json
+{
+	"type": "model_usage",
+	"id": "4e1e5bcf",
+	"parentId": "40ec204f",
+	"timestamp": "2026-11-18T10:16:19.964Z",
+	"purpose": "find",
+	"role": "typesafe",
+	"api": "typesafe",
+	"provider": "typesafe",
+	"model": "jev-1.14.0",
+	"usage": { "input": 824, "output": 87, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 911, "cost": { "input": 0.0000346, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.0000346 } },
+	"stopReason": "stop",
+	"duration": 212,
+	"judgment": {
+		"state": "9f2c1a7b3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8",
+		"answers": { "p00": 0.46, "p01": 0.02, "kind": ["helper", 0.41] },
+		"cached": 1
+	}
+}
+```
+
+```json
+{
+	"type": "model_usage",
+	"purpose": "title",
+	"duration": 640,
+	"ttft": 410,
+	"completion": {
+		"prompt": "<user>\nfix the share bar\n</user>",
+		"reply": "<title>Fix stats share bar</title>"
+	}
+}
+```
+
 ### `model_change`
 
 ```json
@@ -342,7 +404,7 @@ The strings in the table are reserved for their core consumers. Extensions MUST 
 
 ### `custom_message`
 
-Extension-provided message that does participate in LLM context. `content` can be a string or text/image content blocks, and `attribution` records whether the user or agent initiated it.
+Extension-provided message that participates in LLM context unless `excludeFromContext` is `true` (then it is only drawn and saved, like a `!!` bash row). `content` can be a string or text/image content blocks, and `attribution` records whether the user or agent initiated it.
 
 ```json
 {

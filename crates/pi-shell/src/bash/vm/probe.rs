@@ -277,10 +277,17 @@ pub fn perform(
 			};
 			ProbeResult::Ok(funcs.contains(name.as_slice()))
 		},
-		Probe::RealPath { path } => {
+		Probe::RealPath { path } | Probe::Backing { path } => {
+			let asked = |fs: &mut dyn crate::bash::fs::Fs| {
+				if matches!(probe, Probe::Backing { .. }) {
+					fs.backing_path(BStr::new(path))
+				} else {
+					fs.realpath(BStr::new(path))
+				}
+			};
 			let polled = match &mut sc.live {
 				Live::Path(fut) => fut.poll(&mut tcx),
-				_ => match cx.host.fs().realpath(BStr::new(path)) {
+				_ => match asked(cx.host.fs()) {
 					FsPoll::Ready(polled) => Poll::Ready(polled),
 					FsPoll::Pending(mut fut) => {
 						let polled = fut.poll(&mut tcx);

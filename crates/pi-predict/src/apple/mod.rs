@@ -46,6 +46,8 @@ pub fn open(_config: &Config) -> anyhow::Result<Box<dyn Predictor>> {
 
 #[cfg(target_os = "macos")]
 mod macos {
+	use xutf::Text;
+
 	use super::appkit;
 	use crate::{Predictor, Query, Suggestion};
 
@@ -64,7 +66,7 @@ mod macos {
 	}
 
 	fn utf16_len(text: &str) -> anyhow::Result<u32> {
-		u32::try_from(text.encode_utf16().count())
+		u32::try_from(text.transcoded_len::<u16>())
 			.map_err(|_| anyhow::anyhow!("line is too long for NSSpellChecker"))
 	}
 

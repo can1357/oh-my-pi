@@ -593,16 +593,11 @@ async function startMessageReader(client: LspClient): Promise<void> {
 								const params = message.params as { token: string | number; value?: { kind?: string } };
 								if (params.value?.kind === "begin") {
 									client.activeProgressTokens.add(params.token);
+									clearTimeout(projectQuietTimers.get(client));
 									countFolderLoad(client, -1);
 								} else if (params.value?.kind === "end") {
 									client.activeProgressTokens.delete(params.token);
-									// After a folder add, only progress that began since ends the load.
-									if (
-										client.activeProgressTokens.size === 0 &&
-										!workspaceFolderStates.get(client)?.pendingLoads
-									) {
-										client.resolveProjectLoaded();
-									}
+									if (client.activeProgressTokens.size === 0) settleProjectLoadWhenQuiet(client);
 								}
 							} else if (message.method === "textDocument/clangd.fileStatus" && message.params) {
 								const params = message.params as { uri: string; state?: string };
@@ -708,6 +703,28 @@ function currentWorkspaceFolders(client: LspClient): Array<{ uri: string; name: 
 	return [client.cwd, ...(workspaceFolderStates.get(client)?.added.keys() ?? [])].map(workspaceFolder);
 }
 
+/**
+ * How long a server must report no progress after its last task ends before its
+ * project load counts as done. Indexers run in phases (rust-analyzer: fetching,
+ * loading, indexing; clangd: background index) with gaps between them, and
+ * the first gap is not the end of the load.
+ */
+const PROJECT_LOAD_QUIET_MS = 500;
+const projectQuietTimers = new WeakMap<LspClient, NodeJS.Timeout>();
+
+function settleProjectLoadWhenQuiet(client: LspClient): void {
+	clearTimeout(projectQuietTimers.get(client));
+	const timer = setTimeout(() => {
+		projectQuietTimers.delete(client);
+		// After a folder add, only progress that began since ends the load.
+		if (client.activeProgressTokens.size === 0 && !workspaceFolderStates.get(client)?.pendingLoads) {
+			client.resolveProjectLoaded();
+		}
+	}, PROJECT_LOAD_QUIET_MS);
+	timer.unref?.();
+	projectQuietTimers.set(client, timer);
+}
+
 function countFolderLoad(client: LspClient, delta: number): void {
 	const state = workspaceFolderStates.get(client);
 	if (state) state.pendingLoads = Math.max(0, state.pendingLoads + delta);
@@ -727,6 +744,22 @@ async function realPathOf(filePath: string): Promise<string> {
  */
 async function workspaceFolderToAdd(client: LspClient, filePath: string): Promise<string | undefined> {
 	if (!client.serverCapabilities?.workspace?.workspaceFolders?.changeNotifications) return undefined;
+	return foreignCheckout(client, filePath);
+}
+
+/**
+ * The checkout holding `filePath` when the server cannot be told about it: it is
+ * not the checkout of the client's root and the server does not accept
+ * `workspace/didChangeWorkspaceFolders`. Its answers for the file then come from
+ * the root's checkout index.
+ */
+export async function unservedCheckout(client: LspClient, filePath: string): Promise<string | undefined> {
+	if (client.serverCapabilities?.workspace?.workspaceFolders?.changeNotifications) return undefined;
+	return foreignCheckout(client, filePath);
+}
+
+/** The checkout holding `filePath` when it differs from the one holding the client's root. */
+async function foreignCheckout(client: LspClient, filePath: string): Promise<string | undefined> {
 	const checkout = await findRepoRoot(path.dirname(await realPathOf(filePath)));
 	if (!checkout || checkout === (await findRepoRoot(await realPathOf(client.cwd)))) return undefined;
 	// A repository at or above the home directory (a dotfiles checkout) would have the
@@ -1023,17 +1056,23 @@ function updateDynamicCapabilities(client: LspClient, message: LspJsonRpcRequest
 	}
 }
 
-/** Whether the server advertised LSP 3.17 document diagnostic pulls statically or through registration. */
-export function supportsDocumentDiagnostics(client: LspClient): boolean {
-	const staticProvider = client.serverCapabilities?.diagnosticProvider;
-	if (staticProvider) return true;
-
+/**
+ * Whether the server handles `method`: its `capability` provider is set in the
+ * initialize result, or it registered the method dynamically.
+ */
+export function supportsMethod(client: LspClient, capability: string, method: string): boolean {
+	if (client.serverCapabilities?.[capability]) return true;
 	const registrations = client.dynamicCapabilityRegistrations;
 	if (!registrations) return false;
-	for (const method of registrations.values()) {
-		if (method === "textDocument/diagnostic") return true;
+	for (const registered of registrations.values()) {
+		if (registered === method) return true;
 	}
 	return false;
+}
+
+/** Whether the server advertised LSP 3.17 document diagnostic pulls statically or through registration. */
+export function supportsDocumentDiagnostics(client: LspClient): boolean {
+	return supportsMethod(client, "diagnosticProvider", "textDocument/diagnostic");
 }
 
 /**

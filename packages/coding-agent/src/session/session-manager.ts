@@ -61,11 +61,13 @@ import {
 	type CustomMessageEntry,
 	EPHEMERAL_MODEL_CHANGE_ROLE,
 	PREWALK_MODEL_CHANGE_ROLE,
+	TEMPORARY_MODEL_CHANGE_ROLE,
 	type FileEntry,
 	type LabelEntry,
 	type ModeChangeEntry,
 	type ModelChangeEntry,
 	type ModelUsageEntry,
+	type ModelUsageRecord,
 	lastSelfSelectedLeafId,
 	type NewSessionOptions,
 	type ResetBoundaryEntry,
@@ -3640,10 +3642,7 @@ export class SessionManager {
 
 	/** Record usage on its initiating branch without moving a successor branch or session. */
 	appendModelUsage(
-		usage: Pick<
-			ModelUsageEntry,
-			"purpose" | "role" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage" | "cacheRefresh"
-		>,
+		usage: ModelUsageRecord,
 		owner: { sessionId: string; parentId: string | null },
 	): string | undefined {
 		if (this.#sessionId !== owner.sessionId || (owner.parentId !== null && !this.#index.has(owner.parentId))) {
@@ -3796,12 +3795,14 @@ export class SessionManager {
 	}
 
 	/**
-	 * Append a custom message entry (for extensions) that participates in LLM context.
+	 * Append a custom message entry (for extensions) that participates in LLM context unless `excludeFromContext`.
 	 * @param customType Hook identifier for filtering on reload
 	 * @param content Message content (string or TextContent/ImageContent array)
 	 * @param display Whether to show in TUI (true = styled display, false = hidden)
 	 * @param details Optional extension-specific metadata (not sent to LLM)
 	 * @param attribution Who initiated this message for billing/attribution semantics
+	 * @param timestamp The message's own timestamp; defaults to now
+	 * @param excludeFromContext Render and save the message but never send it to the model
 	 */
 	appendCustomMessageEntry<T = unknown>(
 		customType: string | undefined,
@@ -3810,8 +3811,16 @@ export class SessionManager {
 		details?: T,
 		attribution: MessageAttribution | undefined = "agent",
 		timestamp?: number,
+		excludeFromContext?: boolean,
 	): string {
-		const normalized = normalizeCustomMessagePayload<T>({ customType, content, display, details, attribution });
+		const normalized = normalizeCustomMessagePayload<T>({
+			customType,
+			content,
+			display,
+			details,
+			attribution,
+			excludeFromContext,
+		});
 		const fresh = this.#freshEntryFields();
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
@@ -3821,6 +3830,7 @@ export class SessionManager {
 			// Drop AgentSession-internal transient fields before disk persistence.
 			details: stripInternalDetailsFields(normalized.details),
 			attribution: normalized.attribution,
+			excludeFromContext: normalized.excludeFromContext,
 			...fresh,
 			// Prefer the initiating message's own timestamp: without it the entry
 			// records the emission time, which on rebuild excludes provider
@@ -3915,7 +3925,9 @@ export class SessionManager {
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index];
 			if (entry.type !== "model_change") continue;
-			return entry.role === "temporary" || entry.role === PREWALK_MODEL_CHANGE_ROLE ? entry : undefined;
+			return entry.role === TEMPORARY_MODEL_CHANGE_ROLE || entry.role === PREWALK_MODEL_CHANGE_ROLE
+				? entry
+				: undefined;
 		}
 		return undefined;
 	}
@@ -3950,6 +3962,15 @@ export class SessionManager {
 	 */
 	getBranch(fromId?: string): SessionEntry[] {
 		return this.#index.pathTo(fromId ?? this.#index.leafId());
+	}
+
+	/**
+	 * All session entries (excludes header) without the defensive copy. The
+	 * array is live and owned by the manager: never mutate it, and use
+	 * `getEntries()` when you need a snapshot that survives appends.
+	 */
+	getEntriesView(): readonly SessionEntry[] {
+		return this.#entries;
 	}
 
 	/**
@@ -4564,23 +4585,24 @@ export class SessionManager {
 		const breadcrumb = await readTerminalBreadcrumbEntry();
 		let chosenSession: string | null | undefined;
 
-		if (breadcrumb) {
+		if (breadcrumb?.fresh && !breadcrumb.exists) {
 			// A lazy fresh-session boundary whose JSONL was never materialized
 			// (for example, initial creation followed by exit before any assistant
-			// output). Honor the boundary rather than falling back to
-			// findMostRecentSession(), which would resurrect an older transcript.
+			// output). In its own cwd, honor the boundary rather than falling back to
+			// findMostRecentNonEmptySession(), which would resurrect an older
+			// transcript. From another cwd it names no transcript to resume or
+			// relocate, so this cwd's newest session wins.
 			// Explicit newSession() boundaries are materialized before it returns so
 			// this remains correct even when the relaunch has a different terminal id.
 			if (
-				breadcrumb.fresh &&
-				!breadcrumb.exists &&
+				path.resolve(breadcrumb.cwd) === resolvedCwd &&
 				(!sessionDir || pathIsWithin(dir, path.dirname(breadcrumb.sessionFile)))
 			) {
 				const manager = new SessionManager(cwd, dir, true, storage);
 				manager.#resetToNewSession();
 				return manager;
 			}
-
+		} else if (breadcrumb) {
 			// Recover stale crumbs: a subagent open (pre-fix) may have pointed this
 			// terminal's breadcrumb at an artifact child; resume the parent instead.
 			breadcrumb.sessionFile = resolveBreadcrumbToInteractiveRoot(breadcrumb.sessionFile);

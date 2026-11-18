@@ -108,6 +108,12 @@ export type SubmittedUserInput = {
 	started: boolean;
 };
 
+/** A dialog that hands typing to the composer: registered by the ExtensionUiController approval, form and ask presenters, read by InputController's image and HTML paste routing. */
+export interface ComposerOwner {
+	component: Component;
+	owns(): boolean;
+}
+
 export interface InteractiveModeInitOptions {
 	suppressWelcomeIntro?: boolean;
 	clearInitialTerminalHistory?: boolean;
@@ -175,6 +181,8 @@ export interface InteractiveModeContext {
 	chatContainer: TranscriptContainer;
 	/** `!`/`$` runs started while the agent streams, until {@link flushPendingBashComponents} moves them into the transcript. */
 	pendingShellContainer: Container;
+	/** Natively (Tern), the ask waiting for answers, inline at the transcript's end above the composer. */
+	askContainer: Container;
 	pendingMessagesContainer: Container;
 	statusContainer: Container;
 	/** Whether the status/working row rendered lines in the latest frame; the band composer's editor top gap collapses only then. */
@@ -217,6 +225,8 @@ export interface InteractiveModeContext {
 	readonly focusedAgentId: string | undefined;
 	/** Set while a tool-approval dialog owns the composer: its drafts steer the main session awaiting that approval, even from a focused agent's view. */
 	approvalOwnsComposer?: boolean;
+	/** The mounted dialog that currently hands typing to the composer, if any. */
+	composerOwner?: ComposerOwner;
 	/** Focus the main view on an agent's live session (delegates to SessionFocusController.focusAgent). */
 	focusAgentSession(id: string): Promise<void>;
 	/** Focus the focused agent's parent session, falling back to main (delegates to focusParent). */
@@ -686,6 +696,12 @@ export interface InteractiveModeContext {
 	handleTanCommand(work: string, images?: ImageContent[]): Promise<boolean>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;
+	/** Natively (Tern), gives the keys to the ask waiting inline above the composer; false when none waits. */
+	focusInlineAsk(): boolean;
+	/** The composer talks to a `/btw` note (Tern): plain drafts go to its topic as follow-ups. */
+	readonly isBtwFocused: boolean;
+	/** Sends a draft to the focused `/btw` note's topic; false when no follow-up started. */
+	submitBtwFollowUp(question: string, images?: ImageContent[]): Promise<boolean>;
 	handleBtwBranchKey(): Promise<boolean>;
 	canBranchBtw(): boolean;
 	handlesBtwBranchKey(): boolean;

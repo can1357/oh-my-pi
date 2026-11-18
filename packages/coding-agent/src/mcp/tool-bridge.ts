@@ -66,6 +66,8 @@ const RETRIABLE_PATTERNS = [
 	"transport closed",
 	"network error",
 ];
+const EXPIRED_SESSION = /(?:unknown|expired|invalid) session|session (?:not found|expired|is invalid)/i;
+
 export function isRetriableConnectionError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	if (error instanceof MCPTransportError) {
@@ -77,7 +79,10 @@ export function isRetriableConnectionError(error: unknown): boolean {
 		) {
 			return error.retryable;
 		}
-		return error.failure === "http_status" && (error.code === 404 || error.code === 502 || error.code === 503);
+		if (error.failure === "http_status" && (error.code === 404 || error.code === 502 || error.code === 503))
+			return true;
+		// An expired HTTP session (`-32001 Unknown or expired session`) never ran the call: re-initialize and retry.
+		return (error.failure === "http_status" || error.failure === "json_rpc") && EXPIRED_SESSION.test(error.message);
 	}
 	const msg = error.message.toLowerCase();
 	// Stale session (server restarted, old session ID is gone)

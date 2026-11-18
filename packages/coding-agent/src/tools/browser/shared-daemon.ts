@@ -10,11 +10,12 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { acquireFileLock, type FileLockHandle, logger, withTimeout } from "@oh-my-pi/pi-utils";
+import { acquireFileLock, type FileLockHandle, logger, sanitizeText, withTimeout } from "@oh-my-pi/pi-utils";
 import { type DaemonBrokerClient, daemonClientForProject } from "../../launch/client";
 import { describeDaemon, describeQuietly, stopQuietly, waitReady } from "../../launch/ensure";
 import { daemonRuntimeDir } from "../../launch/paths";
 import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { throwIfAborted } from "../tool-errors";
 import { probeCdpStatus } from "./attach";
 import {
@@ -29,6 +30,8 @@ import type { SharedTargetScope } from "./orphan-registry";
 const READY_LOG_PATTERN = String.raw`DevTools listening on ws://\S+`;
 const READY_TIMEOUT_MS = 30_000;
 const PROBE_TIMEOUT_MS = 1_500;
+/** Lines of Chrome's output a failed start reports. */
+const OUTPUT_TAIL_LINES = 6;
 /** describe→start rounds before giving up; bounds cross-process start races and wedged-Chrome replacement. */
 const ENSURE_ATTEMPTS = 3;
 /**
@@ -59,6 +62,8 @@ const PROBE_STALLED = "Shared browser probe did not settle";
 /** Broker-owned browser endpoint one omp process can attach to. */
 export interface SharedBrowserEndpoint {
 	wsEndpoint: string;
+	/** The broker-launched Chrome's process, which owns its windows on screen. */
+	pid?: number;
 	daemonName: string;
 	/** Canonical project directory owning the broker (used to address later stop requests). */
 	projectDir: string;
@@ -104,9 +109,11 @@ async function probeEndpoint(wsEndpoint: string): Promise<boolean> {
  * processes: each describe→adopt-or-start round runs under a cross-process
  * claim on the profile, so racing clients converge on the first one's launch
  * (and losers of any remaining broker start race adopt the winner's endpoint
- * on the next round). Returns null when the shared path is unavailable (no
- * resolvable Chromium, broker failure, or a daemon that never becomes
- * reachable); callers fall back to a process-local launch.
+ * on the next round). Throws a ToolError naming why the shared path is
+ * unavailable (no resolvable Chromium, a broker failure, Chrome exiting or
+ * never becoming reachable, the profile held by another process), with the
+ * tail of Chrome's output; a CLI-host process never falls back to a
+ * process-local launch.
  *
  * Per-open process flags are intentionally absent: a running shared Chromium
  * cannot be relaunched for one tab, so invalid-certificate handling stays
@@ -117,7 +124,7 @@ export async function ensureSharedBrowser(opts: {
 	headless: boolean;
 	viewport?: { width: number; height: number };
 	signal?: AbortSignal;
-}): Promise<SharedBrowserEndpoint | null> {
+}): Promise<SharedBrowserEndpoint> {
 	const client = await daemonClientForProject(opts.projectDir);
 	const name = sharedBrowserDaemonName(opts.headless);
 	const userDataDir = sharedBrowserProfileDir(client.projectDir, name);
@@ -126,8 +133,9 @@ export async function ensureSharedBrowser(opts: {
 		userDataDir,
 		viewport: opts.viewport,
 	});
-	if (!launch) return null;
+	if (!launch) throw new ToolError("Shared browser daemon unavailable: no Chromium executable could be resolved");
 	await fs.mkdir(userDataDir, { recursive: true });
+	let reason = "no attempt settled";
 	for (let attempt = 0; attempt < ENSURE_ATTEMPTS; attempt++) {
 		throwIfAborted(opts.signal);
 		// Chromium reads Preferences only at startup and rewrites them from
@@ -139,13 +147,17 @@ export async function ensureSharedBrowser(opts: {
 		// starts Chrome, so every launch runs on a prepared profile.
 		const claim = await claimProfile(userDataDir, opts.signal);
 		try {
-			const endpoint = await adoptOrStart(client, name, launch, userDataDir, claim !== null, opts.signal);
-			if (endpoint) return endpoint;
+			const round = await adoptOrStart(client, name, launch, userDataDir, claim !== null, opts.signal);
+			if (typeof round !== "string") return round;
+			reason = round;
 		} finally {
 			claim?.release();
 		}
 	}
-	return null;
+	const logPath = path.join(daemonRuntimeDir(client.projectDir), "daemons", name, "output.log");
+	throw new ToolError(
+		`Shared browser daemon unavailable after ${ENSURE_ATTEMPTS} attempts: ${reason}. Chrome's output: ${logPath}; \`omp ps\` lists the ${name} daemon.`,
+	);
 }
 
 /** Claim the shared profile; null when another client held it past the wait. */
@@ -204,7 +216,7 @@ export async function restartSharedBrowser(
  * profile, after preparing it (seeding Preferences, discarding the previous
  * Chrome's session-restore state); adopting an existing browser never writes
  * the profile.
- * Resolves undefined when the caller should run another round.
+ * Resolves why it got no endpoint when the caller should run another round.
  */
 async function adoptOrStart(
 	client: DaemonBrokerClient,
@@ -213,28 +225,28 @@ async function adoptOrStart(
 	userDataDir: string,
 	claimed: boolean,
 	signal?: AbortSignal,
-): Promise<SharedBrowserEndpoint | undefined> {
+): Promise<SharedBrowserEndpoint | string> {
 	const described = await describeDaemon(client, name, "Shared browser", signal);
 	// No settled answer: Chrome may be running on the profile, so it must not be
 	// prepared, and a start without preparing it restores the stale session.
 	// Describe again next round.
-	if (described.status === "unknown") return undefined;
+	if (described.status === "unknown") return "the daemon broker did not answer";
 	const existing = described.status === "found" ? described.daemon : undefined;
 	if (existing && existing.state !== "exited" && existing.state !== "failed") {
 		const settled =
 			existing.readyAt !== undefined ? existing : await waitReady(client, name, "Shared browser", signal);
 		const wsEndpoint = wsEndpointOf(settled);
 		if (wsEndpoint && (await probeEndpoint(wsEndpoint))) {
-			return { wsEndpoint, daemonName: name, projectDir: client.projectDir };
+			return { wsEndpoint, pid: settled?.pid, daemonName: name, projectDir: client.projectDir };
 		}
 		// Live record but unreachable Chrome (wedged, or readiness never
 		// matched): replace it rather than handing out a dead endpoint.
 		await stopQuietly(client, name, "Shared browser", signal);
-		return undefined;
+		return `the running Chrome (pid ${settled?.pid ?? existing.pid ?? "?"}) did not answer on its DevTools endpoint, so it was stopped`;
 	}
 	// Without the claim the profile cannot be prepared, and an unprepared start
 	// restores the stale session; the claim holder starts Chrome instead.
-	if (!claimed) return undefined;
+	if (!claimed) return "another omp process held the shared browser profile while starting Chrome";
 	await seedOwnedProfilePreferences(userDataDir);
 	await discardOwnedProfileSessions(userDataDir);
 	try {
@@ -256,22 +268,48 @@ async function adoptOrStart(
 			},
 			signal,
 		);
-		if (started.op !== "start") return undefined;
+		if (started.op !== "start") return `the daemon broker answered the start with ${started.op}`;
 		const wsEndpoint = started.readyTimedOut ? undefined : wsEndpointOf(started.daemon);
 		if (wsEndpoint && (await probeEndpoint(wsEndpoint))) {
-			return { wsEndpoint, daemonName: name, projectDir: client.projectDir };
+			return { wsEndpoint, pid: started.daemon.pid, daemonName: name, projectDir: client.projectDir };
 		}
+		const daemon = started.daemon;
+		const failure =
+			daemon.state === "exited" || daemon.state === "failed"
+				? `Chrome (${launch.executablePath}) exited${daemon.exitCode === undefined ? "" : ` with code ${daemon.exitCode}`}${daemon.exitReason ? ` (${daemon.exitReason})` : ""} before it was ready`
+				: started.readyTimedOut
+					? `Chrome (${launch.executablePath}) printed no DevTools endpoint within ${READY_TIMEOUT_MS / 1000}s`
+					: `Chrome (${launch.executablePath}) did not answer on its DevTools endpoint`;
+		const tail = await outputTail(client, name, signal);
 		await stopQuietly(client, name, "Shared browser", signal);
+		return tail ? `${failure}; its last output: ${tail}` : failure;
 	} catch (error) {
 		throwIfAborted(signal);
 		// Lost a cross-process start race ("already starting/ready"); the next
 		// describe round adopts the winner's endpoint.
-		logger.debug("Shared browser start contention", {
-			name,
-			error: error instanceof Error ? error.message : String(error),
-		});
+		const message = error instanceof Error ? error.message : String(error);
+		logger.debug("Shared browser start contention", { name, error: message });
+		return `the daemon broker refused the start: ${message}`;
 	}
-	return undefined;
+}
+
+/** The last lines Chrome printed under the broker, one line; empty when the broker has none to give. */
+async function outputTail(client: DaemonBrokerClient, name: string, signal?: AbortSignal): Promise<string> {
+	try {
+		const result = await client.request(
+			{ op: "logs", name, lines: OUTPUT_TAIL_LINES, head: false, follow: false, timeoutMs: 1_000 },
+			signal,
+		);
+		if (result.op !== "logs") return "";
+		return sanitizeText(result.text)
+			.split("\n")
+			.map(line => line.trim())
+			.filter(line => line.length > 0)
+			.join(" | ");
+	} catch {
+		throwIfAborted(signal);
+		return "";
+	}
 }
 
 /** Seams for {@link stopSharedBrowserIfUnreachable}; the defaults hit the real broker and CDP probe. */

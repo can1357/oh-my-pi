@@ -63,6 +63,7 @@ use std::{
 
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
+use xutf::Text;
 
 use self::{
 	config::{Decoder, LlamaConfig, LlamaWeights},
@@ -141,7 +142,7 @@ fn load_decoder(weights: LlamaWeights<std::fs::File>) -> anyhow::Result<Box<dyn 
 }
 
 fn utf16_len(text: &str) -> usize {
-	text.chars().map(char::len_utf16).sum()
+	text.transcoded_len::<u16>()
 }
 
 /// Last `units` UTF-16 units of `before`, starting after a whitespace so no
