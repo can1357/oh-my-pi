@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import {
 	type ApiKeyCredential,
+	type AuthAccountPolicies,
 	type AuthCredential,
 	type AuthCredentialStore,
 	AuthStorage,
@@ -718,11 +719,15 @@ describe("AuthStorage Claude tier reserve health", () => {
 		};
 	}
 
-	async function createClaudeStorage(reports: Record<string, UsageReport | null>): Promise<AuthStorage> {
+	async function createClaudeStorage(
+		reports: Record<string, UsageReport | null>,
+		accountPolicies?: AuthAccountPolicies,
+	): Promise<AuthStorage> {
 		const storage = new AuthStorage(makeStore([oauthRow(1)]), {
 			usageProviderResolver: provider => (provider === "anthropic" ? makeUsageProvider(reports) : undefined),
 			rankingStrategyResolver: provider => (provider === "anthropic" ? claudeRankingStrategy : undefined),
 			configValueResolver: async value => value,
+			accountPolicies,
 		});
 		await storage.credentials.reload();
 		storages.push(storage);
@@ -771,6 +776,21 @@ describe("AuthStorage Claude tier reserve health", () => {
 		});
 		expect(health.state).toBe("healthy");
 		expect(health.accounts[0]?.remainingFraction).toBeCloseTo(0.28);
+	});
+
+	it("holds the Fable tier row to its per-limit reserve and leaves Opus on the account reserve", async () => {
+		const storage = await createClaudeStorage({ "account-1": tieredReport(0.75) }, [
+			{
+				provider: "anthropic",
+				account: { accountId: "account-1" },
+				reservePct: 2,
+				reservePctByLimit: { "anthropic:7d:fable": 30 },
+			},
+		]);
+		const fable = await storage.health.model("anthropic", { modelId: "claude-fable-5", reserveFraction: 0.1 });
+		expect(fable.state).toBe("reserve");
+		const opus = await storage.health.model("anthropic", { modelId: "claude-opus-4-8", reserveFraction: 0.1 });
+		expect(opus.state).toBe("healthy");
 	});
 
 	it("still depletes a Fable model on a confirmed 100% tier row", async () => {

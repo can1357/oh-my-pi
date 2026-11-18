@@ -15,13 +15,14 @@ import {
 	type OAuthAccountIdentity,
 	type OAuthAccountSummary,
 	type ResetCreditRedeemOutcome,
-	isWithinUsageReserve,
+	isAnyUsageLimitWithinReserve,
 	resolveCredentialIdentityKey,
 	resolveUsedFraction,
 	type UsageHistoryEntry,
 	type UsageLimit,
 	type UsageReport,
 	type UsageUnit,
+	usageLimitReserveFraction,
 	usageSubscriptionPlan,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker";
@@ -671,9 +672,12 @@ export type UsagePolicyDiagnostics = {
 	priority: number;
 	reservePct: number;
 	reserveSource: "global" | "override";
+	reservePctByLimit?: Readonly<Record<string, number>>;
 	reclaimAbovePct?: number;
 	/** Ids of exhausted limits outside the shared pool (a model-scoped weekly row); they gate only their own requests. */
 	scopedExhausted?: string[];
+	/** Ids of limits outside the shared pool that `reservePctByLimit` names and that sit inside that reserve; they rank only their own requests last. */
+	scopedInsideReserve?: string[];
 } & (
 	| { state: "unknown"; remainingPct?: never }
 	| { state: "exhausted"; remainingPct?: number }
@@ -690,9 +694,10 @@ function computePolicyDiagnostics(
 	const configuredReservePct = policy?.reservePct;
 	const reservePct = Math.max(0, Math.min(100, configuredReservePct ?? options.globalReservePct));
 	// `omp usage` has no model/session context, so report the conservative
-	// account-wide state from the most-consumed account-wide window. Rows
-	// outside those windows (a Claude Fable or Opus weekly counter) gate only
-	// their own models in AuthStorage, so they are listed separately instead.
+	// account-wide state from the account-wide windows, each against its own
+	// reserve (`reservePctByLimit`, else `reservePct`). Rows outside those
+	// windows (a Claude Fable or Opus weekly counter) gate only their own models
+	// in AuthStorage, so they are listed separately instead.
 	// A `sharedGroup` row is one subpool's quota and a shared row naming a
 	// `modelId` is one model's meter (Codex Spark), not account-wide windows;
 	// a provider that marks no account-wide window keeps every row.
@@ -705,6 +710,19 @@ function computePolicyDiagnostics(
 	const scopedExhausted = reported
 		.filter(limit => !pool.includes(limit) && resolveStatus(limit) === "exhausted")
 		.map(limit => limit.id);
+	const reserveFraction = (limit: UsageLimit) => usageLimitReserveFraction(policy, limit.id, reservePct / 100);
+	// A scoped row the policy gives its own reserve is listed when inside it; the account's state stays the pool's.
+	const byLimit = policy?.reservePctByLimit;
+	const scopedInsideReserve = reported
+		.filter(
+			limit =>
+				!pool.includes(limit) &&
+				byLimit !== undefined &&
+				Object.hasOwn(byLimit, limit.id) &&
+				!scopedExhausted.includes(limit.id) &&
+				isAnyUsageLimitWithinReserve([limit], reserveFraction),
+		)
+		.map(limit => limit.id);
 	// Exhaustion follows the same status-first rule as the limit rows and routing's
 	// `isUsageLimitReached`: a provider-reported "exhausted" wins over the fraction.
 	const exhausted = pool.some(limit => resolveStatus(limit) === "exhausted");
@@ -715,27 +733,33 @@ function computePolicyDiagnostics(
 		priority: policy?.priority ?? 0,
 		reservePct,
 		reserveSource: configuredReservePct === undefined ? "global" : "override",
+		...(policy?.reservePctByLimit === undefined ? {} : { reservePctByLimit: policy.reservePctByLimit }),
 		...(policy?.reclaimAbovePct === undefined ? {} : { reclaimAbovePct: policy.reclaimAbovePct }),
 		...(scopedExhausted.length === 0 ? {} : { scopedExhausted }),
+		...(scopedInsideReserve.length === 0 ? {} : { scopedInsideReserve }),
 	} as const;
 	if (usedFractions.length === 0) return { ...base, state: exhausted ? "exhausted" : "unknown" };
 	const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
-	const state =
-		exhausted || remainingFraction <= 0
-			? "exhausted"
-			: isWithinUsageReserve(remainingFraction, reservePct / 100)
-				? "inside-reserve"
-				: "eligible";
+	const insideReserve = isAnyUsageLimitWithinReserve(pool, reserveFraction);
+	const state = exhausted || remainingFraction <= 0 ? "exhausted" : insideReserve ? "inside-reserve" : "eligible";
 	// Rounded exactly as the text view prints it (`toFixed(1)`), so JSON carries 9 rather than 8.999999999999996.
 	return { ...base, state, remainingPct: Number((remainingFraction * 100).toFixed(1)) };
 }
 
 function formatPolicyLine(policy: UsagePolicyDiagnostics, limits?: UsageLimit[]): string {
+	const limitReserveLabel = Object.entries(policy.reservePctByLimit ?? {})
+		.map(([limitId, pct]) => ` · ${limitId} reserve ${pct}%`)
+		.join("");
 	const reclaimLabel = policy.reclaimAbovePct === undefined ? "" : ` · reclaim above ${policy.reclaimAbovePct}%`;
-	const prefix = `policy: priority ${policy.priority} · reserve ${policy.reservePct}% (${policy.reserveSource})${reclaimLabel}`;
+	const prefix = `policy: priority ${policy.priority} · reserve ${policy.reservePct}% (${policy.reserveSource})${limitReserveLabel}${reclaimLabel}`;
 	const scopedLabel = (limits ?? [])
-		.filter(limit => policy.scopedExhausted?.includes(limit.id))
-		.map(limit => ` · ${limitTitle(limit)} exhausted`)
+		.flatMap(limit =>
+			policy.scopedExhausted?.includes(limit.id)
+				? [` · ${limitTitle(limit)} exhausted`]
+				: policy.scopedInsideReserve?.includes(limit.id)
+					? [` · ${limitTitle(limit)} inside reserve`]
+					: [],
+		)
 		.join("");
 	if (policy.remainingPct === undefined) {
 		return `${prefix} · ${policy.state === "exhausted" ? "exhausted" : "reserve unknown"}${scopedLabel}`;

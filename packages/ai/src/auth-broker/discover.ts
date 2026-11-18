@@ -151,6 +151,7 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 				key !== "account" &&
 				key !== "priority" &&
 				key !== "reservePct" &&
+				key !== "reservePctByLimit" &&
 				key !== "reclaimAbovePct",
 		);
 		if (unknownPolicyFields.length > 0) {
@@ -200,6 +201,22 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 		) {
 			throw new AIError.ConfigurationError(`${path}.reservePct must be between 0 and 100`);
 		}
+		let reservePctByLimit: Record<string, number> | undefined;
+		if (policy.reservePctByLimit !== undefined) {
+			const rawReserves = policy.reservePctByLimit;
+			if (rawReserves === null || typeof rawReserves !== "object" || Array.isArray(rawReserves)) {
+				throw new AIError.ConfigurationError(`${path}.reservePctByLimit must be an object of limit ids`);
+			}
+			reservePctByLimit = {};
+			for (const [limitId, pct] of Object.entries(rawReserves)) {
+				if (typeof pct !== "number" || !Number.isFinite(pct) || pct < 0 || pct > 100) {
+					throw new AIError.ConfigurationError(
+						`${path}.reservePctByLimit["${limitId}"] must be between 0 and 100`,
+					);
+				}
+				reservePctByLimit[limitId] = pct;
+			}
+		}
 		if (
 			policy.reclaimAbovePct !== undefined &&
 			(typeof policy.reclaimAbovePct !== "number" || !Number.isFinite(policy.reclaimAbovePct))
@@ -217,6 +234,7 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 			},
 			...(typeof policy.priority === "number" ? { priority: policy.priority } : {}),
 			...(typeof policy.reservePct === "number" ? { reservePct: policy.reservePct } : {}),
+			...(reservePctByLimit === undefined ? {} : { reservePctByLimit }),
 			...(typeof policy.reclaimAbovePct === "number" ? { reclaimAbovePct: policy.reclaimAbovePct } : {}),
 		};
 	});
