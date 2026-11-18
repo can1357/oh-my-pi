@@ -48,6 +48,7 @@
 - The model switcher's thinking slider shows the level auto settled on (as the status line does) instead of `Auto`, in subagents and any session running on auto
 - `/tan` tells a running agent about the tangent at its next step, as a `<tangent-notice>` naming the tangent's handle and work, instead of only after its turn ends
 - The Tern jobs pill counts and lists background jobs only; a subagent's task job and its widget no longer show up as a running job beside the agents count
+- `commit.draft()` in a worktree with thousands of untracked or unrecorded files no longer holds tens of times their size in memory (35 MB of untracked text took 1.2 GB) ([#19040](https://github.com/can1357/oh-my-pi/issues/19040))
 - `urlmap` shell builtin maps a URL path onto a host directory or file for the shell and the programs it runs (`urlmap [-r] [-e] URL PATH`, `urlmap -d URL`, bare `urlmap` lists the mounts as commands); named services and `pty` commands get the session's `local://`, `skill://`, `artifact://` and `attachment://` paths through it
 - `tab.screenshot({path})` saves the capture to a chosen file and `format: "webp"` is supported on Chromium; unknown screenshot options are rejected
 - Session files now account for side-channel model calls such as compaction, recaps, memory extraction, commit drafts, image generation, and web search, with timing and compact replies where available
