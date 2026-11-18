@@ -304,8 +304,10 @@ describe("AgyHost stateful steps", () => {
 			"thought_level:medium",
 		]);
 		const suffixed = ["low", "medium", "high"].map(level => `${model.id}-${level}`);
-		expect(await turn(suffixed, ["high", "low", undefined])).toEqual([
+		// No effort, or one the roster lacks (`xhigh`), takes the model's default level.
+		expect(await turn(suffixed, ["high", "xhigh", "low", undefined])).toEqual([
 			`model:${model.id}-high`,
+			`model:${model.id}-medium`,
 			`model:${model.id}-low`,
 			`model:${model.id}-medium`,
 		]);

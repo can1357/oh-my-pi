@@ -85,6 +85,8 @@ describe("omp auth-broker serve shutdown", () => {
 				"XDG_CONFIG_HOME",
 				"XDG_DATA_HOME",
 				"XDG_STATE_HOME",
+				// The test waits for an info-level line, which OMP_LOG_LEVEL can silence.
+				"OMP_LOG_LEVEL",
 			]) {
 				delete env[key];
 			}

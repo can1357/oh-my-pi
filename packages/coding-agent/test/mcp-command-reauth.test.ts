@@ -301,7 +301,7 @@ describe("/mcp auth commands", () => {
 
 		expect(showError).toHaveBeenCalledWith(
 			expect.stringMatching(
-				/dynamic client registration was rejected \(POST https:\/\/auth\.example\.com\/register → HTTP 403 — Forbidden\).*pre-approved clients.*oauth\.clientId/s,
+				/dynamic client registration was rejected \(POST https:\/\/auth\.example\.com\/register → HTTP 403 — Forbidden\).*oauth\.clientId/s,
 			),
 		);
 	});

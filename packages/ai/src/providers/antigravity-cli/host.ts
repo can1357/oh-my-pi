@@ -875,14 +875,16 @@ function modelValues(options: SessionConfigOption[] | null | undefined): string[
 /**
  * agy's `model` value for an omp model. Depending on sign-in, agy advertises
  * either bare ids with a separate `thought_level` or only effort-suffixed ids
- * such as `gemini-4-hydrogen-high` (#19638); the bare id is kept when agy
- * offers it or no matching suffixed value exists.
+ * such as `gemini-4-hydrogen-high` (#19638). The bare id is kept when agy offers
+ * it; otherwise the requested effort's suffix, then the model's default level's,
+ * and the bare id only when agy advertises neither.
  */
 function agyModelValue(model: Model, effort: string | undefined, advertised: string[] | undefined): string {
 	if (!advertised || advertised.includes(model.id)) return model.id;
-	const level = effort ?? model.thinking?.defaultLevel;
-	const suffixed = level && `${model.id}-${level}`;
-	return suffixed && advertised.includes(suffixed) ? suffixed : model.id;
+	for (const level of [effort, model.thinking?.defaultLevel]) {
+		if (level && advertised.includes(`${model.id}-${level}`)) return `${model.id}-${level}`;
+	}
+	return model.id;
 }
 
 /** Project a tool onto MCP `tools/list`; the official CLI owns any provider-specific schema conversion. */

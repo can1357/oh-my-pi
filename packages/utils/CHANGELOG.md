@@ -5,6 +5,7 @@
 ### Added
 
 - `spillUrl`, `parseSpillUrl` and `spillUrlIds` format and parse a session spill's `local://N.log` URL
+- `postmortem.exitCleanlyOnStopSignals()` makes a long-running service exit 0 after its cleanup pass on SIGINT/SIGTERM instead of 130/143
 
 ### Fixed
 

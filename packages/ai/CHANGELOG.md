@@ -6,7 +6,7 @@
 
 - `prewarm` stream option: Anthropic Messages sends the request as built, non-streaming with `max_tokens: 0`, to refresh its prompt cache without billing output; it refuses budget thinking, forced tool choice and structured output before sending
 - Claude usage reports now carry the account's subscription plan (`Max 5x`, `Max 20x`, `Pro`, `Team`, `Enterprise`) in `metadata.subscriptionPlan`, read from the OAuth profile on every fetch, so an auth broker serves it to its clients with the rest of the report. Added `usageSubscriptionPlan` and `claudeProfilePlan`
-- Added `onBrokerRetry` to `discoverAuthStorage` and `openAuthCredentialStore`, called after each failed initial-snapshot attempt startup retries, so hosts can show that startup is waiting on the broker ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `retryUnreachableBroker` (default on) and `onBrokerRetry` to `discoverAuthStorage`, so a host chooses whether startup retries an unreachable broker and can show that it is waiting ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
