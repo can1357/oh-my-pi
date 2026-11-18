@@ -39,7 +39,7 @@ describe("HistoryStorage.search", () => {
 		storage.delete(deleted.id);
 		expect(storage.getRecent(10).map(entry => entry.prompt)).toEqual(["commit two"]);
 		expect(storage.search("commit", 10).map(entry => entry.prompt)).toEqual(["commit two"]);
-		await storage.add("commit one");
+		await seed(storage, ["commit one"]);
 		expect(storage.search("commit", 10).map(entry => entry.prompt)).toEqual(["commit one", "commit two"]);
 	});
 

@@ -6,6 +6,12 @@
 
 - `ShellRunResult` carries `endedByExit`: true when `exit` or an armed `set -e` cut the run short with commands still left to run (whatever followed the abort did not run); a trailing `exit` at the end of the input, which ends the run where the input's end would have, is not reported ([#18879](https://github.com/can1357/oh-my-pi/issues/18879), [#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
 - The `endedByExit` notice no longer tells forked or one-off shells that options like `set -e` stay set in the session: only the session shell keeps them ([#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
+## [18.22.2] - 2026-11-18
+
+### Added
+
+- `TtyWriter` now works on Windows consoles: it writes off the JS thread in 16 KiB `WriteFile` chunks, restores the UTF-8 console code pages that child processes change, and `stop()` cancels a blocked write
+- Added `isolateThreadStartsFromConsole()`, which keeps a Windows console whose terminal stopped reading from blocking new threads in the process
 
 ## [18.22.1] - 2026-11-17
 
