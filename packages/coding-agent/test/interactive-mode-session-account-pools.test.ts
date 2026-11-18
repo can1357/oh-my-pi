@@ -75,7 +75,6 @@ test("cwd changes keep the session's explicitly selected account pool through mo
 			accountPoolScope: scope,
 		});
 		mode = new InteractiveMode(session, "test");
-		vi.spyOn(mode, "refreshTitleSystemPrompt").mockResolvedValue();
 		vi.spyOn(mode.statusLine, "applyCwdChange").mockImplementation(() => {});
 		const refreshSkills = vi.spyOn(session, "refreshSkillsAndCommands").mockResolvedValue();
 		const permits = (account: { credentialId: number }) =>

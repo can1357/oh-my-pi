@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -336,8 +336,14 @@ describe("createAgentSession cwd after /move", () => {
 			preloadedCustomToolPaths: [],
 		});
 		const originalProjectDir = getProjectDir();
+		let failRescope = false;
+		const reloadForCwd = settings.reloadForCwd.bind(settings);
+		const reloadForCwdSpy = spyOn(settings, "reloadForCwd").mockImplementation(async cwd => {
+			if (!failRescope) return reloadForCwd(cwd);
+			failRescope = false;
+			throw new Error("destination project rescope failed");
+		});
 		try {
-			let failRescope = false;
 			const output: string[] = [];
 			const runtime = {
 				session,
@@ -348,11 +354,7 @@ describe("createAgentSession cwd after /move", () => {
 					output.push(text);
 				},
 				refreshCommands: () => {},
-				reloadPlugins: async () => {
-					if (!failRescope) return;
-					failRescope = false;
-					throw new Error("destination plugin rescope failed");
-				},
+				reloadPlugins: async () => {},
 			};
 			const permits = (account: { credentialId: number }) =>
 				authStorage.sessions.permits("anthropic", sessionManager.getSessionId(), account.credentialId);
@@ -379,6 +381,7 @@ describe("createAgentSession cwd after /move", () => {
 			expect(permits(accountA)).toBe(true);
 			expect(permits(accountB)).toBe(false);
 		} finally {
+			reloadForCwdSpy.mockRestore();
 			setProjectDir(originalProjectDir);
 			await session.dispose();
 			authStorage.close();
