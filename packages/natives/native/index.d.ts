@@ -776,11 +776,12 @@ export declare class TextPredictor {
 
 /**
  * Dedicated, cancellable terminal writer. The destination must be a TTY that
- * can be independently reopened; pipes and files are deliberately rejected.
+ * can be independently reopened (unix) or a console (Windows); pipes and
+ * files are deliberately rejected.
  */
 export declare class TtyWriter {
   /**
-   * Start an independently opened terminal writer. onDrain runs when the
+   * Start a writer on its own handle to the terminal. onDrain runs when the
    * pending bound crosses from above drainThreshold to at/below it, and on
    * fatal writes even below the threshold. It does not retain the event loop.
    */
@@ -797,9 +798,10 @@ export declare class TtyWriter {
   /** Wait for queued output until the deadline. False on timeout or failure. */
   flushSync(timeoutMs: number): boolean
   /**
-   * Drain until the deadline, then cancel and join. Never detaches a writer
-   * or leaves old output running after return. Already queued JS callbacks
-   * may still run; callers must ignore callbacks from a stopped writer.
+   * Drain until the deadline, then cancel and join. Nothing is written after
+   * return, except one chunk a Windows console refused to abort. Already
+   * queued JS callbacks may still run; callers must ignore callbacks from a
+   * stopped writer.
    */
   stop(flushTimeoutMs: number): void
 }
@@ -1695,9 +1697,11 @@ export interface DesktopDragResult {
 export declare function desktopEscapeStops(key: string): number
 
 /**
- * Where focus ended after a takeover input call, as `WindowServer` reports
- * it. Input calls resolve to it on macOS when they took over; other
- * backends and background delivery resolve to `null`.
+ * Where focus ended after a takeover input call.
+ *
+ * Input calls resolve to it on macOS and Windows when they took over, as
+ * the window server reports it; other backends and background delivery
+ * resolve to `null`.
  */
 export interface DesktopFocusReturn {
   /** Whether the takeover handed the front back to the app front before it. */
@@ -2876,6 +2880,17 @@ export interface IsoFileChange {
  * failure when handling caught errors on the JS side.
  */
 export declare function isoIsUnavailableError(message: string): boolean
+
+/**
+ * Keep a stalled Windows console from blocking thread starts in this process.
+ *
+ * Stops `KernelBase`'s per-thread console call, which JSC's lazily started
+ * helper threads would otherwise wait on. Process-wide and permanent; repeat
+ * calls are no-ops. Returns false, leaving the process untouched, when
+ * `KernelBase`'s loader entry does not have the expected shape; always false
+ * off Windows.
+ */
+export declare function isolateThreadStartsFromConsole(): boolean
 
 /**
  * Probe whether the requested backend can start on this host. Pass

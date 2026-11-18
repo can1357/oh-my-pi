@@ -60,6 +60,8 @@ const model = createMockModel({
 									agent: "task",
 									task: "Return initial child result.",
 									solutionSpace: "Report only.",
+									// Only a schema gives the child `yield`, whose wake-turn re-yield carries the correction.
+									outputSchema: {},
 								},
 							],
 						},

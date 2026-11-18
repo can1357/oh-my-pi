@@ -566,7 +566,7 @@ await Promise.withResolvers().promise;`;
 			server.stop(true);
 			recycled.stop(true);
 			later.stop(true);
-			await closeLaunchedBrowser(browser);
+			await closeLaunchedBrowser({ browser, userDataDir });
 			if (userDataDir) await removeUserDataDir(userDataDir);
 		}
 	}, 30_000);
