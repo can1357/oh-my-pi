@@ -236,9 +236,10 @@ function readOnlyGit(args: string[]): boolean {
 	if (sub === "branch") return positional.length === 0 && flags.every(flag => inTable(GIT_BRANCH_LISTING, flag));
 	if (sub === "remote" || sub === "stash" || sub === "tag") {
 		const action = positional[0];
+		// A bare `git stash` (or `git stash -v`) is `git stash push`; bare `git remote` and `git tag` list.
+		const listing = action === "show" || action === "list" || (action === undefined && sub !== "stash");
 		return (
-			(action === undefined || action === "show" || action === "list" || action === "get-url") &&
-			flags.every(flag => flag === "-v" || flag === "-l" || flag === "--list")
+			(listing || action === "get-url") && flags.every(flag => flag === "-v" || flag === "-l" || flag === "--list")
 		);
 	}
 	if (sub === "config") return rest.some(arg => arg.startsWith("--get") || arg === "--list" || arg === "-l");
@@ -381,7 +382,10 @@ function readOnlySegment(text: string): boolean {
 	const command = unwrapCommand(words, READ_WRAPPERS);
 	// An assignment (`PATH=/tmp/x git status`, `export PATH=...; git status`) changes which program a
 	// name runs or what it reads, for the command or for the rest of the shell.
-	if (words.slice(0, words.length - command.length).some(isShellEnvironmentAssignment)) return false;
+	const prefix = words.slice(0, words.length - command.length);
+	if (prefix.some(isShellEnvironmentAssignment)) return false;
+	// GNU time writes its report to a file with `-o FILE`, `-oFILE` or `--output=FILE`.
+	if (prefix.includes("time") && prefix.some(word => /^-[a-zA-Z]*o|^--o/.test(word))) return false;
 	const name = command[0];
 	if (name === undefined) return words.length === 0 || command.length === 0;
 	const args = command.slice(1);
@@ -390,7 +394,8 @@ function readOnlySegment(text: string): boolean {
 		case "find":
 			return !args.some(arg => inTable(FIND_ACTIONS, arg));
 		case "rg":
-			return !args.some(arg => arg.startsWith("--pre"));
+			// `--pre` and `--hostname-bin` run a program of the caller's choosing.
+			return !args.some(arg => arg.startsWith("--pre") || arg.startsWith("--hostname-bin"));
 		case "sort":
 			return !args.some(
 				arg => /^-[a-zA-Z]*o/.test(arg) || arg.startsWith("--output") || arg.startsWith("--compress-program"),

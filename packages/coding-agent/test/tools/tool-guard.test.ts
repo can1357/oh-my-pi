@@ -165,6 +165,9 @@ describe("tool guard", () => {
 			"find . -name '*.ts'",
 			"timeout 5 rg x",
 			"sort -n data.txt",
+			"time git status",
+			"git stash list",
+			"git tag",
 		]) {
 			expect(isReadOnlyCommand(command)).toBe(true);
 		}
@@ -194,6 +197,13 @@ describe("tool guard", () => {
 			"sort --compress-program=/tmp/x data.txt",
 			"sort -o /etc/passwd data.txt",
 			"sort -uo out data.txt",
+			// GNU time writes its report to a file; rg runs programs to fill a hyperlink's host; bare git stash pushes.
+			"time --output=/etc/important.conf git status",
+			"time -o/etc/important.conf cat notes.txt",
+			"nice time -ao /etc/x ls",
+			"rg --hostname-bin=/tmp/x.sh --hyperlink-format=default foo",
+			"git stash",
+			"git stash -v",
 		]) {
 			expect(isReadOnlyCommand(command)).toBe(false);
 		}

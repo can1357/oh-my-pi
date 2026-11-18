@@ -12,8 +12,8 @@
 
 ### Added
 
-- Added an opt-in tool guard (`tools.guard.enabled`) that asks the judge model about risky tool calls approval allowed, such as deletions outside the working directory, force pushes, or uploads, and refuses those the user did not ask for ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
-- On Linux the tool guard also refuses heavy work (installs, builds, test suites) started while the host is strained by memory pressure, swapping, CPU saturation, I/O stalls, or a nearly full disk, and suggests moving it to another host or waiting ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
+- Added an opt-in tool guard (`tools.guard.enabled`) that asks the judge model about risky tool calls and refuses those the user did not ask for ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
+- On Linux the tool guard also refuses heavy work started while the host is strained ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
 - Cache warming bridges long tool calls: it keeps refreshing while the refresh spend since the last request stays under the cheaper buy-out, then compacts a large prompt a minute before the cache expires (committed when the tool returns) or lets the entry expire, replacing the fixed one-hour cap. `providers.cacheWarmingStrategy` (`auto`, `keepalive`, `compact`) picks the policy; compaction needs a prompt of at least the lower of `providers.cacheWarmingCompactPercent` (60%) of the window and `providers.cacheWarmingCompactTokens` (150k)
 - `cache_warming_decision` carries the refresh `method`, `compactCost` and `spentCost`, and accepts a `"compact"` action; `cache_warming_start`/`cache_warming_end` events carry `method` (`prewarm` or `replay`)
 - Enable `task.crossInstance` (off by default) to list same-folder omp instances with `agent://peers` and read or message their agents by PID. While enabled, digit-only task names get an `Agent` prefix.
