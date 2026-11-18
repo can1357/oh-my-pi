@@ -3197,22 +3197,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		syncCostCapGate();
 		this.addDisposer(this.#costGate.onCapChange(syncCostCapGate));
 		this.addDisposer(() => removeCostCapGate?.());
-		// Continuations of retained `length` reasoning, from any source, stop at their allowance or when the
-		// chain no longer fits. Registered only during length recovery, for the same abort reason as above.
-		let removeLengthRecoveryGate: (() => void) | undefined;
-		this.addDisposer(
-			this.#maintenance.onLengthRecoveryChange(() => {
-				if (this.#maintenance.recoveringFromLengthStop) {
-					removeLengthRecoveryGate ??= this.agent.addBeforeModelCall((_context, signal) =>
-						this.#maintenance.checkLengthContinuationBudget(signal),
-					);
-				} else if (removeLengthRecoveryGate) {
-					removeLengthRecoveryGate();
-					removeLengthRecoveryGate = undefined;
-				}
-			}),
-		);
-		this.addDisposer(() => removeLengthRecoveryGate?.());
+		this.addDisposer(() => this.#maintenance.dispose());
 
 		const handoffHost: SessionHandoffHost = {
 			agent: this.agent,
@@ -6210,17 +6195,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return;
 		}
 		const failure = this.#prunedTerminalFailure;
+		const failureKey = failure && sessionMessagePersistenceKey(failure);
 		if (
 			failure &&
 			!event.messages.some(
 				message =>
 					message === failure ||
 					(message.role === "assistant" &&
-						message.timestamp === failure.timestamp &&
-						message.provider === failure.provider &&
-						message.model === failure.model &&
-						message.stopReason === failure.stopReason &&
-						message.errorMessage === failure.errorMessage),
+						message.errorMessage === failure.errorMessage &&
+						sessionMessagePersistenceKey(message) === failureKey),
 			)
 		)
 			event = { ...event, messages: [...event.messages, failure] };

@@ -1245,27 +1245,14 @@ const streamOpenAICompletionsOnce = (
 					block = openThinkingBlock();
 					liteLLMThinkingBlock = block;
 				}
-				if (thinking) {
-					// LiteLLM closes a fragmented stream with one signed full-text snapshot;
-					// append only its unseen suffix. Unsigned repeats are real text.
-					let delta = thinking;
-					if (
-						signature &&
-						!block.thinkingSignature &&
-						block.thinking.length > 0 &&
-						thinking.startsWith(block.thinking)
-					) {
-						delta = thinking.slice(block.thinking.length);
-					}
-					if (delta) {
-						block.thinking += delta;
-						stream.push({
-							type: "thinking_delta",
-							contentIndex: blockIndex(block),
-							delta,
-							partial: output,
-						});
-					}
+				// LiteLLM closes a fragmented stream with a signed snapshot. Append only its unseen suffix.
+				const delta =
+					signature && !block.thinkingSignature && thinking.startsWith(block.thinking)
+						? thinking.slice(block.thinking.length)
+						: thinking;
+				if (delta) {
+					block.thinking += delta;
+					stream.push({ type: "thinking_delta", contentIndex: blockIndex(block), delta, partial: output });
 				}
 				if (signature) block.thinkingSignature = (block.thinkingSignature ?? "") + signature;
 			};
@@ -2617,6 +2604,7 @@ export function convertMessages(
 			}
 
 			const liteLLMThinkingBlocks = encodeLiteLLMThinkingBlocks(msg.content);
+			if (liteLLMThinkingBlocks.length > 0) assistantMsg.thinking_blocks = liteLLMThinkingBlocks;
 
 			// Handle thinking blocks
 			const thinkingBlocks = msg.content.filter(b => b.type === "thinking") as ThinkingContent[];
@@ -2697,19 +2685,12 @@ export function convertMessages(
 							? signature
 							: (compat.reasoningContentField ?? "reasoning_content");
 					assistantMsg[reasoningField] = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
-				} else if (msg.stopReason === "length") {
-					// Retained `length` turn: prefer LiteLLM's native carrier, else demote.
-					if (liteLLMThinkingBlocks.length > 0) {
-						assistantMsg.thinking_blocks = liteLLMThinkingBlocks;
-					} else {
-						const thinkingText = nonEmptyThinkingBlocks
-							.map(b => renderDemotedThinking(model.id, b.thinking))
-							.join(" ");
-						assistantMsg.content =
-							typeof assistantMsg.content === "string" && assistantMsg.content.length > 0
-								? `${thinkingText} ${assistantMsg.content}`
-								: thinkingText;
-					}
+				} else if (msg.stopReason === "length" && !assistantMsg.thinking_blocks) {
+					const thinkingText = nonEmptyThinkingBlocks
+						.map(b => renderDemotedThinking(model.id, b.thinking))
+						.join(" ");
+					const text = typeof assistantMsg.content === "string" ? assistantMsg.content : "";
+					assistantMsg.content = text ? `${thinkingText} ${text}` : thinkingText;
 				}
 			}
 
@@ -2735,9 +2716,6 @@ export function convertMessages(
 					}
 				}
 			}
-
-			if (assistantMsg.thinking_blocks === undefined && liteLLMThinkingBlocks.length > 0)
-				assistantMsg.thinking_blocks = liteLLMThinkingBlocks;
 
 			const toolCalls = msg.content.filter(b => b.type === "toolCall") as ToolCall[];
 			// Replay reasoning_content on assistant turns for backends that validate
@@ -2849,14 +2827,8 @@ export function convertMessages(
 			// Some OpenAI-compatible backends concatenate assistant content as a
 			// string even for tool-call replay. OpenAI accepts an empty string here;
 			// null trips strict/proxy implementations before the tool result is read.
-			// A retained `length` turn may carry its reasoning only in LiteLLM `thinking_blocks`.
-			const carriesRetainedThinking = msg.stopReason === "length" && assistantMsg.thinking_blocks !== undefined;
-			if (
-				assistantMsg.content === null &&
-				(hasReasoningField || carriesRetainedThinking || assistantMsg.tool_calls)
-			) {
-				assistantMsg.content = "";
-			}
+			const hasReasoning = hasReasoningField || (msg.stopReason === "length" && !!assistantMsg.thinking_blocks);
+			if (assistantMsg.content === null && (hasReasoning || assistantMsg.tool_calls)) assistantMsg.content = "";
 			// Skip assistant messages that have no content, no tool calls, and no reasoning payload.
 			// Some OpenAI-compatible backends require replaying reasoning-only assistant turns
 			// so follow-up requests preserve the provider-specific reasoning field name.
@@ -2868,7 +2840,7 @@ export function convertMessages(
 			if (!hasContent && assistantMsg.tool_calls && compat.requiresAssistantContentForToolCalls) {
 				assistantMsg.content = ".";
 			}
-			if (!hasContent && !assistantMsg.tool_calls && !hasReasoningField && !carriesRetainedThinking) {
+			if (!hasContent && !assistantMsg.tool_calls && !hasReasoning) {
 				continue;
 			}
 			params.push(assistantMsg);

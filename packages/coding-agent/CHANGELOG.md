@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- A response that hits the output-token cap mid-reasoning now continues from its reasoning (up to 3 times) instead of restarting it; recovery pauses with a reason when the retained reasoning no longer fits the context, and goal mode pauses rather than looping; explicit retry renews the continuation allowance ([#18064](https://github.com/can1357/oh-my-pi/pull/18064) by [@SergioHC95](https://github.com/SergioHC95))
+- Responses cut off mid-reasoning continue up to three times without starting over. If recovery pauses, retry to continue from the retained reasoning ([#18064](https://github.com/can1357/oh-my-pi/pull/18064) by [@SergioHC95](https://github.com/SergioHC95))
 
 ## [19.0.0] - 2026-11-18
 

@@ -659,7 +659,7 @@ export class SessionMaintenance {
 	 * prompt ({@link resetForNewPrompt}).
 	 */
 	#incompleteRecoveryAttempts = 0;
-	#lengthRecoveryListeners = new Set<() => void>();
+	#removeLengthRecoveryGate: (() => void) | undefined;
 	/** Latest rollover boundary that already received its pre-threshold notebook reminder. */
 	#experimentalNotesReminderBoundaryId: string | undefined;
 	/** Each archive's no-reasoning view, rendered (or failed closed) once per compaction entry. */
@@ -768,22 +768,21 @@ export class SessionMaintenance {
 		}
 	}
 
-	/** Whether a `length` recovery loop is counting attempts, so model calls must respect its budget. */
-	get recoveringFromLengthStop(): boolean {
-		return this.#incompleteRecoveryAttempts > 0;
-	}
-
-	/** Notified when {@link recoveringFromLengthStop} changes. */
-	onLengthRecoveryChange(listener: () => void): () => void {
-		this.#lengthRecoveryListeners.add(listener);
-		return () => this.#lengthRecoveryListeners.delete(listener);
+	dispose(): void {
+		this.resetForNewPrompt();
 	}
 
 	#setIncompleteRecoveryAttempts(attempts: number): void {
-		const wasRecovering = this.#incompleteRecoveryAttempts > 0;
 		this.#incompleteRecoveryAttempts = attempts;
-		if (wasRecovering === attempts > 0) return;
-		for (const listener of this.#lengthRecoveryListeners) listener();
+		if (attempts === 0) {
+			this.#removeLengthRecoveryGate?.();
+			this.#removeLengthRecoveryGate = undefined;
+		} else if (!this.#host.isDisposed()) {
+			// A permanent pre-model gate would turn ordinary user aborts into clean stops.
+			this.#removeLengthRecoveryGate ??= this.#host.agent.addBeforeModelCall((_context, signal) =>
+				this.#checkLengthContinuationBudget(signal),
+			);
+		}
 	}
 
 	/** Whether blocking compaction owns prompt admission. */
@@ -3688,7 +3687,7 @@ export class SessionMaintenance {
 			if (hasReplayableThinking(assistantMessage, this.#model)) {
 				if (
 					this.#incompleteRecoveryAttempts > INCOMPLETE_RECOVERY_MAX_RETRIES &&
-					this.checkLengthContinuationBudget()
+					this.#checkLengthContinuationBudget()
 				)
 					return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
 				if (windowExhausted || !this.#compactionCreatedRetryFit()) {
@@ -3920,7 +3919,7 @@ export class SessionMaintenance {
 		return COMPACTION_CHECK_NONE;
 	}
 
-	checkLengthContinuationBudget(signal?: AbortSignal): AgentPreModelCallResult {
+	#checkLengthContinuationBudget(signal?: AbortSignal): AgentPreModelCallResult {
 		if (signal?.aborted || this.#incompleteRecoveryAttempts === 0) return;
 		const exhausted = this.#incompleteRecoveryAttempts > INCOMPLETE_RECOVERY_MAX_RETRIES;
 		if (!exhausted && this.#compactionCreatedRetryFit()) return;
@@ -4936,6 +4935,21 @@ export class SessionMaintenance {
 			);
 		}
 		return this.contextFitsModel(model);
+	}
+
+	/** A rebuilt branch can contain the failed turn again, followed by excluded rows. */
+	#dropFailedCompactionTurn(dropLength: boolean): boolean {
+		const messages = this.#host.agent.state.messages;
+		const index = lastContextIndex(messages);
+		const tail = messages[index];
+		if (
+			tail?.role !== "assistant" ||
+			(tail.stopReason !== "error" && !(dropLength && tail.stopReason === "length" && !hasReplayableThinking(tail)))
+		) {
+			return false;
+		}
+		this.#host.agent.replaceMessages(messages.toSpliced(index, 1));
+		return true;
 	}
 
 	/**
@@ -6789,23 +6803,7 @@ export class SessionMaintenance {
 		let hasHeadroom = false;
 
 		if (willRetry) {
-			const messages = this.#host.agent.state.messages;
-			// Rows kept out of context may trail the failed turn; they stay, the turn goes.
-			const lastIndex = lastContextIndex(messages);
-			const lastMsg = messages[lastIndex];
-			if (lastMsg?.role === "assistant") {
-				const lastAssistant = lastMsg as AssistantMessage;
-				// Failed turns are discarded; an interrupted reasoning chain stays in context.
-				const shouldDrop =
-					lastAssistant.stopReason === "error" ||
-					(reason === "incomplete" &&
-						lastAssistant.stopReason === "length" &&
-						!hasReplayableThinking(lastAssistant));
-				if (shouldDrop) {
-					this.#host.agent.replaceMessages(messages.toSpliced(lastIndex, 1));
-					this.#host.rebaseAfterCompaction();
-				}
-			}
+			if (this.#dropFailedCompactionTurn(reason === "incomplete")) this.#host.rebaseAfterCompaction();
 
 			// Retry only needs the rebuilt prompt to fit the window again — measured
 			// AFTER the drop above so the just-failed turn (which the retry prompt
@@ -7012,21 +7010,7 @@ export class SessionMaintenance {
 
 			let continuationScheduled = false;
 			if (willRetry) {
-				// The shake rebuild replays every entry, so a trailing error/length
-				// assistant from the failed turn re-enters agent state — drop it before
-				// retrying, same as the context-full tail.
-				const messages = this.#host.agent.state.messages;
-				const lastIndex = lastContextIndex(messages);
-				const lastMsg = messages[lastIndex];
-				if (lastMsg?.role === "assistant") {
-					const lastAssistant = lastMsg as AssistantMessage;
-					const shouldDrop =
-						lastAssistant.stopReason === "error" ||
-						(reason === "incomplete" &&
-							lastAssistant.stopReason === "length" &&
-							!hasReplayableThinking(lastAssistant));
-					if (shouldDrop) this.#host.agent.replaceMessages(messages.toSpliced(lastIndex, 1));
-				}
+				this.#dropFailedCompactionTurn(reason === "incomplete");
 				if (!suppressContinuation) {
 					this.#host.scheduleAgentContinue({ source: "shake-retry", delayMs: 100, generation });
 					continuationScheduled = true;

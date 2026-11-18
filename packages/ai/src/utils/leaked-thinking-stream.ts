@@ -34,14 +34,7 @@
 import { ThinkingInbandScanner } from "../dialect/thinking";
 import type { InbandScanEvent } from "../dialect/types";
 import { isAnthropicServerToolHistoryBlock } from "../providers/anthropic-wire";
-import type {
-	AnthropicServerToolContent,
-	AssistantMessage,
-	ImageContent,
-	TextContent,
-	ThinkingContent,
-	ToolCall,
-} from "../types";
+import type { AssistantMessage, ImageContent, TextContent, ThinkingContent, ToolCall } from "../types";
 import {
 	clearStreamingPartialJson,
 	copyCursorExecResolved,
@@ -537,23 +530,13 @@ class LeakedThinkingProjector {
 			sourceIndex: this.#sourceAnchors.get(block) ?? message.content.length + order,
 			order,
 		}));
-		for (const srcIndex of pairedIndexes) {
-			const content = message.content[srcIndex];
-			if (content?.type !== "anthropicServerTool") continue;
-			const cloned: AnthropicServerToolContent = {
-				type: "anthropicServerTool",
-				block: structuredClone(content.block),
-			};
-			anchored.push({ block: cloned, sourceIndex: srcIndex, order: srcIndex });
-		}
 		for (let srcIndex = 0; srcIndex < message.content.length; srcIndex++) {
 			const content = message.content[srcIndex];
-			if (content?.type !== "redactedThinking" || content.data.length === 0) continue;
-			anchored.push({
-				block: { type: "redactedThinking", data: content.data },
-				sourceIndex: srcIndex,
-				order: srcIndex,
-			});
+			if (content?.type === "anthropicServerTool" && pairedIndexes.has(srcIndex)) {
+				anchored.push({ block: structuredClone(content), sourceIndex: srcIndex, order: srcIndex });
+			} else if (content?.type === "redactedThinking" && content.data.length > 0) {
+				anchored.push({ block: { ...content }, sourceIndex: srcIndex, order: srcIndex });
+			}
 		}
 		anchored.sort((left, right) => left.sourceIndex - right.sourceIndex || left.order - right.order);
 		return anchored.map(({ block }) => block);

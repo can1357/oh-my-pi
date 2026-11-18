@@ -2228,25 +2228,22 @@ export async function compact(
 			reportRemoteUsage(usage, startedAt);
 			preserveData = withOpenAiRemoteCompactionPreserveData(preserveData, remote);
 		};
-		const selected = buildOpenAiNativeHistory(
-			convertToLlm(
-				preserveInterruptedReasoning ? remotePrefixMessages : [...remotePrefixMessages, ...recentMessages],
-			),
-			model,
-			previousReplacementHistory,
-			supportsOriginalDetail,
-		);
+		const buildHistory = (includeTail: boolean) => {
+			const messages = includeTail ? [...remotePrefixMessages, ...recentMessages] : remotePrefixMessages;
+			return buildOpenAiNativeHistory(
+				convertToLlm(messages),
+				model,
+				previousReplacementHistory,
+				supportsOriginalDetail,
+			);
+		};
+		const selected = buildHistory(!preserveInterruptedReasoning);
 		if (selected.length > 0) {
 			try {
 				await sendRemoteCompaction(
 					() => sendV1(selected, preserveInterruptedReasoning || !canCompactBeforeTail),
 					async () => {
-						const prefix = buildOpenAiNativeHistory(
-							convertToLlm(remotePrefixMessages),
-							model,
-							previousReplacementHistory,
-							supportsOriginalDetail,
-						);
+						const prefix = buildHistory(false);
 						if (prefix.length === 0) return false;
 						await sendV1(prefix, true);
 						return true;
@@ -2276,20 +2273,19 @@ export async function compact(
 	let nativeUsedTokens: number | undefined;
 	let nativeRetainedFiles: AnthropicCompactionFiles[] | undefined;
 	let nativeToolChanges: Record<string, unknown>[] | undefined;
-	const anthropicNative =
-		!usedRemoteCompaction && settings.remoteEnabled !== false && shouldUseAnthropicNativeCompaction(model);
-	const allMessages = [...messagesToSummarize, ...turnPrefixMessages, ...recentMessages];
+	const allMessages =
+		!usedRemoteCompaction && settings.remoteEnabled !== false && shouldUseAnthropicNativeCompaction(model)
+			? [...messagesToSummarize, ...turnPrefixMessages, ...recentMessages]
+			: undefined;
 	const originalCut = messagesToSummarize.length + turnPrefixMessages.length;
-	const nativeCut = anthropicNative ? findAnthropicCompactionCut(allMessages, originalCut) : originalCut;
-	// Hand-built preparations lacking entry IDs cannot move their persisted
-	// boundary into the tail. Summarizing all is still safe.
-	const safeCut =
-		nativeCut > originalCut && nativeCut < allMessages.length && !recentEntryIds?.[nativeCut - originalCut]
-			? allMessages.length
-			: nativeCut;
-	// A native cut moved into pending reasoning would summarize it; the local
-	// prefix summary keeps the tail instead.
-	if (anthropicNative && !(preserveInterruptedReasoning && safeCut > originalCut)) {
+	const nativeCut = allMessages ? findAnthropicCompactionCut(allMessages, originalCut) : originalCut;
+	// Fall back to a local prefix summary if the native cut would eat the pending tail.
+	if (allMessages && (!preserveInterruptedReasoning || nativeCut <= originalCut)) {
+		// Without a persisted tail boundary, the native request must summarize it all.
+		const safeCut =
+			nativeCut > originalCut && nativeCut < allMessages.length && !recentEntryIds?.[nativeCut - originalCut]
+				? allMessages.length
+				: nativeCut;
 		const previousNative = getPreservedAnthropicCompactionData(previousPreserveData);
 		// Lead with the previous summary as the live context renders it:
 		// natively when this provider wrote it, as text otherwise.

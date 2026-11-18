@@ -369,21 +369,13 @@ export function sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 	const sanitized = sanitizeOpenAIResponsesHistoryItemsForReplay(items, options);
 	let hasReplayableAssistantOutput = false;
 	let hasEmptyAssistantMessage = false;
-	let hasReasoning = false;
 
 	for (const item of sanitized) {
-		if (item.type === "reasoning") {
-			hasReasoning = true;
-			continue;
-		}
-		if (isEmptyAssistantMessage(item)) {
-			hasEmptyAssistantMessage = true;
-			continue;
-		}
-		hasReplayableAssistantOutput = true;
+		if (isEmptyAssistantMessage(item)) hasEmptyAssistantMessage = true;
+		else if (item.type !== "reasoning" || options.preserveReasoningOnly) hasReplayableAssistantOutput = true;
 	}
 
-	if (!hasReplayableAssistantOutput && !(options.preserveReasoningOnly && hasReasoning)) return undefined;
+	if (!hasReplayableAssistantOutput) return undefined;
 	if (!hasEmptyAssistantMessage) return sanitized;
 	return options.preserveReasoningOnly
 		? sanitized.filter(item => !isEmptyAssistantMessage(item))

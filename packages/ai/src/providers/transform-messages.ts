@@ -488,8 +488,11 @@ function sanitizeMalformedToolCalls(messages: Message[], model: Model): Message[
  */
 export function shouldDropTruncatedThinkingOnlyAssistant(msg: AssistantMessage): boolean {
 	const isTruncatedStop = msg.stopReason === "length" || msg.stopReason === "error" || msg.stopReason === "aborted";
-	if (isTruncatedStop && msg.content.some(block => block.type === "toolCall" || block.type === "text")) return false;
-	return isTruncatedStop && (msg.stopReason !== "length" || !hasReplayableThinking(msg));
+	return (
+		isTruncatedStop &&
+		!msg.content.some(block => block.type === "toolCall" || block.type === "text") &&
+		(msg.stopReason !== "length" || !hasReplayableThinking(msg))
+	);
 }
 
 /**
@@ -585,14 +588,11 @@ export function hasReplayableThinking(message: AssistantMessage, model?: Model):
 		}
 		return false;
 	}
-	if (message.api === "openai-completions") {
-		// LiteLLM's `thinking_blocks` carrier replays redacted blocks natively.
-		return message.content.some(block => block.type === "redactedThinking" && block.data.trim().length > 0);
-	}
-	if (message.api !== "anthropic-messages" && message.api !== "bedrock-converse-stream") return false;
+	const anthropic = message.api === "anthropic-messages" || message.api === "bedrock-converse-stream";
+	if (!anthropic && message.api !== "openai-completions") return false;
 	return message.content.some(block => {
 		if (block.type === "redactedThinking") return block.data.trim().length > 0;
-		if (block.type !== "thinking") return false;
+		if (!anthropic || block.type !== "thinking") return false;
 		const signature = block.thinkingSignature;
 		return (
 			Boolean(signature?.trim()) &&
@@ -1233,12 +1233,8 @@ export function transformMessages<TApi extends Api>(
 						if (!sanitized.thinkingSignature && (!sanitized.thinking || sanitized.thinking.trim() === "")) {
 							return [];
 						}
-						// Same-model Anthropic replay to a signature-enforcing endpoint
-						// requires valid signatures to natively replay thinking blocks.
-						// Both undefined and empty string signatures are invalid and must
-						// be dropped entirely — not demoted to text. Demotion would cause
-						// the reasoning_extraction safety classifier to refuse the response.
-						// Except a `length` turn: the cap cut its signature, so its thought demotes.
+						// Signing endpoints reject unsigned thinking. Only length-cut thoughts
+						// keep their text when the stream ended before signing.
 						if (isSameModel && isSigningAnthropicTarget && !sanitized.thinkingSignature?.trim()) {
 							if (assistantMsg.stopReason === "length" && sanitized.thinking.trim().length > 0) {
 								return {
@@ -1551,18 +1547,8 @@ export function transformMessages<TApi extends Api>(
 
 			const assistantMsg = msg as AssistantMessage;
 
-			// Drop assistant turns that carry no actionable content (no `text`, no `toolCall`)
-			// AND were terminated by a truncating stop reason (`length` / `error` / `aborted`).
-			// These are produced when the provider returns `stop_reason: "max_tokens"` (or a
-			// stream error) mid-thinking, leaving a `[thinking]`-only message with a valid
-			// signature but nothing for the next turn to anchor on. Keeping it creates
-			// back-to-back assistant turns once the next response lands, which Anthropic
-			// rejects with "messages.X.content.Y: `thinking` blocks in the latest assistant
-			// message cannot be modified".
-			//
-			// `stopReason: "stop"` thinking-only messages are intentionally preserved: they
-			// represent reasoning-only assistant turns used for replay round-trips
-			// (OpenAI completions `reasoning_text`, Google signed thought parts).
+			// Drop failed non-answers, and length stops with no reasoning left to replay.
+			// Check the original so sanitizer-dropped tool calls don't look like reasoning-only turns.
 			const originalMsg = messages[i]!;
 			if (
 				originalMsg.role === "assistant" &&
