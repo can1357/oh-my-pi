@@ -44,6 +44,7 @@
 
 ### Fixed
 
+- Commit drafts no longer show a committed block as deleted in one hunk and re-added in the next (left out vs. selected) when part of the work was committed earlier and the block sits among repeated lines such as `return;` or `}`; committing the preselection duplicated those lines
 - A `reasoning_extraction` refusal that cuts off a turn mid-stream is retried once on the same model instead of failing the turn (subagents died on it and needed a manual resume)
 - `omp --restore` goes on with a turn cut off by SIGTERM or SIGHUP (a terminal such as Tern restarting its panes) instead of leaving it at "Operation aborted"; only its subagents went on before
 - A subagent (or a resumed session) running on auto thinking without a user turn of its own, such as one woken by IRC, shows the level it thinks at in the composer and status line instead of auto as still pending
