@@ -7,9 +7,9 @@
 - Entry: `packages/coding-agent/src/tools/ast-grep.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/ast-grep.md`
 - Key collaborators:
-   - `crates/pi-natives/src/ast.rs` — native scan, parse, match engine
-   - `crates/pi-ast/src/language/mod.rs` — language aliases and extension inference used by the native wrapper.
-   - `crates/pi-ast/src/ops.rs` — pattern compilation and JSON member-fragment fallback
+   - `crates/natives/src/ast.rs` — native scan, parse, match engine
+   - `crates/ast/src/language/mod.rs` — language aliases and extension inference used by the native wrapper.
+   - `crates/ast/src/ops.rs` — pattern compilation and JSON member-fragment fallback
    - `packages/coding-agent/src/tools/path-utils.ts` — path/glob parsing (host paths and internal URLs) and multi-path resolution
    - `packages/coding-agent/src/internal-urls/url-filesystem.ts` — `InternalUrlFilesystem`, the URL filesystem native ast-grep walks and reads through
    - `packages/tui/src/render/render-utils.ts` — parse-error dedupe and display caps
@@ -36,7 +36,7 @@ Pattern grammar and language support exposed to the model:
 - Reusing the same metavariable requires identical code at each occurrence.
 - Prompt guidance requires one valid AST node for the inferred or explicitly selected language. The native compiler also accepts JSON member fragments such as `"key": $V` by wrapping them in an object and selecting the `pair` node; this fallback applies only to `MultipleNode` parse failures.
 - `.cu` and `.cuh` infer as C++; C++ expression-statement patterns need their trailing `;`.
-- Supported canonical languages come from `SupportLang::all_langs()` in `crates/pi-ast/src/language/mod.rs`: `astro`, `bash`, `c`, `cmake`, `cpp`, `csharp`, `dart`, `clojure`, `css`, `diff`, `dockerfile`, `emacs-lisp`, `elixir`, `erlang`, `fortran`, `go`, `graphql`, `haskell`, `hcl`, `html`, `ini`, `java`, `javascript`, `json`, `just`, `julia`, `kotlin`, `lua`, `make`, `markdown`, `nix`, `objc`, `ocaml`, `odin`, `php`, `powershell`, `protobuf`, `python`, `r`, `regex`, `ruby`, `rust`, `scala`, `solidity`, `sql`, `starlark`, `svelte`, `swift`, `toml`, `tlaplus`, `tsx`, `typescript`, `verilog`, `vue`, `xml`, `yaml`, `zig`.
+- Supported canonical languages come from `SupportLang::all_langs()` in `crates/ast/src/language/mod.rs`: `astro`, `bash`, `c`, `cmake`, `cpp`, `csharp`, `dart`, `clojure`, `css`, `diff`, `dockerfile`, `emacs-lisp`, `elixir`, `erlang`, `fortran`, `go`, `graphql`, `haskell`, `hcl`, `html`, `ini`, `java`, `javascript`, `json`, `just`, `julia`, `kotlin`, `lua`, `make`, `markdown`, `nix`, `objc`, `ocaml`, `odin`, `php`, `powershell`, `protobuf`, `python`, `r`, `regex`, `ruby`, `rust`, `scala`, `solidity`, `sql`, `starlark`, `svelte`, `swift`, `toml`, `tlaplus`, `tsx`, `typescript`, `verilog`, `vue`, `xml`, `yaml`, `zig`.
 
 `ast_grep` is disabled by default (`astGrep.enabled = false`) and is a discoverable tool when enabled.
 
@@ -66,7 +66,7 @@ Pattern grammar and language support exposed to the model:
    - one native `astGrep(...)` call for a single resolved base, or
    - `runMultiTargetAstGrep(...)`, which calls the native binding once per target, rebases host paths back to the common root (URL hits stay full URLs), sorts globally, then applies `skip` and the wrapper limit.
      Every native call gets `filesystem: urlFilesystem.shellFilesystem()`.
-7. Native `ast_grep` in `crates/pi-natives/src/ast.rs`:
+7. Native `ast_grep` in `crates/natives/src/ast.rs`:
    - normalizes and deduplicates patterns,
    - resolves a `MatchStrictness` (`smart` by default),
    - collects candidate files from a file or gitignore-aware directory scan,
@@ -99,11 +99,11 @@ Pattern grammar and language support exposed to the model:
 ## Limits & Caps
 
 - Wrapper-visible result cap: `DEFAULT_AST_LIMIT = 50` in `packages/coding-agent/src/tools/ast-grep.ts`.
-   - Single-target calls rely on the native default limit of 50 in `crates/pi-natives/src/ast.rs`.
+   - Single-target calls rely on the native default limit of 50 in `crates/natives/src/ast.rs`.
    - Multi-target calls fetch `skip + 50 + 1` matches per target, then re-page after global sort.
-- Native `limit` is clamped to at least `1`; omitted `offset` defaults to `0` in `crates/pi-natives/src/ast.rs`.
+- Native `limit` is clamped to at least `1`; omitted `offset` defaults to `0` in `crates/natives/src/ast.rs`.
 - Parse issues are rendered with at most `PARSE_ERRORS_LIMIT = 20` lines in `packages/tui/src/render/render-utils.ts`; `capParseErrors()` also caps `details.parseErrors` to those 20 unique entries, with `details.parseErrorsTotal` holding the pre-cap deduplicated total.
-- Directory scans use `include_hidden: true`, `use_gitignore: true`, and skip `node_modules` unless the glob text explicitly mentions `node_modules` in `crates/pi-natives/src/ast.rs`.
+- Directory scans use `include_hidden: true`, `use_gitignore: true`, and skip `node_modules` unless the glob text explicitly mentions `node_modules` in `crates/natives/src/ast.rs`.
 - No hard file-count cap is applied by the wrapper or native `ast_grep`; candidate count is whatever the resolved path/glob expands to after gitignore filtering.
 - Multi-path union deduplicates identical path inputs before resolution in `resolveExplicitSearchPaths()`.
 
@@ -123,5 +123,5 @@ Pattern grammar and language support exposed to the model:
 - `ast_grep` can search mixed-language trees because native compilation happens per discovered language, but the prompt still tells the model to keep calls single-language when possible to reduce parse noise.
 - Pattern compilation is per language present in the candidate set. One pattern can succeed for some languages and generate per-file parse errors for others in the same run.
 - A file with tree-sitter error nodes still gets searched; the syntax warning is additive, not a skip condition.
-- For glob semantics, `*.ts` matches only direct children while `**/*.ts` recurses; this is covered by native tests in `crates/pi-natives/src/ast.rs`.
+- For glob semantics, `*.ts` matches only direct children while `**/*.ts` recurses; this is covered by native tests in `crates/natives/src/ast.rs`.
 - Output anchors are intended for follow-up tools, but the exact anchor format depends on session edit mode (`hashline` vs line-number mode).

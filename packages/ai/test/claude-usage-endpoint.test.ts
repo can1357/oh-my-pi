@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchContext } from "@oh-my-pi/pi-ai/usage";
-import { claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
+import { claudeProfilePlan, claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
 
 const CANONICAL_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 
@@ -188,5 +188,67 @@ describe("claudeUsageProvider usage endpoint resolution", () => {
 		// the generic transient classification.
 		expect(plainUsageUrls(urls)).toEqual(["https://gateway.example.com/api/oauth/usage", CANONICAL_USAGE_URL]);
 		expect(report?.metadata?.endpoint).toBe(CANONICAL_USAGE_URL);
+	});
+});
+
+describe("claudeUsageProvider subscription plan", () => {
+	const PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
+	const profile = (type: string, tier: string) => ({ organization: { organization_type: type, rate_limit_tier: tier } });
+
+	it("labels Max plans by rate-limit tier and other plans by organization type", () => {
+		expect(claudeProfilePlan(profile("claude_max", "default_claude_max_20x"))).toBe("Max 20x");
+		expect(claudeProfilePlan(profile("claude_max", "default_claude_max_5x"))).toBe("Max 5x");
+		expect(claudeProfilePlan(profile("claude_max", "unrecognised"))).toBe("Max");
+		expect(claudeProfilePlan(profile("claude_enterprise", "default_claude_zero"))).toBe("Enterprise");
+		expect(claudeProfilePlan(profile("something_new", "default"))).toBeUndefined();
+		expect(claudeProfilePlan({ uuid: "no-organization" })).toBeUndefined();
+	});
+
+	it("stamps the profile's plan on the report", async () => {
+		const { fetch } = recordingFetch(url =>
+			url === PROFILE_URL
+				? jsonResponse(200, profile("claude_max", "default_claude_max_5x"))
+				: jsonResponse(200, USAGE_PAYLOAD),
+		);
+
+		const report = await claudeUsageProvider.fetchUsage(params(), context(fetch));
+
+		expect(report?.metadata?.subscriptionPlan).toBe("Max 5x");
+	});
+
+	it("keeps the previous report's plan when the profile probe fails, and reports none without one", async () => {
+		const { fetch } = recordingFetch(url =>
+			url === PROFILE_URL ? jsonResponse(500, { error: "boom" }) : jsonResponse(200, USAGE_PAYLOAD),
+		);
+		const previousReport = {
+			provider: "anthropic" as const,
+			fetchedAt: Date.now() - 60_000,
+			limits: [],
+			metadata: { subscriptionPlan: "Max 20x" },
+		};
+
+		const carried = await claudeUsageProvider.fetchUsage(params(), { ...context(fetch), previousReport });
+		const fresh = await claudeUsageProvider.fetchUsage(params(), context(fetch));
+
+		expect(carried?.metadata?.subscriptionPlan).toBe("Max 20x");
+		expect(fresh?.metadata).not.toHaveProperty("subscriptionPlan");
+	});
+
+	it("lets a changed plan replace the previous report's", async () => {
+		const { fetch } = recordingFetch(url =>
+			url === PROFILE_URL
+				? jsonResponse(200, profile("claude_max", "default_claude_max_20x"))
+				: jsonResponse(200, USAGE_PAYLOAD),
+		);
+		const previousReport = {
+			provider: "anthropic" as const,
+			fetchedAt: Date.now() - 60_000,
+			limits: [],
+			metadata: { subscriptionPlan: "Max 5x" },
+		};
+
+		const report = await claudeUsageProvider.fetchUsage(params(), { ...context(fetch), previousReport });
+
+		expect(report?.metadata?.subscriptionPlan).toBe("Max 20x");
 	});
 });

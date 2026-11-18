@@ -751,7 +751,7 @@ export async function splitDelimitedPathEntry(
 		exclusionParts?: boolean;
 		/**
 		 * Filesystem that probes a `;` list starting with an internal URL and also
-		 * naming local paths or globs (`artifact://1;src/*.ts`). Search tools pass
+		 * naming local paths or globs (`local://1.log;src/*.ts`). Search tools pass
 		 * the filesystem they search with. Omit it so a `;` inside one internal
 		 * URL cannot select an extra file.
 		 */
@@ -784,7 +784,7 @@ export async function splitDelimitedPathEntry(
 		return (await internalUrlEntryResolves(normalizedEntry, options.mixedLocalPaths)) ? null : parts;
 	}
 	if (isInternalUrlPath(normalizedEntry)) {
-		// A `;` list of internal URLs (`artifact://44;artifact://43`) names
+		// A `;` list of internal URLs (`local://44.log;local://43.log`) names
 		// several resources: the router resolves one URI per entry, so the list
 		// must split before dispatch (issue #14091). Split only when every part
 		// is itself an internal URL or a `!glob` exclusion (`local://notes;!*.test.ts`)
@@ -1631,7 +1631,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 	try {
 		isDirectory = (await opts.filesystem.stat(searchPath)).type === "directory";
 	} catch (error) {
-		// A URL failure carries its handler's diagnosis (`Artifact 9 not found. Available: 4`).
+		// A URL failure carries its handler's diagnosis (`Not found: reviewer_9`).
 		if (internalRouter.canHandle(searchPath)) {
 			throw new ToolError(
 				`Cannot ${internalUrlAction} ${searchPath}: ${error instanceof Error ? error.message : String(error)}`,
