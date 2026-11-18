@@ -200,7 +200,7 @@ fn parse_git_diff(blob: &[u8]) -> Vec<FileChange> {
 		return Vec::new();
 	};
 	let mut out = Vec::<FileChange>::new();
-	let iter = text.split_inclusive('\n');
+	let iter = xutf::lines_str(text, xutf::LineEnds::Lf).map(|line| line.with_end());
 	let mut buf = String::new();
 	let mut header_path: Option<PathBuf> = None;
 	let mut header_kind = ChangeKind::Modified;
@@ -662,6 +662,14 @@ mod tests {
 			fs::symlink_metadata(root.join(name)).is_err(),
 			"{name} should have been removed by the patch"
 		);
+	}
+
+	#[test]
+	fn git_diff_parser_keeps_line_endings_and_final_unterminated_line() {
+		let input = "diff --git a/text b/text\n--- a/text\n+++ b/text\n@@ -1 +1 @@\n-old\r\n+new";
+		let changes = super::parse_git_diff(input.as_bytes());
+		assert_eq!(changes.len(), 1);
+		assert_eq!(changes[0].diff.as_deref(), Some(input));
 	}
 
 	#[test]

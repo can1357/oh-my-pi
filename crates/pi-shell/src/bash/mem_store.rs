@@ -139,6 +139,16 @@ impl MemStore {
 		self.epoch += 1;
 	}
 
+	/// The root's process records ([`Key::forked`]), as a fork copies them.
+	pub const fn image(&self) -> &Image {
+		&self.image
+	}
+
+	/// Read a blob without the trait's `&mut`.
+	pub fn blob(&self, slot: BlobSlot) -> Option<&[u8]> {
+		self.blobs.get(&slot).map(Vec::as_slice)
+	}
+
 	/// Read a record without the trait's `&mut` (tests, `obash`).
 	#[inline]
 	pub fn record(&self, key: Key<'_>) -> Option<&Record> {

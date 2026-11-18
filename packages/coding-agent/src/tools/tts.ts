@@ -15,7 +15,7 @@ import { roleCandidatePool } from "../config/model-roles";
 import { settings, type Settings } from "../config/settings";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import ttsDescription from "../prompts/tools/tts.md" with { type: "text" };
-import { DEFAULT_TTS_VOICE, KOKORO_VOICES } from "../tts/models";
+import { DEFAULT_TTS_VOICE, TTS_LOCAL_VOICES } from "../tts/models";
 import { ttsClient } from "../tts/tts-client";
 import { encodeWav } from "../tts/wav";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
@@ -185,7 +185,7 @@ export const ttsTool: CustomTool<typeof ttsSchema, TtsToolDetails> = {
 	strict: false,
 	approval: "write",
 	description: prompt.render(ttsDescription, {
-		localVoices: KOKORO_VOICES.map(v => (v.id === DEFAULT_TTS_VOICE ? `${v.id} (default)` : v.id)).join(", "),
+		localVoices: TTS_LOCAL_VOICES.map(v => (v.id === DEFAULT_TTS_VOICE ? `${v.id} (default)` : v.id)).join(", "),
 		xaiVoices: formatVoiceList(),
 		maxLength: XAI_MAX_TEXT_LENGTH.toLocaleString("en-US"),
 	}),

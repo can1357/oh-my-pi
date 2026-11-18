@@ -515,10 +515,25 @@ impl Shell {
 	/// session's state (variables, functions, aliases, options, working
 	/// directory) as of its last command boundary: while a command runs, the
 	/// state that command started from. What the fork sets stays in the
-	/// fork. Never waits for the running command.
+	/// fork until `adopt()` carries it back. Never waits for the running
+	/// command.
 	#[napi]
 	pub fn fork(&self) -> Self {
 		Self { inner: Arc::new(self.inner.fork()) }
+	}
+
+	/// Carry what `fork` (a `fork()` of this shell whose `run` settled)
+	/// changed, its variables, functions, aliases, options and traps, into
+	/// this shell's session: at the end of the command it runs now, or at
+	/// once between commands, and into every fork taken from here on. A name
+	/// both changed keeps the value of the command that ended last. Returns
+	/// `false` when there is nothing to carry from or into: the fork did not
+	/// start from a session's state or lost its session, or this shell has
+	/// none.
+	#[napi]
+	#[allow(clippy::use_self, reason = "napi argument types must name the exported class")]
+	pub fn adopt(&self, fork: &Shell) -> bool {
+		self.inner.adopt(&fork.inner)
 	}
 
 	/// Run a shell command using the provided options.

@@ -57,17 +57,32 @@ export interface CallRecord extends JournalAgent {
 	end: number;
 	/** One-line description (command head, cell title). */
 	label: string;
+	/**
+	 * Command or code the call ran, capped at {@link CALL_SCRIPT_CHARS}. A deleted file leaves no
+	 * timestamp to match against the window, so drafts look for its path here instead. Absent in
+	 * journals written before scripts were recorded.
+	 */
+	script?: string;
 }
 
 /** Display cap for a call label. */
 const CALL_LABEL_CHARS = 80;
+/** Storage cap for a call script. */
+const CALL_SCRIPT_CHARS = 64 * 1024;
 
-/** One-line {@link CallRecord.label} from `bash`/`eval` arguments: the command's or cell's first line. */
-export function callLabel(args: unknown): string {
-	if (!isRecord(args)) return "";
-	const source = [args.title, args.command, args.code].find(value => typeof value === "string" && value.trim());
-	const line = typeof source === "string" ? (source.trim().split("\n", 1)[0] ?? "") : "";
-	return line.length > CALL_LABEL_CHARS ? `${line.slice(0, CALL_LABEL_CHARS)}…` : line;
+/**
+ * {@link CallRecord.label} (the cell title, else the command's or code's first line) and
+ * {@link CallRecord.script} from `bash`/`eval` arguments.
+ */
+export function callDetails(args: unknown): Pick<CallRecord, "label" | "script"> {
+	if (!isRecord(args)) return { label: "" };
+	const text = (value: unknown) => (typeof value === "string" && value.trim() ? value : undefined);
+	const script = text(args.command) ?? text(args.code);
+	const line = (text(args.title) ?? script)?.trim().split("\n", 1)[0] ?? "";
+	return {
+		label: line.length > CALL_LABEL_CHARS ? `${line.slice(0, CALL_LABEL_CHARS)}…` : line,
+		script: script?.slice(0, CALL_SCRIPT_CHARS),
+	};
 }
 
 /** A commit created by the selective commit flow. */

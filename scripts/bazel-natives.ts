@@ -345,6 +345,123 @@ export async function verifyHostAddonLoads(
 	throw new Error(`${header}:\n${stderr.trim()}\n${ADDON_LOAD_FAILURE_EXPLANATION}`);
 }
 
+/**
+ * Every library a glibc addon may need: those the glibc 2.17 floor keeps out of
+ * `libc.so.6`, minus the libm and libutil functions
+ * crates/pi-natives/src/bundled_libc.rs links in.
+ */
+export const GLIBC_ADDON_NEEDED: ReadonlySet<string> = new Set([
+	"libc.so.6",
+	"libpthread.so.0",
+	"libdl.so.2",
+	"ld-linux-x86-64.so.2",
+	"ld-linux-aarch64.so.1",
+]);
+
+/** The one symbol a Linux addon exports (`:exports_map` in crates/pi-natives/BUILD.bazel). */
+const LINUX_ADDON_EXPORT = "napi_register_module_v1";
+
+const SHT_DYNAMIC = 6;
+const SHT_DYNSYM = 11;
+const DT_NULL = 0n;
+const DT_NEEDED = 1n;
+const STB_LOCAL = 0;
+const STV_DEFAULT = 0;
+const STV_PROTECTED = 3;
+
+/** What an ELF image takes from and offers to the dynamic loader. */
+export interface ElfDynamic {
+	/** `DT_NEEDED` libraries. */
+	needed: string[];
+	/** Defined symbols other images can bind to. */
+	exports: string[];
+}
+
+/** Read {@link ElfDynamic} from an ELF64 little-endian image; null for any other file. */
+export async function elfDynamic(file: string): Promise<ElfDynamic | null> {
+	const handle = await fs.open(file, "r");
+	try {
+		const read = async (offset: number, length: number): Promise<Buffer> => {
+			const bytes = Buffer.alloc(length);
+			await handle.read(bytes, 0, length, offset);
+			return bytes;
+		};
+		const header = await read(0, 64);
+		if (header.toString("latin1", 0, 4) !== "\x7fELF" || header[4] !== 2 || header[5] !== 1) return null;
+		const shentsize = header.readUInt16LE(58);
+		const shnum = header.readUInt16LE(60);
+		const sections = await read(Number(header.readBigUInt64LE(40)), shentsize * shnum);
+		const section = (index: number) => {
+			const at = index * shentsize;
+			return {
+				type: sections.readUInt32LE(at + 4),
+				offset: Number(sections.readBigUInt64LE(at + 24)),
+				size: Number(sections.readBigUInt64LE(at + 32)),
+				link: sections.readUInt32LE(at + 40),
+			};
+		};
+		const image: ElfDynamic = { needed: [], exports: [] };
+		for (let index = 0; index < shnum; index++) {
+			const table = section(index);
+			if (table.type !== SHT_DYNAMIC && table.type !== SHT_DYNSYM) continue;
+			const strings = section(table.link);
+			const [entries, names] = await Promise.all([
+				read(table.offset, table.size),
+				read(strings.offset, strings.size),
+			]);
+			const name = (start: number) => names.toString("latin1", start, names.indexOf(0, start));
+			if (table.type === SHT_DYNAMIC) {
+				for (let at = 0; at + 16 <= entries.length; at += 16) {
+					const tag = entries.readBigUInt64LE(at);
+					if (tag === DT_NULL) break;
+					if (tag === DT_NEEDED) image.needed.push(name(Number(entries.readBigUInt64LE(at + 8))));
+				}
+				continue;
+			}
+			// Elf64_Sym entries after the null one: st_name, st_info, st_other, st_shndx, …
+			for (let at = 24; at + 24 <= entries.length; at += 24) {
+				const visibility = entries.readUInt8(at + 5) & 3;
+				if (
+					entries.readUInt16LE(at + 6) !== 0 &&
+					entries.readUInt8(at + 4) >> 4 !== STB_LOCAL &&
+					(visibility === STV_DEFAULT || visibility === STV_PROTECTED)
+				) {
+					image.exports.push(name(entries.readUInt32LE(at)));
+				}
+			}
+		}
+		return image;
+	} finally {
+		await handle.close();
+	}
+}
+
+/**
+ * Reject a Linux addon that exports anything beside its N-API entry point, or
+ * a glibc one that needs a library outside {@link GLIBC_ADDON_NEEDED}. Darwin
+ * and Windows images pass untouched.
+ */
+export async function verifyLinuxAddon(file: string): Promise<void> {
+	const image = await elfDynamic(file);
+	if (!image) return;
+	const problems: string[] = [];
+	const exports = image.exports.filter(symbol => symbol !== LINUX_ADDON_EXPORT);
+	if (exports.length > 0) {
+		problems.push(
+			`exports ${exports.length} symbols beside ${LINUX_ADDON_EXPORT} (${exports.slice(0, 3).join(", ")}, …): ` +
+				"the link did not apply :exports_map from crates/pi-natives/BUILD.bazel",
+		);
+	}
+	const needed = image.needed.filter(library => !GLIBC_ADDON_NEEDED.has(library));
+	if (image.needed.includes("libc.so.6") && needed.length > 0) {
+		problems.push(
+			`needs ${needed.join(", ")}: define the functions it imports from there in ` +
+				"crates/pi-natives/src/bundled_libc.rs (`llvm-readelf --dyn-syms` lists them)",
+		);
+	}
+	if (problems.length > 0) throw new Error(`built addon ${path.basename(file)} ${problems.join("; ")}`);
+}
+
 /** Build and install the host addon through the local Cargo/N-API path. */
 async function buildLocalHostAddon(host: HostInfo, destDir: string): Promise<void> {
 	const script = path.join(repoRoot, "packages/natives/scripts/build-bindings.ts");
@@ -486,6 +603,7 @@ async function main(): Promise<void> {
 				? `installed ${path.basename(output)} (stamped ${version}) → ${destPath}`
 				: `installed ${path.basename(output)} (prebuilt without a version stamp slot; left unstamped) → ${destPath}`,
 		);
+		if (!options.source) await verifyLinuxAddon(destPath);
 		if (probeFilename && path.basename(output) === probeFilename) {
 			await verifyHostAddonLoads(destPath, undefined, stamped ? version : undefined);
 		}

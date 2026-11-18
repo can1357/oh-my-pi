@@ -241,6 +241,20 @@ describe("marked compatibility", () => {
 		]);
 	});
 
+	// Korean, Japanese and Chinese put no space after a parenthesized URL, so the unbalanced ")" before the next word
+	// ends the URL. Balanced parentheses and ASCII after an unbalanced ")" keep the GFM rule.
+	test("bare URLs end at an unbalanced ) followed by non-ASCII text", () => {
+		const links = (source: string) =>
+			Lexer.lexInline(source).flatMap(token => (token.type === "link" ? [token.href] : []));
+		expect(links("F09(https://github.com/a/b/pull/12686)가 계약")).toEqual(["https://github.com/a/b/pull/12686"]);
+		expect(links("（https://x.y/a.)が")).toEqual(["https://x.y/a"]);
+		expect(links("https://x.y/w_(가)나 다")).toEqual(["https://x.y/w_(가)나"]);
+		expect(links("https://ko.wikipedia.org/wiki/서울 문서")).toEqual(["https://ko.wikipedia.org/wiki/서울"]);
+		expect(links("www.google.com/search?q=(business))+ok")).toEqual([
+			"http://www.google.com/search?q=(business))+ok",
+		]);
+	});
+
 	test("an inline extension's startFrom hint tokenizes like its start hint", () => {
 		const dollar = (src: string, from: number) => {
 			const index = src.indexOf("$", from);

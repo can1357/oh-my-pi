@@ -366,31 +366,44 @@ export class ModelControls {
 		thinkingLevel?: ConfiguredThinkingLevel,
 		options?: { ephemeral?: boolean; prewalk?: boolean },
 		selection: "explicit" | "automatic" = "explicit",
-	): Promise<void> {
+		isCurrent?: () => boolean,
+	): Promise<boolean> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		if (!this.#host.modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
+		if (isCurrent?.() === false) return false;
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(targetModel, selection);
-		this.#host.sessionManager.appendModelChange(
-			`${targetModel.provider}/${targetModel.id}`,
-			options?.prewalk ? PREWALK_MODEL_CHANGE_ROLE : options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
-		);
-		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
+		// Identity, not object equality: the agent's resolver and metadata rebinds swap in refitted rows of the
+		// same model. Only a different model means another selection replaced this one during reconciliation.
+		const landed = modelsAreEqual(this.#model, targetModel);
+		if (landed) {
+			this.#host.sessionManager.appendModelChange(
+				`${targetModel.provider}/${targetModel.id}`,
+				options?.prewalk
+					? PREWALK_MODEL_CHANGE_ROLE
+					: options?.ephemeral
+						? EPHEMERAL_MODEL_CHANGE_ROLE
+						: "temporary",
+			);
+			this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
+		}
 
-		// Apply explicit thinking level if given; otherwise prefer the model's
-		// configured defaultLevel; otherwise re-clamp the current level (or auto).
-		if (thinkingLevel !== undefined) {
+		// A user selection during the switch owns effort, even on the same model.
+		if (isCurrent?.() === false || !landed) {
+			this.#reapplyThinkingLevel();
+		} else if (thinkingLevel !== undefined) {
 			this.setThinkingLevel(thinkingLevel);
 		} else {
 			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
 		}
 		await this.#host.syncAfterModelChange(previousEditMode);
+		return isCurrent?.() !== false && landed;
 	}
 
 	/**
@@ -639,8 +652,6 @@ export class ModelControls {
 			ceiling === undefined
 				? efforts
 				: efforts.filter(level => THINKING_EFFORTS.indexOf(level) <= THINKING_EFFORTS.indexOf(ceiling));
-		// Auto never opts an unverified model into thinking; only a concrete pick does.
-		if (this.#model.thinking?.unverified) return [ThinkingLevel.Off, ...selectable];
 		return [ThinkingLevel.Off, AUTO_THINKING, ...selectable];
 	}
 
@@ -675,7 +686,7 @@ export class ModelControls {
 	 */
 	async applyAutoThinkingLevel(promptText: string, generation: number, solutionSpace?: string): Promise<void> {
 		const model = this.#model;
-		if (!model?.reasoning || model.thinking?.unverified) return;
+		if (!model?.reasoning) return;
 		// Models with reasoning but no controllable effort surface (devin-agent
 		// Cascade routes effort via sibling model ids, not a wire param) have
 		// nothing to pick — skip classification rather than discard its result.
@@ -744,7 +755,7 @@ export class ModelControls {
 	applyChillax(promptText: string): boolean {
 		if (!this.#host.magicKeywordEnabled("chillax") || !containsMagicKeyword(promptText, "chillax")) return false;
 		const model = this.#model;
-		if (!model?.reasoning || model.thinking?.unverified || !takesPerMessageEffort(model)) return false;
+		if (!model?.reasoning || !takesPerMessageEffort(model)) return false;
 		const floor = getSupportedEfforts(model)[0];
 		if (floor === undefined) return false;
 		if (this.#autoThinking) {

@@ -227,23 +227,44 @@ impl GitRepo {
 	/// is underway while its state directory exists; git leaves `REBASE_HEAD`
 	/// behind after one finishes.
 	pub fn operation_in_progress(&self) -> Result<bool> {
-		const STATE: [&str; 5] =
-			["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"];
-		if STATE
-			.iter()
-			.any(|name| self.info.git_dir.join(name).exists())
+		Ok(self.operation_kind()?.is_some())
+	}
+
+	/// Name the operation underway in this checkout, or `unmerged-index` for
+	/// unresolved index entries without an operation's state files.
+	///
+	/// Rebase state takes precedence over individual replayed commits. The
+	/// `applying` marker distinguishes `git am` from the apply rebase backend.
+	pub fn operation_kind(&self) -> Result<Option<&'static str>> {
+		let git_dir = &self.info.git_dir;
+		if git_dir.join("rebase-merge").exists() {
+			return Ok(Some("rebase"));
+		}
+		if git_dir.join("rebase-apply").exists() {
+			return Ok(Some(if git_dir.join("rebase-apply/applying").exists() {
+				"am"
+			} else {
+				"rebase"
+			}));
+		}
+		for (marker, kind) in
+			[("MERGE_HEAD", "merge"), ("CHERRY_PICK_HEAD", "cherry-pick"), ("REVERT_HEAD", "revert")]
 		{
-			return Ok(true);
+			if git_dir.join(marker).exists() {
+				return Ok(Some(kind));
+			}
 		}
 		if self.is_reftable() {
-			return Ok(!cli_text(self.root(), &["ls-files", "--unmerged"])?.is_empty());
+			return Ok((!cli_text(self.root(), &["ls-files", "--unmerged"])?.is_empty())
+				.then_some("unmerged-index"));
 		}
 		let repo = self.gix()?;
 		let index = load_index_or_empty(&repo, "git ls-files")?;
 		Ok(index
 			.entries()
 			.iter()
-			.any(|entry| entry.stage() != gix::index::entry::Stage::Unconflicted))
+			.any(|entry| entry.stage() != gix::index::entry::Stage::Unconflicted)
+			.then_some("unmerged-index"))
 	}
 
 	/// Render git status in porcelain-v1 form.
@@ -891,7 +912,8 @@ impl GitRepo {
 					let (meta, path) = record.split_once('\t')?;
 					let mut fields = meta.split(' ');
 					let mode = u32::from_str_radix(fields.next()?, 8).ok()?;
-					(fields.next()? == "blob").then(|| TreeEntry { path: path.to_owned(), mode })
+					matches!(fields.next()?, "blob" | "commit")
+						.then(|| TreeEntry { path: path.to_owned(), mode })
 				})
 				.collect());
 		}
@@ -909,7 +931,7 @@ impl GitRepo {
 			.files()
 			.map_err(|e| Error::backend("git ls-tree", e))?
 			.into_iter()
-			.filter(|e| e.mode.is_blob() || e.mode.is_link())
+			.filter(|e| e.mode.is_blob() || e.mode.is_link() || e.mode.is_commit())
 			.map(|e| TreeEntry {
 				path: bytes_to_path(e.filepath.as_bstr()),
 				mode: u32::from(e.mode.value()),
@@ -1397,6 +1419,62 @@ mod tests {
 	}
 
 	#[test]
+	fn operation_kind_names_state_files_and_distinguishes_am_from_rebase() -> TestResult {
+		let (_dir, repo) = repo()?;
+		let git_dir = &repo.info().git_dir;
+		assert_eq!(repo.operation_kind()?, None);
+		assert!(!repo.operation_in_progress()?);
+		for (marker, kind) in
+			[("MERGE_HEAD", "merge"), ("CHERRY_PICK_HEAD", "cherry-pick"), ("REVERT_HEAD", "revert")]
+		{
+			fs::write(git_dir.join(marker), "")?;
+			assert_eq!(repo.operation_kind()?, Some(kind));
+			assert!(repo.operation_in_progress()?);
+			fs::remove_file(git_dir.join(marker))?;
+		}
+		fs::create_dir(git_dir.join("rebase-merge"))?;
+		assert_eq!(repo.operation_kind()?, Some("rebase"));
+		assert!(repo.operation_in_progress()?);
+		fs::remove_dir(git_dir.join("rebase-merge"))?;
+		fs::create_dir(git_dir.join("rebase-apply"))?;
+		assert_eq!(repo.operation_kind()?, Some("rebase"));
+		assert!(repo.operation_in_progress()?);
+		fs::write(git_dir.join("rebase-apply/applying"), "")?;
+		assert_eq!(repo.operation_kind()?, Some("am"));
+		assert!(repo.operation_in_progress()?);
+		fs::remove_dir_all(git_dir.join("rebase-apply"))?;
+		// Git can retain REBASE_HEAD after the rebase has finished.
+		fs::write(git_dir.join("REBASE_HEAD"), "")?;
+		assert_eq!(repo.operation_kind()?, None);
+		assert!(!repo.operation_in_progress()?);
+		Ok(())
+	}
+
+	#[test]
+	fn operation_kind_detects_unmerged_index_without_state_files() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "conflict.txt", "base\n", "base")?;
+		fs::write(root.join("conflict.txt"), "stashed\n")?;
+		git(root, &["stash", "push", "-m", "stashed"])?;
+		commit(root, "conflict.txt", "main\n", "main")?;
+		assert!(git(root, &["stash", "pop"]).is_err());
+		assert!(!git(root, &["ls-files", "--unmerged"])?.is_empty());
+		for marker in
+			["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"]
+		{
+			assert!(!repo.info().git_dir.join(marker).exists());
+		}
+		assert_eq!(repo.operation_kind()?, Some("unmerged-index"));
+		assert!(repo.operation_in_progress()?);
+		fs::write(root.join("conflict.txt"), "resolved\n")?;
+		git(root, &["add", "conflict.txt"])?;
+		assert_eq!(repo.operation_kind()?, None);
+		assert!(!repo.operation_in_progress()?);
+		Ok(())
+	}
+
+	#[test]
 	fn bounded_logs_read_only_the_requested_prefix_like_git_log() -> TestResult {
 		let (dir, repo) = repo()?;
 		commit(dir.path(), "one", "one\n", "first")?;
@@ -1741,6 +1819,28 @@ mod tests {
 		assert_eq!(repo.remote_url("origin")?.as_deref(), Some("https://example.test/repo"));
 		assert_eq!(repo.lfs_media_dir()?, Some(repo.info().common_dir.join("lfs").join("objects")));
 		assert_eq!(repo.head_watch_target(), repo.info().head_path);
+		Ok(())
+	}
+
+	#[test]
+	fn read_ls_tree_includes_gitlinks_without_loading_their_objects() -> TestResult {
+		let (dir, repo) = repo()?;
+		commit(dir.path(), "plain", "text\n", "seed")?;
+		let missing = "1234567890123456789012345678901234567890";
+		git(dir.path(), &[
+			"update-index",
+			"--add",
+			"--cacheinfo",
+			&format!("160000,{missing},nested/module"),
+		])?;
+		git(dir.path(), &["commit", "-qm", "gitlink"])?;
+		let expected =
+			vec![TreeEntry { path: "nested/module".to_owned(), mode: 0o160000 }, TreeEntry {
+				path: "plain".to_owned(),
+				mode: 0o100644,
+			}];
+		assert_eq!(repo.ls_tree("HEAD", &[])?, expected);
+		assert_eq!(repo.ls_tree("HEAD", &["nested".to_owned()])?, expected[..1]);
 		Ok(())
 	}
 

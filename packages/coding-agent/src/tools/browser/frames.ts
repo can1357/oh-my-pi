@@ -9,7 +9,14 @@ import {
 	parseAriaRefSelector,
 	resolveAriaRefHandle,
 } from "./aria/aria-snapshot";
-import { clickElement, fillViaHandle, pressKey, typeIntoElement, withLiveElement } from "./interactions";
+import {
+	clickElement,
+	fillViaHandle,
+	focusKeyTarget,
+	pressKey,
+	typeIntoElement,
+	withLiveElement,
+} from "./interactions";
 import { readPageViewport } from "./launch";
 import { emitScreenshot, type ScreenshotRun, whileDrawing } from "./screenshot";
 import { selectorWaitOptions, type SelectorWaitOptions, waitForDetached, waitForSelectorHandle } from "./selector-wait";
@@ -96,6 +103,8 @@ export interface FrameApiHooks {
 	waitMs(timeout?: number): number;
 	/** Run a named, abort-aware operation. */
 	op: FrameOperation;
+	/** Run an input action like {@link op}, so the tab's next look waits for its effects. */
+	act: FrameOperation;
 	/** Persist and report a frame element screenshot. */
 	captureScreenshot(frame: Frame, selector: string, signal: AbortSignal): Promise<string>;
 }
@@ -245,7 +254,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 	};
 	return {
 		click: (selector, options) =>
-			hooks.op(
+			hooks.act(
 				`frame.click(${JSON.stringify(selector)})`,
 				hooks.actionOpMs,
 				async signal => {
@@ -268,13 +277,13 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 				selectorOptions(selector),
 			),
 		fill: (selector, value) =>
-			hooks.op(
+			hooks.act(
 				`frame.fill(${JSON.stringify(selector)})`,
 				hooks.actionOpMs,
 				async signal => {
 					const handle = await actionHandle(`frame.fill(${JSON.stringify(selector)})`, selector, signal);
 					try {
-						await fillViaHandle(handle, value, signal);
+						await fillViaHandle(handle, value, `frame.fill(${JSON.stringify(selector)})`, signal);
 					} finally {
 						await handle.dispose().catch(() => undefined);
 					}
@@ -282,14 +291,14 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 				selectorOptions(selector),
 			),
 		type: (selector, text) =>
-			hooks.op(
+			hooks.act(
 				`frame.type(${JSON.stringify(selector)})`,
 				hooks.actionOpMs,
 				async signal => {
 					const handle = await untilAborted(signal, () => frame.$(hooks.normalizeSelector(selector)));
 					if (!handle) throw new ToolError(`frame.type(${JSON.stringify(selector)}) matched no element`);
 					try {
-						await typeIntoElement(handle, text, signal);
+						await typeIntoElement(handle, text, `frame.type(${JSON.stringify(selector)})`, signal);
 					} finally {
 						await handle.dispose().catch(() => undefined);
 					}
@@ -297,9 +306,21 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 				selectorOptions(selector),
 			),
 		press: (key, options) =>
-			hooks.op(`frame.press(${JSON.stringify(key)})`, hooks.actionOpMs, async signal => {
-				if (options?.selector)
-					await untilAborted(signal, () => frame.focus(hooks.normalizeSelector(options.selector!)));
+			hooks.act(`frame.press(${JSON.stringify(key)})`, hooks.actionOpMs, async signal => {
+				if (options?.selector) {
+					const selector = hooks.normalizeSelector(options.selector);
+					const handle = await untilAborted(signal, () => frame.$(selector));
+					if (!handle) throw new ToolError(`No element found for selector: ${selector}`);
+					try {
+						await focusKeyTarget(
+							handle,
+							`frame.press(${JSON.stringify(key)}, { selector: ${JSON.stringify(options.selector)} })`,
+							signal,
+						);
+					} finally {
+						await handle.dispose().catch(() => undefined);
+					}
+				}
 				await pressKey(frame.page(), key, undefined, signal);
 			}),
 		// Without a selector, the frame's `<body>`; any value passed, `null` included, is still checked as a selector.

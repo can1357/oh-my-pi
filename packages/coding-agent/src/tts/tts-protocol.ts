@@ -49,20 +49,17 @@ export type TtsWorkerOutbound =
 
 /**
  * Wire transport between the parent (`TtsClient`) and the local TTS subprocess.
- * The parent owns the subprocess lifecycle (graceful work, hard SIGKILL on
- * shutdown); the protocol carries no explicit close handshake — once the parent
- * decides to terminate, it signals the OS to reap the child so
- * `onnxruntime-node`'s NAPI finalizer never runs in the main agent address
- * space (it segfaults Bun on shutdown — issue #1606). See `tts-client.ts` for
- * the spawn/kill glue.
+ * The subprocess keeps native inference (model memory, any native fault) out of
+ * the agent process. The parent owns its lifecycle (graceful work, hard SIGKILL
+ * on shutdown); the protocol carries no explicit close handshake. See
+ * `tts-client.ts` for the spawn/kill glue.
  */
 export interface TtsTransport {
 	send(message: TtsWorkerOutbound): void;
 	/**
 	 * Send and resolve once the message has drained into the IPC channel.
-	 * Streaming synthesis awaits this per audio chunk: ONNX inference blocks
-	 * the worker's event loop for seconds at a time, so fire-and-forget sends
-	 * queue unflushed until the session ends and arrive as one burst.
+	 * Streaming synthesis awaits this per audio chunk, so each segment reaches
+	 * the parent before the next one synthesizes and the pipe never backs up.
 	 */
 	sendAndFlush(message: TtsWorkerOutbound): Promise<void>;
 	onMessage(handler: (message: TtsWorkerInbound) => void): () => void;

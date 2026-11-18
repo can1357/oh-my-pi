@@ -50,6 +50,7 @@ import type {
 } from "../network";
 import { urlMatcher } from "../network";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "../readable";
+import { normalizeSelectOptions, type SelectOptionInput } from "../select-options";
 import { assertTabPressArgs } from "../tab-arguments";
 import { readFilePayloads } from "../upload-files";
 import type { VitalsOptions, VitalsResult } from "../react/vitals";
@@ -587,8 +588,8 @@ export class CmuxTab implements InProcessRunTab {
 		this.#runContext = context;
 	}
 
-	clearRunContext(): void {
-		this.#runContext = undefined;
+	clearRunContext(context: InProcessRunContext): void {
+		if (this.#runContext === context) this.#runContext = undefined;
 	}
 
 	async a11y(options: BrowserA11yOptions = {}): Promise<BrowserA11yResult> {
@@ -1047,8 +1048,9 @@ export class CmuxTab implements InProcessRunTab {
 		await this.#selectorAction(selector, "scrollIntoView");
 	}
 
-	async select(selector: string, ...values: string[]): Promise<string[]> {
-		return await this.#selectorAction<string[]>(selector, "select", { values });
+	async select(selector: string, ...values: SelectOptionInput[]): Promise<string[]> {
+		const choices = normalizeSelectOptions(values, { coercePrimitives: true });
+		return await this.#selectorAction<string[]>(selector, "select", { values: choices });
 	}
 
 	async extract(format: ReadableFormat = "markdown", opts?: ReadableExtractOptions): Promise<string> {
@@ -1933,18 +1935,19 @@ export class CmuxTab implements InProcessRunTab {
 					return true;
 				}
 				case "select": {
-					const values = Array.isArray(args.values) ? args.values.map(String) : [String(args.value || "")];
+					const values = args.values;
 					if (element.tagName !== "SELECT") throw new Error("tab.select() requires a <select> element");
-					// An exact value wins over a visible label.
 					const options = Array.from(element.options);
 					const wanted = [];
 					const missing = [];
-					for (const value of values) {
-						const option =
-							options.find(candidate => candidate.value === value) ||
-							options.find(candidate => candidate.label === value || candidate.text.replace(/\\s+/g, " ").trim() === value);
+					for (const choice of values) {
+						const option = choice.kind === "index"
+							? options[choice.value]
+							: (choice.kind !== "label" && options.find(candidate => candidate.value === choice.value)) ||
+								(choice.kind !== "value" && options.find(candidate =>
+									candidate.label === choice.value || candidate.text.replace(/\\s+/g, " ").trim() === choice.value));
 						if (option) wanted.push(option);
-						else missing.push(value);
+						else missing.push(choice.kind === "string" ? choice.value : { [choice.kind]: choice.value });
 					}
 					// A value that matches nothing leaves the select untouched rather than committing its default option.
 					if (missing.length > 0) throw new Error("No <select> option matches " + missing.map(value => JSON.stringify(value)).join(", "));
@@ -2259,6 +2262,10 @@ class CmuxElementHandle {
 
 	async press(key: string): Promise<void> {
 		await this.#tab.press(key, { selector: this.#selector });
+	}
+
+	async select(...values: SelectOptionInput[]): Promise<string[]> {
+		return await this.#tab.select(this.#selector, ...values);
 	}
 
 	async focus(): Promise<void> {

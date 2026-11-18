@@ -65,6 +65,9 @@ describe("browser handle enrichment — fill()", () => {
 						node.focused = true;
 					},
 					matches: () => false,
+					getRootNode() {
+						return { activeElement: this };
+					},
 				}),
 			frame: {
 				page: () => ({
@@ -178,7 +181,13 @@ describe("browser handle enrichment — guarded actions", () => {
 		const stub = {
 			type: async () => {},
 			evaluate: async (fn: (el: unknown) => unknown) => {
-				fn({ focus: () => {}, matches: () => false });
+				fn({
+					focus: () => {},
+					matches: () => false,
+					getRootNode() {
+						return { activeElement: this };
+					},
+				});
 			},
 			frame: {
 				page: () => ({
@@ -259,6 +268,9 @@ describe("browser handle enrichment — guarded actions", () => {
 						node.focused = true;
 					},
 					matches: () => false,
+					getRootNode() {
+						return { activeElement: this };
+					},
 				}),
 			type: async () => {},
 			frame: {

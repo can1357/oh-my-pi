@@ -147,6 +147,13 @@ describe("git native", () => {
 			const path = () => h.find(n => (n.p as { role?: string } | undefined)?.role === "omp.app.git.path");
 			expect(diff()?.p).toMatchObject({ mode: "split", path: "src/a.ts" });
 
+			// The Wrap lines tool reaches the drawn diff (off, as in the terminal, until toggled).
+			expect(diff()?.p).toMatchObject({ wrap: false });
+			const wrap = h.find(n => n.id.endsWith("/wrap"));
+			h.event({ ev: "action", sf, id: wrap?.id ?? "", act: "wrap" });
+			await settle();
+			expect(diff()?.p).toMatchObject({ wrap: true });
+
 			const views = h.find(n => n.k === "tabs" && (n.p as { active?: string }).active === "split");
 			h.event({ ev: "select", sf, id: views?.id ?? "", item: "inline" });
 			await settle();

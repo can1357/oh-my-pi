@@ -833,6 +833,16 @@ impl VcsGitRepo {
 		blocking("vcs.isDirty", self.inner.clone(), signal, |repo| repo.is_dirty())
 	}
 
+	/// Operation underway, including unresolved index conflicts without state
+	/// files.
+	#[napi(ts_return_type = "Promise<\"merge\" | \"cherry-pick\" | \"revert\" | \"rebase\" | \
+	                         \"am\" | \"unmerged-index\" | null>")]
+	pub fn operation_kind(&self, signal: Option<Unknown>) -> Promise<Option<String>> {
+		blocking("vcs.operationKind", self.inner.clone(), signal, |repo| {
+			repo.operation_kind().map(|kind| kind.map(str::to_owned))
+		})
+	}
+
 	/// Porcelain status.
 	#[napi]
 	pub fn status_porcelain(
@@ -1295,6 +1305,20 @@ impl VcsGitRepo {
 	) -> Promise<()> {
 		blocking("vcs.readTree", self.inner.clone(), signal, move |r| {
 			r.read_tree(&treeish, index_path.as_deref().map(Path::new))
+		})
+	}
+
+	/// Read a tree into a private index while preserving sparse-checkout
+	/// exclusions.
+	#[napi]
+	pub fn read_tree_keeping_sparse(
+		&self,
+		treeish: String,
+		index_path: String,
+		signal: Option<Unknown>,
+	) -> Promise<()> {
+		blocking("vcs.readTreeKeepingSparse", self.inner.clone(), signal, move |r| {
+			r.read_tree_keeping_sparse(&treeish, Path::new(&index_path))
 		})
 	}
 

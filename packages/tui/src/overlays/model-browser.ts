@@ -810,10 +810,10 @@ function formatCostDetail(model: Model): string {
 
 /** Fact columns of a model picker (Stencil `NATIVE_REDESIGN.md` §4.7); the lowest priority hides first. */
 export const MODEL_PICKER_COLUMNS: readonly TspPickerColumn[] = [
-	{ id: "int", head: "Int", format: "num", priority: 1 },
-	{ id: "speed", head: "t/s", format: "num", priority: 2 },
-	{ id: "ctx", head: "Ctx", format: "num", priority: 4 },
-	{ id: "price", head: "$/M", format: "price", priority: 3 },
+	{ id: "int", head: "Int", format: "num", priority: 4 },
+	{ id: "speed", head: "t/s", format: "num", priority: 3 },
+	{ id: "ctx", head: "Ctx", format: "num", priority: 1 },
+	{ id: "price", head: "$/M", format: "price", priority: 2 },
 ];
 
 /** `$3·15` price fact of a picker row; `free` at zero cost; a declared pricing state otherwise. */
@@ -1046,6 +1046,8 @@ export class ModelBrowser implements Component {
 	#hoveredIndex: number | null = null;
 	#maxVisible = 10;
 	#showProvider: boolean;
+	/** Native rows name the provider before the model id (off where a logo already says it). */
+	#pickerProvider = true;
 	#currentContextTokens: number;
 	#markOverContext: boolean;
 	#emptyText?: () => string | undefined;
@@ -1170,6 +1172,26 @@ export class ModelBrowser implements Component {
 	setShowProvider(show: boolean): void {
 		if (show !== this.#showProvider) this.#bumpNativeEpoch();
 		this.#showProvider = show;
+	}
+
+	/** Whether native rows' labels lead with `provider/` (search hits follow the label). */
+	setPickerProvider(show: boolean): void {
+		if (show !== this.#pickerProvider) this.#bumpNativeEpoch();
+		this.#pickerProvider = show;
+	}
+
+	/** A native row's tooltip: its provider when the label leaves it out, and its intelligence. */
+	#pickerTitle(item: ModelBrowserItem, int: number | undefined): { title?: string } {
+		const parts = [
+			...(this.#pickerProvider || item.provider === "" ? [] : [item.provider]),
+			...(int !== undefined ? [`Intelligence ${Math.round(int)}`] : []),
+		];
+		return parts.length > 0 ? { title: parts.join(" · ") } : {};
+	}
+
+	/** A native row's label: the model id, after `provider/` unless {@link setPickerProvider} moved it to the tooltip. */
+	#pickerLabel(item: ModelBrowserItem): string {
+		return item.provider === "" || !this.#pickerProvider ? item.id : item.selector;
 	}
 	/** Keep the source order after fuzzy filtering instead of applying model-specific ranking. */
 	setPreserveQueryOrder(preserve: boolean): void {
@@ -2115,14 +2137,14 @@ export class ModelBrowser implements Component {
 		const quickRole = item.provider === "" && item.id.startsWith("@");
 		const value: TspPickerItem = {
 			id: item.selector,
-			label: quickRole ? item.id : item.selector,
+			label: this.#pickerLabel(item),
 			mark: providerMark(item.model.provider),
 			mono: true,
 			...(quickRole ? { detail: `${item.model.provider}/${item.model.id}` } : {}),
 			facts,
 			...(badges.length > 0 ? { badges: badges.slice(0, 3) } : {}),
 			...(chips.length > 0 ? { chips } : {}),
-			...(int !== undefined ? { title: `Intelligence ${Math.round(int)}` } : {}),
+			...this.#pickerTitle(item, int),
 		};
 		// Discovery re-mints Model objects for unchanged models; an equal row keeps its identity.
 		const kept = cached && Bun.deepEquals(cached.value, value) ? cached.value : value;
@@ -2193,8 +2215,7 @@ export class ModelBrowser implements Component {
 			hits = {};
 			for (const item of visible) {
 				if (this.#isDisabled(item)) continue;
-				const label = item.provider === "" ? item.id : item.selector;
-				const ranges = pickerFuzzyHits(label, query);
+				const ranges = pickerFuzzyHits(this.#pickerLabel(item), query);
 				if (ranges) hits[item.selector] = ranges;
 			}
 		}

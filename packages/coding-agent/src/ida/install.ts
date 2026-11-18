@@ -1,6 +1,5 @@
 /**
- * Local IDA Pro install detection. IDA features (`read` views, the `ida` tool) are only
- * exposed when {@link cfgIdaAvailable} finds an install shipping idalib.
+ * Local IDA Pro install detection used by disassembler backend selection.
  *
  * Detection is synchronous because tool gating and prompt rendering are synchronous; it runs
  * once per settings input change (memoized by the registry), never per call.
@@ -9,8 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $env, logger } from "@oh-my-pi/pi-utils";
-import { combine } from "../config/registry";
-import { cfgIdaEnabled, cfgIdaInstallDir } from "./settings";
+import { cfgIdaInstallDir } from "./settings";
 
 const IDALIB =
 	process.platform === "darwin" ? "libidalib.dylib" : process.platform === "win32" ? "idalib.dll" : "libidalib.so";
@@ -86,11 +84,5 @@ export function locateIdaInstall(configured: string | undefined): string | undef
 	return candidates.find((dir): dir is string => !!dir && hasIdalib(dir));
 }
 
-/** IDA install directory when `ida.enabled` is on and an install is found; undefined otherwise. */
-export const cfgIdaInstall = combine(
-	{ enabled: cfgIdaEnabled, installDir: cfgIdaInstallDir },
-	({ enabled, installDir }) => (enabled ? locateIdaInstall(installDir?.trim() || undefined) : undefined),
-);
-
-/** Whether IDA features (`read` views, the `ida` tool) are exposed. */
-export const cfgIdaAvailable = cfgIdaInstall.map(dir => dir !== undefined);
+/** Installed IDA directory with idalib, independent of backend selection. */
+export const cfgIdaInstall = cfgIdaInstallDir.map(dir => locateIdaInstall(dir?.trim() || undefined));

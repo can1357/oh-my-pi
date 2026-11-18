@@ -11,7 +11,13 @@ import { formatBytes, formatCount, formatDuration } from "@oh-my-pi/pi-utils";
 import { span } from "../native/describe";
 import type { JobSnapshot } from "../tools/wait";
 import type { DaemonSnapshot } from "../tools/daemon";
-import { type CustomMessage, type FileMentionMessage, resolveAbortLabel, shouldRenderAbortReason } from "./messages";
+import {
+	type AsyncNotifyDetails,
+	type CustomMessage,
+	type FileMentionMessage,
+	resolveAbortLabel,
+	shouldRenderAbortReason,
+} from "./messages";
 import { createIrcMessageCard } from "../tools/wait";
 import {
 	formatArtifactErrorNotice,
@@ -20,7 +26,13 @@ import {
 	type OutputMeta,
 } from "../tools/output-meta";
 import type { OutputArtifactError } from "../tools/streaming-output";
-import { formatStyledPath, replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
+import {
+	formatStyledPath,
+	PREVIEW_LIMITS,
+	replaceTabs,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "../render/render-utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { ToolActivityContainer } from "../chrome/tool-activity";
 import { CustomMessageComponent } from "./custom-message";
@@ -178,6 +190,44 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 				message: [span(label), span(" "), span(daemon.name, "mono"), ...facts([exit, duration])],
 			},
 		});
+	}
+	return new ToolActivityContainer(new TranscriptStatusBlock(rows));
+}
+
+/**
+ * Render an `async-notify` custom message (output a running background job or
+ * service was asked to report) as a transcript block: one "Background job
+ * output" / "Supervised process output" row per source with its first matching
+ * lines beneath.
+ */
+export function buildAsyncNotifyBlock(message: CustomOrHookMessage): ToolActivityContainer {
+	const details = (message as CustomMessage<AsyncNotifyDetails>).details;
+	const rows: TranscriptStatusRow[] = [];
+	const detail = (text: string, color: "dim" | "warning"): TranscriptStatusRow => ({
+		parts: [{ text, color }],
+		indent: 3,
+		native: {
+			tone: color === "warning" ? "warning" : "info",
+			message: [span(text, color === "dim" ? "mono" : undefined)],
+		},
+	});
+	for (const report of details?.reports ?? []) {
+		const label = report.type === "service" ? "Supervised process output" : "Background job output";
+		const total = report.lines.length + report.omitted;
+		const tally = formatCount("line", total);
+		rows.push({
+			parts: [
+				{ text: `${theme.status.info} ${label}`, color: "accent" },
+				{ text: report.id, color: "accent" },
+				{ text: `(${tally})`, color: "dim" },
+			],
+			native: { tone: "info", message: [span(label), ...facts([report.id, tally])] },
+		});
+		const shown = report.lines.slice(0, PREVIEW_LIMITS.OUTPUT_EXPANDED);
+		// Process output: tabs and overlong lines would break the row.
+		for (const line of shown) rows.push(detail(truncateToWidth(replaceTabs(line), TRUNCATE_LENGTHS.LINE), "dim"));
+		if (total > shown.length) rows.push(detail(`… ${total - shown.length} more`, "dim"));
+		if (report.stopped) rows.push(detail("Matched too often: notify is off for it", "warning"));
 	}
 	return new ToolActivityContainer(new TranscriptStatusBlock(rows));
 }

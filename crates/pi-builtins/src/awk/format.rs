@@ -22,7 +22,12 @@ pub(super) struct Flags {
 
 /// Number of characters in `s`: UTF-8 lead bytes and stray bytes.
 pub(super) fn char_count(s: &[u8]) -> usize {
-	s.iter().filter(|&&b| b & 0xC0 != 0x80).count()
+	const CONTINUATIONS: xutf::UnitSet = xutf::UnitSet::from_ranges(&[0x80..=0xbf]);
+	if s.len() >= 64 {
+		s.len() - CONTINUATIONS.count::<xutf::Utf8>(s)
+	} else {
+		s.iter().filter(|&&b| b & 0xC0 != 0x80).count()
+	}
 }
 
 /// Byte length of the first `chars` characters of `s`.
@@ -350,6 +355,15 @@ mod tests {
 		let mut out = Vec::new();
 		sprintf(&mut out, format.as_bytes(), args, b"%.6g").unwrap();
 		String::from_utf8(out).unwrap()
+	}
+
+	#[test]
+	fn character_helpers_preserve_raw_byte_semantics() {
+		let mut bytes = vec![b'a'; 130];
+		bytes.extend_from_slice(&[0x80, 0xbf, 0xc0, 0xff]);
+		assert_eq!(char_count(&bytes), 132);
+		assert_eq!(char_prefix(&bytes, 130), 132);
+		assert_eq!(char_prefix(&[0x80, b'a', 0x80, b'b'], 0), 1);
 	}
 
 	#[test]

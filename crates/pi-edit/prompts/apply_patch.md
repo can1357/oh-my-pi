@@ -1,4 +1,4 @@
-Edit files: `apply_patch` shell command.
+Edit files: pass the patch as this tool's input. It is not a shell command; `bash` has no `apply_patch`.
 
 `apply_patch`: stripped-down, file-oriented diff; easy to parse, safe to apply.
 
@@ -63,4 +63,4 @@ Full patches may combine operations:
 *** End Patch
 ```
 
-MUST use Add/Delete/Update header; new-file lines MUST start `+`; file references relative, NEVER absolute.
+MUST use Add/Delete/Update header; new-file lines MUST start `+`; relative paths resolve against the session cwd (a shell `cd` does not change it); use absolute paths for files outside it.
