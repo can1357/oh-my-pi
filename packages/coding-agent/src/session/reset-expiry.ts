@@ -4,6 +4,7 @@
  * warn about the accounts the salvage planners would act on.
  */
 import type {
+	AuthAccountPolicy,
 	UsageLimit,
 	UsageReport,
 	UsageResetCredit,
@@ -25,6 +26,8 @@ import {
 	planClaudeResetRedemptions,
 } from "./claude-auto-reset";
 import {
+	ACCOUNT_POLICY_RESET_KEYS,
+	accountResetWindowModes,
 	type CodexResetAction,
 	type CodexResetSkip,
 	DEBOUNCE_BUCKET_MS,
@@ -154,7 +157,8 @@ function spendableNow(
 
 /**
  * What an open interactive omp session does with an account's soonest expiring saved
- * reset, from the consent of the window that governs it: `auto` spends it by its
+ * reset, from the consent of the window that governs it (the account policy's
+ * `autoRedeem*` key, else the provider setting): `auto` spends it by its
  * last five minutes if the provider still allows it then, `ask` prompts first,
  * `off` leaves it. `eligibleNow` is the salvage planner's answer for this report
  * today; usage can change it before the reset expires.
@@ -167,16 +171,25 @@ export interface ResetSpendVerdict {
 	eligibleNow: boolean;
 }
 
+/** `policy` is the account policy of the stored account the report belongs to. */
 export function resetSpendVerdict(
 	report: UsageReport,
 	warning: ResetExpiryWarning,
 	settings: Settings,
 	nowMs: number,
+	policy: AuthAccountPolicy | undefined,
 ): ResetSpendVerdict {
-	const mode = resetWindowMode(resetWindowModes(warning.provider, settings), warning.window);
+	const providerModes = resetWindowModes(warning.provider, settings);
+	const mode = resetWindowMode(accountResetWindowModes(providerModes, policy) ?? providerModes, warning.window);
 	const kind = mode === "no" ? "off" : mode === "unset" ? "ask" : "auto";
 	const windows: readonly ResetWindow[] = warning.window ? [warning.window] : ["5h", "weekly"];
-	const setting = windows.map(window => resetWindowSettings[warning.provider][window]?.id).join(" + ");
+	const setting = windows
+		.map(window =>
+			policy?.[ACCOUNT_POLICY_RESET_KEYS[window]] === undefined
+				? resetWindowSettings[warning.provider][window]?.id
+				: `account policy ${ACCOUNT_POLICY_RESET_KEYS[window]}`,
+		)
+		.join(" + ");
 	const plan = planAsLastChance(report, warning, settings, nowMs);
 	// A stale report says nothing about eligibility: the sweep plans only after a fresh fetch.
 	const eligibleNow =
@@ -221,7 +234,7 @@ function planAsLastChance(
 			trigger: "sweep",
 			provider: "",
 			modelId: "",
-			settings: resetPlanSettings({ "5h": "yes", weekly: "yes" }, cfgCodexResets.get(settings)),
+			settings: resetPlanSettings({ modes: { "5h": "yes", weekly: "yes" } }, cfgCodexResets.get(settings)),
 			identity: undefined,
 			reports: [{ ...lastChance, metadata: { ...report.metadata, resetCreditCredentialId: credentialId } }],
 			...episodes,
@@ -233,7 +246,10 @@ function planAsLastChance(
 		trigger: "sweep",
 		provider: "",
 		modelId: "",
-		settings: resetPlanSettings({ "5h": "yes", weekly: "yes", fable: "yes" }, cfgClaudeResets.get(settings)),
+		settings: resetPlanSettings(
+			{ modes: { "5h": "yes", weekly: "yes", fable: "yes" } },
+			cfgClaudeResets.get(settings),
+		),
 		reports: [lastChance],
 		statuses: [
 			{

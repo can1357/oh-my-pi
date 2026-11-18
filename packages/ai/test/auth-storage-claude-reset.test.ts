@@ -27,6 +27,10 @@ interface ResetFixture {
 		responseStatus: number;
 		/** Plain `/usage` leaves the programs unevaluated and every reset probe is rate-limited. */
 		resetProbeFailing?: boolean;
+		/** Organization `/api/oauth/profile` reports for a credential stored without one. */
+		profileOrgId?: string;
+		/** Profile requests answered 503 before `profileOrgId` is served. */
+		profileFailures?: number;
 		postGate?: Promise<void>;
 		postArrived?: () => void;
 		usageGate?: Promise<void>;
@@ -63,6 +67,13 @@ async function fixture(): Promise<ResetFixture> {
 				state.postArrived?.();
 				await state.postGate;
 				return Response.json(state.response, { status: state.responseStatus });
+			}
+			if (url.pathname === "/api/oauth/profile" && state.profileOrgId) {
+				if (state.profileFailures) {
+					state.profileFailures--;
+					return new Response("profile unavailable", { status: 503 });
+				}
+				return Response.json({ organization: { uuid: state.profileOrgId } });
 			}
 			if (url.pathname === "/api/oauth/usage") {
 				usageRequests.push(url.search);
@@ -172,6 +183,71 @@ describe("Claude saved reset account safety", () => {
 		});
 		expect(removed.code).toBe("no_account");
 		expect(f.posts.length).toBe(1);
+		// A replaced store can reuse a row id for another account; a target planned for org-a never spends org-b.
+		const reused = await f.storage.resets.redeem({
+			target: { ...f.target, accountId: "shared-account", orgId: "org-a" },
+			baseUrlResolver: f.baseUrlResolver,
+		});
+		expect(reused.code).toBe("no_account");
+		// Nor one whose new row shares no identity field with the planned account.
+		await f.storage.credentials.set("anthropic", [
+			{
+				type: "oauth",
+				access: "token-other",
+				refresh: "refresh-other",
+				expires: Date.now() + 3_600_000,
+				email: "other@example.com",
+				orgId: "org-b",
+			},
+		]);
+		const [other] = f.storage.oauth.accounts("anthropic");
+		if (!other) throw new Error("Expected the replacement credential");
+		const disjoint = await f.storage.resets.redeem({
+			target: {
+				provider: "anthropic",
+				credentialId: other.credentialId,
+				accountId: "shared-account",
+				orgId: "org-b",
+			},
+			baseUrlResolver: f.baseUrlResolver,
+		});
+		expect(disjoint.code).toBe("no_account");
+		// Nor a row stored without its organization whose token resolves another one live.
+		await f.storage.credentials.set("anthropic", [
+			{
+				type: "oauth",
+				access: "token-orgless",
+				refresh: "refresh-orgless",
+				expires: Date.now() + 3_600_000,
+				accountId: "shared-account",
+				email: "same@example.com",
+			},
+		]);
+		const [orgless] = f.storage.oauth.accounts("anthropic");
+		if (!orgless) throw new Error("Expected the org-less credential");
+		const orgTarget = { ...f.target, credentialId: orgless.credentialId, accountId: "shared-account" };
+		// Discovery cannot resolve its organization: a later resolution at spend time is unchecked, so nothing is spent.
+		f.state.profileOrgId = "org-b";
+		f.state.profileFailures = 1;
+		const unresolved = await f.storage.resets.redeem({
+			target: { ...orgTarget, orgId: "org-a" },
+			baseUrlResolver: f.baseUrlResolver,
+		});
+		expect(unresolved.code).toBe("organization_unavailable");
+		expect(f.posts.length).toBe(1);
+		const elsewhere = await f.storage.resets.redeem({
+			target: { ...orgTarget, orgId: "org-a" },
+			baseUrlResolver: f.baseUrlResolver,
+		});
+		expect(elsewhere.code).toBe("no_account");
+		expect(f.posts.length).toBe(1);
+		// The organization it resolves to is the planned one: the spend goes through.
+		const resolved = await f.storage.resets.redeem({
+			target: { ...orgTarget, orgId: "org-b" },
+			baseUrlResolver: f.baseUrlResolver,
+		});
+		expect(resolved.ok).toBe(true);
+		expect(f.posts.at(-1)?.path).toBe("/api/organizations/org-b/reset_rate_limits");
 	});
 
 	it("lists exact account quota evidence without a second generic usage request", async () => {

@@ -166,7 +166,7 @@ function claudeResetReport(nowMs: number, usage: Record<string, number>, grants:
 }
 
 function resetExpiryOptions(overrides: Record<string, unknown> = {}): UsageResetExpiryOptions {
-	return { settings: Settings.isolated(overrides), accounts: () => [] };
+	return { settings: Settings.isolated(overrides), accounts: () => [], getAccountPolicy: () => undefined };
 }
 
 describe("buildRedactionMap", () => {
@@ -1557,6 +1557,49 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("▲ 2 saved resets expire within 24h\n");
 		expect(text).toContain("(codexResets.autoRedeemWeekly: yes)");
 		expect(text).toContain("→ not spent automatically  (claudeResets.autoRedeemWeekly: no)");
+	});
+
+	it.each([
+		{ name: "its one report", orgs: ["claude-org"], owned: true },
+		{ name: "no report when two organizations' reports fit it", orgs: ["org-a", "org-b"], owned: false },
+	])("attributes a credential stored without its organization to $name", ({ orgs, owned }) => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const reports = orgs.map(orgId => {
+			const report = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.6 }, [
+				cedarGrant(now, "cedar", 3 * HOUR),
+			]);
+			return { ...report, metadata: { ...report.metadata, orgId } };
+		});
+		// Stored before its organization was known. The selector names the account id, which the reports carry too,
+		// so only attribution, not the report's own identity, can decide whose consent applies.
+		const stored = { position: 0, credentialId: 7, accountId: "claude-account", email: "claude@example.test" };
+		const policy = {
+			provider: "anthropic",
+			account: { accountId: stored.accountId },
+			autoRedeemWeekly: "no",
+		} as const;
+		const getAccountPolicy = (_provider: string, identity: { accountId?: string }) =>
+			identity.accountId === stored.accountId ? policy : undefined;
+		const accounts = [
+			{ provider: "anthropic", type: "oauth" as const, accountId: stored.accountId, email: stored.email },
+		];
+		const policyOptions = { globalReservePct: 10, getAccountPolicy, accounts: () => [{ ...stored, active: false }] };
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(reports, accounts, now, undefined, [], policyOptions, {
+				...resetExpiryOptions({ "claudeResets.autoRedeemWeekly": "yes" }),
+				accounts: () => [{ ...stored, active: false }],
+				getAccountPolicy,
+			}),
+		);
+		const json = annotateUsagePolicy(reports, [], accounts, policyOptions).reports.map(
+			report => report.policy?.autoRedeemWeekly,
+		);
+		expect(json).toEqual(orgs.map(() => (owned ? "no" : undefined)));
+		// The report's own policy line (the stored row's "no usage data" line always shows its policy).
+		expect(text.includes("auto-redeem weekly no · eligible")).toBe(owned);
+		expect(text.includes("→ not spent automatically  (account policy autoRedeemWeekly: no)")).toBe(owned);
+		expect(text.includes("/usage reset anthropic/7")).toBe(owned);
+		if (owned) expect(text).toContain("▲ 1 saved reset expires within 24h and will be lost\n");
 	});
 
 	it("counts only expiring resets that the warned reset's setting decides", () => {

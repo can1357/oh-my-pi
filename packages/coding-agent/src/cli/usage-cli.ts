@@ -37,7 +37,7 @@ import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import { resetAccountLockKey } from "../session/codex-auto-reset";
 import { checkCodexBalance, type ResetMarker, resetLockPath, withResetFence } from "../session/reset-fence";
 import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
-import { reportMatchesStatus } from "../session/claude-auto-reset";
+import { reportStoredAccount } from "../session/claude-auto-reset";
 import {
 	classifyResetExpiry,
 	type ResetExpiryWarning,
@@ -90,6 +90,8 @@ export interface UsagePolicyDiagnosticsOptions {
 	globalReservePct: number;
 	/** Delegates selector matching to AuthStorage's authoritative policy matcher. */
 	getAccountPolicy: (provider: string, identity: OAuthAccountIdentity) => AuthAccountPolicy | undefined;
+	/** Stored OAuth accounts; saved-reset consent is read from the one the reset planners attribute a report to. */
+	accounts?: (provider: string) => readonly OAuthAccountSummary[];
 }
 
 export interface UsageResetExpiryOptions {
@@ -97,6 +99,8 @@ export interface UsageResetExpiryOptions {
 	settings: Settings;
 	/** Stored OAuth accounts, as `/usage reset <provider>/<credential id>` addresses them. */
 	accounts: (provider: string) => readonly OAuthAccountSummary[];
+	/** The account policy whose `autoRedeem*` keys override the provider settings for one account. */
+	getAccountPolicy: (provider: string, identity: OAuthAccountIdentity) => AuthAccountPolicy | undefined;
 }
 
 /**
@@ -648,6 +652,24 @@ function accountOAuthIdentity(account: UsageAccountIdentity): OAuthAccountIdenti
 	};
 }
 
+/**
+ * The identity whose saved-reset consent applies to a report: the stored account
+ * the reset planners attribute it to among `reports`. `null` when stored accounts
+ * are known but none owns the report alone: no one account's consent can be
+ * named for it. Without stored accounts, the report's own identity.
+ */
+function reportConsentIdentity(
+	report: UsageReport,
+	reports: readonly UsageReport[],
+	accounts: ((provider: string) => readonly OAuthAccountSummary[]) | undefined,
+): OAuthAccountIdentity | null {
+	if (!accounts || (report.provider !== "anthropic" && report.provider !== "openai-codex")) {
+		return usageReportIdentity(report);
+	}
+	const providerReports = reports.filter(candidate => candidate.provider === report.provider);
+	return reportStoredAccount(report, accounts(report.provider), providerReports) ?? null;
+}
+
 function policyEnabledProviders(
 	reports: UsageReport[],
 	accounts: UsageAccountIdentity[],
@@ -674,19 +696,27 @@ export type UsagePolicyDiagnostics = {
 	reclaimAbovePct?: number;
 	/** Ids of exhausted limits outside the shared pool (a model-scoped weekly row); they gate only their own requests. */
 	scopedExhausted?: string[];
-} & (
-	| { state: "unknown"; remainingPct?: never }
-	| { state: "exhausted"; remainingPct?: number }
-	| { state: "eligible" | "inside-reserve"; remainingPct: number }
-);
+} & Pick<AuthAccountPolicy, "autoRedeem5h" | "autoRedeemWeekly" | "autoRedeemFable"> &
+	(
+		| { state: "unknown"; remainingPct?: never }
+		| { state: "exhausted"; remainingPct?: number }
+		| { state: "eligible" | "inside-reserve"; remainingPct: number }
+	);
 
+/**
+ * `consentIdentity` picks the policy whose `autoRedeem*` keys are shown (`null`: none);
+ * the rest come from `identity`'s.
+ */
 function computePolicyDiagnostics(
 	provider: string,
 	identity: OAuthAccountIdentity,
 	limits: UsageLimit[] | undefined,
 	options: UsagePolicyDiagnosticsOptions,
+	consentIdentity: OAuthAccountIdentity | null = identity,
 ): UsagePolicyDiagnostics {
 	const policy = options.getAccountPolicy(provider, identity);
+	const consent =
+		consentIdentity === identity ? policy : consentIdentity && options.getAccountPolicy(provider, consentIdentity);
 	const configuredReservePct = policy?.reservePct;
 	const reservePct = Math.max(0, Math.min(100, configuredReservePct ?? options.globalReservePct));
 	// `omp usage` has no model/session context, so report the conservative
@@ -717,6 +747,9 @@ function computePolicyDiagnostics(
 		reserveSource: configuredReservePct === undefined ? "global" : "override",
 		...(policy?.reclaimAbovePct === undefined ? {} : { reclaimAbovePct: policy.reclaimAbovePct }),
 		...(scopedExhausted.length === 0 ? {} : { scopedExhausted }),
+		...(consent?.autoRedeem5h === undefined ? {} : { autoRedeem5h: consent.autoRedeem5h }),
+		...(consent?.autoRedeemWeekly === undefined ? {} : { autoRedeemWeekly: consent.autoRedeemWeekly }),
+		...(consent?.autoRedeemFable === undefined ? {} : { autoRedeemFable: consent.autoRedeemFable }),
 	} as const;
 	if (usedFractions.length === 0) return { ...base, state: exhausted ? "exhausted" : "unknown" };
 	const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
@@ -732,7 +765,13 @@ function computePolicyDiagnostics(
 
 function formatPolicyLine(policy: UsagePolicyDiagnostics, limits?: UsageLimit[]): string {
 	const reclaimLabel = policy.reclaimAbovePct === undefined ? "" : ` · reclaim above ${policy.reclaimAbovePct}%`;
-	const prefix = `policy: priority ${policy.priority} · reserve ${policy.reservePct}% (${policy.reserveSource})${reclaimLabel}`;
+	const autoRedeem = [
+		["5h", policy.autoRedeem5h],
+		["weekly", policy.autoRedeemWeekly],
+		["fable", policy.autoRedeemFable],
+	].flatMap(([window, consent]) => (consent ? [`${window} ${consent}`] : []));
+	const autoRedeemLabel = autoRedeem.length === 0 ? "" : ` · auto-redeem ${autoRedeem.join(", ")}`;
+	const prefix = `policy: priority ${policy.priority} · reserve ${policy.reservePct}% (${policy.reserveSource})${reclaimLabel}${autoRedeemLabel}`;
 	const scopedLabel = (limits ?? [])
 		.filter(limit => policy.scopedExhausted?.includes(limit.id))
 		.map(limit => ` · ${limitTitle(limit)} exhausted`)
@@ -765,6 +804,7 @@ export function annotateUsagePolicy(
 							usageReportIdentity(report),
 							report.limits,
 							options,
+							reportConsentIdentity(report, reports, options.accounts),
 						),
 					}
 				: report,
@@ -808,7 +848,24 @@ function formatResetExpiryBanner(
 	redaction: Map<string, string> | undefined,
 	options: UsageResetExpiryOptions,
 ): string[] {
-	const verdicts = expiring.map(({ report, warning }) => resetSpendVerdict(report, warning, options.settings, nowMs));
+	// Usage reports carry no credential id; the stored account the reset planners match has it, and its policy.
+	const owners = expiring.map(({ report }) =>
+		reportStoredAccount(
+			report,
+			options.accounts(report.provider),
+			reportsByProvider.get(report.provider) ?? [report],
+		),
+	);
+	const verdicts = expiring.map(({ report, warning }, index) =>
+		resetSpendVerdict(
+			report,
+			warning,
+			options.settings,
+			nowMs,
+			// No unique owner: no one account's policy can be named, so the provider key decides, as on main.
+			owners[index] && options.getAccountPolicy(warning.provider, owners[index]),
+		),
+	);
 	const count = expiring.reduce((sum, { warning }) => sum + warning.count, 0);
 	const lost = verdicts.every(verdict => verdict.kind === "off");
 	const lines = [
@@ -827,12 +884,8 @@ function formatResetExpiryBanner(
 		);
 		lines.push(`    ${chalk.dim(formatResetSpendVerdict(verdicts[index]!))}`);
 		if (!warning.usableNow) return;
-		// Codex usage reports carry no credential id; the stored account with the same identity has it.
-		const stored = options
-			.accounts(warning.provider)
-			.filter(account => reportMatchesStatus(report, { ...account, provider: warning.provider }));
-		const command =
-			stored.length === 1 ? `/usage reset ${warning.provider}/${stored[0]!.credentialId}` : "/usage reset";
+		const owner = owners[index];
+		const command = owner ? `/usage reset ${warning.provider}/${owner.credentialId}` : "/usage reset";
 		lines.push(
 			`    ${verdicts[index]!.kind === "off" ? "spend it" : "or now"}:  ${chalk.cyan(command)} ${chalk.dim("in omp")}`,
 		);
@@ -919,7 +972,7 @@ export function formatUsageBreakdown(
 			lines.push(`  ${formatAccountHeader(report, providerReports, index, nowMs, redaction)}`);
 			if (policyOptions && policyProviders.has(provider)) {
 				lines.push(
-					`      ${chalk.dim(formatPolicyLine(computePolicyDiagnostics(provider, usageReportIdentity(report), report.limits, policyOptions), report.limits))}`,
+					`      ${chalk.dim(formatPolicyLine(computePolicyDiagnostics(provider, usageReportIdentity(report), report.limits, policyOptions, reportConsentIdentity(report, providerReports, policyOptions.accounts)), report.limits))}`,
 				);
 			}
 			if (report.limits.length === 0) {
@@ -1661,6 +1714,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		const policyOptions: UsagePolicyDiagnosticsOptions = {
 			globalReservePct: cfgRetryUsageReservePct.get(settings),
 			getAccountPolicy: (provider, identity) => authStorage.oauth.policy(provider, identity),
+			accounts: provider => authStorage.oauth.accounts(provider),
 		};
 		const modelRegistry = await loadUsageSources(cmd, settings, authStorage);
 		const reports =
@@ -1764,6 +1818,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		const resetOptions: UsageResetExpiryOptions = {
 			settings,
 			accounts: provider => authStorage.oauth.accounts(provider),
+			getAccountPolicy: policyOptions.getAccountPolicy,
 		};
 		process.stdout.write(
 			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, resetOptions)}\n`,
