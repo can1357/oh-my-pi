@@ -10,8 +10,6 @@
 
 - Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy
 - Fixed the Spotlight experiment re-asking Stencil Cloud on every tool call for an account without Cloud access (waitlisted): omp now warns once and pauses Spotlight for that account for a few hours, honors `Retry-After` on rate limits and outages, and sends its `omp/<version>` User-Agent on every Spotlight request
-- Fixed `/guided-goal` interviews to ask batched questions through the built-in ask tool ([#19654](https://github.com/can1357/oh-my-pi/pull/19654) by [@Thinkscape](https://github.com/Thinkscape)).
-- Kept input and loop auto-submit responsive after `/guided-goal`, with shutdown progress visible during cleanup ([#19654](https://github.com/can1357/oh-my-pi/pull/19654) by [@Thinkscape](https://github.com/Thinkscape)).
 
 ### Changed
 
