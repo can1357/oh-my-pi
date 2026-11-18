@@ -19,9 +19,14 @@ const RESET_SELECTOR_MAX_VISIBLE = 10;
 
 const oneLine = (value: string): string => sanitizeText(value.replace(/[\r\n\t]+/g, " "));
 
-/** Reset count, usability, expiry and unavailability of an account row, or its error. */
+/** Reset count, usability, expiry and unavailability of an account row, or its error; a reset row's own line. */
 function accountCountLabel(account: ResetUsageAccount): string {
 	if (account.error) return oneLine(account.error);
+	if (account.creditLine) {
+		const reason =
+			account.redeemableCount <= 0 && account.unavailableReason ? ` · ${oneLine(account.unavailableReason)}` : "";
+		return `${oneLine(account.creditLine)}${reason}`;
+	}
 	let countLabel = `${account.availableCount} saved reset${account.availableCount === 1 ? "" : "s"}`;
 	if (account.redeemableCount !== account.availableCount) {
 		countLabel += ` · ${account.redeemableCount} usable now`;
@@ -46,6 +51,7 @@ function accountPickerItem(account: ResetUsageAccount, id: string): TspPickerIte
 	if (reason) detail.push(span(` · ${oneLine(reason)}`, account.error ? "error" : "warning"));
 	let resets: TspSpan;
 	if (account.error) resets = span("unavailable", "error");
+	else if (account.creditLine) resets = span(oneLine(account.creditLine), redeemable ? "success" : "dim");
 	else if (!redeemable) resets = span(`${account.availableCount} saved`, "dim");
 	else if (account.redeemableCount === account.availableCount)
 		resets = span(`${account.redeemableCount} usable`, "success");
@@ -67,25 +73,9 @@ function accountPickerItem(account: ResetUsageAccount, id: string): TspPickerIte
 		facts,
 		...(reason ? { disabled: oneLine(reason) } : {}),
 	};
-	// Each credit's id, title and coverage on hover; an account needing a named reset says so.
+	// Each credit's id, title and coverage on hover.
 	if (account.creditLines?.length) item.title = account.creditLines.map(oneLine).join("\n");
-	if (account.creditChoice) {
-		item.badges = [{ text: "name the reset", tone: "warning", title: creditChoiceMessage(account) }];
-	}
 	return item;
-}
-
-/** Why nothing is spent on an account whose resets clear different limits, with each exact spend command. */
-function creditChoiceMessage(account: ResetUsageAccount): string {
-	const commands = (account.creditChoice ?? []).map(choice => oneLine(choice.command)).join(" or ");
-	return `${oneLine(account.label)} holds saved resets that clear different limits, so nothing was spent. Spend one by name: ${commands}.`;
-}
-
-/** One saved reset of an account whose resets clear different limits, with the command that spends exactly it. */
-export interface ResetUsageCreditChoice {
-	/** The reset's id, title, what it clears, usability and expiry. */
-	line: string;
-	command: string;
 }
 
 /** One account row with its redeemable rate-limit reset credits. */
@@ -115,19 +105,20 @@ export interface ResetUsageAccount {
 	/** One line per banked credit: id, title, what it clears when the provider reports it, usability, expiry. */
 	creditLines?: readonly string[];
 	/**
-	 * Set when the account holds resets that clear different limits. The provider spends only
-	 * the one it offers next, so the reset type is the user's call, made with the exact command;
-	 * the selector spends nothing on such an account.
+	 * Set on a row that stands for one reset of an account whose resets clear different
+	 * limits, so the user picks the reset type: its id, title, what it clears and whether
+	 * it is offered next. Only the offered, usable reset can be confirmed, and that row
+	 * carries its id in `target.creditId`.
 	 */
-	creditChoice?: readonly ResetUsageCreditChoice[];
+	creditLine?: string;
 }
 
 /**
  * Account picker for `/usage reset`. Lists provider accounts with their saved
  * rate-limit reset counts and the selected account's credits; selecting one redeems
  * a reset. Because a reset is a scarce, irreversible credit, Enter requires a second
- * press to confirm. An account whose resets clear different limits is never spent
- * here: Enter shows the command that spends each one by name instead.
+ * press to confirm. An account whose resets clear different limits gets one row per
+ * reset instead, and only the reset the provider offers next can be confirmed.
  */
 export class ResetUsageSelectorComponent extends OverlayPanel {
 	#listContainer: Container;
@@ -147,12 +138,13 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 		this.#onCancelCallback = onCancel;
 		const firstRedeemable = accounts.find(account => account.redeemableCount > 0);
 		const accountKey = (account: ResetUsageAccount) =>
-			`${account.provider}:${account.target.credentialId}:${account.target.creditId ?? ""}`;
+			`${account.provider}:${account.target.credentialId}:${account.credit?.id ?? account.target.creditId ?? ""}`;
 		this.#menu = new MenuSelection<ResetUsageAccount>(
 			accounts,
 			{
 				getKey: accountKey,
-				getSearchText: account => `${account.label} ${account.providerLabel}`,
+				getSearchText: account =>
+					`${account.label} ${account.providerLabel} ${account.credit?.id ?? ""} ${account.credit?.title ?? ""}`,
 				requiresConfirmation: account => account.redeemableCount > 0,
 			},
 			firstRedeemable ? accountKey(firstRedeemable) : undefined,
@@ -303,16 +295,14 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 	#activateSelection(): void {
 		const account = this.#menu.selectedItem;
 		if (!account) return;
-		if (account.creditChoice) {
-			this.#menu.cancelConfirmation();
-			this.#statusMessage = creditChoiceMessage(account);
-			this.#updateList();
-			return;
-		}
 		if (account.redeemableCount <= 0) {
-			this.#statusMessage = account.unavailableReason
-				? `That account's saved resets are unavailable: ${account.unavailableReason}`
-				: "That account has no saved resets usable right now.";
+			if (account.creditLine) {
+				this.#statusMessage = `That reset can't be spent now${account.unavailableReason ? `: ${account.unavailableReason}` : "."}`;
+			} else {
+				this.#statusMessage = account.unavailableReason
+					? `That account's saved resets are unavailable: ${account.unavailableReason}`
+					: "That account has no saved resets usable right now.";
+			}
 			this.#updateList();
 			return;
 		}

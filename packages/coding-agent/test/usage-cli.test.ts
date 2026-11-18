@@ -5,6 +5,7 @@ import { stripVTControlCharacters } from "node:util";
 import {
 	AuthStorage,
 	type OAuthCredential,
+	type ResetCreditTarget,
 	SqliteAuthCredentialStore,
 	type UsageReport,
 	type UsageResetCredit,
@@ -2403,14 +2404,20 @@ describe("omp usage reset", () => {
 			expect(consumes()).toEqual([]);
 		});
 
-		it("never spends from the /usage reset selector, which shows each grant's spend command instead", async () => {
+		/** Opens the real `/usage reset` selector over the stubbed endpoints, recording every redeem it makes. */
+		async function openResetSelector(): Promise<{
+			selector: ResetUsageSelectorComponent;
+			redeems: Promise<unknown>[];
+			targets: ResetCreditTarget[];
+		}> {
 			await initTheme();
-			const { claude } = credentialIds();
 			const redeems: Promise<unknown>[] = [];
+			const targets: ResetCreditTarget[] = [];
 			const ctx = createInteractiveModeContext({
 				session: {
 					listResetCredits: () => authStorage.resets.list({ provider: "anthropic" }),
 					redeemResetCredit: target => {
+						targets.push(target);
 						const redeem = authStorage.resets.redeem({ target });
 						redeems.push(redeem);
 						return redeem;
@@ -2421,7 +2428,13 @@ describe("omp usage reset", () => {
 			await new SelectorController(ctx).showResetUsageSelector();
 			const selector = ctx.editorContainer.children[0];
 			if (!(selector instanceof ResetUsageSelectorComponent)) throw new Error("expected the reset selector");
+			return { selector, redeems, targets };
+		}
 
+		it("lists each grant in the /usage reset selector and spends nothing on one Claude does not offer next", async () => {
+			const { selector, redeems } = await openResetSelector();
+			// Move off the offered full reset to the Fable grant and try to confirm it.
+			selector.handleInput("\x1b[B");
 			selector.handleInput("\r");
 			selector.handleInput("\r");
 			await Promise.all(redeems);
@@ -2429,8 +2442,18 @@ describe("omp usage reset", () => {
 			expect(redeems).toHaveLength(0);
 			expect(consumes()).toEqual([]);
 			const shown = stripVTControlCharacters(selector.render(400).join("\n"));
-			expect(shown).toContain(`/usage reset anthropic/${claude}:full-reset-2611`);
-			expect(shown).toContain(`/usage reset anthropic/${claude}:launch-2610-fable`);
+			expect(shown).toContain("full-reset-2611");
+			expect(shown).toContain("launch-2610-fable");
+		});
+
+		it("spends exactly the offered grant chosen in the /usage reset selector", async () => {
+			const { selector, redeems, targets } = await openResetSelector();
+			selector.handleInput("\r");
+			selector.handleInput("\r");
+			await Promise.all(redeems);
+
+			expect(targets.map(target => target.creditId)).toEqual(["full-reset-2611"]);
+			expect(consumes().map(request => request.body?.grant_id)).toEqual(["full-reset-2611"]);
 		});
 
 		it("refuses to pick one when no credit id is given, listing the command for each", async () => {

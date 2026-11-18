@@ -7,7 +7,7 @@
 import { groupResetCreditsByClears, type UsageResetCredit } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome, ResetCreditTarget } from "../../session/auth-storage";
-import type { ResetUsageAccount, ResetUsageCreditChoice } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
+import type { ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
 import { formatUsageResetWindow, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
 
 const CODEX_PROVIDER_ID = "openai-codex";
@@ -116,20 +116,15 @@ function creditCommand(command: string, account: ResetUsageAccount, credit: Usag
 }
 
 /**
- * The exact spend command for each of the account's spendable credits when they clear
- * different limits, so spending without a credit id would pick a reset type for the user;
- * otherwise undefined. The one decision behind both the typed refusal and the selector's.
+ * The account's spendable credits when they clear different limits, so spending without
+ * naming one would pick a reset type for the user; otherwise undefined. The one decision
+ * behind both the typed refusal and the selector's per-reset rows.
  */
-export function resetCreditChoice(account: ResetUsageAccount, command: string): ResetUsageCreditChoice[] | undefined {
+export function resetCreditChoice(account: ResetUsageAccount): UsageResetCredit[] | undefined {
 	const credits = account.credits ?? [];
 	const unspent = groupResetCreditsByClears(credits);
 	if (unspent.length <= 1) return undefined;
-	return credits
-		.filter(credit => unspent.some(group => group.includes(credit)))
-		.map(credit => ({
-			line: formatResetCreditLine(account, credit),
-			command: creditCommand(command, account, credit),
-		}));
+	return credits.filter(credit => unspent.some(group => group.includes(credit)));
 }
 
 /**
@@ -189,12 +184,14 @@ export function resolveResetUsageTarget(
 		}
 		return { account: { ...account, credit: chosen, target: { ...account.target, creditId: chosen.id } } };
 	}
-	const choice = resetCreditChoice(account, command);
+	const choice = resetCreditChoice(account);
 	if (choice) {
 		const lines = [
 			`${who}: this account holds saved resets that clear different limits, so name the one to spend. Nothing was spent.`,
 		];
-		for (const { line, command: spend } of choice) lines.push(`  - ${line}`, `    ${spend}`);
+		for (const credit of choice) {
+			lines.push(`  - ${formatResetCreditLine(account, credit)}`, `    ${creditCommand(command, account, credit)}`);
+		}
 		return { error: lines.join("\n") };
 	}
 	if (account.redeemableCount <= 0) {
@@ -288,19 +285,51 @@ export function toResetUsageAccounts(statuses: ResetCreditAccountStatus[]): Rese
 	});
 }
 
+/** Why the selector cannot spend `credit` now; undefined for the offered, usable grant. */
+function selectorCreditUnavailable(account: ResetUsageAccount, credit: UsageResetCredit): string | undefined {
+	if (credit.status === "redeemed" || credit.status === "expired") return credit.status;
+	const next = account.target.creditId;
+	if (account.provider === CLAUDE_PROVIDER_ID && credit.id !== next) {
+		return next ? `not offered next; Claude offers ${oneLine(next)} first` : "Claude offers no saved reset now";
+	}
+	if (
+		account.redeemableCount <= 0 ||
+		credit.usable === false ||
+		(credit.status !== undefined && credit.status !== "available")
+	) {
+		return account.unavailableReason ?? credit.status ?? "not usable now";
+	}
+	return undefined;
+}
+
 /**
- * Rows for the `/usage reset` selector: each account's credit lines and, when its resets
- * clear different limits, the command that spends each one, since the selector then spends nothing.
+ * Rows for the `/usage reset` selector. An account whose resets clear different limits
+ * gets one row per reset, so the user picks the reset type: only the offered, usable one
+ * can be confirmed, and its row carries its id. Any other account keeps one row, with
+ * a line per credit for its details.
  */
 export function toResetSelectorAccounts(statuses: ResetCreditAccountStatus[]): ResetUsageAccount[] {
-	return toResetUsageAccounts(statuses).map(account => {
-		if (account.error) return account;
-		const choice = resetCreditChoice(account, "/usage reset");
-		return {
-			...account,
-			creditLines: (account.credits ?? []).map(credit => formatResetCreditLine(account, credit)),
-			...(choice ? { creditChoice: choice } : {}),
-		};
+	return toResetUsageAccounts(statuses).flatMap(account => {
+		if (account.error) return [account];
+		const credits = account.credits ?? [];
+		if (!resetCreditChoice(account)) {
+			return [{ ...account, creditLines: credits.map(credit => formatResetCreditLine(account, credit)) }];
+		}
+		const unpinned = { ...account.target };
+		delete unpinned.creditId;
+		return credits.map(credit => {
+			const unavailable = selectorCreditUnavailable(account, credit);
+			return {
+				...account,
+				availableCount: credit.remainingCount ?? 1,
+				redeemableCount: unavailable ? 0 : 1,
+				unavailableReason: unavailable,
+				expiresAt: credit.expiresAt,
+				credit,
+				creditLine: formatResetCreditLine(account, credit),
+				target: unavailable ? unpinned : { ...unpinned, creditId: credit.id },
+			};
+		});
 	});
 }
 
