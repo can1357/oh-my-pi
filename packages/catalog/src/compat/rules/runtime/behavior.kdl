@@ -90,6 +90,18 @@ behavior {
 		fallback "openai" substring="gpt-"
 		fallback "openai" substring="openai/"
 	}
+	// The Antigravity CLI reports the same three counters through `agy /usage`:
+	// general Gemini, the separate Gemini 4 Argon weekly bucket, and the shared
+	// Claude/GPT bucket.
+	quota-tiers provider="antigravity-cli" {
+		tier "claude-gpt" "claude-sonnet-5-5" "claude-opus-5-5" "gpt-oss-120b-medium"
+		tier "gemini-argon" "gemini-4-argon"
+		tier "gemini" "gemini-4-carbon" "gemini-4-hydrogen" "gemini-3.8-flash"
+		fallback "claude-gpt" substring="claude-"
+		fallback "claude-gpt" substring="gpt-"
+		fallback "gemini-argon" substring="gemini-4-argon"
+		fallback "gemini" substring="gemini-"
+	}
 	// Codex Spark consumes an independent meter. The broad chat fallback follows
 	// Spark so the specific suffix wins for discovered ids.
 	quota-tiers provider="openai-codex" {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added quota-tier metadata for `antigravity-cli` so usage reports scope Gemini, Argon, and Claude/GPT limits to the matching model bucket. ([#19414](https://github.com/can1357/oh-my-pi/pull/19414) by [@SenCha930511](https://github.com/SenCha930511))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
