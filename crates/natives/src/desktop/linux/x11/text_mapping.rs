@@ -274,16 +274,19 @@ impl TextMapping {
 	/// from the core one after a device switch; an MPX keyboard's goes to its
 	/// master.
 	fn snapshots(&self, template: &Keymap) -> CoreResult<(Keymap, Option<Keymap>)> {
+		if template.core_mapping {
+			let (core, xtest) = Keymap::core_and_xtest(&self.conn)?;
+			return Ok(if template.device.is_some() {
+				(xtest, Some(core))
+			} else {
+				(core, Some(xtest))
+			});
+		}
 		let source = template.refresh(&self.conn)?;
-		let other = if source.core_mapping && source.device.is_some() {
-			Some(Keymap::core(&self.conn)?)
-		} else if source.core_mapping {
-			Some(Keymap::xtest(&self.conn)?)
-		} else if let Some(master) = source.master {
-			Some(Keymap::device(&self.conn, master.into())?)
-		} else {
-			None
-		};
+		let other = source
+			.master
+			.map(|master| Keymap::device(&self.conn, master.into()))
+			.transpose()?;
 		Ok((source, other))
 	}
 
@@ -472,26 +475,17 @@ impl TextMapping {
 			};
 			let mut buffer = Vec::new();
 			let mut failure = None;
-			// A core write reaches the `XTest` keyboard too, so it clears only the
-			// rows both maps show as ours; while only one does, our marks stay.
+			// With a row of ours the core and `XTest` maps disagree on, our marks
+			// stay.
 			let mut split = false;
 			for &target in &self.targets {
 				let maps = match target.device {
 					Some(device) => Keymap::device(&self.conn, device.into()).map(|map| (map, None)),
-					None => Keymap::core(&self.conn)
-						.and_then(|core| Ok((core, Some(Keymap::xtest(&self.conn)?)))),
+					None => Keymap::core_and_xtest(&self.conn).map(|(core, xtest)| (core, Some(xtest))),
 				};
 				let result = maps.and_then(|(map, other)| {
-					let mut clear: Vec<_> = bound
-						.iter()
-						.filter(|binding| {
-							let both = other.as_ref().is_none_or(|other| binding.owns(other));
-							split |= other.is_some() && binding.owns(&map) != both;
-							both && binding.owns(&map) && !claimed(&marks, &map, binding.code)
-						})
-						.map(|binding| (binding.code, 0))
-						.collect();
-					clear.sort_unstable_by_key(|&(code, _)| code);
+					let (clear, kept) = restorable(&bound, &marks, &map, other.as_ref());
+					split |= kept;
 					write_rows(
 						&self.conn,
 						MapTarget { width: map.keysyms_per_keycode, ..target },
@@ -635,6 +629,32 @@ fn no_rows(needed: usize, available: usize) -> DesktopError {
 	))
 }
 
+/// The rows a restore clears in `map`, and whether it left a row of ours
+/// because `other`, the second map a core write reaches, disagrees on it: a
+/// write would clear the row in both, whoever owns it in `other`. A row a
+/// live owner claims is left too.
+fn restorable(
+	bound: &[Binding],
+	marks: &[Mark],
+	map: &Keymap,
+	other: Option<&Keymap>,
+) -> (Vec<(u8, u32)>, bool) {
+	let mut split = false;
+	let mut clear: Vec<_> = bound
+		.iter()
+		.filter(|binding| {
+			let code = binding.code;
+			let ours = binding.owns(map) || other.is_some_and(|other| binding.owns(other));
+			let agree = other.is_none_or(|other| row_symbol(map, code) == row_symbol(other, code));
+			split |= ours && !agree;
+			ours && agree && !claimed(marks, map, code)
+		})
+		.map(|binding| (binding.code, 0))
+		.collect();
+	clear.sort_unstable_by_key(|&(code, _)| code);
+	(clear, split)
+}
+
 /// Whether a live owner's mark shows `code` as its row in `map`: such a
 /// claim beats our having bound the row earlier.
 fn claimed(marks: &[Mark], map: &Keymap, code: u8) -> bool {
@@ -661,18 +681,20 @@ fn refuse_split(map: &Keymap, other: Option<&Keymap>, marks: &[Mark]) -> CoreRes
 	)))
 }
 
-// XKB canonicalizes redundant levels to NoSymbol padding.
 fn row_matches(map: &Keymap, code: u8, symbol: u32) -> bool {
+	row_symbol(map, code) == Some(symbol)
+}
+
+/// The one keysym row `code` holds in `map`, 0 when empty, or `None` for a row
+/// with several; XKB canonicalizes redundant levels to `NoSymbol` padding.
+fn row_symbol(map: &Keymap, code: u8) -> Option<u32> {
 	let width = usize::from(map.keysyms_per_keycode);
-	code
-		.checked_sub(map.min_keycode)
-		.and_then(|index| {
-			map.keysyms
-				.get(usize::from(index) * width..(usize::from(index) + 1) * width)
-		})
-		.is_some_and(|row| {
-			row.first() == Some(&symbol) && row.iter().all(|&value| value == 0 || value == symbol)
-		})
+	let index = usize::from(code.checked_sub(map.min_keycode)?);
+	let row = map.keysyms.get(index * width..(index + 1) * width)?;
+	let first = *row.first()?;
+	row.iter()
+		.all(|&value| value == 0 || value == first)
+		.then_some(first)
 }
 
 struct ServerGrab<'a>(&'a RustConnection);
@@ -779,5 +801,23 @@ mod tests {
 		assert!(!bound[0].holds(new));
 		confirm(&mut bound, &[(255, new)]);
 		assert!(bound[0].holds(new) && !bound[0].owns(&row(old)));
+	}
+
+	#[test]
+	fn a_restore_writes_no_row_the_core_and_xtest_maps_disagree_on() {
+		let (check, e_acute) = (0x0100_2713, 0xe9);
+		let row = |symbol| Keymap::new(255, 2, vec![symbol, 0], Vec::new());
+		let mut bound = vec![Binding {
+			code:      255,
+			symbol:    check,
+			attempted: Vec::new(),
+			last_key:  Cell::new(None),
+		}];
+		// A rebind to é failed unconfirmed; after a reload another session took
+		// the row for é, and a device switch left the core map showing ✓.
+		register(&mut bound, &[(255, e_acute)]);
+		let theirs = [Mark { owner: 1, code: 255, symbol: e_acute, live: true }];
+		assert_eq!(restorable(&bound, &theirs, &row(check), Some(&row(e_acute))), (vec![], true));
+		assert_eq!(restorable(&bound, &[], &row(check), Some(&row(check))), (vec![(255, 0)], false));
 	}
 }

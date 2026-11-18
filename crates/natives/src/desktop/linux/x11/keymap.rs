@@ -115,25 +115,42 @@ impl Keymap {
 	/// Falls back to the core map when the server lists no such device.
 	pub(super) fn xtest(conn: &RustConnection) -> CoreResult<Self> {
 		let core = Self::core(conn)?;
+		match Self::xtest_device(conn)? {
+			Some(device) => Self::xtest_map(conn, device, core.modifier_masks),
+			None => Ok(core),
+		}
+	}
+
+	/// The core map and [`Self::xtest`]'s, reading the core map once.
+	pub(super) fn core_and_xtest(conn: &RustConnection) -> CoreResult<(Self, Self)> {
+		let core = Self::core(conn)?;
+		let xtest = match Self::xtest_device(conn)? {
+			Some(device) => Self::xtest_map(conn, device, core.modifier_masks.clone())?,
+			None => core.clone(),
+		};
+		Ok((core, xtest))
+	}
+
+	fn xtest_device(conn: &RustConnection) -> CoreResult<Option<u16>> {
 		let devices = conn
 			.xinput_list_input_devices()
 			.map_err(keymap_failed)?
 			.reply()
 			.map_err(keymap_failed)?;
-		let Some(device) = devices
+		Ok(devices
 			.devices
 			.iter()
 			.zip(&devices.names)
 			.find(|(_, name)| name.name == XTEST_KEYBOARD)
-			.map(|(device, _)| device.device_id)
-		else {
-			return Ok(core);
-		};
-		Ok(Self {
-			modifier_masks: core.modifier_masks,
-			core_mapping: true,
-			..Self::device(conn, device.into())?
-		})
+			.map(|(device, _)| device.device_id.into()))
+	}
+
+	fn xtest_map(
+		conn: &RustConnection,
+		device: u16,
+		modifier_masks: Vec<(u8, u16)>,
+	) -> CoreResult<Self> {
+		Ok(Self { modifier_masks, core_mapping: true, ..Self::device(conn, device)? })
 	}
 
 	pub(super) const fn new(
