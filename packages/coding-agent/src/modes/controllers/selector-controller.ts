@@ -884,8 +884,9 @@ export class SelectorController {
 				quickRoles: quickRoleCycle?.models,
 				quickRoleOrder,
 				currentQuickRole: quickRoleCycle?.models[quickRoleCycle.currentIndex]?.role,
-				// What #applySessionModel applies without a slider level; the slider clamps it per model.
-				thinkingLevelFor: () => viewed.configuredThinkingLevel(),
+				// The level the session runs at, auto's resolved effort once a turn settles it (as the
+				// status line shows); an untouched slider still carries the selection, auto included.
+				thinkingLevelFor: () => viewed.autoResolvedThinkingLevel() ?? viewed.configuredThinkingLevel(),
 			},
 		);
 		this.#mountMenu(menu, picker, () => {

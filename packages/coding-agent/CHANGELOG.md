@@ -24,6 +24,7 @@
 
 ### Fixed
 
+- The model switcher's thinking slider shows the level auto settled on (as the status line does) instead of `Auto`, in subagents and any session running on auto
 - `/tan` tells a running agent about the tangent at its next step, as a `<tangent-notice>` naming the tangent's handle and work, instead of only after its turn ends
 - `urlmap` shell builtin maps a URL path onto a host directory or file for the shell and the programs it runs (`urlmap [-r] [-e] URL PATH`, `urlmap -d URL`, bare `urlmap` lists the mounts as commands); named services and `pty` commands get the session's `local://`, `skill://`, `artifact://` and `attachment://` paths through it
 - `tab.screenshot({path})` saves the capture to a chosen file and `format: "webp"` is supported on Chromium; unknown screenshot options are rejected
