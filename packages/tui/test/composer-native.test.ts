@@ -541,6 +541,19 @@ describe("native autocomplete list", () => {
 	});
 });
 
+describe("native composer queue shorthand", () => {
+	it("keeps typing on the prefix's line and dims the prefix", () => {
+		setNativeRendering(true);
+		for (const prefix of ["->", "=>"]) {
+			const editor = composer({ running: false });
+			for (const key of `${prefix} add`) editor.handleInput(key);
+			expect(editor.getText()).toBe(`${prefix} add`);
+			expect(editor.getCursor()).toEqual({ line: 0, col: 6 });
+			expect(editor.describeDecorations?.(editor.getLines())).toContainEqual({ from: 0, to: 2, s: "dim" });
+		}
+	});
+});
+
 describe("native composer startup typeahead", () => {
 	const field = (composer: Composer) => nodes(composer.editor.describe(cx)).find(n => n.k === "editor");
 

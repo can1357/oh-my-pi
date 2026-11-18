@@ -1446,6 +1446,24 @@ export const cfgProvidersFetch = register({
 	},
 });
 
+/**
+ * Whether `web_search` and the URL reader may use third-party services the user
+ * holds no credential for. Off, they stick to configured services; a per-request
+ * `omp q --model` selector still runs.
+ */
+export const cfgProvidersWebKeyless = register({
+	id: "providers.webKeyless",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Keyless Web Services",
+		description:
+			"Let web search and URL reading use third-party services without your credential: keyless Parallel, Exa, Firecrawl, Keenable, and Perplexity, the Jina reader, and scraped engines (Startpage, DuckDuckGo, Ecosia, Google, Mojeek, Hacker News). Off, only services you configured run.",
+	},
+});
+
 /** A saved-reset window with its own auto-redeem consent. */
 export type ResetWindow = "5h" | "weekly" | "fable";
 

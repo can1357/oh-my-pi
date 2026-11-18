@@ -208,6 +208,7 @@ describe("proc:// background jobs", () => {
 			const client: DaemonBrokerClient = {
 				projectDir: process.cwd(),
 				onCompletion: () => () => {},
+				onNotify: () => () => {},
 				close() {},
 				async request(operation: DaemonOperation): Promise<DaemonRpcResult> {
 					if (operation.op === "list") return { op: "list", daemons: [] };
@@ -526,6 +527,7 @@ describe("proc:// background jobs", () => {
 		const client = {
 			projectDir: process.cwd(),
 			onCompletion: () => () => {},
+			onNotify: () => () => {},
 			close() {},
 			async request(operation: DaemonOperation): Promise<DaemonRpcResult> {
 				if (operation.op === "list") return { op: "list", daemons: [daemon] };
@@ -607,6 +609,7 @@ describe("proc:// background jobs", () => {
 				throw new Error("Daemon list request timed out");
 			},
 			onCompletion: () => () => {},
+			onNotify: () => () => {},
 		} as unknown as daemonClient.DaemonBrokerClient);
 		const manager = new AsyncJobManager({});
 		const blocked = Promise.withResolvers<string>();
@@ -660,6 +663,7 @@ describe("proc:// background jobs", () => {
 		const broker = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue({
 			request: async () => gate.promise,
 			onCompletion: () => () => {},
+			onNotify: () => () => {},
 		} as unknown as daemonClient.DaemonBrokerClient);
 		const manager = new AsyncJobManager({});
 		const settled = Promise.withResolvers<string>();
@@ -689,6 +693,7 @@ describe("proc:// background jobs", () => {
 		const broker = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue({
 			request: async () => ({ op: "list", daemons: [] }) as DaemonRpcResult,
 			onCompletion: () => () => {},
+			onNotify: () => () => {},
 		} as unknown as daemonClient.DaemonBrokerClient);
 		const manager = new AsyncJobManager({});
 		const id = manager.register("bash", "earlier build", async () => "done earlier", { ownerId: "Main" });
@@ -941,6 +946,7 @@ describe("bash services via proc://", () => {
 		const client = {
 			projectDir: process.cwd(),
 			onCompletion: () => () => {},
+			onNotify: () => () => {},
 			close() {},
 			async request(operation: DaemonOperation): Promise<DaemonRpcResult> {
 				if (operation.op === "start") {
@@ -1001,6 +1007,7 @@ describe("bash services via proc://", () => {
 		const client = {
 			projectDir: process.cwd(),
 			onCompletion: () => () => {},
+			onNotify: () => () => {},
 			close() {},
 			async request(operation: DaemonOperation): Promise<DaemonRpcResult> {
 				if (operation.op === "start") return { op: "start", daemon, readyTimedOut: false };
@@ -1094,6 +1101,7 @@ describe("bash services via proc://", () => {
 		const client = {
 			projectDir: process.cwd(),
 			onCompletion: () => () => {},
+			onNotify: () => () => {},
 			close() {},
 			async request(operation: DaemonOperation): Promise<DaemonRpcResult> {
 				operations.push(operation.op);

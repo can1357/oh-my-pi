@@ -317,6 +317,55 @@ describe("spotlight shaping hooks", () => {
 	});
 });
 
+describe("spotlight access denial", () => {
+	it("stops asking for a waitlisted account, says so once, and asks again for another account", async () => {
+		const credential = new StencilCredential();
+		let token = "waitlisted-account";
+		const resolve = vi.spyOn(credential, "resolve").mockImplementation(async () => token);
+		const sent: (string | null)[] = [];
+		const denying = (async (_url: string | URL | Request, init?: RequestInit) => {
+			const headers = new Headers(init?.headers);
+			sent.push(headers.get("user-agent"));
+			if (headers.get("authorization") === "Bearer waitlisted-account") {
+				return Response.json(
+					{ error: "waitlisted", message: "This Stencil account does not have Stencil Cloud access yet." },
+					{ status: 403 },
+				);
+			}
+			return Response.json({ answers: { line: { scores: [0.5] } }, usage: { input_tokens: 1 } });
+		}) as typeof fetch;
+		const client = new SpotlightClient({
+			url: "http://waitlisted.test/v1/spotlight",
+			timeoutMs: 2_000,
+			credential,
+			fetch: denying,
+		});
+		const denied: string[] = [];
+		client.onAccessDenied = reason => denied.push(reason);
+		const ctx = buildCallContext([], "x", "./ingest.sh", undefined);
+		const score = async () => {
+			const scorer = new RecordingScorer(client, "low");
+			return { scores: await scorer.score(["a"], ctx), usage: scorer.usage };
+		};
+
+		for (let call = 0; call < 3; call++) {
+			const result = await score();
+			expect(result.scores).toBeNull();
+			expect(result.usage.failureCauses).toEqual({ waitlisted: 1 });
+		}
+		// The warm-up stays quiet too: it would send right after its credential lookup settles.
+		client.warm();
+		await resolve.mock.results.at(-1)?.value;
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).toStartWith("omp/");
+		expect(denied).toEqual(["This Stencil account does not have Stencil Cloud access yet."]);
+
+		token = "admitted-account";
+		expect((await score()).scores).toEqual([0.5]);
+		expect(sent).toHaveLength(2);
+	});
+});
+
 /** A source file well past `plain`'s read page (300 lines), which shaping outlines. */
 const BIG_SOURCE = Array.from(
 	{ length: 120 },

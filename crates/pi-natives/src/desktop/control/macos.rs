@@ -15,7 +15,7 @@ use objc2_core_foundation::CGPoint;
 use parking_lot::Mutex;
 
 use super::{CoreResult, DesktopError, EmergencyStop, intervention::UserInputs};
-use crate::desktop::macos::front_pid;
+use crate::desktop::macos::{front_pid, rerouted_to};
 
 pub(crate) const SYNTHETIC_EVENT_TAG: i64 = 0x7069_6465_736b;
 const SOURCE_USER_DATA: u32 = 42;
@@ -504,13 +504,15 @@ const _: () = {
 };
 
 /// The process a foreign key press or click lands in: the target the
-/// annotated tap names, else what [`untargeted`] says for its type, and the
-/// front process for a type without a rule. A release lands nowhere: it ends
-/// a click its press counted already.
+/// annotated tap names, or for a key the user's app when the focus guard moves
+/// it back there from the target ([`rerouted_to`], here `moved`); else what
+/// [`untargeted`] says for its type, and the front process for a type without
+/// a rule. A release lands nowhere: it ends a click its press counted already.
 fn input_target(
 	kind: u32,
 	target: i64,
 	front: impl FnOnce() -> Option<libc::pid_t>,
+	moved: impl FnOnce(libc::pid_t) -> Option<libc::pid_t>,
 ) -> Option<libc::pid_t> {
 	if is_pointer_release(kind) {
 		return None;
@@ -518,7 +520,11 @@ fn input_target(
 	if let Ok(pid) = libc::pid_t::try_from(target)
 		&& pid > 0
 	{
-		return Some(pid);
+		return Some(if kind == KEY_DOWN {
+			moved(pid).unwrap_or(pid)
+		} else {
+			pid
+		});
 	}
 	match untargeted(kind) {
 		Some(Untargeted::Front) => front(),
@@ -594,7 +600,7 @@ unsafe extern "C" fn observe_user(_proxy: Ref, kind: u32, event: Ref, user: Ref)
 			if hardware {
 				context.inner.pressed(at);
 			}
-			if let Some(pid) = input_target(kind, target, front_pid) {
+			if let Some(pid) = input_target(kind, target, front_pid, |pid| rerouted_to(pid, event)) {
 				context.inner.record(pid, at);
 			}
 		}
@@ -924,21 +930,40 @@ mod tests {
 	#[test]
 	fn foreign_input_lands_in_its_annotated_target_or_a_key_in_the_front_process() {
 		let unread = || -> Option<libc::pid_t> { panic!("the front process is not read") };
-		assert_eq!(input_target(KEY_DOWN, 77, unread), Some(77));
-		assert_eq!(input_target(LEFT_MOUSE_DOWN, 77, unread), Some(77));
-		assert_eq!(input_target(KEY_DOWN, 0, || Some(12)), Some(12));
-		assert_eq!(input_target(KEY_DOWN, 0, || None), None);
-		assert_eq!(input_target(LEFT_MOUSE_DOWN, 0, unread), None);
-		assert_eq!(input_target(RIGHT_MOUSE_DOWN, -1, unread), None);
-		assert_eq!(input_target(OTHER_MOUSE_DOWN, 0, unread), None);
+		let kept = |_| None;
+		assert_eq!(input_target(KEY_DOWN, 77, unread, kept), Some(77));
+		assert_eq!(input_target(LEFT_MOUSE_DOWN, 77, unread, kept), Some(77));
+		assert_eq!(input_target(KEY_DOWN, 0, || Some(12), kept), Some(12));
+		assert_eq!(input_target(KEY_DOWN, 0, || None, kept), None);
+		assert_eq!(input_target(LEFT_MOUSE_DOWN, 0, unread, kept), None);
+		assert_eq!(input_target(RIGHT_MOUSE_DOWN, -1, unread, kept), None);
+		assert_eq!(input_target(OTHER_MOUSE_DOWN, 0, unread, kept), None);
 		// A type without a rule counts against the front process rather than
 		// being dropped.
-		assert_eq!(input_target(11, 0, || Some(12)), Some(12));
+		assert_eq!(input_target(11, 0, || Some(12), kept), Some(12));
 		// A release the tap sees to place its click is no input of its own.
 		for kind in [LEFT_MOUSE_UP, RIGHT_MOUSE_UP, OTHER_MOUSE_UP] {
 			assert_ne!(USER_INPUT_MASK & (1 << kind), 0, "the tap listens for {kind}");
-			assert_eq!(input_target(kind, 77, unread), None);
+			assert_eq!(input_target(kind, 77, unread, kept), None);
 		}
+	}
+
+	#[test]
+	fn a_key_the_focus_guard_moves_back_lands_in_the_users_app() {
+		let unread = || -> Option<libc::pid_t> { panic!("the front process is not read") };
+		let unasked =
+			|_| -> Option<libc::pid_t> { panic!("only a key the target was sent is asked about") };
+		let to_user = |pid| {
+			assert_eq!(pid, 77);
+			Some(12)
+		};
+		assert_eq!(input_target(KEY_DOWN, 77, unread, to_user), Some(12));
+		assert_eq!(
+			input_target(LEFT_MOUSE_DOWN, 77, unread, unasked),
+			Some(77),
+			"a click is never moved"
+		);
+		assert_eq!(input_target(KEY_DOWN, 0, || Some(13), unasked), Some(13));
 	}
 
 	#[test]

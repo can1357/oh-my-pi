@@ -1,15 +1,18 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { commitSelection } from "@oh-my-pi/pi-coding-agent/commit/selective/apply";
+import { commitSelection, type CommitOutcome } from "@oh-my-pi/pi-coding-agent/commit/selective/apply";
 import { createDraft } from "@oh-my-pi/pi-coding-agent/commit/selective/draft";
-import { ChangeJournal } from "@oh-my-pi/pi-coding-agent/commit/selective/journal";
+import { ChangeJournal, type JournalRecord } from "@oh-my-pi/pi-coding-agent/commit/selective/journal";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 
@@ -29,6 +32,39 @@ async function git(cwd: string, args: readonly string[], extraEnv: Record<string
 	]);
 	if (code !== 0) throw new Error(`git ${args.join(" ")} failed (${code}): ${err}`);
 	return out;
+}
+
+function commitIsRecorded(journalFile: string, sha: string): boolean {
+	let text: string;
+	try {
+		text = fsSync.readFileSync(journalFile, "utf8");
+	} catch {
+		return false;
+	}
+	return text.split("\n").some(line => {
+		if (!line) return false;
+		try {
+			const record: JournalRecord = JSON.parse(line);
+			return record.type === "commit" && record.sha === sha;
+		} catch {
+			return false;
+		}
+	});
+}
+
+async function installSubjectRewriteHook(root: string): Promise<void> {
+	await git(root, ["config", "core.hooksPath", ".git/hooks"]);
+	const hook = path.join(root, ".git", "hooks", "commit-msg");
+	await Bun.write(
+		hook,
+		"#!/bin/sh\n" +
+			"cat > \"$1\" <<'EOF'\n" +
+			"fix(notes): kept the rewritten subject\n" +
+			"\n" +
+			"- Hook rewrote the body.\n" +
+			"EOF\n",
+	);
+	await fs.chmod(hook, 0o755);
 }
 
 const CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Fixed an old bug\n";
@@ -52,6 +88,32 @@ async function emptyRepo() {
 		journal.recordChange({ agent, parent, tool: "edit", path: absolute, before, after });
 	};
 	return { root, journal, write };
+}
+
+async function gitlinkWorkspace() {
+	const workspace = await emptyRepo();
+	const { root } = workspace;
+	const module = path.join(root, "module");
+	await fs.mkdir(module);
+	await git(module, ["init", "-q", "-b", "main"]);
+	await git(module, ["config", "user.email", "test@example.com"]);
+	await git(module, ["config", "user.name", "Test"]);
+	await git(module, ["config", "commit.gpgSign", "false"]);
+	const commits: string[] = [];
+	for (const content of ["one\n", "two\n", "three\n"]) {
+		await Bun.write(path.join(module, "content.txt"), content);
+		await git(module, ["add", "content.txt"]);
+		await git(module, ["commit", "-qm", content.trim()]);
+		commits.push((await git(module, ["rev-parse", "HEAD"])).trim());
+	}
+	const [before, after, later] = commits;
+	await git(module, ["checkout", "-q", before]);
+	await Bun.write(path.join(root, "user.txt"), "original\n");
+	await git(root, ["add", "user.txt"]);
+	await git(root, ["update-index", "--add", "--cacheinfo", `160000,${before},module`]);
+	await git(root, ["commit", "-qm", "seed gitlink"]);
+	await git(module, ["checkout", "-q", after]);
+	return { ...workspace, module, before, after, later };
 }
 
 /**
@@ -86,6 +148,111 @@ async function sharedWorkspace() {
 }
 
 describe("selective commit flow", () => {
+	it("explicitly selects a gitlink SHA with ordinary edits without committing child dirt or other staged work", async () => {
+		const { root, module, journal, write, before, after } = await gitlinkWorkspace();
+		await Bun.write(path.join(root, "user.txt"), "user staged\n");
+		await git(root, ["add", "user.txt"]);
+		await write("Main", undefined, "agent.txt", "agent\n");
+		await journal.flush();
+		await Bun.write(path.join(module, "content.txt"), "child dirty\n");
+		const childStatus = await git(module, ["status", "--porcelain"]);
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+
+		expect(draft.selection().map(change => change.path)).toEqual(["agent.txt"]);
+		expect(draft.skipped).not.toContain("module");
+		expect(draft.show()).toContain(`${before} → ${after}`);
+		expect(() => draft.take({ path: "module", units: ["2"] })).toThrow(/only unit 1/);
+		draft.take({ path: "module", units: ["1"] });
+		draft.drop({ path: "module" });
+		expect(draft.selection().map(change => change.path)).toEqual(["agent.txt"]);
+		draft.take({ path: "module" });
+		draft.only(["module", "agent.txt"]);
+		expect(draft.diff()).toContain(`-Subproject commit ${before}\n+Subproject commit ${after}\n`);
+		const outcome = await commitSelection(
+			draft,
+			{ subject: "fix: update module and agent" },
+			{ journal, agent: { agent: "Main" } },
+		);
+
+		expect(outcome.paths.sort()).toEqual(["agent.txt", "module"]);
+		expect(outcome.indexNotes).toEqual([]);
+		expect(await git(root, ["ls-tree", "HEAD", "module"])).toBe(`160000 commit ${after}\tmodule\n`);
+		expect(await git(root, ["show", "HEAD:agent.txt"])).toBe("agent\n");
+		expect(await git(root, ["show", "HEAD:user.txt"])).toBe("original\n");
+		expect(await git(root, ["diff", "--cached", "--name-only"])).toBe("user.txt\n");
+		expect(await git(module, ["status", "--porcelain"])).toBe(childStatus);
+		expect(await Bun.file(path.join(module, "content.txt")).text()).toBe("child dirty\n");
+	});
+
+	it("does not offer a gitlink update when only files inside the child are dirty", async () => {
+		const { root, module, journal, before } = await gitlinkWorkspace();
+		await git(module, ["checkout", "-q", before]);
+		await Bun.write(path.join(module, "content.txt"), "dirty\n");
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(draft.paths).not.toContain("module");
+		expect(draft.selection()).toEqual([]);
+	});
+
+	it("rejects a changed child HEAD after drafting without changing the parent HEAD or index", async () => {
+		const { root, module, journal, later } = await gitlinkWorkspace();
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		draft.take({ path: "module" });
+		await git(module, ["checkout", "-q", later]);
+		const head = await git(root, ["rev-parse", "HEAD"]);
+		const index = await git(root, ["ls-files", "--stage"]);
+		await expect(
+			commitSelection(draft, { subject: "fix: stale" }, { journal, agent: { agent: "Main" } }),
+		).rejects.toThrow(/submodule HEAD changed.*new draft/);
+		expect(await git(root, ["rev-parse", "HEAD"])).toBe(head);
+		expect(await git(root, ["ls-files", "--stage"])).toBe(index);
+		expect((await git(module, ["rev-parse", "HEAD"])).trim()).toBe(later);
+	});
+
+	it("preserves a different staged gitlink while committing the selected worktree SHA", async () => {
+		const { root, journal, after, later } = await gitlinkWorkspace();
+		await git(root, ["update-index", "--cacheinfo", `160000,${later},module`]);
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		draft.take({ path: "module" });
+		const outcome = await commitSelection(
+			draft,
+			{ subject: "fix: selected pointer" },
+			{ journal, agent: { agent: "Main" } },
+		);
+		expect((await git(root, ["rev-parse", "HEAD:module"])).trim()).toBe(after);
+		expect(await git(root, ["ls-files", "--stage", "module"])).toBe(`160000 ${later} 0\tmodule\n`);
+		expect(outcome.indexNotes).toEqual([expect.stringContaining("someone else's staged changes")]);
+	});
+
+	it("rejects a conflicting superproject commit instead of overwriting its gitlink SHA", async () => {
+		const { root, journal, later } = await gitlinkWorkspace();
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		draft.take({ path: "module" });
+		await git(root, ["update-index", "--cacheinfo", `160000,${later},module`]);
+		await git(root, ["commit", "-qm", "other pointer"]);
+		const head = await git(root, ["rev-parse", "HEAD"]);
+		const index = await git(root, ["ls-files", "--stage"]);
+		await expect(
+			commitSelection(draft, { subject: "fix: conflict" }, { journal, agent: { agent: "Main" } }),
+		).rejects.toThrow(/HEAD moved.*module.*new draft/);
+		expect(await git(root, ["rev-parse", "HEAD"])).toBe(head);
+		expect(await git(root, ["ls-files", "--stage"])).toBe(index);
+	});
+
+	it.each(["uninitialized", "deleted", "file"])(
+		"skips an unsupported %s gitlink checkout while still drafting ordinary edits",
+		async state => {
+			const { root, module, journal, write } = await gitlinkWorkspace();
+			await fs.rm(module, { recursive: true });
+			if (state === "uninitialized") await fs.mkdir(module);
+			if (state === "file") await Bun.write(module, "not a checkout\n");
+			await write("Main", undefined, "agent.txt", "agent\n");
+			await journal.flush();
+			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+			expect(draft.paths).not.toContain("module");
+			expect(draft.selection().map(change => change.path)).toEqual(["agent.txt"]);
+		},
+	);
+
 	it("commits the agent tree's lines and leaves the user's staged and unstaged work alone", async () => {
 		const { root, journal, head } = await sharedWorkspace();
 		const worktreeBefore = await git(root, ["diff", "HEAD"]);
@@ -129,6 +296,61 @@ describe("selective commit flow", () => {
 		expect(outcome.indexNotes).toEqual([]);
 		expect((await git(root, ["diff", "--cached", "--name-only"])).trim()).toBe("b.ts");
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"runs hooks without reporting sparse-checkout paths as unstaged deletions",
+		async () => {
+			const { root, journal, write } = await emptyRepo();
+			await Bun.write(path.join(root, "kept/inside"), "before\n");
+			await Bun.write(path.join(root, "away/deep/outside"), "outside\n");
+			await Bun.write(path.join(root, "away/other"), "other\n");
+			await git(root, ["add", "."]);
+			await git(root, ["commit", "-q", "-m", "seed"]);
+			await git(root, ["sparse-checkout", "init", "--cone", "--sparse-index"]);
+			await git(root, ["sparse-checkout", "set", "kept"]);
+
+			// The shared index collapses the excluded subtree to one `away/` entry; the
+			// cached diff (index_changes) must expand it, never report it as a change.
+			expect((await git(root, ["ls-files", "--sparse"])).trim().split("\n").sort()).toEqual([
+				"away/",
+				"kept/inside",
+			]);
+			const repo = vcs.git(root);
+			expect(repo).not.toBeNull();
+			expect(await repo!.changedFiles({ cached: true })).toEqual([]);
+
+			const marker = path.join(root, ".git", "omp-hook-sparse.txt");
+			const hook = path.join(root, ".git/hooks/pre-commit");
+			await Bun.write(
+				hook,
+				[
+					"#!/bin/sh",
+					"set -e",
+					'[ -z "$(git diff --name-only)" ]',
+					"git add kept/inside",
+					'git ls-files --sparse > "$GIT_DIR/omp-hook-sparse.txt"',
+				].join("\n") + "\n",
+			);
+			await fs.chmod(hook, 0o755);
+
+			await write("Main", undefined, "kept/inside", "after\n");
+			await journal.flush();
+			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+			await commitSelection(draft, { subject: "fix: sparse commit" }, { journal, agent: { agent: "Main" } });
+
+			// The hook really did hand write_index_tree a collapsed `away/` directory entry.
+			expect((await Bun.file(marker).text()).trim().split("\n").sort()).toEqual(["away/", "kept/inside"]);
+			expect(await git(root, ["show", "HEAD:kept/inside"])).toBe("after\n");
+			expect(await git(root, ["show", "HEAD:away/deep/outside"])).toBe("outside\n");
+			expect(await git(root, ["show", "HEAD:away/other"])).toBe("other\n");
+			expect((await git(root, ["ls-tree", "-r", "--name-only", "HEAD"])).trim().split("\n").sort()).toEqual([
+				"away/deep/outside",
+				"away/other",
+				"kept/inside",
+			]);
+			await git(root, ["fsck", "--strict"]);
+		},
+	);
 
 	it("commits only one subagent's changes when scoped to it", async () => {
 		const { root, journal } = await sharedWorkspace();
@@ -444,6 +666,43 @@ describe("selective commit flow", () => {
 		expect(await Bun.file(path.join(root, "conflict.txt")).text()).toBe(conflict);
 	});
 
+	it("tells an empty repository apart from an empty selection when committing", async () => {
+		const { root, journal } = await emptyRepo();
+		await Bun.write(path.join(root, "a.ts"), "export const a = 1;\n");
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-q", "-m", "seed"]);
+		const context = { journal, agent: { agent: "Main" } };
+
+		const clean = await createDraft({ cwd: root, journal, caller: "Main" });
+		await expect(commitSelection(clean, { subject: "fix: a" }, context)).rejects.toThrow(
+			/Nothing to commit: .* has no changes against HEAD/,
+		);
+
+		// Error output must not expose the absolute home directory.
+		Object.defineProperty(clean, "root", { value: path.join(os.homedir(), "workspace") });
+		await expect(commitSelection(clean, { subject: "fix: a" }, context)).rejects.toThrow(
+			"Nothing to commit: ~/workspace has no changes against HEAD.",
+		);
+
+		// A nested repository is dirty but skipped: the repository is not clean.
+		const nested = path.join(root, "vendor");
+		await fs.mkdir(nested);
+		await git(nested, ["init", "-q"]);
+		const skippedOnly = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(skippedOnly.skipped).toEqual(["vendor"]);
+		await expect(commitSelection(skippedOnly, { subject: "fix: a" }, context)).rejects.toThrow(
+			"Nothing to commit: only vendor changed (submodule or nested repository), which selective commits skip.",
+		);
+		await fs.rm(nested, { recursive: true });
+
+		// The user's unjournaled edit is a change, just not selected.
+		await Bun.write(path.join(root, "a.ts"), "export const a = 2;\n");
+		const unselected = await createDraft({ cwd: root, journal, caller: "Main" });
+		await expect(commitSelection(unselected, { subject: "fix: a" }, context)).rejects.toThrow(
+			"Nothing selected; use take() first.",
+		);
+	});
+
 	it("rejects an unknown hunk unit id without changing the selection", async () => {
 		const { root, journal, write } = await emptyRepo();
 		await Bun.write(path.join(root, "a.ts"), "export const a = 1;\n");
@@ -516,5 +775,101 @@ describe("selective commit flow", () => {
 
 		expect(outcome.paths).toEqual([filename]);
 		expect(await git(root, ["show", `HEAD:${filename}`])).toBe("after\n");
+	});
+
+	it("returns the subject a commit-msg hook stored on the commit", async () => {
+		// The commit summary prints outcome.subject. A hook can replace that line;
+		// callers must see the subject on the commit, not the one they submitted.
+		const { root, journal, write } = await emptyRepo();
+		await installSubjectRewriteHook(root);
+		await write("Main", undefined, "notes.txt", "notes\n");
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		const outcome = await commitSelection(
+			draft,
+			{ subject: "chore: original subject", body: ["- Original body."] },
+			{ journal, agent: { agent: "Main" } },
+		);
+
+		const stored = (await git(root, ["log", "-1", "--format=%s"])).replace(/\n$/, "");
+		expect(stored).toBe("fix(notes): kept the rewritten subject");
+		expect(outcome.subject).toBe(stored);
+		expect(await git(root, ["log", "-1", "--format=%B"])).toContain("- Hook rewrote the body.");
+		expect(await git(root, ["log", "-1", "--format=%B"])).not.toContain("Original body");
+	});
+
+	it("remembers a saved commit when the caller stops while its subject is read", async () => {
+		// Stopping while the subject is read back used to happen before the session
+		// recorded the commit, so a later amend was refused. The record is already on
+		// disk when that read starts, the read is not cancelled, and the subject is the
+		// line the hook stored.
+		const { root, journal, write } = await emptyRepo();
+		await installSubjectRewriteHook(root);
+		await write("Main", undefined, "notes.txt", "notes\n");
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		const controller = new AbortController();
+		const requireGit = vcs.requireGit.bind(vcs);
+		const journalFile = path.join(journal.dir, "changes.jsonl");
+		let sawRead = false;
+		let recordedBeforeRead = false;
+		let readSignal: AbortSignal | undefined;
+		const spy = vi.spyOn(vcs, "requireGit").mockImplementation((dir: string) => {
+			const repo = requireGit(dir);
+			if (path.resolve(repo.info().repoRoot) !== path.resolve(draft.root)) return repo;
+			return new Proxy(repo, {
+				get(target, prop) {
+					if (prop === "commitDetails") {
+						return (rev: string, signal?: AbortSignal) => {
+							sawRead = true;
+							recordedBeforeRead = commitIsRecorded(journalFile, rev);
+							readSignal = signal;
+							controller.abort();
+							return signal === undefined ? target.commitDetails(rev) : target.commitDetails(rev, signal);
+						};
+					}
+					const value: unknown = Reflect.get(target, prop, target);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			});
+		});
+		try {
+			let outcome: CommitOutcome | undefined;
+			let failure: unknown;
+			try {
+				outcome = await commitSelection(
+					draft,
+					{ subject: "chore: original subject", body: ["- Original body."] },
+					{ journal, agent: { agent: "Main" }, signal: controller.signal },
+				);
+			} catch (error) {
+				failure = error;
+			}
+			expect(failure).toBeUndefined();
+			if (!outcome) throw new Error("commit did not return an outcome");
+			expect(sawRead).toBe(true);
+			expect(recordedBeforeRead).toBe(true);
+			expect(readSignal).toBeUndefined();
+			expect(controller.signal.aborted).toBe(true);
+			const stored = (await git(root, ["log", "-1", "--format=%s"])).replace(/\n$/, "");
+			expect(stored).toBe("fix(notes): kept the rewritten subject");
+			expect(outcome.subject).toBe(stored);
+
+			spy.mockRestore();
+			await write("Main", undefined, "notes.txt", "notes\nrevised\n");
+			await journal.flush();
+			const followUp = await createDraft({ cwd: root, journal, caller: "Main" });
+			const amended = await commitSelection(
+				followUp,
+				{ subject: "fix(notes): amended after a stop", amend: true },
+				{ journal, agent: { agent: "Main" } },
+			);
+			expect(amended.sha).not.toBe(outcome.sha);
+			expect((await git(root, ["rev-parse", "HEAD"])).trim()).toBe(amended.sha);
+		} finally {
+			spy.mockRestore();
+		}
 	});
 });

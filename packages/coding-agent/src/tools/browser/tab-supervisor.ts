@@ -102,6 +102,8 @@ export interface PendingRun {
 	 * timeout. `pending.reject` still fires first so the awaiting caller
 	 * sees the tab-close error immediately; `closeAc` propagates the
 	 * cancellation into the still-running `runInProcessTab` body (issue #4499).
+	 * It also stops an in-process run that outlived its call's bound
+	 * (`boundInProcessRun`).
 	 */
 	closeAc?: AbortController;
 	/** A direct `tab.waitForDownload()` call: it holds the tab until a download finishes. */
@@ -1176,17 +1178,30 @@ export async function runInTab(name: string, opts: RunInTabOptions): Promise<Run
 	return result;
 }
 
+interface RunTabOptions {
+	code: string;
+	timeoutMs: number;
+	signal?: AbortSignal;
+	session?: ToolSession;
+	/** This run follows a re-adoption that a detach before the previous attempt caused; it is not retried again. */
+	readopted?: boolean;
+	waitsForDownload?: boolean;
+}
+
+/** A call registered in its tab's `pending`. */
+interface RegisteredRun {
+	id: string;
+	pending: PendingRun;
+	/** Settles with the run's outcome, or with `releaseTab`'s close error when the tab closes first. */
+	promise: Promise<RunResultOk>;
+	closeAc: AbortController;
+	/** `performance.now()` when the call registered. */
+	startedAt: number;
+}
+
 async function runInTabWithSnapshot(
 	name: string,
-	opts: {
-		code: string;
-		timeoutMs: number;
-		signal?: AbortSignal;
-		session?: ToolSession;
-		/** This run follows a re-adoption that a detach before the previous attempt caused; it is not retried again. */
-		readopted?: boolean;
-		waitsForDownload?: boolean;
-	},
+	opts: RunTabOptions,
 	snapshot: SessionSnapshot,
 ): Promise<RunResultOk> {
 	// Chrome refused this tab's last re-adoption over another extension's frame: re-adopt it first, a reattach this
@@ -1280,20 +1295,33 @@ async function runInTabWithSnapshot(
 	// attach their consumers, and an unobserved `pending.reject` would fire
 	// `unhandledRejection` and tear the whole session down (issue #4499).
 	promise.catch(() => undefined);
+	// A call that returned or threw holds no pending entry, whatever way it ended, so the tab takes the next call.
+	try {
+		return await dispatchRun(tab, name, opts, snapshot, { id, pending, promise, closeAc, startedAt });
+	} finally {
+		tab.pending.delete(id);
+	}
+}
+
+/** Drive registered call `run` on its tab's backend; {@link runInTabWithSnapshot} removes its pending entry. */
+async function dispatchRun(
+	tab: TabSession,
+	name: string,
+	opts: RunTabOptions,
+	snapshot: SessionSnapshot,
+	run: RegisteredRun,
+): Promise<RunResultOk> {
+	const { id, pending, promise, closeAc, startedAt } = run;
 	const dispatchWorker = tab.backend === "worker" ? tab.worker : undefined;
 	// Resume a settle-frozen page before driving it — frozen rAF/timers would
 	// otherwise hang the execution below. A refused resume fails the run
 	// here with an actionable error instead of stalling to timeout.
 	if (!(await unfreezeTabSession(tab))) {
-		tab.pending.delete(id);
 		throw new ToolError(`Tab ${JSON.stringify(name)} is frozen and could not be resumed. Close and reopen it.`);
 	}
 	// An abort that landed during the resume roundtrip must not dispatch:
 	// the worker ignores `abort` for a run that was never started.
-	if (opts.signal?.aborted) {
-		tab.pending.delete(id);
-		throw new ToolAbortError();
-	}
+	if (opts.signal?.aborted) throw new ToolAbortError();
 	const current = tabs.get(name);
 	if (current !== tab || current.state === "dead") {
 		// A teardown won the race with our unfreeze roundtrip. Prefer its
@@ -1301,14 +1329,12 @@ async function runInTabWithSnapshot(
 		// synchronously, so it is already settled here); otherwise surface
 		// the closure. `race` — not a bare `await promise` — so a teardown
 		// that never settled the run cannot hang us.
-		tab.pending.delete(id);
 		const notAlive = new ToolError(notAliveMessage(name));
 		return await Promise.race([promise, Promise.reject(notAlive)]);
 	}
 	// A worker that exited during the resume already failed this run (its exit handler rejected it) and is being
 	// replaced; dispatching now would run the code on the replacement after the caller was told it failed.
 	if (tab.backend === "worker" && (tab.worker !== dispatchWorker || tab.workerRecovery)) {
-		tab.pending.delete(id);
 		const replaced = new ToolError(
 			`Tab ${JSON.stringify(name)}'s worker was replaced while the tab was being resumed; retry the call.`,
 		);
@@ -1331,10 +1357,9 @@ async function runInTabWithSnapshot(
 				signal: runSignal,
 				session: pending.session,
 				snapshot,
-			}).then(resolve, reject);
-			return await promise;
+			}).then(pending.resolve, pending.reject);
+			return await boundInProcessRun(promise, closeAc, name, opts.timeoutMs, opts.signal);
 		} finally {
-			tab.pending.delete(id);
 			// Completion is use too: a run outlasting the idle timeout must
 			// not look stale to the sweep right after it finishes.
 			tab.lastActivityAt = Date.now();
@@ -1529,7 +1554,6 @@ async function runInTabWithSnapshot(
 	} finally {
 		clearTimeout(abortTimer);
 		opts.signal?.removeEventListener("abort", abort);
-		tab.pending.delete(id);
 		// Completion is use too: a run outlasting the idle timeout must
 		// not look stale to the sweep right after it finishes.
 		tab.lastActivityAt = Date.now();
@@ -2835,6 +2859,45 @@ function logWorkerMessage(msg: Extract<WorkerOutbound, { type: "log" }>): void {
 	if (msg.level === "debug") logger.debug(msg.msg, msg.meta);
 	else if (msg.level === "warn") logger.warn(msg.msg, msg.meta);
 	else logger.error(msg.msg, msg.meta);
+}
+
+/**
+ * Await in-process run `promise` on the supervisor's own timers. `runInProcessTab` ends at its budget and on abort;
+ * should it not (a backend call that never settles and ignores the abort), the call still ends `GRACE_MS` past its
+ * budget or its abort, and `cancel` stops the run, so a run that never settles cannot hold the tab busy.
+ */
+async function boundInProcessRun(
+	promise: Promise<RunResultOk>,
+	cancel: AbortController,
+	name: string,
+	timeoutMs: number,
+	signal: AbortSignal | undefined,
+): Promise<RunResultOk> {
+	// Plain timers, as in `raceWithTimeout`: `AbortSignal.timeout` may not fire beside a promise that never settles.
+	const { promise: expired, reject } = Promise.withResolvers<never>();
+	const expire = (error: Error): void => {
+		cancel.abort(error);
+		reject(error);
+	};
+	let timer = setTimeout(() => {
+		expire(
+			new ToolError(
+				`Browser code execution did not stop at its ${timeoutMs}ms budget, so omp ended the call; tab ${JSON.stringify(name)} takes new calls, but what the call started in the page may still be running.${longerBudgetHint(timeoutMs)}`,
+			),
+		);
+	}, timeoutMs + GRACE_MS);
+	const onAbort = (): void => {
+		clearTimeout(timer);
+		timer = setTimeout(() => expire(new ToolAbortError()), GRACE_MS);
+	};
+	if (signal?.aborted) onAbort();
+	else signal?.addEventListener("abort", onAbort, { once: true });
+	try {
+		return await Promise.race([promise, expired]);
+	} finally {
+		clearTimeout(timer);
+		signal?.removeEventListener("abort", onAbort);
+	}
 }
 
 async function raceWithTimeout<T>(

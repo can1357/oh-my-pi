@@ -188,6 +188,8 @@ await win.click(120, 48, button="right")
   NEVER call them to make input work; launching, reopening and window input work in the background.
 - macOS background routes cover left-button drags and `holdMouse` that start on a slider, scroll bar, splitter or stepper,
   middle-button drags, modified clicks, right-clicks and scrolls.
+  - A background `win.move` gives the app no hover, and a takeover move's hover ends before it returns. On a web page a plain click
+    often reaches a control shown only on hover; otherwise click it with `{ takeover: true }`.
   - A plain left drag across the text of one native text element (TextEdit, other AppKit text views and fields)
     becomes an AX selection with no mouse input: `drag` returns `{start, length, text}`,
     or throws `AxFailed`/`AxUnconfirmed` as `selectText` does (check the selection before retrying).

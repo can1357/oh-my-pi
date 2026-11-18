@@ -126,6 +126,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
    - **Primary**: `modelRoles.web`. If it is set, its first selector pattern that matches an available model becomes the first candidate and is explicit. If it is unset, the role resolves through the built-in `web` priority list.
    - **Fallbacks**: `retry.fallbackChains.web`. If it is set (even as an empty list), exactly those selectors follow the primary and are explicit. If it is unset, every entry of the built-in `web` priority list that matches an available model follows as a non-explicit candidate. Duplicate models are dropped, and a model listed by any explicit selector stays explicit.
    - **Explicit vs automatic**: explicit candidates use `isExplicitlyAvailable()`, so Perplexity and Public Web can run their unauthenticated paths when you select them. Parallel, Exa, and Firecrawl run their keyless paths in either mode. Automatic candidates use `isAvailable()` and are skipped when their credentials are missing.
+   - **Keyless services** (`providers.webKeyless`, default `true`): with it off, `executeSearch()` skips every candidate whose `isKeyless()` reports that the search would reach a third party without a credential or endpoint you configured: Parallel, Exa, and Keenable without a key, Firecrawl without a key or self-hosted endpoint, Perplexity without direct auth, and the scraped engines (Startpage, DuckDuckGo, Ecosia, Google, Mojeek, Hacker News, Public Web). This applies to configured `modelRoles.web` / `retry.fallbackChains.web` entries too, including migrated chains; only a per-request selector (`omp q --model web/duckduckgo`) still runs a keyless engine. Hosted search, SearXNG, and credentialed engines are unaffected. When every candidate was skipped this way the tool returns `Error: No configured web search service is available, and providers.webKeyless is off. …`.
    - **Per-request selector**: `SearchQueryParams.model` (`omp q --model web/duckduckgo "…"`) replaces the whole chain with that single explicit candidate.
    - **xAI credential order**: xAI-grounded candidates are reordered among their own slots by provider priority, so an `xai-oauth` login runs before an `xai` API key wherever both appear (unless `modelProviderOrder` says otherwise); other candidates keep their positions.
    - **X-only queries**: without a per-request selector, a query whose `site:` values are all X hosts or that names `from:<handle>` authors moves the chain's xAI-grounded candidates to the front; a chain without one gets `xaiModelChain()`'s default xAI model prepended as an automatic candidate. Only xAI's `x_search` reaches X posts. The rest of the chain still follows. The tool description names these X operators only when an xAI-grounded model has credentials (`xSearchAvailable()`). That check runs once per process, at the first description read with a model registry, so the description and prompt cache stay stable; an xAI login or logout takes effect in the description after a restart (routing itself follows credentials live).
@@ -194,7 +195,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - `limit` and `num_search_results` are collapsed together before dispatch.
       - Output may include parsed free-text `answer`, `sources`, `requestId`.
    - **Exa** — `packages/coding-agent/src/web/search/providers/exa.ts`
-      - Availability: available unless `exa.enabled=false`. `EXA_API_KEY` or a stored credential for `exa` selects the API; otherwise search uses the public MCP.
+      - Availability: available unless `exa.enabled=false`. `EXA_API_KEY` or a stored credential for `exa` selects the API; otherwise search uses the public MCP, which counts as keyless. A configured credential that fails to resolve errors instead of downgrading to the MCP.
       - Querying: POST `https://api.exa.ai/search` with the resolved Exa API key, otherwise JSON-RPC `tools/call` against `https://mcp.exa.ai/mcp` for remote MCP tool `web_search_exa`.
       - `limit` and `num_search_results` are collapsed together before dispatch.
       - Output: synthesized `answer` from up to 3 result summaries, `sources`, `requestId`.
@@ -230,7 +231,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - `num_search_results ?? limit` is clamped to `1..20`, default `5`.
       - Output: `answer`, `sources`, `requestId`, `authMode: "api_key"`.
    - **Firecrawl** — `packages/coding-agent/src/web/search/providers/firecrawl.ts`
-      - Availability: always available; uses keyless mode when no credential or self-hosted endpoint resolves.
+      - Availability: always available; uses keyless mode when no credential or self-hosted endpoint is configured. A configured credential that fails to resolve against the hosted API errors instead of downgrading to keyless mode.
       - Querying: POST `https://api.firecrawl.dev/v2/search` with `sources: [{ type: "web" }]`. The endpoint is built by the shared resolver in `packages/coding-agent/src/web/firecrawl.ts`, which applies the `FIRECRAWL_BASE_URL` (alias `FIRECRAWL_API_URL`) self-hosting override. Google-style operators are formatted into the query; `recency` and parsed absolute dates map to `tbs`.
       - `limit` / `num_search_results`: collapsed and clamped to `1..100`, default `10`; output `sources`, `requestId`, and `authMode: "api_key" | "keyless"`.
       - The shared client also exposes `/scrape` as a `providers.fetch` reader backend, requiring a Firecrawl credential. API reference: [docs.firecrawl.dev](https://docs.firecrawl.dev).
@@ -250,8 +251,8 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - `limit` / `num_search_results`: `params.numSearchResults ?? params.limit`, clamped to `1..20`, default `10`.
       - Output: `sources`, `requestId`.
    - **Parallel** — `packages/coding-agent/src/web/search/providers/parallel.ts`, `packages/coding-agent/src/web/parallel.ts`
-      - Availability: always available and first in the automatic chain, using authenticated search when configured and the credential-free MCP otherwise.
-      - Querying: authenticated requests POST `https://api.parallel.ai/v1beta/search` with `objective`, one search query, `mode:"fast"`, `excerpts.max_chars_per_result:10000`, and beta header `search-extract-2025-10-10`. Domain filters and `after:`/recency map to `source_policy`; explicit `after:` wins. Keyless requests call `web_search` at `https://search.parallel.ai/mcp`, retaining query operators and a recency-derived date hint. They include session id and the selected search candidate's model id when at most 100 characters, and identify the client as `omp/<version>`.
+      - Availability: always available and first in the automatic chain, using authenticated search when configured and the credential-free MCP otherwise. A configured credential that fails to resolve errors instead of downgrading to the MCP.
+      - Querying: authenticated requests POST `https://api.parallel.ai/v1beta/search` with `objective`, one search query, `mode:"fast"`, `excerpts.max_chars_per_result:10000`, and beta header `search-extract-2025-10-10`. Domain filters and `after:`/recency map to `source_policy`; explicit `after:` wins. Keyless requests call `web_search` at `https://search.parallel.ai/mcp` with only `objective` and `search_queries`, retaining query operators and a recency-derived date hint; no session or model identifiers are sent. The client identifies as `omp/<version>`.
       - There is no provider fan-out here despite the name; the current adapter always sends a one-element `search_queries` array.
       - `limit` and `num_search_results` are collapsed together before dispatch, clamped to `1..40`, default `10`.
       - Output: `sources`, `requestId`.
@@ -340,7 +341,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 
 ## Errors
 
-- Tool-level no-candidate case returns a normal tool result with `Error: No web search model configured.` (or `No web search model matches selector "<model>".`); it does not throw.
+- Tool-level no-candidate case returns a normal tool result with `Error: No web search model configured.` (or `No web search model matches selector "<model>".`, or the `providers.webKeyless` message when that setting skipped every candidate); it does not throw.
 - Tool-level all-failed case also returns a normal tool result with `Error: ...`; the message is either the single normalized provider error or a semicolon-separated summary of all failed providers.
 - Provider adapters usually throw `SearchProviderError(provider, message, status)` for HTTP or protocol failures.
 - Availability is provider-specific: most credentialed adapters inspect AuthStorage, while keyless engines and explicitly selected Perplexity/Public Web have separate admission rules.

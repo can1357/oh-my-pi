@@ -25,6 +25,7 @@ use image::RgbaImage;
 #[cfg(test)]
 pub(super) use input::entry_front_pinned;
 pub(super) use input::pin_entry_front;
+pub(super) use key_reroute::rerouted_to;
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
 pub(super) use process::started as process_started;
 pub(super) use roster::window_roster;

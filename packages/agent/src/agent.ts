@@ -40,7 +40,7 @@ import {
 } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
 import { agentPauseGate } from "./pause";
-import { isProviderRefusalMessage } from "./replay-policy";
+import { filterProviderReplayMessages } from "./replay-policy";
 import { SentToolDefinitions } from "./sent-tool-definitions";
 import { Tokenizer } from "./tokenizer";
 import {
@@ -75,10 +75,12 @@ import { isSoftToolRequirement } from "./types";
  * Default convertToLlm: Keep only LLM-compatible replay messages.
  */
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
-	return messages.filter((m): m is Message => {
-		if (m.role === "assistant") return !isProviderRefusalMessage(m);
-		return m.role === "user" || m.role === "developer" || m.role === "toolResult";
-	});
+	return filterProviderReplayMessages(
+		messages.filter(
+			(m): m is Message =>
+				m.role === "assistant" || m.role === "user" || m.role === "developer" || m.role === "toolResult",
+		),
+	);
 }
 
 function refreshToolChoiceForActiveTools(

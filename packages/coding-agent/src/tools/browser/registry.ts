@@ -247,7 +247,12 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		return { key: browserKey(kind), kind, tern, refCount: 0 };
 	}
 	if (kind.kind === "webkit") {
-		return { key: browserKey(kind), kind, webkit: await WebKitHost.launch(kind.path, kind.viewer), refCount: 0 };
+		return {
+			key: browserKey(kind),
+			kind,
+			webkit: await WebKitHost.launch(kind.path, kind.viewer, opts.signal),
+			refCount: 0,
+		};
 	}
 	if (kind.kind === "headless") {
 		// Every real omp process (session, subagent, worker — anything with a CLI
@@ -468,7 +473,9 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 			}
 			return;
 		}
-		if (handle.browser.connected) await closeLaunchedBrowser(handle.browser);
+		if (handle.browser.connected) {
+			await closeLaunchedBrowser({ browser: handle.browser, userDataDir: handle.userDataDir });
+		}
 		// OMP owns the profile directory (puppeteer's temp cleanup is disabled by
 		// our explicit --user-data-dir), so remove it now the process tree has
 		// exited. Tolerant of the Windows lock-held window (issue #7058).

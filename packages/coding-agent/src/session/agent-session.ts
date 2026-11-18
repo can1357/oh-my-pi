@@ -116,9 +116,16 @@ import {
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 import { frameDataBytesBudget, readerIncludesThinking } from "@oh-my-pi/snapcompact";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
+import { ASYNC_NOTIFY_MESSAGE_TYPE } from "@oh-my-pi/pi-tui/chat/messages";
 import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { loadAdvisorTranscriptCosts } from "../advisor";
-import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager, type AsyncJobManagerApi } from "../async";
+import {
+	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
+	type AsyncJob,
+	AsyncJobManager,
+	type AsyncJobManagerApi,
+	type NotifyBatch,
+} from "../async";
 import { planParallel } from "../auto-parallel/planner";
 import { classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { reset as resetCapabilities } from "../capability";
@@ -350,6 +357,7 @@ import {
 	type AsyncResultEntry,
 	buildAsyncResultBatchMessage,
 } from "./async-job-delivery";
+import { type AsyncNotifyEntry, type AsyncNotifySource, buildAsyncNotifyBatchMessage } from "./async-notify";
 import { type BashExecuteOptions, BashRunner, type BashRunnerHost } from "./bash-runner";
 import {
 	checkpointStartedAtFromEntry,
@@ -2612,6 +2620,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				);
 			},
 		});
+		// Registered ahead of `launch-completion` and `async-result`: kinds drain in
+		// registration order, so a service's last matches read before its exit notice,
+		// and a job's before its result, when both inject at one boundary.
+		// A service belongs to a session id, as its completion does: its matches
+		// are dropped while another session holds the transcript.
+		this.yieldQueue.register<AsyncNotifyEntry>(ASYNC_NOTIFY_MESSAGE_TYPE, {
+			isStale: entry =>
+				this.#isDisposed ||
+				(entry.owner !== undefined && !isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId())),
+			build: buildAsyncNotifyBatchMessage,
+		});
 		this.yieldQueue.register<LaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {
 			isStale: entry =>
 				this.#isDisposed || !isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
@@ -2622,13 +2641,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// injection boundary; all but broadcasts and progress notes also expose a
 		// non-consuming interrupt peek so `wait` can return early before the boundary drains them.
 		this.agent.hasIrcInterrupts = () => this.#irc.hasInterrupts();
-		// Completion notices (finished background jobs, exited supervised
-		// processes) queue here for the same boundary; peeking them lets a
-		// `wait` return early rather than miss a queued completion. Entries
-		// consumed elsewhere since they queued (an eval cell awaiting the job)
-		// are dropped by the drain, so they must not cut a wait short.
+		// Background notices (finished background jobs, exited supervised
+		// processes, output a running job was asked to report) queue here for
+		// the same boundary; peeking them lets a `wait` return early rather than
+		// miss a queued notice. Entries consumed elsewhere since they queued (an
+		// eval cell awaiting the job) are dropped by the drain, so they must not
+		// cut a wait short.
 		this.agent.hasBackgroundCompletions = () =>
 			this.yieldQueue.hasDeliverable(LAUNCH_COMPLETION_MESSAGE_TYPE) ||
+			this.yieldQueue.hasDeliverable(ASYNC_NOTIFY_MESSAGE_TYPE) ||
 			this.yieldQueue.hasDeliverable(ASYNC_RESULT_MESSAGE_TYPE);
 		// Passive asides (`deliverAs: "aside"`) also end an interruptible `wait`
 		// instead of sitting behind it. Deferred wakes are not peeked: no
@@ -3694,11 +3715,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const manager = this.#asyncJobManager;
 		manager?.cancelAll({ ownerId: this.#agentId }, reason);
 		manager?.evictCompletedJobs({ ownerId: this.#agentId });
-		// Invalidate this owner's in-flight/drained deliveries against the new
-		// generation, then drop any async-result follow-up already queued, so a
-		// prior session's background result cannot inject into the next transcript.
+		// Invalidate this owner's in-flight/drained deliveries and open notify
+		// channels against the new generation, then drop any follow-up already
+		// queued, so a prior session's background job cannot inject into the next
+		// transcript.
 		this.#asyncDeliveryEpoch += 1;
 		this.yieldQueue.clear("async-result");
+		this.yieldQueue.clear(ASYNC_NOTIFY_MESSAGE_TYPE);
 	}
 
 	/**
@@ -3753,6 +3776,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// counting them would hold the run open against the very driver that parked them.
 		const queued =
 			this.yieldQueue.hasDeliverable(ASYNC_RESULT_MESSAGE_TYPE) ||
+			this.yieldQueue.hasDeliverable(ASYNC_NOTIFY_MESSAGE_TYPE) ||
 			this.yieldQueue.hasDeliverable(LAUNCH_COMPLETION_MESSAGE_TYPE) ||
 			this.#irc.hasWakeable() ||
 			this.#ircWakesAwaitingCompaction > 0;
@@ -10799,6 +10823,33 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	queueDeferredMessage(message: CustomMessage): void {
 		this.#queueHiddenNextTurnMessage(message, true);
+	}
+
+	/**
+	 * Opens the channel for the `notify` matches of a background job this session
+	 * started. Each batch sent through it queues as an `async-notify` notice and
+	 * is delivered like the job's result: it starts a turn when the session is
+	 * idle, injects between requests otherwise, and ends a blocked `wait`. The
+	 * channel belongs to the transcript the job started in: once a session
+	 * transition replaces it, or the session is disposed, batches are dropped.
+	 */
+	openAsyncNotify(job: AsyncNotifySource): (batch: NotifyBatch) => void {
+		const epoch = this.#asyncDeliveryEpoch;
+		return batch => {
+			if (this.#isDisposed || epoch !== this.#asyncDeliveryEpoch) return;
+			this.yieldQueue.enqueue<AsyncNotifyEntry>(ASYNC_NOTIFY_MESSAGE_TYPE, { ...job, ...batch });
+		};
+	}
+
+	/**
+	 * Queues one batch of `notify` matches from a supervised service, delivered
+	 * like {@link openAsyncNotify}'s. A service outlives transcripts, so the
+	 * batch names the session id that owns it (`entry.owner`) and is dropped
+	 * unless that session holds the transcript when the notice is built.
+	 */
+	queueServiceNotify(entry: AsyncNotifyEntry): void {
+		if (this.#isDisposed) return;
+		this.yieldQueue.enqueue<AsyncNotifyEntry>(ASYNC_NOTIFY_MESSAGE_TYPE, entry);
 	}
 
 	queueLaunchCompletion(notification: DaemonCompletionNotification): Promise<void> {
