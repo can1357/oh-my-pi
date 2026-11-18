@@ -1,8 +1,9 @@
 # Topic branches carried in every build, merged in this order onto the mirror branch.
 # Each is cut from the mirror, so each is also a clean upstream pull request.
-feat/resume-by-title-01a1da62-source-88c8dc4
-feat/goal-park-guard-eb29a2c7-source-88c8dc4
+chore/fork-upstream-compat-tip
+feat/resume-by-title-tip
+feat/goal-park-guard-2cdc756
 feat/extension-ctx-restart-source-88c8dc4
 fix/skip-underscore-extension-files
-fix/eval-names-top-level-only-rebased
+fix/eval-names-top-level-only-tip
 fix/force-cli-verify
