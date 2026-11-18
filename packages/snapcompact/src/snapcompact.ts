@@ -48,7 +48,7 @@
  *
  * The whole pass is local and deterministic — no LLM call, no API key, no
  * latency beyond rendering. Rasterization and PNG encoding happen in native
- * code (`renderSnapcompactPng` in `crates/pi-natives/src/snapcompact.rs`).
+ * code (`renderSnapcompactPng` in `crates/natives/src/snapcompact.rs`).
  * Frames persist in the compaction entry's `preserveData` and are
  * re-attached to the compaction summary message on every context rebuild.
  */
@@ -1509,7 +1509,7 @@ const DOC_GUTTER = 3;
 
 /** East Asian Wide / Fullwidth code points that occupy two grid cells when a
  *  narrow bitmap shape draws them through the Silver fallback. Mirrors
- *  `is_wide` in `crates/pi-natives/src/snapcompact.rs`; the two MUST stay in
+ *  `is_wide` in `crates/natives/src/snapcompact.rs`; the two MUST stay in
  *  sync or native layout and this capacity math disagree on cell counts. */
 function isWideCodePoint(cp: number): boolean {
 	return (

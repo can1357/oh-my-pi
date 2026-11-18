@@ -1,6 +1,6 @@
 """Rules for producing release-grade, canonically named pi_natives addons.
 
-`native_addon` transitions //crates/pi-natives:pi_natives onto a shipping
+`native_addon` transitions //crates/natives:pi_natives onto a shipping
 platform with the release codegen profile (opt, thin LTO, cgu=16, stripped —
 mirrors the cargo `ci` profile) and renames the produced shared library to the
 loader's canonical `pi_natives.<platform>-<arch>[-<variant>].node` filename.
@@ -79,7 +79,7 @@ native_addon = rule(
         "lib": attr.label(
             cfg = _addon_transition,
             mandatory = True,
-            doc = "The rust_shared_library target (//crates/pi-natives:pi_natives).",
+            doc = "The rust_shared_library target (//crates/natives:pi_natives).",
         ),
         "platform": attr.label(
             mandatory = True,

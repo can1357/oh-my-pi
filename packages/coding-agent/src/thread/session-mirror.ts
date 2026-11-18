@@ -54,7 +54,7 @@ import type {
 import type { IdleMaintenanceOptions } from "../session/idle-maintenance";
 import type { CustomMessage } from "../session/messages";
 import type { ServingModel } from "../session/retry-fallback-chains";
-import type { ModelUsageEntry, SessionEntry, UsageStatistics } from "../session/session-entries";
+import type { ModelUsageRecord, SessionEntry, UsageStatistics } from "../session/session-entries";
 import type { AgentDefinition } from "../task/types";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { RemoteObject, RpcMethod } from "./rpc";
@@ -64,6 +64,7 @@ export interface SessionMirrorState {
 	isStreaming: boolean;
 	runStartedAt: number | undefined;
 	ircWakesPending: boolean;
+	hasPendingWake: boolean;
 	/** Senders with a message still queued for a turn of its own (backs `hasQueuedIrcFrom`). */
 	ircQueuedFrom: string[];
 	isPaused: boolean;
@@ -144,7 +145,6 @@ export interface SessionViewState {
 	/** Provider-facing session id (`AgentSession.sessionId`). */
 	providerSessionId: string;
 	sessionName: string | undefined;
-	seanceSourceArtifactsDir: string | null;
 	leafId: string | null;
 	/** Effort applied to the agent loop (`agent.state.thinkingLevel`). */
 	agentEffort: Effort | undefined;
@@ -167,7 +167,6 @@ export interface SessionViewState {
 	compactionSpeculation: "idle" | "running" | "armed";
 	contextUsageRevision: number;
 	contextUsage: ContextUsage | undefined;
-	isGeneratingHandoff: boolean;
 	isRetrying: boolean;
 	retryAttempt: number;
 	isTtsrAbortPending: boolean;
@@ -246,25 +245,14 @@ export type SessionHostProtocol = {
 	popQueuedMessage: RpcMethod<[id: string], void>;
 	setTodoPhases: RpcMethod<[phases: TodoPhase[]], void>;
 	appendCustomEntry: RpcMethod<[customType: string, data: unknown], void>;
-	appendModelUsage: RpcMethod<
-		[
-			usage: Pick<
-				ModelUsageEntry,
-				"purpose" | "role" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage"
-			>,
-			owner: { sessionId: string; parentId: string | null },
-		],
-		void
-	>;
+	appendModelUsage: RpcMethod<[usage: ModelUsageRecord, owner: { sessionId: string; parentId: string | null }], void>;
 	flushSession: RpcMethod<[], void>;
 	ensureOnDisk: RpcMethod<[], void>;
 	getArtifactPath: RpcMethod<[id: string], string | null>;
-	getArtifactContent: RpcMethod<[id: string], string | null>;
 	resume: RpcMethod<[], void>;
 	retry: RpcMethod<[], boolean>;
 	abortRetry: RpcMethod<[], void>;
 	abortCompaction: RpcMethod<[reason?: unknown], void>;
-	abortHandoff: RpcMethod<[], void>;
 	setModelTemporary: RpcMethod<
 		[model: Model, thinkingLevel?: ConfiguredThinkingLevel, options?: { ephemeral?: boolean }],
 		void
@@ -334,6 +322,7 @@ export const SESSION_STATE_READERS: {
 	isStreaming: session => session.isStreaming,
 	runStartedAt: session => session.runStartedAt,
 	ircWakesPending: session => session.ircWakesPending,
+	hasPendingWake: session => session.hasPendingWake,
 	isPaused: session => session.agent.isPaused,
 	streamMessage: session => toWireData(session.agent.state.streamMessage),
 	pendingToolCalls: session => [...session.agent.state.pendingToolCalls],

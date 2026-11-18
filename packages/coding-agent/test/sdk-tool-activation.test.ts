@@ -1778,7 +1778,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(keptWithinRun.content).toEqual([{ type: "text", text: "Result submitted." }]);
 
 			resetYieldTurnState(yieldTool);
-			await expect(yieldTool.execute("run2-empty", { type: "result" })).rejects.toThrow(/no text \(thinking only\)/);
+			await expect(yieldTool.execute("run2-empty", { type: "result" })).rejects.toThrow(/none were submitted/);
 		} finally {
 			await session.dispose();
 		}

@@ -520,11 +520,9 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
 	const model: Model<TApi> = {
 		...spec,
-		// A reviewed `thinking-upgrade-neutral` policy can repair a stale
-		// `reasoning: false` discovery default, and an unclassified neutral spec
-		// gets an unverified ladder (see `resolveThinkingPolicy`); materialize
-		// either for transports and the picker.
-		reasoning: spec.reasoning || policy.thinking !== undefined,
+		// Missing evidence may produce a provisional ladder; reviewed neutral
+		// upgrades may repair stale capability data.
+		reasoning: spec.reasoning === true || policy.thinking !== undefined,
 		name: cleanModelName(spec.name),
 		identity: policy.identity,
 		requiresGlyphTokenization: policy.identity.class === "anthropic",

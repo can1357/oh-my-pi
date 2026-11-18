@@ -18,10 +18,14 @@ export * from "./loader";
 export * from "./manager";
 // OAuth Discovery
 export * from "./oauth-discovery";
+// Reconnect
+export * from "./reload";
 // Tool bridge
 export * from "./tool-bridge";
 // Tool cache
 export * from "./tool-cache";
+// Built-in transforms
+export * from "./transforms";
 // Transports
 export * from "./transports/http";
 export * from "./transports/stdio";
@@ -32,6 +36,8 @@ export type {
 	MCPToolDetails,
 	MCPTextContent,
 	MCPImageContent,
+	MCPAudioContent,
 	MCPResourceContent,
+	MCPResourceLinkContent,
 	MCPContent,
 } from "@oh-my-pi/pi-tui/tools/mcp";

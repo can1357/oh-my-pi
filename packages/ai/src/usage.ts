@@ -149,8 +149,18 @@ export interface UsageReport {
 	 * requests: N") stay on {@link UsageLimit.notes}.
 	 */
 	notes?: string[];
+	/**
+	 * Provider-specific attributes. `subscriptionPlan` names the account's paid
+	 * plan (e.g. "Max 20x"); read it with {@link usageSubscriptionPlan}.
+	 */
 	metadata?: Record<string, unknown>;
 	raw?: unknown;
+}
+
+/** Subscription plan label a report carries in `metadata.subscriptionPlan`, when the provider resolved one. */
+export function usageSubscriptionPlan(report: Pick<UsageReport, "metadata"> | null | undefined): string | undefined {
+	const plan = report?.metadata?.subscriptionPlan;
+	return typeof plan === "string" && plan.trim() ? plan.trim() : undefined;
 }
 
 /**
@@ -391,6 +401,8 @@ export interface UsageCredential {
 	activeOrganizationId?: string;
 	metadata?: Record<string, unknown>;
 	apiEndpoint?: string;
+	/** Kiro profile ARN the login routes by (see OAuthCredentials.kiroProfileArn). */
+	kiroProfileArn?: string;
 }
 
 /** Parameters provided to a usage fetcher. */

@@ -83,7 +83,7 @@ export function chatTextBackend(model: Model<Api>, options: ChatTextBackendOptio
 							onAttempt: options.onAttempt,
 						},
 					),
-				{ signal: judge.signal, provider: model.provider },
+				{ signal: judge.signal, provider: model.provider, baseUrl: model.baseUrl },
 			);
 			if (response.stopReason === "aborted" || judge.signal?.aborted) {
 				throw judge.signal?.reason instanceof Error

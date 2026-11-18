@@ -50,6 +50,7 @@ const COMMON_EXPORT_PALETTE = {
 	"--thinkingXhigh": "var(--warn)",
 	"--bashMode": "#168b9a",
 	"--pythonMode": "var(--warn)",
+	"--btwMode": "var(--accent)",
 	"--statusLineBg": "var(--bg)",
 	"--statusLineSep": "var(--fg-faint)",
 	"--statusLineModel": "var(--accent)",

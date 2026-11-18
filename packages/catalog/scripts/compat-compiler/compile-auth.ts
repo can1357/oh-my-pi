@@ -329,7 +329,16 @@ function validation(node: KdlNodeView): CompiledAuthValidation {
 			leaf(node, ["base-url", "model", "label", "optional", "trust-forbidden"]);
 			return { kind, ...common, baseUrl: requiredProp(node, "base-url"), model: requiredProp(node, "model") };
 		case "models-endpoint": {
-			leaf(node, ["url", "base-url-env", "base-url-path", "headers-hook", "label", "optional", "trust-forbidden"]);
+			leaf(node, [
+				"url",
+				"base-url-env",
+				"base-url-path",
+				"base-url-append",
+				"headers-hook",
+				"label",
+				"optional",
+				"trust-forbidden",
+			]);
 			const result: CompiledAuthValidation = { kind, ...common, url: requiredProp(node, "url") };
 			const baseUrlEnv = propString(node, "base-url-env");
 			if (baseUrlEnv !== undefined) result.baseUrlEnv = baseUrlEnv;
@@ -337,6 +346,11 @@ function validation(node: KdlNodeView): CompiledAuthValidation {
 			if (baseUrlPath !== undefined) {
 				if (baseUrlEnv === undefined || !baseUrlPath.startsWith("/")) malformed(node);
 				result.baseUrlPath = baseUrlPath;
+			}
+			const baseUrlAppend = propString(node, "base-url-append");
+			if (baseUrlAppend !== undefined) {
+				if (baseUrlEnv === undefined || !baseUrlAppend.startsWith("/")) malformed(node);
+				result.baseUrlAppend = baseUrlAppend;
 			}
 			if (propString(node, "headers-hook") !== undefined) result.headersHook = hookName(node, "headers-hook");
 			return result;

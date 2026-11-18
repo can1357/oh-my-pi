@@ -213,6 +213,7 @@ describe("pause screen", () => {
 			status: "running",
 			session: {
 				isStreaming: true,
+				runStartedAt: 1,
 				agent: subagentAgent,
 				getAdvisorStatusOverview: noAdvisors,
 			} as unknown as AgentSession,
@@ -300,6 +301,7 @@ describe("pause screen", () => {
 			status: "running",
 			session: {
 				isStreaming: true,
+				runStartedAt: 1,
 				agent: { isPaused: true },
 				getAdvisorStatusOverview: () => ({ configured: true, advisors: [childAdvisor] }),
 			} as unknown as AgentSession,

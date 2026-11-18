@@ -16,7 +16,6 @@ describe("yield subprocess extraction", () => {
 					status: "success",
 					data: { ok: true },
 					type: ["notes"],
-					useLastTurn: true,
 				},
 			},
 			isError: false,
@@ -26,7 +25,6 @@ describe("yield subprocess extraction", () => {
 			data: { ok: true },
 			error: undefined,
 			type: ["notes"],
-			useLastTurn: true,
 		});
 	});
 
@@ -62,7 +60,7 @@ describe("yield subprocess extraction", () => {
 				toolCallId: "call-terminal-string",
 				result: {
 					content: [{ type: "text", text: "Result submitted." }],
-					details: { status: "success", type: "summary", useLastTurn: true },
+					details: { status: "success", type: "summary" },
 				},
 				isError: false,
 			}),

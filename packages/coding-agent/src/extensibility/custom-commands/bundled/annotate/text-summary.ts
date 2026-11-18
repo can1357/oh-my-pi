@@ -1,6 +1,7 @@
 import { completeSimple } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { CustomCommandContext } from "../../../../extensibility/custom-commands/types";
+import { journalCompletion } from "../../../../session/model-usage-journal";
 import summaryPrompt from "./prompts/text-summary.md" with { type: "text" };
 import { normalizeTextReviewContextSummary } from "./text-review";
 
@@ -17,6 +18,8 @@ export async function generateTextReviewContextSummary(
 
 	const timeout = AbortSignal.timeout(60_000);
 	const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+	// The command context types its manager read-only; the session manager behind it journals, any other is skipped.
+	const journal = journalCompletion(ctx.sessionManager, { purpose: "annotate-summary" });
 	const message = await completeSimple(
 		model,
 		{
@@ -30,6 +33,7 @@ export async function generateTextReviewContextSummary(
 			signal: requestSignal,
 		},
 	);
+	journal?.(message, sourceText);
 	if (message.stopReason === "error" || message.stopReason === "aborted") return undefined;
 	const completion = message.content
 		.filter((part): part is Extract<(typeof message.content)[number], { type: "text" }> => part.type === "text")

@@ -22,6 +22,7 @@ import * as AIError from "../error";
 import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
+	AssistantMessagePhase,
 	ComputerAction,
 	ComputerSafetyCheck,
 	ComputerScreenshotRef,
@@ -49,7 +50,12 @@ import {
 	type OpenAIResponsesTool,
 	openaiResponsesRequestSchema,
 } from "./openai-responses-server-schema";
-import { coerceNullMessageContentInPlace, encodeTextSignatureV1, parseTextSignature } from "./openai-shared";
+import {
+	coerceNullMessageContentInPlace,
+	encodeTextSignatureV1,
+	parseAssistantMessagePhase,
+	parseTextSignature,
+} from "./openai-shared";
 
 export type { ParsedRequest };
 
@@ -97,11 +103,11 @@ function asString(v: unknown): string | undefined {
 	return typeof v === "string" ? v : undefined;
 }
 
-type AssistantItemPhase = "commentary" | "final_answer";
+type AssistantItemPhase = AssistantMessagePhase;
 type MessageSignature = { id: string; phase?: AssistantItemPhase };
 
 function parseAssistantItemPhase(value: unknown): AssistantItemPhase | undefined {
-	return value === "commentary" || value === "final_answer" ? value : undefined;
+	return parseAssistantMessagePhase(value);
 }
 
 function messageTextSignature(id: unknown, phase: unknown): string | undefined {

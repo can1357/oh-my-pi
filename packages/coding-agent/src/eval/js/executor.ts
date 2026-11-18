@@ -8,7 +8,7 @@ import {
 import { isEvalTimeoutControlEvent, withBridgeTimeoutPause } from "../bridge-timeout";
 import { DisplayOutputCollector } from "../executor-base";
 import type { EvalDisplayOutput } from "../types";
-import { executeInVmContext } from "./context-manager";
+import { executeInVmContext, hasLiveVmContext } from "./context-manager";
 import { formatCellError } from "./error-text";
 import { installJsPackages } from "./package-installer";
 import type { JsPackageEnvironmentMode } from "./package-installer";
@@ -143,6 +143,14 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				: await installJsPackages(installOptions);
 		packageSignal?.throwIfAborted();
 		if (install.summary) outputSink.push(`${install.summary}\n`);
+		// Bun's resolver caches node_modules directory listings per process, so a retained
+		// worker cannot see packages added after it looked there: restart it to resolve them.
+		const restartForInstall = packages.length > 0 && !options.reset && hasLiveVmContext(options.sessionId);
+		if (restartForInstall) {
+			outputSink.push(
+				"The retained JS worker was restarted so the new packages resolve; earlier JS globals were cleared.\n",
+			);
+		}
 		packageWorkComplete = true;
 		// Start the legacy compute timer only after host-side package work. The
 		// eval tool's normal idle watchdog is already paused by the status
@@ -167,7 +175,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			localRoots: options.localRoots,
 			packageRoot: install.environment.packageRoot,
 			packageEnvironment: install.environment.description,
-			reset: options.reset,
+			reset: options.reset || restartForInstall,
 			code,
 			filename,
 			timeoutMs: runtimeTimeoutMs ?? options.idleTimeoutMs,

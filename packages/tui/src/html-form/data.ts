@@ -8,6 +8,7 @@
  * const data = defaultFormData(form);   // { db: "sqlite", notes: "" }
  * formAnswers(form, data);              // [{ name: "db", question: "Database", answer: "SQLite" }, …]
  */
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type ChoiceField, type FormBlock, type FormField, type HtmlForm, spansText, type TextField } from "./parse";
 
 /** Submitted value of one control: text, a number for `number`/`range` inputs, or a group's checked values. */
@@ -36,7 +37,13 @@ export interface OptionNote {
 	option: string;
 	/** The option's submitted value, as it appears in the form data. */
 	value: string;
+	/**
+	 * In a form-dialog result, `[Image #N, WxH]` markers are numbered 1..K in order of appearance within this
+	 * note; `images[N-1]` is marker N's image.
+	 */
 	text: string;
+	/** Pasted images of the note; present only when non-empty. */
+	images?: ImageContent[];
 }
 
 /** Label of the free-text answer the UI adds to radio and checkbox groups ({@link ChoiceField.other}). */
