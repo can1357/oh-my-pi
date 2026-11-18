@@ -106,6 +106,11 @@ export function stopPendingStartupComposer(): void {
 	pendingComposer = undefined;
 }
 
+/** True while a prepaint composer owns the terminal and InteractiveMode has not taken it yet. */
+export function hasPendingStartupComposer(): boolean {
+	return pendingComposer !== undefined;
+}
+
 /** Apply final settings to the pending Composer and cache them for the next first frame. */
 export function applyStartupComposerPreferences(update: PrepaintComposerPreferences): void {
 	const pending = pendingComposer;

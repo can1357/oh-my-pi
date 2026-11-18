@@ -27,6 +27,7 @@ import {
 } from "@oh-my-pi/pi-ai/auth-broker";
 import {
 	type AuthBrokerClientConfig,
+	type AuthBrokerStartupRetry,
 	type DiscoverAuthStorageOptions,
 	discoverAuthStorage as discoverAuthStorageShared,
 	getAuthBrokerTokenFilePath,
@@ -35,7 +36,7 @@ import {
 } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { setUnpausedProviders } from "@oh-my-pi/pi-ai/oauth";
-import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
+import { getAgentDir, isInteractiveHost, logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { combine, effectsSettings, type ScopeLike } from "../config/registry";
 import { resolveConfigValue } from "../config/resolve-config-value";
@@ -251,17 +252,34 @@ export function createAuthStorageSettingsSync(
  * pi-ai so the CLI, subagents, and the catalog generator all see the same
  * credentials.
  *
- * Default `agentDir` is the current configured agent directory.
+ * Default `agentDir` is the current configured agent directory. Outside the
+ * interactive host, a startup that waits on an unreachable broker says so once
+ * on stderr. In the interactive host the TUI may own the terminal, so only the
+ * caller can tell whether a line is safe: `main.ts` passes its own hook for
+ * startup discovery.
  */
 export function discoverAuthStorage(
 	agentDir: string = getAgentDir(),
 	options?: Omit<DiscoverAuthStorageOptions, "agentDir" | "configValueResolver">,
 ): Promise<AuthStorage> {
 	return discoverAuthStorageShared({
+		onBrokerRetry: isInteractiveHost() ? undefined : authBrokerWaitNotice(),
 		...options,
 		agentDir,
 		configValueResolver: resolveConfigValue,
 	});
+}
+
+/** Print the first retry of one startup to stderr; the retry is otherwise only in the log file. */
+export function authBrokerWaitNotice(): (retry: AuthBrokerStartupRetry) => void {
+	let shown = false;
+	return ({ url, error, budgetMs }) => {
+		if (shown) return;
+		shown = true;
+		process.stderr.write(
+			`Waiting for auth broker at ${url} (${error.message}); retrying for up to ${budgetMs / 1000}s...\n`,
+		);
+	};
 }
 
 /**

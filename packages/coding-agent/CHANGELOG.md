@@ -287,6 +287,9 @@
 ### Fixed
 
 - Stopping `omp auth-broker serve` with SIGTERM or Ctrl-C no longer exits before a login refresh in flight saves its rotated token, which left the store with a spent refresh token and disabled the login ([#19599](https://github.com/can1357/oh-my-pi/pull/19599) by [@will-bogusz](https://github.com/will-bogusz))
+### Added
+
+- Startup prints `Waiting for auth broker at <url> …` to stderr while it retries an unreachable auth broker, in CLI commands (`omp login`, `omp models`, `omp commit`, `omp usage`, …) and in interactive launches that start without the prepaint composer (`--model`, `--resume`, …) ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 

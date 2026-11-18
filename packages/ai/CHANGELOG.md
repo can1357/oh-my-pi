@@ -9,6 +9,11 @@
 ### Fixed
 
 - Fixed a Claude account staying blocked for Fable and Mythos after the shared weekly limit behind their 429 recovered, when `/usage` reported only that weekly window, so failover could not return to it ([#19600](https://github.com/can1357/oh-my-pi/pull/19600) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `onBrokerRetry` to `discoverAuthStorage` and `openAuthCredentialStore`, called after each failed initial-snapshot attempt startup retries, so hosts can show that startup is waiting on the broker ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Startup with an auth broker and no fresh snapshot cache no longer fails when the broker is restarting or briefly unreachable, including a connection dropped mid-response; it retries for up to 30 seconds, while a rejected token or a malformed snapshot still fails at once ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 
