@@ -91,6 +91,7 @@ import { isCompleteReadResult } from "../tools/read-supersede";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown } from "./agent-session-types";
+import type { CacheBridgeEstimate, CacheBridgeOutcome } from "./cache-warmer";
 import { findCompactMode } from "./compact-modes";
 import {
 	type CompactionMethod,
@@ -381,6 +382,34 @@ interface SpeculationRun {
 	promise: Promise<void>;
 	contextTokensAtStart: number;
 	armed?: ArmedSpeculation;
+	/**
+	 * Bridges a long tool call for the cache warmer: the armed result commits at the next mid-run boundary
+	 * whatever the threshold says.
+	 */
+	bridge: boolean;
+	/** A provider billed one of the run's requests, which therefore read the cached prefix. */
+	accepted: boolean;
+}
+
+/** Summary output a bridge compaction is priced at (measured remote summaries run ~3–5k tokens). */
+const BRIDGE_SUMMARY_TOKENS = 5_000;
+
+/**
+ * Index of the newest assistant message whose tool calls have not all been answered by a later tool result,
+ * or -1. A bridge compaction runs while that call is pending: summarizing the message would record the call
+ * as failed (the provider transform pairs it with a synthetic "No result provided"), and the request would no
+ * longer match the prefix the cache holds.
+ */
+function findPendingToolCall<T>(items: readonly T[], messageOf: (item: T) => AgentMessage | undefined): number {
+	const answered = new Set<string>();
+	for (let index = items.length - 1; index >= 0; index--) {
+		const message = messageOf(items[index]);
+		if (message?.role === "toolResult") answered.add(message.toolCallId);
+		else if (message?.role === "assistant") {
+			return message.content.some(block => block.type === "toolCall" && !answered.has(block.id)) ? index : -1;
+		}
+	}
+	return -1;
 }
 
 interface ReadyCompaction {
@@ -2392,7 +2421,8 @@ export class SessionMaintenance {
 		if (thresholdTokens - contextTokens > resolveSpeculationLeadTokens(thresholdTokens)) return;
 		const current = this.#speculation;
 		if (current) {
-			if (!current.armed) return; // one run at a time
+			// One run at a time; a bridge result waits for the boundary that commits it.
+			if (!current.armed || current.bridge) return;
 			// Refresh-on-growth: the armed summary's kept tail grows with every
 			// turn; once the growth exceeds the keep-recent budget, a fresh cut
 			// reclaims materially more context at apply time.
@@ -2415,13 +2445,15 @@ export class SessionMaintenance {
 	}
 
 	/** Install and launch one background speculation run for `method`. */
-	#startSpeculationRun(contextTokens: number, method: "remote" | "handoff" | "soft"): void {
+	#startSpeculationRun(contextTokens: number, method: "remote" | "handoff" | "soft", bridge = false): SpeculationRun {
 		const controller = new AbortController();
 		const run: SpeculationRun = {
 			method,
 			controller,
 			promise: Promise.resolve(),
 			contextTokensAtStart: contextTokens,
+			bridge,
+			accepted: false,
 		};
 		const model = this.#model;
 		// Keyed now: the session can switch before the run settles.
@@ -2448,6 +2480,70 @@ export class SessionMaintenance {
 				this.#failedNativeSpeculation = nativeKey;
 			}
 		});
+		return run;
+	}
+
+	/**
+	 * The method a bridge compaction would run: the first available configured method that speculation
+	 * can run in the background, minus `soft` (its summary request reads nothing from the prompt cache).
+	 * Undefined when that is a local method, when automatic, async, or mid-turn compaction is off, while
+	 * another compaction owns the session, and when `session_before_compact` handlers must keep exact
+	 * blocking semantics.
+	 */
+	#bridgeMethod(): "remote" | "handoff" | undefined {
+		if (this.#host.isDisposed() || this.#usesExperimentalContextManagement()) return undefined;
+		const settings = this.#compactionSettings;
+		if (!settings.enabled || settings.asyncEnabled === false || settings.midTurnEnabled === false) return undefined;
+		if (this.isCompacting || this.isBackgroundCompacting) return undefined;
+		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return undefined;
+		const model = this.#model;
+		if (!model) return undefined;
+		const methodOrder = resolveCompactionMethodOrder(settings.methodOrder).filter(method => method !== "soft");
+		const method = resolveSpeculationMethod(
+			model,
+			{ ...settings, methodOrder },
+			{ skipRemote: this.#nativeSpeculationFailed(model) },
+		);
+		return method === "soft" ? undefined : method;
+	}
+
+	/**
+	 * Cost inputs for bridging a `promptTokens` prompt with compaction, or undefined when no bridge-capable
+	 * method can run now. The compacted context is sized from this session's latest compaction
+	 * (`tokensAfter`), else as the keep-recent budget plus the summary, never above the prompt.
+	 */
+	bridgeCompactionEstimate(promptTokens: number): CacheBridgeEstimate | undefined {
+		if (!this.#bridgeMethod()) return undefined;
+		const latest = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
+		const keptTokens = latest?.tokensAfter ?? this.#compactionSettings.keepRecentTokens + BRIDGE_SUMMARY_TOKENS;
+		return { summaryTokens: BRIDGE_SUMMARY_TOKENS, keptTokens: Math.min(keptTokens, promptTokens) };
+	}
+
+	/**
+	 * Compact the history behind the pending tool call in the background so a long wait need not keep its
+	 * prompt-cache entry alive. Reuses the speculation slot: a run already summarizing with a bridge-capable
+	 * method is taken over, any other is replaced. The armed result commits at the next mid-run boundary
+	 * whatever the threshold; invalid results are discarded as for any speculation.
+	 */
+	startBridgeCompaction(): Promise<CacheBridgeOutcome> {
+		const method = this.#bridgeMethod();
+		if (!method) return Promise.resolve("failed-unaccepted");
+		let run = this.#speculation;
+		if (run && run.method !== "soft") {
+			run.bridge = true;
+		} else {
+			this.cancelSpeculation();
+			const lastAssistant = this.#host.findLastAssistantMessage();
+			const contextTokens = compactionContextTokens(
+				lastAssistant ? calculateContextTokens(lastAssistant.usage) : 0,
+				this.#estimateStoredContextTokens(),
+			);
+			run = this.#startSpeculationRun(contextTokens, method, true);
+		}
+		const bridged = run;
+		return bridged.promise.then(() =>
+			bridged.armed ? "armed" : bridged.accepted ? "failed-accepted" : "failed-unaccepted",
+		);
 	}
 
 	/** Identity of `model`'s native speculation in the current session. */
@@ -2525,18 +2621,31 @@ export class SessionMaintenance {
 		if (!model) return clear();
 		const settings = this.#compactionSettings;
 		const effectiveSettings = resolveMethodSettings(settings, method);
-		const branch = this.#host.sessionManager.getBranch();
+		const fullBranch = this.#host.sessionManager.getBranch();
+		// A bridge runs while a tool call is pending: summarize what preceded the call, which is exactly the
+		// prefix its warm cache entry holds; the call and its coming result stay in the kept tail.
+		const pendingEntry = run.bridge
+			? findPendingToolCall(fullBranch, entry => (entry.type === "message" ? entry.message : undefined))
+			: -1;
+		const branch = pendingEntry < 0 ? fullBranch : fullBranch.slice(0, pendingEntry);
 		const snapshotLeafId = branch[branch.length - 1]?.id;
 		if (!snapshotLeafId) return clear();
 		const preparation = prepareCompaction(branch, effectiveSettings, model, this.#tokenizer);
 		if (!preparation) return clear();
 		const signal = run.controller.signal;
+		const onAttempt = (message: AssistantMessage) => {
+			if (message.usage.totalTokens > 0) run.accepted = true;
+		};
 		let armed: ArmedSpeculation;
 		if (method === "handoff") {
+			const liveMessages = this.#host.agent.state.messages;
+			const pendingMessage = run.bridge ? findPendingToolCall(liveMessages, message => message) : -1;
 			const document = await this.#host.generateHandoffDocument(AUTO_HANDOFF_THRESHOLD_FOCUS, {
 				model,
 				autoTriggered: true,
 				signal,
+				...(pendingMessage < 0 ? {} : { messages: liveMessages.slice(0, pendingMessage) }),
+				onAttempt,
 			});
 			if (!document) return clear();
 			const { summary, details } = handoffSummaryFromDocument(document, preparation);
@@ -2588,6 +2697,7 @@ export class SessionMaintenance {
 					preferWebsockets: false,
 				},
 				candidates,
+				onAttempt,
 			);
 			armed = {
 				result: {
@@ -3063,6 +3173,30 @@ export class SessionMaintenance {
 		const billedContextTokens = calculateContextTokens(lastAssistant.usage);
 		const storedContextTokens = this.#estimateStoredContextTokens();
 		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
+		// A bridge compaction replaced the long tool call's prompt-cache entry: its result lands here, whatever
+		// the threshold says. One still summarizing leaves this turn on the old, still warm, context.
+		if (this.#speculation?.bridge && this.#speculation.armed) {
+			const bridged = this.#claimArmedSpeculation(contextTokens);
+			if (bridged) {
+				if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
+				if (signal?.aborted || this.#host.isDisposed()) return;
+				await this.runAutoCompaction("threshold", false, {
+					autoContinue: false,
+					suppressContinuation: true,
+					triggerContextTokens: contextTokens,
+					phase: "mid_turn",
+					detachPostCommit: true,
+					bridgeSpeculation: bridged,
+				});
+				if (signal?.aborted) return;
+				this.#replaceActiveMessages(activeMessages);
+				logger.debug("Bridge compaction committed between provider calls", {
+					method: bridged.method,
+					contextTokens,
+				});
+				return;
+			}
+		}
 		const persistedDeadEnd = this.#midTurnCompactionDeadEnds.has(activeMessages);
 		if (persistedDeadEnd) {
 			if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
@@ -3878,12 +4012,21 @@ export class SessionMaintenance {
 		signal: AbortSignal,
 		options?: SummaryOptions,
 		precomputedCandidates?: Model[],
+		/** Sees every provider attempt's response, billed or failed, beside the spend journal. */
+		onAttempt?: (message: AssistantMessage) => void,
 	): Promise<CompactionResult> {
 		const candidates =
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
-		const journal = this.#journalCompaction(method);
+		const compactionJournal = this.#journalCompaction(method);
+		const journal: CompletionJournal | undefined =
+			onAttempt === undefined
+				? compactionJournal
+				: message => {
+						compactionJournal?.(message);
+						onAttempt(message);
+					};
 
 		for (const candidate of candidates) {
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
@@ -5349,6 +5492,11 @@ export class SessionMaintenance {
 			 * request (#11482).
 			 */
 			excludeMediaMethods?: boolean;
+			/**
+			 * A bridge result the caller already claimed: commit it under its own method whatever the
+			 * configured order, with no fallback to another method if the commit fails.
+			 */
+			bridgeSpeculation?: ArmedSpeculation;
 		} = {},
 	): Promise<CompactionCheckResult> {
 		const compactionSettings = this.#compactionSettings;
@@ -5380,10 +5528,12 @@ export class SessionMaintenance {
 		const suppressContinuation = options.suppressContinuation === true;
 		const shouldAutoContinue =
 			!suppressContinuation && options.autoContinue !== false && compactionSettings.autoContinue !== false;
+		const bridgeSpec = options.bridgeSpeculation;
 		const startIndex = options.methodIndex ?? 0;
-		let methodIndex = -1;
-		let method: CompactionMethod | undefined;
-		for (let index = startIndex; index < methods.length; index++) {
+		// Past the last method: a bridge commit that fails leaves the uncompacted history in place.
+		let methodIndex = bridgeSpec ? methods.length : -1;
+		let method: CompactionMethod | undefined = bridgeSpec?.method;
+		for (let index = startIndex; !bridgeSpec && index < methods.length; index++) {
 			const candidate = methods[index];
 			if (
 				!isCompactionMethodUsable(
@@ -5436,7 +5586,8 @@ export class SessionMaintenance {
 		// returned only when still valid for the current branch/model/settings.
 		// Snapcompact is local and instant, so an armed LLM summary (possible
 		// only when settings/model changed since arming) never overrides it.
-		const claimedSpec = this.#claimArmedSpeculation(options.triggerContextTokens, options.pendingContextTokens);
+		const claimedSpec =
+			bridgeSpec ?? this.#claimArmedSpeculation(options.triggerContextTokens, options.pendingContextTokens);
 		const armedSpec = method === "snapcompact" ? undefined : claimedSpec;
 
 		const effectiveSettings = resolveMethodSettings(compactionSettings, method);

@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- SDK: `createAgentSession`'s `cacheWarming` option is a mode cap (`"off" | "streaming" | "idle"`, the lower of it and `providers.cacheWarming` applies) instead of a boolean; pass `"off"` where you passed `false`
 - `artifact://N` is gone: truncated tool output and shaped originals are now `local://N.log` files at the session's `local://` root, readable, listable and completable like any other `local://` file. Old sessions' `artifact://` links are not migrated
 - SDK: use `session.compact(focus, { mode: "handoff" })` instead of `session.handoff(focus)`, and cancel it with `abortCompaction()`.
 - One per-user daemon now owns every shared background process (services, language servers, disassembler databases, blob exposure, local models, speech, text prediction) instead of a broker per project plus separate hosts; daemons and services started by older versions are not adopted
@@ -11,6 +12,8 @@
 
 ### Added
 
+- Cache warming bridges long tool calls: it keeps refreshing while the refresh spend since the last request stays under the cheaper buy-out, then compacts a large prompt a minute before the cache expires (committed when the tool returns) or lets the entry expire, replacing the fixed one-hour cap. `providers.cacheWarmingStrategy` (`auto`, `keepalive`, `compact`) picks the policy; compaction needs a prompt of at least the lower of `providers.cacheWarmingCompactPercent` (60%) of the window and `providers.cacheWarmingCompactTokens` (150k)
+- `cache_warming_decision` carries the refresh `method`, `compactCost` and `spentCost`, and accepts a `"compact"` action; `cache_warming_start`/`cache_warming_end` events carry `method` (`prewarm` or `replay`)
 - Enable `task.crossInstance` (off by default) to list same-folder omp instances with `agent://peers` and read or message their agents by PID. While enabled, digit-only task names get an `Agent` prefix.
 - A draft starting with `?` enters btw mode (its own `btwMode` border and chip) and submits as `/btw <question>`
 - The daemon survives updates: a newer omp re-execs it in place, keeping running services, PTYs and language servers; `OMP_DAEMON_TCP=host:port` serves it over TCP instead of the local socket
@@ -21,6 +24,8 @@
 
 ### Changed
 
+- Cache warming refreshes first-party Anthropic entries with a `max_tokens: 0` pre-warm that bills no output, replaying for the rest of the session where the endpoint rejects it, and prices replays with the output this session's replays were actually billed
+- Task subagents keep their prompt cache warm through long tool calls (`streaming` mode; still off when `providers.cacheWarming` is `off`)
 - Switching models keeps your thinking level, moving it only as far as the new model's effort ladder requires; a model's own default level now applies only when no level is set, and picking a model no longer borrows the level of a role that names it (quick-role picks still apply their role's level)
 
 ### Fixed

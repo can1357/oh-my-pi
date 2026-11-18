@@ -276,7 +276,12 @@ import {
 	type SystemPromptRebuilder,
 } from "./session/session-tools";
 import { anthropicSlowModeHasNoSiblingHeadroom } from "./session/anthropic-slow-mode";
-import { CacheWarmer } from "./session/cache-warmer";
+import {
+	CacheWarmer,
+	type CacheWarmingMode,
+	capCacheWarmingMode,
+	resolveBridgeCompactionThreshold,
+} from "./session/cache-warmer";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
@@ -408,6 +413,9 @@ import {
 	cfgPersonality,
 	cfgProviderAppendOnlyContext,
 	cfgProvidersCacheWarming,
+	cfgProvidersCacheWarmingCompactPercent,
+	cfgProvidersCacheWarmingCompactTokens,
+	cfgProvidersCacheWarmingStrategy,
 	cfgProvidersKimiApiFormat,
 	cfgRetryFallbackChains,
 	cfgRetryModelFallback,
@@ -706,12 +714,14 @@ export interface CreateAgentSessionOptions {
 	/** OpenAI service-tier override for this session. `null` omits `service_tier`. */
 	openAIServiceTier?: ServiceTier | null;
 	/**
-	 * Enable prompt-cache warming for this session's main loop. Defaults to
-	 * `true`; one-shot and spawned sessions (task subagents, standalone
-	 * compaction, agentic commit) pass `false` so short-lived sessions never
-	 * schedule background warm requests.
+	 * Highest prompt-cache warming mode for this session's main loop; the
+	 * effective mode is the lower of this and `providers.cacheWarming`.
+	 * Defaults to `"idle"` (the setting alone decides). Task subagents pass
+	 * `"streaming"` so their long tool waits are bridged but nothing warms
+	 * after they settle; one-shot sessions (standalone compaction, agentic
+	 * commit, worker warm-up) pass `"off"`, which builds no warmer.
 	 */
-	cacheWarming?: boolean;
+	cacheWarming?: CacheWarmingMode;
 	/**
 	 * Per-family service tiers for this session, replacing the `tier.*` settings
 	 * and any persisted tier history. Called once the initial model is final —
@@ -5009,18 +5019,31 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				kimiApiFormat: streamOptions?.kimiApiFormat ?? (kimiApiFormat === "auto" ? undefined : kimiApiFormat),
 			});
 		};
-		// Prompt-cache warmer for the main agent loop only: replays the last
+		// Prompt-cache warmer for the main agent loop only: refreshes the last
 		// request through the same primary wrapper just before the entry would
-		// expire, so idle gaps do not force a full-prefix cache re-write.
-		// Spawned/one-shot sessions opt out via `cacheWarming: false`.
+		// expire, so long tool calls and idle gaps do not force a full-prefix
+		// cache re-write, and bridges a wait that outgrows renting with
+		// compaction. One-shot sessions opt out via `cacheWarming: "off"`.
+		const cacheWarmingCap = options.cacheWarming ?? "idle";
 		const cacheWarmer: CacheWarmer | undefined =
-			options.cacheWarming === false
+			cacheWarmingCap === "off"
 				? undefined
 				: new CacheWarmer({
 						stream: (model, context, streamOptions) => primaryStreamFn(model, context, streamOptions),
 						getPromptTokens: () => session.lastPromptTokens(),
-						getMode: () => cfgProvidersCacheWarming.get(settings),
+						getMode: () => capCacheWarmingMode(cfgProvidersCacheWarming.get(settings), cacheWarmingCap),
 						decide: event => extensionRunner.emitCacheWarmingDecision(event),
+						bridge: {
+							strategy: () => cfgProvidersCacheWarmingStrategy.get(settings),
+							thresholdTokens: model =>
+								resolveBridgeCompactionThreshold(
+									model.contextWindow ?? 0,
+									cfgProvidersCacheWarmingCompactPercent.get(settings),
+									cfgProvidersCacheWarmingCompactTokens.get(settings),
+								),
+							estimate: promptTokens => session.bridgeCompactionEstimate(promptTokens),
+							compact: () => session.startBridgeCompaction(),
+						},
 					});
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {
 			let result = args;

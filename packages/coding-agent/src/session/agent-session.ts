@@ -476,6 +476,8 @@ import {
 import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
 import { buildSessionContext, getRestorableSessionModels, isTranscriptEntry } from "./session-context";
 import {
+	type CacheBridgeEstimate,
+	type CacheBridgeOutcome,
 	type CacheRefreshOutcome,
 	type CacheWarmer,
 	type CacheWarmingMode,
@@ -6552,6 +6554,24 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				return message.usage.input + message.usage.cacheRead + message.usage.cacheWrite;
 		}
 		return 0;
+	}
+
+	/**
+	 * What bridging a long tool call with compaction would produce for a
+	 * `promptTokens` prompt, or undefined when no bridge-capable compaction
+	 * method can run now (the cache warmer's buy-out pricing input).
+	 */
+	bridgeCompactionEstimate(promptTokens: number): CacheBridgeEstimate | undefined {
+		return this.#maintenance.bridgeCompactionEstimate(promptTokens);
+	}
+
+	/**
+	 * Compact the history behind the pending tool call in the background, for
+	 * the cache warmer's buy-out. The result replaces the history at the tool's
+	 * turn end; resolves once the compaction settles.
+	 */
+	startBridgeCompaction(): Promise<CacheBridgeOutcome> {
+		return this.#maintenance.startBridgeCompaction();
 	}
 
 	/** Persist a completed warm request as off-transcript usage so session totals include its cost. */

@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, Context, Model, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Context, Model, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -81,6 +81,7 @@ describe("async speculative compaction", () => {
 			buildLiveProviderContext?: (summarized: AgentMessage[], retained: AgentMessage[]) => Promise<Context>;
 			persistTurnMessagesForMidRunCompaction?: () => Promise<boolean>;
 			generateHandoffDocument?: SessionMaintenanceHost["generateHandoffDocument"];
+			extensionRunner?: Pick<NonNullable<SessionMaintenanceHost["extensionRunner"]>, "hasHandlers">;
 		} = {},
 	): SessionMaintenance {
 		agent = new Agent({
@@ -101,7 +102,7 @@ describe("async speculative compaction", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			extensionRunner: undefined,
+			extensionRunner: options.extensionRunner,
 			sideStreamFn: async () => {
 				throw new Error("The compact seam should be used instead of the side stream");
 			},
@@ -683,6 +684,86 @@ describe("async speculative compaction", () => {
 		await maintenance.maintainContextMidRun(activeMessages, undefined, context);
 		await maintenance.speculationCompletion();
 		expect(compactSpy).toHaveBeenCalledTimes(2);
+	});
+
+	/** A short conversation ending in a tool call whose result has not arrived. */
+	function appendPendingToolCall(): AssistantMessage {
+		sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage(userMessage("earlier request ".repeat(400)));
+		sessionManager.appendMessage(assistantMessage("earlier response ".repeat(400), model));
+		sessionManager.appendMessage(userMessage("retained request"));
+		const pending: AssistantMessage = {
+			...assistantMessage("", model),
+			content: [{ type: "toolCall", id: "call-1", name: "wait", arguments: {} }],
+			stopReason: "toolUse",
+		};
+		sessionManager.appendMessage(pending);
+		return pending;
+	}
+
+	it("bridges a pending tool call from what preceded it and commits at the tool's turn end below the threshold", async () => {
+		const pending = appendPendingToolCall();
+		let handoffMessages: readonly AgentMessage[] | undefined;
+		maintenance = createMaintenance({
+			methodOrder: ["handoff"],
+			persistTurnMessagesForMidRunCompaction: async () => true,
+			generateHandoffDocument: async (_instructions, options) => {
+				handoffMessages = options.messages;
+				return "## Goal\nFinish once the tool returns.\n";
+			},
+		});
+		// The live loop holds the call while its tool runs.
+		agent.replaceMessages([...sessionManager.buildSessionContext().messages, pending]);
+		expect(maintenance.bridgeCompactionEstimate(80_000)).toEqual({ summaryTokens: 5_000, keptTokens: 5_001 });
+
+		expect(await maintenance.startBridgeCompaction()).toBe("armed");
+		// The call's result has not arrived: the summarized request is the one the cache holds.
+		expect(handoffMessages?.map(message => message.role)).toEqual(["user", "assistant", "user"]);
+
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "wait",
+			content: [{ type: "text", text: "done" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		sessionManager.appendMessage(result);
+		agent.state.messages.push(result);
+		await maintenance.maintainContextMidRun(agent.state.messages, undefined, {
+			message: pending,
+			toolResults: [result],
+			willContinue: true,
+		});
+
+		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
+		const roles = sessionManager.buildSessionContext().messages.map(message => message.role);
+		expect(roles[0]).toBe("compactionSummary");
+		expect(roles.slice(-2)).toEqual(["assistant", "toolResult"]);
+	});
+
+	it("reports whether a failed bridge reached the provider, and offers none without a bridge-capable method", async () => {
+		const pending = appendPendingToolCall();
+		let billed = false;
+		maintenance = createMaintenance({
+			methodOrder: ["handoff"],
+			generateHandoffDocument: async (_instructions, options) => {
+				if (billed) options.onAttempt?.(assistantMessage("", model));
+				return undefined;
+			},
+		});
+		agent.replaceMessages([...sessionManager.buildSessionContext().messages, pending]);
+		expect(await maintenance.startBridgeCompaction()).toBe("failed-unaccepted");
+		billed = true;
+		expect(await maintenance.startBridgeCompaction()).toBe("failed-accepted");
+
+		// Soft summaries read nothing from the prompt cache; compaction hooks keep exact blocking semantics.
+		expect(createMaintenance({ methodOrder: ["soft"] }).bridgeCompactionEstimate(80_000)).toBeUndefined();
+		const hooked = createMaintenance({
+			methodOrder: ["handoff"],
+			extensionRunner: { hasHandlers: event => event === "session_before_compact" },
+		});
+		expect(hooked.bridgeCompactionEstimate(80_000)).toBeUndefined();
 	});
 
 	it("discards an armed summary after a reset boundary and re-summarizes the new branch", async () => {

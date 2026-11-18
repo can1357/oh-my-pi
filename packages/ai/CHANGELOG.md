@@ -4,6 +4,7 @@
 
 ### Added
 
+- `prewarm` stream option: Anthropic Messages sends the request as built, non-streaming with `max_tokens: 0`, to refresh its prompt cache without billing output; it refuses budget thinking, forced tool choice and structured output before sending
 - Claude usage reports now carry the account's subscription plan (`Max 5x`, `Max 20x`, `Pro`, `Team`, `Enterprise`) in `metadata.subscriptionPlan`, read from the OAuth profile on every fetch, so an auth broker serves it to its clients with the rest of the report. Added `usageSubscriptionPlan` and `claudeProfilePlan`
 
 ## [18.22.2] - 2026-11-18

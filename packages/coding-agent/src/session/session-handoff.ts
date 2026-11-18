@@ -13,7 +13,7 @@ import {
 	generateHandoffFromContext,
 	renderHandoffPrompt,
 } from "@oh-my-pi/pi-agent-core/compaction";
-import type { Message, Model, ServiceTier, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Message, Model, ServiceTier, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
@@ -39,6 +39,8 @@ export interface HandoffGenerationOptions {
 	signal: AbortSignal;
 	messages?: readonly AgentMessage[];
 	autoTriggered?: boolean;
+	/** Sees every provider attempt's response, billed or failed, beside the spend journal. */
+	onAttempt?: (message: AssistantMessage) => void;
 }
 
 /** Capabilities borrowed from the owning AgentSession. */
@@ -79,7 +81,7 @@ export class SessionHandoff {
 	 */
 	async generateDocument(
 		customInstructions: string | undefined,
-		{ model, signal, messages, autoTriggered }: HandoffGenerationOptions,
+		{ model, signal, messages, autoTriggered, onAttempt }: HandoffGenerationOptions,
 	): Promise<string | undefined> {
 		try {
 			throwIfHandoffAborted(signal);
@@ -147,6 +149,7 @@ export class SessionHandoff {
 						const message = await stream.result();
 						// One call per provider attempt, so a retried or failed one is billed too.
 						journal?.(message);
+						onAttempt?.(message);
 						return message;
 					},
 					telemetry: resolveTelemetry(this.#host.agent.telemetry, cacheSessionId),

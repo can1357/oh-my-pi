@@ -5,21 +5,28 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { factoryModel } from "../../ai/test/helpers/factory-droid";
 import {
+	type CacheBridgeCompactor,
+	type CacheBridgeOutcome,
 	CacheWarmer,
 	type CacheRefreshOutcome,
 	type CacheWarmerDeps,
 	type CacheWarmingRefreshEnd,
 	type CacheWarmingRefreshStart,
+	type CacheWarmingStrategy,
 	type CacheWarmStream,
+	capCacheWarmingMode,
 	getCacheWarmingDelayMs,
 	getPromptCacheTtlMs,
 	isReplayable,
 	type PromptCacheChange,
+	resolveBridgeCompactionThreshold,
 } from "../src/session/cache-warmer";
 
 const SHORT_DELAY_MS = 4.5 * 60_000; // 90% of the 300s short tier
 const LONG_DELAY_MS = 54 * 60_000; // 90% of the 3600s long tier
 const PROMPT_TOKENS = 100_000;
+/** A gateway reusing the provider id: no `max_tokens: 0` pre-warm, so refreshes replay. */
+const GATEWAY_BASE_URL = "https://claude-gateway.example.com";
 
 function makeModel(): Model {
 	return buildModel({
@@ -170,8 +177,8 @@ function change(h: Harness): PromptCacheChange | undefined {
 	return h.current ? undefined : { kind: "history" };
 }
 
-function start(h: Harness, options: SimpleStreamOptions = {}): void {
-	h.warmer.start({ model: makeModel(), context: { messages: [] }, options }, () => change(h));
+function start(h: Harness, options: SimpleStreamOptions = {}, model = makeModel()): void {
+	h.warmer.start({ model, context: { messages: [] }, options }, () => change(h));
 }
 
 async function advance(ms: number): Promise<void> {
@@ -180,6 +187,18 @@ async function advance(ms: number): Promise<void> {
 }
 
 describe("cache warming scheduling math", () => {
+	test("a session cap lowers the configured mode but never raises it", () => {
+		expect(capCacheWarmingMode("idle", "streaming")).toBe("streaming");
+		expect(capCacheWarmingMode("streaming", "idle")).toBe("streaming");
+		expect(capCacheWarmingMode("off", "streaming")).toBe("off");
+	});
+
+	test("bridges with compaction from the lower of the window share and the token cap", () => {
+		expect(resolveBridgeCompactionThreshold(200_000, 60, 150_000)).toBe(120_000);
+		expect(resolveBridgeCompactionThreshold(1_000_000, 60, 150_000)).toBe(150_000);
+		expect(resolveBridgeCompactionThreshold(0, 60, 150_000)).toBe(150_000);
+	});
+
 	test("schedules at 90% of the TTL with a ten-second margin", () => {
 		expect(getCacheWarmingDelayMs(300_000)).toBe(270_000);
 		expect(getCacheWarmingDelayMs(3600_000)).toBe(3_240_000);
@@ -316,7 +335,7 @@ describe("cache warmer lifecycle", () => {
 
 	test("cuts the replay off at the first generated block and re-arms on a cache hit", async () => {
 		const h = harness();
-		start(h);
+		start(h, {}, { ...makeModel(), baseUrl: GATEWAY_BASE_URL });
 		expect(h.warmer.status.state).toBe("scheduled");
 		await advance(SHORT_DELAY_MS);
 		expect(h.replays).toHaveLength(1);
@@ -329,10 +348,11 @@ describe("cache warmer lifecycle", () => {
 		expect(h.warmed[0]?.message.usage.cost.total).toBeGreaterThan(0);
 		expect(h.warmer.status.state).toBe("scheduled");
 		expect(h.refreshes).toEqual([
-			{ type: "start", phase: "streaming", provider: "anthropic", model: "claude-sonnet-5" },
+			{ type: "start", phase: "streaming", method: "replay", provider: "anthropic", model: "claude-sonnet-5" },
 			{
 				type: "end",
 				phase: "streaming",
+				method: "replay",
 				provider: "anthropic",
 				model: "claude-sonnet-5",
 				outcome: "hit",
@@ -384,10 +404,11 @@ describe("cache warmer lifecycle", () => {
 		await advance(SHORT_DELAY_MS);
 		expect(thrown.warmer.status).toMatchObject({ state: "inactive", reason: "refresh failed" });
 		expect(thrown.refreshes).toEqual([
-			{ type: "start", phase: "streaming", provider: "anthropic", model: "claude-sonnet-5" },
+			{ type: "start", phase: "streaming", method: "prewarm", provider: "anthropic", model: "claude-sonnet-5" },
 			{
 				type: "end",
 				phase: "streaming",
+				method: "prewarm",
 				provider: "anthropic",
 				model: "claude-sonnet-5",
 				outcome: "error",
@@ -683,7 +704,7 @@ describe("cache warmer lifecycle", () => {
 		start(h);
 		await advance(SHORT_DELAY_MS);
 		expect(h.refreshes).toEqual([
-			{ type: "start", phase: "streaming", provider: "anthropic", model: "claude-sonnet-5" },
+			{ type: "start", phase: "streaming", method: "prewarm", provider: "anthropic", model: "claude-sonnet-5" },
 		]);
 		h.warmer.onAgentSettled();
 		h.mode = "off";
@@ -693,10 +714,11 @@ describe("cache warmer lifecycle", () => {
 		expect(h.warmed).toHaveLength(1);
 		expect(h.warmed[0]?.message.usage.cacheRead).toBe(PROMPT_TOKENS);
 		expect(h.refreshes).toEqual([
-			{ type: "start", phase: "streaming", provider: "anthropic", model: "claude-sonnet-5" },
+			{ type: "start", phase: "streaming", method: "prewarm", provider: "anthropic", model: "claude-sonnet-5" },
 			{
 				type: "end",
 				phase: "streaming",
+				method: "prewarm",
 				provider: "anthropic",
 				model: "claude-sonnet-5",
 				outcome: "aborted",
@@ -725,6 +747,7 @@ describe("cache warmer lifecycle", () => {
 		expect(h.refreshes.at(-1)).toEqual({
 			type: "end",
 			phase: "streaming",
+			method: "prewarm",
 			provider: "anthropic",
 			model: "claude-sonnet-5",
 			outcome: "aborted",
@@ -742,10 +765,11 @@ describe("cache warmer lifecycle", () => {
 		expect(h.replays[0]?.options?.signal?.aborted).toBe(true);
 		expect(h.warmed).toHaveLength(1);
 		expect(h.refreshes).toEqual([
-			{ type: "start", phase: "streaming", provider: "anthropic", model: "claude-sonnet-5" },
+			{ type: "start", phase: "streaming", method: "prewarm", provider: "anthropic", model: "claude-sonnet-5" },
 			{
 				type: "end",
 				phase: "streaming",
+				method: "prewarm",
 				provider: "anthropic",
 				model: "claude-sonnet-5",
 				outcome: "aborted",
@@ -761,5 +785,188 @@ describe("cache warmer lifecycle", () => {
 		h.mode = "off";
 		start(h);
 		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "cache warming disabled" });
+	});
+});
+
+/** Usage the provider billed `dollars` for. */
+function billed(tokens: Parameters<typeof makeUsage>[0], dollars: number): Usage {
+	const usage = makeUsage(tokens);
+	usage.cost.total = dollars;
+	return usage;
+}
+
+function bridge(
+	outcome: CacheBridgeOutcome,
+	compactions: number[],
+	overrides: Partial<CacheBridgeCompactor> = {},
+): CacheBridgeCompactor {
+	return {
+		strategy: () => "auto",
+		thresholdTokens: () => 50_000,
+		estimate: () => ({ summaryTokens: 5_000, keptTokens: 20_000 }),
+		compact: async () => {
+			compactions.push(Date.now());
+			return outcome;
+		},
+		...overrides,
+	};
+}
+
+describe("cache warmer rent and buy-out", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		delete process.env.PI_CACHE_RETENTION;
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	test("pre-warms where the endpoint takes max_tokens 0 and replays for the session once it refuses", async () => {
+		const h = harness();
+		h.script = { kind: "done", usage: makeUsage({ cacheRead: PROMPT_TOKENS }) };
+		start(h, { maxTokens: 4_096 });
+		await advance(SHORT_DELAY_MS);
+		expect(h.replays[0]?.options).toMatchObject({ prewarm: true, maxTokens: 4_096 });
+		expect(h.warmer.status.state).toBe("scheduled");
+
+		const sent: string[] = [];
+		const refused = harness({
+			stream: (_model, _context, options) => {
+				sent.push(options?.prewarm ? "prewarm" : `maxTokens ${options?.maxTokens}`);
+				if (!options?.prewarm) {
+					const usage = makeUsage({ cacheRead: PROMPT_TOKENS });
+					return scriptedStream({ kind: "generate", usage }, { options, consumed: [], cutOff: false });
+				}
+				const error: AssistantMessage = {
+					...makeMessage(makeUsage({}), "error"),
+					errorStatus: 400,
+					errorMessage: "invalid_request_error",
+				};
+				return {
+					async *[Symbol.asyncIterator]() {
+						yield { type: "error", reason: "error", error } as AssistantMessageEvent;
+					},
+					result: () => Promise.resolve(error),
+				};
+			},
+		});
+		start(refused);
+		await advance(SHORT_DELAY_MS);
+		expect(sent).toEqual(["prewarm", "maxTokens 1"]);
+		expect(refused.refreshes.map(event => `${event.type} ${event.method}`)).toEqual([
+			"start prewarm",
+			"end prewarm",
+			"start replay",
+			"end replay",
+		]);
+		expect(refused.warmer.status.state).toBe("scheduled");
+		await advance(SHORT_DELAY_MS);
+		expect(sent).toEqual(["prewarm", "maxTokens 1", "maxTokens 1"]);
+	});
+
+	test("prices a replay with the output this session's replays of the model were billed", async () => {
+		const h = harness();
+		h.script = { kind: "generate", usage: makeUsage({ cacheRead: PROMPT_TOKENS, output: 2_000 }) };
+		start(h, {}, { ...makeModel(), baseUrl: GATEWAY_BASE_URL });
+		const read = (PROMPT_TOKENS * 0.3) / 1e6;
+		expect(h.warmer.status.decision).toMatchObject({ method: "replay" });
+		expect(h.warmer.status.decision?.warmCost).toBeCloseTo(read + (512 * 15) / 1e6, 9);
+		await advance(SHORT_DELAY_MS);
+		expect(h.warmer.status.decision?.warmCost).toBeCloseTo(read + (2_000 * 15) / 1e6, 9);
+	});
+
+	test("streaming warming rents past an hour until the spend would pass the cost of losing the entry", async () => {
+		const h = harness();
+		// Losing a 1h entry costs a 1h write minus a read: (6 - 0.3) × 0.1M = $0.57; each refresh bills $0.10
+		// against a $0.03 pre-warm estimate, so the sixth refresh is the last within the bound.
+		h.script = { kind: "done", usage: billed({ cacheRead: PROMPT_TOKENS }, 0.1) };
+		start(h, { cacheRetention: "long" });
+		for (let refresh = 0; refresh < 8; refresh++) await advance(LONG_DELAY_MS);
+		expect(h.replays).toHaveLength(6);
+		expect(h.warmer.status).toMatchObject({
+			state: "inactive",
+			reason: "refresh spend reached the cost of losing the cache",
+		});
+	});
+
+	test("compacts a minute before expiry once renting stops paying", async () => {
+		const compactions: number[] = [];
+		const h = harness({ bridge: bridge("armed", compactions) });
+		// Compacting: read $0.03 + 5k summary $0.075 + re-writing 20k (3.75 - 0.3) $0.069 = $0.174 < expire $0.345.
+		h.script = { kind: "done", usage: billed({ cacheRead: PROMPT_TOKENS }, 0.1) };
+		start(h);
+		await advance(SHORT_DELAY_MS);
+		await advance(SHORT_DELAY_MS);
+		expect(h.replays).toHaveLength(2);
+		const touchedAt = h.warmer.cacheEntry?.touchedAt ?? 0;
+		expect(h.warmer.status).toMatchObject({
+			state: "scheduled",
+			nextWarmAt: touchedAt + 240_000,
+			decision: { action: "compact" },
+		});
+		await advance(240_000);
+		expect(compactions).toEqual([touchedAt + 240_000]);
+		expect(h.replays).toHaveLength(2);
+		expect(h.warmer.status).toMatchObject({
+			state: "inactive",
+			reason: "bridged by compaction",
+			decision: { action: "compact" },
+		});
+	});
+
+	test("never compacts a prompt under the threshold or under the keepalive strategy", async () => {
+		for (const overrides of [
+			{ thresholdTokens: () => PROMPT_TOKENS + 1 },
+			{ strategy: (): CacheWarmingStrategy => "keepalive" },
+		]) {
+			const compactions: number[] = [];
+			const h = harness({ bridge: bridge("armed", compactions, overrides) });
+			h.script = { kind: "done", usage: billed({ cacheRead: PROMPT_TOKENS }, 0.1) };
+			start(h);
+			for (let refresh = 0; refresh < 5; refresh++) await advance(SHORT_DELAY_MS);
+			expect(compactions).toEqual([]);
+			// Expire ($0.345) is the only buy-out: refreshes at $0, $0.10, $0.20, $0.30 spent.
+			expect(h.replays).toHaveLength(4);
+			expect(h.warmer.status.reason).toBe("refresh spend reached the cost of losing the cache");
+		}
+	});
+
+	test("a bridge compaction that never reached the provider is replaced by one refresh", async () => {
+		const compactions: number[] = [];
+		const h = harness({ bridge: bridge("failed-unaccepted", compactions) });
+		h.script = { kind: "done", usage: billed({ cacheRead: PROMPT_TOKENS }, 0.1) };
+		start(h);
+		await advance(SHORT_DELAY_MS);
+		await advance(SHORT_DELAY_MS);
+		await advance(240_000);
+		expect(compactions).toHaveLength(1);
+		// The fallback refresh went out at the compaction point; compaction is no longer a buy-out.
+		expect(h.replays).toHaveLength(3);
+		expect(h.warmer.status.decision?.compactCost).toBeUndefined();
+		for (let refresh = 0; refresh < 3; refresh++) await advance(SHORT_DELAY_MS);
+		expect(compactions).toHaveLength(1);
+		expect(h.warmer.status.reason).toBe("refresh spend reached the cost of losing the cache");
+
+		// One that read the entry already refreshed it: warming stops without another request.
+		const accepted = harness({ bridge: bridge("failed-accepted", compactions) });
+		accepted.script = { kind: "done", usage: billed({ cacheRead: PROMPT_TOKENS }, 0.1) };
+		start(accepted);
+		await advance(SHORT_DELAY_MS);
+		await advance(SHORT_DELAY_MS);
+		await advance(240_000);
+		expect(accepted.replays).toHaveLength(2);
+		expect(accepted.warmer.status.reason).toBe("bridge compaction failed");
+	});
+
+	test("the compact strategy compacts at the first decision once the prompt reaches the threshold", async () => {
+		const compactions: number[] = [];
+		const h = harness({ bridge: bridge("armed", compactions, { strategy: () => "compact" }) });
+		start(h);
+		const startedAt = Date.now();
+		expect(h.warmer.status).toMatchObject({ nextWarmAt: startedAt + 240_000, decision: { action: "compact" } });
+		await advance(240_000);
+		expect(compactions).toEqual([startedAt + 240_000]);
+		expect(h.replays).toHaveLength(0);
 	});
 });
