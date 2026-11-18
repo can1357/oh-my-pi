@@ -197,11 +197,23 @@ interface CdpMessage {
 	result?: { targetId?: string; targetInfos?: Array<{ targetId: string; type: string }> };
 }
 
+/** A rejection no run owns, as a Puppeteer event handler's would be: run as a tab's code, it ends the tab's worker. */
+const END_WORKER = `
+	const err = new Error("library-internal");
+	err.stack = "Error: library-internal\\n    at #onFileChooser (puppeteer/Page.js:1:1)";
+	Promise.reject(err);
+	await Promise.withResolvers().promise;
+`;
+
 /**
- * A CDP endpoint in front of real Chromium that behaves like Lightpanda: each connection sees only the pages it
- * created, and its pages close when it disconnects.
+ * A CDP endpoint in front of real Chromium. `scoped`: it behaves like Lightpanda, so each connection sees only the
+ * pages it created, and its pages close when it disconnects. `failTargetQueries`: `Target.getTargets` and a
+ * `Target.getTargetInfo` for a page fail, as on an endpoint that does not implement them.
  */
-function startConnectionScopedProxy(upstream: string): { url: string; stop(): void } {
+function startCdpProxy(
+	upstream: string,
+	{ scoped, failTargetQueries = false }: { scoped: boolean; failTargetQueries?: boolean },
+): { url: string; stop(): void } {
 	// Page and tab target id → the connection that created it. Chromium announces a created page's tab and page
 	// targets before answering `Target.createTarget`, so a connection waiting on one claims both.
 	const owners = new Map<string, number>();
@@ -218,7 +230,7 @@ function startConnectionScopedProxy(upstream: string): { url: string; stop(): vo
 		nextRequestId: number;
 	}
 	const visible = (conn: Connection, targetId: string, type: string): boolean => {
-		if (type !== "page" && type !== "tab") return true;
+		if (!scoped || (type !== "page" && type !== "tab")) return true;
 		const owner = owners.get(targetId);
 		if (owner === undefined && conn.pendingCreates > 0) owners.set(targetId, conn.id);
 		return owners.get(targetId) === conn.id;
@@ -257,7 +269,7 @@ function startConnectionScopedProxy(upstream: string): { url: string; stop(): vo
 					// Answers to the proxy's own requests below.
 					if (message.id !== undefined && message.id >= PROXY_REQUEST_IDS) return;
 					if (message.sessionId && conn.hiddenSessions.has(message.sessionId)) return;
-					if (message.id !== undefined && conn.ownedRequests.get(message.id) === "Target.createTarget") {
+					if (scoped && message.id !== undefined && conn.ownedRequests.get(message.id) === "Target.createTarget") {
 						conn.pendingCreates--;
 						if (message.result?.targetId) owners.set(message.result.targetId, conn.id);
 					}
@@ -302,7 +314,14 @@ function startConnectionScopedProxy(upstream: string): { url: string; stop(): vo
 				const conn = ws.data;
 				const message = JSON.parse(String(raw)) as CdpMessage;
 				const targetId = message.params?.targetId;
-				if (targetId && message.method?.startsWith("Target.") && owners.get(targetId) !== conn.id) {
+				if (
+					failTargetQueries &&
+					(message.method === "Target.getTargets" || (message.method === "Target.getTargetInfo" && targetId))
+				) {
+					ws.send(JSON.stringify({ id: message.id, error: { code: -32000, message: "Internal error" } }));
+					return;
+				}
+				if (scoped && targetId && message.method?.startsWith("Target.") && owners.get(targetId) !== conn.id) {
 					ws.send(
 						JSON.stringify({ id: message.id, error: { code: -32602, message: "No target with given id found" } }),
 					);
@@ -925,22 +944,18 @@ describe("pickElectronTarget", () => {
 		async () => {
 			const launched = sharedHeadless;
 			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
-			const proxy = startConnectionScopedProxy(launched.wsEndpoint);
+			const proxy = startCdpProxy(launched.wsEndpoint, { scoped: true });
 			const session = makeSession();
 			const prelude = createBrowserPrelude(session);
 			const context = { session, toolCallId: "browser-attach-connection-scoped" };
 			const name = `attach-connection-scoped-${process.pid}-${Math.random().toString(36).slice(2)}`;
 			const url = "data:text/html,<title>connection-scoped-page</title>";
-			// A rejection no run owns, as a Puppeteer event handler's would be: it ends the tab's worker.
-			const endWorker = `
-				const err = new Error("library-internal");
-				err.stack = "Error: library-internal\\n    at #onFileChooser (puppeteer/Page.js:1:1)";
-				Promise.reject(err);
-				await Promise.withResolvers().promise;
-			`;
 
 			try {
-				await prelude.invoke({ action: "open", name, url, app: proxy.url }, context);
+				await prelude.invoke(
+					{ action: "open", name, url, app: proxy.url, init_scripts: ["window.fromInit = 'yes';"] },
+					context,
+				);
 				await prelude.invoke(
 					{ action: "run", name, code: "await tab.evaluate(() => { window.marker = 1; });" },
 					context,
@@ -948,7 +963,7 @@ describe("pickElectronTarget", () => {
 				// The supervisor's own connection cannot see the page, which is not a page that closed.
 				expect(listTabs().map(tab => tab.name)).toContain(name);
 
-				const exit = await rejectionOf(prelude.invoke({ action: "run", name, code: endWorker }, context));
+				const exit = await rejectionOf(prelude.invoke({ action: "run", name, code: END_WORKER }, context));
 				expect(exit instanceof Error ? exit.message : String(exit)).toContain(
 					"the tab's page closed with it, so omp is opening a new page for the tab on a new worker",
 				);
@@ -956,12 +971,85 @@ describe("pickElectronTarget", () => {
 					{
 						action: "run",
 						name,
-						code: "return { title: await tab.title(), marker: await tab.evaluate(() => window.marker ?? null) };",
+						code: "return { title: await tab.title(), marker: await tab.evaluate(() => window.marker ?? null), fromInit: await tab.evaluate(() => window.fromInit ?? null) };",
 					},
 					context,
 				);
-				// A new page on the new worker's connection, back on the old page's URL, without its state.
-				expect(after.details).toMatchObject({ value: { title: "connection-scoped-page", marker: null } });
+				// A new page on the new worker's connection, back on the old page's URL, without its state, and with the
+				// document-start script the tab was opened with.
+				expect(after.details).toMatchObject({
+					value: { title: "connection-scoped-page", marker: null, fromInit: "yes" },
+				});
+			} finally {
+				await prelude.invoke({ action: "close", name }, context).catch(() => undefined);
+				proxy.stop();
+			}
+		},
+		30_000,
+	);
+
+	// Launches real headless Chromium; skipped where Chrome's system libraries are absent.
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"releases a connection-scoped tab whose page closed outside omp instead of re-creating it",
+		async () => {
+			const launched = sharedHeadless;
+			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
+			const proxy = startCdpProxy(launched.wsEndpoint, { scoped: true });
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const context = { session, toolCallId: "browser-attach-connection-scoped-closed" };
+			const name = `attach-connection-scoped-closed-${process.pid}-${Math.random().toString(36).slice(2)}`;
+			const url = "data:text/html,<title>connection-scoped-closed</title>";
+
+			try {
+				await prelude.invoke({ action: "open", name, url, app: proxy.url }, context);
+				// Another client closes the page: a connection that sees every target, as omp's never does here.
+				const page = (await launched.browser.pages()).find(candidate => candidate.url() === url);
+				if (!page) throw new Error("Expected the tab's page in the browser");
+				await page.close();
+
+				const error = await rejectionOf(
+					prelude.invoke({ action: "run", name, code: "return await tab.evaluate(() => 1);" }, context),
+				);
+				expect(error instanceof Error ? error.message : String(error)).toContain("page closed outside omp");
+				expect(listTabs().map(tab => tab.name)).not.toContain(name);
+				expect((await launched.browser.pages()).some(candidate => candidate.url() === url)).toBe(false);
+			} finally {
+				await prelude.invoke({ action: "close", name }, context).catch(() => undefined);
+				proxy.stop();
+			}
+		},
+		30_000,
+	);
+
+	// Launches real headless Chromium; skipped where Chrome's system libraries are absent.
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"re-adopts a tab's page when the endpoint cannot list its targets",
+		async () => {
+			const launched = sharedHeadless;
+			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
+			const proxy = startCdpProxy(launched.wsEndpoint, { scoped: false, failTargetQueries: true });
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const context = { session, toolCallId: "browser-attach-unlisted-targets" };
+			const name = `attach-unlisted-targets-${process.pid}-${Math.random().toString(36).slice(2)}`;
+
+			try {
+				await prelude.invoke(
+					{ action: "open", name, url: "data:text/html,<title>unlisted-targets</title>", app: proxy.url },
+					context,
+				);
+				await prelude.invoke(
+					{ action: "run", name, code: "await tab.evaluate(() => { window.marker = 1; });" },
+					context,
+				);
+				await rejectionOf(prelude.invoke({ action: "run", name, code: END_WORKER }, context));
+				const after = await prelude.invoke(
+					{ action: "run", name, code: "return await tab.evaluate(() => window.marker ?? null);" },
+					context,
+				);
+				// A probe that failed proves nothing about scoping: the new worker adopted the same page, state intact.
+				expect(after.details).toMatchObject({ value: 1 });
 			} finally {
 				await prelude.invoke({ action: "close", name }, context).catch(() => undefined);
 				proxy.stop();

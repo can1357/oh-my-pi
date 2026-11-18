@@ -235,9 +235,10 @@ export interface RunErrorPayload {
 	debuggerDetached?: { when: "during" | "before"; reason: string };
 	/**
 	 * The page's Puppeteer session went stale (main frame detached, CDP session closed) `during` this run, after its
-	 * code started, or `before` it, so nothing ran; the supervisor reattaches the target on a new worker.
+	 * code started, or `before` it, so nothing ran; the supervisor reattaches the target on a new worker. `closed`:
+	 * the page itself closed, which a reattach cannot undo.
 	 */
-	pageLost?: { when: "during" | "before" };
+	pageLost?: { when: "during" | "before"; closed: boolean };
 }
 
 export type WorkerOutbound =
@@ -256,6 +257,13 @@ export type WorkerOutbound =
 			 */
 			type: "page-created";
 			targetId: string;
+	  }
+	| {
+			/**
+			 * The page closed while omp was not closing it. Not sent once the worker stops; a supervisor that cannot
+			 * see the page in the browser's target list (a connection-scoped page) releases the tab on it.
+			 */
+			type: "page-closed";
 	  }
 	| { type: "ready"; info: ReadyInfo }
 	| { type: "init-failed"; error: RunErrorPayload }

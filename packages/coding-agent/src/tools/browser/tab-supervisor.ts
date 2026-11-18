@@ -158,6 +158,8 @@ export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle>
 	connectionScoped?: boolean;
 	/** The URL the page was on before a recycle re-created it (see `connectionScoped`), for the result reporting it. */
 	recreatedFrom?: string;
+	/** What a re-created connection-scoped page needs before it loads the old URL again: the open's page options. */
+	openOptions?: Pick<AcquireTabOptions, "viewport" | "initScripts" | "downloadsPath" | "userAgent">;
 	/**
 	 * The tab's upload staging folder. It outlives the tab's workers, since Chrome reads a picked file only when the page
 	 * does, and goes with the page when omp closes it; a page left open in the user's browser keeps it until the sweep.
@@ -409,6 +411,8 @@ class PageSessionLostError extends ToolError {
 		message: string,
 		/** `during`: the run's code had started, so its input may already have landed. */
 		readonly when: "during" | "before",
+		/** The page itself closed: re-adopting it fails, and a connection-scoped tab must not re-create it. */
+		readonly closed: boolean,
 	) {
 		super(message);
 	}
@@ -633,6 +637,10 @@ async function acquireTabImpl(
 				if (opts.persist !== undefined && existing.ownerSessionId === opts.ownerSessionId) {
 					existing.persist = opts.persist;
 				}
+				// A re-created connection-scoped page takes the size the tab last asked for.
+				if (opts.viewport && existing.backend === "worker" && existing.openOptions) {
+					existing.openOptions.viewport = opts.viewport;
+				}
 				const reuseSteps: string[] = [];
 				if (
 					opts.viewport &&
@@ -771,11 +779,12 @@ async function acquireTabImpl(
 		}
 	}
 
-	// Probed before the abort check below, so an open cancelled meanwhile still leaves nothing behind.
+	// Probed before the abort check below, so an open cancelled meanwhile still leaves nothing behind. Only a target
+	// list that answers without the page marks it connection-scoped; a probe that fails says nothing about scoping.
 	const connectionScoped =
 		browser.kind.kind === "connected" &&
 		ownsPage(initPayload) &&
-		!(await targetVisibleAcrossConnections(browser, info.targetId));
+		(await listedOnSupervisorConnection(browser, info.targetId)) === false;
 
 	// If the caller aborted while we were spawning/initializing the worker, tear
 	// the freshly-built worker down before publishing the tab so the browser
@@ -813,6 +822,14 @@ async function acquireTabImpl(
 		uploadDir: initPayload.uploadDir,
 		insecure: opts.insecure,
 		connectionScoped,
+		openOptions: connectionScoped
+			? {
+					viewport: opts.viewport,
+					initScripts: opts.initScripts,
+					downloadsPath: opts.downloadsPath,
+					userAgent: opts.userAgent,
+				}
+			: undefined,
 	};
 	attachTabWorker(tab, worker);
 	noteHiddenFrames(tab, info.hiddenFrames);
@@ -1603,6 +1620,15 @@ async function dispatchRun(
 			}
 			if (error instanceof PageSessionLostError) {
 				for (const ctrl of pending.toolCalls.values()) ctrl.abort(error);
+				// A connection-scoped page that closed was closed outside omp: release the tab, as `listTabs` does for a
+				// page the target list no longer shows, instead of re-creating it.
+				if (error.closed && tab.connectionScoped) {
+					const closedOutside = `Tab ${JSON.stringify(name)}'s page closed outside omp`;
+					if (tabs.get(name) === tab && tab.state === "alive") await forceKillTab(name, closedOutside);
+					throw new ToolError(
+						`${error.message}. ${closedOutside}, so omp released the tab; open it again with browser.open()`,
+					);
+				}
 				const lost = `${error.message}. omp could not reattach to the tab's page (it may have closed), so it released the tab. Open it again with browser.open()`;
 				// A new worker connects afresh and adopts the same target, page untouched (a connection-scoped page is
 				// re-created instead); a target that is gone kills the tab.
@@ -2642,7 +2668,17 @@ function safeSend(tab: WorkerTabSession, msg: WorkerInbound): void {
  * when the new worker exits too within {@link WORKER_EXIT_RETRY_WINDOW_MS}.
  */
 function attachTabWorker(tab: WorkerTabSession, worker: WorkerHandle): void {
-	worker.onMessage(msg => handleTabMessage(tab, msg));
+	worker.onMessage(msg => {
+		if (msg.type !== "page-closed") {
+			handleTabMessage(tab, msg);
+			return;
+		}
+		// The target list `listTabs` checks never shows a connection-scoped page, so its worker reports the close.
+		if (tabs.get(tab.name) !== tab || tab.worker !== worker || tab.state !== "alive" || releaseInflight.has(tab))
+			return;
+		if (!tab.connectionScoped) return;
+		void forceKillTab(tab.name, `Tab ${JSON.stringify(tab.name)}'s page closed outside omp`).catch(() => undefined);
+	});
 	let lastError: Error | undefined;
 	worker.onError(error => {
 		// A message that failed to deserialize leaves the worker running, so it is no exit's cause.
@@ -2737,6 +2773,8 @@ async function recycleTimedOutWorkerTab(
 		allowedDomains: tab.allowedDomains,
 		// The override's CDP session died with the old worker.
 		insecure: tab.insecure,
+		// A re-created page gets the open's size, document-start scripts, downloads folder and user agent back.
+		...(tab.connectionScoped ? tab.openOptions : undefined),
 		// Unblock a wedged page (open JS dialog, hung navigation) before adopting it —
 		// otherwise init stalls, times out, and the tab gets force-killed.
 		recover: opts.recover ?? true,
@@ -2865,15 +2903,22 @@ async function forceKillTabTeardown(tab: WorkerTabSession): Promise<void> {
 }
 
 /**
- * Whether a connection other than the one that created `targetId` sees it. Chromium shares targets across CDP
- * connections; engines such as Lightpanda keep each page on the connection that created it.
+ * Whether `browser`'s supervisor connection lists `targetId`, a page a tab worker created on its own connection.
+ * Chromium shares targets across CDP connections; engines such as Lightpanda list only the pages a connection created.
+ * `undefined` when the endpoint did not answer.
  */
-async function targetVisibleAcrossConnections(browser: PuppeteerBrowserHandle, targetId: string): Promise<boolean> {
+async function listedOnSupervisorConnection(
+	browser: PuppeteerBrowserHandle,
+	targetId: string,
+): Promise<boolean | undefined> {
 	try {
-		await browserConnection(browser.browser).send("Target.getTargetInfo", { targetId });
-		return true;
-	} catch {
-		return false;
+		const { targetInfos } = await browserConnection(browser.browser).send("Target.getTargets");
+		return targetInfos.some(info => info.targetId === targetId);
+	} catch (error) {
+		logger.debug("Could not list a CDP endpoint's targets; treating its pages as shared across connections", {
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return undefined;
 	}
 }
 
@@ -3002,7 +3047,7 @@ function addPageGlobalHint(error: Error): void {
 
 function errorFromPayload(payload: RunErrorPayload): Error {
 	if (payload.pageLost) {
-		const error = new PageSessionLostError(payload.message, payload.pageLost.when);
+		const error = new PageSessionLostError(payload.message, payload.pageLost.when, payload.pageLost.closed);
 		if (payload.stack) error.stack = payload.stack;
 		return error;
 	}

@@ -381,6 +381,8 @@ const ATTACHED_TARGET_EXPOSE_TIMEOUT_MS = 5_000;
 const MATCH_COUNT_PROBE_TIMEOUT_MS = 1_000;
 /** Bound on the page command that lets a relay detach report overtake a run's failure; inside the supervisor's grace. */
 const DETACH_REPORT_TIMEOUT_MS = 500;
+/** Bound on the target-list read that tells a closed page from a stale session; past it the page counts as open. */
+const PAGE_CLOSED_PROBE_TIMEOUT_MS = 1_000;
 /** Longest a page call waits for a main-frame navigation the page requested to replace the document. */
 const REQUESTED_NAVIGATION_WAIT_MS = 5_000;
 
@@ -1314,6 +1316,8 @@ class PageSessionLostError extends ToolError {
 		reason: string,
 		/** `during`: the run's code had started, so its input may already have landed. */
 		readonly when: "during" | "before",
+		/** The page itself closed: a reattach finds nothing to drive. */
+		readonly closed: boolean,
 	) {
 		super(
 			`omp lost its connection to this tab's page (${reason}) ${when === "during" ? "during this call" : "before this call, so its code did not run"}`,
@@ -1543,7 +1547,7 @@ function errorPayload(error: unknown): RunErrorPayload {
 	const rendererCrashed = error instanceof RendererCrashedError || undefined;
 	const debuggerDetached =
 		error instanceof DebuggerDetachedError ? { when: error.when, reason: error.reason } : undefined;
-	const pageLost = error instanceof PageSessionLostError ? { when: error.when } : undefined;
+	const pageLost = error instanceof PageSessionLostError ? { when: error.when, closed: error.closed } : undefined;
 	if (error instanceof ToolAbortError) {
 		return { name: error.name, message: error.message, stack: error.stack, isToolError: false, isAbort: true };
 	}
@@ -2334,6 +2338,11 @@ export class WorkerCore {
 				...(hiddenFrames.length > 0 ? { hiddenFrames } : {}),
 			};
 			this.#started = true;
+			// A page closed without omp closing it: a supervisor that cannot see the page in the browser's target list
+			// learns it here. A close this worker makes itself comes after it stopped.
+			this.#page.once("close", () => {
+				if (!this.#stopped) this.#transport.send({ type: "page-closed" });
+			});
 			this.#transport.send({ type: "ready", info });
 		} catch (error) {
 			// A page this attempt created would be orphaned (the supervisor retries
@@ -2503,7 +2512,7 @@ export class WorkerCore {
 			this.#sendResult({
 				id: msg.id,
 				ok: false,
-				error: errorPayload(new PageSessionLostError(lostBefore, "before")),
+				error: errorPayload(new PageSessionLostError(lostBefore, "before", await this.#pageClosed())),
 			});
 			return;
 		}
@@ -2701,7 +2710,7 @@ export class WorkerCore {
 			const error = errorPayload(
 				lost === undefined
 					? failure.error
-					: new PageSessionLostError(lost, active.codeStarted ? "during" : "before"),
+					: new PageSessionLostError(lost, active.codeStarted ? "during" : "before", await this.#pageClosed()),
 			);
 			if (nativeNotices.length > 0) {
 				error.message = [error.message, ...nativeNotices].join("\n");
@@ -2748,6 +2757,29 @@ export class WorkerCore {
 		if (frame.detached) return "its main frame detached";
 		if (frame.client.detached) return "its CDP session closed";
 		return undefined;
+	}
+
+	/**
+	 * Whether the page itself closed, not just this worker's hold on it. Puppeteer can see the page's session end
+	 * before it marks the page closed, so the browser's target list on this worker's own connection decides; a list
+	 * that does not answer leaves Puppeteer's word.
+	 */
+	async #pageClosed(): Promise<boolean> {
+		const page = this.#page;
+		const browser = this.#browser;
+		const targetId = this.#targetId;
+		if (!page || page.isClosed()) return true;
+		if (!browser || !targetId) return false;
+		try {
+			const { targetInfos } = await withTimeout(
+				browserConnection(browser).send("Target.getTargets"),
+				PAGE_CLOSED_PROBE_TIMEOUT_MS,
+				"Timed out listing the browser's targets",
+			);
+			return !targetInfos.some(info => info.targetId === targetId);
+		} catch {
+			return false;
+		}
 	}
 
 	/**
