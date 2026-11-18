@@ -654,18 +654,20 @@ function accountOAuthIdentity(account: UsageAccountIdentity): OAuthAccountIdenti
 
 /**
  * The identity whose saved-reset consent applies to a report: the stored account
- * the reset planners attribute it to among `reports`, else the report's own.
+ * the reset planners attribute it to among `reports`. `null` when stored accounts
+ * are known but none owns the report alone: the planners spend nothing for it, so
+ * no account's consent applies. Without stored accounts, the report's own identity.
  */
 function reportConsentIdentity(
 	report: UsageReport,
 	reports: readonly UsageReport[],
 	accounts: ((provider: string) => readonly OAuthAccountSummary[]) | undefined,
-): OAuthAccountIdentity {
+): OAuthAccountIdentity | null {
 	if (!accounts || (report.provider !== "anthropic" && report.provider !== "openai-codex")) {
 		return usageReportIdentity(report);
 	}
 	const providerReports = reports.filter(candidate => candidate.provider === report.provider);
-	return reportStoredAccount(report, accounts(report.provider), providerReports) ?? usageReportIdentity(report);
+	return reportStoredAccount(report, accounts(report.provider), providerReports) ?? null;
 }
 
 function policyEnabledProviders(
@@ -701,16 +703,20 @@ export type UsagePolicyDiagnostics = {
 		| { state: "eligible" | "inside-reserve"; remainingPct: number }
 	);
 
-/** `consentIdentity` picks the policy whose `autoRedeem*` keys are shown; the rest come from `identity`'s. */
+/**
+ * `consentIdentity` picks the policy whose `autoRedeem*` keys are shown (`null`: none);
+ * the rest come from `identity`'s.
+ */
 function computePolicyDiagnostics(
 	provider: string,
 	identity: OAuthAccountIdentity,
 	limits: UsageLimit[] | undefined,
 	options: UsagePolicyDiagnosticsOptions,
-	consentIdentity: OAuthAccountIdentity = identity,
+	consentIdentity: OAuthAccountIdentity | null = identity,
 ): UsagePolicyDiagnostics {
 	const policy = options.getAccountPolicy(provider, identity);
-	const consent = consentIdentity === identity ? policy : options.getAccountPolicy(provider, consentIdentity);
+	const consent =
+		consentIdentity === identity ? policy : consentIdentity && options.getAccountPolicy(provider, consentIdentity);
 	const configuredReservePct = policy?.reservePct;
 	const reservePct = Math.max(0, Math.min(100, configuredReservePct ?? options.globalReservePct));
 	// `omp usage` has no model/session context, so report the conservative
@@ -856,7 +862,8 @@ function formatResetExpiryBanner(
 			warning,
 			options.settings,
 			nowMs,
-			options.getAccountPolicy(warning.provider, owners[index] ?? usageReportIdentity(report)),
+			// No unique owner: the planners spend nothing for this report, so no account policy decides it.
+			owners[index] && options.getAccountPolicy(warning.provider, owners[index]),
 		),
 	);
 	const count = expiring.reduce((sum, { warning }) => sum + warning.count, 0);
