@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Antigravity CLI provider so a refused turn fails with an explicit refusal error instead of a normal empty stop, and a `max_turn_requests` stop is reported as `length` so the conversation can continue ([#19436](https://github.com/can1357/oh-my-pi/pull/19436) by [@SenCha930511](https://github.com/SenCha930511))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

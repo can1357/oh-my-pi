@@ -163,6 +163,14 @@ class FakeAgy implements AgyTransport {
 			update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
 		});
 	}
+
+	thinking(text: string): void {
+		this.options.onUpdate({
+			sessionId: this.currentId,
+			update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text } },
+		});
+	}
+
 	call(name = "read", args: Record<string, unknown> = { path: "a.txt" }, id = this.currentId): Promise<McpToolOutput> {
 		this.options.onUpdate({
 			sessionId: id,
@@ -299,6 +307,69 @@ describe("AgyHost stateful steps", () => {
 			additionalProperties: false,
 			properties: { data: { anyOf: [{ type: "object" }, { type: "string" }] } },
 		});
+	});
+	it("fails a refused turn with an explicit provider error instead of an empty stop", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("I cannot help with that.");
+		prompt.response.resolve({ stopReason: "refusal" });
+		await expect(run.done).rejects.toThrow("Antigravity CLI refused the request");
+		expect(state.host.hasPendingTurn).toBe(false);
+		expect(fake.closed).toBe(true);
+	});
+	it("finishes a max_turn_requests stop as length and continues the same conversation", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("1 2 3");
+		prompt.response.resolve({ stopReason: "max_turn_requests" });
+		await run.done;
+		expect(run.writer.output.stopReason).toBe("length");
+		expect(run.writer.output.content).toEqual([{ type: "text", text: "1 2 3" }]);
+		const next = step(state.host, [user("count to one hundred"), run.writer.output, user("continue")]);
+		const continuation = await fake.prompts.next();
+		expect(textOf(continuation.request.prompt)).toBe("continue");
+		expect(fake.created).toHaveLength(1);
+		fake.text("4 5 6");
+		continuation.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.stopReason).toBe("stop");
+	});
+	it("reports an empty max_turn_requests stop as length", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		prompt.response.resolve({ stopReason: "max_turn_requests" });
+		await run.done;
+		expect(run.writer.output.stopReason).toBe("length");
+		expect(run.writer.output.content).toEqual([]);
+	});
+
+	it("reports a thinking-only max_turn_requests stop as length", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.thinking("still thinking");
+		prompt.response.resolve({ stopReason: "max_turn_requests" });
+		await run.done;
+		expect(run.writer.output.stopReason).toBe("length");
+		expect(run.writer.output.content).toEqual([{ type: "thinking", thinking: "still thinking" }]);
+	});
+	it("keeps an end_turn stop as a normal stop", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Hello.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		expect(run.writer.output.stopReason).toBe("stop");
+		expect(fake.closed).toBe(false);
 	});
 	it("parks and resumes multiple serial tool steps under exactly one ACP prompt", async () => {
 		const state = await parked();
