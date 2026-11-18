@@ -1,5 +1,8 @@
 auth "openai" {
 	name "OpenAI (Sign in with ChatGPT)"
+	// Each sign-in registers its own client, bound to one user and workspace; identity is qualified by that
+	// client so two registrations of one account are stored as two credentials.
+	client-scoped-identity #true
 	// ChatGPT token sharing: omp registers as an agent and the grant bills the
 	// ChatGPT subscription against the regular OpenAI API. The per-login client id,
 	// ID-token verification and refresh live in `@oh-my-pi/pi-ai/src/registry/oauth/openai-chatgpt.ts`.

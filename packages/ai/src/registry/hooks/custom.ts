@@ -3,6 +3,7 @@
  * whose flow is not expressible in the declarative grammar.
  */
 import { loginMistralVibeSignIn } from "../oauth/mistral-vibe";
+import { loginOpenAIChatGPTHook, refreshOpenAIChatGPTHook } from "../oauth/openai-chatgpt";
 import type { Lazy, LoginHook, RefreshHook } from "./types";
 
 export const CUSTOM_LOGIN_HOOKS: Record<string, Lazy<LoginHook>> = {
@@ -15,7 +16,7 @@ export const CUSTOM_LOGIN_HOOKS: Record<string, Lazy<LoginHook>> = {
 	"devin-windsurf": () => import("../oauth/devin-windsurf").then(module => module.loginDevinWindsurfHook),
 	"antigravity-cli": () => import("../oauth/antigravity-cli").then(module => module.loginAntigravityCli),
 	"kiro-login": () => import("../oauth/kiro").then(module => module.loginKiroHook),
-	"openai-chatgpt": () => import("../oauth/openai-chatgpt").then(module => module.loginOpenAIChatGPTHook),
+	"openai-chatgpt": async () => loginOpenAIChatGPTHook,
 };
 export const CUSTOM_REFRESH_HOOKS: Record<string, Lazy<RefreshHook>> = {
 	"github-copilot": () => import("../oauth/github-copilot").then(module => module.refreshGitHubCopilotHook),
@@ -23,5 +24,5 @@ export const CUSTOM_REFRESH_HOOKS: Record<string, Lazy<RefreshHook>> = {
 	snowflake: () => import("../oauth/snowflake").then(module => module.refreshSnowflakeToken),
 	"antigravity-cli": () => import("../oauth/antigravity-cli").then(module => module.refreshAntigravityCli),
 	"kiro-refresh": () => import("../oauth/kiro").then(module => module.refreshKiroHook),
-	"openai-chatgpt-refresh": () => import("../oauth/openai-chatgpt").then(module => module.refreshOpenAIChatGPTHook),
+	"openai-chatgpt-refresh": async () => refreshOpenAIChatGPTHook,
 };

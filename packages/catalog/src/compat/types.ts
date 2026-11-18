@@ -580,6 +580,8 @@ export interface CompiledAuthProvider {
 	loginSubscription?: boolean;
 	/** Qualify credential and usage-report identity by org when an email may have multiple subscriptions. */
 	orgScopedIdentity?: boolean;
+	/** Qualify credential identity by the OAuth client a login registered, so registrations of one account stay separate. */
+	clientScopedIdentity?: boolean;
 	/** Environment variables carrying this provider's own OAuth bearer, excluding borrowed API-key aliases. */
 	oauthTokenEnv?: string[];
 	/** APIs whose provider transport resolves credentials without a stored account. */

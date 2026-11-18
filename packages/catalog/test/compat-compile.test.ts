@@ -385,6 +385,17 @@ describe("auth grammar", () => {
 		);
 	});
 
+	test("client-scoped-identity compiles to a provider flag and rejects a non-boolean value", () => {
+		const compiled = compileAuth([
+			{ file: "auth/x.kdl", text: 'auth "x" {\n\tname "X"\n\tclient-scoped-identity #true\n}' },
+			order(),
+		]);
+		expect(compiled.providers[0]?.clientScopedIdentity).toBe(true);
+		expect(() =>
+			compileAuth([{ file: "auth/x.kdl", text: 'auth "x" {\n\tname "X"\n\tclient-scoped-identity "yes"\n}' }]),
+		).toThrow(/auth\/x\.kdl:3/);
+	});
+
 	test("oauth-code derives callback-port and paste-code; refresh inherits the login token request", () => {
 		const compiled = compileAuth([
 			{

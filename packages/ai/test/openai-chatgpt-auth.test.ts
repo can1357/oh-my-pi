@@ -32,6 +32,11 @@ type TokenOverrides = {
 	answer?: string;
 	/** `client_id` echoed on the redirect: a value, or null for a re-authorization callback that omits it. */
 	redirectClientId?: string | null;
+	/** What the ID token says about the signed-in account. */
+	sub?: string;
+	email?: string;
+	/** `chatgpt_account_id` claim (a workspace id), as stored accountId carries when the token has one. */
+	workspaceId?: string;
 };
 
 /** Drives the browser-less login: reads the authorization URL, "redirects" the user back with a client id. */
@@ -65,10 +70,13 @@ async function login(overrides: TokenOverrides = {}) {
 				const idToken = await signIdToken({
 					iss: ISSUER,
 					aud: "agent_client_1",
-					sub: "user-123",
+					sub: overrides.sub ?? "user-123",
 					exp: Math.floor(Date.now() / 1000) + 600,
 					nonce: overrides.nonce ? overrides.nonce(nonce) : nonce,
-					email: "Dev@Example.com",
+					email: overrides.email ?? "Dev@Example.com",
+					...(overrides.workspaceId
+						? { "https://api.openai.com/auth": { chatgpt_account_id: overrides.workspaceId } }
+						: {}),
 				});
 				return Response.json({
 					access_token: "access-1",
@@ -151,6 +159,31 @@ describe("OpenAI ChatGPT token-sharing login", () => {
 		it("rejects a callback that swaps the saved account's client", async () => {
 			await expect(login({ saved: [saved], answer: "1", redirectClientId: "agent_client_2" })).rejects.toThrow(
 				/different client/,
+			);
+		});
+
+		it("accepts a saved account whose stored identity is a workspace id, as earlier logins stored it", async () => {
+			const workspaceSaved: OAuthCredentials = { ...saved, accountId: "acct_workspace_1" };
+
+			const { result } = await login({ saved: [workspaceSaved], answer: "1", workspaceId: "acct_workspace_1" });
+
+			expect(result.accountId).toBe("acct_workspace_1");
+		});
+
+		it("rejects a sign-in that landed on another account than the selected one", async () => {
+			await expect(login({ saved: [saved], answer: "1", sub: "someone-else" })).rejects.toThrow(/different account/);
+			await expect(
+				login({
+					saved: [{ ...saved, accountId: "acct_workspace_1" }],
+					answer: "1",
+					workspaceId: "acct_workspace_2",
+				}),
+			).rejects.toThrow(/different account/);
+		});
+
+		it("rejects a sign-in whose email differs even when the stored identity matches", async () => {
+			await expect(login({ saved: [saved], answer: "1", email: "other@example.com" })).rejects.toThrow(
+				/different account/,
 			);
 		});
 	});

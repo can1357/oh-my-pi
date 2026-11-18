@@ -545,12 +545,20 @@ function getOpenAIResponsesProviderSessionState(
 	return created;
 }
 
+/** Whether the key this request sends (explicit, else the provider's env key) is a ChatGPT token-sharing token. */
+function usesChatGPTTokenSharing(
+	model: Model<"openai-responses">,
+	options: OpenAIResponsesOptions | undefined,
+): boolean {
+	return isChatGPTTokenSharingKey(options?.apiKey || getEnvApiKey(model.provider));
+}
+
 function isOpenAIResponsesStatefulEnabled(
 	options: OpenAIResponsesOptions | undefined,
 	model: Model<"openai-responses">,
 ): boolean {
 	// Token sharing admits neither stored responses nor `previous_response_id`.
-	if (isChatGPTTokenSharingKey(options?.apiKey)) return false;
+	if (usesChatGPTTokenSharing(model, options)) return false;
 	// Chaining forces `store: true`, so a storing host whose storage is off
 	// must never chain — not even when the caller asks for it.
 	if (model.compat.storeResponses === true && !storesResponsesServerSide(model, options)) return false;
@@ -2020,7 +2028,7 @@ export function buildParams(
 
 	applyOpenAIExtraBody(params, options?.extraBody);
 	applyOpenAIResponsesPromptCachePolicy(params, model, options, statefulCacheBaseline);
-	if (isChatGPTTokenSharingKey(options?.apiKey)) applyChatGPTTokenSharingParams(params);
+	if (usesChatGPTTokenSharing(model, options)) applyChatGPTTokenSharingParams(params);
 
 	let trailingScaffoldingItems = 0;
 	if (options?.forceReasoningOff && model.compat.requiresReasoningOffJuiceInstruction) {

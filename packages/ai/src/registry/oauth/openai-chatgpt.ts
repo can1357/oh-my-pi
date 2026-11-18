@@ -35,9 +35,7 @@ const TOKEN_URL = `${ISSUER}/api/accounts/oauth/token`;
 const JWKS_URL = `${ISSUER}/.well-known/jwks.json`;
 /** Audience of the issued token: the OpenAI API the bearer is valid for. */
 const RESOURCE = "https://api.openai.com/v1";
-const SCOPE = ["openid", "profile", "email", "offline_access", "resource.invoke", CHATGPT_TOKEN_SHARING_SCOPE].join(
-	" ",
-);
+const SCOPE_NAMES = ["openid", "profile", "email", "offline_access", "resource.invoke"];
 const CALLBACK_PATH = "/auth/callback";
 const REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_TOKEN_LIFETIME_S = 3600;
@@ -75,7 +73,9 @@ export function createOpenAIChatGPTAuthorizationUrl(args: {
 		ext_agent_host_id: args.hostId,
 		response_type: "code",
 		redirect_uri: args.redirectUri,
-		scope: SCOPE,
+		// Joined at call time, not module load: the hook table imports this module while the sharing module may still be
+		// evaluating (sharing -> registry engine -> hooks -> here), so its scope constant is not readable yet.
+		scope: [...SCOPE_NAMES, CHATGPT_TOKEN_SHARING_SCOPE].join(" "),
 		resource: RESOURCE,
 		state: args.state,
 		nonce: args.nonce,
@@ -316,15 +316,28 @@ class OpenAIChatGPTFlow extends OAuthCallbackFlow {
 		const claims = await verifyOpenAIChatGPTIdToken(idToken, clientId, this.#nonce, this.#fetch, signal);
 		throwIfCancelled(signal);
 		const profile = getTokenProfile(access, idToken);
+		// `sub` is verified non-empty, so every login has a stable identity even without a workspace claim.
+		const accountId = profile.accountId ?? stringField(claims.sub);
 		const email = profile.email ?? stringField(claims.email)?.trim().toLowerCase();
+		// A returning sign-in must be the account that was selected, whichever account the browser signed in as. Compare
+		// the identity login stores (workspace id, else subject) and, where both sides know it, the email.
+		if (this.#saved) {
+			const sameAccount = accountId === this.#saved.accountId;
+			const sameEmail = !email || !this.#saved.email || email === this.#saved.email;
+			if (!sameAccount || !sameEmail) {
+				throw new AIError.OAuthError(
+					"ChatGPT signed in a different account than the one selected. Choose that account again, or add a new one.",
+					{ kind: "validation", provider: PROVIDER },
+				);
+			}
+		}
 		return {
 			access,
 			refresh,
 			expires:
 				Date.now() + (typeof tokens.expires_in === "number" ? tokens.expires_in : DEFAULT_TOKEN_LIFETIME_S) * 1000,
 			oauthClientId: clientId,
-			// `sub` is verified non-empty, so every login has a stable identity even without a workspace claim.
-			accountId: profile.accountId ?? stringField(claims.sub),
+			accountId,
 			...(email ? { email } : {}),
 		};
 	}

@@ -45,7 +45,7 @@ function sse(text: string, responseId: string): Response {
 }
 
 /** Two chained-eligible turns with the same options; returns the request bodies the server saw. */
-async function twoTurns(apiKey: string, preferWebsockets = false): Promise<Array<Record<string, unknown>>> {
+async function twoTurns(apiKey: string | undefined, preferWebsockets = false): Promise<Array<Record<string, unknown>>> {
 	const sent: Array<Record<string, unknown>> = [];
 	const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
 		sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
@@ -110,5 +110,21 @@ describe("openai-responses with a ChatGPT token-sharing credential", () => {
 		const [, second] = await twoTurns(accessToken("openid profile"));
 
 		expect(second?.previous_response_id).toBe("resp_1");
+	});
+
+	it("shapes the request when the token comes from OPENAI_API_KEY rather than options", async () => {
+		const previous = Bun.env.OPENAI_API_KEY;
+		Bun.env.OPENAI_API_KEY = accessToken("openid chatgpt.tokens.use.direct offline_access");
+		try {
+			const [first, second] = await twoTurns(undefined, true);
+
+			expect(first?.store).toBe(false);
+			expect(second?.store).toBe(false);
+			expect(second?.previous_response_id).toBeUndefined();
+			expect(first).not.toHaveProperty("max_output_tokens");
+		} finally {
+			if (previous === undefined) delete Bun.env.OPENAI_API_KEY;
+			else Bun.env.OPENAI_API_KEY = previous;
+		}
 	});
 });

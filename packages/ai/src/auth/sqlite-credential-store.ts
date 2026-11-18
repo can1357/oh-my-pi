@@ -189,7 +189,8 @@ function toStoredAuthCredential(row: AuthRow, credential: AuthCredential): Store
 	return { id: row.id, provider: row.provider, credential, disabledCause: row.disabled_cause };
 }
 
-function resolveProviderCredentialIdentityKey(provider: string, identifiers: string[]): string | null {
+/** Account part of a credential's identity key: email/account/project, qualified by org where the provider is org-scoped. */
+function resolveAccountIdentityKey(provider: string, identifiers: string[]): string | null {
 	const emailIdentifier = identifiers.find(identifier => identifier.startsWith("email:"));
 	if (authPolicyFor(provider)?.orgScopedIdentity === true) {
 		// One account email can hold several organizations/workspaces (e.g. a
@@ -215,6 +216,17 @@ function resolveProviderCredentialIdentityKey(provider: string, identifiers: str
 	const projectIdentifier = identifiers.find(identifier => identifier.startsWith("project:"));
 	if (projectIdentifier) return projectIdentifier;
 	return null;
+}
+
+function resolveProviderCredentialIdentityKey(provider: string, identifiers: string[]): string | null {
+	const accountKey = resolveAccountIdentityKey(provider, identifiers);
+	if (authPolicyFor(provider)?.clientScopedIdentity !== true) return accountKey;
+	// Each login registers its own OAuth client, bound to one workspace. Qualify by it so another registration of the
+	// same account is a separate credential, and a re-login with the same client replaces its own row. A row without a
+	// client id (written before the qualifier existed) keeps its bare key.
+	const client = identifiers.find(identifier => identifier.startsWith("client:"));
+	if (!client) return accountKey;
+	return accountKey ? `${accountKey}|${client}` : client;
 }
 
 /**
@@ -266,6 +278,17 @@ export function matchesReplacementCredential(
 	if (incomingIdentityKey === null) return false;
 	if (incomingIdentityKey === existingIdentityKey) return true;
 	if (existingIdentityKey === null) return false;
+	// Client-scoped providers: a row stored before the qualifier existed (bare account key) is claimed by a login of
+	// the same client, so upgrading does not leave a duplicate beside the re-login.
+	const clientIdentifier = incomingIdentifiers.find(identifier => identifier.startsWith("client:"));
+	if (
+		clientIdentifier !== undefined &&
+		incomingIdentityKey === `${existingIdentityKey}|${clientIdentifier}` &&
+		existing.type === "oauth" &&
+		normalizeStoredAccountId(existing.oauthClientId) === normalizeStoredAccountId(incoming.oauthClientId)
+	) {
+		return true;
+	}
 	// One-way upgrade, applied only when the INCOMING identity key carries the
 	// org qualifier (only providers with org-scoped identity create such keys,
 	// so other providers never reach the checks below). An org-scoped login `org:<o>`
@@ -337,6 +360,8 @@ function extractOAuthCredentialIdentifiers(credential: OAuthCredential): string[
 	if (projectId) identifiers.add(`project:${projectId}`);
 	const orgId = normalizeStoredAccountId(credential.orgId);
 	if (orgId) identifiers.add(`org:${orgId}`);
+	const clientId = normalizeStoredAccountId(credential.oauthClientId);
+	if (clientId) identifiers.add(`client:${clientId}`);
 	const accessIdentifiers = extractOAuthTokenIdentifiers(credential.access) ?? [];
 	for (const identifier of accessIdentifiers) {
 		identifiers.add(identifier);

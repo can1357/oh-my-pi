@@ -4,6 +4,7 @@
 
 ### Added
 
+- `client-scoped-identity` auth rule: a provider's credential identity is qualified by the OAuth client its login registered, so one account signed in through two clients keeps two credentials ([#19686](https://github.com/can1357/oh-my-pi/pull/19686) by [@xeonise](https://github.com/xeonise))
 - `prompt-cache-prewarm` compat axis, read through `isPromptCachePrewarmSupported`: the first-party Anthropic endpoint accepts a `max_tokens: 0` prompt-cache pre-warm
 
 ### Fixed
