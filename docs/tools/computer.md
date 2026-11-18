@@ -181,6 +181,8 @@ On macOS, `selectText(text, { prefix?, suffix?, select? })` writes `AXSelectedTe
 
 On Linux, `selectText` uses the GTK or Qt element's AT-SPI `Text` interface, including read-only and unfocused text. Requests and results use the same UTF-16 units as macOS; GTK's Unicode-scalar offsets are converted at the backend boundary. Unknown toolkits, password or masked text, inconsistent full-text character counts, and multiple selections are refused before mutation. The backend attempts at most one selection or caret write, then verifies its actual range, unchanged full text and unchanged target focus. A native failure after that attempt is `AxUnconfirmed`. Canceling or timing out the surrounding `computer.run` can instead return the run's usual abort/timeout error. Inspect the field before retrying or typing in either case, because the selection may have changed. This does not change `type`'s existing toolkit and focus restrictions.
 
+On Linux, a nonempty native selection may replace PRIMARY (middle-click paste); `selectText` does not preserve its contents or ownership.
+
 AX actions need no screenshot. AX bounds and `desktop.elementAt()` use platform-native global desktop coordinates (logical points on macOS, physical pixels on Windows), not screenshot pixels. An element keeps its ref across AX snapshots; a ref throws `StaleRef` once its element is missing from the window's current and previous snapshots. A role or label change gives the element a new ref, and its old ref keeps working until it expires the same way.
 
 ### Clipboard

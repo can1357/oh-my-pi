@@ -1,8 +1,10 @@
 //! Selecting text in an element's value through its `Text` interface.
 //!
-//! Changes only the selection or caret, without requesting focus or sending
-//! keys. Read-back must confirm unchanged text and focus. Subsequent typing
-//! and insertion retain their editability, focus and toolkit restrictions.
+//! Selects text or places a caret without requesting focus or sending keys.
+//! A nonempty native selection may replace PRIMARY (middle-click paste);
+//! PRIMARY contents and ownership are not preserved. Read-back must confirm
+//! unchanged text and focus. Subsequent typing and insertion retain their
+//! editability, focus and toolkit restrictions.
 //! Public offsets count UTF-16 code units; GTK's native offsets count Unicode
 //! scalars, while Qt's already count UTF-16.
 

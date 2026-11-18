@@ -637,6 +637,7 @@ fn cancellation_and_timeout_preserve_whether_a_write_might_have_landed() {
 			state.stop = Some(stage);
 			state.cancel = cancelled.then(|| source.clone());
 			let mut fixture = Fixture::new(state);
+			fixture.ax.reply_timeout = Duration::from_millis(200);
 			let result =
 				control::with_token_for_test(&source.token(), || fixture.select(&request("bc")));
 			let expected = if stage != Stage::BeforeWrite {
