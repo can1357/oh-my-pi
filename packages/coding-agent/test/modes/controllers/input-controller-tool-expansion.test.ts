@@ -6,17 +6,18 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { cfgDisplayHideToolActivity } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 describe("InputController tool output expansion", () => {
-	it("expands children and forces a full repaint so every live block re-renders", () => {
+	it("expands children and replays committed history so retired blocks re-render", () => {
 		const expandable = { setExpanded: vi.fn() };
 		const inert = { render: vi.fn(() => []) };
 		const pendingShell = { setExpanded: vi.fn() };
 		const requestRender = vi.fn();
+		const resetDisplay = vi.fn();
 		const showStatus = vi.fn();
 		const ctx = {
 			toolOutputExpanded: false,
 			chatContainer: { children: [expandable, inert] },
 			pendingShellContainer: { children: [pendingShell] },
-			ui: { requestRender },
+			ui: { requestRender, resetDisplay },
 			showStatus,
 		} as unknown as InteractiveModeContext;
 
@@ -25,10 +26,10 @@ describe("InputController tool output expansion", () => {
 		expect(ctx.toolOutputExpanded).toBe(true);
 		expect(expandable.setExpanded).toHaveBeenCalledWith(true);
 		expect(pendingShell.setExpanded).toHaveBeenCalledWith(true);
-		// Expansion mutates every live block; the forced repaint re-renders them
-		// at their new heights in the same frame.
-		expect(requestRender).toHaveBeenCalledTimes(1);
-		expect(requestRender).toHaveBeenCalledWith(true);
+		// Expansion mutates every live block; replaying native history is the only
+		// way rows already retired to scrollback adopt the new state too.
+		expect(resetDisplay).toHaveBeenCalledTimes(1);
+		expect(requestRender).not.toHaveBeenCalled();
 		expect(showStatus).toHaveBeenCalledWith("Tool output expansion: enabled");
 	});
 
