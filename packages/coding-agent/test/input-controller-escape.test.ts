@@ -843,7 +843,7 @@ describe("InputController escape behavior", () => {
 		const { ctx, editor, spies } = createContext();
 		mutableSessionState(ctx).isPanelRunning = true;
 		mutableSessionState(ctx).isStreaming = true;
-		abortViewSession(ctx).isGeneratingHandoff = true;
+		abortViewSession(ctx).isCompacting = true;
 		const controller = new InputController(ctx);
 
 		controller.setupKeyHandlers();
@@ -851,7 +851,7 @@ describe("InputController escape behavior", () => {
 
 		expect(spies.abortPanel).toHaveBeenCalledTimes(1);
 		expect(spies.abort).not.toHaveBeenCalled();
-		expect(spies.abortHandoff).not.toHaveBeenCalled();
+		expect(spies.abortCompaction).not.toHaveBeenCalled();
 		expect(spies.showStatus).toHaveBeenCalledWith("Cancelling panel…");
 	});
 
