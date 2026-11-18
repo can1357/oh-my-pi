@@ -12,6 +12,10 @@
 
 - Main agent, Subagents and Advisor shares in Token mix now count conversation turns only; side-channel calls no longer inflate them. Sessions changed since 2026-08-31 are re-read once after upgrading to attribute past calls
 
+### Fixed
+
+- The dashboard refuses requests under a public host name it was not told about, so a web page can no longer read it through DNS rebinding; IP addresses, `localhost`, LAN short names, `.local` and Tailscale (`*.ts.net`) names keep working, and other names such as a reverse proxy's domain go in `OMP_STATS_ALLOWED_HOSTS`
+
 ## [18.22.1] - 2026-11-17
 
 ### Fixed

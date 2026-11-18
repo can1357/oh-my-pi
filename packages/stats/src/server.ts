@@ -443,12 +443,48 @@ export function formatStatsDashboardUrl(hostname: string, port: number): string 
 	return `http://${urlHostname}:${port}`;
 }
 
+/** Extra Host names (comma-separated) the dashboard answers to, e.g. a reverse proxy's public domain. */
+export const STATS_ALLOWED_HOSTS_ENV = "OMP_STATS_ALLOWED_HOSTS";
+
+/** Suffixes no public DNS server can hand out: loopback, mDNS, private-use names, and Tailscale MagicDNS. */
+const PRIVATE_NAME_SUFFIXES = [".localhost", ".local", ".internal", ".home.arpa", ".ts.net"];
+const IPV4_LITERAL = /^\d+\.\d+\.\d+\.\d+$/;
+
+/**
+ * DNS-rebinding guard. A rebinding page reaches the dashboard under a public name whose DNS the attacker
+ * controls, and the browser sends that name as Host; it can never send an IP literal or a name public DNS
+ * cannot resolve. So IP literals, `localhost`, single-label names (LAN and MagicDNS short names) and
+ * {@link PRIVATE_NAME_SUFFIXES} pass (Tailscale Serve forwards its `*.ts.net` Host unchanged), and any other
+ * dotted name must be listed in {@link STATS_ALLOWED_HOSTS_ENV}. `hostname` is the parsed request URL's.
+ */
+function isRebindSafeHost(hostname: string, allowed: ReadonlySet<string>): boolean {
+	const name = hostname.toLowerCase().replace(/\.$/, "");
+	if (name.startsWith("[") || IPV4_LITERAL.test(name) || !name.includes(".")) return true;
+	return allowed.has(name) || PRIVATE_NAME_SUFFIXES.some(suffix => name.endsWith(suffix));
+}
+
+function readAllowedHosts(): Set<string> {
+	const names = (process.env[STATS_ALLOWED_HOSTS_ENV] ?? "").split(",");
+	return new Set(names.map(name => name.trim().toLowerCase().replace(/\.$/, "")).filter(Boolean));
+}
+
 function createDashboardServer(port: number, hostname: string): Server<undefined> {
+	// The operator chose the bind name, and the printed URL and the reuse probe both use it.
+	const allowedHosts = readAllowedHosts();
+	allowedHosts.add(hostname.toLowerCase().replace(/\.$/, ""));
 	const server = Bun.serve({
 		port,
 		hostname,
 		async fetch(req, server) {
 			const url = new URL(req.url);
+			if (!isRebindSafeHost(url.hostname, allowedHosts)) {
+				return new Response(
+					`Host not allowed; add it to ${STATS_ALLOWED_HOSTS_ENV} to serve the dashboard under it`,
+					{
+						status: 403,
+					},
+				);
+			}
 			const path = url.pathname;
 
 			// The identity header lets another omp session's reuse probe positively
