@@ -160,7 +160,7 @@ export interface MCPConfigFile {
 	mcpServers?: Record<string, MCPServerConfig>;
 	/** Names to hide regardless of any source `enabled` flag. Highest precedence. */
 	disabledServers?: string[];
-	/** Names to force-enable when a non-writable source reports `enabled: false`. */
+	/** Names to force-enable when a non-writable source reports `enabled: false` or a built-in transform would drop them. */
 	enabledServers?: string[];
 }
 

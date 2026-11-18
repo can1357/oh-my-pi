@@ -24,6 +24,8 @@ export * from "./reload";
 export * from "./tool-bridge";
 // Tool cache
 export * from "./tool-cache";
+// Built-in transforms
+export * from "./transforms";
 // Transports
 export * from "./transports/http";
 export * from "./transports/stdio";

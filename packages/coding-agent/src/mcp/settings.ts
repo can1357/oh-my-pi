@@ -43,6 +43,19 @@ export const cfgMcpEvalNamespaces = register({
 	},
 });
 
+export const cfgMcpBuiltinTransforms = register({
+	id: "mcp.builtinTransforms",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "MCP Built-in Transforms",
+		description:
+			"Skip recognized MCP servers that omp's own tools replace (Codex's node_repl while eval runs JavaScript)",
+	},
+});
+
 export const cfgMcpRenderMarkdownResults = register({
 	id: "mcp.renderMarkdownResults",
 	type: "boolean",

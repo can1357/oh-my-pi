@@ -174,6 +174,7 @@ import {
 	MCPToolCache,
 	type MCPToolsLoadResult,
 	reconnectMCPServers,
+	resolveMCPTransformContext,
 	shouldFilterBrowserMCPForPrelude,
 } from "./mcp";
 import { parseMCPToolName } from "@oh-my-pi/pi-tui/tools/mcp";
@@ -3017,6 +3018,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			filterExa: true,
 			// Filter browser MCP only when Eval can expose the built-in browser prelude.
 			filterBrowser: initialBrowserPreludeAvailable,
+			builtinTransforms: resolveMCPTransformContext(settings, {
+				evalActive: toolRegistry.has("eval") && activeToolNames.has("eval"),
+			}),
 			extensionRoots: buildSessionExtensionRoots(),
 		};
 		if (enableMCP && !mcpManager && isMainThread()) {
@@ -5469,6 +5473,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							...mcpDiscoverOptions,
 							enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
 							filterBrowser: session.getEvalPreludes().some(definition => definition.name === "browser"),
+							builtinTransforms: resolveMCPTransformContext(settings, {
+								evalActive: session.getActiveToolNames().includes("eval"),
+							}),
 							extensionRoots: buildSessionExtensionRoots(),
 						});
 						if (session.isDisposed) {
