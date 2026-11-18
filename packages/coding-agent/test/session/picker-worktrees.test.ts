@@ -86,7 +86,11 @@ describe.skipIf(process.platform === "win32")("resume picker across git worktree
 	/** Runs `/wt`'s worktree creation and session move for a fresh session in `repo`. */
 	async function sessionMovedByWt(branch: string): Promise<{ id: string; worktree: string }> {
 		const session = await answeredSession(repo);
-		const { path: worktree } = await createSessionWorktree(repo, Settings.isolated(), branch);
+		const { path: worktree } = await createSessionWorktree(
+			repo,
+			Settings.isolated({ "ovnfs.path": "/nonexistent/ovnfs" }),
+			branch,
+		);
 		await session.moveTo(worktree);
 		await session.close();
 		return { id: session.getSessionId(), worktree };

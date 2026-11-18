@@ -33,7 +33,6 @@ function extractPaperId(url: string): string | null {
 	const patterns = [
 		/semanticscholar\.org\/paper\/[^/]+\/([a-f0-9]{40})/i,
 		/semanticscholar\.org\/paper\/([a-f0-9]{40})/i,
-		/api\.semanticscholar\.org\/.*\/paper\/([a-f0-9]{40})/i,
 	];
 
 	for (const pattern of patterns) {
@@ -45,18 +44,17 @@ function extractPaperId(url: string): string | null {
 }
 
 export const handleSemanticScholar: SpecialHandler = async (url: string, timeout: number, signal?: AbortSignal) => {
-	if (!url.includes("semanticscholar.org")) return null;
+	let hostname: string;
+	try {
+		hostname = new URL(url).hostname;
+	} catch {
+		return null;
+	}
+	// The API answers its own URLs (with the fields the caller chose); only paper pages are rendered here.
+	if (hostname !== "semanticscholar.org" && hostname !== "www.semanticscholar.org") return null;
 
 	const paperId = extractPaperId(url);
-	if (!paperId) {
-		return buildResult("Failed to extract paper ID from Semantic Scholar URL", {
-			url,
-			method: "semantic-scholar",
-			fetchedAt: new Date().toISOString(),
-			notes: ["Invalid URL format"],
-			contentType: "text/plain",
-		});
-	}
+	if (!paperId) return null;
 
 	const fields = [
 		"title",

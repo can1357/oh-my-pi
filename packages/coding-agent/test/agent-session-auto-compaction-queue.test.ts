@@ -1331,13 +1331,18 @@ describe("AgentSession auto-compaction queue resume", () => {
 	const queueLaunchCompletion = (session: AgentSession): Promise<void> => {
 		const owner = session.sessionManager.getSessionId();
 		return session.queueLaunchCompletion({
-			event: "daemon-completed",
+			ev: "completed",
 			completionId: "idle-completion",
 			owner,
-			daemon: {
-				name: "worker",
+			unit: {
 				id: "daemon-id",
+				kind: "proc",
+				scope: { kind: "session", id: owner },
+				key: "worker",
+				label: "worker",
+				generation: "1",
 				state: "exited",
+				pids: [],
 				createdAt: 1,
 				startedAt: 1,
 				exitedAt: 2,
@@ -1345,8 +1350,9 @@ describe("AgentSession auto-compaction queue resume", () => {
 				restartCount: 0,
 				outputBytes: 0,
 				owner,
-				persist: false,
-				detached: false,
+				leases: 0,
+				policy: { hold: "leases", idleMs: 0, onIdle: "stop", restart: "no", survive: "none" },
+				supervised: true,
 			},
 		});
 	};

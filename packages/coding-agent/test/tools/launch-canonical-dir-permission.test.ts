@@ -3,7 +3,7 @@ import type { PathLike } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { canonicalProjectDir } from "../../src/launch/paths";
+import { canonicalProjectDir } from "../../src/daemon/paths";
 
 describe("canonicalProjectDir permission fallback", () => {
 	const originalRealpath = fs.realpath.bind(fs);

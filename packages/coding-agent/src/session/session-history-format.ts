@@ -627,6 +627,7 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 			case "custom":
 			case "hookMessage": {
 				const custom = msg as CustomMessage | HookMessage;
+				if (custom.role === "custom" && custom.excludeFromContext) break;
 				if (
 					custom.display === false &&
 					!PRIMARY_CONTEXT_CUSTOM_TYPES.has(custom.customType) &&

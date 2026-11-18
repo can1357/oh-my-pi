@@ -1,4 +1,4 @@
-# Bazel build configuration for the pi-natives NAPI addon pipeline.
+# Bazel build configuration for the omp-natives NAPI addon pipeline.
 # Cross targets, ISA variants, and release codegen are encoded in the
 # //:natives-* addon targets (bazel/defs.bzl transition), so a bare
 # `bazel build //:natives-<target>` is always release-grade.
@@ -51,11 +51,11 @@ build:macos --@rules_rust//rust/settings:extra_exec_rustc_flag=-Clink-arg=-Wl,-S
 
 
 # --- Rust validation (replaces cargo clippy/nextest in CI) --------------------
-# Mirrors cargo semantics: crates with `[lints] workspace = true` (pi-ast,
-# pi-iso, pi-natives, pi-shell, pi-voice, pi-walker) get the strict workspace
+# Mirrors cargo semantics: crates with `[lints] workspace = true` (omp-ast,
+# omp-iso, omp-natives, omp-shell, omp-voice, omp-xfs) get the strict workspace
 # policy
 # (clippy-strict; bazel/clippy.bazelrc is generated from Cargo.toml); everything
-# else gets default clippy + -Dwarnings (clippy). pi-builtins allows every
+# else gets default clippy + -Dwarnings (clippy). omp-builtins allows every
 # clippy group in its manifest (ported uutils/jaq code) while keeping
 # rustc warnings at zero; the aspect ignores Cargo `[lints]`, so clippy-ported
 # re-states those allows on top of -Dwarnings.
