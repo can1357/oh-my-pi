@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Anthropic strict-tool fallback now treats a Vertex org-policy rejection of `structured_outputs` (`allowedPartnerModelFeatures` / "disallowed feature structured_outputs") as a strict-tools rejection, retries once without `strict`, and pins `strictToolsDisabled` ([#19576](https://github.com/can1357/oh-my-pi/issues/19576))
+- Anthropic strict-tool fallback now treats a Vertex org-policy rejection of `structured_outputs` (`allowedPartnerModelFeatures` / "disallowed feature structured_outputs") as a strict-tools rejection, retries once without `strict`, and pins `strictToolsDisabled` ([#19576](https://github.com/can1357/oh-my-pi/issues/19576)) ([#19655](https://github.com/can1357/oh-my-pi/pull/19655) by [@koeria](https://github.com/koeria))
 
 ## [18.22.2] - 2026-11-18
 
