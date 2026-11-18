@@ -454,6 +454,7 @@ import {
 	type PrewalkCoordinatorHost,
 	type PrewalkRestartResult,
 } from "./prewalk";
+import { PROVIDER_REFUSAL_CUSTOM_TYPE, providerRefusalData } from "./provider-refusal";
 import {
 	IMAGE_ATTACHMENT_DESCRIPTION_TYPE,
 	isAdvisorCard,
@@ -4641,6 +4642,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (message.role === "custom" && message.customType === "ttsr-injection") {
 				this.#ttsr.markInjectedFromDetails(message.details);
 			}
+			return;
+		}
+		// A refused turn stays out of the transcript (#persistSessionMessageIfMissing
+		// skips it); keep a non-context record of it instead. Recorded here, once per
+		// message_end, because mid-run compaction re-offers unpersisted turn messages.
+		if (message.role === "assistant" && this.#recovery.isClassifierRefusal(message)) {
+			this.sessionManager.appendCustomEntry(PROVIDER_REFUSAL_CUSTOM_TYPE, providerRefusalData(message));
 			return;
 		}
 		this.#persistSessionMessageIfMissing(message);

@@ -15,6 +15,7 @@
 - `goal` tool `pause` op stops autonomous continuation while blocked on the user
 - Lsp references and rename warn about textual occurrences the server missed, and definition/references flag locations that do not mention the symbol (with clangd's missing compile_commands.json called out)
 - BMP and TIFF images are transcoded to PNG and read inline like PNG/JPEG
+- Turns the provider refuses (e.g. `reasoning_extraction`) are kept in the session file as a `provider_refusal` entry with the category, explanation, usage and whatever streamed before the refusal; the entry never reaches later requests
 
 ### Changed
 
