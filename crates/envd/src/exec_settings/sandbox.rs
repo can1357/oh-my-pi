@@ -392,8 +392,10 @@ pub struct SandboxSettings {
 	/// wherever a sandbox spec is built and enforced, whether they exist yet or
 	/// not: the operator grants store and the user extension root. Not a user
 	/// convar. Skipped when empty so the policy digest of settings without
-	/// protected paths is unchanged.
-	#[serde(skip_serializing_if = "Vec::is_empty")]
+	/// protected paths is unchanged. Serialized lossily, so a path that is not
+	/// valid UTF-8 still digests: only the daemon policy digest serializes
+	/// settings, and enforcement reads the exact paths.
+	#[serde(skip_serializing_if = "Vec::is_empty", serialize_with = "serialize_paths_lossy")]
 	pub protected_write_paths: Vec<PathBuf>,
 	/// Whether the user set any `sv_sandbox_*` convar, rather than leaving the
 	/// shipped posture. A sandbox the user asked for that cannot be built is a
@@ -539,21 +541,44 @@ pub fn protected_write_paths(data_dir: &Path, home: &Path) -> Vec<PathBuf> {
 	}
 	let mut paths = candidates
 		.into_iter()
-		.map(|path| {
-			canonical_protected_location(&path)
-				.unwrap_or_else(|_| std::path::absolute(&path).unwrap_or(path))
-		})
+		.map(protected_spelling)
 		.collect::<Vec<_>>();
 	paths.sort_unstable();
 	paths.dedup();
 	paths
 }
 
+/// Serializes paths as strings, replacing bytes that are not UTF-8 with U+FFFD.
+/// Only the daemon policy digest serializes settings, and failing there would
+/// take the session down; enforcement reads the exact [`PathBuf`]s.
+fn serialize_paths_lossy<S: serde::Serializer>(
+	paths: &[PathBuf],
+	serializer: S,
+) -> Result<S::Ok, S::Error> {
+	serializer.collect_seq(paths.iter().map(|path| path.to_string_lossy()))
+}
+
+/// The canonical spelling of a protected location, or its absolute spelling
+/// when no ancestor of it can be canonicalized.
+fn protected_spelling(path: PathBuf) -> PathBuf {
+	canonical_protected_location(&path)
+		.unwrap_or_else(|_| std::path::absolute(&path).unwrap_or(path))
+}
+
 fn host_protected_write_paths() -> Vec<PathBuf> {
-	match (omp_core::dirs::data_dir(None), omp_core::dirs::home_dir()) {
-		(Ok(data_dir), Some(home)) => protected_write_paths(&data_dir, &home),
-		(Ok(data_dir), None) => vec![data_dir.join("ext")],
-		(Err(_), _) => Vec::new(),
+	protected_paths_for_host(
+		omp_core::dirs::data_dir(None).ok().as_deref(),
+		omp_core::dirs::home_dir().as_deref(),
+	)
+}
+
+/// Without a home directory only the data directory's store can be protected,
+/// spelled like every other protected path; without a data directory, nothing.
+fn protected_paths_for_host(data_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+	match (data_dir, home) {
+		(Some(data_dir), Some(home)) => protected_write_paths(data_dir, home),
+		(Some(data_dir), None) => vec![protected_spelling(data_dir.join("ext"))],
+		(None, _) => Vec::new(),
 	}
 }
 
@@ -993,13 +1018,83 @@ mod tests {
 		);
 	}
 
+	/// The protected locations are the canonical data-directory store and user
+	/// extension root, so a spelling through a link cannot dodge the sandbox
+	/// deny.
+	#[cfg(unix)]
 	#[test]
-	fn from_con_includes_shared_host_protected_paths() {
-		let data_dir = omp_core::dirs::data_dir(None).expect("data directory");
-		let home = omp_core::dirs::home_dir().expect("home directory");
-		let expected = protected_write_paths(&data_dir, &home);
-		let actual = SandboxSettings::from_con(&Ctx::new()).protected_write_paths;
-		assert_eq!(actual, expected);
+	fn protected_write_paths_are_the_canonical_store_and_extension_root() {
+		use std::os::unix::fs::symlink;
+
+		let tree = tempfile::tempdir().expect("tree");
+		let real = fs::canonicalize(tree.path()).expect("canonical tree");
+		fs::create_dir_all(real.join("data-real")).expect("data directory");
+		fs::create_dir_all(real.join("home-real")).expect("home directory");
+		symlink(real.join("data-real"), real.join("data")).expect("data link");
+		symlink(real.join("home-real"), real.join("home")).expect("home link");
+
+		// Both roots are handed over through links, as a launcher might receive them.
+		let data_dir = real.join("data");
+		let home = real.join("home");
+		let extension_root = omp_core::dirs::profile_config_dir(&home)
+			.expect("profile config root")
+			.join("agent/extensions");
+		// `<home>/.o2/agent/extensions`, unless a config override moved the root away.
+		let canonical_extension_root = match extension_root.strip_prefix(&home) {
+			Ok(inside) => real.join("home-real").join(inside),
+			Err(_) => extension_root,
+		};
+		let mut expected = vec![real.join("data-real/ext"), canonical_extension_root];
+		expected.sort_unstable();
+
+		assert_eq!(protected_write_paths(&data_dir, &home), expected);
+	}
+
+	/// Two spellings of one location collapse to a single protected path.
+	#[cfg(unix)]
+	#[test]
+	fn protected_write_paths_deduplicate_one_location() {
+		use std::os::unix::fs::symlink;
+
+		let tree = tempfile::tempdir().expect("tree");
+		let real = fs::canonicalize(tree.path()).expect("canonical tree");
+		let data_dir = real.join("data");
+		let home = real.join("home");
+		let extension_root = omp_core::dirs::profile_config_dir(&home)
+			.expect("profile config root")
+			.join("agent/extensions");
+		if !extension_root.starts_with(&real) {
+			eprintln!("skip: a config override places the extension root outside the test tree");
+			return;
+		}
+		fs::create_dir_all(&extension_root).expect("extension root");
+		fs::create_dir_all(&data_dir).expect("data directory");
+		// The store resolves to the extension root, so both candidates name it.
+		symlink(&extension_root, data_dir.join("ext")).expect("store link");
+
+		assert_eq!(protected_write_paths(&data_dir, &home), [extension_root]);
+	}
+
+	/// Without a home directory only the data directory's store is protected,
+	/// and it is canonical like the store of every other host.
+	#[cfg(unix)]
+	#[test]
+	fn host_protected_paths_without_a_home_keep_the_canonical_store() {
+		use std::os::unix::fs::symlink;
+
+		let tree = tempfile::tempdir().expect("tree");
+		let real = fs::canonicalize(tree.path()).expect("canonical tree");
+		fs::create_dir(real.join("data-real")).expect("data directory");
+		symlink(real.join("data-real"), real.join("data")).expect("data link");
+		let data_dir = real.join("data");
+
+		assert_eq!(protected_paths_for_host(Some(data_dir.as_path()), None), [
+			real.join("data-real/ext")
+		]);
+		assert!(
+			protected_paths_for_host(None, Some(real.as_path())).is_empty(),
+			"a host without a data directory protects nothing"
+		);
 	}
 
 	/// Settings without protected paths serialize exactly as before the field
@@ -1023,5 +1118,24 @@ mod tests {
 		let value = serde_json::to_value(&protected).expect("settings JSON");
 		assert_eq!(value["protected_write_paths"], serde_json::json!(["/srv/grants"]));
 		assert_eq!(serde_json::from_value::<SandboxSettings>(value).expect("round trip"), protected);
+	}
+
+	/// A protected path that is not valid UTF-8 serializes lossily, so the
+	/// daemon policy digest never fails on it; the in-memory path stays exact.
+	#[cfg(unix)]
+	#[test]
+	fn non_utf8_protected_write_paths_serialize_lossily() {
+		use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _};
+
+		let exact = PathBuf::from(OsStr::from_bytes(b"/srv/\xffstore"));
+		let settings = SandboxSettings {
+			protected_write_paths: vec![exact.clone()],
+			..SandboxSettings::default()
+		};
+		let value = serde_json::to_value(&settings).expect("non-UTF-8 paths still serialize");
+		assert_eq!(value["protected_write_paths"], serde_json::json!(["/srv/\u{fffd}store"]));
+		assert_eq!(settings.protected_write_paths, [exact], "enforcement keeps the exact path");
+		let restored: SandboxSettings = serde_json::from_value(value).expect("round trip");
+		assert_eq!(restored.protected_write_paths, [PathBuf::from("/srv/\u{fffd}store")]);
 	}
 }
