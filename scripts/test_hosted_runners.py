@@ -100,7 +100,7 @@ class HostedRunnerPolicy(unittest.TestCase):
         ci = yaml.load(self.ci, Loader=yaml.BaseLoader)
         self.assertEqual(ci['env']['CI_MACOS_CONTROL_POLICY'], 'source-bound')
         self.assertRegex(ci['env']['CI_MACOS_WORKER_SHA'], r'^[0-9a-f]{40}$')
-        self.assertEqual(ci['env']['CI_MACOS_WORKER_REF'], 'ci-macos-worker-source-bound-v3')
+        self.assertEqual(ci['env']['CI_MACOS_WORKER_REF'], 'ci-macos-worker-source-bound-v4')
         for name in MACOS_JOBS:
             job = ci['jobs'][name]
             self.assertNotIn('macos_controls', job['runs-on'])

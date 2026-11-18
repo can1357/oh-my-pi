@@ -52,8 +52,8 @@ the heavy native objective, not all unrelated workflows or provisioning actions.
 
 ## Configuration
 
-The parent workflow now pins admission release `ci-macos-worker-source-bound-v3`
-to commit `868abec9d4ecac36f981ba2c3328e2506de4f0f4` in versioned workflow
+The parent workflow now pins admission release `ci-macos-worker-source-bound-v4`
+to commit `6e361f2d70c505aa38c9ad6aaf359cb9b5cd457b` in versioned workflow
 environment values. The tag must resolve to that exact commit at every dispatch;
 a missing/moved tag fails closed. Old repository worker-ref/SHA variables do not
 override this pin. Keep old tags while old generations may still need draining.
@@ -73,7 +73,7 @@ or revert the parent workflow pin/routing change. Do not delete active release t
 
 ## Verification
 
-Local validation passed: 133 tests through the existing CI runner/policy suite,
+Local validation passed: 134 tests through the existing CI runner/policy suite,
 `check-ci-paths.py`, editing-discipline checks, whitespace checks and Actionlint
 1.7.12 for CI, worker, CodeQL and P8 (Shellcheck unavailable/disabled).
 Offline tests cover changed-parent admission without the previous workflow hash,
@@ -89,3 +89,14 @@ PR. Both queries were executed against PR #685; its merge commit's parents
 matched the base/head identities. V3 explicitly pins the compatible `2022-11-28`
 API contract and keeps the existing exact-merge fence. V2 did not dispatch work
 and does not establish native verification success.
+
+The v3 attempt at source `0db9c2e1e6dcee2d1251fee398afd476fa1b26af`
+did exercise hosted cancellation and generation-1 dispatch. However, its worker
+`runs-on` default still used `["macos-15"]`, while admission defaulted to
+`["self-hosted","macOS","ARM64"]`. With no label variable configured, both
+fallback jobs landed on GitHub-hosted runners and failed admission; neither
+executed native verification. See [Rust fallback](https://github.com/blyzer/oh-my-pi/actions/runs/44198306165)
+and [lint fallback](https://github.com/blyzer/oh-my-pi/actions/runs/44198285861).
+V4 aligns runner selection and admission defaults, with a regression test covering
+both expressions and preserving the hosted branch. This is a routing correction,
+not evidence that the physical Mac has executed the new worker successfully.
