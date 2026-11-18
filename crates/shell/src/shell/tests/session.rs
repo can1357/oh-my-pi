@@ -1793,7 +1793,7 @@ async fn cancellation_reaches_descendants_in_a_new_session() {
 	.expect("escaped child script");
 	fs::write(
 		root.path().join("parent.sh"),
-		"printf '%s' \"$$\" > parent.pid\nsetsid sh escaped.sh &\nwait\n",
+		"printf '%s' \"$$\" > parent.pid\nsetsid /bin/sh escaped.sh &\nwait\n",
 	)
 	.expect("parent script");
 	let shell = Shell::new(None);
@@ -1804,7 +1804,7 @@ async fn cancellation_reaches_descendants_in_a_new_session() {
 		shell
 			.run(
 				ShellRunOptions {
-					command: "sh parent.sh".into(),
+					command: "/bin/sh parent.sh".into(),
 					cwd: Some(cwd),
 					..Default::default()
 				},
