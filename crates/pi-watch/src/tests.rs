@@ -31,9 +31,11 @@ impl Seen {
 			let batch = batch.expect("watch ended");
 			assert!(!batch.is_empty(), "an empty batch was delivered");
 			self.batches += 1;
-			self
-				.events
-				.extend(batch.iter().map(|event| (event.path.to_path_buf(), event.flags)));
+			self.events.extend(
+				batch
+					.iter()
+					.map(|event| (event.path.to_path_buf(), event.flags)),
+			);
 		}
 	}
 
@@ -120,9 +122,7 @@ fn file_root_survives_atomic_save_and_recreation() {
 
 	seen.events.clear();
 	fs::remove_file(&file).unwrap();
-	seen.until(&batches, |seen| {
-		seen.has(&file, Flags::REMOVED) || seen.has(&file, Flags::RENAMED)
-	});
+	seen.until(&batches, |seen| seen.has(&file, Flags::REMOVED) || seen.has(&file, Flags::RENAMED));
 	seen.events.clear();
 	fs::write(&other, "sibling").unwrap();
 	fs::write(&file, "again").unwrap();
@@ -143,14 +143,24 @@ fn burst_of_thousands_of_files_is_reported_in_full_or_as_overflow() {
 		if index % 100 == 0 {
 			fs::create_dir(root.join(format!("d{}", index / 100))).unwrap();
 		}
-		fs::write(root.join(format!("d{}", index / 100)).join(format!("f{index}")), "x").unwrap();
+		fs::write(
+			root
+				.join(format!("d{}", index / 100))
+				.join(format!("f{index}")),
+			"x",
+		)
+		.unwrap();
 	}
 	let mut seen = Seen::default();
 	let all = |seen: &Seen| {
 		let mut paths: Vec<&PathBuf> = seen
 			.events
 			.iter()
-			.filter(|(path, _)| path.file_name().is_some_and(|name| name.as_encoded_bytes()[0] == b'f'))
+			.filter(|(path, _)| {
+				path
+					.file_name()
+					.is_some_and(|name| name.as_encoded_bytes()[0] == b'f')
+			})
 			.map(|(path, _)| path)
 			.collect();
 		paths.sort_unstable();
@@ -160,7 +170,11 @@ fn burst_of_thousands_of_files_is_reported_in_full_or_as_overflow() {
 	// Every file, unless the system itself dropped events under the load, which
 	// it must then say.
 	seen.until(&batches, |seen| {
-		all(seen) || seen.events.iter().any(|(_, flags)| flags.contains(Flags::OVERFLOW))
+		all(seen)
+			|| seen
+				.events
+				.iter()
+				.any(|(_, flags)| flags.contains(Flags::OVERFLOW))
 	});
 	// Gathered, not one delivery per file.
 	assert!(seen.batches < FILES / 4, "{} batches for {FILES} files", seen.batches);
@@ -244,16 +258,16 @@ fn missing_root_is_awaited_and_a_removed_one_is_watched_again() {
 	seen.until_touched(&batches, &file);
 
 	fs::remove_dir_all(&root).unwrap();
-	seen.until(&batches, |seen| {
-		seen.has(&root, Flags::REMOVED) || seen.has(&file, Flags::REMOVED)
-	});
+	seen.until(&batches, |seen| seen.has(&root, Flags::REMOVED) || seen.has(&file, Flags::REMOVED));
 	seen.events.clear();
 	fs::create_dir(&root).unwrap();
 	seen.until_touched(&batches, &file);
 
 	let mut strict = Config::new([Root::recursive(dir.path().join("never"))]);
 	strict.await_missing = false;
-	let error = Watcher::channel(strict).err().expect("a missing root fails the start");
+	let error = Watcher::channel(strict)
+		.err()
+		.expect("a missing root fails the start");
 	assert_eq!(error.kind(), io::ErrorKind::NotFound);
 }
 
@@ -267,9 +281,11 @@ impl Seen {
 			if let Ok(batch) = batches.recv_timeout(Duration::from_millis(200)) {
 				let batch = batch.expect("watch ended");
 				self.batches += 1;
-				self
-					.events
-					.extend(batch.iter().map(|event| (event.path.to_path_buf(), event.flags)));
+				self.events.extend(
+					batch
+						.iter()
+						.map(|event| (event.path.to_path_buf(), event.flags)),
+				);
 			}
 		}
 	}

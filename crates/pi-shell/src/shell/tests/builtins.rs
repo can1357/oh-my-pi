@@ -1955,7 +1955,10 @@ async fn say_speaks_through_the_speech_host_of_its_run() {
 		.expect("run say");
 	assert_eq!(result.exit_code, Some(0));
 	let requests = speech.0.lock();
-	let spoken: Vec<&str> = requests.iter().map(|request| request.text.as_str()).collect();
+	let spoken: Vec<&str> = requests
+		.iter()
+		.map(|request| request.text.as_str())
+		.collect();
 	assert_eq!(spoken, ["hi", "piped\n", "subshell", "xargs"]);
 	assert_eq!(requests[0].rate, Some(200));
 }

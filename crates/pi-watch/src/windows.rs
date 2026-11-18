@@ -34,8 +34,8 @@ use windows_sys::Win32::{
 		FILE_ACTION_RENAMED_NEW_NAME, FILE_ACTION_RENAMED_OLD_NAME, FILE_FLAG_BACKUP_SEMANTICS,
 		FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_DIR_NAME,
 		FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
-		FILE_NOTIFY_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-		OPEN_EXISTING, ReadDirectoryChangesW,
+		FILE_NOTIFY_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+		ReadDirectoryChangesW,
 	},
 	System::{
 		IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
@@ -154,7 +154,11 @@ impl Target {
 		let (Some(parent), Some(name)) = (self.path.parent(), self.path.file_name()) else {
 			return Err(io::ErrorKind::InvalidInput.into());
 		};
-		self.dir = if parent.as_os_str().is_empty() { PathBuf::from(".") } else { parent.to_path_buf() };
+		self.dir = if parent.as_os_str().is_empty() {
+			PathBuf::from(".")
+		} else {
+			parent.to_path_buf()
+		};
 		self.recursive = false;
 		self.file = Some(name.encode_wide().collect());
 		Ok(())
@@ -399,7 +403,11 @@ impl Reader {
 	/// Reports the root itself as removed or created.
 	fn report_root(&self, change: Flags) {
 		let Target { root, prefix, file, .. } = &self.target;
-		let kind = if file.is_some() { Flags::IS_FILE } else { Flags::IS_DIR };
+		let kind = if file.is_some() {
+			Flags::IS_FILE
+		} else {
+			Flags::IS_DIR
+		};
 		self.emit(|emitter| {
 			emitter.push(*root, prefix, change | kind, 0, 0);
 			emitter.flush();
@@ -513,7 +521,11 @@ fn parse(buffer: &[u64], bytes: usize, directories: bool, target: &Target, emitt
 		};
 		// A modification on the file stream may also name a directory whose
 		// entries changed, so it carries no type.
-		let kind = if directories { Flags::IS_DIR } else { Flags::IS_FILE };
+		let kind = if directories {
+			Flags::IS_DIR
+		} else {
+			Flags::IS_FILE
+		};
 		let flags = match record.Action {
 			FILE_ACTION_ADDED => Some(Flags::CREATED | kind),
 			FILE_ACTION_REMOVED => Some(Flags::REMOVED | kind),

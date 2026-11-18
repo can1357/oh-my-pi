@@ -1,13 +1,6 @@
 //! Batches of events and the emitter backends fill them through.
 
-use std::{
-	ffi::OsStr,
-	hash::BuildHasher,
-	io,
-	ops::Range,
-	path::Path,
-	time::SystemTime,
-};
+use std::{ffi::OsStr, hash::BuildHasher, io, ops::Range, path::Path, time::SystemTime};
 
 use hashbrown::{DefaultHashBuilder, HashTable};
 

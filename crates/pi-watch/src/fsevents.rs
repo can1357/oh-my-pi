@@ -279,16 +279,28 @@ impl Context {
 		if native & ROOT_CHANGED != 0 {
 			// The root itself, or a directory above it, was moved or removed,
 			// or the root is back.
-			flags |= if exists(path) { Flags::CREATED } else { Flags::REMOVED };
+			flags |= if exists(path) {
+				Flags::CREATED
+			} else {
+				Flags::REMOVED
+			};
 		} else if self.stat {
 			let both = Flags::CREATED | Flags::REMOVED;
 			if flags.contains(both) || flags.contains(Flags::RENAMED) {
 				let exists = exists(path);
 				if flags.contains(both) {
-					flags = flags.difference(if exists { Flags::REMOVED } else { Flags::CREATED });
+					flags = flags.difference(if exists {
+						Flags::REMOVED
+					} else {
+						Flags::CREATED
+					});
 				}
 				if flags.contains(Flags::RENAMED) {
-					flags |= if exists { Flags::MOVED_TO } else { Flags::MOVED_FROM };
+					flags |= if exists {
+						Flags::MOVED_TO
+					} else {
+						Flags::MOVED_FROM
+					};
 				}
 			}
 		}
@@ -315,7 +327,11 @@ fn canonicalize(path: &Path, lenient: bool) -> io::Result<PathBuf> {
 			return Err(error);
 		};
 		rest.push(name);
-		let above = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
+		let above = if parent.as_os_str().is_empty() {
+			Path::new(".")
+		} else {
+			parent
+		};
 		if let Ok(mut base) = fs::canonicalize(above) {
 			base.extend(rest.iter().rev());
 			return Ok(base);
@@ -406,7 +422,9 @@ impl Stream {
 			}
 			strings.push(Cf(string));
 			// Two names of one directory: the recursive one covers both.
-			let slot = prefixes.entry(Box::<[u8]>::from(bytes)).or_insert(index as u32);
+			let slot = prefixes
+				.entry(Box::<[u8]>::from(bytes))
+				.or_insert(index as u32);
 			if root.recursive {
 				*slot = index as u32;
 			}
@@ -426,7 +444,12 @@ impl Stream {
 		let raw: Vec<CFRef> = strings.iter().map(|string| string.0).collect();
 		// SAFETY: `raw` holds `raw.len()` live CFStrings; the array retains them.
 		let array = Cf(unsafe {
-			CFArrayCreate(ptr::null(), raw.as_ptr(), raw.len() as CFIndex, &raw const kCFTypeArrayCallBacks)
+			CFArrayCreate(
+				ptr::null(),
+				raw.as_ptr(),
+				raw.len() as CFIndex,
+				&raw const kCFTypeArrayCallBacks,
+			)
 		});
 		if array.0.is_null() {
 			std::mem::forget(array);

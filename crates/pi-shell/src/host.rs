@@ -462,12 +462,12 @@ impl PiHost {
 			fs,
 			launcher: Launcher {
 				spawner:  NativeSpawner::new(SpawnConfig {
-					grace:    TERM_GRACE,
+					grace: TERM_GRACE,
 					sessions,
 					// The session driver is an async task: exits wake its waker
 					// from waiter threads.
-					exits:    Exits::Thread,
-					umask:    None,
+					exits: Exits::Thread,
+					umask: None,
 				}),
 				streams:  StdStreams::default(),
 				observer: None,

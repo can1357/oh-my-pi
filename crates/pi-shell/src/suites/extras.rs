@@ -479,10 +479,18 @@ async fn entr_runs_its_utility_through_the_shell() {
 	let (_dir, root) = watched_dir();
 	let mut s = session_in(&root, &[("SHELL", "/bin/sh")]);
 	let file = root.join("a.txt");
-	assert_eq!(out(&mut s, "echo a.txt | entr -z echo ran /_").await, format!("ran {}\n", file.display()));
+	assert_eq!(
+		out(&mut s, "echo a.txt | entr -z echo ran /_").await,
+		format!("ran {}\n", file.display())
+	);
 
 	let ran = run(&mut s, "echo a.txt | entr -zs 'echo \"changed $0\"; exit 4'").await;
-	assert_eq!((ran.status, ran.stdout), (4, format!("changed {}\n", file.display())), "{}", ran.stderr);
+	assert_eq!(
+		(ran.status, ran.stdout),
+		(4, format!("changed {}\n", file.display())),
+		"{}",
+		ran.stderr
+	);
 
 	let ran = run(&mut s, "echo a.txt | entr -z no-such-utility").await;
 	assert_eq!(
@@ -616,8 +624,8 @@ async fn watchexec_restarts_signals_and_cancels_its_command() {
 	let seen = || std::fs::read_to_string(&log).unwrap_or_default();
 	let cancel = CancellationToken::new();
 	let command = format!(
-		"watchexec -s USR1 -e trigger 'trap \"echo reloaded >> {log}\" USR1; echo ready >> {log}; while :; do \
-		 sleep 0.05; done'",
+		"watchexec -s USR1 -e trigger 'trap \"echo reloaded >> {log}\" USR1; echo ready >> {log}; \
+		 while :; do sleep 0.05; done'",
 		log = log.display()
 	);
 	let trigger = cancel.clone();

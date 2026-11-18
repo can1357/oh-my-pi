@@ -60,7 +60,15 @@ impl Stamp {
 		};
 		#[cfg(not(any(unix, windows)))]
 		let (changed, mode, owner, links) = ((0, 0), 0, (0, 0), 1);
-		Self { kind, modified: metadata.modified().ok(), changed, size: metadata.len(), mode, owner, links }
+		Self {
+			kind,
+			modified: metadata.modified().ok(),
+			changed,
+			size: metadata.len(),
+			mode,
+			owner,
+			links,
+		}
 	}
 
 	/// What changed between two scans of one path of one type.
@@ -142,7 +150,9 @@ impl Scanner {
 						if known.stamp.kind == stamp.kind {
 							let flags = known.stamp.changes_to(&stamp);
 							if !flags.is_empty() {
-								self.emitter.push(index as u32, bytes, flags | stamp.kind, 0, 0);
+								self
+									.emitter
+									.push(index as u32, bytes, flags | stamp.kind, 0, 0);
 							}
 						} else {
 							self
@@ -160,9 +170,11 @@ impl Scanner {
 							.emitter
 							.push(index as u32, bytes, Flags::CREATED | stamp.kind, 0, 0);
 					}
-					self
-						.known
-						.insert(bytes.into(), Known { stamp, root: index as u32, scan: self.scan });
+					self.known.insert(bytes.into(), Known {
+						stamp,
+						root: index as u32,
+						scan: self.scan,
+					});
 				}
 				if metadata.is_dir()
 					&& (depth == 0 || recursive)

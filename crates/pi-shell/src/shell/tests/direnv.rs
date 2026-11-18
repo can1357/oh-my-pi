@@ -26,7 +26,12 @@ impl Project {
 	}
 
 	fn text(&self, relative: &str) -> String {
-		self.root.join(relative).to_str().expect("utf-8 path").to_owned()
+		self
+			.root
+			.join(relative)
+			.to_str()
+			.expect("utf-8 path")
+			.to_owned()
 	}
 
 	fn write(&self, relative: &str, content: &str) {
@@ -67,10 +72,10 @@ async fn envrc_stdlib_builds_the_exported_environment() {
 	project.write(
 		"tree/proj/.envrc",
 		"source_up\nPATH_add bin\npath_add EXTRA_PATH lib\nMANPATH_add man\nlayout go\nexport \
-		 FOO=bar\ndotenv\ndotenv_if_exists missing.env\nsource_env_if_exists .envrc.local\nwatch_file \
-		 extra.txt\nhas cat && export HAS_CAT=yes\nexport EXPANDED=\"$(expand_path \
-		 sub/../file)\"\nunset DROPPED\nlog_status \"custom status\"\nenv_vars_required FOO\necho \
-		 \"stdout from envrc\"\n",
+		 FOO=bar\ndotenv\ndotenv_if_exists missing.env\nsource_env_if_exists \
+		 .envrc.local\nwatch_file extra.txt\nhas cat && export HAS_CAT=yes\nexport \
+		 EXPANDED=\"$(expand_path sub/../file)\"\nunset DROPPED\nlog_status \"custom \
+		 status\"\nenv_vars_required FOO\necho \"stdout from envrc\"\n",
 	);
 	project.write("tree/proj/.env", "DOTENV_VAR=\"dot value\"\n");
 	project.write("tree/proj/.envrc.local", "export LOCAL=1\n");
@@ -78,11 +83,12 @@ async fn envrc_stdlib_builds_the_exported_environment() {
 	let (status, output) = project
 		.run(
 			"export DROPPED=1 MANPATH=/usr/share/man\ndirenv allow || exit 90\ndirenv export json \
-			 >\"$root/out.json\" 2>\"$root/err.txt\"; echo \"export=$?\"\neval \"$(direnv export bash \
-			 2>/dev/null)\"\necho \"FOO=$FOO PARENT=$PARENT LOCAL=$LOCAL DROPPED=${DROPPED-unset} \
-			 FILE=$DIRENV_FILE\"\necho \"again=[$(direnv export bash 2>&1)]\"\ncd \
-			 \"$root/outside\"\neval \"$(direnv export bash 2>\"$root/unload.txt\")\"\necho \
-			 \"FOO=${FOO-unset} DROPPED=${DROPPED-unset} FILE=${DIRENV_FILE-unset}\"\n",
+			 >\"$root/out.json\" 2>\"$root/err.txt\"; echo \"export=$?\"\neval \"$(direnv export \
+			 bash 2>/dev/null)\"\necho \"FOO=$FOO PARENT=$PARENT LOCAL=$LOCAL \
+			 DROPPED=${DROPPED-unset} FILE=$DIRENV_FILE\"\necho \"again=[$(direnv export bash \
+			 2>&1)]\"\ncd \"$root/outside\"\neval \"$(direnv export bash \
+			 2>\"$root/unload.txt\")\"\necho \"FOO=${FOO-unset} DROPPED=${DROPPED-unset} \
+			 FILE=${DIRENV_FILE-unset}\"\n",
 		)
 		.await;
 	assert_eq!(status, Some(0), "{output}");
@@ -141,8 +147,8 @@ async fn envrc_stdlib_builds_the_exported_environment() {
 		format!("direnv: loading {}/.envrc", project.text("tree")),
 		"direnv: custom status".to_owned(),
 		"stdout from envrc".to_owned(),
-		"direnv: export +DOTENV_VAR +EXPANDED +EXTRA_PATH +FOO +GOBIN +GOPATH +HAS_CAT +LOCAL +PARENT \
-		 -DROPPED ~MANPATH ~PATH"
+		"direnv: export +DOTENV_VAR +EXPANDED +EXTRA_PATH +FOO +GOBIN +GOPATH +HAS_CAT +LOCAL \
+		 +PARENT -DROPPED ~MANPATH ~PATH"
 			.to_owned(),
 	] {
 		assert!(log.lines().any(|found| found == line), "missing {line:?} in:\n{log}");
@@ -171,10 +177,11 @@ async fn exec_runs_the_command_in_the_shell_with_the_loaded_environment() {
 
 	let (status, output) = project
 		.run(
-			"direnv allow || exit 90\nexec 2>/dev/null\ndirenv exec . type cat\ndirenv exec . printenv \
-			 FOO\necho piped | direnv exec . cat\ndirenv exec . tool a b\ndirenv exec . sh -c 'exit 7'; \
-			 echo \"status=$?\"\necho \"after=${FOO-unset}\"\ncd \"$root/outside\"\ndirenv exec \
-			 \"$root/tree/proj\" printenv FOO\ndirenv exec \"$root/tree/proj\" pwd\n",
+			"direnv allow || exit 90\nexec 2>/dev/null\ndirenv exec . type cat\ndirenv exec . \
+			 printenv FOO\necho piped | direnv exec . cat\ndirenv exec . tool a b\ndirenv exec . sh \
+			 -c 'exit 7'; echo \"status=$?\"\necho \"after=${FOO-unset}\"\ncd \
+			 \"$root/outside\"\ndirenv exec \"$root/tree/proj\" printenv FOO\ndirenv exec \
+			 \"$root/tree/proj\" pwd\n",
 		)
 		.await;
 	assert_eq!(status, Some(0), "{output}");
@@ -210,7 +217,14 @@ async fn envrc_is_evaluated_only_once_allowed() {
 		project.text("tree/proj")
 	);
 	assert!(lines[0].contains(&blocked), "{output}");
-	assert_eq!(lines[1..], ["blocked=1", "ran", "denied=0", "1", "allowed=0", "evaluated-when-allowed"]);
+	assert_eq!(lines[1..], [
+		"blocked=1",
+		"ran",
+		"denied=0",
+		"1",
+		"allowed=0",
+		"evaluated-when-allowed"
+	]);
 }
 
 /// Contract: an `.envrc` that fails under `strict_env` fails the load:

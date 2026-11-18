@@ -35,10 +35,10 @@ mod batch;
 mod flags;
 #[cfg(target_os = "macos")]
 mod fsevents;
-#[cfg(target_os = "macos")]
-mod kqueue;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod inotify;
+#[cfg(target_os = "macos")]
+mod kqueue;
 mod poll;
 #[cfg(windows)]
 mod windows;
@@ -49,11 +49,11 @@ use std::{
 	time::Duration,
 };
 
+use crate::batch::Emitter;
 pub use crate::{
 	batch::{Batch, Event},
 	flags::Flags,
 };
-use crate::batch::Emitter;
 
 /// The mechanism a [`Watcher`] observes the file system with.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -153,8 +153,8 @@ impl Root {
 pub type Filter = Box<dyn FnMut(&Path, Flags) -> bool + Send>;
 
 /// Decides whether a directory below a recursive root is watched; runs on the
-/// watcher's thread. Backends that watch a subtree through its root (`FSEvents`,
-/// `ReadDirectoryChangesW`) never ask.
+/// watcher's thread. Backends that watch a subtree through its root
+/// (`FSEvents`, `ReadDirectoryChangesW`) never ask.
 pub type Descend = Box<dyn FnMut(&Path) -> bool + Send>;
 
 /// What a [`Watcher`] watches and how it reports.
@@ -274,8 +274,8 @@ impl Watcher {
 	/// - [`io::ErrorKind::NotFound`]: a root does not exist and
 	///   [`Config::await_missing`] is unset.
 	/// - [`io::ErrorKind::Unsupported`]: the platform lacks [`Config::backend`].
-	/// - Whatever the system reports when it cannot watch a root (the
-	///   inotify watch limit, a denied open).
+	/// - Whatever the system reports when it cannot watch a root (the inotify
+	///   watch limit, a denied open).
 	pub fn start(
 		config: Config,
 		sink: impl FnMut(io::Result<&Batch>) + Send + 'static,

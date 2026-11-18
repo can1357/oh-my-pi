@@ -124,7 +124,11 @@ impl State {
 		};
 		if wd < 0 {
 			let error = io::Error::last_os_error();
-			return Err(if error.raw_os_error() == Some(libc::ENOSPC) { limit_reached() } else { error });
+			return Err(if error.raw_os_error() == Some(libc::ENOSPC) {
+				limit_reached()
+			} else {
+				error
+			});
 		}
 		Ok(wd)
 	}
@@ -153,7 +157,11 @@ impl State {
 		let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
 			return Err(io::ErrorKind::InvalidInput.into());
 		};
-		let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
+		let parent = if parent.as_os_str().is_empty() {
+			Path::new(".")
+		} else {
+			parent
+		};
 		let wd = self.add_watch(parent, 0)?;
 		let watch = self.watches.entry(wd).or_insert_with(|| Watch {
 			path:  parent.as_os_str().as_bytes().into(),
@@ -174,7 +182,11 @@ impl State {
 		let recursive = self.roots[root as usize].recursive;
 		let mut stack = vec![(dir, top)];
 		while let Some((dir, top)) = stack.pop() {
-			let links = if top || self.follow_links { 0 } else { libc::IN_DONT_FOLLOW };
+			let links = if top || self.follow_links {
+				0
+			} else {
+				libc::IN_DONT_FOLLOW
+			};
 			let wd = match self.add_watch(&dir, libc::IN_ONLYDIR | links) {
 				Ok(wd) => wd,
 				Err(error) if top || is_limit(&error) => return Err(error),
@@ -236,10 +248,13 @@ impl State {
 	fn forget_below(&mut self, dir: &[u8], inclusive: bool) {
 		let inotify = self.inotify.as_raw_fd();
 		self.watches.retain(|&wd, watch| {
-			let gone = watch.path.strip_prefix(dir).is_some_and(|rest| match rest.first() {
-				None => inclusive,
-				Some(&next) => next == b'/',
-			});
+			let gone = watch
+				.path
+				.strip_prefix(dir)
+				.is_some_and(|rest| match rest.first() {
+					None => inclusive,
+					Some(&next) => next == b'/',
+				});
 			if gone {
 				// SAFETY: plain syscall on a live descriptor.
 				unsafe { libc::inotify_rm_watch(inotify, wd) };
@@ -277,7 +292,11 @@ impl State {
 					// A root still absent is now watched through its directory,
 					// which reports its creation.
 					if exists {
-						let kind = if state.path.is_dir() { Flags::IS_DIR } else { Flags::IS_FILE };
+						let kind = if state.path.is_dir() {
+							Flags::IS_DIR
+						} else {
+							Flags::IS_FILE
+						};
 						let path = state.path.as_os_str().as_bytes();
 						self.emitter.push(root, path, Flags::CREATED | kind, 0, 0);
 					}
@@ -368,7 +387,12 @@ impl State {
 			return Ok(());
 		}
 		let is_dir = mask & libc::IN_ISDIR != 0;
-		let flags = flags | if is_dir { Flags::IS_DIR } else { Flags::IS_FILE };
+		let flags = flags
+			| if is_dir {
+				Flags::IS_DIR
+			} else {
+				Flags::IS_FILE
+			};
 		let id = u64::from(cookie);
 		// A file root that turns out to be, or comes back as, a directory.
 		let mut grown = None;
@@ -471,9 +495,8 @@ impl State {
 			libc::pollfd { fd: self.inotify.as_raw_fd(), events: libc::POLLIN, revents: 0 },
 		];
 		let count = if events { 2 } else { 1 };
-		let timeout = timeout.map_or(-1, |timeout| {
-			i32::try_from(timeout.as_millis().max(1)).unwrap_or(i32::MAX)
-		});
+		let timeout = timeout
+			.map_or(-1, |timeout| i32::try_from(timeout.as_millis().max(1)).unwrap_or(i32::MAX));
 		loop {
 			// SAFETY: `fds` holds `count` initialized entries.
 			let ready = unsafe { libc::poll(fds.as_mut_ptr(), count, timeout) };
@@ -566,7 +589,11 @@ impl Inotify {
 			wake,
 			roots: roots
 				.into_iter()
-				.map(|root| RootState { path: root.path, recursive: root.recursive, missing: false })
+				.map(|root| RootState {
+					path:      root.path,
+					recursive: root.recursive,
+					missing:   false,
+				})
 				.collect(),
 			watches: HashMap::new(),
 			missing: 0,

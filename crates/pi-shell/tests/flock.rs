@@ -152,8 +152,8 @@ flock --verbose lock echo done | sed 's/took [0-9.]*/took N/'
 	let (_, output) = run(dir.path(), script).await;
 	assert_eq!(
 		output,
-		"line 5\nbuiltin 1\nexternal 3\nsignal 143\nseparator 6\nmissing 69\nflock: failed to execute \
-		 no-such-command-flock: No such file or directory\nflock: getting lock took N \
+		"line 5\nbuiltin 1\nexternal 3\nsignal 143\nseparator 6\nmissing 69\nflock: failed to \
+		 execute no-such-command-flock: No such file or directory\nflock: getting lock took N \
 		 seconds\nflock: executing echo\ndone\n"
 	);
 }
@@ -167,7 +167,8 @@ async fn cancelled_run_stops_waiting_for_the_lock() {
 	holder.try_lock().expect("hold the lock");
 
 	let started = Instant::now();
-	let (status, timed_out, output) = run_for(dir.path(), "flock lock echo ran; echo after", 300).await;
+	let (status, timed_out, output) =
+		run_for(dir.path(), "flock lock echo ran; echo after", 300).await;
 	let elapsed = started.elapsed();
 	assert!(elapsed < Duration::from_secs(5), "the wait took {elapsed:?}");
 	assert_eq!((status, timed_out), (None, true));

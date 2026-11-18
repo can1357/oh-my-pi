@@ -2628,8 +2628,8 @@ async fn process_shell_runs_pi_utilities_and_keeps_externals_in_its_group() {
 	let (sum, group) = (root.path().join("sum"), root.path().join("group"));
 	// Nothing reaches the test's own streams: every command redirects.
 	let command = format!(
-		"PATH={}; echo '{{\"a\":[40,2]}}' | jq '.a | add' > {}; /bin/sh -c '/bin/ps -o pgid= -p $$' > {} \
-		 2>&1",
+		"PATH={}; echo '{{\"a\":[40,2]}}' | jq '.a | add' > {}; /bin/sh -c '/bin/ps -o pgid= -p $$' \
+		 > {} 2>&1",
 		quote_arg(&empty.to_string_lossy()),
 		quote_arg(&sum.to_string_lossy()),
 		quote_arg(&group.to_string_lossy()),

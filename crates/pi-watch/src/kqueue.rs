@@ -129,9 +129,21 @@ impl State {
 		change.flags = libc::EV_ADD | libc::EV_CLEAR;
 		change.fflags = notes;
 		// SAFETY: one initialized change record, no event list.
-		let done =
-			unsafe { libc::kevent(self.kqueue.as_raw_fd(), &raw const change, 1, ptr::null_mut(), 0, ptr::null()) };
-		if done < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+		let done = unsafe {
+			libc::kevent(
+				self.kqueue.as_raw_fd(),
+				&raw const change,
+				1,
+				ptr::null_mut(),
+				0,
+				ptr::null(),
+			)
+		};
+		if done < 0 {
+			Err(io::Error::last_os_error())
+		} else {
+			Ok(())
+		}
 	}
 
 	/// Opens and registers `path`; a path watched already is left alone.
@@ -152,9 +164,13 @@ impl State {
 		// SAFETY: `fd` is a fresh descriptor this value now owns.
 		let owned = unsafe { OwnedFd::from_raw_fd(fd) };
 		self.register(fd, libc::EVFILT_VNODE, NOTES)?;
-		self
-			.watched
-			.insert(fd, Watched { _open: owned, path: path.into(), root, is_dir, entries: None });
+		self.watched.insert(fd, Watched {
+			_open: owned,
+			path: path.into(),
+			root,
+			is_dir,
+			entries: None,
+		});
 		self.by_path.insert(path.into(), fd);
 		Ok(fd)
 	}
@@ -169,11 +185,17 @@ impl State {
 		let mut stack = vec![(path, top, true)];
 		while let Some((path, top, listed)) = stack.pop() {
 			let follow = top || self.follow_links;
-			let metadata = if follow { fs::metadata(&path) } else { fs::symlink_metadata(&path) };
+			let metadata = if follow {
+				fs::metadata(&path)
+			} else {
+				fs::symlink_metadata(&path)
+			};
 			let bytes = path.as_os_str().as_bytes();
 			let opened = metadata.and_then(|metadata| {
 				let is_dir = metadata.is_dir();
-				self.open(bytes, root, is_dir, follow).map(|fd| (fd, is_dir))
+				self
+					.open(bytes, root, is_dir, follow)
+					.map(|fd| (fd, is_dir))
 			});
 			let (fd, is_dir) = match opened {
 				Ok(opened) => opened,
@@ -208,7 +230,8 @@ impl State {
 				}
 				// A directory below a flat root, or one the hook prunes, is
 				// watched as an entry: its own changes, not its entries.
-				let listed = is_dir && recursive && self.descend.as_mut().is_none_or(|descend| descend(&entry));
+				let listed =
+					is_dir && recursive && self.descend.as_mut().is_none_or(|descend| descend(&entry));
 				stack.push((entry, false, listed));
 			}
 			if let Some(watched) = self.watched.get_mut(&fd) {
@@ -242,7 +265,10 @@ impl State {
 		let path = path_of(path);
 		if let (Some(parent), Some(name)) = (path.parent(), path.file_name())
 			&& let Some(parent) = self.by_path.get(parent.as_os_str().as_bytes())
-			&& let Some(entries) = self.watched.get_mut(parent).and_then(|dir| dir.entries.as_mut())
+			&& let Some(entries) = self
+				.watched
+				.get_mut(parent)
+				.and_then(|dir| dir.entries.as_mut())
 			&& let Ok(at) = entries.binary_search_by(|entry| (**entry).cmp(name.as_bytes()))
 		{
 			entries.remove(at);
@@ -278,7 +304,11 @@ impl State {
 				Ok(()) => {
 					self.roots[root as usize].missing = false;
 					self.missing -= 1;
-					let kind = if metadata.is_dir() { Flags::IS_DIR } else { Flags::IS_FILE };
+					let kind = if metadata.is_dir() {
+						Flags::IS_DIR
+					} else {
+						Flags::IS_FILE
+					};
 					self
 						.emitter
 						.push(root, path.as_os_str().as_bytes(), Flags::CREATED | kind, 0, 0);
@@ -309,7 +339,11 @@ impl State {
 			let path = join(&dir, name);
 			// Its own removal may have been reported already.
 			if let Some(gone) = self.by_path.get(&*path).and_then(|fd| self.watched.get(fd)) {
-				let kind = if gone.is_dir { Flags::IS_DIR } else { Flags::IS_FILE };
+				let kind = if gone.is_dir {
+					Flags::IS_DIR
+				} else {
+					Flags::IS_FILE
+				};
 				self.emitter.push(root, &path, Flags::REMOVED | kind, 0, 0);
 			}
 			self.forget(&path);
@@ -376,8 +410,14 @@ impl State {
 			}
 		}
 		if !flags.is_empty() {
-			let kind = if is_dir { Flags::IS_DIR } else { Flags::IS_FILE };
-			self.emitter.push(root, &watched.path, flags | kind, notes, 0);
+			let kind = if is_dir {
+				Flags::IS_DIR
+			} else {
+				Flags::IS_FILE
+			};
+			self
+				.emitter
+				.push(root, &watched.path, flags | kind, notes, 0);
 		}
 		if notes & GONE != 0 {
 			let path = watched.path.clone();
@@ -398,7 +438,8 @@ impl State {
 		if self.timing.latency.is_zero() {
 			return false;
 		}
-		let mut wake = libc::pollfd { fd: self.wake.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+		let mut wake =
+			libc::pollfd { fd: self.wake.as_raw_fd(), events: libc::POLLIN, revents: 0 };
 		let millis = i32::try_from(self.timing.latency.as_millis().max(1)).unwrap_or(i32::MAX);
 		// SAFETY: one initialized entry.
 		unsafe { libc::poll(&raw mut wake, 1, millis) > 0 }
@@ -416,7 +457,14 @@ impl State {
 			// SAFETY: `events` is writable for `EVENTS` records; `limit` is
 			// null or points at a live `timespec`.
 			let taken = unsafe {
-				libc::kevent(self.kqueue.as_raw_fd(), ptr::null(), 0, events.as_mut_ptr(), EVENTS as i32, limit)
+				libc::kevent(
+					self.kqueue.as_raw_fd(),
+					ptr::null(),
+					0,
+					events.as_mut_ptr(),
+					EVENTS as i32,
+					limit,
+				)
 			};
 			if taken < 0 {
 				if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
@@ -508,7 +556,11 @@ impl Kqueue {
 			wake,
 			roots: roots
 				.into_iter()
-				.map(|root| RootState { path: root.path, recursive: root.recursive, missing: false })
+				.map(|root| RootState {
+					path:      root.path,
+					recursive: root.recursive,
+					missing:   false,
+				})
 				.collect(),
 			watched: HashMap::new(),
 			by_path: HashMap::new(),
