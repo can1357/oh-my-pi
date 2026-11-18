@@ -242,6 +242,9 @@ function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageConte
 						: `[Resource: ${item.resource.uri}]`,
 				);
 				break;
+			case "resource_link":
+				appendText(`[Resource: ${item.uri}]`);
+				break;
 		}
 	}
 	flushText();

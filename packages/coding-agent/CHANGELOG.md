@@ -13,7 +13,7 @@
 
 ### Added
 
-- Enable `mcp.evalNamespaces` (off by default) to expose each MCP server as an eval global instead of top-level or `xd://` tools: `mcp__github_create_issue` becomes `await github.create_issue({...})` in JavaScript and Python, full docs live at `xd://eval/github`, and the eval tool lists each server with a cached model-written "when to use" hint once one has been generated
+- Enable `mcp.evalNamespaces` (off by default) to expose each MCP server as an eval global instead of top-level or `xd://` tools: `mcp__github_create_issue` becomes `await github.create_issue({...})` in JavaScript and Python, full docs live at `xd://eval/github` (with the server's advertised resources), images, audio and binary resources a call returns are saved as `local://mcp/…` files, and the eval tool lists each server with a cached model-written "when to use" hint once one has been generated
 - `/tan` agents are named by the small title model from the request plus the latest turns that fit beside it (`FlakyRetryTest` instead of `Tan-0190a1b2…`), and the tray titles their cards by that name; naming that fails or takes over 30s falls back to a random name (`SwiftFalcon`)
 - Cache warming bridges long tool calls: it keeps refreshing while the refresh spend since the last request stays under the cheaper buy-out, then compacts a large prompt a minute before the cache expires (committed when the tool returns) or lets the entry expire, replacing the fixed one-hour cap. `providers.cacheWarmingStrategy` (`auto`, `keepalive`, `compact`) picks the policy; compaction needs a prompt of at least the lower of `providers.cacheWarmingCompactPercent` (60%) of the window and `providers.cacheWarmingCompactTokens` (150k)
 - `cache_warming_decision` carries the refresh `method`, `compactCost` and `spentCost`, and accepts a `"compact"` action; `cache_warming_start`/`cache_warming_end` events carry `method` (`prewarm` or `replay`)
@@ -37,6 +37,7 @@
 
 ### Fixed
 
+- MCP tool results that link to a resource show it as `[Resource: <uri>]` instead of dropping it
 - `commit` drafts committed through a `pre-commit` hook that restages files (e.g. a formatter) leave the index matching the commit instead of staging the pre-hook content as an inverse change that later drafts reported as "Staged by others"
 - An agent that promised another a later reply, or whose subagent waits for its next message, and ends its turn with nothing left to wake it gets one notice naming each waiter (what it asked, what was promised, for how long) instead of leaving it blocked until someone notices
 - `wait` returns at once, naming the agent, when one that promised the caller a reply (or the caller's parent) is idle with nothing to wake it, or when any agent it would block on (asked agent, parent, or subagent whose result it waits for) is itself waiting on the caller, with the chain it waits through (e.g. "`B` is waiting on you (via `C`)"); a top-level session's wait no longer says to end the turn while an agent is blocked on it and nothing else will wake it

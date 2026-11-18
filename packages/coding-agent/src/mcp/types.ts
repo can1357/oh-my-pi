@@ -1,4 +1,5 @@
 import type {
+	MCPAudioContent,
 	MCPContent,
 	MCPImageContent,
 	MCPProgress,
@@ -465,13 +466,6 @@ export interface MCPPrompt {
 export interface MCPPromptsListResult {
 	prompts: MCPPrompt[];
 	nextCursor?: string;
-}
-
-/** Audio content in prompt messages */
-export interface MCPAudioContent {
-	type: "audio";
-	data: string;
-	mimeType: string;
 }
 
 /** Content type union for prompt messages */

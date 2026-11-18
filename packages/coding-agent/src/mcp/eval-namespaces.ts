@@ -4,20 +4,28 @@
  * Each server's enabled tools become async methods of one eval global
  * (`mcp__github_create_issue` → `github.create_issue(args)`) and leave the
  * top-level and `xd://` tool surfaces. A method calls its registry tool
- * through the eval tool bridge (`__omp_call_tool__`), so approval, ACP gates
- * and extension hooks stay the tool's own. Full docs (every method with its
- * description and argument type) live behind `read xd://eval/<namespace>`; the
- * eval namespace listing carries a model-written "when to use" hint, cached
- * like skill descriptions and empty until generated.
+ * through the eval bridge op {@link EVAL_MCP_BRIDGE_NAME}, which runs the
+ * tool exactly as `tool.<name>(args)` does (approval, ACP gates, extension
+ * hooks stay the tool's own) and maps its MCP content to a script value
+ * ({@link mcpNamespaceValue}): images, audio and binary resources land as
+ * `local://mcp/…` files. Full docs (every method with its description and
+ * argument type, plus the server's advertised resources) live behind
+ * `read xd://eval/<namespace>`; the eval namespace listing carries a
+ * model-written "when to use" hint, cached like skill descriptions and empty
+ * until generated.
  *
  * Consumers: `SessionTools` partitions {@link isEvalNamespaceTool} entries out
- * of the presented tools, and the SDK appends {@link MCPEvalNamespaceCatalog.preludes}
- * to the session's eval preludes.
+ * of the presented tools, the SDK appends {@link MCPEvalNamespaceCatalog.preludes}
+ * to the session's eval preludes, and the eval tool bridge serves the calls.
  */
-import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { jsonSchemaToTypeScript, toolWireSchema } from "@oh-my-pi/pi-ai";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { blobExtensionForImageMimeType, normalizeBlobExtension } from "@oh-my-pi/pi-tui/prompt/image-format";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { isRecord, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeDefinition } from "../eval/preludes";
+import { resolveLocalUrlToPath } from "../internal-urls/local-protocol";
+import type { LocalProtocolOptions } from "../internal-urls/local-root";
 import {
 	previewSkillDescription,
 	RoutingHintCatalog,
@@ -29,7 +37,17 @@ import namespaceHint from "../prompts/tools/mcp-namespace-hint.md" with { type: 
 // @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
 import namespaceJavascript from "./eval-namespace.js" with { type: "text" };
 import namespacePython from "./eval-namespace.py" with { type: "text" };
+import type { MCPManagerApi } from "./manager";
 import { mcpToolNameParts } from "./tool-bridge";
+
+/** Eval bridge op a namespace method calls with an {@link MCPNamespaceCall}. */
+export const EVAL_MCP_BRIDGE_NAME = "__mcp__";
+
+/** Most advertised resources and templates a namespace's docs list. */
+const MAX_LISTED_RESOURCES = 100;
+
+/** Resource catalog the docs list; the live MCP manager, which changes as discovery settles. */
+export type MCPResourceSource = Pick<MCPManagerApi, "getServerResources" | "ensureServerResources">;
 
 const PYTHON_KEYWORDS = new Set(
 	"and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield".split(
@@ -191,24 +209,55 @@ function hintRequest(namespace: MCPNamespace): RoutingHintRequest {
 	};
 }
 
-function namespacePrelude(namespace: MCPNamespace, summary: string): EvalPreludeDefinition {
+function namespacePrelude(
+	namespace: MCPNamespace,
+	summary: string,
+	resources: (() => MCPResourceSource | undefined) | undefined,
+): EvalPreludeDefinition {
 	const methods = Object.fromEntries(namespace.methods.map(method => [method.name, method.tool.name]));
-	let documentation: string | undefined;
+	// Load the resource catalogs now, so the docs list them by the time they are read.
+	for (const server of namespace.servers) {
+		resources?.()
+			?.ensureServerResources(server)
+			.catch(error => logger.debug("MCP namespace resources unavailable", { server, error: String(error) }));
+	}
+	let methodDocs: Array<{ name: string; tool: string; description: string; schema: string }> | undefined;
 	return {
 		name: namespace.name,
-		// Rendered once, on the first read: schemas of large servers are costly to print.
 		get documentation() {
-			documentation ??= prompt.render(namespaceDocs, {
+			// Schemas are printed once, on the first read: large servers are costly to print.
+			methodDocs ??= namespace.methods.map(method => ({
+				name: method.name,
+				tool: method.tool.name,
+				description: (method.tool.description ?? "").trim(),
+				schema: jsonSchemaToTypeScript(toolWireSchema(method.tool)),
+			}));
+			// Resources are read live: a server's list changes without its tools changing.
+			const source = resources?.();
+			const listed = namespace.servers.flatMap(server => {
+				const catalog = source?.getServerResources(server);
+				if (!catalog) return [];
+				return [
+					...catalog.resources.map(resource => ({
+						uri: resource.uri,
+						name: resource.title ?? resource.name,
+						description: resource.description && previewSkillDescription(resource.description),
+					})),
+					...catalog.templates.map(template => ({
+						uri: template.uriTemplate,
+						template: true,
+						name: template.title ?? template.name,
+						description: template.description && previewSkillDescription(template.description),
+					})),
+				];
+			});
+			return prompt.render(namespaceDocs, {
 				name: namespace.name,
 				servers: namespace.servers,
-				methods: namespace.methods.map(method => ({
-					name: method.name,
-					tool: method.tool.name,
-					description: (method.tool.description ?? "").trim(),
-					schema: jsonSchemaToTypeScript(toolWireSchema(method.tool)),
-				})),
+				methods: methodDocs,
+				resources: listed.slice(0, MAX_LISTED_RESOURCES),
+				omittedResources: Math.max(0, listed.length - MAX_LISTED_RESOURCES),
 			});
-			return documentation;
 		},
 		summary,
 		javascript: `${namespaceJavascript.trim()}(${JSON.stringify({ name: namespace.name, methods })});\n`,
@@ -226,10 +275,13 @@ function namespacePrelude(namespace: MCPNamespace, summary: string): EvalPrelude
  */
 export class MCPEvalNamespaceCatalog {
 	readonly #hints: RoutingHintCatalog;
+	readonly #resources: (() => MCPResourceSource | undefined) | undefined;
 	#built = new Map<string, { namespace: MCPNamespace; prelude: EvalPreludeDefinition }>();
 
-	constructor(options: RoutingHintCatalogOptions = {}) {
+	/** `resources` returns the live MCP manager whose resource catalogs the docs list. */
+	constructor(options: RoutingHintCatalogOptions & { resources?: () => MCPResourceSource | undefined } = {}) {
 		this.#hints = new RoutingHintCatalog(options);
+		this.#resources = options.resources;
 	}
 
 	/**
@@ -255,7 +307,7 @@ export class MCPEvalNamespaceCatalog {
 				namespace.name,
 				built && sameNamespace(built.namespace, namespace)
 					? built
-					: { namespace, prelude: namespacePrelude(namespace, hints[index++]) },
+					: { namespace, prelude: namespacePrelude(namespace, hints[index++], this.#resources) },
 			);
 		}
 		this.#built = next;
@@ -271,4 +323,121 @@ export class MCPEvalNamespaceCatalog {
 	waitForPending(): Promise<void> {
 		return this.#hints.waitForPending();
 	}
+}
+
+/** One {@link EVAL_MCP_BRIDGE_NAME} request: kernel method `label` (`github.search`) running registry tool `tool`. */
+export interface MCPNamespaceCall {
+	readonly tool: string;
+	readonly label: string;
+	readonly args: unknown;
+}
+
+/** @throws {ToolError} when the kernel sent a malformed request. */
+export function parseMCPNamespaceCall(args: unknown): MCPNamespaceCall {
+	if (!isRecord(args) || typeof args.tool !== "string" || typeof args.label !== "string") {
+		throw new ToolError("Invalid MCP namespace call");
+	}
+	return { tool: args.tool, label: args.label, args: args.args ?? {} };
+}
+
+/**
+ * A resource an MCP namespace call returned. Embedded text comes as `text`, an
+ * embedded binary as a `local://` `path`; a link carries neither and is read
+ * with `read("mcp://<uri>")`.
+ */
+export interface MCPNamespaceResource {
+	uri: string;
+	name?: string;
+	description?: string;
+	mimeType?: string;
+	text?: string;
+	path?: string;
+}
+
+/** Call result that carries media or resources beside its text. */
+export interface MCPNamespaceResult {
+	text: string;
+	structured?: Record<string, unknown>;
+	/** `local://mcp/…` image files. */
+	images?: string[];
+	/** `local://mcp/…` audio files. */
+	audio?: string[];
+	resources?: MCPNamespaceResource[];
+}
+
+/** What a namespace method resolves to: structured content, else text, else a {@link MCPNamespaceResult}. */
+export type MCPNamespaceValue = string | Record<string, unknown> | MCPNamespaceResult;
+
+function contentText(content: readonly unknown[]): string {
+	const texts: string[] = [];
+	for (const item of content) {
+		if (isRecord(item) && item.type === "text" && typeof item.text === "string") texts.push(item.text);
+	}
+	return texts.join("\n\n");
+}
+
+/** Decode base64 `data` into a fresh `local://mcp/<label>-<id>.<ext>` file; returns its URL. */
+async function saveLocal(label: string, data: string, mimeType: unknown, local: LocalProtocolOptions): Promise<string> {
+	const mime = typeof mimeType === "string" ? mimeType : undefined;
+	const subtype = mime?.split(";")[0].split("/")[1];
+	const extension =
+		blobExtensionForImageMimeType(mime) ??
+		(subtype === "octet-stream" ? undefined : normalizeBlobExtension(subtype)) ??
+		"bin";
+	const url = `local://mcp/${label.replace(/[^\w.-]/g, "_")}-${Snowflake.next()}.${extension}`;
+	await Bun.write(resolveLocalUrlToPath(url, local), Buffer.from(data, "base64"));
+	return url;
+}
+
+/**
+ * Script value of one namespace call. The server's structured content when it
+ * sent some, else its text; a result that also carries images, audio or
+ * resources becomes a {@link MCPNamespaceResult}, with media and binary
+ * resources saved under `local://mcp/`.
+ *
+ * @throws {ToolError} with the tool's error text when the call failed.
+ */
+export async function mcpNamespaceValue(
+	label: string,
+	result: AgentToolResult,
+	local: LocalProtocolOptions,
+): Promise<MCPNamespaceValue> {
+	const details = isRecord(result.details) ? result.details : {};
+	if (result.isError === true || details.isError === true) {
+		throw new ToolError(contentText(result.content) || `${label} failed`);
+	}
+	// The server's own content blocks: the model-facing `content` may be truncated or carry rendered JSON.
+	const content: readonly unknown[] = Array.isArray(details.rawContent) ? details.rawContent : result.content;
+	const images: string[] = [];
+	const audio: string[] = [];
+	const resources: MCPNamespaceResource[] = [];
+	for (const item of content) {
+		if (!isRecord(item)) continue;
+		if ((item.type === "image" || item.type === "audio") && typeof item.data === "string") {
+			(item.type === "image" ? images : audio).push(await saveLocal(label, item.data, item.mimeType, local));
+		} else if (item.type === "resource" && isRecord(item.resource) && typeof item.resource.uri === "string") {
+			const { uri, mimeType, text, blob } = item.resource;
+			const entry: MCPNamespaceResource = { uri };
+			if (typeof mimeType === "string") entry.mimeType = mimeType;
+			if (typeof text === "string") entry.text = text;
+			else if (typeof blob === "string") entry.path = await saveLocal(label, blob, mimeType, local);
+			resources.push(entry);
+		} else if (item.type === "resource_link" && typeof item.uri === "string") {
+			const entry: MCPNamespaceResource = { uri: item.uri };
+			const name = typeof item.title === "string" ? item.title : item.name;
+			if (typeof name === "string") entry.name = name;
+			if (typeof item.description === "string") entry.description = item.description;
+			if (typeof item.mimeType === "string") entry.mimeType = item.mimeType;
+			resources.push(entry);
+		}
+	}
+	const text = contentText(content);
+	const structured = isRecord(details.structuredContent) ? details.structuredContent : undefined;
+	if (images.length === 0 && audio.length === 0 && resources.length === 0) return structured ?? text;
+	const value: MCPNamespaceResult = { text };
+	if (structured) value.structured = structured;
+	if (images.length > 0) value.images = images;
+	if (audio.length > 0) value.audio = audio;
+	if (resources.length > 0) value.resources = resources;
+	return value;
 }

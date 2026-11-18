@@ -4415,6 +4415,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		mcpNamespaces = new MCPEvalNamespaceCatalog({
 			store: ownedSkillDescriptionStore,
 			deferCompression: true,
+			resources: () => toolSession.mcpManager,
 			compress: createSkillDescriptionCompressor(modelRegistry, settings, {
 				...hintCompressorOptions,
 				purpose: "mcp-namespace-hint",

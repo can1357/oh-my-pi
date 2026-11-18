@@ -1,17 +1,9 @@
 # Installs one MCP eval namespace; `eval-namespaces.ts` appends the call binding its global.
-# Each method calls its session tool through the eval tool bridge, so the tool's own approval applies.
+# Each method runs its session tool through the `__mcp__` bridge op, which applies the tool's own
+# approval, maps its content to a value, and raises on a tool error.
 def _omp_mcp_namespace(name, methods):
-    _tool_callable = _ToolCallable
-
-    async def _call(tool, args, kwargs):
-        value = await _tool_callable(tool)(args, **kwargs)
-        if not isinstance(value, dict):
-            return value
-        if value.get("hasError"):
-            raise RuntimeError(value.get("text") or f"{name} call failed")
-        details = value.get("details")
-        structured = details.get("structuredContent") if isinstance(details, dict) else None
-        return structured if structured is not None else value.get("text")
+    _bridge = _bridge_call
+    _to_thread = _omp_asyncio.to_thread
 
     class _Namespace:
         __slots__ = ()
@@ -26,12 +18,19 @@ def _omp_mcp_namespace(name, methods):
             tool = methods.get(method)
             if tool is None:
                 raise AttributeError(f"{name} has no method {method!r}; read xd://eval/{name}")
+            label = f"{name}.{method}"
 
             async def _method(args=None, /, **kwargs):
-                return await _call(tool, args, kwargs)
+                if args is None:
+                    merged = dict(kwargs)
+                elif isinstance(args, dict):
+                    merged = {**args, **kwargs}
+                else:
+                    raise TypeError(f"{label}(...) expects keyword arguments or one dict (got {type(args).__name__})")
+                return await _to_thread(_bridge, "__mcp__", {"tool": tool, "label": label, "args": merged})
 
             _method.__name__ = method
-            _method.__qualname__ = f"{name}.{method}"
+            _method.__qualname__ = label
             return _method
 
     return _Namespace()

@@ -6,7 +6,13 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type DownloadActivity, onDownloadActivity } from "@oh-my-pi/pi-coding-agent/downloads/activity";
 import { SkillDescriptionStore } from "@oh-my-pi/pi-coding-agent/extensibility/skill-descriptions";
-import { groupMCPNamespaces, MCPEvalNamespaceCatalog } from "@oh-my-pi/pi-coding-agent/mcp/eval-namespaces";
+import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import {
+	EVAL_MCP_BRIDGE_NAME,
+	groupMCPNamespaces,
+	MCPEvalNamespaceCatalog,
+	mcpNamespaceValue,
+} from "@oh-my-pi/pi-coding-agent/mcp/eval-namespaces";
 import { createMCPToolName } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -119,22 +125,89 @@ describe("MCPEvalNamespaceCatalog", () => {
 		}
 	});
 
-	it("installs methods that return structured content and throw on tool errors", async () => {
+	it("installs methods that send their tool and arguments to the __mcp__ bridge op", async () => {
 		const [prelude] = new MCPEvalNamespaceCatalog().preludes([mcpTool("github", "search_issues")], new Set());
 		const calls: Array<[string, unknown]> = [];
 		const context = vm.createContext({
-			__omp_call_tool__: async (name: string, args: { query?: string }) => {
+			__omp_call_tool__: async (name: string, args: unknown) => {
 				calls.push([name, args]);
-				if (args.query === "boom") return { text: "Error: exploded", details: {}, hasError: true };
-				if (args.query === "text") return "plain";
-				return { text: "{}", details: { structuredContent: { hits: 1 } } };
+				return "ok";
 			},
 		});
 		vm.runInContext(prelude.javascript, context);
-		const github = vm.runInContext("github", context);
-		expect(await github.search_issues({ query: "x" })).toEqual({ hits: 1 });
-		expect(await github.search_issues({ query: "text" })).toBe("plain");
-		await expect(github.search_issues({ query: "boom" })).rejects.toThrow("Error: exploded");
-		expect(calls[0]).toEqual(["mcp__github_search_issues", { query: "x" }]);
+		expect(await vm.runInContext("github.search_issues({ query: 'x' })", context)).toBe("ok");
+		expect(calls).toEqual([
+			[
+				EVAL_MCP_BRIDGE_NAME,
+				{ tool: "mcp__github_search_issues", label: "github.search_issues", args: { query: "x" } },
+			],
+		]);
+	});
+});
+
+describe("mcpNamespaceValue", () => {
+	const dirs: string[] = [];
+	afterEach(() => {
+		for (const dir of dirs.splice(0)) removeSyncWithRetries(dir);
+	});
+	const localOptions = () => {
+		const dir = path.join(os.tmpdir(), `mcp-eval-ns-local-${Snowflake.next()}`);
+		dirs.push(dir);
+		return { getArtifactsDir: () => dir, getSessionId: () => "session" };
+	};
+
+	it("resolves to structured content, else text, when the result carries no media or resources", async () => {
+		const local = localOptions();
+		const text = {
+			content: [{ type: "text" as const, text: "plain" }],
+			details: { rawContent: [{ type: "text", text: "plain" }] },
+		};
+		expect(await mcpNamespaceValue("github.search", text, local)).toBe("plain");
+		const structured = { ...text, details: { ...text.details, structuredContent: { hits: 2 } } };
+		expect(await mcpNamespaceValue("github.search", structured, local)).toEqual({ hits: 2 });
+	});
+
+	it("saves images and binary resources under local:// and maps resource links", async () => {
+		const local = localOptions();
+		const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
+		const value = await mcpNamespaceValue(
+			"github.shot",
+			{
+				content: [{ type: "text", text: "rendered for the model" }],
+				details: {
+					rawContent: [
+						{ type: "text", text: "caption" },
+						{ type: "image", data: png, mimeType: "image/png" },
+						{ type: "resource", resource: { uri: "repo://readme", mimeType: "text/markdown", text: "# Hi" } },
+						{ type: "resource", resource: { uri: "repo://logo", mimeType: "application/pdf", blob: png } },
+						{ type: "resource_link", uri: "repo://issues/1", name: "Issue 1", mimeType: "application/json" },
+					],
+				},
+			},
+			local,
+		);
+		if (typeof value !== "object" || !Array.isArray(value.images) || !Array.isArray(value.resources)) {
+			throw new Error(`expected a media result, got ${JSON.stringify(value)}`);
+		}
+		expect(value.text).toBe("caption");
+		expect(value.images).toEqual([expect.stringMatching(/^local:\/\/mcp\/github\.shot-[0-9a-f]+\.png$/)]);
+		expect([...(await Bun.file(resolveLocalUrlToPath(value.images[0], local)).bytes())]).toEqual([
+			0x89, 0x50, 0x4e, 0x47,
+		]);
+		const [readme, logo, link] = value.resources;
+		expect(readme).toEqual({ uri: "repo://readme", mimeType: "text/markdown", text: "# Hi" });
+		expect(logo).toEqual({ uri: "repo://logo", mimeType: "application/pdf", path: expect.stringMatching(/\.pdf$/) });
+		expect(await Bun.file(resolveLocalUrlToPath(logo.path ?? "", local)).exists()).toBe(true);
+		expect(link).toEqual({ uri: "repo://issues/1", name: "Issue 1", mimeType: "application/json" });
+	});
+
+	it("throws the tool's error text", async () => {
+		await expect(
+			mcpNamespaceValue(
+				"github.search",
+				{ content: [{ type: "text", text: "Error: rate limited" }], details: { isError: true }, isError: true },
+				localOptions(),
+			),
+		).rejects.toThrow("Error: rate limited");
 	});
 });
