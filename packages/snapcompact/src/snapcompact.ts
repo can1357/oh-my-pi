@@ -32,9 +32,13 @@
  *   billing (32px × 1.2, 10k-patch budget at `detail: "original"`) is
  *   area-proportional, so resolution cannot improve chars/$ — 1568 stays.
  *   `detail: "high"` would downgrade (2,500-patch cap); `original` is sent.
- * - **Unknown providers** default to `8on22-bw`. `providerImageBudget` caps
- *   per-request images at the deployment's catalog `image-count-budget`, so
- *   inline imaging cannot flood a request with attachments.
+ * - **Readers no catalog rule covers** default to `8on22-bw` (`11on16-bw` on
+ *   Anthropic wires). `providerImageBudget` caps per-request images at the
+ *   deployment's catalog `image-count-budget`, so inline imaging cannot flood
+ *   a request with attachments.
+ * - **A model's configured `snapcompactShape`** (models.yml, `modelOverrides`,
+ *   an extension's provider) replaces its catalog shape; an explicit
+ *   `snapcompact.shape` setting still wins over both.
  *
  * The per-frame token estimate follows the reading model's catalog
  * `image-tokenization` rule (its lineage, not the gateway), so Claude behind
@@ -64,9 +68,10 @@ import {
 	imageTokens,
 	resolveImageMaxEdge,
 	resolveImageTokenization,
+	resolveSnapcompactShape,
+	type SnapcompactVariant,
 } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
 import { resolveImageCountBudget, resolveInlineImageByteBudget } from "@oh-my-pi/pi-catalog/compat/request-size";
-import { classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
 import { renderSnapcompactPng, snapcompactSupportedChars } from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, isRecord, prompt, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -211,7 +216,7 @@ export const SHAPE_VARIANTS = {
 		lineRepeat: 1,
 		frameSize: 1568,
 	},
-} as const satisfies Record<string, ShapeGeometry>;
+} as const satisfies Record<SnapcompactVariant, ShapeGeometry>;
 
 /** Research name of one renderable frame variant. */
 export type ShapeVariantName = keyof typeof SHAPE_VARIANTS;
@@ -359,14 +364,8 @@ export function isShape(value: unknown): value is Shape {
 	return ShapeSchema.allows(value);
 }
 
-/** Eval-winning variant per wire family (fallback when the model id matches
- *  no known reader line). */
-const FAMILY_VARIANT: Record<ApiFamily, ShapeVariantName> = {
-	anthropic: "11on16-bw",
-	google: "8on22-bw",
-	openai: "8on22-bw",
-	unknown: "8on22-bw",
-};
+/** Edge variant for readers no `snapcompact-variant` rule covers. */
+const DEFAULT_VARIANT = "8on22-bw" satisfies ShapeVariantName;
 
 /** Denser companion variant per family for the foveated archive middle: same
  *  pixels (identical per-frame bill) but a tighter 8px cell, trading some
@@ -378,62 +377,6 @@ const FAMILY_VARIANT_LOW: Record<ApiFamily, ShapeVariantName> = {
 	openai: "8on16-bw",
 	unknown: "8on16-bw",
 };
-
-/** One model line's ideal format: variant plus an optional frame-size
- *  override when the line reads larger frames at no extra cost. */
-export interface IdealShape {
-	variant: ShapeVariantName;
-	frameSize?: number;
-}
-
-/** Eval-winning format per model line. The wire API only identifies the
- *  gateway — a Claude served through Vertex or OpenRouter still reads best
- *  with its own shape. Classified Anthropic models use the shared catalog
- *  identity parser; remaining model lines use first-match regex rules and fall
- *  back to the API family's winner at the standard 1568px frame. */
-const HIGH_RES_ANTHROPIC_VARIANT = { variant: "11on16-bw", frameSize: 1932 } as const satisfies IdealShape;
-const MODEL_VARIANTS: readonly (readonly [RegExp, IdealShape])[] = [
-	// Versionless Fable/Mythos aliases (e.g. `claude-fable-latest`) never parse
-	// a numeric version, so keep them on the high-res tier by name — every
-	// Fable/Mythos line reads it natively.
-	[/claude.*(fable|mythos)/i, HIGH_RES_ANTHROPIC_VARIANT],
-	// Older Claude lines downscale past 1568px — keep the safe size.
-	[/claude/i, { variant: "11on16-bw" }],
-	// Gemini 3.x bills a fixed 1,120-token budget per image regardless of
-	// pixels: 2048px packs more chars per frame at the same bill.
-	[/gemini/i, { variant: "8on22-bw", frameSize: 2048 }],
-	// gpt-5.5 patch billing is area-proportional; 1568 is already optimal.
-	[/gpt|codex/i, { variant: "8on22-bw" }],
-	// kimi-k3 chunked bench: `8on22-bw` scored f1 .915 @ $0.66 vs .813 on `8on16-bw` ($0.70);
-	// 1568 wins on chars/$ (image processor downscales past 1792px).
-	[/kimi/i, { variant: "8on22-bw" }],
-	// glm-4.6v .780 mono via direct vendor routing.
-	[/glm/i, { variant: "8on16-bw" }],
-];
-
-/** Eval-ideal format for a model id, or undefined when unmeasured. */
-export function idealShapeVariant(modelId: string): IdealShape | undefined {
-	const identity = classifyModel("", modelId, { lenient: true });
-	const revision = identity.revision === undefined ? undefined : parseRevision(identity.revision);
-	const opusFloor = parseRevision("4.7");
-	if (
-		identity.class === "anthropic" &&
-		(identity.family === "fable" ||
-			identity.family === "mythos" ||
-			(identity.family === "opus" &&
-				revision !== undefined &&
-				opusFloor !== undefined &&
-				compareRevision(revision, opusFloor) >= 0))
-	) {
-		// Opus 4.7+ and Fable/Mythos read high-res natively: same recall and
-		// cost as 1568, a third fewer frames. 1932 is the largest *square* not
-		// downscaled under Anthropic's 4,784 visual-token cap ((1932/28)² =
-		// 69² = 4,761 ≤ 4,784 28px patches), and staying below 2000px clears
-		// the stricter ≤2000px limit for requests with more than 20 images.
-		return HIGH_RES_ANTHROPIC_VARIANT;
-	}
-	return MODEL_VARIANTS.find(([pattern]) => pattern.test(modelId))?.[1];
-}
 
 /** What will read the frames: the model id (shape and billing), the wire API
  *  (request hints, fallback billing), and optionally the host, parsed
@@ -449,24 +392,30 @@ export interface ShapeTarget {
 /**
  * Pick the frame shape for a reader. An explicit `variant` (anything but
  * `"auto"`) forces that geometry; otherwise the model's configured shape
- * (`snapcompactShape`), else its model id, selects the shape — and frame
- * size — falling back to the API family's winner when the model is
- * unmeasured. Either way the frame is no wider than the host's catalog
- * `image-max-edge`. Billing (token estimate, detail hint) is computed for
- * the resolved frame size from the model's catalog image rule. Accepts a
- * full pi-ai `Model` or any `{ api, id }` subset.
+ * (`snapcompactShape`, from user or extension configuration) wins, else the
+ * reader's catalog `snapcompact-variant` and `snapcompact-frame-size` rules
+ * select its lineage's eval-winning shape and frame size, so a Claude behind
+ * Vertex or OpenRouter still reads Claude's. Either way the frame is no wider
+ * than the host's catalog `image-max-edge`. Billing (token estimate, detail
+ * hint) is computed for the resolved frame size from the model's catalog
+ * image rule. Accepts a full pi-ai `Model` or any `{ api, id }` subset.
  */
 export function resolveShape(model?: ShapeTarget, variant?: ShapeVariantName | "auto"): Shape {
 	if (variant && variant !== "auto") return priceShape(fitHostImageEdge(SHAPE_VARIANTS[variant], model), model);
-	const ideal = configuredShape(model) ?? (model?.id ? idealShapeVariant(model.id) : undefined);
-	const base = SHAPE_VARIANTS[ideal?.variant ?? FAMILY_VARIANT[apiFamily(model?.api)]];
-	return priceShape(fitHostImageEdge(ideal?.frameSize ? { ...base, frameSize: ideal.frameSize } : base, model), model);
+	const policy = configuredShape(model) ?? (model ? resolveSnapcompactShape(model) : undefined);
+	const base = SHAPE_VARIANTS[policy?.variant ?? DEFAULT_VARIANT];
+	return priceShape(
+		fitHostImageEdge(policy?.frameSize ? { ...base, frameSize: policy.frameSize } : base, model),
+		model,
+	);
 }
 
 /** The model's configured shape. An unknown variant name is ignored, and a
  *  frame size outside {@link isConfigurableFrameSize} falls back to the
- *  variant's own. */
-function configuredShape(target: ShapeTarget | undefined): IdealShape | undefined {
+ *  variant's own (not a catalog rule's). */
+function configuredShape(
+	target: ShapeTarget | undefined,
+): { variant: ShapeVariantName; frameSize?: number } | undefined {
 	const configured = target?.snapcompactShape;
 	if (!configured || !isShapeVariantName(configured.variant)) return undefined;
 	const { frameSize } = configured;
@@ -566,6 +515,9 @@ export const FRAME_TOKEN_ESTIMATE = 5024;
  *  standing request bodies at large context windows. */
 export const FRAME_DATA_BYTES_ESTIMATE = 170_000;
 
+/** Frame edge {@link FRAME_DATA_BYTES_ESTIMATE} was measured at. */
+const FRAME_DATA_BYTES_EDGE = 1932;
+
 /** Frame payload cap for a deployment without a catalog `inline-image-byte-budget`:
  *  an unmeasured backend can accept the HTTP body and still fail mid-stream
  *  with opaque 5xx errors. Keep this independent from visual-token budgeting:
@@ -588,7 +540,7 @@ export function frameDataBytesBudget(model: Model | undefined): number {
 const AREA_PRICED_VARIANTS: readonly ShapeGeometry[] = [SHAPE_VARIANTS["8on22-bw"], SHAPE_VARIANTS["11on16-bw"]];
 
 /** Frame-count cap a `budget` of base64 bytes implies for frames rendered by
- *  `shape`. {@link AREA_PRICED_VARIANTS} below 1932px are charged
+ *  `shape`. {@link AREA_PRICED_VARIANTS} below {@link FRAME_DATA_BYTES_EDGE} are charged
  *  {@link FRAME_DATA_BYTES_ESTIMATE} scaled by pixel area; every other shape
  *  pays the full estimate. */
 export function maxFramesForDataBudget(shape: ShapeGeometry, budget: number): number {
@@ -603,7 +555,7 @@ export function maxFramesForDataBudget(shape: ShapeGeometry, budget: number): nu
 			variant.columns === shape.columns &&
 			variant.lineRepeat === shape.lineRepeat,
 	);
-	const areaRatio = areaPriced ? (shape.frameSize / HIGH_RES_ANTHROPIC_VARIANT.frameSize) ** 2 : 1;
+	const areaRatio = areaPriced ? (shape.frameSize / FRAME_DATA_BYTES_EDGE) ** 2 : 1;
 	const frameBytes = Math.min(FRAME_DATA_BYTES_ESTIMATE, Math.ceil(FRAME_DATA_BYTES_ESTIMATE * areaRatio));
 	return Math.max(1, Math.floor(budget / frameBytes));
 }

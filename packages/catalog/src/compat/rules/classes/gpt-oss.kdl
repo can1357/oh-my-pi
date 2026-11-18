@@ -17,3 +17,8 @@ class "gpt-oss" {
 		supports-function-part-id #true
 	}
 }
+
+// Snapcompact frames: GPT's `8on22-bw` at 1568px.
+class "gpt-oss" {
+	snapcompact-variant "8on22-bw"
+}

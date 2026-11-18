@@ -818,3 +818,26 @@ class "anthropic" {
 		}
 	}
 }
+
+// Snapcompact frames: 8x13 glyphs on an 11px advance (`11on16-bw`). Lines that
+// read high-res natively (Opus 4.7+, Fable, Mythos) get 1932px frames: same
+// recall and cost as 1568, a third fewer frames. 1932 is the largest square
+// not downscaled under the 4,784 visual-token cap ((1932/28)² = 69² = 4,761
+// patches), and staying below 2000px clears the stricter limit for requests
+// with more than 20 images. Older lines downscale past 1568px and keep it.
+// Haiku 5.5 is billed on the high-res tier and reads 1932px, but 1932 measured
+// no recall gain over 1568 (2026-11: ΔF1 -.006 [-.068, .059]), so it stays.
+class "anthropic" {
+	snapcompact-variant "11on16-bw"
+	family "opus" {
+		revision ">=4.7" {
+			snapcompact-frame-size 1932
+		}
+	}
+	family "fable" {
+		snapcompact-frame-size 1932
+	}
+	family "mythos" {
+		snapcompact-frame-size 1932
+	}
+}
