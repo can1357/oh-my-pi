@@ -1,10 +1,6 @@
 # Changelog
 
 ## [Unreleased]
-### Added
-
-- Added radare2 as a third `dsm` backend alongside IDA and Ghidra, with the same open, view, exec, annotate, save and close actions, managed radare2 projects, and a free scriptable option for binary analysis ([#19612](https://github.com/can1357/oh-my-pi/pull/19612) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
 
 ### Breaking Changes
 
@@ -19,6 +15,9 @@
 - Extensions can identify which eval cell or kernel-defined tool dispatched a nested tool: `tool_call` and `tool_result` now include an optional `parentToolCallId` ([#19823](https://github.com/can1357/oh-my-pi/pull/19823) by [@baekjosh](https://github.com/baekjosh)).
 - Sessions now record approval prompts in their session file, even before the first reply: a `tool_approval_requested` entry when a tool call starts waiting on you (naming the dispatching eval call in `parentToolCallId` for calls made from an eval) and a `tool_approval_resolved` entry when it is approved, denied, aborted, or refused, so tools that read session files (sidebars, dashboards) can show a session waiting on approval ([#18837](https://github.com/can1357/oh-my-pi/pull/18837) by [@baekjosh](https://github.com/baekjosh))
 - Added Binary Ninja as a disassembler backend for read analysis views and the dsm namespace. Select it with disassembler.backend = binja; it uses a local install found through binja.installDir, $BN_INSTALL_DIR, or the default install locations ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- Added radare2 as a third `dsm` backend alongside IDA and Ghidra, with the same open, view, exec, annotate, save and close actions, managed radare2 projects, and a free scriptable option for binary analysis ([#19612](https://github.com/can1357/oh-my-pi/pull/19612) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- `omp usage` and `/usage` show each Claude account's subscription plan (e.g. `Max 20x`) beside its organization
+- Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
 
 ### Changed
 
@@ -170,7 +169,6 @@
 ### Added
 
 - Added `notify` to the `bash` tool: a regex whose matching output lines are reported to the agent while a background command or a named service runs, waking an idle session or ending a blocked `wait`; the command's result or the service's exit notice still follows
-- Added radare2 as a third `dsm` backend alongside IDA and Ghidra, with the same open, view, exec, annotate, save and close actions, managed radare2 projects, and a free scriptable option for binary analysis ([#19612](https://github.com/can1357/oh-my-pi/pull/19612) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 

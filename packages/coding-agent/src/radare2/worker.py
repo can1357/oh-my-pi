@@ -6,11 +6,13 @@ Response: {"id", "ok": true, "result", "dirty"} | {"id", "ok": false, "error": {
 
 import _thread
 import ast
+import base64
 import io
 import json
 import os
 import queue
 import re
+import shutil
 import signal
 import sys
 import threading
@@ -36,6 +38,10 @@ R2 = None
 _DATABASE_PATH = None
 _DIRTY = False
 _MODULE = None
+_R2_PROC = None
+_R2_KILLED_PID = None
+_kill_lock = threading.Lock()
+_WATCHDOG_STARTED = False
 NS = {}
 _WINDOWS = sys.platform == "win32"
 _EXEC_FILE = "<radare2-exec>"
@@ -386,15 +392,17 @@ def rename(t, name):
 
 
 def comment(t, text, repeatable=False):
-    """Set an address comment with CC; repeatable also comments every xref."""
+    """Set an address comment with CC base64; repeatable also comments every xref."""
     global _DIRTY
     r2 = _program()
     ea = resolve(t)
+    value = str(text)
+    encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
     targets = [ea]
     if repeatable:
         targets.extend(ref["from"] for ref in xrefs_to(ea) if ref["from"] is not None and ref["from"] != ea)
     with _nul_io():
-        outs = [r2.cmd(f"CC {text} @ {_hex(addr)}") for addr in targets]
+        outs = [r2.cmd(f"CC base64:{encoded} @ {_hex(addr)}") for addr in targets]
         comments = r2.cmdj("CCj")
     failure = next((f for f in map(_r2_failure, outs) if f), None)
     if failure:
@@ -402,11 +410,40 @@ def comment(t, text, repeatable=False):
     written = {}
     for item in _items(comments):
         written.setdefault(_addr(item.get("offset", 0)), []).append(str(item.get("name") or ""))
-    missing = [addr for addr in targets if not any(text in value for value in written.get(addr, []))]
+    missing = [addr for addr in targets if not any(value in item for item in written.get(addr, []))]
     if missing:
         raise ValueError("radare2 did not apply comment at " + ", ".join(_hex(addr) for addr in missing))
     _DIRTY = True
     return {"ea": _hex(ea)}
+
+
+def _decl_parts(decl):
+    """Return (afs declaration, return type, bare name), moving pointer stars off the name."""
+    before, sep, rest = decl.partition("(")
+    head = before.strip()
+    match = re.fullmatch(r"(.+?)\s*(\**)\s*([A-Za-z_][A-Za-z0-9_]*)", head)
+    if match is None:
+        return None
+    base, stars, name = match.groups()
+    base = base.strip()
+    if not base:
+        return None
+    ret = base + stars
+    return f"{ret} {name}{sep}{rest}", ret, name
+
+
+def _signature_decl(sig):
+    """Rebuild an afs declaration from an afsj record for rollback."""
+    name = str(sig.get("name") or "")
+    ret = str(sig.get("ret") or "")
+    if not name or not ret:
+        return None
+    args = []
+    for arg in _items(sig.get("args")):
+        arg_type = str(arg.get("type") or "")
+        arg_name = str(arg.get("name") or "")
+        args.append((arg_type + " " + arg_name).strip())
+    return f"{ret} {name}({', '.join(args)})"
 
 
 def set_type(t, decl):
@@ -415,23 +452,34 @@ def set_type(t, decl):
     prototype = _clean_decl(decl)
     if prototype is None:
         raise ValueError("set_type needs a C function declaration, got: " + repr(decl))
+    parts = _decl_parts(prototype)
+    if parts is None:
+        raise ValueError("set_type needs a function name, got: " + repr(decl))
+    command, want_ret, want_name = parts
     r2 = _program()
     ea = resolve(t)
-    head = prototype.partition("(")[0].strip().split()
-    want_name = head[-1] if head else ""
-    want_ret = " ".join(head[:-1])
     with _nul_io():
-        out = r2.cmd(f"afs {prototype} @ {_hex(ea)}")
+        before = r2.cmdj(f"afsj @ {_hex(ea)}")
+        out = r2.cmd(f"afs {command} @ {_hex(ea)}")
         sig = r2.cmdj(f"afsj @ {_hex(ea)}")
     failure = _r2_failure(out)
-    if failure:
-        raise ValueError(f"radare2 rejected type {prototype!r} at {_hex(ea)}: {failure}")
-    if not isinstance(sig, dict) or not sig or str(sig.get("name") or "") != want_name:
+    bad = failure or not isinstance(sig, dict) or not sig or str(sig.get("name") or "") != want_name
+    if not bad and want_ret.replace(" ", "") != " ".join(str(sig.get("ret") or "").split()).replace(" ", ""):
+        bad = True
+    if bad:
+        if not failure and isinstance(before, dict) and before:
+            restore = _signature_decl(before)
+            if restore:
+                try:
+                    with _nul_io():
+                        r2.cmd(f"afs {restore} @ {_hex(ea)}")
+                except Exception:
+                    traceback.print_exc()
+        if failure:
+            raise ValueError(f"radare2 rejected type {prototype!r} at {_hex(ea)}: {failure}")
         raise ValueError(f"radare2 did not apply type {prototype!r} at {_hex(ea)}")
-    if want_ret.replace(" ", "") != " ".join(str(sig.get("ret") or "").split()).replace(" ", ""):
-        raise ValueError(f"radare2 did not apply return type {want_ret!r} at {_hex(ea)}")
     _DIRTY = True
-    return {"ea": _hex(ea), "type": prototype}
+    return {"ea": _hex(ea), "type": command}
 
 
 def make_function(t):
@@ -559,10 +607,10 @@ _TARGET_VIEWS = {
 
 
 def _r2_exe_home(project_dir):
-    """Pin r2pipe to the configured binary via a `radare2` symlink in a shim dir.
+    """Pin r2pipe to the configured binary via a staged `radare2` executable.
 
     r2pipe only accepts a directory (radare2home) and always spawns `<dir>/radare2`,
-    so a symlink is what forces an exact executable regardless of name or PATH.
+    so staging is what forces an exact executable regardless of name or PATH.
     """
     configured = os.environ.get("RADARE2_BIN", "").strip()
     if not configured:
@@ -577,14 +625,20 @@ def _r2_exe_home(project_dir):
             return shim
         if os.path.lexists(link):
             os.unlink(link)
-        os.symlink(target, link)
+        try:
+            os.symlink(target, link)
+        except OSError:
+            if not _WINDOWS:
+                raise
+            # Standard Windows denies symlink creation without SeCreateSymbolicLinkPrivilege.
+            shutil.copy2(target, link)
     except OSError as exc:
         raise RuntimeError(f"cannot stage configured radare2 binary {target}: {exc}") from exc
     return shim
 
 
 def _rpc_open(params):
-    global R2, _DATABASE_PATH, _DIRTY, _MODULE
+    global R2, _DATABASE_PATH, _DIRTY, _MODULE, _R2_PROC, _R2_KILLED_PID
     if R2 is not None:
         raise RuntimeError("a project is already open in this worker")
     project_dir = os.path.abspath(params["project"])
@@ -613,6 +667,8 @@ def _rpc_open(params):
     marker = os.path.join(project_dir, "omp.r2")
     Path(marker).touch()
     R2 = r2
+    _R2_PROC = getattr(r2, "process", None)
+    _R2_KILLED_PID = None
     _DATABASE_PATH = marker
     _DIRTY = False
     NS.clear()
@@ -735,34 +791,71 @@ _running_id = None
 _interrupt_pending = False
 
 
-def _kill_r2(r2):
-    """SIGKILL and reap the r2 child; SIGINT is swallowed by `r2 -q0`."""
-    proc = getattr(r2, "process", None)
+def _kill_r2(r2=None):
+    """SIGKILL and reap the r2 child; safe from a signal or stdin thread."""
+    global _R2_KILLED_PID
+    target = R2 if r2 is None else r2
+    proc = getattr(target, "process", None) if target is not None else None
     if proc is None:
+        proc = _R2_PROC
+    pid = getattr(proc, "pid", None)
+    with _kill_lock:
+        if pid is not None and pid == _R2_KILLED_PID:
+            return
+        if proc is not None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                traceback.print_exc()
+            if pid is not None:
+                _R2_KILLED_PID = pid
+            return
+        if target is None:
+            return
         try:
-            r2.quit()
+            target.quit()
         except Exception:
             traceback.print_exc()
+
+
+def _start_interrupt_watchdog():
+    """Kill the r2 child as soon as SIGINT arrives, even inside a blocked NUL read."""
+    global _WATCHDOG_STARTED
+    if _WINDOWS or _WATCHDOG_STARTED:
         return
-    try:
-        proc.kill()
-    except OSError:
-        pass
-    try:
-        proc.wait(timeout=5)
-    except Exception:
-        traceback.print_exc()
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(read_fd, True)
+    os.set_blocking(write_fd, False)
+    signal.set_wakeup_fd(write_fd, warn_on_full_buffer=False)
+    _WATCHDOG_STARTED = True
+
+    def watch():
+        while True:
+            try:
+                if not os.read(read_fd, 4096):
+                    return
+            except OSError:
+                return
+            with _running_lock:
+                active = _running_id is not None
+            if active:
+                _kill_r2()
+
+    threading.Thread(target=watch, name="omp-radare2-interrupt-watchdog", daemon=True).start()
 
 
 def _cancel_session():
-    global R2, _DIRTY
+    global R2, _DIRTY, _R2_PROC
     r2 = R2
+    _kill_r2(r2)
     R2 = None
+    _R2_PROC = None
     _DIRTY = False
     NS.clear()
-    if r2 is not None:
-        _kill_r2(r2)
-
 
 def _on_sigint(signum, frame):
     _cancel_session()
@@ -882,6 +975,7 @@ def _handle(line):
 def main():
     if not _WINDOWS:
         signal.signal(signal.SIGINT, _on_sigint)
+        _start_interrupt_watchdog()
     threading.Thread(target=_read_requests, name="omp-radare2-stdin", daemon=True).start()
     while True:
         try:

@@ -11,10 +11,13 @@ import { DisasmWorker } from "../../src/disasm/supervisor";
 const pythonName = "python" + "3";
 const pythonPath = Bun.env.PYTHON ?? ($which(pythonName) ? pythonName : "python");
 
+const base64 = (text: string): string => Buffer.from(text, "utf8").toString("base64");
+
 /** Stub r2pipe driven entirely by the worker protocol; no radare2 install needed. */
 const STUB_R2PIPE = `
 import builtins
 import os
+import base64
 
 _LOG = os.environ["OMP_R2_STUB_LOG"]
 _FAIL_PDGJ = {"value": False}
@@ -32,6 +35,9 @@ class StubR2:
         self.signature = {"name": "main", "ret": "int", "argc": 0, "args": []}
     def cmd(self, text):
         _record("cmd:" + text)
+        for extra in str(text).replace(";", "\\n").split("\\n")[1:]:
+            if extra.strip():
+                _record("cmd:" + extra.strip())
         if text == "__stub_fail_pdgj":
             _FAIL_PDGJ["value"] = True
         elif text == "__stub_ok_pdgj":
@@ -57,6 +63,11 @@ class StubR2:
         elif text.startswith("CC "):
             value, _, addr_text = text[3:].rpartition(" @ ")
             addr = int(addr_text, 16)
+            if value.startswith("base64:"):
+                value = base64.b64decode(value[7:]).decode("utf-8")
+            if value == "__stub_hang_read":
+                _record("read_blocked")
+                value = self.process.stdout.read(1).decode("utf-8", "replace")
             self.comments[addr] = (self.comments.get(addr, "") + " " + value).strip()
             return ""
         return ""
@@ -138,6 +149,10 @@ class StubR2:
 		'    def quit(self):\n        _record("quit")\n',
 		'    def quit(self):\n        _record("quit")\n        self.process.kill()\n        self.process.wait()\n',
 	);
+
+/** Hung-read stub: CC blocks on the child's stdout until the child is killed. */
+const STUB_R2PIPE_HANG_READ = STUB_R2PIPE_PROCESS
+	.replace("stdout=subprocess.DEVNULL,", "stdout=subprocess.PIPE,");
 
 
 describe("radare2 worker protocol from a hidden managed store", () => {
@@ -409,13 +424,13 @@ type StubWorker = { worker: DisasmWorker; dir: string; databaseDir: string; log:
 type MutationResult = { ea: string; [key: string]: unknown };
 
 /** Start a radare2 worker against a fresh temp tree; frameMode forces an stdin interrupt frame. */
-async function startStubWorker(prefix: string, frameMode = false, childProcess = false): Promise<StubWorker> {
+async function startStubWorker(prefix: string, frameMode = false, childProcess = false, hangRead = false): Promise<StubWorker> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
 	const databaseDir = path.join(dir, ".omp", "db");
 	const log = path.join(dir, "r2.log");
 	const stubs = path.join(dir, "stubs");
 	await Bun.write(log, "");
-	await Bun.write(path.join(stubs, "r2pipe.py"), childProcess ? STUB_R2PIPE_PROCESS : STUB_R2PIPE);
+	await Bun.write(path.join(stubs, "r2pipe.py"), hangRead ? STUB_R2PIPE_HANG_READ : childProcess ? STUB_R2PIPE_PROCESS : STUB_R2PIPE);
 	const binary = path.join(databaseDir, "stub.bin");
 	await Bun.write(binary, "radare2 mutation fixture\n");
 	const env: Record<string, string> = {};
@@ -498,7 +513,7 @@ describe("radare2 mutations and cancellation", () => {
 		const lines = (await Bun.file(stub.log).text()).split("\n").filter(Boolean);
 		for (const cmd of [
 			"cmd:afn entry_main @ 0x1000",
-			"cmd:CC entry @ 0x1000",
+			`cmd:CC base64:${base64("entry")} @ 0x1000`,
 			"cmd:afs int main(void) @ 0x1000",
 			"cmd:af @ 0x2000",
 		]) {
@@ -514,7 +529,7 @@ describe("radare2 mutations and cancellation", () => {
 		await stub.worker.request("comment", { target: "main", text: "shared", repeatable: true });
 		const lines = (await Bun.file(stub.log).text()).split("\n").filter(Boolean);
 		for (const addr of ["0x1000", "0x2000"]) {
-			expect(lines).toContain(`cmd:CC shared @ ${addr}`);
+			expect(lines).toContain(`cmd:CC base64:${base64("shared")} @ ${addr}`);
 		}
 		expect(lines.some(line => line.startsWith("cmdj:axtj"))).toBe(true);
 	});
@@ -540,6 +555,69 @@ describe("radare2 mutations and cancellation", () => {
 		const name = await stub.worker.request<ExecResult>("exec", { code: "func('main')['name']" });
 		expect(name.value).toContain("entry_main");
 	});
+
+	it("writes comment text as base64 without executing separators", async () => {
+		const text = "quoted \"x\"; afn injected @ 0x1000\n# next line";
+		const before = await Bun.file(stub.log).text();
+		const result = await stub.worker.request<MutationResult>("comment", { target: "main", text, repeatable: true });
+		expect(result).toMatchObject({ ea: "0x1000" });
+		const after = (await Bun.file(stub.log).text()).slice(before.length);
+		expect(after).toContain(`cmd:CC base64:${base64(text)} @ 0x1000`);
+		expect(after).toContain(`cmd:CC base64:${base64(text)} @ 0x2000`);
+		expect(after).not.toContain("cmd:afn injected @ 0x1000");
+		expect(after).not.toContain("cmd:# next line");
+		const roundTrip = await stub.worker.request<ExecResult>("exec", {
+			code: "import base64\n[base64.b64encode(c['name'].encode('utf-8')).decode('ascii') for c in r2.cmdj('CCj') if c['offset'] == 4096]",
+		});
+		const encodedValue = roundTrip.value?.match(/'([A-Za-z0-9+/=]+)'/)?.[1];
+		expect(encodedValue).toBeDefined();
+		expect(Buffer.from(encodedValue!, "base64").toString("utf8")).toContain(text);
+	});
+
+	it("applies char *main(void) as a pointer return and marks dirty", async () => {
+		await stub.worker.request("save", {});
+		const typed = await stub.worker.request<MutationResult>("set_type", { target: "main", decl: "char *main(void)" });
+		expect(typed).toMatchObject({ ea: "0x1000" });
+		expect(stub.worker.needsSave).toBe(true);
+		const lines = (await Bun.file(stub.log).text()).split("\n").filter(Boolean);
+		expect(lines).toContain("cmd:afs char* main(void) @ 0x1000");
+		const sig = await stub.worker.request<ExecResult>("exec", { code: "r2.cmdj('afsj')" });
+		expect(sig.value).toContain("'name': 'main'");
+		expect(sig.value).toContain("'ret': 'char*'");
+	});
+
+	it("kills and reaps a radare2 child when a _nul_io read hangs", async () => {
+		const hangStub = await startStubWorker("radare2-hang-read-", false, true, true);
+		try {
+			const before = await Bun.file(hangStub.log).text();
+			const childPids = [...before.matchAll(/^child:(\d+)$/gm)].map(match => Number(match[1]));
+			const childPid = childPids.at(-1);
+			expect(childPid).toBeDefined();
+			expect(pidAlive(childPid!)).toBe(true);
+
+			const started = Date.now();
+			await expect(
+				hangStub.worker.request(
+					"comment",
+					{ target: "main", text: "__stub_hang_read" },
+					{ timeoutMs: 300 },
+				),
+			).rejects.toThrow(/interrupted/i);
+			expect(Date.now() - started).toBeLessThan(5_000);
+			const after = await Bun.file(hangStub.log).text();
+			expect(after).toContain("read_blocked");
+			expect(after).toContain(`kill:${childPid}`);
+			expect(after).toContain(`reaped:${childPid}:`);
+			if (process.platform !== "win32") expect(after).toContain(`reaped:${childPid}:-9`);
+			expect(pidAlive(childPid!)).toBe(false);
+
+			await hangStub.worker.close({ save: false });
+			const lock = await acquireFileLock(hangStub.marker);
+			lock.release();
+		} finally {
+			await stopStubWorker(hangStub);
+		}
+	}, 15_000);
 
 	it("interrupt frame terminates r2 and preserves the last saved project", async () => {
 		const cancelStub = await startStubWorker("radare2-cancel-", true, true);
@@ -631,6 +709,68 @@ with open(${JSON.stringify(result)}, "w") as handle:
 			expect(frames).toEqual([
 				{ id: 7, ok: false, error: { type: "KeyboardInterrupt", message: "interrupted" } },
 			]);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("radare2 executable staging", () => {
+	it("copies the configured binary on Windows when symlinks are privileged", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "radare2-staging-"));
+		try {
+			const stubs = path.join(dir, "stubs");
+			const projectDir = path.join(dir, "project");
+			const configured = path.join(dir, "custom-r2");
+			const result = path.join(dir, "result.json");
+			await fs.mkdir(projectDir, { recursive: true });
+			await Bun.write(path.join(stubs, "r2pipe.py"), STUB_R2PIPE);
+			await Bun.write(configured, "radare2 shim fixture\n");
+			await Bun.write(path.join(dir, "worker.py"), DISASM_BACKENDS.radare2.workerScript);
+			await Bun.write(path.join(dir, "probe.py"), `
+import json
+import os
+import sys
+sys.path.insert(0, ${JSON.stringify(dir)})
+import worker
+worker._WINDOWS = True
+def deny_symlink(*args, **kwargs):
+    raise OSError(1314, "A required privilege is not held by the client")
+worker.os.symlink = deny_symlink
+try:
+    shim = worker._r2_exe_home(${JSON.stringify(projectDir)})
+    link = os.path.join(shim, "radare2.exe")
+    with open(link, "rb") as handle:
+        payload = handle.read().decode("utf-8")
+    result = {"shim": shim, "is_symlink": os.path.islink(link), "payload": payload}
+except Exception as exc:
+    result = {"error": str(exc), "type": type(exc).__name__}
+with open(${JSON.stringify(result)}, "w") as handle:
+    json.dump(result, handle)
+`);
+			const log = path.join(dir, "r2.log");
+			await Bun.write(log, "");
+			const env: Record<string, string> = {};
+			for (const key in process.env) {
+				const value = process.env[key];
+				if (value !== undefined) env[key] = value;
+			}
+			env.PYTHONPATH = stubs;
+			env.PYTHONIOENCODING = "utf-8";
+			env.RADARE2_BIN = configured;
+			env.OMP_R2_STUB_LOG = log;
+			const proc = Bun.spawn([pythonPath, path.join(dir, "probe.py")], { env, stdout: "pipe", stderr: "pipe" });
+			expect(await proc.exited).toBe(0);
+			const staged = JSON.parse(await Bun.file(result).text()) as {
+				shim?: string;
+				is_symlink?: boolean;
+				payload?: string;
+				error?: string;
+			};
+			expect(staged.error).toBeUndefined();
+			expect(staged.shim).toBe(path.join(projectDir, ".omp-r2-bin"));
+			expect(staged.is_symlink).toBe(false);
+			expect(staged.payload).toBe("radare2 shim fixture\n");
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
