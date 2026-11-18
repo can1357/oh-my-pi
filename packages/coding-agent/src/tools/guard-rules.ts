@@ -683,10 +683,12 @@ const TAR_ENTRY_OPTIONS: Record<string, string> = {
  * that directory, as tar does; each `-C` is relative to the one before it. A member's braces are
  * expanded before it is resolved, as the shell expands them before tar sees the member
  * (`{/etc/shadow,x}`, `{~/.ssh,~/.aws}`). Option values stay as written, and exclusions are left
- * out. A member after a directory the guard cannot resolve, or one longer than
- * {@link SHELL_MAX_DIRECTORY}, is left out unless it is absolute. An extraction, listing or
- * deletion (`x`, `t`, `--delete`) reads only the archive and the member lists: its members name
- * entries of the archive, not files.
+ * out. A member after a directory the guard cannot resolve (an unresolvable `-C`, or one longer
+ * than {@link SHELL_MAX_DIRECTORY}) is resolved against nothing there: an absolute one still
+ * counts, and so does a `.env` by its name, while a relative one is left out, as is a member it
+ * cannot resolve against a directory it knows. An extraction, listing or deletion (`x`, `t`,
+ * `--delete`) reads only the archive and the member lists: its members name entries of the
+ * archive, not files.
  */
 function tarReadWords(command: ShellCommand, home: string): string[] {
 	const argv = args(command);
@@ -744,10 +746,12 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 			const literalTilde = command.literalTildes.has(arg);
 			for (const expanded of shellBraces(command, arg)) {
 				const word = literalTilde ? `./${expanded}` : expanded;
+				// From a directory the guard cannot resolve, no relative member is resolved against it;
+				// an absolute one still counts, and so does a `.env`, by its name wherever it is.
 				const member: string | undefined =
 					dir !== undefined
 						? resolveShellWordPath(word, dir, home)
-						: path.isAbsolute(word) || ABSOLUTE_EXPANSION_RE.test(word)
+						: path.isAbsolute(word) || ABSOLUTE_EXPANSION_RE.test(word) || namesDotenv(path.basename(word))
 							? word
 							: undefined;
 				if (member !== undefined) members.push(member);
