@@ -5105,6 +5105,7 @@ mod tests {
 			'!' => key(18, true, false),
 			' ' => key(49, false, false),
 			'\r' | '\n' => key(36, false, false),
+			'\t' => key(48, false, false),
 			'€' => key(19, true, true),
 			'å' => key(0, false, true),
 			_ => None,
@@ -5716,12 +5717,7 @@ mod tests {
 		]);
 		let stroke = |code, shift| Keystroke { code, shift, option: false };
 		for remote in [RemoteScreen::KeyEvents, RemoteScreen::HidReports] {
-			let keys = keys_for(&window, "aB\n\t", Some(remote), || {
-				Ok(Some(|character| match character {
-					'\t' => Some(stroke(48, false)),
-					character => us_stroke(character),
-				}))
-			});
+			let keys = keys_for(&window, "aB\n\t", Some(remote), || Ok(Some(us_stroke)));
 			assert_eq!(keys.unwrap(), [
 				TypedKey::Layout(stroke(0, false), "a"),
 				TypedKey::Layout(stroke(11, true), "B"),
@@ -5960,11 +5956,7 @@ mod tests {
 		}
 		// Tab, newline and shifted characters have keys: Shift goes down
 		// around the shifted key only.
-		let with_tab = |character| match character {
-			'\t' => Some(Keystroke { code: 48, shift: false, option: false }),
-			character => us_stroke(character),
-		};
-		let keys = typed_keys(&screen_sharing(), "a\tB\n", with_tab).unwrap();
+		let keys = typed_keys(&screen_sharing(), "a\tB\n", us_stroke).unwrap();
 		assert_eq!(bare_transitions(&keys), [
 			(0, true),
 			(0, false),
