@@ -7,6 +7,8 @@ auth "openai-codex-device" {
 				grant_type "refresh_token"
 				refresh_token "{refresh_token}"
 				client_id "app_EMoamEEZ73f0CkXaXp7hrann"
+				// AuthAPI refresh diagnostics, as codex-rs sends them (openai/codex#53991).
+				refresh_reason "{refresh_reason}"
 			}
 		}
 		credential {
