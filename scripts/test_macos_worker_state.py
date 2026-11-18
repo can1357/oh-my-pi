@@ -62,6 +62,38 @@ class StateTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    def _prepare_with_linker(self, shim_version):
+        with tempfile.TemporaryDirectory() as temporary:
+            previous = Path.cwd()
+            try:
+                os.chdir(temporary)
+                python_inputs()
+                calls = []
+                def run(command, **kwargs):
+                    calls.append(command)
+                    if command[:2] == ["bash", "crates/py/scripts/fetch-python.sh"]:
+                        python_outputs()
+                    class Result:
+                        # The unversioned Homebrew link drifted to a newer major.
+                        stdout = ("Homebrew LLD 23.1.3\n" if command[0] == "/opt/homebrew/bin/ld64.lld"
+                                  else shim_version)
+                    return Result()
+                with patch.object(state.platform, "system", return_value="Darwin"), patch.object(state.platform, "machine", return_value="arm64"):
+                    state.prepare({"MACOS_WORKER": "true", "RUNNER_ENVIRONMENT": "github-hosted"}, run)
+                return calls
+            finally:
+                os.chdir(previous)
+
+    def test_linker_check_uses_the_build_shim_not_the_unversioned_link(self):
+        calls = self._prepare_with_linker("Homebrew LLD 22.1.8\n")
+        self.assertNotIn(["/opt/homebrew/bin/ld64.lld", "--version"], calls)
+        self.assertIn(["bash", "crates/py/scripts/ld64.lld", "--version"], calls)
+
+    def test_linker_check_refuses_a_shim_that_is_not_llvm22(self):
+        with self.assertRaisesRegex(state.VerificationError, "LLVM22"):
+            self._prepare_with_linker("Homebrew LLD 23.1.3\n")
+
+
     def test_hosted_cache_reuses_complete_matching_state_and_rebuilds_invalid_restores(self):
         with tempfile.TemporaryDirectory() as temporary:
             previous = Path.cwd()
