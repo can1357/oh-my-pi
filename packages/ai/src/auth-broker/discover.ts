@@ -53,8 +53,14 @@ export interface DiscoverAuthStorageOptions {
 	accountPolicies?: AuthAccountPolicies;
 	authStorageOptions?: Omit<AuthStorageOptions, "accountPolicies" | "configValueResolver" | "sourceLabel">;
 	/**
+	 * Without a usable snapshot cache, retry a broker that is restarting or
+	 * briefly unreachable for up to 30 s (default `true`). A host with a user
+	 * waiting on it passes `false` to fail at once.
+	 */
+	retryUnreachableBroker?: boolean;
+	/**
 	 * Called after each failed attempt at the initial snapshot that startup will
-	 * retry, so an interactive CLI can tell its user it is waiting on the broker.
+	 * retry, so a CLI can tell its user it is waiting on the broker.
 	 */
 	onBrokerRetry?: (retry: AuthBrokerStartupRetry) => void;
 }
@@ -619,7 +625,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		cachePath: options.cachePath,
 		sourceLabel: options.sourceLabel,
 		accountPool: options.accountPool,
-		retryUnreachableBroker: true,
+		retryUnreachableBroker: options.retryUnreachableBroker ?? true,
 		onBrokerRetry: options.onBrokerRetry,
 	});
 	const storage = new AuthStorage(store, {

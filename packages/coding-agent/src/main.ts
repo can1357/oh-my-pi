@@ -94,7 +94,6 @@ import { invokeSkillCommandFromText, isKnownSkillCommand } from "./modes/skill-c
 import {
 	applyStartupComposerPreferences,
 	type ComposerLease,
-	hasPendingStartupComposer,
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
 } from "./modes/startup-composer";
@@ -112,11 +111,7 @@ import {
 	SessionModelRestoreError,
 } from "./sdk";
 import type { AgentSession } from "./session/agent-session";
-import {
-	authBrokerWaitNotice,
-	createAuthStorageSettingsSync,
-	describeAuthBrokerStartupError,
-} from "./session/auth-broker-config";
+import { createAuthStorageSettingsSync, describeAuthBrokerStartupError } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
 import {
@@ -1980,17 +1975,8 @@ export async function runRootCommand(
 			? Promise.resolve(deps.settings)
 			: logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config });
 		settingsPromise.catch(() => {});
-		// Say when startup waits on an unreachable auth broker, unless the prepaint
-		// composer owns the terminal (interactive launches with `--model`, `--resume`
-		// and other flags start none, so they get the line too).
-		const brokerWaitNotice = authBrokerWaitNotice();
 		const authStoragePromise = logger.time("discoverAuthStorage", async () =>
-			(deps.discoverAuthStorage ?? discoverAuthStorage)(undefined, {
-				settings: await settingsPromise,
-				onBrokerRetry: retry => {
-					if (!hasPendingStartupComposer()) brokerWaitNotice(retry);
-				},
-			}),
+			(deps.discoverAuthStorage ?? discoverAuthStorage)(undefined, { settings: await settingsPromise }),
 		);
 		authStoragePromise.catch(() => {});
 		let authStorage: AuthStorage;

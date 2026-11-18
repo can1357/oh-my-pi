@@ -252,18 +252,18 @@ export function createAuthStorageSettingsSync(
  * pi-ai so the CLI, subagents, and the catalog generator all see the same
  * credentials.
  *
- * Default `agentDir` is the current configured agent directory. Outside the
- * interactive host, a startup that waits on an unreachable broker says so once
- * on stderr. In the interactive host the TUI may own the terminal, so only the
- * caller can tell whether a line is safe: `main.ts` passes its own hook for
- * startup discovery.
+ * Default `agentDir` is the current configured agent directory. Interactive omp
+ * fails at once when the broker is unreachable rather than hold the user for the
+ * startup retry window; every other host retries and says so once on stderr.
  */
 export function discoverAuthStorage(
 	agentDir: string = getAgentDir(),
 	options?: Omit<DiscoverAuthStorageOptions, "agentDir" | "configValueResolver">,
 ): Promise<AuthStorage> {
+	const interactive = isInteractiveHost();
 	return discoverAuthStorageShared({
-		onBrokerRetry: isInteractiveHost() ? undefined : authBrokerWaitNotice(),
+		retryUnreachableBroker: !interactive,
+		onBrokerRetry: interactive ? undefined : authBrokerWaitNotice(),
 		...options,
 		agentDir,
 		configValueResolver: resolveConfigValue,
@@ -271,7 +271,7 @@ export function discoverAuthStorage(
 }
 
 /** Print the first retry of one startup to stderr; the retry is otherwise only in the log file. */
-export function authBrokerWaitNotice(): (retry: AuthBrokerStartupRetry) => void {
+function authBrokerWaitNotice(): (retry: AuthBrokerStartupRetry) => void {
 	let shown = false;
 	return ({ url, error, budgetMs }) => {
 		if (shown) return;

@@ -15,10 +15,11 @@ import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
-import { describeAuthBrokerStartupError } from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
-import { beginStartupComposer, stopPendingStartupComposer } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
-import { setInteractiveHost } from "@oh-my-pi/pi-utils";
-import { VirtualTerminal } from "../../tui/test/virtual-terminal";
+import {
+	describeAuthBrokerStartupError,
+	discoverAuthStorage,
+} from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
+import { setInteractiveHost, TempDir } from "@oh-my-pi/pi-utils";
 
 class ProcessExitSignal extends Error {
 	constructor(readonly code: number) {
@@ -112,47 +113,48 @@ describe("runRootCommand — unreachable auth broker at startup", () => {
 		expect(stderr).toContain("Auth broker request failed after 2 attempt(s)");
 		expect(stderr).toContain("omp auth-broker serve");
 	}, 15_000);
+});
 
+describe("discoverAuthStorage with a broker that is down", () => {
+	// A restarting broker answers 503; a later answer the retry cannot fix (401) ends startup.
 	it.each([
-		{ composer: false, notice: true },
-		{ composer: true, notice: false },
+		{ interactive: true, requests: 1, notice: false },
+		{ interactive: false, requests: 2, notice: true },
 	])(
-		"prints the broker wait line unless a startup composer owns the terminal (composer: $composer)",
-		async ({ composer, notice }) => {
-			const previous = setInteractiveHost(false);
-			const parsed = parseArgs([]);
-			parsed.noExtensions = true;
-			const originalIsTTY = process.stdin.isTTY;
-			Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
-			if (composer) beginStartupComposer({ terminal: new VirtualTerminal(80, 24), cache: false });
-
+		"retries only outside interactive omp (interactive: $interactive)",
+		async ({ interactive, requests, notice }) => {
+			let served = 0;
+			using server = Bun.serve({
+				port: 0,
+				fetch: () => new Response("unavailable", { status: ++served === 1 ? 503 : 401 }),
+			});
+			using agentDir = TempDir.createSync("@omp-broker-down-");
+			const env = {
+				OMP_AUTH_BROKER_URL: process.env.OMP_AUTH_BROKER_URL,
+				OMP_AUTH_BROKER_TOKEN: process.env.OMP_AUTH_BROKER_TOKEN,
+				OMP_AUTH_BROKER_SNAPSHOT_TTL_MS: process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS,
+			};
+			process.env.OMP_AUTH_BROKER_URL = server.url.toString();
+			process.env.OMP_AUTH_BROKER_TOKEN = "test-token";
+			process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "0";
+			const previous = setInteractiveHost(interactive);
 			let stderr = "";
-			vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
-				throw new ProcessExitSignal(code ?? 0);
-			}) as typeof process.exit);
 			vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
 				stderr += String(chunk);
 				return true;
 			});
-
 			try {
-				await runRootCommand(parsed, [], {
-					discoverAuthStorage: async (_agentDir, options) => {
-						const error = new AuthBrokerError("Auth broker request failed after 2 attempt(s)");
-						options?.onBrokerRetry?.({ url: "http://127.0.0.1:1", error, delayMs: 500, budgetMs: 30_000 });
-						throw error;
-					},
-				});
-			} catch {
-				// The broker error exits 1 through the mocked process.exit.
+				await expect(discoverAuthStorage(agentDir.path())).rejects.toBeInstanceOf(AuthBrokerError);
 			} finally {
 				vi.restoreAllMocks();
-				stopPendingStartupComposer();
-				Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 				setInteractiveHost(previous);
+				for (const [key, value] of Object.entries(env)) {
+					if (value === undefined) delete process.env[key];
+					else process.env[key] = value;
+				}
 			}
-
-			expect(stderr.includes("Waiting for auth broker at http://127.0.0.1:1")).toBe(notice);
+			expect(served).toBe(requests);
+			expect(stderr.includes("Waiting for auth broker")).toBe(notice);
 		},
 		15_000,
 	);
