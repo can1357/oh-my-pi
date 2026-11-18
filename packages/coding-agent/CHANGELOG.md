@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed the shell's `rm -r` failing with `Permission denied` on a Windows junction or directory symlink inside the tree; it is now removed without following it ([#19572](https://github.com/can1357/oh-my-pi/pull/19572) by [@zhivko-kocev](https://github.com/zhivko-kocev))
+- Fixed the shell's built-in `cat`, `grep`, `comm` and `diff` on Windows failing on process substitution (`cat <(echo x)` reported `/dev/fd/63: No such file or directory`) ([#19574](https://github.com/can1357/oh-my-pi/pull/19574) by [@zhivko-kocev](https://github.com/zhivko-kocev))
 
 ## [18.22.1] - 2026-11-17
 

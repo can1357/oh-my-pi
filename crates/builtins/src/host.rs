@@ -476,6 +476,11 @@ impl Drop for CancelOnDrop {
 /// terminal gets `ENXIO` for `/dev/tty`; a path cannot carry that errno.)
 #[cfg(unix)]
 const UNAVAILABLE_DESCRIPTOR: &str = "/dev/fd/-1";
+/// On Windows `/dev/fd/-1` is an ordinary file on the current drive, so the
+/// sentinel is a device name that nothing defines: opening, creating or
+/// statting it fails with `ERROR_FILE_NOT_FOUND`.
+#[cfg(not(unix))]
+const UNAVAILABLE_DESCRIPTOR: &str = r"\\.\omp-closed-descriptor";
 
 /// How a builtin running inside the host process sees paths.
 ///
@@ -560,18 +565,9 @@ impl ShellPaths {
 	/// A descriptor path becomes `/dev/fd/<host fd>` for the shell's
 	/// descriptor, or a path that cannot be opened when the shell has none.
 	pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
-		// Windows has no `/dev/fd`: an engine-backed descriptor named as the
-		// shell spells it (`diff <(a) <(b)`) resolves to its mount, before the
-		// spelling becomes a native path.
-		#[cfg(not(unix))]
-		if let Some(DescriptorPath::Fd(fd)) = DescriptorPath::parse(path.as_ref())
-			&& self.file(fd).and_then(OpenFile::as_vfs).is_some()
-		{
-			return virtual_descriptor_path(fd);
-		}
 		let resolved = self.absolute(path.as_ref());
-		#[cfg(unix)]
-		if let Some(descriptor) = DescriptorPath::parse(&resolved) {
+		let spelled = Self::descriptor_spelling(path.as_ref(), &resolved);
+		if let Some(descriptor) = DescriptorPath::parse(spelled) {
 			return self.descriptor_target(descriptor);
 		}
 		resolved
@@ -586,15 +582,22 @@ impl ShellPaths {
 	/// spelled. `/dev/fd/N` names the descriptor itself and still resolves.
 	pub fn resolve_link(&self, path: impl AsRef<Path>) -> PathBuf {
 		let resolved = self.absolute(path.as_ref());
-		#[cfg(unix)]
-		if let Some(descriptor) = DescriptorPath::parse(&resolved)
+		let spelled = Self::descriptor_spelling(path.as_ref(), &resolved);
+		if let Some(descriptor) = DescriptorPath::parse(spelled)
 			&& descriptor != DescriptorPath::Terminal
 			// `/dev/stdin` and friends sit directly under `/dev`.
-			&& resolved.components().count() != 3
+			&& spelled.components().count() != 3
 		{
 			return self.descriptor_target(descriptor);
 		}
 		resolved
+	}
+
+	/// The path to match against the descriptor spellings. On Windows
+	/// `/dev/fd/N` has no drive, so `resolved` is that path on the working
+	/// directory's drive (`C:/dev/fd/N`); the path as written is matched.
+	fn descriptor_spelling<'a>(path: &'a Path, resolved: &'a Path) -> &'a Path {
+		if cfg!(windows) { path } else { resolved }
 	}
 
 	fn absolute(&self, path: &Path) -> PathBuf {
@@ -605,10 +608,7 @@ impl ShellPaths {
 		absolute_path(&self.cwd, normalized_path.as_ref())
 	}
 
-	#[cfg(unix)]
 	fn descriptor_target(&self, descriptor: DescriptorPath) -> PathBuf {
-		use std::os::fd::AsRawFd as _;
-
 		let fd = match descriptor {
 			DescriptorPath::Fd(fd) => fd,
 			// A command whose stdin is not a terminal runs with no controlling
@@ -625,10 +625,11 @@ impl ShellPaths {
 		if self.file(fd).and_then(OpenFile::as_vfs).is_some() {
 			return virtual_descriptor_path(fd);
 		}
-		match self.file(fd).and_then(|file| file.try_borrow_as_fd().ok()) {
-			Some(host_fd) => PathBuf::from(format!("/dev/fd/{}", host_fd.as_raw_fd())),
-			None => PathBuf::from(UNAVAILABLE_DESCRIPTOR),
+		#[cfg(unix)]
+		if let Some(host_fd) = self.file(fd).and_then(OpenFile::raw_fd) {
+			return PathBuf::from(format!("/dev/fd/{host_fd}"));
 		}
+		PathBuf::from(UNAVAILABLE_DESCRIPTOR)
 	}
 
 	/// The shell's open descriptor `fd`; `None` when it is closed.

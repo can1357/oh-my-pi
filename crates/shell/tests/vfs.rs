@@ -1099,3 +1099,60 @@ async fn direnv_exec_commands_open_provider_urls() {
 	assert_eq!(run.status, Some(0), "{}", run.stderr);
 	assert_eq!(run.stdout, "alpha\nhello\n");
 }
+
+/// Serves one file wherever a path spells `/dev/fd/-1` and leaves every other
+/// path to the host: a stand-in for a file at `\dev\fd\-1` on the current
+/// drive, which a test must not create.
+#[cfg(windows)]
+#[derive(Debug)]
+struct DevFdMinusOneFilesystem {
+	file: PathBuf,
+}
+
+#[cfg(windows)]
+impl DevFdMinusOneFilesystem {
+	fn served(&self, path: &Path) -> io::Result<&Path> {
+		let spelled = path.to_string_lossy().replace('\\', "/");
+		if spelled.ends_with("/dev/fd/-1") {
+			Ok(&self.file)
+		} else {
+			Err(io::Error::from(io::ErrorKind::NotFound))
+		}
+	}
+}
+
+#[cfg(windows)]
+#[async_trait]
+impl FileSystem for DevFdMinusOneFilesystem {
+	fn is_native_local(&self, path: &Path) -> bool {
+		self.served(path).is_err()
+	}
+
+	async fn open(&self, path: &Path, options: &OpenOptions) -> io::Result<File> {
+		Fs::native().open_with(self.served(path)?, options).await
+	}
+
+	async fn metadata(&self, path: &Path) -> io::Result<Metadata> {
+		Fs::native().metadata(self.served(path)?).await
+	}
+
+	async fn read_dir(&self, _path: &Path) -> io::Result<ReadDir> {
+		Err(io::Error::from(io::ErrorKind::NotADirectory))
+	}
+}
+
+/// A descriptor the shell does not have fails like a missing file on Windows
+/// too. Its placeholder path used to be `/dev/fd/-1`, an ordinary path on the
+/// current drive, so `cat /dev/fd/9` read whatever file was there.
+#[cfg(windows)]
+#[tokio::test]
+async fn closed_descriptors_never_open_a_drive_file() {
+	let directory = tempfile::tempdir().expect("isolated host directory");
+	let trap = directory.path().join("trap");
+	fs::write(&trap, b"trap\n").expect("file behind /dev/fd/-1");
+	let filesystem = Fs::new(Arc::new(DevFdMinusOneFilesystem { file: trap }));
+	let run = run_script(filesystem, Some(directory.path()), "cat /dev/fd/9").await;
+	assert_eq!(run.status, Some(1), "stdout: {:?}, stderr: {:?}", run.stdout, run.stderr);
+	assert_eq!(run.stdout, "");
+	assert!(run.stderr.contains("/dev/fd/9"), "{}", run.stderr);
+}
