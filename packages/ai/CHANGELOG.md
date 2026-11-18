@@ -10,6 +10,7 @@
 - Added a `definitive` option to `OAuthError`; `isDefinitiveOAuthFailure` now takes the error object and disables a credential marked definitive without matching its message ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix))
 - `buildAnthropicSearchHeaders` takes `extraBetas`, request-specific betas sent beside the web search beta ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `omitDemotedReasoning` to `StreamOptions`: an Anthropic request leaves out other models' reasoning that it would otherwise replay as text, and a refused request reports how many such blocks it carried in `demotedReasoningBlocks` ([#10407](https://github.com/can1357/oh-my-pi/issues/10407)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+- Added Antigravity CLI tool relay so a tool call that outlives its MCP window returns a notice with a `call_id`, and `omp_await_result` returns the original result in the same turn without running the tool again; results that land after the turn are delivered in the next step. Relay is opt-in: `OMP_ACP_TOOL_RELAY_MS` enables it only when set to a positive window, clamped to 5000–165000. ([#19435](https://github.com/can1357/oh-my-pi/pull/19435) by [@SenCha930511](https://github.com/SenCha930511))
 
 ### Fixed
 

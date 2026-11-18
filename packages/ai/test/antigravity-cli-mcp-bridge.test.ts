@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { connect, type Socket } from "node:net";
 import { McpBridge, type McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
+import { RELAY_CONTROL_TOOL } from "@oh-my-pi/pi-ai/providers/antigravity-cli/relay";
 
 interface Reply {
 	id: number;
@@ -176,5 +177,25 @@ describe("McpBridge", () => {
 		await peer.closed;
 		result.resolve({ content: [{ type: "text", text: "late" }] });
 		bridge.close();
+	});
+
+	it("lists and dispatches the relay control tool beside the omp tools", async () => {
+		const calls: { name: string; args: Record<string, unknown> }[] = [];
+		const bridge = new McpBridge([...tools, RELAY_CONTROL_TOOL], async (name, args) => {
+			calls.push({ name, args });
+			return { content: [{ type: "text", text: "stored result" }] };
+		});
+		cleanups.push(() => bridge.close());
+		const peer = await client(bridge.port);
+		expect((await peer.request("tools/list")).result).toEqual({ tools: [...tools, RELAY_CONTROL_TOOL] });
+		const call = await peer.request("tools/call", {
+			name: RELAY_CONTROL_TOOL.name,
+			arguments: { call_id: "call-1" },
+		});
+		expect(call.result).toEqual({ content: [{ type: "text", text: "stored result" }] });
+		expect((await peer.request("tools/call", { name: RELAY_CONTROL_TOOL.name, arguments: {} })).error?.code).toBe(
+			-32602,
+		);
+		expect(calls).toEqual([{ name: RELAY_CONTROL_TOOL.name, args: { call_id: "call-1" } }]);
 	});
 });

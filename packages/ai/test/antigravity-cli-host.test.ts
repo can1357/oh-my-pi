@@ -13,9 +13,11 @@ import {
 	type AgyScheduler,
 	type AgyStepOptions,
 	type AgyTransport,
+	type AgyTimer,
 	type AgyTransportOptions,
 } from "@oh-my-pi/pi-ai/providers/antigravity-cli/host";
 import type { McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
+import { type RelayClock, RELAY_CONTROL_NAME, ToolRelay } from "@oh-my-pi/pi-ai/providers/antigravity-cli/relay";
 import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-writer";
 import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -53,17 +55,17 @@ class Queue<T> {
 	}
 }
 
-class Clock {
+class Clock implements RelayClock {
 	readonly timers = new Map<object, { ms: number; callback(): void }>();
-	readonly schedule: AgyScheduler = (ms, callback) => {
+	setTimeout(callback: () => void, ms: number): AgyTimer {
 		const token = {};
 		this.timers.set(token, { ms, callback });
-		return {
-			cancel: () => {
-				this.timers.delete(token);
-			},
-		};
-	};
+		return { cancel: () => this.timers.delete(token) };
+	}
+	clearTimeout(timer: unknown): void {
+		(timer as AgyTimer).cancel();
+	}
+	readonly schedule: AgyScheduler = (ms, callback) => this.setTimeout(callback, ms);
 	fire(ms: number): void {
 		// Callbacks may schedule new timers; only fire the current matching batch.
 		const ready = [...this.timers].filter(([, timer]) => timer.ms === ms);
@@ -189,11 +191,25 @@ afterEach(async () => {
 	for (const dispose of cleanup.splice(0).reverse()) await dispose();
 });
 
-async function fixture(options: AgyHostOptions = {}) {
+/**
+ * `relayMs` is 0 for a disabled relay, otherwise the relay threshold under test;
+ * omitting it leaves the host on its own `OMP_ACP_TOOL_RELAY_MS` default.
+ */
+type FixtureOptions = AgyHostOptions & { relayMs?: number };
+
+async function fixture(options: FixtureOptions = {}) {
+	const { relayMs, ...hostOptions } = options;
 	const dir = await mkdtemp(path.join(tmpdir(), "agy-host-test-"));
 	const started = new Queue<FakeAgy>();
 	const clock = new Clock();
 	const instances: FakeAgy[] = [];
+	const relay =
+		relayMs === undefined
+			? undefined
+			: new ToolRelay(
+					relayMs === 0 ? { enabled: false, thresholdMs: 0 } : { enabled: true, thresholdMs: relayMs },
+					clock,
+				);
 	const host = new AgyHost(dir, {
 		startupTimeoutMs: 500,
 		cancelTimeoutMs: 60,
@@ -205,13 +221,14 @@ async function fixture(options: AgyHostOptions = {}) {
 			started.push(fake);
 			return fake;
 		},
-		...options,
+		...hostOptions,
+		...(relay ? { relay } : {}),
 	});
 	cleanup.push(async () => {
 		await host.dispose();
 		await rm(dir, { recursive: true, force: true });
 	});
-	return { host, started, instances, dir, clock };
+	return { host, started, instances, dir, clock, relay };
 }
 
 function step(
@@ -241,7 +258,7 @@ function result(message: AssistantMessage, text = "actual file body"): ToolResul
 	};
 }
 
-async function parked(options: AgyHostOptions = {}) {
+async function parked(options: FixtureOptions = {}) {
 	const state = await fixture(options);
 	const messages = [user("read a.txt")];
 	const first = step(state.host, messages);
@@ -255,6 +272,10 @@ async function parked(options: AgyHostOptions = {}) {
 
 function textOf(blocks: ContentBlock[]): string {
 	return blocks.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+}
+
+function outputText(output: McpToolOutput): string {
+	return output.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
 }
 
 describe("AgyHost stateful steps", () => {
@@ -353,7 +374,7 @@ describe("AgyHost stateful steps", () => {
 	});
 
 	it("waits for confirmed cancellation before releasing a deadline-held MCP call or sending its late result", async () => {
-		const state = await parked({ holdLimitMs: 20, cancelTimeoutMs: 300 });
+		const state = await parked({ holdLimitMs: 20, cancelTimeoutMs: 300, relayMs: 0 });
 		state.fake.cancelMode = "hold";
 		let released = false;
 		void state.output.then(() => {
@@ -375,7 +396,7 @@ describe("AgyHost stateful steps", () => {
 	});
 
 	it("kills a turn when cancellation is not acknowledged, then reseeds instead of resuming it", async () => {
-		const state = await parked({ holdLimitMs: 10, cancelTimeoutMs: 15 });
+		const state = await parked({ holdLimitMs: 10, cancelTimeoutMs: 15, relayMs: 0 });
 		state.fake.cancelMode = "hold";
 		state.clock.fire(10);
 		await state.fake.cancellations.next();
@@ -393,7 +414,7 @@ describe("AgyHost stateful steps", () => {
 	});
 
 	it("does not treat an end_turn response as successful cancellation", async () => {
-		const state = await parked({ holdLimitMs: 10, cancelTimeoutMs: 100 });
+		const state = await parked({ holdLimitMs: 10, cancelTimeoutMs: 100, relayMs: 0 });
 		state.fake.cancelMode = "hold";
 		state.clock.fire(10);
 		await state.fake.cancellations.next();
@@ -726,7 +747,7 @@ describe("AgyHost stateful steps", () => {
 	});
 
 	it("close clears pending calls and deadline timers without a later cancel", async () => {
-		const state = await parked({ holdLimitMs: 10 });
+		const state = await parked({ holdLimitMs: 10, relayMs: 0 });
 		state.host.close();
 		expect((await state.output).isError).toBe(true);
 		state.clock.fire(10);
@@ -826,5 +847,237 @@ describe("AgyHost stateful steps", () => {
 		fake.text("Done.");
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await first.done;
+	});
+	it("relays a tool call past the threshold and finishes the same turn through omp_await_result", async () => {
+		const state = await fixture({ relayMs: 20 });
+		const messages = [user("read a.txt")];
+		const first = step(state.host, messages);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Reading now.");
+		const output = fake.call();
+		await first.done;
+		expect(fake.options.tools).toHaveLength(1);
+		expect(fake.options.controlTools?.map(tool => tool.name)).toEqual([RELAY_CONTROL_NAME]);
+		state.clock.fire(20);
+		const notice = await output;
+		expect(notice.isError).toBe(false);
+		const callId = /"call_id":"([^"]+)"/.exec(outputText(notice))?.[1];
+		if (!callId) throw new Error("Relay notice lost its call id");
+		const call = first.writer.output.content.find(block => block.type === "toolCall");
+		if (call?.type !== "toolCall") throw new Error("Expected a tool call");
+		expect(callId).toBe(call.id);
+		const awaiting = fake.call(RELAY_CONTROL_NAME, { call_id: callId });
+		const second = step(state.host, [...messages, first.writer.output, result(first.writer.output, "relayed body")]);
+		expect(outputText(await awaiting)).toBe("relayed body");
+		expect(outputText(await fake.call(RELAY_CONTROL_NAME, { call_id: callId }))).toBe("relayed body");
+		fake.text("The file says: relayed body");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		expect(second.writer.output.content).toEqual([{ type: "text", text: "The file says: relayed body" }]);
+		expect(fake.promptHistory).toHaveLength(1);
+		expect(second.writer.output.content.some(block => block.type === "toolCall")).toBe(false);
+		expect(first.writer.output.content.filter(block => block.type === "toolCall")).toHaveLength(1);
+	});
+
+	it("delivers a relay result that lands after the turn ended as a late prompt", async () => {
+		const state = await fixture({ relayMs: 20 });
+		const messages = [user("read a.txt")];
+		const first = step(state.host, messages);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Reading now.");
+		const output = fake.call();
+		await first.done;
+		state.clock.fire(20);
+		expect((await output).isError).toBe(false);
+		const before = JSON.stringify(first.writer.output);
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await prompt.response.promise;
+		await Promise.resolve();
+		expect(state.host.hasPendingTurn).toBe(true);
+		const second = step(state.host, [...messages, first.writer.output, result(first.writer.output, "late body")]);
+		const late = await fake.prompts.next();
+		expect(textOf(late.request.prompt)).toContain("late body");
+		expect(JSON.stringify(first.writer.output)).toBe(before);
+		fake.text("Late result received.");
+		late.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		expect(second.writer.output.content).toEqual([{ type: "text", text: "Late result received." }]);
+		expect(fake.promptHistory).toHaveLength(2);
+	});
+
+	it("steers a live turn that never called the control tool with the relayed result", async () => {
+		const state = await parked({ relayMs: 20 });
+		state.clock.fire(20);
+		expect((await state.output).isError).toBe(false);
+		state.fake.text("Still waiting on the read.");
+		const next = step(state.host, [...state.messages, result(state.first.writer.output, "steered body")]);
+		const steer = await state.fake.prompts.next();
+		expect(textOf(steer.request.prompt)).toContain("steered body");
+		state.fake.text("Now I have it.");
+		steer.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Now I have it." }]);
+	});
+
+	it("keeps a relayed call awaitable across a process restart", async () => {
+		const state = await parked({ relayMs: 20 });
+		state.clock.fire(20);
+		const notice = await state.output;
+		const callId = /"call_id":"([^"]+)"/.exec(outputText(notice))?.[1];
+		if (!callId) throw new Error("Relay notice lost its call id");
+		const conversationId = state.host.conversationId;
+		if (!conversationId) throw new Error("Relayed turn lost its conversation");
+		const next = step(state.host, [...state.messages, result(state.first.writer.output, "restart body")], {
+			tools: [...tools, { name: "write", description: "Write", parameters: type({ text: "string" }) }],
+		});
+		const restarted = await state.started.next();
+		expect(state.fake.closed).toBe(true);
+		const late = await restarted.prompts.next();
+		expect(restarted.loads).toEqual([conversationId]);
+		expect(textOf(late.request.prompt)).toContain("restart body");
+		expect(outputText(await restarted.call(RELAY_CONTROL_NAME, { call_id: callId }))).toBe("restart body");
+		restarted.text("Restart result received.");
+		late.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Restart result received." }]);
+	});
+
+	it("detaches a control call that was waiting when its transport restarted", async () => {
+		const state = await parked({ relayMs: 20 });
+		state.clock.fire(20);
+		const notice = await state.output;
+		const callId = /"call_id":"([^"]+)"/.exec(outputText(notice))?.[1];
+		if (!callId) throw new Error("Relay notice lost its call id");
+		const { relay } = state;
+		if (!relay) throw new Error("Relay fixture is missing");
+		const waiting = state.fake.call(RELAY_CONTROL_NAME, { call_id: callId });
+		expect(relay.awaiting(callId)).toBe(true);
+		const next = step(state.host, [...state.messages, result(state.first.writer.output, "restart body")], {
+			tools: [...tools, { name: "write", description: "Write", parameters: type({ text: "string" }) }],
+		});
+		const restarted = await state.started.next();
+		// The old socket died with its process, so the result must not be handed to its waiter.
+		expect(relay.awaiting(callId)).toBe(false);
+		expect(outputText(await waiting)).toContain("transport stopped");
+		const late = await restarted.prompts.next();
+		expect(textOf(late.request.prompt)).toContain("restart body");
+		expect(outputText(await restarted.call(RELAY_CONTROL_NAME, { call_id: callId }))).toBe("restart body");
+		restarted.text("Restart result received.");
+		late.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Restart result received." }]);
+	});
+
+	it("keeps a steered result when the relay threshold expires during the steering handshake", async () => {
+		const state = await parked({ relayMs: 20 });
+		state.fake.autoSteer = false;
+		let released = false;
+		void state.output.then(() => {
+			released = true;
+		});
+		const next = step(state.host, [
+			...state.messages,
+			result(state.first.writer.output, "steered relay body"),
+			user("also check b.txt"),
+		]);
+		const steer = await state.fake.prompts.next();
+		expect(textOf(steer.request.prompt)).toBe("also check b.txt");
+		expect(released).toBe(false);
+		state.clock.fire(20);
+		expect(released).toBe(false);
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		expect(outputText(await state.output)).toBe("steered relay body");
+		state.fake.text("Steered with the real result.");
+		steer.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Steered with the real result." }]);
+		expect(state.fake.closed).toBe(false);
+		expect(state.fake.promptHistory).toHaveLength(2);
+	});
+
+	it("rejects a user tool named like the relay control tool without stopping the live process", async () => {
+		const state = await parked({ relayMs: 20 });
+		const colliding: Tool = {
+			name: RELAY_CONTROL_NAME,
+			description: "A user tool that happens to share the control name",
+			parameters: type({ text: "string" }),
+		};
+		const blocked = step(state.host, [...state.messages, result(state.first.writer.output)], {
+			tools: [...tools, colliding],
+		});
+		await expect(blocked.done).rejects.toThrow(
+			/tool name "omp_await_result" collides with the tool relay control tool.*unset OMP_ACP_TOOL_RELAY_MS/,
+		);
+		expect(state.fake.closed).toBe(false);
+		expect(state.instances).toHaveLength(1);
+		const next = step(state.host, [...state.messages, result(state.first.writer.output, "actual file body")]);
+		expect(await state.output).toEqual({ content: [{ type: "text", text: "actual file body" }], isError: false });
+		state.fake.text("Recovered without a restart.");
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Recovered without a restart." }]);
+	});
+
+	it("answers a repeated identical call with its relay notice instead of running it twice", async () => {
+		const state = await parked({ relayMs: 20 });
+		state.clock.fire(20);
+		const notice = await state.output;
+		const callId = /"call_id":"([^"]+)"/.exec(outputText(notice))?.[1];
+		if (!callId) throw new Error("Relay notice lost its call id");
+		const repeat = await state.fake.call("read", { path: "a.txt" });
+		expect(outputText(repeat)).toContain(`"call_id":"${callId}"`);
+		expect(state.first.writer.output.content.filter(block => block.type === "toolCall")).toHaveLength(1);
+	});
+
+	it("rejects a control call from another conversation instead of returning the relay result", async () => {
+		const state = await parked({ relayMs: 20 });
+		state.clock.fire(20);
+		const notice = await state.output;
+		const callId = /"call_id":"([^"]+)"/.exec(outputText(notice))?.[1];
+		if (!callId) throw new Error("Relay notice lost its call id");
+		const next = step(state.host, [...state.messages, result(state.first.writer.output, "relay body")]);
+		await state.fake.prompts.next();
+		const foreign = await state.fake.call(RELAY_CONTROL_NAME, { call_id: callId }, crypto.randomUUID());
+		expect(foreign.isError).toBe(true);
+		expect(outputText(foreign)).not.toContain("relay body");
+		expect(outputText(foreign)).not.toContain(callId);
+		await expect(next.done).rejects.toThrow("outside the active step");
+		expect(state.fake.closed).toBe(true);
+	});
+
+	it("rejects a duplicate call from another conversation instead of repeating the relay notice", async () => {
+		const state = await parked({ relayMs: 20 });
+		state.clock.fire(20);
+		const notice = await state.output;
+		const callId = /"call_id":"([^"]+)"/.exec(outputText(notice))?.[1];
+		if (!callId) throw new Error("Relay notice lost its call id");
+		state.fake.options.onUpdate({
+			sessionId: state.fake.currentId,
+			update: {
+				sessionUpdate: "tool_call",
+				toolCallId: crypto.randomUUID(),
+				title: "mcp_ide-tools_read",
+				status: "in_progress",
+			},
+		});
+		const foreign = await state.fake.options.onCall("read", { path: "a.txt" }, crypto.randomUUID());
+		expect(foreign.isError).toBe(true);
+		expect(outputText(foreign)).not.toContain(callId);
+		expect(state.fake.closed).toBe(true);
+		expect(state.first.writer.output.content.filter(block => block.type === "toolCall")).toHaveLength(1);
+	});
+
+	it("keeps the plain MCP window and hides the control tool when relay is disabled", async () => {
+		const state = await parked({ relayMs: 0 });
+		expect(state.fake.options.controlTools).toEqual([]);
+		expect(state.clock.timers.size).toBe(1);
+		const next = step(state.host, [...state.messages, result(state.first.writer.output)]);
+		expect(await state.output).toEqual({ content: [{ type: "text", text: "actual file body" }], isError: false });
+		state.fake.text("Plain result received.");
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Plain result received." }]);
 	});
 });
