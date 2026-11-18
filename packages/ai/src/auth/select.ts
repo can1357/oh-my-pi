@@ -55,8 +55,8 @@ export const OAUTH_REFRESH_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
 function isCancelledRefresh(error: unknown, signal?: AbortSignal): boolean {
 	return (
 		signal?.aborted === true ||
-		AIError.is(AIError.classify(error), AIError.Flag.Abort) ||
-		(error instanceof Error && error.name === "AbortError")
+		(error instanceof Error && error.name === "AbortError") ||
+		AIError.is(AIError.classify(error), AIError.Flag.Abort)
 	);
 }
 
