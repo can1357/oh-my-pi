@@ -5,11 +5,13 @@
 ### Added
 
 - `spillUrl`, `parseSpillUrl` and `spillUrlIds` format and parse a session spill's `local://N.log` URL
+- `postmortem.exitCleanlyOnStopSignals()` makes a long-running service exit 0 after its cleanup pass on SIGINT/SIGTERM instead of 130/143
 
 ### Fixed
 
 - Windows shell discovery skips the WSL `bash.exe` launcher, so services no longer run in WSL
 - Opening an archive no longer fails because one unrelated member exceeds the 64 MiB extraction limit; the limit applies when that member is read
+- `OMP_LOG_LEVEL` now also limits what console-logging services such as `omp auth-broker serve` print to stdout; it applied only to the log file, so an `info` setting still let every debug line into the service's journal ([#19605](https://github.com/can1357/oh-my-pi/pull/19605) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 

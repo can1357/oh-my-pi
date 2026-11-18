@@ -263,7 +263,10 @@ impl MacInput {
 		// remote screen cannot receive refuses cleanly.
 		let keys = keys_for(window, text, remote, || cached_layout_strokes(KeyLayer::Typing))?;
 		let gap = key_gap(remote);
-		match mode {
+		// A remote screen's pixels hold no popup to read, so its keys are not
+		// watched.
+		let types_ahead = remote.is_none() && ax::type_ahead::text_types_ahead(text);
+		ax::type_ahead::marking(|pending| match mode {
 			DeliveryMode::Background => {
 				if remote == Some(RemoteScreen::KeyEvents) {
 					let modified = modified_text(&keys);
@@ -277,13 +280,16 @@ impl MacInput {
 				let mut physical = remote_modifier_check(remote, window);
 				with_background_keyboard(&self.source, pid, wid, window, entry_front, |to, guard| {
 					element_keys(pid, element, || {
+						*pending = watch_type_ahead(types_ahead, element, to);
+						let posted = Cell::new(false);
 						let guard = || {
 							guard()?;
 							physical.as_mut().map_or(Ok(()), |check| check())
 						};
-						type_keys(&self.source, &keys, gap, guard, |event| {
-							skylight::post_keyboard(to, event)
-						})
+						let sent = type_keys(&self.source, &keys, gap, guard, |event| {
+							note_key_down(&posted, event, |event| skylight::post_keyboard(to, event))
+						});
+						ax::type_ahead::keys_sent(pending, posted.get(), sent)
 					})
 				})
 			},
@@ -296,7 +302,9 @@ impl MacInput {
 					|activated| {
 						control::wait(first_key_settle(activated))?;
 						element_keys(pid, element, || {
-							if remote.is_some() {
+							*pending = watch_type_ahead(types_ahead, element, pid);
+							let posted = Cell::new(false);
+							let sent = if remote.is_some() {
 								// A remote screen may read modifiers from the keyboard
 								// state, which only bare key
 								// transitions at the HID tap move. They
@@ -313,14 +321,15 @@ impl MacInput {
 									&keys,
 									gap,
 									|| skylight::require_front_window(pid, wid),
-									post_global,
+									|event| note_key_down(&posted, event, post_global),
 								)
-							}
+							};
+							ax::type_ahead::keys_sent(pending, posted.get(), sent)
 						})
 					},
 				)
 			},
-		}
+		})
 	}
 
 	/// Presses `keys` in `window`; with an `element`, once that element holds
@@ -338,7 +347,8 @@ impl MacInput {
 		let remote = process::remote_screen(pid);
 		require_phone_screen(window, remote)?;
 		let gap = key_gap(remote);
-		match mode {
+		let types_ahead = remote.is_none() && ax::type_ahead::chord_types_ahead(keys);
+		ax::type_ahead::marking(|pending| match mode {
 			DeliveryMode::Background => {
 				let chord = chord_keys(window, keys, remote, layout_strokes)?;
 				if remote == Some(RemoteScreen::KeyEvents)
@@ -355,16 +365,23 @@ impl MacInput {
 					entry_front,
 					|to, guard| {
 						element_keys(pid, element, || {
+							*pending = watch_type_ahead(types_ahead, element, to);
+							let posted = Cell::new(false);
 							let press = || {
 								press_chord(&self.source, &chord, gap, |event| {
 									let guard = || {
 										guard()?;
 										physical.as_mut().map_or(Ok(()), |check| check())
 									};
-									post_guarded(event, guard, |event| skylight::post_keyboard(to, event))
+									post_guarded(event, guard, |event| {
+										note_key_down(&posted, event, |event| {
+											skylight::post_keyboard(to, event)
+										})
+									})
 								})
 							};
-							guard_key_menu(window, keys, (pid, to), press)
+							let sent = guard_key_menu(window, keys, (pid, to), press);
+							ax::type_ahead::keys_sent(pending, posted.get(), sent)
 						})
 					},
 				)?;
@@ -388,21 +405,24 @@ impl MacInput {
 						control::wait(first_key_settle(activated))?;
 						element_keys(pid, element, || {
 							let chord = chord_keys(window, keys, remote, layout_strokes)?;
-							if remote.is_some() {
+							*pending = watch_type_ahead(types_ahead, element, pid);
+							let posted = Cell::new(false);
+							let sent = if remote.is_some() {
 								// As for typed text: a remote screen may read modifiers
 								// from the keyboard state, which only
 								// bare transitions move.
 								press_bare_chord(&chord, gap, || skylight::require_front_window(pid, wid))
 							} else {
 								press_chord(&self.source, &chord, gap, |event| {
-									post_takeover_key(pid, wid, event)
+									note_key_down(&posted, event, |event| post_takeover_key(pid, wid, event))
 								})
-							}
+							};
+							ax::type_ahead::keys_sent(pending, posted.get(), sent)
 						})
 					},
 				)
 			},
-		}
+		})
 	}
 }
 
@@ -1097,6 +1117,21 @@ fn post_guarded(
 		guard()?;
 	}
 	post(event)
+}
+
+/// Posts `event` with `post`, noting in `posted` once a key-down went out: only
+/// a key-down types ahead in a popup, never a release or a modifier change,
+/// such as the cleanup releases that follow a refused press.
+fn note_key_down(
+	posted: &Cell<bool>,
+	event: &CGEvent,
+	post: impl FnOnce(&CGEvent) -> CoreResult<()>,
+) -> CoreResult<()> {
+	post(event)?;
+	if matches!(CGEvent::r#type(Some(event)), CGEventType::KeyDown) {
+		posted.set(true);
+	}
+	Ok(())
 }
 
 /// Whether `event` presses a key: a key-down, or a modifier change that sets
@@ -2367,6 +2402,21 @@ fn key_menu_guarded(
 		press,
 		|before, _| settle(before),
 	)
+}
+
+/// The popup button about to take keys that type ahead (`types_ahead`):
+/// `element`, or the element of `pid` holding keyboard focus
+/// ([`ax::type_ahead::watch`]). Other keys read nothing. Once the keys went
+/// out the popup is marked, so the session's next read of it waits for the
+/// option the letters choose; the call itself returns as for any key.
+fn watch_type_ahead(
+	types_ahead: bool,
+	element: Option<&AXUIElement>,
+	pid: libc::pid_t,
+) -> Option<ax::type_ahead::Pending> {
+	types_ahead
+		.then(|| ax::type_ahead::watch(element, pid))
+		.flatten()
 }
 
 /// `keys` as a chord's name in errors, such as "alt+down".
@@ -7227,6 +7277,45 @@ mod tests {
 		let unchecked =
 			|| -> CoreResult<bool> { panic!("a chord without a modifier is not checked") };
 		assert!(confirm_shortcut_answered(&window, &[KeyName::Enter], unchecked).is_ok());
+	}
+
+	#[test]
+	fn a_refused_first_letter_notes_no_key_down_though_its_release_goes_out() {
+		let source = source().expect("Quartz event source");
+		let chord = [KeyPress { name: KeyName::Shift, code: 56 }, KeyPress {
+			name: KeyName::Char('r'),
+			code: 15,
+		}];
+		// The user typed before the letter's press: its guard refuses it, and
+		// cleanup releases Shift and the attempted letter unguarded.
+		let posted = Cell::new(false);
+		let mut events = Vec::new();
+		let result = press_chord(&source, &chord, KEY_GAP, |event| {
+			let refuse = || -> CoreResult<()> {
+				if matches!(CGEvent::r#type(Some(event)), CGEventType::KeyDown) {
+					Err(DesktopError::user_intervened("the user typed"))
+				} else {
+					Ok(())
+				}
+			};
+			post_guarded(event, refuse, |event| {
+				note_key_down(&posted, event, |event| {
+					events.push(CGEvent::r#type(Some(event)).0);
+					Ok(())
+				})
+			})
+		});
+		assert!(result.is_err());
+		assert!(events.contains(&CGEventType::KeyUp.0), "{events:?}");
+		assert!(!events.contains(&CGEventType::KeyDown.0), "{events:?}");
+		assert!(!posted.get(), "a release or modifier marked the popup");
+		// A key-down whose own post fails (a front-window check inside it) is
+		// not noted either; one that went out is.
+		let down = |code| CGEvent::new_keyboard_event(Some(&source), code, true).expect("key-down");
+		let failed = note_key_down(&posted, &down(15), |_| Err(DesktopError::input_failed("moved")));
+		assert!(failed.is_err() && !posted.get());
+		note_key_down(&posted, &down(15), |_| Ok(())).unwrap();
+		assert!(posted.get());
 	}
 
 	#[test]
