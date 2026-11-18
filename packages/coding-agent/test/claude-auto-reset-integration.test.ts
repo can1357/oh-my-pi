@@ -24,7 +24,7 @@ import {
 	createCodexAutoRedeemCoordinator,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, logger, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 import { resetWindowModes } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -390,6 +390,7 @@ describe("Claude saved-reset trigger integration", () => {
 			streamErrorFirst: true,
 		});
 		mockSchedulerWaitWithClock();
+		const info = vi.spyOn(logger, "info");
 
 		await session.prompt("trigger a Claude usage limit");
 		await session.waitForIdle();
@@ -415,6 +416,17 @@ describe("Claude saved-reset trigger integration", () => {
 					),
 			);
 		expect(recovered).toBe(true);
+		expect(info).toHaveBeenCalledWith(
+			"reset spend",
+			expect.objectContaining({
+				provider: "anthropic",
+				credentialId: CREDENTIAL_ID,
+				creditId: "cedar-grant-1",
+				trigger: "blocked",
+				reason: "blocked-account",
+				code: "reset",
+			}),
+		);
 	});
 
 	it("continues the task using live reset evidence when broker usage polling is unavailable", async () => {
@@ -746,9 +758,14 @@ describe("Claude saved-reset trigger integration", () => {
 				stdout += String(chunk);
 				return true;
 			});
+			const info = vi.spyOn(logger, "info");
 			await runUsageCommand({ action: "reset", target: `claude/${CREDENTIAL_ID}`, noExtensions: true });
 			expect(stdout).toContain("Reset applied");
 			expect(targets).toHaveLength(1);
+			expect(info).toHaveBeenCalledWith(
+				"reset spend",
+				expect.objectContaining({ credentialId: CREDENTIAL_ID, trigger: "manual", code: "reset" }),
+			);
 
 			status.availableCount = 0;
 			status.redeemableCount = 0;
