@@ -1695,7 +1695,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					pty: pty ?? true,
 					ready,
 					notify: notifySource,
-					env: { ...(await this.#sessionExports(sessionId, commandCwd, signal)), ...sessionEnv },
 				},
 				signal,
 				ready === undefined ? undefined : ctx?.toolCall?.steeringSignal,
@@ -1881,13 +1880,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// the executeBash branch so a cold `.envrc` can't outlast a short call.
 		const backendPreflight =
 			bridgeTerminalAvailable || canUseInteractiveBashPty(pty === true, ctx)
-				? await applyDirenvPreflight(command, commandCwd, {
 						callerEnv: sessionEnv,
 						signal,
 						timeoutMs: cfgBashDirenvLoadTimeoutMs.get(this.session.settings),
 						callerTimeoutMs: timeoutMs,
 						direnvSetting: cfgBashDirenv.get(this.session.settings),
-					})
 				: undefined;
 
 		// Route through the client terminal when the client advertises the terminal capability.

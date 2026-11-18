@@ -223,6 +223,10 @@
 - `grep` searches notebooks' cell text, with line numbers and edit anchors matching `read`
 - `glob` takes a `pattern` argument as the glob scoped under `path` instead of dropping it, rejects other unknown arguments, and bounds `limit` (1–200) in its schema
 - `glob` lists `.git` entries when the pattern names `.git`, descends nested `node_modules` under a `node_modules` base, and lists each missing path when none exist
+- `pty: true` commands, named services, and client-terminal commands now receive the real files behind internal URLs (`node local://f.mjs`, `cat local://x`, `< local://in`, `> local://log`, `--env-file=local://a.env`, `"$(cat local://prompt.txt)"`), the same as ordinary bash calls
+- External programs resolve internal URLs in more argument forms: `@local://body.json` (curl), `-F body=@local://b.md` (gh), `-olocal://out`, and environment values (`ENV_FILE=skill://x/.env cmd`, `env KEY=local://x cmd`, exported variables)
+- An internal-URL-looking argument that cannot be resolved (`bm read memory://notes/x`, `log.sh 'agent://A; artifact://12'`, prose that starts with a URL) reaches the program as written instead of failing the command with "cannot resolve … for an external command"
+- `omp` commands run from bash (`omp read 'skill://name:1-20'`, also behind `nice`/`npx`/`sudo`) receive their URL arguments untouched
 
 ### Removed
 

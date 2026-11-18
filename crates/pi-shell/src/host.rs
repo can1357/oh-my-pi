@@ -604,12 +604,15 @@ impl crate::bash::Host for PiHost {
 
 	/// Spawns through the process-group spawner. With a pi-vfs filesystem,
 	/// an external sees no URL it cannot open: a `scheme://` program,
-	/// argument (bare, or attached to an option name: `--root=skill://x`) or
-	/// working directory the filesystem backs with a host file is handed over
-	/// as that file, and the child's `PWD` names the host directory. A
-	/// working directory backed by nothing, or one the filesystem refuses to
-	/// change, refuses the command, as does a URL the provider cannot
-	/// resolve. Only a spawn that names a URL asks the provider, and it
+	/// argument (bare, or attached to an option: `--root=skill://x`,
+	/// `-oskill://x`, `@skill://x`), environment value or working directory
+	/// the filesystem backs with a host file is handed over as that file,
+	/// and the child's `PWD` names the host directory. A working directory
+	/// backed by nothing, or one the filesystem refuses to change, refuses
+	/// the command, as does a program the provider cannot resolve; an
+	/// argument or environment value it cannot resolve stays as written, and
+	/// `omp` is handed every one as written ([`urls`]). Only a spawn that
+	/// names a URL asks the provider, and it
 	/// awaits the answer: the returned future owns a copy of the names and
 	/// the spawn's descriptors, and launches (routing, observer and all)
 	/// only after the resolution succeeded, so dropping it earlier spawns
