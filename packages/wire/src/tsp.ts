@@ -195,6 +195,20 @@ export interface TspCommonProps {
 	 * that don't know it ignore it and keep showing `title`.
 	 */
 	hovercard?: TspPropNode;
+	/**
+	 * `layout` makes the node a layout-transition container: descendants carrying a {@link motionKey} glide to
+	 * their new place and size when an update moves, resizes, adds or removes them; new keys fade in, leaving
+	 * ones fade out. Reduced motion turns it off.
+	 */
+	transition?: "layout";
+	/** A `transition` container's duration in ms (200 by default, at most 1000; 0 snaps). */
+	transitionMs?: number;
+	/**
+	 * The node's identity in its nearest `transition` container. Unlike `key`, it survives a move to another
+	 * parent, so the node glides there; give two shapes of one thing (a folded and an open question) the
+	 * same one so it resizes instead of swapping.
+	 */
+	motionKey?: string;
 }
 
 /** A {@link TspCommonProps.mark}. */
@@ -208,12 +222,35 @@ export type TspPreview = { lines: number } | "auto";
 export interface TspColProps {
 	gap?: TspSpace;
 	align?: "start" | "center" | "end" | "stretch";
+	/**
+	 * On a dock composer's container: fold it to its compact row now, as an unfocused pane's composer folds,
+	 * while the keys are elsewhere in the document (a question above it).
+	 */
+	folded?: boolean;
+	/** On `omp.tray`: a counter the program bumps to move keyboard focus into the tray (acted on a change, never on first sight). */
+	focus?: number;
+	/** On `omp.tray`: the `ref` of the card its `omp.tray.peek` child belongs to. */
+	peek?: string;
+	/** On `omp.tray.card`: what the card stands for. */
+	item?: TspTrayItem;
+	/** On `omp.tray.card` and `omp.tray.peek`: the item's id (an agent id, a job id, or `done`). */
+	ref?: string;
+	/** On `omp.tray.card`: the item's state. */
+	status?: TspTrayStatus;
+	/** On an agent's `omp.tray.card`: epoch ms of its last operation (its latest tool call start, or when it settled). */
+	acted?: number;
 }
+/** What an `omp.tray.card` stands for. */
+export type TspTrayItem = "agent" | "job" | "done";
+/** The state of an `omp.tray.card`. */
+export type TspTrayStatus = "queued" | "running" | "done" | "failed" | "stopped";
 export interface TspRowProps {
 	gap?: TspSpace;
 	align?: "start" | "center" | "baseline" | "end" | "stretch";
 	justify?: "start" | "between" | "end";
 	wrap?: boolean;
+	/** On `omp.tray.ev`: how the operation went, or `run` while it is in flight. */
+	state?: "ok" | "err" | "run";
 }
 export interface TspCardProps {
 	/** Header content, inline. */
@@ -248,6 +285,8 @@ export interface TspTextProps {
 	truncate?: TspTruncate;
 	lines?: number;
 	measure?: "prose" | "fill";
+	/** On `omp.tray.count`: the card state the count is of. */
+	status?: "failed" | "running" | "done";
 }
 export interface TspMarkdownProps {
 	text?: string;

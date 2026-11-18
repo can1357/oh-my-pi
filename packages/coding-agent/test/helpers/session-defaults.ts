@@ -21,5 +21,6 @@ export function createSessionDefaults() {
 		isAdvisorActive: () => false,
 		subscribeRunState: () => () => {},
 		addDisposer: () => {},
+		getWorkPoolYieldItems: () => [],
 	} satisfies Partial<AgentSession>;
 }

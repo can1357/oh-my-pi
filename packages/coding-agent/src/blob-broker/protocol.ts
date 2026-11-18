@@ -1,39 +1,36 @@
 /**
- * Cross-process contract for the broker-owned blob daemon.
+ * Cross-process contract for the daemon-hosted blob broker (`blob` module).
  *
- * One blob daemon runs per project scope (launched through the same daemon
- * broker that owns the shared Chromium and LSP mux), so every omp process in
- * the project shares one exposure (tunnel or uploader) and one URL per blob.
- * Control traffic rides HTTP over a Unix socket in the daemon runtime dir;
- * public traffic reaches the same store through the exposure.
+ * One `blob` unit runs in the omp daemon per (project scope, config key), so
+ * every omp process in a project with the same image URL settings shares one
+ * exposure (tunnel or uploader) and one URL per blob. Control traffic is
+ * `call("blob", method, params, { unit })` ({@link BlobBrokerCalls}); lazy
+ * blobs render through a tunnel on {@link BLOB_RENDER_CHANNEL} back into the
+ * registering session. Public traffic reaches the store through the exposure.
  */
-import * as path from "node:path";
-export { BLOB_BROKER_WORKER_ARG } from "../cli/worker-selectors";
 import type { BlobDestinationId } from "./destinations";
 import type { BlobPublication, RemoteDeleteAction } from "./publication";
 import type { BlobBrokerSavingsStatus } from "./savings";
-import type { DestinationRuntimeConfig } from "./uploader-runtime";
+import type { DestinationProcessContext, DestinationRuntimeConfig } from "./uploader-runtime";
 
-/** Environment key carrying the control socket path the worker listens on. */
-export const BLOB_BROKER_SOCKET_ENV = "OMP_BLOB_BROKER_SOCKET";
+/** Daemon unit kind and `call` module name. */
+export const BLOB_BROKER_KIND = "blob";
 
-/** Environment key carrying the JSON {@link BlobBrokerWorkerConfig}. */
-export const BLOB_BROKER_CONFIG_ENV = "OMP_BLOB_BROKER_CONFIG";
+/** Tunnel channel on which the daemon asks the registering session to render lazy blobs. */
+export const BLOB_RENDER_CHANNEL = "render";
 
-/** Stable broker daemon name for the shared blob broker. */
-export const BLOB_BROKER_DAEMON_NAME = "omp.blob.broker";
-
-/** Broker readiness regex matched against the banner printed by the worker. */
-export const BLOB_BROKER_READY_PATTERN = String.raw`omp blob broker serving \S+`;
-
-/** Banner printed on stdout once the exposure is up and control is listening. */
-export function blobBrokerReadyBanner(baseUrl: string): string {
-	return `omp blob broker serving ${baseUrl}`;
+/** Stable identity for a worker config; the unit key, so differing configs get differing units. */
+export function blobBrokerConfigKey(config: BlobBrokerWorkerConfig): string {
+	return Bun.hash(JSON.stringify(config)).toString(16);
 }
 
-/** Resolve the control socket path for one project scope. */
-export function blobBrokerEndpoint(runtimeDir: string): string {
-	return path.join(runtimeDir, "blob-broker.sock");
+/** `open` params of a `blob` unit. Credentials ride in `config`; never log them. */
+export interface BlobUnitParams {
+	config: BlobBrokerWorkerConfig;
+	/** Environment and cwd of the opening client, for tunnel and uploader children. */
+	spawn: DestinationProcessContext;
+	/** How long a lazy render may take before its fetch answers 410 (ms); default 30 s, at most 60 s. */
+	renderTimeoutMs?: number;
 }
 
 /** Exposure or upload configuration serialized into the worker environment. */
@@ -56,16 +53,18 @@ export interface BlobBrokerWorkerConfig {
 	};
 }
 
-/** `GET /info` — exposure state advertised by the worker. */
+/** `info` call result: exposure state advertised by the unit. */
 export interface BlobBrokerInfo {
 	/** Public base URL for served blobs; empty for uploader backends. */
 	baseUrl: string;
 	/** Whether lazy (render-on-fetch) blobs are supported. */
 	lazy: boolean;
+	/** {@link blobBrokerConfigKey} of the unit's config. */
+	configKey: string;
 }
 
 /**
- * `POST /blob` request body. Probe first (no `data`): a persisted or live
+ * `blob` call params. Probe first (no `data`): a persisted or live
  * registration answers without the bytes ever crossing the socket; only a
  * miss pays the transfer.
  */
@@ -77,17 +76,15 @@ export interface EnsureBlobRequest {
 	data?: string;
 }
 
-/** `POST /lazy` request body. */
+/** `lazy` call params. */
 export interface EnsureLazyRequest {
 	key: string;
 	mimeType: string;
-	/** Loopback port of the owning session's render callback server. */
-	callbackPort: number;
-	/** Bearer token the daemon presents to the callback server. */
-	callbackToken: string;
+	/** Owner id the caller announced on its {@link BLOB_RENDER_CHANNEL} tunnel. */
+	owner: string;
 }
 
-/** Response body for `POST /blob` and `POST /lazy`. */
+/** Result of the `blob` and `lazy` calls. */
 export interface EnsureBlobResponse {
 	/** Durable publication returned by the selected backend. */
 	publication?: BlobPublication;
@@ -144,10 +141,8 @@ export interface BlobStoreStatus {
 	recentFetches: readonly BlobFetchAttributionEvent[];
 }
 
-/** `GET /status` response for daemon and backend health inspection. */
+/** `status` call result for daemon and backend health inspection. */
 export interface BlobBrokerStatus extends BlobBrokerInfo, BlobStoreStatus {
-	/** Stable hash of the worker configuration. */
-	configKey: string;
 	/** Aggregate inline-versus-reference bytes recorded for this project. */
 	savings: BlobBrokerSavingsStatus;
 }
@@ -164,13 +159,13 @@ export interface BlobBrokerDoctorCheck {
 	detail: string;
 }
 
-/** `POST /doctor` request selecting active checks. */
+/** `doctor` call params selecting active checks. */
 export interface BlobBrokerDoctorRequest {
 	/** Include a live public health request; defaults to `true`. */
 	probe?: boolean;
 }
 
-/** `POST /doctor` response with daemon status and checks. */
+/** `doctor` call result with daemon status and checks. */
 export interface BlobBrokerDoctorResponse {
 	/** Store and exposure snapshot observed by the doctor. */
 	status: BlobBrokerStatus;
@@ -178,13 +173,13 @@ export interface BlobBrokerDoctorResponse {
 	checks: readonly BlobBrokerDoctorCheck[];
 }
 
-/** `POST /probe` request for the configured destination's public health endpoint. */
+/** `probe` call params for the configured destination's public health endpoint. */
 export interface BlobBrokerProbeRequest {
 	/** Per-attempt public request timeout in milliseconds. */
 	timeoutMs?: number;
 }
 
-/** `POST /probe` response from an actual public health request. */
+/** `probe` call result from an actual public health request. */
 export interface BlobBrokerProbeResponse {
 	/** Whether the public health endpoint answered successfully. */
 	ok: boolean;
@@ -194,7 +189,7 @@ export interface BlobBrokerProbeResponse {
 	detail: string;
 }
 
-/** `POST /purge` request selecting registrations to remove. */
+/** `purge` call params selecting registrations to remove. */
 export interface BlobBrokerPurgeRequest {
 	/** Execute remote deletion requests and remove registrations. Defaults to dry-run. */
 	apply?: boolean;
@@ -206,7 +201,7 @@ export interface BlobBrokerPurgeRequest {
 	before?: number;
 }
 
-/** `POST /purge` response describing removed registrations. */
+/** `purge` call result describing removed registrations. */
 export interface BlobBrokerPurgeResponse {
 	/** Whether this request performed mutations. */
 	applied: boolean;
@@ -226,7 +221,27 @@ export interface BlobBrokerPurgeResponse {
 	errors: readonly string[];
 }
 
-/** Path prefix of the session-side render callback server. */
-export const RENDER_CALLBACK_PATH = "/render/";
-/** Header carrying {@link EnsureLazyRequest.callbackToken} on render callbacks. */
-export const RENDER_CALLBACK_TOKEN_HEADER = "x-omp-blob-token";
+/** First line a client sends on its {@link BLOB_RENDER_CHANNEL} tunnel. */
+export interface BlobRenderHello {
+	owner: string;
+}
+
+/** Daemon -> client line on the render tunnel: produce the bytes of lazy blob `key`. */
+export interface BlobRenderRequest {
+	id: number;
+	key: string;
+}
+
+/** Client -> daemon line answering a {@link BlobRenderRequest}. */
+export type BlobRenderResponse = { id: number; mime: string; base64: string } | { id: number; error: string };
+
+/** `call("blob", method)` params and results. */
+export interface BlobBrokerCalls {
+	info: { params: Record<string, never>; result: BlobBrokerInfo };
+	status: { params: Record<string, never>; result: BlobBrokerStatus };
+	doctor: { params: BlobBrokerDoctorRequest; result: BlobBrokerDoctorResponse };
+	probe: { params: BlobBrokerProbeRequest; result: BlobBrokerProbeResponse };
+	purge: { params: BlobBrokerPurgeRequest; result: BlobBrokerPurgeResponse };
+	blob: { params: EnsureBlobRequest; result: EnsureBlobResponse };
+	lazy: { params: EnsureLazyRequest; result: EnsureBlobResponse };
+}

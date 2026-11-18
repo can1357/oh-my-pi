@@ -147,6 +147,28 @@ describe("read local:// images", () => {
 		// the replacement char; the fixed path must never emit it as text.
 		expect(joinText(result.content)).not.toContain("\uFFFDPNG");
 	});
+	it("transcodes a BMP to an inline image block", async () => {
+		// 1x1 24-bit BMP: 14-byte file header, 40-byte info header, one padded pixel row.
+		const bmp = Buffer.alloc(58);
+		bmp.write("BM", 0, "latin1");
+		bmp.writeUInt32LE(58, 2);
+		bmp.writeUInt32LE(54, 10);
+		bmp.writeUInt32LE(40, 14);
+		bmp.writeInt32LE(1, 18);
+		bmp.writeInt32LE(1, 22);
+		bmp.writeUInt16LE(1, 26);
+		bmp.writeUInt16LE(24, 28);
+		bmp.writeUInt32LE(4, 34);
+		bmp.set([0, 0, 255], 54);
+		await Bun.write(path.join(localRoot, "tiny.bmp"), bmp);
+		const tool = new ReadTool(makeSession(testDir));
+
+		const result = await tool.execute("call", { path: "local://tiny.bmp" });
+
+		expect(result.content.some(c => c.type === "image")).toBe(true);
+		expect(joinText(result.content)).toContain("Read image file [image/bmp]");
+	});
+
 	it("resets the repeat-read hint when an image at the same path changes", async () => {
 		const file = path.join(localRoot, "regenerated.png");
 		const tool = new ReadTool(makeSession(testDir));

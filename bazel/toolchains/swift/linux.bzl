@@ -3,7 +3,7 @@
 Downloads the pinned Swift release for the linux host that fetches the repo
 (the Ubuntu 22.04 build: glibc 2.35, and it runs unchanged on 24.04) and prunes
 it to what `swiftc -emit-library` needs to compile and link
-crates/pi-natives/src/applefm/bridge.swift for arm64-apple-macos against
+crates/natives/src/applefm/bridge.swift for arm64-apple-macos against
 @macos_sdk: swift-driver, swift-frontend, the clang it links through and the
 host Swift runtime and compiler libraries those load (~900 MiB of ~4 GiB).
 
