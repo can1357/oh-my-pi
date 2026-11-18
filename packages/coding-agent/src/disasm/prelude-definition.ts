@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import { type } from "@oh-my-pi/omptype";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
-import type { EvalPreludeDefinition } from "../eval/preludes";
+import type { HostEvalPreludeDefinition } from "../eval/preludes";
 import dsmDocumentation from "../prompts/tools/dsm.md" with { type: "text" };
 import dsmGuidance from "../prompts/tools/dsm-guidance.md" with { type: "text" };
 import type { ToolSession } from "../tools";
@@ -128,7 +128,7 @@ function describeCall(parameters: unknown): string | undefined {
 }
 
 /** Hidden, backend-neutral disassembly capability with independently retained cross-agent database handles. */
-export function createDsmPrelude(session: ToolSession): EvalPreludeDefinition {
+export function createDsmPrelude(session: ToolSession): HostEvalPreludeDefinition {
 	const owner = referenceOwner(session);
 	const notOpen = () =>
 		new ToolError("Database reference is closed or expired; reopen with dsm.open(path or handle).");
