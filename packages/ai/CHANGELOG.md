@@ -125,6 +125,8 @@
 - A Codex additional meter (Spark) reported with only a `metered_feature` now carries that codename as `scope.modelId`, as it already did with a `limit_name`, so it stays scoped to its own model ([#19606](https://github.com/can1357/oh-my-pi/pull/19606) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed auth-broker clients failing to read credentials or usage from a newer broker that adds a field or a usage unit or status; unknown fields are ignored and unknown values read as `unknown`. The broker likewise accepts observed-usage reports carrying fields from newer clients ([#19602](https://github.com/can1357/oh-my-pi/pull/19602) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Antigravity CLI requests failing with `Unknown model ID` (e.g. `gemini-4-hydrogen`) when `agy` only offers effort-suffixed models such as `gemini-4-hydrogen-high` ([#19638](https://github.com/can1357/oh-my-pi/issues/19638))
+- Shared `agy acp` processes and IDE MCP bridges across concurrent `antigravity-cli` sessions with matching credentials and tool sets (`shareProcess` / `antigravityShareProcess`, env `PI_AGY_SHARE_PROCESS`), with per-conversation MCP call routing, credential-rotation retirement, and unreferenced idle shutdown ([#19329](https://github.com/can1357/oh-my-pi/pull/19329) by [@0xprincess](https://github.com/0xprincess))
+
 ### Changed
 
 - Isolated the `antigravity-cli` ACP child working directory in an empty managed workspace by default (`isolateWorkspace` / `antigravityIsolateWorkspace`, env `PI_AGY_ISOLATE_WORKSPACE`), preventing `agy` from indexing large host repositories into memory while host tools continue executing in the real session directory ([#19328](https://github.com/can1357/oh-my-pi/pull/19328) by [@0xprincess](https://github.com/0xprincess))
@@ -200,9 +202,6 @@
 
 - Fixed rate-limit handling for Mistral and other OpenAI-compatible providers so requests with no available allowance fail immediately with an actionable error suggesting a model or plan change.
 - Fixed Anthropic OAuth requests for pooled Claude accounts to report accurate device and account information, including after credentials are rotated during a request.
-### Added
-
-- Shared `agy acp` processes and IDE MCP bridges across concurrent `antigravity-cli` sessions with matching credentials and tool sets (`shareProcess` / `antigravityShareProcess`, env `PI_AGY_SHARE_PROCESS`), with per-conversation MCP call routing, credential-rotation retirement, and unreferenced idle shutdown ([#19329](https://github.com/can1357/oh-my-pi/pull/19329) by [@0xprincess](https://github.com/0xprincess))
 
 ### Changed
 
