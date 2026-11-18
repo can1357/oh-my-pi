@@ -713,6 +713,7 @@ export class EditTool implements AgentTool<TInput> {
 				// Patched through a local mirror of the live remote text; `#write` sends it back.
 				const resource = await router.resolve(target, context);
 				if (resource.isDirectory) return { error: `${url} is a directory`, planWritable: false };
+				if (typeof resource.content !== "string") return { error: `${url} is binary`, planWritable: false };
 				return { path: await writeRemoteMirror(target, resource.content), planWritable: false };
 			}
 			if (!router.fileWritable(target)) {
