@@ -714,19 +714,27 @@ impl Cast {
 
 	/// Validating coordinates needs the layout as it is now, and the portal
 	/// reports an output's position and size only when a stream starts, while
-	/// an output can move under a kept stream. So validation replaces the
-	/// kept stream with a new one, as every capture did before streams were
-	/// kept, one share at a time, and later captures use the new stream.
+	/// an output can move under a kept stream. So validation opens a new stream
+	/// and compares: on an unchanged layout the kept stream stays, with the
+	/// frame it holds, since a new one gets no frame on a still screen until
+	/// something changes; on a changed one the new stream replaces it.
 	fn geometry_with(
 		&mut self,
 		open: impl FnOnce() -> CoreResult<Live>,
 	) -> CoreResult<PortalGeometry> {
-		self.live = None;
 		let fresh = open()?;
 		let frame = fresh.request(false)?.ok_or_else(stream_closed)?;
 		let geometry = PortalGeometry::new(fresh.position, fresh.size, frame.width, frame.height);
-		if !fresh.closed() {
-			self.live = Some(fresh);
+		let unchanged = self.live.as_ref().is_some_and(|live| {
+			live.position == fresh.position
+				&& live.size == fresh.size
+				&& matches!(
+					live.request(false),
+					Ok(Some(kept)) if (kept.width, kept.height) == (frame.width, frame.height)
+				)
+		});
+		if !unchanged {
+			self.live = (!fresh.closed()).then_some(fresh);
 		}
 		Ok(geometry)
 	}
@@ -837,19 +845,30 @@ mod tests {
 		answer
 	}
 
-	/// A stream whose thread answers every request with `reply()`.
-	fn replying(position: (i32, i32), reply: fn() -> CoreResult<CapturedFrame>) -> Live {
+	/// A stream whose thread answers every request with `reply(pixels)`.
+	fn replying(position: (i32, i32), reply: fn(bool) -> CoreResult<CapturedFrame>) -> Live {
 		let (requests, inbox) = flume::unbounded::<FrameRequest>();
 		let thread = thread::spawn(move || {
 			while let Ok(request) = inbox.recv() {
-				let _ = request.reply.send(reply());
+				let _ = request.reply.send(reply(request.pixels));
 			}
 		});
 		Live { requests, position: Some(position), size: Some((1, 1)), thread: Some(thread) }
 	}
 
 	fn answering(position: (i32, i32)) -> Live {
-		replying(position, || Ok(frame()))
+		replying(position, |_| Ok(frame()))
+	}
+
+	/// A new stream on a still screen: it knows its size, but no frame comes.
+	fn opened_on_a_still_screen(position: (i32, i32)) -> Live {
+		replying(position, |pixels| {
+			if pixels {
+				Err(DesktopError::capture_failed("PipeWire frame timed out"))
+			} else {
+				Ok(CapturedFrame { image: None, width: 1, height: 1 })
+			}
+		})
 	}
 
 	/// On a still screen the producer sends one frame and then nothing; every
@@ -931,7 +950,7 @@ mod tests {
 	#[test]
 	fn a_kept_stream_that_fails_a_capture_is_closed() {
 		let mut cast = Cast {
-			live: Some(replying((0, 0), || {
+			live: Some(replying((0, 0), |_| {
 				Err(DesktopError::capture_failed("PipeWire frame timed out"))
 			})),
 		};
@@ -942,14 +961,28 @@ mod tests {
 		assert!(cast.live.is_none());
 	}
 
-	/// Coordinate validation replaces the kept stream with a new one, which
-	/// reports the layout as it is now, so two shares never overlap.
+	/// Coordinate validation on a moved output replaces the kept stream with
+	/// the new one, which reports the layout as it is now.
 	#[test]
-	fn validation_replaces_the_kept_stream_with_a_new_one() {
+	fn validation_replaces_the_kept_stream_when_the_layout_changed() {
 		let mut cast = Cast { live: Some(answering((0, 0))) };
 		let geometry = cast.geometry_with(|| Ok(answering((1920, 0)))).unwrap();
 		let expected = PortalGeometry::new(Some((1920, 0)), Some((1, 1)), 1, 1);
 		assert_eq!(format!("{geometry:?}"), format!("{expected:?}"));
 		assert_eq!(cast.live.as_ref().and_then(|live| live.position), Some((1920, 0)));
+	}
+
+	/// Coordinate validation on an unchanged layout keeps the kept stream, so
+	/// a screenshot after a click on a still screen still gets its frame.
+	#[test]
+	fn validation_keeps_the_kept_stream_when_the_layout_is_unchanged() {
+		let mut cast = Cast { live: Some(answering((0, 0))) };
+		cast
+			.geometry_with(|| Ok(opened_on_a_still_screen((0, 0))))
+			.unwrap();
+		let (captured, _) = cast
+			.capture_with(|| unreachable!("the kept stream answers"))
+			.expect("the kept stream's frame");
+		assert!(captured.image.is_some());
 	}
 }
