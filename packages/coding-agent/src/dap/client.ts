@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import { isEnoent, logger, ptree } from "@oh-my-pi/pi-utils";
 import { NON_INTERACTIVE_ENV } from "../exec/non-interactive-env";
+import { WindowsJob } from "../launch/job-object";
 import { encodeMessageFrame, MessageFramer, MessageFramingError } from "../jsonrpc/message-framing";
 import { ToolAbortError } from "../tools/tool-errors";
 import type {
@@ -69,6 +70,8 @@ export class DapClient {
 	#pendingRequests = new Map<number, DapPendingRequest>();
 	#isReading = false;
 	#disposed = false;
+	/** Kills the adapter and its debuggee with the owner; undefined when containment is unavailable. */
+	#job?: WindowsJob;
 	#lastActivity = Date.now();
 	#capabilities?: DapCapabilities;
 	#eventHandlers = new Map<string, Set<DapEventHandler>>();
@@ -127,6 +130,21 @@ export class DapClient {
 			detached: true,
 		});
 		const client = new DapClient(adapter, cwd, proc);
+		// Detached adapters (and their debuggees) escape Bun's own kill-on-close job on
+		// Windows: a crashed host leaves them running. Contain the tree in our job so
+		// that dispose() or an abrupt exit reaps it.
+		const job = WindowsJob.create();
+		if (job) {
+			const assigned = job.assign(proc.proc.pid);
+			if (assigned.ok) client.#job = job;
+			else {
+				job.close();
+				logger.debug("DAP adapter not contained in a job object", {
+					adapter: adapter.name,
+					error: assigned.error,
+				});
+			}
+		}
 		proc.exited.then(() => {
 			client.#handleProcessExit();
 		});
@@ -596,6 +614,8 @@ export class DapClient {
 				error: toErrorMessage(error),
 			});
 		}
+		this.#job?.close();
+		this.#job = undefined;
 		await this.proc.exited.catch(() => {});
 	}
 
