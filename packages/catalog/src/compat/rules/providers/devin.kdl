@@ -51,7 +51,6 @@ provider "devin" {
 	official-image-count-budget 60
 	inline-image-byte-budget 24000000
 	request-body-byte-limit 32000000
-	endpoint-hosts "server.codeium.com"
 	catalog-endpoint-budgets #true
 
 	// Enterprise (ACUs) fallback prices: https://docs.devin.ai/desktop/models
