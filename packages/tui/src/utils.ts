@@ -173,29 +173,75 @@ export function wrapLiteralLine(line: string, width: number): string[] {
 	return rows;
 }
 
-const TRUNCATION_ELLIPSIS_RESET = "\x1b[0m…";
-const SGR_BG_STATE = /\x1b\[(?:0|49|4[0-7]|10[0-7]|48;[0-9;]+)m/g;
+const SGR_SEQUENCE = /\x1b\[([0-9:;]*)m/g;
+const SGR_RESET = "\x1b[0m";
+
+function ellipsisText(kind: Ellipsis): string {
+	switch (kind) {
+		case Ellipsis.Ascii:
+			return "...";
+		case Ellipsis.Omit:
+			return "";
+		default:
+			return "…";
+	}
+}
+
+/**
+ * Background SGR active at the end of `prefix`, or undefined when the row has
+ * no background. Native truncation resets every attribute before its ellipsis,
+ * so only the background needs restoring there.
+ */
+function activeBackground(prefix: string): string | undefined {
+	let background: string | undefined;
+	for (const match of prefix.matchAll(SGR_SEQUENCE)) {
+		const params = match[1]!.split(";");
+		for (let i = 0; i < params.length; i++) {
+			const raw = params[i]!;
+			if (raw.includes(":")) {
+				if (raw.startsWith("48:")) background = `\x1b[${raw}m`;
+				continue;
+			}
+			const code = Number(raw);
+			if (raw === "" || code === 0 || code === 49) {
+				background = undefined;
+			} else if (code === 38 || code === 48) {
+				const mode = params[i + 1];
+				const extra = mode === "5" ? 2 : mode === "2" ? 4 : 0;
+				if (extra > 0 && i + extra < params.length) {
+					if (code === 48) {
+						background = `\x1b[${params.slice(i, i + extra + 1).join(";")}m`;
+					}
+					i += extra;
+				}
+			} else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) {
+				background = `\x1b[${code}m`;
+			}
+		}
+	}
+	return background;
+}
 
 /**
  * Native truncation closes styling with a full reset before its ellipsis. On a
- * tinted row that reset also drops the background, so the ellipsis loses the
- * row's fill. Re-open the background active in the kept prefix, keeping native
- * padding after the ellipsis untouched.
+ * tinted row that reset also drops the background, so the ellipsis and native
+ * padding lose the row's fill. Re-open the background after the reset and keep
+ * it through the padding.
  */
-function preserveTruncatedBackground(text: string, truncated: string): string {
-	if (truncated === text) return truncated; // the row fit: any ellipsis is literal input
-	const marker = TRUNCATION_ELLIPSIS_RESET;
+function preserveTruncatedBackground(text: string, truncated: string, kind: Ellipsis): string {
+	// The native fast path returns the original row plus plain padding when it
+	// fits; any reset/ellipsis in it came from the caller, not truncation.
+	if (truncated.startsWith(text) || !text.includes("\x1b")) return truncated;
+	const ellipsis = ellipsisText(kind);
+	const marker = `${SGR_RESET}${ellipsis}`;
 	const at = truncated.lastIndexOf(marker);
 	if (at < 0) return truncated;
 	const suffix = truncated.slice(at + marker.length);
-	if (!/^ *$/.test(stripTerminalSequences(suffix))) return truncated;
+	if (!/^ *$/.test(suffix)) return truncated;
 	const prefix = truncated.slice(0, at);
-	let background: string | undefined;
-	for (const match of prefix.matchAll(SGR_BG_STATE)) {
-		background = match[0] === "\x1b[0m" || match[0] === "\x1b[49m" ? undefined : match[0];
-	}
+	const background = activeBackground(prefix);
 	if (background === undefined) return truncated;
-	return `${prefix}\x1b[0m${background}…\x1b[49m${suffix}`;
+	return `${prefix}${SGR_RESET}${background}${ellipsis}${suffix}\x1b[49m`;
 }
 
 export function truncateToWidth(
@@ -212,14 +258,9 @@ export function truncateToWidth(
 	if (!pad && !text.includes("\x1b]66") && text.length * 3 <= maxWidth) {
 		return text;
 	}
-	const truncated = nativeTruncateToWidth(
-		text,
-		maxWidth,
-		(typeof ellipsisKind === "string" ? Ellipsis.Omit : ellipsisKind) ?? Ellipsis.Unicode,
-		pad ?? false,
-		DEFAULT_TAB_WIDTH,
-	);
-	return preserveTruncatedBackground(text, truncated);
+	const kind = (typeof ellipsisKind === "string" ? Ellipsis.Omit : ellipsisKind) ?? Ellipsis.Unicode;
+	const truncated = nativeTruncateToWidth(text, maxWidth, kind, pad ?? false, DEFAULT_TAB_WIDTH);
+	return preserveTruncatedBackground(text, truncated, kind);
 }
 
 export function wrapTextWithAnsi(text: string, width: number): string[] {
