@@ -3172,14 +3172,29 @@ export class ModelRegistry {
 			},
 		];
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
+		// A pi-native override routes the provider through a gateway, which is not
+		// the provider's listing API. Descriptors that ignore the override's base
+		// URL would also send the gateway key to the provider itself.
 		const standardProviderDescriptors = PROVIDER_DESCRIPTORS.filter(descriptor => {
 			if (disabledProviders.has(descriptor.providerId)) return false;
+			if (
+				(this.#runtimeProviderOverrides.get(descriptor.providerId)?.transport ??
+					this.#providerOverrides.get(descriptor.providerId)?.transport) === "pi-native"
+			) {
+				return false;
+			}
 			if (configuredDiscoveryProviders.has(descriptor.providerId)) return false;
 			if (this.#runtimeModelManagers.has(descriptor.providerId)) return false;
 			return providerFilter ? providerFilter.has(descriptor.providerId) : true;
 		});
 		const enabledSpecialProviderDescriptors = specialProviderDescriptors.filter(descriptor => {
 			if (disabledProviders.has(descriptor.providerId)) return false;
+			if (
+				(this.#runtimeProviderOverrides.get(descriptor.providerId)?.transport ??
+					this.#providerOverrides.get(descriptor.providerId)?.transport) === "pi-native"
+			) {
+				return false;
+			}
 			if (configuredDiscoveryProviders.has(descriptor.providerId)) return false;
 			return providerFilter ? providerFilter.has(descriptor.providerId) : true;
 		});
