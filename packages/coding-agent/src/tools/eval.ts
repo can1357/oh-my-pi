@@ -40,9 +40,7 @@ import type {
 	EvalViewEntry,
 } from "@oh-my-pi/pi-tui/tools/eval";
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
-import evalAgentsTopic from "../prompts/tools/eval-agents.md" with { type: "text" };
-import evalJudgeTopic from "../prompts/tools/eval-judge.md" with { type: "text" };
-import evalHelpersTopic from "../prompts/tools/eval-helpers.md" with { type: "text" };
+import { type EvalToolDescriptionOptions, evalTemplateContext, getEvalDocTopics } from "./eval-doc-topics";
 import {
 	DEFAULT_MAX_BYTES,
 	findColumnCapped,
@@ -51,7 +49,6 @@ import {
 	TailBuffer,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
-import { resolveSpawnPolicy } from "../task/spawn-policy";
 import { canSpawnAtDepth } from "../task/types";
 import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
@@ -75,7 +72,7 @@ import {
 	cfgEvalToolsEnabled,
 } from "../eval/settings";
 import { cfgTaskMaxRecursionDepth, perCallModelEnabled } from "../task/settings";
-import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "../task/model-approval";
+import { getPerCallModelAdvertisement } from "../task/model-approval";
 import { shapeToolResult } from "../spotlight";
 import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
 
@@ -180,81 +177,6 @@ const MAX_VIEW_JSON_CHARS = 32 * 1024;
 const MAX_VIEWS_PER_CELL = 16;
 /** Minimum spacing between live eval updates; bursts coalesce to one trailing snapshot. */
 const LIVE_UPDATE_INTERVAL_MS = 50;
-
-export interface EvalToolDescriptionOptions {
-	py?: boolean;
-	js?: boolean;
-	/**
-	 * Parent spawn policy (`getSessionSpawns`). `true`/omitted means unrestricted,
-	 * `false`/`""` hides `agent()`, and a comma list drives the advertised default.
-	 */
-	spawns?: boolean | string | null;
-	/** Advertise auto-backgrounding of long-running cells in the tool prompt. */
-	autoBackgroundEnabled?: boolean;
-	/** Advertise `@tool` / `tool(fn)` and the `tools` spawn option (`eval.tools.enabled`). */
-	evalTools?: boolean;
-	/** Push `workpool()` as the default for independent items (model delegation bias `eager`). Default: false. */
-	eagerDelegation?: boolean;
-	/** Point blocked callers at the `wait` tool; false when the session lacks it (subagents). Default: true. */
-	waitTool?: boolean;
-	/** Enabled preludes; each becomes an `xd://eval/<name>` doc topic, inlined when it asks to be. */
-	preludes?: readonly Pick<
-		EvalPreludeDefinition,
-		"name" | "documentation" | "inlineDocumentation" | "firstCallDocumentation"
-	>[];
-	/** The session can send first-call guides; without it such a prelude is listed as read-first. */
-	firstCallGuides?: boolean;
-	/**
-	 * Inline every doc topic instead of linking `xd://eval/<topic>`. Required
-	 * when the session cannot `read` (the only transport for topic docs).
-	 */
-	inlineTopics?: boolean;
-	/** Whether missing runtimes and environments may be provisioned automatically. */
-	autoProvision?: boolean;
-	/** `task.perCallModel` accepts `model` for eval: advertise it on `agent()`/`workpool()`. Default: false. */
-	perCallModel?: boolean;
-	/** Operator-owned role selectors and narrowing allowlist; bare values use the current model registry. */
-	perCallModelAdvertisement?: PerCallModelAdvertisement;
-	/** Canonical and wire names currently accepted by the session tool bridge. */
-	toolNames?: readonly string[];
-}
-
-function evalTemplateContext(options: EvalToolDescriptionOptions) {
-	const spawnPolicy = resolveSpawnPolicy(options.spawns ?? true);
-	return {
-		py: options.py ?? true,
-		js: options.js ?? true,
-		evalTools: options.evalTools ?? true,
-		eagerDelegation: options.eagerDelegation ?? false,
-		waitTool: options.waitTool ?? true,
-		autoBackgroundEnabled: options.autoBackgroundEnabled ?? false,
-		spawns: spawnPolicy.enabled,
-		spawnDefaultAgent: spawnPolicy.defaultAgent,
-		spawnAllowedAgentsText: spawnPolicy.allowedPromptText,
-		autoProvision: options.autoProvision ?? true,
-		perCallModel: options.perCallModel ?? false,
-		perCallModelAdvertisement: options.perCallModelAdvertisement,
-	};
-}
-
-/**
- * On-demand eval docs (`topic → markdown`) served at `xd://eval/<topic>`:
- * `judge` (including completion), `helpers`, `agents` (when spawning is allowed),
- * and one per enabled prelude.
- */
-export function getEvalDocTopics(options: EvalToolDescriptionOptions = {}): Record<string, string> {
-	const context = evalTemplateContext(options);
-	const topics: Record<string, string> = {
-		judge: prompt.render(evalJudgeTopic, context),
-		helpers: prompt.render(evalHelpersTopic, context),
-	};
-	if (context.spawns) topics.agents = prompt.render(evalAgentsTopic, context);
-	for (const prelude of options.preludes ?? []) {
-		const doc = prelude.documentation.trim();
-		if (doc) topics[prelude.name] = doc;
-	}
-	return topics;
-}
 
 /** Model-facing eval description: core kernel surface plus one pointer per linked doc topic. */
 export function getEvalToolDescription(options: EvalToolDescriptionOptions = {}): string {
@@ -940,7 +862,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 			const sessionFile = session.getSessionFile?.() ?? undefined;
 			const kernelOwnerId = session.getEvalKernelOwnerId?.() ?? undefined;
-			const { path: artifactPath, id: artifactId } = (await session.allocateOutputArtifact?.("eval")) ?? {};
+			const { path: artifactPath, id: artifactId } = (await session.allocateOutputArtifact?.()) ?? {};
 			session.assertEvalExecutionAllowed?.();
 			outputSink = new OutputSink({
 				artifactPath,

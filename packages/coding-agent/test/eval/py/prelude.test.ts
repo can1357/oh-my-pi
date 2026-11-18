@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { $which, TempDir } from "@oh-my-pi/pi-utils";
 import { PYTHON_PRELUDE } from "../../../src/eval/py/prelude";
-import { artifactReadBridge } from "../../helpers/artifact-read-bridge";
 const pythonPath = Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python");
 
 async function runPrelude(
@@ -137,7 +136,7 @@ describe("python prelude", () => {
 					session: "test-session",
 					run: null,
 					name: "read",
-					args: { path: "mcp://server/resource:10-14" },
+					args: { path: "mcp://server/resource:raw:10-14" },
 				},
 			]);
 		} finally {
@@ -161,7 +160,7 @@ describe("python prelude", () => {
 			},
 		});
 		try {
-			// No inherited artifacts root (an Eval cell running these tests has one); tests that want one pass it.
+			// No inherited local:// root (an Eval cell running these tests has one); tests that want one pass it.
 			const result = await runPrelude(code, {
 				PI_EVAL_LOCAL_ROOTS: "{}",
 				...env,
@@ -180,79 +179,23 @@ describe("python prelude", () => {
 		"\n",
 	);
 
-	it("reads an artifact from this session's dir; empty for limit <= 0", async () => {
-		using artifacts = TempDir.createSync("@omp-py-prelude-artifacts-");
-		await Bun.write(artifacts.join("12.eval.log"), "first\nsecond\nthird\n");
+	it("reads a large spill local://<N>.log from the injected root without the read tool", async () => {
+		using tmp = TempDir.createSync("@omp-py-prelude-spill-");
+		await Bun.write(tmp.join("local", "7.log"), largeArtifact);
+		const out = tmp.join("out.txt");
 		const { stdout, stderr, requests } = await runWithReadBridge(
 			[
-				`print(repr(read("artifact://12", offset=2, limit=1)))`,
-				`print([read("artifact://12", limit=0), read("artifact://12", limit=-1), read("artifact://7", limit=0)])`,
+				`open(${JSON.stringify(out)}, "w", newline="").write(read("local://7.log"))`,
+				`print(repr(read("local://7.log", offset=3, limit=2)))`,
 			].join("\n"),
-			{ PI_EVAL_LOCAL_ROOTS: JSON.stringify({ artifact: artifacts.path() }) },
+			{ PI_EVAL_LOCAL_ROOTS: JSON.stringify({ local: tmp.join("local") }) },
 			async () => ({ text: "from the read tool" }),
 		);
 
 		expect(stderr).toBe("");
-		expect(stdout).toBe("'second\\n'\n['', '', '']\n");
+		expect(await Bun.file(out).text()).toBe(largeArtifact);
+		expect(stdout).toBe("'row 0\\nrow 1\\n'\n");
 		expect(requests).toEqual([]);
-	});
-
-	it("reads an artifact another session holds in full, however large, through the read tool", async () => {
-		using tmp = TempDir.createSync("@omp-py-prelude-artifact-fallback-");
-		await Bun.write(tmp.join("owner", "7.bash.log"), largeArtifact);
-		await Bun.write(tmp.join("own", "12.eval.log"), "this session's");
-		const out = tmp.join("out.txt");
-		const { stdout, stderr, requests } = await runWithReadBridge(
-			[
-				`open(${JSON.stringify(out)}, "w", newline="").write(read("artifact://7"))`,
-				`print(repr(read("artifact://7", offset=3, limit=2)))`,
-				`print(read("artifact://7", offset=3) == "".join(f"row {i}\\n" for i in range(3000)))`,
-			].join("\n"),
-			{ PI_EVAL_LOCAL_ROOTS: JSON.stringify({ artifact: tmp.join("own") }) },
-			artifactReadBridge(tmp.path(), tmp.join("owner")),
-		);
-
-		expect(stderr).toBe("");
-		expect(await Bun.file(out).text()).toBe(largeArtifact);
-		expect(stdout).toBe("'row 0\\nrow 1\\n'\nTrue\n");
-		expect(requests).toMatchObject([
-			{ name: "read", args: { path: "artifact://7:raw:1-1" } },
-			{ name: "read", args: { path: "artifact://7:raw:1-1" } },
-			{ name: "read", args: { path: "artifact://7:raw:1-1" } },
-		]);
-	});
-
-	it("reads an artifact in full through the read tool when no artifacts dir was injected", async () => {
-		using tmp = TempDir.createSync("@omp-py-prelude-artifact-no-root-");
-		await Bun.write(tmp.join("12.eval.log"), largeArtifact);
-		const out = tmp.join("out.txt");
-		const { stderr, requests } = await runWithReadBridge(
-			`open(${JSON.stringify(out)}, "w", newline="").write(read("artifact://12"))`,
-			{},
-			artifactReadBridge(tmp.path(), tmp.path()),
-		);
-
-		expect(stderr).toBe("");
-		expect(await Bun.file(out).text()).toBe(largeArtifact);
-		expect(requests).toMatchObject([{ name: "read", args: { path: "artifact://12:raw:1-1" } }]);
-	});
-
-	it("returns a replacement read tool's text when it names no artifact file", async () => {
-		// An extension's same-name `read` replacement returns its own content without the built-in's `details`.
-		const { stdout, stderr, requests } = await runWithReadBridge(
-			[`print(read("artifact://12"))`, `print(read("artifact://12", offset=2, limit=2))`].join("\n"),
-			{},
-			async args => ({ text: `replaced ${args.path}` }),
-		);
-
-		expect(stderr).toBe("");
-		expect(stdout).toBe("replaced artifact://12:raw\nreplaced artifact://12:raw:2-3\n");
-		expect(requests).toMatchObject([
-			{ name: "read", args: { path: "artifact://12:raw:1-1" } },
-			{ name: "read", args: { path: "artifact://12:raw" } },
-			{ name: "read", args: { path: "artifact://12:raw:1-1" } },
-			{ name: "read", args: { path: "artifact://12:raw:2-3" } },
-		]);
 	});
 
 	it("bypasses discovered proxies for loopback bridge calls", async () => {

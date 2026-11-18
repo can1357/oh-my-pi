@@ -1,7 +1,14 @@
-"""omp Ghidra worker: drives one PyGhidra program over NDJSON stdin/stdout.
+"""omp Ghidra worker: drives one PyGhidra program over an NDJSON socket protocol.
+
+Launched as `worker.py --socket PATH` (Unix socket) or `worker.py --port-file PATH` (loopback TCP;
+the bound port is written to PATH). The omp daemon connects, sends `{"token": $OMP_DISASM_WORKER_TOKEN}`
+as its first line, then speaks:
 
 Request:  {"id": int, "method": str, "params": dict}
 Response: {"id", "ok": true, "result", "dirty"} | {"id", "ok": false, "error": {"type", "message"}}
+
+A dropped connection does not close the program: the daemon reconnects after a restart. With no
+connection for `_ORPHAN_S` the worker saves and exits.
 """
 
 import _thread
@@ -12,6 +19,7 @@ import os
 import queue
 import re
 import signal
+import socket
 import sys
 import threading
 import time
@@ -19,17 +27,46 @@ import traceback
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-# Java/native diagnostics and user prints must never corrupt the protocol stream.
-_proto = os.fdopen(os.dup(1), "w", encoding="utf-8", buffering=1)
-os.dup2(2, 1)
-try:
-    sys.stdin.reconfigure(encoding="utf-8")
-except (AttributeError, ValueError):
-    pass
 
-# The broker SIGTERMs the host's process group; the host must save us first. -Xrs
-# prevents the JVM from replacing this disposition when it starts.
-signal.signal(signal.SIGTERM, signal.SIG_IGN)
+def _listen():
+    """Bind the protocol listener before the slow JVM start so the daemon can connect at once."""
+    args = sys.argv[1:]
+    if len(args) == 2 and args[0] == "--socket":
+        try:
+            os.unlink(args[1])
+        except FileNotFoundError:
+            pass
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind(args[1])
+        sock.listen(4)
+        return sock
+    if len(args) == 2 and args[0] == "--port-file":
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(4)
+        tmp = args[1] + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(str(sock.getsockname()[1]))
+        os.replace(tmp, args[1])
+        return sock
+    raise SystemExit("usage: worker.py --socket PATH | --port-file PATH")
+
+
+_TOKEN = os.environ.pop("OMP_DISASM_WORKER_TOKEN", "")
+_listener = _listen()
+
+# Set by SIGTERM: the main loop saves and exits once the running request (if any) finishes.
+_terminate = False
+
+
+def _on_sigterm(signum, frame):
+    global _terminate
+    _terminate = True
+
+
+# SIGTERM must not kill us mid-request or mid-save: it only asks the main loop to save and exit
+# at the next request boundary. -Xrs keeps the JVM from replacing this disposition when it starts.
+signal.signal(signal.SIGTERM, _on_sigterm)
 
 import jpype  # noqa: E402
 import pyghidra  # noqa: E402
@@ -568,7 +605,7 @@ def _rpc_open(params):
     directory = os.path.dirname(binary)
     project_directory = params["project"]
     name = os.path.basename(binary)
-    # The host already holds its OS database lock, so only stale project locks
+    # The omp daemon already holds its OS database lock, so only stale project locks
     # can remain here (e.g. after a worker crash).
     lock_path = str(ProjectLocator(project_directory, "omp").getProjectLockFile())
     for stale in (lock_path, lock_path + "~"):
@@ -602,6 +639,10 @@ def _rpc_open(params):
         "flat": FLAT, "monitor": MONITOR, "pyghidra": pyghidra, "jpype": jpype,
     })
     NS.update({h.__name__: h for h in _HELPERS})
+    return _open_info()
+
+
+def _open_info():
     return {
         "idb": _DATABASE_PATH,
         "module": str(PROGRAM.getName()),
@@ -609,6 +650,13 @@ def _rpc_open(params):
         "arch": str(PROGRAM.getLanguage().getProcessor()),
         "bitness": PROGRAM.getDefaultPointerSize() * 8,
     }
+
+
+def _rpc_status(params):
+    # Queued behind any running request, so a reconnecting daemon sees the finished open.
+    if PROGRAM is None:
+        return {"open": False}
+    return {"open": True, **_open_info()}
 
 
 def _rpc_view(params):
@@ -684,6 +732,7 @@ _METHODS = {
     "set_type": _rpc_set_type,
     "make_function": _rpc_make_function,
     "save": _rpc_save,
+    "status": _rpc_status,
 }
 
 
@@ -698,49 +747,95 @@ def _error(e):
 
 
 def _send(frame):
-    data = json.dumps(frame, ensure_ascii=False, default=str) + "\n"
-    if _WINDOWS:
-        _proto.write(data)
-        _proto.flush()
-        return
-    # Defer SIGINT while writing so a late interrupt cannot truncate a frame.
-    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+    data = (json.dumps(frame, ensure_ascii=False, default=str) + "\n").encode("utf-8")
+    with _conn_lock:
+        conn = _conn
+        if conn is None:
+            # The daemon is gone; after it reconnects it asks `status` instead.
+            return
+        if _WINDOWS:
+            _sendall(conn, data)
+            return
+        # Defer SIGINT while writing so a late interrupt cannot truncate a frame.
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+        try:
+            _sendall(conn, data)
+        finally:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+
+
+def _sendall(conn, data):
     try:
-        _proto.write(data)
-        _proto.flush()
-    finally:
-        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+        conn.sendall(data)
+    except OSError:
+        traceback.print_exc()
 
 
 _WINDOWS = sys.platform == "win32"
 _INTERRUPT_ABSORB_S = 0.5
+# How long the worker keeps its program open with no daemon connected before it saves and exits.
+_ORPHAN_S = 600.0
 _requests = queue.Queue()
 _running_lock = threading.Lock()
 _running_id = None
 _interrupt_pending = False
+_conn_lock = threading.Lock()
+_conn = None
+_disconnected_at = time.monotonic()
 
 
-def _read_requests():
-    global _interrupt_pending
-    for line in sys.stdin:
+def _accept_connections():
+    """Serve one daemon connection at a time; a new connection replaces the previous one."""
+    while True:
         try:
-            frame = json.loads(line)
-        except ValueError:
-            frame = None
-        if isinstance(frame, dict) and "interrupt" in frame:
-            with _running_lock:
-                if not _interrupt_pending and _running_id is not None and _running_id == frame["interrupt"]:
-                    _interrupt_pending = True
+            conn, _ = _listener.accept()
+        except OSError:
+            traceback.print_exc()
+            return
+        threading.Thread(target=_read_requests, args=(conn,), name="omp-ghidra-conn", daemon=True).start()
+
+
+def _read_requests(conn):
+    global _interrupt_pending, _conn, _disconnected_at
+    authenticated = False
+    try:
+        for line in conn.makefile("r", encoding="utf-8", newline="\n"):
+            try:
+                frame = json.loads(line)
+            except ValueError:
+                frame = None
+            if not authenticated:
+                if not isinstance(frame, dict) or frame.get("token") != _TOKEN:
+                    break
+                authenticated = True
+                with _conn_lock:
+                    previous, _conn = _conn, conn
+                if previous is not None:
                     try:
-                        if MONITOR is not None:
-                            MONITOR.cancel()
-                    except Exception:
-                        traceback.print_exc()
-                    finally:
-                        _thread.interrupt_main()
-            continue
-        _requests.put(line)
-    _requests.put("")
+                        previous.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                continue
+            if isinstance(frame, dict) and "interrupt" in frame:
+                with _running_lock:
+                    if not _interrupt_pending and _running_id is not None and _running_id == frame["interrupt"]:
+                        _interrupt_pending = True
+                        try:
+                            if MONITOR is not None:
+                                MONITOR.cancel()
+                        except Exception:
+                            traceback.print_exc()
+                        finally:
+                            _thread.interrupt_main()
+                continue
+            _requests.put(line)
+    except OSError:
+        pass
+    with _conn_lock:
+        if _conn is conn:
+            _conn = None
+            _disconnected_at = time.monotonic()
+    conn.close()
 
 
 def _run(req_id, handler, params):
@@ -808,7 +903,6 @@ def _close_and_exit(save):
     except Exception:
         traceback.print_exc()
         code = 1
-    _proto.flush()
     sys.exit(code)
 
 
@@ -852,12 +946,17 @@ def _handle(line):
 def main():
     # Ghidra uses monitor cancellation plus a frame-triggered Python interrupt on
     # every platform: POSIX signals alone cannot cancel JVM analysis/decompilation.
-    threading.Thread(target=_read_requests, name="omp-ghidra-stdin", daemon=True).start()
-    while True:
+    threading.Thread(target=_accept_connections, name="omp-ghidra-accept", daemon=True).start()
+    while not _terminate:
         try:
-            line = _requests.get()
-            if not line:
-                break
+            try:
+                line = _requests.get(timeout=1)
+            except queue.Empty:
+                with _conn_lock:
+                    orphaned = _conn is None and time.monotonic() - _disconnected_at > _ORPHAN_S
+                if orphaned:
+                    break
+                continue
             if line.strip():
                 _handle(line)
         except KeyboardInterrupt:

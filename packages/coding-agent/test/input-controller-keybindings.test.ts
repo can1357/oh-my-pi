@@ -237,6 +237,7 @@ async function createContext() {
 		updatePendingMessagesDisplay,
 		isBashMode: false,
 		isPythonMode: false,
+		isBtwMode: false,
 		hideToolActivity: false,
 		toolOutputExpanded: false,
 		settings: Settings.isolated(),
@@ -564,6 +565,20 @@ describe("InputController keybinding setup", () => {
 
 		expect(result).toBeUndefined();
 		expect(spies.handleBtwBranchKey).not.toHaveBeenCalled();
+	});
+
+	it("leaves ← to an overlay open over a focused subagent's view", async () => {
+		const { InputController, ctx, setFocused, spies } = await createContext();
+		Object.assign(ctx, { focusedAgentId: "Worker", lastLeftTapTime: 0 });
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(spies.addInputListener);
+
+		// The empty composer owns the ←← back-to-main gesture.
+		expect(dispatchInput(listeners, "\x1b[D")).toEqual({ consume: true });
+		// The model picker's thinking slider steps on ←; the gesture must not swallow it.
+		setFocused({ handleInput: vi.fn() });
+		expect(dispatchInput(listeners, "\x1b[D")).toBeUndefined();
 	});
 
 	it("routes the smart-paste shortcut to a focused login input", async () => {

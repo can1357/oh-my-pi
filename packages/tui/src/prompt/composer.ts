@@ -96,15 +96,22 @@ export interface ComposerOptions {
 	readonly now?: () => number;
 }
 
+/** A native dock root described only on terminals whose `hello` advertises `feature`. */
+export interface FeatureDockEntry {
+	readonly component: Component;
+	readonly feature: string;
+}
+
 /** How {@link Composer.setRuntimeChildren} lays out the roots below the transcript. */
 export interface RuntimeChildrenOptions {
 	/**
 	 * Dock order on a TSP terminal (no status strip; the composer carries its
 	 * facts): the native dock stacks HUD pills, the working row and queued messages over
-	 * the composer in its own order, and may add describe-only roots. Defaults
-	 * to the roots below the transcript in render order.
+	 * the composer in its own order, and may add describe-only roots, also
+	 * ones only a terminal with a given feature gets. Defaults to the roots
+	 * below the transcript in render order.
 	 */
-	readonly nativeDock?: readonly Component[];
+	readonly nativeDock?: readonly (Component | FeatureDockEntry)[];
 	/**
 	 * Below-transcript containers whose children continue `main` on a TSP
 	 * terminal, one block each after the transcript's, instead of riding in the
@@ -248,7 +255,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#headerBefore: readonly Component[] = [];
 	#headerAfter: readonly Component[] = [];
 	#runtimeChildren: readonly Component[] = [];
-	#nativeDock: readonly Component[] | undefined;
+	#nativeDock: readonly (Component | FeatureDockEntry)[] | undefined;
 	#nativeTail: readonly Container[] = [];
 	/** Cache-driven status line shown until {@link setStatusComponent} mounts the session's. */
 	#startupStatus: StatusLineComponent | undefined;
@@ -644,7 +651,14 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 				main.push(...roots.slice(0, transcriptIndex), ...transcript.nativeBlocks(cx));
 				for (const root of this.#nativeTail) main.push(...root.children);
 				const tail: readonly Component[] = this.#nativeTail;
-				dock.push(...(this.#nativeDock ?? roots.slice(transcriptIndex + 1).filter(root => !tail.includes(root))));
+				if (this.#nativeDock) {
+					for (const entry of this.#nativeDock) {
+						if (!("feature" in entry)) dock.push(entry);
+						else if (cx.feature(entry.feature)) dock.push(entry.component);
+					}
+				} else {
+					dock.push(...roots.slice(transcriptIndex + 1).filter(root => !tail.includes(root)));
+				}
 			}
 		}
 		const previous = this.#nativeSurface;

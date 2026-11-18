@@ -290,8 +290,8 @@ describe("job widget derivation", () => {
 		h.ingest();
 		// The stat always has something to say (0 passed); the spark and the failure line do not yet.
 		expect(h.view().blocks).toEqual([{ kind: "stat", items: [{ label: "passed", text: "0" }] }]);
-		out.append("        PASS [   0.012s] pi-natives line_match::tests::named_groups\n");
-		out.append("        FAIL [   0.020s] pi-natives line_match::tests::invalid\n");
+		out.append("        PASS [   0.012s] omp-natives line_match::tests::named_groups\n");
+		out.append("        FAIL [   0.020s] omp-natives line_match::tests::invalid\n");
 		h.ingest();
 		expect(h.view().blocks.map(entry => entry.kind)).toEqual(["stat", "text"]);
 	});
