@@ -579,4 +579,23 @@ describe("HistoryStorage scope filtering", () => {
 		// The resume picker ranks sessions across projects, so this path must stay unscoped.
 		expect(new Set(storage.matchingSessionIds("deploy"))).toEqual(new Set(["s1", "s2"]));
 	});
+
+	it("hides a queued prompt with an empty cwd from directory scopes", async () => {
+		const dir = tempDir!;
+		const fixtures = await createFixtures(dir.path());
+		const storage = HistoryStorage.open(dir.join("history.db"));
+
+		// Deferred writes mean the read path merges the queue in memory before the
+		// row lands; empty spellings are excluded there exactly as the SQL side
+		// excludes them, so visibility must not flip at flush time.
+		await storage.add("empty cwd prompt", "", "s1");
+		await storage.add("normal cwd prompt", fixtures.repoA, "s1");
+		expect(storage.getRecent(10, { kind: "cwd", value: fixtures.repoA }).map(entry => entry.prompt)).toEqual([
+			"normal cwd prompt",
+		]);
+		await storage.flush();
+		expect(storage.getRecent(10, { kind: "cwd", value: fixtures.repoA }).map(entry => entry.prompt)).toEqual([
+			"normal cwd prompt",
+		]);
+	});
 });

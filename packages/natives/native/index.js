@@ -114,6 +114,7 @@ export const ipcEndpoint = nativeBindings.ipcEndpoint ?? missingNativeExport("ip
 export const isoBackend = nativeBindings.isoBackend ?? missingNativeExport("isoBackend");
 export const isoDiff = nativeBindings.isoDiff ?? missingNativeExport("isoDiff");
 export const isoIsUnavailableError = nativeBindings.isoIsUnavailableError ?? missingNativeExport("isoIsUnavailableError");
+export const isolateThreadStartsFromConsole = nativeBindings.isolateThreadStartsFromConsole ?? missingNativeExport("isolateThreadStartsFromConsole");
 export const isoProbe = nativeBindings.isoProbe ?? missingNativeExport("isoProbe");
 export const isoResolve = nativeBindings.isoResolve ?? missingNativeExport("isoResolve");
 export const isoStart = nativeBindings.isoStart ?? missingNativeExport("isoStart");

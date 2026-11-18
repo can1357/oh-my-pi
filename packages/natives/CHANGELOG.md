@@ -16,6 +16,11 @@
 - Fixed cancelling a traced command leaving TERM-ignoring descendants alive after their parent exits, including blocked captured output and descendants that escape into new sessions. Cancellation now retains its pre-TERM identities through hard escalation and refreshes late orphan descendants; ordinary script signals and successful background commands keep their existing behavior ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed Zsh's GNU-profile signal names, function-trap activation and alias identity, and OS handler restoration across local scopes and re-exec. Function copies, enable/disable operations, missing function bodies, and failed handler setup now preserve their distinct trap semantics without losing cleanup errors or cancellation status ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+### Added
+
+- `TtyWriter` now works on Windows consoles: it writes off the JS thread in 16 KiB `WriteFile` chunks, restores the UTF-8 console code pages that child processes change, and `stop()` cancels a blocked write
+- Added `isolateThreadStartsFromConsole()`, which keeps a Windows console whose terminal stopped reading from blocking new threads in the process
+
 ## [18.22.1] - 2026-11-17
 
 ### Added
