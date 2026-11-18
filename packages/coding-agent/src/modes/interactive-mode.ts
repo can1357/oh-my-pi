@@ -1690,11 +1690,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 		);
 		this.#syncJobWidgetsListener();
-		// A subagent's task job draws a widget too, though it counts as no
-		// background job: its widget alone keeps the segment and hover card up.
-		const widgets = this.session.getRunningJobWidgets();
-		const runningJobs = Math.max(this.statusLine.runningBackgroundJobCount(), widgets.length);
-		this.#jobsSegment = jobsSegment(this.#jobsSegment, runningJobs, widgets);
+		// Background jobs only: a job that runs an agent is that agent's, so
+		// neither it nor its widget counts here; the agents segment has it.
+		const background = new Set<string>();
+		for (const job of this.session.getAsyncJobSnapshot()?.running ?? []) {
+			if (job.agentId === undefined) background.add(job.id);
+		}
+		const widgets = this.session.getRunningJobWidgets().filter(entry => background.has(entry.id));
+		this.#jobsSegment = jobsSegment(this.#jobsSegment, background.size, widgets);
 		const segments: NativeChild[] = [];
 		if (this.#agentsSegment) segments.push(this.#agentsSegment.node);
 		if (this.#jobsSegment) segments.push(this.#jobsSegment.node);
