@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Custom message payloads accept `excludeFromContext`, kept through normalization and when a saved entry is restored ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
+
 ### Fixed
 
 - In Tern, typing `->` or `=>` in the composer no longer moves the caret to a new line; the queued message continues on the same line
@@ -39,11 +43,6 @@
 - Images in Ask forms now render correctly in Kitty-protocol terminals, including Kitty, Ghostty, and herdr.
 - Fixed model mentions followed by punctuation so they become editable chips without consuming the punctuation.
 - Fixed /copy to copy the visible prose from mid-turn out:// replies, including replies sent by commands, instead of the tool's internal result text.
-- Ask form pictures in WebP, JPEG or GIF now show in Kitty-protocol terminals (Kitty, Ghostty, herdr) instead of leaving a blank gap ([#19512](https://github.com/can1357/oh-my-pi/pull/19512) by [@jaredlyon](https://github.com/jaredlyon))
-- Model mentions followed by punctuation collapse into editable chips without swallowing the punctuation ([#19445](https://github.com/can1357/oh-my-pi/pull/19445) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- `/copy` copies the prose a mid-turn `out://` reply showed, including a reply a command sent in its result, instead of the reply tool's own "Shown to the user." result ([#19551](https://github.com/can1357/oh-my-pi/pull/19551) by [@bannert1337](https://github.com/bannert1337))
-- Fixed tables in Ask forms cutting long cells off with an ellipsis and dropping their `<br>` lines; cells now wrap within their column ([#19506](https://github.com/can1357/oh-my-pi/issues/19506))
-- Custom message payloads accept `excludeFromContext`, kept through normalization and when a saved entry is restored ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
 
 ## [18.22.0] - 2026-11-16
 
