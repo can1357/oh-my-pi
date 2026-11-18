@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [18.22.2] - 2026-11-18
+
+### Added
+
+- `ui.loop-blocked` log records now name what held the event loop (`cause`, `causeShare`, `top`), sampled by an always-on profiler; `PI_LOOP_SAMPLER=0` turns it off
+
+### Changed
+
+- On Windows, terminal output is written off the JS thread, so input and rendering stay responsive while the console drains a large repaint
+
+### Fixed
+
+- On Windows, omp no longer freezes when the terminal stops reading its output (a hung Windows Terminal, a paused ssh client); it keeps running and catches up once the terminal reads again
+
 ## [18.22.1] - 2026-11-17
 
 ### Added
