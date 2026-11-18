@@ -41,6 +41,7 @@ mod quoting_style;
 #[cfg(any(
 	feature = "util.awk",
 	feature = "util.date",
+	feature = "util.direnv",
 	feature = "util.du",
 	feature = "util.file",
 	feature = "util.ls",
@@ -115,6 +116,8 @@ mod dd;
 mod df;
 #[cfg(feature = "util.diff")]
 mod diff;
+#[cfg(feature = "util.direnv")]
+mod direnv;
 #[cfg(feature = "util.dirname")]
 mod dirname;
 #[cfg(feature = "util.du")]

@@ -53,6 +53,7 @@ macro_rules! for_each_extra {
 			utility [feature = "util.dd"] "dd" dd::Dd;
 			utility [feature = "util.df"] "df" df::Df;
 			utility [feature = "util.diff"] "diff" diff::Diff;
+			utility [feature = "util.direnv"] "direnv" direnv::Direnv;
 			utility [feature = "util.dirname"] "dirname" dirname::Dirname;
 			utility [feature = "util.du"] "du" du::Du;
 			utility [feature = "util.env"] "env" env::Env;

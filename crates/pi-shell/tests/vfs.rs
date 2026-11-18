@@ -1076,3 +1076,26 @@ async fn url_spawn_and_output_pumps_run_on_a_current_thread_runtime() {
 	assert_eq!(run.status, Some(0), "{}", run.stderr);
 	assert!(run.stdout.ends_with("a.txt\nlate\n"), "{}", run.stdout);
 }
+
+/// `direnv exec` runs its command in the shell, not as a program of its own:
+/// the command it starts from an allowed `.envrc`'s environment still opens
+/// provider URLs, which no spawned process could.
+#[cfg(unix)]
+#[tokio::test]
+async fn direnv_exec_commands_open_provider_urls() {
+	let provider_root = tempfile::tempdir().expect("isolated provider filesystem");
+	fs::write(provider_root.path().join("a.txt"), b"alpha\n").expect("document");
+	let host = tempfile::tempdir().expect("host working directory");
+	fs::write(host.path().join(".envrc"), "export GREETING=hello\n").expect(".envrc");
+	let run = run_script(
+		provider(provider_root.path(), true),
+		Some(host.path()),
+		"export HOME=\"$PWD/home\" XDG_DATA_HOME=\"$PWD/data\" XDG_CONFIG_HOME=\"$PWD/config\" \
+		 XDG_CACHE_HOME=\"$PWD/cache\"\nunset DIRENV_DIFF DIRENV_DIR DIRENV_FILE DIRENV_WATCHES \
+		 DIRENV_CONFIG DIRENV_EXE_PATH\ndirenv allow && direnv exec . cat virtual://a.txt && direnv \
+		 exec . printenv GREETING",
+	)
+	.await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	assert_eq!(run.stdout, "alpha\nhello\n");
+}

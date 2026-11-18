@@ -6591,6 +6591,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "toml",
  "uucore",
  "uutils_term_grid",
  "windows-sys 0.61.2",

@@ -336,6 +336,7 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		"dd",
 		"df",
 		"diff",
+		"direnv",
 		"dirname",
 		"du",
 		"env",

@@ -11,6 +11,7 @@ use super::*;
 use crate::proctree;
 
 mod builtins;
+mod direnv;
 mod env_cwd;
 mod process_control;
 mod redirections;

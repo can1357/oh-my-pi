@@ -98,6 +98,8 @@ smallvec.workspace = true
 # `jq` evaluates on a grown stack and bounds its recursion by the stack left.
 stacker = "0.1.25"
 tempfile = "3.15.0"
+# `direnv`: `direnv.toml`.
+toml = { workspace = true, optional = true }
 tokio-util = "0.7"
 xutf.workspace = true
 libc = "0.2.172"
@@ -241,6 +243,7 @@ default = ["utils"]
 "util.dd" = []
 "util.df" = []
 "util.diff" = []
+"util.direnv" = ["dep:toml"]
 "util.dirname" = []
 "util.du" = []
 "util.env" = []
@@ -343,6 +346,7 @@ utils = [
   "util.dd",
   "util.df",
   "util.diff",
+  "util.direnv",
   "util.dirname",
   "util.du",
   "util.env",
