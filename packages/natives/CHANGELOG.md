@@ -2,22 +2,23 @@
 
 ## [Unreleased]
 
-### Changed
-
-- Typing on iPhone Mirroring is about twice as fast (about 150 ms per character instead of 290), and key presses there are quicker ([#17897](https://github.com/can1357/oh-my-pi/pull/17897) by [@will-bogusz](https://github.com/will-bogusz))
 ### Added
 
-- `VcsGitRepo.worktreeToGit()` converts worktree content to the blob `git add` would store
-- `ShellOptions.process` makes a `Shell` the process's own shell: its commands run over the process's stdin, stdout and stderr, and externals stay in its session and terminal
-- `ShellRunOptions.speech` bridges the host's speech handler to the shell's `say`.
-- In-process `file` shell builtin, a port of file 5.41 with its magic database that prints what the system tool prints (text encodings and line terminators, scripts, ELF linkage/interpreter/BuildID, Mach-O incl. per-architecture lines on macOS, archives, images, documents), with the flags `-b -i/-I --mime-type --mime-encoding --extension --apple -L -h -z -Z -E -e --exclude-quiet -f -F -0 -N -n -p -r -s -k -m -P -S -d --help -v`
+- Added `VcsGitRepo.worktreeToGit()` to convert worktree content into the blob representation produced by `git add`.
+- Added support for using a `Shell` as a process's shell, routing commands through the process's standard streams while preserving the process session and terminal for external commands.
+- Added `ShellRunOptions.speech` to connect the host speech handler to the shell's `say` command.
+- Added an in-process `file` shell builtin with broad file-type detection, MIME and encoding output, archive/image/document support, and compatibility with the commonly used `file` command options.
+
+### Changed
+
+- Improved typing and key-press responsiveness in iPhone Mirroring, reducing per-character latency by approximately half.
 
 ### Fixed
 
-- Fixed screenshots of a Linux window partly off its monitor: Wayland labelled the visible part with the whole window's coordinates, so zoom regions landed off target, and X11 failed with "resized since capture"; both now capture the visible part ([#19596](https://github.com/can1357/oh-my-pi/pull/19596) by [@Deftera186](https://github.com/Deftera186) and [@will-bogusz](https://github.com/will-bogusz))
-- Fixed Wayland pointer and keyboard calls on a desktop with no input route, such as Hyprland without a RemoteDesktop portal, asking for a screenshot first or opening a screen capture before refusing: every one now refuses at once with `PermissionDenied` naming the missing route ([#19629](https://github.com/can1357/oh-my-pi/pull/19629) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed macOS `computer` background clicks, keys and pop-up menu actions, and any takeover call, leaving the target window in front of your windows until you moved it: the window you were typing in goes back in front of it within the call (your other windows it covered stay behind it) ([#19532](https://github.com/can1357/oh-my-pi/pull/19532) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed a read of a macOS popup button right after a `computer` letter key showing the option from before the key; the read now waits for the option the letters choose ([#19516](https://github.com/can1357/oh-my-pi/pull/19516) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed screenshots of partially off-screen Linux windows on Wayland and X11 so the visible region is captured and coordinate-based zoom targets correctly.
+- Fixed Wayland input operations on desktops without an available input route to fail immediately with a clear `PermissionDenied` error instead of attempting unnecessary screen capture first.
+- Fixed macOS `computer` interactions so background clicks, key presses, pop-up menu actions, and takeover calls restore the previously active window within the call.
+- Fixed macOS pop-up menu reads immediately after typing so they reflect the option selected by the entered letters.
 
 ## [18.22.2] - 2026-11-18
 
