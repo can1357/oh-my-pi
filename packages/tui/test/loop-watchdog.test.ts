@@ -1,4 +1,4 @@
-import { samplingProfilerStackTraces } from "bun:jsc";
+import * as jsc from "bun:jsc";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import {
 	createJscLoopSampler,
@@ -719,19 +719,32 @@ describe("LoopWatchdog with the JSC sampler", () => {
 		expect(named).toContain("blockLoopInSamplerProbe");
 	});
 
-	test.skipIf(createJscLoopSampler() === null)("stops the profiler once the last running watchdog stops", () => {
+	test.skipIf(createJscLoopSampler() === null)("pauses the profiler once the last running watchdog stops", () => {
+		const startProfiler = vi.spyOn(jsc, "startSamplingProfiler");
+		const pauseProfiler = vi.spyOn(jsc, "profile");
 		const schedule = () => ({});
 		const first = new LoopWatchdog({ schedule });
 		const second = new LoopWatchdog({ schedule });
 		first.start();
 		second.start();
-		first.stop();
+		expect(startProfiler).toHaveBeenCalledTimes(1);
 		// The profiler is process-wide: it keeps sampling for the watchdog still running.
-		while (samplingProfilerStackTraces().traces.length === 0) blockLoopInSamplerProbe(10);
+		first.stop();
+		expect(pauseProfiler).not.toHaveBeenCalled();
 		second.stop();
-		// A sample left in the profiler's buffer keeps the functions on its stack from being collected.
+		expect(pauseProfiler).toHaveBeenCalledTimes(1);
+		// A sample left in the buffer keeps the functions on its stack from being collected.
 		blockLoopInSamplerProbe(50);
-		expect(samplingProfilerStackTraces().traces).toEqual([]);
+		expect(jsc.samplingProfilerStackTraces().traces).toEqual([]);
+
+		first.start();
+		expect(startProfiler).toHaveBeenCalledTimes(2);
+		try {
+			// A paused profiler records again once restarted.
+			while (jsc.samplingProfilerStackTraces().traces.length === 0) blockLoopInSamplerProbe(10);
+		} finally {
+			first.stop();
+		}
 	});
 });
 

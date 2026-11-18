@@ -33,6 +33,7 @@
 - Fixed checkbox groups so pressing Enter with nothing selected first checks the focused box.
 - Ask forms now open each question with its preselected answer, allowing Enter to accept the recommendation without replacing it.
 - The stack profiler behind `ui.loop-blocked` stops while no TUI runs (an external editor, after the session ends) instead of sampling the JS thread every millisecond for the rest of the process
+- Loop-stall diagnostics (`ui.loop-blocked`) no longer sample the JS thread while no TUI runs, such as in an external editor or after the session ends
 - In Tern, a "Background job output" notice shows the job's output lines beneath one header, in full, instead of one info-icon row per line cut at 110 columns
 - In Tern, typing `->` or `=>` in the composer no longer moves the caret to a new line; the queued message continues on the same line
 - Web search results without a synthesized answer (e.g. Parallel) list each source once with a short cleaned excerpt instead of rendering the model-facing numbered listing as markdown
