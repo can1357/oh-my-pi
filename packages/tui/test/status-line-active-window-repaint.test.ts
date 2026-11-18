@@ -232,3 +232,35 @@ describe("status line spinner redraw", () => {
 		component.dispose();
 	});
 });
+
+/**
+ * Contract: a spinner frame inside one second redraws only the brand glyph, and
+ * the line it yields is byte-for-byte the line a full rebuild draws at that
+ * moment, in every layout that embeds the brand.
+ */
+describe("status line spinner redraw", () => {
+	beforeAll(async () => {
+		await initTheme();
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("matches a full rebuild on every spinner frame, across the turn timer's seconds", () => {
+		vi.useFakeTimers({ now: 10_000 });
+		const component = new StatusLineComponent(createSession(true), createHost());
+		component.markActivityStart();
+		const lines = new Set<string>();
+		for (let frame = 0; frame < 30; frame++) {
+			const followed = [component.getBandTopBorder(100).content, component.getTopBorder(100).content];
+			// invalidate() forces the full rebuild the redraw must reproduce, at the same instant.
+			component.invalidate();
+			expect(followed).toEqual([component.getBandTopBorder(100).content, component.getTopBorder(100).content]);
+			lines.add(followed[0]!);
+			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS);
+		}
+		// The spinner moved: these were redraws, not one cached line.
+		expect(lines.size).toBeGreaterThan(3);
+		component.dispose();
+	});
+});

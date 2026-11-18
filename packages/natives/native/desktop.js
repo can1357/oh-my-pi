@@ -38,3 +38,11 @@ export function closeDesktopEventTaps() {
 export function desktopWindowRoster() {
 	return (loadNative().desktopWindowRoster ?? missingNativeExport("desktopWindowRoster"))();
 }
+
+/**
+ * Sample every on-screen window, popup menus and system panels included,
+ * loading the native addon on first use. Needs no desktop session.
+ */
+export function desktopWindowRoster() {
+	return (loadNative().desktopWindowRoster ?? missingNativeExport("desktopWindowRoster"))();
+}
