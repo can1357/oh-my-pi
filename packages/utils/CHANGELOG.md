@@ -101,7 +101,7 @@
 ## [18.13.3] - 2026-10-28
 ### Added
 
-- `getTempRoot()`, `tempSubpath()`, `mkdtempInTempRoot()` and `mkdtempInTempRootSync()`, which place omp's temp paths under `<os temp>/omp/` instead of beside it ([#17274](https://github.com/can1357/oh-my-pi/pull/17274) by [@iacore](https://github.com/iacore))
+- `getTempRoot()`, `tempSubpath()`, `mkdtempInTempRoot()` and `mkdtempInTempRootSync()`, which place omp's temp paths under `<os temp>/omp-<uid>/` instead of beside it ([#17274](https://github.com/can1357/oh-my-pi/pull/17274) by [@iacore](https://github.com/iacore))
 
 ### Changed
 
