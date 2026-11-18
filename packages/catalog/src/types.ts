@@ -18,6 +18,7 @@ export type KnownApi =
 	| "google-generative-ai"
 	| "google-gemini-cli"
 	| "google-vertex"
+	| "kiro-api"
 	| "ollama-chat"
 	| "cursor-agent"
 	| "factory-droid-agent"

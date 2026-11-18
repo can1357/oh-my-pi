@@ -50,6 +50,7 @@ import { getVertexAccessToken } from "./providers/google-auth";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import { streamKimi } from "./providers/kimi";
+import type { KiroOptions } from "./providers/kiro/stream";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import { usesOpenCodeClientIdentity, withOpenCodeFreeSystemPrompt } from "./providers/opencode-free";
@@ -66,6 +67,7 @@ import {
 	streamGoogle,
 	streamGoogleGeminiCli,
 	streamGoogleVertex,
+	streamKiro,
 	streamOllama,
 	streamOpenAICodexResponses,
 	streamOpenAICompletions,
@@ -89,6 +91,7 @@ import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
+import { withResolvedHeaders } from "./utils/model-headers";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
 import { withTransportFetch } from "./utils/transport-fetch";
 
@@ -845,15 +848,12 @@ function withResolvedModelHeaders<TApi extends Api>(
 	signal: AbortSignal | undefined,
 	run: (resolvedModel: Model<TApi>) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
-	const resolveHeaders = model.resolveHeaders;
-	if (!resolveHeaders) return run(model);
+	if (!model.resolveHeaders) return run(model);
 
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
 		try {
-			const headers = await untilAborted(signal, () => resolveHeaders(signal));
-			signal?.throwIfAborted();
-			const inner = run({ ...model, resolveHeaders: undefined, headers: headers ? { ...headers } : undefined });
+			const inner = run(await withResolvedHeaders(model, signal));
 			for await (const event of inner) {
 				outer.push(event);
 				if (outer.done) return;
@@ -1025,6 +1025,9 @@ function streamDispatch<TApi extends Api>(
 
 		case "ollama-chat":
 			return streamOllama(providerModel as Model<"ollama-chat">, context, providerOptions as OllamaChatOptions);
+
+		case "kiro-api":
+			return streamKiro(providerModel as Model<"kiro-api">, context, providerOptions as KiroOptions);
 
 		case "cursor-agent":
 			return streamCursor(providerModel as Model<"cursor-agent">, context, providerOptions as CursorOptions);
@@ -2360,6 +2363,14 @@ function mapOptionsForApi<TApi extends Api>(
 				reasoning: resolveOpenAiReasoningEffort(model, options),
 				disableReasoning: options?.disableReasoning,
 				toolChoice: options?.toolChoice,
+			});
+
+		case "kiro-api":
+			return castApi<"kiro-api">({
+				...base,
+				reasoning: options?.reasoning,
+				disableReasoning: options?.disableReasoning,
+				hideThinkingSummary: options?.hideThinkingSummary,
 			});
 
 		case "cursor-agent": {

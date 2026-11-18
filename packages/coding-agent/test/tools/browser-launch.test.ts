@@ -148,7 +148,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("process-local headless launch", () => {
 			expect(await worker.version()).toBe(await browser.version());
 			worker.disconnect();
 		} finally {
-			await closeLaunchedBrowser(browser);
+			await closeLaunchedBrowser({ browser, userDataDir });
 			if (userDataDir) await removeUserDataDir(userDataDir);
 		}
 	}, 30_000);
