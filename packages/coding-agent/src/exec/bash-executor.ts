@@ -950,6 +950,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	}
 
 	let resetSession = false;
+	let completedResult: BashResult | undefined;
 	// Set when the command returns before its native run settled.
 	let unsettled: { run: Promise<ShellRunResult>; cleanup: Promise<void> } | undefined;
 	const runTrace = options?.onTrace ? new RunTrace(finalCommand) : undefined;
@@ -1084,28 +1085,17 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			}
 		}
 
-		// Normal completion. A shell the settle path drops — a per-job
-		// `:async:` shell, one whose agent session was left or switched
-		// while the call ran (`isSessionCurrent` false), or one a release
-		// already replaced in the map — never carries its options to a
-		// later call: report it as the ephemeral shell it is (the notice
-		// then makes no persistence claim).
-		const ephemeralShell =
-			shellSession === undefined ||
-			options?.sessionKey?.includes(":async:") === true ||
-			options?.isSessionCurrent?.() === false ||
-			shellSessions.get(sessionKey) !== shellSession;
-		return {
+		completedResult = {
 			exitCode: winner.result.exitCode,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
 			endedByExit: winner.result.endedByExit === true,
-			ephemeralShell,
 			...(minimizedMeta ? { minimized: minimizedMeta } : {}),
 			...settleTrace(),
 			...(await settleFork()),
 			...(await dump()),
 		};
+		return completedResult;
 	} catch (err) {
 		resetSession = true;
 		throw err;
@@ -1125,6 +1115,12 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			} else {
 				await releasePersistentShell(release, { reset: resetSession });
 			}
+		}
+		if (completedResult) {
+			// Finalize attribution after output cleanup and shell release:
+			// either can yield while the owning session is left or released.
+			// Inspect actual retention rather than predicting that decision.
+			completedResult.ephemeralShell = shellSession === undefined || shellSessions.get(sessionKey) !== shellSession;
 		}
 	}
 }

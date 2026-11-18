@@ -1404,17 +1404,18 @@ async fn run_shell_command_segmented_chain(
 		let keep_running = !command_run.outcome.exited && !scope.cancel.is_cancelled();
 		last_status = Some(exit);
 		if !keep_running {
-			// The abort hid statements only when input remained: commands
-			// after the abort in its own segment, or a later segment that
-			// would still have run. An `exit` on the last input that would
-			// run ends the command exactly where it would have ended anyway.
+			// A suppressed segment already contains `&& :`: its continuation
+			// walk decides whether any conditional successor would run, even
+			// when a function's final `!` changes its outgoing status. Only
+			// unconditional later segments add input outside that walk; the
+			// raw exit status is not the counterfactual continuation status.
 			ended_by_exit = command_run.outcome.exited
 				&& command_run.outcome.exit_cause == Some(crate::bash::ExitCause::Exit)
 				&& !scope.cancel.is_cancelled()
 				&& (command_run.outcome.cut_short
 					|| segments
 						.by_ref()
-						.any(|segment| !segment.run_if_previous_succeeded || previous_succeeded));
+						.any(|segment| !segment.run_if_previous_succeeded));
 			break;
 		}
 	}

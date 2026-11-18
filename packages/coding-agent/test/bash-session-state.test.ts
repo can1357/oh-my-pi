@@ -6,7 +6,7 @@
  * session is pinned in `crates/pi-shell` (`exit_and_errexit_keep_session_state`):
  * pull-request CI runs these tests against main's native addon.
  */
-import { afterEach, beforeEach, expect, it } from "bun:test";
+import { afterEach, beforeEach, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -14,6 +14,7 @@ import { AsyncJobManager } from "../src/async";
 import { Settings } from "../src/config/settings";
 import { executeBash, releaseShellSessions, __test } from "../src/exec/bash-executor";
 import { Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
+import { OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../src/tools";
 import { BashTool } from "../src/tools/bash";
 
@@ -283,6 +284,44 @@ it("classifies a session-left owner shell as ephemeral", async () => {
 		__test.run = undefined;
 	}
 });
+
+it.each(["keep", "leave", "release"] as const)(
+	"classifies actual shell retention when the session changes during output cleanup (%s)",
+	async transition => {
+		let current = true;
+		let firstShell: Shell | undefined;
+		let lastShell: Shell | undefined;
+		__test.run = shell => {
+			firstShell ??= shell;
+			lastShell = shell;
+			return Promise.resolve(nativeResult({ endedByExit: true }));
+		};
+		const dispose = OutputSink.prototype.dispose;
+		const spy = vi.spyOn(OutputSink.prototype, "dispose").mockImplementation(async function (this: OutputSink) {
+			// Native completion is not the end of the call: output disposal
+			// still yields before the persistent-shell release decision.
+			if (transition === "leave") current = false;
+			if (transition === "release") releaseShellSessions(cwd);
+			await dispose.call(this);
+		});
+		try {
+			const result = await executeBash("exit 0; printf never", {
+				minimize: false,
+				sessionKey: cwd,
+				isSessionCurrent: () => current,
+			});
+			spy.mockRestore();
+			await executeBash("true", { minimize: false, sessionKey: cwd });
+			// Pin actual retention, not merely the callback's return value.
+			expect(lastShell === firstShell).toBe(transition === "keep");
+			expect(result.endedByExit).toBe(true);
+			expect(result.ephemeralShell).toBe(transition !== "keep");
+		} finally {
+			spy.mockRestore();
+			__test.run = undefined;
+		}
+	},
+);
 
 // Probe the raw native result shape on a natural end, not the behavior being tested.
 const hasNativeExitFlag = Object.hasOwn(await new Shell().run({ command: "true" }), "endedByExit");

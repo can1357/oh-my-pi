@@ -3993,6 +3993,11 @@ fn settle_builtin(
 	chunks: Vec<Chunk>,
 	fatal: bool,
 ) -> Option<Flow> {
+	// Only the actual exit/logout transfer is an explicit exit. Other
+	// builtin exits (bad break arguments, curses initialization, or the
+	// POSIX conversions below) are fatal errors, even for `exit` itself.
+	let explicit_exit = matches!(outcome.control, Control::Exit)
+		&& matches!(id, IntrinsicId::Exit | IntrinsicId::Logout);
 	// A special builtin's usage error ends a posix shell.
 	if fatal
 		&& outcome.status != 0
@@ -4018,6 +4023,18 @@ fn settle_builtin(
 			outcome.status = 1;
 			outcome.control = Control::Exit;
 		}
+	}
+	if matches!(outcome.control, Control::Exit) && !explicit_exit {
+		let unrun = vp.frames.last().map_or(0, |f| f.pc + 1);
+		exec::capture_exit_report(
+			k,
+			vp,
+			cx,
+			outcome.status,
+			unrun,
+			exec::ExitCause::PosixFatal,
+			false,
+		);
 	}
 	for c in chunks {
 		let (fd, bytes) = match c {

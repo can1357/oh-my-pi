@@ -637,18 +637,24 @@ fn starts_command(unit: &Unit, op: Op) -> bool {
 	}
 }
 
-/// Whether the unparsed remainder of a script frame's source holds any more
-/// command: whitespace and comment-only tails do not count.
-fn script_has_command(src: &[u8], from: usize) -> bool {
-	let mut i = from.min(src.len());
-	while i < src.len() {
-		match src[i] {
+/// Whether unread script bytes hold another command. Alias text precedes
+/// source text, even when a comment or line continuation spans that boundary.
+/// Match the lexer: only space, tab, newline and escaped newline are trivia.
+fn script_has_command(src: impl Iterator<Item = u8>) -> bool {
+	let mut bytes = src.peekable();
+	while let Some(b) = bytes.next() {
+		match b {
 			b'#' => {
-				while i < src.len() && src[i] != b'\n' {
-					i += 1;
+				for b in bytes.by_ref() {
+					if b == b'\n' {
+						break;
+					}
 				}
 			},
-			b if b.is_ascii_whitespace() => i += 1,
+			b' ' | 0x09 | b'\n' => {},
+			b'\\' if bytes.peek() == Some(&b'\n') => {
+				bytes.next();
+			},
 			_ => return true,
 		}
 	}
@@ -833,14 +839,15 @@ fn frame_continuation(
 		// (jump target when the op can leave the linear flow, whether the
 		// next op also runs). Unconditional jumps lose the fall-through;
 		// terminators have neither.
-		// A loop's test branch with a runtime-only condition (an
-		// arithmetic or `[[ ]]` test) resolves to its exit when the walk
-		// cannot know the value: the exit restores the body status the
-		// loop record already holds, and re-entering the body cannot
-		// introduce commands the exit had not already passed.
-		let test_exits = |target: u32| {
+		// Unknown tests keep both branches for a first header: its body
+		// may not have started. After a completed iteration, the live
+		// record proves that walking the body would replay old input.
+		let repeats_body = |target: u32| {
 			ops.get(target as usize)
-				.is_some_and(|t| t.code == Opcode::LoopExit)
+				.is_some_and(|op| op.code == Opcode::LoopExit)
+				&& runtime_loops
+					.iter()
+					.any(|rec| rec.exit == target && rec.iterations > 0)
 		};
 		let (target, falls_through) = match op.code {
 			// A backward jump is iteration machinery, not new input. Its
@@ -854,13 +861,13 @@ fn frame_continuation(
 			Opcode::BrOk => match branch_zero {
 				Some(true) => (Some(op.a), false),
 				Some(false) => (None, true),
-				None if test_exits(op.a) => (Some(op.a), false),
+				None if repeats_body(op.a) => (Some(op.a), false),
 				None => (Some(op.a), true),
 			},
 			Opcode::BrFail => match branch_zero {
 				Some(true) => (None, true),
 				Some(false) => (Some(op.a), false),
-				None if test_exits(op.a) => (Some(op.a), false),
+				None if repeats_body(op.a) => (Some(op.a), false),
 				None => (Some(op.a), true),
 			},
 			Opcode::ForNext => (Some(op.a), true),
@@ -911,14 +918,10 @@ fn exit_cut_short(
 	// a status-setting composite inside the function flips what the `&&`
 	// after the call sees.
 	let mut status = WalkStatus::of(status);
-	// Only a DEBUG (before each command) or ERR (after a failing command)
-	// trap preempts a victim mid-stream — as does a signal trap, delivered
-	// after the current command completes, before the next runs —: when
-	// its frame ends, the frame below resumes at the very pc it was
-	// preempted on. Other trap kinds unwind (`RETURN`/`EXIT` run while the
-	// frame is already leaving, its last command executed), and every
-	// non-trap frame (a function call, an eval/source) resumes after the
-	// call op that led here.
+	// DEBUG/ERR/signal traps resume the victim at its parked op; ordinary
+	// function/eval/source calls resume after their completed call. Expansion
+	// frames also park the parent op (NoFork, zsh hooks and math functions),
+	// as identified by its pending substitution rather than its frame kind.
 	let resumes_in_place = |kind: &FrameKind| {
 		matches!(kind, FrameKind::Script {
 			what: ScriptKind::Trap { key: TrapKey::Debug | TrapKey::Err | TrapKey::Signal(_), .. },
@@ -926,16 +929,33 @@ fn exit_cut_short(
 		})
 	};
 	let mut resume_at_pc = false;
-	for (i, frame) in vp.frames.iter().rev().enumerate() {
-		if let FrameKind::Script { src, pos, .. } = &frame.kind
-			&& script_has_command(src.as_ref(), pos.0 as usize)
-		{
-			return true;
+	let mut unwind_to = None;
+	for (index, frame) in vp.frames.iter().enumerate().rev() {
+		// A RETURN trap already committed these frames to unwind. Neither
+		// their current bytecode nor their unparsed text will run again.
+		if unwind_to.is_some_and(|keep| index >= keep) {
+			continue;
+		}
+		unwind_to = None;
+		if let FrameKind::Script { src, pos, aux, .. } = &frame.kind {
+			let pending = aux
+				.as_deref()
+				.and_then(|a| a.pending.as_ref())
+				.map_or(&[][..], |p| p.0.as_slice());
+			if script_has_command(pending.iter().chain(src[pos.0 as usize..].iter()).copied()) {
+				return true;
+			}
 		}
 		if let Some(unit) = frame.unit.as_ref() {
-			let from = if i == 0 {
+			let expanding = frame.scratch.as_ref().is_some_and(|sc| {
+				matches!(
+					sc.sub,
+					Some(PendingSub::NoFork { .. } | PendingSub::Here { .. } | PendingSub::Math { .. })
+				)
+			});
+			let from = if index + 1 == vp.frames.len() {
 				top_from as usize
-			} else if resume_at_pc {
+			} else if resume_at_pc || expanding {
 				frame.pc as usize
 			} else if let Some(op) = unit.ops.get(frame.pc as usize)
 				&& op.code == Opcode::Spawn
@@ -970,8 +990,12 @@ fn exit_cut_short(
 		resume_at_pc = resumes_in_place(&frame.kind);
 		// A trap restores the interrupted status even when its carrier
 		// has no unit (zsh function traps run above an empty script).
-		if let FrameKind::Script { what: ScriptKind::Trap { status: kept, .. }, .. } = &frame.kind {
+		if let FrameKind::Script {
+			what: ScriptKind::Trap { status: kept, return_target, .. }, ..
+		} = &frame.kind
+		{
 			status = WalkStatus::of(*kept);
+			unwind_to = *return_target;
 		}
 	}
 	false
@@ -6009,6 +6033,56 @@ fn run_func_trap(
 mod tests {
 	use super::*;
 	use crate::bash::fd::FdTable;
+
+	#[test]
+	fn exit_classification_parked_expansions_resume_parent_command() {
+		// NoFork/Here/Math leave the parent Exec unfinished. Ordinary
+		// completed calls resume after it; a forked substitution owns no
+		// frames in this vproc. Do not infer resumption from the child's
+		// kind: zsh math calls use ordinary function frames.
+		for (pending, expected) in [
+			(None, false),
+			(Some(PendingSub::Fork { vpid: Vpid(2), capture: Capture::default() }), false),
+			(Some(PendingSub::NoFork { capture: Capture::default(), value: false }), true),
+			(Some(PendingSub::NoFork { capture: Capture::default(), value: true }), true),
+			(Some(PendingSub::Here { status: 0 }), true),
+			(Some(PendingSub::Math { status: 1, slot: Slot::Words }), true),
+		] {
+			let mut vp =
+				Vproc::new(Vpid(1), None, FdTable::default(), BString::from("/"), None, false);
+			let unit = Arc::new(ir::asm::asm("0 Exec\n1 End").unwrap());
+			let mut parent = Frame::new(Some(Arc::clone(&unit)), 0, FrameKind::Subshell);
+			parent.scratch = Some(Box::new(Scratch { sub: pending, ..Default::default() }));
+			vp.frames.push(parent);
+			vp.frames
+				.push(Frame::new(Some(unit), 0, FrameKind::Function {
+					name:     BString::from("callee"),
+					zsh:      true,
+					autoload: false,
+				}));
+			assert_eq!(exit_cut_short(&vp, 1, 0, false, false, |_| None), expected);
+		}
+	}
+
+	#[test]
+	fn exit_classification_alias_and_source_trivia_share_lexer_state() {
+		// The lexer reads pending alias bytes before source bytes. A
+		// comment/escaped newline may start in one and finish in the other.
+		for (alias, source, expected) in [
+			("# comment", "printf hidden", false),
+			("# comment", "\nprintf unrun", true),
+			("\\", "\n", false),
+			("\\", "\nprintf unrun", true),
+			(" ", "# comment", false),
+			("\\#literal", "", true),
+		] {
+			assert_eq!(
+				script_has_command(alias.bytes().chain(source.bytes())),
+				expected,
+				"alias={alias:?}, source={source:?}"
+			);
+		}
+	}
 
 	#[test]
 	fn exit_classification_trap_carriers_restore_status_with_or_without_a_unit() {
