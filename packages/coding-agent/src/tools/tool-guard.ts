@@ -4,7 +4,8 @@
  * One judgment asks two questions over the session: a choice of what the call would do (`routine`, a
  * named risk, or `unclear`) and a yes/no on whether the user asked for it. The call is refused when
  * the named risks together reach `tools.guard.riskThreshold` and the asked probability stays below
- * `tools.guard.askedThreshold`. Any judge failure, timeout or malformed answer lets the call through.
+ * `tools.guard.askedThreshold`. Any judge failure, timeout or malformed answer lets the call through;
+ * a call aborted while it is judged never runs.
  *
  * Calls that cannot do harm never reach the judge: read-tier tools, writes inside the working
  * directory, shell commands made only of reading commands, and web search. The design, wording and
@@ -95,8 +96,13 @@ const UNJUDGED_TOOLS = wordTable("web_search task");
 const READ_ONLY_COMMANDS = wordTable(
 	"cat head tail ls pwd echo printf wc grep egrep fgrep which whereis type file stat du df cut tr nl diff cmp " +
 		"basename dirname realpath readlink date whoami id uname hostname true false cd test [ column jq comm paste " +
-		"fold rev seq md5sum sha1sum sha256sum shasum md5 sleep uniq set export unset pushd popd tree pdfinfo",
+		"fold rev seq md5sum sha1sum sha256sum shasum md5 sleep uniq pushd popd tree pdfinfo",
 );
+/** `tree` options that write files: `-o FILE`, also inside a cluster (`-ao FILE`), and `-R`, which reruns tree with `-o 00Tree.html` in each directory. */
+const TREE_WRITES = /^-[^-]*[oR]/;
+/** `set` flags that change only how the shell stops on errors and traces, with `-o` naming one of {@link SET_NAMED_OPTIONS}. */
+const SET_FLAGS = /^[-+][euxv]*o?$/;
+const SET_NAMED_OPTIONS = wordTable("pipefail errexit nounset xtrace verbose");
 /** Commands that write only where they are told: read-only when every target is inside the working directory. */
 const LOCAL_WRITERS = wordTable("tee mkdir touch");
 const GIT_READS = wordTable(
@@ -198,7 +204,8 @@ interface ShellScope {
 function insideRoot(word: string, scope: ShellScope): boolean {
 	if (!scope.localWrites) return false;
 	const target = resolveWord(word, scope.base);
-	return target !== undefined && pathIsWithin(scope.root, target);
+	// A missing target resolves through its deepest existing parent, so `link/new` lands where `link` points.
+	return target !== undefined && pathIsWithin(scope.root, target, { throughMissing: true });
 }
 
 /** Leading assignments and read-only wrappers removed (`FOO=1 timeout 5 cat x` → `cat x`). */
@@ -254,6 +261,16 @@ function readOnlyGit(args: string[]): boolean {
 	return sub === "reflog" && (positional[0] === undefined || positional[0] === "show");
 }
 
+/** Whether `set` only changes how the shell stops and traces (`set -euo pipefail`); `-a`, `-k` and positional `--` change what later commands see. */
+function readOnlySet(args: string[]): boolean {
+	for (let i = 0; i < args.length; i++) {
+		const flags = args[i];
+		if (flags.length < 2 || !SET_FLAGS.test(flags)) return false;
+		if (flags.endsWith("o") && i + 1 < args.length && !inTable(SET_NAMED_OPTIONS, args[++i])) return false;
+	}
+	return true;
+}
+
 /** Whether one simple command leaves everything outside the working directory as it was. */
 function readOnlySegment(text: string, scope: ShellScope): boolean {
 	const tokens = lexShellCommand(text);
@@ -267,16 +284,15 @@ function readOnlySegment(text: string, scope: ShellScope): boolean {
 			if (target === "") {
 				let next = i + 1;
 				const separator = tokens[next];
-				// `2>&1`: the lexer splits `&` off as a separator; a descriptor copy writes nothing.
-				if (separator?.kind === "separator" && separator.raw.trimStart().startsWith("&")) {
-					i = next + 1;
-					continue;
-				}
+				// The lexer splits `&` off as a separator: `>&1`, `>&-` copy or close a descriptor and write
+				// nothing, while Bash's `>&file` writes the file.
+				const duplicates = separator?.kind === "separator" && separator.raw.trimStart().startsWith("&");
 				if (separator?.kind === "separator") next++;
 				const word = tokens[next];
 				if (word?.kind !== "word") return false;
-				target = word.value;
 				i = next;
+				if (duplicates && /^(?:\d+|-)$/.test(word.value)) continue;
+				target = word.value;
 			}
 			if (!inTable(SAFE_REDIRECT_TARGETS, target) && !insideRoot(target, scope)) return false;
 			continue;
@@ -291,10 +307,13 @@ function readOnlySegment(text: string, scope: ShellScope): boolean {
 		words.push(token.value);
 	}
 	const command = unwrapCommand(words, READ_WRAPPERS);
+	// An assignment (`PATH=/tmp/x git status`, `export PATH=...; git status`) changes which program a
+	// name runs or what it reads, for the command or for the rest of the shell.
+	if (words.slice(0, words.length - command.length).some(isShellEnvironmentAssignment)) return false;
 	const name = command[0];
 	if (name === undefined) return words.length === 0 || command.length === 0;
 	const args = command.slice(1);
-	if (inTable(READ_ONLY_COMMANDS, name)) return !(name === "tree" && args.includes("-o"));
+	if (inTable(READ_ONLY_COMMANDS, name)) return !(name === "tree" && args.some(arg => TREE_WRITES.test(arg)));
 	if (inTable(LOCAL_WRITERS, name)) {
 		return args.filter(arg => !arg.startsWith("-")).every(arg => insideRoot(arg, scope));
 	}
@@ -307,6 +326,8 @@ function readOnlySegment(text: string, scope: ShellScope): boolean {
 			return !args.some(
 				arg => /^-[a-zA-Z]*o/.test(arg) || arg.startsWith("--output") || arg.startsWith("--compress-program"),
 			);
+		case "set":
+			return readOnlySet(args);
 		case "git":
 			return readOnlyGit(args);
 		default:
@@ -573,7 +594,10 @@ export class ToolGuard {
 		}
 		const messages = this.#host.messages();
 		let runKey = 0;
-		for (const message of messages) if (userRole(message) && !message.synthetic) runKey++;
+		// A new request is a user message or a user-invoked `/skill` prompt (a custom message).
+		for (const message of messages) {
+			if (userRole(message) ? !message.synthetic : operatorTitleText(message) !== undefined) runKey++;
+		}
 		if (this.#runKey !== runKey) {
 			this.#runKey = runKey;
 			this.#consecutive = 0;
@@ -650,15 +674,18 @@ export class ToolGuard {
 				this.#host.hostPressure ? this.#host.hostPressure() : readHostPressure(cwd),
 			).catch(() => undefined);
 			if (pressure) state.host = summarizeHostPressure(pressure);
-			const { answers } = await this.#host.judge().judge(
-				{
-					state,
-					questions: {
-						risk: QUESTIONS.risk,
-						asked: renderQuestion(QUESTIONS.asked, { allowances: Boolean(allowances) }),
+			// A judge that ignores its signal still cannot hold the call past the deadline or an abort.
+			const { answers } = await untilAborted(deadline, () =>
+				this.#host.judge().judge(
+					{
+						state,
+						questions: {
+							risk: QUESTIONS.risk,
+							asked: renderQuestion(QUESTIONS.asked, { allowances: Boolean(allowances) }),
+						},
 					},
-				},
-				{ signal: deadline },
+					{ signal: deadline },
+				),
 			);
 			const verdict = guardVerdict(answers, {
 				risk: cfgToolGuardRiskThreshold.get(authority),
@@ -672,12 +699,13 @@ export class ToolGuard {
 			}
 			return verdict;
 		} catch (error) {
+			// A call the user aborted says nothing about the judge, and must not run.
+			if (signal?.aborted) throw error;
 			logger.debug("tool guard: judgment failed, call allowed", {
 				tool: call.toolName,
 				error: error instanceof Error ? error.message : String(error),
 			});
-			// A call the user aborted says nothing about the judge.
-			if (!signal?.aborted) this.#recordJudgeFailure();
+			this.#recordJudgeFailure();
 			return undefined;
 		}
 	}

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, setSystemTime, spyOn, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage, AgentTool, AgentToolContext, ToolTier } from "@oh-my-pi/pi-agent-core";
 import type { JudgmentRequest, Questions } from "@oh-my-pi/pi-ai";
@@ -162,7 +163,7 @@ describe("tool guard", () => {
 			"git log --oneline -5",
 			"git -C sub diff HEAD~1",
 			"find . -name '*.ts'",
-			"FOO=1 timeout 5 rg x",
+			"timeout 5 rg x",
 			"sort -n data.txt",
 		]) {
 			expect(isReadOnlyCommand(command, cwd)).toBe(true);
@@ -196,6 +197,47 @@ describe("tool guard", () => {
 		]) {
 			expect(isReadOnlyCommand(command, cwd)).toBe(false);
 		}
+	});
+
+	it("judges a command that changes the shell environment the next command runs in", () => {
+		for (const command of [
+			"export PATH=/tmp/attacker; git status",
+			"PATH=/tmp/attacker; git status",
+			"PATH=/tmp/attacker git status",
+			"unset GIT_DIR; git status",
+			"set -k; git diff GIT_EXTERNAL_DIFF=/tmp/x.sh",
+		]) {
+			expect(isReadOnlyCommand(command, cwd)).toBe(false);
+		}
+		// Error and trace flags change nothing a command reads.
+		expect(isReadOnlyCommand("set -euo pipefail; git status", cwd)).toBe(true);
+	});
+
+	it("treats `>&file` as a write to the file and `>&N` as a descriptor copy", () => {
+		expect(isReadOnlyCommand("echo overwritten >&/etc/important.conf", cwd)).toBe(false);
+		expect(isReadOnlyCommand("echo overwritten 1>& /etc/important.conf", cwd)).toBe(false);
+		expect(isReadOnlyCommand("echo ok >&2 2>&1 >&-", cwd)).toBe(true);
+		expect(isReadOnlyCommand("echo ok >&notes.txt", cwd)).toBe(true);
+	});
+
+	it("places a new file under a symlinked directory where the link points", () => {
+		const outside = TempDir.createSync("@omp-tool-guard-outside-");
+		try {
+			fs.symlinkSync(outside.path(), path.join(cwd, "link"));
+			fs.mkdirSync(path.join(cwd, "sub"));
+			expect(isReadOnlyCommand("echo data > link/newfile", cwd)).toBe(false);
+			expect(isReadOnlyCommand("touch link/new/deeper", cwd)).toBe(false);
+			expect(isReadOnlyCommand("echo data > sub/newfile", cwd)).toBe(true);
+		} finally {
+			outside.removeSync();
+		}
+	});
+
+	it("judges tree when it writes an output file", () => {
+		for (const command of ["tree -o /etc/important.conf .", "tree -ao /etc/important.conf .", "tree -R -H . /srv"]) {
+			expect(isReadOnlyCommand(command, cwd)).toBe(false);
+		}
+		expect(isReadOnlyCommand("tree -a -L 2 --noreport src", cwd)).toBe(true);
 	});
 
 	it("lets the call through when the judge fails or answers malformed", async () => {
@@ -365,6 +407,116 @@ describe("tool guard", () => {
 		messages.push(userMessage("Try something else."));
 		await guard.check(bash, { command: "rm -rf /srv/other" }, "exec");
 		expect(stops).toHaveLength(1);
+	});
+
+	it("counts again for a new /skill request", async () => {
+		const { guard } = guardWith(fakeJudge({ destroys_data: 1 }, 0));
+		for (let i = 0; i < 2; i++) await guard.check(bash, { command: `rm -rf /srv/db${i}` }, "exec");
+
+		messages.push({
+			role: "custom",
+			customType: "skill-prompt",
+			attribution: "user",
+			content: "The skill's instructions.",
+			display: true,
+			details: { name: "cleanup", args: "the old exports" },
+			timestamp: Date.now(),
+		} as AgentMessage);
+		await guard.check(bash, { command: "rm -rf /srv/other" }, "exec");
+		expect(stops).toEqual([]);
+	});
+
+	it("never runs a call aborted while the judge decides", async () => {
+		const runner = new ExtensionRunner(
+			[],
+			new ExtensionRuntime(),
+			cwd,
+			SessionManager.inMemory(),
+			{} as ModelRegistry,
+		);
+		const controller = new AbortController();
+		// The user aborts mid-judgment; this judge rejects on its signal, as the judge role chain does.
+		const listening: GuardJudge = {
+			judge: (async (_request: unknown, options?: { signal?: AbortSignal }) => {
+				controller.abort();
+				throw options?.signal?.reason ?? new Error("aborted");
+			}) as GuardJudge["judge"],
+		};
+		const { guard, settings } = guardWith(listening, { "tools.guard.enabled": true, "tools.approvalMode": "yolo" });
+		runner.setToolGuard(guard);
+		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ran" }] }));
+		const wrapped = new ExtensionToolWrapper({ ...bash, execute } as AgentTool, runner) as ExtensionToolWrapper<any>;
+
+		await expect(
+			wrapped.execute("call-1", { command: "rm -rf /srv/db" }, controller.signal, undefined, {
+				settings,
+			} as AgentToolContext),
+		).rejects.toThrow();
+		expect(execute).not.toHaveBeenCalled();
+
+		// A judge that ignores its signal cannot hold an aborted call either.
+		const ignoring = new AbortController();
+		const deaf: GuardJudge = {
+			judge: (async () => {
+				ignoring.abort();
+				return Promise.withResolvers<never>().promise;
+			}) as GuardJudge["judge"],
+		};
+		await expect(
+			guardWith(deaf).guard.check(bash, { command: "rm -rf /srv/db" }, "exec", ignoring.signal),
+		).rejects.toThrow();
+	});
+
+	it("does not screen again a device call whose carrier the user approved", async () => {
+		const runner = new ExtensionRunner(
+			[],
+			new ExtensionRuntime(),
+			cwd,
+			SessionManager.inMemory(),
+			{} as ModelRegistry,
+		);
+		const select = vi.fn(async () => "Approve");
+		runner.initialize({} as never, {} as never, undefined, { select } as never);
+		const judge = fakeJudge({ destroys_data: 1 }, 0);
+		const { guard } = guardWith(judge);
+		runner.setToolGuard(guard);
+		const ran = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ran" }] }));
+		const device = new ExtensionToolWrapper(
+			{ ...bash, execute: ran } as AgentTool,
+			runner,
+		) as ExtensionToolWrapper<any>;
+		// Stands in for `write xd://bash`: it dispatches the device with the context `xd-protocol.ts` passes.
+		const carrier = new ExtensionToolWrapper(
+			{
+				...tool("write", "exec"),
+				execute: (id: string, _args: unknown, signal?: AbortSignal, onUpdate?: never, context?: AgentToolContext) =>
+					device.execute(
+						id,
+						{ command: "rm -rf /srv/db" },
+						signal,
+						onUpdate,
+						context ? { ...context, xdevPolicyKey: "bash" } : undefined,
+					),
+			} as AgentTool,
+			runner,
+		) as ExtensionToolWrapper<any>;
+		const call = { path: "xd://bash", content: "rm -rf /srv/db" };
+
+		await carrier.execute("call-1", call, undefined, undefined, {
+			settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+		} as AgentToolContext);
+		expect(select).toHaveBeenCalledTimes(1);
+		expect(ran).toHaveBeenCalledTimes(1);
+		expect(judge.requests).toHaveLength(0);
+
+		// Unprompted, the device call is the one the guard screens.
+		await expect(
+			carrier.execute("call-2", call, undefined, undefined, {
+				settings: Settings.isolated({ "tools.approvalMode": "yolo" }),
+			} as AgentToolContext),
+		).rejects.toThrow("The tool guard refused this call");
+		expect(ran).toHaveBeenCalledTimes(1);
+		expect(judge.requests).toHaveLength(1);
 	});
 
 	it("refuses through the tool wrapper without running the tool", async () => {
