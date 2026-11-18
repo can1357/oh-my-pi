@@ -798,7 +798,12 @@ export class AgyHost implements ProviderSessionState {
 	async #logDiagnostics(): Promise<void> {
 		const diagnostics = this.#options.diagnostics;
 		if (!diagnostics.enabled) return;
-		await diagnostics.settled();
+		await withTimeout(
+			diagnostics.settled(),
+			DIAGNOSTICS_SETTLE_TIMEOUT_MS,
+			"Antigravity CLI diagnostics did not settle",
+			this.#options.schedule,
+		).catch(() => undefined);
 		const summary = diagnostics.summary();
 		if (summary.samples === 0 || diagnostics.generation === this.#loggedGeneration) return;
 		this.#loggedGeneration = diagnostics.generation;
@@ -909,6 +914,7 @@ function errorOutput(text: string): McpToolOutput {
 	return { content: [{ type: "text", text }], isError: true };
 }
 
+const DIAGNOSTICS_SETTLE_TIMEOUT_MS = 250;
 const MAX_DIAGNOSTIC_ISSUES = 8;
 const MAX_DIAGNOSTIC_PATH_SEGMENTS = 8;
 const MAX_DIAGNOSTIC_PATH_SEGMENT = 64;
