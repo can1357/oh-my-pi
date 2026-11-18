@@ -301,7 +301,7 @@ export interface MCPRequestOptions {
 	signal?: AbortSignal;
 	/**
 	 * Adds `_meta.progressToken` to the request and receives only this request's
-	 * `notifications/progress` while pending. Progress never extends its deadline.
+	 * `notifications/progress` while pending; each one restarts a default tool-call deadline (never a configured one).
 	 */
 	onProgress?: (progress: MCPProgress) => void;
 }

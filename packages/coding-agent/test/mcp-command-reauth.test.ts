@@ -267,6 +267,45 @@ describe("/mcp auth commands", () => {
 		});
 	});
 
+	// Issue #19641: Figma answers unlisted DCR clients with a bare 403. The
+	// registration diagnostic names the endpoint and "HTTP 403"; the reauth
+	// engine must not fold it into a generic client-credentials error.
+	test("surfaces a rejected dynamic client registration", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.credentials.reload();
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
+		const fetchMock = Object.assign(
+			async (input: string | URL | Request): Promise<Response> => {
+				const url = String(input);
+				if (url === "https://auth.example.com/.well-known/oauth-authorization-server") {
+					return Response.json({ registration_endpoint: "https://auth.example.com/register" });
+				}
+				if (url === "https://auth.example.com/register") return new Response("Forbidden", { status: 403 });
+				if (url.startsWith("https://auth.example.com/authorize?")) {
+					return new Response("Missing required parameter: client_id", { status: 400 });
+				}
+				return new Response("not found", { status: 404 });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				await this.generateAuthUrl("state", "http://127.0.0.1:53192/callback");
+				throw new Error("authorization URL must not be issued without a client_id");
+			},
+		);
+		const { controller, showError } = createController(authStorage);
+
+		await controller.handle("/mcp reauth envserver");
+
+		expect(showError).toHaveBeenCalledWith(
+			expect.stringMatching(
+				/dynamic client registration was rejected \(POST https:\/\/auth\.example\.com\/register → HTTP 403 — Forbidden\).*oauth\.clientId/s,
+			),
+		);
+	});
+
 	test.each([
 		{ scope: undefined, expectedScope: null },
 		{ scope: "openid", expectedScope: "openid" },

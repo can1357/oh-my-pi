@@ -777,6 +777,19 @@ export interface StreamOptions {
 	 * observes limit headers, and decides capacity waits.
 	 */
 	anthropicSlowMode?: AnthropicSlowModeHooks;
+	/**
+	 * Prompt-cache pre-warm (Anthropic Messages only). The provider builds the
+	 * request exactly as it would otherwise (same `onPayload` hooks, auth, and
+	 * headers, so the cache key is identical), then sends it non-streaming
+	 * with `max_tokens: 0`: the endpoint reads the prompt, refreshes the cache
+	 * at its breakpoints, and returns usage with no output billed. The stream
+	 * emits `start` then `done` with empty content, `stopReason: "length"`,
+	 * and that usage. Ends in an `error` event, sending nothing, when the
+	 * request has budget thinking, a forced `tool_choice`, or structured
+	 * output, which the endpoint rejects. Other providers ignore the flag and generate normally,
+	 * so callers gate it on `isPromptCachePrewarmSupported`.
+	 */
+	prewarm?: boolean;
 }
 
 /**

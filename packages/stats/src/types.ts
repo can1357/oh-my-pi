@@ -36,6 +36,16 @@ export interface MessageStats {
 	/** Which agent produced this message (main agent, task subagent, advisor) */
 	agentType: AgentType;
 	/**
+	 * Raw `purpose` of the `model_usage` entry this row was journaled from (a
+	 * model call that is not a conversation turn: title generation, judge
+	 * queries, …), `:detail` suffix included; `null` for an assistant message.
+	 * Non-null is what marks a row as off-transcript, so the parser always gives
+	 * such a row a value. Always written by `rowToMessageStats`; optional because
+	 * the parser omits it for assistant messages and session fixtures that stand
+	 * in for ingest input are typed as `MessageStats` too.
+	 */
+	purpose?: string | null;
+	/**
 	 * Service tier the provider reported serving this turn, or `null` when the
 	 * provider reported none. Lets consumers separate a fast serving path's
 	 * throughput and premium traffic from standard-tier traffic. Always written by
@@ -71,7 +81,11 @@ export interface MessageStatsInput extends Omit<MessageStats, "usage" | "costUnp
 export interface RequestDetails extends MessageStats {
 	/** The full conversation history or just the last turn. */
 	messages: unknown[];
-	/** The model's response; `null` for `model_usage` entries, which journal no payload. */
+	/**
+	 * The model's response. For a `model_usage` entry, the payload it journaled:
+	 * the reply text of a completion, else a judgment's answers by question id,
+	 * else `null`.
+	 */
 	output: unknown;
 }
 
@@ -116,6 +130,14 @@ export interface SessionModelUsageEntry {
 	usage: Usage;
 	stopReason?: StopReason;
 	errorMessage?: string;
+	/** Wall time of the request in milliseconds; absent on older entries. */
+	duration?: number;
+	/** Milliseconds until the first token; absent on older entries. */
+	ttft?: number;
+	/** What a native judge query answered, by question id; absent on older entries. */
+	judgment?: { state: string; answers: Record<string, number | [string | number, number]>; cached?: number };
+	/** What a text side channel (title generation) was sent and replied; absent on older entries. */
+	completion?: { prompt?: string; reply?: string };
 }
 
 /**

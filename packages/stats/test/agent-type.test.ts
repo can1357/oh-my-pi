@@ -4,7 +4,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getOverviewStats } from "@oh-my-pi/omp-stats/aggregator";
 import { initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
-import { getStatsByAgentType } from "@oh-my-pi/omp-stats/rollup";
+import { getUsageAttribution } from "@oh-my-pi/omp-stats/rollup";
 import { classifyAgentType } from "@oh-my-pi/omp-stats/parser";
 import type { AgentType, MessageStats } from "@oh-my-pi/omp-stats/types";
 import { getConfigRootDir, getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
@@ -64,7 +64,7 @@ describe("classifyAgentType", () => {
 	});
 });
 
-describe("getStatsByAgentType", () => {
+describe("getUsageAttribution byAgentType", () => {
 	it("groups token usage and requests by agent type", async () => {
 		await initDb();
 		insertMessageStats([
@@ -74,7 +74,7 @@ describe("getStatsByAgentType", () => {
 			makeMessage("a1", "advisor", { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 }),
 		]);
 
-		const byType = new Map(getStatsByAgentType().map(stat => [stat.agentType, stat]));
+		const byType = new Map(getUsageAttribution().byAgentType.map(stat => [stat.agentType, stat]));
 		expect(byType.get("main")).toMatchObject({
 			totalRequests: 2,
 			totalInputTokens: 200,
@@ -176,7 +176,7 @@ describe("agent_type migration backfill", () => {
 
 		await initDb();
 
-		const byType = new Map(getStatsByAgentType().map(stat => [stat.agentType, stat.totalRequests]));
+		const byType = new Map(getUsageAttribution().byAgentType.map(stat => [stat.agentType, stat.totalRequests]));
 		expect(byType.get("main")).toBe(1);
 		expect(byType.get("subagent")).toBe(1);
 		expect(byType.get("advisor")).toBe(1);

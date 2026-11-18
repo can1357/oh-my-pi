@@ -667,6 +667,23 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("runs a subagent on its parent's model when its deferred pattern matches nothing", async () => {
+		const { session, modelFallbackMessage } = await createAgentSession({
+			...buildSessionOptions("missing-provider/missing-model"),
+			modelPatternParentFallback: "runtime-provider/runtime-model",
+		});
+
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("runtime-model");
+			expect(modelFallbackMessage).toBe(
+				'Model "missing-provider/missing-model" not found. Using parent model runtime-provider/runtime-model',
+			);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("names the provider's near ids when a deferred provider-qualified pattern stays unresolved", async () => {
 		const { session, modelFallbackMessage } = await createAgentSession(
 			buildSessionOptions("runtime-provider/runtime-modl"),
@@ -686,7 +703,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		const { session, modelFallbackMessage } = await createAgentSession({
 			...buildSessionOptions("runtime-provider/runtime-model"),
 			settings,
-			modelPatternAuthFallback: "runtime-provider/runtime-fallback-model",
+			modelPatternParentFallback: "runtime-provider/runtime-fallback-model",
 		});
 
 		try {
@@ -798,7 +815,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			preloadedCustomToolPaths: [],
 			toolNames: ["read"],
 			modelPattern: "runtime-provider/runtime-model",
-			modelPatternAuthFallback: `${parentModel.provider}/${parentModel.id}`,
+			modelPatternParentFallback: `${parentModel.provider}/${parentModel.id}`,
 		});
 
 		try {

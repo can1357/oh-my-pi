@@ -157,6 +157,37 @@ describe("default web chain", () => {
 		expect(result.details.error).toContain("returned no sources");
 	});
 
+	it("labels a hosted answer as synthesized and drops citations outside a site: scope", async () => {
+		vi.spyOn(provider, "getGroundedSearchProvider").mockResolvedValue({
+			id: "anthropic",
+			label: "Anthropic",
+			isAvailable: () => true,
+			isExplicitlyAvailable: () => true,
+			isKeyless: () => false,
+			search: async () => ({
+				provider: "anthropic",
+				answer: "ARR was $6.3M",
+				sources: [{ title: "Forum", url: "https://forums.example.com/t/1" }],
+				citations: [
+					{ title: "Forum", url: "https://forums.example.com/t/1" },
+					{ title: "Press", url: "https://press.other.com/release" },
+				],
+			}),
+		});
+
+		const result = await runSearchQuery(
+			{ query: "arr site:forums.example.com", model: "web/hosted" },
+			{ authStorage, modelRegistry, sessionModel: sessionModel("anthropic", "claude-sonnet-4-5") },
+		);
+
+		const text = result.content[0]?.text ?? "";
+		expect(text).toStartWith("Note: synthesized answer by anthropic/");
+		expect(text).toContain("removed 1 source outside `site:forums.example.com`");
+		expect(result.details.response.citations?.map(citation => citation.url)).toEqual([
+			"https://forums.example.com/t/1",
+		]);
+	});
+
 	it("fails an explicit web/hosted selection outside a session instead of substituting another engine", async () => {
 		const result = await runSearchQuery({ query: "anything", model: "web/hosted" }, { authStorage, modelRegistry });
 
