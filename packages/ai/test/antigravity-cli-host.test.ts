@@ -1,10 +1,19 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import {
+	antigravityHostIdle,
+	closeAntigravityHosts,
+	retireAgyHost,
+	setAntigravityHostOverrides,
+	streamAntigravityCli,
+} from "@oh-my-pi/pi-ai/providers/antigravity-cli";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
+import { agyCredentialKey } from "@oh-my-pi/pi-ai/providers/antigravity-cli/credentials";
+import { SessionRuntimePool, sessionRuntimeStore } from "@oh-my-pi/pi-ai/providers/antigravity-cli/runtime-pool";
 import {
 	AgyHost,
 	describeToolArguments,
@@ -17,7 +26,14 @@ import {
 } from "@oh-my-pi/pi-ai/providers/antigravity-cli/host";
 import type { McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
 import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-writer";
-import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	Context,
+	Message,
+	ProviderSessionState,
+	Tool,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ContentBlock, PromptRequest, PromptResponse, SessionConfigOption } from "@oh-my-pi/pi-utils/acp";
@@ -871,5 +887,342 @@ describe("AgyHost stateful steps", () => {
 		fake.text("Done.");
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await first.done;
+	});
+});
+
+describe("Antigravity CLI retained hosts", () => {
+	const key = "antigravity-acp:account:default";
+
+	async function retained(options: AgyHostOptions = {}) {
+		const dir = await mkdtemp(path.join(tmpdir(), "agy-retained-test-"));
+		const clock = new Clock();
+		const started = new Queue<FakeAgy>();
+		const states = new Map<string, ProviderSessionState>();
+		const pool = new SessionRuntimePool<AgyHost>(
+			() =>
+				new AgyHost(dir, {
+					startupTimeoutMs: 500,
+					cancelTimeoutMs: 60,
+					announcementTimeoutMs: 30,
+					schedule: clock.schedule,
+					startTransport: async input => {
+						const fake = new FakeAgy(input);
+						started.push(fake);
+						return fake;
+					},
+					...options,
+				}),
+			retireAgyHost,
+			antigravityHostIdle,
+			sessionRuntimeStore(states, (value): value is AgyHost => value instanceof AgyHost),
+		);
+		cleanup.push(async () => {
+			await pool.closeAll();
+			await rm(dir, { recursive: true, force: true });
+		});
+		return { pool, states, dir, clock, started };
+	}
+
+	async function conversation(dir: string, id: string): Promise<string> {
+		const store = conversationStorePath(dir, id);
+		await mkdir(path.dirname(store), { recursive: true });
+		await Bun.write(store, "");
+		return store;
+	}
+
+	it("keeps a leased host out of idle retirement and closes it without its conversation", async () => {
+		const state = await retained();
+		const lease = state.pool.acquire(key);
+		expect(state.states.get(key)).toBe(lease.value);
+		expect(await state.pool.closeIdle(key)).toBe(false);
+
+		const run = step(lease.value, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		expect(await state.pool.closeIdle(key)).toBe(false);
+		fake.text("Done.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		const store = await conversation(state.dir, fake.currentId);
+
+		expect(await state.pool.closeIdle(key)).toBe(false);
+		lease.release();
+		expect(await state.pool.closeIdle(key)).toBe(true);
+		expect(fake.closed).toBe(true);
+		expect(state.pool.peek(key)).toBeUndefined();
+		expect(state.states.size).toBe(0);
+		expect(await Bun.file(store).exists()).toBe(true);
+	});
+
+	it("retains a host with a parked tool call and resumes it after an idle sweep", async () => {
+		const state = await retained();
+		const lease = state.pool.acquire(key);
+		const messages = [user("read a.txt")];
+		const first = step(lease.value, messages);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Reading now.");
+		const output = fake.call();
+		await first.done;
+		lease.release();
+
+		expect(lease.value.hasPendingTurn).toBe(true);
+		expect(await state.pool.closeIdle(key)).toBe(false);
+		expect(state.pool.peek(key)).toBe(lease.value);
+
+		const second = step(lease.value, [...messages, first.writer.output, result(first.writer.output)]);
+		expect(await output).toEqual({ content: [{ type: "text", text: "actual file body" }], isError: false });
+		fake.text("Finished.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		expect(lease.value.hasPendingTurn).toBe(false);
+		expect(await state.pool.closeIdle(key)).toBe(true);
+		expect(fake.promptHistory).toHaveLength(1);
+	});
+
+	it("disposes an explicitly retired host and never hands it out again", async () => {
+		const state = await retained();
+		const lease = state.pool.acquire(key);
+		const run = step(lease.value, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Done.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		const store = await conversation(state.dir, fake.currentId);
+		lease.release();
+
+		await state.pool.close(key);
+		expect(fake.closed).toBe(true);
+		expect(state.pool.peek(key)).toBeUndefined();
+		expect(state.states.size).toBe(0);
+		expect(await Bun.file(store).exists()).toBe(false);
+
+		const next = state.pool.acquire(key);
+		expect(next.value).not.toBe(lease.value);
+		next.release();
+	});
+
+	it("fails a stream without credentials before retaining a host", async () => {
+		const result = await streamAntigravityCli(model, { messages: [user("hello")] }, {}).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("requires sign-in");
+	});
+});
+
+describe("Antigravity CLI provider retention", () => {
+	const apiKey = JSON.stringify({
+		token: "access-token",
+		refreshToken: "refresh-token",
+		expiresAt: Date.now() + 3_600_000,
+		email: "retained@example.com",
+	});
+	const account = agyCredentialKey(apiKey);
+
+	async function provider(options: AgyHostOptions = {}) {
+		const dir = await mkdtemp(path.join(tmpdir(), "agy-provider-test-"));
+		const clock = new Clock();
+		const started = new Queue<FakeAgy>();
+		const transports: FakeAgy[] = [];
+		const states = new Map<string, ProviderSessionState>();
+		setAntigravityHostOverrides({
+			directory: () => dir,
+			options: {
+				startupTimeoutMs: 500,
+				cancelTimeoutMs: 60,
+				announcementTimeoutMs: 30,
+				schedule: clock.schedule,
+				startTransport: async input => {
+					const fake = new FakeAgy(input);
+					transports.push(fake);
+					started.push(fake);
+					return fake;
+				},
+				...options,
+			},
+		});
+		cleanup.push(async () => {
+			setAntigravityHostOverrides();
+			await closeAntigravityHosts();
+			await closeAntigravityHosts(states);
+			await rm(dir, { recursive: true, force: true });
+		});
+		return { dir, clock, started, transports, states };
+	}
+
+	/** Await real I/O so the provider's own teardown can finish between turns. */
+	async function gone(file: string): Promise<boolean> {
+		return stat(file).then(
+			() => false,
+			() => true,
+		);
+	}
+
+	async function settle(predicate: () => Promise<boolean>): Promise<void> {
+		for (let turn = 0; turn < 200; turn++) {
+			if (await predicate()) return;
+			await Promise.resolve();
+		}
+		throw new Error("Antigravity CLI provider state did not settle");
+	}
+
+	function conversationId(message: AssistantMessage): string | undefined {
+		const payload = message.providerPayload;
+		return payload?.type === "antigravityCli" ? payload.conversationId : undefined;
+	}
+
+	it("reuses one retained host for an explicit provider session", async () => {
+		const state = await provider();
+		const messages = [user("hello")];
+		const first = streamAntigravityCli(
+			model,
+			{ messages, tools },
+			{
+				apiKey,
+				sessionId: "explicit",
+				providerSessionState: state.states,
+			},
+		);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("First.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		const firstMessage = await first.result();
+		expect(firstMessage.stopReason).toBe("stop");
+		expect(state.states.size).toBe(1);
+		expect(state.states.get(`antigravity-acp:${account}:explicit`)).toBeInstanceOf(AgyHost);
+
+		const second = streamAntigravityCli(
+			model,
+			{ messages: [...messages, firstMessage, user("again")], tools },
+			{ apiKey, sessionId: "explicit", providerSessionState: state.states },
+		);
+		const next = await fake.prompts.next();
+		fake.text("Second.");
+		next.response.resolve({ stopReason: "end_turn" });
+		const secondMessage = await second.result();
+		expect(secondMessage.content).toEqual([{ type: "text", text: "Second." }]);
+		expect(conversationId(secondMessage)).toBe(fake.currentId);
+		expect(conversationId(firstMessage)).toBe(fake.currentId);
+		expect(fake.promptHistory).toHaveLength(2);
+		expect(fake.loads).toEqual([]);
+		expect(state.transports).toHaveLength(1);
+	});
+
+	it("reuses one retained host for an implicit stable session", async () => {
+		const state = await provider();
+		const messages = [user("hello")];
+		const first = streamAntigravityCli(model, { messages, tools }, { apiKey, sessionId: "implicit" });
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("First.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		const firstMessage = await first.result();
+
+		const second = streamAntigravityCli(
+			model,
+			{ messages: [...messages, firstMessage, user("again")], tools },
+			{ apiKey, sessionId: "implicit" },
+		);
+		const next = await fake.prompts.next();
+		fake.text("Second.");
+		next.response.resolve({ stopReason: "end_turn" });
+		const secondMessage = await second.result();
+		expect(secondMessage.content).toEqual([{ type: "text", text: "Second." }]);
+		expect(conversationId(secondMessage)).toBe(fake.currentId);
+		expect(fake.promptHistory).toHaveLength(2);
+		expect(state.transports).toHaveLength(1);
+		expect(state.states.size).toBe(0);
+	});
+
+	it("continues a parked tool call through the provider", async () => {
+		const state = await provider();
+		const messages = [user("read a.txt")];
+		const first = streamAntigravityCli(
+			model,
+			{ messages, tools },
+			{
+				apiKey,
+				sessionId: "tool",
+				providerSessionState: state.states,
+			},
+		);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Reading now.");
+		const output = fake.call();
+		const firstMessage = await first.result();
+		expect(firstMessage.stopReason).toBe("toolUse");
+		const host = state.states.get(`antigravity-acp:${account}:tool`);
+		if (!(host instanceof AgyHost)) throw new Error("Expected the provider to retain an AgyHost");
+		expect(host.hasPendingTurn).toBe(true);
+
+		const second = streamAntigravityCli(
+			model,
+			{ messages: [...messages, firstMessage, result(firstMessage)], tools },
+			{ apiKey, sessionId: "tool", providerSessionState: state.states },
+		);
+		expect(await output).toEqual({ content: [{ type: "text", text: "actual file body" }], isError: false });
+		fake.text("Finished.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		const secondMessage = await second.result();
+		expect(secondMessage.content).toEqual([{ type: "text", text: "Finished." }]);
+		expect(conversationId(secondMessage)).toBe(fake.currentId);
+		expect(fake.promptHistory).toHaveLength(1);
+		expect(state.transports).toHaveLength(1);
+	});
+
+	it("continues a keyless tool call through its native conversation id", async () => {
+		const state = await provider();
+		const messages = [user("read a.txt")];
+		const first = streamAntigravityCli(model, { messages, tools }, { apiKey });
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Reading now.");
+		const output = fake.call();
+		const firstMessage = await first.result();
+		expect(firstMessage.stopReason).toBe("toolUse");
+
+		// Neither a session id nor a caller map: the parked turn is found by the
+		// conversation recorded on the last assistant step.
+		const second = streamAntigravityCli(
+			model,
+			{ messages: [...messages, firstMessage, result(firstMessage)], tools },
+			{ apiKey },
+		);
+		expect(await output).toEqual({ content: [{ type: "text", text: "actual file body" }], isError: false });
+		fake.text("Finished.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		const secondMessage = await second.result();
+		expect(secondMessage.content).toEqual([{ type: "text", text: "Finished." }]);
+		expect(conversationId(secondMessage)).toBe(fake.currentId);
+		expect(fake.promptHistory).toHaveLength(1);
+		expect(state.transports).toHaveLength(1);
+	});
+
+	it("disposes a keyless host once its turn ends without a parked tool call", async () => {
+		const state = await provider();
+		const messages = [user("hello")];
+		const run = streamAntigravityCli(model, { messages, tools }, { apiKey });
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		const store = conversationStorePath(state.dir, fake.currentId);
+		await mkdir(path.dirname(store), { recursive: true });
+		await Bun.write(store, "");
+		fake.text("Done.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		expect((await run.result()).stopReason).toBe("stop");
+
+		await settle(() => gone(store));
+		expect(fake.closed).toBe(true);
+
+		const again = streamAntigravityCli(model, { messages, tools }, { apiKey });
+		const second = await state.started.next();
+		expect(second).not.toBe(fake);
+		expect(state.transports).toHaveLength(2);
+		const secondPrompt = await second.prompts.next();
+		second.text("Again.");
+		secondPrompt.response.resolve({ stopReason: "end_turn" });
+		expect((await again.result()).stopReason).toBe("stop");
 	});
 });
