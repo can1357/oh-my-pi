@@ -198,7 +198,7 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
  * Render an `async-notify` custom message (output a running background job or
  * service was asked to report) as a transcript block: one "Background job
  * output" / "Supervised process output" row per source with its first matching
- * lines beneath.
+ * lines beneath (natively the notice's body: wrapped in full, no icon per line).
  */
 export function buildAsyncNotifyBlock(message: CustomOrHookMessage): ToolActivityContainer {
 	const details = (message as CustomMessage<AsyncNotifyDetails>).details;
@@ -224,8 +224,15 @@ export function buildAsyncNotifyBlock(message: CustomOrHookMessage): ToolActivit
 			native: { tone: "info", message: [span(label), ...facts([report.id, tally])] },
 		});
 		const shown = report.lines.slice(0, PREVIEW_LIMITS.OUTPUT_EXPANDED);
-		// Process output: tabs and overlong lines would break the row.
-		for (const line of shown) rows.push(detail(truncateToWidth(replaceTabs(line), TRUNCATE_LENGTHS.LINE), "dim"));
+		for (const line of shown) {
+			const output = replaceTabs(line);
+			rows.push({
+				// Process output: an overlong line would break the text terminal's row; a native one wraps it.
+				parts: [{ text: truncateToWidth(output, TRUNCATE_LENGTHS.LINE), color: "dim" }],
+				indent: 3,
+				native: { tone: "info", body: true, message: [span(output, "mono")] },
+			});
+		}
 		if (total > shown.length) rows.push(detail(`… ${total - shown.length} more`, "dim"));
 		if (report.stopped) rows.push(detail("Matched too often: notify is off for it", "warning"));
 	}
