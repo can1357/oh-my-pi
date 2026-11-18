@@ -6573,6 +6573,7 @@ dependencies = [
  "pi-iso",
  "pi-vfs",
  "pi-walker",
+ "pi-watch",
  "rand 0.10.3",
  "rayon",
  "regex",
@@ -6700,6 +6701,7 @@ dependencies = [
  "pi-vfs",
  "pi-voice",
  "pi-walker",
+ "pi-watch",
  "png",
  "portable-pty",
  "ptts",
@@ -6861,6 +6863,17 @@ dependencies = [
  "tokio",
  "windows-sys 0.61.2",
  "xutf",
+]
+
+[[package]]
+name = "pi-watch"
+version = "18.22.2"
+dependencies = [
+ "flume",
+ "hashbrown 0.17.1",
+ "libc",
+ "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -84,6 +84,7 @@ parse_datetime = "0.16"
 pi-ast = { workspace = true, optional = true }
 pi-diff.workspace = true
 pi-walker.workspace = true
+pi-watch.workspace = true
 pi-vfs.workspace = true
 rand = { version = "0.10.0", features = ["std_rng"] }
 rayon = "1.10"
@@ -322,6 +323,8 @@ default = ["utils"]
 "util.uname" = []
 "util.uniq" = []
 "util.uptime" = []
+# Needs change notification and processes: unix and windows targets.
+"util.watchexec" = []
 "util.wc" = []
 "util.which" = []
 "util.whoami" = []
@@ -418,6 +421,7 @@ utils = [
   "util.uname",
   "util.uniq",
   "util.uptime",
+  "util.watchexec",
   "util.wc",
   "util.which",
   "util.whoami",

@@ -21,6 +21,7 @@
 - `file` runs in the bash tool's shell as a builtin, so it identifies internal URLs (`file local://report.pdf`, `artifact://N`, `skill://…`) as well as paths, and works on Windows where there is no `file` program
 - `direnv` is now a bash-tool builtin: `.envrc`/`.env` files are evaluated inside the embedded shell with direnv's stdlib, `direnv exec DIR cmd…` runs the command in-shell with the loaded environment (builtins and internal URIs keep working), and `allow`/`deny`/`export`/`status`/`hook`/`reload`/`prune`/`edit`/`fetchurl` share the real direnv's allow list and config, so it works without direnv installed
 - In-process `flock` shell builtin matching util-linux (`flock FILE CMD…`, `flock FILE -c CMD`, `flock N` on the shell's own descriptors, `--fd N CMD`; `-s`/`-x`/`-u`/`-n`/`-w`/`-E`/`-o`/`-F`/`--fcntl`/`--start`/`--length`/`--verbose`), so lock scripts behave the same on macOS, Linux and Windows.
+- `watchexec` runs in the bash tool's own shell as a builtin with watchexec 2.3.2's options, messages and event formats (`-w`/`-W`/`-F`, `-e`/`-f`/`-i`, ignore files, `-r`, `-s`, `-o`, `--stop-signal`/`--stop-timeout`, `-d`, `-p`, `--poll`, `--emit-events-to`, `--only-emit-events`, …), so it works where the program is not installed, its command can use builtins and `scheme://` paths, and a stopped watcher leaves no process behind.
 
 ### Changed
 

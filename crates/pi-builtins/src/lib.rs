@@ -248,6 +248,8 @@ mod uname;
 mod uniq;
 #[cfg(feature = "util.uptime")]
 mod uptime;
+#[cfg(all(feature = "util.watchexec", any(unix, windows)))]
+mod watchexec;
 #[cfg(feature = "util.wc")]
 mod wc;
 #[cfg(feature = "util.which")]

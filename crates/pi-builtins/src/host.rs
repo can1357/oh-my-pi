@@ -1075,6 +1075,17 @@ impl Host {
 		self.drain_output(false).await
 	}
 
+	/// Delivers all pending output of stdout and stderr, whatever the
+	/// destination: for a utility whose output is read while it runs and waits
+	/// (a watcher's messages and event lines, also in a file).
+	///
+	/// # Errors
+	///
+	/// As for [`Host::flush_output`].
+	pub async fn sync_output(&self) -> io::Result<()> {
+		self.drain_output(true).await
+	}
+
 	/// [`Host::flush_output`] for a loop whose next unit of output follows
 	/// without waiting (a walk, a search of listed files): delivers once
 	/// [`PACED_BYTES`] are pending or [`PACED_INTERVAL`] has passed since
@@ -1349,13 +1360,15 @@ impl RunningCommand {
 /// device, as GNU `xargs` and `find -exec` give their children; stdout and
 /// stderr are the utility's own.
 pub struct ShellCommand {
-	argv:  Vec<OsString>,
-	argv0: Option<OsString>,
+	argv:    Vec<OsString>,
+	argv0:   Option<OsString>,
 	/// The source of a command-line command; `argv` is then empty.
-	line:  Option<OsString>,
-	cwd:   Option<PathBuf>,
-	stdin: Option<Fd>,
-	env:   Vec<EnvChange>,
+	line:    Option<OsString>,
+	cwd:     Option<PathBuf>,
+	stdin:   Option<Fd>,
+	env:     Vec<EnvChange>,
+	/// Signal numbers to deliver to the command while it runs.
+	signals: Option<flume::Receiver<i32>>,
 }
 
 /// One environment change a [`ShellCommand`] makes for its own command,
@@ -1374,14 +1387,22 @@ impl ShellCommand {
 	/// A command running `argv`; `argv[0]` names the builtin or program.
 	#[must_use]
 	pub fn new(argv: Vec<OsString>) -> Self {
-		Self { argv, argv0: None, line: None, cwd: None, stdin: None, env: Vec::new() }
+		Self { argv, argv0: None, line: None, cwd: None, stdin: None, env: Vec::new(), signals: None }
 	}
 
 	/// A command line `source` for the invoking shell to parse and run in a
 	/// subshell of its own, with no positional parameters (`sh -c source`).
 	#[must_use]
 	pub fn line(source: impl Into<OsString>) -> Self {
-		Self { argv: Vec::new(), argv0: None, line: Some(source.into()), cwd: None, stdin: None, env: Vec::new() }
+		Self {
+			argv: Vec::new(),
+			argv0: None,
+			line: Some(source.into()),
+			cwd: None,
+			stdin: None,
+			env: Vec::new(),
+			signals: None,
+		}
 	}
 
 	/// The argv; `argv[0]` names the builtin or program to look up. Empty for
@@ -1421,6 +1442,12 @@ impl ShellCommand {
 	/// Takes the command's stdin; `None` means the null device.
 	pub fn take_stdin(&mut self) -> Option<Fd> {
 		self.stdin.take()
+	}
+
+	/// Takes the channel of signals for the command
+	/// ([`ShellCommand::signals`]); `None` when the utility sends none.
+	pub fn take_signals(&mut self) -> Option<flume::Receiver<i32>> {
+		self.signals.take()
 	}
 
 	/// Presents `argv0` to the command as its `argv[0]` (`env -a`); the
@@ -1471,6 +1498,16 @@ impl ShellCommand {
 	/// Feeds `stdin` to the command as fd 0.
 	pub fn stdin(mut self, stdin: Fd) -> Self {
 		self.stdin = Some(stdin);
+		self
+	}
+
+	/// Delivers every signal number sent on `signals` (the platform's
+	/// numbering; Linux's on Windows) to the command while it runs, as a
+	/// signal to its process group would: the command and everything it
+	/// started get it. `watchexec` and `entr -r` stop and restart their
+	/// command this way.
+	pub fn signals(mut self, signals: flume::Receiver<i32>) -> Self {
+		self.signals = Some(signals);
 		self
 	}
 }
@@ -1539,7 +1576,8 @@ fn cancelled_command() -> io::Error {
 /// invocation is cancelled or ends.
 ///
 /// A command runs with the utility's stdout and stderr, its own
-/// [`ShellCommand::take_stdin`] (else the null device), in
+/// [`ShellCommand::take_stdin`] (else the null device), receiving the signals
+/// of [`ShellCommand::take_signals`], in
 /// [`ShellCommand::dir`] (else the invocation's working directory), with
 /// [`ShellCommand::env_changes`] applied to that command only. A command line
 /// ([`ShellCommand::source`]) is parsed and run by the shell itself, with no
@@ -3381,12 +3419,18 @@ mod testing {
 	/// builtins `echo`, `true`, `false`, `pwd`, and `cd`, else as a program
 	/// found on its `PATH`, writing to the invoking utility's stdout and
 	/// stderr; a command line runs as `sh -c <source>`. Environment changes
-	/// apply to that command only.
+	/// apply to that command only. A command given
+	/// [`signals`](super::ShellCommand::signals) leads a process group that
+	/// gets each one (an extra is cancelled by any), and `KILL` once
+	/// [`TestRunner::ending_with`]'s token fires: the shell's cancel of a
+	/// utility ends its commands too.
 	pub(crate) struct TestRunner {
 		env:    HashMap<String, String>,
 		cwd:    PathBuf,
 		stdout: std::fs::File,
 		stderr: std::fs::File,
+		/// Ends the commands that take signals.
+		cancel: Option<tokio_util::sync::CancellationToken>,
 	}
 
 	impl TestRunner {
@@ -3398,7 +3442,14 @@ mod testing {
 			stdout: std::fs::File,
 			stderr: std::fs::File,
 		) -> Self {
-			Self { env, cwd, stdout, stderr }
+			Self { env, cwd, stdout, stderr, cancel: None }
+		}
+
+		/// Kills the commands that take signals once `cancel` fires: pass the
+		/// invocation's own token.
+		pub(crate) fn ending_with(mut self, cancel: tokio_util::sync::CancellationToken) -> Self {
+			self.cancel = Some(cancel);
+			self
 		}
 
 		fn dup(&self) -> io::Result<Self> {
@@ -3407,6 +3458,7 @@ mod testing {
 				cwd:    self.cwd.clone(),
 				stdout: self.stdout.try_clone()?,
 				stderr: self.stderr.try_clone()?,
+				cancel: self.cancel.clone(),
 			})
 		}
 	}
@@ -3454,8 +3506,12 @@ mod testing {
 			};
 			let name = argv.first().cloned().unwrap_or_default();
 			let argv0 = command.presented_argv0().map(|argv0| argv0.to_string_lossy().into_owned());
+			let signals = command.take_signals();
 			Box::pin(async move {
 				let (runner, stdin) = prepared?;
+				let grouped = signals.is_some();
+				let ending = runner.cancel.clone().filter(|_| grouped);
+				let mut signals = Signals { sent: signals, ending };
 				if crate::extras::kind(&name).is_some() {
 					if let (Some(argv0), Some(first)) = (argv0, argv.first_mut()) {
 						*first = argv0;
@@ -3470,7 +3526,16 @@ mod testing {
 						crate::extras::Fd::File(runner.stderr.try_clone()?),
 					];
 					invocation.commands = Some(Box::new(runner));
-					let code = crate::extras::run(invocation).await;
+					let cancel = tokio_util::sync::CancellationToken::new();
+					invocation.cancel = Some(cancel.clone());
+					let run = crate::extras::run(invocation);
+					tokio::pin!(run);
+					let code = loop {
+						tokio::select! {
+							code = &mut run => break code,
+							_ = signals.next() => cancel.cancel(),
+						}
+					};
 					return Ok(CommandStatus::Exited((code & 0xff) as u8));
 				}
 				if let Some(status) = builtin(&runner, &argv)? {
@@ -3493,13 +3558,75 @@ mod testing {
 				if let Some(argv0) = argv0 {
 					std::os::unix::process::CommandExt::arg0(&mut child, argv0);
 				}
+				#[cfg(unix)]
+				if grouped {
+					std::os::unix::process::CommandExt::process_group(&mut child, 0);
+				}
 				let mut child = child.spawn()?;
-				let status = tokio::task::spawn_blocking(move || child.wait())
-					.await
-					.map_err(io::Error::other)??;
+				let pid = child.id();
+				let wait = tokio::task::spawn_blocking(move || child.wait());
+				tokio::pin!(wait);
+				let status = loop {
+					tokio::select! {
+						status = &mut wait => break status.map_err(io::Error::other)??,
+						signal = signals.next() => deliver(pid, signal),
+					}
+				};
 				Ok(CommandStatus::from(status))
 			})
 		}
+	}
+
+	/// The signals of one command of a [`TestRunner`].
+	struct Signals {
+		/// What the utility sends.
+		sent:   Option<flume::Receiver<i32>>,
+		/// Fires when the utility is cancelled.
+		ending: Option<tokio_util::sync::CancellationToken>,
+	}
+
+	impl Signals {
+		/// The next signal for the command: what the utility sends, and `KILL`
+		/// once when the utility is cancelled; never without either.
+		async fn next(&mut self) -> i32 {
+			const KILL: i32 = 9;
+			loop {
+				let sent = async {
+					match &self.sent {
+						Some(sent) => sent.recv_async().await.ok(),
+						None => std::future::pending().await,
+					}
+				};
+				let ending = async {
+					match &self.ending {
+						Some(ending) => ending.cancelled().await,
+						None => std::future::pending().await,
+					}
+				};
+				tokio::select! {
+					signal = sent => match signal {
+						Some(signal) => return signal,
+						// The utility sends no more.
+						None => self.sent = None,
+					},
+					() = ending => {
+						self.ending = None;
+						return KILL;
+					},
+				}
+			}
+		}
+	}
+
+	/// Sends `signal` to the process group `pid` leads.
+	fn deliver(pid: u32, signal: i32) {
+		#[cfg(unix)]
+		if let Ok(pid) = i32::try_from(pid) {
+			// SAFETY: plain syscall without pointer arguments.
+			unsafe { libc::kill(-pid, signal) };
+		}
+		#[cfg(not(unix))]
+		let _ = (pid, signal);
 	}
 
 	/// Runs the shell builtins a test command line may name; `None` for any

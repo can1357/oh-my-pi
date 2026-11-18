@@ -122,6 +122,7 @@ macro_rules! for_each_extra {
 			utility [feature = "util.uname"] "uname" uname::Uname;
 			utility [feature = "util.uniq"] "uniq" uniq::Uniq;
 			utility [feature = "util.uptime"] "uptime" uptime::Uptime;
+			async_utility [all(feature = "util.watchexec", any(unix, windows))] "watchexec" watchexec::Watchexec;
 			utility [feature = "util.wc"] "wc" wc::Wc;
 			utility [feature = "util.which"] "which" which::WhichCli;
 			utility [feature = "util.whoami"] "whoami" whoami::Whoami;

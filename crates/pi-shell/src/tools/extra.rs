@@ -25,6 +25,11 @@
 //! subshell through `exec`, so their actual signal deaths reach the utility
 //! as [`CommandStatus::Signaled`], distinct from an ordinary exit of `128+n`.
 //! In-engine commands report [`CommandStatus::Exited`].
+//!
+//! A command the utility may signal ([`ShellCommand::signals`]: `watchexec`,
+//! `entr -r`) runs under a label of its own below the call's, so each signal
+//! reaches that command's tree alone, as one to its process group would;
+//! `KILL` also goes to the externals the tree left running, as for `timeout`.
 
 use std::{
 	ffi::OsStr,
@@ -40,11 +45,11 @@ use bstr::{BString, ByteSlice};
 use pi_builtins::extras::{CommandRunner, CommandStatus, EnvChange, Fd, ShellCommand};
 use tokio_util::sync::CancellationToken;
 
-use super::{Child, ToolConfig, Turn};
+use super::{Child, ToolConfig, Turn, signal_os};
 use crate::{
 	bash::{
-		CallOutcome, IntrinsicId, Lineage, ModeId, RunId, RunStdio, Script, ShellApi, ToolCall,
-		VprocSel,
+		CallOutcome, IntrinsicId, Lineage, ModeId, Platform, RunId, RunStdio, Script, ShellApi,
+		SigTarget, Signal, ToolCall, VprocSel,
 	},
 	extras::Done,
 	sys::StdFile,
@@ -60,11 +65,28 @@ const DEFAULT_PATH: &str = if cfg!(any(target_os = "linux", target_os = "android
 /// How a command a utility asked for ended, back to the utility.
 type Reply = flume::Sender<io::Result<CommandStatus>>;
 
-/// A command the utility asked the driver to run.
-struct Request {
-	command: ShellCommand,
-	program: Program,
-	reply:   Reply,
+/// What the utility asks of the driver.
+enum Request {
+	/// Run a command.
+	Run {
+		command:   Box<ShellCommand>,
+		program:   Program,
+		reply:     Reply,
+		/// The id later [`Request::Signal`]s name the command by; `None` when
+		/// the utility sends it no signals.
+		signalled: Option<u64>,
+	},
+	/// Deliver the signal numbered `signal` to the tree of the command `id`.
+	Signal { id: u64, signal: i32 },
+}
+
+/// A command's subshell, still running.
+struct Run {
+	id:    RunId,
+	reply: Reply,
+	/// The id and label of a command the utility may signal: its tree has a
+	/// label of its own.
+	own:   Option<(u64, u32)>,
 }
 
 /// What a requested command is, decided by the lookup before it is sent.
@@ -93,12 +115,24 @@ pub(super) struct Extra {
 	call:             Option<ToolCall>,
 	running:          Option<Running>,
 	/// The commands' subshells still running, with their replies.
-	runs:             Vec<(RunId, Reply)>,
+	runs:             Vec<Run>,
+	/// Labels of signalled commands that ended since the last turn.
+	ended:            Vec<u32>,
+	/// Labels of ended signalled commands, for the next one: a utility
+	/// restarting its command for days holds one label, not one per run.
+	spare:            Vec<u32>,
 }
 
 impl Extra {
 	pub(super) fn new(call: ToolCall) -> Self {
-		Self { child: Child::default(), call: Some(call), running: None, runs: Vec::new() }
+		Self {
+			child:   Child::default(),
+			call:    Some(call),
+			running: None,
+			runs:    Vec::new(),
+			ended:   Vec::new(),
+			spare:   Vec::new(),
+		}
 	}
 
 	pub(super) fn advance(
@@ -129,7 +163,7 @@ impl Extra {
 				config: turn.config.clone(),
 			};
 			invocation.commands =
-				Some(Box::new(Runner { requests, waker: turn.waker.clone(), lookup }));
+				Some(Box::new(Runner { requests, waker: turn.waker.clone(), lookup, signalled: 0 }));
 			let done = crate::extras::spawn(&runtime, invocation);
 			let env_names = call
 				.env
@@ -138,11 +172,43 @@ impl Extra {
 				.collect();
 			self.running = Some(Running { done, cancel, requests: received, env_names });
 		}
+		// The externals of an ended command are no longer its label's.
+		for label in self.ended.drain(..) {
+			turn.log.forget(&[label]);
+			self.spare.push(label);
+		}
 		let running = self.running.as_ref()?;
-		while let Ok(Request { command, program, reply }) = running.requests.try_recv() {
-			let lineage = Lineage { label: self.child.label, detached: false };
-			let run = api.run_subshell_in(script(command, &program, &running.env_names), lineage);
-			self.runs.push((run, reply));
+		while let Ok(request) = running.requests.try_recv() {
+			match request {
+				Request::Run { command, program, reply, signalled } => {
+					let own = signalled.map(|id| {
+						let label = self
+							.spare
+							.pop()
+							.unwrap_or_else(|| turn.labels.fresh(self.child.label));
+						(id, label)
+					});
+					let label = own.map_or(self.child.label, |(_, label)| label);
+					let lineage = Lineage { label, detached: false };
+					let id =
+						api.run_subshell_in(script(*command, &program, &running.env_names), lineage);
+					self.runs.push(Run { id, reply, own });
+				},
+				Request::Signal { id, signal } => {
+					// A command that ended already has no tree to signal.
+					let label = self
+						.runs
+						.iter()
+						.find_map(|run| run.own.filter(|&(own, _)| own == id))
+						.map(|(_, label)| label);
+					let signal = u8::try_from(signal)
+						.ok()
+						.and_then(|number| Signal::from_number(number, Platform::current()));
+					if let (Some(label), Some(signal)) = (label, signal) {
+						signal_tree(turn, label, signal);
+					}
+				},
+			}
 		}
 		match running.done.poll(&Context::from_waker(turn.waker)) {
 			// The utility waits for every command it started; one whose
@@ -155,10 +221,11 @@ impl Extra {
 	/// `run` ended with `status`; `false` when it is not one of this call's
 	/// commands.
 	pub(super) fn on_done(&mut self, run: RunId, status: i32, signal: Option<i32>) -> bool {
-		let Some(at) = self.runs.iter().position(|(r, _)| *r == run) else {
+		let Some(at) = self.runs.iter().position(|r| r.id == run) else {
 			return false;
 		};
-		let (_, reply) = self.runs.swap_remove(at);
+		let Run { reply, own, .. } = self.runs.swap_remove(at);
+		self.ended.extend(own.map(|(_, label)| label));
 		let code = u8::try_from(status.rem_euclid(256)).unwrap_or(u8::MAX);
 		// The utility may have stopped waiting (cancelled).
 		let outcome = signal.map_or(CommandStatus::Exited(code), CommandStatus::Signaled);
@@ -168,7 +235,7 @@ impl Extra {
 
 	/// The commands' subshells still running.
 	pub(super) fn pending(&self) -> Vec<RunId> {
-		self.runs.iter().map(|(run, _)| *run).collect()
+		self.runs.iter().map(|run| run.id).collect()
 	}
 }
 
@@ -179,6 +246,23 @@ impl Drop for Extra {
 	fn drop(&mut self) {
 		if let Some(running) = &self.running {
 			running.cancel.cancel();
+		}
+	}
+}
+
+/// Send `signal` to the tree of the command labeled `label` and, for `KILL`,
+/// to the externals it started (each leads its own process group).
+fn signal_tree(turn: &Turn<'_>, label: u32, signal: Signal) {
+	let group = turn.labels.group(label);
+	for &label in &group {
+		turn.ctl.signal(SigTarget::Label(label), signal);
+	}
+	// The tree's live externals get the signal from the engine; those it
+	// already abandoned are reached here, but only by the uncatchable `KILL`
+	// (a trapped signal must not run its handler twice).
+	if signal == Signal::Kill {
+		for pid in turn.log.live(&group) {
+			signal_os(pid, signal, true);
 		}
 	}
 }
@@ -322,29 +406,60 @@ fn quote(out: &mut Vec<u8>, word: &[u8]) {
 /// The utility's [`CommandRunner`]: looks each command up, then sends it to
 /// the driver and waits for its reply.
 struct Runner {
-	requests: flume::Sender<Request>,
+	requests:  flume::Sender<Request>,
 	/// Wakes the driver.
-	waker:    Waker,
-	lookup:   Lookup,
+	waker:     Waker,
+	lookup:    Lookup,
+	/// The id of the last command the utility may signal.
+	signalled: u64,
 }
 
 impl CommandRunner for Runner {
 	fn start(
 		&mut self,
-		command: ShellCommand,
+		mut command: ShellCommand,
 	) -> Pin<Box<dyn Future<Output = io::Result<CommandStatus>> + Send + 'static>> {
+		let signals = command.take_signals().map(|signals| {
+			self.signalled += 1;
+			(signals, self.signalled, self.requests.clone(), self.waker.clone())
+		});
+		let signalled = signals.as_ref().map(|&(_, id, ..)| id);
 		let response = self.lookup.program(&command).map(|program| {
 			let (reply, response) = flume::bounded(1);
 			let sent = self
 				.requests
-				.send(Request { command, program, reply })
+				.send(Request::Run { command: Box::new(command), program, reply, signalled })
 				.is_ok();
 			self.waker.wake_by_ref();
 			sent.then_some(response)
 		});
 		Box::pin(async move {
 			let response = response?.ok_or_else(cancelled)?;
-			response.recv_async().await.map_err(|_| cancelled())?
+			let Some((signals, id, requests, waker)) = signals else {
+				return response.recv_async().await.map_err(|_| cancelled())?;
+			};
+			// Hand the driver each signal until the command ends.
+			let mut signals = Some(signals);
+			loop {
+				let next = async {
+					match &signals {
+						Some(signals) => signals.recv_async().await.ok(),
+						None => std::future::pending().await,
+					}
+				};
+				tokio::select! {
+					biased;
+					outcome = response.recv_async() => return outcome.map_err(|_| cancelled())?,
+					signal = next => match signal {
+						Some(signal) => {
+							let _ = requests.send(Request::Signal { id, signal });
+							waker.wake_by_ref();
+						},
+						// The utility sends no more.
+						None => signals = None,
+					},
+				}
+			}
 		})
 	}
 }
