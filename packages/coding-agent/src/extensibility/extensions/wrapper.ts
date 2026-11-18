@@ -428,7 +428,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					toolAliases: aliases,
 					policy: approvalCheck.required ? "prompt" : "allow",
 					rules: cfgToolInterceptorRules.get(approvalSettings),
-					judge: () => this.runner.getJudge?.("tool-interceptor", approvalSettings),
+					judge: () => this.runner.getJudge("tool-interceptor", approvalSettings),
 					signal,
 				}),
 			);

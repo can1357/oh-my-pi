@@ -11,7 +11,14 @@ import { cfgTaskSpeculativeLaunch } from "../task/settings";
 import type { ToolSession } from "../tools";
 import { approvalRestrictions, resolveApproval } from "../tools/approval";
 import { getApprovalGrants } from "../tools/approval-cache";
-import { cfgToolsApproval, cfgToolsApprovalMode } from "../tools/settings";
+import {
+	cfgToolInterceptorEnabled,
+	cfgToolInterceptorRules,
+	cfgToolsApproval,
+	cfgToolsApprovalMode,
+} from "../tools/settings";
+import { hasApplicableToolInterceptorRules } from "../tools/tool-interceptor";
+
 
 export interface SpeculationLifecycle {
 	hasHandlers(eventType: string): boolean;
@@ -53,8 +60,12 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 		return this.#policyGate(context.tool, context.args);
 	}
 
-	/** Extension lifecycle handlers and non-auto-allow approval both veto early execution. */
-	#policyGate(tool: SpeculativeToolReference, args: unknown): SpeculativeAuthorization {
+	/** Extension lifecycle handlers, tool interceptor rules, and non-auto-allow approval all veto early execution. */
+	#policyGate(
+		tool: SpeculativeToolReference,
+		args: unknown,
+		extraToolNames?: readonly string[],
+	): SpeculativeAuthorization {
 		if (hasLifecycleHandlers(this.extensionRunner)) {
 			return { allowed: false, reason: "active extension lifecycle handler" };
 		}
@@ -67,6 +78,18 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 			approvalRestrictions(this.settings, this.toolSession.cwd),
 		);
 		if (approval.policy !== "allow") return { allowed: false, reason: "tool approval is not auto-allow" };
+		if (cfgToolInterceptorEnabled.get(this.settings)) {
+			const targetTools = extraToolNames ? [tool.name, ...extraToolNames] : [tool.name];
+			if (
+				hasApplicableToolInterceptorRules(targetTools, {
+					rules: cfgToolInterceptorRules.get(this.settings),
+					availableTools: this.toolSession.getToolContext?.()?.toolNames,
+					policy: "allow",
+				})
+			) {
+				return { allowed: false, reason: "active tool interceptor rule" };
+			}
+		}
 		return { allowed: true };
 	}
 }

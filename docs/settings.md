@@ -276,7 +276,7 @@ toolInterceptor:
         message: "Include a CR ticket before calling production deploy tools."
 ```
 
-Each rule specifies `tools` (supporting `*` wildcards; omitted applies to all tools), `message`, and `pattern` and/or `question` (with optional `flags`, `threshold`, `suggestedTool`, and `whenPolicy: prompt` / `whenPolicy: prompt | allow`). Setting `whenPolicy: prompt` skips the rule when the call is already allowed by policy (for example, a `bash` command permitted by `bash.patterns`). All matching `question` rules for a call are batched into a single `judge` request.
+Each rule specifies `tools` (supporting `*` wildcards; omitted applies to all tools), `message`, and `pattern` and/or `question` (with optional `flags`, `threshold`, `suggestedTool`, and `whenPolicy: prompt | allow`). Setting `whenPolicy: prompt` skips the rule when the call is already allowed by policy (for example, a `bash` command permitted by `bash.patterns`). All matching `question` rules for a call are batched into a single `judge` request. If the session's `judge` model role is unavailable or a judge request fails, `question` rules fail open and log a warning once per session while `pattern`-only rules still enforce.
 
 During a tool call, `resolveApproval` `deny` checks (including `bashInterceptor.patterns`, `bash.patterns` `deny` rules, and `tools.approval.<tool>: deny`) run before extension `tool_call` handlers; after any `tool_call` input rewrite and post-emit `resolveApproval` check, `toolInterceptor.rules` (`pattern` + batched `judge` questions) run before the interactive approval prompt. See [the Bash tool documentation](tools/bash.md#evaluation-order-and-interaction) for the complete step-by-step sequence.
 

@@ -4,9 +4,14 @@ import type { Judge, JudgmentRequest, JudgmentResult, Questions } from "@oh-my-p
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
+import { CodingAgentSpeculativeExecutionHost } from "@oh-my-pi/pi-coding-agent/speculation/host";
 import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
-import { DEFAULT_TOOL_INTERCEPTOR_RULES, type ToolInterceptorRule } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import {
+	cfgToolInterceptorRules,
+	DEFAULT_TOOL_INTERCEPTOR_RULES,
+	type ToolInterceptorRule,
+} from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { checkToolInterception } from "@oh-my-pi/pi-coding-agent/tools/tool-interceptor";
 
 const ALL_DEDICATED_TOOLS = ["read", "write", "edit", "grep", "glob", "bash"];
@@ -115,7 +120,7 @@ describe("judge-backed question rules with optional pattern prefilter", () => {
 		expect(spy).not.toHaveBeenCalled();
 	});
 
-	it("distinguishes single tool.<name> wrappers from @tool/loop orchestration via the judge", async () => {
+	it("routes tool.<name> cells to the judge and blocks only when the score meets threshold", async () => {
 		const { judge, spy } = makeMockJudge((_question, request) => {
 			const state = request.state as { code?: string };
 			return state.code?.includes("for (const target of targets)") ? 0.05 : 0.95;
@@ -140,7 +145,7 @@ describe("judge-backed question rules with optional pattern prefilter", () => {
 		expect(spy).toHaveBeenCalledTimes(2);
 	});
 
-	it("distinguishes trivial JSON filtering from statistical file aggregation via the judge", async () => {
+	it("prefilters file-backed JSON cells for the judge and propagates suggestedTool and message", async () => {
 		const { judge, spy } = makeMockJudge((_question, request) => {
 			const state = request.state as { code?: string };
 			return state.code?.includes("statistics.median") ? 0.1 : 0.95;
@@ -195,6 +200,40 @@ describe("judge-backed question rules with optional pattern prefilter", () => {
 		expect(spy).toHaveBeenCalledTimes(1);
 		const firstCallQuestions = Object.keys(spy.mock.calls[0]![0].questions);
 		expect(firstCallQuestions.length).toBeGreaterThanOrEqual(2);
+	});
+
+	it("preserves rule order when an earlier question rule precedes a later pattern-only rule", async () => {
+		const rules: ToolInterceptorRule[] = [
+			{
+				tools: ["eval"],
+				pattern: "\\bdangerousCall\\s*\\(",
+				question: "Is this dangerousCall targeting production?",
+				message: "Earlier judged rule matched.",
+			},
+			{
+				tools: ["eval"],
+				pattern: "\\bdangerousCall\\s*\\(",
+				message: "Later pattern-only fallback matched.",
+			},
+		];
+
+		const { judge: highJudge } = makeMockJudge(() => 0.9);
+		const firstWins = await checkToolInterception(
+			"eval",
+			{ language: "js", code: "dangerousCall('prod')" },
+			{ rules, judge: highJudge },
+		);
+		expect(firstWins.block).toBe(true);
+		expect(firstWins.message).toBe("Earlier judged rule matched.");
+
+		const { judge: lowJudge } = makeMockJudge(() => 0.1);
+		const fallbackWins = await checkToolInterception(
+			"eval",
+			{ language: "js", code: "dangerousCall('dev')" },
+			{ rules, judge: lowJudge },
+		);
+		expect(fallbackWins.block).toBe(true);
+		expect(fallbackWins.message).toBe("Later pattern-only fallback matched.");
 	});
 
 	it("does not block when the suggested replacement tool is unavailable in the session", async () => {
@@ -434,5 +473,56 @@ describe("ExtensionToolWrapper pre-approval interception across tools", () => {
 		).rejects.toThrow("Use the read tool instead of unapproved ad-hoc bash parsing.");
 		expect(judgeSpy).toHaveBeenCalledTimes(1);
 		expect(select).not.toHaveBeenCalled();
+	});
+
+	it("vetoes speculative execution in CodingAgentSpeculativeExecutionHost only for tools targeted by toolInterceptor.rules", async () => {
+		const settings = Settings.isolated({
+			"tools.approvalMode": "yolo",
+			"toolInterceptor.enabled": true,
+			"toolInterceptor.rules": [
+				...DEFAULT_TOOL_INTERCEPTOR_RULES,
+				{
+					tools: ["task"],
+					pattern: "forbiddenTask",
+					message: "Task intercepted.",
+				},
+			],
+		});
+		const toolSession = {
+			cwd: process.cwd(),
+			getToolContext: () => ({ toolNames: [...ALL_DEDICATED_TOOLS, "eval", "task"] }) as unknown as AgentToolContext,
+		} as unknown as ToolSession;
+		const host = new CodingAgentSpeculativeExecutionHost(settings, toolSession, {
+			hasHandlers: () => false,
+		});
+
+		const taskLaunch = host.authorizeLaunch({
+			tool: { name: "task", approval: "exec" },
+			toolCall: { type: "toolCall", id: "call-task", name: "task", arguments: {} },
+			args: { tasks: [] },
+		});
+		expect(taskLaunch).toEqual({ allowed: false, reason: "active tool interceptor rule" });
+
+		const untargetedLaunch = host.authorizeLaunch({
+			tool: { name: "bash", approval: "exec" },
+			toolCall: { type: "toolCall", id: "call-bash", name: "bash", arguments: {} },
+			args: { command: "echo ok" },
+		});
+		expect(untargetedLaunch).toEqual({ allowed: true });
+	});
+
+	it("validates toolInterceptor.rules entries and rejects malformed rules or regexes", () => {
+		const settings = Settings.isolated();
+		expect(() =>
+			cfgToolInterceptorRules.override(settings, [{ tools: ["eval"], pattern: "[unclosed", message: "Bad regex." }]),
+		).toThrow(/invalid regex/);
+		expect(() =>
+			cfgToolInterceptorRules.override(settings, [
+				{ tools: ["eval"], pattern: "foo", threshold: 1.5, message: "Bad threshold." },
+			]),
+		).toThrow(/threshold/);
+		expect(() =>
+			cfgToolInterceptorRules.override(settings, [{ tools: ["eval"], message: "Missing pattern and question." }]),
+		).toThrow(/must specify 'pattern' and\/or 'question'/);
 	});
 });
