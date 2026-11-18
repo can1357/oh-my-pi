@@ -4,10 +4,22 @@
 
 ### Added
 
+- `prompt-cache-prewarm` compat axis, read through `isPromptCachePrewarmSupported`: the first-party Anthropic endpoint accepts a `max_tokens: 0` prompt-cache pre-warm
+- Added `Model.voice` (default voice for speech models) and `Model.speechFormats` (the only audio containers a speech model returns), and moved `SPEECH_FORMATS`/`SpeechFormat` here from `@oh-my-pi/pi-ai` ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+
+### Fixed
+
+- Hosted jev (TypeSafe, OpenRouter, Command Code, OpenCode Zen) splits judgment requests at 32 questions, ending `400 questions must map 1 through 32 ids` find failures
+- Fixed Devin models seeing only the newest 5 images of a conversation: Devin's own host now takes up to 60 (20 for Claude models) within 24 MB of image data and a custom Devin base URL up to 40, and snapcompact plans Gemini 4 Carbon and Gemini 3.7 Flash archive frames at the 1,089 tokens Devin bills instead of about 5,000 ([#19619](https://github.com/can1357/oh-my-pi/pull/19619) by [@will-bogusz](https://github.com/will-bogusz))
+- Devin's Gemini 3.7 Flash, 3.8 Flash, 4 Argon and 4 Carbon now switch from promo to list price when each promotion ends, instead of showing and billing the promo price indefinitely ([#19601](https://github.com/can1357/oh-my-pi/pull/19601) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.22.2] - 2026-11-18
+
+### Added
+
 - Added Kiro to the model catalog with automatic discovery of every model available to the signed-in Kiro account ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
 - Added Factory Droid's Claude Fable 5.2, Gemini 4 Carbon (with its launch credit promotion, half the input rate until 2026-12-01) and Kimi K3.1 Pro, each listed once the account's feature flag enables it, and GPT Image 2.6 and GPT Image 2.6 Flare ahead of GPT Image 2.5 in the `image` role's Factory defaults ([#19191](https://github.com/can1357/oh-my-pi/pull/19191) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `writeModelCacheAsync()` and `forEachInSlices()`: model refreshes now build and cache discovered models in slices that yield to the event loop; `writeModelCache()` returns its outcome and no longer rewrites a provider whose rows are unchanged
-- Added `Model.voice` (default voice for speech models) and `Model.speechFormats` (the only audio containers a speech model returns), and moved `SPEECH_FORMATS`/`SpeechFormat` here from `@oh-my-pi/pi-ai` ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 

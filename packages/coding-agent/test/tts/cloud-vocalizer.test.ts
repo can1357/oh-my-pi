@@ -82,7 +82,7 @@ describe("decodeWav", () => {
 	});
 
 	test("rejects a non-WAV buffer such as MP3", () => {
-		expect(() => decodeWav(new Uint8Array([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 0, 0, 0]))).toThrow("RIFF");
+		expect(() => decodeWav(new Uint8Array([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 0, 0, 0]))).toThrow("Not a WAVE file");
 	});
 });
 

@@ -28,8 +28,9 @@ import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
 import { cfgTtsLocalSpeed, cfgTtsLocalVoice } from "../tts/settings";
 
 // Built-in voices per xAI Tier-1 docs (2026-05-16). xAI also accepts custom voice IDs,
-// so the schema does NOT enum-restrict voice_id; this constant only drives the description.
-const XAI_BUILTIN_VOICES = ["ara", "eve", "leo", "rex", "sal"] as const;
+// so the schema does NOT enum-restrict voice_id; this constant drives the description and
+// the voices the shell's `say` matches by name.
+export const XAI_BUILTIN_VOICES = ["ara", "eve", "leo", "rex", "sal"] as const;
 
 const formatVoiceList = (): string =>
 	XAI_BUILTIN_VOICES.map(v => (v === DEFAULT_XAI_VOICE_ID ? `${v} (default)` : v)).join(", ");

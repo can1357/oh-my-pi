@@ -9,8 +9,8 @@ export const handlePubDev: SpecialHandler = async (url: string, timeout: number,
 		const parsed = new URL(url);
 		if (parsed.hostname !== "pub.dev" && parsed.hostname !== "www.pub.dev") return null;
 
-		// Extract package name from /packages/{package}
-		const match = parsed.pathname.match(/^\/packages\/([^/]+)/);
+		// The package page /packages/{package} only: its subpages (changelog, versions, example…) render as HTML.
+		const match = parsed.pathname.match(/^\/packages\/([^/]+)\/?$/);
 		if (!match) return null;
 
 		const packageName = decodeURIComponent(match[1]);

@@ -48,7 +48,7 @@ The SDK registers this write-approved custom tool when `speechgen.enabled=true` 
 
 ## Modes / Variants
 
-- Local: Phonon 31M on-device inference (native pi-natives runtime, English only, 24 kHz); always WAV/PCM16. Model weights (~68 MB) may need downloading before local inference can run.
+- Local: Phonon 31M on-device inference (native omp-natives runtime, English only, 24 kHz); always WAV/PCM16. Model weights (~68 MB) may need downloading before local inference can run.
 - xAI: Grok Voice cloud synthesis; MP3 or WAV.
 - OpenAI-compatible speech: selected cloud model and endpoint; MP3 or WAV.
 - Legacy `providers.tts` values (`local`, `xai`, `deepinfra`) migrate to speech-role selectors on settings load. `providers.tts` and `tts.localModel` are removed; local model selection now comes from the speech role.

@@ -26,9 +26,9 @@ export interface SearchParams {
 	 * (domain/date filters) or engine query syntax (`formatQuery`) where the
 	 * upstream supports them, and lean lenient otherwise: the pipeline
 	 * post-filters every response with `applyQueryConstraints`, which
-	 * relaxes any constraint that would eliminate all results — so a
-	 * best-effort search always beats an empty one. When absent (direct
-	 * provider calls), parse with `parseSearchQuery(params.query)`.
+	 * always enforces scope directives (`site:`, `inurl:`, exclusions) and
+	 * relaxes any other constraint that would eliminate all results. When
+	 * absent (direct provider calls), parse with `parseSearchQuery(params.query)`.
 	 */
 	parsedQuery?: StructuredQuery;
 	limit?: number;

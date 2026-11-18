@@ -22,6 +22,7 @@ import {
 	MAX_RAW_QUERY_ROWS,
 	openSqliteReadConnection,
 	parseSqlitePathCandidates,
+	parseSqliteSelectorBoundaryCandidates,
 	parseSqliteSelector,
 	queryRows,
 	renderRow,
@@ -88,6 +89,16 @@ export async function resolveSqliteReadPath(
 				}
 			}
 		}
+	}
+
+	// A SQLite file without a database extension is recognized by its header alone.
+	for (const candidate of parseSqliteSelectorBoundaryCandidates(readPath)) {
+		const absolutePath = resolveReadPath(candidate.sqlitePath, session.cwd);
+		const stat = await Bun.file(absolutePath)
+			.stat()
+			.catch(() => null);
+		if (!stat?.isFile() || !(await isSqliteFile(absolutePath))) continue;
+		return { absolutePath, sqliteSubPath: candidate.subPath, queryString: candidate.queryString };
 	}
 
 	return null;

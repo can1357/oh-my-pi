@@ -300,6 +300,7 @@ describe("openai-codex usage parser", () => {
 		const spark = report?.limits.find(l => l.id === "openai-codex:spark:primary");
 		expect(spark).toBeTruthy();
 		expect(spark?.scope.tier).toBe("spark");
+		expect(spark?.scope.modelId).toBe("codex_bengalfox");
 	});
 
 	it("returns a report even when only additional_rate_limits are present (no main rate_limit)", async () => {
