@@ -10,7 +10,7 @@ import { type Component } from "../tui";
 import { formatBytes, formatCount, formatDuration } from "@oh-my-pi/pi-utils";
 import { span } from "../native/describe";
 import type { JobSnapshot } from "../tools/wait";
-import type { DaemonSnapshot } from "../tools/daemon";
+import { type PersistedSnapshot, serviceView } from "../tools/daemon";
 import {
 	type AsyncNotifyDetails,
 	type CustomMessage,
@@ -159,9 +159,9 @@ function facts(values: readonly (string | undefined)[]): TspSpan[] {
  * "Supervised process ..." row per daemon, matching background-job rows.
  */
 export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolActivityContainer {
-	const details = (message as CustomMessage<{ daemons?: DaemonSnapshot[] }>).details;
+	const details = (message as CustomMessage<{ daemons?: PersistedSnapshot[] }>).details;
 	const rows: TranscriptStatusRow[] = [];
-	const daemons = details?.daemons ?? [];
+	const daemons = (details?.daemons ?? []).map(serviceView);
 	if (daemons.length === 0 && typeof message.content === "string") {
 		rows.push({
 			parts: [{ text: `${theme.status.success} ${message.content}`, color: "dim" }],

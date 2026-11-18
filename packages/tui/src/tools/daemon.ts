@@ -92,3 +92,54 @@ export interface UnitSnapshot {
 	/** False for `external` units and re-adopted detached units the daemon cannot wait on. */
 	supervised: boolean;
 }
+
+/**
+ * A service snapshot of the launch broker the daemon replaced: what `launch-completion` messages
+ * and `proc://` results persisted in sessions written before {@link UnitSnapshot}.
+ */
+export interface BrokerSnapshot {
+	name: string;
+	id: string;
+	state: DaemonState;
+	pid?: number;
+	createdAt: number;
+	startedAt: number;
+	exitedAt?: number;
+	exitCode?: number;
+	persist: boolean;
+	detached: boolean;
+}
+
+/** A service snapshot read back from session history, written by either generation. */
+export type PersistedSnapshot = UnitSnapshot | BrokerSnapshot;
+
+/** What transcript renderers show of a supervised service; see {@link serviceView}. */
+export interface ServiceView {
+	/** The service name, as `proc://` takes it. */
+	name: string;
+	state: DaemonState;
+	/** Main process id, when the snapshot has one. */
+	pid?: number;
+	startedAt: number;
+	exitedAt?: number;
+	exitCode?: number;
+	hold: UnitPolicy["hold"];
+}
+
+/** The renderable facts of a persisted service snapshot, whichever generation wrote it. */
+export function serviceView(snapshot: PersistedSnapshot): ServiceView {
+	const { state, startedAt, exitedAt, exitCode } = snapshot;
+	if ("key" in snapshot) {
+		return {
+			name: snapshot.key,
+			state,
+			pid: snapshot.pids[0],
+			startedAt,
+			exitedAt,
+			exitCode,
+			hold: snapshot.policy.hold,
+		};
+	}
+	const hold = snapshot.detached ? "detached" : snapshot.persist ? "persist" : "leases";
+	return { name: snapshot.name, state, pid: snapshot.pid, startedAt, exitedAt, exitCode, hold };
+}
