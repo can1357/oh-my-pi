@@ -1391,6 +1391,12 @@ echo ok
 					originMainBefore,
 				);
 			});
+
+			it("pushes the branch pr_checkout made for the named PR, not the current branch", async () => {
+				const tool = new GithubTool(createSession(fixture.repoRoot));
+				const result = await tool.execute("pr-push-named", { op: "pr_push", pr: "100" });
+				expect(result.details).toMatchObject({ branch: "pr-100", remoteBranch: fixture.headRefName });
+			});
 		});
 	});
 

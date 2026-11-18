@@ -292,6 +292,17 @@ describe("html form", () => {
 			form.dispose();
 		});
 
+		it("checks the focused box when Enter leaves an empty checkbox group", () => {
+			const { form } = dialog(`<form><fieldset><legend>Pick</legend>
+<label><input type="checkbox" name="t" value="a"> A</label>
+<label><input type="checkbox" name="t" value="b"> B</label>
+</fieldset></form>`);
+			form.handleInput(DOWN);
+			form.handleInput(ENTER);
+			expect(form.data().t).toEqual(["b"]);
+			form.dispose();
+		});
+
 		it("keeps checkbox drafts across navigation and projects only finally selected options", () => {
 			const { form } = dialog(DB_FORM);
 			form.handleInput("n");

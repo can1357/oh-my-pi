@@ -17,7 +17,7 @@
  *
  * Keys: ↑/↓ move between choices and fields, Tab/Shift+Tab jump fields,
  * Space toggles (or opens a dropdown), ←/→ change a dropdown, Enter picks a
- * radio (or leaves a field) and moves on, Enter on Submit validates and
+ * radio (or the focused box of an empty checkbox group, or leaves a field) and moves on, Enter on Submit validates and
  * submits, PgUp/PgDn (←/→ on choices) turn pages (question tabs natively),
  * `app.ask.hide` collapses the form to one row, Esc cancels. Notes use `n`
  * on option rows and Alt+n on dropdowns, without selecting the option.
@@ -627,7 +627,9 @@ export class HtmlFormDialog implements Component, Focusable {
 			return;
 		}
 		if (confirm) {
-			if (!stop.field.multi) this.#toggle(stop.field, stop.option);
+			// Enter picks a radio; on a checkbox group with nothing checked yet it checks the focused box, so
+			// Enter alone never leaves the group empty.
+			if (!stop.field.multi || this.#checked.get(stop.field)?.size === 0) this.#toggle(stop.field, stop.option);
 			this.#moveField(1);
 		}
 	}

@@ -59,6 +59,9 @@ const HEADLESS_FORK_ASK_ERROR = prompt.render(askHeadlessForkMessage);
 const NO_NAMED_CONTROLS_ERROR =
 	"Error: the form has no named controls. Put at least one <input>, <select> or <textarea> with a `name` attribute inside the <form>.";
 
+const ASK_TIMED_OUT_UNANSWERED = "The ask timed out before the user answered its required fields; no answer was given.";
+const INVALID_ASK_ERROR = "Error: ask takes one `html` string holding a <form>.";
+
 // Window after the timeout deadline within which an `undefined` answer is
 // attributed to a UI-enforced timeout (for surfaces that close the dialog at
 // the deadline but never invoke `onTimeout`). Cancels beyond it are user Esc.
@@ -70,11 +73,44 @@ const askSchema = arkType({
 
 export type AskParams = typeof askSchema.infer;
 
-/** The `html` of a persisted or streamed `ask` call, for `/tree` re-answer and status lines. */
+/**
+ * The form an `ask` call asks: its `html`, a bare string, or the pre-HTML `questions` list
+ * (`[{id, question, options: [{label, description?}], multi?, recommended?}]`) rebuilt as a form.
+ * Also reads persisted and streamed calls for `/tree` re-answer and status lines.
+ */
 export function recoverAskHtml(toolCallArguments: unknown): string | undefined {
+	if (typeof toolCallArguments === "string") return toolCallArguments;
 	if (!isRecord(toolCallArguments)) return undefined;
 	const html = toolCallArguments.html;
-	return typeof html === "string" ? html : undefined;
+	if (typeof html === "string") return html;
+	const questions = toolCallArguments.questions;
+	return Array.isArray(questions) && questions.length > 0 ? legacyQuestionsHtml(questions) : undefined;
+}
+
+function legacyQuestionsHtml(questions: unknown[]): string | undefined {
+	const fieldsets: string[] = [];
+	for (const [index, item] of questions.entries()) {
+		if (!isRecord(item) || typeof item.question !== "string") return undefined;
+		const name = Bun.escapeHTML(typeof item.id === "string" && item.id ? item.id : `q${index + 1}`);
+		const kind = item.multi === true ? "checkbox" : "radio";
+		const options = Array.isArray(item.options) ? item.options : [];
+		const inputs: string[] = [];
+		for (const [optionIndex, option] of options.entries()) {
+			const label = isRecord(option) ? option.label : option;
+			if (typeof label !== "string") return undefined;
+			const description =
+				isRecord(option) && typeof option.description === "string"
+					? ` — ${Bun.escapeHTML(option.description)}`
+					: "";
+			const checked = item.recommended === optionIndex ? " checked" : "";
+			inputs.push(
+				`<label><input type="${kind}" name="${name}" value="${Bun.escapeHTML(label)}"${checked}> ${Bun.escapeHTML(label)}${description}</label>`,
+			);
+		}
+		const control = inputs.length > 0 ? inputs.join("") : `<textarea name="${name}"></textarea>`;
+		fieldsets.push(`<fieldset><legend>${Bun.escapeHTML(item.question)}</legend>${control}</fieldset>`);
+	}
+	return `<form>${fieldsets.join("")}</form>`;
 }
 
 // =============================================================================
@@ -361,6 +397,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	readonly summary = "Ask the user to fill in a form";
 	readonly parameters = askSchema;
 	readonly strict = true;
+	// Raw args reach execute() on schema failure, so a bare string or a legacy `questions` list still asks.
+	readonly lenientArgValidation = true;
 
 	// Run alone in its tool batch. The interactive dialog is a single shared UI
 	// surface (`ExtensionUiController` has no queue and overwrites the active
@@ -450,7 +488,11 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			throw new ToolAbortError("Ask tool requires interactive mode");
 		}
 
-		const form = parseHtmlForm(params.html);
+		const html = recoverAskHtml(params);
+		if (html === undefined) {
+			return { content: [{ type: "text", text: INVALID_ASK_ERROR }], details: { answers: [] }, isError: true };
+		}
+		const form = parseHtmlForm(html);
 		const questions = fieldQuestions(form);
 		const named = form.fields.filter(field => field.name);
 		if (named.length === 0) {
@@ -496,7 +538,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			if (extensionUi.formDialog) {
 				const formDialog = extensionUi.formDialog.bind(extensionUi);
 				answered = await untilAborted(dialogSignal, () =>
-					formDialog(params.html, { timeout, signal: dialogSignal, acceptImages: true }),
+					formDialog(html, { timeout, signal: dialogSignal, acceptImages: true }),
 				);
 			} else {
 				answered = await askFieldByField(extensionUi, form, timeout, dialogSignal);
@@ -506,6 +548,13 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			throw error;
 		}
 		if (!answered) return cancelAsk();
+		// A timeout submits what the form holds; with a required field still empty that is no answer, not data.
+		if (answered.timedOut && named.some(field => fieldError(field, answered.data[field.name!]) !== undefined)) {
+			return {
+				content: [{ type: "text", text: ASK_TIMED_OUT_UNANSWERED }],
+				details: { answers: [], timedOut: true },
+			};
+		}
 
 		const notes = answered.notes?.length ? answered.notes : undefined;
 		// Each note numbers its markers from 1; shift them so `[Image #N]` indexes all result images.

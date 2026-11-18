@@ -200,6 +200,18 @@ describe("AskTool form dialog", () => {
 		expect(result.details?.notes).toEqual(notes);
 	});
 
+	it("gives no answer when a timeout leaves a required field empty", async () => {
+		const result = await new AskTool(createSession()).execute(
+			"call-timeout-required",
+			{ html: '<form><input name="transport" required></form>' },
+			undefined,
+			undefined,
+			createContext({ formDialog: async () => ({ data: { transport: "" }, timedOut: true }) }),
+		);
+		expect(text(result)).toContain("no answer was given");
+		expect(result.details).toEqual({ answers: [], timedOut: true });
+	});
+
 	it("aborts the turn when the user cancels the form", async () => {
 		const abort = vi.fn();
 		const outcome = new AskTool(createSession()).execute(
@@ -601,10 +613,18 @@ describe("AskTool without an interactive UI", () => {
 });
 
 describe("recoverAskHtml", () => {
-	it("recovers the form of an html call and nothing from legacy question calls", () => {
+	it("recovers the form of an html call, a bare string and a legacy question call", () => {
 		expect(recoverAskHtml({ html: DB_FORM })).toBe(DB_FORM);
-		expect(recoverAskHtml({ questions: [{ id: "q", question: "Q?", options: [] }] })).toBeUndefined();
-		expect(recoverAskHtml("<form></form>")).toBeUndefined();
+		expect(recoverAskHtml("<form></form>")).toBe("<form></form>");
+		const legacy = recoverAskHtml({
+			questions: [
+				{ id: "db", question: "Which <db>?", options: [{ label: "pg" }, { label: "sqlite" }], recommended: 1 },
+			],
+		});
+		expect(legacy).toBe(
+			'<form><fieldset><legend>Which &lt;db&gt;?</legend><label><input type="radio" name="db" value="pg"> pg</label><label><input type="radio" name="db" value="sqlite" checked> sqlite</label></fieldset></form>',
+		);
+		expect(recoverAskHtml({ questions: [{ id: "q" }] })).toBeUndefined();
 	});
 });
 

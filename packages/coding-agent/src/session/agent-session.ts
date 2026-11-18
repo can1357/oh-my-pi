@@ -3552,8 +3552,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Plan-proposal handler consulted by `xd://propose` while plan mode is active. */
 	#planProposalHandler: PlanProposalHandler | undefined;
 
+	/**
+	 * The installed handler; while plan mode is active without one (a host that never installed it, or a mode
+	 * switch that dropped it), proposing still validates the plan and returns it for review.
+	 */
 	peekPlanProposalHandler(): PlanProposalHandler | undefined {
-		return this.#planProposalHandler;
+		if (this.#planProposalHandler) return this.#planProposalHandler;
+		return this.#planModeState?.enabled ? title => this.preparePlanForReview(title) : undefined;
 	}
 
 	/** The handler can ask the user to approve the plan mid-turn (ACP), so it runs as a {@link waitForUser}. */
