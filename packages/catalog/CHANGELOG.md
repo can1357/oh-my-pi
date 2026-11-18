@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Hosted jev (TypeSafe, OpenRouter, Command Code, OpenCode Zen) splits judgment requests at 32 questions, ending `400 questions must map 1 through 32 ids` find failures
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

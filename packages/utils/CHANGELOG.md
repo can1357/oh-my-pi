@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows shell discovery skips the WSL `bash.exe` launcher, so services no longer run in WSL
+- Opening an archive no longer fails because one unrelated member exceeds the 64 MiB extraction limit; the limit applies when that member is read
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
