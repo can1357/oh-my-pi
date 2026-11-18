@@ -554,15 +554,17 @@ function guardEnabled(settings: Settings): boolean {
  */
 export class ToolGuard {
 	readonly #host: ToolGuardHost;
-	#consecutive = 0;
 	#total = 0;
 	/**
-	 * The runs of refusals each call ended, by tool call id, kept while the call's device tool may still
-	 * be refused. A device call (`write xd://<tool>`, a shell redirect to one) passes the guard twice
-	 * under one id: its carrier, then the device's tool. When the device's tool is refused, its carrier
-	 * ran nothing and ended no run. Keyed per call, since device calls can be in flight at once.
+	 * The refusal count when each call that passed ended a run of refusals, by tool call id. A device
+	 * call (`write xd://<tool>`, a shell redirect to one) passes the guard twice under one id: its
+	 * carrier, then the device's tool. A refused device tool takes its carrier's end back, since the
+	 * carrier ran nothing. Every other end stands: device calls can be in flight at once, and a call
+	 * that passed while one waited may have run.
 	 */
-	readonly #endedRuns = new Map<string, number>();
+	readonly #ends = new Map<string, number>();
+	/** The refusal count at the last end no refusal can take back. */
+	#settledEnd = 0;
 	/** Non-synthetic user messages when the counts last restarted; one more starts a new run. */
 	#runKey: number | undefined;
 	/** Judgments in a row that failed or timed out. */
@@ -582,9 +584,9 @@ export class ToolGuard {
 		for (const message of messages) if (userRole(message) && !message.synthetic) runKey++;
 		if (this.#runKey !== runKey) {
 			this.#runKey = runKey;
-			this.#consecutive = 0;
 			this.#total = 0;
-			this.#endedRuns.clear();
+			this.#ends.clear();
+			this.#settledEnd = 0;
 		}
 		// Rule gates never consult the judge breaker below: a failing judge must not open them.
 		const gate = await this.#host.gate?.(tool, args, toolCall.toolCallId, signal);
@@ -644,23 +646,26 @@ export class ToolGuard {
 
 	/** Ends the current run of refusals at an allowed call. */
 	#endRefusals(toolCallId: string): void {
-		if (this.#consecutive > 0) this.#endedRuns.set(toolCallId, this.#consecutive);
-		this.#consecutive = 0;
+		if (this.#ends.has(toolCallId)) {
+			// The device's tool of a call whose carrier passed: it runs, after every end so far.
+			this.#ends.clear();
+			this.#settledEnd = this.#total;
+		} else if (this.#total > this.#settledEnd) {
+			this.#ends.set(toolCallId, this.#total);
+		}
 	}
 
 	/** Counts one refusal, stopping the run after too many, and returns it. */
 	#refused(toolCallId: string, refusal: string): string {
-		// The device's tool of a call whose carrier ended the run: the carrier ran nothing, so the run goes on.
-		const endedRun = this.#endedRuns.get(toolCallId);
-		if (endedRun !== undefined) {
-			this.#endedRuns.delete(toolCallId);
-			this.#consecutive += endedRun;
-		}
-		this.#consecutive++;
+		// The device's tool of a call whose carrier passed: the carrier ran nothing, so its end is taken back.
+		this.#ends.delete(toolCallId);
 		this.#total++;
+		let lastEnd = this.#settledEnd;
+		for (const end of this.#ends.values()) lastEnd = Math.max(lastEnd, end);
+		const consecutive = this.#total - lastEnd;
 		const exhausted =
-			this.#consecutive >= MAX_CONSECUTIVE_REFUSALS
-				? `The tool guard refused ${this.#consecutive} tool calls in a row; the run stopped.`
+			consecutive >= MAX_CONSECUTIVE_REFUSALS
+				? `The tool guard refused ${consecutive} tool calls in a row; the run stopped.`
 				: this.#total >= MAX_TOTAL_REFUSALS
 					? `The tool guard refused ${this.#total} tool calls in this run; the run stopped.`
 					: undefined;
