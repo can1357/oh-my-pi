@@ -4,6 +4,7 @@
  * prompt before releasing its MCP response; the actual late result is sent
  * only in a subsequent prompt. Failed drains kill the process and reseed.
  */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $which, isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import {
@@ -27,6 +28,7 @@ import type {
 import { normalizeSchemaForMCP, toolWireSchema } from "../../utils/schema";
 import { type JsonSchemaValidationResult, validateJsonSchemaValue } from "../../utils/schema/json-schema-validator";
 import agentDefinition from "./agent.md" with { type: "text" };
+import { resolveAntigravityCliIsolateWorkspace } from "../antigravity-cli-state";
 import { resolveAgyBinary } from "./binary";
 import {
 	conversationStorePath,
@@ -54,6 +56,8 @@ export interface AgyStepOptions {
 	signal?: AbortSignal;
 	/** Non-secret credential revision; a changed revision restarts agy's native token cache. */
 	credentialVersion?: string;
+	/** Pass an empty managed workspace directory to `agy` instead of `cwd` (default: `true`). */
+	isolateWorkspace?: boolean;
 }
 
 /** ACP operations required by the host; injectable without module or environment mutation. */
@@ -223,7 +227,9 @@ export class AgyHost implements ProviderSessionState {
 		try {
 			if (options.signal?.aborted) onAbort();
 			step.controller.signal.throwIfAborted();
-			const cwd = options.cwd ?? process.cwd();
+			const cwd = resolveAntigravityCliIsolateWorkspace(options.isolateWorkspace)
+				? await this.#setup(ensureEmptyWorkspace(this.#geminiDir))
+				: (options.cwd ?? process.cwd());
 			const tools = (context.tools ?? []).map(toMcpTool);
 			const toolsKey = stableStringifyJson(tools);
 			const system = (context.systemPrompt ?? []).join("\n\n");
@@ -856,6 +862,14 @@ async function writeAgentDefinition(geminiDir: string): Promise<void> {
 	const file = Bun.file(path.join(geminiDir, "config", "agents", `${AGENT_NAME}.md`));
 	if ((await file.exists()) && (await file.text()) === agentDefinition) return;
 	await Bun.write(file, agentDefinition);
+}
+
+/** Ensure the private empty workspace directory passed to `agy` when workspace isolation is active. */
+export async function ensureEmptyWorkspace(geminiDir: string): Promise<string> {
+	const workspace = path.join(geminiDir, "empty-workspace");
+	await fs.mkdir(workspace, { recursive: true, mode: 0o700 });
+	await fs.chmod(workspace, 0o700);
+	return workspace;
 }
 
 function systemMeta(system: string): Record<string, unknown> {

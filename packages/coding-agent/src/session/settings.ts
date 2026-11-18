@@ -25,6 +25,7 @@ import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } fr
 import { compileModelPatterns } from "../utils/model-patterns";
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
+import { configureAntigravityCliIsolateWorkspace } from "@oh-my-pi/pi-ai/providers/antigravity-cli-state";
 import { configureCodexAccessPrograms } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
@@ -1292,6 +1293,23 @@ export const cfgProvidersOpenaiCodexDaybreak = register({
 // Sessions pass their own value per request; this process-wide default covers
 // callers without a session stream function (titles, commit messages, memories).
 effect(cfgProvidersOpenaiCodexDaybreak, enabled => configureCodexAccessPrograms(enabled));
+
+export const cfgProvidersAntigravityCliIsolateWorkspace = register({
+	id: "providers.antigravity-cli.isolateWorkspace",
+	type: "boolean",
+	default: true,
+	env: "PI_AGY_ISOLATE_WORKSPACE",
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "Antigravity CLI Isolate Workspace",
+		description:
+			"Pass the per-account empty workspace directory (<geminiDir>/<account>/empty-workspace) to agy so agy does not index large repositories into memory while omp executes tools in the session directory.",
+	},
+});
+// Sessions pass their own value per request; this process-wide default covers
+// callers without a session stream function (titles, commit messages, memories).
+effect(cfgProvidersAntigravityCliIsolateWorkspace, enabled => configureAntigravityCliIsolateWorkspace(enabled));
 
 export const cfgProvidersCacheRetention = register({
 	id: "providers.cacheRetention",
