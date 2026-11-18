@@ -72,6 +72,7 @@ Plain provider credential names come from `env` entries in `packages/catalog/src
 | `XIAOMI_TOKEN_PLAN_AMS_API_KEY`       | Xiaomi MiMo Token Plan auth (AMS)                  | Using `xiaomi-token-plan-ams` provider                         |                                                                                                                                              |
 | `XIAOMI_TOKEN_PLAN_CN_API_KEY`        | Xiaomi MiMo Token Plan auth (CN)                   | Using `xiaomi-token-plan-cn` provider                          |                                                                                                                                              |
 | `XIAOMI_TOKEN_PLAN_SGP_API_KEY`       | Xiaomi MiMo Token Plan auth (SGP)                  | Using `xiaomi-token-plan-sgp` provider                         |                                                                                                                                              |
+| `KIRO_API_KEY`                        | Kiro API-key auth                                  | Using `kiro` without `/login kiro`                             | Must be a `ksk_…` key; a stored `/login kiro` credential wins                                                                                |
 | `MOONSHOT_API_KEY`                    | Moonshot auth                                      | Using `moonshot` provider                                      | `KIMI_API_KEY` is accepted as a fallback alias                                                                                               |
 | `STEPFUN_API_KEY`                     | StepFun auth                                       | Using `stepfun` provider                                       | Keys are region-scoped: the `.ai` key works against `api.stepfun.ai`, the `.com` key against `api.stepfun.com`                               |
 | `HELMCODE_API_KEY`                    | Helmcode auth                                      | Using `helmcode` provider                                      |                                                                                                                                              |
@@ -319,6 +320,14 @@ Base URL resolution: option `azureBaseUrl` → env `AZURE_OPENAI_BASE_URL` → o
 | `KIMI_CODE_BASE_URL`   | Overrides Kimi usage endpoint base URL (`usage/kimi.ts`) |
 
 OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth.kimi.com`.
+
+### Kiro
+
+| Variable          | Default / behavior                                                                                                                       |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `KIRO_API_REGION` | Unset: an API key without a stored endpoint is probed in the bootstrap regions. Set: discovery and requests use this AWS region directly |
+
+An invalid `KIRO_API_REGION` is an error rather than a silent fallback. `/login kiro` also reads it when validating a pasted API key. See [Kiro](./kiro.md).
 
 ### OpenAI-compatible endpoint controls
 
@@ -690,6 +699,7 @@ These are read as runtime signals; they are usually set by the terminal/OS rathe
 | `PI_KITTY_PLACEHOLDERS`        | `1` forces Kitty Unicode placeholder placement on; `0` forces it off. Under a terminal multiplexer, use `1` only after confirming the outer terminal supports Kitty `U=1` placeholders—otherwise U+10EEEE may render as literal PUA boxes                                                                                                                       |
 | `PI_NO_KITTY_PLACEHOLDERS`     | `1` hard-disables Kitty Unicode placeholder placement and takes precedence over `PI_KITTY_PLACEHOLDERS`                                                                                                                                                                                                                                                         |
 | `PI_TUI_RESIZE_IN_PLACE`       | `1`/`true` force in-place resize (no alt-screen borrow, no ED3 rewrap); `0`/`false` force the alt-screen fast path. Default-on for Warp, which re-reports its size on alt-screen toggles — except on a ConPTY host (Windows, and WSL through `wslhost`), where conhost owns the grid and repaints its own viewport on resize, so the anchor cannot be recovered |
+| `PI_LOOP_SAMPLER`            | If `0` or `false`, turns off the JavaScriptCore stack sampler the TUI event-loop watchdog runs (also off under `--cpu-prof`). When on (default), each `ui.loop-blocked` log record adds `cause` (the most sampled innermost source frame of the blocked window, `name (path:line)`), `causeShare` (fraction of window samples containing it) and `top` (up to 4 callers present in at least half the samples, outermost first, `name (path:line) NN%`)                                                                                                                                                     |
 
 ### Remote file links
 
