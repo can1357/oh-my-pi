@@ -1,4 +1,5 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+import { truncateToWidth } from "@oh-my-pi/pi-tui";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 
@@ -85,6 +86,17 @@ export function formatActiveAccountLabel(identity: OAuthAccountIdentity | undefi
 	if (!base) return undefined;
 	const org = identity.orgName || identity.orgId;
 	return org && org !== base ? `${base} (${org})` : base;
+}
+
+const NOTICE_LABEL_MAX = 80;
+
+/**
+ * An account label (provider-supplied email and organization) fit for a
+ * one-line TUI notice: escapes and layout characters removed, whitespace runs
+ * collapsed, width capped. Empty when nothing printable remains.
+ */
+export function formatNoticeAccountLabel(label: string): string {
+	return truncateToWidth(sanitizeText(label).replace(/\s+/g, " ").trim(), NOTICE_LABEL_MAX);
 }
 
 /**

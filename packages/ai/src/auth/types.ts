@@ -1301,6 +1301,12 @@ export interface SessionsApi {
 	 * callers must treat its absence as "unknown attribution".
 	 */
 	sticky?(provider: string, sessionId: string | undefined): SessionCredential | undefined;
+	/**
+	 * Which rule moved `sessionId` onto its current `provider` account, returned
+	 * once: the read clears it, so a later caller never re-reports an old switch.
+	 * Optional for the same reason as {@link sticky}.
+	 */
+	takeSwitchReason?(provider: string, sessionId: string): AccountSwitchReason | undefined;
 }
 
 /** Usage reporting, observation, and provider configuration. */

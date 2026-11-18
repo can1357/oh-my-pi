@@ -54,6 +54,7 @@ import {
 	USER_INTERRUPT_LABEL,
 } from "../../session/messages";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
+import { formatNoticeAccountLabel } from "../../slash-commands/helpers/active-oauth-account";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { writeDeviceDispatch } from "../../tools/resolve";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
@@ -2896,9 +2897,9 @@ export class EventController {
 	}
 
 	async #handleAccountSwitched(event: Extract<AgentSessionEvent, { type: "account_switched" }>): Promise<void> {
-		const from = event.from === undefined ? "a removed account" : sanitizeText(event.from);
+		const from = event.from === undefined ? "a removed account" : formatNoticeAccountLabel(event.from);
 		const reason = event.reason ? ` (${event.reason})` : "";
-		this.ctx.showStatus(`${event.provider} account: ${from} -> ${sanitizeText(event.to)}${reason}`);
+		this.ctx.showStatus(`${event.provider} account: ${from} -> ${formatNoticeAccountLabel(event.to)}${reason}`);
 	}
 
 	async #handleTtsrTriggered(event: Extract<AgentSessionEvent, { type: "ttsr_triggered" }>): Promise<void> {

@@ -10,11 +10,14 @@ import type {
 	UsageResetCreditDetail,
 	UsageResetCredits,
 } from "@oh-my-pi/pi-ai";
-import { truncateToWidth } from "@oh-my-pi/pi-tui";
 import { bankedResetCreditExpiryMs } from "@oh-my-pi/pi-tui/overlays/usage-display";
-import { formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { formatActiveAccountLabel, usageReportIdentity } from "../slash-commands/helpers/active-oauth-account";
+import {
+	formatActiveAccountLabel,
+	formatNoticeAccountLabel,
+	usageReportIdentity,
+} from "../slash-commands/helpers/active-oauth-account";
 import { formatResetProviderName } from "../slash-commands/helpers/reset-usage";
 import {
 	type ClaudeResetAction,
@@ -49,7 +52,6 @@ const SOON_MS = 7 * 24 * 3_600_000;
 const IMMINENT_MS = 24 * 3_600_000;
 /** The TUI warns about a saved reset only in its final hours; the status line and `omp usage` flag it from 24h out. */
 const NOTICE_LEAD_MS = 6 * 3_600_000;
-const NOTICE_LABEL_MAX = 80;
 
 /** Saved resets close to expiry on an account whose fullest chat window is worth restoring. */
 export interface ResetExpiryWarning {
@@ -279,10 +281,8 @@ export function claimResetExpiryNotice(
 	const { report, warning } = soonest;
 	const provider = formatResetProviderName(warning.provider);
 	// Email and organization come from the provider; keep escapes and layout characters out of the TUI.
-	const label = sanitizeText(formatActiveAccountLabel(usageReportIdentity(report)) ?? "")
-		.replace(/\s+/g, " ")
-		.trim();
-	const account = label ? ` on ${truncateToWidth(label, NOTICE_LABEL_MAX)}` : "";
+	const label = formatNoticeAccountLabel(formatActiveAccountLabel(usageReportIdentity(report)) ?? "");
+	const account = label ? ` on ${label}` : "";
 	const due = formatDuration(warning.expiresAtMs - nowMs);
 	const resets =
 		warning.count === 1
