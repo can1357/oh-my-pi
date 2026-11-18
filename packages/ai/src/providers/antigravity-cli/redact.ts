@@ -27,6 +27,9 @@ const OAUTH_PAIR_KEYS = [
 	"refresh_token",
 	"client_secret",
 	"id_token",
+	"token",
+	"api_key",
+	"password",
 ] as const;
 
 const URL_USERINFO = /(:\/\/)[^:/?#\s@]*:[^/?#\s@]*@/gi;
@@ -38,6 +41,10 @@ const QUOTED_OAUTH_PAIR = new RegExp(
 );
 const BARE_OAUTH_PAIR = new RegExp(
 	`\\b(${OAUTH_PAIR_KEYS.join("|")})(\\s*[:=]\\s*)("[^"]*"|'[^']*'|[^\\s,;&)"'}\\]]+)`,
+	"gi",
+);
+const AMBIGUOUS_BARE_PAIR = new RegExp(
+	`\\b(code|state)(\\s*[:=]\\s*)("[^"]{16,}"|'[^']{16,}'|[A-Za-z0-9._~-]{16,})`,
 	"gi",
 );
 const BEARER_TOKEN = /\b(Bearer\s+)\S+/gi;
@@ -58,5 +65,6 @@ export function redactSensitiveText(text: string | undefined | null): string {
 		.replace(QUOTED_OAUTH_PAIR, `$1"${MASK}"`)
 		.replace(SENSITIVE_QUERY_PARAM, `$1${MASK}`)
 		.replace(BARE_OAUTH_PAIR, `$1$2${MASK}`)
+		.replace(AMBIGUOUS_BARE_PAIR, `$1$2${MASK}`)
 		.replace(BEARER_TOKEN, `$1${MASK}`);
 }

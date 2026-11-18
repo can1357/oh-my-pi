@@ -933,6 +933,23 @@ describe("Antigravity CLI error text", () => {
 		expect(redactSensitiveText(undefined)).toBe("");
 	});
 
+	it("masks bare token, api_key, password and long opaque code or state pairs", () => {
+		expect(redactSensitiveText("token=live-token api_key=live-key password=live-pass")).toBe(
+			"token=*** api_key=*** password=***",
+		);
+		expect(redactSensitiveText("code=authorization-code-1234567890 state=opaque-state-value-123")).toBe(
+			"code=*** state=***",
+		);
+		expect(redactSensitiveText("exit code=1, state=ready")).toBe("exit code=1, state=ready");
+	});
+
+	it("masks bare pairs in a cause chain", () => {
+		const mapped = mapAgyError(new Error("token=live-token", { cause: new Error("password=live-pass") }));
+		expect(mapped.message).toBe("token=***");
+		const cause = mapped.cause;
+		expect(cause instanceof Error ? cause.message : "").toBe("password=***");
+	});
+
 	it("redacts the message returned by mapAgyError", () => {
 		const error = new Error(
 			"refresh failed: https://oauth.example/token?refresh_token=rt-secret and Bearer ya29.secret",
