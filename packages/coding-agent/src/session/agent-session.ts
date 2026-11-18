@@ -179,6 +179,7 @@ import { createExtensionModelQuery } from "../extensibility/extensions/model-api
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
+import type { MCPEvalNamespaceCatalog } from "../mcp/eval-namespaces";
 import {
 	type BuiltSkillPromptMessage,
 	loadSkillPrompt,
@@ -1319,6 +1320,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
 	#setMcpServerInstructionsSource: AgentSessionConfig["setMcpServerInstructionsSource"];
 	#skillDescriptions: SkillDescriptionCatalog;
+	#mcpNamespaces: MCPEvalNamespaceCatalog | undefined;
 	#promptSkillsSource: readonly Skill[] | undefined;
 	#promptSkills: readonly Skill[] = [];
 	/**
@@ -2244,6 +2246,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#ownsCostGate = config.costGate === undefined;
 		this.#costGate = config.costGate ?? this.#createCostGate();
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
+		this.#mcpNamespaces = config.mcpNamespaces;
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
 		this.#allowSessionModelFallback = config.allowSessionModelFallback === true;
@@ -2794,6 +2797,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			reconcileSettingsGatedTools: config.reconcileSettingsGatedTools,
 			rebuildSystemPrompt: config.rebuildSystemPrompt,
 			getMcpServerInstructions: config.getMcpServerInstructions,
+			bindsMcpToEval: config.bindsMcpToEval,
+			evalBoundToolNames: config.evalBoundToolNames,
 			xdev: config.xdev,
 			setActiveToolNames: config.setActiveToolNames,
 			baseSystemPrompt: this.agent.state.systemPrompt,
@@ -7868,6 +7873,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#tools.getEvalBridgeToolNames();
 	}
 
+	/** Enabled MCP tools presented as eval namespace methods (see {@link SessionTools.getEvalBoundToolNames}). */
+	getEvalBoundToolNames(): string[] {
+		return this.#tools.getEvalBoundToolNames();
+	}
+
 	/** Eval tool names frozen into the provider-visible eval description (see {@link SessionTools.advertisedEvalToolNames}). */
 	getAdvertisedEvalToolNames(): readonly string[] {
 		return this.#tools.advertisedEvalToolNames;
@@ -11947,9 +11957,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#promptSkills;
 	}
 
-	/** Start skill-description compression held by `deferSkillDescriptionCompression` (see `createAgentSession`). */
-	startSkillDescriptionCompression(): void {
+	/** Start skill and MCP namespace hint compression held by `deferHintCompression` (see `createAgentSession`). */
+	startHintCompression(): void {
 		this.#skillDescriptions.startCompression();
+		this.#mcpNamespaces?.startCompression();
 	}
 
 	/** Frozen skill-URI hint visibility snapshot (see {@link SessionTools.skillHintVisible}). */

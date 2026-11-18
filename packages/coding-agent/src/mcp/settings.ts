@@ -30,6 +30,19 @@ export const cfgMcpStartupTimeoutMs = register({
 	},
 });
 
+export const cfgMcpEvalNamespaces = register({
+	id: "mcp.evalNamespaces",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "MCP Eval Namespaces",
+		description:
+			"Expose each MCP server as an eval global (github.create_issue(...)) instead of top-level or xd:// tools",
+	},
+});
+
 export const cfgMcpRenderMarkdownResults = register({
 	id: "mcp.renderMarkdownResults",
 	type: "boolean",

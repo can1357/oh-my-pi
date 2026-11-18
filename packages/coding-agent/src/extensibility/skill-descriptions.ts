@@ -55,7 +55,8 @@ class SkillDescriptionLengthError extends Error {}
  * the inherited `default` when `smol` is unset, then the built-in chain — before a configured `tiny`.
  * Never uses the session's foreground model. `getCostGate` returns the session tree's gate per request,
  * following it across new sessions and switches; each provider attempt is admitted and metered there.
- * `usageLedger` is the session whose prompt asked for the compression; each attempt is journaled there.
+ * `usageLedger` is the session whose prompt asked for the compression; each attempt is journaled there,
+ * under `purpose` (default `skill-description`); `oneshotKind` (default `skill_description`) tags telemetry.
  */
 export function createSkillDescriptionCompressor(
 	registry: ModelRegistry,
@@ -65,6 +66,8 @@ export function createSkillDescriptionCompressor(
 		getTelemetry?: () => AgentTelemetry | undefined;
 		getCostGate?: () => CostGateApi | undefined;
 		usageLedger?: Partial<ModelUsageLedger>;
+		purpose?: string;
+		oneshotKind?: string;
 	} = {},
 ): SkillDescriptionCompressor {
 	const select = (): Model<Api> | undefined => {
@@ -116,7 +119,7 @@ export function createSkillDescriptionCompressor(
 				refused.abort(error);
 				throw error;
 			};
-			const journal = journalCompletion(options.usageLedger, { purpose: "skill-description" });
+			const journal = journalCompletion(options.usageLedger, { purpose: options.purpose ?? "skill-description" });
 			let response: AssistantMessage;
 			try {
 				response = await instrumentedCompleteSimple(
@@ -138,7 +141,7 @@ export function createSkillDescriptionCompressor(
 							journal?.(message, request);
 						},
 					},
-					{ telemetry: options.getTelemetry?.(), oneshotKind: "skill_description" },
+					{ telemetry: options.getTelemetry?.(), oneshotKind: options.oneshotKind ?? "skill_description" },
 				);
 			} catch (error) {
 				if (refused.signal.aborted) throw refused.signal.reason;
@@ -290,9 +293,9 @@ function adoptLegacyDatabase(legacyPath: string, dbPath: string): void {
 }
 
 /**
- * SQLite store of compressed descriptions, keyed by prompt + skill content hash. A
- * `<key>:v<revision>:<provider/id>` row records that model's unusable answer, so it is not asked
- * again while new models and validation revisions still are.
+ * SQLite store of routing hints (compressed skill descriptions, MCP namespace hints), keyed by a hash
+ * of the prompt and the content it condenses. A `<key>:v<revision>:<provider/id>` row records that
+ * model's unusable answer, so it is not asked again while new models and validation revisions still are.
  */
 export class SkillDescriptionStore {
 	/** Database file; scopes in-flight compression jobs shared by catalogs on this store. */
@@ -390,71 +393,81 @@ export class SkillDescriptionStore {
 	}
 }
 
-/** One prompt/session snapshot; completing a background job never mutates its rendered descriptions. */
-export class SkillDescriptionCatalog {
+/** One routing hint a {@link RoutingHintCatalog} serves: the cached model answer, else `placeholder`. */
+export interface RoutingHintRequest {
+	/** Store key: a digest of the prompt and everything it renders. */
+	readonly key: string;
+	/** Subject name, passed to the compressor and logged on failure. */
+	readonly name: string;
+	/** Source text the hint condenses, passed to the compressor. */
+	readonly description: string;
+	/** Hint shown until the model answer is cached, and remembered for a model whose answer is unusable. */
+	readonly placeholder: string;
+	/** The model request; rendered only when compression runs. */
+	render(): string;
+}
+
+/** Store, compressor and deferral shared by every {@link RoutingHintCatalog}. */
+export interface RoutingHintCatalogOptions {
+	/** Defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep placeholders. */
+	store?: SkillDescriptionStore;
+	compress?: SkillDescriptionCompressor;
+	/**
+	 * Hold model work until {@link RoutingHintCatalog.startCompression}: until the owning session's
+	 * cost gate exists, and off a startup path (resolving the compression model composes the catalog).
+	 */
+	deferCompression?: boolean;
+}
+
+/**
+ * One prompt/session snapshot of model-condensed routing hints. A hint is frozen the first time the
+ * catalog renders it, so completing a background job never mutates a prompt this catalog already
+ * built; the answer reaches the next catalog through the store. Skills
+ * ({@link SkillDescriptionCatalog}) and MCP eval namespaces (`mcp/eval-namespaces.ts`) use it.
+ */
+export class RoutingHintCatalog {
 	readonly #store: SkillDescriptionStore | undefined;
 	readonly #compress?: SkillDescriptionCompressor;
 	readonly #snapshot = new Map<string, string>();
 	/** Misses rendered before {@link startCompression}; `undefined` once compression runs. */
-	#deferred: Map<string, Skill> | undefined;
+	#deferred: Map<string, RoutingHintRequest> | undefined;
 
-	/**
-	 * `store` defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep previews.
-	 * `deferCompression` holds model work until {@link startCompression}: until the owning session's
-	 * cost gate exists, and off a startup path (resolving the compression model composes the catalog).
-	 */
-	constructor(
-		options: {
-			store?: SkillDescriptionStore;
-			compress?: SkillDescriptionCompressor;
-			deferCompression?: boolean;
-		} = {},
-	) {
+	constructor(options: RoutingHintCatalogOptions = {}) {
 		this.#store = options.store ?? sharedSkillDescriptionStore();
 		this.#compress = options.compress;
 		if (options.deferCompression) this.#deferred = new Map();
 	}
 
-	/** Read the session's frozen prompt hints without starting new model work. */
-	snapshot(skills: readonly Skill[]): Array<Skill & { description: string }> {
-		return skills.map(skill => ({
-			...skill,
-			description: this.#snapshot.get(keyFor(skill)) ?? previewSkillDescription(skill.description),
-		}));
+	/** The hint this catalog froze for `key`, else `placeholder`; schedules no model work. */
+	peek(key: string, placeholder: string): string {
+		return this.#snapshot.get(key) ?? placeholder;
 	}
 
-	render(skills: readonly Skill[]): Array<Skill & { description: string }> {
-		if (skills.length === 0) return [];
+	/**
+	 * Hints for `requests`, in order: the frozen one, else the cached answer, else the placeholder.
+	 * Misses schedule one compression batch (held while compression is deferred).
+	 */
+	hints(requests: readonly RoutingHintRequest[]): string[] {
 		const store = this.#store;
-		const misses = new Map<string, Skill>();
-		const rendered = skills.map(skill => {
-			// Authored descriptions already within the preview budget need no model
-			// compression: use them verbatim so exclusions survive. Only truly
-			// short input qualifies — `previewSkillDescription` truncates longer
-			// text to fit, which must still schedule compression. `keyFor` runs
-			// only for long descriptions that may schedule compression.
-			const collapsed = skill.description.replace(/\s+/g, " ").trim();
-			if (collapsed.length <= MAX_PREVIEW_CHARS)
-				return { ...skill, description: previewSkillDescription(skill.description) };
-			const key = keyFor(skill);
-			let description = this.#snapshot.get(key);
-			if (description === undefined) {
-				try {
-					description = store?.get(key);
-				} catch (error) {
-					logger.warn("Skill description cache read failed", { error: String(error) });
-				}
-				if (description === undefined) {
-					description = previewSkillDescription(skill.description);
-					misses.set(key, skill);
-				}
-				this.#snapshot.set(key, description);
+		const misses = new Map<string, RoutingHintRequest>();
+		const rendered = requests.map(request => {
+			let hint = this.#snapshot.get(request.key);
+			if (hint !== undefined) return hint;
+			try {
+				hint = store?.get(request.key);
+			} catch (error) {
+				logger.warn("Routing hint cache read failed", { error: String(error) });
 			}
-			return { ...skill, description };
+			if (hint === undefined) {
+				hint = request.placeholder;
+				misses.set(request.key, request);
+			}
+			this.#snapshot.set(request.key, hint);
+			return hint;
 		});
 		if (!store || misses.size === 0) return rendered;
 		if (this.#deferred) {
-			for (const [key, skill] of misses) this.#deferred.set(key, skill);
+			for (const [key, request] of misses) this.#deferred.set(key, request);
 		} else {
 			this.#schedule(store, misses);
 		}
@@ -468,40 +481,94 @@ export class SkillDescriptionCatalog {
 		if (deferred && deferred.size > 0 && this.#store) this.#schedule(this.#store, deferred);
 	}
 
-	/** Await background writes already scheduled by this catalog (for shutdown or tests). */
+	/** Await background writes already scheduled on this catalog's store (for shutdown or tests). */
 	async waitForPending(): Promise<void> {
 		if (!this.#store) return;
 		await Promise.all(pendingForStore(this.#store));
 	}
 
-	#schedule(store: SkillDescriptionStore, misses: ReadonlyMap<string, Skill>): void {
+	#schedule(store: SkillDescriptionStore, misses: ReadonlyMap<string, RoutingHintRequest>): void {
 		const compressor = this.#compress;
 		if (!compressor || store.isClosing) return;
 		// One resolution serves the whole batch: each composes the available model catalog, and a
 		// miss that model already answered unusably needs nothing more. Deferred until the current
 		// synchronous prompt rendering has finished.
 		let batchModel: Promise<string | undefined> | undefined;
-		for (const [key, skill] of misses) {
+		for (const [key, request] of misses) {
 			const job = `${store.path}:${key}`;
 			if (inFlight.has(job)) continue;
 			batchModel ??= Promise.resolve().then(() => compressor.modelKey());
-			const pending = compressSkill(store, compressor, batchModel, key, skill).finally(() => inFlight.delete(job));
+			const pending = compressHint(store, compressor, batchModel, request).finally(() => inFlight.delete(job));
 			inFlight.set(job, pending);
 		}
 	}
 }
 
+/** Skill routing hints: one prompt/session snapshot over a {@link RoutingHintCatalog}. */
+export class SkillDescriptionCatalog {
+	readonly #hints: RoutingHintCatalog;
+
+	constructor(options: RoutingHintCatalogOptions = {}) {
+		this.#hints = new RoutingHintCatalog(options);
+	}
+
+	/** Read the session's frozen prompt hints without starting new model work. */
+	snapshot(skills: readonly Skill[]): Array<Skill & { description: string }> {
+		return skills.map(skill => ({
+			...skill,
+			description: this.#hints.peek(keyFor(skill), previewSkillDescription(skill.description)),
+		}));
+	}
+
+	render(skills: readonly Skill[]): Array<Skill & { description: string }> {
+		if (skills.length === 0) return [];
+		// Authored descriptions already within the preview budget need no model
+		// compression: use them verbatim so exclusions survive. Only truly
+		// short input qualifies — `previewSkillDescription` truncates longer
+		// text to fit, which must still schedule compression. `keyFor` runs
+		// only for long descriptions that may schedule compression.
+		const requests = skills.map((skill): RoutingHintRequest | undefined =>
+			skill.description.replace(/\s+/g, " ").trim().length <= MAX_PREVIEW_CHARS
+				? undefined
+				: {
+						key: keyFor(skill),
+						name: skill.name,
+						description: skill.description,
+						placeholder: previewSkillDescription(skill.description),
+						render: () =>
+							prompt.render(compressDescriptionPrompt, { name: skill.name, description: skill.description }),
+					},
+		);
+		const hints = this.#hints.hints(requests.filter(request => request !== undefined));
+		let next = 0;
+		return skills.map((skill, index) => ({
+			...skill,
+			description: requests[index] ? hints[next++] : previewSkillDescription(skill.description),
+		}));
+	}
+
+	/** Start compression held by `deferCompression`; later renders schedule theirs immediately. */
+	startCompression(): void {
+		this.#hints.startCompression();
+	}
+
+	/** Await background writes already scheduled by this catalog (for shutdown or tests). */
+	waitForPending(): Promise<void> {
+		return this.#hints.waitForPending();
+	}
+}
+
 /**
- * Compress one skill's description into `store`. `batchModel` filters out skills that model
- * already answered unusably (and everything when no model is available) before taking a slot.
+ * Compress one routing hint into `store`. `batchModel` filters out requests that model already
+ * answered unusably (and everything when no model is available) before taking a slot.
  */
-async function compressSkill(
+async function compressHint(
 	store: SkillDescriptionStore,
 	compressor: SkillDescriptionCompressor,
 	batchModel: Promise<string | undefined>,
-	key: string,
-	skill: Skill,
+	request: RoutingHintRequest,
 ): Promise<void> {
+	const { key, name } = request;
 	try {
 		const candidate = await batchModel;
 		if (candidate === undefined || store.isClosing || store.get(unusableKey(key, candidate)) !== undefined) return;
@@ -513,13 +580,9 @@ async function compressSkill(
 			const model = compressor.modelKey();
 			const unusable = model === undefined ? undefined : unusableKey(key, model);
 			if (unusable !== undefined && store.get(unusable) !== undefined) return;
-			const request = prompt.render(compressDescriptionPrompt, {
-				name: skill.name,
-				description: skill.description,
-			});
 			let result: string | null = null;
 			try {
-				result = validCompression(await compressor.compress(skill.name, skill.description, request));
+				result = validCompression(await compressor.compress(name, request.description, request.render()));
 			} catch (error) {
 				if (!(error instanceof SkillDescriptionLengthError)) throw error;
 			}
@@ -527,16 +590,16 @@ async function compressSkill(
 			if (result !== null) {
 				store.put(key, result);
 			} else if (unusable !== undefined) {
-				logger.warn("Skill description compression unusable; keeping the preview for this model", {
-					skill: skill.name,
+				logger.warn("Routing hint compression unusable; keeping the placeholder for this model", {
+					name,
 					model,
 				});
-				store.put(unusable, previewSkillDescription(skill.description));
+				store.put(unusable, request.placeholder);
 			}
 		} finally {
 			compressionSlots.release();
 		}
 	} catch (error) {
-		logger.warn("Skill description compression failed", { skill: skill.name, error: String(error) });
+		logger.warn("Routing hint compression failed", { name, error: String(error) });
 	}
 }

@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import type { EvalPreludeDefinition } from "../../eval/preludes";
+import type { HostEvalPreludeDefinition } from "../../eval/preludes";
 import commitDocumentation from "../../prompts/tools/commit.md" with { type: "text" };
 import commitGuidance from "../../prompts/tools/commit-guidance.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -91,7 +91,7 @@ function describeCall(parameters: unknown): string | undefined {
  * Create the `commit` eval prelude: draft the session agent tree's changes from its change
  * journal, adjust the selection, and commit it without touching other agents' work.
  */
-export function createCommitPrelude(session: ToolSession): EvalPreludeDefinition {
+export function createCommitPrelude(session: ToolSession): HostEvalPreludeDefinition {
 	const drafts = new Map<string, { draft: Draft; scope: ScopeSpec }>();
 	const remember = (draft: Draft, scope: ScopeSpec) => {
 		drafts.set(draft.id, { draft, scope });

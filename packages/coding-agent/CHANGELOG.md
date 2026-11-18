@@ -9,9 +9,11 @@
 - SDK: use `session.compact(focus, { mode: "handoff" })` instead of `session.handoff(focus)`, and cancel it with `abortCompaction()`.
 - One per-user daemon now owns every shared background process (services, language servers, disassembler databases, blob exposure, local models, speech, text prediction) instead of a broker per project plus separate hosts; daemons and services started by older versions are not adopted
 - `omp ps` lists global, project and session units from that one daemon: `--global <service>` is gone, `--json` prints one `{daemon, reports}` object, and `dsm://` handles no longer carry `?project=`
+- SDK: `deferSkillDescriptionCompression` is now `deferHintCompression` and `AgentSession.startSkillDescriptionCompression()` is now `startHintCompression()`; they also cover MCP namespace hints
 
 ### Added
 
+- Enable `mcp.evalNamespaces` (off by default) to expose each MCP server as an eval global instead of top-level or `xd://` tools: `mcp__github_create_issue` becomes `await github.create_issue({...})` in JavaScript and Python, full docs live at `xd://eval/github`, and the eval tool lists each server with a cached model-written "when to use" hint once one has been generated
 - Cache warming bridges long tool calls: it keeps refreshing while the refresh spend since the last request stays under the cheaper buy-out, then compacts a large prompt a minute before the cache expires (committed when the tool returns) or lets the entry expire, replacing the fixed one-hour cap. `providers.cacheWarmingStrategy` (`auto`, `keepalive`, `compact`) picks the policy; compaction needs a prompt of at least the lower of `providers.cacheWarmingCompactPercent` (60%) of the window and `providers.cacheWarmingCompactTokens` (150k)
 - `cache_warming_decision` carries the refresh `method`, `compactCost` and `spentCost`, and accepts a `"compact"` action; `cache_warming_start`/`cache_warming_end` events carry `method` (`prewarm` or `replay`)
 - Enable `task.crossInstance` (off by default) to list same-folder omp instances with `agent://peers` and read or message their agents by PID. While enabled, digit-only task names get an `Agent` prefix.
