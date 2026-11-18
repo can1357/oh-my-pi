@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The extension attaches Chrome's debugger only to tabs omp is driving: listing your open tabs no longer raises the "started debugging this browser" infobar on tabs the agent never uses. If the relay process disappears, the extension releases any attachment it still holds after a short grace period instead of leaving the infobar behind.
+
 ## [18.22.1] - 2026-11-17
 
 ### Fixed

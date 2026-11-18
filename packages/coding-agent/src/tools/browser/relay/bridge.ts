@@ -747,6 +747,12 @@ export class RelayBridge {
 			tab.cancelAttach = null;
 			tab.attachCancelled = false;
 			if (!tab.attached) this.#forgetChildren(tab);
+			// An attachment can outlive the relay or client that made it (a crashed relay, a finished
+			// session): nobody can send the detach anymore, and Chrome keeps the debugger infobar on
+			// the tab. Reclaim it here unless a live client claims the tab or holds a session on it.
+			if (tab.attached && !this.#claimed(tab.tabKey) && this.#sessionHolders(tab.tabKey).length === 0) {
+				this.#detachIfUnheld(tab.tabKey);
+			}
 			if (tab.discarded) {
 				// Retire held sessions now; revival will reannounce and attach the tab.
 				this.#retractTab(tab);
@@ -1315,6 +1321,9 @@ export class RelayBridge {
 			this.#log("tab claimed", { conn: conn.id, tabKey });
 		}
 		this.#syncTabGrouping(tab);
+		// Claiming is driving: the attachment (and the tab session this client needs to adopt it) starts
+		// now, not only when it asks for auto-attach or materializes a page.
+		this.#attachForAutoAttach(tab);
 	}
 
 	/** True while any downstream connection claims the tab as its drive target. */
@@ -1401,9 +1410,17 @@ export class RelayBridge {
 			}
 			case "Target.setAutoAttach": {
 				conn.autoAttach = true;
-				// Discarded tabs can stall debugger calls. Retract targets already
-				// announced by Target.setDiscoverTargets so Puppeteer can connect().
-				const tabs = [...this.#tabs.values()].filter(tab => this.#eligible(tab) && !tab.discarded);
+				// Discovery already listed every tab, and omp adopts a relay tab from its `/json`
+				// metadata. Attaching every announced tab here would put Chrome's "started debugging
+				// this browser" infobar on tabs nobody drives for the whole session, so only the tabs
+				// this client claimed (worker adoption, Target.createTarget) or already holds a session
+				// on are attached now; every other tab attaches on demand through Target.attachToTarget.
+				const tabs = [...this.#tabs.values()].filter(
+					tab =>
+						this.#eligible(tab) &&
+						!tab.discarded &&
+						(conn.claims.has(tab.tabKey) || conn.sessionsForTab(tab.tabKey).length > 0),
+				);
 				await Promise.all(tabs.map(tab => this.#ensureAttached(tab, { retryAfterDiscard: true })));
 				for (const tab of tabs) {
 					if (!tab.attached || tab.discarded || !this.#eligible(tab)) {
@@ -1414,6 +1431,8 @@ export class RelayBridge {
 					}
 					this.#emitTabAttached(conn, tab);
 				}
+				// Discarded tabs can stall debugger calls. Retract targets already
+				// announced by Target.setDiscoverTargets so Puppeteer can connect().
 				for (const tab of this.#tabs.values()) {
 					if (tab.announced && tab.discarded && this.#eligible(tab)) {
 						this.#retractTab(tab);
@@ -1805,7 +1824,7 @@ export class RelayBridge {
 		}
 	}
 
-	/** Announce an unannounced tab to discovering connections and attach it for auto-attaching ones. */
+	/** Announce an unannounced tab to discovering connections; attach it only once a client drives it. */
 	#announceTab(tab: TabState): void {
 		tab.announced = true;
 		for (const conn of this.#conns.values()) {
@@ -1817,14 +1836,11 @@ export class RelayBridge {
 	}
 
 	#attachForAutoAttach(tab: TabState): void {
-		let hasAutoAttach = false;
-		for (const conn of this.#conns.values()) {
-			if (conn.autoAttach) {
-				hasAutoAttach = true;
-				break;
-			}
-		}
-		if (!hasAutoAttach) return;
+		// Only a claimed tab is driven: attaching an unclaimed one would leave Chrome's debugger
+		// infobar on a tab the session never uses. Discovery alone needs no attachment, and the
+		// client that adopts the tab attaches it here or through Target.attachToTarget.
+		const drivers = [...this.#conns.values()].filter(conn => conn.autoAttach && conn.claims.has(tab.tabKey));
+		if (drivers.length === 0) return;
 		void this.#ensureAttached(tab, { retryAfterDiscard: true }).then(ok => {
 			if (!ok) {
 				// A refused attach bars the tab until its URL changes. Withdraw the announcement too, or the URL change
@@ -1837,9 +1853,9 @@ export class RelayBridge {
 				this.#detachIfUnheld(tab.tabKey);
 				return;
 			}
-			for (const conn of this.#conns.values()) {
-				if (conn.autoAttach) this.#emitTabAttached(conn, tab);
-			}
+			// A session on an undriven connection would keep the attachment (and its infobar) alive
+			// after the driver leaves, because #detachIfUnheld counts every session holder.
+			for (const conn of drivers) this.#emitTabAttached(conn, tab);
 		});
 	}
 
@@ -2014,17 +2030,25 @@ export class RelayBridge {
 	#detachIfUnheld(tabKey: string): void {
 		if (this.#sessionHolders(tabKey).length > 0) return;
 		const tab = this.#tabs.get(tabKey);
-		if (!tab?.attached) return;
-		tab.attached = false;
-		this.#resetRuntime(tab);
-		this.#forgetChildren(tab);
-		tab.reattachedAfterDetach = false;
+		if (!tab || tab.detaching || (!tab.attached && !tab.attaching)) return;
 		// In a real Chrome CDP session, detaching during a focus-emulation reset can strand the next session.
 		// Wait for in-flight tab-wide switches (bounded by their RPC timeout) before ending the attachment.
 		const transitions = TAB_WIDE_SWITCHES.map(method => this.#switchTransitions.get(`${tabKey} ${method}`)).filter(
 			pending => pending !== undefined,
 		);
+		const inFlight = tab.attaching;
 		const done = (async () => {
+			// An attach already in flight (a re-adoption after Chrome detached) owns the attachment this
+			// detach would race: the extension processes the two RPCs independently, and a retry of the
+			// attach can land after the detach and leave an attachment nobody tracks. Let it settle first;
+			// a new attach waits on `tab.detaching` below.
+			if (inFlight) await inFlight.catch(() => undefined);
+			// The in-flight attach failed, or another session claimed the tab while it settled.
+			if (!tab.attached || this.#sessionHolders(tabKey).length > 0) return;
+			tab.attached = false;
+			this.#resetRuntime(tab);
+			this.#forgetChildren(tab);
+			tab.reattachedAfterDetach = false;
 			if (transitions.length > 0) await Promise.all(transitions);
 			await this.#rpc({ op: "detach", tabId: tab.tabId }, this.#instanceFor(tab));
 		})()

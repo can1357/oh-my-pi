@@ -17,6 +17,7 @@ import {
 	type RelayToExtMessage,
 	type TabSnapshot,
 } from "../../coding-agent/src/tools/browser/relay/protocol";
+import { OrphanSweep } from "../../coding-agent/src/tools/browser/relay/orphan-sweep";
 import { ownedDebuggerTabs } from "./debugger-ownership";
 import { DownloadPairing } from "./download-pairing";
 import { onForeignFramesHidden, pastForeignFrames } from "./foreign-frames";
@@ -327,6 +328,7 @@ async function connect(): Promise<void> {
 	const socket = new WebSocket(url);
 	ws = socket;
 	socket.onopen = () => {
+		orphanSweep.connected();
 		reconnectDelay = RECONNECT_MIN_MS;
 		void setBadge(true);
 		void buildHello().then(hello => post(hello));
@@ -345,12 +347,45 @@ async function connect(): Promise<void> {
 		}
 		void setBadge(false);
 		void restoreGroups();
+		orphanSweep.disconnected();
 		scheduleReconnect();
 	};
 	socket.onerror = () => {
 		socket.close();
 	};
 }
+
+/**
+ * Detach the tabs this extension still holds. Only the extension can release them: after the
+ * relay process dies, nobody else can send `detach`, and the attachment keeps Chrome's
+ * "started debugging this browser" infobar on the user's tab for the life of the service worker.
+ */
+async function sweepOrphanedAttachments(): Promise<void> {
+	// The relay is back and its hello reconciles attachments; detaching now would fight it.
+	if (ws?.readyState === WebSocket.OPEN) return;
+	let targets: ChromeDebuggerTargetInfo[];
+	try {
+		targets = await chrome.debugger.getTargets();
+	} catch {
+		return;
+	}
+	const owned = await ownedDebuggerTabs(targets, tabId =>
+		chrome.debugger.sendCommand({ tabId }, "Target.getTargetInfo"),
+	);
+	await Promise.allSettled(
+		owned.map(async tabId => {
+			relayInitiatedDetachTabs.add(tabId);
+			try {
+				await chrome.debugger.detach({ tabId });
+			} catch (error) {
+				relayInitiatedDetachTabs.delete(tabId);
+				throw error;
+			}
+		}),
+	);
+}
+
+const orphanSweep = new OrphanSweep(sweepOrphanedAttachments);
 
 // ---- downloads ----------------------------------------------------------------
 
@@ -421,5 +456,6 @@ chrome.storage.onChanged.addListener((_changes, areaName) => {
 chrome.action.onClicked.addListener(() => void chrome.runtime.openOptionsPage());
 chrome.runtime.onInstalled.addListener(() => void connect());
 chrome.runtime.onStartup.addListener(() => void connect());
+chrome.runtime.onSuspend.addListener(() => void orphanSweep.suspend());
 
 void connect();
