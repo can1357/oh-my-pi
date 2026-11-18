@@ -86,7 +86,6 @@ Manager defaults when a setting is omitted:
 | `repeatGap`     | `10` completed turns                             |
 | `builtinRules`  | `true` (consumed by `bucketRules`, not matching) |
 | `disabledRules` | `[]` (consumed by `bucketRules`, not matching)   |
-| `gateTimeoutMs` | `10000` (consumed by the session's gates, §11)   |
 
 ## 2. Streaming monitor lifecycle
 

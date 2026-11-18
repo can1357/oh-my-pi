@@ -167,7 +167,6 @@ const DEFAULT_SETTINGS: TtsrSettings = {
 	repeatGap: 10,
 	builtinRules: true,
 	disabledRules: [],
-	gateTimeoutMs: 10_000,
 };
 
 /**

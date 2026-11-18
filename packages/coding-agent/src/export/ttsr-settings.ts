@@ -152,7 +152,6 @@ export const cfgTtsr = combine({
 	repeatGap: cfgTtsrRepeatGap,
 	builtinRules: cfgTtsrBuiltinRules,
 	disabledRules: cfgTtsrDisabledRules,
-	gateTimeoutMs: cfgTtsrGateTimeoutMs,
 });
 
 /** Time-traveling stream rules configuration ({@link cfgTtsr}). */
