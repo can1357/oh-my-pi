@@ -2117,9 +2117,9 @@ function discardChanges(
 	restores: readonly StashRestore[],
 ): GuardHit | undefined {
 	if (command.argv[0] !== "git") return undefined;
-	const { sub, rest, target } = gitInvocation(command, scope.home);
+	const { sub, rest, target, exits } = gitInvocation(command, scope.home);
 	const probe = discardProbe(command, scope, sub, rest);
-	if (!probe || !target) return undefined;
+	if (!probe || !target || exits) return undefined;
 	let check: VcsDiscardCheck = { ...probe.check, gitDir: target.gitDir, workTree: target.workTree };
 	// A stash just before keeps what it saved; only what it left behind can be lost. It keeps no
 	// nested repository, only a pointer to its commit, so a `git clean -ff` is checked in full. A

@@ -1513,4 +1513,13 @@ describe("guard rule review regressions", () => {
 			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: undefined });
 		}
 	});
+
+	it("passes a discarding git command that one of git's own exiting options ends first", async () => {
+		await dirtyRepo(cwd);
+		fs.writeFileSync(path.join(cwd, "scratch.txt"), "x\n");
+		for (const command of ["git --version reset --hard", "git --help checkout .", "git -h clean -fd"]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: undefined });
+		}
+		expect(ruleOf(bashApproval(cwd, "git --exec-path=/usr/lib/git-core reset --hard"))).toBe("discard_changes");
+	});
 });
