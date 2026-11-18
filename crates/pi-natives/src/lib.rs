@@ -30,6 +30,7 @@ pub mod block;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 mod bundled_libc;
 pub mod clipboard;
+pub mod console_threads;
 pub mod crash_handler;
 pub mod desktop;
 pub mod devicecheck;

@@ -473,7 +473,9 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 			}
 			return;
 		}
-		if (handle.browser.connected) await closeLaunchedBrowser(handle.browser);
+		if (handle.browser.connected) {
+			await closeLaunchedBrowser({ browser: handle.browser, userDataDir: handle.userDataDir });
+		}
 		// OMP owns the profile directory (puppeteer's temp cleanup is disabled by
 		// our explicit --user-data-dir), so remove it now the process tree has
 		// exited. Tolerant of the Windows lock-held window (issue #7058).
