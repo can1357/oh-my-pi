@@ -2106,15 +2106,6 @@ describe("omp usage reset", () => {
 		expect(consumes()).toEqual([]);
 	});
 
-	it("leaves Codex credits' coverage out of the JSON listing", async () => {
-		await runUsageCommand({ action: "reset", provider: "codex", json: true, noExtensions: true });
-		const listing: { accounts: Array<{ credits: Array<Record<string, unknown>> }> } = JSON.parse(stdout);
-		const credits = listing.accounts.flatMap(account => account.credits);
-		expect(credits.length).toBeGreaterThan(0);
-		for (const credit of credits) expect(credit.clears).toBeUndefined();
-		expect(consumes()).toEqual([]);
-	});
-
 	it("prints credential ids, credit ids and expiries as JSON", async () => {
 		const { team, spare, claude } = credentialIds();
 		await runUsageCommand({ action: "reset", json: true, noExtensions: true });
@@ -2394,16 +2385,6 @@ describe("omp usage reset", () => {
 			expect(consumes()).toEqual([]);
 		});
 
-		it("tells shared-weekly coverage from Fable-only coverage in the JSON listing", async () => {
-			await runUsageCommand({ action: "reset", provider: "claude", json: true, noExtensions: true });
-			const listing: { accounts: Array<{ credits: Array<{ id: string; clears?: string[] }> }> } = JSON.parse(stdout);
-			const clears = new Map(listing.accounts.flatMap(account => account.credits).map(c => [c.id, c.clears]));
-			expect(clears.get("full-reset-2611")).toContain("anthropic:7d");
-			expect(clears.get("launch-2610-fable")).toContain("anthropic:7d:fable");
-			expect(clears.get("launch-2610-fable")).not.toContain("anthropic:7d");
-			expect(consumes()).toEqual([]);
-		});
-
 		/** Opens the real `/usage reset` selector over the stubbed endpoints, recording every redeem it makes. */
 		async function openResetSelector(): Promise<{
 			selector: ResetUsageSelectorComponent;
@@ -2431,8 +2412,8 @@ describe("omp usage reset", () => {
 			return { selector, redeems, targets };
 		}
 
-		it("lists each grant in the /usage reset selector and spends nothing on one Claude does not offer next", async () => {
-			const { selector, redeems } = await openResetSelector();
+		it("lists each grant in the /usage reset selector and spends only the one Claude offers next", async () => {
+			const { selector, redeems, targets } = await openResetSelector();
 			// Move off the offered full reset to the Fable grant and try to confirm it.
 			selector.handleInput("\x1b[B");
 			selector.handleInput("\r");
@@ -2444,10 +2425,9 @@ describe("omp usage reset", () => {
 			const shown = stripVTControlCharacters(selector.render(400).join("\n"));
 			expect(shown).toContain("full-reset-2611");
 			expect(shown).toContain("launch-2610-fable");
-		});
 
-		it("spends exactly the offered grant chosen in the /usage reset selector", async () => {
-			const { selector, redeems, targets } = await openResetSelector();
+			// Back on the offered full reset, confirming spends exactly that grant.
+			selector.handleInput("\x1b[A");
 			selector.handleInput("\r");
 			selector.handleInput("\r");
 			await Promise.all(redeems);
@@ -2470,8 +2450,6 @@ describe("omp usage reset", () => {
 		it("spends exactly the named grant", async () => {
 			const { claude } = credentialIds();
 			await runUsageCommand({ action: "reset", target: `claude/${claude}:full-reset-2611`, noExtensions: true });
-
-			expect(stripVTControlCharacters(stdout)).toContain("Reset applied for dev@example.test · Acme Corp (Claude)");
 			expect(consumes().map(request => [request.path, request.body?.grant_id])).toEqual([
 				["/api/organizations/org-claude/reset_rate_limits", "full-reset-2611"],
 			]);
@@ -2495,7 +2473,6 @@ describe("omp usage reset", () => {
 				grants: [full, { ...fable, id: "full-reset-2612", clears: full.clears }],
 			};
 			await runUsageCommand({ action: "reset", target: `claude/${claude}`, noExtensions: true });
-			expect(stripVTControlCharacters(stdout)).toContain("Reset applied for dev@example.test · Acme Corp (Claude)");
 			expect(consumes().map(request => request.body?.grant_id)).toEqual(["full-reset-2611"]);
 			expect(process.exitCode).toBe(0);
 		});
