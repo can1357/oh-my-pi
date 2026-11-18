@@ -5,6 +5,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { resolveOpTimeouts, resolveWaitTimeout } from "@oh-my-pi/pi-coding-agent/tools/browser/op-timeouts";
 import { parseRoleSelector } from "@oh-my-pi/pi-coding-agent/tools/browser/query-handlers";
+import { renderTabCall, tabCallBudgetSeconds } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-call";
 import { dispatchScroll, normalizeSelector } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import { resolvePredicateTimeout } from "@oh-my-pi/pi-coding-agent/tools/run-scope";
 import { Connection, type ConnectionTransport } from "puppeteer-core";
@@ -124,6 +125,17 @@ describe("browser scroll acknowledgement", () => {
 });
 
 describe("browser wait-helper timeout resolution", () => {
+	it("uses waitForFunction options before its predicate arguments for budgets and Infinity", async () => {
+		const args = ["(n) => n", { timeout: 60_000 }, 7];
+		expect(tabCallBudgetSeconds([{ method: "waitForFunction", args }])).toBeGreaterThan(60);
+		args[1] = { timeout: Number.POSITIVE_INFINITY };
+		const code = renderTabCall([{ method: "waitForFunction", args }]);
+		const received = await new Function("tab", `return (async () => { ${code} })()`)({
+			waitForFunction: (...values: unknown[]) => values,
+		});
+		expect(received).toEqual(["(n) => n", { timeout: 0 }, 7]);
+	});
+
 	it("defaults a wait to the cell budget when no explicit timeout is given", () => {
 		const cell = 30_000;
 		expect(resolveWaitTimeout(cell)).toBe(resolveOpTimeouts(cell).budgetBound);

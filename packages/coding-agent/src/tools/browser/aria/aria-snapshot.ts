@@ -112,6 +112,11 @@ const ARIA_REF_PREFIXES = ["aria-ref=", "aria-ref/", "ariaref/"];
  */
 export function assertSelectorString(selector: unknown): asserts selector is string {
 	if (typeof selector === "string") return;
+	if (typeof selector === "function") {
+		throw new ToolError(
+			"Browser selector must be a string; got a function. To wait until a condition holds, use tab.waitForFunction(fn, { timeout }).",
+		);
+	}
 	let kind: string;
 	if (selector !== null && typeof selector === "object") {
 		const proto = Object.getPrototypeOf(selector);

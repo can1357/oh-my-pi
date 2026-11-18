@@ -188,6 +188,7 @@
 		"select",
 		"uploadFile",
 		"waitForUrl",
+		"waitForFunction",
 		"text",
 		"html",
 		"value",
@@ -288,6 +289,7 @@
 		"evaluate",
 		"waitFor",
 		"waitForSelector",
+		"waitForFunction",
 		"screenshot",
 	];
 	// `console()` and `errors()` answer `{ entries, nextSeq, dropped }`; array methods, `length` and

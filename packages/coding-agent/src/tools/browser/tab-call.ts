@@ -56,6 +56,7 @@ export const TAB_VALUE_METHODS: readonly string[] = [
 	"select",
 	"uploadFile",
 	"waitForUrl",
+	"waitForFunction",
 	"text",
 	"html",
 	"value",
@@ -166,6 +167,7 @@ export const FRAME_METHODS: readonly string[] = [
 	"evaluate",
 	"waitFor",
 	"waitForSelector",
+	"waitForFunction",
 	"screenshot",
 ];
 
@@ -175,11 +177,12 @@ const FRAME_METHODS_DESCRIPTION = FRAME_METHODS.join(", ");
 
 function renderWaitStep(step: TabCallStep): string {
 	if (!step.method.startsWith("waitFor")) return renderCallChain([step]);
-	const options = step.args.at(-1);
+	const optionsIndex = step.method === "waitForFunction" ? 1 : step.args.length - 1;
+	const options = step.args[optionsIndex];
 	if (!isRecord(options) || options.timeout !== Number.POSITIVE_INFINITY) return renderCallChain([step]);
 	// JSON.stringify turns Infinity into null; zero is the equivalent bounded disable sentinel.
 	const args = step.args.slice();
-	args[args.length - 1] = { ...options, timeout: 0 };
+	args[optionsIndex] = { ...options, timeout: 0 };
 	return renderCallChain([{ method: step.method, args }]);
 }
 
@@ -255,7 +258,8 @@ export function tabCallBudgetSeconds(
 	let budget: number | undefined;
 	if (cellTimeoutMs === 0) budget = TOOL_TIMEOUTS.browser.max;
 	else if (cellTimeoutMs !== undefined && cellTimeoutMs > 0) budget = Math.ceil(cellTimeoutMs / 1000);
-	const options = chain?.at(-1)?.args.at(-1);
+	const step = chain?.at(-1);
+	const options = step?.args[step.method === "waitForFunction" ? 1 : step.args.length - 1];
 	const timeout = isRecord(options) ? options.timeout : undefined;
 	if (timeout === 0 || timeout === Number.POSITIVE_INFINITY) {
 		budget = Math.max(budget ?? 0, TOOL_TIMEOUTS.browser.max);

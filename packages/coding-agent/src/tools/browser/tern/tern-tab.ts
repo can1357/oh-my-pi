@@ -2889,21 +2889,21 @@ export class TernTab implements InProcessRunTab {
 		await this.#input(typeSteps(String(text), this.#mods));
 	}
 
-	/** Poll a page-world predicate until it returns a truthy value. */
+	/** Poll a page-world predicate (in `frame`, else the main frame) until it returns a truthy value. */
 	async waitForFunction(
 		fn: string | ((...args: unknown[]) => unknown | Promise<unknown>),
 		opts: { timeout?: number; polling?: number } | undefined,
-		args: unknown[],
+		args: unknown[] = [],
+		frame: FramePath = null,
+		label = frame === null ? "tab.waitForFunction()" : "frame.waitForFunction()",
 	): Promise<unknown> {
 		const interval = typeof opts?.polling === "number" && opts.polling > 0 ? opts.polling : 100;
 		const deadline = Date.now() + resolveWaitTimeout(this.#cellMs, opts?.timeout);
 		for (;;) {
-			const value = await this.#evalUser("page.waitForFunction()", fn, args, null);
+			const value = await this.#evalUser(label, fn, args, frame);
 			if (value) return value;
 			if (Date.now() >= deadline) {
-				throw new ToolError(
-					`page.waitForFunction() timed out after ${resolveWaitTimeout(this.#cellMs, opts?.timeout)}ms`,
-				);
+				throw new ToolError(`${label} timed out after ${resolveWaitTimeout(this.#cellMs, opts?.timeout)}ms`);
 			}
 			await untilAborted(this.#signal, () => Bun.sleep(interval));
 		}
@@ -4360,6 +4360,14 @@ export class TernFrame {
 		return (await this.#tab.waitForSelectorIn(selector, options, this.#path)) !== null;
 	}
 
+	/** Wait until a function or expression evaluated in the frame returns a truthy value, and resolve with it. */
+	async waitForFunction(
+		fn: string | ((...args: unknown[]) => unknown | Promise<unknown>),
+		options?: { timeout?: number; polling?: number },
+	): Promise<unknown> {
+		return await this.#tab.waitForFunction(fn, options, [], this.#path);
+	}
+
 	/** Capture an element of the frame. */
 	async screenshot(selector: string): Promise<string> {
 		const result = await this.#tab.screenshotIn({ selector }, this.#path);
@@ -4526,7 +4534,7 @@ export class TernPageFacade {
 		opts?: { timeout?: number; polling?: number },
 		...args: unknown[]
 	): Promise<unknown> {
-		return await this.#tab.waitForFunction(fn, opts, args);
+		return await this.#tab.waitForFunction(fn, opts, args, null, "page.waitForFunction()");
 	}
 
 	async waitForResponse(
