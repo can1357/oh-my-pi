@@ -172,9 +172,9 @@ import {
 	canAutoCreateWorktree,
 	planWorktreeExit,
 	removeExitWorktrees,
-	type SessionWorktree,
 	type WorktreeExitPlan,
 } from "../session/session-worktree";
+import type { SessionWorktree } from "../worktree/backend";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
@@ -9383,7 +9383,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		try {
 			if (
 				cfgWorktreeOnStart.get(this.settings) === "off" ||
-				!(await canAutoCreateWorktree(this.sessionManager.getCwd()))
+				!(await canAutoCreateWorktree(this.sessionManager.getCwd(), this.settings))
 			)
 				return;
 			if (

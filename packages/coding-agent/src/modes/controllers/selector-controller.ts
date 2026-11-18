@@ -1885,6 +1885,7 @@ export class SelectorController {
 					this.ctx.sessionManager.getSessionDir(),
 					undefined,
 					cfgSessionWorktreeScope.get(this.ctx.settings),
+					this.ctx.settings,
 				),
 				loadPinnedSessionIds(),
 			]);
@@ -2121,7 +2122,8 @@ export class SelectorController {
 		const cwd = sessionManager.getCwd();
 		const sessionDir = sessionManager.getSessionDir();
 		const info = await readSessionInfo(sessionPath);
-		if (!info || !(await SessionManager.isStrandedIn(info, cwd, sessionDir))) return { sessionPath };
+		if (!info || !(await SessionManager.isStrandedIn(info, cwd, sessionDir, this.ctx.settings)))
+			return { sessionPath };
 		try {
 			const relocated = await SessionManager.openRelocated(sessionPath, info.cwd, cwd, sessionDir);
 			const movedPath = relocated.getSessionFile() ?? sessionPath;

@@ -4,9 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { clearWorktrees, listWorktrees } from "../../src/cli/worktree-cli";
 import { Settings } from "../../src/config/settings";
 import * as client from "../../src/ovnfs/client";
 import * as daemon from "../../src/ovnfs/daemon";
+import { SessionManager } from "../../src/session/session-manager";
+import { sessionDirForCwd } from "../../src/session/session-paths";
 import {
 	canAutoCreateWorktree,
 	createSessionWorktree,
@@ -19,6 +22,7 @@ import {
 	type WorktreeExitAction,
 	type WorktreeExitPolicy,
 } from "../../src/session/session-worktree";
+import { makeAssistantMessage } from "../session-manager/helpers";
 
 const clean: SessionWorktreeState = { dirty: false, moved: false, offBranch: false };
 
@@ -324,7 +328,8 @@ describe("session worktree helpers (ovnfs checkout)", () => {
 	let repo: string;
 	let mount: string;
 	let settings: Settings;
-	let requests: Record<string, unknown>[];
+	let savedEnv: string | undefined;
+	let checkouts: Map<string, { name: string; path: string; source: string; created: string }>;
 	const branch = "wt/test-session";
 
 	beforeEach(async () => {
@@ -341,26 +346,33 @@ describe("session worktree helpers (ovnfs checkout)", () => {
 		await Bun.write(command, "#!/bin/sh\n");
 		await fs.chmod(command, 0o755);
 		settings = Settings.isolated({ "ovnfs.path": command });
-		requests = [];
+		savedEnv = process.env.OMP_WORKTREE_DIR;
+		process.env.OMP_WORKTREE_DIR = path.join(root, "wt");
+		checkouts = new Map();
 		vi.spyOn(daemon, "startDaemon").mockResolvedValue({ socket: path.join(root, "ovnfs.sock") });
+		vi.spyOn(daemon, "runningDaemon").mockResolvedValue({ socket: path.join(root, "ovnfs.sock") });
+		vi.spyOn(client, "socketFeatures").mockResolvedValue(new Set(["rm.keep_commits"]));
 		// A daemon whose checkouts are plain copies of the folder with their own git dir, as ovnfs serves them.
 		vi.spyOn(client, "callSocket").mockImplementation(
 			async <T>(_socket: string, op: string, args: object): Promise<T> => {
 				const request = args as { dir?: string; name?: string; rev?: string; checkout?: string };
-				requests.push({ op, ...request });
+				if (op === "ls") return { checkouts: [...checkouts.values()] } as T;
 				const target = path.join(mount, request.name ?? request.checkout ?? "");
-				if (op === "new" && request.dir) {
+				if (op === "new" && request.dir && request.name) {
 					if (await exists(target)) throw new client.OvnfsError("exists", `checkout ${request.name} exists`);
 					await fs.cp(request.dir, target, { recursive: true });
 					if (request.rev) {
 						git(target, "checkout", "-q", "-f", "--detach", request.rev);
 						git(target, "clean", "-fdq");
 					}
-					return { checkout: { name: request.name, path: target, base: "b_1" } } as T;
+					const checkout = { name: request.name, path: target, source: request.dir, created: crypto.randomUUID() };
+					checkouts.set(request.name, checkout);
+					return { checkout } as T;
 				}
-				if (op === "rm") {
+				if (op === "rm" && request.checkout) {
 					if (!(await exists(target))) throw new client.OvnfsError("not_found", `no checkout ${request.checkout}`);
 					await fs.rm(target, { recursive: true, force: true });
+					checkouts.delete(request.checkout);
 					return {} as T;
 				}
 				throw new Error(`unexpected ovnfs op ${op}`);
@@ -370,22 +382,20 @@ describe("session worktree helpers (ovnfs checkout)", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		if (savedEnv === undefined) delete process.env.OMP_WORKTREE_DIR;
+		else process.env.OMP_WORKTREE_DIR = savedEnv;
 		await fs.rm(root, { recursive: true, force: true });
 	});
 
 	it("opens a checkout on the new branch, leaves the source repo without it, and removes it clean", async () => {
 		await Bun.write(path.join(repo, "tracked.txt"), "edited\n");
 		const wt = await createSessionWorktree(repo, settings, branch, { keepChanges: false });
-		const checkout = wt.ovnfs?.checkout;
-		expect(checkout).toMatch(/^wt-test-session-[0-9a-f]{7}$/);
-		expect(requests).toEqual([{ op: "new", dir: repo, name: checkout, rev: wt.baseCommit }]);
-		expect(wt.path).toBe(path.join(mount, checkout!));
+		expect(await Bun.file(path.join(wt.path, "tracked.txt")).text()).toBe("base\n");
 		expect(git(wt.path, "symbolic-ref", "HEAD")).toBe(`refs/heads/${branch}`);
 		expect(branchSha(repo, branch)).toBeNull();
 		expect(await inspectSessionWorktree(wt)).toEqual(clean);
 
 		await removeSessionWorktree(wt, false);
-		expect(requests.at(-1)).toEqual({ op: "rm", checkout });
 		expect(await exists(wt.path)).toBe(false);
 		expect(branchSha(repo, branch)).toBeNull();
 	});
@@ -401,6 +411,19 @@ describe("session worktree helpers (ovnfs checkout)", () => {
 		expect(branchSha(repo, branch)).toBe(tip);
 	});
 
+	it("keeps both branches when publishing a moved checkout would overwrite a divergent source branch", async () => {
+		const wt = await createSessionWorktree(repo, settings, branch);
+		await commitFile(wt.path, "checkout.txt");
+		await commitFile(repo, "source.txt");
+		git(repo, "branch", branch);
+		const sourceTip = branchSha(repo, branch);
+		const checkoutTip = branchSha(wt.path, branch);
+
+		await expect(removeSessionWorktree(wt, true)).rejects.toThrow();
+		expect(branchSha(repo, branch)).toBe(sourceTip);
+		expect(branchSha(wt.path, branch)).toBe(checkoutTip);
+	});
+
 	it("keeps a checkout whose daemon cannot start instead of treating it as deleted", async () => {
 		const wt = await createSessionWorktree(repo, settings, branch);
 		vi.spyOn(daemon, "startDaemon").mockRejectedValue(new Error("ovnfs start failed"));
@@ -414,5 +437,50 @@ describe("session worktree helpers (ovnfs checkout)", () => {
 		expect(plan).toEqual([]);
 		expect(warnings).toEqual(["ovnfs start failed"]);
 		expect(await exists(wt.path)).toBe(true);
+	});
+
+	it("lists mixed worktrees, clears through their owners, and resumes a removed ovnfs session", async () => {
+		const wt = await createSessionWorktree(repo, settings, branch);
+		const native = await createSessionWorktree(
+			repo,
+			Settings.isolated({ "isolation.backend": "rcopy", "ovnfs.path": "/not-found/ovnfs" }),
+			"wt/git",
+		);
+		const sessionsRoot = path.join(root, "sessions");
+		const sourceDir = sessionDirForCwd(repo, sessionsRoot);
+		const checkoutDir = sessionDirForCwd(wt.path, sessionsRoot);
+		const session = SessionManager.create(wt.path, checkoutDir);
+		session.appendMessage({ role: "user", content: "working in ovnfs", timestamp: 1 });
+		session.appendMessage(makeAssistantMessage());
+		await session.setSessionName("ovnfs work", "user");
+		await session.flush();
+		const id = session.getSessionId();
+		await session.close();
+		const findSession = async () => {
+			const listing = await SessionManager.listForPicker(repo, sourceDir, undefined, "repo", settings);
+			return (await listing.complete).find(row => row.id === id);
+		};
+		expect((await findSession())?.cwd).toBe(wt.path);
+		expect(await canAutoCreateWorktree(wt.path, settings)).toBe(false);
+
+		const output = vi.spyOn(console, "log").mockImplementation(() => {});
+		await listWorktrees({ json: true });
+		const listed = JSON.parse(output.mock.calls.at(-1)?.[0]);
+		expect(listed).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ path: wt.path, kind: "ovnfs" }),
+				expect.objectContaining({ path: native.path, kind: "pr-checkout" }),
+			]),
+		);
+		expect(await clearWorktrees({ all: true, json: true, dryRun: true })).toEqual({ removed: 0, failed: 0 });
+		expect(await exists(wt.path)).toBe(true);
+		expect(await clearWorktrees({ all: true, json: true, dryRun: false })).toEqual({ removed: 2, failed: 0 });
+		expect(await exists(wt.path)).toBe(false);
+		expect(await exists(native.path)).toBe(false);
+
+		vi.spyOn(daemon, "runningDaemon").mockResolvedValue(undefined);
+		const removed = await findSession();
+		if (!removed) throw new Error("removed checkout session disappeared from its source picker");
+		expect(await SessionManager.isStrandedIn(removed, repo, sourceDir, settings)).toBe(true);
 	});
 });

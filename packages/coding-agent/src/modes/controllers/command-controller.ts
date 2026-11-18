@@ -79,8 +79,8 @@ import {
 	createSessionWorktree,
 	defaultSessionWorktreeBranch,
 	formatSessionWorktreeSummary,
-	type SessionWorktree,
 } from "../../session/session-worktree";
+import type { SessionWorktree } from "../../worktree/backend";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
 import {
 	codexUsagePlan,

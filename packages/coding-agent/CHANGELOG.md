@@ -9,7 +9,7 @@
 
 ### Added
 
-- `/wt` moves the session into an ovnfs checkout instead of a linked git worktree when ovnfs is found and `isolation.backend` is `auto`: ignored build output comes along, the branch stays in the checkout until `ovnfs land` (or until exit removal copies its new commits into the source repo), and `ovnfs ls` lists it
+- `/wt` uses ovnfs when available with `isolation.backend: auto`. The project resume picker and `omp worktree list` and `clear` handle both Git and ovnfs worktrees, even after switching backends. Sessions remain resumable from the source repository after their managed checkout is removed.
 - `omp usage` and `/usage` show each Claude account's subscription plan (e.g. `Max 20x`) beside its organization
 - Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
 

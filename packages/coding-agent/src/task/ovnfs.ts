@@ -34,22 +34,11 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { callOvnfs, checkoutStem, type NewReply, removeCheckout } from "../ovnfs/checkouts";
 import { OvnfsError, socketFeatures } from "../ovnfs/client";
 import { startDaemon } from "../ovnfs/daemon";
+import { type CheckoutRecord, OVNFS_CHECKOUT_FILE, releaseOvnfsCheckout } from "../ovnfs/task-record";
 import type { IsolationWorkspace, OpenWorkspace, RetainedWorkspace, WorkspaceStart } from "./isolation-runner";
 import { vacateIsolationSlot } from "./isolation-runner";
 import { writeIsolationOwner } from "./isolation-ownership";
 import { captureIsolationBaseline, taskIsolationBaseDir, type WorktreeBaseline } from "./worktree";
-
-/** Record of the checkout an isolation dir stands for. */
-export const OVNFS_CHECKOUT_FILE = ".omp-ovnfs-checkout.json";
-
-/** Contents of {@link OVNFS_CHECKOUT_FILE}. */
-interface CheckoutRecord {
-	/** ovnfs executable that opened the checkout (it can start the daemon again). */
-	command: string;
-	checkout: string;
-	/** The checkout on the same capture a branch commit reads its baseline from, while it exists. */
-	start?: string;
-}
 
 /** The part of ovnfs's `diff` reply used here. */
 interface DiffReply {
@@ -87,23 +76,6 @@ async function releaseCheckoutRecord(dir: string, command: string, checkout: str
 		return;
 	}
 	await fs.rm(dir, { recursive: true, force: true });
-}
-
-/**
- * Remove the ovnfs checkouts a task-isolation dir records and report whether it
- * recorded one. Throws when a checkout cannot be removed (the record then stays
- * for a later retry); `omp worktree clear` calls this before deleting the dir.
- */
-export async function releaseOvnfsCheckout(dir: string): Promise<boolean> {
-	let record: CheckoutRecord;
-	try {
-		record = (await Bun.file(path.join(dir, OVNFS_CHECKOUT_FILE)).json()) as CheckoutRecord;
-	} catch {
-		return false;
-	}
-	if (record.start) await removeCheckout(record.command, record.start);
-	await removeCheckout(record.command, record.checkout);
-	return true;
 }
 
 /** Whether paths `a` and `b` name the same folder (case-insensitively on Windows). */

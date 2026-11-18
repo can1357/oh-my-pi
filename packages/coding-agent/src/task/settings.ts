@@ -189,8 +189,8 @@ export const cfgOvnfsPath = register({
  * guidance), the bash git guard, and, when `isolation.backend` is auto, the task
  * runner (ovnfs-backed isolation) and `/wt` (ovnfs-backed session worktrees).
  */
-export function ovnfsCommand(settings: Settings): string | undefined {
-	const command = cfgOvnfsPath.get(settings)?.trim() || "ovnfs";
+export function ovnfsCommand(settings?: Settings): string | undefined {
+	const command = (settings && cfgOvnfsPath.get(settings)?.trim()) || "ovnfs";
 	return $which(command) ? command : undefined;
 }
 

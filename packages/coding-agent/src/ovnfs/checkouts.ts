@@ -12,7 +12,7 @@ import { forgetDaemon, startDaemon } from "./daemon";
 
 /** The parts of ovnfs's `new` reply omp reads. */
 export interface NewReply {
-	checkout: { name: string; path: string; base: string };
+	checkout: { name: string; path: string; base: string; created: string };
 	/** How the folder was captured; absent for a checkout from a snapshot. */
 	capture?: { root: string; repos: string[] | null };
 }
@@ -31,9 +31,13 @@ export async function callOvnfs<T>(command: string, op: string, args: object): P
 }
 
 /** Remove a checkout; one already gone counts as removed. */
-export async function removeCheckout(command: string, checkout: string): Promise<void> {
+export async function removeCheckout(
+	command: string,
+	checkout: string,
+	options: { keepCommits?: boolean } = {},
+): Promise<void> {
 	try {
-		await callOvnfs(command, "rm", { checkout });
+		await callOvnfs(command, "rm", { checkout, keep_commits: options.keepCommits });
 	} catch (err) {
 		if (!(err instanceof OvnfsError && err.code === "not_found")) throw err;
 	}

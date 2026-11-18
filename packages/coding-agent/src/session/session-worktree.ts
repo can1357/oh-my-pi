@@ -1,67 +1,15 @@
-/**
- * `/wt` backing: fork the current checkout into a fresh worktree on a new
- * branch, carrying the uncommitted changes along, so the session can be
- * relocated there without disturbing the original checkout.
- *
- * With `isolation.backend` on auto and the ovnfs binary found (`ovnfs.path`),
- * the worktree is an ovnfs checkout: a copy-on-write view of the repository,
- * ignored build output included, with its own git dir. Its branch exists only
- * there until `ovnfs land`, or until removal copies a moved branch into the
- * source repository. `ovnfs ls` lists these checkouts.
- *
- * Otherwise it is a linked git worktree created through the clone-first path
- * (`worktree.clone`, `isolation.backend`) under the agent-managed worktree base
- * (`worktree.base`, default `~/.omp/wt`) next to `github pr_checkout` trees,
- * so `omp worktree list|clear` sees it.
- */
+/** Session relocation and exit policy for worktrees created by `/wt`. */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { IsoBackendKind } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getWorktreeDir, hashPath, logger } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 import type { Settings } from "../config/settings";
-import { callOvnfs, checkoutStem, type NewReply, removeCheckout } from "../ovnfs/checkouts";
-import { OvnfsError } from "../ovnfs/client";
-import { startDaemon } from "../ovnfs/daemon";
-import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
-import { resolveAvailableWorktreePath } from "../tools/gh-pr-checkout";
-
-import {
-	cfgIsolationBackend,
-	cfgWorktreeCleanSource,
-	cfgWorktreeClone,
-	type cfgWorktreeOnExit,
-	ovnfsCommand,
-} from "../task/settings";
-
-export interface SessionWorktree {
-	/** Absolute, realpath'd worktree root. */
-	path: string;
-	/** Branch checked out in the worktree (created from the source `HEAD`). */
-	branch: string;
-	/** Backend that cloned the checkout, or undefined for a plain checkout. */
-	clonedWith?: IsoBackendKind;
-	/** Why the clone fell back to a plain checkout, when it did. */
-	cloneError?: string;
-	/** Checkout the worktree was forked from. */
-	sourceCwd: string;
-	/** Source `HEAD` the worktree branch was created at. */
-	baseCommit: string;
-	/** Whether uncommitted source changes were carried into the worktree. */
-	keptChanges: boolean;
-	/** The ovnfs checkout the worktree is, when it is one; `branch` then lives in the checkout's own git dir. */
-	ovnfs?: OvnfsCheckout;
-}
-
-/** An ovnfs checkout opened by `/wt`. */
-export interface OvnfsCheckout {
-	/** ovnfs executable whose daemon serves the checkout. */
-	command: string;
-	/** Checkout name, for `ovnfs land|rm`. */
-	checkout: string;
-}
+import { cfgWorktreeCleanSource, type cfgWorktreeOnExit } from "../task/settings";
+import { formatIsolationBackend } from "../task/worktree";
+import type { SessionWorktree } from "../worktree/backend";
+import { creationBackend, worktreeBackend, worktreeOrigin } from "../worktree/worktrees";
 
 /** State of a session-owned worktree at exit. */
 export interface SessionWorktreeState {
@@ -91,10 +39,10 @@ export function decideWorktreeExit(policy: WorktreeExitPolicy, state: SessionWor
 	return "prompt";
 }
 
-/** Reports whether a fresh session in `cwd` may get a worktree: a primary git checkout with commits. */
-export async function canAutoCreateWorktree(cwd: string): Promise<boolean> {
+/** Reports whether `cwd` is a primary Git checkout with commits, not an existing worktree. */
+export async function canAutoCreateWorktree(cwd: string, settings?: Settings): Promise<boolean> {
 	const repository = vcs.git(cwd);
-	if (!repository || repository.linkedWorktree()) return false;
+	if (!repository || (await worktreeOrigin(cwd, settings))) return false;
 	return Boolean(await repository.headSha());
 }
 
@@ -178,73 +126,14 @@ export async function createSessionWorktree(
 	if (!baseCommit) {
 		throw new Error(`Cannot create a worktree: ${cwd} has no commits.`);
 	}
-	const primaryRoot = repository.primaryRoot() ?? repository.info().repoRoot;
-	const ovnfs = cfgIsolationBackend.get(settings) === "auto" ? ovnfsCommand(settings) : undefined;
-	if (ovnfs) {
-		// Checkout names are unique across folders: the root hash keeps two repositories' `/wt feature` apart.
-		const target: OvnfsCheckout = {
-			command: ovnfs,
-			checkout: `${checkoutStem(branch, 56) || "wt"}-${hashPath(primaryRoot)}`,
-		};
-		const rev = keepChanges ? undefined : baseCommit;
-		const checkoutPath = await openOvnfsCheckout(target, repository.info().repoRoot, branch, rev);
-		return { path: checkoutPath, branch, sourceCwd: cwd, baseCommit, keptChanges: keepChanges, ovnfs: target };
-	}
-	const slug = branch.replaceAll(/[^A-Za-z0-9._-]+/g, "-");
-	const basePath = getWorktreeDir(`${slug}-${hashPath(primaryRoot)}`);
-	const worktreePath = await resolveAvailableWorktreePath(basePath, await repository.worktrees());
-	await fs.mkdir(path.dirname(worktreePath), { recursive: true });
-
-	await repository.createBranch(branch, baseCommit, false);
-	const result = await repository.worktreeAdd(worktreePath, branch, {
-		detach: false,
-		clone: cfgWorktreeClone.get(settings),
-		backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
-		keepChanges,
-	});
-	return {
-		path: await fs.realpath(worktreePath),
+	return creationBackend(settings).create({
+		repository,
+		settings,
 		branch,
-		clonedWith: result.clonedWith ?? undefined,
-		cloneError: result.cloneError ?? undefined,
 		sourceCwd: cwd,
 		baseCommit,
 		keptChanges: keepChanges,
-	};
-}
-
-/**
- * Open ovnfs checkout `target` of `repoRoot`, as it is now or with tracked
- * files at `rev`, and switch it to new branch `branch`; returns the
- * checkout's realpath. A checkout whose branch cannot be created is removed.
- */
-async function openOvnfsCheckout(
-	target: OvnfsCheckout,
-	repoRoot: string,
-	branch: string,
-	rev: string | undefined,
-): Promise<string> {
-	const { command, checkout } = target;
-	let reply: NewReply;
-	try {
-		reply = await callOvnfs<NewReply>(command, "new", { dir: repoRoot, name: checkout, rev });
-	} catch (err) {
-		if (err instanceof OvnfsError && err.code === "exists") {
-			throw new Error(
-				`ovnfs checkout ${checkout} already exists; pick another branch name or remove it with \`ovnfs rm ${checkout}\`.`,
-			);
-		}
-		throw err;
-	}
-	try {
-		await vcs.requireGit(reply.checkout.path).checkoutNewBranch(branch);
-		return await fs.realpath(reply.checkout.path);
-	} catch (err) {
-		await removeCheckout(command, checkout).catch(error =>
-			logger.warn("failed to remove ovnfs checkout after /wt branch creation failed", { checkout, error }),
-		);
-		throw err;
-	}
+	});
 }
 
 /** State of `wt` plus a fingerprint that changes whenever any file, ref, or `HEAD` in it changes. */
@@ -256,16 +145,8 @@ interface WorktreeSnapshot {
 }
 
 async function snapshotSessionWorktree(wt: SessionWorktree): Promise<WorktreeSnapshot> {
-	// The daemon serves an ovnfs checkout's files: a stopped one must not pass for a deleted checkout.
-	if (wt.ovnfs) await startDaemon(wt.ovnfs.command);
-	const worktreeExists = await fs.stat(wt.path).then(
-		() => true,
-		() => false,
-	);
-	const worktreeRepo = worktreeExists ? vcs.git(wt.path) : null;
-	// A linked worktree's branch is the source repo's; an ovnfs checkout's is in its own git dir.
-	const branchRepo = wt.ovnfs ? worktreeRepo : vcs.git(wt.sourceCwd);
-	let moved = !wt.ovnfs;
+	const { checkout: worktreeRepo, branchRepo, missingBranchRepoMeansMoved } = await worktreeBackend(wt).inspect(wt);
+	let moved = missingBranchRepoMeansMoved;
 	let tip: string | null | undefined;
 	if (branchRepo) {
 		tip = await branchRepo.resolveRef(`refs/heads/${wt.branch}`);
@@ -399,32 +280,5 @@ export async function removeExitWorktrees(plan: readonly WorktreeExitPlan[]): Pr
  * checkout then stays.
  */
 export async function removeSessionWorktree(wt: SessionWorktree, moved: boolean): Promise<void> {
-	const repository = vcs.requireGit(wt.sourceCwd);
-	if (wt.ovnfs) {
-		const { command, checkout } = wt.ovnfs;
-		if (moved) {
-			const ref = `refs/heads/${wt.branch}`;
-			try {
-				await repository.fetch(wt.path, ref, ref);
-			} catch (err) {
-				throw new Error(
-					`Failed to copy branch '${wt.branch}' out of ovnfs checkout ${checkout}; checkout kept: ${err instanceof Error ? err.message : String(err)}`,
-				);
-			}
-		}
-		try {
-			await removeCheckout(command, checkout);
-		} catch (err) {
-			throw new Error(
-				`Failed to remove ovnfs checkout ${checkout}: ${err instanceof Error ? err.message : String(err)}`,
-			);
-		}
-		return;
-	}
-	if (!(await repository.worktreeRemove(wt.path, true))) {
-		throw new Error(`Failed to remove worktree ${wt.path}; branch '${wt.branch}' kept.`);
-	}
-	if (!moved && !(await repository.deleteBranch(wt.branch, true))) {
-		throw new Error(`Removed worktree ${wt.path} but failed to delete branch '${wt.branch}'.`);
-	}
+	await worktreeBackend(wt).remove(wt, moved);
 }
