@@ -4,6 +4,7 @@ pub(super) mod open_menu;
 mod placement;
 mod popup;
 mod selection;
+pub(crate) mod type_ahead;
 
 use std::{
 	collections::VecDeque,
@@ -1113,6 +1114,7 @@ impl AxBackend for MacAx {
 
 	fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps> {
 		let element = mac_handle(h)?;
+		type_ahead::settle_read(element)?;
 		let values = NodeValues::read(element, NodeRead::Props);
 		let mut count: CFIndex = 0;
 		// SAFETY: `count` is writable and the retained element outlives the
@@ -1140,6 +1142,7 @@ impl AxBackend for MacAx {
 		_max_children: u32,
 	) -> CoreResult<(AxProps, Vec<AxHandle>)> {
 		let element = mac_handle(h)?;
+		type_ahead::settle_read(element)?;
 		let read = match read_bounds {
 			WalkBounds::Read => NodeRead::WalkWithBounds,
 			WalkBounds::Skip => NodeRead::Walk,
@@ -1302,6 +1305,7 @@ impl AxBackend for MacAx {
 
 	fn attributes(&mut self, h: &AxHandle) -> CoreResult<Vec<(String, String)>> {
 		let element = mac_handle(h)?;
+		type_ahead::settle_read(element)?;
 		let names = copy_attribute_names(element)?;
 		let mut result = Vec::with_capacity(names.len());
 		for name in names {
@@ -1334,6 +1338,14 @@ impl AxBackend for MacAx {
 
 	fn value_settable(&mut self, h: &AxHandle) -> Option<bool> {
 		attribute_settable_answer(mac_handle(h).ok()?, "AXValue")
+	}
+
+	fn pending(&mut self, h: &AxHandle) -> bool {
+		mac_handle(h).is_ok_and(type_ahead::pending)
+	}
+
+	fn settle(&mut self, h: &AxHandle) -> CoreResult<()> {
+		type_ahead::settle_read(mac_handle(h)?)
 	}
 }
 

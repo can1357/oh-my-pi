@@ -22,6 +22,10 @@
 
 - Fixed macOS `computer` background clicks, keys and pop-up menu actions, and any takeover call, leaving the target window in front of your windows until you moved it: the window you were typing in goes back in front of it within the call (your other windows it covered stay behind it) ([#19532](https://github.com/can1357/oh-my-pi/pull/19532) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- Fixed a read of a macOS popup button right after a `computer` letter key showing the option from before the key; the read now waits for the option the letters choose ([#19516](https://github.com/can1357/oh-my-pi/pull/19516) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
