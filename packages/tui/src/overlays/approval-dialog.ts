@@ -430,7 +430,12 @@ export class ApprovalDialogComponent implements Component {
 			const rows = this.#details.map((line, index) => {
 				const styled = styledRows[index]!;
 				const content = styled.spans ? { spans: styled.spans } : { text: line };
-				const row = node("text", this.#expanded ? content : { ...content, truncate: "end" }, undefined, String(index));
+				const row = node(
+					"text",
+					this.#expanded ? content : { ...content, truncate: "end" },
+					undefined,
+					String(index),
+				);
 				// Like the text view's opening offset: the first prompted segment past the fold scrolls into view on mount.
 				return !this.#expanded && index === this.#promptedRow ? { ...row, reveal: "nearest" as const } : row;
 			});

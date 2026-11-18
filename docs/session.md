@@ -219,6 +219,73 @@ optional `errorMessage`. These records contribute usage accounting, not model
 messages or transcript turns. `appendModelUsage()` attaches the record to the
 initiating session/branch and rejects stale session ownership.
 
+Optional fields describe the call without copying the static prompt, which is
+identified by `purpose`.
+
+- `duration` / `ttft`: request wall time and time to first token, in ms.
+- `judgment`: a native judge query (TypeSafe jev and other judgment APIs).
+  `state` is the `sha256` of the canonical state, which is `states.id` in the
+  judgment answer cache (`~/.omp/cache/judgment-cache.db`): that database holds
+  the state text once and, under `oracle(state, model, name)`, each question's
+  rendered instructions, criteria, and full answer. `answers` keeps the headline
+  of each answer the request produced, by question id: a noul's probability of
+  yes, `[label, confidence]` for a choice, `[score, confidence]` for a score,
+  `[top, bottom, left, right, confidence]` for a box. `cached` counts questions
+  the cache answered instead (not billed, not in `answers`). A judgment answered
+  wholly from the cache writes no entry; a failed request has empty `answers`.
+- `completion`: a text side channel (title generation, recaps, commit
+  messages, memory extraction, …). `prompt` is the dynamic user-turn text the
+  model was sent; it is absent when the request read the conversation at the
+  entry's `parentId` (`title-fork`, `recap`, `btw`). `reply` is the raw reply
+  before parsing, or the tool arguments as JSON when the call answered through
+  a forced tool call. Either side is left out, never truncated, when it exceeds
+  4,000 characters (a diff, a transcript). Calls whose result the session
+  already stores (`compaction:<method>`, `branch-summary`, `web-search`,
+  `image-gen`, `image-describe`) journal usage and timing only. Compaction
+  purposes name the method that made the request: `compaction:remote`
+  (provider-native compaction, including OpenAI `/responses/compact` and V2
+  streaming), `compaction:soft` (local summary requests), `compaction:handoff`
+  (the handoff document); an advisor compacting its own history journals
+  `compaction:advisor`.
+
+An on-device model call that produced output is journaled with zero usage, so
+its count and `duration` are still visible.
+
+```json
+{
+	"type": "model_usage",
+	"id": "4e1e5bcf",
+	"parentId": "40ec204f",
+	"timestamp": "2026-11-18T10:16:19.964Z",
+	"purpose": "find",
+	"role": "typesafe",
+	"api": "typesafe",
+	"provider": "typesafe",
+	"model": "jev-1.14.0",
+	"usage": { "input": 824, "output": 87, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 911, "cost": { "input": 0.0000346, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.0000346 } },
+	"stopReason": "stop",
+	"duration": 212,
+	"judgment": {
+		"state": "9f2c1a7b3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8",
+		"answers": { "p00": 0.46, "p01": 0.02, "kind": ["helper", 0.41] },
+		"cached": 1
+	}
+}
+```
+
+```json
+{
+	"type": "model_usage",
+	"purpose": "title",
+	"duration": 640,
+	"ttft": 410,
+	"completion": {
+		"prompt": "<user>\nfix the share bar\n</user>",
+		"reply": "<title>Fix stats share bar</title>"
+	}
+}
+```
+
 ### `model_change`
 
 ```json
@@ -505,7 +572,7 @@ The underlying model is append-only tree + mutable leaf pointer:
 
 `getEntries()` returns all non-header entries in insertion order. There is no separate persisted leaf field: loading rebuilds the leaf from the last physical entry. Pointer-only `branch()`/`resetLeaf()` changes therefore need a subsequent append to survive reload. `discardEntryDurably()` appends a metadata branch marker and rewrites the journal to make a discarded path durable.
 
-`createBranchedSession(leafId, { copyArtifacts? })` creates a new identity containing only the selected root-to-leaf path. It drops old label records and recreates the resolved labels for retained entries. Unlike a full fork, it does not inherit the provider prompt-cache key. With `copyArtifacts` (used by `AgentSession.fork(entryId)`), the artifacts directory is copied in the background and the new artifact manager waits for the copy before allocating ids or resolving `artifact://`, as for a move to a sibling file.
+`createBranchedSession(leafId, { copyArtifacts? })` creates a new identity containing only the selected root-to-leaf path. It drops old label records and recreates the resolved labels for retained entries. Unlike a full fork, it does not inherit the provider prompt-cache key. With `copyArtifacts` (used by `AgentSession.fork(entryId)`), the artifacts directory is copied in the background and the new artifact manager waits for the copy before allocating ids or resolving spills (`local://N.log`), as for a move to a sibling file.
 
 ## Context Reconstruction (`buildSessionContext`)
 
@@ -556,7 +623,7 @@ Ordinary completed appends update memory and local file storage synchronously on
 - Atomic full rewrites use storage `writeTextAtomic` with a commit guard and expected byte-size precondition; file storage stages then renames over the target, including an EPERM-safe move-aside fallback.
 - Local appends and publication share a cross-process publish lock. A changed byte size raises `SessionWriteConflictError`; lock contention raises `SessionLockError` without publishing the staged rewrite. This is not a content-hash comparison and cannot protect against non-cooperating external writers.
 - `FileSessionStorage` holds a process-owned OS lease on each session a process writes, keyed by the session id rather than the file's path, so every process that reaches one journal (through a symlink, a hard link, or after a move) meets the same lease. The lease is `pi-utils` `tryAcquireFileLock` on `<session-owners>/<session-id>`, where `<session-owners>` is `~/.omp/run/session-owners` (XDG: `$XDG_STATE_HOME/omp/run/session-owners`), shared across profiles: on Linux an abstract socket and on Windows a named mutex, neither of which creates a file; on macOS and other non-Linux Unix a `flock` on a sidecar in that directory. Only write paths claim it, so the first process to write a session owns it; opening a session to inspect it (`omp share`, `--export`, `render`) never does. Managers in one process share the lease; it is released on close or a session switch, and the kernel drops it when its process exits. Processes with different home or state directories do not meet in this lease. A plain copy of a session file keeps its id, so a process writing the copy while the original's writer is live moves to a sibling; a collab guest's replica takes its own id (`parentSession` is the host's) so it never contends with the host.
-- A process never writes a session whose lease another live process holds: its first write moves the session to a fresh sibling `<timestamp>_<new-session-id>.jsonl` in the same directory, publishes the whole in-memory transcript there once, and continues appending incrementally. The owner's file is left untouched. Like `fork`, the sibling gets a new session id with `parentSession` pointing at the old one and keeps the provider prompt-cache key, so resume-by-id, the title index, and the picker never see two files for one id. The artifacts directory is copied in the background without overwriting files the moved session has already written; its artifact manager waits for the copy before allocating ids or resolving `artifact://`, and `flush()`/`close()` await it. `local://` and `agent://` reads that bypass the artifact manager can miss pre-move files until the copy finishes.
+- A process never writes a session whose lease another live process holds: its first write moves the session to a fresh sibling `<timestamp>_<new-session-id>.jsonl` in the same directory, publishes the whole in-memory transcript there once, and continues appending incrementally. The owner's file is left untouched. Like `fork`, the sibling gets a new session id with `parentSession` pointing at the old one and keeps the provider prompt-cache key, so resume-by-id, the title index, and the picker never see two files for one id. The artifacts directory is copied in the background without overwriting files the moved session has already written; its artifact manager waits for the copy before allocating ids or resolving spills, and `flush()`/`close()` await it. `local://` and `agent://` reads that bypass the artifact manager can miss pre-move files until the copy finishes.
 - `moveTo()` refuses, before anything moves or any directory is created, to move a session another live process writes or to replace a destination file whose session (by its header id) another live process writes.
 - Another program can check ownership without claiming: `isSessionLeaseHeld(sessionId)`, `omp session lease --json -- <id>...` (`{"held": [...], "unknown": [...]}`), and RPC `get_session_lease` observe the lease without taking or opening it (a connect probe on Linux, `F_GETLK` on other Unix, a `\BaseNamedObjects` directory listing on Windows), so they never make a concurrent claim fork the session.
 - Under `bun test`, the lease directory is `<os temp>/omp-test-session-owners-<uid>` instead of the real state directory. It is exported as `PI_TEST_SESSION_OWNERS_DIR` when `session-storage` loads; a test that spawns an omp process which writes sessions must pass `env: process.env` (Bun's default is the launch environment), or run under `ci-test-ts`, whose children inherit `PI_TEST_RUNTIME=1` and derive the same directory.

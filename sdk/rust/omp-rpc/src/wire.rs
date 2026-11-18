@@ -3667,6 +3667,24 @@ impl CacheWarmingPhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CacheWarmingMethod {
+	#[serde(rename = "prewarm")]
+	Prewarm,
+	#[serde(rename = "replay")]
+	Replay,
+}
+
+impl CacheWarmingMethod {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Prewarm => "prewarm",
+			Self::Replay => "replay",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CacheWarmingOutcome {
 	#[serde(rename = "hit")]
 	Hit,
@@ -3843,7 +3861,7 @@ pub struct AutoCompactionEndEvent {
 	pub skipped: Option<bool>,
 }
 
-/// A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted.
+/// A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ManualCompactionStartEvent {
 	/// The `/compact <mode>` subcommand, when one was given.
@@ -3894,6 +3912,7 @@ pub struct AutoRetryEndEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheWarmingStartEvent {
 	pub phase: CacheWarmingPhase,
+	pub method: CacheWarmingMethod,
 	pub provider: String,
 	pub model: String,
 }
@@ -3902,6 +3921,7 @@ pub struct CacheWarmingStartEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheWarmingEndEvent {
 	pub phase: CacheWarmingPhase,
+	pub method: CacheWarmingMethod,
 	pub provider: String,
 	pub model: String,
 	pub outcome: CacheWarmingOutcome,
@@ -4019,7 +4039,7 @@ pub enum RpcAgentEvent {
 	ToolExecutionEnd(ToolExecutionEndEvent),
 	AutoCompactionStart(AutoCompactionStartEvent),
 	AutoCompactionEnd(AutoCompactionEndEvent),
-	/// A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted.
+	/// A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle.
 	ManualCompactionStart(ManualCompactionStartEvent),
 	/// Outcome of the compaction announced by the matching `manual_compaction_start`.
 	ManualCompactionEnd(ManualCompactionEndEvent),

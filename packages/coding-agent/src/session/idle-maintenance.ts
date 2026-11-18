@@ -321,7 +321,7 @@ export class IdleMaintenance {
 				goal: this.#goalText() ?? "",
 				task: nextActionableTask(session.getTodoPhases())?.content ?? "",
 			});
-			const { replyText } = await session.runEphemeralTurn({ promptText, signal: run.signal });
+			const { replyText } = await session.runEphemeralTurn({ promptText, purpose: "recap", signal: run.signal });
 			if (this.#recapRun !== run || run.signal.aborted) return;
 			if (this.#isBlocked()) return;
 			if (!this.#isSettled()) {

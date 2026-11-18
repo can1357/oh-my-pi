@@ -27,9 +27,10 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { CURRENT_SESSION_VERSION, type SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgCompactionExperimentalContextManagement } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { resourceText } from "../helpers/resource-text";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "history-protocol-"));
@@ -55,9 +56,9 @@ function makeToolSession(
 		getSessionFile: () => sessionFile,
 		getSessionSpawns: () => "*",
 		getArtifactsDir: () => path.join(cwd, "artifacts"),
-		allocateOutputArtifact: async toolType => ({
+		allocateOutputArtifact: async () => ({
 			id: "history-read",
-			path: path.join(cwd, "artifacts", `history-read.${toolType}.log`),
+			path: path.join(cwd, "artifacts", `history-read.log`),
 		}),
 		settings: Settings.isolated(),
 		...overrides,
@@ -339,6 +340,17 @@ describe("history:// protocol", () => {
 		expect(resource.sourcePath).toBeUndefined();
 	});
 
+	it("reads bare history://current as the caller's own branch when no agent is named current", async () => {
+		const resource = await InternalUrlRouter.instance().resolve("history://current", {
+			experimentalContextManagement: true,
+			getSessionBranch: currentBranchFixture,
+		});
+		expect(resource.content).toContain("latest raw request survives");
+		await expect(InternalUrlRouter.instance().resolve("history://current")).rejects.toThrow(
+			"experimentalContextManagement",
+		);
+	});
+
 	it("rejects current/full when disabled or without a caller-bound branch", async () => {
 		await expect(
 			InternalUrlRouter.instance().resolve("history://current/full", {
@@ -428,7 +440,8 @@ describe("history:// protocol", () => {
 
 		expect(output?.type).toBe("text");
 		if (output?.type !== "text") throw new Error("Expected text output");
-		expect(output.text).toBe(resource.content.split("\n").slice(0, 2).join("\n"));
+		// A raw range keeps each line's terminator, so consecutive ranges concatenate to the source.
+		expect(output.text).toBe(`${resourceText(resource).split("\n").slice(0, 2).join("\n")}\n`);
 	});
 
 	it("resolves agent ids case-insensitively", async () => {

@@ -67,7 +67,7 @@ export type SchemeBacking = "file" | "virtual" | "remote" | "device";
 
 /**
  * Read-selector grammar after the URL.
- * - `lines`: any trailing `:<selector>` chain is a read selector (`artifact://3:raw:1-50`).
+ * - `lines`: any trailing `:<selector>` chain is a read selector (`local://3.log:raw:1-50`).
  * - `none`: never peel; the URL is passed through as written.
  * - `opaque`: server-defined URIs that may legitimately end in selector-shaped tails (mcp://).
  */
@@ -117,8 +117,11 @@ export interface SchemeSpec {
 	pathAuthority?: true;
 	/** Default immutability of resolved resources; a resource may override it per URL. */
 	immutable: boolean;
-	/** Resources are session artifact storage (artifact://); located read pages skip the artifact spill. */
-	artifactStore?: true;
+	/**
+	 * Located read pages get the full line-scaled byte budget and never spill: the file is already
+	 * session storage (`local://N.log` spills) that selectors re-read, so a spill would only copy it.
+	 */
+	unspilledPages?: true;
 	/** Approval tier for reading/searching this scheme. Default `read`; ssh:// is `exec`. */
 	readTier?: ToolTier;
 	/** Read output bypasses result truncation limits (skill:// instructions). */
@@ -161,6 +164,8 @@ export interface SchemeHost {
 	settingsApproval: boolean;
 	/** `out://` writes reach the user as transcript replies: `out.enabled` is on in the top-level TUI session. */
 	outReplies: boolean;
+	/** Advertise PID-qualified agent URLs and same-folder peer discovery. */
+	crossInstanceAgents?: boolean;
 	/** The session is a subagent: `agent://all` broadcasts are refused, so they go unadvertised. */
 	subagent: boolean;
 }
@@ -169,14 +174,25 @@ export interface SchemeHost {
  * Raw resource payload returned by protocol handlers. The router defaults
  * `immutable` from {@link SchemeSpec.immutable}, so handlers set it only to
  * override the scheme default for a specific URL.
+ *
+ * `Content` is text for most handlers; a handler that can serve binary
+ * (`mcp://` blobs) resolves `InternalResource<string | Buffer>`, which is also
+ * what {@link ProtocolHandler.resolve} and the router return.
  */
-export interface InternalResource {
+export interface InternalResource<Content extends string | Buffer = string> {
 	/** Canonical URL that was resolved */
 	url: string;
-	/** Resolved text content */
-	content: string;
-	/** MIME type: text/markdown, application/json, or text/plain */
-	contentType: "text/markdown" | "application/json" | "text/plain";
+	/**
+	 * Resolved text, or the raw bytes of a binary resource. `read` treats bytes
+	 * like a file of the same name and type (image, document, binary notice);
+	 * byte-oriented consumers (the bash URL filesystem) take them verbatim.
+	 */
+	content: Content;
+	/**
+	 * MIME type: text/markdown, application/json, or text/plain for text; the
+	 * reported type of byte `content` (`application/pdf`), when known.
+	 */
+	contentType: string;
 	/** Content size in bytes */
 	size?: number;
 	/** Underlying filesystem path (for debugging, not exposed to agent) */
@@ -381,7 +397,7 @@ export interface ProtocolHandler {
 	 *   preference to global state.
 	 * @throws Error with user-friendly message if resolution fails
 	 */
-	resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource>;
+	resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource<string | Buffer>>;
 	/**
 	 * Handler-owned write hook: present exactly when `spec.write.via` is
 	 * `"handler"` (the router enforces this at registration). The write tool

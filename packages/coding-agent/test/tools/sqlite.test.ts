@@ -315,6 +315,17 @@ describe("SQLite tool support", () => {
 		expect(getText(result)).toContain("users (6 rows)");
 	});
 
+	it("recognizes a SQLite file without a database extension by its header", async () => {
+		const vscdb = await stampFreshDb("state.vscdb");
+		expect(getText(await readTool.execute("sqlite-vscdb-list", { path: vscdb }))).toContain("users (6 rows)");
+		expect(getText(await readTool.execute("sqlite-vscdb-table", { path: `${vscdb}:users` }))).toContain(
+			"CREATE TABLE",
+		);
+		expect(
+			getText(await readTool.execute("sqlite-vscdb-query", { path: `${vscdb}?q=SELECT count(*) AS n FROM users` })),
+		).toContain("6");
+	});
+
 	it("falls through to plain file reading for non-SQLite .db files", async () => {
 		const result = await readTool.execute("sqlite-invalid-db", { path: invalidDbPath });
 		expect(getText(result)).toContain("not sqlite");

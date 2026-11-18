@@ -22,7 +22,7 @@
 - `packages/natives/scripts/gen-enums.ts`
 - `packages/natives/scripts/gen-npm-packages.ts`
 - `scripts/bazel-natives.ts`
-- `crates/pi-natives/src/lib.rs` and its modules
+- `crates/natives/src/lib.rs` and its modules
 
 ## Package entrypoints
 
@@ -87,20 +87,20 @@ Set `PI_DEBUG_STARTUP` to emit synchronous `[startup]` markers to stderr around 
 
 ## Rust module ownership
 
-`crates/pi-natives/src/lib.rs` registers the current modules:
+`crates/natives/src/lib.rs` registers the current modules:
 
 - platform/runtime: `appearance`, `clipboard`, `crash_handler`, `desktop`, `devicecheck`, `file_lock`, `oauth_callback`, `power`, `prof`, `ps`, `pty`, `shell`, `spelling`, `tty_writer`, `vcs`;
 - media/live/model: `applefm`, `audio`, `live`, `predict`, `sixel`, `snapcompact`, `svg`;
 - code/data: `ast`, `block`, `diff`, `edit`, `fd`, `glob`, `grep`, `highlight`, `html`, `keys`, `mermaid`, `pdf`, `summary`, `text`, `tokens`, `utok`, `vectors`, `workspace`;
 - isolation/task support: `iso`, `task`, plus N-API boundary/conversion helpers (`js`, crate-private `utils`, test-only `testing`);
-- language metadata re-exported from `pi_ast::language`.
+- language metadata re-exported from `omp_ast::language`.
 
 Rust `#[napi]` functions, classes, objects, and enums generate the declaration surface. Default snake_case Rust names become camelCase JavaScript names.
 
 ## Ownership boundaries
 
 - **Package/scripts** own binary selection, CPU variants, optional leaf resolution, embedded extraction, Windows staging, desktop ABI adaptation, declarations, and explicit ESM exports.
-- **`pi-natives` and supporting crates** own algorithms, native resources, platform behavior, cancellation, and N-API conversion.
+- **`omp-natives` and supporting crates** own algorithms, native resources, platform behavior, cancellation, and N-API conversion.
 - **Consumers** own higher-level tool policy, rendering, artifacts, and user-facing fallbacks not encoded in a primitive.
 
 For the supporting-crate map, see [`native-crates.md`](./native-crates.md). For exact loader diagnostics, see [`natives-addon-loader-runtime.md`](./natives-addon-loader-runtime.md).
