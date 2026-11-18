@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/session` shows the path of the session's `local://` directory, and `/copy local` copies it, creating the directory first so it can be entered before anything was written there ([#19778](https://github.com/can1357/oh-my-pi/pull/19778) by [@farnoy](https://github.com/farnoy))
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes

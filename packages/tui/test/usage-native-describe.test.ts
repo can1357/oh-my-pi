@@ -218,7 +218,7 @@ describe("SessionInfoOverlay.describe", () => {
 	const dim = (key: string): string => theme.fg("dim", `${key}:`);
 	// Built per test: the theme initializes in `beforeAll`, after this block is collected.
 	const fullReport = (): string =>
-		`${dim("File")} /tmp/s.jsonl\n${dim("ID")} abc-123\n` +
+		`${dim("File")} /tmp/s.jsonl\n${dim("ID")} abc-123\n${dim("Local")} /tmp/s/local\n` +
 		`\n${theme.bold("Provider")}\n${dim("Model")} claude-sonnet-4-5\n` +
 		`\n${theme.bold("Messages")}\n${dim("User")} 6\n${dim("Tool Calls")} 23\n${dim("Total")} 29\n\n` +
 		`${dim("Append-Only")} ${theme.fg("success", "active")} (setting: auto)\n` +
@@ -230,13 +230,14 @@ describe("SessionInfoOverlay.describe", () => {
 	const kvItems = (root: NativeNode, role: string): unknown[] =>
 		findAll(root, n => n.p?.role === role).flatMap(n => (n.k === "kv" ? [n.p?.items] : []));
 
-	it("leads with the session id, then the file, each copying its own value", () => {
+	it("leads with the session id, then the file and local directory, each copying its own value", () => {
 		const overlay = new SessionInfoOverlay({ terminal: { rows: 20 } }, fullReport(), () => {});
 		const root = overlay.describe(cx);
 		const copies = findAll(root, n => n.p?.role === "omp.info.copy");
-		expect(copies.map(n => n.p?.title)).toEqual(["Copy session ID", "Copy /tmp/s.jsonl"]);
+		expect(copies.map(n => n.p?.title)).toEqual(["Copy session ID", "Copy /tmp/s.jsonl", "Copy /tmp/s/local"]);
 		expect(JSON.stringify(copies[0])).toContain("abc-123");
 		expect(JSON.stringify(copies[1])).toContain("/tmp/s.jsonl");
+		expect(JSON.stringify(copies[2])).toContain("/tmp/s/local");
 		expect(JSON.stringify(root)).not.toContain("\x1b");
 	});
 
