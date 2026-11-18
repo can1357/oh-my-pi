@@ -962,15 +962,15 @@ export function readShellWord(text: string): { value: string; rest: string } | "
 
 /**
  * The longest directory, in characters, {@link parseShellCommands} follows a command line into: the
- * one it starts in, or one a `cd`, `pushd`, `popd`, `env -C`, `sudo -D` or `tar -C` changes to. Past
- * it the directory is unknown, so relative paths after it are not resolved. Every later path is
- * resolved against the directory, so following longer ones would cost the directory's length per
- * path, and a chain of changes one step deeper each the square of the command's length.
+ * one it starts in, or one a `cd`, `pushd` or `popd` changes to. Past it the directory is unknown, so
+ * relative paths after it are not resolved. Every later path is resolved against the directory, so
+ * following longer ones would cost the directory's length per path, and a chain of changes one step
+ * deeper each the square of the command's length.
  */
 const SHELL_MAX_DIRECTORY = 1024;
 
 /** `dir`, or `undefined` (unknown) when it is longer than {@link SHELL_MAX_DIRECTORY}. */
-export function boundedDirectory(dir: string | undefined): string | undefined {
+function boundedDirectory(dir: string | undefined): string | undefined {
 	return dir !== undefined && dir.length > SHELL_MAX_DIRECTORY ? undefined : dir;
 }
 
@@ -988,8 +988,8 @@ export interface ShellCommand {
 	fedInput: boolean;
 	/**
 	 * Directory the program runs in: where the shell is after the `cd`, `pushd` and `popd` before the
-	 * command, moved by a wrapper's directory option (`env -C`, `sudo -D`). `undefined` when the
-	 * guard cannot tell (`cd "$dir"`), so relative paths are not resolved.
+	 * command. `undefined` when the guard cannot tell (`cd "$dir"`), or when a wrapper's directory
+	 * option (`env -C`, `sudo -D`) moves the program, so relative paths are not resolved.
 	 */
 	cwd: string | undefined;
 	/**
@@ -1043,7 +1043,7 @@ export function resolveShellWordPath(word: string, cwd: string | undefined, home
  * The absolute path a word of `command` names, as {@link resolveShellWordPath} resolves it, except
  * that a leading `~` the source quoted ({@link ShellCommand.literalTildes}) stays a plain character.
  */
-export function resolveCommandWordPath(
+function resolveCommandWordPath(
 	command: ShellCommand,
 	word: string,
 	cwd: string | undefined,
@@ -1529,17 +1529,17 @@ const WRAPPER_ASSIGNMENT_RE = /^[^=-][^=]*=/;
 /**
  * The command a wrapper chain runs in `words` (`sudo env X=1 timeout 5 rm ...` runs `rm ...`), after
  * the shell's own assignments (an identifier name only: bash runs `A-B=1 cmd` as a command named
- * `A-B=1`) and a `!`, with the directories a wrapper's directory option ({@link SHELL_WRAPPER_CHDIRS})
- * moves it to, in order. A long option may be abbreviated, as getopt allows (`--us root`); in a
+ * `A-B=1`) and a `!`, and whether a wrapper's directory option ({@link SHELL_WRAPPER_CHDIRS}) moves
+ * it to another directory. A long option may be abbreviated, as getopt allows (`--us root`); in a
  * bundle of short options (`-nu root`), the first that takes a value takes the rest of the word, or
  * the next word when it ends the bundle. env and sudo also take the variables they set
  * ({@link WRAPPER_ASSIGNMENT_RE}). `undefined` when env runs the command an `env -S` string holds,
  * which the guard does not split.
  */
-function unwrapShellCommand(words: readonly string[]): { argv: string[]; chdirs: string[] } | undefined {
+function unwrapShellCommand(words: readonly string[]): { argv: string[]; moved: boolean } | undefined {
 	let i = 0;
 	while (i < words.length && (SHELL_ASSIGNMENT.test(words[i]) || words[i] === "!")) i++;
-	const chdirs: string[] = [];
+	let moved = false;
 	let wrapper: string | undefined;
 	while (i < words.length) {
 		const name = path.posix.basename(words[i]);
@@ -1568,17 +1568,13 @@ function unwrapShellCommand(words: readonly string[]): { argv: string[]; chdirs:
 				) {
 					return undefined;
 				}
-				const dir = eq < 0 ? words[i + 1] : attachedValue(arg.slice(eq + 1));
-				if (chdir && flag.length >= chdir.shortest.length && chdir.long.startsWith(flag) && dir !== undefined) {
-					chdirs.push(dir);
-				}
+				moved ||= chdir !== undefined && flag.length >= chdir.shortest.length && chdir.long.startsWith(flag);
 				if (eq < 0 && valued.some(option => option.startsWith(arg))) i++;
 			} else if (options && arg.startsWith("-") && arg.length > 1) {
 				let k = 1;
 				while (k < arg.length && !valued.includes(`-${arg[k]}`)) k++;
 				if (name === "env" && arg[k] === ENV_SPLIT_OPTION.letter) return undefined;
-				const dir = k === arg.length - 1 ? words[i + 1] : attachedValue(arg.slice(k + 1));
-				if (chdir && arg[k] === chdir.letter && dir !== undefined) chdirs.push(dir);
+				moved ||= chdir !== undefined && arg[k] === chdir.letter;
 				if (k === arg.length - 1) i++;
 			} else if (positional > 0) {
 				positional--;
@@ -1590,7 +1586,7 @@ function unwrapShellCommand(words: readonly string[]): { argv: string[]; chdirs:
 	const argv = words.slice(i);
 	// `env` alone prints the environment.
 	if (argv.length === 0 && wrapper !== undefined) argv.push(wrapper);
-	return { argv, chdirs };
+	return { argv, moved };
 }
 
 /** Directories `pushd` saved, the one `popd` returns to first; what is below them is unknown. */
@@ -1679,29 +1675,19 @@ function markLiteral(literal: Set<string>, bare: Set<string>, word: string, quot
 
 /**
  * The simple command `segment` runs from `cwd`, or `undefined` when it runs none that reads
- * anything; `piped` when an earlier pipeline stage feeds it. The program runs where a wrapper's
- * directory option moves it (`env -C`).
+ * anything; `piped` when an earlier pipeline stage feeds it. The program runs in an unknown
+ * directory when a wrapper's directory option moves it (`env -C`).
  */
-function shellCommand(
-	segment: Segment,
-	cwd: string | undefined,
-	home: string,
-	piped: boolean,
-): ShellCommand | undefined {
+function shellCommand(segment: Segment, cwd: string | undefined, piped: boolean): ShellCommand | undefined {
 	const unwrapped = unwrapShellCommand(segment.words);
 	const argv = unwrapped?.argv ?? [];
 	if (argv.length === 0 && segment.reads.length === 0) return undefined;
 	if (argv.length > 0 && argv[0].includes("/")) argv[0] = path.posix.basename(argv[0]);
-	let programCwd = cwd;
-	for (const dir of unwrapped?.chdirs ?? []) {
-		const word = segment.literalTildes.has(dir) ? `./${dir}` : dir;
-		programCwd = boundedDirectory(resolveShellWordPath(word, programCwd, home));
-	}
 	return {
 		argv,
 		reads: segment.reads,
 		fedInput: piped || segment.input,
-		cwd: programCwd,
+		cwd: unwrapped?.moved ? undefined : cwd,
 		shellCwd: cwd,
 		literalTildes: segment.literalTildes,
 		literalBraces: segment.literalBraces,
@@ -1713,8 +1699,8 @@ function shellCommand(
  * pipeline, in order, empty for one with no simple command (`a=1`, `{ ...; }`). Follows quotes
  * (`$'...'` and `$"..."` included), escapes, comments, `;`/`&&`/`||`/`|` chains (continued on the
  * next line after `|`, `&&` or `||`), redirections, wrappers (`sudo`, `env`, `timeout`, `xargs`,
- * `nohup`, `nice`, ..., with the directory `env -C` or `sudo -D` runs the command in), and `cd`,
- * `cd -`, `pushd` and `popd` between commands. It reads into nothing nested: a compound command
+ * `nohup`, `nice`, ..., with the directory `env -C` or `sudo -D` runs the command in unknown), and
+ * `cd`, `cd -`, `pushd` and `popd` between commands. It reads into nothing nested: a compound command
  * (`{ }`, `if`, a loop, `case`, `[[ ]]`) or a function definition is a pipeline stage with no
  * command in it, and it stops at the first nested part ({@link nestedAt}: a substitution, any `(`,
  * a heredoc), leaving out the command that part is in, whose words after it are unknown; `bash -c`,
@@ -1747,7 +1733,7 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellCom
 			changesShell = skipper.changesShell;
 		} else if (segment.used) {
 			stages++;
-			last = shellCommand(segment, dirs.cwd, scope.home, stages > 1);
+			last = shellCommand(segment, dirs.cwd, stages > 1);
 			if (last) pipeline.push(last);
 			changesShell = false;
 		}
