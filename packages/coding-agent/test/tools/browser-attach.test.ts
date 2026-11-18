@@ -37,7 +37,7 @@ import {
 	normalizeConnectedCdpUrl,
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
-import { acquireTab, getTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { acquireTab, getTab, listTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import {
 	type Browser,
@@ -182,6 +182,154 @@ async function spawnDisposableExecutable(args: string[] = []): Promise<Disposabl
 			await fs.rm(tempDir, { recursive: true, force: true });
 		},
 	};
+}
+
+interface CdpMessage {
+	id?: number;
+	method?: string;
+	sessionId?: string;
+	params?: {
+		targetId?: string;
+		sessionId?: string;
+		waitingForDebugger?: boolean;
+		targetInfo?: { targetId: string; type: string };
+	};
+	result?: { targetId?: string; targetInfos?: Array<{ targetId: string; type: string }> };
+}
+
+/**
+ * A CDP endpoint in front of real Chromium that behaves like Lightpanda: each connection sees only the pages it
+ * created, and its pages close when it disconnects.
+ */
+function startConnectionScopedProxy(upstream: string): { url: string; stop(): void } {
+	// Page and tab target id → the connection that created it. Chromium announces a created page's tab and page
+	// targets before answering `Target.createTarget`, so a connection waiting on one claims both.
+	const owners = new Map<string, number>();
+	let nextConnection = 0;
+	// Ids of the proxy's own requests upstream, above any a client sends here.
+	const PROXY_REQUEST_IDS = 1_000_000_000;
+	interface Connection {
+		id: number;
+		upstream: WebSocket;
+		queued: string[] | null;
+		pendingCreates: number;
+		hiddenSessions: Set<string>;
+		ownedRequests: Map<number, string>;
+		nextRequestId: number;
+	}
+	const visible = (conn: Connection, targetId: string, type: string): boolean => {
+		if (type !== "page" && type !== "tab") return true;
+		const owner = owners.get(targetId);
+		if (owner === undefined && conn.pendingCreates > 0) owners.set(targetId, conn.id);
+		return owners.get(targetId) === conn.id;
+	};
+	const server = Bun.serve<Connection>({
+		port: 0,
+		hostname: "127.0.0.1",
+		fetch(req, srv) {
+			const url = new URL(req.url);
+			if (url.pathname === "/json/version") {
+				return Response.json({ Browser: "Chrome", webSocketDebuggerUrl: `ws://${url.host}/devtools/browser` });
+			}
+			const id = nextConnection++;
+			const data: Connection = {
+				id,
+				upstream: new WebSocket(upstream),
+				queued: [],
+				pendingCreates: 0,
+				hiddenSessions: new Set(),
+				ownedRequests: new Map(),
+				nextRequestId: PROXY_REQUEST_IDS,
+			};
+			if (srv.upgrade(req, { data })) return undefined;
+			return new Response("not found", { status: 404 });
+		},
+		websocket: {
+			open(ws) {
+				const conn = ws.data;
+				conn.upstream.onopen = () => {
+					for (const message of conn.queued ?? []) conn.upstream.send(message);
+					conn.queued = null;
+				};
+				conn.upstream.onclose = () => ws.close();
+				conn.upstream.onmessage = event => {
+					const message = JSON.parse(String(event.data)) as CdpMessage;
+					// Answers to the proxy's own requests below.
+					if (message.id !== undefined && message.id >= PROXY_REQUEST_IDS) return;
+					if (message.sessionId && conn.hiddenSessions.has(message.sessionId)) return;
+					if (message.id !== undefined && conn.ownedRequests.get(message.id) === "Target.createTarget") {
+						conn.pendingCreates--;
+						if (message.result?.targetId) owners.set(message.result.targetId, conn.id);
+					}
+					if (message.id !== undefined) conn.ownedRequests.delete(message.id);
+					if (message.result?.targetInfos) {
+						message.result.targetInfos = message.result.targetInfos.filter(info =>
+							visible(conn, info.targetId, info.type),
+						);
+					}
+					const info = message.params?.targetInfo;
+					if (info && !visible(conn, info.targetId, info.type)) {
+						const sessionId = message.params?.sessionId;
+						if (message.method === "Target.attachedToTarget" && sessionId) {
+							conn.hiddenSessions.add(sessionId);
+							// Chromium paused the target for this connection's auto-attach, which never learns of it: resume
+							// and let it go, or the other connection's page never navigates.
+							if (message.params?.waitingForDebugger) {
+								conn.upstream.send(
+									JSON.stringify({
+										id: conn.nextRequestId++,
+										method: "Runtime.runIfWaitingForDebugger",
+										sessionId,
+									}),
+								);
+							}
+							conn.upstream.send(
+								JSON.stringify({
+									id: conn.nextRequestId++,
+									method: "Target.detachFromTarget",
+									params: { sessionId },
+								}),
+							);
+						}
+						return;
+					}
+					const targetId = message.params?.targetId;
+					if (targetId && owners.has(targetId) && owners.get(targetId) !== conn.id) return;
+					ws.send(JSON.stringify(message));
+				};
+			},
+			message(ws, raw) {
+				const conn = ws.data;
+				const message = JSON.parse(String(raw)) as CdpMessage;
+				const targetId = message.params?.targetId;
+				if (targetId && message.method?.startsWith("Target.") && owners.get(targetId) !== conn.id) {
+					ws.send(
+						JSON.stringify({ id: message.id, error: { code: -32602, message: "No target with given id found" } }),
+					);
+					return;
+				}
+				if (message.id !== undefined && message.method) conn.ownedRequests.set(message.id, message.method);
+				if (message.method === "Target.createTarget") conn.pendingCreates++;
+				if (conn.queued) conn.queued.push(String(raw));
+				else conn.upstream.send(String(raw));
+			},
+			close(ws) {
+				const conn = ws.data;
+				// The connection's pages go with it, as Lightpanda's do.
+				for (const [targetId, owner] of owners) {
+					if (owner !== conn.id) continue;
+					if (conn.upstream.readyState === WebSocket.OPEN) {
+						conn.upstream.send(
+							JSON.stringify({ id: conn.nextRequestId++, method: "Target.closeTarget", params: { targetId } }),
+						);
+					}
+					owners.delete(targetId);
+				}
+				conn.upstream.close();
+			},
+		},
+	});
+	return { url: `http://127.0.0.1:${server.port}`, stop: () => server.stop(true) };
 }
 
 describe("pickElectronTarget", () => {
@@ -766,6 +914,57 @@ describe("pickElectronTarget", () => {
 				expect(targetPage.url()).toBe(requested);
 			} finally {
 				if (opened) await invokeBrowser({ action: "close", name: tabName });
+			}
+		},
+		30_000,
+	);
+
+	// Launches real headless Chromium; skipped where Chrome's system libraries are absent.
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"keeps a tab on a connection-scoped CDP endpoint through tab listing and a worker exit",
+		async () => {
+			const launched = sharedHeadless;
+			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
+			const proxy = startConnectionScopedProxy(launched.wsEndpoint);
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const context = { session, toolCallId: "browser-attach-connection-scoped" };
+			const name = `attach-connection-scoped-${process.pid}-${Math.random().toString(36).slice(2)}`;
+			const url = "data:text/html,<title>connection-scoped-page</title>";
+			// A rejection no run owns, as a Puppeteer event handler's would be: it ends the tab's worker.
+			const endWorker = `
+				const err = new Error("library-internal");
+				err.stack = "Error: library-internal\\n    at #onFileChooser (puppeteer/Page.js:1:1)";
+				Promise.reject(err);
+				await Promise.withResolvers().promise;
+			`;
+
+			try {
+				await prelude.invoke({ action: "open", name, url, app: proxy.url }, context);
+				await prelude.invoke(
+					{ action: "run", name, code: "await tab.evaluate(() => { window.marker = 1; });" },
+					context,
+				);
+				// The supervisor's own connection cannot see the page, which is not a page that closed.
+				expect(listTabs().map(tab => tab.name)).toContain(name);
+
+				const exit = await rejectionOf(prelude.invoke({ action: "run", name, code: endWorker }, context));
+				expect(exit instanceof Error ? exit.message : String(exit)).toContain(
+					"the tab's page closed with it, so omp is opening a new page for the tab on a new worker",
+				);
+				const after = await prelude.invoke(
+					{
+						action: "run",
+						name,
+						code: "return { title: await tab.title(), marker: await tab.evaluate(() => window.marker ?? null) };",
+					},
+					context,
+				);
+				// A new page on the new worker's connection, back on the old page's URL, without its state.
+				expect(after.details).toMatchObject({ value: { title: "connection-scoped-page", marker: null } });
+			} finally {
+				await prelude.invoke({ action: "close", name }, context).catch(() => undefined);
+				proxy.stop();
 			}
 		},
 		30_000,

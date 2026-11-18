@@ -67,11 +67,14 @@ export interface SessionSnapshot {
 
 /**
  * The page an attach worker drives. `create`: open and own a background tab in a
- * spawned browser or relay; `nearTargetId` selects the relay browser when given.
- * `owned`: an omp tab adopted after recycle. `borrowed`: a user's page, never closed,
- * and focus-emulated only in a browser the user drives (see `userDriven`).
+ * spawned browser, relay or CDP endpoint; `nearTargetId` selects the relay browser when given,
+ * and `reload` loads a URL once the page is set up (a recycle re-creating a page that closed with
+ * its old worker's connection). `owned`: an omp tab adopted after recycle. `borrowed`: a user's
+ * page, never closed, and focus-emulated only in a browser the user drives (see `userDriven`).
  */
-export type AttachPage = { kind: "create"; nearTargetId?: string } | { kind: "owned" | "borrowed"; targetId: string };
+export type AttachPage =
+	| { kind: "create"; nearTargetId?: string; reload?: { url: string; timeoutMs: number } }
+	| { kind: "owned" | "borrowed"; targetId: string };
 
 /** omp created the payload's page: closing the tab closes the page. */
 export function ownsPage(payload: WorkerInitPayload): boolean {

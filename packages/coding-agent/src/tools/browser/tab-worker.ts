@@ -2323,6 +2323,11 @@ export class WorkerCore {
 				});
 			}
 			if (payload.mode === "attach" && payload.relay === true) await this.#takeHiddenFrames(this.#page);
+			if (payload.mode === "attach" && payload.page.kind === "create" && payload.page.reload) {
+				// A failed load leaves the new page where it got to; the supervisor reports that from the ready URL.
+				const { url, timeoutMs } = payload.page.reload;
+				await this.#page.goto(url, { waitUntil: "load", timeout: timeoutMs }).catch(() => undefined);
+			}
 			const hiddenFrames = this.#hiddenFrames.splice(0);
 			const info: ReadyInfo = {
 				...(await this.#currentReadyInfo()),
