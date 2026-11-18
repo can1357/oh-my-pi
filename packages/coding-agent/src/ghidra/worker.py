@@ -22,10 +22,12 @@ from pathlib import Path
 # Java/native diagnostics and user prints must never corrupt the protocol stream.
 _proto = os.fdopen(os.dup(1), "w", encoding="utf-8", buffering=1)
 os.dup2(2, 1)
-try:
-    sys.stdin.reconfigure(encoding="utf-8")
-except (AttributeError, ValueError):
-    pass
+
+# Keep the reader off fd 0. JVM _setmode(0) on Windows deadlocks with _read(0).
+_proto_in = os.fdopen(os.dup(0), "r", encoding="utf-8")
+_null = os.open(os.devnull, os.O_RDONLY)
+os.dup2(_null, 0)
+os.close(_null)
 
 # The broker SIGTERMs the host's process group; the host must save us first. -Xrs
 # prevents the JVM from replacing this disposition when it starts.
@@ -722,7 +724,7 @@ _interrupt_pending = False
 
 def _read_requests():
     global _interrupt_pending
-    for line in sys.stdin:
+    for line in _proto_in:
         try:
             frame = json.loads(line)
         except ValueError:

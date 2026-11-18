@@ -140,13 +140,18 @@ def transaction(program, description):
 `;
 
 const STUB_LAUNCHER = `
+import os
+import sys
+
 class HeadlessPyGhidraLauncher:
     def __init__(self, install_dir):
         pass
     def add_vmargs(self, *args):
         pass
     def start(self, **kwargs):
-        pass
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.setmode(0, os.O_BINARY)
 `;
 
 /** API-shaped Java doubles keep these regressions independent of a local Ghidra install. */
