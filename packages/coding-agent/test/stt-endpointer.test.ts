@@ -26,9 +26,71 @@ describe("StreamEndpointer pre-roll", () => {
 		const segments = events.filter(event => event.kind === "segment");
 		expect(segments).toHaveLength(1);
 		const audio = segments[0]!.audio;
-		// The pre-roll window is the most recent 1600 samples up to and including the onset frame.
+		// The segment is the 1600 samples before the onset frame, then the onset frame and the rest
+		// of the input, each sample exactly once.
 		const preRoll = 1600;
-		const onsetEnd = silenceSamples + frame;
-		expect(Array.from(audio.subarray(0, preRoll))).toEqual(Array.from(input.subarray(onsetEnd - preRoll, onsetEnd)));
+		const segmentStart = silenceSamples - preRoll;
+		expect(Array.from(audio)).toEqual(Array.from(input.subarray(segmentStart, segmentStart + audio.length)));
+		expect(audio.length).toBe(input.length - segmentStart);
+	});
+});
+
+const FRAME = 480; // 30 ms at 16 kHz
+
+/** Frames of a square wave whose RMS equals each given level. */
+function framesAt(levels: number[]): Float32Array {
+	const out = new Float32Array(levels.length * FRAME);
+	levels.forEach((level, f) => {
+		for (let i = 0; i < FRAME; i += 1) out[f * FRAME + i] = i % 2 === 0 ? level : -level;
+	});
+	return out;
+}
+
+function concat(...parts: Float32Array[]): Float32Array {
+	const out = new Float32Array(parts.reduce((n, part) => n + part.length, 0));
+	let offset = 0;
+	for (const part of parts) {
+		out.set(part, offset);
+		offset += part.length;
+	}
+	return out;
+}
+
+function segmentsOf(input: Float32Array): Float32Array[] {
+	const endpointer = new StreamEndpointer();
+	return [...endpointer.push(input), ...endpointer.flush()]
+		.filter(event => event.kind === "segment")
+		.map(event => event.audio);
+}
+
+const roomNoise = (frames: number) => framesAt(Array(frames).fill(0.002));
+
+describe("StreamEndpointer segmentation", () => {
+	it("keeps a softer phrase that follows louder speech in the same segment", () => {
+		// Loud syllables with quiet in-between frames (above the room noise), then a 900 ms softer
+		// phrase, then loud speech again: no real pause anywhere.
+		const loud = Array.from({ length: 100 }, (_, f) => (f % 4 === 0 ? 0.1 : 0.009));
+		const speech = framesAt([...loud, ...Array(30).fill(0.02), ...loud]);
+		const segments = segmentsOf(concat(roomNoise(20), speech, roomNoise(30)));
+
+		expect(segments).toHaveLength(1);
+		expect(segments[0]!.length).toBeGreaterThanOrEqual(speech.length);
+	});
+
+	it("discards an isolated click after a pause", () => {
+		// A key click is one loud frame; the pre-roll before it is not speech.
+		const segments = segmentsOf(concat(roomNoise(40), framesAt([0.3]), roomNoise(30)));
+		expect(segments).toHaveLength(0);
+	});
+
+	it("discards a click that is still open when the stream ends", () => {
+		// Push-to-talk release: the click lands ~250 ms before recording stops.
+		const segments = segmentsOf(concat(roomNoise(40), framesAt([0.3]), roomNoise(8)));
+		expect(segments).toHaveLength(0);
+	});
+
+	it("commits a short spoken word", () => {
+		const segments = segmentsOf(concat(roomNoise(40), framesAt(Array(8).fill(0.05)), roomNoise(30)));
+		expect(segments).toHaveLength(1);
 	});
 });

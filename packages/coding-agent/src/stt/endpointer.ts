@@ -33,7 +33,7 @@ export interface EndpointerConfig {
 	partialIntervalMs: number;
 	/** Speech threshold is `max(minThreshold, noiseFloor * energyRatio)`. */
 	energyRatio: number;
-	/** EMA weight tracking the ambient noise floor on non-speech frames. */
+	/** EMA weight tracking the ambient noise floor on non-speech frames between segments. */
 	floorAttack: number;
 	/** Absolute RMS floor so a near-silent room never trips speech detection. */
 	minThreshold: number;
@@ -153,6 +153,8 @@ export class StreamEndpointer {
 	#noiseFloor: number;
 	#silenceMs = 0;
 	#segmentMs = 0;
+	/** Pre-roll at the head of the current segment; it is context, not speech. */
+	#leadMs = 0;
 	#msSincePartial = 0;
 	#partialDirty = false;
 	#slowPartials = 0;
@@ -214,7 +216,7 @@ export class StreamEndpointer {
 		}
 		this.#leftoverLen = 0;
 		if (this.#inSpeech) {
-			const speechMs = this.#segmentMs - this.#silenceMs;
+			const speechMs = this.#segmentMs - this.#leadMs - this.#silenceMs;
 			if (speechMs >= this.#cfg.minSpeechMs) {
 				events.push({ kind: "segment", audio: this.#segment.take(this.#endpointKeep()) });
 			}
@@ -227,16 +229,17 @@ export class StreamEndpointer {
 		const energy = rms(frame);
 		const threshold = Math.max(this.#cfg.minThreshold, this.#noiseFloor * this.#cfg.energyRatio);
 		const voiced = energy > threshold;
-		// Track ambient noise on non-speech frames only, so loud speech never
-		// inflates the floor (which would make the tail of an utterance read as
-		// silence and clip the segment short).
-		if (!voiced) {
+		// Track ambient noise only between segments. Inside one, sub-threshold
+		// frames are mostly quiet speech: feeding them in ratchets the floor up
+		// until the speaker's own voice reads as silence, which ends the segment
+		// mid-sentence and drops the rest of the utterance.
+		if (!voiced && !this.#inSpeech) {
 			this.#noiseFloor = this.#noiseFloor * (1 - this.#cfg.floorAttack) + energy * this.#cfg.floorAttack;
 		}
 
 		if (!this.#inSpeech) {
-			this.#preRoll.push(frame);
 			if (voiced) this.#beginSegment(frame);
+			else this.#preRoll.push(frame);
 			return;
 		}
 
@@ -260,6 +263,7 @@ export class StreamEndpointer {
 			events.push({ kind: "segment", audio: this.#segment.take() });
 			this.#segment.reset();
 			this.#segmentMs = 0;
+			this.#leadMs = 0;
 			this.#silenceMs = 0;
 			this.#msSincePartial = 0;
 			this.#partialDirty = false;
@@ -276,16 +280,17 @@ export class StreamEndpointer {
 		this.#inSpeech = true;
 		this.#segment.reset();
 		this.#preRoll.copyInto(this.#segment);
-		this.#segment.push(onsetFrame);
 		this.#preRoll.reset();
+		this.#leadMs = (this.#segment.length / this.#cfg.sampleRate) * 1000;
+		this.#segment.push(onsetFrame);
+		this.#segmentMs = this.#leadMs + this.#cfg.frameMs;
 		this.#silenceMs = 0;
-		this.#segmentMs = (this.#segment.length / this.#cfg.sampleRate) * 1000;
 		this.#msSincePartial = 0;
 		this.#partialDirty = true;
 	}
 
 	#finalizeSegment(events: EndpointerEvent[]): void {
-		const speechMs = this.#segmentMs - this.#silenceMs;
+		const speechMs = this.#segmentMs - this.#leadMs - this.#silenceMs;
 		if (speechMs >= this.#cfg.minSpeechMs) {
 			events.push({ kind: "segment", audio: this.#segment.take(this.#endpointKeep()) });
 		}
@@ -293,6 +298,7 @@ export class StreamEndpointer {
 		this.#segment.reset();
 		this.#silenceMs = 0;
 		this.#segmentMs = 0;
+		this.#leadMs = 0;
 		this.#msSincePartial = 0;
 		this.#partialDirty = false;
 	}
@@ -312,6 +318,7 @@ export class StreamEndpointer {
 		this.#preRoll.reset();
 		this.#silenceMs = 0;
 		this.#segmentMs = 0;
+		this.#leadMs = 0;
 		this.#msSincePartial = 0;
 		this.#partialDirty = false;
 		this.#noiseFloor = this.#cfg.minThreshold;
