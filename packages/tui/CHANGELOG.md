@@ -49,6 +49,8 @@
 - Fixed checkbox groups so pressing Enter with nothing selected first checks the focused box.
 - Ask forms now open each question with its preselected answer, allowing Enter to accept the recommendation without replacing it.
 
+- Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
