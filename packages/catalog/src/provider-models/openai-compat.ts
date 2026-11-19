@@ -40,6 +40,7 @@ import {
 	type ModelSpec,
 	type OpenAICompat,
 	type Provider,
+	type RemoteCompactionConfig,
 	type ThinkingConfig,
 	type TokenCost,
 	runnerApiKind,
@@ -5810,6 +5811,16 @@ type LiteLLMRichEndpointResult<TApi extends Api> =
 	| { failure: LiteLLMRichEndpointFailure };
 
 const LITELLM_RICH_ENDPOINTS = ["/model_group/info", "/v2/model/info", "/model/info", "/v1/model/info"] as const;
+/**
+ * Endpoints that echo the operator's own `model_info` dictionary. Capability
+ * blocks only an operator can declare (provider-native compaction, extra
+ * compat flags) live there, so a complete `/model_group/info` row is not
+ * enough evidence to stop scanning before one of them answers.
+ */
+const LITELLM_OPERATOR_METADATA_ENDPOINTS: Record<string, true> = {
+	"/model/info": true,
+	"/v1/model/info": true,
+};
 // Bound paginated management responses before trusting their advertised page count.
 const LITELLM_MAX_RICH_PAGES = 100;
 export const OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW = 128_000;
@@ -5967,6 +5978,47 @@ function getLiteLLMCost(entry: LiteLLMRichModelEntry): ModelSpec<Api>["cost"] | 
 	};
 }
 
+/**
+ * Resolve the deployment's own provider-native compaction declaration.
+ *
+ * `model_info` is a free-form dictionary: LiteLLM echoes every operator key
+ * back verbatim (on `/model/info`) without validating it, so this block is the
+ * only place a gateway can say "this group supports Responses V2 compaction".
+ * Copy only the documented {@link RemoteCompactionConfig} keys, dropping
+ * entries with the wrong type instead of trusting the payload shape.
+ */
+function getLiteLLMRemoteCompaction<TApi extends Api>(
+	entry: LiteLLMRichModelEntry,
+): RemoteCompactionConfig<TApi> | undefined {
+	const value = getLiteLLMMetadataValue(entry, "remoteCompaction");
+	if (!isRecord(value)) {
+		return undefined;
+	}
+	const config: RemoteCompactionConfig<TApi> = {};
+	if (typeof value.enabled === "boolean") config.enabled = value.enabled;
+	if (typeof value.v2StreamingEnabled === "boolean") config.v2StreamingEnabled = value.v2StreamingEnabled;
+	if (typeof value.api === "string" && value.api.trim().length > 0) config.api = value.api as TApi;
+	for (const key of ["endpoint", "v2Endpoint", "streamingEndpoint", "model"] as const) {
+		const raw = value[key];
+		if (typeof raw === "string" && raw.trim().length > 0) config[key] = raw;
+	}
+	return Object.keys(config).length > 0 ? config : undefined;
+}
+
+/**
+ * Field-wise compaction union for the management endpoints describing one
+ * group: a later endpoint overrides the keys it reports and leaves the rest
+ * alone, so an absent key means "no news", never "retract".
+ */
+function mergeLiteLLMRemoteCompaction<TApi extends Api>(
+	existing: RemoteCompactionConfig<TApi> | undefined,
+	next: RemoteCompactionConfig<TApi> | undefined,
+): RemoteCompactionConfig<TApi> | undefined {
+	if (!existing) return next;
+	if (!next) return existing;
+	return { ...existing, ...next };
+}
+
 function getLiteLLMRichModelId(entry: LiteLLMRichModelEntry): string | undefined {
 	return (
 		toNonEmptyString(entry.model_group) ??
@@ -5995,29 +6047,52 @@ function getLiteLLMProviders(entry: LiteLLMRichModelEntry): string[] | undefined
 	return providers.length > 0 ? providers : undefined;
 }
 
+/**
+ * LiteLLM provider ids whose groups are served by the OpenAI Responses family.
+ *
+ * `chatgpt/*` is the Codex backend: LiteLLM exposes it as its own provider id
+ * (and `/model/info` reports `litellm_provider: "chatgpt"`), but its wire is
+ * Responses, so a `chatgpt` group must not be downgraded to Completions just
+ * because the id is not literally `openai`.
+ */
+const OPENAI_RESPONSES_LITELLM_PROVIDERS: Record<string, true> = { openai: true, chatgpt: true };
+
+function isOpenAIResponsesLiteLLMProvider(provider: string | undefined): boolean {
+	return provider !== undefined && OPENAI_RESPONSES_LITELLM_PROVIDERS[provider] === true;
+}
+
 function classifyLiteLLMApiRoute(entry: LiteLLMRichModelEntry | undefined, id: string): LiteLLMApiRoute {
 	if (entry) {
 		const providers = getLiteLLMProviders(entry);
 		if (providers) {
-			return providers.every(provider => provider === "openai") ? "openai" : "other";
+			return providers.every(provider => isOpenAIResponsesLiteLLMProvider(provider)) ? "openai" : "other";
 		}
 
 		const params = getLiteLLMParams(entry);
 		const configuredProvider = toNonEmptyString(params?.custom_llm_provider)?.toLowerCase();
 		if (configuredProvider) {
-			return configuredProvider === "openai" ? "openai" : "other";
+			return isOpenAIResponsesLiteLLMProvider(configuredProvider) ? "openai" : "other";
 		}
 
 		const backendModel = toNonEmptyString(params?.model);
 		const backendSeparator = backendModel?.indexOf("/") ?? -1;
 		if (backendModel && backendSeparator > 0) {
-			return backendModel.slice(0, backendSeparator).toLowerCase() === "openai" ? "openai" : "other";
+			return isOpenAIResponsesLiteLLMProvider(backendModel.slice(0, backendSeparator).toLowerCase())
+				? "openai"
+				: "other";
+		}
+
+		// `/model/info` reports the operator's own provider id instead of a
+		// `providers` array; it is the deployment's declaration of the upstream.
+		const declaredProvider = toNonEmptyString(getLiteLLMMetadataValue(entry, "litellm_provider"))?.toLowerCase();
+		if (declaredProvider) {
+			return isOpenAIResponsesLiteLLMProvider(declaredProvider) ? "openai" : "other";
 		}
 
 		const baseModel = toNonEmptyString(getLiteLLMMetadataValue(entry, "base_model"));
 		const baseSeparator = baseModel?.indexOf("/") ?? -1;
 		if (baseModel && baseSeparator > 0) {
-			return baseModel.slice(0, baseSeparator).toLowerCase() === "openai" ? "openai" : "other";
+			return isOpenAIResponsesLiteLLMProvider(baseModel.slice(0, baseSeparator).toLowerCase()) ? "openai" : "other";
 		}
 	}
 
@@ -6143,7 +6218,7 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 	// transport field from the discovered provider and model id, so only the
 	// effort vocabulary flows through here. Mirrors `discoverOpenAIModelsList`.
 	const referenceCompat = reference?.compat as OpenAICompat | undefined;
-	const compat: OpenAICompat = {
+	const compat: OpenAICompat & { supportsServerCompaction?: boolean } = {
 		supportsStore: false,
 		supportsDeveloperRole: false,
 		...(supportedOpenAIParams !== undefined
@@ -6154,6 +6229,12 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 		...(referenceCompat?.reasoningEffortMap ? { reasoningEffortMap: referenceCompat.reasoningEffortMap } : {}),
 		...(referenceCompat?.omitReasoningEffort !== undefined
 			? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
+			: {}),
+		// The deployment declares the Anthropic on-demand compaction beta for
+		// groups it fronts with `anthropic-messages`; without this the model only
+		// ever saw the local summarizer.
+		...(getLiteLLMMetadataValue(entry, "supports_anthropic_compaction") === true
+			? { supportsServerCompaction: true }
 			: {}),
 		// The deployment is authoritative about its own groups. When its
 		// `model_info.supports_vision` says the group reads images, the derived
@@ -6170,6 +6251,7 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 		...(supportsVision === true ? { stripImageInput: false } : {}),
 	};
 	const api = options.resolveApi?.(entry, id) ?? options.api;
+	const remoteCompaction = getLiteLLMRemoteCompaction<TApi>(entry);
 	return {
 		id,
 		name: toLiteLLMDisplayName(modelName, reference?.name, id),
@@ -6189,6 +6271,7 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 		thinking: reference?.thinking,
 		cost: getLiteLLMCost(entry) ?? reference?.cost ?? UNKNOWN_PROXY_COST,
 		...(supportsTools !== undefined ? { supportsTools } : {}),
+		...(remoteCompaction ? { remoteCompaction } : {}),
 		compat: compat as ModelSpec<TApi>["compat"],
 	};
 }
@@ -6254,6 +6337,7 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 		input: next.supportsVision === true || next.supportsVision === false ? next.model.input : existing.model.input,
 		reasoning: typeof next.supportsReasoning === "boolean" ? next.model.reasoning : existing.model.reasoning,
 		cost: { ...existing.model.cost, ...existing.reportedCost, ...next.reportedCost },
+		remoteCompaction: mergeLiteLLMRemoteCompaction(existing.model.remoteCompaction, next.model.remoteCompaction),
 		compat: mergeLiteLLMCompat(existing.model.compat, next.model.compat, {
 			existingReportedParams: existing.hasSupportedOpenAIParams,
 			nextReportedParams: next.hasSupportedOpenAIParams,
@@ -6436,7 +6520,9 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 		const deduped = new Map<string, LiteLLMRichEndpointModel<TApi>>();
 		const excludedModelIds = new Set<string>();
 		let metadataFailure: LiteLLMRichEndpointFailure | undefined;
-		for (const endpoint of LITELLM_RICH_ENDPOINTS) {
+		let consultedOperatorMetadata = false;
+		for (let endpointIndex = 0; endpointIndex < LITELLM_RICH_ENDPOINTS.length; endpointIndex++) {
+			const endpoint = LITELLM_RICH_ENDPOINTS[endpointIndex];
 			const result = await fetchLiteLLMRichEndpoint(endpoint, options, managementBaseUrl, runtimeBaseUrl, signal);
 			if (!result) {
 				continue;
@@ -6455,6 +6541,9 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 					metadataFailure = result.failure;
 				}
 				continue;
+			}
+			if (LITELLM_OPERATOR_METADATA_ENDPOINTS[endpoint] === true) {
+				consultedOperatorMetadata = true;
 			}
 			for (const modelId of result.excludedModelIds) {
 				excludedModelIds.add(modelId);
@@ -6493,7 +6582,17 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 				}
 			}
 			if (!needsMoreMetadata) {
-				break;
+				if (consultedOperatorMetadata) {
+					break;
+				}
+				// `/v2/model/info` is a bulk row dump; a complete row only needs the
+				// operator's own capability block, so skip ahead to `/model/info`
+				// instead of paging through every group first.
+				const operatorIndex = LITELLM_RICH_ENDPOINTS.indexOf("/model/info", endpointIndex + 1);
+				if (operatorIndex === -1) {
+					break;
+				}
+				endpointIndex = operatorIndex - 1;
 			}
 		}
 		if (deduped.size === 0) {

@@ -582,6 +582,115 @@ describe("LiteLLM provider discovery", () => {
 		expect(models?.find(model => model.id === "claude-proxy")?.api).toBe("openai-completions");
 	});
 
+	test("keeps operator-declared remote compaction and routes chatgpt groups through Responses", async () => {
+		const seen: string[] = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			seen.push(url);
+			if (url === MODELS_DEV_URL) return Response.json({});
+			if (url === "http://primary:4000/v1/models") return Response.json({ data: [{ id: "gpt-6.2-sol" }] });
+			if (url === "http://primary:4000/model_group/info") {
+				// Complete enough that the pre-fix loop stopped here, before the
+				// operator's own /model/info row could declare compaction support.
+				return Response.json({
+					data: [
+						{
+							model_group: "gpt-6.2-sol",
+							providers: ["chatgpt"],
+							mode: "responses",
+							supports_vision: true,
+							supports_reasoning: true,
+							max_input_tokens: 500_000,
+							max_output_tokens: 128_000,
+							input_cost_per_token: 1e-6,
+							output_cost_per_token: 2e-6,
+							cache_read_input_token_cost: 1e-7,
+							cache_creation_input_token_cost: 2e-7,
+						},
+					],
+				});
+			}
+			if (url === "http://primary:4000/model/info") {
+				return Response.json({
+					data: [
+						{
+							model_name: "gpt-6.2-sol",
+							model_info: {
+								litellm_provider: "chatgpt",
+								mode: "responses",
+								remoteCompaction: { v2StreamingEnabled: true },
+							},
+						},
+					],
+				});
+			}
+			return new Response("Not found", { status: 404 });
+		}) as FetchImpl;
+		const options = litellmModelManagerOptions({
+			apiKey: "sk-rich",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		});
+
+		const spec = (await options.fetchDynamicModels?.())?.find(model => model.id === "gpt-6.2-sol");
+
+		expect(spec?.api).toBe("openai-responses");
+		expect(spec?.remoteCompaction).toEqual({ v2StreamingEnabled: true });
+		// The operator metadata endpoint is authoritative for capability blocks,
+		// so a complete model_group row must not end the scan before it answers.
+		expect(seen).toContain("http://primary:4000/model/info");
+	});
+
+	test("merges remote compaction across management endpoints without retracting undeclared keys", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === MODELS_DEV_URL) return Response.json({});
+			if (url === "http://primary:4000/model_group/info") return new Response("{}", { status: 404 });
+			if (url === "http://primary:4000/v2/model/info") return new Response("{}", { status: 500 });
+			if (url === "http://primary:4000/model/info") {
+				return Response.json({
+					data: [
+						{
+							model_name: "merge-gpt",
+							model_info: {
+								remoteCompaction: { v2StreamingEnabled: true, endpoint: "https://gw/v1/responses/compact" },
+							},
+						},
+					],
+				});
+			}
+			if (url === "http://primary:4000/v1/model/info") {
+				return Response.json({
+					data: [
+						{
+							model_name: "merge-gpt",
+							model_info: {
+								supports_vision: false,
+								supports_anthropic_compaction: true,
+								remoteCompaction: { v2StreamingEnabled: false },
+							},
+						},
+					],
+				});
+			}
+			return new Response("Not found", { status: 404 });
+		}) as FetchImpl;
+
+		const specs = await fetchLiteLLMRichModels<"openai-completions">({
+			api: "openai-completions",
+			provider: "private-litellm",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		});
+
+		if (!specs?.[0]) throw new Error("expected exactly one discovered model");
+		expect(specs[0].remoteCompaction).toEqual({
+			v2StreamingEnabled: false,
+			endpoint: "https://gw/v1/responses/compact",
+		});
+		expect(specs[0].compat).toMatchObject({ supportsServerCompaction: true });
+	});
+
 	test("enriches scoped /v1/models entries with matching rich LiteLLM metadata", async () => {
 		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
 			const url = inputUrl(input);
@@ -972,6 +1081,9 @@ describe("LiteLLM provider discovery", () => {
 					],
 				});
 			}
+			if (url === "http://primary:4000/model/info" || url === "http://primary:4000/v1/model/info") {
+				return new Response("{}", { status: 404 });
+			}
 			throw new Error(`Unexpected URL: ${url}`);
 		}) as FetchImpl;
 
@@ -982,7 +1094,12 @@ describe("LiteLLM provider discovery", () => {
 			fetch: fetchMock,
 		});
 
-		expect(calls).toEqual(["http://primary:4000/model_group/info", "http://primary:4000/v2/model/info"]);
+		expect(calls).toEqual([
+			"http://primary:4000/model_group/info",
+			"http://primary:4000/v2/model/info",
+			"http://primary:4000/model/info",
+			"http://primary:4000/v1/model/info",
+		]);
 		expect(models?.map(model => model.id)).toEqual(["keep-chat"]);
 	});
 
@@ -1322,6 +1439,9 @@ describe("LiteLLM provider discovery", () => {
 			}
 			if (url === "http://primary:4000/v2/model/info") {
 				throw new Error("/v2/model/info should not be called when model_group info has a real model");
+			}
+			if (url === "http://primary:4000/model/info" || url === "http://primary:4000/v1/model/info") {
+				return new Response("{}", { status: 404 });
 			}
 			if (url === "http://primary:4000/v1/models") return Response.json({ data: [{ id: "example-real-model" }] });
 			throw new Error(`Unexpected URL: ${url}`);
