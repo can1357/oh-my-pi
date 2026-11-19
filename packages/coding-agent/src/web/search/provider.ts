@@ -29,6 +29,7 @@ const PROVIDER_LOADERS: ProviderRegistry<SearchEngineId> = {
 	brave: () => import("./providers/brave").then(m => new m.BraveProvider()),
 	deepseek: () => import("./providers/deepseek").then(m => new m.DeepSeekProvider()),
 	kimi: () => import("./providers/kimi").then(m => new m.KimiProvider()),
+	kiro: () => import("./providers/kiro").then(m => new m.KiroProvider()),
 	parallel: () => import("./providers/parallel").then(m => new m.ParallelProvider()),
 	synthetic: () => import("./providers/synthetic").then(m => new m.SyntheticProvider()),
 	ollama: () => import("./providers/ollama").then(m => new m.OllamaProvider()),
