@@ -419,14 +419,13 @@ export class IndexedSessionStorage implements SessionStorage {
 		await this.#awaitPath(sessionPath);
 		const sessionEntry = this.#index.get(sessionPath);
 		if (!sessionEntry) throw enoent(sessionPath);
-		// Purge history/stats rows before the transcript is gone (#18674).
-		// Best-effort: a busy dashboard store never fails the delete itself.
+		// Capture the transcript before removal. History/stats are purged only
+		// after the backend remove succeeds, so a failed delete does not drop
+		// rows for a session that is still listed. An unreadable transcript
+		// still deletes; its id cannot be resolved.
+		let content: string | undefined;
 		try {
-			purgeDeletedSessionRows(sessionPath, {
-				content: await this.readText(sessionPath),
-				historyDbPath: options?.historyDbPath,
-				statsDbPath: options?.statsDbPath,
-			});
+			content = await this.readText(sessionPath);
 		} catch {}
 
 		const artifactsDir = sessionPath.slice(0, -6);
@@ -455,6 +454,15 @@ export class IndexedSessionStorage implements SessionStorage {
 			for (const [path] of previous) this.#failFrame(path, sessionEntry.mtimeMs);
 			throw toError(err);
 		}
+
+		// Best-effort: a busy dashboard store never fails the delete itself.
+		try {
+			purgeDeletedSessionRows(sessionPath, {
+				content,
+				historyDbPath: options?.historyDbPath,
+				statsDbPath: options?.statsDbPath,
+			});
+		} catch {}
 	}
 
 	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {

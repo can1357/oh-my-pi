@@ -115,6 +115,7 @@ Hook events are strongly typed in `types.ts`.
 - `session_start`
 - `session_before_switch` → can return `{ cancel?: boolean }`
 - `session_switch`
+- `session_clear`
 - `session_before_branch` → can return `{ cancel?: boolean; skipConversationRestore?: boolean }`
 - `session_branch`
 - `session_before_compact` → can return `{ cancel?: boolean; compaction?: CompactionResult }`
@@ -125,6 +126,12 @@ Hook events are strongly typed in `types.ts`.
 - `session_shutdown`
 
 `session_before_branch` and `session_branch` carry `reason`, which decides what `session_before_branch.entryId` means. For `"branch"` (`branch(entryId)`, `/branch`) it is the user message being rewound: it and everything after it are dropped. For `"fork"` (`AgentSession.fork(entryId)`, RPC `fork` with an `entryId`) and `"btw"` (`/btw` promotion) it is the last entry kept in the new session.
+
+`session_clear` is a non-cancellable notification after `/clear` (or
+`AgentSession.resetSessionContext()`) successfully resets context in place.
+Use it to invalidate cached "already injected" instructions; handlers finish
+before the reset returns. It also fires for an empty successful clear, never
+for a busy/rejected reset, and does not change the session id, file, or history.
 
 ### Agent/context events
 

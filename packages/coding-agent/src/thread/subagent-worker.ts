@@ -474,6 +474,7 @@ export class SubagentWorkerPool {
 	/** Terminate every worker; later placements throw. */
 	dispose(): void {
 		this.#disposed = true;
+		// oxlint-disable-next-line unicorn/no-useless-spread -- snapshot: the loop body may add or remove workers
 		for (const worker of [...this.#workers.values()]) worker.terminate("worker pool disposed");
 	}
 

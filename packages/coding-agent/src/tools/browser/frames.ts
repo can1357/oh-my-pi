@@ -1,25 +1,27 @@
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-
-import { Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ElementHandle, ElementScreenshotOptions, Frame, Page } from "puppeteer-core";
-import { formatScreenshot, resizeImage } from "../../utils/image-resize";
 import { throwIfAborted } from "../tool-errors";
 import { markHandled } from "../run-scope";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
 	type AriaSnapshotOptions,
+	assertSelectorString,
 	captureAriaSnapshot,
 	parseAriaRefSelector,
 	resolveAriaRefHandle,
 } from "./aria/aria-snapshot";
-import { clickElement, fillViaHandle, pressKey, typeIntoElement, withLiveElement } from "./interactions";
+import {
+	clickElement,
+	fillViaHandle,
+	focusKeyTarget,
+	pressKey,
+	typeIntoElement,
+	withLiveElement,
+} from "./interactions";
 import { readPageViewport } from "./launch";
-import { RunOutput } from "./run-output";
-import { whileDrawing } from "./screenshot";
+import { emitScreenshot, type ScreenshotRun, whileDrawing } from "./screenshot";
+import { optionalSelectorArgs, pressArgs } from "./tab-arguments";
 import { selectorWaitOptions, type SelectorWaitOptions, waitForDetached, waitForSelectorHandle } from "./selector-wait";
-import type { ScreenshotResult, SessionSnapshot } from "./tab-protocol";
 
 /** JSON-safe metadata for one document frame. */
 export interface BrowserFrameInfo {
@@ -56,7 +58,7 @@ export interface BrowserFrameApi {
 	/** Type text into a matching element. */
 	type(selector: string, text: string): Promise<void>;
 	/** Press a keyboard key, optionally after focusing an element. */
-	press(key: string, options?: FramePressOptions): Promise<void>;
+	press(key: string, options?: FramePressOptions | string): Promise<void>;
 	/** Return a matching element's text content; without a selector, the frame's `<body>`. */
 	text(selector?: string): Promise<string>;
 	/** Return a matching element's inner HTML; without a selector, the frame's `<body>`. */
@@ -70,15 +72,15 @@ export interface BrowserFrameApi {
 	/** Report whether a matching element is visible. */
 	isVisible(selector: string): Promise<boolean>;
 	/** Capture a Playwright-format ARIA snapshot inside this frame. */
-	ariaSnapshot(selector?: string, options?: AriaSnapshotOptions): Promise<string>;
+	ariaSnapshot(selector?: string | AriaSnapshotOptions, options?: AriaSnapshotOptions): Promise<string>;
 	/** Evaluate a function or expression in this frame. */
 	evaluate<R, TArgs extends unknown[]>(fn: string | ((...args: TArgs) => R | Promise<R>), ...args: TArgs): Promise<R>;
 	/** Wait for a selector and report whether it appeared. */
 	waitFor(selector: string, options?: FrameWaitOptions): Promise<boolean>;
 	/** Wait for a selector and report whether it appeared. */
 	waitForSelector(selector: string, options?: FrameWaitOptions): Promise<boolean>;
-	/** Capture a matching element inside this frame. */
-	screenshot(selector: string): Promise<string>;
+	/** Capture a matching element inside this frame; without a selector, the whole frame. */
+	screenshot(selector?: string): Promise<string>;
 }
 
 /** Per-operation guard supplied by the tab worker. */
@@ -103,8 +105,10 @@ export interface FrameApiHooks {
 	waitMs(timeout?: number): number;
 	/** Run a named, abort-aware operation. */
 	op: FrameOperation;
+	/** Run an input action like {@link op}, so the tab's next look waits for its effects. */
+	act: FrameOperation;
 	/** Persist and report a frame element screenshot. */
-	captureScreenshot(frame: Frame, selector: string, signal: AbortSignal): Promise<string>;
+	captureScreenshot(frame: Frame, selector: string | undefined, signal: AbortSignal): Promise<string>;
 }
 
 /** A frame's DevTools identifier, the id CDP events name it by. */
@@ -252,7 +256,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 	};
 	return {
 		click: (selector, options) =>
-			hooks.op(
+			hooks.act(
 				`frame.click(${JSON.stringify(selector)})`,
 				hooks.actionOpMs,
 				async signal => {
@@ -263,7 +267,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 							try {
 								await clickElement(handle, label, signal, {
 									button: options?.button,
-									clickCount: options?.count,
+									count: options?.count,
 								});
 							} finally {
 								await handle.dispose().catch(() => undefined);
@@ -275,13 +279,13 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 				selectorOptions(selector),
 			),
 		fill: (selector, value) =>
-			hooks.op(
+			hooks.act(
 				`frame.fill(${JSON.stringify(selector)})`,
 				hooks.actionOpMs,
 				async signal => {
 					const handle = await actionHandle(`frame.fill(${JSON.stringify(selector)})`, selector, signal);
 					try {
-						await fillViaHandle(handle, value, signal);
+						await fillViaHandle(handle, value, `frame.fill(${JSON.stringify(selector)})`, signal);
 					} finally {
 						await handle.dispose().catch(() => undefined);
 					}
@@ -289,26 +293,40 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 				selectorOptions(selector),
 			),
 		type: (selector, text) =>
-			hooks.op(
+			hooks.act(
 				`frame.type(${JSON.stringify(selector)})`,
 				hooks.actionOpMs,
 				async signal => {
 					const handle = await untilAborted(signal, () => frame.$(hooks.normalizeSelector(selector)));
 					if (!handle) throw new ToolError(`frame.type(${JSON.stringify(selector)}) matched no element`);
 					try {
-						await typeIntoElement(handle, text, signal);
+						await typeIntoElement(handle, text, `frame.type(${JSON.stringify(selector)})`, signal);
 					} finally {
 						await handle.dispose().catch(() => undefined);
 					}
 				},
 				selectorOptions(selector),
 			),
-		press: (key, options) =>
-			hooks.op(`frame.press(${JSON.stringify(key)})`, hooks.actionOpMs, async signal => {
-				if (options?.selector)
-					await untilAborted(signal, () => frame.focus(hooks.normalizeSelector(options.selector!)));
+		press: (keyArg, optionsArg) => {
+			const { key, opts: options } = pressArgs(keyArg, optionsArg);
+			return hooks.act(`frame.press(${JSON.stringify(key)})`, hooks.actionOpMs, async signal => {
+				if (options?.selector) {
+					const selector = hooks.normalizeSelector(options.selector);
+					const handle = await untilAborted(signal, () => frame.$(selector));
+					if (!handle) throw new ToolError(`No element found for selector: ${selector}`);
+					try {
+						await focusKeyTarget(
+							handle,
+							`frame.press(${JSON.stringify(key)}, { selector: ${JSON.stringify(options.selector)} })`,
+							signal,
+						);
+					} finally {
+						await handle.dispose().catch(() => undefined);
+					}
+				}
 				await pressKey(frame.page(), key, undefined, signal);
-			}),
+			});
+		},
 		// Without a selector, the frame's `<body>`; any value passed, `null` included, is still checked as a selector.
 		text: (selector = "body") =>
 			hooks.op(
@@ -372,8 +390,10 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 					await handle.dispose().catch(() => undefined);
 				}
 			}),
-		ariaSnapshot: (selector, options) =>
-			hooks.op("frame.ariaSnapshot()", hooks.quickOpMs, async signal => {
+		ariaSnapshot: (selectorArg, optionsArg) => {
+			const { selector, opts: options } = optionalSelectorArgs(selectorArg, optionsArg);
+			if (selector !== undefined) assertSelectorString(selector);
+			return hooks.op("frame.ariaSnapshot()", hooks.quickOpMs, async signal => {
 				const root = selector ? await untilAborted(signal, () => frame.$(hooks.normalizeSelector(selector))) : null;
 				try {
 					if (selector && !root)
@@ -382,7 +402,8 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 				} finally {
 					await root?.dispose().catch(() => undefined);
 				}
-			}),
+			});
+		},
 		evaluate: ((fn: string | ((...args: unknown[]) => unknown), ...args: unknown[]) =>
 			hooks.op("frame.evaluate()", Number.POSITIVE_INFINITY, signal =>
 				untilAborted(signal, () => frame.evaluate(fn as never, ...args)),
@@ -391,26 +412,36 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 		waitForSelector,
 		screenshot: selector =>
 			hooks.op(
-				`frame.screenshot(${JSON.stringify(selector)})`,
+				selector === undefined ? "frame.screenshot()" : `frame.screenshot(${JSON.stringify(selector)})`,
 				hooks.quickOpMs,
 				signal => hooks.captureScreenshot(frame, selector, signal),
-				selectorOptions(selector),
+				selector === undefined ? undefined : selectorOptions(selector),
 			),
 	};
 }
 
-/** Persist a frame-scoped element screenshot and emit the normal Eval image output. */
+/**
+ * Persist a frame-scoped element screenshot and emit the normal Eval image output. Without a selector the frame's
+ * own `<iframe>` element is captured, which shows the whole frame.
+ */
 export async function captureFrameScreenshot(
 	frame: Frame,
-	selector: string,
+	selector: string | undefined,
 	signal: AbortSignal,
 	normalizeSelector: (selector: string) => string,
-	session: SessionSnapshot,
-	output: RunOutput,
-	screenshots: ScreenshotResult[],
+	run: ScreenshotRun,
 ): Promise<string> {
-	const handle = await untilAborted(signal, () => frame.$(normalizeSelector(selector)));
-	if (!handle) throw new ToolError(`frame.screenshot(${JSON.stringify(selector)}) matched no element`);
+	const handle =
+		selector === undefined
+			? await untilAborted(signal, () => frame.frameElement())
+			: await untilAborted(signal, () => frame.$(normalizeSelector(selector)));
+	if (!handle) {
+		throw new ToolError(
+			selector === undefined
+				? "frame.screenshot(): the main frame has no frame element; use tab.screenshot()"
+				: `frame.screenshot(${JSON.stringify(selector)}) matched no element`,
+		);
+	}
 	let buffer: Buffer;
 	let captureScale: number;
 	try {
@@ -430,38 +461,9 @@ export async function captureFrameScreenshot(
 	} finally {
 		await handle.dispose().catch(() => undefined);
 	}
-	const resized = await resizeImage(
-		{ type: "image", data: buffer.toBase64(), mimeType: "image/png" },
-		{ maxWidth: 1024, maxHeight: 1024, maxBytes: 150 * 1024, jpegQuality: 70, excludeWebP: session.excludeWebP },
+	return await emitScreenshot(
+		{ bytes: buffer, mimeType: "image/png", area: "element", scale: captureScale, inFrame: true },
+		run,
+		signal,
 	);
-	const saveFullRes = !!session.browserScreenshotDir;
-	const savedBuffer = saveFullRes ? buffer : resized.buffer;
-	const savedMimeType = saveFullRes ? ("image/png" as const) : resized.mimeType;
-	const ext = savedMimeType === "image/webp" ? "webp" : savedMimeType === "image/jpeg" ? "jpg" : "png";
-	const dest = session.browserScreenshotDir
-		? path.join(
-				session.browserScreenshotDir,
-				`frame-screenshot-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.${ext}`,
-			)
-		: path.join(os.tmpdir(), `omp-frame-sshots-${Snowflake.next()}.${ext}`);
-	await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-	await Bun.write(dest, savedBuffer);
-	screenshots.push({
-		dest,
-		mimeType: savedMimeType,
-		bytes: savedBuffer.length,
-		width: resized.width,
-		height: resized.height,
-	});
-	output.push({
-		type: "text",
-		text: formatScreenshot({
-			saveFullRes,
-			dest,
-			resized,
-			capture: { area: "element", scale: captureScale },
-		}).join("\n"),
-	});
-	output.push({ type: "image", data: resized.data, mimeType: resized.mimeType });
-	return dest;
 }

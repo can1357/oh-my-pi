@@ -23,7 +23,7 @@ Webhook → durable queue → async dispatcher → per-issue git worktree → om
 - `src/prompts/` — Mustache-style `{{var}}` templates loaded by `persona.py` via `@cache` and `importlib.resources`. Shipped as package data (`pyproject.toml` `package-data`).
 - `tests/` — pytest suite. `test_worker_smoke.py` is gated on `ROBOMP_INTEGRATION=1`.
 - `data/` — runtime state (sqlite + WAL, `workspaces/`, `logs/`). Never committed.
-- `/Dockerfile` (pi root) — produces `oh-my-pi/pi:dev` (pi runtime image: python + bun + rustup + pi-natives + omp_rpc + `/usr/local/bin/omp` shim + the full pi source under `/pi`). Stages: `natives-builder` → `wheel-builder` → `pi-base` → `pi-runtime` (default). Built via `bun run pi:image`. Robomp's image extends `pi-base` via `FROM ${PI_BASE}` in `/Dockerfile.robomp`.
+- `/Dockerfile` (pi root) — produces `oh-my-pi/pi:dev` (pi runtime image: python + bun + rustup + omp-natives + omp_rpc + `/usr/local/bin/omp` shim + the full pi source under `/pi`). Stages: `natives-builder` → `wheel-builder` → `pi-base` → `pi-runtime` (default). Built via `bun run pi:image`. Robomp's image extends `pi-base` via `FROM ${PI_BASE}` in `/Dockerfile.robomp`.
 
 ## Development Commands
 
@@ -97,7 +97,7 @@ Lint + format: TypeScript via Biome (config in `biome.json`), Python via Ruff (c
 - `src/cli.py` — Click CLI (`serve`, `triage`, `replay`, `status`, `cleanup`).
 - `src/dashboard.py` — single-page HTML dashboard served from `/`.
 - `pyproject.toml` — packaging + pytest config (`asyncio_mode = "auto"`, `testpaths = ["tests"]`).
-- `/Dockerfile.robomp` (pi root) — robomp's image. `FROM ${PI_BASE}` (default `oh-my-pi/pi:dev`), adds the SolidJS dashboard bundle, the robomp Python package, and the `robomp-entrypoint` shim. Tini entrypoint, exposes `8080`, `VOLUME /data`. The toolchain (python + bun + rustup + pi-natives + omp_rpc + `omp` shim) comes from `pi-base` — no duplication in this file.
+- `/Dockerfile.robomp` (pi root) — robomp's image. `FROM ${PI_BASE}` (default `oh-my-pi/pi:dev`), adds the SolidJS dashboard bundle, the robomp Python package, and the `robomp-entrypoint` shim. Tini entrypoint, exposes `8080`, `VOLUME /data`. The toolchain (python + bun + rustup + omp-natives + omp_rpc + `omp` shim) comes from `pi-base` — no duplication in this file.
 - `docker-compose.yml` — `build.args.PI_BASE`, mounts `$PI_ROOT:/work/pi:ro`, `./data:/data`, `~/.omp/agent/models.container.yml:ro` (mapped to `models.yml` inside the container — kept separate from the host's `~/.omp/agent/models.yml` so the host omp doesn't pick up gateway routing intended only for the container), `extra_hosts: llm-gateway.internal:host-gateway`.
 - `entrypoint.sh` — validates `PI_ROOT`, creates `/data/{workspaces,logs}` + build caches.
 - `.env.example` — authoritative list of required runtime env vars.

@@ -27,8 +27,10 @@ import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { 
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
-import type { ToolSession } from "../tools";
+import { readSnapshot } from "../commit/selective/journal";
+import type { FileChangeReport, ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
+import { patchSectionPaths, splitPatchSections } from "../utils/git-diff-paths";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { withRepoLock } from "../utils/repo-lock";
 import type { ExecutorOptions } from "./executor";
@@ -176,7 +178,14 @@ export function makeIsolationCommitMessage(session: ToolSession): BuildCommitMes
 		const settings = session.settings;
 		const sessionId = session.getSessionId?.() ?? undefined;
 		return async (diff: string) =>
-			generateCommitMessage(diff, registry, settings, sessionId, session.getActiveModel?.()?.provider);
+			generateCommitMessage(
+				diff,
+				registry,
+				settings,
+				sessionId,
+				session.getActiveModel?.()?.provider,
+				session.sessionManager,
+			);
 	};
 }
 
@@ -731,6 +740,23 @@ export interface IsolationMergeOptions {
 	result: SingleResult;
 	repoRoot: string;
 	mergeMode: "patch" | "branch";
+	/**
+	 * Journal each file a patch-mode merge rewrites as the subagent's change
+	 * (see {@link ToolSession.recordFileChange}); the subagent's own edit records
+	 * name its isolated checkout, not this repository.
+	 */
+	recordFileChange?: (change: FileChangeReport) => void;
+	/** Agent id of the session merging the result (the subagent's parent). */
+	parentAgentId?: string;
+}
+
+/** Repo-relative paths a git patch touches (both sides of each `diff --git` header). */
+function patchPaths(patch: string): string[] {
+	const paths = new Set<string>();
+	for (const section of splitPatchSections(patch)) {
+		for (const file of patchSectionPaths(section)) paths.add(file);
+	}
+	return [...paths];
 }
 
 export interface IsolationMergeOutcome {
@@ -837,7 +863,29 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 				hadAnyChanges = false;
 			} else {
 				const normalized = patchText.endsWith("\n") ? patchText : `${patchText}\n`;
+				const touched = opts.recordFileChange
+					? await Promise.all(
+							patchPaths(normalized).map(async file => {
+								const absolute = path.join(repoRoot, file);
+								return { absolute, before: await readSnapshot(absolute) };
+							}),
+						)
+					: [];
 				({ changesApplied, hadAnyChanges } = await applyRootPatch(repo, repoRoot, normalized));
+				if (changesApplied && hadAnyChanges) {
+					for (const { absolute, before } of touched) {
+						const after = await readSnapshot(absolute);
+						if (!before || !after || before.text === after.text) continue;
+						opts.recordFileChange?.({
+							path: absolute,
+							tool: "task",
+							before: before.text,
+							after: after.text,
+							beforeMtimeMs: before.mtimeMs,
+							agent: { agent: result.id, parent: opts.parentAgentId },
+						});
+					}
+				}
 			}
 		}
 

@@ -1,31 +1,13 @@
 /**
- * Session-scoped artifact storage for truncated tool outputs.
+ * Session-scoped spill storage for truncated tool outputs and shaped originals.
  *
- * Artifacts are stored in a directory alongside the session file,
- * accessible via artifact:// URLs.
+ * Spill `N` is the file `<N>.log` at the session's `local://` root, read back as
+ * `local://<N>.log` (see `spillUrl` in `@oh-my-pi/pi-utils`).
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { logger, toError } from "@oh-my-pi/pi-utils";
+import { isEexist, logger, spillFileName, spillIdOfFileName, toError } from "@oh-my-pi/pi-utils";
 import { replaceFileAtomically } from "../utils/atomic-file";
-
-/**
- * Sanitize a tool name for safe use as the middle segment of the artifact
- * filename (`${id}.${toolType}.log`). Built-in tool names are fixed, but MCP,
- * extension, and RPC-host tool names are arbitrary and may contain path
- * separators (`/`, `\`) or traversal sequences (`..`) that would otherwise let
- * a spilled artifact escape the artifacts directory. Collapse everything
- * outside `[A-Za-z0-9_-]` to `_`, and cap the length so an arbitrarily long
- * name cannot overflow the filesystem's filename limit (ENAMETOOLONG). Fall
- * back to `tool` when nothing survives.
- */
-function sanitizeToolType(toolType: string): string {
-	const sanitized = toolType
-		.replace(/[^A-Za-z0-9_-]+/g, "_")
-		.slice(0, 64)
-		.replace(/^_+|_+$/g, "");
-	return sanitized.length > 0 ? sanitized : "tool";
-}
 
 /**
  * Persist an artifact only when the filesystem confirms the complete payload is
@@ -67,66 +49,67 @@ export async function writeArtifact(path: string, content: string): Promise<numb
 }
 
 /**
- * Artifact surface shared by a session and the subagents that adopt its
- * manager. {@link ArtifactManager} implements it on the owning thread; a
- * subagent worker holds a remote implementation whose ids come from the owner
+ * Spill surface shared by a session and the subagents that adopt its manager.
+ * {@link ArtifactManager} implements it on the owning thread; a subagent worker
+ * holds a remote implementation whose ids come from the owner
  * (`thread/services/runtime-remote.ts`), so ids stay unique across the tree.
  */
 export interface ArtifactManagerApi {
-	/** Artifact directory path; may not exist until the first artifact is saved. */
+	/** The `local://` root spills live in; may not exist until the first spill is saved. */
 	readonly dir: string;
-	/** Allocate the next artifact id. */
-	allocateId(): number;
-	/** Allocate a new artifact path and id without writing content. */
-	allocatePath(toolType: string): Promise<{ id: string; path: string }>;
-	/** Save `content` as a new artifact; returns its id. */
-	save(content: string, toolType: string): Promise<string>;
+	/**
+	 * The owning session's directory (`<session>` beside `<session>.jsonl`), which
+	 * `getArtifactsDir()` and `resolveLocalRoot` key off; null without a session file.
+	 */
+	readonly sessionDir: string | null;
+	/** Claim the next spill id and its file without writing content. */
+	allocatePath(): Promise<{ id: string; path: string }>;
+	/** Save `content` as a new spill; returns its id. */
+	save(content: string): Promise<string>;
 	exists(id: string): Promise<boolean>;
-	/** Every artifact file name in the directory; empty when it does not exist. */
-	listFiles(): Promise<string[]>;
-	/** Full path of an artifact file, or null when it does not exist. */
+	/** Full path of a spill file, or null when it does not exist. */
 	getPath(id: string): Promise<string | null>;
 }
 
 /**
- * Manages artifact storage for a session.
+ * Manages spill storage for a session.
  *
- * Artifacts are stored with sequential IDs in the session's artifact directory.
- * The directory is created lazily on first write.
+ * Spills get sequential ids at the session's `local://` root. That root is
+ * shared with the agent's own `local://` writes, so each id's file is claimed
+ * exclusively before content lands: a model-written `7.log` is skipped, never
+ * clobbered. The directory is created lazily on first write.
  *
  * Subagents do not own their own `ArtifactManager`. The parent's instance is
  * adopted via `SessionManager.adoptArtifactManager`, so the whole parent +
- * subagent tree shares one ID space and one directory.
+ * subagent tree shares one id space and one root.
  */
 export class ArtifactManager implements ArtifactManagerApi {
 	#nextId = 0;
 	readonly #dir: string;
+	readonly #sessionDir: string | null;
 	#dirCreated = false;
 	#initPromise: Promise<void> | null = null;
 	readonly #ready: Promise<void> | undefined;
-	readonly #reservedIdsDir: string | undefined;
 
 	/**
-	 * @param dir Directory that will hold artifact files. Created lazily on first save.
+	 * @param dir The `local://` root that holds spill files. Created lazily on first save.
+	 * @param sessionDir The owning session's directory, carried for adopting subagents.
 	 * @param ready Settles once `dir` is seeded (a session move copying the previous
-	 *   session's artifacts in the background). Id scans and lookups wait for it,
+	 *   session's files in the background). Id scans and lookups wait for it,
 	 *   so new ids never collide with copied ones. Must not reject.
-	 * @param reservedIdsDir Read-only directory whose ids stay reserved: a seance
-	 *   fork allocates past its source's ids so `artifact://<n>` from the inherited
-	 *   transcript keeps naming the source artifact.
 	 */
-	constructor(dir: string, ready?: Promise<void>, reservedIdsDir?: string) {
+	constructor(dir: string, sessionDir: string | null, ready?: Promise<void>) {
 		this.#dir = dir;
+		this.#sessionDir = sessionDir;
 		this.#ready = ready;
-		this.#reservedIdsDir = reservedIdsDir;
 	}
 
-	/**
-	 * Artifact directory path.
-	 * Directory may not exist until first artifact is saved.
-	 */
 	get dir(): string {
 		return this.#dir;
+	}
+
+	get sessionDir(): string | null {
+		return this.#sessionDir;
 	}
 
 	async #ensureDir(): Promise<void> {
@@ -142,78 +125,48 @@ export class ArtifactManager implements ArtifactManagerApi {
 		await this.#initPromise;
 	}
 
-	/**
-	 * Scan existing artifact files to find the next available ID.
-	 * This ensures we don't overwrite artifacts when resuming a session.
-	 */
+	/** Start ids past every `<N>.log` already at the root, so a resumed session never reuses one. */
 	async #scanExistingIds(): Promise<void> {
-		const files = await this.listFiles();
-		if (this.#reservedIdsDir) {
-			try {
-				files.push(...(await fs.readdir(this.#reservedIdsDir)));
-			} catch {
-				// A missing source artifacts dir reserves nothing.
-			}
-		}
 		let maxId = -1;
-		for (const file of files) {
-			// Files are named: {id}.{toolType}.log
-			const match = file.match(/^(\d+)\..*\.log$/);
-			if (match) {
-				const id = parseInt(match[1], 10);
-				if (id > maxId) maxId = id;
-			}
+		for (const file of await this.#listFiles()) {
+			const id = spillIdOfFileName(file);
+			if (id !== undefined && id > maxId) maxId = id;
 		}
 		this.#nextId = maxId + 1;
 	}
 
 	/**
-	 * Atomically allocate next artifact ID.
-	 * IDs are sequential within the session.
+	 * Claim the next free spill id: create its file exclusively (`wx`), bumping
+	 * past any `<N>.log` that appeared since the scan. The empty placeholder is
+	 * replaced atomically by {@link writeArtifact}.
 	 */
-	allocateId(): number {
-		return this.#nextId++;
-	}
-
-	/**
-	 * Allocate a new artifact path and ID without writing content.
-	 *
-	 * @param toolType Tool name for file extension (e.g., "bash", "read")
-	 */
-	async allocatePath(toolType: string): Promise<{ id: string; path: string }> {
+	async allocatePath(): Promise<{ id: string; path: string }> {
 		await this.#ensureDir();
-		const id = String(this.allocateId());
-		const filename = `${id}.${sanitizeToolType(toolType)}.log`;
-		return { id, path: path.join(this.#dir, filename) };
+		for (;;) {
+			const id = String(this.#nextId++);
+			const filePath = path.join(this.#dir, spillFileName(id));
+			try {
+				const handle = await fs.open(filePath, "wx");
+				await handle.close();
+				return { id, path: filePath };
+			} catch (err) {
+				if (!isEexist(err)) throw err;
+			}
+		}
 	}
 
-	/**
-	 * Save content as an artifact and return the artifact ID.
-	 *
-	 * @param content Full content to save
-	 * @param toolType Tool name for file extension (e.g., "bash", "read")
-	 * @returns Artifact ID (numeric string)
-	 */
-	async save(content: string, toolType: string): Promise<string> {
-		const { id, path } = await this.allocatePath(toolType);
+	/** Save content as a new spill and return its id. */
+	async save(content: string): Promise<string> {
+		const { id, path } = await this.allocatePath();
 		await writeArtifact(path, content);
 		return id;
 	}
 
-	/**
-	 * Check if an artifact exists.
-	 * @param id Artifact ID (numeric string)
-	 */
 	async exists(id: string): Promise<boolean> {
-		const files = await this.listFiles();
-		return files.some(f => f.startsWith(`${id}.`));
+		return (await this.getPath(id)) !== null;
 	}
 
-	/**
-	 * List all artifact files in the directory.
-	 * Returns empty array if directory doesn't exist.
-	 */
-	async listFiles(): Promise<string[]> {
+	async #listFiles(): Promise<string[]> {
 		await this.#ready;
 		try {
 			return await fs.readdir(this.#dir);
@@ -222,15 +175,14 @@ export class ArtifactManager implements ArtifactManagerApi {
 		}
 	}
 
-	/**
-	 * Get the full path to an artifact file.
-	 * Returns null if artifact doesn't exist.
-	 *
-	 * @param id Artifact ID (numeric string)
-	 */
+	/** Full path of spill `id`, or null when its file does not exist. */
 	async getPath(id: string): Promise<string | null> {
-		const files = await this.listFiles();
-		const match = files.find(f => f.startsWith(`${id}.`));
-		return match ? path.join(this.#dir, match) : null;
+		await this.#ready;
+		const filePath = path.join(this.#dir, spillFileName(id));
+		try {
+			return (await fs.stat(filePath)).isFile() ? filePath : null;
+		} catch {
+			return null;
+		}
 	}
 }

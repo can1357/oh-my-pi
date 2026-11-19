@@ -282,14 +282,19 @@ export interface Outlined {
 	recovery: boolean;
 }
 
-/** Outline of one `read` of a source file; a read overlapping folded code is shown whole. */
-export async function outlineRead(run: Run, abs: string): Promise<Outlined> {
+/**
+ * Outline of one `read` of a source file; a read overlapping folded code is shown whole. So is a window of at most
+ * `whole` characters, the size the valve leaves a source read uncut at: outlined, 49% of such reads were followed at
+ * once by a read of the folded lines, against 5% of the same reads shown whole, for ~600 tokens saved per read.
+ */
+export async function outlineRead(run: Run, abs: string, whole: number): Promise<Outlined> {
 	const read = run.input.read;
 	if (!read) return { recovery: false };
 	if (isRecovery(run, abs, read.firstLine, read.firstLine + read.lines.length - 1)) {
 		bump(run, "outlineRecoveries");
 		return { recovery: true };
 	}
+	if (read.shown.reduce((chars, line) => chars + line.length + 1, 0) <= whole) return { recovery: false };
 	const o = await outlineWindow(run, read.lines, read.shown, read.firstLine, shifted(0));
 	if (!o) return { recovery: false };
 	rememberFolds(run, abs, o.folded);

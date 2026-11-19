@@ -69,8 +69,14 @@ More globals; `read` the linked docs before first use:
 - `agent`, `workpool`: background subagents, DAG waves → xd://eval/agents
 {{/if}}
 {{#each preludes}}
-- `{{name}}`: {{summary}} → xd://eval/{{name}}
+- `{{name}}`{{#if summary}}: {{summary}}{{/if}} → xd://eval/{{name}}
 {{/each}}
+{{#if firstCallPreludes}}
+No `read` needed before first use; the guide follows the first call's result (full reference linked):
+{{#each firstCallPreludes}}
+- `{{name}}`{{#if summary}}: {{summary}}{{/if}} → `xd://eval/{{name}}`
+{{/each}}
+{{/if}}
 </namespaces>
 {{#each inlinePreludes}}
 

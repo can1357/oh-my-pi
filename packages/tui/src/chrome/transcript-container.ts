@@ -116,6 +116,8 @@ interface TranscriptEntry {
 	 * state for emitted-row slicing but never emits another mid-stream row.
 	 */
 	stableFrozen: boolean;
+	/** Proves each frame that the published stable rows still prefix the block's render. */
+	stableRenderPrefix: RowPrefixCheck;
 	/**
 	 * Head rows of a settled block already in native history while the rest
 	 * stays live: pressure commits only the rows that left the screen, so no
@@ -297,6 +299,36 @@ export function isRowPrefix(prefix: readonly string[], rows: readonly string[]):
 	return true;
 }
 
+/**
+ * {@link isRowPrefix} for a check repeated every frame on rows that mostly
+ * carry over. Stable rows and a block's render are separate renders, so their
+ * equal rows are distinct strings that compare byte by byte; this keeps copies
+ * of the last pair it proved and re-proves a row that is still the same string
+ * on both sides by transitivity, which compares pointers. The copies, not the
+ * caller's arrays, are the proof, so a renderer that reuses and rewrites a
+ * returned array is still caught.
+ */
+export class RowPrefixCheck {
+	#prefix: readonly string[] = EMPTY_ROWS;
+	#rows: readonly string[] = EMPTY_ROWS;
+
+	/** Whether `prefix` matches `rows` byte-for-byte from the top. */
+	holds(prefix: readonly string[], rows: readonly string[]): boolean {
+		if (prefix.length > rows.length) return false;
+		const proven = this.#prefix;
+		const provenRows = this.#rows;
+		const carried = Math.min(proven.length, prefix.length);
+		let index = 0;
+		while (index < carried && prefix[index] === proven[index] && rows[index] === provenRows[index]) index++;
+		for (; index < prefix.length; index++) {
+			if (prefix[index] !== rows[index]) return false;
+		}
+		this.#prefix = prefix.slice();
+		this.#rows = rows.slice(0, prefix.length);
+		return true;
+	}
+}
+
 function isStablePrefix(prefix: readonly TranscriptStableRow[], rows: readonly TranscriptStableRow[]): boolean {
 	if (prefix.length > rows.length) return false;
 	for (let index = 0; index < prefix.length; index++) {
@@ -366,6 +398,17 @@ export class TranscriptContainer extends Container {
 	#lastFrame: AnimationFrame = { tick: 0, now: 0 };
 	// Start rows from the last full render(), keyed by child component (transcript deep-links).
 	#childStartRows = new Map<Component, number>();
+	// Last full render() while no block is committed (transcript viewers), reused while
+	// every block returns the same rows: a viewer repaints on every key and tick.
+	#fullRender:
+		| {
+				width: number;
+				components: Component[];
+				blocks: (readonly string[])[];
+				compact: boolean[];
+				rows: readonly string[];
+		  }
+		| undefined;
 	// Watchdog for the wedge where an unfinalized frontier block pins pressure
 	// retirement: everything behind it stays live and degrades to one-line
 	// allocations. Logs once per pinned episode after a grace period.
@@ -418,6 +461,7 @@ export class TranscriptContainer extends Container {
 			stableRowCountByWidth: new Map(),
 			emitted: 0,
 			stableFrozen: false,
+			stableRenderPrefix: new RowPrefixCheck(),
 			split: undefined,
 		});
 		// `children` is public and may be edited externally; re-check the whole
@@ -456,6 +500,7 @@ export class TranscriptContainer extends Container {
 		this.#entries.splice(index, 1);
 		this.#frontier = Math.min(this.#frontier, this.#entries.length);
 		this.#childStartRows.delete(component);
+		this.#fullRender = undefined;
 	}
 
 	override clear(): void {
@@ -464,6 +509,7 @@ export class TranscriptContainer extends Container {
 		this.#frontier = 0;
 		this.#offered = undefined;
 		this.#childStartRows.clear();
+		this.#fullRender = undefined;
 		this.#pinnedFrontier = undefined;
 		this.#replayPending = false;
 		this.#replayRequested = false;
@@ -1401,23 +1447,49 @@ export class TranscriptContainer extends Container {
 		return this.#nativeNode;
 	}
 
-	/** Full semantic render used by exports and non-terminal commands. */
+	/**
+	 * Full semantic render used by exports, non-terminal commands, and transcript
+	 * viewers. It writes no scrollback, so the append-only emission ledger is left
+	 * to the frame path.
+	 */
 	override render(width: number): readonly string[] {
 		this.#syncEntries();
+		const components: Component[] = [];
+		const blocks: (readonly string[])[] = [];
+		const compact: boolean[] = [];
+		let committed = false;
+		for (const entry of this.#entries) {
+			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+			components.push(entry.component);
+			blocks.push(entry.component.render(width));
+			compact.push(isCompact(entry.component));
+			if (entry.state === "committed") {
+				committed = true;
+				this.#releaseRenderCaches(entry);
+			}
+		}
+		const memo = this.#fullRender;
+		if (
+			memo?.width === width &&
+			sameItems(memo.components, components) &&
+			sameItems(memo.blocks, blocks) &&
+			sameItems(memo.compact, compact)
+		) {
+			return memo.rows;
+		}
 		this.#childStartRows.clear();
 		const rows: string[] = [];
 		let above: RowsAbove;
-		for (const entry of this.#entries) {
-			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
-			const block = this.#renderEntry(entry, width);
-			if (entry.state === "committed") this.#releaseRenderCaches(entry);
+		for (let index = 0; index < blocks.length; index++) {
+			const block = trimBlankEdges(blocks[index]!);
 			if (block.length === 0) continue;
-			const compact = isCompact(entry.component);
-			if (separatorRows(above, compact) > 0) rows.push("");
-			this.#childStartRows.set(entry.component, rows.length);
-			rows.push(...block);
-			above = compact;
+			if (separatorRows(above, compact[index]!) > 0) rows.push("");
+			this.#childStartRows.set(components[index]!, rows.length);
+			for (const row of block) rows.push(row);
+			above = compact[index]!;
 		}
+		// Committed blocks drop their render caches, so they never return the same rows twice.
+		this.#fullRender = committed ? undefined : { width, components, blocks, compact, rows };
 		return rows;
 	}
 
@@ -1442,7 +1514,7 @@ export class TranscriptContainer extends Container {
 				? [...entry.stableRows, ...stable.slice(entry.stableRows.length)]
 				: entry.stableRows;
 		const stableRendered = appendOnly.renderTranscriptStableRows(published.length, width);
-		if (!isRowPrefix(stableRendered, rendered)) {
+		if (!entry.stableRenderPrefix.holds(stableRendered, rendered)) {
 			return this.#freezeStableRows(entry, rendered, "stable rows no longer render as a prefix of the block");
 		}
 		const priorRender = entry.renderedStableByWidth.get(width);
@@ -1795,6 +1867,7 @@ export class TranscriptContainer extends Container {
 		entry.stableRows = EMPTY_STABLE_ROWS;
 		entry.renderedStableByWidth = new Map();
 		entry.stableRowCountByWidth = new Map();
+		entry.stableRenderPrefix = new RowPrefixCheck();
 		this.#frameRows.delete(entry);
 		this.#releaseRenderCaches(entry);
 	}
@@ -2010,6 +2083,7 @@ export class TranscriptContainer extends Container {
 					stableRowCountByWidth: new Map(),
 					emitted: 0,
 					stableFrozen: false,
+					stableRenderPrefix: new RowPrefixCheck(),
 					split: undefined,
 				},
 		);

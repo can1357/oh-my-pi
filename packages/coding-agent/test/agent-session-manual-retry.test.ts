@@ -88,6 +88,78 @@ describe("AgentSession manual retry", () => {
 		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "recovered after manual retry" });
 	});
 
+	it.each(["retry", "new", "clear", "tree"])("handles a pruned refusal before %s", async action => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+
+		const mock = createMockModel({
+			responses: [
+				{ content: ["previous answer"], stopReason: "stop" },
+				{
+					stopReason: "error",
+					stopDetails: { type: "refusal", category: "cyber", explanation: "Declined." },
+					errorMessage: "Refusal (cyber): Declined.",
+				},
+				{ content: ["retried answer"], stopReason: "stop" },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"retry.modelFallback": false,
+			}),
+			modelRegistry,
+		});
+
+		await session.prompt("first prompt");
+		await session.waitForIdle();
+		const previousLeaf = session.sessionManager.getLeafId();
+		if (!previousLeaf) throw new Error("Expected the previous answer to be persisted");
+
+		await session.prompt("second prompt");
+		await session.waitForIdle();
+		expect(session.getLastAssistantMessage()?.stopReason).toBe("error");
+		expect(session.agent.state.messages.at(-1)?.role).toBe("user");
+		expect(
+			session.sessionManager
+				.buildSessionContext({ transcript: true })
+				.messages.some(message => message.role === "assistant" && message.stopReason === "error"),
+		).toBe(false);
+
+		if (action === "retry") {
+			await expect(session.retry()).resolves.toBe(true);
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(3);
+			const request = mock.calls[2].context.messages;
+			expect(request.filter(message => message.role === "user").map(message => message.content)).toEqual([
+				[{ type: "text", text: "first prompt" }],
+				[{ type: "text", text: "second prompt" }],
+			]);
+			expect(request.filter(message => message.role === "assistant").map(message => message.content)).toEqual([
+				[{ type: "text", text: "previous answer" }],
+			]);
+			expect(session.getLastAssistantMessage()?.content).toEqual([{ type: "text", text: "retried answer" }]);
+		} else if (action === "new") {
+			await session.newSession();
+		} else if (action === "clear") {
+			await session.resetSessionContext();
+		} else {
+			await session.navigateTree(previousLeaf, { summarize: false });
+		}
+
+		await expect(session.retry()).resolves.toBe(false);
+		expect(mock.calls).toHaveLength(action === "retry" ? 3 : 2);
+	});
+
 	it("returns false when the trailing assistant turn succeeded", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {

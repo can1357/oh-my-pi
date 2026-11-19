@@ -47,6 +47,20 @@ describe("Factory Droid completions reasoning matrix", () => {
 		expect(captured[0].body.temperature).toBe(0.2);
 	});
 
+	it("names the tool on Kimi K3.1 Pro's tool-result message, as Kimi K3 does", async () => {
+		const captured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			factoryModel("kimi-k3.1-pro", ["fireworks"]),
+			{
+				messages: [{ role: "user", content: "read it", timestamp: 1 }, ...toolTurn("n", "kimi-k3.1-pro")],
+				tools: [{ name: "Read", description: "Read file", parameters: type({ path: "string" }) }],
+			},
+			{ apiKey: "workos-token", fetch: captureFetch(captured, completionsChunks("OK", "kimi-k3.1-pro")) },
+		).result();
+		const messages = captured[0].body.messages as Array<{ role: string; name?: string }>;
+		expect(messages.find(message => message.role === "tool")?.name).toBe("Read");
+	});
+
 	it("releases the first-event budget and aborts a stalled completions stream via the idle watchdog", async () => {
 		// One valid chunk, then a stall: the first-event budget (huge here) must
 		// be released once the first SSE event arrived, so the steady-state idle

@@ -4,7 +4,8 @@
  * The steps go out in at most {@link MAX_STEPS} prompts ({@link renderStepPrompts}): the first is
  * the initial prompt, each later one is sent once the child delivered the previous (a terminal
  * `yield`, or without `yield` its final message), so the child works one stage at a time instead of
- * planning against the whole list. The last prompt's result is the run's result.
+ * planning against the whole list. What the child delivers for each earlier prompt reaches the agent
+ * that spawned it as a step report ({@link sendStepReport}); the last prompt's result is the run's result.
  *
  * A run records the prompts it sent as {@link TASK_STEPS_ENTRY} entries, so `omp --restore` goes on
  * with the prompts an interrupted run had left ({@link readStepProgress}).
@@ -12,8 +13,10 @@
  * @example
  * renderStepPrompts(["a", "b", "c", "d", "e"], true).length; // 4: steps 1–2, then 3, 4, 5
  */
-import { isRecord, prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
+import { IrcBus } from "../irc/bus";
 import stepTemplate from "../prompts/system/subagent-step.md" with { type: "text" };
+import stepReportTemplate from "../prompts/system/subagent-step-report.md" with { type: "text" };
 import stepsBriefTemplate from "../prompts/system/subagent-steps-brief.md" with { type: "text" };
 import type { FileEntry } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
@@ -89,6 +92,23 @@ export function renderStepPrompts(steps: readonly string[], structured: boolean)
 export function renderStepsBrief(steps: readonly string[]): string {
 	const rendered = prompt.render(stepsBriefTemplate, { steps: steps.map((_, index) => textSlot(index)) });
 	return fillTextSlots(rendered, steps, 0);
+}
+
+/** The stepped child its step reports come from, and the agent that spawned it, who reads them. */
+export interface StepReportRoute {
+	from: string;
+	to: string;
+}
+
+/**
+ * Hands `report`, what the child delivered for a prompt before the last, to its spawner as an IRC
+ * progress note: a busy spawner reads it at its next step boundary, an idle one wakes for it, and a
+ * `wait` keeps waiting for the final result. Delivery failures are logged; the steps go on.
+ */
+export async function sendStepReport(route: StepReportRoute, report: string): Promise<void> {
+	const body = prompt.render(stepReportTemplate, { report });
+	const receipt = await IrcBus.global().send({ ...route, body, progress: true });
+	if (receipt.outcome === "failed") logger.warn("Step report not delivered", { ...route, error: receipt.error });
 }
 
 /** Persists that the first `sent` prompts went out; pass `prompts` on a run's first record only. */

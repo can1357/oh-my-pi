@@ -52,16 +52,21 @@ export function defaultShellVizPreferences(): ShellVizPreferences {
 	};
 }
 
-/** Render through native ownership; an explicit replay cursor never uses the normal output sink. */
+/**
+ * Render through native ownership; an explicit replay cursor never uses the normal output sink.
+ * `streaming` marks a command whose arguments are still arriving: its unfinished end draws as it will continue.
+ */
 export function readShellPresentation(
 	source: ShellVisualizationSource,
 	preferences: ShellVizPreferences,
 	snapshot?: ShellTrace,
 	output?: string,
+	streaming = false,
 ): ShellVizPresentation {
 	const options: ShellVizOptions = {
 		...preferences,
 		cursorSeq: preferences.cursor === undefined ? undefined : snapshot?.history?.[preferences.cursor - 1]?.seq,
+		streaming,
 	};
 	const presentation = decodeShellPresentation(source.present(options));
 	if (preferences.cursor === undefined && output !== undefined) presentation.output = output;

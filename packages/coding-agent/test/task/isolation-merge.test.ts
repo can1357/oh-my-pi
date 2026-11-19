@@ -64,4 +64,33 @@ describe("mergeIsolatedChanges patch mode", () => {
 		expect(landed).toHaveLength(workers);
 		expect(outcomes.every(o => o.changesApplied && o.hadAnyChanges)).toBe(true);
 	});
+
+	it.skipIf(process.platform === "win32")("records task edits for quoted diff paths", async () => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-quoted-path-"));
+		tempDirs.push(repo);
+		const filename = 'has"quote.txt';
+		const file = path.join(repo, filename);
+		await Bun.write(file, "before\n");
+		await $`git init -q -b main && git config core.autocrlf false && git add -- ${filename} && git -c user.email=t@t -c user.name=t commit -qm base`
+			.cwd(repo)
+			.quiet();
+		await Bun.write(file, "after\n");
+		const patchPath = path.join(repo, ".git/quoted.patch");
+		await Bun.write(patchPath, await $`git diff --no-ext-diff --no-textconv`.cwd(repo).quiet().text());
+		await $`git checkout -q -- ${filename}`.cwd(repo).quiet();
+
+		const changes: Array<{ path: string; before: string | null; after: string | null }> = [];
+		const outcome = await mergeIsolatedChanges({
+			result: patchResult(1, patchPath),
+			repoRoot: repo,
+			mergeMode: "patch",
+			recordFileChange: change => changes.push(change),
+		});
+
+		expect(outcome.changesApplied).toBe(true);
+		expect(outcome.hadAnyChanges).toBe(true);
+		expect(changes.map(change => ({ path: change.path, before: change.before, after: change.after }))).toEqual([
+			{ path: file, before: "before\n", after: "after\n" },
+		]);
+	});
 });

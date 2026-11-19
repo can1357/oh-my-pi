@@ -18,11 +18,13 @@ export type KnownApi =
 	| "google-generative-ai"
 	| "google-gemini-cli"
 	| "google-vertex"
+	| "kiro-api"
 	| "ollama-chat"
 	| "cursor-agent"
 	| "factory-droid-agent"
 	| "gitlab-duo-agent"
 	| "devin-agent"
+	| "antigravity-acp"
 	| "apple-foundation-models";
 export type Api = KnownApi | (string & {});
 
@@ -199,9 +201,9 @@ export interface ThinkingConfig {
 	requiresEffort?: boolean;
 	/**
 	 * The catalog has no evidence this model reasons (unclassified id, no
-	 * capability metadata). The ladder is offered for the user to opt into:
-	 * sessions leave thinking unset until the user picks an effort, and a
-	 * request without an effort goes out as non-reasoning (see
+	 * capability metadata). The provisional ladder follows the session/default
+	 * effort until live discovery verifies its controls. A request without an
+	 * effort goes out as non-reasoning (see
 	 * `withoutUnverifiedThinking`).
 	 */
 	unverified?: boolean;
@@ -1898,6 +1900,7 @@ export interface Model<TApi extends Api = Api> {
 export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	Model<TApi>,
 	| "compat"
+	| "reasoning"
 	| "identity"
 	| "compatConfig"
 	| "requiresGlyphTokenization"
@@ -1907,6 +1910,8 @@ export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	| "supportsAssistantPrefill"
 	| "supportsComputerUseConfig"
 > {
+	/** Authored capability: undefined means no evidence; false explicitly rules out reasoning. */
+	reasoning?: boolean;
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */
 	compat?: CompatConfigOf<TApi>;
 }

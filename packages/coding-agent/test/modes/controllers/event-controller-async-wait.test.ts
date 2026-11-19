@@ -1,13 +1,15 @@
 /**
- * A turn can end while background jobs it started are still running: the
- * session settles with `awaitingAsyncWork` and only a job result can resume it.
+ * A model loop can stop while the run waits on outside work it started: the
+ * session emits `agent_pause { yielded: true }` and only a background-job
+ * result, a child agent or a peer message can resume the run.
  *
  * Contracts:
- *  1. The working row names that wait and its jobs — not the last tool call's
- *     intent — until a woken run takes the row back.
- *  2. Ending the wait (Esc → `stopAwaitingAsyncWork`) interrupts the session and
- *     tears the run down at once, while the jobs keep running; the settle watch
- *     must not tear it down a second time when they finish.
+ *  1. The run is still on: program status stays `working`, and the working row
+ *     names the awaited jobs and child agents — not the last tool call's
+ *     intent — until a woken loop takes the row back.
+ *  2. Ending the wait (Esc → `stopAwaitingAsyncWork`) interrupts the session;
+ *     the run's following `agent_end` tears down as user-interrupted (status
+ *     idle, no completion toast) and says which jobs keep running.
  *  3. End to end on a real session: a job that finishes after the wait was
  *     ended lands in context and does not start a model turn.
  */
@@ -21,16 +23,19 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { WakeSources } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import type { AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as runStatus from "@oh-my-pi/pi-coding-agent/utils/run-status";
 import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
+type AgentPause = Extract<AgentSessionEvent, { type: "agent_pause" }>;
 type AgentEnd = Extract<AgentSessionEvent, { type: "agent_end" }>;
 
 beforeAll(() => {
@@ -48,18 +53,28 @@ afterEach(() => {
 	resetSettingsForTest();
 });
 
-function asyncWaitEnd(): AgentEnd {
-	const message = {
-		role: "assistant",
-		content: [{ type: "text", text: "started the job" }],
-		stopReason: "stop",
-		usage: { inputTokens: 0, outputTokens: 0 },
-		timestamp: Date.now(),
-	} as unknown as AssistantMessage;
-	return { type: "agent_end", messages: [message], isTerminal: false, yielded: true, awaitingAsyncWork: true };
+function yieldedMessages(): AssistantMessage[] {
+	return [
+		{
+			role: "assistant",
+			content: [{ type: "text", text: "started the job" }],
+			stopReason: "stop",
+			usage: { inputTokens: 0, outputTokens: 0 },
+			timestamp: Date.now(),
+		} as unknown as AssistantMessage,
+	];
 }
 
-function runningJobs(ids: string[]): AsyncJobSnapshot {
+function yieldedPause(): AgentPause {
+	return { type: "agent_pause", messages: yieldedMessages(), yielded: true, awaiting: true };
+}
+
+/** The run's `agent_end` after the user ended the wait: it carries the last loop's normal yield. */
+function runEnd(): AgentEnd {
+	return { type: "agent_end", messages: yieldedMessages() };
+}
+
+function runningJobs(ids: readonly string[]): AsyncJobSnapshot {
 	return {
 		running: ids.map(id => ({ id, type: "bash", status: "running", label: `job ${id}`, startTime: 0 })),
 		recent: [],
@@ -67,32 +82,44 @@ function runningJobs(ids: string[]): AsyncJobSnapshot {
 	} as unknown as AsyncJobSnapshot;
 }
 
-/** Stub session whose background jobs stay pending until `drain()`; `cancel(id)` drops one job without a wake. */
-function makeWaitingContext(jobIds: string[]) {
-	let pending = true;
-	const running = [...jobIds];
-	const settled = Promise.withResolvers<void>();
+/** Stub session paused on outside work; `cancel(id)` drops one job without a wake, `end()` closes the run. */
+function makeAwaitingContext(jobIds: string[], agentIds: string[] = []) {
+	const jobs = [...jobIds];
+	const agents = [...agentIds];
+	let runActive = true;
+	let streaming = false;
 	const abort = vi.fn(async (_options?: { reason?: string }) => {});
-	const suppressAutoResumeUntilPrompt = vi.fn(() => {});
 	const ctx = createInteractiveModeContext({
 		sessionManager: { getSessionName: () => "test-session" },
 		session: {
-			hasAdmittedSubmission: true,
-			hasPendingAsyncWork: () => pending,
-			settleAsyncWork: () => settled.promise,
-			getAsyncJobSnapshot: () => runningJobs(pending ? running : []),
+			get isRunActive() {
+				return runActive;
+			},
+			get isStreaming() {
+				return streaming;
+			},
+			get wakeSources(): WakeSources | undefined {
+				if (jobs.length === 0 && agents.length === 0) return undefined;
+				return { jobs: [...jobs], agents: [...agents], queued: false };
+			},
+			getAsyncJobSnapshot: () => runningJobs(jobs),
 			abort,
-			suppressAutoResumeUntilPrompt,
 		},
 	});
-	const drain = () => {
-		pending = false;
-		settled.resolve();
+	return {
+		ctx,
+		abort,
+		cancel: (id: string) => {
+			jobs.splice(jobs.indexOf(id), 1);
+		},
+		wake: () => {
+			streaming = true;
+		},
+		end: () => {
+			runActive = false;
+			streaming = false;
+		},
 	};
-	const cancel = (id: string) => {
-		running.splice(running.indexOf(id), 1);
-	};
-	return { ctx, drain, abort, cancel, suppressAutoResumeUntilPrompt };
 }
 
 /** What the working row shows now, as the loader reads it on a tick. */
@@ -102,42 +129,43 @@ function rowLabel(setWorkingMessage: { mock: { calls: unknown[][] } }): string |
 	return typeof message === "string" ? message : undefined;
 }
 
-/** One macrotask hop: every microtask continuation queued so far has run. */
-async function nextMacrotask(): Promise<void> {
-	const { promise, resolve } = Promise.withResolvers<void>();
-	setImmediate(resolve);
-	await promise;
-}
-
-describe("EventController — run waiting only on background jobs", () => {
-	it("names the waited-on jobs on the working row, then hands the row back to a woken run", async () => {
-		const { ctx } = makeWaitingContext(["bg_1", "bg_2"]);
+describe("EventController — run paused on outside work", () => {
+	it("keeps program status working and names the awaited jobs and agents, then hands the row back to a woken loop", async () => {
+		const { ctx, wake } = makeAwaitingContext(["bg_1", "bg_2"], ["Scout"]);
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
 		const setWorkingMessage = vi.spyOn(ctx, "setWorkingMessage");
 		const ensureLoadingAnimation = vi.spyOn(ctx, "ensureLoadingAnimation");
+		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
 		const controller = new EventController(ctx);
 
-		await controller.handleEvent(asyncWaitEnd());
+		await controller.handleEvent({ type: "agent_start" });
+		report.mockClear();
+		await controller.handleEvent(yieldedPause());
 
-		// The prompt's own completion may already have torn the loader down.
+		// The run goes on: nothing reports a settled status or tears the run down.
+		expect(report).not.toHaveBeenCalled();
+		expect(markActivityEnd).not.toHaveBeenCalled();
 		expect(ensureLoadingAnimation).toHaveBeenCalled();
 		const label = rowLabel(setWorkingMessage);
 		expect(label).toContain("bg_1");
 		expect(label).toContain("bg_2");
+		expect(label).toContain("Scout");
 		expect(controller.isAwaitingAsyncWork()).toBe(true);
 
 		// A job result woke the run: the row must not keep claiming it waits.
-		await controller.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
+		wake();
+		await controller.handleEvent({ type: "agent_start" });
 		expect(setWorkingMessage).toHaveBeenLastCalledWith();
 		expect(controller.isAwaitingAsyncWork()).toBe(false);
 	});
 
 	it("drops a job cancelled without a wake from the row on the next tick", async () => {
-		// `/jobs kill bg_1` enqueues no wake, so no settle or agent_start refreshes
-		// the row; a label built once at the settle kept naming the dead job.
-		const { ctx, cancel } = makeWaitingContext(["bg_1", "bg_2"]);
+		// `/jobs kill bg_1` enqueues no wake, so no pause or agent_start refreshes
+		// the row; a label built once at the pause kept naming the dead job.
+		const { ctx, cancel } = makeAwaitingContext(["bg_1", "bg_2"]);
 		const setWorkingMessage = vi.spyOn(ctx, "setWorkingMessage");
 		const controller = new EventController(ctx);
-		await controller.handleEvent(asyncWaitEnd());
+		await controller.handleEvent(yieldedPause());
 		expect(rowLabel(setWorkingMessage)).toContain("bg_1");
 
 		cancel("bg_1");
@@ -148,32 +176,40 @@ describe("EventController — run waiting only on background jobs", () => {
 		expect(label).not.toContain("2 background jobs");
 	});
 
-	it("ends the wait with a user interrupt and tears the run down while its jobs keep running", async () => {
-		const { ctx, drain, abort, suppressAutoResumeUntilPrompt } = makeWaitingContext(["bg_1"]);
+	it("ends the wait with a user interrupt; the run's agent_end tears down as interrupted while its jobs keep running", async () => {
+		const { ctx, abort, end } = makeAwaitingContext(["bg_1"]);
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
 		const notify = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
 		const controller = new EventController(ctx);
-		await controller.handleEvent(asyncWaitEnd());
+		const predict = vi.spyOn(controller.composerPrediction, "request");
+		await controller.handleEvent(yieldedPause());
 		expect(markActivityEnd).not.toHaveBeenCalled();
 
 		await controller.stopAwaitingAsyncWork();
-
 		expect(abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
-		// The abort stops no run here, so it suppresses nothing by itself: ending the
-		// wait is what keeps the job results from starting a turn.
-		expect(suppressAutoResumeUntilPrompt).toHaveBeenCalledTimes(1);
-		// Torn down now, with the job still pending — not when it finishes.
+
+		// The session ends the paused run right away.
+		end();
+		await controller.handleEvent(runEnd());
+
+		expect(report).toHaveBeenLastCalledWith({ state: "idle" });
 		expect(markActivityEnd).toHaveBeenCalledTimes(1);
 		expect(controller.isAwaitingAsyncWork()).toBe(false);
-		// The user stopped it on purpose: no "Complete" toast.
+		// The user stopped it on purpose: no "Complete" toast, no prediction.
 		expect(notify).not.toHaveBeenCalled();
+		expect(predict).not.toHaveBeenCalled();
 		// It says what is still running, since its result will now arrive silently.
-		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("1 background job"));
+		expect(ctx.showStatus).toHaveBeenCalledWith("Stopped waiting · 1 background job still running (/jobs)");
+	});
 
-		drain();
-		await nextMacrotask();
-		// The retired settle watch must not run the teardown again.
-		expect(markActivityEnd).toHaveBeenCalledTimes(1);
+	it("does not mount the wait row for a yielded pause nothing outside can resume", async () => {
+		const { ctx } = makeAwaitingContext([]);
+		const setWorkingMessage = vi.spyOn(ctx, "setWorkingMessage");
+		const controller = new EventController(ctx);
+		await controller.handleEvent(yieldedPause());
+		expect(controller.isAwaitingAsyncWork()).toBe(false);
+		expect(setWorkingMessage).not.toHaveBeenCalled();
 	});
 });
 
@@ -226,27 +262,32 @@ describe("EventController — ending the wait on a real session", () => {
 		gates.push(gate);
 		manager.register("bash", "sleep 150", async () => await gate.promise, { ownerId: "Main" });
 
-		const ends: AgentEnd[] = [];
+		const ctx = createInteractiveModeContext({ session, sessionManager });
+		const controller = new EventController(ctx);
+		const events: AgentSessionEvent[] = [];
 		session.subscribe(event => {
-			if (event.type === "agent_end") ends.push(event);
+			events.push(event);
+			void controller.dispatchSessionEvent(event);
 		});
 		await session.prompt("start the long job");
 		await session.waitForIdle();
-		const waitEnd = ends.findLast(event => event.awaitingAsyncWork === true);
-		if (!waitEnd) throw new Error("Expected the turn to settle waiting on the background job");
+		expect(events.some(event => event.type === "agent_pause" && event.yielded)).toBe(true);
+		expect(events.some(event => event.type === "agent_end")).toBe(false);
 		expect(mock.calls.length).toBe(1);
-
-		const ctx = createInteractiveModeContext({ session, sessionManager });
-		const controller = new EventController(ctx);
-		await controller.handleEvent(waitEnd);
 		expect(controller.isAwaitingAsyncWork()).toBe(true);
 
 		await controller.stopAwaitingAsyncWork();
-		expect(session.isStreaming).toBe(false);
+		await session.waitForRunEnd();
+		// Let the dispatched `agent_end` finish its teardown.
+		await controller.runSerialized(async () => {});
+		expect(session.isRunActive).toBe(false);
+		expect(events.filter(event => event.type === "agent_end")).toHaveLength(1);
+		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("1 background job"));
 
 		gate.resolve("JOB_FINISHED");
-		await session.settleAsyncWork();
-		await session.waitForIdle();
+		await manager.waitForAll();
+		await manager.drainDeliveries();
+		await session.waitForRunEnd();
 
 		expect(mock.calls.length).toBe(1);
 		const results = session.agent.state.messages.filter(

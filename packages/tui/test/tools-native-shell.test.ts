@@ -865,3 +865,25 @@ describe("user shell runs", () => {
 		expect(Bun.stripANSI(run.render(120).join("\n"))).toContain("Minimized: git 27.6KB → 9.5KB");
 	});
 });
+
+describe("bash call still streaming", () => {
+	beforeAll(async () => {
+		setThemeInstance((await getThemeByName("dark"))!);
+	});
+
+	it("draws an unfinished command as it will continue only while its arguments stream", () => {
+		const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
+		const tool = new ToolExecutionComponent("bash", { command: 'cd /tmp && rg -n "va' }, {}, undefined, ui);
+		try {
+			const drawn = () => Bun.stripANSI(tool.render(100).join("\n"));
+			// Streaming: the open quote is closed, so the commands keep their rows.
+			expect(drawn()).toContain("and rg -n");
+			expect(drawn()).not.toContain('cd /tmp && rg -n "va');
+			// Complete: the unterminated quote is the command's own, drawn literally.
+			tool.setArgsComplete();
+			expect(drawn()).toContain('cd /tmp && rg -n "va');
+		} finally {
+			tool.dispose();
+		}
+	});
+});

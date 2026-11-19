@@ -2,12 +2,40 @@
 
 ## [Unreleased]
 
+## [19.0.0] - 2026-11-18
+
+### Breaking Changes
+
+- Spotlight recovery counts reads from local spill files toward recovery counts; reads from artifact references in older sessions continue to count as before.
+
+### Added
+
+- Expanded the Overview's Token mix to include off-transcript model calls—such as title generation, job captions, judge queries, and cache warming—with per-source request counts, token totals, and usage shares.
+- Added a Decision models card to the Overview showing requests, tokens, and usage share by judgment use case for native judgment models.
+- Request details for title-generation and judge calls now display the generated reply or recorded judge answers.
+
+### Changed
+
+- Token mix shares for the main agent, subagents, and advisor now reflect conversation turns only, excluding side-channel model calls.
+
 ### Fixed
 
-- Fixed the `omp stats` Traces tab leaving every background job open to the end of the session, which hid all idle time and stretched each turn bar across the whole timeline ([#19115](https://github.com/can1357/oh-my-pi/pull/19115) by [@will-bogusz](https://github.com/will-bogusz))
-- The Frustration page's per-model table counts every answered message again; since agent notices began landing before replies, about half went uncounted ([#19114](https://github.com/can1357/oh-my-pi/pull/19114) by [@will-bogusz](https://github.com/will-bogusz))
-- The stats dashboard keeps serving its other pages and the Live status while the Spotlight view rebuilds, instead of freezing for the seconds each rebuild after a sync takes ([#19118](https://github.com/can1357/oh-my-pi/pull/19118) by [@will-bogusz](https://github.com/will-bogusz))
-- Daily charts (7d, 30d, 90d, All, Costs and Gain) now group usage by your local calendar day instead of the UTC day, so evening work west of UTC no longer shows under the previous date ([#16605](https://github.com/can1357/oh-my-pi/pull/16605) by [@GarrettShrop](https://github.com/GarrettShrop))
+- Hardened the dashboard against DNS rebinding by rejecting requests made through unconfigured public host names. IP addresses, localhost, LAN short names, local network domains, and Tailscale names remain supported; configure reverse-proxy or other custom domains with OMP_STATS_ALLOWED_HOSTS, including wildcard subdomains such as *.example.com.
+
+## [18.22.1] - 2026-11-17
+
+### Fixed
+
+- Fixed the Gain tab undercounting savings for sessions that use snapcompact context compaction, including backfilling recent compaction history after upgrading.
+
+## [18.20.1] - 2026-11-14
+
+### Fixed
+
+- Fixed Traces tab timing so background jobs show their actual completion times, including accurate idle periods and turn durations.
+- Fixed per-model message counts on the Frustration page to include all answered messages.
+- Improved dashboard responsiveness by keeping other pages and Live status available while Spotlight rebuilds.
+- Fixed daily usage charts to group activity by the user's local calendar day instead of UTC.
 
 ## [18.20.0] - 2026-11-12
 

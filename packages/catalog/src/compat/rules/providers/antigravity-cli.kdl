@@ -1,0 +1,82 @@
+// Catalog entry for "antigravity-cli": Google's Antigravity CLI (`agy acp`)
+// driven as a local subprocess over the Agent Client Protocol.
+
+provider "antigravity-cli" {
+	// `gemini-4-carbon` is the model `agy acp` selects for a new session.
+	default-model "gemini-4-carbon"
+	// ACP exposes model/effort selection, but no per-request output-token cap.
+	preserves-max-output-tokens #false
+	// agy executes its control tools internally alongside the IDE MCP tools.
+	requires-native-tools #true
+
+	// The roster `agy acp` 1.5.9 advertises in `session/new` config options
+	// (orchestrators omitted: they drive agy's own subagents, which this
+	// transport replaces). Context windows are the `usage_update.size` agy
+	// reports after `session/set_config_option`; output caps are the
+	// `maxOutputTokens` agy sends upstream. Plan usage, so no token price.
+	seed api="antigravity-acp" base-url="https://antigravity.google" bundle="always" {
+		model "gemini-4-carbon" name="Gemini 4 Carbon" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1048576 max-tokens=262144
+			supports-tools #true
+		}
+		model "gemini-4-argon" name="Gemini 4 Argon" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1048576 max-tokens=65536
+			supports-tools #true
+		}
+		model "gemini-4-hydrogen" name="Gemini 4 Hydrogen" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1048576 max-tokens=262144
+			supports-tools #true
+		}
+		model "gemini-3.8-flash" name="Gemini 3.8 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1048576 max-tokens=65536
+			supports-tools #true
+		}
+		model "claude-opus-5-5" name="Claude Opus 5.5" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=128000
+			supports-tools #true
+		}
+		model "claude-sonnet-5-5" name="Claude Sonnet 5.5" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=128000
+			supports-tools #true
+		}
+		// agy exposes no thought level for it: the id pins medium reasoning.
+		model "gpt-oss-120b-medium" name="GPT-OSS 120B (Medium)" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=131072 max-tokens=32768
+			supports-tools #true
+		}
+	}
+
+	// Each model's `thought_level` values in `agy acp` 1.5.9; they outrank the
+	// lineage ladders, which add levels this wire cannot select.
+	models "gemini-4-carbon" "gemini-4-argon" "gemini-3.8-flash" "claude-opus-5-5" "claude-sonnet-5-5" {
+		thinking-mode "effort"
+		thinking-efforts "low" "medium" "high"
+		thinking-default-level "medium"
+	}
+	models "gemini-4-hydrogen" {
+		thinking-mode "effort"
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-default-level "medium"
+	}
+}

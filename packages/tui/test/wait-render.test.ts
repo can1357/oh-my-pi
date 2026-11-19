@@ -9,7 +9,8 @@ import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { prompt } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../../coding-agent/src/prompts/tools/task-summary.md" with { type: "text" };
 import type { NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
-import { type CoordinationDetails, waitToolRenderer } from "@oh-my-pi/pi-tui/tools/wait";
+import { type CoordinationDetails, createIrcMessageCard, waitToolRenderer } from "@oh-my-pi/pi-tui/tools/wait";
+import { renderAgentWrite } from "@oh-my-pi/pi-tui/tools/proc-render";
 import { decodeBench } from "./fixtures/job-widget-views";
 
 /** Every described node under `children`, depth first. */
@@ -480,5 +481,75 @@ describe("job renderer task-result preview", () => {
 				for (const line of lines) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(100);
 			}
 		});
+	});
+});
+
+describe("IRC body wrapping", () => {
+	beforeAll(async () => {
+		await initTheme();
+	});
+
+	it("soft-wraps a long body line to the card width when expanded", () => {
+		const longLine = "word ".repeat(40).trim();
+		const component = createIrcMessageCard({ kind: "incoming", from: "Peer", body: longLine }, () => true, theme);
+		const lines = component.render(120) as readonly string[];
+		const stripped = lines.map(line => Bun.stripANSI(line));
+		const bodyLines = stripped.filter(line => line.includes("word"));
+		// A 200-char line wraps to multiple lines at the card width
+		expect(bodyLines.length).toBeGreaterThanOrEqual(2);
+		// Full content preserved across the wrap
+		const words = bodyLines
+			.join(" ")
+			.split(/\s+/)
+			.filter(w => w === "word");
+		expect(words).toHaveLength(40);
+	});
+
+	it("shows every line of an incoming message when expanded", () => {
+		const body = Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n");
+		const component = createIrcMessageCard({ kind: "incoming", from: "Peer", body }, () => true, theme);
+		const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
+		for (let index = 0; index < 30; index++) expect(output).toContain(`line ${index}`);
+		expect(output).not.toContain("more line");
+	});
+
+	it("shows an expand hint on a collapsed card with hidden lines", () => {
+		const body = ["line one", "line two", "line three", "line four"].join("\n");
+		const component = createIrcMessageCard({ kind: "incoming", from: "Peer", body }, () => false, theme);
+		const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
+		// The card shows three lines collapsed, so one of four is hidden.
+		expect(output).toContain("+1 more line");
+		expect(output).toContain("Expand");
+	});
+
+	it("preserves ANSI escape codes across a wrap boundary", () => {
+		const longLine = `\x1b[31m${"red ".repeat(40)}\x1b[0m`;
+		const component = createIrcMessageCard({ kind: "incoming", from: "Peer", body: longLine }, () => true, theme);
+		const lines = component.render(120) as readonly string[];
+		const rawJoined = lines.join("\n");
+		// ANSI codes preserved in raw output
+		expect(rawJoined).toContain("\x1b[31m");
+		expect(rawJoined).toContain("\x1b[0m");
+		// Full visible content preserved after stripping
+		const stripped = Bun.stripANSI(rawJoined);
+		const words = stripped.split(/\s+/).filter(w => w === "red");
+		expect(words).toHaveLength(40);
+	});
+
+	it("wraps an expanded outgoing agent write in full at render(120)", () => {
+		// Twenty long lines: expanded shows every one, each soft-wrapped to the
+		// card width instead of clipped at the fixed cap, with no elision row.
+		const body = Array.from({ length: 20 }, (_, index) => `${"word ".repeat(30)}END-${index}`).join("\n");
+		const component = renderAgentWrite(
+			"peer",
+			body,
+			undefined,
+			undefined,
+			{ expanded: true, isPartial: false },
+			theme,
+		);
+		const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
+		for (let index = 0; index < 20; index++) expect(output).toContain(`END-${index}`);
+		expect(output).not.toContain("more lines");
 	});
 });

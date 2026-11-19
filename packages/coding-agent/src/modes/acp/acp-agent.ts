@@ -81,10 +81,10 @@ import { refreshAgentDiscovery } from "../../task";
 import { sumSubagentTreeCost } from "../agent-hub-runtime";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import {
-	blockText,
 	choiceValue,
 	defaultFormData,
 	fieldQuestions,
+	formContext,
 	type HtmlFormData,
 	type HtmlFormValue,
 	isArrayChoice,
@@ -113,6 +113,7 @@ import {
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
 
 import { cfgDisabledExtensions, cfgExtensions } from "../../extensibility/settings";
+import { cfgMcpStartupTimeoutMs } from "../../mcp/settings";
 import { cfgPlanEnabled } from "../../plan-mode/settings";
 
 const ACP_DEFAULT_MODE_ID = "default";
@@ -659,24 +660,6 @@ async function elicitFromAcpClient(
 }
 
 /**
- * The elicitation message for an HTML form: its section titles and context
- * blocks (paragraphs, lists, preformatted text, tables) as plain text, the
- * fields themselves being schema properties.
- */
-function formElicitationMessage(form: HtmlForm): string {
-	const parts: string[] = [];
-	for (const section of form.sections) {
-		const title = spansText(section.title).trim();
-		if (title) parts.push(title);
-		for (const block of section.blocks) {
-			const text = blockText(block);
-			if (text) parts.push(text);
-		}
-	}
-	return parts.filter(part => part.trim()).join("\n\n") || "Fill in the form";
-}
-
-/**
  * Property holding each "Other" choice field's free-text answer:
  * `<name>__other` ({@link OTHER_SUFFIX}), with more underscores while another
  * control already uses it.
@@ -965,7 +948,8 @@ export function createAcpExtensionUiContext(
 				connection,
 				getSessionId(),
 				"formDialog",
-				formElicitationMessage(form),
+				// Section titles and captions already title the field properties ({@link formContext}).
+				formContext(form).join("\n\n") || "Fill in the form",
 				properties,
 				required.length > 0 ? required : undefined,
 				{
@@ -2174,7 +2158,10 @@ export class AcpAgent implements Agent {
 			await this.#flushMissedFinalAssistantText(record, event);
 			await this.#flushUnreportedTurnError(record, event);
 			await this.#emitEndOfTurnUpdates(record);
-			await this.#waitForAcpPromptIdle(record);
+			await this.#waitForAcpPromptIdle(record, promptTurn);
+			// A follow-up turn's `agent_end` handler can settle the prompt first; this
+			// handler must not then reset or settle the next prompt's state.
+			if (promptTurn.settled) return;
 			record.liveMessageId = undefined;
 			record.liveMessageProgress = undefined;
 			this.#finishPrompt(record, {
@@ -2267,9 +2254,10 @@ export class AcpAgent implements Agent {
 		});
 	}
 
-	async #waitForAcpPromptIdle(record: ManagedSessionRecord): Promise<void> {
+	async #waitForAcpPromptIdle(record: ManagedSessionRecord, promptTurn: PromptTurnState): Promise<void> {
 		for (let pass = 0; pass < ACP_ASYNC_DELIVERY_DRAIN_MAX_PASSES; pass++) {
 			await record.session.waitForIdle();
+			if (promptTurn.settled) return;
 			const delivered = await record.session.drainAsyncJobDeliveriesForAcp({
 				timeoutMs: ACP_ASYNC_DELIVERY_DRAIN_TIMEOUT_MS,
 			});
@@ -2877,7 +2865,7 @@ export class AcpAgent implements Agent {
 
 	/**
 	 * Reload plugin/registry state for an ACP session. Mirrors the interactive
-	 * `/reload-plugins` and `/move` flows: invalidates the plugin-roots cache,
+	 * `/reload-plugins` flow: invalidates the plugin-roots cache,
 	 * refreshes task agents, resets the capability cache, refreshes the
 	 * session's slash-command state, then re-advertises commands so the client
 	 * sees newly installed/disabled plugins.
@@ -3468,7 +3456,14 @@ export class AcpAgent implements Agent {
 			};
 		}
 
-		const result = await manager.connectServers(configs, sources);
+		// Honor the user's startup window like the interactive path does
+		// (`sdk.ts`); `OMP_MCP_STARTUP_TIMEOUT_MS` still takes precedence.
+		const result = await manager.connectServers(
+			configs,
+			sources,
+			undefined,
+			cfgMcpStartupTimeoutMs.get(record.session.settings),
+		);
 		// A client-declared server whose initial connect fails (e.g. an expired
 		// client-owned bearer answering 401 inside the startup window) must not
 		// abort session creation: the record keeps the manager with the failed

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
- * Pins pi-ast to a stencil-hq/wasm-grammars release: fetches its
- * `manifest.json` and regenerates `crates/pi-ast/src/language/wasm_grammars.rs`,
+ * Pins omp-ast to a stencil-hq/wasm-grammars release: fetches its
+ * `manifest.json` and regenerates `crates/ast/src/language/wasm_grammars.rs`,
  * the table of WebAssembly grammars (file names, SHA-256 digests, sizes) the
  * addon loads and the agent downloads on demand.
  *
@@ -10,15 +10,15 @@
  *   bun run gen:grammars -- v3                   # a specific release tag
  *   bun run gen:grammars -- ./dist/manifest.json # a local wasm-grammars build
  *
- * A language pi-ast maps to a wasm grammar but the manifest lacks fails to
- * compile (`grammar!(wasm …)` in `crates/pi-ast/src/language/mod.rs`).
+ * A language omp-ast maps to a wasm grammar but the manifest lacks fails to
+ * compile (`grammar!(wasm …)` in `crates/ast/src/language/mod.rs`).
  */
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 
 const REPO = "stencil-hq/wasm-grammars";
 const REPO_ROOT = path.join(import.meta.dir, "..");
-const TABLE = path.join(REPO_ROOT, "crates", "pi-ast", "src", "language", "wasm_grammars.rs");
+const TABLE = path.join(REPO_ROOT, "crates", "omp-ast", "src", "language", "wasm_grammars.rs");
 
 /** A wasm-grammars release `manifest.json`; `tree_sitter` is the CLI version, which fixes the wasm ABI. */
 const Manifest = type({
@@ -45,7 +45,7 @@ const [builtMinor, runtimeMinor] = [manifest.tree_sitter, runtime].map(version =
 if (builtMinor !== runtimeMinor) {
 	console.error(
 		`gen-grammars: ${manifest.release} was built by tree-sitter-cli ${manifest.tree_sitter}, ` +
-			`but pi-ast links tree-sitter ${runtime}; their wasm ABIs differ`,
+			`but omp-ast links tree-sitter ${runtime}; their wasm ABIs differ`,
 	);
 	process.exit(1);
 }
