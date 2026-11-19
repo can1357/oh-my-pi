@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed unchanged extensions adding new Bun transpiler cache files on every launch ([#19780](https://github.com/can1357/oh-my-pi/issues/19780)).
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes

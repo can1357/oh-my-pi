@@ -9,8 +9,13 @@ const healthProbePath = path.resolve(import.meta.dir, "fixtures", "legacy-pi-ext
 const cjsProbePath = path.resolve(import.meta.dir, "fixtures", "legacy-pi-extension-cjs-cache-probe.ts");
 const tempDirs: TempDir[] = [];
 
-async function runProbe(cacheRoot: string, script: string = probePath, args: string[] = []): Promise<string> {
-	const env: Record<string, string | undefined> = { ...process.env, XDG_CACHE_HOME: cacheRoot };
+async function runProbe(
+	cacheRoot: string,
+	script: string = probePath,
+	args: string[] = [],
+	extraEnv: Record<string, string> = {},
+): Promise<string> {
+	const env: Record<string, string | undefined> = { ...process.env, XDG_CACHE_HOME: cacheRoot, ...extraEnv };
 	for (const key of ["PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE", "PI_CONFIG_DIR"]) {
 		delete env[key];
 	}
@@ -48,10 +53,33 @@ test("warm extension analysis preserves import rewriting without reparsing", asy
 
 	expect(await runProbe(cacheRoot)).toBe('import value from "./dependency.js?mtime=7";\n');
 
-	// Each real load uses a fresh tag; the warm run must still hit the cache.
+	// A same-process reload changes the tag; warm analysis must still hit the parse cache.
 	expect(await runProbe(cacheRoot, probePath, ["--expect-cache-hit", "--tag=8"])).toBe(
 		'import value from "./dependency.js?mtime=8";\n',
 	);
+});
+
+test("unchanged extension reuses Bun's transpiler cache across processes", async () => {
+	const tempDir = TempDir.createSync("@legacy-pi-transpiler-cache-");
+	tempDirs.push(tempDir);
+	const cacheRoot = path.join(tempDir.path(), "cache");
+	const transpilerCache = path.join(tempDir.path(), "transpiler-cache");
+	await fs.mkdir(path.join(cacheRoot, "omp"), { recursive: true });
+	await fs.mkdir(transpilerCache, { recursive: true });
+	const entry = path.join(tempDir.path(), "extension", "index.ts");
+	await Bun.write(
+		entry,
+		`import { value } from "./helper.ts";\nexport const result = value;\n${"// padding\n".repeat(7000)}`,
+	);
+	await Bun.write(path.join(path.dirname(entry), "helper.ts"), 'export const value = "stable";\n');
+	const env = { BUN_RUNTIME_TRANSPILER_CACHE_PATH: transpilerCache };
+
+	expect(await runProbe(cacheRoot, cjsProbePath, [entry], env)).toBe("stable\n");
+	const firstLaunch = (await fs.readdir(transpilerCache)).filter(file => file.endsWith(".pile")).sort();
+	expect(firstLaunch.length).toBeGreaterThan(0);
+
+	expect(await runProbe(cacheRoot, cjsProbePath, [entry], env)).toBe("stable\n");
+	expect((await fs.readdir(transpilerCache)).filter(file => file.endsWith(".pile")).sort()).toEqual(firstLaunch);
 });
 
 test("warm CommonJS classification of type-less script dependencies does not reparse", async () => {

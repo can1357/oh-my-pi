@@ -1189,8 +1189,8 @@ async function rewriteLegacyExtensionSource(
 		}
 	}
 	// Resolve `require()` targets against the original source rather than the
-	// import-rewritten text: the rewrite embeds a per-load `?mtime=` tag, which
-	// would give every load a fresh parse-cache key and force a Babel reparse.
+	// import-rewritten text: same-process reloads change the embedded tag and
+	// would otherwise force a Babel reparse.
 	// Import and require references never overlap, so one pass applies both.
 	replacements.push(...(await collectExtensionSpecifierReplacements(source, importerPath)));
 	return applySpecifierReplacements(source, replacements);
@@ -2198,11 +2198,17 @@ export function ensureGraphCommonJsRequireRegistered(): void {
 
 ensureGraphCommonJsRequireRegistered();
 
-let legacyPiLoadTag = 0;
+declare global {
+	/** Process-wide counts prevent a second loader instance from reusing an evaluated module graph. */
+	var __ompLegacyPiLoadCounts: Map<string, number> | undefined;
+}
 
-function nextLegacyPiLoadTag(): string {
-	legacyPiLoadTag = Math.max(legacyPiLoadTag + 1, Date.now());
-	return String(legacyPiLoadTag);
+function nextLegacyPiLoadTag(entryRealPath: string): string {
+	const counts = (globalThis.__ompLegacyPiLoadCounts ??= new Map<string, number>());
+	const count = (counts.get(entryRealPath) ?? 0) + 1;
+	counts.set(entryRealPath, count);
+	// Fixed-width path hash separates graphs while the count busts only same-process reloads.
+	return `${Bun.hash(entryRealPath).toString().padStart(20, "0")}${count}`;
 }
 
 /** Resolve symlinks in a path, falling back to the input if realpath fails. */
@@ -2749,7 +2755,7 @@ export async function loadLegacyPiModule(resolvedPath: string, options: { reload
 			? toImportSpecifier(entryRealPath)
 			: stripWindowsExtendedLengthPathPrefix(entryRealPath);
 		if (options.reload === false) return await import(entrySpecifier);
-		return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag()}`);
+		return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag(entryRealPath)}`);
 	} finally {
 		// Drop whatever the initial import didn't consume: graph modules only
 		// reached by lazy dynamic imports must be read from disk at their actual
