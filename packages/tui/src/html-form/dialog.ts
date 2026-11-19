@@ -301,7 +301,7 @@ function splitLines(spans: readonly FormSpan[]): FormSpan[][] {
 	return lines;
 }
 
-/** One line of spans styled over `base`; code keeps the markdown code color. */
+/** One line of spans styled over `base`; code keeps the markdown code color, mark inverts. */
 function styleSpans(spans: readonly FormSpan[], base: (text: string) => string): string {
 	let out = "";
 	for (const span of spans) {
@@ -309,6 +309,7 @@ function styleSpans(spans: readonly FormSpan[], base: (text: string) => string):
 		if (span.style === "code") out += theme.fg("mdCode", text);
 		else if (span.style === "strong") out += theme.bold(base(text));
 		else if (span.style === "em") out += theme.italic(base(text));
+		else if (span.style === "mark") out += `\x1b[7m${base(text)}\x1b[27m`;
 		else out += base(text);
 	}
 	return out;
@@ -2016,12 +2017,16 @@ export class HtmlFormDialog implements Component, Focusable {
 				};
 			}
 			case "table": {
-				const cells = block.rows.map(row => row.map(cell => sanitize(spansText(cell))));
+				const cells = block.rows;
 				const count = Math.max(0, ...cells.map(row => row.length));
 				const columns: TableColumn[] = Array.from({ length: count }, (_, column) => ({
 					width: Math.max(
 						1,
-						...cells.flatMap(row => (row[column] ?? "").split("\n").map(line => visibleWidth(line))),
+						...cells.flatMap(row =>
+							sanitize(spansText(row[column] ?? []))
+								.split("\n")
+								.map(line => visibleWidth(line)),
+						),
 					),
 					minWidth: 4,
 					align: "left",
@@ -2034,7 +2039,9 @@ export class HtmlFormDialog implements Component, Focusable {
 						index < block.headerRows
 							? (text: string) => theme.bold(theme.fg("text", text))
 							: (text: string) => theme.fg("muted", text);
-					const padded = Array.from({ length: count }, (_, column) => ({ text: row[column] ?? "", style }));
+					const padded = Array.from({ length: count }, (_, column) => ({
+						text: column < row.length ? styleSpans(row[column]!, style) : "",
+					}));
 					lines.push(...renderTableRowLines(padded, columns, width, { gap: "  " }));
 				});
 				return { lines };
