@@ -15,6 +15,7 @@
 - Fixed `^model` mentions in extension messages sent with `sendUserMessage({ deliverAs: "steer" | "followUp" | "aside" })` while the agent is busy reaching the model as literal text ([#19799](https://github.com/can1357/oh-my-pi/pull/19799) by [@H4vC](https://github.com/H4vC))
 - Fixed every message queued behind an undelivered `^model` mention repeating the "`m<N>` now available" notice to the model ([#19799](https://github.com/can1357/oh-my-pi/pull/19799) by [@H4vC](https://github.com/H4vC))
 - Fixed the browser relay extension dying silently in a browser whose loaded permission set predates the `downloads` permission: it now keeps working without download pairing, and the relay reports a download tracking gap instead of a generic not-found ([#19659](https://github.com/can1357/oh-my-pi/pull/19659) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+- Fixed `/loop` iterations and `/goal` continuations firing ~800ms after a turn yields to wait on background subagents or jobs; they now wait until the run finishes ([#19781](https://github.com/can1357/oh-my-pi/issues/19781))
 
 ## [19.0.0] - 2026-11-18
 

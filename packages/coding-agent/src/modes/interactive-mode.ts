@@ -3608,8 +3608,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (was) this.showStatus(message);
 	}
 
+	/**
+	 * Whether loop iterations and goal continuations must hold off. An open run
+	 * counts even while paused on background subagents/jobs: its terminal
+	 * `agent_end` re-arms both.
+	 */
 	#isAutoSubmitBlocked(): boolean {
-		return this.session.isStreaming || this.session.isCompacting || this.session.hasPostPromptWork;
+		return (
+			this.session.isStreaming ||
+			this.session.isCompacting ||
+			this.session.hasPostPromptWork ||
+			this.session.isRunActive
+		);
 	}
 
 	#submitLoopPromptWhenReady(prompt: string): void {
