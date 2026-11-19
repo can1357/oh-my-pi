@@ -43,12 +43,16 @@ const scriptedIdleExtension = `function (pi) {
 			return stream;
 		},
 	});
+	pi.on("session_start", async () => {
+		await pi.sendUserMessage("First turn");
+		await pi.sendUserMessage("Second turn");
+	});
 }
 `;
 
 describe("RPC idle maintenance", () => {
 	it(
-		"runs configured idle compaction without journaling an idle recap",
+		"runs configured idle compaction after extension startup turns without journaling an idle recap",
 		async () => {
 			await using temp = await TempDir.create("@rpc-idle-maintenance-");
 			const sourceDir = path.resolve(import.meta.dir, "../src");
@@ -57,6 +61,7 @@ describe("RPC idle maintenance", () => {
 				fixturePath,
 				`
 import { createAssistantMessageEventStream } from ${JSON.stringify(path.resolve(import.meta.dir, "../../ai/src/index.ts"))};
+import { buildModel } from ${JSON.stringify(path.resolve(import.meta.dir, "../../catalog/src/build.ts"))};
 import { createAgentSession, Settings } from ${JSON.stringify(path.join(sourceDir, "sdk.ts"))};
 import { runRpcMode } from ${JSON.stringify(path.join(sourceDir, "modes/rpc/rpc-mode.ts"))};
 
@@ -68,6 +73,18 @@ const { session } = await createAgentSession({
 	enableLsp: false,
 	disableExtensionDiscovery: true,
 	extensions: [${scriptedIdleExtension}],
+	model: buildModel({
+		id: "idle",
+		name: "Scripted idle",
+		api: "scripted-idle",
+		provider: "scripted",
+		baseUrl: "http://127.0.0.1:9/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 500000,
+		maxTokens: 4096,
+	}),
 	settings: Settings.isolated({
 		"compaction.enabled": true,
 		"compaction.autoContinue": false,
@@ -108,15 +125,10 @@ await runRpcMode(session, { headless: true });
 				timeout: RPC_CHILD_TIMEOUT_MS,
 			});
 			const stderr = new Response(child.stderr).text();
-			const send = async (frame: object) => {
-				child.stdin.write(`${JSON.stringify(frame)}\n`);
-				await child.stdin.flush();
-			};
 			let autoCompactionStart: unknown;
 			let autoCompactionEnd: unknown;
 			const frames: unknown[] = [];
 			try {
-				await send({ type: "set_model", id: "model", provider: "scripted", modelId: "idle" });
 				for await (const frame of readJsonl<unknown>(child.stdout)) {
 					if (!isRecord(frame)) continue;
 					frames.push({
@@ -129,12 +141,7 @@ await runRpcMode(session, { headless: true });
 						stopReason: isRecord(frame.message) ? frame.message.stopReason : undefined,
 						errorMessage: isRecord(frame.message) ? frame.message.errorMessage : undefined,
 					});
-					if (frame.type === "response" && frame.id === "model") {
-						if (frame.success !== true) throw new Error(`Scripted model unavailable: ${JSON.stringify(frame)}`);
-						await send({ type: "prompt", id: "first", message: "First turn" });
-					} else if (frame.type === "prompt_result" && frame.id === "first") {
-						await send({ type: "prompt", id: "second", message: "Second turn" });
-					} else if (frame.type === "auto_compaction_start") {
+					if (frame.type === "auto_compaction_start") {
 						autoCompactionStart = frame;
 					} else if (frame.type === "auto_compaction_end") {
 						autoCompactionEnd = frame;

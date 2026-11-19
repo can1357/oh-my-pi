@@ -49,6 +49,7 @@ describe("RPC goal command", () => {
 		script?: "complete" | "idle" | "slow";
 		plan?: boolean;
 		persist?: boolean;
+		idleMaintenance?: boolean;
 	}): Promise<RpcClient> {
 		directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-goal-"));
 		client = new RpcClient({
@@ -61,6 +62,7 @@ describe("RPC goal command", () => {
 				GOAL_RPC_SCRIPT: options.script ?? "complete",
 				GOAL_RPC_PLAN: options.plan ? "1" : "0",
 				GOAL_RPC_PERSIST: options.persist ? "1" : "0",
+				GOAL_RPC_IDLE_MAINTENANCE: options.idleMaintenance ? "1" : "0",
 			},
 		});
 		await client.start();
@@ -110,6 +112,28 @@ describe("RPC goal command", () => {
 			message => message.role === "custom" && message.customType === "goal-continuation",
 		);
 		expect(continuations).toHaveLength(1);
+	}, 30_000);
+
+	test("dropping a held goal continuation refreshes idle maintenance", async () => {
+		const rpc = await start({ continuation: true, script: "idle", idleMaintenance: true });
+		const callsPath = path.join(directory!, "idle-refresh.calls");
+		const callCount = async () => {
+			const calls = await fs.readFile(callsPath, "utf8").catch(() => "");
+			return calls.trim() ? calls.trim().split("\n").length : 0;
+		};
+		await rpc.promptAndWait("/goaltest-hold-continuation");
+		await rpc.goal("create", { objective: "drop before admission" });
+		const beforeDrop = await callCount();
+		await rpc.goal("drop");
+		await rpc.promptAndWait("/goaltest-release-continuation");
+		await withTimeout(
+			(async () => {
+				while ((await callCount()) === beforeDrop) await Bun.sleep(10);
+			})(),
+			5_000,
+			"Dropped continuation did not refresh idle maintenance",
+		);
+		expect(await callCount()).toBe(beforeDrop + 1);
 	}, 30_000);
 
 	test("create refuses a second goal, a paused goal, and invalid input; pause/resume/drop restore tools", async () => {

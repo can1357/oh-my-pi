@@ -1456,8 +1456,11 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const extensionUserMessageTracker = new RpcExtensionUserMessageTracker();
 	const wordPredictor = new RpcWordPredictor();
 	const btw = new RpcBtwController(session, output);
-	// A continuation abandoned while waiting leaves nothing to end the activity stretch: re-check settlement.
-	const goalController = new RpcGoalController(session, () => void settleWatcher.check());
+	// A continuation abandoned while waiting leaves nothing to end the activity stretch: re-check settlement and idle work.
+	const goalController = new RpcGoalController(session, () => {
+		session.refreshIdleMaintenance();
+		void settleWatcher.check();
+	});
 	// A scheduled or held goal turn will start a turn: every settle report treats it as busy,
 	// and any report of "not settled" for that reason is later closed by `session_settled`.
 	const goalTurnScheduled = watchedScheduledTurnProbe(
@@ -1756,6 +1759,13 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	};
 	inputRead.then(rejectStartupDialogs, rejectStartupDialogs);
 
+	let rpcStartupComplete = false;
+	session.enableIdleMaintenance({
+		recap: false,
+		isBlocked: () => !rpcStartupComplete,
+		scheduledTurn: goalTurnScheduled,
+	});
+
 	// Set up extensions with RPC-based UI context
 	await initializeExtensions(session, {
 		mode: "rpc",
@@ -1813,7 +1823,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	});
 	await goalController.reconcile();
 	await goalController.settled();
-	session.enableIdleMaintenance({ recap: false, scheduledTurn: goalTurnScheduled });
+	rpcStartupComplete = true;
+	session.refreshIdleMaintenance();
 
 	// Discriminates a store failure from any other dispose rejection below.
 	let persistenceFailure: Error | undefined;
