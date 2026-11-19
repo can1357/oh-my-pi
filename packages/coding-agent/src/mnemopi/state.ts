@@ -985,9 +985,11 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 						error,
 					);
 				});
-			} else if (event.type === "agent_end") {
+			} else if (event.type === "agent_end" || (event.type === "agent_pause" && event.yielded)) {
+				// The run's `agent_end` waits until no job, child agent or peer can resume it;
+				// a yielded pause ends the model's turn while such work keeps the run open.
 				void this.maybeRetainOnAgentEnd(event.messages).catch(error => {
-					this.#logLifecycleFailure("agent_end retention", [this.#local().retain.bank], error);
+					this.#logLifecycleFailure("turn-end retention", [this.#local().retain.bank], error);
 				});
 			}
 		});

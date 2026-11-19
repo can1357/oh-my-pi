@@ -221,11 +221,6 @@ describe("GlobTool hard-cap limit notice", () => {
 
 	type GlobExecuteResult = Awaited<ReturnType<GlobTool["execute"]>>;
 
-	function textOf(result: GlobExecuteResult): string {
-		const first = result.content[0];
-		return first?.type === "text" && first.text !== undefined ? first.text : "";
-	}
-
 	function limitNotice(result: GlobExecuteResult): string {
 		return formatOutputNotice((result.details as { meta?: OutputMeta } | undefined)?.meta);
 	}
