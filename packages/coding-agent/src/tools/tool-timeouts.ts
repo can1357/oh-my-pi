@@ -24,16 +24,22 @@ export type ToolWithTimeout = keyof typeof TOOL_TIMEOUTS;
 /**
  * Clamp a raw timeout to the allowed range for a tool.
  *
- * When `rawTimeout` is undefined the tool's `default` is used. A positive
- * `maxTimeout` (the `tools.maxTimeout` global ceiling) caps the *resolved*
- * value — including the default-fallback path — before the per-tool `min`/`max`
- * floor and ceiling apply, so a configured global cap governs calls where the
- * agent omits `timeout`, not only explicitly-passed values. `maxTimeout <= 0`
- * means no global cap.
+ * When `rawTimeout` is undefined, `defaultTimeout` (a domain setting such as
+ * `eval.defaultTimeout`) replaces the tool's static `default` when supplied.
+ * A positive `maxTimeout` (the `tools.maxTimeout` global ceiling) caps the
+ * *resolved* value — including the default-fallback path — before the per-tool
+ * `min`/`max` floor and ceiling apply, so a configured global cap governs calls
+ * where the agent omits `timeout`, not only explicitly-passed values.
+ * `maxTimeout <= 0` means no global cap.
  */
-export function clampTimeout(tool: ToolWithTimeout, rawTimeout?: number, maxTimeout?: number): number {
+export function clampTimeout(
+	tool: ToolWithTimeout,
+	rawTimeout?: number,
+	maxTimeout?: number,
+	defaultTimeout?: number,
+): number {
 	const config = TOOL_TIMEOUTS[tool];
-	const timeout = rawTimeout ?? config.default;
+	const timeout = rawTimeout ?? defaultTimeout ?? config.default;
 	const capped = maxTimeout !== undefined && maxTimeout > 0 ? Math.min(timeout, maxTimeout) : timeout;
 	return Math.max(config.min, Math.min(config.max, capped));
 }

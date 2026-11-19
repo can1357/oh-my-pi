@@ -69,6 +69,7 @@ import {
 	cfgEvalAutoBackgroundEnabled,
 	cfgEvalAutoBackgroundThresholdMs,
 	cfgEvalAutoProvision,
+	cfgEvalDefaultTimeout,
 	cfgEvalToolsEnabled,
 } from "../eval/settings";
 import { cfgTaskMaxRecursionDepth, perCallModelEnabled } from "../task/settings";
@@ -123,14 +124,14 @@ const evalCellCommonFields = {
 	"reset?": type("boolean").describe("Wipe only this kernel."),
 };
 
-function evalTimeoutSchema(maxTimeout?: number) {
+function evalTimeoutSchema(maxTimeout?: number, defaultTimeout: number = TOOL_TIMEOUTS.eval.default) {
 	const { min, max } = TOOL_TIMEOUTS.eval;
 	const configured =
 		maxTimeout !== undefined && maxTimeout > 0
 			? ` Configured tools.maxTimeout: ${maxTimeout}s (effective ceiling ${clampTimeout("eval", max, maxTimeout)}s).`
 			: "";
 	return type("number").describe(
-		`Cell deadline in seconds; nonzero values clamp to ${min}–${max}; 0 disables it.${configured}`,
+		`Cell deadline in seconds; defaults to ${defaultTimeout}s; nonzero values clamp to ${min}–${max}; 0 disables it.${configured}`,
 	);
 }
 
@@ -155,11 +156,15 @@ export type EvalCellInput = EvalToolParams;
  * tool description stay in lockstep with {@link resolveAdvertisedEvalBackends}. The static
  * {@link evalSchema} (full union) remains the type-level source of truth.
  */
-function buildEvalSchema(langs: readonly EvalLanguageToken[], maxTimeout?: number): typeof evalSchema {
+function buildEvalSchema(
+	langs: readonly EvalLanguageToken[],
+	maxTimeout?: number,
+	defaultTimeout?: number,
+): typeof evalSchema {
 	const schema = type({
 		language: type.enumerated(...langs).describe(describeLanguageField(langs)),
 		...evalCellCommonFields,
-		"timeout?": evalTimeoutSchema(maxTimeout),
+		"timeout?": evalTimeoutSchema(maxTimeout, defaultTimeout),
 	});
 	return schema;
 }
@@ -370,10 +375,17 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	get parameters(): typeof evalSchema {
 		const langs = this.#enabledLanguages();
 		const maxTimeout = this.session ? cfgToolsMaxTimeout.get(this.session.settings) : undefined;
-		if (langs.length === EVAL_LANGUAGE_ORDER.length && !maxTimeout) return evalSchema;
-		const key = `${langs.join(",")}:${maxTimeout ?? 0}`;
+		const defaultTimeout = this.session ? cfgEvalDefaultTimeout.get(this.session.settings) : undefined;
+		if (
+			langs.length === EVAL_LANGUAGE_ORDER.length &&
+			!maxTimeout &&
+			(defaultTimeout === undefined || defaultTimeout === TOOL_TIMEOUTS.eval.default)
+		) {
+			return evalSchema;
+		}
+		const key = `${langs.join(",")}:${maxTimeout ?? 0}:${defaultTimeout ?? 0}`;
 		if (this.#paramsKey !== key) {
-			this.#cachedParams = buildEvalSchema(langs, maxTimeout);
+			this.#cachedParams = buildEvalSchema(langs, maxTimeout, defaultTimeout);
 			this.#paramsKey = key;
 		}
 		return this.#cachedParams ?? evalSchema;
@@ -485,7 +497,14 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		// the cell IdleTimeout is armed only later in #runCells, so a hung runtime
 		// probe would otherwise wedge the whole turn (issue #9466).
 		const cellTimeoutSec =
-			params.timeout === 0 ? 0 : clampTimeout("eval", params.timeout, cfgToolsMaxTimeout.get(session.settings));
+			params.timeout === 0
+				? 0
+				: clampTimeout(
+						"eval",
+						params.timeout,
+						cfgToolsMaxTimeout.get(session.settings),
+						cfgEvalDefaultTimeout.get(session.settings),
+					);
 		const cellTimeoutMs = cellTimeoutSec * 1000;
 		const timeoutNotice =
 			params.timeout !== undefined && params.timeout !== cellTimeoutSec
