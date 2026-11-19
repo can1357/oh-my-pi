@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added configurable `eval.defaultTimeout` for eval cells that omit a timeout, so long-running tool, agent, and network cells are no longer cut off by the fixed 30s default ([#19801](https://github.com/can1357/oh-my-pi/pull/19801) by [@2118505078xyh1](https://github.com/2118505078xyh1)).
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes
