@@ -29,6 +29,8 @@ export const GAP = "~gap";
 export const TAIL = "~tail";
 /** Lines of a file no record covers at all. */
 export const UNRECORDED = "~none";
+/** A net change whose ownership the edit replay cannot separate from already committed lines. */
+export const REORDERED = "~reordered";
 /** Inserter of lines present in HEAD. */
 const HEAD = "~head";
 /** Largest HEAD-side × worktree-side item product a cancellation window aligns; larger ones stay as replayed. */
@@ -250,7 +252,49 @@ export function attribute(head: readonly string[], steps: readonly Step[], work:
 	});
 	const alive = items.filter(item => item.alive).map(item => item.text);
 	if (!linesEqual(alive, work)) throw new Error("attribution chain does not end at the worktree content");
-	return deriveOps(items);
+	const replay = deriveOps(items);
+	// After HEAD advances independently, crossing equal lines can strand a deletion and its
+	// reinsertion in different hunks. Selecting just one would commit a change neither side made.
+	if (steps[0]?.actor !== PRE || replay.ops.length === Math.abs(work.length - head.length)) return replay;
+	const net = changedRegions(head, work);
+	const netCount = net.reduce((count, r) => count + (r.i2 - r.i1) + (r.j2 - r.j1), 0);
+	if (netCount >= replay.ops.length) return replay;
+	return reconcileNetHunks(head, work, replay, net);
+}
+
+/** Keep the replay's exact ops and ordering where it agrees with the net diff. Else offer only
+ * the real hunk, for explicit review: matching repeated text is not proof of who wrote it. */
+function reconcileNetHunks(
+	head: readonly string[],
+	work: readonly string[],
+	replay: Attribution,
+	regions: readonly Region[],
+): Attribution {
+	const sources = replay.items.filter(item => item.op !== undefined);
+	const result: Item[] = [];
+	const base = { by: HEAD, over: [], step: -1 };
+	let i = 0;
+	let h = 0;
+	for (const r of regions) {
+		for (; i < r.i1; i++) result.push({ ...base, text: head[i], head: i, alive: true });
+		while (h < replay.hunks.length && (replay.hunks[h].headStart < i || replay.hunks[h].workStart < r.j1)) h++;
+		const old = replay.hunks[h];
+		if (
+			old &&
+			old.headStart === i &&
+			old.workStart === r.j1 &&
+			old.headCount === r.i2 - i &&
+			old.workCount === r.j2 - r.j1
+		) {
+			for (const op of old.ops) result.push(sources[op.id]);
+			i = r.i2;
+		} else {
+			for (; i < r.i2; i++) result.push({ ...base, text: head[i], head: i, alive: false, deletedBy: REORDERED });
+			for (let j = r.j1; j < r.j2; j++) result.push({ ...base, text: work[j], by: REORDERED, alive: true });
+		}
+	}
+	for (; i < head.length; i++) result.push({ ...base, text: head[i], head: i, alive: true });
+	return deriveOps(result);
 }
 
 /** An unchanged HEAD line: present in HEAD and alive in the current content. */
@@ -487,6 +531,7 @@ export type OpStatus = "own" | "other" | "review";
 
 /** Why an op is not plainly own/other; drives the review explanation shown to the agent. */
 export type ReviewReason =
+	| { kind: "reordered" }
 	/** An in-scope agent edited lines that out-of-scope actors added and never committed. */
 	| { kind: "entangled"; with: readonly string[] }
 	/** An out-of-scope actor rewrote lines that in-scope agents wrote. */
@@ -533,6 +578,12 @@ export function classify(attribution: Attribution, scope: ReadonlySet<string>): 
 		}
 		let review = false;
 		for (const op of hunk.ops) {
+			if (op.by === REORDERED) {
+				status[op.id] = "review";
+				reasons.set(op.id, { kind: "reordered" });
+				review = true;
+				continue;
+			}
 			if (likelySteps.has(op.step) && isPseudoActor(op.by)) {
 				status[op.id] = "own";
 				likely.add(op.id);
