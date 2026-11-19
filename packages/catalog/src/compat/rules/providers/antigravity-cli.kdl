@@ -2,8 +2,10 @@
 // driven as a local subprocess over the Agent Client Protocol.
 
 provider "antigravity-cli" {
-	// `gemini-4-neon` is the model `agy acp` selects for a new session.
-	default-model "gemini-4-neon"
+	// Bundled fallback when discovery supplies no provider default. `agy acp`
+	// 1.5.11 opens new sessions on `gemini-4-neon`, but rosters vary by account,
+	// so the default stays on `gemini-4-carbon`.
+	default-model "gemini-4-carbon"
 	// ACP exposes model/effort selection, but no per-request output-token cap.
 	preserves-max-output-tokens #false
 	// agy executes its control tools internally alongside the IDE MCP tools.
