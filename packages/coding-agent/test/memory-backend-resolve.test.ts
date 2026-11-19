@@ -18,6 +18,12 @@ describe("resolveMemoryBackend", () => {
 		expect((await resolveMemoryBackend(b)).id).toBe("hindsight");
 	});
 
+	it("returns the supermemory backend when memory.backend is supermemory", async () => {
+		expect((await resolveMemoryBackend(Settings.isolated({ "memory.backend": "supermemory" }))).id).toBe(
+			"supermemory",
+		);
+	});
+
 	it("exposes inactive status when no session is available", async () => {
 		const memory = createMemoryRuntimeContext({ agentDir: "/tmp/agent", cwd: "/tmp/project" });
 

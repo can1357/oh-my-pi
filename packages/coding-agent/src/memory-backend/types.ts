@@ -11,9 +11,10 @@ import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { HindsightSessionStateApi } from "../hindsight/state";
 import type { MnemopiSessionStateApi } from "../mnemopi/state";
+import type { SupermemorySessionStateApi } from "../supermemory/state";
 import type { AgentSession } from "../session/agent-session";
 
-export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi" | "sharpshooter";
+export type MemoryBackendId = "off" | "local" | "hindsight" | "mnemopi" | "sharpshooter" | "supermemory";
 
 export interface MemoryBackendStatus {
 	backend: MemoryBackendId;
@@ -90,6 +91,7 @@ export interface MemoryBackendStartOptions {
 	taskDepth: number;
 	parentHindsightSessionState?: HindsightSessionStateApi;
 	parentMnemopiSessionState?: MnemopiSessionStateApi;
+	parentSupermemorySessionState?: SupermemorySessionStateApi;
 }
 
 /** A successful recall, including an empty result, staged until user-turn delivery. */

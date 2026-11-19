@@ -140,3 +140,8 @@ export function formatPercent(ratio: number): string {
 export function normalizePremiumRequests(value: number): number {
 	return Math.round((value + Number.EPSILON) * 100) / 100;
 }
+
+/** `value` bounded to `[min, max]`. */
+export function clamp(value: number, min: number, max: number): number {
+	return Math.max(min, Math.min(value, max));
+}

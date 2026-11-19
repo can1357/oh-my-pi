@@ -5,6 +5,7 @@ import { sanitizeSkillName, writeManagedSkill } from "../autolearn/managed-skill
 import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import { localBackend } from "../memory-backend/local-backend";
+import { isSupermemoryConfigured, loadSupermemoryConfig } from "../supermemory/config";
 import learnDescription from "../prompts/tools/learn.md" with { type: "text" };
 import type { ToolSession } from ".";
 
@@ -71,8 +72,10 @@ export class LearnTool implements AgentTool<LearnSchema> {
 	static createIf(session: ToolSession): LearnTool | null {
 		if (!cfgAutolearnEnabled.get(session.settings)) return null;
 		const backend = cfgMemoryBackend.get(session.settings);
-		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "local") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "supermemory" && backend !== "local")
+			return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
+		if (backend === "supermemory" && !isSupermemoryConfigured(loadSupermemoryConfig(session.settings))) return null;
 		return new LearnTool(session);
 	}
 
@@ -117,6 +120,16 @@ export class LearnTool implements AgentTool<LearnSchema> {
 				const reason = error instanceof Error ? error.message : String(error);
 				throw new Error(`Mnemopi did not store the lesson: ${reason}`, { cause: error });
 			}
+		} else if (backend === "supermemory") {
+			const state = this.session.getSupermemorySessionState?.();
+			if (!state) {
+				throw new Error("Supermemory backend is not initialised for this session.");
+			}
+			// Throws before queueing when the outbox cannot persist the lesson, so no skill is written either.
+			await state.enqueueRetain(toolCallId, [
+				{ content: params.memory, context: params.context, source: "coding-agent-learn" },
+			]);
+			memoryMessage = "Lesson queued for retention";
 		} else if (backend === "local") {
 			const result = await localBackend.save?.(
 				{ agentDir: this.session.settings.getAgentDir(), cwd: this.session.cwd },

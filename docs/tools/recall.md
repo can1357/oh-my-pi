@@ -19,7 +19,7 @@
 ## Registration / Visibility
 
 - Tool metadata: `approval = "read"`, `strict = true`, `loadMode = "discoverable"`.
-- The tool is registered only for `memory.backend = "hindsight"` or `"mnemopi"`; it is absent for `"off"` and `"local"`. Hindsight additionally requires a non-empty configured API URL (`isHindsightConfigured(loadHindsightConfig(...))`).
+- The tool is registered only for `memory.backend = "hindsight"`, `"mnemopi"`, or `"supermemory"`; it is absent for `"off"` and `"local"`. Hindsight additionally requires a non-empty configured API URL (`isHindsightConfigured(loadHindsightConfig(...))`); Supermemory requires an API key, an accepted base URL and no invalid `SUPERMEMORY_NAMESPACE` (`isSupermemoryConfigured(loadSupermemoryConfig(...))`).
 - In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set for either supported backend. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://recall`; an explicitly requested tool remains top-level.
 - Execution is single-shot. The tool does not emit streaming argument/result updates.
@@ -88,6 +88,15 @@ When no matches exist:
    - `per-project-tagged` — recall reads the cwd-derived project bank and shared bank, then merges results.
    - Per-project modes may also read safely identified legacy cwd-only banks to recover memories created under the earlier git-root-derived scheme.
 - Session scope: reads cross-session memory data, using the active session's cached config and scope. Subagent aliases use the parent's backend scope.
+
+### Supermemory
+
+- Reads `session.getSupermemorySessionState()`; throws `Supermemory backend is not initialised for this session.` when it is missing.
+- `POST /ns/{namespace}/search` on the session namespace with `query`, `supermemory.searchMode`, `supermemory.threshold` and `supermemory.recallLimit` all sent explicitly (v5's defaults differ), and `rewriteQuery: false`. The query is secret-redacted first.
+- Results render through `formatMemories(...)` like Hindsight; empty results return `No relevant memories found.` with `useless: true`. Memory results carry `(id: <id>)`, the memory id `memory_edit` accepts; memories Supermemory inferred rather than read as stated (`isInference`) are also marked `[inferred]`. Document-chunk results (`supermemory.searchMode: hybrid`) are marked `[document chunk]` and show no id, because chunk ids are not memory ids; chunks are never `[inferred]`. The first-turn `<supermemory_recall>` block uses the same markers. Content is shown in full, not clipped, with terminal controls stripped (as in `read memory://<id>`).
+- `read memory://<id>` resolves a memory id through the caller's Supermemory state (`GET /ns/{namespace}/memories/{id}?include=related,documents&relatedLimit=10`) and renders frontmatter (id, namespace, version, `isStatic`/`isInference`/`isLatest`/`isForgotten`, timestamps, metadata), the memory text, then `## Earlier versions`, `## Later versions`, `## Linked memories` and `## Source document` when present. A subagent alias reads through its parent (over RPC on a worker); HTTP 404 throws `Supermemory memory <id> not found in namespace <ns>.`
+- HTTP, timeout (15 s) and invalid-JSON failures throw messages that never include the API key or response body.
+- Subagents alias the parent's state on the same namespace. See [Supermemory remote backend](../memory.md#supermemory-remote-backend).
 
 ## Side Effects
 

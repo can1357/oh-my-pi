@@ -10,6 +10,7 @@
  * event time.
  */
 
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { SessionEntry } from "../session/session-entries";
 import { type HindsightMessage, hasSubstantiveContent } from "./content";
@@ -85,4 +86,34 @@ function extractAssistantText(msg: AssistantMessage): string {
 		if (block.type === "text" && block.text) parts.push(block.text);
 	}
 	return parts.join("\n");
+}
+
+/** Reduce arbitrary AgentMessages (e.g. the messages a compaction summarizes) into the flat-text shape. */
+export function flattenMessagesForRecall(messages: AgentMessage[]): HindsightMessage[] {
+	const out: HindsightMessage[] = [];
+	for (const msg of messages) {
+		if (msg.role === "user") {
+			const content = msg.content;
+			if (typeof content === "string") {
+				if (hasSubstantiveContent(content)) out.push({ role: "user", content });
+				continue;
+			}
+			if (Array.isArray(content)) {
+				const text = content
+					.filter((b): b is { type: "text"; text: string } => !!b && (b as { type?: unknown }).type === "text")
+					.map(b => b.text)
+					.join("\n");
+				if (hasSubstantiveContent(text)) out.push({ role: "user", content: text });
+			}
+			continue;
+		}
+		if (msg.role === "assistant") {
+			const text = msg.content
+				.filter((b): b is { type: "text"; text: string } => b.type === "text")
+				.map(b => b.text)
+				.join("\n");
+			if (hasSubstantiveContent(text)) out.push({ role: "assistant", content: text });
+		}
+	}
+	return out;
 }

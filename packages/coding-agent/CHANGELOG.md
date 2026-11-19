@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `supermemory` memory backend on the Supermemory v5 namespace API: first-turn recall (profile facts with editable ids, inferred facts marked `[inferred]`) and recall in compaction summaries, both bounded by `supermemory.recallTimeoutMs` so a hung server cannot hold a turn for long, periodic retention (retried after resume), `recall`/`retain`/`learn`/`memory_edit` (including a dry-run `preview_forget` by meaning), `read memory://<id>` with version history and source document, writes that survive outages, subagents that share the parent's memory, and a `SUPERMEMORY_NAMESPACE` override ([#18755](https://github.com/can1357/oh-my-pi/pull/18755) by [@panosAthDBX](https://github.com/panosAthDBX))
+
 ### Fixed
 
 - Fixed the shell's `dirname` builtin on Windows ignoring `\` separators and drive prefixes (`dirname 'C:\a\b'` printed `.`), which broke scripts like VS Code's `code` launcher (`./Code.exe: No such file or directory`)

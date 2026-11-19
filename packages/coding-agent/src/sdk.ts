@@ -263,6 +263,7 @@ import { SessionManager } from "./session/session-manager";
 import { cfgOffline } from "./config/auxiliary-model-policy";
 import { SHAPE_RULE } from "./spotlight/shape";
 import { buildCallContext } from "./spotlight/context";
+import type { SupermemorySessionStateApi } from "./supermemory/state";
 import { type CalledToolShaper, shapeCalledTool } from "./spotlight";
 import {
 	accessDeniedNotice,
@@ -955,6 +956,8 @@ export interface CreateAgentSessionOptions {
 	parentHindsightSessionState?: HindsightSessionStateApi;
 	/** Parent Mnemopi state: subagents alias it; a top-level fork (`/tan`) inherits its delivered recall. */
 	parentMnemopiSessionState?: MnemopiSessionStateApi;
+	/** Parent Supermemory state to alias for subagent memory tools. */
+	parentSupermemorySessionState?: SupermemorySessionStateApi;
 	/** Pre-allocated agent identity for IRC routing. Default: "Main" for top-level, parentTaskPrefix-derived for sub. */
 	agentId?: string;
 	/** Display name for the agent in IRC. Default: "main" or "sub". */
@@ -2760,6 +2763,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			isDisposed: () => session?.isDisposed ?? false,
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
+			getSupermemorySessionState: () => session?.getSupermemorySessionState(),
 			getAgentId: () => resolvedAgentId,
 			getPromptCacheKey: () => {
 				if (!session) return undefined;
@@ -6284,6 +6288,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				taskDepth,
 				parentHindsightSessionState: options.parentHindsightSessionState,
 				parentMnemopiSessionState: options.parentMnemopiSessionState,
+				parentSupermemorySessionState: options.parentSupermemorySessionState,
 			});
 		};
 

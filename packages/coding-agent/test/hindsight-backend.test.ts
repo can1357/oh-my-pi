@@ -16,7 +16,8 @@ import {
 	reloadMentalModelsForSession,
 } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
 import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
-import { HindsightRetainQueue, type HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
+import type { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
+import { MemoryOutboxQueue } from "@oh-my-pi/pi-coding-agent/memory-backend/outbox";
 import type { AgentSessionEventListener } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
@@ -1038,7 +1039,7 @@ describe("hindsightBackend cwd rebind", () => {
 			taskDepth: 0,
 		});
 		let flushes = 0;
-		vi.spyOn(HindsightRetainQueue.prototype, "flush").mockImplementation(async () => {
+		vi.spyOn(MemoryOutboxQueue.prototype, "flush").mockImplementation(async () => {
 			flushes++;
 			if (flushes > 1) return;
 			parked.resolve();
@@ -1098,7 +1099,7 @@ describe("hindsightBackend cwd rebind", () => {
 			taskDepth: 0,
 		});
 		let flushes = 0;
-		vi.spyOn(HindsightRetainQueue.prototype, "flush").mockImplementation(async () => {
+		vi.spyOn(MemoryOutboxQueue.prototype, "flush").mockImplementation(async () => {
 			flushes++;
 			if (flushes > 1) return;
 			parked.resolve();
