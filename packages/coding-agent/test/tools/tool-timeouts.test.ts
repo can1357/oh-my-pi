@@ -33,6 +33,20 @@ describe("clampTimeout", () => {
 		expect(clampTimeout("bash", undefined, -1)).toBe(TOOL_TIMEOUTS.bash.default);
 	});
 
+	it("uses a configured default when the raw timeout is omitted", () => {
+		expect(clampTimeout("eval", undefined, undefined, 120)).toBe(120);
+	});
+
+	it("lets an explicit timeout win over the configured default", () => {
+		expect(clampTimeout("eval", 45, undefined, 120)).toBe(45);
+	});
+
+	it("caps and clamps the configured default like the static default", () => {
+		expect(clampTimeout("eval", undefined, 60, 120)).toBe(60);
+		expect(clampTimeout("eval", undefined, undefined, 9999)).toBe(TOOL_TIMEOUTS.eval.max);
+		expect(clampTimeout("eval", undefined, undefined, 0.1)).toBe(TOOL_TIMEOUTS.eval.min);
+	});
+
 	it("still enforces the per-tool min when maxTimeout is below it", () => {
 		// maxTimeout under the floor cannot drive the effective timeout below
 		// the tool's own minimum (bash min = 1s).

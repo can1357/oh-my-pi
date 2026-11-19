@@ -6,6 +6,7 @@ import { jsBackend, pythonBackend } from "@oh-my-pi/pi-coding-agent/eval";
 import type { ExecutorBackendResult } from "@oh-my-pi/pi-coding-agent/eval/backend";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import { cfgEvalDefaultTimeout } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { cfgToolsMaxTimeout } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 function makeSession(settings: Settings, asyncJobManager?: AsyncJobManager): ToolSession {
@@ -89,6 +90,31 @@ describe("eval timeout admission contract", () => {
 		expect(description()).toContain("12");
 		cfgToolsMaxTimeout.override(settings, 7);
 		expect(description()).toContain("7");
+	});
+
+	it("uses eval.defaultTimeout for a cell that omits a deadline", async () => {
+		const settings = Settings.isolated({ "eval.defaultTimeout": 120 });
+		const execute = vi.spyOn(jsBackend, "execute").mockImplementation(async (_code, options) => {
+			expect(options.idleTimeoutMs).toBe(120_000);
+			return result();
+		});
+		await new EvalTool(makeSession(settings)).execute("configured-default", {
+			language: "js",
+			code: "print('done')",
+		});
+		expect(execute).toHaveBeenCalledTimes(1);
+	});
+
+	it("advertises the configured default and follows live setting changes", () => {
+		const settings = Settings.isolated({ "eval.defaultTimeout": 120 });
+		const tool = new EvalTool(makeSession(settings));
+		const description = () => {
+			const schema = toolWireSchema(tool) as { properties: { timeout: { description: string } } };
+			return schema.properties.timeout.description;
+		};
+		expect(description()).toContain("defaults to 120s");
+		cfgEvalDefaultTimeout.override(settings, 90);
+		expect(description()).toContain("defaults to 90s");
 	});
 
 	it("keeps a background cell's deadline and notices fixed at its admitted value", async () => {

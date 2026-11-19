@@ -88,6 +88,19 @@ export const cfgEvalAutoBackgroundThresholdMs = register({
 	default: 60_000,
 });
 
+export const cfgEvalDefaultTimeout = register({
+	id: "eval.defaultTimeout",
+	type: "number",
+	default: 30,
+	ui: {
+		tab: "shell",
+		group: "Eval & Runtimes",
+		label: "Eval Cell Timeout",
+		description:
+			"Default deadline in seconds for eval cells whose call omits a timeout (clamped to the tool's 1–3600s range and tools.maxTimeout)",
+	},
+});
+
 // Runtime knobs (consumed by eval backends and the /python slash command)
 export const cfgPythonKernelMode = register({
 	id: "python.kernelMode",
