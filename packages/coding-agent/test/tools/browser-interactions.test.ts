@@ -993,6 +993,38 @@ return await tab.value("#paste");`,
 		30_000,
 	);
 
+	test("fill puts a multiline value in a textarea without pressing Enter", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `fill-multiline-${crypto.randomUUID()}`;
+		const html = `<!doctype html><textarea id="msg">old</textarea>
+<script>
+window.sent = [];
+const box = document.querySelector("#msg");
+box.addEventListener("keydown", event => { if (event.key === "Enter") window.sent.push(box.value); });
+</script>`;
+		const context = { session, toolCallId: "browser-fill-multiline" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(html)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.fill("#msg", "a\\nb");
+return { value: await tab.value("#msg"), sent: await tab.evaluate(() => window.sent) };`,
+					timeout: 25,
+				},
+				context,
+			);
+			expect(valueFrom<unknown>(result)).toEqual({ value: "a\nb", sent: [] });
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
 	test("clearing a field with an empty fill reports the change to the page", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
@@ -1984,7 +2016,7 @@ return picks;`,
 				result[id] = await clickElement(handle, `click #${id}`).then(
 					() => "clicked",
 					error =>
-						String(error).includes("did not deliver the click")
+						String(error).includes("could not confirm the click reached")
 							? "refused"
 							: String(error).includes("covered by")
 								? "covered"
@@ -2003,6 +2035,7 @@ return picks;`,
 <span id="shadowed">Shadowed</span>
 <span id="actions">Go<span slot="alt" hidden>Alt</span></span>
 <button id="menu-item">Menu item</button>
+<div id="rerender-host"><button id="rerender">Rerender</button></div>
 <script>
 document.getElementById("shadowed").attachShadow({ mode: "open" }).innerHTML = "<button disabled><slot></slot></button>";
 document.getElementById("actions").attachShadow({ mode: "open" }).innerHTML =
@@ -2012,9 +2045,22 @@ document.getElementById("menu-item").addEventListener("pointerdown", event => {
 	event.preventDefault();
 	event.currentTarget.remove();
 });
+// A framework re-renders the button on pointerdown, so the original node never sees the click.
+document.getElementById("rerender").addEventListener("pointerdown", () => {
+	document.getElementById("rerender-host").innerHTML = "<button>Rerendered</button>";
+});
 </script>`);
 			expect(
-				await outcomes(["enabled", "disabled", "inert", "styled-inert", "shadowed", "actions", "menu-item"]),
+				await outcomes([
+					"enabled",
+					"disabled",
+					"inert",
+					"styled-inert",
+					"shadowed",
+					"actions",
+					"menu-item",
+					"rerender",
+				]),
 			).toEqual({
 				enabled: "clicked",
 				disabled: "refused",
@@ -2023,6 +2069,7 @@ document.getElementById("menu-item").addEventListener("pointerdown", event => {
 				shadowed: "refused",
 				actions: "clicked",
 				"menu-item": "clicked",
+				rerender: "clicked",
 			});
 			// A modal dialog escapes the inert shell it sits in; the shell lies under its backdrop.
 			await page.setContent(`<div inert><button id="shell">Shell</button><dialog id="dlg"><button id="ok">OK</button></dialog></div>

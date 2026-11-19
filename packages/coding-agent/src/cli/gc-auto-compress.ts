@@ -19,7 +19,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Subprocess } from "bun";
 import { getSessionsDir, isEnoent, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
-import { spawnDetached } from "../subprocess/shared-worker";
+import { spawnDetached } from "../subprocess/detached";
 import { resolveCliEntryCmd, workerEnvFromParent } from "../subprocess/worker-client";
 import { compressMethod } from "./gc-compress";
 

@@ -522,7 +522,7 @@ describe("SessionManager cross-process rewrite freshness", () => {
 			const creator = SessionManager.create(tempDir.path(), tempDir.path(), new FileSessionStorage());
 			await creator.ensureOnDisk();
 			creator.appendMessage(userTurn("our turn before the conflict"));
-			const artifactId = await creator.saveArtifact("tool output", "bash");
+			const artifactId = await creator.saveArtifact("tool output");
 			const owned = creator.getSessionFile();
 			const ownedId = creator.getSessionId();
 			if (!owned || !artifactId) throw new Error("Expected session file and artifact");
@@ -541,7 +541,7 @@ describe("SessionManager cross-process rewrite freshness", () => {
 			try {
 				await firstWrite(ours);
 				// Saved right after the move, while the background artifact copy may still run.
-				laterArtifactId = await ours.saveArtifact("output after the move", "bash");
+				laterArtifactId = await ours.saveArtifact("output after the move");
 				for (const turn of ourTurnsAfter) ours.appendMessage(userTurn(turn));
 				// The whole transcript is published to the sibling once; later appends go incremental.
 				expect(fullRewrites.reduce((calls, spy) => calls + spy.mock.calls.length, 0)).toBe(1);
@@ -560,10 +560,12 @@ describe("SessionManager cross-process rewrite freshness", () => {
 			const lateNotices: SessionPersistenceNotice[] = [];
 			ours.onPersistenceNotice(notice => lateNotices.push(notice));
 			expect(lateNotices).toEqual(notices);
-			// Recorded `artifact://` references keep resolving after the move, and the
-			// artifact saved during the copy got a fresh id instead of overwriting one.
+			// Recorded spill references keep resolving after the move, and the
+			// spill saved during the copy got a fresh id instead of overwriting one.
 			const artifactPath = await ours.getArtifactPath(artifactId);
-			expect(artifactPath && path.dirname(artifactPath)).toBe(sibling.slice(0, -".jsonl".length));
+			expect(artifactPath && path.dirname(artifactPath)).toBe(
+				path.join(sibling.slice(0, -".jsonl".length), "local"),
+			);
 			expect(artifactPath && (await Bun.file(artifactPath).text())).toBe("tool output");
 			expect(laterArtifactId).toBeDefined();
 			expect(laterArtifactId).not.toBe(artifactId);

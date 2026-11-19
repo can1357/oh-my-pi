@@ -8,7 +8,7 @@ import { materializeReadUrlToFile } from "@oh-my-pi/pi-coding-agent/tools/fetch"
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
 import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake, spillFileName } from "@oh-my-pi/pi-utils";
 
 const ATOM = `<?xml version="1.0"?>\n<feed xmlns="http://www.w3.org/2005/Atom"><title>Sample</title><entry><title>One</title><id>1</id><updated>2024-01-01T00:00:00Z</updated><content>body</content></entry></feed>`;
 const JSON_BODY = `{"alpha":1,"beta":[2,3]}`;
@@ -23,9 +23,9 @@ function makeSession(testDir: string): ToolSession {
 		getSessionFile: () => sessionFile,
 		getArtifactsDir: () => artifactsDir,
 		getSessionSpawns: () => null,
-		allocateOutputArtifact: async toolType => {
+		allocateOutputArtifact: async () => {
 			const id = String(nextArtifactId++);
-			return { id, path: path.join(artifactsDir, `${id}.${toolType}.log`) };
+			return { id, path: path.join(artifactsDir, `${id}.log`) };
 		},
 		settings: Settings.isolated({ "fetch.enabled": true }),
 	};
@@ -139,7 +139,7 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 				.join("\n") ?? "";
 
 		expect(result.details?.method).toBe("raw");
-		expect(text).toBe("raw line 3\nraw line 4\nraw line 5");
+		expect(text).toBe("raw line 3\nraw line 4\nraw line 5\n");
 	});
 
 	it("keeps body coordinates when the response adds a Notes header", async () => {
@@ -155,7 +155,7 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 		}));
 
 		const result = await new ReadTool(session).execute("call", { path: "https://example.com/page.txt:12:raw" });
-		expect(result.content.find(c => c.type === "text")?.text).toBe("raw line 12");
+		expect(result.content.find(c => c.type === "text")?.text).toBe("raw line 12\n");
 		expect(result.details?.totalLines).toBe(20);
 	});
 });
@@ -216,7 +216,7 @@ describe("raw URL response bytes", () => {
 		for (const selector of ["raw:2-4", "2-4:raw"]) {
 			const result = await tool.execute("raw-json-range", { path: `${origin}/body:${selector}` });
 			const text = result.content.find(c => c.type === "text")?.text;
-			expect(text).toBe('{\n  "ok": true\n}');
+			expect(text).toBe('{\n  "ok": true\n}\n');
 			expect(JSON.parse(text ?? "")).toEqual({ ok: true });
 		}
 		const open = await tool.execute("raw-json-open", { path: `${origin}/body:raw:2-` });
@@ -257,19 +257,19 @@ describe("raw URL response bytes", () => {
 		const preview = await tool.execute("raw-preview", { path: `${origin}/body:raw` });
 		const artifactId = preview.details?.meta?.truncation?.artifactId;
 		expect(artifactId).toBeDefined();
-		const artifactPath = path.join(testDir, "session", `${artifactId}.read.log`);
+		const artifactPath = path.join(testDir, "session", spillFileName(artifactId ?? ""));
 		expect(await Bun.file(artifactPath).text()).toBe(body);
 
 		const materialized = await materializeReadUrlToFile(session, { path: `${origin}/body`, raw: true });
 		expect(await Bun.file(materialized.path).text()).toBe(body);
 		for (const target of [`${origin}/body`, artifactPath, materialized.path]) {
 			const result = await tool.execute("body-coordinates", { path: `${target}:301-302:raw` });
-			expect(result.content.find(c => c.type === "text")?.text).toBe("body 301\nbody 302");
+			expect(result.content.find(c => c.type === "text")?.text).toBe("body 301\nbody 302\n");
 		}
 
 		const normal = await tool.execute("normal-coordinates", { path: `${origin}/body:12-12` });
 		expect(normal.content.find(c => c.type === "text")?.text).toBe(
-			"body 11\nbody 12\nbody 13\nbody 14\nbody 15\n\n[305 more lines in URL output. Use :16 to continue]",
+			"body 11\nbody 12\nbody 13\nbody 14\nbody 15\n\n[305 more lines in URL output. Use :16- to continue]",
 		);
 		expect(normal.details?.displayContent?.startLine).toBe(11);
 	});

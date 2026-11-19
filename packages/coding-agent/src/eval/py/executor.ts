@@ -267,6 +267,7 @@ async function startKernel(cwd: string, options: PythonExecutorOptions): Promise
 		signal: options.signal,
 		deadlineMs: options.deadlineMs,
 		interpreter: options.interpreter,
+		sessionId: options.toolSession?.getSessionId?.() ?? undefined,
 	});
 }
 

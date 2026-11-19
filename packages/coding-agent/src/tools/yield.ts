@@ -498,6 +498,15 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			yieldType = [item.id];
 		} else {
 			yieldType = parseYieldType(raw.type);
+			// `["result"]` means the finalize marker unless the schema has a `result` field.
+			if (
+				Array.isArray(yieldType) &&
+				yieldType.length === 1 &&
+				yieldType[0] === "result" &&
+				!this.#knownSectionLabels.includes("result")
+			) {
+				yieldType = "result";
+			}
 		}
 		// Incremental array-typed sections carry partial data (one finding, one
 		// field) that cannot satisfy the full output schema; the assembled result
@@ -613,8 +622,16 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 							? ` Call yield again with the corrected shape — ${remaining} retry attempt(s) remain before the schema constraint is dropped.`
 							: " Call yield again with the corrected shape — this is the final retry before the schema constraint is dropped.";
 					const scope = isIncremental ? `Section ${formatYieldLabels(yieldType as string[])}` : "Output";
+					// A whole array sent for an array field whose elements each fit.
+					const elementsHint =
+						isIncremental &&
+						Array.isArray(data) &&
+						data.length > 0 &&
+						data.every(element => validateData(element)?.success !== false)
+							? " Send one element per call."
+							: "";
 					throw new Error(
-						`${scope} does not match schema: ${formatAllValidationIssues(sectionFailure.issues)}.${decodedFailureHint}${retryHint}`,
+						`${scope} does not match schema: ${formatAllValidationIssues(sectionFailure.issues)}.${decodedFailureHint}${elementsHint}${retryHint}`,
 					);
 				}
 				// Budget exhausted: capture the count for the message, accept, and

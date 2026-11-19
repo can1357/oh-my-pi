@@ -151,7 +151,7 @@ describe("OutputSink fd lifecycle", () => {
 		expect(summary.artifactError).toBe("open");
 		expect(summary.artifactId).toBeUndefined();
 		expect(notice).toContain("not saved completely");
-		expect(notice).not.toContain("artifact://");
+		expect(notice).not.toMatch(/local:\/\/\d+\.log/);
 		expect(await Bun.file(artifactPath).exists()).toBe(false);
 	});
 
@@ -252,7 +252,7 @@ describe("OutputSink fd lifecycle", () => {
 		expect(summary.artifactError).toBe("end");
 		expect(summary.artifactId).toBeUndefined();
 		expect(notice).toContain("not saved completely");
-		expect(notice).not.toContain("artifact://");
+		expect(notice).not.toMatch(/local:\/\/\d+\.log/);
 		expect(end).toHaveBeenCalledTimes(1);
 		expect(await Bun.file(artifactPath).text()).toBe("prefix");
 		const meta = outputMeta().truncationFromSummary(summary, { direction: "tail" }).get();
@@ -266,6 +266,6 @@ describe("OutputSink fd lifecycle", () => {
 		);
 		const rendered = sanitizeText(component.render(160).join("\n"));
 		expect(rendered).toContain("not saved completely");
-		expect(rendered).not.toContain("artifact://");
+		expect(rendered).not.toMatch(/local:\/\/\d+\.log/);
 	});
 });
