@@ -261,6 +261,7 @@ export interface ModelPatch {
 	omitMaxOutputTokens?: boolean;
 	/** WebSocket preference within catalog policy; explicit false disables transport selection. */
 	preferWebsockets?: boolean;
+	serviceTiers?: string[];
 	headers?: Record<string, string>;
 	resolveHeaders?: Model<Api>["resolveHeaders"];
 	compat?: ModelSpec<Api>["compat"];
@@ -305,6 +306,7 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (patch.maxTokens !== undefined) result.maxTokens = patch.maxTokens;
 	if (patch.omitMaxOutputTokens !== undefined) result.omitMaxOutputTokens = patch.omitMaxOutputTokens;
 	if (patch.preferWebsockets !== undefined) result.preferWebsockets = patch.preferWebsockets;
+	if (patch.serviceTiers !== undefined) result.serviceTiers = patch.serviceTiers;
 	if (patch.contextPromotionTarget !== undefined) result.contextPromotionTarget = patch.contextPromotionTarget;
 	if (patch.compactionModel !== undefined) result.compactionModel = patch.compactionModel;
 	if (patch.remoteCompaction !== undefined) {
