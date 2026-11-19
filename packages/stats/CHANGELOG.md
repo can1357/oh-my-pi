@@ -2,23 +2,25 @@
 
 ## [Unreleased]
 
+## [19.0.0] - 2026-11-18
+
 ### Breaking Changes
 
-- Spotlight recovery counts reads of `local://N.log` spills; older sessions' `artifact://N` reads still count
+- Spotlight recovery counts reads from local spill files toward recovery counts; reads from artifact references in older sessions continue to count as before.
 
 ### Added
 
-- The Overview's Token mix now shows off-transcript model calls (title generation, job captions, judge queries, cache warming, …) as their own categories beside the agents in the By source bar (formerly By agent), each with its request count, tokens and share
-- Added a Decision models card to the Overview showing, per use case, the requests, tokens and share of usage served by native judgment models
-- Request details of a title or judge call now show the reply or the judge's answers it recorded
+- Expanded the Overview's Token mix to include off-transcript model calls—such as title generation, job captions, judge queries, and cache warming—with per-source request counts, token totals, and usage shares.
+- Added a Decision models card to the Overview showing requests, tokens, and usage share by judgment use case for native judgment models.
+- Request details for title-generation and judge calls now display the generated reply or recorded judge answers.
 
 ### Changed
 
-- Main agent, Subagents and Advisor shares in Token mix now count conversation turns only; side-channel calls no longer inflate them. Sessions changed since 2026-08-31 are re-read once after upgrading to attribute past calls
+- Token mix shares for the main agent, subagents, and advisor now reflect conversation turns only, excluding side-channel model calls.
 
 ### Fixed
 
-- The dashboard refuses requests under a public host name it was not told about, so a web page can no longer read it through DNS rebinding; IP addresses, `localhost`, LAN short names, `.local`/`.lan`/`.home` names and Tailscale (`*.ts.net`) names keep working, and other names such as a reverse proxy's domain go in `OMP_STATS_ALLOWED_HOSTS` (`*.example.com` allows its subdomains)
+- Hardened the dashboard against DNS rebinding by rejecting requests made through unconfigured public host names. IP addresses, localhost, LAN short names, local network domains, and Tailscale names remain supported; configure reverse-proxy or other custom domains with OMP_STATS_ALLOWED_HOSTS, including wildcard subdomains such as *.example.com.
 
 ## [18.22.1] - 2026-11-17
 

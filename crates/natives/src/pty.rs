@@ -379,7 +379,12 @@ impl PtySession {
 	#[napi(ts_return_type = "Promise<void>")]
 	pub fn pause_output<'env>(&self, env: &'env Env) -> Result<PromiseRaw<'env, ()>> {
 		#[cfg(unix)]
-		let stopped = self.handles.lock().output.clone().and_then(|gate| gate.pause());
+		let stopped = self
+			.handles
+			.lock()
+			.output
+			.clone()
+			.and_then(|gate| gate.pause());
 		#[cfg(not(unix))]
 		let stopped: Option<tokio::sync::oneshot::Receiver<()>> = None;
 		task::future(env, "pty.pause_output", async move {
@@ -561,7 +566,8 @@ impl OutputGate {
 			return Err(std::io::Error::last_os_error());
 		}
 		// SAFETY: `pipe` just returned these fds; nothing else owns them.
-		let (wake_rx, wake_tx) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+		let (wake_rx, wake_tx) =
+			unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
 		for fd in fds {
 			// SAFETY: fcntl with scalar arguments on the fds owned above. Both
 			// ends stay out of exec'd images and never block.
@@ -651,7 +657,9 @@ impl OutputGate {
 		let mut state = self.state.lock();
 		let waiters = state.requested.take().unwrap_or_default();
 		if forwarding && !state.undeliverable && state.delivered < sent {
-			state.draining.extend(waiters.into_iter().map(|tx| (sent, tx)));
+			state
+				.draining
+				.extend(waiters.into_iter().map(|tx| (sent, tx)));
 		} else {
 			// Everything sent is delivered (or never will be): resolve now, not
 			// when this frame ends after the park below.
@@ -670,10 +678,11 @@ impl OutputGate {
 	fn wait_readable(&self, fd: i32) -> std::io::Result<bool> {
 		use std::os::fd::AsRawFd;
 		let wake_fd = self.wake_rx.as_raw_fd();
-		let mut fds = [
-			libc::pollfd { fd, events: libc::POLLIN, revents: 0 },
-			libc::pollfd { fd: wake_fd, events: libc::POLLIN, revents: 0 },
-		];
+		let mut fds = [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }, libc::pollfd {
+			fd:      wake_fd,
+			events:  libc::POLLIN,
+			revents: 0,
+		}];
 		loop {
 			// SAFETY: polls the two valid `pollfd` entries above.
 			if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } >= 0 {
@@ -740,11 +749,11 @@ fn run_adopted_sync(
 	let reader = clone("reader")?;
 	let writer = clone("writer")?;
 	let io = PtyIo {
-		master:    PtyMaster::Adopted(fd),
+		master: PtyMaster::Adopted(fd),
 		reader,
-		writer:    Box::new(writer),
+		writer: Box::new(writer),
 		child_pid: Some(pid),
-		wait:      Box::new(move || wait_pid_exit_code(pid)),
+		wait: Box::new(move || wait_pid_exit_code(pid)),
 	};
 	drive_pty(io, on_chunk, control_tx, control_rx, ct, handles)
 }
@@ -1444,7 +1453,9 @@ mod output_gate_tests {
 	fn delivered_pause_resolves_while_reader_is_held() {
 		let gate = Arc::new(OutputGate::new().unwrap());
 		gate.delivered(5);
-		let mut stopped = gate.pause().expect("a running reader has a pause to wait for");
+		let mut stopped = gate
+			.pause()
+			.expect("a running reader has a pause to wait for");
 		let reader = {
 			let gate = Arc::clone(&gate);
 			std::thread::spawn(move || gate.hold(5, true))

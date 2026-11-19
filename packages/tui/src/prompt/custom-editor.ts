@@ -1541,12 +1541,7 @@ export class CustomEditor extends Editor {
 				compact([
 					shell.excluded &&
 						node("icon", { name: "eye-off", title: "Not sent to the model" }, undefined, "excluded"),
-					node(
-						"text",
-						{ spans: [span(shell.kind, `${shell.kind}Mode`)], wrap: "none" },
-						undefined,
-						"label",
-					),
+					node("text", { spans: [span(shell.kind, `${shell.kind}Mode`)], wrap: "none" }, undefined, "label"),
 				]),
 				{
 					role: "omp.composer.mode",
