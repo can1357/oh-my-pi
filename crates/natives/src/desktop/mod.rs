@@ -918,13 +918,31 @@ impl Worker {
 		Ok((x, y, frame))
 	}
 
+	fn minimized_root(&mut self, id: &str) -> CoreResult<Option<ax::WindowRoot>> {
+		let retained = self.registry.retained_root(id);
+		self
+			.backend
+			.as_mut()
+			.map_err(|error| error.clone())?
+			.minimized_root(id, retained)
+	}
+
 	fn explicit_window(&mut self, target: &Target) -> CoreResult<DesktopWindow> {
-		if !matches!(target, Target::Window(_)) {
+		let Target::Window(id) = target else {
 			return Err(DesktopError::invalid_target(
 				"this operation requires an explicit window target",
 			));
+		};
+		match self.window(target) {
+			Err(error) if error.code == ErrorCode::WindowNotFound => {
+				if self.minimized_root(id)?.is_some() {
+					Err(menus::minimized_window(id))
+				} else {
+					Err(error)
+				}
+			},
+			result => result,
 		}
-		self.window(target)
 	}
 
 	fn validate_keyboard_target(&mut self, target: &Target) -> CoreResult<()> {
@@ -954,8 +972,24 @@ impl Worker {
 		Ok(())
 	}
 
+	fn read_root(&mut self, target: &Target) -> CoreResult<ax::WindowRoot> {
+		match self.window(target) {
+			Ok(window) => ax::WindowRoot::listed(self.ax()?, window),
+			Err(error) => {
+				if error.code == ErrorCode::WindowNotFound
+					&& let Target::Window(id) = target
+					&& let Some(root) = self.minimized_root(id)?
+				{
+					Ok(root)
+				} else {
+					Err(error)
+				}
+			},
+		}
+	}
+
 	fn snapshot(&mut self, target: &Target, options: &AxSnapshotOptions) -> CoreResult<AxSnapshot> {
-		let window = self.window(target)?;
+		let window = self.read_root(target)?;
 		let (backend, registry) = (&mut self.backend, &mut self.registry);
 		let ax = backend
 			.as_mut()
@@ -1181,6 +1215,11 @@ impl Worker {
 			backend.refuse_input()?;
 		}
 		let _scope = token.enter();
+		if request.is_mutation()
+			&& let Some(reference) = request.reference()
+		{
+			self.registry.require_actionable(reference)?;
+		}
 		let awaits_input = self.awaits_late_input(request);
 		// A ref whose row the app rebuilt names the row's copy before the
 		// request reads its element or its app, and an element action waits
@@ -1483,6 +1522,13 @@ impl Worker {
 			// Input whose app cannot be named fails like the input itself
 			// would; a ref that no longer resolves fails in `process`.
 			return match access {
+				AppAccess::Input(id)
+					if matches!(request, Request::MenuItems { .. } | Request::MenuSelect { .. })
+						&& self.registry.retained_root(id).is_some()
+						&& self.minimized_root(id)?.is_some() =>
+				{
+					Err(menus::minimized_window(id))
+				},
 				AppAccess::Input(id) => Err(DesktopError::window_not_found(format!(
 					"window '{id}' was not found; it may be closed"
 				))),
@@ -1773,7 +1819,7 @@ impl Worker {
 				Ok(Response::Snapshot(self.snapshot(target, options)?))
 			},
 			Request::AxQuery { target, query, .. } => {
-				let window = self.window(target)?;
+				let window = self.read_root(target)?;
 				let (backend, registry) = (&mut self.backend, &mut self.registry);
 				let ax = backend
 					.as_mut()
@@ -3103,6 +3149,7 @@ mod capture_tests {
 		window:                 DesktopWindow,
 		overlap:                Option<DesktopWindow>,
 		window_present:         bool,
+		minimized_id:           Option<&'static str>,
 		/// An AX tree the app can rebuild; `None` answers every element as one
 		/// button.
 		tree:                   Option<Arc<Mutex<FakeTree>>>,
@@ -3221,6 +3268,7 @@ mod capture_tests {
 				},
 				overlap: None,
 				window_present: true,
+				minimized_id: None,
 				tree: None,
 				menu_control: false,
 				no_input: false,
@@ -3279,7 +3327,7 @@ mod capture_tests {
 			if let Some(tree) = &self.tree {
 				tree.lock().roots += 1;
 			}
-			Ok(AxHandle::Test(1))
+			Ok(AxHandle::Test(if self.minimized_id.is_some() { 2 } else { 1 }))
 		}
 
 		fn window_id(&mut self, _: &AxHandle, windows: &[DesktopWindow]) -> CoreResult<String> {
@@ -3494,6 +3542,21 @@ mod capture_tests {
 				.chain(self.window_present.then_some(&self.window))
 				.cloned()
 				.collect())
+		}
+
+		fn minimized_root(
+			&mut self,
+			id: &str,
+			retained: Option<&AxHandle>,
+		) -> CoreResult<Option<ax::WindowRoot>> {
+			Ok(retained
+				.filter(|_| self.minimized_id == Some(id))
+				.map(|element| ax::WindowRoot {
+					id:      id.to_owned(),
+					app:     self.window.app.clone(),
+					state:   ax::RootState::Minimized,
+					element: element.clone(),
+				}))
 		}
 
 		#[cfg(target_os = "macos")]
@@ -4800,6 +4863,57 @@ mod capture_tests {
 		assert_eq!(named(&error, "e2"), None);
 		assert_eq!(tree.lock().pressed, [2, 2, 2]);
 		assert_eq!(tree.lock().probes, 1);
+	}
+
+	#[test]
+	fn a_minimized_window_tree_is_read_only_and_never_uses_its_visible_sibling() {
+		let documents = Arc::new(Mutex::new(FakeTree {
+			titles: [(1, "Retained document"), (2, "Visible sibling")].into(),
+			roles: [(2, "window")].into(),
+			..Default::default()
+		}));
+		let roster = |minimized| {
+			let mut backend = FakeWaylandBackend::new();
+			backend.window.id = if minimized { "43" } else { "42" }.into();
+			backend.minimized_id = minimized.then_some("42");
+			backend.tree = Some(Arc::clone(&documents));
+			backend
+		};
+		let mut worker = worker_with(roster(false));
+		let target = Target::Window("42".into());
+		worker
+			.snapshot(&target, &AxSnapshotOptions::default())
+			.unwrap();
+		worker.backend = Ok(Box::new(roster(true)));
+		let tree = worker
+			.snapshot(&target, &AxSnapshotOptions::default())
+			.unwrap();
+		assert!(tree.text.contains("Retained document") && tree.text.contains("(minimized)"));
+		assert!(!tree.text.contains("Visible sibling"));
+		let menu = worker.explicit_window(&target).unwrap_err();
+		assert_eq!(menu.code, ErrorCode::WindowUnavailable);
+		assert!(menu.message.contains("'42' is minimized"));
+		let source = CancellationSource::default();
+		let focus =
+			call(&mut worker, |reply| Request::AxFocus { reference: "e1".into(), reply }, &source);
+		assert_eq!(focus.err().map(|error| error.code), Some(ErrorCode::WindowUnavailable));
+		assert_eq!(worker.window(&target).unwrap_err().code, ErrorCode::WindowNotFound);
+		let absent = Target::Window("99".into());
+		assert_eq!(
+			worker
+				.snapshot(&absent, &AxSnapshotOptions::default())
+				.unwrap_err()
+				.code,
+			ErrorCode::WindowNotFound
+		);
+		worker.backend = Ok(Box::new(roster(false)));
+		let restored = worker
+			.snapshot(&target, &AxSnapshotOptions::default())
+			.unwrap();
+		assert!(
+			restored.text.contains("Retained document") && !restored.text.contains("(minimized)")
+		);
+		assert!(worker.registry.require_actionable("e1").is_ok());
 	}
 
 	#[test]

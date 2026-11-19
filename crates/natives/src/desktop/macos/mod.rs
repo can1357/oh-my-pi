@@ -123,6 +123,36 @@ impl Backend for MacosBackend {
 		self.capture.windows()
 	}
 
+	fn minimized_root(
+		&mut self,
+		id: &str,
+		retained: Option<&AxHandle>,
+	) -> CoreResult<Option<super::ax::WindowRoot>> {
+		let Ok(wid) = id.parse::<u32>() else {
+			return Ok(None);
+		};
+		let (pid, element) = if let Some(held) = retained {
+			// A retained AX root that no longer attests this ID must not rebind to
+			// a different window just because WindowServer reused its number.
+			let Some(pid) = ax::retained_minimized_owner(held, wid) else {
+				return Ok(None);
+			};
+			(pid, held.clone())
+		} else if let Some(pid) =
+			window_owner(id, skylight::window_owner_pid, || capture::window_owner_pid(wid))
+		{
+			(pid, ax::minimized_root(pid, wid)?)
+		} else {
+			return Ok(None);
+		};
+		Ok(Some(super::ax::WindowRoot {
+			id: id.to_owned(),
+			app: self.app_name(pid),
+			state: super::ax::RootState::Minimized,
+			element,
+		}))
+	}
+
 	fn window_app(&mut self, id: &str) -> Option<libc::pid_t> {
 		window_owner(id, skylight::window_owner_pid, || {
 			self
