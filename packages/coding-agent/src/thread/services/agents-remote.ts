@@ -57,6 +57,7 @@ class ForwardedListeners<A extends unknown[]> {
 	}
 
 	#emit(args: A): void {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- snapshot: the loop body may add or remove listeners
 		for (const listener of [...this.#listeners]) {
 			try {
 				listener(...args);

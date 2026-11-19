@@ -1,7 +1,7 @@
 /**
  * Editor-anchored, right-aligned progress rows above the working line: judge
- * batches (`judge_batch`) and automatic downloads/installs (model weights,
- * tool binaries, browsers, side runtimes). Both render through
+ * batches (`judge_batch`) and automatic background work (downloads and
+ * installs, skill optimization). Both render through
  * {@link renderHudProgressRow} so they read as one HUD.
  */
 import { type Component, renderProgressBar, visibleWidth } from "@oh-my-pi/pi-tui";
@@ -148,6 +148,19 @@ const DOWNLOAD_DONE_RETAIN_MS = 1_500;
 /** A failed download's row lingers this long so the reason can be read. */
 const DOWNLOAD_FAILED_RETAIN_MS = 10_000;
 
+/** What a running activity of unknown total shows: the amount so far, else its current step. */
+function formatStep(activity: DownloadActivity): string {
+	const { loaded, unit } = activity;
+	if (loaded) return unit === "steps" ? `${loaded}` : formatBytes(loaded);
+	return activity.detail ?? (unit === "steps" ? "working…" : "downloading…");
+}
+
+/** Progress of an activity whose total is known: `129MB / 258MB`, or `3/12` steps. */
+function formatProgress(activity: DownloadActivity, received: number, total: number): string {
+	if (activity.unit === "steps") return `${received}/${total}`;
+	return `${formatBytes(received)} / ${formatBytes(total)}`;
+}
+
 interface DownloadRow {
 	activity: DownloadActivity;
 	startedAt: number;
@@ -155,8 +168,8 @@ interface DownloadRow {
 }
 
 /**
- * Progress rows for automatic downloads and installs (see `downloads/activity`):
- * a byte bar when the size is known, the current step otherwise, then a brief
+ * Progress rows for automatic background work (see `downloads/activity`): a
+ * byte or step bar when the total is known, the current step otherwise, then a brief
  * `ready` or a lingering failure reason. Owns its reveal/retain timers.
  */
 export class DownloadActivityHud implements Component {
@@ -237,11 +250,11 @@ export class DownloadActivityHud implements Component {
 			return describeHudRow(
 				key,
 				label,
-				[span(`${formatBytes(received)} / ${formatBytes(total)}`, "strong")],
+				[span(formatProgress(activity, received, total), "strong")],
 				received / total,
 			);
 		}
-		const step = loaded ? formatBytes(loaded) : (activity.detail ?? "downloading…");
+		const step = formatStep(activity);
 		return describeHudRow(key, activity.label, [span(step)]);
 	}
 
@@ -279,13 +292,13 @@ export class DownloadActivityHud implements Component {
 			const percent = `${Math.floor((received / total) * 100)}%`;
 			return renderHudProgressRow(width, {
 				label: activity.detail ? `${activity.label} · ${activity.detail}` : activity.label,
-				tail: theme.bold(theme.fg("text", `${formatBytes(received)} / ${formatBytes(total)}`)),
+				tail: theme.bold(theme.fg("text", formatProgress(activity, received, total))),
 				fallback: theme.bold(theme.fg("text", percent)),
 				bar: { value: received, max: total },
 			});
 		}
-		// Size unknown: bytes so far, or the current step (`installing`, `extracting`).
-		const step = loaded ? formatBytes(loaded) : (activity.detail ?? "downloading…");
+		// Total unknown: the amount so far, or the current step (`installing`, `extracting`).
+		const step = formatStep(activity);
 		return renderHudProgressRow(width, {
 			label: activity.label,
 			tail: theme.fg("text", step),
