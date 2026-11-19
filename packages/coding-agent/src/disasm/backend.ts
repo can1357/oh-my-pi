@@ -1,9 +1,8 @@
 import * as path from "node:path";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import binjaEngine from "../binja/worker.py" with { type: "text" };
+import binjaWorker from "../binja/worker.py" with { type: "text" };
 import ghidraWorker from "../ghidra/worker.py" with { type: "text" };
 import idaWorker from "../ida/worker.py" with { type: "text" };
-import workerTransport from "./worker-transport.py" with { type: "text" };
 
 /** Every backend id; handle hosts, unit params and eval arguments validate against this list. */
 export const DISASM_BACKEND_IDS = ["ida", "ghidra", "binja"] as const;
@@ -73,8 +72,7 @@ export const DISASM_BACKENDS: Record<DisasmBackendId, DisasmBackend> = {
 		databaseExt: ".bndb",
 		databaseName: name => `${name}.bndb`,
 		isDatabasePath: p => path.extname(p).toLowerCase() === ".bndb",
-		// The transport binds the listener before the engine part imports binaryninja.
-		workerScript: `${workerTransport}\n${binjaEngine}`,
+		workerScript: binjaWorker,
 		workerStageDir: "omp-binja-worker",
 		interrupt: "signal",
 		projectAlias: false,

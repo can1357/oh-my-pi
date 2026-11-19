@@ -1,9 +1,8 @@
 /**
- * Contract of the real Binary Ninja worker (`src/disasm/worker-transport.py` followed by
- * `src/binja/worker.py`) as the unmodified supervisor (`DisasmWorker`) drives it: the RPC results,
- * what survives a save, a close and a cold reopen, what a failed or interrupted `exec` leaves
- * behind, and how a failed open is answered. The daemon tests substitute a fake worker, so
- * nothing else runs this Python code.
+ * Contract of the real Binary Ninja worker (`src/binja/worker.py`) as the unmodified supervisor
+ * (`DisasmWorker`) drives it: the RPC results, what survives a save, a close and a cold reopen,
+ * what a failed or interrupted `exec` leaves behind, and how a failed open is answered. The
+ * daemon tests substitute a fake worker, so nothing else runs this Python code.
  *
  * Skipped unless a Binary Ninja install resolves on the host and a Python 3 can start it headless
  * (which is where the licence is checked). Each test works in its own temp dir against a copy of
