@@ -162,7 +162,7 @@ describe("selective commit flow", () => {
 		await Bun.write(path.join(root, file), head);
 		await git(root, ["add", file]);
 		await git(root, ["commit", "-qm", "seed"]);
-		await Bun.write(path.join(root, file), foreign);
+		await write("Other", undefined, file, foreign);
 		await write("Main", undefined, file, insert(foreign));
 		await journal.flush();
 
@@ -171,6 +171,14 @@ describe("selective commit flow", () => {
 
 		expect(await git(root, ["show", `HEAD:${file}`])).toBe(insert(head));
 		expect(await Bun.file(path.join(root, file)).text()).toBe(insert(foreign));
+
+		const replay = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(replay.selection()).toEqual([]);
+		expect(replay.summary()).not.toContain("Review:");
+		const remaining = await createDraft({ cwd: root, journal, caller: "Other" });
+		await commitSelection(remaining, { subject: "test: update return" }, { journal, agent: { agent: "Other" } });
+		expect(await git(root, ["show", `HEAD:${file}`])).toBe(insert(foreign));
+		expect(await git(root, ["status", "--porcelain"])).toBe("");
 	});
 
 	it("explicitly selects a gitlink SHA with ordinary edits without committing child dirt or other staged work", async () => {

@@ -61,12 +61,38 @@ describe("selective commit attribution", () => {
 				{ actor: "Main", before, after: work },
 			];
 
-			expect(commitFor(head, edits, work, ["Main"]).content).toBe(`begin\n${selectedBody}\nend`);
+			const committed = commitFor(head, edits, work, ["Main"]).content;
+			expect(committed).toBe(`begin\n${selectedBody}\nend`);
+			// A replacement made before recording also keeps the repeated text on its own side.
+			expect(commitFor(head, edits.slice(1), work, ["Main"]).content).toBe(committed);
 			expect(commitFor(head, edits, work, ["Other"]).content).toBe(before);
 			expect(commitFor(head, edits, work, ["Main", "Other"]).content).toBe(work);
 			expect(commitFor(head, edits, work, []).content).toBe(head);
+
+			const replay = commitFor(committed, edits, work, ["Main"]);
+			expect(replay.verdicts).toEqual(["other -old", "other -shared", "other +new"]);
+			expect(replay.content).toBe(committed);
+			const remaining = commitFor(committed, edits, work, ["Other"]);
+			expect(remaining.verdicts).toEqual(["own -old", "own -shared", "own +new"]);
+			expect(remaining.content).toBe(work);
 		});
 	}
+
+	it("places the rest of an insertion around a line already committed at the boundary", () => {
+		const original = "begin\nold\nend";
+		const before = "begin\nnew\nend";
+		const work = "begin\nfirst\ncheck\nlast\nnew\nend";
+		const committed = "begin\ncheck\nold\nend";
+		const edits = [
+			// The gap after this snapshot hides the committed check until Main re-adds it.
+			{ actor: "Earlier", before: null, after: committed },
+			{ actor: "Other", before: original, after: before },
+			{ actor: "Main", before, after: work },
+		];
+		const replay = commitFor(committed, edits, work, ["Main"]);
+		expect(replay.content).toBe("begin\nfirst\ncheck\nlast\nold\nend");
+		expect(replay.verdicts).toEqual(["own +first", "own +last", "other -old", "other +new"]);
+	});
 
 	it("reviews an entire insertion between lines of someone else's replacement", () => {
 		const head = "begin\nold\nshared\nend";

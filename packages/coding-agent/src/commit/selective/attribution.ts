@@ -208,6 +208,64 @@ export function changedRegions(a: readonly string[], b: readonly string[]): Regi
 	return regions;
 }
 
+/** Replay a boundary insertion around any HEAD lines already committed there. */
+function* replayRegions(
+	items: readonly Item[],
+	aliveAt: readonly number[],
+	headLength: number,
+	step: Step,
+): Generator<Region & { leftAt: number; rightAt: number }> {
+	for (const region of changedRegions(step.before, step.after)) {
+		let leftAt = region.i1 === 0 ? -1 : aliveAt[region.i1 - 1];
+		const rightAt = region.i2 === aliveAt.length ? items.length : aliveAt[region.i2];
+		let next = region.j1;
+		const left = items[leftAt];
+		const right = items[rightAt];
+		if (region.i1 === region.i2 && (left?.span || right?.span)) {
+			const start = headEnd(left);
+			const end = headStart(right, headLength);
+			// Only a forward gap can contain committed lines between these neighbours. A
+			// replacement's own tombstones (possibly with identical text) are outside it.
+			const deleted: number[] = [];
+			if (start !== undefined && end !== undefined && start < end) {
+				for (let i = leftAt + 1; i < rightAt; i++) {
+					const { head, deletedBy } = items[i];
+					if (head !== undefined && head >= start && head < end && (deletedBy === PRE || deletedBy === GAP)) {
+						deleted.push(i);
+					}
+				}
+			}
+			if (deleted.length && deleted.length * (region.j2 - next) <= PAIRING_BUDGET) {
+				const old = deleted.map(i => items[i].text).join("\n");
+				const inserted = step.after.slice(next, region.j2).join("\n");
+				let i = 0;
+				let j = next;
+				for (const run of diffLineRuns(old, inserted)) {
+					if (run.removed) i += run.count;
+					else if (run.added) j += run.count;
+					else {
+						if (next < j) yield { ...region, j1: next, j2: j, leftAt, rightAt: deleted[i] };
+						const stop = i + run.count;
+						while (i < stop) items[deleted[i++]].alive = true;
+						leftAt = deleted[i - 1];
+						j += run.count;
+						next = j;
+					}
+				}
+			}
+		}
+		if (next < region.j2 || region.i1 < region.i2) yield { ...region, j1: next, leftAt, rightAt };
+	}
+}
+
+function headEnd(left: Item | undefined): number | undefined {
+	return !left ? 0 : left.head !== undefined ? left.head + 1 : left.span?.end;
+}
+
+function headStart(right: Item | undefined, headLength: number): number | undefined {
+	return !right ? headLength : (right.head ?? right.span?.start);
+}
+
 /**
  * Replay `steps` over `head` and derive the HEAD → `work` change ops with their actors.
  * @throws when the chain is not contiguous (a step's `before` differs from the running content)
@@ -224,7 +282,7 @@ export function attribute(head: readonly string[], steps: readonly Step[], work:
 			throw new Error(`attribution chain broken at step ${stepIndex} (${step.actor})`);
 		}
 		const insertions: Array<{ at: number; items: Item[] }> = [];
-		for (const region of changedRegions(step.before, step.after)) {
+		for (const region of replayRegions(items, aliveAt, head.length, step)) {
 			const over = new Set<string>();
 			let dependencies: Set<string> | undefined;
 			let orderedInsertion = region.i1 < region.i2;
@@ -242,7 +300,7 @@ export function attribute(head: readonly string[], steps: readonly Step[], work:
 				over.add(item.by);
 			}
 			if (region.j2 === region.j1) continue;
-			let at = region.i2 === aliveAt.length ? items.length : aliveAt[region.i2];
+			let at = region.rightAt;
 			let start: number | undefined;
 			let end: number | undefined;
 			if (region.i1 < region.i2) {
@@ -252,13 +310,13 @@ export function attribute(head: readonly string[], steps: readonly Step[], work:
 				end = last.head !== undefined ? last.head + 1 : last.span?.end;
 				at = aliveAt[region.i2 - 1] + 1;
 			} else {
-				const leftAt = region.i1 === 0 ? -1 : aliveAt[region.i1 - 1];
+				const leftAt = region.leftAt;
 				const left = items[leftAt];
 				const right = items[at];
 				if (left?.span || right?.span) {
 					orderedInsertion = true;
-					const leftEnd = !left ? 0 : left.head !== undefined ? left.head + 1 : left.span?.end;
-					const rightStart = !right ? head.length : (right.head ?? right.span?.start);
+					const leftEnd = headEnd(left);
+					const rightStart = headStart(right, head.length);
 					if (leftEnd !== undefined && leftEnd === rightStart) {
 						// The two worktree neighbours meet at this HEAD gap. Keep the insertion on the
 						// same side of the old body as it was on the new body.
