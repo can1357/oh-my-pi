@@ -253,7 +253,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - Output: `sources`, `requestId`.
    - **Kiro** — `packages/coding-agent/src/web/search/providers/kiro.ts`
       - Availability: a stored `kiro` login (`/login kiro`) or `KIRO_API_KEY`. An API key needs a region (stored by `/login kiro`, or `KIRO_API_REGION`); search never probes for one.
-      - Querying: POST `https://runtime.<region>.kiro.dev/mcp`, JSON-RPC `tools/call` of the `web_search` tool with `{ query }` and the bearer; logins add `x-amzn-kiro-profile-arn`, API keys `tokentype: API_KEY`. Quoted phrases, exclusions, `site:` and `filetype:` stay in the query; dates are left to the post-filter. Queries over 200 characters (the tool's limit) fail before the request. `recency` is ignored.
+      - Querying: POST `https://runtime.<region>.kiro.dev/mcp`, JSON-RPC `tools/call` of the `web_search` tool with `{ query }` and the bearer. Requests use the same Kiro CLI streaming SDK user-agent profile as chat, with JSON-RPC instead of an AWS JSON 1.0 target. Logins send `x-amzn-kiro-profile-arn` when available; API keys send `tokentype: API_KEY`. Quoted phrases, exclusions, `site:` and `filetype:` stay in the query; dates are left to the post-filter. Queries over 200 characters (the tool's limit) fail before the request. `recency` is ignored.
       - `limit` / `num_search_results`: the tool returns one page of up to `10` results, which is sliced locally.
       - Output: `sources` (`publishedDate` from the epoch-millisecond date), `authMode: "oauth"` or `"api_key"`. Per-source reuse limits (`maxVerbatimWordLimit`) are not carried.
    - **Parallel** — `packages/coding-agent/src/web/search/providers/parallel.ts`, `packages/coding-agent/src/web/parallel.ts`

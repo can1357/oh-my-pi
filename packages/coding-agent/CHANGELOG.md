@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added Kiro as a web search engine (`web/kiro`). It searches with the `/login kiro` account or `KIRO_API_KEY` through the Kiro runtime's `web_search` tool ([#19725](https://github.com/can1357/oh-my-pi/pull/19725) by [@emotionbug](https://github.com/emotionbug))
+- Added Kiro as a web search engine (`web/kiro`). It searches with the `/login kiro` account or `KIRO_API_KEY` through the Kiro runtime's `web_search` tool and uses Kiro CLI-compatible request headers ([#19725](https://github.com/can1357/oh-my-pi/pull/19725) by [@emotionbug](https://github.com/emotionbug))
 
 ## [19.0.0] - 2026-11-18
 

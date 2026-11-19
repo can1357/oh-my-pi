@@ -8,6 +8,7 @@
  */
 import { type AuthStorage, resolveApiKeyOnce, seedApiKeyResolver, withAuth } from "@oh-my-pi/pi-ai";
 import { decodeKiroCredential, kiroRuntimeBaseUrl } from "@oh-my-pi/pi-catalog/wire/kiro";
+import { kiroCliMcpHeaders } from "@oh-my-pi/pi-catalog/wire/kiro-cli";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { formatQuery, parseSearchQuery, type QuerySyntax } from "../query";
 import type { SearchResponse, SearchSource } from "../types";
@@ -49,16 +50,7 @@ async function callKiroSearch(key: string, query: string, params: SearchParams):
 	const id = crypto.randomUUID();
 	const response = await (params.fetch ?? fetch)(`${kiroRuntimeBaseUrl(credential.region)}mcp`, {
 		method: "POST",
-		headers: {
-			Accept: "application/json",
-			"Content-Type": "application/json",
-			Authorization: `Bearer ${credential.token}`,
-			// Without it Kiro reads a `ksk_…` key as an OAuth bearer and rejects it.
-			...(credential.kind === "api_key" ? { tokentype: "API_KEY" } : {}),
-			...(credential.kind === "oauth" && credential.profileArn
-				? { "x-amzn-kiro-profile-arn": credential.profileArn }
-				: {}),
-		},
+		headers: kiroCliMcpHeaders(credential.token, credential.kind === "oauth" ? credential.profileArn : undefined),
 		body: JSON.stringify({
 			jsonrpc: "2.0",
 			id,

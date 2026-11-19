@@ -1,7 +1,7 @@
 /**
  * The official Kiro CLI's wire identity, captured from kiro-cli 3.2.0. Every
- * Kiro request omp sends — runtime chat, model/profile management, AWS SSO-OIDC
- * login, and the Kiro social auth service — takes its headers from here, so
+ * Kiro request omp sends — runtime chat and MCP, model/profile management, AWS
+ * SSO-OIDC login, and the Kiro social auth service — takes its headers from here, so
  * the identity lives in one place. Credential-free: callers pass the bearer.
  */
 import { KIRO_API_KEY_PREFIX } from "./kiro";
@@ -130,6 +130,18 @@ export function kiroCliServiceHeaders(
 		authorization: `Bearer ${token}`,
 		...(token.startsWith(KIRO_API_KEY_PREFIX) ? { tokentype: "API_KEY" } : {}),
 		...sdkRequest(attempt),
+	};
+}
+
+/** Kiro CLI `InvokeMcp` uses the streaming SDK but sends JSON-RPC, not an AWS JSON 1.0 target. */
+export function kiroCliMcpHeaders(token: string, profileArn?: string): Record<string, string> {
+	return {
+		"content-type": "application/json",
+		...userAgents(OPERATIONS.GenerateAssistantResponse),
+		authorization: `Bearer ${token}`,
+		...(token.startsWith(KIRO_API_KEY_PREFIX) ? { tokentype: "API_KEY" } : {}),
+		...(profileArn ? { "x-amzn-kiro-profile-arn": profileArn } : {}),
+		...sdkRequest({ attempt: 1, maxAttempts: 1 }),
 	};
 }
 

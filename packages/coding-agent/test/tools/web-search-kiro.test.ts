@@ -84,6 +84,14 @@ describe("Kiro web search provider", () => {
 		expect(request.url).toBe("https://runtime.eu-central-1.kiro.dev/mcp");
 		expect(request.headers.get("authorization")).toBe("Bearer access");
 		expect(request.headers.get("x-amzn-kiro-profile-arn")).toBe(PROFILE_ARN);
+		expect(request.headers.get("user-agent")).toMatch(
+			/^aws-sdk-rust\/\S+ ua\/2\.1 api\/codewhispererstreaming\/\S+ .* md\/appVersion-\S+ app\/AmazonQ-For-CLI$/,
+		);
+		expect(request.headers.get("x-amz-user-agent")).toMatch(
+			/^aws-sdk-rust\/\S+ ua\/2\.1 api\/codewhispererstreaming\/\S+ .* app\/AmazonQ-For-CLI$/,
+		);
+		expect(request.headers.get("content-type")).toBe("application/json");
+		expect(request.headers.get("x-amz-target")).toBeNull();
 		expect(request.headers.get("tokentype")).toBeNull();
 		expect(request.body).toMatchObject({ method: "tools/call", params: { name: "web_search" } });
 		// Phrases and site: are sent; dates are left to the central post-filter.
