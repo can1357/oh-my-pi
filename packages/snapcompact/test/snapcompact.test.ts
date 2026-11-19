@@ -332,6 +332,38 @@ describe("shape resolution", () => {
 		expect(snapcompact.resolveShape(undefined)).toEqual(unknownFallback);
 	});
 
+	it("lets a model's configured shape replace its model-line default, below an explicit setting", () => {
+		const gemini = { api: "google-generative-ai", id: "gemini-3.5-flash" } as const;
+		const claudeShaped = snapcompact.resolveShape({
+			...gemini,
+			snapcompactShape: { variant: "11on16-bw", frameSize: 1932 },
+		});
+		expect(claudeShaped.cellWidth).toBe(11);
+		expect(claudeShaped.cellHeight).toBe(16);
+		expect(claudeShaped.frameSize).toBe(1932);
+		// The variant's own frame size applies when none is configured.
+		expect(snapcompact.resolveShape({ ...gemini, snapcompactShape: { variant: "11on16-bw" } }).frameSize).toBe(1568);
+		// An out-of-range frame size falls back to the variant's own rather than
+		// rendering one character per frame or an unbounded PNG.
+		for (const frameSize of [4, 63, 2577, 100_000]) {
+			expect(
+				snapcompact.resolveShape({ ...gemini, snapcompactShape: { variant: "11on16-bw", frameSize } }).frameSize,
+			).toBe(1568);
+		}
+		expect(
+			snapcompact.resolveShape({ ...gemini, snapcompactShape: { variant: "11on16-bw", frameSize: 64 } }).frameSize,
+		).toBe(64);
+		// Billing still follows the reader, not the borrowed shape.
+		expect(claudeShaped.frameTokenEstimate).toBe(snapcompact.resolveShape(gemini).frameTokenEstimate);
+		// An unknown variant leaves the model-line default; an explicit setting wins over the model.
+		expect(snapcompact.resolveShape({ ...gemini, snapcompactShape: { variant: "nope" } })).toEqual(
+			snapcompact.resolveShape(gemini),
+		);
+		expect(
+			snapcompact.resolveShape({ ...gemini, snapcompactShape: { variant: "11on16-bw" } }, "8on22-bw").cellWidth,
+		).toBe(8);
+	});
+
 	it("detects the ideal shape from the model id across gateways", () => {
 		// A high-res Claude served through an OpenAI-compatible gateway keeps
 		// its own geometry (tracked 8x13), its 1932px frame, and Anthropic's

@@ -194,7 +194,12 @@ import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility
 import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState, GoalTokenUsage } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
-import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
+import {
+	InternalUrlRouter,
+	type LocalProtocolOptions,
+	resolveLocalRoot,
+	sessionLocalProtocolOptions,
+} from "../internal-urls";
 import { type ChainJudge, hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
@@ -8496,6 +8501,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Current session ID */
 	get sessionId(): string {
 		return this.#activeProviderSessionId();
+	}
+
+	/**
+	 * Absolute path of the session's `local://` directory, which exists only once something is written there.
+	 * Follows the tools' mapping, which an SDK host or a parent session may have pinned elsewhere.
+	 */
+	get localRoot(): string {
+		const tools = this.#evalToolSession;
+		return resolveLocalRoot(tools ? sessionLocalProtocolOptions(tools) : this.#localProtocolOptions());
 	}
 	getEvalSessionId(): string {
 		return this.#eval.getSessionId();

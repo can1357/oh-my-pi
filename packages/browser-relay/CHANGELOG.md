@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The browser relay extension survives a browser whose loaded permission set predates the `downloads` permission: the service worker keeps working without download pairing instead of crashing before it ever connects ([#19659](https://github.com/can1357/oh-my-pi/pull/19659) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+
 ## [18.22.1] - 2026-11-17
 
 ### Fixed
