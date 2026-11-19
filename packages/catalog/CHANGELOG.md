@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Codex client version cache so `codex-client-version.json` is read and written under `$XDG_CACHE_HOME/omp` when that root is initialized, instead of the agent directory ([#19776](https://github.com/can1357/oh-my-pi/pull/19776) by [@Parsifa1](https://github.com/Parsifa1))
+
 ## [19.0.0] - 2026-11-18
 
 ### Added
