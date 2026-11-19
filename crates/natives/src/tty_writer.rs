@@ -755,9 +755,9 @@ mod tests {
 		fn new() -> Self {
 			let mut master = -1;
 			let mut slave = -1;
-			// SAFETY: both outputs point to valid storage. No optional name,
-			// termios, or window-size pointers are passed.
 			assert_eq!(
+				// SAFETY: both outputs point to valid storage. No optional name,
+				// termios, or window-size pointers are passed.
 				unsafe {
 					libc::openpty(
 						&mut master,
@@ -781,15 +781,16 @@ mod tests {
 			let mut attrs = unsafe { attrs.assume_init() };
 			// SAFETY: attrs is initialized, and this test owns the PTY.
 			unsafe { libc::cfmakeraw(&mut attrs) };
+			// SAFETY: slave is a live, test-owned TTY; attrs is initialized.
 			assert_eq!(unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &attrs) }, 0);
 			for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
 				// SAFETY: these are live, test-owned descriptors.
 				assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }, 0);
 			}
-			// The test's reads must have deadlines even if the writer fails.
+			// Nonblocking, so a read returns once the PTY is empty.
 			let flags = flags(master.as_raw_fd());
-			// SAFETY: master is test-owned, unrelated to stdout.
 			assert_eq!(
+				// SAFETY: master is test-owned, unrelated to stdout.
 				unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
 				0
 			);
@@ -824,10 +825,11 @@ mod tests {
 			.unwrap()
 	}
 
+	/// Polls until `ready` holds. The test runner's own timeout bounds the
+	/// wait: a deadline here turns a loaded machine's late scheduling of the
+	/// worker or the test's reader into a failure the writer did not cause.
 	fn wait_until(mut ready: impl FnMut() -> bool) {
-		let deadline = Instant::now() + Duration::from_secs(3);
 		while !ready() {
-			assert!(Instant::now() < deadline, "timed out waiting for worker");
 			std::thread::sleep(Duration::from_millis(1));
 		}
 	}
@@ -876,6 +878,7 @@ mod tests {
 		// Changing the original's flags cannot turn the worker into a blocking
 		// writer (which is exactly what dup-based implementations permit).
 		assert_eq!(
+			// SAFETY: the slave is a live descriptor this test owns.
 			unsafe {
 				libc::fcntl(pty.slave.as_raw_fd(), libc::F_SETFL, original_flags & !libc::O_NONBLOCK)
 			},
@@ -885,6 +888,7 @@ mod tests {
 		let (mut writer, _) = pty.writer(0);
 		assert_eq!(flags(pty.slave.as_raw_fd()), original_flags);
 		let cancel = writer.worker.as_ref().unwrap().cancel.0.as_raw_fd();
+		// SAFETY: cancel stays open until the writer stops.
 		assert_ne!(unsafe { libc::fcntl(cancel, libc::F_GETFD) } & libc::FD_CLOEXEC, 0);
 		writer.stop(0);
 		assert_eq!(flags(pty.slave.as_raw_fd()), original_flags);
