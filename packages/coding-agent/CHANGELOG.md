@@ -44,6 +44,9 @@
 - Added a notify option to the bash tool for reporting matching output from background commands and named services, waking idle sessions or ending blocked waits.
 - `omp usage` and `/usage` show each Claude account's subscription plan (e.g. `Max 20x`) beside its organization
 - Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
+- Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy
+- Fixed the Spotlight experiment re-asking Stencil Cloud on every tool call for an account without Cloud access (waitlisted): omp now warns once and pauses Spotlight for that account for a few hours, honors `Retry-After` on rate limits and outages, and sends its `omp/<version>` User-Agent on every Spotlight request
+- Fixed `omp --resume <id>` under `--mode rpc`, `--mode rpc-ui` and `--mode acp` failing at start when the session's directory no longer exists; the session now opens where it is stored, with the launch directory as its working directory, without asking whether to move it ([#19651](https://github.com/can1357/oh-my-pi/pull/19651) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
