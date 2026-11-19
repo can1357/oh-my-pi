@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added a spawn depth for the SDK and task executor (`createAgentSession({ spawnDepth })`, executor `spawnDepth`/`parentSpawnDepth`) that limits subagent nesting separately from task depth, so a long-lived worker started with a reset spawn depth keeps the full `task.maxRecursionDepth` helper budget, also after it is parked and revived
+- Added a spawn depth for the SDK and task executor (`createAgentSession({ spawnDepth })`, executor `spawnDepth`/`parentSpawnDepth`) that limits subagent nesting separately from task depth, so a long-lived worker started with a reset spawn depth keeps the full `task.maxRecursionDepth` helper budget, also after it is parked and revived ([#19790](https://github.com/can1357/oh-my-pi/pull/19790) by [@jerryfane](https://github.com/jerryfane))
 
 ### Fixed
 
