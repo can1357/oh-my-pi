@@ -237,7 +237,10 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 				fetch: fetcher,
 			});
 			const result = await resolveProviderModels({ ...options, cacheDbPath: path.join(dir, "models.db") }, "online");
-			const model = result.models.find(model => model.id === "claude-sonnet-5-5");
+			const model = result.models.find(
+				(model): model is Model<"google-gemini-cli"> =>
+					model.id === "claude-sonnet-5-5" && model.api === "google-gemini-cli",
+			);
 			if (!model) throw new Error("missing claude-sonnet-5-5");
 
 			for (const [email, expected] of [
@@ -415,7 +418,10 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 				fetch: fetcher,
 			});
 			const result = await resolveProviderModels({ ...options, cacheDbPath: path.join(dir, "models.db") }, "online");
-			const model = result.models.find(model => model.id === "claude-sonnet-4-6");
+			const model = result.models.find(
+				(model): model is Model<"google-gemini-cli"> =>
+					model.id === "claude-sonnet-4-6" && model.api === "google-gemini-cli",
+			);
 			if (!model) throw new Error("missing claude-sonnet-4-6");
 			// With the serving account's profile and with the row's own.
 			for (const email of ["a@example.com", undefined]) {

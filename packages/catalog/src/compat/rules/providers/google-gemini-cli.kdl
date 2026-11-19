@@ -4,6 +4,30 @@ provider "google-gemini-cli" {
 	default-model "gemini-3.1-pro-preview"
 	image-count-budget 200
 
+	// Same Cloud Code Assist transport as Antigravity: no transcribe SKU, so
+	// dictation runs a Gemini chat SKU with the audio inline.
+	seed api="google-gemini-cli-transcribe" base-url="https://cloudcode-pa.googleapis.com" bundle="always" {
+		model "gemini-3-flash-transcribe" name="Gemini 3 Flash (transcribe)" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+			request-model-id "gemini-3-flash-preview"
+		}
+		model "gemini-2.5-flash-transcribe" name="Gemini 2.5 Flash (transcribe)" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+			request-model-id "gemini-2.5-flash"
+		}
+	}
+	models "gemini-3-flash-transcribe" "gemini-2.5-flash-transcribe" {
+		kind "stt"
+	}
+
 	class "gemini" {
 		// Cloud Code Assist rejects an unsigned first function call; the bypass
 		// sentinel is required only on that first call (secondary parallel calls

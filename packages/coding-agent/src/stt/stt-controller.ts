@@ -1,5 +1,5 @@
 import type { ApiKeyResolver } from "@oh-my-pi/pi-ai";
-import { transcribeAudio } from "@oh-my-pi/pi-ai/transcription";
+import { isTranscriptionApi, transcribeAudio } from "@oh-my-pi/pi-ai/transcription";
 import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
 import { AudioCapture } from "@oh-my-pi/pi-natives";
 import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
@@ -243,7 +243,7 @@ export class STTController {
 			if (qualified) options.showWarning(`Dictation model ${qualified} not found; using the built-in local model`);
 		}
 		let model = first?.model;
-		if (model?.api === "openai-transcriptions") {
+		if (model && isTranscriptionApi(model.api)) {
 			this.#startBuffered(editor, options, model);
 			return;
 		}
@@ -259,7 +259,7 @@ export class STTController {
 			options.showWarning("No dictation model matches the active session provider in offline mode.");
 			return;
 		}
-		if (model?.api === "openai-transcriptions") {
+		if (model && isTranscriptionApi(model.api)) {
 			this.#startBuffered(editor, options, model);
 			return;
 		}

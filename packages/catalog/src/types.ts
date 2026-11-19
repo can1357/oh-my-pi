@@ -67,6 +67,8 @@ export const RUNNER_APIS = [
 	"openrouter-rerank",
 	"openrouter-video",
 	"openai-transcriptions",
+	"xai-stt",
+	"google-gemini-cli-transcribe",
 ] as const;
 /** Kind each single-purpose runner API serves; `local-inference` hosts several kinds. */
 export const RUNNER_API_KINDS: Record<Exclude<(typeof RUNNER_APIS)[number], "local-inference">, ModelKind> = {
@@ -86,6 +88,8 @@ export const RUNNER_API_KINDS: Record<Exclude<(typeof RUNNER_APIS)[number], "loc
 	"openrouter-rerank": "rerank",
 	"openrouter-video": "video",
 	"openai-transcriptions": "stt",
+	"xai-stt": "stt",
+	"google-gemini-cli-transcribe": "stt",
 };
 
 const RUNNER_API_KIND_BY_API: ReadonlyMap<Api, ModelKind> = new Map(Object.entries(RUNNER_API_KINDS));
