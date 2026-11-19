@@ -450,6 +450,8 @@ export interface AgentSessionConfig {
 
 /** Options for AgentSession.prompt(). */
 export interface PromptOptions {
+	/** New user/parent assignment, or an internal continuation of the admitted turn. */
+	admissionOrigin?: "new-turn" | "continuation";
 	/** Whether to expand file-based prompt templates (default: true). */
 	expandPromptTemplates?: boolean;
 	/**

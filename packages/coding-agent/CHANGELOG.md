@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `retry.fallbackRevertPolicy: "next-turn"` to retry the primary at new-turn boundaries after transient failures, with bounded backoff and quota cooldown protection ([#15536](https://github.com/can1357/oh-my-pi/pull/15536) by [@schickling-assistant](https://github.com/schickling-assistant)).
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes

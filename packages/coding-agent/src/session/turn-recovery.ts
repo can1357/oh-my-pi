@@ -66,6 +66,7 @@ import {
 import {
 	type ActiveRetryFallbackState,
 	calculateRetryBackoffDelayMs,
+	classifyRetryFallbackFailure,
 	findRetryFallbackCandidates,
 	formatRetryFallbackBaseSelector,
 	formatRetryFallbackSelector,
@@ -73,6 +74,7 @@ import {
 	getRetryFallbackRevertPolicy,
 	parseRetryFallbackSelector,
 	type RetryFallbackChains,
+	type RetryFallbackFailureKind,
 	type RetryFallbackResolutionContext,
 	type RetryFallbackRevertPolicy,
 	type RetryFallbackSelector,
@@ -419,6 +421,7 @@ export class TurnRecovery {
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
+	#primaryTrial: { sessionId: string; model: string; failures: number } | undefined;
 	#activeFallbackCreditRedemption?: {
 		targetSelector: string;
 		handle: AnthropicFallbackCreditHandle;
@@ -634,6 +637,12 @@ export class TurnRecovery {
 		this.#requestBodyReadTimeoutRecoveryPromptSequence = undefined;
 		const model = this.#host.model();
 		if (model) {
+			if (
+				!this.#activeRetryFallback &&
+				this.#primaryTrial?.sessionId === this.#host.sessionManager.getSessionId() &&
+				this.#primaryTrial.model === formatModelStringWithRouting(model)
+			)
+				this.#primaryTrial = undefined;
 			const level = this.#host.thinkingLevel();
 			this.#lastServed = {
 				attribution: {
@@ -842,13 +851,13 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Restores the configured primary after fallback cooldown expiry.
+	 * Restores the configured primary when the fallback policy admits it.
 	 * @returns true when the active model was actually switched back to the
 	 * primary, so callers can re-run the pre-send context-fit check against the
 	 * reverted (possibly smaller) window before issuing the next request.
 	 */
-	maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
-		return this.#maybeRestoreRetryFallbackPrimary();
+	maybeRestoreRetryFallbackPrimary(origin: "new-turn" | "continuation" = "continuation"): Promise<boolean> {
+		return this.#maybeRestoreRetryFallbackPrimary(origin);
 	}
 
 	/** Applies model fallback policy from live usage health before a turn starts. */
@@ -2296,7 +2305,13 @@ export class TurnRecovery {
 		role: string,
 		selector: RetryFallbackSelector,
 		currentSelector: string,
-		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal; reason?: string },
+		options?: {
+			pinFallback?: boolean;
+			apiKey?: string;
+			signal?: AbortSignal;
+			reason?: string;
+			failureKind?: RetryFallbackFailureKind;
+		},
 	): Promise<boolean> {
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
@@ -2357,12 +2372,21 @@ export class TurnRecovery {
 		this.#host.settings.getStorage()?.recordModelUsage(candidateSelector);
 		this.#host.setThinkingLevel(nextThinkingLevel);
 		if (!this.#activeRetryFallback) {
+			const sessionId = this.#host.sessionManager.getSessionId();
+			const primary = previousModel ? formatModelStringWithRouting(previousModel) : currentSelector;
+			if (this.#primaryTrial?.sessionId !== sessionId || this.#primaryTrial.model !== primary) {
+				this.#primaryTrial = { sessionId, model: primary, failures: 0 };
+			} else {
+				this.#primaryTrial.failures = Math.min(4, this.#primaryTrial.failures + 1);
+			}
 			this.#activeRetryFallback = {
 				role,
 				originalSelector: currentSelector,
 				originalThinkingLevel: currentThinkingLevel,
 				lastAppliedFallbackThinkingLevel: nextThinkingLevel,
 				pinned: options?.pinFallback === true,
+				failureKind: options?.failureKind ?? "usage",
+				returnBoundariesRemaining: 2 ** this.#primaryTrial.failures,
 			};
 		} else {
 			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
@@ -2517,6 +2541,11 @@ export class TurnRecovery {
 				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
 					...options,
 					reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
+					failureKind: classifyRetryFallbackFailure(
+						this.#classifyRetryMessage(failedMessage),
+						failedMessage.errorMessage ?? "",
+						failedMessage.errorStatus,
+					),
 				});
 				// Redemption replays the refused request's frozen `system` and `tools`. If the
 				// swap rebuilt either, the fallback model would be prompted with, and call tools
@@ -2680,16 +2709,17 @@ export class TurnRecovery {
 		return true;
 	}
 
-	async #maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
-		if (!this.#activeRetryFallback) return false;
-		if (this.#activeRetryFallback.pinned) return false;
-		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return false;
+	async #maybeRestoreRetryFallbackPrimary(origin: "new-turn" | "continuation" = "continuation"): Promise<boolean> {
+		const active = this.#activeRetryFallback;
+		const policy = this.#getRetryFallbackRevertPolicy();
+		if (!active || active.pinned || policy === "never") return false;
+		if (policy === "next-turn") {
+			if (origin !== "new-turn" || this.#retryPromise || active.failureKind === "auth") return false;
+			active.returnBoundariesRemaining = Math.max(0, (active.returnBoundariesRemaining ?? 1) - 1);
+			if (active.returnBoundariesRemaining > 0) return false;
+		}
 
-		const {
-			originalSelector: originalSelectorRaw,
-			originalThinkingLevel,
-			lastAppliedFallbackThinkingLevel,
-		} = this.#activeRetryFallback;
+		const { originalSelector: originalSelectorRaw, originalThinkingLevel, lastAppliedFallbackThinkingLevel } = active;
 		const originalSelector = parseRetryFallbackSelector(originalSelectorRaw, this.#host.modelRegistry);
 		if (!originalSelector) {
 			// Defensive: the stored selector is always produced by
@@ -2710,7 +2740,11 @@ export class TurnRecovery {
 			}
 			return false;
 		}
-		if (this.isRetryFallbackSelectorSuppressed(originalSelector)) return false;
+		if (
+			!(policy === "next-turn" && active.failureKind === "transient") &&
+			this.isRetryFallbackSelectorSuppressed(originalSelector)
+		)
+			return false;
 
 		const resolvedPrimary = resolveModelOverride(
 			[originalSelector.raw],
@@ -2722,7 +2756,7 @@ export class TurnRecovery {
 		if (!primaryModel) return false;
 		if (cfgOffline.get(this.#host.settings) && primaryModel.provider !== currentModel.provider) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
-		if (!apiKey) return false;
+		if (!apiKey || this.#activeRetryFallback !== active) return false;
 
 		const currentThinkingLevel = this.#host.configuredThinkingLevel();
 		const thinkingToApply =

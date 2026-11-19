@@ -197,6 +197,7 @@ async function compressFile(input: {
 				source,
 				nonce,
 			}),
+			"new-turn",
 		);
 		let reviewed = 0;
 		while (!protocol.approved) {
@@ -206,7 +207,11 @@ async function compressFile(input: {
 			if (!draft || draft.round === reviewed || draft.round > maxRounds) break;
 			reviewed = draft.round;
 			protocol.markReviewed(draft.round);
-			await turn(session, renderReview({ protocol, draft, nonce, maxRounds, final: draft.round >= maxRounds }));
+			await turn(
+				session,
+				renderReview({ protocol, draft, nonce, maxRounds, final: draft.round >= maxRounds }),
+				"continuation",
+			);
 		}
 
 		const draft = protocol.latest;
@@ -234,8 +239,8 @@ async function compressFile(input: {
 }
 
 /** Send one prompt and wait for the agent to settle. */
-async function turn(session: AgentSession, text: string): Promise<void> {
-	await session.prompt(text, { expandPromptTemplates: false, synthetic: true, userInitiated: false });
+async function turn(session: AgentSession, text: string, admissionOrigin: "new-turn" | "continuation"): Promise<void> {
+	await session.prompt(text, { admissionOrigin, expandPromptTemplates: false, synthetic: true, userInitiated: false });
 	await session.waitForIdle();
 }
 

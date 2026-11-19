@@ -91,6 +91,7 @@ export type SubmittedUserInput = {
 	images?: ImageContent[];
 	imageLinks?: (string | undefined)[];
 	customType?: string;
+	admissionOrigin?: "new-turn" | "continuation";
 	/** The `.`/`c` continue shortcut: dispatch through `session.resume()` instead of
 	 *  prompting with `text`, so no visible user turn is added. */
 	resume?: boolean;
@@ -505,6 +506,7 @@ export interface InteractiveModeContext {
 			images?: ImageContent[];
 			imageLinks?: (string | undefined)[];
 			customType?: string;
+			admissionOrigin?: "new-turn" | "continuation";
 			display?: boolean;
 			streamingBehavior?: "steer" | "followUp";
 			followUps?: string[];

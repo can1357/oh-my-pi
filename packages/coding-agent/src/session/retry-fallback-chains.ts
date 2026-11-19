@@ -1,5 +1,6 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import { type Model, parseRateLimitReason } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { ModelRegistry } from "../config/model-registry";
 import { cfgModelRoles } from "../config/model-settings";
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
@@ -20,7 +21,30 @@ import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy, type RetrySetting
 export type RetryFallbackChains = Record<string, string[]>;
 
 /** Policy controlling restoration of a fallback chain's primary model. */
-export type RetryFallbackRevertPolicy = "never" | "cooldown-expiry";
+export type RetryFallbackRevertPolicy = "never" | "cooldown-expiry" | "next-turn";
+
+export type RetryFallbackFailureKind = "transient" | "usage" | "auth" | "unknown";
+
+/** Only transport/server failures may return before the primary's cooldown expires. */
+export function classifyRetryFallbackFailure(
+	errorId: number,
+	errorMessage: string,
+	errorStatus?: number,
+): RetryFallbackFailureKind {
+	if (AIError.is(errorId, AIError.Flag.AuthFailed) || AIError.is(errorId, AIError.Flag.AccountPolicy)) return "auth";
+	const reason = parseRateLimitReason(errorMessage);
+	if (
+		AIError.is(errorId, AIError.Flag.UsageLimit) ||
+		errorStatus === 429 ||
+		/\b429\b|rate[_ -]?limit|too many requests/i.test(errorMessage) ||
+		reason === "RATE_LIMIT_EXCEEDED" ||
+		reason === "CONCURRENT_LIMIT" ||
+		reason === "QUOTA_EXHAUSTED" ||
+		reason === "INSUFFICIENT_G1_CREDITS_BALANCE"
+	)
+		return "usage";
+	return AIError.is(errorId, AIError.Flag.Transient) ? "transient" : "unknown";
+}
 
 /**
  * Parsed model selector used by retry fallback resolution. `thinkingLevel`
@@ -59,6 +83,8 @@ export interface ActiveRetryFallbackState {
 	originalThinkingLevel: ConfiguredThinkingLevel | undefined;
 	lastAppliedFallbackThinkingLevel: ConfiguredThinkingLevel | undefined;
 	pinned: boolean;
+	failureKind?: RetryFallbackFailureKind;
+	returnBoundariesRemaining?: number;
 	/**
 	 * Set once a turn on the fallback target settles successfully. Until then the
 	 * switch is only a routing decision — nothing has been produced by the new
@@ -360,7 +386,7 @@ export function validateRetryFallbackChains(
 
 /** Returns the configured fallback-primary restoration policy. */
 export function getRetryFallbackRevertPolicy(settings: Settings): RetryFallbackRevertPolicy {
-	return cfgRetryFallbackRevertPolicy.get(settings) === "never" ? "never" : "cooldown-expiry";
+	return cfgRetryFallbackRevertPolicy.get(settings);
 }
 
 /** Whether `retry.fallbackOn` lets a failure walk the fallback chain. */

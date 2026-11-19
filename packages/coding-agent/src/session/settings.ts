@@ -968,7 +968,7 @@ export const cfgRetryFallbackChains = register({
 export const cfgRetryFallbackRevertPolicy = register({
 	id: "retry.fallbackRevertPolicy",
 	type: "enum",
-	values: ["cooldown-expiry", "never"] as const,
+	values: ["cooldown-expiry", "next-turn", "never"] as const,
 	default: "cooldown-expiry",
 	ui: {
 		tab: "model",
@@ -980,6 +980,11 @@ export const cfgRetryFallbackRevertPolicy = register({
 				value: "cooldown-expiry",
 				label: "Cooldown expiry",
 				description: "Return to the primary model after its suppression window ends",
+			},
+			{
+				value: "next-turn",
+				label: "Next turn",
+				description: "Retry the primary on a new turn after transport/server failures; respect quota cooldowns",
 			},
 			{ value: "never", label: "Never", description: "Stay on the fallback model until manually changed" },
 		],

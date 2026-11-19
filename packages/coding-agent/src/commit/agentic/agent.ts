@@ -177,6 +177,7 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 			const reminder = buildReminderMessage(state, needsChangelog, retryCount, MAX_RETRIES);
 			await session.prompt(reminder, {
 				attribution: "agent",
+				admissionOrigin: "continuation",
 				expandPromptTemplates: false,
 				synthetic: true,
 			});

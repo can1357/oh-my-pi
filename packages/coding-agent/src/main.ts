@@ -483,7 +483,10 @@ export async function submitInteractiveInput(
 				display: input.display ?? false,
 				attribution: "agent" as const,
 			};
-			input.dispatched = await session.promptCustomMessage(message, { streamingBehavior });
+			input.dispatched = await session.promptCustomMessage(message, {
+				streamingBehavior,
+				...(input.admissionOrigin ? { admissionOrigin: input.admissionOrigin } : {}),
+			});
 		} else if (input.resume) {
 			// No queue intent: a continue shortcut interrupts a running turn instead.
 			await session.resume();

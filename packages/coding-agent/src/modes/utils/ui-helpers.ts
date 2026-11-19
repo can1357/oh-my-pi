@@ -1404,6 +1404,7 @@ export class UiHelpers {
 		}
 		if (typeof builtin === "string") {
 			const forwarded = await this.ctx.session.prompt(builtin, {
+				admissionOrigin: "continuation",
 				streamingBehavior: message.mode,
 				images: message.images,
 				onPromptQueued: onQueued,
@@ -1423,7 +1424,7 @@ export class UiHelpers {
 		}
 		if (this.ctx.isKnownSlashCommand(message.text)) {
 			// No `streamingBehavior`: this prompt never queues (a busy session rejects it).
-			const forwarded = await this.ctx.session.prompt(message.text);
+			const forwarded = await this.ctx.session.prompt(message.text, { admissionOrigin: "continuation" });
 			this.#parkLoopOnLocalConsume(message.text, forwarded);
 			return;
 		}
@@ -1607,6 +1608,7 @@ export class UiHelpers {
 					? this.ctx.session
 							.promptCustomMessage(built.message, {
 								...built.options,
+								admissionOrigin: "continuation",
 								onPromptQueued: onFirstQueued,
 								onPromptAdmitted: onFirstAdmitted,
 							})
@@ -1619,6 +1621,7 @@ export class UiHelpers {
 				promptPromise = this.ctx.session
 					.prompt(first.text, {
 						streamingBehavior: first.mode === "followUp" ? "followUp" : "steer",
+						admissionOrigin: "continuation",
 						images: first.images,
 						onPromptQueued: onFirstQueued,
 						onPromptAdmitted: onFirstAdmitted,

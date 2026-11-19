@@ -6680,6 +6680,180 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(session.model?.id).toBe(fallbackModel.id);
 	});
+	describe("next-turn fallback restoration", () => {
+		const primary = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const fallback = getBundledModel("openai", "gpt-4o-mini")!;
+		const primaryId = `${primary.provider}/${primary.id}`;
+		const fallbackId = `${fallback.provider}/${fallback.id}`;
+
+		function setup(response: (model: Model) => MockResponse, pinned = false) {
+			const requested: string[] = [];
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: pinned ? fallback : primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requested.push(`${model.provider}/${model.id}`);
+					mock.push(response(model));
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { default: [fallbackId] },
+				"retry.fallbackRevertPolicy": "next-turn",
+			});
+			settings.setModelRole("default", primaryId);
+			const active = new AgentSession({
+				agent,
+				settings,
+				modelRegistry,
+				sessionManager: SessionManager.inMemory(),
+				initialRetryFallback: pinned
+					? { role: "default", originalSelector: primaryId, originalThinkingLevel: undefined, pinned: true }
+					: undefined,
+			});
+			session = active;
+			return {
+				requested,
+				active,
+				async prompt(origin: "continuation" | "new-turn" = "new-turn") {
+					await active.prompt("Continue the assignment", { admissionOrigin: origin });
+					await active.waitForIdle();
+				},
+			};
+		}
+
+		it("tries the primary on a new prompt despite a transient selector cooldown", async () => {
+			let failed = false;
+			const { requested, prompt } = setup(model => {
+				if (model.id === primary.id && !failed) {
+					failed = true;
+					return { throw: "Connection refused" };
+				}
+				return { content: ["Recovered"] };
+			});
+			await prompt();
+			expect(modelRegistry.isSelectorSuppressed(primaryId)).toBe(true);
+			await prompt();
+			expect(requested).toEqual([primaryId, fallbackId, primaryId]);
+		});
+
+		it.each(["quota exceeded", "rate limit exceeded"])("waits for the known reset after %s", async failure => {
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			let failed = false;
+			const { requested, prompt } = setup(model => {
+				if (model.id === primary.id && !failed) {
+					failed = true;
+					return { throw: `${failure} retry-after-ms=${FALLBACK_TEST_RETRY_AFTER_MS}` };
+				}
+				return { content: ["Recovered"] };
+			});
+			await prompt();
+			await prompt();
+			expect(requested).toEqual([primaryId, fallbackId, fallbackId]);
+			now += FALLBACK_TEST_RETRY_AFTER_MS + 1;
+			await prompt();
+			expect(requested.at(-1)).toBe(primaryId);
+		});
+
+		it.each([false, true])("never automatically returns from auth failure or a pin (pinned=%s)", async pinned => {
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			const { requested, prompt } = setup(
+				model =>
+					model.id === primary.id
+						? {
+								throw: "403 permission_error: OAuth authentication is currently not allowed for this organization",
+							}
+						: { content: ["Fallback"] },
+				pinned,
+			);
+			await prompt();
+			now += 86_400_000;
+			await prompt();
+			expect(requested).toEqual(pinned ? [fallbackId, fallbackId] : [primaryId, fallbackId, fallbackId]);
+		});
+
+		it("caps unsuccessful primary trials at gaps of 1/2/4/8/16 admissions despite fallback output", async () => {
+			const { requested, prompt } = setup(model =>
+				model.id === primary.id ? { throw: "Connection refused" } : { content: ["Fallback output"] },
+			);
+			const primaryTurns: number[] = [];
+			for (let turn = 0; turn < 64; turn++) {
+				const before = requested.length;
+				await prompt();
+				if (requested.slice(before).includes(primaryId)) primaryTurns.push(turn);
+			}
+			expect(primaryTurns).toEqual([0, 1, 3, 7, 15, 31, 47, 63]);
+		});
+
+		it("resets the admission gap after primary output, not fallback output", async () => {
+			let attempts = 0;
+			const { requested, prompt } = setup(model => {
+				if (model.id !== primary.id) return { content: ["Fallback"] };
+				return [1, 2, 4].includes(++attempts) ? { throw: "Connection refused" } : { content: ["Primary"] };
+			});
+			const primaryTurns: number[] = [];
+			for (let turn = 0; turn < 6; turn++) {
+				const before = requested.length;
+				await prompt();
+				if (requested.slice(before).includes(primaryId)) primaryTurns.push(turn);
+			}
+			expect(primaryTurns).toEqual([0, 1, 3, 4, 5]);
+		});
+
+		it("does not spend admissions on continuations or automatic fallback retries", async () => {
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			let retryFallback = false;
+			const { requested, prompt } = setup(model => {
+				if (model.id === primary.id) return { throw: "Connection refused" };
+				if (retryFallback) {
+					retryFallback = false;
+					return { throw: "service unavailable: 503 overloaded" };
+				}
+				return { content: ["Fallback"] };
+			});
+			await prompt();
+			await prompt();
+			const before = requested.length;
+			retryFallback = true;
+			await prompt("continuation");
+			await prompt("continuation");
+			expect(requested.slice(before)).toEqual([fallbackId, fallbackId, fallbackId]);
+			now += 10 * 60_000;
+			await prompt();
+			expect(requested.filter(id => id === primaryId)).toHaveLength(2);
+			await prompt();
+			expect(requested.filter(id => id === primaryId)).toHaveLength(3);
+		});
+
+		it("admits a new primary trial after cancellation of the fallback turn", async () => {
+			const started = Promise.withResolvers<void>();
+			let failed = false;
+			const { requested, active, prompt } = setup(model => {
+				if (model.id === primary.id && !failed) {
+					failed = true;
+					return { throw: "Connection refused" };
+				}
+				if (model.id === fallback.id) {
+					started.resolve();
+					return { content: ["Interrupted fallback"], delayMs: 10_000 };
+				}
+				return { content: ["Primary"] };
+			});
+			const pending = prompt();
+			await started.promise;
+			await active.abort();
+			await pending;
+			await prompt();
+			expect(requested.at(-1)).toBe(primaryId);
+		});
+	});
+
 	it("suppresses cooled selectors and lazily reverts to the role primary after cooldown expiry", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");

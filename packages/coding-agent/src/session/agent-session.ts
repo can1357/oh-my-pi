@@ -5962,6 +5962,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					synthetic: true,
 				},
 				autoContinuePrompt,
+				"continuation",
 				{
 					skipPostPromptRecoveryWait: true,
 					prependMessages: eagerNudges.length > 0 ? eagerNudges : undefined,
@@ -9440,7 +9441,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		let dispatched = false;
 		const refusalBeforeDispatch = this.#costCapRefusal;
 		try {
-			dispatched = await this.#promptWithMessage(message, expandedText, {
+			dispatched = await this.#promptWithMessage(message, expandedText, options?.admissionOrigin ?? "new-turn", {
 				...options,
 				followUpBatch: followUps,
 				images: normalizedImages,
@@ -9493,7 +9494,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	async promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps"> & {
+		options?: Pick<
+			PromptOptions,
+			"streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps" | "admissionOrigin"
+		> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
 			onPromptQueued?: PromptOptions["onPromptQueued"];
@@ -9504,7 +9508,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	async #promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps"> & {
+		options?: Pick<
+			PromptOptions,
+			"streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps" | "admissionOrigin"
+		> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
 			onPromptQueued?: PromptOptions["onPromptQueued"];
@@ -9554,7 +9561,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async #dispatchCustomPrompt<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		options:
-			| (Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps"> & {
+			| (Pick<
+					PromptOptions,
+					"streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps" | "admissionOrigin"
+			  > & {
 					queueChipText?: string;
 					queueOnly?: boolean;
 					onPromptQueued?: PromptOptions["onPromptQueued"];
@@ -9665,14 +9675,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			outcome.sessionClaimed = true;
 			return true;
 		}
-		outcome.sessionClaimed = await this.#promptWithMessage(preparedMessage, textContent, {
-			...options,
-			followUpBatch: followUps,
-			prependMessages:
-				keywordNotices.length > 0 || descriptionNotice
-					? [...keywordNotices, ...(descriptionNotice ? [descriptionNotice] : [])]
-					: undefined,
-		});
+		outcome.sessionClaimed = await this.#promptWithMessage(
+			preparedMessage,
+			textContent,
+			options?.admissionOrigin ?? "new-turn",
+			{
+				...options,
+				followUpBatch: followUps,
+				prependMessages:
+					keywordNotices.length > 0 || descriptionNotice
+						? [...keywordNotices, ...(descriptionNotice ? [descriptionNotice] : [])]
+						: undefined,
+			},
+		);
 		if (!outcome.sessionClaimed) this.#reportDroppedCustomPrompt(message, options, followUps);
 		return outcome.sessionClaimed;
 	}
@@ -9890,6 +9905,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async #promptWithMessage(
 		message: AgentMessage,
 		expandedText: string,
+		origin: "new-turn" | "continuation",
 		options?: Pick<
 			PromptOptions,
 			"toolChoice" | "images" | "skipCompactionCheck" | "solutionSpace" | "onPromptAdmitted"
@@ -9916,7 +9932,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#promptSetupAbortController = setupAbort;
 		try {
 			options?.onPromptAdmitted?.();
-			await this.#recovery.maybeRestoreRetryFallbackPrimary();
+			await this.#recovery.maybeRestoreRetryFallbackPrimary(origin);
 			// Auto-prewalk: return from the previous task's handoff before the usage preflight checks the model,
 			// then judge this task alongside the rest of setup; the decision is applied right before dispatch.
 			const userTask = this.#isUserTask(message);
@@ -11086,7 +11102,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const prependMessages = queuedMessages.slice(0, -1);
 		const textContent = this.#getCustomMessageTextContent(message);
 		try {
-			await this.#promptWithMessage(message, textContent, {
+			await this.#promptWithMessage(message, textContent, "continuation", {
 				prependMessages,
 				skipPostPromptRecoveryWait: true,
 			});

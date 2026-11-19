@@ -1,13 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Model, ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
+	classifyRetryFallbackFailure,
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
 	type RetryFallbackResolutionContext,
+	type RetryFallbackFailureKind,
 	parseRetryFallbackSelector,
 	resolveRetryFallbackChainKey,
 	validateRetryFallbackChains,
@@ -35,6 +38,22 @@ function createContext(
 		},
 	};
 }
+
+describe("retry fallback failure classification", () => {
+	const cases: [number, string, number | undefined, RetryFallbackFailureKind][] = [
+		[AIError.create(AIError.Flag.Transient), "Connection refused", undefined, "transient"],
+		[AIError.create(AIError.Flag.Transient), "quota exceeded", 429, "usage"],
+		[AIError.create(AIError.Flag.Transient), "rate limit exceeded", undefined, "usage"],
+		[AIError.create(AIError.Flag.Transient), "too many requests", undefined, "usage"],
+		[AIError.create(AIError.Flag.UsageLimit), "Quota exhausted", undefined, "usage"],
+		[AIError.create(AIError.Flag.AuthFailed), "Rate limit", 429, "auth"],
+		[AIError.create(AIError.Flag.AccountPolicy), "Organization disabled", 403, "auth"],
+		[0, "Unrecognized failure", undefined, "unknown"],
+	];
+	it.each(cases)("classifies flags=%s message=%s status=%s as %s", (id, message, status, expected) => {
+		expect(classifyRetryFallbackFailure(id, message, status)).toBe(expected);
+	});
+});
 
 describe("retry fallback selector resolution", () => {
 	it("resolves chain keys by exact model, longest wildcard, role, then default", () => {

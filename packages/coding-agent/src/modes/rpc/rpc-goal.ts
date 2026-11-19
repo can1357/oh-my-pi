@@ -456,15 +456,20 @@ export class RpcGoalController {
 			// promptCustomMessage counts the submission as admitted synchronously, so every
 			// settle report sees it from here on. A continuation that is refused or bails
 			// before its run starts must neither stay counted nor withhold settlement.
-			session.promptCustomMessage({ customType: "goal-continuation", content: prompt, display: false }).then(
-				dispatched => {
-					if (!dispatched) unclaim();
-				},
-				error => {
-					unclaim();
-					reportControllerError(error);
-				},
-			);
+			session
+				.promptCustomMessage(
+					{ customType: "goal-continuation", content: prompt, display: false },
+					{ admissionOrigin: "continuation" },
+				)
+				.then(
+					dispatched => {
+						if (!dispatched) unclaim();
+					},
+					error => {
+						unclaim();
+						reportControllerError(error);
+					},
+				);
 		})().catch(error => {
 			this.#continuationScheduled = false;
 			this.#onContinuationDropped?.();
