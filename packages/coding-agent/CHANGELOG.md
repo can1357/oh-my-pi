@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `app.display.hold` (`Alt+S`): holds all output so a streaming turn stops scrolling the screen while you read back through native scrollback; any key resumes and catches up in one frame.
+- Added `app.display.hold` (`Alt+S`): holds all output so a streaming turn stops scrolling the screen while you read back through native scrollback; any key resumes and catches up in one frame ([#19751](https://github.com/can1357/oh-my-pi/pull/19751) by [@LangYa466](https://github.com/LangYa466)).
 
 ## [19.0.0] - 2026-11-18
 

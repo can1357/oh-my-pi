@@ -66,6 +66,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "./utils";
+import { sanitizeDisplaySingleLine } from "./overlays/extensions/display-text";
 import { tmuxClientRendersSixel } from "./tmux";
 
 /** Full-attribute reset terminating each rendered content row. */
@@ -1251,9 +1252,9 @@ export class TUI extends Container {
 	 * cannot move the reading position either.
 	 *
 	 * A hold freezes the composer's echo too: painting any frame is painting the
-	 * screen. Callers therefore release on the next keystroke and before showing a
-	 * dialog the user must answer, which is the caller's job — it knows the keys
-	 * and the dialogs.
+	 * screen. Callers therefore release on the next real keystroke, which is the
+	 * caller's job — only it knows the key. Overlays release it here for the same
+	 * reason: a prompt the agent waits on must never be invisible.
 	 *
 	 * @param notice Optional one-line hint painted into the last screen row
 	 *   without scrolling it (released with the next real frame).
@@ -1267,16 +1268,22 @@ export class TUI extends Container {
 			this.#renderTimer?.cancel();
 			this.#renderTimer = undefined;
 			this.#renderRequested = false;
+			// An in-flight resize transaction writes on its own settle timer — an
+			// alt-buffer borrow toggles in and out and probes the cursor. Abandon it
+			// before it can, or the hold freezes the stream while the screen still
+			// jumps. The release repaints from the geometry the terminal settled on.
+			this.#abandonResizeTransaction();
 			if (notice !== undefined && !this.#altActive && !this.#nativeLive) {
 				this.terminal.write(this.#holdNoticeSequence(notice, this.terminal.columns, this.terminal.rows));
 			}
 			return true;
 		}
-		// The terminal may have reflowed while held. Take its settled geometry as
-		// the new baseline so the repaint stays viewport-only: a hold must not
+		// The terminal may have reflowed while held. Rebase the physical anchor to
+		// the current geometry so the repaint is viewport-only: a hold must not
 		// hand the release a width change that clears native scrollback and
-		// replays the transcript (the very jump a hold exists to prevent).
-		this.#absorbHeldResize();
+		// replays the transcript (the very jump a hold exists to prevent), nor
+		// paint at a stale anchor that overwrites history a grow pulled back down.
+		this.#rebaseAnchorAfterHold();
 		this.requestRender(true);
 		return true;
 	}
@@ -1284,6 +1291,38 @@ export class TUI extends Container {
 	/** Whether {@link setOutputHold} is holding the output. */
 	getOutputHold(): boolean {
 		return this.#outputHold;
+	}
+
+	/**
+	 * Drop every in-flight resize transaction without writing. A hold owns the
+	 * screen, so the borrow's entry, its settle timer, and its anchor probe are
+	 * all released here; the release repaints at the geometry the terminal
+	 * already settled on.
+	 */
+	#abandonResizeTransaction(): void {
+		this.#resizeSettleTimer?.cancel();
+		this.#resizeSettleTimer = undefined;
+		this.#cancelResizeProbe();
+		if (this.#resizeAltActive) {
+			if (this.#pendingAltEnter !== "") {
+				// The borrow never painted its entry (a deferred frame held it), so
+				// dropping the entry is the whole transaction: writing a matching exit
+				// would be a bare buffer switch, and writing anything here is output
+				// the hold forbids.
+				this.#pendingAltEnter = "";
+			} else {
+				// The entry is on screen: leaving the user on the alternate buffer
+				// would hide the transcript for the whole hold, so restore it now —
+				// one write, before the freeze, exactly as the settle would have.
+				this.terminal.write(this.#altScreenExit());
+			}
+			this.#resizeAltActive = false;
+			this.#resizeAltExitFused = false;
+			setAltScreenActive(false);
+			this.#altPreviousLines = [];
+			this.#altPreparedRows = [];
+		}
+		this.#resizeInPlaceActive = false;
 	}
 
 	/** Delete every tracked Kitty image from the terminal graphics store. */
@@ -1398,6 +1437,11 @@ export class TUI extends Container {
 	 * Returns a handle to control the overlay's visibility.
 	 */
 	showOverlay(component: Component, options?: OverlayOptions): OverlayHandle {
+		// An overlay the user has not caused — an approval, a plan review, a
+		// session picker the agent opened — must never land behind a held screen:
+		// the hold suppresses painting, so the prompt would be invisible and the
+		// agent would wait on an answer nobody can give.
+		if (this.#outputHold) this.setOutputHold(false);
 		component.setIgnoreTight?.(true);
 		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false, released: false };
 		this.overlayStack.push(entry);
@@ -2052,26 +2096,55 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Adopt the terminal's current geometry as the painted one after a hold.
+	 * Rebase the painted geometry and the physical viewport anchor after a hold.
 	 *
-	 * A hold swallows SIGWINCH, so nothing reflowed the screen under the app's
-	 * knowledge. Releasing has to repaint the viewport without handing the size
-	 * delta to {@link #prepareResizeReplay}: a width change there clears native
-	 * history (`rebuild`) or appends a second copy (`append`), and both are the
-	 * scrollback jump a hold exists to prevent. Clearing the burst accounting
-	 * makes the release a viewport repaint at the geometry the terminal already
-	 * settled on, which is `preserve` semantics for that one frame.
+	 * A hold swallows SIGWINCH, so the terminal reflowed the normal buffer without
+	 * the app following. Two things are therefore stale, and both must be fixed
+	 * before the release paints:
+	 *
+	 * - The size delta. Handing it to {@link #prepareResizeReplay} would clear
+	 *   native history (`rebuild`) or append a second copy (`append`) — the jump
+	 *   a hold exists to prevent. Clearing the burst accounting instead makes the
+	 *   release a viewport repaint at the geometry the terminal already settled
+	 *   on, i.e. `preserve` semantics for that one frame.
+	 * - The anchor. `#previousHeight` must NOT simply be overwritten: a grow pulls
+	 *   committed scrollback rows back onto the grid, so the old
+	 *   `#providerViewportTop` would address live rows over history and overwrite
+	 *   it. Recover the moved anchor the way every settled resize does — a CPR
+	 *   round trip against the parked cursor — through the same probe the resize
+	 *   path uses. Its completion (`#resolveResizeAnchor`) sets the forced
+	 *   repaint, so the release frame waits for a correct anchor.
 	 */
-	#absorbHeldResize(): void {
+	#rebaseAnchorAfterHold(): void {
 		this.#resizeBurstGrew = false;
 		this.#resizeBurstShrank = false;
 		this.#resizeBurstLastHeight = undefined;
 		this.#resizeBurstPull = 0;
 		this.#resizeBurstWidthChanged = false;
 		this.#resizeBurstResized = false;
-		this.#previousWidth = this.terminal.columns;
-		this.#previousHeight = this.terminal.rows;
 		this.#resizeReplaySize = undefined;
+		const width = this.terminal.columns;
+		const height = this.terminal.rows;
+		const resized = width !== this.#previousWidth || height !== this.#previousHeight;
+		if (!resized || !this.#hasEverRendered || this.#providerWindow.length === 0) {
+			this.#previousWidth = width;
+			this.#previousHeight = height;
+			return;
+		}
+		// The probe measures against the pre-hold window and parked offset, which
+		// are exactly the values recorded by the last real paint; they are what the
+		// terminal reflowed.
+		this.#resizeProbeWindow = this.#providerWindow;
+		this.#resizeProbeOffset = this.#parkedViewportOffset;
+		this.#resizeBurstResized = true;
+		if (width !== this.#previousWidth) this.#resizeBurstWidthChanged = true;
+		if (height > this.#previousHeight) {
+			this.#resizeBurstGrew = true;
+			this.#resizeBurstPull = height - this.#previousHeight;
+		} else if (height < this.#previousHeight) {
+			this.#resizeBurstShrank = true;
+		}
+		this.#beginResizeAnchorProbe();
 	}
 
 	/**
@@ -3745,7 +3818,10 @@ export class TUI extends Container {
 	 * row until the release repaint rewrites it.
 	 */
 	#holdNoticeSequence(notice: string, width: number, height: number): string {
-		const label = truncateToWidth(notice, width, Ellipsis.Omit);
+		// `notice` is a public parameter, so it is sanitized like any other
+		// untrusted display string: an unsanitized ESC would let the caller erase
+		// the very scrollback the hold protects, and a newline would push a row.
+		const label = truncateToWidth(sanitizeDisplaySingleLine(notice), width, Ellipsis.Omit);
 		return `${this.#paintBeginSequence}\x1b7\x1b[${height};1H${SEGMENT_RESET}${ERASE_LINE}\x1b[2m${label}${SEGMENT_RESET}\x1b8${this.#paintEndSequence}`;
 	}
 

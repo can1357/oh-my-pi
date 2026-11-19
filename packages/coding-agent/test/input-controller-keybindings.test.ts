@@ -2009,14 +2009,16 @@ describe("app.display.hold", () => {
 		expect(isOutputHeld()).toBe(false);
 	});
 
-	it("ignores mouse reports and key releases while held", async () => {
+	it("ignores terminal reports and key releases while held", async () => {
 		const { InputController, ctx, isOutputHeld, spies } = await createContext();
 		const controller = new InputController(ctx);
 		controller.setupKeyHandlers();
 		const listeners = registeredInputListeners(spies.addInputListener);
 
 		dispatchInput(listeners, "\x1bs");
-		// SGR mouse wheel and a key-release report must not drop the hold.
+		// A delayed cell-size answer, an SGR mouse wheel, and a key release must
+		// all leave the hold alone: none of them is the user asking to follow.
+		dispatchInput(listeners, "\x1b[6;16;8t");
 		dispatchInput(listeners, "\x1b[<64;10;5M");
 		dispatchInput(listeners, "\x1b[97;1:3u");
 		expect(isOutputHeld()).toBe(true);

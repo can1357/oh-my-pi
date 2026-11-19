@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	extractPrintableText,
+	isTerminalReport,
 	isWindowsTerminalSession,
 	matchesKey,
 	matchesRawBackspace,
@@ -332,5 +333,44 @@ describe("extractPrintableText", () => {
 
 	it("preserves Kitty CSI-u text-field decoding for supported modifiers", () => {
 		expect(extractPrintableText("\x1b[97;1;229u")).toBe("å");
+	});
+});
+
+describe("isTerminalReport", () => {
+	it("classifies terminal replies that share the input stream with typing", () => {
+		for (const report of [
+			"\x1b[6;16;8t", // cell size in pixels
+			"\x1b[4;18;9t",
+			"\x1b]1337;ReportCellSize=16.0;8.0\x07", // iTerm2 cell size
+			"\x1b[12;40R", // cursor position report
+			"\x1b[?62;4;6;22c", // primary device attributes
+			"\x1b[?2026;1$y", // DECRQM
+			"\x1b[<64;10;5M", // SGR mouse wheel
+			"\x1b[<0;10;5m",
+			"\x1b[M abc", // legacy X10 mouse
+			"\x1b]11;rgb:0000/0000/0000\x07", // OSC background colour
+			"\x1bP1$r0m\x1b\\", // DCS
+			"\x1b_s;x\x1b\\", // APC
+		]) {
+			expect(isTerminalReport(report)).toBe(true);
+		}
+	});
+
+	it("leaves real keystrokes alone", () => {
+		for (const key of [
+			"a",
+			"\r",
+			"\x1bs", // alt+s
+			"\x1b[A", // up
+			"\x1b[1;5C", // ctrl+right
+			"\x1b[97;1:3u", // kitty key release
+			"\x1b[27u",
+			"\x1b[Z", // shift+tab
+			"\x1b[3~", // delete
+			"\x1bOP", // F1
+			"\x1b[200~hi\x1b[201~", // bracketed paste
+		]) {
+			expect(isTerminalReport(key)).toBe(false);
+		}
 	});
 });

@@ -13,6 +13,7 @@ import {
 	parseKey,
 	parseSgrMouse,
 	type PasteOptions,
+	isTerminalReport,
 	type SlashCommand,
 } from "@oh-my-pi/pi-tui";
 import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -388,24 +389,25 @@ export class InputController {
 			this.ctx.ui.addInputListener(
 				data => {
 					if (this.ctx.keybindings.matches(data, "app.display.hold")) {
-						if (this.ctx.ui.hasOverlay()) return undefined;
 						if (this.ctx.ui.getOutputHold()) {
+							// Releasing always wins, overlay or not: a hold must never trap the
+							// user behind a prompt they cannot see.
 							this.ctx.ui.setOutputHold(false);
-						} else {
-							const key = appKey(this.ctx.keybindings, "app.display.hold");
-							// The bottom-row notice is the whole message: a status row
-							// presented now could not paint until the release anyway.
-							this.ctx.ui.setOutputHold(true, `⏸ Output held · ${key} or any key resumes`);
+							return { consume: true };
 						}
+						if (this.ctx.ui.hasOverlay()) return undefined;
+						const key = appKey(this.ctx.keybindings, "app.display.hold");
+						// The bottom-row notice is the whole message: a status row
+						// presented now could not paint until the release anyway.
+						this.ctx.ui.setOutputHold(true, `⏸ Output held · ${key} or any key resumes`);
 						return { consume: true };
 					}
-					// Only a real keystroke resumes: a wheel tick or a key release is not
-					// the user asking to follow again, and mouse capture (`tui.mouse`)
-					// would otherwise drop a hold the moment the wheel moves. The release
-					// marker is matched directly because `isKeyRelease` is inert until the
-					// kitty protocol is negotiated, and a release can only arrive after it.
+					// Only a real keystroke resumes. Terminal reports arrive unprompted on
+					// the same stream (a delayed cell-size reply, a cursor-position answer
+					// to a resize probe), and a key release or wheel tick is not the user
+					// asking to follow again — none of them may drop the hold.
 					if (!this.ctx.ui.getOutputHold()) return undefined;
-					if (data.startsWith("\x1b[<") || KEY_RELEASE_REPORT.test(data)) return undefined;
+					if (isTerminalReport(data) || KEY_RELEASE_REPORT.test(data)) return undefined;
 					this.ctx.ui.setOutputHold(false);
 					return undefined;
 				},
