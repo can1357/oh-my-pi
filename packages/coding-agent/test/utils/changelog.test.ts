@@ -410,27 +410,36 @@ describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () =>
 						`setupVersion: ${CURRENT_SETUP_VERSION}\ncollapseChangelog: false\n`,
 					);
 
-					const proc = Bun.spawn(["script", "-q", "-c", `bun ${JSON.stringify(cliEntry)}`, "/dev/null"], {
-						cwd: repoRoot,
-						stdout: "pipe",
-						stderr: "pipe",
-						env: {
-							...process.env,
-							// ci-test-ts children inherit PI_TEST_RUNTIME=1, which makes the CLI
-							// headless: it paints nothing and exits once startup drains. Clear it so
-							// CI runs the same painting interactive startup as a local `bun test`.
-							PI_TEST_RUNTIME: undefined,
-							HOME: root,
-							XDG_CONFIG_HOME: path.join(root, "xdg-config"),
-							XDG_STATE_HOME: path.join(root, "xdg-state"),
-							XDG_DATA_HOME: path.join(root, "xdg-data"),
-							PI_CODING_AGENT_DIR: agentDir,
-							PI_PACKAGE_DIR: packageDir,
-							PI_NO_TITLE: "1",
-							NO_COLOR: "1",
-							TERM: "xterm-256color",
+					const proc = Bun.spawn(
+						[
+							"script",
+							"-q",
+							"-c",
+							`${JSON.stringify(process.execPath)} ${JSON.stringify(cliEntry)}`,
+							"/dev/null",
+						],
+						{
+							cwd: repoRoot,
+							stdout: "pipe",
+							stderr: "pipe",
+							env: {
+								...process.env,
+								// ci-test-ts children inherit PI_TEST_RUNTIME=1, which makes the CLI
+								// headless: it paints nothing and exits once startup drains. Clear it so
+								// CI runs the same painting interactive startup as a local `bun test`.
+								PI_TEST_RUNTIME: undefined,
+								HOME: root,
+								XDG_CONFIG_HOME: path.join(root, "xdg-config"),
+								XDG_STATE_HOME: path.join(root, "xdg-state"),
+								XDG_DATA_HOME: path.join(root, "xdg-data"),
+								PI_CODING_AGENT_DIR: agentDir,
+								PI_PACKAGE_DIR: packageDir,
+								PI_NO_TITLE: "1",
+								NO_COLOR: "1",
+								TERM: "xterm-256color",
+							},
 						},
-					});
+					);
 					let exited = false;
 					void proc.exited.then(() => {
 						exited = true;

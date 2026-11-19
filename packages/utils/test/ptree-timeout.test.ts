@@ -52,7 +52,7 @@ describe("ptree timeout", () => {
 
 		try {
 			// Bun's subprocess timeout uses the platform clock; fake timers cannot drive this lifecycle.
-			using child = spawn(["bun", "-e", "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)"], {
+			using child = spawn([process.execPath, "-e", "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)"], {
 				timeout: 20,
 			});
 			await child.nothrow().text();
