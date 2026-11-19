@@ -6,6 +6,7 @@ import { ADVISOR_SEVERITIES } from "@oh-my-pi/pi-tui/chat/messages";
 import { ADVISOR_REVIEW_MODES, ADVISOR_SYNC_BACKLOG_MODES } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { register } from "../config/registry";
 import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "./emission-guard";
+import { ADVISOR_WIP_DELIVERY_MODES } from "./advise-tool";
 
 // Advisor is interactive-session assistance: protocol hosts opt in explicitly instead of inheriting the
 // user's local preference, and get the default tuning rather than the user's local tuning.
@@ -78,6 +79,30 @@ export const cfgAdvisorContinueSeverity = register({
 			{ value: "nit", label: "Nit", description: "Every note continues the run." },
 			{ value: "concern", label: "Concern", description: "Concerns and blockers continue the run. Default." },
 			{ value: "blocker", label: "Blocker", description: "Only blockers continue the run." },
+		],
+		condition: "advisorEnabled",
+	},
+});
+
+export const cfgAdvisorWipDelivery = register({
+	id: "advisor.wipDelivery",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ADVISOR_WIP_DELIVERY_MODES,
+	default: "aside",
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Advisor WIP Delivery",
+		description:
+			"How advisor nits and concerns raised while the agent is mid-run reach it. Aside delivers them at the agent's next step without interrupting; Defer holds them until the agent's final answer (legacy). Changing this takes effect in the advisor's own guidance on its next session.",
+		options: [
+			{
+				value: "aside",
+				label: "Aside",
+				description: "Deliver at the agent's next step without interrupting. Default.",
+			},
+			{ value: "defer", label: "Defer", description: "Hold until the agent's final answer (legacy)." },
 		],
 		condition: "advisorEnabled",
 	},
@@ -158,6 +183,81 @@ export const cfgAdvisorEvictStaleResults = register({
 		label: "Advisor Evict Stale Results",
 		description:
 			"Before each review, replace the advisor's read/grep/glob output from older reviews with a short placeholder. The latest review is kept.",
+		condition: "advisorEnabled",
+	},
+});
+
+export const cfgAdvisorJudgeGate = register({
+	id: "advisor.judgeGate",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ["off", "auto", "on"] as const,
+	default: "off",
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Advisor Judge Gate (experimental)",
+		description:
+			"Before each in-progress review, ask the 'judge' model role whether the update shows risk. Low-risk updates are held for the next review instead of costing a full advisor turn, up to the hold count and age caps below. Final turns are never gated, though review cadence can still hold them; judge failures review anyway.",
+		options: [
+			{ value: "off", label: "Off", description: "Review every in-progress update. Default." },
+			{
+				value: "auto",
+				label: "Auto",
+				description:
+					"Gate only when the judge role resolves to a native judgment model (TypeSafe jev), whose calibrated probabilities the risk threshold assumes",
+			},
+			{
+				value: "on",
+				label: "On",
+				description:
+					"Gate with whichever model the judge role resolves to; prompted judges answer an uncalibrated yes/no",
+			},
+		],
+		condition: "advisorEnabled",
+	},
+});
+
+export const cfgAdvisorJudgeGateMaxHolds = register({
+	id: "advisor.judgeGateMaxHolds",
+	protocolDefault: ["rpc", "acp"],
+	type: "number",
+	default: 3,
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Advisor Judge Gate Max Holds",
+		description:
+			"After the judge gate has held this many in-progress updates in a row (minimum 1), the next one is reviewed without asking the judge, together with everything held.",
+		options: [
+			{ value: "1", label: "1 update" },
+			{ value: "2", label: "2 updates" },
+			{ value: "3", label: "3 updates", description: "Default." },
+			{ value: "5", label: "5 updates" },
+			{ value: "10", label: "10 updates" },
+		],
+		condition: "advisorEnabled",
+	},
+});
+
+export const cfgAdvisorJudgeGateMaxHoldMs = register({
+	id: "advisor.judgeGateMaxHoldMs",
+	protocolDefault: ["rpc", "acp"],
+	type: "number",
+	default: 120_000,
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Advisor Judge Gate Max Hold Time",
+		description:
+			"When the oldest update the judge gate holds has waited longer than this, the next in-progress update is reviewed without asking the judge, together with everything held. 0 disables the time cap.",
+		options: [
+			{ value: "0", label: "Off" },
+			{ value: "30000", label: "30 seconds" },
+			{ value: "60000", label: "1 minute" },
+			{ value: "120000", label: "2 minutes", description: "Default." },
+			{ value: "300000", label: "5 minutes" },
+		],
 		condition: "advisorEnabled",
 	},
 });

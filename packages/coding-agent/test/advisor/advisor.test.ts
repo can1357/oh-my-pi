@@ -665,6 +665,18 @@ describe("advisor", () => {
 	});
 
 	describe("AdviseTool", () => {
+		// Deferral is now the legacy, opt-in mode (production defaults to aside).
+		// Pin these tests to it explicitly so the aside default cannot silently
+		// reinterpret what they assert.
+		type DeferAdviseCallback = (
+			note: string,
+			severity: AdvisorNote["severity"],
+			turn?: number,
+			opts?: { wip?: boolean },
+		) => void;
+		const deferTool = (onAdvice: DeferAdviseCallback, guard?: AdvisorEmissionGuard): AdviseTool =>
+			new AdviseTool(onAdvice, guard, () => "defer");
+
 		it("suppresses duplicate advice notes from the same advisor session", async () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
@@ -742,7 +754,7 @@ describe("advisor", () => {
 
 		it("defers non-blockers per update and flushes the backlog on the next completed update", async () => {
 			const onAdvice = vi.fn();
-			const tool = new AdviseTool(onAdvice);
+			const tool = deferTool(onAdvice);
 			const note = "The result still needs a focused regression test.";
 
 			tool.beginUpdate(true);
@@ -773,7 +785,7 @@ describe("advisor", () => {
 
 		it("does not pile up duplicate deferred notes during a long mid-turn", async () => {
 			const onAdvice = vi.fn();
-			const tool = new AdviseTool(onAdvice);
+			const tool = deferTool(onAdvice);
 			const note = "Same point raised repeatedly.";
 
 			tool.beginUpdate(true);
@@ -789,7 +801,7 @@ describe("advisor", () => {
 
 		it("retains the highest severity when duplicate deferred advice escalates", async () => {
 			const onAdvice = vi.fn();
-			const tool = new AdviseTool(onAdvice);
+			const tool = deferTool(onAdvice);
 
 			tool.beginUpdate(true);
 			await tool.execute("tc-1", { note: "Same point raised repeatedly.", severity: "nit" });
@@ -809,7 +821,7 @@ describe("advisor", () => {
 			const delivered: string[] = [];
 			// Mirror AgentSession: admission (filter + per-update budget) runs at
 			// emission; routing never re-filters.
-			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard());
+			const tool = deferTool(note => delivered.push(note), new AdvisorEmissionGuard());
 			const concerns = [
 				"Bare `location` cannot work outside the page; inspect with `await page.url()`.",
 				"Scope navigation to the visualizer's own `.viz-container`.",
@@ -838,7 +850,7 @@ describe("advisor", () => {
 			// unconditional "will be delivered automatically" promised delivery for
 			// notes the guard had already rejected, and the advice was lost.
 			const delivered: string[] = [];
-			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
+			const tool = deferTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
 
 			tool.beginUpdate(true);
 			const accepted = await tool.execute("x-0", { note: "First mid-turn concern.", severity: "concern" });
@@ -861,7 +873,7 @@ describe("advisor", () => {
 			// concern takes the update's slot and the guard names the displaced
 			// pending nit, which must not be flushed alongside it.
 			const delivered: { note: string; severity?: string }[] = [];
-			const tool = new AdviseTool(
+			const tool = deferTool(
 				(note, severity) => delivered.push({ note, severity }),
 				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
 			);
@@ -885,7 +897,7 @@ describe("advisor", () => {
 			// older update's accepted reservation holds no slot in the current
 			// update and must survive its eviction rounds.
 			const delivered: { note: string; severity?: string }[] = [];
-			const tool = new AdviseTool(
+			const tool = deferTool(
 				(note, severity) => delivered.push({ note, severity }),
 				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
 			);
@@ -910,7 +922,7 @@ describe("advisor", () => {
 			// free slots. When full, a higher-severity note displaces the
 			// lowest-rank PENDING entry — not the first one, never a routed one.
 			const delivered: { note: string; severity?: string }[] = [];
-			const tool = new AdviseTool(
+			const tool = deferTool(
 				(note, severity) => delivered.push({ note, severity }),
 				new AdvisorEmissionGuard({ budgetPerUpdate: 3 }),
 			);
@@ -942,7 +954,7 @@ describe("advisor", () => {
 			// so an equal-rank newcomer at a full budget is rate-limited instead
 			// of displacing the genuinely-escalated note.
 			const delivered: { note: string; severity?: string }[] = [];
-			const tool = new AdviseTool(
+			const tool = deferTool(
 				(note, severity) => delivered.push({ note, severity }),
 				new AdvisorEmissionGuard({ budgetPerUpdate: 2 }),
 			);
@@ -973,7 +985,7 @@ describe("advisor", () => {
 			// following concern is still reserved and flushed — and the noise call
 			// is told it carried no content.
 			const delivered: string[] = [];
-			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
+			const tool = deferTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
 
 			tool.beginUpdate(true);
 			const noise = await tool.execute("n-0", { note: "Stop.", severity: "concern" });
@@ -1034,7 +1046,7 @@ describe("advisor", () => {
 			// interrupt at blocker severity now — not be rejected as already-seen
 			// and arrive late at the lower deferred severity.
 			const delivered: { note: string; severity?: string }[] = [];
-			const tool = new AdviseTool(
+			const tool = deferTool(
 				(note, severity) => delivered.push({ note, severity }),
 				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
 			);
@@ -1062,7 +1074,7 @@ describe("advisor", () => {
 			// routed (non-displaceable), so a follow-up emission in the same
 			// update still faces the spent budget. The next beginUpdate resets it.
 			const delivered: { note: string; severity?: string }[] = [];
-			const tool = new AdviseTool(
+			const tool = deferTool(
 				(note, severity) => delivered.push({ note, severity }),
 				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
 			);
@@ -1091,7 +1103,7 @@ describe("advisor", () => {
 
 		it("resetDeliveredNotes resets the guard and the pending backlog together", async () => {
 			const delivered: string[] = [];
-			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
+			const tool = deferTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
 
 			tool.beginUpdate(true);
 			await tool.execute("q-0", { note: "Queued but never flushed.", severity: "concern" });
@@ -1127,6 +1139,115 @@ describe("advisor", () => {
 
 			const invalid = tool.parameters({ note: 123, severity: "invalid" });
 			expect(invalid instanceof type.errors).toBe(true);
+		});
+	});
+
+	describe("AdviseTool WIP aside delivery", () => {
+		it("delivers a mid-run concern immediately as a WIP aside instead of holding it to the final answer", async () => {
+			// Regression (session 2026-10-22T02-40-40): a concern raised 2s after a
+			// failure reached the primary long past its final answer. In aside mode
+			// it must route the instant it is raised, not on a later completed-update
+			// flush.
+			const onAdvice = vi.fn();
+			const tool = new AdviseTool(onAdvice, undefined, () => "aside");
+			const note = "The #sendEmail path is disabled after its third failure.";
+
+			tool.beginUpdate(true, 11);
+			await tool.execute("tc-1", { note, severity: "concern" });
+
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+			expect(onAdvice).toHaveBeenCalledWith(note, "concern", 11, { wip: true });
+
+			// The completed-update transition must not re-deliver it: nothing queued.
+			tool.beginUpdate(false);
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+		});
+
+		it("dedupes a mid-run aside note repeated across two in-progress updates", async () => {
+			const onAdvice = vi.fn();
+			const tool = new AdviseTool(onAdvice, undefined, () => "aside");
+			const note = "Scope the navigation to the viz container.";
+
+			tool.beginUpdate(true, 1);
+			await tool.execute("a-0", { note, severity: "concern" });
+			tool.beginUpdate(true, 2);
+			await tool.execute("a-1", { note, severity: "concern" });
+
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+		});
+
+		it("still delivers a mid-run blocker live without the WIP flag in aside mode", async () => {
+			const onAdvice = vi.fn();
+			const tool = new AdviseTool(onAdvice, undefined, () => "aside");
+
+			tool.beginUpdate(true, 3);
+			await tool.execute("b-0", { note: "A destructive command is running.", severity: "blocker" });
+
+			// Blockers take the unchanged live path: no wip flag, so the session may
+			// still interrupt now.
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+			expect(onAdvice).toHaveBeenCalledWith("A destructive command is running.", "blocker", 3);
+		});
+
+		it("delivers a reserved note once as a WIP aside when wip delivery switches defer->aside on an equal-rank re-raise", async () => {
+			// Regression: the aside branch spliced the pending reservation before
+			// re-admitting, so the guard rejected the equal-rank re-raise as a
+			// duplicate and the note was lost (never routed, nothing left to flush).
+			const onAdvice = vi.fn();
+			let mode: "aside" | "defer" = "defer";
+			const tool = new AdviseTool(onAdvice, undefined, () => mode);
+			const note = "The retry budget is never decremented.";
+
+			tool.beginUpdate(true, 1);
+			await tool.execute("c-0", { note, severity: "concern" });
+			expect(onAdvice).not.toHaveBeenCalled();
+
+			// Operator flips the setting mid-update; the same concern is re-raised.
+			mode = "aside";
+			await tool.execute("c-1", { note, severity: "concern" });
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+			expect(onAdvice).toHaveBeenCalledWith(note, "concern", 1, { wip: true });
+
+			// The later flush must not re-send the already-delivered note.
+			tool.flushDeferredNotes();
+			tool.beginUpdate(false);
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+		});
+
+		it("delivers a reserved concern once at concern severity when a lower-rank nit re-raise lands in aside mode", async () => {
+			const onAdvice = vi.fn();
+			let mode: "aside" | "defer" = "defer";
+			const tool = new AdviseTool(onAdvice, undefined, () => mode);
+			const note = "The lock is released before the write completes.";
+
+			tool.beginUpdate(true, 2);
+			await tool.execute("d-0", { note, severity: "concern" });
+			expect(onAdvice).not.toHaveBeenCalled();
+
+			mode = "aside";
+			await tool.execute("d-1", { note, severity: "nit" });
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+			expect(onAdvice).toHaveBeenCalledWith(note, "concern", 2, { wip: true });
+
+			tool.flushDeferredNotes();
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+		});
+
+		it("escalates a reserved nit to a concern once as a WIP aside on a higher-rank re-raise in aside mode", async () => {
+			const onAdvice = vi.fn();
+			let mode: "aside" | "defer" = "defer";
+			const tool = new AdviseTool(onAdvice, undefined, () => mode);
+			const note = "The migration drops the audit table.";
+
+			tool.beginUpdate(true, 3);
+			await tool.execute("e-0", { note, severity: "nit" });
+			mode = "aside";
+			await tool.execute("e-1", { note, severity: "concern" });
+			expect(onAdvice).toHaveBeenCalledTimes(1);
+			expect(onAdvice).toHaveBeenCalledWith(note, "concern", 3, { wip: true });
+
+			tool.flushDeferredNotes();
+			expect(onAdvice).toHaveBeenCalledTimes(1);
 		});
 	});
 
@@ -1737,6 +1858,172 @@ describe("advisor", () => {
 			const secondReview = promptText(promptInputs[1]);
 			expect(secondReview).toContain("Second turn observable output.");
 			expect(secondReview).not.toContain("Second turn private reasoning.");
+		});
+
+		it("holds in-progress updates the review gate passes on until the final review", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const gated: string[] = [];
+			const messages: AgentMessage[] = [{ role: "user", content: "routine step one", timestamp: 1 } as AgentMessage];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				gateReview: update => {
+					gated.push(update);
+					return Promise.resolve(false);
+				},
+			});
+
+			runtime.onTurnEnd(messages, { willContinue: true });
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(promptInputs).toHaveLength(0);
+
+			messages.push({ role: "user", content: "final step two", timestamp: 2 } as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1_000, 1);
+
+			// Only the in-progress update was judged; the final one reviews both.
+			expect(gated).toHaveLength(1);
+			expect(promptInputs).toHaveLength(1);
+			const review = promptText(promptInputs[0]);
+			expect(review).toContain("routine step one");
+			expect(review).toContain("final step two");
+		});
+
+		it("does not let a late gate verdict review updates held after it", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const verdictA = Promise.withResolvers<boolean>();
+			const verdicts = [verdictA.promise, Promise.resolve(false)];
+			const messages: AgentMessage[] = [{ role: "user", content: "step A", timestamp: 1 } as AgentMessage];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				gateReview: () => verdicts.shift()!,
+			});
+
+			runtime.onTurnEnd(messages, { willContinue: true });
+			messages.push({ role: "user", content: "final step B", timestamp: 2 } as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1_000, 1);
+			messages.push({ role: "user", content: "routine step C", timestamp: 3 } as AgentMessage);
+			runtime.onTurnEnd(messages, { willContinue: true });
+			verdictA.resolve(true);
+			// The runtime's reaction to A's verdict runs before ours; any review it queued drains here.
+			await verdictA.promise;
+			await runtime.waitForCatchup(1_000, 1);
+
+			// A rode along with B's review; C was judged low-risk and stays held.
+			expect(promptInputs).toHaveLength(1);
+			expect(promptText(promptInputs[0])).toContain("step A");
+			expect(promptText(promptInputs[0])).not.toContain("routine step C");
+		});
+
+		it("reviews an in-progress update when the review gate fails", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const messages: AgentMessage[] = [{ role: "user", content: "risky step", timestamp: 1 } as AgentMessage];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				gateReview: () => Promise.reject(new Error("judge unavailable")),
+			});
+
+			runtime.onTurnEnd(messages, { willContinue: true });
+			await settleUntil(() => promptInputs.length > 0);
+
+			expect(promptText(promptInputs[0])).toContain("risky step");
+		});
+
+		/** Runtime whose gate always holds; `step(n)` ends an in-progress turn carrying "step n". */
+		function holdingGateRuntime(limits: { maxHolds: number; maxHoldMs: number }) {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const messages: AgentMessage[] = [];
+			const judged: string[] = [];
+			const runtime = new AdvisorRuntime(makeAgent(promptInputs), {
+				snapshotMessages: () => messages,
+				gateReview: update => {
+					judged.push(update);
+					return Promise.resolve(false);
+				},
+				gateLimits: () => limits,
+			});
+			const step = (n: number): void => {
+				messages.push({ role: "user", content: `step ${n}`, timestamp: n } as AgentMessage);
+				runtime.onTurnEnd(messages, { willContinue: true });
+			};
+			return { runtime, promptInputs, judged, step };
+		}
+
+		it("reviews every held update without judging once the gate has held the maximum", async () => {
+			const { runtime, promptInputs, judged, step } = holdingGateRuntime({ maxHolds: 3, maxHoldMs: 0 });
+
+			step(1);
+			step(2);
+			step(3);
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(promptInputs).toHaveLength(0);
+
+			step(4);
+			await runtime.waitForCatchup(1_000, 1);
+
+			// The fourth update skipped the judge and carried all three held updates with it.
+			expect(judged).toHaveLength(3);
+			expect(promptInputs).toHaveLength(1);
+			const review = promptText(promptInputs[0]);
+			for (const n of [1, 2, 3, 4]) expect(review).toContain(`step ${n}`);
+		});
+
+		it("reviews held updates without judging once the oldest has waited past the age cap", async () => {
+			const { runtime, promptInputs, judged, step } = holdingGateRuntime({ maxHolds: 10, maxHoldMs: 60_000 });
+			const now = vi.spyOn(Date, "now");
+			try {
+				now.mockReturnValue(1_000_000);
+				step(1);
+				now.mockReturnValue(1_030_000);
+				step(2);
+				await Promise.resolve();
+				await Promise.resolve();
+				// 30s after the first hold: under the cap, so both were judged and held.
+				expect(judged).toHaveLength(2);
+				expect(promptInputs).toHaveLength(0);
+
+				now.mockReturnValue(1_061_000);
+				step(3);
+				await runtime.waitForCatchup(1_000, 1);
+			} finally {
+				now.mockRestore();
+			}
+
+			expect(judged).toHaveLength(2);
+			expect(promptInputs).toHaveLength(1);
+			const review = promptText(promptInputs[0]);
+			for (const n of [1, 2, 3]) expect(review).toContain(`step ${n}`);
+		});
+
+		it("starts counting gate holds afresh after a review dispatches", async () => {
+			const { runtime, promptInputs, judged, step } = holdingGateRuntime({ maxHolds: 2, maxHoldMs: 0 });
+
+			step(1);
+			step(2);
+			step(3);
+			await runtime.waitForCatchup(1_000, 1);
+			expect(promptInputs).toHaveLength(1);
+
+			// Without the reset the held count would still sit at the cap and these would skip the judge.
+			step(4);
+			step(5);
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(judged).toHaveLength(4);
+			expect(promptInputs).toHaveLength(1);
+
+			step(6);
+			await runtime.waitForCatchup(1_000, 1);
+
+			expect(promptInputs).toHaveLength(2);
+			const second = promptText(promptInputs[1]);
+			for (const n of [4, 5, 6]) expect(second).toContain(`step ${n}`);
+			expect(second).not.toContain("step 3");
 		});
 
 		it("preserves the next user turn when an accepted empty stop is pruned", async () => {

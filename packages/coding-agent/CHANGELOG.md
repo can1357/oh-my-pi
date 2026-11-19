@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added experimental `advisor.judgeGate` (`off` / `auto` / `on`): the `judge` model role screens each in-progress advisor update, and low-risk updates wait for the next review instead of costing a full advisor turn. `auto` gates only when the judge role is a native judgment model such as TypeSafe Jev, whose calibrated probabilities the risk threshold assumes; `on` gates with any judge ([#14279](https://github.com/can1357/oh-my-pi/pull/14279) by [@LaansDole](https://github.com/LaansDole))
+- Added `advisor.judgeGateMaxHolds` (default 3) and `advisor.judgeGateMaxHoldMs` (default 120000, `0` disables) so the judge gate force-reviews held in-progress updates mid-session instead of leaving advice until the final review ([#14279](https://github.com/can1357/oh-my-pi/pull/14279) by [@LaansDole](https://github.com/LaansDole))
+
+### Fixed
+
+- Advisor nits and concerns raised mid-run now reach the agent at its next step instead of after its final answer (`advisor.wipDelivery: defer` restores the old behaviour) ([#14279](https://github.com/can1357/oh-my-pi/pull/14279) by [@LaansDole](https://github.com/LaansDole))
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes

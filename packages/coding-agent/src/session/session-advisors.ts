@@ -123,20 +123,27 @@ import type { SessionManager } from "./session-manager";
 import { buildSessionMetadata } from "./session-metadata";
 import type { YieldQueue } from "./yield-queue";
 
+import { judgeAdvisorReview } from "../advisor/review-gate";
 import {
 	cfgAdvisorContinueSeverity,
 	cfgAdvisorEvictStaleResults,
 	cfgAdvisorImmuneTurns,
+	cfgAdvisorJudgeGateMaxHoldMs,
+	cfgAdvisorJudgeGateMaxHolds,
 	cfgAdvisorMaxNotesPerUpdate,
 	cfgAdvisorReviewInterval,
 	cfgAdvisorReviewMode,
 	cfgAdvisorSyncBacklog,
+	cfgAdvisorWipDelivery,
 } from "../advisor/settings";
+import { journalJudgmentUsage } from "../judgment";
 import { cfgCompaction, cfgContextPromotionEnabled } from "./context-settings";
 import { resolveModelCompactionSettings } from "./model-compaction-threshold";
 import { cfgProvidersOpenaiCodexDaybreak, cfgRetry, cfgTierAdvisor } from "./settings";
 
 const ADVISOR_CODEX_SSE_MAX_ATTEMPTS = 1;
+/** Judge-gate deadline; a timeout fails open into a normal review. */
+const ADVISOR_REVIEW_GATE_TIMEOUT_MS = 4_000;
 
 /**
  * Buffer added to a sibling credential's unblock deadline before the advisor
@@ -694,6 +701,20 @@ export class SessionAdvisors {
 				// Delivery never pauses: advice already produced against work the
 				// reviewers saw still reaches the primary during an advisor continuation.
 				for (const advisor of this.#advisors) advisor.adviseTool.flushDeferredNotes();
+				// A WIP aside (stamped with its review turn) left in the queue from a
+				// prior streaming step — the dispatcher is skipIdleFlush, so no idle
+				// flush drains it — would be shipped stampless by the loop's generic
+				// aside drain, and a stale nit would spuriously continue the run. Pull
+				// those into the boundary merge so they ship under continueSeverity with
+				// their original turn stamp. The predicate skips only untagged asides (no
+				// turn stamp); a stamped WIP aside's review turn is always earlier than
+				// this terminal turn, so every one is drained here.
+				for (const note of this.#host.yieldQueue.drain<AdvisorNote>(
+					"advisor",
+					n => n.turn !== undefined && n.turn < this.#advisorPrimaryTurnsCompleted,
+				)) {
+					this.#advisorBoundaryNotes.push(note);
+				}
 			}
 			// A boundary of a continuation the advisor itself started is captured but
 			// never schedules a review: the next genuinely started boundary reviews it.
@@ -1372,13 +1393,19 @@ export class SessionAdvisors {
 			// accepted notes and acknowledges truthfully. No separate accept wrapper.
 			const emissionGuard = new AdvisorEmissionGuard({ budgetPerUpdate });
 			const adviseTool = new AdviseTool(
-				(note, severity, turn) => this.#routeAdvice(advisorRef, note, severity, turn),
+				(note, severity, turn, opts) => this.#routeAdvice(advisorRef, note, severity, turn, opts),
 				emissionGuard,
+				() => cfgAdvisorWipDelivery.get(this.#host.settings),
 			);
 
 			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
 			// instructions; `config.instructions` adds this advisor's specialization.
-			const systemPrompt = [prompt.render(advisorSystemPrompt, { max_notes_per_update: budgetPerUpdate })];
+			const systemPrompt = [
+				prompt.render(advisorSystemPrompt, {
+					max_notes_per_update: budgetPerUpdate,
+					wip_aside: cfgAdvisorWipDelivery.get(this.#host.settings) === "aside",
+				}),
+			];
 			if (this.#advisorContextPrompt) systemPrompt.push(this.#advisorContextPrompt);
 			if (this.#advisorMemoryPrompt) systemPrompt.push(this.#advisorMemoryPrompt);
 			if (this.#advisorWatchdogPrompt) systemPrompt.push(this.#advisorWatchdogPrompt);
@@ -1722,6 +1749,21 @@ export class SessionAdvisors {
 						.emitSessionEvent({ type: "advisor_yielded" })
 						.catch(err => logger.debug("advisor yield notification failed", { err: String(err) }));
 				},
+				gateReview: update =>
+					judgeAdvisorReview(update, {
+						settings: this.#host.settings,
+						registry: this.#host.modelRegistry,
+						sessionId: this.#host.sessionId(),
+						model: this.#host.agent.state.model,
+						metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
+						onUsage: journalJudgmentUsage(this.#host.sessionManager),
+						telemetry: this.#host.agent.telemetry,
+						timeoutMs: ADVISOR_REVIEW_GATE_TIMEOUT_MS,
+					}),
+				gateLimits: () => ({
+					maxHolds: Math.max(1, Math.trunc(cfgAdvisorJudgeGateMaxHolds.get(this.#host.settings))),
+					maxHoldMs: cfgAdvisorJudgeGateMaxHoldMs.get(this.#host.settings),
+				}),
 			});
 
 			const advisorRef: ActiveAdvisor = {
@@ -1802,7 +1844,13 @@ export class SessionAdvisors {
 	 * admission — the note cleared the emission guard inside AdviseTool when it was
 	 * emitted, so a deferred flush replays the backlog without re-filtering.
 	 */
-	#routeAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity, turn?: number): void {
+	#routeAdvice(
+		advisor: ActiveAdvisor,
+		note: string,
+		severity?: AdvisorSeverity,
+		turn?: number,
+		opts?: { wip?: boolean },
+	): void {
 		// The implicit single ("default") advisor stamps no source name, so its
 		// agent-facing `<advisory>` bytes stay identical to the pre-multi-advisor path.
 		const source = advisor.slug ? advisor.name : undefined;
@@ -1817,6 +1865,27 @@ export class SessionAdvisors {
 		// the next user turn.
 		if (this.#advisorTerminalBoundaryOpen) {
 			this.#advisorBoundaryNotes.push({
+				note,
+				severity,
+				advisor: source,
+				turn: turn ?? this.#advisorPrimaryTurnsCompleted,
+			});
+			return;
+		}
+		// WIP aside (advisor.wipDelivery = aside): a mid-run non-blocker must reach
+		// the primary at its NEXT step without interrupting. Only queue it while
+		// the loop is genuinely working — not during terminal unwind (the loop
+		// still reports streaming after the boundary callback closes), abort, or
+		// a preserved terminal yield. Late notes take the existing finished-run
+		// continuation policy below, not the loop's generic aside drain.
+		if (
+			opts?.wip &&
+			!this.#terminalUnwindActive &&
+			this.#host.agent.state.isStreaming &&
+			!this.#preserveTerminalYieldAdvice &&
+			!this.#host.abortInProgress()
+		) {
+			this.#host.yieldQueue.enqueue("advisor", {
 				note,
 				severity,
 				advisor: source,

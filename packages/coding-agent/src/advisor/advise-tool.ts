@@ -74,6 +74,13 @@ export function meetsAdvisorSeverity(severity: AdvisorSeverity | undefined, mini
 
 /** How an advisor note is routed to the primary. */
 export type AdvisorDeliveryChannel = "aside" | "steer" | "preserve";
+
+/** How a WIP (mid-run) advisor non-blocker reaches the primary: `aside`
+ *  delivers it live at the primary's next step boundary without interrupting;
+ *  `defer` holds it until the primary's final answer (legacy). */
+export const ADVISOR_WIP_DELIVERY_MODES = ["aside", "defer"] as const;
+export type AdvisorWipDelivery = (typeof ADVISOR_WIP_DELIVERY_MODES)[number];
+
 /** Half-open turn-count fence for the post-interrupt cooldown. */
 export function isAdvisorInterruptImmuneTurnActive(opts: {
 	completedTurns: number;
@@ -194,6 +201,8 @@ const ADVISOR_ACK_SENT = "Delivered.";
 const ADVISOR_ACK_DEFERRED = "Queued for the end of the turn. Do not re-raise.";
 /** The review was cancelled (superseded, reset, disposed); its turn is discarded. */
 const ADVISOR_ACK_CANCELLED = "Dropped: this review was cancelled.";
+/** The session may route a WIP note as an aside or preserve it at a terminal boundary. */
+const ADVISOR_ACK_ASIDE = "Accepted for delivery. Do not re-raise.";
 /** A suppressed note is never described as recorded or queued. */
 const ADVISOR_ACK_SUPPRESSED: Record<AdvisorSuppressionReason, string> = {
 	empty: "Dropped: empty note.",
@@ -240,10 +249,22 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	 *   note is emitted (live or deferred). Defaults to a stock
 	 *   {@link AdvisorEmissionGuard} (default budget
 	 *   {@link ADVISOR_DEFAULT_BUDGET_PER_UPDATE}).
+	 * @param wipDelivery Live getter for how a mid-run (in-progress) non-blocker
+	 *   reaches the primary: `aside` routes it live through the aside channel the
+	 *   instant it is raised; `defer` holds it to the completed-update flush.
+	 *   Defaults to `defer` so a bare tool is legacy-safe; the session wires the
+	 *   `advisor.wipDelivery` setting (which defaults to `aside`). Blockers and
+	 *   completed-update notes ignore it.
 	 */
 	constructor(
-		private readonly onAdvice: (note: string, severity: AdviseDetails["severity"] | undefined, turn?: number) => void,
+		private readonly onAdvice: (
+			note: string,
+			severity: AdviseDetails["severity"] | undefined,
+			turn?: number,
+			opts?: { wip?: boolean },
+		) => void,
 		guard?: AdvisorEmissionGuard,
+		private readonly wipDelivery: () => AdvisorWipDelivery = () => "defer",
 	) {
 		this.#guard = guard ?? new AdvisorEmissionGuard();
 	}
@@ -298,6 +319,31 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		const rank = advisorSeverityRank(args.severity);
 		const key = advisorNoteDedupeKey(args.note);
 		if (this.#inProgressUpdate && args.severity !== "blocker") {
+			if (this.wipDelivery() === "aside") {
+				// Aside mode: deliver the mid-run non-blocker live instead of
+				// withholding it, flagged WIP so the session forces it onto the
+				// non-interrupting aside channel (lands at the primary's next step,
+				// never aborts a running tool).
+				const pending = this.#deferredNotes.find(item => item.key === key);
+				if (pending) {
+					// A reservation left by defer mode already cleared admission;
+					// re-admitting would be rejected as a duplicate and lose the note.
+					// Deliver it now: escalate in place on a strictly-higher re-raise,
+					// mark it routed (its slot stays charged, no longer displaceable),
+					// drop it from the backlog so the later flush does not re-send it,
+					// and route once at the effective (highest-seen) severity.
+					const severity = rank > advisorSeverityRank(pending.severity) ? args.severity : pending.severity;
+					if (rank > advisorSeverityRank(pending.severity)) this.#guard.escalatePending(args.note, rank);
+					this.#deferredNotes.splice(this.#deferredNotes.indexOf(pending), 1);
+					this.#guard.markRouted(args.note);
+					this.onAdvice(args.note, severity, pending.turn ?? this.#coveredTurn, { wip: true });
+					return this.#result(ADVISOR_ACK_ASIDE, args);
+				}
+				const decision = this.#guard.admit(args.note, { rank, pending: false });
+				if (!decision.accepted) return this.#suppressed(args, decision.reason);
+				this.onAdvice(args.note, args.severity, this.#coveredTurn, { wip: true });
+				return this.#result(ADVISOR_ACK_ASIDE, args);
+			}
 			// Withheld, not delivered: reserve for the deterministic flush at the
 			// completed-update transition / terminal boundary.
 			const pending = this.#deferredNotes.find(item => item.key === key);

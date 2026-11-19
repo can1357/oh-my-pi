@@ -20,6 +20,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { finalizeSubagentLifecycle } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
+import { AdviseTool } from "../src/advisor";
 import { AdvisorLoopGuard } from "../src/advisor/loop-guard";
 import { cfgAdvisorReviewInterval } from "../src/advisor/settings";
 import { activateTodoTool, createInMemoryAuthStorage, fixedAdvisorTools } from "./helpers/agent-session-setup";
@@ -763,6 +764,110 @@ describe("advisor tool-call loop guard", () => {
 			releaseLiveRun.resolve();
 			await livePrompt;
 		}
+	});
+
+	it("routes a mid-run WIP concern as a non-interrupting aside without arming the immune window", async () => {
+		// advisor.wipDelivery defaults to aside: a concern raised while the primary
+		// is mid-turn must ride the non-interrupting aside queue, never steer, and
+		// must NOT arm the post-interrupt immune window (it did not interrupt).
+		const { advisor } = createAdvisor({ "advisor.syncBacklog": "1" }, 0);
+		if (!session) throw new Error("Expected live session");
+		const advise = advisor.state.tools.find(tool => tool.name === "advise");
+		if (!(advise instanceof AdviseTool)) throw new Error("Expected advise tool");
+
+		session.agent.state.isStreaming = true;
+		try {
+			// In-progress review: the concern is forced onto the aside channel.
+			advise.beginUpdate(true, 1);
+			await advise.execute("wip-note", {
+				note: "The in-progress edit drops the retry guard.",
+				severity: "concern",
+			});
+			await new Promise<void>(resolve => setImmediate(resolve));
+			// Aside, not steer: nothing entered the steering queue; the note is on
+			// the advisor aside channel instead.
+			expect(session.agent.peekSteeringQueue()).toHaveLength(0);
+			expect(session.yieldQueue.hasDeliverable("advisor")).toBe(true);
+			session.yieldQueue.clear("advisor");
+
+			// Immunity NOT armed by the aside: a subsequent non-WIP concern in the
+			// same live turn still steers. Had the aside armed immunity, this concern
+			// would be downgraded to an aside and the steering queue would stay empty.
+			advise.beginUpdate(false);
+			await advise.execute("live-note", {
+				note: "A second distinct operation overwrites the destination file.",
+				severity: "concern",
+			});
+			await new Promise<void>(resolve => setImmediate(resolve));
+			expect(session.agent.peekSteeringQueue()).toHaveLength(1);
+		} finally {
+			session.agent.clearSteeringQueue();
+			session.agent.state.isStreaming = false;
+		}
+	});
+
+	it("flushes a pending advisor aside into the terminal-boundary delivery instead of stranding it", async () => {
+		// A WIP aside left in the queue from an earlier streaming step (skipIdleFlush,
+		// so no idle flush drains it) must be pulled into the boundary merge when the
+		// primary reaches its terminal boundary, applying continueSeverity and the
+		// staleness stamp — not stranded for the next prompt nor shipped stampless.
+		const { advisor } = createAdvisor({ "advisor.syncBacklog": "1" }, 0);
+		if (!session) throw new Error("Expected live session");
+		if (!advisor) throw new Error("Expected advisor agent");
+		session.yieldQueue.enqueue("advisor", {
+			note: "The earlier edit still needs a regression test.",
+			severity: "nit",
+			turn: 0,
+		});
+
+		await session.prompt("only update");
+		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
+		await session.waitForIdle();
+
+		// Delivered once, as a visible card (a nit is below the default
+		// continueSeverity) carrying a turns_ago stamp — the boundary-merge path, not
+		// the dispatcher's stampless build.
+		const cards = session.agent.state.messages.filter(
+			message =>
+				message.role === "custom" &&
+				message.customType === "advisor" &&
+				JSON.stringify(message).includes("still needs a regression test"),
+		);
+		expect(cards).toHaveLength(1);
+		const card = cards[0];
+		const content = card && "content" in card && typeof card.content === "string" ? card.content : "";
+		expect(content).toContain('turns_ago="1"');
+		// The leftover aside must not also survive in the queue.
+		expect(session.yieldQueue.hasDeliverable("advisor")).toBe(false);
+	});
+
+	it("preserves a late WIP nit after the terminal boundary instead of starting an extra turn", async () => {
+		const { advisor } = createAdvisor({ "advisor.syncBacklog": "strict" }, 0);
+		if (!session) throw new Error("Expected live session");
+		const advise = advisor.state.tools.find(tool => tool.name === "advise");
+		if (!(advise instanceof AdviseTool)) throw new Error("Expected advise tool");
+
+		let raised = false;
+		// The core loop has completed its terminal-boundary callback but still
+		// reports streaming until the final aside poll. Simulate a delayed WIP
+		// review reaching advise in that gap.
+		session.agent.setOnBeforeYield(async () => {
+			if (raised) return;
+			raised = true;
+			advise.beginUpdate(true, 0);
+			await advise.execute("late-wip-nit", { note: "The earlier change needs a regression test.", severity: "nit" });
+		});
+
+		await session.prompt("make one update");
+		await session.waitForIdle();
+		expect(raised).toBe(true);
+		expect(session.agent.state.messages.filter(message => message.role === "assistant")).toHaveLength(1);
+		const cards = session.agent.state.messages.filter(
+			message => message.role === "custom" && message.customType === "advisor",
+		);
+		expect(cards).toHaveLength(1);
+		expect(JSON.stringify(cards[0])).toContain("The earlier change needs a regression test.");
+		expect(session.yieldQueue.hasDeliverable("advisor")).toBe(false);
 	});
 
 	it("holds a final-review continuation during the post-interrupt cooldown", async () => {
