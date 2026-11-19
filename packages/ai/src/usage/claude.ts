@@ -1080,8 +1080,9 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 	 *
 	 * Legacy and shared quota errors also leave account-wide blocks. A
 	 * complete report with every reported quota healthy can heal that scope; a
-	 * report with a single shared window can heal it only when that window's
-	 * reset matches the stored block deadline.
+	 * report with a single shared window can heal it, and a tier block a spent
+	 * shared wall caused, only when that window's reset matches the stored
+	 * block deadline.
 	 */
 	healableBlockScopes(report) {
 		const sharedLimits = report.limits.filter(limit => limit.scope.shared === true);
@@ -1091,20 +1092,6 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 			limits: report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier !== undefined),
 			healthy: report.metadata?.source === "ratelimit-headers" ? false : undefined,
 		};
-		// The endpoint returns a report as soon as one window parses, and a tier
-		// 429 can be caused by a shared wall. A payload missing a shared gate
-		// leaves the block's cause unknown. One exception: a report exposing a
-		// single shared window may heal the account-wide block only when that
-		// window's reset is the exact deadline that created the block; without
-		// that match, the missing window could still be the cap behind the 429.
-		// If both windows were spent, the stored deadline is the later reset, so
-		// an early recovery of that window can still lift a block the other
-		// window holds; the next 429 restores it.
-		if (!claudeReportCoversSharedGates(report)) {
-			if (sharedLimits.length !== 1) return [];
-			// Only shared windows are matched against the block deadline.
-			return [{ ...globalScope, resetMatchRequired: true }];
-		}
 		// A tier block is judged by the scoped weekly rows that gate its family
 		// (see `scopedWeeklyGates`), plus the shared walls. A payload with no
 		// scoped row leaves nothing this report can judge, so no tier scope is
@@ -1116,6 +1103,26 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 			const gates = labelled.length > 0 ? labelled : scopedWeeklyLimits;
 			if (gates.length === 0) continue;
 			tierScopes.push({ blockScope: `tier:${tier}`, limits: [...sharedLimits, ...gates] });
+		}
+		// The endpoint returns a report as soon as one window parses, and a tier
+		// 429 can be caused by a shared wall. A payload missing a shared gate
+		// leaves the block's cause unknown. One exception: a report exposing a
+		// single shared window may heal a block only when that window's reset is
+		// the exact deadline that created the block; without that match, the
+		// missing window could still be the cap behind the 429. A tier 429 behind
+		// that shared wall stores the same deadline, so its tier scope heals by
+		// the same match once its own weekly row has room. If both windows were
+		// spent, the stored deadline is the later reset, so an early recovery of
+		// that window can still lift a block the other window holds; the next
+		// 429 restores it.
+		if (!claudeReportCoversSharedGates(report)) {
+			if (sharedLimits.length !== 1) return [];
+			// Only shared windows are matched against the block deadline.
+			return [globalScope, ...tierScopes].map(scope => ({
+				...scope,
+				healthy: globalScope.healthy,
+				resetMatchRequired: true,
+			}));
 		}
 		return [globalScope, ...tierScopes];
 	},

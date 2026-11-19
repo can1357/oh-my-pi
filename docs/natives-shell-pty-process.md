@@ -260,7 +260,7 @@ Current JS surface is the `Process` class:
 
 The platform-specific implementation lives in `omp_shell::process`; `crates/natives/src/ps.rs` is a N-API shim plus re-exports used by PTY termination.
 
-`execReplace(argv)` is a separate synchronous process handoff: on Unix it calls `execvp`, replacing the host process without JS/native cleanup on success. Callers must restore the terminal and flush logs first. Empty argv, interior NUL bytes, exec failures, and unsupported platforms throw; Windows callers must use spawn-and-wait instead.
+`execReplace(path, argv, env, keepFds)` is a separate synchronous process handoff: on Unix it clears `FD_CLOEXEC` on `keepFds` and calls `execve`, replacing the host process in the same PID without JS/native cleanup on success. `path` is not looked up on `PATH`. Callers must restore the terminal and flush logs first. Interior NUL bytes, exec failures, and unsupported platforms throw; Windows callers must use spawn-and-wait instead.
 
 `expandWindowsLongPath(path)` and `getWindowsShortPath(path)` are exported from `shell.rs`. They preserve the input when expansion/short-name lookup fails and are identity functions off Windows.
 

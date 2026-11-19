@@ -6,9 +6,18 @@
 
 - `productIdentityKey` (`@oh-my-pi/pi-catalog/identity`) gives one key to a model across its providers, spellings and routes, and separate keys to products that share a class, family and revision; `productIdentityKeys` gives a row the keys of both the id its provider is sent and its own catalog id ([#19682](https://github.com/can1357/oh-my-pi/pull/19682) by [@sjawhar](https://github.com/sjawhar))
 
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added support for prompt-cache prewarming on the first-party Anthropic endpoint via the `isPromptCachePrewarmSupported` compatibility capability.
+
 ### Fixed
 
-- Hosted jev (TypeSafe, OpenRouter, Command Code, OpenCode Zen) splits judgment requests at 32 questions, ending `400 questions must map 1 through 32 ids` find failures
+- Fixed hosted judgment requests for TypeSafe, OpenRouter, Command Code, and OpenCode Zen when evaluating more than 32 questions.
+- Improved Devin image handling to support more conversation images within provider limits, and updated image compaction for Devin Gemini models to reflect their billed token usage.
+- Fixed Devin Gemini model pricing so models switch from promotional to list pricing when promotions end.
+- Fixed Kiro API key authentication (`KIRO_API_KEY` and `ksk_…`) so model listing, chat, and `/usage` requests work correctly.
 
 ## [18.22.2] - 2026-11-18
 

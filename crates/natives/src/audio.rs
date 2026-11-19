@@ -11,8 +11,8 @@ use napi::{
 	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode, UnknownReturnValue},
 };
 use napi_derive::napi;
-use parking_lot::Mutex;
 use omp_voice::audio::{CaptureStream, PlaybackState, PlaybackStream};
+use parking_lot::Mutex;
 
 type CaptureCallback = ThreadsafeFunction<Float32Array, UnknownReturnValue>;
 

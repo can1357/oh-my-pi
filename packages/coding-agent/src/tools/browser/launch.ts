@@ -649,7 +649,7 @@ export interface LaunchHeadlessResult {
 
 /**
  * Base Chromium argv shared by process-local puppeteer launches and the
- * broker-owned shared browser: sandbox/stealth flags, window size, and
+ * daemon-owned shared browser unit: sandbox/stealth flags, window size, and
  * PUPPETEER_PROXY* env-derived proxy flags.
  */
 export function buildHeadlessLaunchArgs(
@@ -883,15 +883,15 @@ export async function discardOwnedProfileSessions(userDataDir: string): Promise<
 	}
 }
 
-/** Fully resolved executable and argv for a broker-spawned shared Chromium. */
+/** Fully resolved executable and argv for a daemon-spawned shared Chromium. */
 export interface SharedBrowserLaunchSpec {
 	executablePath: string;
 	args: string[];
 }
 
 /**
- * Resolve the executable and complete argv for a shared Chromium the daemon
- * broker spawns directly (no puppeteer inside the broker). Mirrors
+ * Resolve the executable and complete argv for a shared Chromium the daemon's
+ * browser unit spawns directly (no puppeteer inside the daemon). Mirrors
  * `launchHeadlessBrowser` flag assembly — puppeteer's default args minus the
  * stealth-suppressed set — suppresses Puppeteer's unowned startup window, and
  * exposes CDP on an ephemeral port. Returns null when no executable resolves;

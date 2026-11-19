@@ -2682,6 +2682,7 @@ export class SessionAdvisors {
 							journal?.(message);
 							return message;
 						},
+						onRemoteUsage: journal,
 					},
 				);
 				break;

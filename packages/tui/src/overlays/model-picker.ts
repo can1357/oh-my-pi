@@ -91,9 +91,10 @@ export interface ModelPickerOptions {
 	/** `provider/id` highlighted and preselected in task mode (current Task subagent model). */
 	taskSelector?: string;
 	/**
-	 * Thinking selector picking `model` applies when the slider is untouched
-	 * (what the session carries over). Enables the session-mode thinking
-	 * slider; absent, the picker shows none.
+	 * Level the untouched slider shows for `model` (clamped to its ladder): the
+	 * session's current level. An untouched pick carries the session's own
+	 * selection over instead. Enables the session-mode thinking slider; absent,
+	 * the picker shows none.
 	 */
 	thinkingLevelFor?: (model: Model) => ConfiguredThinkingLevel | undefined;
 }
@@ -213,7 +214,7 @@ export class ModelPickerComponent implements Component {
 	#taskModeKey: KeyId | undefined;
 	#taskSelector: string | undefined;
 	#thinkingLevelFor: ((model: Model) => ConfiguredThinkingLevel | undefined) | undefined;
-	/** The slider's pending level; undefined while untouched (each model shows what picking it applies). */
+	/** The slider's pending level; undefined while untouched (each model shows the session's current level). */
 	#thinking: ConfiguredThinkingLevel | undefined;
 	/** Active scope: {@link ALL_SCOPE} or `provider:<id>`. */
 	#scope = ALL_SCOPE;

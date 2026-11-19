@@ -95,6 +95,7 @@ import { bindEffects, combine } from "./config/registry";
 import { Settings } from "./config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
+import { daemonMutex } from "./daemon/modules/mutex";
 import "./discovery";
 import { LiveImageUrlService } from "./blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
@@ -173,9 +174,11 @@ import {
 	MCPToolCache,
 	type MCPToolsLoadResult,
 	reconnectMCPServers,
+	resolveMCPTransformContext,
 	shouldFilterBrowserMCPForPrelude,
 } from "./mcp";
 import { parseMCPToolName } from "@oh-my-pi/pi-tui/tools/mcp";
+import { isEvalNamespaceTool, MCPEvalNamespaceCatalog } from "./mcp/eval-namespaces";
 import { mapPromptArguments } from "./mcp/prompt-args";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
 import { resolveMCPToolAlias } from "./mcp/tool-bridge";
@@ -276,7 +279,12 @@ import {
 	type SystemPromptRebuilder,
 } from "./session/session-tools";
 import { anthropicSlowModeHasNoSiblingHeadroom } from "./session/anthropic-slow-mode";
-import { CacheWarmer } from "./session/cache-warmer";
+import {
+	CacheWarmer,
+	type CacheWarmingMode,
+	capCacheWarmingMode,
+	resolveBridgeCompactionThreshold,
+} from "./session/cache-warmer";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
@@ -408,6 +416,9 @@ import {
 	cfgPersonality,
 	cfgProviderAppendOnlyContext,
 	cfgProvidersCacheWarming,
+	cfgProvidersCacheWarmingCompactPercent,
+	cfgProvidersCacheWarmingCompactTokens,
+	cfgProvidersCacheWarmingStrategy,
 	cfgProvidersKimiApiFormat,
 	cfgRetryFallbackChains,
 	cfgRetryModelFallback,
@@ -451,6 +462,7 @@ import {
 import { cfgLspEnabled, cfgLspLazy, cfgLspShared } from "./lsp/settings";
 import {
 	cfgMcpEnableProjectConfig,
+	cfgMcpEvalNamespaces,
 	cfgMcpNotificationDebounceMs,
 	cfgMcpNotifications,
 	cfgMcpStartupTimeoutMs,
@@ -463,7 +475,7 @@ import {
 	cfgSnapcompactToolResults,
 	cfgWorkspaceAdditionalDirectories,
 } from "./session/context-settings";
-import { cfgTaskBatch, cfgTaskDisabledAgents, cfgTaskEager, ovnfsCommand } from "./task/settings";
+import { cfgTaskBatch, cfgTaskCrossInstance, cfgTaskDisabledAgents, cfgTaskEager, ovnfsCommand } from "./task/settings";
 
 /** Agent-level tool-call switches, snapshotted by the agent loop per prompt run. */
 const cfgToolCallSwitches = combine({
@@ -706,12 +718,14 @@ export interface CreateAgentSessionOptions {
 	/** OpenAI service-tier override for this session. `null` omits `service_tier`. */
 	openAIServiceTier?: ServiceTier | null;
 	/**
-	 * Enable prompt-cache warming for this session's main loop. Defaults to
-	 * `true`; one-shot and spawned sessions (task subagents, standalone
-	 * compaction, agentic commit) pass `false` so short-lived sessions never
-	 * schedule background warm requests.
+	 * Highest prompt-cache warming mode for this session's main loop; the
+	 * effective mode is the lower of this and `providers.cacheWarming`.
+	 * Defaults to `"idle"` (the setting alone decides). Task subagents pass
+	 * `"streaming"` so their long tool waits are bridged but nothing warms
+	 * after they settle; one-shot sessions (standalone compaction, agentic
+	 * commit, worker warm-up) pass `"off"`, which builds no warmer.
 	 */
-	cacheWarming?: boolean;
+	cacheWarming?: CacheWarmingMode;
 	/**
 	 * Per-family service tiers for this session, replacing the `tier.*` settings
 	 * and any persisted tier history. Called once the initial model is final —
@@ -1038,12 +1052,12 @@ export interface CreateAgentSessionOptions {
 	 */
 	autoTitle?: boolean;
 	/**
-	 * Hold background skill-description compression until
-	 * {@link AgentSession.startSkillDescriptionCompression}: resolving its model composes the
+	 * Hold background routing-hint compression (skill descriptions, MCP namespace hints) until
+	 * {@link AgentSession.startHintCompression}: resolving its model composes the
 	 * whole model catalog. The interactive TUI sets this and starts it after the first frame.
 	 * Default: false, which starts it once the session (and so its cost gate) exists.
 	 */
-	deferSkillDescriptionCompression?: boolean;
+	deferHintCompression?: boolean;
 	/**
 	 * Defer `confirm` reserve-policy fallback until AgentSession prompt-time UI is configured.
 	 * ACP uses this while capabilities are negotiated without enabling UI-only tools.
@@ -2753,6 +2767,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (!model) return undefined;
 				return session.getPromptCacheKeyForModel(model) ?? session.agent.sessionId;
 			},
+			getPromptCacheEntry: () => session?.promptCacheEntry,
+			hasWakeAfterTurn: () => session?.hasWakeAfterTurn() ?? false,
 			getToolByName: name => session?.getToolByName(name),
 			getToolForEvalBridge: name => session?.getToolForEvalBridge(name),
 			getAdvertisedEvalToolNames: () => session?.getAdvertisedEvalToolNames() ?? [],
@@ -2877,6 +2893,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let archivePrelude: EvalPreludeDefinition | undefined;
 		let commitPrelude: EvalPreludeDefinition | undefined;
 		let dsmPrelude: EvalPreludeDefinition | undefined;
+		// `mcp.evalNamespaces`: MCP servers as eval globals. The catalog is built with the skill
+		// description catalog below; until then (and before any MCP tool exists) no namespace is listed.
+		const bindsMcpToEval = (): boolean => !restrictToolNames && cfgMcpEvalNamespaces.get(settings);
+		// oxlint-disable-next-line prefer-const -- captured by getEvalPreludes before assignment
+		let mcpNamespaces: MCPEvalNamespaceCatalog | undefined;
+		let initialEvalBoundToolNames: readonly string[] = [];
 		const getEvalPreludes = (): readonly EvalPreludeDefinition[] => {
 			if (restrictToolNames || !toolRegistry.has("eval") || !activeToolNames.has("eval")) return [];
 			const builtins: EvalPreludeDefinition[] = [];
@@ -2904,7 +2926,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				dsmPrelude ??= createDsmPrelude(toolSession);
 				builtins.push(dsmPrelude);
 			}
-			return getEnabledEvalPreludes(builtins);
+			const enabled = getEnabledEvalPreludes(builtins);
+			if (!mcpNamespaces || !bindsMcpToEval()) return enabled;
+			const evalBound = (hasSession ? session.getEvalBoundToolNames() : initialEvalBoundToolNames).flatMap(name => {
+				const tool = toolRegistry.get(name);
+				return tool ? [tool] : [];
+			});
+			const taken = new Set(enabled.flatMap(prelude => [prelude.name, ...prelude.exports]));
+			return [...enabled, ...mcpNamespaces.preludes(evalBound, taken)];
 		};
 		toolSession.getEvalPreludes = getEvalPreludes;
 		// SessionTools owns the advertised snapshot; before it exists the base
@@ -2936,10 +2965,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		toolSession.getArtifactsDir = getArtifactsDir;
 		toolSession.localProtocolOptions = localProtocolOptions;
-		toolSession.agentOutputManager = new AgentOutputManager(
-			getArtifactsDir,
-			options.parentTaskPrefix ? { parentPrefix: options.parentTaskPrefix } : undefined,
-		);
+		toolSession.agentOutputManager = new AgentOutputManager(getArtifactsDir, {
+			settings,
+			parentPrefix: options.parentTaskPrefix,
+		});
 
 		// Create built-in tools (already wrapped with meta notice formatting)
 		await logger.time("createAllTools", createTools, toolSession, options.toolNames);
@@ -2989,6 +3018,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			filterExa: true,
 			// Filter browser MCP only when Eval can expose the built-in browser prelude.
 			filterBrowser: initialBrowserPreludeAvailable,
+			builtinTransforms: resolveMCPTransformContext(settings, {
+				evalActive: toolRegistry.has("eval") && activeToolNames.has("eval"),
+			}),
 			extensionRoots: buildSessionExtensionRoots(),
 		};
 		if (enableMCP && !mcpManager && isMainThread()) {
@@ -4370,19 +4402,34 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			path.resolve(agentDir) === path.resolve(getAgentDir())
 				? undefined
 				: openSessionSkillDescriptionStore(agentDir);
+		const hintCompressorOptions = {
+			getCostGate: currentCostGate,
+			usageLedger: sessionManager,
+			getTelemetry: () =>
+				agent
+					? resolveTelemetry(agent.telemetry, agent.sessionId)
+					: resolveTelemetry(options.telemetry, providerSessionId),
+		};
+		// One omp process asks the model for a hint; the others wait on the daemon and read its answer.
+		const hintLock = (job: string) => daemonMutex("routing-hints").lock(job);
 		const skillDescriptions = new SkillDescriptionCatalog({
 			store: ownedSkillDescriptionStore,
 			// Held until AgentSession exists: before then the root cost gate does not, so a request
 			// sent from the startup prompt render could go out ungated (see `startCompression` below).
 			deferCompression: true,
+			compress: createSkillDescriptionCompressor(modelRegistry, settings, hintCompressorOptions),
+			lock: hintLock,
+		});
+		mcpNamespaces = new MCPEvalNamespaceCatalog({
+			store: ownedSkillDescriptionStore,
+			deferCompression: true,
+			resources: () => toolSession.mcpManager,
 			compress: createSkillDescriptionCompressor(modelRegistry, settings, {
-				getCostGate: currentCostGate,
-				usageLedger: sessionManager,
-				getTelemetry: () =>
-					agent
-						? resolveTelemetry(agent.telemetry, agent.sessionId)
-						: resolveTelemetry(options.telemetry, providerSessionId),
+				...hintCompressorOptions,
+				purpose: "mcp-namespace-hint",
+				oneshotKind: "mcp_namespace_hint",
 			}),
+			lock: hintLock,
 		});
 		// Instructions from MCP servers the host connects outside `mcpManager`
 		// (ACP client-declared servers); installed via
@@ -4629,6 +4676,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				securityEnabled: cfgSecurityEnabled.get(settings),
 				settingsApproval: toolSession.settingsApproval === true,
 				outReplies: outRepliesActive(settings, tuiTranscript),
+				crossInstanceAgents: cfgTaskCrossInstance.get(settings),
 				evalPreludes: toolSession.getAdvertisedEvalPreludes?.(),
 				model: getActiveModelString(),
 				includeModelInPrompt: cfgIncludeModelInPrompt.get(settings),
@@ -4774,6 +4822,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// constructed and attached. Startup failure therefore leaves it revivable.
 		hasRegistered = options.expectedAgentRef === undefined || options.expectedAgentRef === null;
 
+		// `mcp.evalNamespaces`: with `eval` top-level, MCP tools present only as eval
+		// namespace methods (same rule as `SessionTools` applies on every later change).
+		if (bindsMcpToEval() && initialToolNames.includes("eval")) {
+			initialEvalBoundToolNames = initialToolNames.filter(name => isEvalNamespaceTool(toolRegistry.get(name)));
+			const evalBound = new Set(initialEvalBoundToolNames);
+			initialToolNames = initialToolNames.filter(name => !evalBound.has(name));
+		}
 		// Partition the initial enabled set for the xd:// transport. Tool instances
 		// remain in the canonical map; only presentation names move between layers.
 		// Mounting requires both transport halves in the granted set (`read xd://`
@@ -5008,18 +5063,31 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				kimiApiFormat: streamOptions?.kimiApiFormat ?? (kimiApiFormat === "auto" ? undefined : kimiApiFormat),
 			});
 		};
-		// Prompt-cache warmer for the main agent loop only: replays the last
+		// Prompt-cache warmer for the main agent loop only: refreshes the last
 		// request through the same primary wrapper just before the entry would
-		// expire, so idle gaps do not force a full-prefix cache re-write.
-		// Spawned/one-shot sessions opt out via `cacheWarming: false`.
+		// expire, so long tool calls and idle gaps do not force a full-prefix
+		// cache re-write, and bridges a wait that outgrows renting with
+		// compaction. One-shot sessions opt out via `cacheWarming: "off"`.
+		const cacheWarmingCap = options.cacheWarming ?? "idle";
 		const cacheWarmer: CacheWarmer | undefined =
-			options.cacheWarming === false
+			cacheWarmingCap === "off"
 				? undefined
 				: new CacheWarmer({
 						stream: (model, context, streamOptions) => primaryStreamFn(model, context, streamOptions),
 						getPromptTokens: () => session.lastPromptTokens(),
-						getMode: () => cfgProvidersCacheWarming.get(settings),
+						getMode: () => capCacheWarmingMode(cfgProvidersCacheWarming.get(settings), cacheWarmingCap),
 						decide: event => extensionRunner.emitCacheWarmingDecision(event),
+						bridge: {
+							strategy: () => cfgProvidersCacheWarmingStrategy.get(settings),
+							thresholdTokens: model =>
+								resolveBridgeCompactionThreshold(
+									model.contextWindow ?? 0,
+									cfgProvidersCacheWarmingCompactPercent.get(settings),
+									cfgProvidersCacheWarmingCompactTokens.get(settings),
+								),
+							estimate: promptTokens => session.bridgeCompactionEstimate(promptTokens),
+							compact: () => session.startBridgeCompaction(),
+						},
 					});
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {
 			let result = args;
@@ -5405,6 +5473,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							...mcpDiscoverOptions,
 							enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
 							filterBrowser: session.getEvalPreludes().some(definition => definition.name === "browser"),
+							builtinTransforms: resolveMCPTransformContext(settings, {
+								evalActive: session.getActiveToolNames().includes("eval"),
+							}),
 							extensionRoots: buildSessionExtensionRoots(),
 						});
 						if (session.isDisposed) {
@@ -5470,6 +5541,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			customCommands: customCommandsResult.commands,
 			skills,
 			skillDescriptions,
+			mcpNamespaces,
 			skillWarnings,
 			skillsReloadable: options.skills === undefined,
 			skillsSettings: cfgSkills.get(settings),
@@ -5515,6 +5587,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames,
+			bindsMcpToEval,
+			evalBoundToolNames: initialEvalBoundToolNames,
 			setActiveToolNames: setSessionActiveToolNames,
 			ensureWriteRegistered,
 			isDeviceOnlyWrite: () => toolSession.deviceOnlyWrite === true,
@@ -5564,7 +5638,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		});
 		hasSession = true;
 		// The session now owns its cost gate; the interactive TUI starts compression after its first frame.
-		if (options.deferSkillDescriptionCompression !== true) skillDescriptions.startCompression();
+		if (options.deferHintCompression !== true) session.startHintCompression();
 		credentialNoticeSession = session;
 		// Tool state belongs to one conversation: /new and switchSession fire the
 		// change callbacks, so start a fresh one there. Stale hashline tags would

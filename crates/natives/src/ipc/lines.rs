@@ -111,19 +111,29 @@ impl LineReader {
 		if line.len() > self.max {
 			return (None, Err(FrameTooLarge));
 		}
-		if line.is_empty() {
+		if self.buf.is_empty() {
 			return (None, Ok(()));
 		}
-		let span = Span { start: 0, end: line.len(), text: classify(line) };
+		let spans = if line.is_empty() {
+			Vec::new()
+		} else {
+			vec![Span { start: 0, end: line.len(), text: classify(line) }]
+		};
 		self.scanned = 0;
-		(Some(LineBatch { bytes: mem::take(&mut self.buf), spans: vec![span] }), Ok(()))
+		(Some(LineBatch { bytes: mem::take(&mut self.buf), spans }), Ok(()))
 	}
 
-	/// Remove `buf[..end]`, returning it as a batch when it holds any line.
+	/// Bytes received after the last completed line (the reader is done).
+	pub fn into_rest(self) -> Vec<u8> {
+		self.buf
+	}
+
+	/// Remove `buf[..end]`, returning it as a batch when non-empty. A batch of
+	/// only empty lines has no spans but still carries its bytes, so a
+	/// connection upgraded to raw framing loses nothing.
 	fn split(&mut self, end: usize, spans: Vec<Span>) -> Option<LineBatch> {
 		self.scanned -= end.min(self.scanned);
-		if spans.is_empty() {
-			self.buf.drain(..end);
+		if end == 0 {
 			return None;
 		}
 		let bytes = if end <= HANDOFF_BYTES {

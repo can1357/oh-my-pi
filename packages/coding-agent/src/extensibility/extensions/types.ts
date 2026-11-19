@@ -1198,7 +1198,9 @@ export type {
 	CacheWarmingAction,
 	CacheWarmingDecision,
 	CacheWarmingMode,
+	CacheWarmingRentMethod,
 	CacheWarmingStatus,
+	CacheWarmingStrategy,
 } from "../../session/cache-warmer";
 
 /** Fired before a provider request is sent. Can replace the payload. */

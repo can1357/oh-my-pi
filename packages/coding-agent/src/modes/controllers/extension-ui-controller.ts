@@ -924,7 +924,8 @@ export class ExtensionUiController {
 	 * agent as the user's and closes the ask, not a command, a shell run or a `/btw` follow-up.
 	 */
 	#draftSkipsAsk(): boolean {
-		if (!this.#ask || this.ctx.isBtwFocused || this.ctx.isBashMode || this.ctx.isPythonMode) return false;
+		if (!this.#ask || this.ctx.isBtwFocused || this.ctx.isBashMode || this.ctx.isPythonMode || this.ctx.isBtwMode)
+			return false;
 		const draft = this.ctx.editor.getText().trim();
 		return draft.length > 0 && !draft.startsWith("/");
 	}

@@ -310,6 +310,13 @@ pub trait Backend: Send {
 				DesktopError::invalid_target("no focused window was found for display keyboard input")
 			})
 	}
+	/// Refuses every pointer and keyboard input call when this desktop has no
+	/// input route at all. Callers ask before waiting for the input lease or
+	/// resolving the call's target or frame, which would otherwise refuse with
+	/// a step the call can never get past, such as taking a screenshot first.
+	fn refuse_input(&mut self) -> CoreResult<()> {
+		Ok(())
+	}
 	fn validate_frame_layout(&mut self, frame: &FrameGeometry) -> CoreResult<()> {
 		let displays = self.displays().map_err(|error| {
 			DesktopError::invalid_coordinate_frame(format!(
@@ -514,5 +521,14 @@ pub trait AxBackend {
 	/// `None` when it gave no answer or the backend cannot ask.
 	fn value_settable(&mut self, _h: &AxHandle) -> Option<bool> {
 		None
+	}
+	/// Whether input already sent to `h` may not show yet (on macOS, letters
+	/// typed on a popup button), so a read of it would wait ([`Self::settle`]).
+	fn pending(&mut self, _h: &AxHandle) -> bool {
+		false
+	}
+	/// Waits until a read of `h` would show the input [`Self::pending`] names.
+	fn settle(&mut self, _h: &AxHandle) -> CoreResult<()> {
+		Ok(())
 	}
 }
