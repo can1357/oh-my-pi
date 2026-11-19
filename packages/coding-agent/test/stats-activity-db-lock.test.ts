@@ -4,8 +4,8 @@ import { closeDb, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
 import { installStatsTestIsolation } from "@oh-my-pi/omp-stats/test-support/temp-agent";
 import type { MessageStats } from "@oh-my-pi/omp-stats/types";
 import { getStatsDbPath } from "@oh-my-pi/pi-utils";
-import type { StatsActivityWorkerInbound, StatsActivityWorkerOutbound } from "../src/stats/activity-protocol";
-import { startStatsActivityWorker } from "../src/stats/activity-worker";
+import { loadDailyActivity } from "../src/stats/activity-client";
+import type { StatsActivityWorkerOutbound } from "../src/stats/activity-protocol";
 
 installStatsTestIsolation("@omp-stats-activity-lock-");
 
@@ -34,23 +34,16 @@ function request(timestamp: number): MessageStats {
 	};
 }
 
-/** Run one `/usage` activity load through the worker and collect what it sends. */
+/** Run one `/usage` activity load through the worker thread and collect what it reports. */
 async function load(): Promise<StatsActivityWorkerOutbound[]> {
-	let receive: ((message: StatsActivityWorkerInbound) => void) | undefined;
+	const id = "load";
 	const events: StatsActivityWorkerOutbound[] = [];
-	const settled = Promise.withResolvers<void>();
-	startStatsActivityWorker({
-		onMessage(handler) {
-			receive = handler;
-			return () => {};
-		},
-		send(message) {
-			events.push(message);
-			if (message.type === "done" || message.type === "error") settled.resolve();
-		},
-	});
-	receive!({ type: "load", id: "load" });
-	await settled.promise;
+	try {
+		await loadDailyActivity(points => events.push({ type: "activity", id, points }));
+		events.push({ type: "done", id });
+	} catch (error) {
+		events.push({ type: "error", id, error: error instanceof Error ? error.message : String(error) });
+	}
 	return events;
 }
 

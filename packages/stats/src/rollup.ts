@@ -27,12 +27,14 @@
 
 import type { Database } from "bun:sqlite";
 import { currentDb, unpricedRequestSql } from "./db";
+import { isDecisionModelApi, sideChannelCategory } from "./side-channels";
 import type {
 	AgentType,
 	AgentTypeStats,
 	AggregatedStats,
 	CostTimeSeriesPoint,
 	DailyActivityPoint,
+	DashboardStats,
 	FolderStats,
 	ModelPerformancePoint,
 	ModelStats,
@@ -40,10 +42,12 @@ import type {
 	ProviderAggregate,
 	ProviderHourlyPoint,
 	ProviderTimeSeriesPoint,
+	SideChannelStats,
 	TimeSeriesPoint,
 	ToolModelStats,
 	ToolTimeSeriesPoint,
 	ToolUsageStats,
+	UsageAttributionTotals,
 } from "./types";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -53,7 +57,7 @@ const DAY_MS = 24 * HOUR_MS;
  * Bump when the rollup schema or fact definitions change: the tables are then
  * dropped and every hour is rebuilt from the raw tables.
  */
-const ROLLUP_VERSION = "2";
+const ROLLUP_VERSION = "3";
 const ROLLUP_VERSION_KEY = "rollup_version";
 /** Bump when the dirty-marking triggers change; they are then recreated in place. */
 const TRIGGER_VERSION = "4";
@@ -79,13 +83,25 @@ const REFRESH_MAX_BATCH = 64;
 // the raw read paths so both produce identical columns.
 // ---------------------------------------------------------------------------
 
-const MESSAGE_DIMENSIONS = "model, provider, folder, agent_type";
+/**
+ * `purpose` (NULL on assistant messages) and `api` carry the attribution of
+ * off-transcript model calls. Both stay raw: the purpose's category and whether
+ * the api is a native judgment api are decided in TypeScript at read time, so
+ * re-cutting either needs no rebuild.
+ */
+const MESSAGE_DIMENSION_COLUMNS = ["model", "provider", "folder", "agent_type", "purpose", "api"] as const;
+const MESSAGE_DIMENSIONS = MESSAGE_DIMENSION_COLUMNS.join(", ");
+
+/** The message dimensions as columns of `messages` qualified by `p`. */
+function messageDimensions(p: string): string {
+	return MESSAGE_DIMENSION_COLUMNS.map(column => `${p}${column}`).join(", ");
+}
 
 /** Additive per-bucket facts over `messages` (columns qualified by `p`). */
 function messageFacts(bucketExpr: string, p: string): string {
 	return `
 		${bucketExpr} AS bucket,
-		${p}model AS model, ${p}provider AS provider, ${p}folder AS folder, ${p}agent_type AS agent_type,
+		${MESSAGE_DIMENSION_COLUMNS.map(column => `${p}${column} AS ${column}`).join(", ")},
 		COUNT(*) AS requests,
 		SUM(CASE WHEN ${p}stop_reason = 'error' THEN 1 ELSE 0 END) AS failed,
 		SUM(${p}input_tokens) AS input_tokens,
@@ -226,6 +242,8 @@ export function ensureRollupSchema(database: Database): void {
 				provider TEXT NOT NULL,
 				folder TEXT NOT NULL,
 				agent_type TEXT NOT NULL,
+				purpose TEXT,
+				api TEXT NOT NULL,
 				requests INTEGER NOT NULL,
 				failed INTEGER NOT NULL,
 				input_tokens INTEGER NOT NULL,
@@ -527,7 +545,7 @@ function messageSource(database: Database, cutoff: number | null, fine: boolean)
 			`SELECT ${messageFacts("d.bucket", "m.")}
 			 FROM rollup_dirty d JOIN messages m ON m.timestamp >= d.bucket AND m.timestamp < d.bucket + ${HOUR_MS}
 			 ${hi !== null ? "WHERE d.bucket >= ?" : ""}
-			 GROUP BY d.bucket, m.model, m.provider, m.folder, m.agent_type`,
+			 GROUP BY d.bucket, ${messageDimensions("m.")}`,
 		);
 		if (hi !== null) params.push(hi);
 	}
@@ -723,10 +741,19 @@ export function getStatsByFolder(cutoff: number | null = null, limit = Number.MA
 	).map(row => ({ folder: row.folder, ...toAggregatedStats(row) }));
 }
 
-/** Token usage per agent type (main, subagent, advisor). */
-export function getStatsByAgentType(cutoff: number | null = null): AgentTypeStats[] {
-	return queryMessages<{
+/**
+ * Usage attributed to what spent it: conversation turns per agent type (main,
+ * subagent, advisor) and side channels per category, apart for decision models.
+ * Rows are grouped by their raw dimensions and classified here (see
+ * `side-channels.ts`), so every row lands in exactly one group.
+ */
+export function getUsageAttribution(
+	cutoff: number | null = null,
+): Pick<DashboardStats, "byAgentType" | "bySideChannel"> {
+	const rows = queryMessages<{
 		agent_type: string | null;
+		purpose: string | null;
+		api: string;
 		requests: number;
 		input_tokens: number | null;
 		output_tokens: number | null;
@@ -735,19 +762,54 @@ export function getStatsByAgentType(cutoff: number | null = null): AgentTypeStat
 		cost_total: number | null;
 	}>(
 		{ cutoff },
-		`f.agent_type AS agent_type, SUM(f.requests) AS requests, SUM(f.input_tokens) AS input_tokens,
+		`f.agent_type AS agent_type, f.purpose AS purpose, f.api AS api,
+		 SUM(f.requests) AS requests, SUM(f.input_tokens) AS input_tokens,
 		 SUM(f.output_tokens) AS output_tokens, SUM(f.cache_read_tokens) AS cache_read_tokens,
 		 SUM(f.cache_write_tokens) AS cache_write_tokens, TOTAL(f.cost_total) AS cost_total`,
-		"GROUP BY f.agent_type",
-	).map(row => ({
-		agentType: (row.agent_type as AgentType | null) ?? "main",
-		totalRequests: row.requests,
-		totalInputTokens: row.input_tokens ?? 0,
-		totalOutputTokens: row.output_tokens ?? 0,
-		totalCacheReadTokens: row.cache_read_tokens ?? 0,
-		totalCacheWriteTokens: row.cache_write_tokens ?? 0,
-		totalCost: row.cost_total ?? 0,
-	}));
+		"GROUP BY f.agent_type, f.purpose, f.api",
+	);
+	const emptyTotals = (): UsageAttributionTotals => ({
+		totalRequests: 0,
+		totalInputTokens: 0,
+		totalOutputTokens: 0,
+		totalCacheReadTokens: 0,
+		totalCacheWriteTokens: 0,
+		totalCost: 0,
+	});
+	const byAgentType = new Map<AgentType, AgentTypeStats>();
+	const bySideChannel = new Map<string, SideChannelStats>();
+	for (const row of rows) {
+		const category = sideChannelCategory(row.purpose);
+		let totals: UsageAttributionTotals;
+		if (category === null) {
+			const agentType = (row.agent_type as AgentType | null) ?? "main";
+			let stat = byAgentType.get(agentType);
+			if (!stat) {
+				stat = { agentType, ...emptyTotals() };
+				byAgentType.set(agentType, stat);
+			}
+			totals = stat;
+		} else {
+			const decision = isDecisionModelApi(row.api);
+			const key = `${decision ? "decision" : "model"}:${category}`;
+			let stat = bySideChannel.get(key);
+			if (!stat) {
+				stat = { category, decision, ...emptyTotals() };
+				bySideChannel.set(key, stat);
+			}
+			totals = stat;
+		}
+		totals.totalRequests += row.requests;
+		totals.totalInputTokens += row.input_tokens ?? 0;
+		totals.totalOutputTokens += row.output_tokens ?? 0;
+		totals.totalCacheReadTokens += row.cache_read_tokens ?? 0;
+		totals.totalCacheWriteTokens += row.cache_write_tokens ?? 0;
+		totals.totalCost += row.cost_total ?? 0;
+	}
+	return {
+		byAgentType: [...byAgentType.values()],
+		bySideChannel: [...bySideChannel.values()].sort((a, b) => b.totalRequests - a.totalRequests),
+	};
 }
 
 /** Requests, errors, tokens and cost per bucket. */

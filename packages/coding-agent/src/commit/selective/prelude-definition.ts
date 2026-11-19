@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import type { EvalPreludeDefinition } from "../../eval/preludes";
+import type { HostEvalPreludeDefinition } from "../../eval/preludes";
 import commitDocumentation from "../../prompts/tools/commit.md" with { type: "text" };
 import commitGuidance from "../../prompts/tools/commit-guidance.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -91,7 +91,7 @@ function describeCall(parameters: unknown): string | undefined {
  * Create the `commit` eval prelude: draft the session agent tree's changes from its change
  * journal, adjust the selection, and commit it without touching other agents' work.
  */
-export function createCommitPrelude(session: ToolSession): EvalPreludeDefinition {
+export function createCommitPrelude(session: ToolSession): HostEvalPreludeDefinition {
 	const drafts = new Map<string, { draft: Draft; scope: ScopeSpec }>();
 	const remember = (draft: Draft, scope: ScopeSpec) => {
 		drafts.set(draft.id, { draft, scope });
@@ -155,12 +155,16 @@ export function createCommitPrelude(session: ToolSession): EvalPreludeDefinition
 				drafts.delete(draft.id);
 				const remaining = await draftFor(context(signal, draft.root), scope);
 				remember(remaining, scope);
-				const lines = [
-					`[${draft.branch ?? "HEAD"} ${outcome.sha.slice(0, 10)}] ${outcome.subject}`,
-					`${outcome.paths.length} path(s): ${outcome.paths.join(", ")}`,
-				];
-				if (outcome.parent && outcome.parent !== draft.head) {
-					lines.push(`HEAD had moved to ${outcome.parent.slice(0, 10)}; the selection applied cleanly on top.`);
+				const lines = [`[${draft.branch ?? "HEAD"} ${outcome.sha.slice(0, 10)}] ${outcome.subject}`];
+				if (outcome.amended) {
+					lines.push(
+						`amended ${outcome.amended.slice(0, 10)} (parent ${outcome.parent?.slice(0, 10) ?? "none, root commit"})`,
+					);
+				}
+				lines.push(`${outcome.paths.length} path(s): ${outcome.paths.join(", ")}`);
+				const placedOn = outcome.amended ?? outcome.parent;
+				if (placedOn && placedOn !== draft.head) {
+					lines.push(`HEAD had moved to ${placedOn.slice(0, 10)}; the selection applied cleanly on top.`);
 				}
 				lines.push(...outcome.indexNotes, "", "Remaining:", remaining.summary());
 				return { text: lines.join("\n"), details: { ...outcome, remaining: describe(remaining) } };

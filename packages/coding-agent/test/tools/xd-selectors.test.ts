@@ -29,3 +29,20 @@ it("refuses a selector on an xd:// write target instead of peeling it", () => {
 		/does not accept the trailing selector ":raw"/,
 	);
 });
+
+// A reviewer subagent without eval still reads the eval docs its assignment links.
+it("reads an eval doc topic in a session without the eval tool", async () => {
+	const session: ToolSession = {
+		cwd: process.cwd(),
+		hasUI: false,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		settings: Settings.isolated(),
+		getToolByName: () => undefined,
+	};
+	const result = await new ReadTool(session).execute("no-eval", { path: "xd://eval/helpers" });
+	const text = result.content.map(entry => (entry.type === "text" ? entry.text : "")).join("\n");
+	expect(text).not.toContain("no doc topics");
+	expect(result.isError).not.toBe(true);
+	expect(text.length).toBeGreaterThan(200);
+});

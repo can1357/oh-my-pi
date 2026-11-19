@@ -28,7 +28,7 @@ import {
 } from "../errors";
 import { RequestIdAllocator } from "../request-id";
 import { routeProgressNotification, withProgressToken } from "../progress";
-import { isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
+import { isMCPTimeoutEnabled, resolveMCPRequestDeadline } from "../timeout";
 import { isThenable } from "../../utils/ipc";
 
 /** Subprocess argv and platform-derived spawn flags for an MCP stdio server. */
@@ -819,7 +819,8 @@ export class StdioTransport implements MCPTransport {
 			params: options?.onProgress ? withProgressToken(params, id) : (params ?? {}),
 		};
 
-		const timeout = resolveMCPTimeoutMs(this.config.timeout);
+		const { timeoutMs: timeout, maxTotalMs } = resolveMCPRequestDeadline(this.config.timeout, method, params);
+		const startedAt = Date.now();
 		const signal = options?.signal;
 
 		if (signal?.aborted) {
@@ -867,8 +868,15 @@ export class StdioTransport implements MCPTransport {
 			if (settle(reason)) sendCancellation("Request cancelled by the client");
 		};
 
+		const progressSink = options?.onProgress;
 		this.#pendingRequests.set(id, {
-			onProgress: options?.onProgress,
+			// Progress shows the server is still working: restart the deadline.
+			onProgress: progressSink
+				? progress => {
+						if (timer) armTimer();
+						progressSink(progress);
+					}
+				: undefined,
 			resolve: (value: unknown) => {
 				settle(undefined, value);
 			},
@@ -877,7 +885,12 @@ export class StdioTransport implements MCPTransport {
 			},
 		});
 
-		if (isMCPTimeoutEnabled(timeout)) {
+		// Progress restarts the deadline, never past the request's hard cap.
+		const armTimer = (): void => {
+			const delay = Math.min(timeout, startedAt + maxTotalMs - Date.now());
+			if (delay <= 0) return;
+			const limit = delay < timeout ? maxTotalMs : timeout;
+			if (timer) clearTimeout(timer);
 			timer = setTimeout(() => {
 				if (
 					settle(
@@ -885,15 +898,16 @@ export class StdioTransport implements MCPTransport {
 							transport: "stdio",
 							stage: "receive",
 							failure: "timeout",
-							message: `Request timeout after ${timeout}ms`,
+							message: `Request timeout after ${limit}ms`,
 							retryable: false,
 						}),
 					)
 				) {
-					sendCancellation(`Request timed out after ${timeout}ms`);
+					sendCancellation(`Request timed out after ${limit}ms`);
 				}
-			}, timeout);
-		}
+			}, delay);
+		};
+		if (isMCPTimeoutEnabled(timeout)) armTimer();
 
 		if (signal) {
 			signal.addEventListener("abort", onAbort, { once: true });

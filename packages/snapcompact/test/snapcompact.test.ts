@@ -126,7 +126,6 @@ describe("computeFileLists", () => {
 	it("drops scheme:// URLs from legacy fileOps before rendering <files>", () => {
 		const fileOps = snapcompact.createFileOps();
 		fileOps.read.add("src/read-only.ts");
-		fileOps.read.add("artifact://7");
 		fileOps.edited.add("src/edited.ts");
 		fileOps.edited.add("conflict://1");
 		fileOps.written.add("local://ctx.md");
@@ -160,7 +159,6 @@ describe("isUrlSchemePath", () => {
 	it("flags internal URIs and web URLs", () => {
 		expect(snapcompact.isUrlSchemePath("conflict://1")).toBe(true);
 		expect(snapcompact.isUrlSchemePath("conflict://*")).toBe(true);
-		expect(snapcompact.isUrlSchemePath("artifact://7")).toBe(true);
 		expect(snapcompact.isUrlSchemePath("local://ctx.md")).toBe(true);
 		expect(snapcompact.isUrlSchemePath("history://AuthLoader")).toBe(true);
 		expect(snapcompact.isUrlSchemePath("https://example.com/page")).toBe(true);

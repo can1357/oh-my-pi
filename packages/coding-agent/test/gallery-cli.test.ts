@@ -76,15 +76,19 @@ describe("gallery harness", () => {
 	});
 
 	it("renders every registered tool in every lifecycle state without throwing", async () => {
+		const empty: string[] = [];
 		for (const name in toolRenderers) {
 			const fixture = resolveFixture(name);
 			for (const state of GALLERY_STATES) {
 				const lines = await renderGalleryState(name, fixture, state, 100);
-				// A renderer that produces no lines for a state is a regression: the
-				// component should always emit at least the call header or result.
-				expect(lines.length, `${name}/${state} rendered nothing`).toBeGreaterThan(0);
+				if (lines.length === 0) empty.push(`${name}/${state}`);
 			}
 		}
+		// A renderer that produces no lines for a state is a regression: the
+		// component should always emit at least the call header or result. The
+		// one exception is a pending ask, whose questions live in the panel over
+		// the composer; its transcript entry appears once answers arrive.
+		expect(empty).toEqual(["ask/streaming", "ask/progress"]);
 	});
 
 	it("routes each state to the matching args/result (streaming args vs result, success vs error)", async () => {
