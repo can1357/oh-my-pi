@@ -359,7 +359,7 @@ darwin_cc(
     arch = "x86_64",
 )
 
-# Swift toolchains for the Apple Foundation Models bridge in pi-natives: the
+# Swift toolchains for the Apple Foundation Models bridge in omp-natives: the
 # host probe for mac exec hosts, the pinned swift.org release for linux ones.
 applefm_swift = use_repo_rule("//bazel/toolchains/swift:applefm.bzl", "applefm_swift_repository")
 

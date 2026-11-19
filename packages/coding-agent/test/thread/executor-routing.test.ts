@@ -436,6 +436,21 @@ describe("subagent runs routed into pooled workers", () => {
 	);
 
 	it(
+		"reads a worker-homed child's pending wake on main: set while its run streams, clear once it ends",
+		async () => {
+			const controller = new AbortController();
+			const running = runSubprocess(runOptions("Waker", HANG_TASK, { signal: controller.signal }));
+			await server.hung();
+			const session = AgentRegistry.global().get("Waker")?.session;
+			await waitFor(() => session?.hasPendingWake === true);
+			controller.abort(new Error("stop from main"));
+			await running;
+			await waitFor(() => session?.hasPendingWake === false);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
 		"aborts the worker run when main's signal aborts",
 		async () => {
 			const controller = new AbortController();

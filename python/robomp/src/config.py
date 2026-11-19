@@ -149,7 +149,7 @@ class Settings(BaseSettings):
     # repo has a sync watermark.
     issue_index_sync_seconds: float = Field(900.0, alias="ROBOMP_ISSUE_INDEX_SYNC_SECONDS")
 
-    # pi-natives build-output cache. Copies pre-built
+    # omp-natives build-output cache. Copies pre-built
     # `packages/natives/native/*.node` (and its companions) into new
     # workspaces keyed by the git tree-hashes of inputs that determine the
     # build output. Misses are captured automatically when a task that

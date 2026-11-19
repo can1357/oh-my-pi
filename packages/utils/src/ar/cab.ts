@@ -4,7 +4,7 @@ import { LzxDecoder } from "./codecs/lzx";
 import { ArchiveError } from "./error";
 import {
 	type ArchiveLimits,
-	assertArchiveMemberSize,
+	assertArchiveMemberSizeField,
 	assertEntryCount,
 	assertIndexSize,
 	assertInMemorySize,
@@ -339,7 +339,7 @@ async function readCabArchive(source: ByteSource, options: Parameters<FormatRead
 		if (folderIndex >= folders.length)
 			throw new ArchiveError("Invalid CAB archive: CFFILE references a missing folder");
 		const rawName = decodeName(nameBytes, (attributes & ATTRIBUTE_UTF8_NAME) !== 0);
-		assertArchiveMemberSize(size, rawName, options.limits);
+		assertArchiveMemberSizeField(size, rawName);
 		const end = folderOffset + size;
 		if (!Number.isSafeInteger(end)) throw new ArchiveError("Invalid CAB archive: CFFILE range is too large");
 		if (end > descriptions[folderIndex]!.requiredSize) descriptions[folderIndex]!.requiredSize = end;

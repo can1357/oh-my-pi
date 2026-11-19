@@ -137,6 +137,44 @@ describe("ast_edit tool schema", () => {
 		}
 	});
 
+	it("reports and applies explicit file targets under their own paths", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-files-"));
+		try {
+			await fs.mkdir(path.join(tempDir, "server", "public"), { recursive: true });
+			const first = path.join(tempDir, "server", "public", "session.ts");
+			const second = path.join(tempDir, "client.ts");
+			await Bun.write(first, "legacyWrap(a, b)\n");
+			await Bun.write(second, "legacyWrap(c, d)\n");
+			const queue = new ToolChoiceQueue();
+			const tools = await createTools(
+				createTestSession(tempDir, {
+					getToolChoiceQueue: () => queue,
+					buildToolChoice: () => ({ type: "tool" as const, name: "resolve" }),
+					steer: () => {},
+				}),
+				["ast_edit"],
+			);
+			const tool = tools.find(entry => entry.name === "ast_edit")!;
+
+			const previewResult = await tool.execute("ast-edit-files", {
+				ops: [{ pat: "legacyWrap($A, $B)", out: "modernWrap($A, $B)" }],
+				paths: ["server/public/session.ts", "client.ts"],
+			});
+			const files = (previewResult.details as { files?: string[] }).files ?? [];
+			expect([...files].sort()).toEqual(["client.ts", "server/public/session.ts"]);
+
+			const applyResult = (await queue.peekPendingInvoker()!({
+				action: "apply",
+				reason: "apply previewed AST edit",
+			})) as InvokedToolResult;
+			expect(applyResult.isError).toBeUndefined();
+			expect(await Bun.file(first).text()).toBe("modernWrap(a, b)\n");
+			expect(await Bun.file(second).text()).toBe("modernWrap(c, d)\n");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	it("fails stale pending apply when preview no longer matches", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-stale-"));
 		try {

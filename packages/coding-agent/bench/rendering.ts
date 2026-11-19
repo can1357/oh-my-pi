@@ -280,7 +280,7 @@ try {
 			getSessionFile: () => path.join(dir, "s.jsonl"),
 			getSessionSpawns: () => "*",
 			getArtifactsDir: () => path.join(dir, "sess"),
-			allocateOutputArtifact: async (t: string) => ({ id: "a", path: path.join(dir, `a.${t}.log`) }),
+			allocateOutputArtifact: async () => ({ id: "a", path: path.join(dir, "a.log") }),
 			settings: Settings.isolated(),
 		}) as unknown as ToolSession;
 	const sameSession = mkSession();

@@ -6,6 +6,12 @@
 
 - Added an opt-in numeric faithfulness check for compaction summaries and handoff documents (`CompactionSettings.numberCheck`): numbers the summarizer was never shown go back to it once for a line-level fix, any left are replaced with `?`, and the findings are recorded in `details.numberCheck` ([#19290](https://github.com/can1357/oh-my-pi/pull/19290) by [@Xytronix](https://github.com/Xytronix))
 
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added support for excluding custom messages from model context and compaction or branch summaries, while allowing queued steering and follow-up messages to continue correctly after excluded messages.
+
 ## [18.22.1] - 2026-11-17
 
 ### Added

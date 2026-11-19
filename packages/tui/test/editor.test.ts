@@ -174,6 +174,29 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("");
 		});
 
+		it("hands Up on the first line to the host when it takes it (an ask above), else recalls history", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.addToHistory("earlier prompt");
+			let askWaits = true;
+			const taken: string[] = [];
+			editor.onUpFromTop = () => {
+				if (askWaits) taken.push(editor.getText());
+				return askWaits;
+			};
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("");
+			editor.setText("draft\nsecond line");
+			editor.handleInput("\x1b[A"); // second line → first line: the cursor moves
+			editor.handleInput("\x1b[A"); // on the first line: out to the ask
+			expect(taken).toEqual(["", "draft\nsecond line"]);
+
+			askWaits = false;
+			editor.setText("");
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("earlier prompt");
+		});
+
 		it("cycles through history entries on repeated Up arrow", () => {
 			const editor = new Editor(defaultEditorTheme);
 

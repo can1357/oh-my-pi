@@ -74,9 +74,9 @@ describe("read URL: native rendering keeps only the head metadata a reader uses"
 			getSessionFile: () => path.join(cwd, "session.jsonl"),
 			getArtifactsDir: () => artifactsDir,
 			getSessionSpawns: () => null,
-			allocateOutputArtifact: async toolType => ({
+			allocateOutputArtifact: async () => ({
 				id: "test",
-				path: path.join(artifactsDir, `test.${toolType}.log`),
+				path: path.join(artifactsDir, `test.log`),
 			}),
 			settings: Settings.isolated({ "fetch.enabled": true, "providers.fetch": provider }),
 			// Remote readers (Jina and the like) answer through here.

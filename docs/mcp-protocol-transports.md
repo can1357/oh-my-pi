@@ -118,7 +118,7 @@ Routing stops when the request settles, including failure or timeout. For Stream
 
 When a tool update sink exists, `MCPTool` and `DeferredMCPTool` expose the latest progress in partial `details.progress` and a bounded one-line text update. Identical text coalesces within a call, and updates are spaced at least `PROGRESS_UPDATE_INTERVAL_MS` (50 ms) apart: the first progress shows immediately, and a burst inside the interval shows only its newest step when the interval ends. A coalesced update still waiting when the call settles is dropped. Final results retain their existing text, error status, and structured content, without a progress field.
 
-Progress never resets or extends the absolute request deadline. An awaited MCP tool call also continues counting against an Eval cell's watchdog while it reports progress.
+Without a configured timeout, each progress notification restarts a tool call's deadline, up to a one-hour cap; a configured timeout is a hard deadline. An awaited MCP tool call also continues counting against an Eval cell's watchdog while it reports progress.
 
 An MCP request id correlates a JSON-RPC response, its progress token correlates progress notifications, and an OMP background job id identifies a locally managed job. These are different handles even though OMP uses the request id's value as the progress token. OMP adds no MCP background jobs and provides no confirmed remote cancellation: local timeout or abort does not prove that server-side work stopped.
 
@@ -145,7 +145,7 @@ If the read loop exits unexpectedly, `finally` triggers `#handleClose()` with th
 
 Per request:
 
-- timeout from `resolveMCPTimeoutMs`: `OMP_MCP_TIMEOUT_MS` env override, else `config.timeout ?? 30000`; `0` disables
+- timeout from `resolveMCPTimeoutMs`: `OMP_MCP_TIMEOUT_MS` env override, else `config.timeout`, else 600000 for `tools/call` (raised to a tool's own timeout argument plus 30000) and 30000 otherwise; `0` disables
 - optional `AbortSignal` from caller
 - abort and timeout both reject the pending promise and clean its map entry; a late write rejection is ignored after settlement
 
@@ -203,7 +203,7 @@ So `connected` means "transport usable", not "persistent stream established".
 
 For `request()`:
 
-- timeout uses `AbortController` via `createMCPTimeout` (`OMP_MCP_TIMEOUT_MS` override, else `config.timeout ?? 30000`; `0` disables)
+- timeout uses `AbortController` via `createMCPTimeout` (same resolution as stdio)
 - external signal, if provided, is merged via `AbortSignal.any([...])`
 - AbortError handling distinguishes caller abort vs timeout
 

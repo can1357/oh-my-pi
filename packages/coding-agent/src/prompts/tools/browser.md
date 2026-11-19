@@ -162,7 +162,7 @@ Tern and WebKit tab limits:
 
 Lifetime:
 
-- Closing releases the managed tab and closes tabs omp opened in the relay, never borrowed relay tabs, CDP-attached pages, or adopted Tern blocks.
+- Closing releases the managed tab and closes pages omp opened, never borrowed pages or adopted Tern blocks.
 - `browser.close({ all: true })` releases the tabs you opened, not other agents'.
 - `kill: true` terminates only applications spawned by this process, never reused browser processes.
 - Idle tabs auto-freeze at turn settle, unfreeze on next use, and close past the idle-close timeout.

@@ -13,7 +13,7 @@ function makeSession(): ToolSession {
 		getSessionFile: () => path.join(cwd, "session.jsonl"),
 		getArtifactsDir: () => artifactsDir,
 		getSessionSpawns: () => null,
-		allocateOutputArtifact: async toolType => ({ id: "test", path: path.join(artifactsDir, `test.${toolType}.log`) }),
+		allocateOutputArtifact: async () => ({ id: "test", path: path.join(artifactsDir, `test.log`) }),
 		settings: Settings.isolated({ "fetch.enabled": true }),
 	};
 }

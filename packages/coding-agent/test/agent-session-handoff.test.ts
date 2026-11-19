@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Model, ToolCall } from "@oh-my-pi/pi-ai";
@@ -17,7 +18,6 @@ import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
@@ -32,6 +32,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
 const HANDOFF_SECRET = "HANDOFF_SECRET_TOKEN_12345";
+const HANDOFF_ARTIFACTS = new Bun.Glob("**/handoff-*.md");
 const UNRENDERABLE_SNAPCOMPACT_TEXT = "\uE000\uE001\uE002\uE003\uE004\uE005\uE006\uE007\uE008\uE009";
 
 describe("AgentSession handoff", () => {
@@ -155,11 +156,11 @@ describe("AgentSession handoff", () => {
 			.spyOn(compactionModule, "generateHandoffFromContext")
 			.mockResolvedValue(handoffText);
 
-		const result = await session.handoff();
+		const result = await session.compact(undefined, { mode: "handoff" });
 		await drainMaintenance();
 
 		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
-		expect(result?.document).toBe(handoffText);
+		expect(result.summary).toContain(handoffText);
 		expect(session.sessionFile).toBe(previousSessionFile);
 		expect(session.sessionId).toBe(previousSessionId);
 		const compaction = sessionManager.getBranch().at(-1);
@@ -171,69 +172,93 @@ describe("AgentSession handoff", () => {
 		expect(events.filter(event => event.type === "auto_compaction_end")).toHaveLength(0);
 	});
 
-	it("dispatches a prompt only after manual handoff commits its compaction", async () => {
-		const started = Promise.withResolvers<void>();
-		const finish = Promise.withResolvers<string>();
-		const mock = createMockModel({ responses: [{ content: ["post-handoff answer"] }] });
+	it("applies the handoff before the next tool-loop request without losing its result or queued input", async () => {
+		cfgCompactionEnabled.set(session.settings, false);
+		const toolStarted = Promise.withResolvers<void>();
+		const releaseTool = Promise.withResolvers<void>();
+		const generationStarted = Promise.withResolvers<void>();
+		const document = Promise.withResolvers<string>();
+		const text = "## Goal\nContinue from the checkpoint";
+		const lateResult = "result completed after the handoff snapshot";
+
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", name: "checkpoint", arguments: {} }] },
+				{ content: ["Checkpoint processed"] },
+				{ content: ["Follow-up completed"] },
+			],
+		});
 		session.agent.streamFn = mock.stream;
 		session.agent.getApiKey = () => "test-key";
-		const enteredAdmission = Promise.withResolvers<void>();
-		let admissionSettled = false;
-		const waitForCleanup = SessionMaintenance.prototype.waitForMaintenanceCleanup;
-		vi.spyOn(SessionMaintenance.prototype, "waitForMaintenanceCleanup").mockImplementation(
-			function (this: SessionMaintenance) {
-				const waiting = waitForCleanup.call(this);
-				enteredAdmission.resolve();
-				void waiting.then(() => {
-					admissionSettled = true;
-				});
-				return waiting;
+		session.agent.setTools([
+			{
+				name: "checkpoint",
+				label: "Checkpoint",
+				description: "Read the checkpoint",
+				parameters: type({}),
+				async execute() {
+					toolStarted.resolve();
+					await releaseTool.promise;
+					return { content: [{ type: "text", text: lateResult }], details: undefined };
+				},
 			},
-		);
+		]);
 		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(() => {
-			started.resolve();
-			return finish.promise;
+			generationStarted.resolve();
+			return document.promise;
 		});
 
-		const handoff = session.handoff();
-		expect(session.isCompacting).toBe(true);
-		await started.promise;
-		const prompt = session.prompt("next task");
-		await enteredAdmission.promise;
-		await Promise.resolve();
-		await Promise.resolve();
-		expect(admissionSettled).toBe(false);
-		expect(session.isStreaming).toBe(false);
-		expect(mock.calls).toHaveLength(0);
+		const run = session.prompt("Read the checkpoint");
+		try {
+			await toolStarted.promise;
+			const compaction = session.compact(undefined, { mode: "handoff" });
+			await generationStarted.promise;
+			// Dispatching a follow-up while the summary is still running must not wait for it.
+			await session.prompt("Continue with the queued request", { streamingBehavior: "followUp" });
 
-		finish.resolve("## Goal\nContinue from handoff");
-		await handoff;
-		await prompt;
-		expect(mock.calls).toHaveLength(1);
-		expect(JSON.stringify(mock.calls[0]?.context)).toContain("Continue from handoff");
+			const ready = Promise.withResolvers<void>();
+			const waitForIdle = session.waitForIdle.bind(session);
+			vi.spyOn(session, "waitForIdle").mockImplementationOnce(() => {
+				ready.resolve();
+				return waitForIdle();
+			});
+			document.resolve(text);
+			await ready.promise;
+			expect(sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(false);
+			releaseTool.resolve();
+			await compaction;
+			await run;
+
+			const nextRequest = JSON.stringify(mock.calls[1]?.context.messages);
+			expect(nextRequest).toContain("Continue from the checkpoint");
+			expect(nextRequest).toContain(lateResult);
+			expect(JSON.stringify(mock.calls[2]?.context.messages)).toContain("Continue with the queued request");
+			const compactionIndex = sessionManager.getBranch().findIndex(entry => entry.type === "compaction");
+			expect(compactionIndex).toBeGreaterThan(0);
+			expect(JSON.stringify(sessionManager.getBranch().slice(0, compactionIndex))).toContain(lateResult);
+		} finally {
+			releaseTool.resolve();
+			document.resolve(text);
+			await run;
+		}
 	});
 
-	it("releases a waiting prompt when manual handoff fails", async () => {
+	it("discards a completed handoff when the conversation was cleared during generation", async () => {
 		const started = Promise.withResolvers<void>();
-		const finish = Promise.withResolvers<string>();
-		const mock = createMockModel({ responses: [{ content: ["resumed answer"] }] });
-		session.agent.streamFn = mock.stream;
-		session.agent.getApiKey = () => "test-key";
+		const document = Promise.withResolvers<string>();
 		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(() => {
 			started.resolve();
-			return finish.promise;
+			return document.promise;
 		});
 
-		const handoff = session.handoff();
+		const compaction = session.compact(undefined, { mode: "handoff" });
 		await started.promise;
-		const prompt = session.prompt("continue after failure");
-		finish.reject(new Error("summary request failed"));
-		await expect(handoff).rejects.toThrow("summary request failed");
-		await prompt;
+		expect(await session.resetSessionContext()).toBeDefined();
+		document.resolve("## Goal\nDo not restore this cleared conversation");
 
-		expect(session.isCompacting).toBe(false);
+		await expect(compaction).rejects.toThrow("Conversation changed while compacting");
+		expect(session.messages).toEqual([]);
 		expect(sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(false);
-		expect(mock.calls).toHaveLength(1);
 	});
 
 	it("runs handoff generation through the configured side stream function", async () => {
@@ -303,10 +328,10 @@ describe("AgentSession handoff", () => {
 					.join("\n");
 			});
 
-		const result = await session.handoff();
+		const result = await session.compact(undefined, { mode: "handoff" });
 
 		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
-		expect(result?.document).toBe(handoffText);
+		expect(result.summary).toContain(handoffText);
 		expect(sideStreamCalls).toBe(1);
 		expect(capturedSideSessionId).toStartWith(`${preHandoffSessionId}:side:`);
 	});
@@ -317,7 +342,7 @@ describe("AgentSession handoff", () => {
 			.spyOn(compactionModule, "generateHandoffFromContext")
 			.mockResolvedValue(`## Goal\nKeep ${placeholder}`);
 
-		const result = await session.handoff(`preserve ${HANDOFF_SECRET}`);
+		const result = await session.compact(`preserve ${HANDOFF_SECRET}`, { mode: "handoff" });
 
 		const handoffCall = generateHandoffSpy.mock.calls[0];
 		if (!handoffCall) throw new Error("Expected generateHandoffFromContext call");
@@ -331,8 +356,8 @@ describe("AgentSession handoff", () => {
 				: (trailing?.content ?? []).map(block => (block.type === "text" ? block.text : "")).join("");
 		expect(trailingText).toContain(`preserve ${placeholder}`);
 		expect(trailingText).not.toContain(HANDOFF_SECRET);
-		expect(result?.document).toContain(HANDOFF_SECRET);
-		expect(result?.document).not.toContain(placeholder);
+		expect(result.summary).toContain(HANDOFF_SECRET);
+		expect(result.summary).not.toContain(placeholder);
 	});
 
 	it("obfuscates the previous compaction summary but preserves opaque replay data", async () => {
@@ -963,7 +988,7 @@ describe("AgentSession handoff", () => {
 			timestamp: Date.now(),
 		};
 
-		const handoffSpy = vi.spyOn(session, "handoff").mockResolvedValue({ document: "handoff document" });
+		const handoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext");
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
 		session.agent.emitExternalEvent({
 			type: "tool_execution_end",
@@ -990,11 +1015,11 @@ describe("AgentSession handoff", () => {
 		const handoffText = "## Goal\nContinue from here";
 		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue(handoffText);
 
-		const result = await session.handoff();
+		const result = await session.compact(undefined, { mode: "handoff" });
 		const entries = sessionManager.getBranch();
 		const compaction = entries.at(-1);
 
-		expect(result?.document).toBe(handoffText);
+		expect(result.summary).toContain(handoffText);
 		expect(session.sessionFile).toBe(sessionFile);
 		expect(compaction).toMatchObject({ type: "compaction" });
 		if (compaction?.type !== "compaction") throw new Error("Expected handoff compaction entry");
@@ -1016,10 +1041,11 @@ describe("AgentSession handoff", () => {
 			);
 		});
 
-		const result = await session.handoff();
+		const result = await session.compact(undefined, { mode: "handoff" });
 		const compaction = sessionManager.getBranch().at(-1);
 
-		expect(result?.document).toBe("## Goal\n- ? files left");
+		expect(result.summary).toContain("## Goal\n- ? files left");
+		expect(result.details).toMatchObject({ numberCheck: { unseenNumbers: ["9731"], blanked: ["9731"] } });
 		if (compaction?.type !== "compaction") throw new Error("Expected handoff compaction entry");
 		expect(compaction.summary).toContain("- ? files left");
 		expect(compaction.details).toMatchObject({ numberCheck: { unseenNumbers: ["9731"], blanked: ["9731"] } });
@@ -1053,7 +1079,7 @@ describe("AgentSession handoff", () => {
 			timestamp: Date.now(),
 		};
 
-		const handoffSpy = vi.spyOn(session, "handoff");
+		const handoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext");
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
 		await drainMaintenance();
@@ -1278,7 +1304,7 @@ describe("AgentSession handoff", () => {
 		const generateHandoffSpy = vi
 			.spyOn(compactionModule, "generateHandoffFromContext")
 			.mockResolvedValue("## Goal\nContinue from here");
-		await session.handoff();
+		await session.compact(undefined, { mode: "handoff" });
 
 		expect(emitBeforeAgentStart).toHaveBeenCalledTimes(1);
 		expect(mock.calls.map(c => c.context.systemPrompt?.join("\n\n") ?? "")).toEqual(["Hook override"]);
@@ -1332,7 +1358,7 @@ describe("AgentSession handoff", () => {
 			.spyOn(compactionModule, "generateHandoffFromContext")
 			.mockResolvedValue("## Goal\nContinue");
 
-		await session.handoff();
+		await session.compact(undefined, { mode: "handoff" });
 
 		const call = generateHandoffSpy.mock.calls[0];
 		if (!call) throw new Error("Expected generateHandoffFromContext call");
@@ -1343,27 +1369,25 @@ describe("AgentSession handoff", () => {
 		expect(streamOptions.sessionId).not.toBe("shared-cache-key");
 	});
 
-	it("saves auto-handoff document to disk when enabled", async () => {
+	it("saves auto-handoff but not manual handoff when artifact writing is enabled", async () => {
 		cfgCompactionHandoffSaveToDisk.set(session.settings, true);
-
+		cfgCompactionMethodOrder.set(session.settings, ["handoff"]);
+		const artifacts = { cwd: tempDir.path(), absolute: true };
 		const handoffText = "## Goal\nContinue from here";
 		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue(handoffText);
 
-		const result = await session.handoff(undefined, { autoTriggered: true });
-		expect(result?.savedPath).toBeDefined();
-		if (!result?.savedPath) throw new Error("Expected handoff document path");
-		expect(result.savedPath.endsWith(".md")).toBe(true);
-		const savedText = await Bun.file(result.savedPath).text();
-		expect(savedText).toContain(handoffText);
-	});
+		await session.runIdleCompaction();
+		const files = await Array.fromAsync(HANDOFF_ARTIFACTS.scan(artifacts));
+		const [artifact] = files;
+		if (!artifact) throw new Error("Expected a saved handoff document");
+		expect(await Bun.file(artifact).text()).toContain(handoffText);
 
-	it("does not save manual handoff document when save setting is enabled", async () => {
-		cfgCompactionHandoffSaveToDisk.set(session.settings, true);
-
-		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nManual handoff");
-
-		const result = await session.handoff();
-		expect(result?.savedPath).toBeUndefined();
+		const mock = createMockModel({ responses: [{ content: ["Worked on the next task"] }] });
+		session.agent.streamFn = mock.stream;
+		session.agent.getApiKey = () => "test-key";
+		await session.prompt("Do the next task");
+		await session.compact(undefined, { mode: "handoff" });
+		expect(await Array.fromAsync(HANDOFF_ARTIFACTS.scan(artifacts))).toEqual(files);
 	});
 
 	it("does not start handoff prompt when provided signal is already cancelled", async () => {
@@ -1372,7 +1396,9 @@ describe("AgentSession handoff", () => {
 
 		const generateHandoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext");
 
-		await expect(session.handoff(undefined, { signal: controller.signal })).rejects.toThrow("Handoff cancelled");
+		await expect(session.compact(undefined, { mode: "handoff", signal: controller.signal })).rejects.toThrow(
+			"Compaction cancelled",
+		);
 		expect(generateHandoffSpy).not.toHaveBeenCalled();
 	});
 
@@ -1398,11 +1424,11 @@ describe("AgentSession handoff", () => {
 				return cancelled.promise;
 			});
 
-		const handoffPromise = session.handoff(undefined, { signal: controller.signal });
+		const handoffPromise = session.compact(undefined, { mode: "handoff", signal: controller.signal });
 		await started.promise;
 		controller.abort();
 
-		await expect(handoffPromise).rejects.toThrow("Handoff cancelled");
+		await expect(handoffPromise).rejects.toThrow("Compaction cancelled");
 		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
 		expect(generateHandoffSpy.mock.calls[0]?.[2]?.streamOptions?.signal?.aborted).toBe(true);
 	});
@@ -1418,11 +1444,11 @@ describe("AgentSession handoff", () => {
 			return cancelled.promise;
 		});
 
-		const handoffPromise = session.handoff();
+		const handoffPromise = session.compact(undefined, { mode: "handoff" });
 		await started.promise;
 		await session.abort({ reason: "Harness stopped the session" });
 
-		await expect(handoffPromise).rejects.toThrow("Harness stopped the session");
+		await expect(handoffPromise).rejects.toMatchObject({ cause: "Harness stopped the session" });
 	});
 
 	it("surfaces the real error when generation fails without a user abort", async () => {
@@ -1435,9 +1461,9 @@ describe("AgentSession handoff", () => {
 			.spyOn(compactionModule, "generateHandoffFromContext")
 			.mockRejectedValue(providerError);
 
-		await expect(session.handoff()).rejects.toThrow("Deepseek stream stalled");
+		await expect(session.compact(undefined, { mode: "handoff" })).rejects.toThrow("Deepseek stream stalled");
 		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
-		expect(session.isGeneratingHandoff).toBe(false);
+		expect(session.isBackgroundCompacting).toBe(false);
 	});
 
 	it("surfaces empty handoff generation as a failure, not a false cancel", async () => {
@@ -1447,18 +1473,11 @@ describe("AgentSession handoff", () => {
 		// detail. Empty output is a real failure and must surface as one.
 		const generateHandoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("   \n  ");
 
-		await expect(session.handoff()).rejects.toThrow("Handoff generation produced no content");
+		await expect(session.compact(undefined, { mode: "handoff" })).rejects.toThrow(
+			"Handoff generation produced no content",
+		);
 		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
-		expect(session.isGeneratingHandoff).toBe(false);
-	});
-
-	it("auto-triggered handoff returns undefined on empty generation for context-full fallback", async () => {
-		// Auto-handoff is best-effort: an empty document must NOT throw so maintenance
-		// can fall back to context-full compaction (see runAutoCompaction).
-		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("");
-
-		const result = await session.handoff(undefined, { autoTriggered: true });
-		expect(result).toBeUndefined();
+		expect(session.isBackgroundCompacting).toBe(false);
 	});
 
 	it("rejects a final answer instead of committing it as a manual handoff", async () => {
@@ -1466,7 +1485,9 @@ describe("AgentSession handoff", () => {
 			"I've read both files completely. Here are the exact texts.",
 		);
 
-		await expect(session.handoff()).rejects.toThrow("Handoff generation produced an invalid document");
+		await expect(session.compact(undefined, { mode: "handoff" })).rejects.toThrow(
+			"Handoff generation produced an invalid document",
+		);
 		expect(sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(false);
 	});
 
@@ -1474,9 +1495,9 @@ describe("AgentSession handoff", () => {
 		const handoffText = "# Handoff\n\n## Goal\nContinue from here";
 		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue(handoffText);
 
-		const result = await session.handoff();
+		const result = await session.compact(undefined, { mode: "handoff" });
 
-		expect(result?.document).toBe(handoffText);
+		expect(result.summary).toContain(handoffText);
 		const compaction = sessionManager.getBranch().findLast(entry => entry.type === "compaction");
 		if (compaction?.type !== "compaction") throw new Error("Expected handoff compaction entry");
 		expect(compaction.summary).toContain(handoffText);
