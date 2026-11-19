@@ -2342,6 +2342,8 @@ export interface ProviderModelConfig {
 	thinking?: Model["thinking"];
 	/** Supported input types. */
 	input: ("text" | "image")[];
+	/** Snapcompact frame shape for this model, replacing the model line's default (see `Model.snapcompactShape`). */
+	snapcompactShape?: Model["snapcompactShape"];
 	/** Cost per million tokens. */
 	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	/** Premium Copilot requests charged per user-initiated request. */

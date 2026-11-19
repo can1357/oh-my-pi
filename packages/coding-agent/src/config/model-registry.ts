@@ -4827,6 +4827,8 @@ export interface ProviderConfigInput {
 		thinking?: ThinkingConfig;
 		input: ("text" | "image")[];
 		supportsTools?: boolean;
+		/** Snapcompact frame shape, replacing the model line's default (see `Model.snapcompactShape`). */
+		snapcompactShape?: Model<Api>["snapcompactShape"];
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		contextWindow: number;
 		maxTokens: number;
