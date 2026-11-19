@@ -275,7 +275,10 @@ fn wait_child(pid: i32) -> io::Result<RawExit> {
 /// `CLOEXEC` flags are restored and a JS error whose `code` is the errno name
 /// is thrown.
 #[napi(ts_return_type = "never")]
-#[allow(clippy::implicit_hasher, reason = "napi marshals a JS object into the default-hasher HashMap")]
+#[allow(
+	clippy::implicit_hasher,
+	reason = "napi marshals a JS object into the default-hasher HashMap"
+)]
 pub fn exec_replace(
 	js_env: &Env,
 	path: String,

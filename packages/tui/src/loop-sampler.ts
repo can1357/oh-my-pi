@@ -86,17 +86,14 @@ export function createJscLoopSampler(): LoopSampler | null {
 		drain(): LoopSample[] {
 			lastDrainAt = performance.now();
 			const { traces } = samplingProfilerStackTraces();
-			const samples: LoopSample[] = new Array(traces.length);
-			for (let i = 0; i < traces.length; i++) {
-				const trace = traces[i]!;
-				const frames: LoopSampleFrame[] = new Array(trace.frames.length);
-				for (let j = 0; j < trace.frames.length; j++) {
-					const frame = trace.frames[j]!;
-					frames[j] = { name: frame.name, url: frame.sourceURL ?? "", line: frame.line };
-				}
-				samples[i] = { atMs: trace.timestamp * 1000, frames };
-			}
-			return samples;
+			return traces.map((trace): LoopSample => ({
+				atMs: trace.timestamp * 1000,
+				frames: trace.frames.map((frame): LoopSampleFrame => ({
+					name: frame.name,
+					url: frame.sourceURL ?? "",
+					line: frame.line,
+				})),
+			}));
 		},
 	};
 }

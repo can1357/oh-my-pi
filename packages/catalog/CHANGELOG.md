@@ -4,7 +4,6 @@
 
 ### Added
 
-- `prompt-cache-prewarm` compat axis, read through `isPromptCachePrewarmSupported`: the first-party Anthropic endpoint accepts a `max_tokens: 0` prompt-cache pre-warm
 - Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Added `anthropic/claude-voice-stream` (`kind "stt"`, `anthropic-voice-stream` runner API): Claude subscription speech-to-text over Claude Code's `/voice` socket, OAuth only ([#19187](https://github.com/can1357/oh-my-pi/pull/19187) by [@Xytronix](https://github.com/Xytronix))
 
@@ -12,11 +11,18 @@
 
 - A provider's authored seed rows now survive that provider's `exclude-models` rules at generation, so a family exclusion such as xai-oauth's `prefix="grok-voice-"` no longer drops a seeded runner row ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added support for prompt-cache prewarming on the first-party Anthropic endpoint via the `isPromptCachePrewarmSupported` compatibility capability.
+
 ### Fixed
 
-- Hosted jev (TypeSafe, OpenRouter, Command Code, OpenCode Zen) splits judgment requests at 32 questions, ending `400 questions must map 1 through 32 ids` find failures
-- Fixed Devin models seeing only the newest 5 images of a conversation: Devin's own host now takes up to 60 (20 for Claude models) within 24 MB of image data and a custom Devin base URL up to 40, and snapcompact plans Gemini 4 Carbon and Gemini 3.7 Flash archive frames at the 1,089 tokens Devin bills instead of about 5,000 ([#19619](https://github.com/can1357/oh-my-pi/pull/19619) by [@will-bogusz](https://github.com/will-bogusz))
-- Devin's Gemini 3.7 Flash, 3.8 Flash, 4 Argon and 4 Carbon now switch from promo to list price when each promotion ends, instead of showing and billing the promo price indefinitely ([#19601](https://github.com/can1357/oh-my-pi/pull/19601) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed hosted judgment requests for TypeSafe, OpenRouter, Command Code, and OpenCode Zen when evaluating more than 32 questions.
+- Improved Devin image handling to support more conversation images within provider limits, and updated image compaction for Devin Gemini models to reflect their billed token usage.
+- Fixed Devin Gemini model pricing so models switch from promotional to list pricing when promotions end.
+- Fixed Kiro API key authentication (`KIRO_API_KEY` and `ksk_…`) so model listing, chat, and `/usage` requests work correctly.
 
 ## [18.22.2] - 2026-11-18
 
