@@ -15,3 +15,5 @@ export const PARENT_WATCHDOG_WORKER_ARG = "__omp_worker_parent_watchdog";
 export const SUBAGENT_WORKER_ARG = "__omp_worker_subagent";
 /** Activity-worker selector shared by the CLI dispatcher and worker launcher. */
 export const STATS_ACTIVITY_WORKER_ARG = "__omp_worker_stats_activity";
+/** TTSR regex-sandbox selector shared by the CLI dispatcher and `export/ttsr-regex-worker.ts`. */
+export const TTSR_REGEX_WORKER_ARG = "__omp_worker_ttsr_regex";

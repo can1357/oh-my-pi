@@ -13,8 +13,14 @@ import * as path from "node:path";
 import type { Judge, JudgeOptions, NoulQuestion } from "@oh-my-pi/pi-ai";
 import { AstMatchStrictness, astMatch, countTokens, Encoding } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
-import { compileRuleCondition, type Rule } from "../capability/rule";
+import { BUILTIN_DEFAULTS_PROVIDER_ID, compileRuleCondition, type Rule } from "../capability/rule";
 import { ensureGrammar } from "../utils/grammars";
+import {
+	evaluateRegexConditionsSandbox,
+	type SandboxVerdict,
+	TTSR_REGEX_SANDBOX_TIMEOUT_MS,
+	TTSR_REGEX_SLOW_CONDITION_MS,
+} from "./ttsr-regex-sandbox";
 import type { TtsrSettings } from "./ttsr-settings";
 
 export type TtsrMatchSource = "text" | "thinking" | "tool";
@@ -150,6 +156,12 @@ const DEFAULT_SETTINGS: TtsrSettings = {
  * check so live setting changes apply immediately.
  */
 export type TtsrSettingsSource = Partial<TtsrSettings> | (() => TtsrSettings);
+
+/** Internal knobs; tests shorten the sandbox deadline. */
+export interface TtsrManagerOptions {
+	/** Wall-clock budget of one regex-sandbox call. Default {@link TTSR_REGEX_SANDBOX_TIMEOUT_MS}. */
+	sandboxTimeoutMs?: number;
+}
 
 const DEFAULT_SCOPE: TtsrScope = {
 	allowText: true,
@@ -363,6 +375,140 @@ function analyzeCondition(condition: RegExp): ConditionTraits {
 	return { sliceSafe, lineLocal: sliceSafe && !crossesLines, monotonic };
 }
 
+/** One open group while scanning a pattern for backtracking. */
+interface BacktrackFrame {
+	/** The group can match one text in more than one way: a variable-length quantifier or an alternation. */
+	ambiguous: boolean;
+	/** Lookahead: its body runs atomically and never makes the enclosing group ambiguous. */
+	look: boolean;
+}
+
+/**
+ * True when `condition` can backtrack exponentially: it has a backreference, a
+ * lookbehind, or a group that can match one text in more than one way repeated
+ * by a quantifier (`(?:\1[ \t]+[^\n]*\n)*`, `(?:a{1,2})+`). Syntax the scan
+ * does not model fails closed.
+ */
+export function isBacktrackProne(condition: RegExp): boolean {
+	return condition.unicodeSets || new BacktrackScan(condition.source).isProne();
+}
+
+class BacktrackScan {
+	readonly #source: string;
+	readonly #open: BacktrackFrame[] = [{ ambiguous: false, look: false }];
+	#index = 0;
+
+	constructor(source: string) {
+		this.#source = source;
+	}
+
+	isProne(): boolean {
+		while (this.#index < this.#source.length) {
+			if (this.#step()) return true;
+		}
+		return this.#open.length !== 1;
+	}
+
+	get #enclosing(): BacktrackFrame {
+		return this.#open[this.#open.length - 1];
+	}
+
+	/** Consume one pattern element; true once the pattern is known prone. */
+	#step(): boolean {
+		switch (this.#source[this.#index]) {
+			case "\\":
+				return this.#escape();
+			case "(":
+				return this.#openGroup();
+			case ")":
+				return this.#closeGroup();
+			case "|":
+				this.#enclosing.ambiguous = true;
+				this.#index++;
+				return false;
+			case "[":
+				this.#index = readClass(this.#source, this.#index + 1).next;
+				return this.#quantify(undefined);
+			default:
+				this.#index++;
+				return this.#quantify(undefined);
+		}
+	}
+
+	#escape(): boolean {
+		const next = this.#source[this.#index + 1];
+		if (
+			next !== undefined &&
+			((next >= "1" && next <= "9") || (next === "k" && this.#source[this.#index + 2] === "<"))
+		) {
+			return true;
+		}
+		this.#index += 2;
+		return this.#quantify(undefined);
+	}
+
+	#openGroup(): boolean {
+		const group = backtrackGroupOpener(this.#source, this.#index);
+		if (group === undefined) return true;
+		this.#open.push({ ambiguous: false, look: group.look });
+		this.#index = group.next;
+		return false;
+	}
+
+	#closeGroup(): boolean {
+		const closed = this.#open.length > 1 ? this.#open.pop() : undefined;
+		this.#index++;
+		return closed === undefined ? true : this.#quantify(closed);
+	}
+
+	/** Apply a quantifier that may follow the atom just read (`closed` when the atom was a group). */
+	#quantify(closed: BacktrackFrame | undefined): boolean {
+		const quantifier = readQuantifier(this.#source, this.#index);
+		if (quantifier !== undefined) this.#index += quantifier.length;
+		const ambiguous = closed?.ambiguous === true && !closed.look;
+		if (ambiguous && quantifier !== undefined && quantifier.max >= 2) return true;
+		if (ambiguous || (quantifier !== undefined && quantifier.min !== quantifier.max)) {
+			this.#enclosing.ambiguous = true;
+		}
+		return false;
+	}
+}
+
+/** Index past a group opener and whether it is a lookahead; undefined for a lookbehind or syntax the scan does not model. */
+function backtrackGroupOpener(source: string, start: number): { next: number; look: boolean } | undefined {
+	if (source[start + 1] !== "?") return { next: start + 1, look: false };
+	const kind = source[start + 2];
+	if (kind === ":") return { next: start + 3, look: false };
+	if (kind === "=" || kind === "!") return { next: start + 3, look: true };
+	if (kind !== "<" || source[start + 3] === "=" || source[start + 3] === "!") return undefined;
+	const close = source.indexOf(">", start + 3);
+	return close === -1 ? undefined : { next: close + 1, look: false };
+}
+
+const BRACE_QUANTIFIER = /\{(\d+)(,(\d*))?\}/y;
+
+/** The quantifier at `index`: its source length and repeat bounds (`max` is Infinity when unbounded). */
+function readQuantifier(source: string, index: number): { length: number; min: number; max: number } | undefined {
+	const lazy = (end: number) => (source[end] === "?" ? 1 : 0);
+	switch (source[index]) {
+		case "*":
+			return { length: 1 + lazy(index + 1), min: 0, max: Infinity };
+		case "+":
+			return { length: 1 + lazy(index + 1), min: 1, max: Infinity };
+		case "?":
+			return { length: 1 + lazy(index + 1), min: 0, max: 1 };
+		case "{": {
+			BRACE_QUANTIFIER.lastIndex = index;
+			const match = BRACE_QUANTIFIER.exec(source);
+			if (!match) return undefined;
+			const min = Number(match[1]);
+			const max = match[2] === undefined ? min : match[3] === "" ? Infinity : Number(match[3]);
+			return { length: match[0].length + lazy(index + match[0].length), min, max };
+		}
+	}
+	return undefined;
+}
+
 /** A condition's progress through one stream buffer. */
 interface ConditionScan {
 	/** Buffer length at the last line-region scan, or -1 before the first. */
@@ -393,6 +539,9 @@ const FULL_RESCAN_ALWAYS_BELOW = 4096;
 const EXCERPT_CONTEXT = 60;
 const EXCERPT_MATCH_MAX = 120;
 
+/** Called when one in-process regex call exceeds {@link TTSR_REGEX_SLOW_CONDITION_MS}. */
+type SlowConditionListener = (condition: RegExp, elapsedMs: number, bufferChars: number) => void;
+
 /** One bounded line of text around a regex match, with whitespace runs collapsed. */
 function matchExcerpt(text: string, index: number, length: number): string {
 	const matchEnd = index + Math.min(length, EXCERPT_MATCH_MAX);
@@ -401,6 +550,31 @@ function matchExcerpt(text: string, index: number, length: number): string {
 	const body = text.slice(start, end).replace(/\s+/g, " ").trim();
 	return `${start > 0 ? "…" : ""}${body}${end < text.length ? "…" : ""}`;
 }
+
+/** First match of `condition` in `text`, or undefined. */
+function firstMatch(condition: RegExp, text: string): { index: number; length: number } | undefined {
+	condition.lastIndex = 0;
+	const match = condition.exec(text);
+	return match ? { index: match.index, length: match[0].length } : undefined;
+}
+
+/** `condition.test(text)`, reporting a call slow enough to warrant the sandbox. */
+function testTimed(condition: RegExp, text: string, onSlow: SlowConditionListener | undefined): boolean {
+	condition.lastIndex = 0;
+	const started = performance.now();
+	const hit = condition.test(text);
+	const elapsed = performance.now() - started;
+	if (elapsed >= TTSR_REGEX_SLOW_CONDITION_MS) onSlow?.(condition, elapsed, text.length);
+	return hit;
+}
+
+/** A condition's identity across recompiles: isolation decisions follow it through rule rebuilds. */
+function conditionKey(condition: RegExp): string {
+	return `${condition.flags}/${condition.source}`;
+}
+
+/** Verdict for a sandboxed condition whose child could not report one. */
+const NO_SANDBOX_MATCH: SandboxVerdict = { matched: false, index: -1, length: 0 };
 
 /**
  * One stream's accumulated text and how far each condition has scanned it.
@@ -428,6 +602,13 @@ class StreamBuffer {
 	#regionStart = 0;
 	/** Text from `#regionStart` to the end. */
 	#region = "";
+	readonly #onSlow: SlowConditionListener | undefined;
+	/** Sandbox verdicts; each holds only while the buffer keeps the length it was computed at. */
+	readonly #verdicts = new Map<RegExp, { length: number; verdict: SandboxVerdict }>();
+
+	constructor(onSlow?: SlowConditionListener) {
+		this.#onSlow = onSlow;
+	}
 
 	append(delta: string): void {
 		if (delta.length > 0) this.#parts.push(delta);
@@ -443,6 +624,7 @@ class StreamBuffer {
 			return;
 		}
 		this.excerpts.clear();
+		this.#verdicts.clear();
 		for (const scan of this.#scans.values()) {
 			scan.scannedTo = -1;
 			scan.lineStart = 0;
@@ -477,29 +659,54 @@ class StreamBuffer {
 			length <= FULL_RESCAN_ALWAYS_BELOW ||
 			length - scan.paceFrom >= scan.paceFrom * FULL_RESCAN_GROWTH;
 		if (!rescanDue) return false;
-		condition.lastIndex = 0;
-		scan.matched = condition.test(this.#text());
+		scan.matched = testTimed(condition, this.#text(), this.#onSlow);
 		scan.settled = scan.matched && traits.monotonic;
 		scan.fullScannedTo = length;
 		scan.paceFrom = length;
 		return scan.matched;
 	}
 
-	/** Bounded one-line excerpt around the first matching condition. */
-	excerpt(ruleName: string, conditions: readonly RegExp[]): string | undefined {
+	/** The buffered text. */
+	snapshot(): string {
+		return this.#text();
+	}
+
+	/** The sandbox verdict for `condition` on the current text, if one was computed. */
+	verdictFor(condition: RegExp): SandboxVerdict | undefined {
+		const entry = this.#verdicts.get(condition);
+		return entry !== undefined && entry.length === this.#length ? entry.verdict : undefined;
+	}
+
+	settle(condition: RegExp, verdict: SandboxVerdict): void {
+		this.#verdicts.set(condition, { length: this.#length, verdict });
+	}
+
+	/**
+	 * Bounded one-line excerpt around the first matching condition. Conditions for
+	 * which `inProcess` is false are never run here; their settled sandbox verdict is used.
+	 */
+	excerpt(
+		ruleName: string,
+		conditions: readonly RegExp[],
+		inProcess: (condition: RegExp) => boolean,
+	): string | undefined {
 		if (this.excerpts.has(ruleName)) return this.excerpts.get(ruleName);
 		const text = this.#text();
 		let excerpt: string | undefined;
 		for (const condition of conditions) {
-			condition.lastIndex = 0;
-			const match = condition.exec(text);
-			if (match && match[0].length > 0) {
-				excerpt = matchExcerpt(text, match.index, match[0].length);
+			const found = inProcess(condition) ? firstMatch(condition, text) : this.#settledMatch(condition);
+			if (found !== undefined && found.length > 0) {
+				excerpt = matchExcerpt(text, found.index, found.length);
 				break;
 			}
 		}
 		this.excerpts.set(ruleName, excerpt);
 		return excerpt;
+	}
+
+	#settledMatch(condition: RegExp): { index: number; length: number } | undefined {
+		const verdict = this.verdictFor(condition);
+		return verdict?.matched ? { index: verdict.index, length: verdict.length } : undefined;
 	}
 
 	/** Whether a non-final check should rescan the region from the condition's last line start. */
@@ -517,8 +724,7 @@ class StreamBuffer {
 			const inSync = scan.scannedTo === this.#previousLength;
 			const start = inSync ? this.#regionStart : scan.lineStart;
 			const region = inSync ? this.#region : this.#text().slice(start);
-			condition.lastIndex = 0;
-			if (condition.test(region)) {
+			if (testTimed(condition, region, this.#onSlow)) {
 				scan.matched = true;
 				// A line-local match starting on a line already followed by `\n` can never change.
 				scan.settled = traits.monotonic || (traits.lineLocal && region.search(condition) < this.#lineStart - start);
@@ -563,18 +769,28 @@ export class TtsrManager {
 	readonly #buffers = new Map<string, StreamBuffer>();
 	/** Last snapshot evaluated for AST conditions, keyed by stream key, to dedupe matcher runs. */
 	readonly #lastAstSnapshots = new Map<string, string>();
+	/** Non-builtin conditions, mapped to their rule name for diagnostics. */
+	readonly #userConditions = new Map<RegExp, string>();
+	/** Conditions evaluated only by the killable regex sandbox, when a stream block ends. */
+	readonly #sandboxed = new Set<RegExp>();
+	/** Conditions that outlived the sandbox deadline; never evaluated again this session. */
+	readonly #quarantined = new Set<RegExp>();
+	readonly #sandboxTimeoutMs: number;
+	readonly #onSlow: SlowConditionListener = (condition, elapsedMs, bufferChars) =>
+		this.#demote(condition, elapsedMs, bufferChars);
 	#messageCount = 0;
 	#canMatchText = false;
 	#canMatchThinking = false;
 	#hasJudgedRules = false;
 
-	constructor(settings?: TtsrSettingsSource) {
+	constructor(settings?: TtsrSettingsSource, options?: TtsrManagerOptions) {
 		if (typeof settings === "function") {
 			this.#settingsSource = settings;
 		} else {
 			const snapshot: TtsrSettings = { ...DEFAULT_SETTINGS, ...settings };
 			this.#settingsSource = () => snapshot;
 		}
+		this.#sandboxTimeoutMs = options?.sandboxTimeoutMs ?? TTSR_REGEX_SANDBOX_TIMEOUT_MS;
 	}
 
 	/** Current settings; resolved per call so a live source is never cached. */
@@ -792,14 +1008,118 @@ export class TtsrManager {
 		return false;
 	}
 
-	#matchesCondition(entry: TtsrEntry, streamBuffer: string): boolean {
+	/**
+	 * Prefilter test of completed content. `verdicts` holds every condition this call routed away from the
+	 * main thread, so a rule rebuild during an awaited prefilter cannot move one back in process.
+	 */
+	#matchesCondition(entry: TtsrEntry, content: string, verdicts: ReadonlyMap<RegExp, SandboxVerdict>): boolean {
 		for (const condition of entry.conditions) {
-			condition.lastIndex = 0;
-			if (condition.test(streamBuffer)) {
-				return true;
+			const verdict = verdicts.get(condition);
+			if (verdict !== undefined) {
+				if (verdict.matched) return true;
+				continue;
 			}
+			if (testTimed(condition, content, this.#onSlow)) return true;
 		}
 		return false;
+	}
+
+	/** Route a non-builtin rule's backtrack-prone conditions to the sandbox; builtin conditions are tested linear and stay in process. */
+	#classifyConditions(rule: Rule, conditions: readonly RegExp[]): void {
+		if (rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID) return;
+		const interrupting = (rule.interruptMode ?? this.#settings.interruptMode) !== "never";
+		for (const condition of conditions) {
+			this.#userConditions.set(condition, rule.name);
+			if (!isBacktrackProne(condition)) continue;
+			this.#sandboxed.add(condition);
+			const message =
+				"TTSR condition can backtrack exponentially: it runs in the regex sandbox when a stream block ends, not on every delta";
+			const detail = { ruleName: rule.name, condition: condition.source };
+			if (interrupting) logger.warn(message, detail);
+			else logger.debug(message, detail);
+		}
+	}
+
+	/** Move a user condition whose in-process scan was slow to the sandbox. The slow call itself was not bounded. */
+	#demote(condition: RegExp, elapsedMs: number, bufferChars: number): void {
+		const ruleName = this.#userConditions.get(condition);
+		if (ruleName === undefined || this.#sandboxed.has(condition)) return;
+		this.#sandboxed.add(condition);
+		logger.warn("TTSR condition moved to the regex sandbox: one in-process scan was slow", {
+			ruleName,
+			condition: condition.source,
+			elapsedMs: Math.round(elapsedMs),
+			bufferChars,
+		});
+	}
+
+	#quarantine(condition: RegExp, bufferChars: number): void {
+		this.#quarantined.add(condition);
+		logger.warn("TTSR condition quarantined: it did not finish within the regex sandbox deadline", {
+			ruleName: this.#userConditions.get(condition),
+			condition: condition.source,
+			deadlineMs: this.#sandboxTimeoutMs,
+			bufferChars,
+			fix: "Rewrite the pattern so it cannot backtrack exponentially; `omp ttsr test` runs it against a sample.",
+		});
+	}
+
+	/** Run `conditions` against `text` in the sandbox; only quarantined conditions come back without a verdict. */
+	#evaluateInSandbox(text: string, conditions: readonly RegExp[]): Map<RegExp, SandboxVerdict> {
+		const result = evaluateRegexConditionsSandbox(
+			text,
+			conditions.map(condition => ({ source: condition.source, flags: condition.flags })),
+			this.#sandboxTimeoutMs,
+		);
+		for (const index of result.culprits) this.#quarantine(conditions[index], text.length);
+		const verdicts = new Map<RegExp, SandboxVerdict>();
+		for (const [index, verdict] of result.verdicts) verdicts.set(conditions[index], verdict);
+		if (result.error !== undefined) {
+			logger.warn("TTSR regex sandbox failed; its conditions count as no match for this check", {
+				error: result.error,
+			});
+			for (const condition of conditions) {
+				if (!verdicts.has(condition)) verdicts.set(condition, NO_SANDBOX_MATCH);
+			}
+		}
+		return verdicts;
+	}
+
+	/** Evaluate, in one child call, every sandboxed condition of the eligible rules that has no verdict on `buffer` yet. */
+	#settleSandboxed(buffer: StreamBuffer, context: TtsrMatchContext): void {
+		const pending: RegExp[] = [];
+		for (const entry of this.#rules.values()) {
+			if (!this.#isEligible(entry, context)) continue;
+			for (const condition of entry.conditions) {
+				if (
+					this.#sandboxed.has(condition) &&
+					!this.#quarantined.has(condition) &&
+					buffer.verdictFor(condition) === undefined
+				) {
+					pending.push(condition);
+				}
+			}
+		}
+		if (pending.length === 0) return;
+		for (const [condition, verdict] of this.#evaluateInSandbox(buffer.snapshot(), pending)) {
+			buffer.settle(condition, verdict);
+		}
+	}
+
+	#conditionMatches(buffer: StreamBuffer, condition: RegExp, traits: ConditionTraits, final: boolean): boolean {
+		if (this.#quarantined.has(condition)) return false;
+		if (this.#sandboxed.has(condition)) return final && buffer.verdictFor(condition)?.matched === true;
+		return buffer.matches(condition, traits, final);
+	}
+
+	/** A regex rule that may trigger on this stream now: not judged, repeat gate open, scope and paths match. */
+	#isEligible(entry: TtsrEntry, context: TtsrMatchContext): boolean {
+		return (
+			!entry.question &&
+			this.#canTrigger(entry.rule) &&
+			this.#matchesScope(entry, context) &&
+			this.#matchesGlobalPaths(entry, context)
+		);
 	}
 
 	/** Add a TTSR rule to be monitored. */
@@ -836,6 +1156,7 @@ export class TtsrManager {
 			scope,
 			globalPathGlobs,
 		});
+		this.#classifyConditions(rule, conditions);
 		if (question) {
 			this.#hasJudgedRules = true;
 		} else {
@@ -887,7 +1208,7 @@ export class TtsrManager {
 		const bufferKey = this.#bufferKey(context);
 		let buffer = this.#buffers.get(bufferKey);
 		if (!buffer) {
-			buffer = new StreamBuffer();
+			buffer = new StreamBuffer(this.#onSlow);
 			this.#buffers.set(bufferKey, buffer);
 		}
 		return buffer;
@@ -1011,27 +1332,47 @@ export class TtsrManager {
 		if (!this.hasJudgedRules()) {
 			return [];
 		}
-		const candidates: JudgedCandidate[] = [];
+		const eligible: { entry: TtsrEntry; question: string }[] = [];
+		const isolated: RegExp[] = [];
+		const quarantined: RegExp[] = [];
 		for (const entry of this.#rules.values()) {
 			if (
 				!entry.question ||
 				!this.#canTrigger(entry.rule) ||
 				!this.#matchesScope(entry, context) ||
-				!this.#matchesGlobalPaths(entry, context) ||
-				!(await this.#passesPrefilter(entry, content, context))
+				!this.#matchesGlobalPaths(entry, context)
 			) {
 				continue;
 			}
-			candidates.push({ rule: entry.rule, question: entry.question });
+			eligible.push({ entry, question: entry.question });
+			for (const condition of entry.conditions) {
+				if (this.#quarantined.has(condition)) quarantined.push(condition);
+				else if (this.#sandboxed.has(condition)) isolated.push(condition);
+			}
+		}
+		const verdicts = this.#evaluateInSandbox(content, isolated);
+		for (const condition of [...isolated, ...quarantined]) {
+			if (!verdicts.has(condition)) verdicts.set(condition, NO_SANDBOX_MATCH);
+		}
+		const candidates: JudgedCandidate[] = [];
+		for (const { entry, question } of eligible) {
+			if (await this.#passesPrefilter(entry, content, context, verdicts)) {
+				candidates.push({ rule: entry.rule, question });
+			}
 		}
 		return candidates;
 	}
 
-	async #passesPrefilter(entry: TtsrEntry, content: string, context: TtsrMatchContext): Promise<boolean> {
+	async #passesPrefilter(
+		entry: TtsrEntry,
+		content: string,
+		context: TtsrMatchContext,
+		verdicts: ReadonlyMap<RegExp, SandboxVerdict>,
+	): Promise<boolean> {
 		if (entry.conditions.length === 0 && entry.astConditions.length === 0) {
 			return true;
 		}
-		if (this.#matchesCondition(entry, content)) {
+		if (this.#matchesCondition(entry, content, verdicts)) {
 			return true;
 		}
 		const lang = context.source === "tool" ? this.#deriveLang(context.filePaths) : undefined;
@@ -1055,24 +1396,25 @@ export class TtsrManager {
 		if (!this.#settings.enabled) {
 			return [];
 		}
+		if (final) this.#settleSandboxed(buffer, context);
 		const matches: Rule[] = [];
 		for (const [name, entry] of this.#rules) {
-			if (entry.question || !this.#canTrigger(entry.rule)) {
-				continue;
-			}
-			if (!this.#matchesScope(entry, context)) {
-				continue;
-			}
-			if (!this.#matchesGlobalPaths(entry, context)) {
+			if (!this.#isEligible(entry, context)) {
 				continue;
 			}
 			if (
-				!entry.conditions.some((condition, index) => buffer.matches(condition, entry.conditionTraits[index], final))
+				!entry.conditions.some((condition, index) =>
+					this.#conditionMatches(buffer, condition, entry.conditionTraits[index], final),
+				)
 			) {
 				continue;
 			}
 
-			const excerpt = buffer.excerpt(name, entry.conditions);
+			const excerpt = buffer.excerpt(
+				name,
+				entry.conditions,
+				condition => !this.#sandboxed.has(condition) && !this.#quarantined.has(condition),
+			);
 			matches.push(entry.rule);
 			logger.debug("TTSR condition matched", {
 				ruleName: name,
@@ -1150,6 +1492,15 @@ export class TtsrManager {
 		this.#lastAstSnapshots.clear();
 	}
 
+	/**
+	 * Give quarantined conditions a fresh sandbox run. Called when the logical
+	 * session changes; a same-session rule rebuild keeps them. Slow-scan
+	 * demotions stay, because a demoted condition's in-process scan is unbounded.
+	 */
+	clearQuarantine(): void {
+		this.#quarantined.clear();
+	}
+
 	/** Clear only one tool stream's transient matcher state. */
 	clearStream(streamKey: string): void {
 		const prefix = `${streamKey}#`;
@@ -1191,6 +1542,17 @@ export class TtsrManager {
 		this.#canMatchText = replacement.#canMatchText;
 		this.#canMatchThinking = replacement.#canMatchThinking;
 		this.#hasJudgedRules = replacement.#hasJudgedRules;
+		const sandboxedKeys = new Set(Array.from(this.#sandboxed, conditionKey));
+		const quarantinedKeys = new Set(Array.from(this.#quarantined, conditionKey));
+		this.#userConditions.clear();
+		this.#sandboxed.clear();
+		this.#quarantined.clear();
+		for (const [condition, ruleName] of replacement.#userConditions) {
+			this.#userConditions.set(condition, ruleName);
+			const key = conditionKey(condition);
+			if (replacement.#sandboxed.has(condition) || sandboxedKeys.has(key)) this.#sandboxed.add(condition);
+			if (quarantinedKeys.has(key)) this.#quarantined.add(condition);
+		}
 		this.resetBuffer();
 
 		if (!this.#settings.enabled) return registered;

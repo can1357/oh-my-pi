@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A TTSR rule whose regex backtracks exponentially, such as a loop over indented lines built from `[ \t]+[^\n]*` under a repeated group, no longer freezes the whole session for minutes or hours at 100% CPU: user and project conditions with that shape now run in a killable child process when the stream block ends, and one that alone does not finish within 500 ms is quarantined for the session with a warning that names the rule and pattern ([#19362](https://github.com/can1357/oh-my-pi/pull/19362) by [@metaphoric-dev](https://github.com/metaphoric-dev))
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes
@@ -58,6 +62,25 @@
 
 ### Fixed
 
+- `edit` rejections of an unknown tag now offer the file's current tag for the rows shown, instead of only sending the model back to output it already copied from ([#19332](https://github.com/can1357/oh-my-pi/pull/19332) by [@Xytronix](https://github.com/Xytronix))
+- The browser tool's `webmcpList` and `webmcpInvoke` now find the tools a page registers in Chrome and Chromium 157 and later, instead of reporting that Chrome does not expose WebMCP to the page ([#19232](https://github.com/can1357/oh-my-pi/pull/19232) by [@tuschla](https://github.com/tuschla))
+- Ask and remember (`always-ask-cached`) now prompts before `read`, `grep`, `glob`, `find` and `ast_grep` reach a private host written with a trailing dot (`http://intranet./`, `http://localhost.:8080/`, `http://db.corp.internal./`) instead of treating it as a public page ([#19228](https://github.com/can1357/oh-my-pi/pull/19228) by [@XYZ1024-alt](https://github.com/XYZ1024-alt))
+- Fixed the TUI freezing when a session was resumed from `/resume` typed into an open tool approval; switching sessions now closes the pending approval instead of waiting on it ([#19239](https://github.com/can1357/oh-my-pi/issues/19239))
+- `take()` and `drop()` now reject a hunk unit that does not exist, such as `1z`, instead of reporting that no lines were selected ([#19310](https://github.com/can1357/oh-my-pi/pull/19310) by [@eggpeat](https://github.com/eggpeat))
+- `/marketplace` with no arguments (and `/marketplace install` or `/marketplace uninstall` with none) now shows `Marketplace error: …` when the plugin picker fails to load, such as when a marketplace's catalog is missing, instead of exiting the session ([#19234](https://github.com/can1357/oh-my-pi/pull/19234) by [@tuschla](https://github.com/tuschla))
+- An `edit` under a tag read before `write conflict://N` (or `conflict://*`) now carries over to the resolved file like after any other `write`, instead of failing with "hash is not from this session" ([#19233](https://github.com/can1357/oh-my-pi/pull/19233) by [@tuschla](https://github.com/tuschla))
+- ACP sessions now honor `mcp.startupTimeoutMs` when connecting the MCP servers a client declares in `session/new` ([#19253](https://github.com/can1357/oh-my-pi/issues/19253)) ([#19286](https://github.com/can1357/oh-my-pi/pull/19286) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
+- Fixed `/commit` and the eval `commit` namespace dropping a file's UTF-8 BOM from the committed blob, which left the committed file showing as modified ([#19327](https://github.com/can1357/oh-my-pi/issues/19327))
+- On Wayland, pasting while the clipboard holds an image or nothing no longer logs a misleading `Executable not found in $PATH: "xsel"` warning ([#19260](https://github.com/can1357/oh-my-pi/pull/19260) by [@tuschla](https://github.com/tuschla))
+- On Linux, JS eval keeps working in a session that outlives an in-place upgrade (pacman, `omp update`) instead of failing prelude calls such as `browser.open` with "`globalThis.__omp_display__` is not a function": its worker now runs the session's own build via `/proc/self/exe` ([#19259](https://github.com/can1357/oh-my-pi/pull/19259) by [@tuschla](https://github.com/tuschla))
+- ACP form elicitations no longer repeat each field's question (section title or caption) in the elicitation message ([#19305](https://github.com/can1357/oh-my-pi/issues/19305))
+- Deleting a session that cannot be removed no longer erases its prompt history and statistics while the session itself remains ([#19271](https://github.com/can1357/oh-my-pi/pull/19271) by [@eggpeat](https://github.com/eggpeat))
+- Fixed quoted and Unicode filenames being omitted from task change tracking or failing selective commits ([#19274](https://github.com/can1357/oh-my-pi/pull/19274) by [@eggpeat](https://github.com/eggpeat))
+- Pasting HTML into the composer keeps the spaces of whitespace-only inline elements (`Hello<span> </span>world` → `Hello world`) and code indentation inside `<pre>` ([#19263](https://github.com/can1357/oh-my-pi/pull/19263) by [@tuschla](https://github.com/tuschla))
+- `browser.open` with `app: "/usr/bin/chromium"` on Arch now reuses the Chromium already running on that profile instead of failing with "Timed out waiting for CDP endpoint" ([#19235](https://github.com/can1357/oh-my-pi/pull/19235) by [@tuschla](https://github.com/tuschla))
+- Editing a queued follow-up (`/queue`, `=>`, or the follow-up key) with Alt+Up now restores it as `=> <message>`, so Enter queues it again for when the agent yields instead of sending it into the running turn ([#19304](https://github.com/can1357/oh-my-pi/issues/19304))
+- `find` lists unranked literal keyword matches from the files it already read when every judge request fails, instead of returning an empty result ([#19231](https://github.com/can1357/oh-my-pi/pull/19231) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Skill-prompt advisor transcript no longer drops the user's request past a long skill body ([#19164](https://github.com/can1357/oh-my-pi/issues/19164)) ([#19267](https://github.com/can1357/oh-my-pi/pull/19267) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed MCP resource links and binary resources so they remain accessible as readable files or inline content rather than being dropped or shown only as placeholders.
 - Fixed commit drafts after pre-commit hooks and partial prior commits so the index, diff, selected blocks, amended parent, review files, and generated summaries remain accurate.
 - Fixed automatic Hindsight and Mnemopi retention during runs with async work, subagents, or peer messages, preventing duplicate or overlapping retention.

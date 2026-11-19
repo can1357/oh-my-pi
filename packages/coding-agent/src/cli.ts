@@ -43,11 +43,13 @@ import {
 	PARENT_WATCHDOG_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
 	SUBAGENT_WORKER_ARG,
+	TTSR_REGEX_WORKER_ARG,
 } from "./cli/worker-selectors";
 import { DAEMON_WORKER_ARG } from "./daemon/protocol";
 import { MNEMOPI_EMBED_WORKER_ARG } from "./mnemopi/embed-protocol";
 import type * as JsProcessEntry from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
+import { runTtsrRegexWorker } from "./export/ttsr-regex-worker";
 import { startParentWatchdog } from "./subprocess/parent-watchdog";
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
@@ -159,6 +161,7 @@ async function runSmokeTest(): Promise<void> {
 	// Other smoke dependencies stay lazy so normal CLI startup does not load their worker clients.
 	const { isolateDaemonForSmokeTest, smokeTestDaemon } = await import("./daemon/client");
 	const { smokeTestSubagentWorker } = await import("./thread/subagent-worker");
+	const { smokeTestTtsrRegexWorker } = await import("./export/ttsr-regex-sandbox");
 	// Every smoke that reaches the daemon must start this build's own, never the user's live one.
 	const cleanupDaemon = await isolateDaemonForSmokeTest();
 	try {
@@ -187,6 +190,7 @@ async function runSmokeTest(): Promise<void> {
 		await smokeTestMnemopiEmbedWorker();
 		await smokeTestDaemon();
 		await smokeTestSubagentWorker();
+		smokeTestTtsrRegexWorker();
 	} finally {
 		await cleanupDaemon();
 	}
@@ -307,6 +311,10 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		// Worker selectors must dispatch before the normal command graph loads.
 		const { startDaemonFromEnvironment } = await import("./daemon/server");
 		await startDaemonFromEnvironment();
+		return true;
+	}
+	if (arg === TTSR_REGEX_WORKER_ARG) {
+		runTtsrRegexWorker();
 		return true;
 	}
 	if (arg === AUTO_UPDATE_WORKER_ARG) {

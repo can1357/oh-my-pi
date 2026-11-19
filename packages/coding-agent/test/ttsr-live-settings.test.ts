@@ -42,7 +42,10 @@ async function settleSettingWatchers(session: AgentSession): Promise<void> {
 	await session.runToolRegistryMutation(async () => {});
 }
 
-async function withGuardedSession(run: (session: AgentSession, settings: Settings) => Promise<void>): Promise<void> {
+async function withGuardedSession(
+	run: (session: AgentSession, settings: Settings) => Promise<void>,
+	rules: Rule[] = [guard],
+): Promise<void> {
 	using tempDir = TempDir.createSync("@pi-ttsr-live-");
 	const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
 	authStorage.keys.setRuntime("managed-primary", "test-key");
@@ -57,7 +60,7 @@ async function withGuardedSession(run: (session: AgentSession, settings: Setting
 		model: buildLocalModel(),
 		disableExtensionDiscovery: true,
 		skills: [],
-		rules: [guard],
+		rules,
 		promptTemplates: [],
 		slashCommands: [],
 		enableMCP: false,
@@ -105,5 +108,25 @@ describe("TTSR settings changed mid-session", () => {
 			expect(manager.checkDelta("FORBIDDEN_TOKEN", { source: "text" })).toEqual([]);
 			expect(session.systemPrompt.join("\n")).not.toContain("blocks the forbidden token");
 		});
+	});
+});
+
+describe("TTSR quarantine across session changes", () => {
+	it("gives a quarantined condition a fresh run in a new session", async () => {
+		const nested: Rule = { ...guard, name: "nested-loop", condition: ["(a+)+b"] };
+		await withGuardedSession(
+			async session => {
+				const manager = session.ttsrManager!;
+				manager.checkDelta(`${"a".repeat(30)}!`, { source: "text" }, { final: true });
+				manager.resetBuffer();
+				expect(manager.checkDelta("aab", { source: "text" }, { final: true })).toEqual([]);
+
+				await session.newSession();
+				expect(manager.checkDelta("aab", { source: "text" }, { final: true }).map(rule => rule.name)).toEqual([
+					"nested-loop",
+				]);
+			},
+			[nested],
+		);
 	});
 });
