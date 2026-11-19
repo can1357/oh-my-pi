@@ -21,6 +21,11 @@
 - Fixed Wayland input operations on desktops without an available input route to fail immediately with a clear `PermissionDenied` error instead of attempting unnecessary screen capture first.
 - Fixed macOS `computer` interactions so background clicks, key presses, pop-up menu actions, and takeover calls restore the previously active window within the call.
 - Fixed macOS pop-up menu reads immediately after typing so they reflect the option selected by the entered letters.
+- Fixed omp freezing for seconds to minutes on WSL2 while saving sessions: Linux `FileLock` now locks a sidecar file instead of binding a socket, which takes about 10 ms per call there. Older omp versions still running do not see these locks, so restart them after updating ([#19704](https://github.com/can1357/oh-my-pi/pull/19704) by [@turgaybulut](https://github.com/turgaybulut))
+- Fixed screenshots of a Linux window partly off its monitor: Wayland labelled the visible part with the whole window's coordinates, so zoom regions landed off target, and X11 failed with "resized since capture"; both now capture the visible part ([#19596](https://github.com/can1357/oh-my-pi/pull/19596) by [@Deftera186](https://github.com/Deftera186) and [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Wayland pointer and keyboard calls on a desktop with no input route, such as Hyprland without a RemoteDesktop portal, asking for a screenshot first or opening a screen capture before refusing: every one now refuses at once with `PermissionDenied` naming the missing route ([#19629](https://github.com/can1357/oh-my-pi/pull/19629) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS `computer` background clicks, keys and pop-up menu actions, and any takeover call, leaving the target window in front of your windows until you moved it: the window you were typing in goes back in front of it within the call (your other windows it covered stay behind it) ([#19532](https://github.com/can1357/oh-my-pi/pull/19532) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a read of a macOS popup button right after a `computer` letter key showing the option from before the key; the read now waits for the option the letters choose ([#19516](https://github.com/can1357/oh-my-pi/pull/19516) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 

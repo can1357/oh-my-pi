@@ -602,11 +602,11 @@ function sessionLeasePath(sessionId: string, createDir: boolean): string {
 		? sessionId
 		: `h-${Bun.hash.wyhash(sessionId).toString(16).padStart(16, "0")}`;
 	const dir = sessionOwnersDir();
-	// Linux (abstract socket) and Windows (named mutex) locks never touch the
-	// filesystem; elsewhere the lock is a `flock` sidecar in that directory. The
-	// sidecars are empty and never removed: unlinking a flock file can split one
-	// lease between a holder of the old inode and a creator of a new one.
-	if (process.platform !== "linux" && process.platform !== "win32") {
+	// Windows (named mutex) locks never touch the filesystem; elsewhere the lock
+	// is a sidecar in that directory. The sidecars are empty and never removed:
+	// unlinking a lock file can split one lease between a holder of the old inode
+	// and a creator of a new one.
+	if (process.platform !== "win32") {
 		if (createDir) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 		// The test-run dir sits in the shared OS temp dir, where another local
 		// user could pre-create it or plant a symlink: refuse anything but a
@@ -1329,8 +1329,9 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	/**
-	 * The lease is an OS lock (abstract socket, named mutex, or `flock` sidecar
-	 * under ~/.omp/run/session-owners), so the kernel drops a dead owner's claim.
+	 * The lease is an OS lock (named mutex on Windows, otherwise an OFD or
+	 * `flock` lock on a sidecar under ~/.omp/run/session-owners), so the kernel
+	 * drops a dead owner's claim.
 	 * Never throws: a lock that cannot be taken for another reason counts as
 	 * owned, so it never moves a session off its file.
 	 */
