@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a coloured extension status variant to `omp gallery --segment status` ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes
