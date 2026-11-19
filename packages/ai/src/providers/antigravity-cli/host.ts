@@ -17,6 +17,7 @@ import {
 } from "@oh-my-pi/pi-utils/acp";
 import type {
 	AntigravityCliCheckpoint,
+	AssistantMessage,
 	Context,
 	Message,
 	Model,
@@ -46,6 +47,14 @@ const ANNOUNCEMENT_TIMEOUT_MS = 2_000;
 const HOLD_LIMIT_MS = 165_000;
 const CANCEL_TIMEOUT_MS = 5_000;
 const MCP_TOOL_NAME = /\bmcp_ide-tools_(\S+)/;
+// agy relays its own request failures as assistant text, so a refused request
+// would otherwise read as an answer: one `⚠ API error (attempt N): …` line per
+// retry, then, once it gives up, a final `⚠ STATUS (code N): …` line. A reply
+// whose text is only those lines is that failure, and its last line is the
+// CLI's final word.
+const RELAYED_API_ERROR = /^⚠ (?:API error \(attempt \d+\): \S|[A-Z][A-Z_]* \(code \d+\): )/;
+const RESOURCE_EXHAUSTED_HINT =
+	" Antigravity's account tier refused the request: check the account quota with /usage, sign in again with /login antigravity-cli, or choose another provider for this session.";
 
 /** Per-step request settings. */
 export interface AgyStepOptions {
@@ -746,6 +755,11 @@ export class AgyHost implements ProviderSessionState {
 			return;
 		}
 		const writer = step.writer;
+		const relayed = relayedApiFailure(writer.output);
+		if (relayed) {
+			this.#fail(new Error(relayed));
+			return;
+		}
 		if (
 			!writer.output.content.some(
 				block => (block.type === "text" && block.text.trim().length > 0) || block.type === "toolCall",
@@ -960,6 +974,30 @@ function mapAgyError(error: unknown): Error {
 		return new Error("Antigravity CLI is not signed in. Run /login and choose Antigravity CLI.");
 	}
 	return error instanceof Error ? error : new Error(String(error));
+}
+
+/**
+ * The failure a relayed agy request error describes, or undefined when the step
+ * is a real answer. agy reports its own request failures as assistant text
+ * (`⚠ API error (attempt N): RESOURCE_EXHAUSTED (code 429): …`), so a reply made
+ * only of those lines must not finish as a successful step. Thinking beside the
+ * lines changes nothing; a tool call, an image, or a line quoted among other
+ * text means the model acted and the reply is an answer.
+ */
+export function relayedApiFailure(output: AssistantMessage): string | undefined {
+	if (
+		output.content.some(
+			block => block.type !== "text" && block.type !== "thinking" && block.type !== "redactedThinking",
+		)
+	)
+		return undefined;
+	const lines = output.content
+		.flatMap(block => (block.type === "text" ? block.text.split("\n") : []))
+		.map(line => line.trim())
+		.filter(line => line.length > 0);
+	if (lines.length === 0 || !lines.every(line => RELAYED_API_ERROR.test(line))) return undefined;
+	const reason = lines.at(-1)!.slice(2);
+	return `Antigravity CLI: ${reason}${/RESOURCE_EXHAUSTED/.test(reason) ? RESOURCE_EXHAUSTED_HINT : ""}`;
 }
 
 function scheduleTimer(delayMs: number, callback: () => void): AgyTimer {

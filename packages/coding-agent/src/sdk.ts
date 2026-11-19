@@ -295,6 +295,7 @@ import {
 	buildSystemPrompt as buildSystemPromptInternal,
 	cfgSystemPromptInputs,
 	composeAppendPrompt,
+	isAntigravityCliProvider,
 	loadProjectContextFiles as loadContextFilesInternal,
 	projectSystemPromptToolMetadata,
 	withoutAgentsMd,
@@ -4449,6 +4450,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			xdev,
 		): Promise<BuildSystemPromptResult> => {
 			const promptCwd = sessionManager.getCwd();
+			// The provider decides the prompt profile, so a switch onto or off an
+			// antigravity-cli model re-renders the same way a model change does.
+			const antigravityCli = isAntigravityCliProvider((agent?.state.model ?? model)?.provider);
 			let activeRepoContext = initialActiveRepoContext;
 			// Re-discover rules and context files from disk on every session-scoped
 			// rebuild. The rule buckets are otherwise frozen at
@@ -4559,7 +4563,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					.filter(mapping => xdevPromptDocs?.catalog.has(mapping.name))
 					.map(mapping => mapping.name),
 			);
-			if (projection.mappings.length > 0 || projection.hasOmittedMappings) {
+			// Antigravity's account tier refuses a request carrying the MCP/xd route
+			// docs with the same RESOURCE_EXHAUSTED (429) it answers for omp's default
+			// prompt, so an antigravity-cli session keeps its tools but sends neither
+			// the route lines nor the connected servers' instructions.
+			if (!antigravityCli && (projection.mappings.length > 0 || projection.hasOmittedMappings)) {
 				appendParts.push(
 					prompt
 						.render(mcpXdevGuidanceTemplate, {
@@ -4574,7 +4582,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						.trim(),
 				);
 			}
-			if (serverInstructions && serverInstructions.size > 0) {
+			if (!antigravityCli && serverInstructions && serverInstructions.size > 0) {
 				appendParts.push(
 					"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
 				);
@@ -4680,6 +4688,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				evalPreludes: toolSession.getAdvertisedEvalPreludes?.(),
 				model: getActiveModelString(),
 				includeModelInPrompt: cfgIncludeModelInPrompt.get(settings),
+				antigravityCli,
 				personality: agentKind === "sub" ? "none" : cfgPersonality.get(settings),
 				subagent: agentKind === "sub",
 				renderMermaid: tuiTranscript && cfgTuiRenderMermaid.get(settings),
