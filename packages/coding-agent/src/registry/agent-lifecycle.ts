@@ -466,21 +466,18 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		const park = this.#parks.get(id);
 		if (park) {
 			const parked = this.#registry.get(id);
-			// Cancel if the live session is still attached — keep it instead of
-			// thrashing dispose + revive.
-			if (parked?.session && !park.detached && park.cancel()) {
-				await park.promise;
-				const kept = this.#registry.get(id)?.session;
-				if (kept) {
-					// Park cleared the idle timer; re-arm so TTL park still works.
-					const adopted = this.#adopted.get(id);
-					if (adopted && adopted.ref === parked && parked.status === "idle") this.#armTimer(id, adopted);
-					return kept;
-				}
-			} else {
-				// Already committed to detach (or no live session): wait for park,
-				// then fall through to the revive path.
-				await park.promise;
+			const wasKilled = parked?.status === "aborted";
+			// Cancel before detach; otherwise wait for disposal. Neither path may hand out
+			// (or cold-revive) a newer owner of the id after the await.
+			const kept = parked === park.ref && parked.session && !park.detached && park.cancel();
+			await park.promise;
+			if (this.#registry.get(id) !== parked || (!wasKilled && parked?.status === "aborted")) {
+				throw new Error(`Agent "${id}" changed while waiting for its session to park.`);
+			}
+			if (kept && parked?.session) {
+				const adopted = this.#adopted.get(id);
+				if (adopted && adopted.ref === parked && parked.status === "idle") this.#armTimer(id, adopted);
+				return parked.session;
 			}
 		}
 
@@ -490,7 +487,10 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				`Unknown agent "${id}" — it was never registered or has been released. If a transcript exists, read history://${id}.`,
 			);
 		}
-		if (ref.status === "aborted") ref = await this.#reopen(id, ref);
+		if (ref.status === "aborted") {
+			ref = await this.#reopen(id, ref);
+			if (this.#registry.get(id) !== ref) throw new Error(`Agent "${id}" changed while reopening its transcript.`);
+		}
 		// A revive attaches its session before it finishes initializing it: join the revive rather
 		// than hand out a session whose extensions have not re-registered their tools yet.
 		const inflight = this.#revivals.get(id);

@@ -579,6 +579,39 @@ describe("AgentLifecycleManager", () => {
 		expect(registry.get("7-Sub")?.session).toBeNull();
 	});
 
+	it("does not revive the next owner of an id while the previous owner's park is disposing", async () => {
+		const disposing = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		const id = "ReplacedWhileParking";
+		const original = makeSessionStub(async () => {
+			disposing.resolve();
+			await finish.promise;
+		});
+		const ref = registerIdleSub(id, original.session);
+		lifecycle.adopt(id, { idleTtlMs: 0 }, ref);
+		const parking = lifecycle.park(id);
+		await disposing.promise;
+		const live = lifecycle.ensureLive(id);
+		const replacement = registry.register({
+			id,
+			displayName: "task",
+			kind: "sub",
+			status: "parked",
+			session: null,
+			sessionFile: `/new/${id}.jsonl`,
+		});
+		const revive = vi.fn(async () => makeSessionStub().session);
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => revive,
+			() => 0,
+		);
+		finish.resolve();
+		await parking;
+		await expect(live).rejects.toThrow();
+		expect(replacement.session).toBeNull();
+		expect(revive).not.toHaveBeenCalled();
+	});
+
 	it("ensureLive during pre-detach park cancels park and keeps the live session", async () => {
 		const gate = deferred();
 		const stub = makeSessionStub(() => gate.promise);
