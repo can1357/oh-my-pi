@@ -3297,8 +3297,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * Opt this session in to autonomous idle maintenance (the idle recap and idle compaction, both governed by
-	 * their settings); recaps reach the owner through `options.onRecap`. One scheduler per session: repeating the
-	 * call keeps the first owner's options, so a view that re-asserts itself cannot duplicate work or displace them.
+	 * their settings); recaps reach the owner through `options.onRecap`. Set `options.recap` to false to retain
+	 * idle compaction without generating recaps. One scheduler per session: repeating the call keeps the first
+	 * owner's options, so a view that re-asserts itself cannot duplicate work or displace them.
 	 * A disposed session cannot start any. Teardown is registered with {@link addDisposer}.
 	 */
 	enableIdleMaintenance(options: IdleMaintenanceOptions = {}): void {
