@@ -162,6 +162,12 @@ export interface TrayInput {
 	readonly showAgents: boolean;
 	/** Whether focusing agent `ref` can show its transcript (a live session, or one on disk to revive). */
 	canOpen(ref: AgentRecordLike): boolean;
+	/**
+	 * Whether agent `id` is being opened for viewing: reviving it to show its
+	 * transcript passes its registry status through `running` without it doing
+	 * any work, which the tray must not read as running.
+	 */
+	reviving(id: string): boolean;
 	readonly now: number;
 }
 
@@ -177,6 +183,8 @@ export interface TraySources {
 	readonly showAgents: boolean;
 	/** False where agent transcripts cannot be focused at all (a collab guest). */
 	readonly canFocus: boolean;
+	/** Agents being opened for viewing (see {@link TrayInput.reviving}). */
+	readonly reviving: ReadonlySet<string>;
 }
 
 /** The tray's input from the live registries and the main session's jobs. */
@@ -206,6 +214,7 @@ export function collectTrayInput(sources: TraySources): TrayInput {
 		// Focusing revives through the lifecycle: a live session, or a transcript on disk. Advisors are
 		// read-only transcripts that focusing never opens.
 		canOpen: ref => sources.canFocus && ref.kind === "sub" && (ref.session !== null || ref.sessionFile !== null),
+		reviving: id => sources.reviving.has(id),
 		now: Date.now(),
 	};
 }
@@ -225,16 +234,41 @@ export class TrayMemory {
 	readonly agents = new Map<string, AgentMemory>();
 	/** The done card's last entries and their signature, so an unchanged list keeps its array. */
 	doneEntries: { key: string; entries: readonly TrayDoneEntry[] } | undefined;
+	/**
+	 * Each agent's place, pinned the first time the tray sees it: its creation
+	 * time (spawn order; an agent restored from disk by when it was made), then
+	 * the order it was seen in. Nothing that happens to an agent later moves it.
+	 */
+	readonly places = new Map<string, { at: number; seq: number }>();
+	#seq = 0;
+	/**
+	 * How each finished agent ended, as first seen settled: reopening a killed
+	 * agent to view it registers it `parked`, which must not turn its stopped
+	 * dot into a done one. Forgotten when it runs again.
+	 */
+	readonly settled = new Map<string, "done" | "failed" | "stopped">();
+
+	/** Agent `id`'s pinned place (see {@link places}), pinning it at `at` on first sight. */
+	place(id: string, at: number): { at: number; seq: number } {
+		let place = this.places.get(id);
+		if (!place) {
+			place = { at, seq: this.#seq++ };
+			this.places.set(id, place);
+		}
+		return place;
+	}
+}
+
+/** Whether the registry says `ref` is a subagent at work (not merely being revived to be viewed). */
+function registryRunning(input: TrayInput, ref: AgentRecordLike | undefined): boolean {
+	return ref?.kind === "sub" && ref.status === "running" && !input.reviving(ref.id);
 }
 
 /** The card state an agent's observer session and registry ref add up to; undefined when it gets no card of that kind. */
-function agentStatus(
-	session: ObservableSession | undefined,
-	ref: AgentRecordLike | undefined,
-): TspTrayStatus | undefined {
+function agentStatus(session: ObservableSession | undefined, running: boolean): TspTrayStatus | undefined {
 	const pending = session?.status === "active" && session.progress?.status === "pending";
 	// The registry also hears agents a message woke or revived, which the observer never sees start.
-	if (ref?.kind === "sub" && ref.status === "running") return pending ? "queued" : "running";
+	if (running) return pending ? "queued" : "running";
 	switch (session?.status) {
 		case "active":
 			return pending ? "queued" : "running";
@@ -482,13 +516,14 @@ function agentItem(
 	session: ObservableSession | undefined,
 	ref: AgentRecordLike | undefined,
 ): TrayAgentItem | undefined {
-	const status = agentStatus(session, ref);
+	const status = agentStatus(session, registryRunning(input, ref));
 	if (!status) return undefined;
 	const key = `agent:${id}`;
 	const remembered = rememberAgent(memory, id, status, session, input.now);
 	const job = input.agentJob(id);
 	if (status === "queued" || status === "running") {
 		memory.dismissed.delete(key);
+		memory.settled.delete(id);
 	} else if (memory.dismissed.has(key) || agentResultReached(job, input.consumed)) {
 		return undefined;
 	}
@@ -534,15 +569,24 @@ function agentHasLook(session: ObservableSession | undefined, text: string): boo
 	return detail.tail.length > 0 || (detail.task !== "" && detail.task !== text);
 }
 
-/** How a finished agent ended, by its observer session and its registry ref. */
+/** How a finished agent ended, by its observer session and its registry ref, as first seen (see {@link TrayMemory.settled}). */
 function finishedStatus(
+	memory: TrayMemory,
+	id: string,
 	session: ObservableSession | undefined,
 	ref: AgentRecordLike | undefined,
 	job: AsyncJob | undefined,
 ): "done" | "failed" | "stopped" {
-	if (session?.status === "failed" || job?.status === "failed") return "failed";
-	if (session?.status === "aborted" || ref?.status === "aborted") return "stopped";
-	return "done";
+	const known = memory.settled.get(id);
+	if (known) return known;
+	const status =
+		session?.status === "failed" || job?.status === "failed"
+			? "failed"
+			: session?.status === "aborted" || ref?.status === "aborted"
+				? "stopped"
+				: "done";
+	memory.settled.set(id, status);
+	return status;
 }
 
 /**
@@ -553,12 +597,13 @@ function finishedStatus(
  */
 function finishedAgentItem(
 	input: TrayInput,
+	memory: TrayMemory,
 	id: string,
 	session: ObservableSession | undefined,
 	ref: AgentRecordLike | undefined,
 ): TrayAgentItem {
 	const job = input.agentJob(id);
-	const status = finishedStatus(session, ref, job);
+	const status = finishedStatus(memory, id, session, ref, job);
 	const name = agentTitle(id);
 	const type = agentType(id, session, ref, name);
 	const text = status === "failed" ? agentDoing(status, session, ref, job).text : outcomeLine(session, ref);
@@ -658,13 +703,13 @@ function jobItem(input: TrayInput, memory: TrayMemory, job: AsyncJob): TrayJobIt
 }
 
 /** A finished agent as the done card's closer look lists it, from its registry ref and observer session. */
-function doneEntry(input: TrayInput, ref: AgentRecordLike, session: ObservableSession | undefined): TrayDoneEntry {
-	const status =
-		session?.status === "failed"
-			? "failed"
-			: session?.status === "aborted" || ref.status === "aborted"
-				? "stopped"
-				: "done";
+function doneEntry(
+	input: TrayInput,
+	memory: TrayMemory,
+	ref: AgentRecordLike,
+	session: ObservableSession | undefined,
+): TrayDoneEntry {
+	const status = finishedStatus(memory, ref.id, session, ref, input.agentJob(ref.id));
 	const progress = session?.progress;
 	const metrics = ref.history?.metrics;
 	const duration = progress?.durationMs || metrics?.durationMs || 0;
@@ -687,17 +732,24 @@ function doneEntry(input: TrayInput, ref: AgentRecordLike, session: ObservableSe
 	};
 }
 
-/** Finished agents (not Main, not running) that have no card of their own, most recently active first. */
-function finishedRefs(input: TrayInput, carded: ReadonlySet<string>): AgentRecordLike[] {
+/** Finished agents (not Main, not at work) that have no card of their own, in their pinned places. */
+function finishedRefs(input: TrayInput, memory: TrayMemory, carded: ReadonlySet<string>): AgentRecordLike[] {
 	return input.refs
-		.filter(ref => ref.id !== MAIN_AGENT_ID && ref.kind !== "main" && ref.status !== "running" && !carded.has(ref.id))
-		.sort((a, b) => b.lastActivity - a.lastActivity);
+		.filter(
+			ref => ref.id !== MAIN_AGENT_ID && ref.kind !== "main" && !registryRunning(input, ref) && !carded.has(ref.id),
+		)
+		.sort((a, b) => byPlace(memory.place(a.id, a.createdAt), memory.place(b.id, b.createdAt)));
+}
+
+/** Pinned places in order: creation time, then first sight. */
+function byPlace(a: { at: number; seq: number }, b: { at: number; seq: number }): number {
+	return a.at - b.at || a.seq - b.seq;
 }
 
 /**
- * The card standing for finished agents `done` (most recently active first):
- * every finished agent while anything runs, only those past a quiet tray's
- * own cards (`more`) while nothing does.
+ * The card standing for finished agents `done` (in their places; its closer
+ * look lists the newest first): every finished agent while anything runs,
+ * only those before a quiet tray's own cards (`more`) while nothing does.
  */
 function doneItem(
 	input: TrayInput,
@@ -710,10 +762,13 @@ function doneItem(
 		memory.doneEntries = undefined;
 		return undefined;
 	}
-	const entries = done.slice(0, TRAY_DONE_LIST_LIMIT).map(ref => doneEntry(input, ref, sessions.get(ref.id)));
+	const newest = done.toReversed();
+	const entries = newest
+		.slice(0, TRAY_DONE_LIST_LIMIT)
+		.map(ref => doneEntry(input, memory, ref, sessions.get(ref.id)));
 	const key = JSON.stringify(entries);
 	if (memory.doneEntries?.key !== key) memory.doneEntries = { key, entries };
-	const names = done.map(ref => agentTitle(ref.id));
+	const names = newest.map(ref => agentTitle(ref.id));
 	const shown = names.slice(0, TRAY_DONE_NAMES).join(", ");
 	const summary = names.length > TRAY_DONE_NAMES ? `${shown} +${names.length - TRAY_DONE_NAMES}` : shown;
 	const name = more ? `${done.length} more done` : `${done.length} done`;
@@ -743,25 +798,31 @@ export interface TrayBuild {
 }
 
 /**
- * The tray's cards in wire order. While anything is live: agents in the
- * observer registry's order (then running agents only the agent registry
- * knows), the done card for every finished agent without a card, then the
- * session's background jobs by start time. While nothing is (quiet),
- * finished agents are not grouped: each gets its own settled card, most
- * recently active first, up to {@link TRAY_QUIET_CARD_LIMIT}, and the done
- * card stands only for the rest and for dismissed ones. A card keeps its key
+ * The tray's cards in wire order: agents, then the session's background jobs
+ * by start time, then the done card. Every card keeps its place for its life:
+ * agents stand in their pinned places (see {@link TrayMemory.places}), never
+ * by activity, so a new card only appends after the last of its kind. While
+ * anything is live the done card stands for every finished agent without a
+ * card. While nothing is (quiet) finished agents are not grouped: the newest
+ * {@link TRAY_QUIET_CARD_LIMIT} each get a settled card, and the done card
+ * stands only for the earlier ones and dismissed ones. A card keeps its key
  * across the switch.
  */
 export function buildTrayItems(input: TrayInput, memory: TrayMemory): TrayBuild {
-	const agents: TrayItem[] = [];
+	const agents: TrayAgentItem[] = [];
 	const jobs: TrayItem[] = [];
 	const seen = new Set<string>();
 	const carded = new Set<string>();
 	const refs = new Map<string, AgentRecordLike>();
 	const sessions = new Map<string, ObservableSession>();
+	const place = (id: string): { at: number; seq: number } =>
+		memory.place(id, refs.get(id)?.createdAt ?? sessions.get(id)?.lastUpdate ?? input.now);
 	if (input.showAgents) {
 		for (const ref of input.refs) refs.set(ref.id, ref);
 		for (const session of input.sessions) if (session.kind === "subagent") sessions.set(session.id, session);
+		// Pin newcomers in a fixed sequence (the observer's order, then the registry's), so ties keep it.
+		for (const id of sessions.keys()) place(id);
+		for (const ref of input.refs) place(ref.id);
 		const add = (id: string, session: ObservableSession | undefined): void => {
 			seen.add(id);
 			const item = agentItem(input, memory, id, session, refs.get(id));
@@ -770,9 +831,8 @@ export function buildTrayItems(input: TrayInput, memory: TrayMemory): TrayBuild 
 			carded.add(id);
 		};
 		for (const session of sessions.values()) add(session.id, session);
-		for (const ref of input.refs) {
-			if (!seen.has(ref.id) && ref.kind === "sub" && ref.status === "running") add(ref.id, undefined);
-		}
+		for (const ref of input.refs) if (!seen.has(ref.id) && registryRunning(input, ref)) add(ref.id, undefined);
+		agents.sort((a, b) => byPlace(place(a.ref), place(b.ref)));
 	} else {
 		memory.doneEntries = undefined;
 	}
@@ -784,39 +844,27 @@ export function buildTrayItems(input: TrayInput, memory: TrayMemory): TrayBuild 
 		if (item) jobs.push(item);
 	}
 	const quiet = ![...agents, ...jobs].some(item => isLive(item.status) || item.status === "failed");
-	if (!input.showAgents) return { items: [...agents, ...jobs], quiet };
+	if (!input.showAgents) return { items: jobs, quiet };
 	if (!quiet) {
-		const done = doneItem(input, memory, finishedRefs(input, carded), sessions, false);
-		return { items: [...agents, ...(done ? [done] : []), ...jobs], quiet };
+		const done = doneItem(input, memory, finishedRefs(input, memory, carded), sessions, false);
+		return { items: [...agents, ...jobs, ...(done ? [done] : [])], quiet };
 	}
-	// Quiet: every finished agent, carded or not, as its own card, newest first; dismissed ones and
-	// those past the cap go to the done card.
-	const finished: {
-		id: string;
-		session: ObservableSession | undefined;
-		ref: AgentRecordLike | undefined;
-		at: number;
-	}[] = [];
-	for (const item of agents) {
-		const ref = refs.get(item.ref);
-		const session = sessions.get(item.ref);
-		finished.push({ id: item.ref, session, ref, at: ref?.lastActivity ?? session?.lastUpdate ?? 0 });
-	}
-	for (const ref of finishedRefs(input, carded)) {
-		finished.push({ id: ref.id, session: sessions.get(ref.id), ref, at: ref.lastActivity });
-	}
-	finished.sort((a, b) => b.at - a.at);
+	// Quiet: every finished agent, carded or not, in its place; the newest get cards of their own,
+	// the earlier and the dismissed ones go to the done card.
+	const finished = [
+		...agents.map(item => ({ id: item.ref, ref: refs.get(item.ref) })),
+		...finishedRefs(input, memory, carded).map(ref => ({ id: ref.id, ref })),
+	].sort((a, b) => byPlace(place(a.id), place(b.id)));
+	const shown = finished.filter(agent => !memory.dismissed.has(`agent:${agent.id}`));
+	const own = new Set(shown.slice(-TRAY_QUIET_CARD_LIMIT).map(agent => agent.id));
 	const cards: TrayItem[] = [];
 	const rest: AgentRecordLike[] = [];
 	for (const agent of finished) {
-		if (cards.length < TRAY_QUIET_CARD_LIMIT && !memory.dismissed.has(`agent:${agent.id}`)) {
-			cards.push(finishedAgentItem(input, agent.id, agent.session, agent.ref));
-		} else if (agent.ref) {
-			rest.push(agent.ref);
-		}
+		if (own.has(agent.id)) cards.push(finishedAgentItem(input, memory, agent.id, sessions.get(agent.id), agent.ref));
+		else if (agent.ref) rest.push(agent.ref);
 	}
 	const done = doneItem(input, memory, rest, sessions, true);
-	return { items: [...cards, ...(done ? [done] : []), ...jobs], quiet };
+	return { items: [...cards, ...jobs, ...(done ? [done] : [])], quiet };
 }
 
 /** Whether two builds show the same cards, in the same order, with the same faces. */
@@ -1395,7 +1443,8 @@ export interface TrayHost {
 	main(): TrayMain;
 	/** Focus agent `id`'s session, as the hub's Open transcript does. */
 	focusAgent(id: string): void;
-	showJobsSheet(): void;
+	/** The jobs sheet, on job `selected` when it lists it. */
+	showJobsSheet(selected?: string): void;
 	/** Stop agent `id` for good, as cancelling its task job does. */
 	stopAgent(id: string): void;
 	cancelJob(id: string): void;
@@ -1599,7 +1648,7 @@ export class Tray implements Component {
 					this.#host.focusAgent(item.ref);
 				} else if (item?.item === "job") {
 					this.#peekRef = undefined;
-					this.#host.showJobsSheet();
+					this.#host.showJobsSheet(item.ref);
 				} else if (ref && this.#doneEntry(ref)?.openable) {
 					this.#peekRef = undefined;
 					this.#host.focusAgent(ref);
