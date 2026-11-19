@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `omp usage` and `/usage` showing nothing for the Antigravity CLI (`antigravity-cli`) provider; it now reports its weekly and five-hour quota windows per OAuth account.
+- Fixed Antigravity usage reports to resolve the current client version before requesting the quota summary, so version-gated quota groups such as the Gemini weekly limit are reported.
+
 ## [19.0.0] - 2026-11-18
 
 ### Added

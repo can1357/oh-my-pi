@@ -1,5 +1,5 @@
 import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import { ensureAntigravityVersion, getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import * as AIError from "../error";
 import type {
 	CredentialRankingContext,
@@ -82,6 +82,8 @@ interface AntigravityEndpointResult {
 	endpoint: string;
 }
 
+/** Project the Antigravity CLI (agy) quota endpoints are queried with. */
+const CLI_PROJECT_ID = "default-cli-project";
 const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const FETCH_AVAILABLE_MODELS_PATH = "/v1internal:fetchAvailableModels";
 const RETRIEVE_USER_QUOTA_SUMMARY_PATH = "/v1internal:retrieveUserQuotaSummary";
@@ -475,20 +477,29 @@ function resolveAccessToken(params: UsageFetchParams): string | undefined {
 	return credential.accessToken;
 }
 
-async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
+async function fetchAntigravityUsage(rawParams: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
+	// agy's exported consumer grant carries no project; its language server queries the fixed default CLI project.
+	const projectId =
+		rawParams.credential.projectId ?? (rawParams.provider === "antigravity-cli" ? CLI_PROJECT_ID : undefined);
+	if (!projectId) return null;
+	const params: UsageFetchParams = { ...rawParams, credential: { ...rawParams.credential, projectId } };
 	const credential = params.credential;
-	if (!credential.projectId) return null;
 
 	const nowMs = Date.now();
 
 	const accessToken = resolveAccessToken(params);
 	if (!accessToken) return null;
 
+	// The quota summary lists groups (e.g. the Gemini weekly limit) by client
+	// version, so resolve the current version before building the User-Agent
+	// rather than reporting against the pinned offline fallback.
+	await ensureAntigravityVersion(ctx.fetch, params.signal);
+
 	const baseUrl = params.baseUrl?.replace(/\/+$/, "");
 	const endpoints = baseUrl ? [baseUrl] : [DEFAULT_ENDPOINT, "https://daily-cloudcode-pa.sandbox.googleapis.com"];
 	const endpointRequest = {
 		endpoints,
-		projectId: credential.projectId,
+		projectId: projectId,
 		accessToken,
 		signal: params.signal,
 	};
@@ -665,6 +676,14 @@ export const antigravityUsageProvider: UsageProvider = {
 	cacheVersion: 3,
 	fetchUsage: fetchAntigravityUsage,
 	supports: params => params.provider === "google-antigravity",
+};
+
+/** `omp usage` coverage for the `antigravity-cli` provider, which shares Google Antigravity's quota endpoints. */
+export const antigravityCliUsageProvider: UsageProvider = {
+	id: "antigravity-cli",
+	cacheVersion: 1,
+	fetchUsage: fetchAntigravityUsage,
+	supports: params => params.provider === "antigravity-cli",
 };
 
 /** Map an Antigravity model id to its backend quota-counter key. */

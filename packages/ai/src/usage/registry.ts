@@ -10,7 +10,11 @@ import { devinUsageProvider } from "./devin";
 import { factoryDroidRankingStrategy, factoryDroidUsageProvider } from "./factory-droid";
 import { googleGeminiCliUsageProvider } from "./gemini";
 import { githubCopilotUsageProvider } from "./github-copilot";
-import { antigravityRankingStrategy, antigravityUsageProvider } from "./google-antigravity";
+import {
+	antigravityCliUsageProvider,
+	antigravityRankingStrategy,
+	antigravityUsageProvider,
+} from "./google-antigravity";
 import { kimiRankingStrategy, kimiUsageProvider } from "./kimi";
 import { kiroRankingStrategy, kiroUsageProvider } from "./kiro";
 import { museCodeUsageProvider } from "./muse-code";
@@ -34,6 +38,7 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	minimaxCodeUsageProvider,
 	museCodeUsageProvider,
 	antigravityUsageProvider,
+	antigravityCliUsageProvider,
 	googleGeminiCliUsageProvider,
 	ollamaUsageProvider,
 	factoryDroidUsageProvider,
