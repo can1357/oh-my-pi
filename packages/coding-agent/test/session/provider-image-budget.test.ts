@@ -16,6 +16,7 @@ import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid"
 import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
+import { DEVIN_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/wire/devin";
 import { factoryDroidWireBaseUrl } from "@oh-my-pi/pi-catalog/wire/factory-droid";
 import { decorateContextImages } from "@oh-my-pi/pi-coding-agent/blob-broker/context-images";
 import {
@@ -99,6 +100,23 @@ function factoryDroidModel(baseUrl: string) {
 		maxTokens: 64_000,
 	});
 }
+function devinModel(id: string, baseUrl = DEVIN_DEFAULT_BASE_URL) {
+	return buildModel({
+		id,
+		name: id,
+		api: "devin-agent",
+		provider: "devin",
+		baseUrl,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 64_000,
+	});
+}
+const DEVIN_GEMINI_MODEL = devinModel("gemini-4-carbon");
+const DEVIN_GATEWAY_GEMINI_MODEL = devinModel("gemini-4-carbon", "https://devin-gateway.example.com");
+const DEVIN_CLAUDE_MODEL = devinModel("claude-haiku-5-5");
 // Factory's hosted HTTP routes refuse request bodies over 4,500,000 bytes (HTTP 413).
 const FACTORY_DROID_ROUTE_BODY_LIMIT = 4_500_000;
 // A base64 character occupies one byte in Anthropic's JSON request body.
@@ -123,6 +141,11 @@ function imageData(context: Context): string[] {
 		}
 	}
 	return data;
+}
+
+/** The note a message that keeps other content gets for the images the clamp dropped from it. */
+function omitted(count = 1): string {
+	return `[${count} image${count === 1 ? "" : "s"} omitted: provider image limit]`;
 }
 
 function textData(context: Context): string[] {
@@ -253,7 +276,11 @@ describe("provider context image budgets", () => {
 		const clamped = clampProviderContextImages(context, UMANS_MODEL);
 
 		expect(imageData(clamped)).toEqual(Array.from({ length: 10 }, (_, index) => `image-${index + 21}`));
-		expect(textData(clamped)).toEqual(Array.from({ length: 31 }, (_, index) => `text-${index}`));
+		expect(textData(clamped)).toEqual(
+			Array.from({ length: 31 }, (_, index) =>
+				index < 21 ? [`text-${index}`, omitted()] : [`text-${index}`],
+			).flat(),
+		);
 		expect(clamped).not.toBe(context);
 		expect(imageData(context)).toEqual(Array.from({ length: 31 }, (_, index) => `image-${index}`));
 	});
@@ -272,6 +299,9 @@ describe("provider context image budgets", () => {
 		["Cursor's default route", CURSOR_DEFAULT_MODEL, 20],
 		["the official DeepSeek API", DEEPSEEK_MODEL, 600],
 		["a DeepSeek proxy", DEEPSEEK_PROXY_MODEL, 5],
+		["Gemini on Devin", DEVIN_GEMINI_MODEL, 60],
+		["Gemini through a Devin gateway", DEVIN_GATEWAY_GEMINI_MODEL, 40],
+		["Claude on Devin", DEVIN_CLAUDE_MODEL, 20],
 	] as const)("keeps the newest images up to the count %s allows", (_label, model, budget) => {
 		const context: Context = {
 			systemPrompt: [],
@@ -301,7 +331,7 @@ describe("provider context image budgets", () => {
 		};
 		const clamped = clampProviderContextImageBytes(context, DEEPSEEK_MODEL);
 		expect(imageData(clamped)).toEqual([fourteenMegabytes, fourteenMegabytes]);
-		expect(textData(clamped)).toEqual(["image-0", "image-1", "image-2"]);
+		expect(textData(clamped)).toEqual(["image-0", omitted(), "image-1", "image-2"]);
 	});
 
 	it.each([
@@ -314,6 +344,8 @@ describe("provider context image budgets", () => {
 		// Cursor took a 64 MB body for both upstreams.
 		["Claude on Cursor", CURSOR_CLAUDE_MODEL, 64_000_000],
 		["GPT on Cursor", CURSOR_GPT_MODEL, 64_000_000],
+		// Devin refuses a request over 32 MiB; a gateway gets no byte budget.
+		["Gemini through a Devin gateway", DEVIN_GATEWAY_GEMINI_MODEL, 33_554_432],
 	] as const)(
 		"keeps %s under its measured body limit at omp's 500 KiB image resize target",
 		(_label, model, bodyLimit) => {
@@ -497,11 +529,11 @@ describe("provider context image budgets", () => {
 		};
 		const clamped = clampProviderContextImageBytes(overBudget, ANTHROPIC_MODEL);
 		expect(clamped).not.toBe(overBudget);
-		expect(clamped.messages[0]).toEqual({ role: "user", content: [text("old")], timestamp: 0 });
+		expect(clamped.messages[0]).toEqual({ role: "user", content: [text("old"), text(omitted())], timestamp: 0 });
 		expect(clamped.messages[1]).toBe(overBudget.messages[1]);
 		expect(clamped.messages[2]).toBe(overBudget.messages[2]);
 		expect(imageData(clamped)).toEqual([HALF_ANTHROPIC_IMAGE_BUDGET, "AAAA"]);
-		expect(textData(clamped)).toEqual(["old", "middle", "new"]);
+		expect(textData(clamped)).toEqual(["old", omitted(), "middle", "new"]);
 		expect(imageData(overBudget)).toHaveLength(3);
 		expect(overBudget.messages[0]).toBe(context.messages[0]);
 	});
@@ -524,9 +556,13 @@ describe("provider context image budgets", () => {
 		const keptImages = imageData(clamped);
 		expect(keptImages).toHaveLength(224);
 		expect(keptImages.reduce((size, data) => size + data.length, 0)).toBe(119_616_000);
-		expect(clamped.messages.slice(0, 16).every(message => message.content.length === 1)).toBe(true);
-		expect(clamped.messages.slice(16).every(message => message.content.length === 2)).toBe(true);
-		expect(textData(clamped)).toEqual(Array.from({ length: 240 }, (_, index) => `result-${index}`));
+		expect(imageData({ ...clamped, messages: clamped.messages.slice(0, 16) })).toHaveLength(0);
+		expect(imageData({ ...clamped, messages: clamped.messages.slice(16) })).toHaveLength(224);
+		expect(textData(clamped)).toEqual(
+			Array.from({ length: 240 }, (_, index) =>
+				index < 16 ? [`result-${index}`, omitted()] : [`result-${index}`],
+			).flat(),
+		);
 		expect(imageData(context)).toHaveLength(240);
 	});
 
@@ -544,7 +580,7 @@ describe("provider context image budgets", () => {
 		const clamped = clampProviderContextImageBytes(context, ANTHROPIC_MODEL);
 		// 123.5 MB of newest images: over the 120 MB image budget, under the body limit; the older image goes instead.
 		expect(imageData(clamped)).toEqual(Array.from({ length: 13 }, () => pasted));
-		expect(textData(clamped)).toEqual(["old", "new"]);
+		expect(textData(clamped)).toEqual(["old", omitted(), "new"]);
 	});
 
 	it("drops Anthropic images under the image budget when long text leaves them no room under the body limit", async () => {
@@ -566,10 +602,37 @@ describe("provider context image budgets", () => {
 		// 114 MB of images fit the 120 MB image budget, but not beside 20 MB of text.
 		const clamped = clampProviderContextImageBytes(context, ANTHROPIC_MODEL);
 		expect(imageData(clamped)).toHaveLength(11);
-		expect(clamped.messages[1]?.content).toHaveLength(1);
+		expect(clamped.messages[1]?.content).toEqual([text("shot-0"), text(omitted())]);
 		const body = await anthropicRequestBody(ANTHROPIC_MODEL, clamped);
 		expect(Buffer.byteLength(body)).toBeLessThan(ANTHROPIC_BODY_LIMIT);
 		expect(body.split(screenshot)).toHaveLength(12);
+	});
+
+	it("keeps a Devin-hosted request's 60 resized screenshots under its 32 MiB request limit", () => {
+		const resized = "A".repeat(Math.ceil((500 * 1024) / 3) * 4);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: Array.from({ length: 60 }, (_, index) => ({
+				role: "toolResult",
+				toolCallId: `call-${index}`,
+				toolName: "screenshot",
+				content: [text(`result-${index}`), image(resized)],
+				isError: false,
+				timestamp: index,
+			})),
+		};
+		expect(clampProviderContextImages(context, DEVIN_GEMINI_MODEL)).toBe(context);
+
+		const clamped = clampProviderContextImageBytes(context, DEVIN_GEMINI_MODEL);
+		const kept = imageData(clamped);
+
+		expect(kept.length).toBeGreaterThan(5);
+		expect(kept.length).toBeLessThan(60);
+		expect(clamped.messages.at(-1)?.content).toHaveLength(2);
+		// The oldest result loses its screenshot, with or without a notice in its place.
+		expect(clamped.messages[0].content).not.toContainEqual(image(resized));
+		expect(JSON.stringify(clamped).length).toBeLessThan(33_554_432);
 	});
 
 	it("keeps a Factory-hosted request's inline images under the route body limit, but not a custom gateway's", () => {
@@ -596,9 +659,12 @@ describe("provider context image budgets", () => {
 			expect(kept.length).toBeGreaterThan(0);
 			expect(kept.length).toBeLessThan(10);
 			// Oldest screenshots go first; the newest results keep theirs.
-			expect(clamped.messages.at(-1)?.content).toHaveLength(2);
-			expect(clamped.messages[0].content).toHaveLength(1);
-			expect(textData(clamped)).toEqual(Array.from({ length: 10 }, (_, index) => `result-${index}`));
+			const newest = clamped.messages.at(-1)?.content;
+			expect(Array.isArray(newest) && newest.some(part => part.type === "image")).toBe(true);
+			expect(clamped.messages[0].content).toEqual([text("result-0"), text(omitted())]);
+			expect(textData(clamped).filter(part => part !== omitted())).toEqual(
+				Array.from({ length: 10 }, (_, index) => `result-${index}`),
+			);
 			expect(JSON.stringify(clamped).length).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
 		}
 		const gateway = factoryDroidModel("https://factory-gateway.example.com/api/llm/a");
@@ -646,7 +712,7 @@ describe("provider context image budgets", () => {
 		// 3 MB of images fit the 3.5 MB budget, but not beside 2 MB of text under 4.5 MB.
 		const clamped = clampProviderContextImageBytes(context, hosted);
 		expect(imageData(clamped)).toHaveLength(2);
-		expect(clamped.messages[1]?.content).toHaveLength(1);
+		expect(clamped.messages[1]?.content).toEqual([text("shot-0"), text(omitted())]);
 		expect(JSON.stringify(clamped).length).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
 	});
 
@@ -1196,7 +1262,7 @@ describe("provider context image budgets", () => {
 		const clamped = clampProviderContextImageBytes(context, hosted);
 		expect(imageData(clamped)).toEqual([fresh]);
 		expect(clamped.messages[2]).toBe(context.messages[2]);
-		expect(textData(clamped)).toEqual(["first", "second", "look at this"]);
+		expect(textData(clamped)).toEqual(["first", omitted(), "second", omitted(), "look at this"]);
 		expect(JSON.stringify(clamped).length).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
 		// An image too large for the route on its own is still dropped.
 		const oversized: Context = {
@@ -1227,7 +1293,7 @@ describe("provider context image budgets", () => {
 		const hosted = factoryDroidModel(factoryDroidWireBaseUrl("anthropic-messages", "global"));
 		const clamped = clampProviderContextImageBytes(context, hosted);
 		expect(imageData(clamped)).toEqual([fresh]);
-		expect(textData(clamped)).toEqual(["shot", "look at this"]);
+		expect(textData(clamped)).toEqual(["shot", omitted(), "look at this"]);
 	});
 
 	it("does not protect a fresh Factory image that the request's text leaves no room for", () => {
@@ -1447,8 +1513,8 @@ describe("provider context image budgets", () => {
 		};
 		const clamped = clampProviderContextImageBytes(context, ANTHROPIC_MODEL);
 		expect(clamped.messages[0]).toBe(context.messages[0]);
-		expect(clamped.messages[1]?.content).toEqual([text("new")]);
-		expect(textData(clamped)).toEqual(["old", "new"]);
+		expect(clamped.messages[1]?.content).toEqual([text("new"), text(omitted())]);
+		expect(textData(clamped)).toEqual(["old", "new", omitted()]);
 		expect(imageData(clamped)).toEqual([""]);
 		expect(imageData(context)).toEqual(["", oversized.data]);
 
@@ -1461,9 +1527,13 @@ describe("provider context image budgets", () => {
 			})),
 		};
 		const countClamped = clampProviderContextImages(countLimited, UMANS_MODEL);
-		expect(countClamped.messages[0]?.content).toEqual([text("ref-0")]);
+		expect(countClamped.messages[0]?.content).toEqual([text("ref-0"), text(omitted())]);
 		expect(imageData(countClamped)).toHaveLength(10);
-		expect(textData(countClamped)).toEqual(Array.from({ length: 11 }, (_, index) => `ref-${index}`));
+		expect(textData(countClamped)).toEqual([
+			"ref-0",
+			omitted(),
+			...Array.from({ length: 10 }, (_, index) => `ref-${index + 1}`),
+		]);
 	});
 
 	it("does not charge assistant output images against the inline byte budget", () => {

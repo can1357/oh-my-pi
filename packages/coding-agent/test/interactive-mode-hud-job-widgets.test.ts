@@ -8,6 +8,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import type { TspPropNode } from "@oh-my-pi/pi-wire";
 import type { NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -22,6 +23,15 @@ function nodes(root: NativeNode): NativeNode[] {
 
 function prop(node: NativeNode | TspPropNode | NativeChild | undefined, name: string): unknown {
 	return node && "p" in node && node.p ? Reflect.get(node.p, name) : undefined;
+}
+
+/** A job snapshot running background jobs `ids`. */
+function running(...ids: string[]): AsyncJobSnapshot {
+	return snapshot(ids.map((id, index) => ({ id, type: "bash", status: "running", label: id, startTime: index })));
+}
+
+function snapshot(items: AsyncJobSnapshot["running"]): AsyncJobSnapshot {
+	return { running: items, recent: [], delivery: { queued: 0, delivering: false, pendingJobIds: [] } };
 }
 
 const decode: JobWidgetView = {
@@ -93,7 +103,7 @@ describe("InteractiveMode HUD pills", () => {
 			{ id: "bg_1", type: "bash", view: evalRun },
 			{ id: "bg_2", type: "bash", view: decode },
 		];
-		spyOn(mode.statusLine, "runningBackgroundJobCount").mockReturnValue(2);
+		spyOn(session, "getAsyncJobSnapshot").mockReturnValue(running("bg_1", "bg_2"));
 		spyOn(session, "getRunningJobWidgets").mockImplementation(() => entries);
 
 		const segment = jobsSegment()!;
@@ -128,7 +138,7 @@ describe("InteractiveMode HUD pills", () => {
 	// updatedAt and state stand still while the view object is swapped for a fresh one.
 	it("re-describes the segment when a refresh swaps the view object without moving updatedAt or state", () => {
 		let entries: JobWidgetEntry[] = [{ id: "bg_1", type: "bash", view: decode }];
-		spyOn(mode.statusLine, "runningBackgroundJobCount").mockReturnValue(1);
+		spyOn(session, "getAsyncJobSnapshot").mockReturnValue(running("bg_1"));
 		spyOn(session, "getRunningJobWidgets").mockImplementation(() => entries);
 
 		const segment = jobsSegment()!;
@@ -144,11 +154,35 @@ describe("InteractiveMode HUD pills", () => {
 	});
 
 	it("keeps the bare count segment while no running job draws a widget", () => {
-		spyOn(mode.statusLine, "runningBackgroundJobCount").mockReturnValue(1);
+		spyOn(session, "getAsyncJobSnapshot").mockReturnValue(running("bg_1"));
 		spyOn(session, "getRunningJobWidgets").mockReturnValue([]);
 		const segment = jobsSegment()!;
 		expect(prop(segment, "hovercard")).toBeUndefined();
 		expect(prop(segment, "title")).toBe("1 job running  /jobs");
+	});
+
+	// An agent's task job draws a widget too; it belongs to the agents segment, so it neither makes nor grows the jobs segment.
+	it("counts and lists background jobs only, never a job that runs an agent", () => {
+		spyOn(session, "getAsyncJobSnapshot").mockReturnValue(
+			snapshot([
+				{ id: "bg_1", type: "bash", status: "running", label: "loadtest", startTime: 1 },
+				{ id: "Scout", type: "task", status: "running", label: "scout", startTime: 2, agentId: "Scout" },
+			]),
+		);
+		spyOn(session, "getRunningJobWidgets").mockReturnValue([
+			{ id: "bg_1", type: "bash", view: decode },
+			{ id: "Scout", type: "task", view: evalRun },
+		]);
+		const segment = jobsSegment()!;
+		expect(prop(segment, "title")).toBe("1 job running  /jobs\nbg_1  loadtest · decode — decode 186 tok/s ▲ 15%");
+		const card = prop(segment, "hovercard") as TspPropNode;
+		expect(card.c?.[0]?.c).toHaveLength(1);
+
+		spyOn(session, "getAsyncJobSnapshot").mockReturnValue(
+			snapshot([{ id: "Scout", type: "task", status: "running", label: "scout", startTime: 2, agentId: "Scout" }]),
+		);
+		spyOn(session, "getRunningJobWidgets").mockReturnValue([{ id: "Scout", type: "task", view: evalRun }]);
+		expect(jobsSegment()).toBeUndefined();
 	});
 
 	it("keeps a clickable idle agents segment after the last subagent finishes, and drops it once none remain", () => {

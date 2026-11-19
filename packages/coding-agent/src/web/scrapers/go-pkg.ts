@@ -52,11 +52,14 @@ export const handleGoPkg: SpecialHandler = async (
 		const notes: string[] = [];
 		const sections: string[] = [];
 
-		// Fetch module info from proxy
+		// Fetch module info from proxy. Standard-library packages (`net/http`, `fmt`: no dot in the first path
+		// element) belong to module "std", which the module proxy does not serve.
 		let moduleInfo: GoModuleInfo | null = null;
-		let actualModulePath = modulePath;
+		const standardLibrary = !modulePath.split("/")[0].includes(".");
+		let actualModulePath = standardLibrary ? "std" : modulePath;
 
-		if (version === "latest") {
+		// A standard-library page's version chip (go1.x) names its release.
+		if (!standardLibrary && version === "latest") {
 			try {
 				const proxyUrl = `https://proxy.golang.org/${encodeURIComponent(modulePath)}/@latest`;
 				const proxyResult = await loadPage(proxyUrl, { timeout, signal });
@@ -70,7 +73,7 @@ export const handleGoPkg: SpecialHandler = async (
 			} catch {
 				// If @latest fails, might be a subpackage - will extract from page
 			}
-		} else {
+		} else if (!standardLibrary) {
 			try {
 				const proxyUrl = `https://proxy.golang.org/${encodeURIComponent(modulePath)}/@v/${encodeURIComponent(version)}.info`;
 				const proxyResult = await loadPage(proxyUrl, { timeout, signal });
@@ -100,7 +103,7 @@ export const handleGoPkg: SpecialHandler = async (
 		const doc = parseHTML(pageResult.content).document;
 
 		// Extract actual module path from breadcrumb or header
-		const breadcrumb = doc.querySelector(".go-Breadcrumb");
+		const breadcrumb = standardLibrary ? null : doc.querySelector(".go-Breadcrumb");
 		if (breadcrumb) {
 			const moduleLink = breadcrumb.querySelector("a[href^='/']");
 			if (moduleLink) {
@@ -116,7 +119,7 @@ export const handleGoPkg: SpecialHandler = async (
 			const versionBadge = doc.querySelector(".go-Chip");
 			if (versionBadge) {
 				const versionText = versionBadge.textContent?.trim();
-				if (versionText?.startsWith("v")) {
+				if (versionText?.startsWith("v") || versionText?.startsWith("go")) {
 					version = versionText;
 				}
 			}

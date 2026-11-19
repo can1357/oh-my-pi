@@ -144,9 +144,9 @@ describe("resource links in chat markdown", () => {
 		await fs.rm(tempDir, { recursive: true, force: true });
 	});
 
-	it("expands labeled, reference, and table links to real local and artifact files", async () => {
+	it("expands labeled, reference, and table links to real local and spill files", async () => {
 		const localFile = path.join(tempDir, "local", "reviewed findings#.json");
-		const artifactFile = path.join(tempDir, "42.txt");
+		const artifactFile = path.join(tempDir, "local", "42.log");
 		await Bun.write(localFile, '{"reviewed":true}');
 		await Bun.write(artifactFile, "artifact output");
 		const href = "local://reviewed%20findings%23.json";
@@ -157,13 +157,13 @@ describe("resource links in chat markdown", () => {
 			"| --- |",
 			"| [Artifact][output] |",
 			"",
-			"[output]: artifact://42",
+			"[output]: local://42.log",
 		].join("\n");
 		const targets = await resolveMarkdownLinkHrefs(terminalCaps.getMarkdownLinkUrls(text), {
 			localProtocolOptions: { getArtifactsDir: () => tempDir },
 		});
 		const localUri = url.pathToFileURL(await fs.realpath(localFile)).href;
-		const artifactUri = url.pathToFileURL(artifactFile).href;
+		const artifactUri = url.pathToFileURL(await fs.realpath(artifactFile)).href;
 		const markdown = new terminalCaps.Markdown(text, 0, 0, {
 			...getMarkdownTheme(),
 			resolveLink: href => targets.get(href),
@@ -173,7 +173,7 @@ describe("resource links in chat markdown", () => {
 		expect(output).toContain(`\x1b]8;;${artifactUri}\x07`);
 		const visible = stripVTControlCharacters(output);
 		expect(visible).toContain(`Reviewed findings (${href})`);
-		expect(visible).toContain("Artifact (artifact://42)");
+		expect(visible).toContain("Artifact (local://42.log)");
 		expect(visible).not.toContain("file://");
 	});
 

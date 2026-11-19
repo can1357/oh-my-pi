@@ -28,24 +28,24 @@ import {
 } from "@oh-my-pi/pi-utils/dirs";
 
 import { raiseInteractiveQos } from "@oh-my-pi/pi-utils/process-qos";
-import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
+import {
+	declareWorkerHostEntry,
+	installWorkerInbox,
+	isWorkerHostSelector,
+	SHELL_PROCESS_SELECTOR,
+} from "@oh-my-pi/pi-utils/worker-host";
 import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
 import { isNativeShell, runNativeShell } from "./cli/native-shell";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
 import {
 	AUTO_UPDATE_WORKER_ARG,
-	BLOB_BROKER_WORKER_ARG,
 	COMPUTER_WORKER_ARG,
-	DAEMON_BROKER_WORKER_ARG,
-	DISASM_HOST_WORKER_ARG,
-	LSP_MUX_WORKER_ARG,
-	MNEMOPI_EMBED_SERVER_WORKER_ARG,
 	PARENT_WATCHDOG_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
 	SUBAGENT_WORKER_ARG,
-	TERMINAL_OUTPUT_WORKER_ARG,
-	TEXT_PREDICT_WORKER_ARG,
 } from "./cli/worker-selectors";
+import { DAEMON_WORKER_ARG } from "./daemon/protocol";
+import { MNEMOPI_EMBED_WORKER_ARG } from "./mnemopi/embed-protocol";
 import type * as JsProcessEntry from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { startParentWatchdog } from "./subprocess/parent-watchdog";
@@ -157,43 +157,39 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestStatsActivityWorker } = await import("./stats/activity-client");
 	const { smokeTestJsEvalWorker } = await import("./eval/js/context-manager");
 	// Other smoke dependencies stay lazy so normal CLI startup does not load their worker clients.
-	const { smokeTestDaemonBroker } = await import("./launch/client");
-	const { smokeTestLspMux } = await import("./lsp/mux/daemon");
-	const { smokeTestDisasmHost } = await import("./disasm/client");
-	const { smokeTestBlobBroker } = await import("./blob-broker/daemon");
-	const { smokeTestTerminalOutputWorker } = await import("./launch/terminal-output-worker-client");
-	const { smokeTestTextPredictDaemon } = await import("./predict/client");
+	const { isolateDaemonForSmokeTest, smokeTestDaemon } = await import("./daemon/client");
 	const { smokeTestSubagentWorker } = await import("./thread/subagent-worker");
-	await smokeTestSyncWorker();
-	await smokeTestSpotlightWorker();
-	await smokeTestStatsActivityWorker();
-
-	const statsServer = await startServer(0);
+	// Every smoke that reaches the daemon must start this build's own, never the user's live one.
+	const cleanupDaemon = await isolateDaemonForSmokeTest();
 	try {
-		const response = await fetch(`http://127.0.0.1:${statsServer.port}/`);
-		if (!response.ok) throw new Error(`stats dashboard smoke failed: HTTP ${response.status}`);
-		const html = await response.text();
-		if (!html.includes('<div id="root"></div>') || !html.includes("index.js")) {
-			throw new Error("stats dashboard smoke failed: dashboard HTML was not served");
-		}
-	} finally {
-		statsServer.stop();
-	}
+		await smokeTestSyncWorker();
+		await smokeTestSpotlightWorker();
+		await smokeTestStatsActivityWorker();
 
-	await smokeTestTinyTitleWorker();
-	await smokeTestSttWorker();
-	await smokeTestJsEvalWorker();
-	const { smokeTestComputerWorker } = await import("./tools/computer/supervisor");
-	await smokeTestComputerWorker();
-	await smokeTestTtsWorker();
-	await smokeTestMnemopiEmbedWorker();
-	await smokeTestDaemonBroker();
-	await smokeTestLspMux();
-	await smokeTestDisasmHost();
-	await smokeTestBlobBroker();
-	await smokeTestTerminalOutputWorker();
-	await smokeTestTextPredictDaemon();
-	await smokeTestSubagentWorker();
+		const statsServer = await startServer(0);
+		try {
+			const response = await fetch(`http://127.0.0.1:${statsServer.port}/`);
+			if (!response.ok) throw new Error(`stats dashboard smoke failed: HTTP ${response.status}`);
+			const html = await response.text();
+			if (!html.includes('<div id="root"></div>') || !html.includes("index.js")) {
+				throw new Error("stats dashboard smoke failed: dashboard HTML was not served");
+			}
+		} finally {
+			statsServer.stop();
+		}
+
+		await smokeTestTinyTitleWorker();
+		await smokeTestSttWorker();
+		await smokeTestJsEvalWorker();
+		const { smokeTestComputerWorker } = await import("./tools/computer/supervisor");
+		await smokeTestComputerWorker();
+		await smokeTestTtsWorker();
+		await smokeTestMnemopiEmbedWorker();
+		await smokeTestDaemon();
+		await smokeTestSubagentWorker();
+	} finally {
+		await cleanupDaemon();
+	}
 	process.stdout.write("smoke-test: ok\n");
 }
 
@@ -205,7 +201,6 @@ const JS_EVAL_WORKER_ARG = "__omp_worker_js_eval";
 const JS_EVAL_PROCESS_ARG = "__omp_worker_js_eval_process";
 const STT_WORKER_ARG = "__omp_worker_stt";
 const TTS_WORKER_ARG = "__omp_worker_tts";
-const MNEMOPI_EMBED_WORKER_ARG = "__omp_worker_mnemopi_embed";
 
 async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === TINY_WORKER_ARG) {
@@ -282,35 +277,24 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		return true;
 	}
 	if (arg === STT_WORKER_ARG) {
-		const { startSttWorker } = await import("./stt/asr-worker");
-		await runIpcSubprocessWorker(startSttWorker);
+		const { runSttWorker } = await import("./stt/asr-worker");
+		await runSttWorker();
 		return true;
 	}
 	if (arg === TTS_WORKER_ARG) {
-		const { startTtsWorker } = await import("./tts/tts-worker");
-		await runIpcSubprocessWorker(startTtsWorker);
+		const { runTtsWorker } = await import("./tts/tts-worker");
+		await runTtsWorker();
 		return true;
 	}
 	if (arg === MNEMOPI_EMBED_WORKER_ARG) {
 		const { startMnemopiEmbedWorker } = await import("./mnemopi/embed-worker");
-		await runIpcSubprocessWorker(startMnemopiEmbedWorker);
-		return true;
-	}
-	if (arg === MNEMOPI_EMBED_SERVER_WORKER_ARG) {
-		const { startMnemopiEmbedServerFromEnvironment } = await import("./mnemopi/embed-server");
-		await startMnemopiEmbedServerFromEnvironment();
+		await startMnemopiEmbedWorker();
 		return true;
 	}
 	if (arg === STATS_ACTIVITY_WORKER_ARG) {
-		const { startStatsActivityWorker } = await import("./stats/activity-worker");
-		await runIpcSubprocessWorker(startStatsActivityWorker);
-		return true;
-	}
-	if (arg === TERMINAL_OUTPUT_WORKER_ARG) {
 		const parentPort = getWorkerParentPort();
 		if (parentPort) installWorkerInbox(parentPort);
-		// This selector is the isolation boundary; a static import would evaluate xterm in normal CLI startup.
-		await import("./launch/terminal-output-worker");
+		await import("./stats/activity-worker");
 		return true;
 	}
 	if (arg === PARENT_WATCHDOG_WORKER_ARG) {
@@ -319,30 +303,10 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		await import("./subprocess/parent-watchdog-worker");
 		return true;
 	}
-	if (arg === DAEMON_BROKER_WORKER_ARG) {
+	if (arg === DAEMON_WORKER_ARG) {
 		// Worker selectors must dispatch before the normal command graph loads.
-		const { startDaemonBrokerFromEnvironment } = await import("./launch/broker");
-		await startDaemonBrokerFromEnvironment();
-		return true;
-	}
-	if (arg === LSP_MUX_WORKER_ARG) {
-		const { startLspMuxFromEnvironment } = await import("./lsp/mux/server");
-		await startLspMuxFromEnvironment();
-		return true;
-	}
-	if (arg === DISASM_HOST_WORKER_ARG) {
-		const { startDisasmHostFromEnvironment } = await import("./disasm/host");
-		await startDisasmHostFromEnvironment();
-		return true;
-	}
-	if (arg === BLOB_BROKER_WORKER_ARG) {
-		const { startBlobBrokerFromEnvironment } = await import("./blob-broker/server");
-		await startBlobBrokerFromEnvironment();
-		return true;
-	}
-	if (arg === TEXT_PREDICT_WORKER_ARG) {
-		const { startTextPredictDaemonFromEnvironment } = await import("./predict/daemon");
-		await startTextPredictDaemonFromEnvironment();
+		const { startDaemonFromEnvironment } = await import("./daemon/server");
+		await startDaemonFromEnvironment();
 		return true;
 	}
 	if (arg === AUTO_UPDATE_WORKER_ARG) {
@@ -456,10 +420,9 @@ async function runIpcSubprocessWorker<In, Out>(
 }
 
 /**
- * Hidden subcommand that boots the ONNX tiny-model worker for one model: a
- * detached process owning that model's socket (`OMP_TINY_WORKER_SOCKET`),
- * shared by every omp process on the machine and exiting on its own when
- * idle. It exists so `onnxruntime-node` (loaded transitively by
+ * Hidden subcommand that boots the ONNX tiny-model worker for one model over
+ * stdin/stdout; the daemon's `infer` units host it, shared by every omp
+ * process on the machine. It exists so `onnxruntime-node` (loaded transitively by
  * `@huggingface/transformers`) never runs in an omp address space — its NAPI
  * finalizer segfaults Bun on Windows (issue #1606).
  */
@@ -478,6 +441,14 @@ export async function runCli(argv: string[]): Promise<void> {
 	// prepaint, network setup and the command table.
 	if (isNativeShell(argv[0])) {
 		await runNativeShell(argv);
+	}
+	// A shell process (a named service, a pty command): the argv after the
+	// selector is its own, its command's flags included, so it dispatches
+	// before anything reads flags out of it.
+	if (argv[0] === SHELL_PROCESS_SELECTOR) {
+		// Command boundary: only shell processes load the engine entry here.
+		const { runShellProcess } = await import("./exec/shell-process-worker");
+		await runShellProcess(argv.slice(1));
 	}
 	let resolvedArgv = argv;
 	try {

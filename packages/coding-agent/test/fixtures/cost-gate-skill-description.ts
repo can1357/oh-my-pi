@@ -137,7 +137,7 @@ try {
 			enableMCP: false,
 			enableLsp: false,
 			skipPythonPreflight: true,
-			cacheWarming: false,
+			cacheWarming: "off",
 			contextFiles: [],
 			promptTemplates: [],
 			slashCommands: [],

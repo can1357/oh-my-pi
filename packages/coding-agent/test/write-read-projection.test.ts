@@ -62,25 +62,25 @@ describe("write tool read projection guard", () => {
 			name: "Showing lines notice",
 			sourceLines: 60,
 			visibleLines: 20,
-			notice: "[Showing lines 1-20 of 60. Use :21 to continue]",
+			notice: "[Showing lines 1-20 of 60. Use :21- to continue]",
 		},
 		{
 			name: "byte-budget Showing lines notice",
 			sourceLines: 60,
 			visibleLines: 20,
-			notice: "[Showing lines 1-20 of 60 (50.0KB limit). Use :21 to continue]",
+			notice: "[Showing lines 1-20 of 60 (50.0KB limit). Use :21- to continue]",
 		},
 		{
 			name: "entity-labelled remaining-lines notice",
 			sourceLines: 60,
 			visibleLines: 20,
-			notice: "[40 more lines in notebook. Use :21 to continue]",
+			notice: "[40 more lines in notebook. Use :21- to continue]",
 		},
 		{
 			name: "unscanned remaining-lines notice",
 			sourceLines: 60,
 			visibleLines: 20,
-			notice: "[More lines in file (120.0KB total; not scanned to EOF). Use :21 to continue]",
+			notice: "[More lines in file (120.0KB total; not scanned to EOF). Use :21- to continue]",
 		},
 		{
 			name: "ASCII summary elision notice",
@@ -92,7 +92,7 @@ describe("write tool read projection guard", () => {
 			name: "stale-total notice",
 			sourceLines: 65,
 			visibleLines: 20,
-			notice: "[Showing lines 1-20 of 60. Use :21 to continue]",
+			notice: "[Showing lines 1-20 of 60. Use :21- to continue]",
 		},
 	])("rejects a shorter $name projection without changing the file", async ({ sourceLines, visibleLines, notice }) => {
 		const filePath = path.join(tmpDir, "sample.txt");
@@ -116,7 +116,7 @@ describe("write tool read projection guard", () => {
 		const projection = resultText(
 			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-1", { path: filePath }),
 		);
-		expect(projection).toContain("[Showing lines 1-20 of 60. Use :21 to continue]");
+		expect(projection).toContain("[Showing lines 1-20 of 60. Use :21- to continue]");
 
 		await expect(new WriteTool(session).execute("write-1", { path: filePath, content: projection })).rejects.toThrow(
 			"incomplete read projection",
@@ -133,7 +133,7 @@ describe("write tool read projection guard", () => {
 		const projection = resultText(
 			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-hashline", { path: filePath }),
 		);
-		expect(projection).toContain("[Showing lines 1-20 of 60. Use :21 to continue]");
+		expect(projection).toContain("[Showing lines 1-20 of 60. Use :21- to continue]");
 		expect(projection.length).toBeGreaterThan(original.length);
 
 		await expect(
@@ -245,7 +245,7 @@ describe("write tool read projection guard", () => {
 				path: `${archivePath}:${member}:1-20`,
 			}),
 		);
-		expect(projection).toContain("[37 more lines in archive entry. Use :24 to continue]");
+		expect(projection).toContain("[37 more lines in archive entry. Use :24- to continue]");
 
 		await expect(
 			new WriteTool(session).execute("write-archive", { path: `${archivePath}:${member}`, content: projection }),
@@ -282,7 +282,7 @@ describe("write tool read projection guard", () => {
 		const projection = resultText(
 			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-url", { path: `${url}:1-20` }),
 		);
-		expect(projection).toContain("[37 more lines in resource. Use :24 to continue]");
+		expect(projection).toContain("[37 more lines in resource. Use :24- to continue]");
 
 		await expect(new WriteTool(session).execute("write-url", { path: url, content: projection })).rejects.toThrow(
 			"incomplete read projection",
@@ -304,7 +304,7 @@ describe("write tool read projection guard", () => {
 			const projection = resultText(
 				await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-src", { path: sourcePath }),
 			);
-			expect(projection).toContain("[Showing lines 1-20 of 60. Use :21 to continue]");
+			expect(projection).toContain("[Showing lines 1-20 of 60. Use :21- to continue]");
 
 			// No remote file yet: nothing to discard, so the write lands as it does for a new disk file.
 			const newPath = path.join(tmpDir, "new.txt");
@@ -395,7 +395,7 @@ describe("write tool read projection guard", () => {
 				bridgeWriteCalled = true;
 			},
 		};
-		const partial = `${bufferContent.split("\n").slice(0, 20).join("\n")}\n[Showing lines 1-20 of 65. Use :21 to continue]\n`;
+		const partial = `${bufferContent.split("\n").slice(0, 20).join("\n")}\n[Showing lines 1-20 of 65. Use :21- to continue]\n`;
 
 		await expect(
 			new WriteTool(createSession(tmpDir, bridge)).execute("write-bridge", { path: filePath, content: partial }),
@@ -407,7 +407,7 @@ describe("write tool read projection guard", () => {
 
 	it("writes a literal read notice when the replacement does not shrink the current source", async () => {
 		const filePath = path.join(tmpDir, "documentation.txt");
-		const content = "Example omp output:\n[Showing lines 1-20 of 60. Use :21 to continue]\n";
+		const content = "Example omp output:\n[Showing lines 1-20 of 60. Use :21- to continue]\n";
 		await Bun.write(filePath, "old\n");
 
 		await new WriteTool(createSession(tmpDir)).execute("call-2", { path: filePath, content });

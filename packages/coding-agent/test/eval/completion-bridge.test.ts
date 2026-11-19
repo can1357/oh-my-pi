@@ -25,6 +25,7 @@ import { disposeAllKernelSessions, type PythonResult } from "../../src/eval/py/e
 import type { ToolSession } from "../../src/tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { CostGate } from "../../src/session/cost-gate";
+import { SessionManager } from "../../src/session/session-manager";
 import { rejectionOf } from "../helpers/rejection";
 
 import { cfgRetryFallbackChains, cfgRetryMaxRetries } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -273,6 +274,27 @@ describe("runEvalCompletion", () => {
 		const refused = await rejectionOf(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session }));
 		expect(String(refused)).toContain("Cost cap reached");
 		expect(spy).toHaveBeenCalledTimes(1);
+	});
+
+	it("journals a completion once on the session, with its usage, prompt and reply", async () => {
+		const billed = assistant({ text: "ok" });
+		billed.usage.input = 7;
+		billed.usage.cost.total = 0.3;
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(billed);
+		const sessionManager = SessionManager.inMemory();
+		const session = { ...makeSession(), sessionManager } as ToolSession;
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		const journaled = sessionManager.getEntries().filter(entry => entry.type === "model_usage");
+		expect(journaled).toHaveLength(1);
+		expect(journaled[0]).toMatchObject({
+			purpose: "completion",
+			role: "smol",
+			usage: billed.usage,
+			completion: { prompt: "q", reply: "ok" },
+		});
+		expect(sessionManager.getUsageStatistics().cost).toBe(0.3);
 	});
 
 	it("prefers the session active model for the default tier, falling back to @default", async () => {

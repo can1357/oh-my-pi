@@ -55,7 +55,7 @@ describe("InteractiveMode session pin indicator", () => {
 			rules: [],
 			enableMCP: false,
 			enableLsp: false,
-			cacheWarming: false,
+			cacheWarming: "off",
 			workspaceTree: { rootPath: dir.path(), rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
 		});
 		cleanups.push(() => session.dispose());
@@ -99,7 +99,7 @@ describe("InteractiveMode session pin indicator", () => {
 			rules: [],
 			enableMCP: false,
 			enableLsp: false,
-			cacheWarming: false,
+			cacheWarming: "off",
 			workspaceTree: { rootPath: dir.path(), rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
 		});
 		cleanups.push(() => session.dispose());
