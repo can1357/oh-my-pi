@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `xai-stt` transcription API: `transcribeAudio` posts xAI's multipart `POST /v1/stt` (model and language before the file) and maps `{ text, language, duration, words }`; `isTranscriptionApi`/`TRANSCRIPTION_APIS` list the dispatchable transcription APIs, and the auth gateway's `/v1/audio/transcriptions` serves both ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Added the `anthropic-voice-stream` transcription API: `transcribeAudio` streams a PCM16 WAV over Claude Code's subscription speech-to-text socket and returns the final transcript; it accepts only Anthropic OAuth tokens ([#19187](https://github.com/can1357/oh-my-pi/pull/19187) by [@Xytronix](https://github.com/Xytronix))
+
+### Changed
+
+- `xai-tts` now sends `speed`, accepts `pcm` output, and allows xAI's current 60,000-character input (was 15,000) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+
 ## [19.0.0] - 2026-11-18
 
 ### Added

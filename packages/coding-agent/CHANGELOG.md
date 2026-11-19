@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Dictation accepts `xai-stt` models such as `xai-oauth/grok-voice-transcribe-2.0` instead of warning "Unsupported speech-to-text API"; the `tts` tool keeps its 15,000-character cap, the shared floor across its speech backends ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Dictation with a Claude subscription: set `modelRoles.dictation: anthropic/claude-voice-stream` to transcribe through the speech-to-text socket Claude Code's `/voice` uses, signed in with `/login anthropic`. Anthropic API keys cannot use it and fail with a message naming the required login ([#19187](https://github.com/can1357/oh-my-pi/pull/19187) by [@Xytronix](https://github.com/Xytronix))
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes
