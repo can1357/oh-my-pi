@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Gemini 4 Neon (`gemini-4-neon`) to the Antigravity CLI provider with low, medium, high, and xhigh thinking levels; it is now the provider's default model, matching what `agy` selects for a new session
+
 ## [19.0.0] - 2026-11-18
 
 ### Added
