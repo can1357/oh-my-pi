@@ -125,6 +125,14 @@ function isWireAgentEvent(event: AgentSessionEvent): event is AgentSessionEvent 
 function isWireSessionEntry(entry: StoredSessionEntry): entry is StoredSessionEntry & WireSessionEntry {
 	return entry.type in WIRE_SESSION_ENTRY_TYPES;
 }
+
+/** The queue key one subagent's progress frames share (its parent tool call and index); undefined for an unkeyable payload. */
+function progressKey(data: unknown): string | undefined {
+	if (typeof data !== "object" || data === null) return undefined;
+	const { index, parentToolCallId } = data as { index?: unknown; parentToolCallId?: unknown };
+	if (typeof index !== "number") return undefined;
+	return `bus-progress:${typeof parentToolCallId === "string" ? parentToolCallId : ""}:${index}`;
+}
 const CONNECT_TIMEOUT_MS = 15_000;
 /** Max bytes served per fetch-transcript reply (guest re-requests from `newSize`). */
 export const TRANSCRIPT_READ_CAP = 4 * 1024 * 1024;
@@ -551,7 +559,13 @@ export class CollabHost {
 			for (const channel of COLLAB_BUS_CHANNELS) {
 				this.#busUnsubscribers.push(
 					observabilityBus.on(channel, data => {
-						if (this.#broadcastAllowed()) this.#send({ t: "bus", channel, data });
+						if (!this.#broadcastAllowed()) return;
+						// A progress frame is the subagent's whole progress so far, so a newer one
+						// supersedes any still queued for the same subagent (as message_update does):
+						// a busy host's subagents can't fill the queue behind a slow welcome.
+						const key = channel === TASK_SUBAGENT_PROGRESS_CHANNEL ? progressKey(data) : undefined;
+						if (key) this.#socket?.sendLatest(key, { t: "bus", channel, data });
+						else this.#send({ t: "bus", channel, data });
 					}),
 				);
 			}
