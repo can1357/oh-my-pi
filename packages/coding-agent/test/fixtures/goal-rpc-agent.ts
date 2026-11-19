@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import * as fs from "node:fs";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -66,6 +67,19 @@ const { session } = await createAgentSession({
 					slowTurnRelease.resolve();
 				},
 			});
+			pi.registerCommand("goaltest-hold-continuation", {
+				description: "hold the next goal continuation before admission",
+				handler: async () => {
+					holdContinuation = true;
+				},
+			});
+			pi.registerCommand("goaltest-release-continuation", {
+				description: "release a goal continuation held before admission",
+				handler: async () => {
+					holdContinuation = false;
+					continuationHold.resolve();
+				},
+			});
 			pi.registerCommand("goaltest-navigate-here", {
 				description: "navigate to the current leaf (no session change)",
 				handler: async (_args, ctx) => {
@@ -76,6 +90,17 @@ const { session } = await createAgentSession({
 		},
 	],
 });
+const originalWaitForIdle = session.waitForIdle.bind(session);
+let holdContinuation = false;
+const continuationHold = Promise.withResolvers<void>();
+session.waitForIdle = () => (holdContinuation ? continuationHold.promise : originalWaitForIdle());
+if (Bun.env.GOAL_RPC_IDLE_MAINTENANCE === "1") {
+	const originalRefreshIdleMaintenance = session.refreshIdleMaintenance.bind(session);
+	session.refreshIdleMaintenance = () => {
+		fs.appendFileSync(path.join(cwd, "idle-refresh.calls"), "called\n");
+		originalRefreshIdleMaintenance();
+	};
+}
 const turns: MockResponse[] =
 	Bun.env.GOAL_RPC_SCRIPT === "complete" || Bun.env.GOAL_RPC_SCRIPT === undefined
 		? [
