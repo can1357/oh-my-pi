@@ -24,4 +24,12 @@ provider "abliteratedllm" {
 	reasoning-effort-map {
 		minimal "low"
 	}
+	// GLM-5.3 Cyber Abliterated always reasons; its chat template honors `low`
+	// and `high` and runs any other value at max (every level returned 200 on
+	// 2026-11-19), so it gets the GLM-5.3 low/high/max ladder.
+	models "glm-5.3-cyber-abliterated" {
+		thinking-default-level "max"
+		thinking-efforts "low" "high" "max"
+		thinking-requires-effort #true
+	}
 }

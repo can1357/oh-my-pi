@@ -178,7 +178,9 @@ async function chatRequestBody(id: string, effort: Effort): Promise<Record<strin
 
 // Checked against api.abliteratedllm.dev on 2026-11-14: glm-5.3 and kimi-k3
 // accept `reasoning_effort: "max"`, and glm-5.3-flash-abliterated rejects
-// `minimal`, which the provider rule sends as `low`.
+// `minimal`, which the provider rule sends as `low`. On 2026-11-19 every level
+// returned 200 on glm-5.3-cyber-abliterated, whose template runs any value
+// other than `low`/`high` at max.
 describe("AbliteratedLLM chat completions requests", () => {
 	test("Qwen 3.8 sends the selected effort as reasoning_effort, not enable_thinking", async () => {
 		for (const effort of [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]) {
@@ -197,8 +199,16 @@ describe("AbliteratedLLM chat completions requests", () => {
 	});
 
 	test("max passes through on GLM-5.3 and Kimi K3", async () => {
-		for (const id of ["glm-5.3", "kimi-k3"]) {
+		for (const id of ["glm-5.3", "glm-5.3-cyber-abliterated", "kimi-k3"]) {
 			expect((await chatRequestBody(id, Effort.Max)).reasoning_effort).toBe("max");
 		}
+	});
+
+	test("GLM-5.3 Cyber Abliterated exposes only the levels its template honors", () => {
+		expect(getBundledModel("abliteratedllm", "glm-5.3-cyber-abliterated").thinking).toMatchObject({
+			efforts: [Effort.Low, Effort.High, Effort.Max],
+			defaultLevel: Effort.Max,
+			requiresEffort: true,
+		});
 	});
 });
