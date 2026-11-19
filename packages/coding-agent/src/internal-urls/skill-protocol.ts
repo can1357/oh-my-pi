@@ -366,7 +366,7 @@ export class SkillProtocolHandler implements ProtocolHandler {
 		return host.skillUriAccess ? skillDoc.trim() : undefined;
 	}
 
-	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
+	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource<string | Buffer>> {
 		// The catalogue backs the progressive variant's discovery guidance; otherwise every
 		// non-hidden skill is already listed in the system prompt.
 		if (!(url.rawHost || url.hostname) && context?.settings && progressiveSkillsRequested(context.settings)) {

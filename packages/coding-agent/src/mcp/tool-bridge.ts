@@ -242,6 +242,9 @@ function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageConte
 						: `[Resource: ${item.resource.uri}]`,
 				);
 				break;
+			case "resource_link":
+				appendText(`[Resource: ${item.uri}]`);
+				break;
 		}
 	}
 	flushText();
@@ -523,18 +526,25 @@ function sanitizeMCPToolNamePart(value: string, fallback: string, keepDigits: bo
  * if the prefix-strip or cap rules change, the legacy alias changes with them.
  */
 function mintMCPToolName(serverName: string, toolName: string, keepDigits: boolean): string {
-	const sanitizedServerName = sanitizeMCPToolNamePart(serverName, "server", keepDigits);
-	const sanitizedToolName = sanitizeMCPToolNamePart(toolName, "tool", keepDigits);
+	const parts = nameParts(serverName, toolName, keepDigits);
+	return capMCPToolNameLength(`mcp__${parts.server}_${parts.tool}`);
+}
 
+function nameParts(serverName: string, toolName: string, keepDigits: boolean): { server: string; tool: string } {
+	const server = sanitizeMCPToolNamePart(serverName, "server", keepDigits);
+	const tool = sanitizeMCPToolNamePart(toolName, "tool", keepDigits);
 	// Strip redundant server name prefix from tool name if present
-	const prefixWithUnderscore = `${sanitizedServerName}_`;
+	const prefix = `${server}_`;
+	return { server, tool: tool.startsWith(prefix) ? tool.slice(prefix.length) : tool };
+}
 
-	let normalizedToolName = sanitizedToolName;
-	if (sanitizedToolName.startsWith(prefixWithUnderscore)) {
-		normalizedToolName = sanitizedToolName.slice(prefixWithUnderscore.length);
-	}
-
-	return capMCPToolNameLength(`mcp__${sanitizedServerName}_${normalizedToolName}`);
+/**
+ * Sanitized server and tool halves of {@link createMCPToolName}, before the
+ * length cap: `mcp__<server>_<tool>`. Eval namespaces (`mcp/eval-namespaces.ts`)
+ * present them as `<server>.<tool>(…)`.
+ */
+export function mcpToolNameParts(serverName: string, toolName: string): { server: string; tool: string } {
+	return nameParts(serverName, toolName, true);
 }
 
 /**
