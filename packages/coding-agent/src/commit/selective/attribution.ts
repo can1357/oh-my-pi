@@ -69,6 +69,8 @@ export interface ChangeOp {
 	by: string;
 	/** For `+`: actors whose lines this insertion replaced within its step; empty for pure insertions. */
 	over: readonly string[];
+	/** Actors whose replacement must be selected to locate this insertion. */
+	placementDependencies?: readonly string[];
 	/** Index of the step that produced the change. */
 	step: number;
 	hint?: string;
@@ -90,6 +92,11 @@ interface Item {
 	alive: boolean;
 	/** HEAD line index for lines that are (or were) HEAD lines. */
 	head?: number;
+	/**
+	 * Projection onto HEAD. Lines of one replacement share its interval, not arbitrary subintervals.
+	 * A later insertion at its edge or inside it records placementDependencies ([] for an exact gap).
+	 */
+	span?: { start?: number; end?: number; placementDependencies?: readonly string[] };
 	by: string;
 	over: readonly string[];
 	step: number;
@@ -219,8 +226,15 @@ export function attribute(head: readonly string[], steps: readonly Step[], work:
 		const insertions: Array<{ at: number; items: Item[] }> = [];
 		for (const region of changedRegions(step.before, step.after)) {
 			const over = new Set<string>();
+			let dependencies: Set<string> | undefined;
+			let orderedInsertion = region.i1 < region.i2;
 			for (let n = region.i1; n < region.i2; n++) {
 				const item = items[aliveAt[n]];
+				if (item.span?.placementDependencies) {
+					for (const actor of item.span.placementDependencies) (dependencies ??= new Set()).add(actor);
+				} else {
+					orderedInsertion = false;
+				}
 				item.alive = false;
 				item.deletedBy = step.actor;
 				item.deletedStep = stepIndex;
@@ -228,20 +242,64 @@ export function attribute(head: readonly string[], steps: readonly Step[], work:
 				over.add(item.by);
 			}
 			if (region.j2 === region.j1) continue;
+			let at = region.i2 === aliveAt.length ? items.length : aliveAt[region.i2];
+			let start: number | undefined;
+			let end: number | undefined;
+			if (region.i1 < region.i2) {
+				const first = items[aliveAt[region.i1]];
+				const last = items[aliveAt[region.i2 - 1]];
+				start = first.head ?? first.span?.start;
+				end = last.head !== undefined ? last.head + 1 : last.span?.end;
+				at = aliveAt[region.i2 - 1] + 1;
+			} else {
+				const leftAt = region.i1 === 0 ? -1 : aliveAt[region.i1 - 1];
+				const left = items[leftAt];
+				const right = items[at];
+				if (left?.span || right?.span) {
+					orderedInsertion = true;
+					const leftEnd = !left ? 0 : left.head !== undefined ? left.head + 1 : left.span?.end;
+					const rightStart = !right ? head.length : (right.head ?? right.span?.start);
+					if (leftEnd !== undefined && leftEnd === rightStart) {
+						// The two worktree neighbours meet at this HEAD gap. Keep the insertion on the
+						// same side of the old body as it was on the new body.
+						start = end = leftEnd;
+						for (let i = leftAt + 1; i < at; i++) {
+							const headLine = items[i].head;
+							if (headLine !== undefined && headLine >= leftEnd) {
+								at = i;
+								break;
+							}
+						}
+					} else {
+						// No single gap in HEAD: selecting the insertion depends on its surrounding edit.
+						dependencies = new Set();
+						for (const neighbour of [left, right]) {
+							if (!neighbour?.span) continue;
+							dependencies.add(neighbour.by);
+							for (const actor of neighbour.span.placementDependencies ?? []) dependencies.add(actor);
+						}
+						if (rightStart !== undefined && leftEnd !== undefined) {
+							start = Math.min(rightStart, leftEnd);
+							end = Math.max(rightStart, leftEnd);
+						}
+					}
+				}
+			}
+			const actors = [...over];
+			const placementDependencies = dependencies ? [...dependencies] : orderedInsertion ? [] : undefined;
+			const span =
+				placementDependencies || (start !== undefined && end !== undefined)
+					? { start, end, placementDependencies }
+					: undefined;
 			const added = step.after.slice(region.j1, region.j2).map((text): Item => ({
 				text,
 				alive: true,
 				by: step.actor,
-				over: [...over],
+				over: actors,
+				span,
 				step: stepIndex,
 				hint: step.hint,
 			}));
-			const at =
-				region.i2 > region.i1
-					? aliveAt[region.i2 - 1] + 1
-					: region.i1 < aliveAt.length
-						? aliveAt[region.i1]
-						: items.length;
 			insertions.push({ at, items: added });
 		}
 		// Later regions sit at higher positions; splicing back to front keeps earlier positions valid.
@@ -264,6 +322,9 @@ function isAnchor(item: Item): boolean {
  * of the work was committed meanwhile, possibly only some of it). Run after every step, so a later
  * step that deletes the line again is recorded as that step's deletion of a HEAD line.
  *
+ * A separately recorded insertion at a replacement boundary partitions these windows: identical
+ * text beyond that boundary belongs to another edit and must not consume part of the insertion.
+ *
  * Pairs are sought within each region between HEAD anchors, and across the anchors between two
  * regions when those may be what keeps a pair apart: the steps' diffs can place the same block at
  * different spots among repeated lines (`return;`, `}`), leaving its deletion before an anchor
@@ -273,7 +334,7 @@ function cancelReinsertions(items: Item[]): Item[] {
 	const out: Item[] = [];
 	let index = 0;
 	while (index < items.length) {
-		if (isAnchor(items[index])) {
+		if (isAnchor(items[index]) || isOrderedInsertion(items[index])) {
 			out.push(items[index++]);
 			continue;
 		}
@@ -283,7 +344,7 @@ function cancelReinsertions(items: Item[]): Item[] {
 		while (end < items.length) {
 			let next = end;
 			while (next < items.length && isAnchor(items[next])) next++;
-			if (next === items.length) break;
+			if (next === items.length || isOrderedInsertion(items[next])) break;
 			const nextEnd = regionEnd(items, next);
 			const region = tally(items, next, nextEnd);
 			// Pairing across the anchors shifts their first onto a line before it and their last onto
@@ -305,10 +366,15 @@ function cancelReinsertions(items: Item[]): Item[] {
 	return out;
 }
 
-/** End of the run of non-anchor items starting at `start`. */
+/** A separately recorded insertion is not a restoration of identical text across its boundary. */
+function isOrderedInsertion(item: Item): boolean {
+	return item.alive && item.span?.placementDependencies !== undefined;
+}
+
+/** End of the run before the next HEAD anchor or separately positioned insertion. */
 function regionEnd(items: readonly Item[], start: number): number {
 	let end = start;
-	while (end < items.length && !isAnchor(items[end])) end++;
+	while (end < items.length && !isAnchor(items[end]) && !isOrderedInsertion(items[end])) end++;
 	return end;
 }
 
@@ -376,6 +442,7 @@ function settleWindow(items: readonly Item[], start: number, end: number, out: I
 		for (const item of segments[n]) out.push(item);
 		// The line is HEAD's now: editing it later must not count as building on its old inserter's work.
 		add.head = heads[n];
+		add.span = undefined;
 		add.by = HEAD;
 		out.push(add);
 	});
@@ -450,6 +517,7 @@ function deriveOps(items: Item[]): Attribution {
 					text: item.text,
 					by: item.by,
 					over: item.over,
+					placementDependencies: item.span?.placementDependencies,
 					step: item.step,
 					hint: item.hint,
 				};
@@ -489,6 +557,8 @@ export type OpStatus = "own" | "other" | "review";
 export type ReviewReason =
 	/** An in-scope agent edited lines that out-of-scope actors added and never committed. */
 	| { kind: "entangled"; with: readonly string[] }
+	/** The insertion is inside a replacement with no corresponding gap in HEAD. */
+	| { kind: "placement"; with: readonly string[] }
 	/** An out-of-scope actor rewrote lines that in-scope agents wrote. */
 	| { kind: "rewritten"; by: string }
 	/** Shares a hunk with an op that needs review, so selecting it alone could split one change. */
@@ -508,8 +578,8 @@ export interface Classification {
  *
  * - Own: inserted or deleted by a scope agent, or by an unrecorded change that rewrote scope lines
  *   while a scope agent's shell/eval call was running (formatters, codegen).
- * - Review: a scope agent rewrote lines others added but never committed, or someone outside the
- *   scope rewrote scope lines. Any review op puts its whole hunk in review.
+ * - Review: a scope agent rewrote or inserted inside uncommitted work outside the scope, or
+ *   someone outside the scope rewrote scope lines. Any review op puts its whole hunk in review.
  * - Other: everything else.
  */
 export function classify(attribution: Attribution, scope: ReadonlySet<string>): Classification {
@@ -533,7 +603,17 @@ export function classify(attribution: Attribution, scope: ReadonlySet<string>): 
 		}
 		let review = false;
 		for (const op of hunk.ops) {
-			if (likelySteps.has(op.step) && isPseudoActor(op.by)) {
+			const inferred = likelySteps.has(op.step) && isPseudoActor(op.by);
+			if ((inScope(op.by) || inferred) && op.placementDependencies?.length) {
+				const missing = op.placementDependencies.filter(actor => !inScope(actor));
+				if (missing.length > 0) {
+					status[op.id] = "review";
+					reasons.set(op.id, { kind: "placement", with: missing });
+					review = true;
+					continue;
+				}
+			}
+			if (inferred) {
 				status[op.id] = "own";
 				likely.add(op.id);
 				continue;

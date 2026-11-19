@@ -152,6 +152,27 @@ async function sharedWorkspace() {
 }
 
 describe("selective commit flow", () => {
+	it("commits an inserted statement before a return changed only in the worktree", async () => {
+		const { root, journal, write } = await emptyRepo();
+		const file = "value.luau";
+		const head = "local function value()\n    return 1\nend\n";
+		const foreign = head.replace("return 1", "return 2");
+		const statement = "    assert(true)\n";
+		const insert = (source: string) => source.replace("    return", `${statement}    return`);
+		await Bun.write(path.join(root, file), head);
+		await git(root, ["add", file]);
+		await git(root, ["commit", "-qm", "seed"]);
+		await Bun.write(path.join(root, file), foreign);
+		await write("Main", undefined, file, insert(foreign));
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		await commitSelection(draft, { subject: "test: assert before return" }, { journal, agent: { agent: "Main" } });
+
+		expect(await git(root, ["show", `HEAD:${file}`])).toBe(insert(head));
+		expect(await Bun.file(path.join(root, file)).text()).toBe(insert(foreign));
+	});
+
 	it("explicitly selects a gitlink SHA with ordinary edits without committing child dirt or other staged work", async () => {
 		const { root, module, journal, write, before, after } = await gitlinkWorkspace();
 		await Bun.write(path.join(root, "user.txt"), "user staged\n");
