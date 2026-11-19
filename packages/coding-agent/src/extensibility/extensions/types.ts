@@ -105,7 +105,7 @@ import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteT
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { TodoOperation, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { ApprovalMode } from "../../tools/approval";
 import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
@@ -1842,6 +1842,16 @@ export interface RegisteredCommand {
 	handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 }
 
+/** What a `todo` tool call is about to change; see {@link TodoBackendDefinition.apply}. */
+export interface TodoBackendChange {
+	/** The call's operation; never `view`. */
+	op: TodoOperation;
+	/** The list before the call. */
+	previous: TodoPhase[];
+	/** The list omp commits when the backend accepts, unless the list changed meanwhile. */
+	next: TodoPhase[];
+}
+
 /**
  * A todo backend registered with `pi.registerTodoBackend()`. omp keeps the todo list; the backend
  * the `todo.backend` setting selects is told about every change to it.
@@ -1851,16 +1861,28 @@ export interface TodoBackendDefinition {
 	id: string;
 	/**
 	 * Called in the main session with the whole todo list after omp committed a change to it:
-	 * a `todo` call, a `/todo` edit, RPC `set_todos`, `/new`, or a resume, rewind, branch, fork or
-	 * move to another session file that left another list or session id. An empty list is sent
-	 * only once omp has called a todo backend for this session; `/new`, a resume, a branch and a
-	 * fork carry that over. Tasks carry `content` and `status` only.
+	 * a `todo` call (unless this backend's `apply` accepted it), a `/todo` edit, RPC `set_todos`,
+	 * `/new`, or a resume, rewind, branch, fork or move to another session file that left another
+	 * list or session id. An empty list is sent only once omp has called a todo backend for this
+	 * session; `/new`, a resume, a branch and a fork carry that over. Tasks carry `content` and
+	 * `status` only.
 	 * One call runs at a time, and lists that change meanwhile collapse into the newest. A throw,
 	 * or no answer within the extension handler timeout, is reported as an extension error and
 	 * leaves omp's list as it is; the next change sends the whole list again, even while a call
 	 * omp gave up on is still running.
 	 */
 	replace(phases: TodoPhase[], ctx: ExtensionContext): void | Promise<void>;
+	/**
+	 * Called in the main session, once it has started, before omp commits a change the model's
+	 * `todo` tool call makes; nothing else reaches it. Throw to refuse the change: the call fails,
+	 * naming the backend and the error's message, and the list stays as it was, as it does when no
+	 * answer comes within the extension handler timeout. A change accepted here is not passed to
+	 * `replace` as well. When `apply` accepts after omp stopped waiting (a timeout or an abort),
+	 * omp's list is sent through `replace` once more, unless the session has changed or is closing
+	 * by then. Edits the user or a client makes (`/todo`, RPC `set_todos`) and resets cannot be
+	 * refused; they only reach `replace`.
+	 */
+	apply?(change: TodoBackendChange, ctx: ExtensionContext): void | Promise<void>;
 }
 
 // ============================================================================
@@ -2173,9 +2195,9 @@ export interface ExtensionAPI {
 
 	/**
 	 * Register a todo backend the user can select with the `todo.backend` setting. Throws for a
-	 * malformed id, for `native` and for a missing `replace`; an id this extension registered
-	 * before gets the new definition. When several extensions register an id, the first one loaded
-	 * keeps it.
+	 * malformed id, for `native`, for a missing `replace` and for an `apply` that is not a
+	 * function; an id this extension registered before gets the new definition. When several
+	 * extensions register an id, the first one loaded keeps it.
 	 */
 	registerTodoBackend(definition: TodoBackendDefinition): void;
 

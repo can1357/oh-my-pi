@@ -468,6 +468,10 @@ export const cfgTodoEager = register({
 /** `todo.backend` value for omp's own todo list, with no extension backend. */
 export const NATIVE_TODO_BACKEND = "native";
 
+/** Why a `todo` call fails when the list it was computed from is gone by the time its backend answers. */
+export const TODO_LIST_CHANGED_ERROR =
+	"The todo list changed while this call waited for the todo backend; nothing was saved.";
+
 export const cfgTodoBackend = register({
 	id: "todo.backend",
 	type: "string",

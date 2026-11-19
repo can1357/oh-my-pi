@@ -123,7 +123,8 @@ The same file also exposes non-tool helpers used by `/todo`:
    - Successful state-changing tool-result messages carry `details.phases`; `getLatestTodoPhasesFromEntries(...)` restores the latest canonical snapshot. Failed and pure-`view` results are skipped.
    - Eval callers use `committedTodoPhases(...)` to persist mutations separately when there is no direct `todo` tool-result entry.
    - Failed `todo` results cause `agent-session` to enqueue a hidden next-turn reminder (`customType: "todo-error-reminder"`).
-   - With `todo.backend` set to an extension's backend, every committed change to the main session's list is then handed to it as a whole list (`docs/extensions.md`, Todo backends). The backend is told after the commit and cannot refuse it.
+   - With `todo.backend` set to an extension's backend, every committed change to the main session's list is then handed to it as a whole list (`docs/extensions.md`, Todo backends). That call comes after the commit and cannot refuse it.
+   - Once the session has started, a selected backend that defines `apply` is asked before a `todo` call's change is committed; when it throws, the call returns an error (`Todo backend "<id>" did not accept this change: …`) and the list is unchanged. Without such a backend the call commits before it first yields, as it always did.
 - User-visible prompts / interactive UI
    - Transcript block is rendered by `todoToolRenderer` and merged with the call line.
    - `event-controller` updates the visible todo panel from successful results.

@@ -176,7 +176,7 @@ import { emitSessionShutdownEvent, TOP_LEVEL_AGENT, UNAVAILABLE_ANNOTATIONS } fr
 import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
-import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+import type { CompactOptions, ContextUsage, TodoBackendChange } from "../extensibility/extensions/types";
 import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import type { MCPEvalNamespaceCatalog } from "../mcp/eval-namespaces";
@@ -12121,6 +12121,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#mirrorTodoPhases(): void {
 		const backend = this.#todoBackend();
 		if (backend) this.#extensionRunner?.syncTodoBackend(backend, this.#todo.phases);
+	}
+
+	/** See `ToolSession.applyTodoBackend`. */
+	applyTodoBackend(change: TodoBackendChange, signal?: AbortSignal): Promise<string | undefined> | undefined {
+		return this.#extensionRunner?.applyTodoBackend(
+			() => this.#todoBackend(),
+			change,
+			() => this.#todo.phases,
+			signal,
+		);
 	}
 
 	/** Active item labels accepted by this pooled turn's incremental yield tool. */

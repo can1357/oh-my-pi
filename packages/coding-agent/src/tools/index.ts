@@ -16,6 +16,7 @@ import type {
 	BeforeSubagentSpawnEvent,
 	BeforeSubagentSpawnEventResult,
 	PreparedExtension,
+	TodoBackendChange,
 } from "../extensibility/extensions/types";
 import type { Skill, SkillRediscoveryHost } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
@@ -515,6 +516,13 @@ export interface ToolSession {
 	 * use this so branch rehydration agrees with the in-memory list.
 	 */
 	commitTodoPhases?: (phases: TodoPhase[]) => void;
+	/**
+	 * Ask the selected todo backend to accept a `todo` call's change before it is committed.
+	 * Returns `undefined` at once when no backend decides (native todos); otherwise resolves to
+	 * the reason the change is not accepted, or to `undefined` once it is accepted or when no
+	 * backend decides any more by the call's turn, and rejects when `signal` aborts.
+	 */
+	applyTodoBackend?: (change: TodoBackendChange, signal?: AbortSignal) => Promise<string | undefined> | undefined;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
 	/** The `i` intent the model wrote on a tool call of the current turn, by call ID. */

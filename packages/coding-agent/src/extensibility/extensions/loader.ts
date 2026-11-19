@@ -381,6 +381,9 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		if (typeof definition.replace !== "function") {
 			throw new TypeError(`Todo backend "${id}" must have a replace function`);
 		}
+		if (definition.apply !== undefined && typeof definition.apply !== "function") {
+			throw new TypeError(`Todo backend "${id}" apply must be a function when given`);
+		}
 		(this.extension.todoBackends ??= new Map()).set(id, definition);
 	}
 
