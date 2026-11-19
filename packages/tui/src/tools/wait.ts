@@ -790,6 +790,7 @@ export function createIrcMessageCard(
 function describeJobsResult(
 	result: ToolRenderResult<CoordinationDetails>,
 	isPartial: boolean,
+	tray: boolean,
 ): NativeToolView | undefined {
 	const jobs = result.details?.jobs ?? [];
 	const agents = result.details?.agents ?? [];
@@ -857,6 +858,8 @@ function describeJobsResult(
 		tone: counts.failed > 0 ? "warning" : counts.running > 0 || agents.length > 0 ? "info" : "success",
 		// The tiles are what a wait shows: clamping the body by lines would cut them.
 		preview: "children",
+		// While it waits, a host's tray already shows these jobs live: the card starts folded.
+		...(isPartial && tray ? { folded: true } : {}),
 		body,
 	};
 }
@@ -878,7 +881,8 @@ export const waitToolRenderer = {
 		result: ToolRenderResult<CoordinationDetails>,
 		options: RenderResultOptions,
 	): NativeToolView | undefined {
-		return waitResultMemo.get(result, [options.isPartial, widgetStamp(result.details?.jobs)], () => {
+		const tray = options.tray === true;
+		return waitResultMemo.get(result, [options.isPartial, tray, widgetStamp(result.details?.jobs)], () => {
 			if (result.isError) return errorView("Wait", resultText(result));
 			const details = result.details;
 			if (details?.interrupted) {
@@ -888,7 +892,7 @@ export const waitToolRenderer = {
 					inline: true,
 				};
 			}
-			return describeJobsResult(result, options.isPartial);
+			return describeJobsResult(result, options.isPartial, tray);
 		});
 	},
 	renderResult(

@@ -282,6 +282,70 @@ describe("TernTab", () => {
 		expect(input.events).toEqual([{ type: "text", text: "a@b.test" }]);
 	});
 
+	it("presses Enter on a native ref handle without sending that ref to the page kit", async () => {
+		const node = {
+			ref: "e1-5",
+			tag: "input",
+			role: "textbox",
+			states: ["editable"],
+			rect: [20, 10, 40, 20],
+		};
+		daemon = await startFakeDaemon(
+			(op): FakeAnswer => {
+				if (op.op === "dom") {
+					return {
+						ok:
+							op.read === "query"
+								? { nodes: [node], total: 1 }
+								: { state: "ok", point: [40, 20], rect: node.rect, node },
+					};
+				}
+				if (op.op === "eval") return { error: { kind: "js", message: "native refs cannot reach the page kit" } };
+				return { ok: {} };
+			},
+			{ welcome: { ops: ["dom"] } },
+		);
+		client = new TernSocketClient({ socketPath: daemon.socketPath });
+		await client.connect();
+		const tab = new TernTab({ client, block: 7, name: "main", viewport: { width: 800, height: 600 } });
+		await new TernElementHandle(tab, { engine: "ref", ref: node.ref }, null).press("Enter");
+		const events = daemon.requests.filter(request => request.op.op === "input").flatMap(request => request.op.events);
+		expect(events).toContainEqual(expect.objectContaining({ type: "key", action: "down", key: "Enter" }));
+		expect(events).toContainEqual(expect.objectContaining({ type: "key", action: "up", key: "Enter" }));
+	});
+
+	it("sends one key press to an uncovered element and none to an element a dialog covers", async () => {
+		let covered = false;
+		const fake = await startPage({
+			eventBatches: [],
+			kit: {
+				target: () =>
+					covered
+						? { ok: false, reason: "covered", count: 1, detail: "<dialog#modal>" }
+						: { ok: true, x: 5, y: 5, width: 100, height: 20, count: 1 },
+				focus: () => null,
+			},
+		});
+		const tab = await openTab(fake);
+		// A short cell budget, so the refused press stops polling the covered target quickly.
+		tab.setRunContext({
+			timeoutMs: 2_000,
+			deadline: Date.now() + 2_000,
+			signal: new AbortController().signal,
+			session: { cwd: os.tmpdir() },
+			output: new RunOutput(),
+			screenshots: [],
+		});
+		await tab.press("Enter", { selector: "#name" });
+		const inputs = () => fake.requests.filter(request => request.op.op === "input").length;
+		expect(inputs()).toBe(1);
+		covered = true;
+		const refused = await tab.press("Enter", { selector: "#name" }).catch((error: unknown) => String(error));
+		expect(refused).toContain('tab.press("Enter", { selector: "#name" }) timed out');
+		expect(refused).toContain("covered by <dialog#modal>");
+		expect(inputs()).toBe(1);
+	});
+
 	it("reports a held dialog and answers it through the dialog op", async () => {
 		const fake = await startPage({
 			eventBatches: [

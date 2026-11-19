@@ -75,9 +75,9 @@ export function getSmolLmModelDir(): string {
 	return path.join(getTinyModelsCacheDir(), "predict", SMOLLM_REPO.replace("/", "--"));
 }
 
-/** Whether the pinned weights are fully downloaded and verified (one small file read). */
-export async function smolLmWeightsReady(): Promise<boolean> {
-	return pinnedHubFilesReady(getSmolLmModelDir(), SMOLLM_FILES);
+/** Whether the pinned weights in `dir` are fully downloaded and verified (one small file read). */
+export async function smolLmWeightsReady(dir: string = getSmolLmModelDir()): Promise<boolean> {
+	return pinnedHubFilesReady(dir, SMOLLM_FILES);
 }
 
 /** Options for {@link ensureSmolLmWeights}. */

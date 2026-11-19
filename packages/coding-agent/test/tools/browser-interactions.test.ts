@@ -18,6 +18,7 @@ import {
 	withLiveElement,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/interactions";
 import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import { normalizeSelectOptions } from "@oh-my-pi/pi-coding-agent/tools/browser/select-options";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { TERN_KIT_SOURCE } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/page-kit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
@@ -175,7 +176,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser fill aborts", () => {
 				return Promise.withResolvers<void>().promise;
 			};
 
-			const error = await rejectionOf(fillViaHandle(editor, "new text", controller.signal));
+			const error = await rejectionOf(fillViaHandle(editor, "new text", "handle.fill()", controller.signal));
 			if (!(error instanceof TypingInterruptedError))
 				throw new Error(`Expected TypingInterruptedError, got ${error}`);
 			expect(error.progress).toContain("replacement text was already sent");
@@ -191,7 +192,10 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser fill aborts", () => {
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser input cut off mid-gesture", () => {
 	// `blockNow(ms)` blocks the page's main thread in its own script right after the current call answers; with
 	// `blockMs` set, the next mousedown or keydown handler blocks instead. Either way omp's input waits on the page
-	// for 9 s, past the 8 s per-op ceiling of a 10 s cell, and the cell's cleanup returns once the page answers.
+	// for BLOCK_MS, past the 2 s per-op ceiling of a BLOCKED_CELL_S cell (`resolveOpTimeouts`: the budget less 1 s),
+	// and the cell's cleanup returns once the page answers, inside that budget.
+	const BLOCKED_CELL_S = 3;
+	const BLOCK_MS = 2_500;
 	const gestureHtml = `<!doctype html>
 <button id="target" style="position:absolute;left:20px;top:20px;width:120px;height:40px">Target</button>
 <div id="from" style="position:absolute;left:20px;top:100px;width:60px;height:60px"></div>
@@ -210,6 +214,21 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 	// Input a cut-off call would still have sent arrives within a few round trips of the page answering; the
 	// page's log is read after that, as the user's next look at the page would be.
 	const readLog = "await wait(500); return await tab.evaluate(() => window.log);";
+
+	// A tab held open for the whole describe keeps its browser alive, so closing each test's tab does not shut
+	// Chromium down for the next test to relaunch.
+	const keeperTab = `gesture-keeper-${crypto.randomUUID()}`;
+	let closeKeeper = async (): Promise<unknown> => undefined;
+	beforeAll(async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "gesture-keeper" };
+		await prelude.invoke({ action: "open", name: keeperTab, url: "about:blank" }, context);
+		closeKeeper = () => prelude.invoke({ action: "close", name: keeperTab, kill: true }, context);
+	});
+	afterAll(async () => {
+		await closeKeeper().catch(() => undefined);
+	});
 
 	async function withGestureTab(
 		toolCallId: string,
@@ -236,7 +255,10 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 
 	test("a click that timed out on a page busy in its own script does not click its target once the page answers", async () => {
 		await withGestureTab("late-click", async run => {
-			const outcome = await run(`await tab.evaluate(() => blockNow(9000)); ${attempt("tab.clickAt(80, 40)")}`);
+			const outcome = await run(
+				`await tab.evaluate(() => blockNow(${BLOCK_MS})); ${attempt("tab.clickAt(80, 40)")}`,
+				BLOCKED_CELL_S,
+			);
 			expect(outcome).toMatch(/^tab\.clickAt\(\) timed out after \d+ms/);
 			// The press was already on its way; it is released off the target, so the button never sees a click.
 			expect(await run(readLog)).toEqual(["down", "up"]);
@@ -245,8 +267,8 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 
 	test("an already-dispatched release can click after timeout, but no later click in the sequence is sent", async () => {
 		await withGestureTab("cut-release", async run => {
-			await run("await tab.evaluate(() => { window.blockUpMs = 9000; });");
-			expect(await run(attempt("tab.clickAt(80, 40, { count: 2 })"))).toMatch(
+			await run(`await tab.evaluate(() => { window.blockUpMs = ${BLOCK_MS}; });`);
+			expect(await run(attempt("tab.clickAt(80, 40, { count: 2 })"), BLOCKED_CELL_S)).toMatch(
 				/^tab\.clickAt\(\) timed out after \d+ms/,
 			);
 			// Chrome already owns the first release; cancellation cannot recall it, but prevents the second press.
@@ -257,8 +279,10 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 
 	test("a drag cut off with the button down releases it off the page, so the next click works", async () => {
 		await withGestureTab("cut-drag", async run => {
-			await run("await tab.evaluate(() => { window.blockMs = 9000; });");
-			expect(await run(attempt(`tab.drag("#from", "#to")`))).toMatch(/^tab\.drag\(\) timed out after \d+ms/);
+			await run(`await tab.evaluate(() => { window.blockMs = ${BLOCK_MS}; });`);
+			expect(await run(attempt(`tab.drag("#from", "#to")`), BLOCKED_CELL_S)).toMatch(
+				/^tab\.drag\(\) timed out after \d+ms/,
+			);
 			expect(await run(readLog)).toEqual(["down", "up"]);
 			expect(await run(attempt(`tab.click("#target")`))).toBe("done");
 		});
@@ -272,8 +296,8 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 		"a key combo through %s cut off with its modifier down sends no further key and releases the modifier",
 		async (_label, call, modifier) => {
 			await withGestureTab("cut-press", async run => {
-				await run("await tab.evaluate(() => { window.blockMs = 9000; });");
-				expect(await run(attempt(call))).toMatch(/ timed out after \d+ms/);
+				await run(`await tab.evaluate(() => { window.blockMs = ${BLOCK_MS}; });`);
+				expect(await run(attempt(call), BLOCKED_CELL_S)).toMatch(/ timed out after \d+ms/);
 				expect(await run(readLog)).toEqual([`keydown:${modifier}`, `keyup:${modifier}`]);
 			});
 		},
@@ -282,8 +306,8 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 
 	test("a tab.mouseDown whose own deadline passed, caught by the code, still releases the button", async () => {
 		await withGestureTab("caught-down", async run => {
-			await run("await tab.evaluate(() => { window.blockMs = 9000; });");
-			expect(await run(`await tab.mouseMove(80, 40); ${attempt("tab.mouseDown()")}`)).toMatch(
+			await run(`await tab.evaluate(() => { window.blockMs = ${BLOCK_MS}; });`);
+			expect(await run(`await tab.mouseMove(80, 40); ${attempt("tab.mouseDown()")}`, BLOCKED_CELL_S)).toMatch(
 				/^tab\.mouseDown\(\) timed out after \d+ms/,
 			);
 			expect(await run(readLog)).toEqual(["down", "up"]);
@@ -322,7 +346,7 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 	}, 40_000);
 });
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser interaction parity", () => {
-	test("clicks a link that wraps across two lines on the link, not on its paragraph, on puppeteer and Tern", async () => {
+	test("clicks and drags a wrapped link on its visible fragment, not its paragraph, on puppeteer and Tern", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
 		const context = { session, toolCallId: "browser-wrapped-link" };
@@ -346,15 +370,22 @@ const ternHit = await tab.evaluate(async () => {
 	const target = await globalThis.__ompTernKit.target({ engine: "css", query: "#link" }, "click");
 	return target.ok ? document.elementFromPoint(target.x, target.y)?.id : target.reason;
 });
-return { fragments, clicked: await tab.evaluate(() => window.clicked), ternHit };`,
+const clicked = await tab.evaluate(() => window.clicked);
+await tab.evaluate(() => {
+	window.dragStarts = [];
+	document.addEventListener("mousedown", event => window.dragStarts.push(event.target.id), true);
+});
+await tab.drag("#link", { x: 200, y: 100, css: true });
+return { fragments, clicked, ternHit, dragStarts: await tab.evaluate(() => window.dragStarts) };`,
 					timeout: 15,
 				},
 				context,
 			);
-			expect(valueFrom<{ fragments: number; clicked: string[]; ternHit: string }>(result)).toEqual({
+			expect(valueFrom<unknown>(result)).toEqual({
 				fragments: 2,
 				clicked: ["link"],
 				ternHit: "link",
+				dragStarts: ["link"],
 			});
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
@@ -470,6 +501,122 @@ return {
 		}
 	}, 40_000);
 
+	test("refuses keys and drags aimed at a control a modal dialog covers, on puppeteer and Tern", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `modal-${crypto.randomUUID()}`;
+		// The dialog's button takes focus when it opens; a key meant for the field behind it activated that button.
+		// Without a modal dialog keys keep going where focus goes: a field under a banner, a board under a HUD, a
+		// field whose focus handler opens a picker over it. A drag to an element off screen does not scroll its start away.
+		const modalHtml = `<!doctype html><label>Name <input id="name"></label> <button id="go">Go</button> <input id="off" disabled>
+<div id="src" draggable="true" style="width:80px;height:30px">Drag</div><div id="dst" style="width:80px;height:30px">Drop</div>
+<p style="position:relative"><input id="under"><span style="position:absolute;inset:0;background:#fec">Banner</span></p>
+<div style="position:relative"><div id="board" style="width:120px;height:30px">Board</div><div id="hud" style="position:absolute;inset:0"></div></div>
+<div style="position:relative"><input id="date"><div id="pop" hidden style="position:absolute;inset:0"><input id="popin"></div></div>
+<iframe id="inner" srcdoc="<input id=deep><dialog id=framed><button>OK</button></dialog><script>document.querySelector('dialog').showModal()</script>"></iframe>
+<div style="height:3000px"></div><div id="far">Far</div>
+<dialog id="modal"><button id="stay">Stay signed in</button></dialog>
+<script>
+window.received = [];
+for (const type of ["keydown", "click", "input", "mousedown", "dragstart"]) document.addEventListener(type, event => received.push(type + ":" + event.target.id), true);
+document.querySelector("#date").addEventListener("focus", () => { document.querySelector("#pop").hidden = false; document.querySelector("#popin").focus(); });
+</script>`;
+		const context = { session, toolCallId: "browser-modal-cover" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(modalHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `const attempt = action => action().then(() => "sent", error => error.message);
+await tab.evaluate(${JSON.stringify(`(function () {\n${TERN_KIT_SOURCE}\n})()`)});
+const aim = (query, actions) => tab.evaluate(async (query, actions) => {
+	const aims = {};
+	for (const action of actions) {
+		const target = await globalThis.__ompTernKit.target({ engine: "css", query }, action);
+		aims[action] = target.ok ? "ok" : target.detail;
+	}
+	return aims;
+}, query, actions);
+await tab.evaluate(() => document.querySelector("#go").focus());
+const disabledPress = await attempt(() => tab.press("Enter", { selector: "#off" }));
+const banner = {
+	fill: await attempt(() => tab.fill("#under", "kept")),
+	press: await attempt(() => tab.press("End", { selector: "#under" })),
+	value: await tab.value("#under"),
+	board: await attempt(() => tab.press("ArrowLeft", { selector: "#board" })),
+	picker: await attempt(() => tab.type("#date", "abc")),
+	picked: await tab.value("#popin"),
+	tern: { under: await aim("#under", ["fill", "press"]), board: await aim("#board", ["press"]), date: await aim("#date", ["type"]) },
+};
+await tab.evaluate(() => document.activeElement.blur());
+const beforePress = await tab.evaluate(() => scrollY);
+await tab.press("ArrowLeft", { selector: "#far" });
+const offscreenPressScrolled = await tab.evaluate(() => scrollY) !== beforePress;
+await tab.evaluate(() => { window.received = []; });
+const farDrag = await attempt(() => tab.drag("#src", "#far"));
+const farDragMisses = await tab.evaluate(() => window.received.filter(entry => !entry.endsWith(":src")));
+const observed = await tab.observe();
+const field = await tab.id(observed.elements.find(element => element.role === "textbox" && element.name.includes("Name")).id);
+await tab.evaluate(() => { document.querySelector("#modal").showModal(); window.received = []; });
+const frame = await tab.frame("#inner");
+const refused = {
+	disabledPress,
+	banner,
+	offscreenPressScrolled,
+	farDrag,
+	farDragMisses,
+	fill: await attempt(() => tab.fill("#name", "Ada Lovelace")),
+	type: await attempt(() => tab.type("#name", "Ada Lovelace")),
+	press: await attempt(() => tab.press("Enter", { selector: "#name" })),
+	handleFill: await attempt(() => field.fill("Ada Lovelace")),
+	handleType: await attempt(() => field.type("Ada Lovelace")),
+	handlePress: await attempt(() => field.press("Enter")),
+	frameFill: await attempt(() => frame.fill("#deep", "Ada Lovelace")),
+	framePress: await attempt(() => frame.press("Enter", { selector: "#deep" })),
+	drag: await attempt(() => tab.drag("#src", "#dst")),
+};
+const tern = await aim("#name", ["fill", "type", "press"]);
+return { ...refused, received: await tab.evaluate(() => window.received), name: await tab.value("#name"), tern };`,
+					timeout: 30,
+				},
+				context,
+			);
+			expect(valueFrom<unknown>(result)).toEqual({
+				disabledPress: 'tab.press("Enter", { selector: "#off" }) blocked: the element is disabled',
+				banner: {
+					fill: "sent",
+					press: "sent",
+					value: "kept",
+					board: "sent",
+					picker: "sent",
+					picked: "abc",
+					tern: { under: { fill: "ok", press: "ok" }, board: { press: "ok" }, date: { type: "ok" } },
+				},
+				offscreenPressScrolled: false,
+				farDrag: "sent",
+				farDragMisses: [],
+				fill: 'tab.fill("#name") blocked: covered by <dialog#modal>',
+				type: 'tab.type("#name") blocked: covered by <dialog#modal>',
+				press: 'tab.press("Enter", { selector: "#name" }) blocked: covered by <dialog#modal>',
+				handleFill: "handle.fill() blocked: covered by <dialog#modal>",
+				handleType: "handle.type() blocked: covered by <dialog#modal>",
+				handlePress: "handle.press() blocked: covered by <dialog#modal>",
+				frameFill: 'frame.fill("#deep") blocked: covered by <dialog#framed>',
+				framePress: 'frame.press("Enter", { selector: "#deep" }) blocked: covered by <dialog#framed>',
+				drag: 'tab.drag() from "#src" blocked: covered by <dialog#modal>',
+				received: [],
+				name: "",
+				tern: { fill: "<dialog#modal>", type: "<dialog#modal>", press: "<dialog#modal>" },
+			});
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	});
+
 	test("guards covered clicks and drives keyboard, pointer, drop-zone, checked-state, and highlight interactions", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
@@ -543,17 +690,18 @@ return { during, after };`,
 		}
 	}, 30_000);
 
-	test("selects options by value, then by visible label, from tabs and element handles", async () => {
+	test("selects options by explicit label, value, or index while preserving string matching and failed selections", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
 		const context = { session, toolCallId: "browser-select" };
 		const selectHtml = `<!doctype html>
 <select id="country"><option value="">Choose…</option><option value="us">United States</option><option value="ca">Canada</option></select>
 <select id="size"><option value="m">Large</option><option value="Large">Extra large</option></select>
-<select id="extras" multiple><option value="cheese">Cheese</option><option value="ham">Ham</option><option value="olives">Olives</option></select>
+<select id="extras" multiple><option value="cheese">Cheese</option><option value="ham">Ham</option><option value="olives">Olives</option><option value="priority" label="Priority">  Priority   boarding + $15  </option><option value="2">Two</option><option value="true">Enabled</option></select>
 <select id="jump"><option value="">Jump to…</option><option value="docs">Docs</option></select>
 <select id="swap"></select>
 <script>
+window.selectEvents = []; for (const type of ["input", "change"]) window.addEventListener(type, event => selectEvents.push(type + ":" + event.target.id), true);
 // A jump menu acts on the choice and resets itself, as "add filter" and "go to" menus do.
 document.querySelector("#jump").addEventListener("change", event => { event.target.value = ""; });
 // A cascading menu replaces its own options on a change.
@@ -590,11 +738,30 @@ const reset = await tab.select("#jump", "Docs");
 const handleReset = await (await tab.waitFor("#jump")).select("docs");
 const afterReset = await tab.value("#jump");
 await tab.evaluate(() => resetSwap());
-const swapped = await tab.select("#swap", "b");
+const swapped = await tab.select("#swap", { value: "b" });
 await tab.evaluate(() => resetSwap());
 await tab.evaluate(${JSON.stringify(`(function () {\n${TERN_KIT_SOURCE}\n})()`)});
-const ternSwapped = await tab.evaluate(() => globalThis.__ompTernKit.select({ engine: "css", query: "#swap" }, ["b"]));
-return { byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, cleared, afterCleared, firstOnSingle, handleFirstOnSingle, afterFirst, noMatch, handleNoMatch, afterNoMatch, multiple, reset, handleReset, afterReset, swapped, ternSwapped };`,
+const ternSwapped = await tab.evaluate(() => globalThis.__ompTernKit.select({ engine: "css", query: "#swap" }, [{ value: "b" }]));
+const explicitLabel = await tab.select("#size", { label: "Large" });
+const explicitValue = await tab.select("#size", { value: "Large" });
+const firstIndex = await tab.select("#country", { index: 0 });
+const laterIndex = await handle.select({ index: 2 });
+const mixed = await tab.select("#extras", { label: "Cheese" }, { value: "ham" }, { index: 2 }, "Priority");
+const fullLabel = await tab.select("#extras", { label: "Priority boarding + $15" });
+const eventsBefore = await tab.evaluate(() => window.selectEvents);
+const invalid = [];
+for (const option of [{}, { unknown: "us" }, { label: "Canada", value: "ca" }, { label: 2 }, { value: 2 }, { index: -1 }, { index: 0.5 }, { index: "0" }, null]) {
+	invalid.push(await tab.select("#country", { value: "us" }, option).then(() => "selected", error => error.message));
+}
+const valueDoesNotMatchLabel = await tab.select("#size", { value: "Extra large" }).then(() => "selected", error => error.message);
+const missingIndex = await handle.select({ index: 99 }).then(() => "selected", error => error.message);
+const invalidOnMissing = await tab.select("#missing", { label: 1 }).then(() => "selected", error => error.message);
+return {
+	byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, cleared, afterCleared, firstOnSingle, handleFirstOnSingle, afterFirst, noMatch, handleNoMatch, afterNoMatch, multiple, reset, handleReset, afterReset, swapped, ternSwapped,
+	explicitLabel, explicitValue, firstIndex, laterIndex, mixed, fullLabel, invalid, valueDoesNotMatchLabel, missingIndex, invalidOnMissing,
+	afterInvalid: await tab.value("#country"), afterInvalidValue: await tab.value("#size"),
+	eventsBefore, eventsAfter: await tab.evaluate(() => window.selectEvents),
+};`,
 					timeout: 20,
 				},
 				context,
@@ -621,7 +788,45 @@ return { byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, cl
 				afterReset: "",
 				swapped: ["z"],
 				ternSwapped: ["z"],
+				explicitLabel: ["m"],
+				explicitValue: ["Large"],
+				firstIndex: [""],
+				laterIndex: ["ca"],
+				mixed: ["cheese", "ham", "olives", "priority"],
+				fullLabel: ["priority"],
+				invalid: Array.from({ length: 9 }, () => expect.stringMatching(/label.*value.*index/i)),
+				valueDoesNotMatchLabel: expect.stringContaining("Extra large"),
+				missingIndex: expect.stringContaining("99"),
+				invalidOnMissing: expect.stringMatching(/label.*value.*index/i),
+				afterInvalid: "ca",
+				afterInvalidValue: "Large",
+				eventsBefore: expect.any(Array),
+				eventsAfter: expect.any(Array),
 			});
+			const selection = valueFrom<{ eventsBefore: string[]; eventsAfter: string[] }>(result);
+			expect(selection.eventsAfter).toEqual(selection.eventsBefore);
+			expect(selection.eventsBefore).toEqual(
+				[
+					"country",
+					"country",
+					"country",
+					"size",
+					"size",
+					"country",
+					"country",
+					"extras",
+					"jump",
+					"jump",
+					"swap",
+					"swap",
+					"size",
+					"size",
+					"country",
+					"country",
+					"extras",
+					"extras",
+				].flatMap(id => [`input:${id}`, `change:${id}`]),
+			);
 
 			// cmux tabs run the same rules in their injected page script; replay it in this page.
 			const cmux = new CmuxTab({
@@ -642,14 +847,68 @@ return { byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, cl
 				context,
 			);
 			expect({
-				byLabel: await cmux.select("#country", "United States"),
+				byLabel: await cmux.elementHandle("#size").select({ label: "Large" }),
+				stringLabel: await cmux.select("#country", "United States"),
 				firstOnSingle: await cmux.select("#country", "Canada", "us"),
-				multiple: await cmux.select("#extras", "Ham", "olives"),
-				swapped: await cmux.select("#swap", "b"),
-			}).toEqual({ byLabel: ["us"], firstOnSingle: ["ca"], multiple: ["ham", "olives"], swapped: ["z"] });
-			const noMatch = await cmux.select("#country", "Mexico").catch((error: Error) => error.message);
-			expect(noMatch).toContain('No <select> option matches "Mexico"');
+				byValue: await cmux.select("#size", { value: "Large" }),
+				firstIndex: await cmux.select("#country", { index: 0 }),
+				laterIndex: await cmux.select("#country", { index: 2 }),
+				multiple: await cmux.select("#extras", "Cheese", { value: "ham" }, { index: 2 }),
+				fullLabel: await cmux.select("#extras", { label: "Priority boarding + $15" }),
+				swapped: await cmux.select("#swap", { value: "b" }),
+				primitives: await Reflect.apply(cmux.select, cmux, ["#extras", 2, true]),
+			}).toEqual({
+				byLabel: ["m"],
+				stringLabel: ["us"],
+				firstOnSingle: ["ca"],
+				byValue: ["Large"],
+				firstIndex: [""],
+				laterIndex: ["ca"],
+				multiple: ["cheese", "ham", "olives"],
+				fullLabel: ["priority"],
+				swapped: ["z"],
+				primitives: ["2", "true"],
+			});
+			const beforeRefusal = await cmux.evaluate<string, []>("JSON.stringify(window.selectEvents)");
+			const noMatch = await cmux
+				.select("#country", { value: "us" }, { label: "Mexico" })
+				.catch((error: Error) => error.message);
+			expect(noMatch).toContain('No <select> option matches {"label":"Mexico"}');
 			expect(await cmux.value("#country")).toBe("ca");
+			expect(await cmux.evaluate<string, []>("JSON.stringify(window.selectEvents)")).toBe(beforeRefusal);
+
+			const ternCases = [
+				{ selector: "#size", options: [{ label: "Large" }], expected: ["m"] },
+				{ selector: "#size", options: [{ value: "Large" }], expected: ["Large"] },
+				{ selector: "#country", options: [{ index: 0 }], expected: [""] },
+				{ selector: "#country", options: [{ index: 2 }], expected: ["ca"] },
+				{
+					selector: "#extras",
+					options: ["Cheese", { value: "ham" }, { index: 2 }],
+					expected: ["cheese", "ham", "olives"],
+				},
+				{ selector: "#extras", options: [{ label: "Priority boarding + $15" }], expected: ["priority"] },
+				{ selector: "#extras", options: [2, true], expected: ["2", "true"] },
+			];
+			await cmux.evaluate(`(function () {\n${TERN_KIT_SOURCE}\n})()`);
+			for (const { selector, options, expected } of ternCases) {
+				const choices = normalizeSelectOptions(options, { coercePrimitives: true });
+				expect(
+					await cmux.evaluate<string[], []>(
+						`globalThis.__ompTernKit.select(${JSON.stringify({ engine: "css", query: selector })}, ${JSON.stringify(choices)})`,
+					),
+				).toEqual(expected);
+			}
+			const ternBefore = await cmux.evaluate<string, []>("JSON.stringify(window.selectEvents)");
+			const ternMissing = normalizeSelectOptions([{ value: "us" }, { value: "Canada" }]);
+			const ternRefusal = await cmux
+				.evaluate(
+					`globalThis.__ompTernKit.select({ engine: "css", query: "#country" }, ${JSON.stringify(ternMissing)})`,
+				)
+				.catch((error: Error) => error.message);
+			expect(ternRefusal).toContain("Canada");
+			expect(await cmux.value("#country")).toBe("ca");
+			expect(await cmux.evaluate<string, []>("JSON.stringify(window.selectEvents)")).toBe(ternBefore);
 		} finally {
 			await prelude.invoke({ action: "close", name: SELECT_TAB_NAME, kill: true }, context).catch(() => undefined);
 		}
@@ -733,6 +992,38 @@ return await tab.value("#paste");`,
 		},
 		30_000,
 	);
+
+	test("fill puts a multiline value in a textarea without pressing Enter", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `fill-multiline-${crypto.randomUUID()}`;
+		const html = `<!doctype html><textarea id="msg">old</textarea>
+<script>
+window.sent = [];
+const box = document.querySelector("#msg");
+box.addEventListener("keydown", event => { if (event.key === "Enter") window.sent.push(box.value); });
+</script>`;
+		const context = { session, toolCallId: "browser-fill-multiline" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(html)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.fill("#msg", "a\\nb");
+return { value: await tab.value("#msg"), sent: await tab.evaluate(() => window.sent) };`,
+					timeout: 25,
+				},
+				context,
+			);
+			expect(valueFrom<unknown>(result)).toEqual({ value: "a\nb", sent: [] });
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
 
 	test("clearing a field with an empty fill reports the change to the page", async () => {
 		const session = makeSession();
@@ -1725,7 +2016,7 @@ return picks;`,
 				result[id] = await clickElement(handle, `click #${id}`).then(
 					() => "clicked",
 					error =>
-						String(error).includes("did not deliver the click")
+						String(error).includes("could not confirm the click reached")
 							? "refused"
 							: String(error).includes("covered by")
 								? "covered"
@@ -1744,6 +2035,7 @@ return picks;`,
 <span id="shadowed">Shadowed</span>
 <span id="actions">Go<span slot="alt" hidden>Alt</span></span>
 <button id="menu-item">Menu item</button>
+<div id="rerender-host"><button id="rerender">Rerender</button></div>
 <script>
 document.getElementById("shadowed").attachShadow({ mode: "open" }).innerHTML = "<button disabled><slot></slot></button>";
 document.getElementById("actions").attachShadow({ mode: "open" }).innerHTML =
@@ -1753,9 +2045,22 @@ document.getElementById("menu-item").addEventListener("pointerdown", event => {
 	event.preventDefault();
 	event.currentTarget.remove();
 });
+// A framework re-renders the button on pointerdown, so the original node never sees the click.
+document.getElementById("rerender").addEventListener("pointerdown", () => {
+	document.getElementById("rerender-host").innerHTML = "<button>Rerendered</button>";
+});
 </script>`);
 			expect(
-				await outcomes(["enabled", "disabled", "inert", "styled-inert", "shadowed", "actions", "menu-item"]),
+				await outcomes([
+					"enabled",
+					"disabled",
+					"inert",
+					"styled-inert",
+					"shadowed",
+					"actions",
+					"menu-item",
+					"rerender",
+				]),
 			).toEqual({
 				enabled: "clicked",
 				disabled: "refused",
@@ -1764,6 +2069,7 @@ document.getElementById("menu-item").addEventListener("pointerdown", event => {
 				shadowed: "refused",
 				actions: "clicked",
 				"menu-item": "clicked",
+				rerender: "clicked",
 			});
 			// A modal dialog escapes the inert shell it sits in; the shell lies under its backdrop.
 			await page.setContent(`<div inert><button id="shell">Shell</button><dialog id="dlg"><button id="ok">OK</button></dialog></div>

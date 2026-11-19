@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { getKeybindings, setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
-import type { NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
+import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { AnnotationOverlay } from "@oh-my-pi/pi-tui/overlays/annotation-overlay";
 import type { CodeReviewOverlayResult, ReviewDiffFile } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 import { PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
@@ -45,7 +45,18 @@ function itemLabel(node: NativeNode): string {
 }
 
 const PLAN = "# Plan\n\n## Alpha\n\nfirst\n\n## Beta\n\nsecond\n\n## Gamma\n\nthird\n";
-const OPTIONS = ["Approve", "Refine plan"];
+const OPTIONS = [
+	{ id: "approve", label: "Approve" },
+	{ id: "stay", label: "Stay" },
+];
+/** A Tern without the plan review's `doc` and dock kinds: one `md` per section and the option list. */
+const LEGACY: DescribeContext = {
+	cols: 100,
+	reduceMotion: false,
+	dark: true,
+	supports: kind => kind !== "doc" && kind !== "buttons" && kind !== "menu",
+	feature: () => true,
+};
 
 describe("review overlays under a native surface", () => {
 	beforeAll(async () => {
@@ -70,12 +81,12 @@ describe("review overlays under a native surface", () => {
 			{ options: OPTIONS },
 			{ onPick: vi.fn(), onCancel: vi.fn(), onFeedbackChange },
 		);
-		const toc = list(overlay.describe(), "toc");
+		const toc = list(overlay.describe(LEGACY), "toc");
 		expect(toc.items.map(itemLabel)).toEqual(["Alpha", "Beta", "Gamma"]);
 		const beta = toc.items[1]!;
 
 		overlay.handleNativeEvent({ type: "select", key: toc.path, item: beta.key! });
-		expect(list(overlay.describe(), "toc").selected).toBe(beta.key);
+		expect(list(overlay.describe(LEGACY), "toc").selected).toBe(beta.key);
 
 		overlay.handleInput("a");
 		overlay.handleInput("tighten this");
@@ -84,7 +95,7 @@ describe("review overlays under a native surface", () => {
 		expect(feedback).toContain("## Beta");
 		expect(feedback).toContain("tighten this");
 		// The note shows next to its section and the Contents entry counts it.
-		const root = overlay.describe();
+		const root = overlay.describe(LEGACY);
 		const betaSection = findKeyed(root, "s2");
 		expect(betaSection?.node.k).toBe("col");
 		expect(JSON.stringify(betaSection?.node)).toContain("tighten this");
@@ -95,25 +106,25 @@ describe("review overlays under a native surface", () => {
 		const onPick = vi.fn();
 		const overlay = new PlanReviewOverlay(
 			PLAN,
-			{ options: OPTIONS, disabledIndices: [1] },
+			{ options: [OPTIONS[0]!, { ...OPTIONS[1]!, disabled: "Not now" }] },
 			{ onPick, onCancel: vi.fn() },
 		);
-		const options = list(overlay.describe(), "options");
+		const options = list(overlay.describe(LEGACY), "options");
 		overlay.handleNativeEvent({ type: "activate", key: options.path, item: options.items[1]!.key! });
 		expect(onPick).not.toHaveBeenCalled();
 
 		overlay.handleNativeEvent({ type: "activate", key: options.path, item: options.items[0]!.key! });
-		expect(onPick).toHaveBeenCalledWith("Approve");
+		expect(onPick).toHaveBeenCalledWith("approve");
 		// Committed: the options give way to a submitting spinner.
-		expect(findKeyed(overlay.describe(), "options")?.node.k).toBe("spinner");
+		expect(findKeyed(overlay.describe(LEGACY), "options")?.node.k).toBe("spinner");
 	});
 
 	it("plan review: describe returns the same tree until visible state changes", () => {
 		const overlay = new PlanReviewOverlay(PLAN, { options: OPTIONS }, { onPick: vi.fn(), onCancel: vi.fn() });
-		const first = overlay.describe();
-		expect(overlay.describe()).toBe(first);
+		const first = overlay.describe(LEGACY);
+		expect(overlay.describe(LEGACY)).toBe(first);
 		overlay.handleInput("\x1b[B");
-		const moved = overlay.describe();
+		const moved = overlay.describe(LEGACY);
 		expect(moved).not.toBe(first);
 		expect(list(moved, "options").selected).toBe("o1");
 	});

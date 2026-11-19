@@ -52,6 +52,10 @@ import {
 	latestJobWidget,
 } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { AsyncJobManagerApi } from "../async/job-manager";
+import { stopAgentRun } from "../async/job-control";
+import { IrcBus } from "../irc/bus";
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
+import { collectTrayInput, runsInlineAgent, Tray, TrayMainActivity } from "./tray";
 import type { JobWidgetRegistry } from "../job-widgets/types";
 import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
 import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
@@ -172,16 +176,16 @@ import {
 	canAutoCreateWorktree,
 	planWorktreeExit,
 	removeExitWorktrees,
-	type SessionWorktree,
 	type WorktreeExitPlan,
 } from "../session/session-worktree";
+import type { SessionWorktree } from "../worktree/backend";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { type DictationTarget, MicCursor, type SttCallbacks, STTController, type SttState } from "../stt";
 import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
-import { resolveCliEntryCmd } from "../subprocess/worker-client";
+import { resolveRestartCmd } from "../subprocess/worker-client";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
 import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
@@ -192,6 +196,7 @@ import {
 	parseConfiguredThinkingLevel,
 	resolveConfiguredThinkingLevel,
 } from "@oh-my-pi/pi-tui/thinking";
+import { capturePage } from "../tools/browser/page-shot";
 import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
 import { resolvePlanFilePath } from "../plan-mode/plan-files";
@@ -253,7 +258,7 @@ import { WidthAwareText } from "@oh-my-pi/pi-tui/render/width-aware-text";
 import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
-import { getEditorCommand, getEditorName, openInEditor } from "../utils/external-editor";
+import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { openPath } from "../utils/open";
 import { resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/theme/session-color";
@@ -289,6 +294,7 @@ import {
 	VibeSessionRegistry,
 } from "../vibe/runtime";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { setEmbedHost } from "@oh-my-pi/pi-tui/chat/embed-host";
 import { setSvgFigureRendering } from "@oh-my-pi/pi-tui/chat/svg-figure";
 import { setTableCharts } from "@oh-my-pi/pi-tui/chat/table-chart";
 import { setTranscriptActionHandler } from "@oh-my-pi/pi-tui/chat/transcript-actions";
@@ -308,7 +314,11 @@ import type { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-executio
 import type { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import type { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
 import type { HookSelectorComponent, HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
-import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
+import {
+	type PlanReviewAnnotationState,
+	PlanReviewOverlay,
+	type PlanReviewOverlayChoice,
+} from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
 import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/overlays/plan-save-overlay";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
@@ -451,6 +461,7 @@ import {
 	cfgTuiMouse,
 	cfgTuiColorfulMarkdown,
 	cfgTuiRenderMermaid,
+	cfgTuiRenderEmbeds,
 	cfgTuiRenderSvg,
 	cfgTuiResizeScrollback,
 	cfgTuiCompleteScrollback,
@@ -528,6 +539,7 @@ const cfgLiveUiSettings = combine({
 	"tui.colorfulMarkdown": cfgTuiColorfulMarkdown,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
 	"tui.renderSvg": cfgTuiRenderSvg,
+	"tui.renderEmbeds": cfgTuiRenderEmbeds,
 	"extensionRenderers.assistantText": cfgExtensionAssistantTextRenderers,
 	"extensionRenderers.transcriptPresenters": cfgExtensionTranscriptPresenters,
 	"tui.autoGraph": cfgTuiAutoGraph,
@@ -561,6 +573,8 @@ const COMPOSER_STATUS_PERSIST_DELAY_MS = 1_000;
 /** Status-line slot of the link-hint mode prompt; the `omp:` prefix keeps it apart from extension keys. */
 const LINK_HINT_STATUS_KEY = "omp:link-hints";
 const DEFAULT_WORKING_MESSAGE = "Working…";
+/** The composer's hint while an ask waits above it. */
+const ASK_COMPOSER_HINT = "↑ answer the questions above, or type here to skip them";
 /** Native working-message shimmer under a session accent: the hue itself is the terminal's `accent`. */
 const NATIVE_ACCENT_SHIMMER: ShimmerPalette = { low: "dim", mid: "accent", high: "accent", bold: true };
 
@@ -643,9 +657,7 @@ function formatHudNoteMarker(count: number): string {
 type GoalSubcommand = "set" | "show" | "pause" | "resume" | "drop" | "budget";
 
 const GOAL_SUBCOMMANDS = new Set<GoalSubcommand>(["set", "show", "pause", "resume", "drop", "budget"]);
-const PLAN_KEEP_CONTEXT_OPTION_INDEX = 2;
 const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
-const PLAN_SAVE_AND_QUIT_OPTION = "Save and quit";
 const PLAN_SAVE_TITLE_LINE_LIMIT = 6;
 
 const CFG_APPROVE_SESSION = "Always for this session";
@@ -732,6 +744,8 @@ class AnchoredLiveContainer extends Container {}
 
 /** An empty HUD slot: the terminal owns spacing, so nothing is described. */
 const EMPTY_HUD: NativeNode = col([]);
+/** The activity line with nothing in it: on a tray host it stays while the tray has cards, the host's seat for them. */
+const EMPTY_ACTIVITY: NativeNode = row([], { role: "omp.hud.activity", align: "center", gap: "sm" });
 
 /** Renders through an ANSI component and describes as a node built alongside it. */
 class DescribedComponent implements Component {
@@ -780,8 +794,9 @@ class HudPillsRow implements Component {
 		return [];
 	}
 
-	describe(): NativeNode {
-		return this.mode.describeHudPills();
+	/** A host with the tray shows running work there instead: the row describes nothing. */
+	describe(cx: DescribeContext): NativeNode {
+		return cx.feature("tray") ? TRAY_HOST_HUD : this.mode.describeHudPills();
 	}
 
 	/** A click on the agents segment opens the agent hub; one on the jobs segment, the jobs sheet. */
@@ -791,6 +806,9 @@ class HudPillsRow implements Component {
 		else if (event.act === "jobs.open") this.mode.showJobsSheet();
 	}
 }
+
+/** The HUD pills row on a host that draws the tray: hidden, as with nothing running. */
+const TRAY_HOST_HUD: NativeNode = row([], { role: "omp.hud", justify: "end", hidden: true });
 
 /** A described counter segment with the count it shows, so an unchanged count reuses the node. */
 interface RunningSegment {
@@ -957,6 +975,14 @@ function describeRunningSegment(spec: RunningSegmentSpec, running: number): Nati
 		],
 		spec.key,
 	);
+}
+
+/** The ask waiting above the composer; in rows a blank row parts it from the working row under it. */
+class AskContainer extends AnchoredLiveContainer {
+	override render(width: number): readonly string[] {
+		const lines = super.render(width);
+		return lines.length > 0 ? [...lines, ""] : lines;
+	}
 }
 
 class StatusHudContainer extends AnchoredLiveContainer {
@@ -1393,6 +1419,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	chatContainer: TranscriptContainer;
 	/** `!`/`$` runs started while the agent streams; {@link flushPendingBashComponents} moves them into the transcript. */
 	pendingShellContainer: Container;
+	askContainer: Container;
 	pendingMessagesContainer: Container;
 	/** Judge-batch and automatic-download progress rows above the working line. */
 	progressHudContainer: Container;
@@ -1523,6 +1550,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	pendingPythonComponents: PresentedBlock<EvalExecutionComponent>[] = [];
 	pythonComponent: EvalExecutionComponent | undefined = undefined;
 	isPythonMode = false;
+	isBtwMode = false;
 	streamingComponent: AssistantMessageComponent | undefined = undefined;
 	streamingMessage: AssistantMessage | undefined = undefined;
 	lastAssistantUsage: Usage | undefined = undefined;
@@ -1585,7 +1613,16 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * loader recreated by a focus switch keeps the real elapsed time.
 	 */
 	#workingStartedAt = 0;
-	#statusHudNative: { children: readonly Component[]; todo: NativeNode | undefined; node: NativeNode } | undefined;
+	#statusHudNative:
+		| {
+				children: readonly Component[];
+				todo: NativeNode | undefined;
+				caption: NativeNode | undefined;
+				/** The tray had cards: an otherwise empty line stays as their seat. */
+				seat: boolean;
+				node: NativeNode;
+		  }
+		| undefined;
 	/**
 	 * The todo HUD, rebuilt with its ANSI rows; undefined while hidden. A
 	 * terminal with `checklist` gets the whole plan as a HUD checklist, others
@@ -1672,11 +1709,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 		);
 		this.#syncJobWidgetsListener();
-		// A subagent's task job draws a widget too, though it counts as no
-		// background job: its widget alone keeps the segment and hover card up.
-		const widgets = this.session.getRunningJobWidgets();
-		const runningJobs = Math.max(this.statusLine.runningBackgroundJobCount(), widgets.length);
-		this.#jobsSegment = jobsSegment(this.#jobsSegment, runningJobs, widgets);
+		// Background jobs only: a job that runs an agent is that agent's, so
+		// neither it nor its widget counts here; the agents segment has it.
+		const background = new Set<string>();
+		for (const job of this.session.getAsyncJobSnapshot()?.running ?? []) {
+			if (job.agentId === undefined) background.add(job.id);
+		}
+		const widgets = this.session.getRunningJobWidgets().filter(entry => background.has(entry.id));
+		this.#jobsSegment = jobsSegment(this.#jobsSegment, background.size, widgets);
 		const segments: NativeChild[] = [];
 		if (this.#agentsSegment) segments.push(this.#agentsSegment.node);
 		if (this.#jobsSegment) segments.push(this.#jobsSegment.node);
@@ -1697,20 +1737,118 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * retry and compaction loaders describe themselves as the working row;
 	 * other rows describe themselves) in an `omp.hud.status` column, then the
 	 * todo HUD, so the todo holds its place as the turn starts and ends.
-	 * Nothing to show describes the empty HUD.
+	 * Nothing to show describes the empty HUD. On a host with the tray, the
+	 * row is the tray's header: while the main agent is idle its caption
+	 * stands in for the status rows, and while the tray has cards the line
+	 * stays, empty if need be, as the seat the host draws them from.
 	 */
 	describeStatusHud(children: readonly Component[], cx: DescribeContext): NativeNode {
 		const hud = this.#todoHudNative;
 		const todo = hud && (cx.supports("checklist") ? hud.checklist : hud.fallback);
+		const onTrayHost = cx.feature("tray");
+		if (onTrayHost) {
+			this.#tray.setOnHost(true);
+			this.#syncTrayJobsListener();
+		} else if (this.#tray.onHost) {
+			this.#releaseTray();
+		}
+		const caption = this.#tray.caption(children.length === 0);
+		const seat = onTrayHost && this.#tray.items.length > 0;
 		const memo = this.#statusHudNative;
-		if (memo && memo.todo === todo && sameItems(memo.children, children)) return memo.node;
+		if (
+			memo &&
+			memo.todo === todo &&
+			memo.caption === caption &&
+			memo.seat === seat &&
+			sameItems(memo.children, children)
+		)
+			return memo.node;
 		const parts: NativeChild[] = [];
 		if (children.length > 0) parts.push(node("col", { role: "omp.hud.status" }, children.slice(), "status"));
+		else if (caption) parts.push(caption);
 		if (todo) parts.push(todo);
 		const described =
-			parts.length === 0 ? EMPTY_HUD : row(parts, { role: "omp.hud.activity", align: "center", gap: "sm" });
-		this.#statusHudNative = { children: children.slice(), todo, node: described };
+			parts.length > 0
+				? row(parts, { role: "omp.hud.activity", align: "center", gap: "sm" })
+				: seat
+					? EMPTY_ACTIVITY
+					: EMPTY_HUD;
+		this.#statusHudNative = { children: children.slice(), todo, caption, seat, node: described };
 		return described;
+	}
+	/**
+	 * Repaint the tray when a job starts, reports output, settles, or has its
+	 * result consumed, following the root job manager. Only a host with the
+	 * tray subscribes.
+	 */
+	#syncTrayJobsListener(): void {
+		this.#syncJobWidgetsListener();
+		const manager = this.session.asyncJobManager;
+		if (this.#trayJobsListener?.manager === manager) return;
+		this.#trayJobsListener?.unsubscribe();
+		this.#trayJobsListener = manager
+			? { manager, unsubscribe: manager.onJobsChanged(() => this.#scheduleTraySync()) }
+			: undefined;
+	}
+	/** Coalesce tray repaints (as the observer's), repainting only when a card or the closer look changed. */
+	#scheduleTraySync(): void {
+		if (this.#traySyncTimer) return;
+		this.#traySyncTimer = setTimeout(() => {
+			this.#traySyncTimer = undefined;
+			if (this.#trayShown() && this.#tray.refresh()) this.ui.requestRender();
+		}, SUBAGENT_OBSERVER_UI_COALESCE_MS);
+		this.#traySyncTimer.unref?.();
+	}
+	/** Whether a native host with the tray is drawing this session. */
+	#trayShown(): boolean {
+		return this.#tray.onHost && isNativeRendering();
+	}
+	/** Off a tray host: no job listener, no pending tray repaint. */
+	#releaseTray(): void {
+		this.#tray.setOnHost(false);
+		this.#trayJobsListener?.unsubscribe();
+		this.#trayJobsListener = undefined;
+		if (this.#traySyncTimer) {
+			clearTimeout(this.#traySyncTimer);
+			this.#traySyncTimer = undefined;
+		}
+	}
+	/**
+	 * Follow the main session's turn and calls for the tray's `main` prop, repainting
+	 * a tray host the moment it flips (a `wait` starting or ending, the turn yielding).
+	 */
+	#followTrayMain(event: AgentSessionEvent): void {
+		switch (event.type) {
+			case "agent_start":
+			case "agent_pause":
+			case "agent_end":
+			case "tool_execution_start":
+			case "tool_execution_end":
+				if (
+					this.#trayMain.handle(event, this.session.isRunActive, id =>
+						runsInlineAgent(this.#observerRegistry.getSessions(), id),
+					) &&
+					this.#trayShown() &&
+					this.#tray.mainChanged()
+				)
+					this.ui.requestRender();
+		}
+	}
+	/** Stop agent `id` for good from the tray, as cancelling its task job from the jobs sheet does. */
+	#stopTrayAgent(id: string): void {
+		const remote = this.collabGuest?.hubRemote;
+		if (remote) {
+			remote.kill(id);
+			return;
+		}
+		const scope = { agentRegistry: AgentRegistry.global(), agentLifecycle: () => AgentLifecycleManager.global() };
+		stopAgentRun(scope, this.session.asyncJobManager, id).then(
+			outcome => {
+				if (outcome.status !== "cancelled") this.showWarning(outcome.message);
+				this.ui.requestRender();
+			},
+			(error: unknown) => this.showError(error instanceof Error ? error.message : String(error)),
+		);
 	}
 	unsubscribe?: () => void;
 	onInputCallback?: (input: SubmittedUserInput) => void;
@@ -1810,7 +1948,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Header components below the config warnings + welcome (the startup changelog), retained so a live config-warning change can rebuild the header (#10048). */
 	#headerAfter: readonly Component[] = [];
 	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[]; registered: string[] } | undefined;
-	#goalModePreviousTools: string[] | undefined;
+	/** True while goal mode owns the `goal` tool in the live roster; exit strips only that tool. */
+	#goalToolAddedByMode = false;
 	// True from `/guided-goal` kickoff until the interview ends: a goal record
 	// appears, a turn makes tool calls (the interview itself is tool-free, so
 	// tool use means it was abandoned for real work), the kickoff fails, or the
@@ -1862,6 +2001,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				remote?: { choice: PlanReviewChoice; feedback?: string };
 				/** Applies a remote tier pick to the review's slider selection; undefined when the slider is hidden. */
 				selectTier?: (role: string) => boolean;
+				/** A remote Save: writes the plan to its default file name; the review stays open. */
+				save: () => void;
 		  }
 		| undefined;
 	/** Serializable review annotations keyed by the resolved plan file path. */
@@ -1966,7 +2107,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.session.sessionName;
 	}
 	focusAgentSession(id: string): Promise<void> {
-		return this.#focusController.focusAgent(id);
+		// Viewing an agent may revive it, passing its registry status through `running`: the
+		// tray must not read that as work (cards would regroup, a quiet tray would wake).
+		// Off a tray host, or for an agent already at work, it is simply viewed.
+		if (!this.#trayShown() || AgentRegistry.global().get(id)?.status === "running") {
+			return this.#focusController.focusAgent(id);
+		}
+		this.#trayReviving.add(id);
+		return this.#focusController.focusAgent(id).finally(() => {
+			this.#trayReviving.delete(id);
+			if (this.#trayShown()) this.#scheduleTraySync();
+		});
 	}
 	focusParentSession(): Promise<void> {
 		return this.#focusController.focusParent();
@@ -2081,6 +2232,39 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** A scrollback replay is rendering. */
 	#replaying = false;
 	#observerUiSyncTimer?: NodeJS.Timeout;
+	/** The tray's state and dock component; idle unless a native host advertises `tray`. */
+	readonly #tray: Tray = new Tray({
+		input: () =>
+			collectTrayInput({
+				observers: this.#observerRegistry,
+				refs: getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global()).list(),
+				manager: this.session.asyncJobManager,
+				snapshot: () => this.session.getAsyncJobSnapshot({ recentLimit: Number.POSITIVE_INFINITY }),
+				irc: IrcBus.existing(),
+				showAgents: cfgDisplayPinnedAgents.get(settings) !== "off",
+				canFocus: this.collabGuest === undefined,
+				reviving: this.#trayReviving,
+			}),
+		main: () => this.#trayMain.state(id => runsInlineAgent(this.#observerRegistry.getSessions(), id)),
+		focusAgent: id => {
+			this.focusAgentSession(id).catch((error: unknown) =>
+				this.showError(error instanceof Error ? error.message : String(error)),
+			);
+		},
+		showJobsSheet: selected => this.showJobsSheet(selected),
+		stopAgent: id => this.#stopTrayAgent(id),
+		cancelJob: id => {
+			this.session.cancelAsyncJob(id);
+		},
+		requestRender: () => this.ui.requestRender(),
+	});
+	/** Agents being opened for viewing; see `TrayInput.reviving`. */
+	readonly #trayReviving = new Set<string>();
+	/** What the main agent is doing, as the tray's `main` prop says; follows the main session's events. */
+	readonly #trayMain = new TrayMainActivity(false);
+	/** The root job manager the tray repaints on, and how to stop listening to it. */
+	#trayJobsListener: { manager: AsyncJobManagerApi; unsubscribe: () => void } | undefined;
+	#traySyncTimer?: NodeJS.Timeout;
 	/** Repaints the subagent HUD so live-preview elapsed markers advance between progress events. */
 	#subagentPreviewTickTimer?: NodeJS.Timeout;
 	/** Active subagent descriptions the todo HUD last rendered with (joined); see #flushObserverUiSync. */
@@ -2137,6 +2321,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor = this.composer.editor;
 		this.editor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		this.editor.placeholder = () => this.#composerHint();
+		this.editor.faint = () => this.#extensionUiController.askHoldsKeys();
+		this.editor.onUpFromTop = () => this.#extensionUiController.focusAsk();
 		this.editor.predictions = () => this.#eventController.composerPrediction.choices;
 		this.editor.onPredictionAccepted = index => this.#eventController.composerPrediction.accepted(index);
 		this.editor.onPredictionShown = () => this.#eventController.composerPrediction.shown();
@@ -2185,6 +2371,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		setMarkdownColorful(cfgTuiColorfulMarkdown.get(settings));
 		setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(settings));
 		setSvgFigureRendering(cfgTuiRenderSvg.get(settings));
+		this.#applyEmbedSetting();
 		this.#applyAutoGraphSetting();
 		this.#applyTextSizingSetting();
 		// Keep generic pi-tui renderers aligned with the coding-agent setting.
@@ -2218,10 +2405,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#eventBusUnsubscribers.push(
 			onNativeRenderingChange(() => {
 				if ((this.viewSession.extensionRunner?.getLinkSchemes().length ?? 0) > 0) this.#redrawExtensionLinks();
+				// Rows draw no tray: stop the work that feeds it until a tray host describes again.
+				if (!isNativeRendering()) this.#releaseTray();
 			}),
 		);
+		this.#eventBusUnsubscribers.push(() => {
+			this.#releaseTray();
+			this.#tray.dispose();
+		});
 		this.chatContainer = new TranscriptContainer();
 		this.pendingShellContainer = new AnchoredLiveContainer();
+		this.askContainer = new AskContainer();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.progressHudContainer = new AnchoredLiveContainer();
 		this.progressHudContainer.addChild(this.#judgmentBatchProgressHud);
@@ -2564,6 +2758,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				// Judge batches and automatic downloads stay editor-anchored and update
 				// independently of transcript output, directly above the working/throughput/title row.
 				this.progressHudContainer,
+				// The ask waiting for answers, over the working row and the composer, a blank row under it
+				// (natively it flows at the transcript's end).
+				this.askContainer,
 				// Working loader / transient status sits below the sticky todo + subagent
 				// HUDs, just above the editor's hook-widget top margin — so it reads next to
 				// the prompt while keeping the one-line gap above the editor (the band
@@ -2585,6 +2782,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// in. Classify every new root that can collapse on its own.
 				transientChrome: [
 					this.editorContainer,
+					this.askContainer,
 					this.attachmentChipsContainer,
 					this.reportContainer,
 					this.pendingShellContainer,
@@ -2609,9 +2807,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				// their current height so streamed rows reach native history as
 				// they leave the screen.
 				billedChrome: [this.statusContainer, this.editorTopGapContainer],
-				// Natively the HUD pills lead the dock, queued messages sit between
-				// the working row and the composer, and the attachment chips live
-				// inside the composer.
+				// Natively the HUD pills lead the dock, aboveEditor hook widgets sit
+				// over the working row (the tray's header, so nothing comes between
+				// the two), queued messages sit between the working row and the
+				// composer, and the attachment chips live inside the composer. The
+				// terminal spaces the dock itself, so the editor's top margin stays out.
 				nativeDock: [
 					new HudPillsRow(this),
 					this.btwContainer,
@@ -2621,16 +2821,17 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.modelCycleContainer,
 					this.deferredCommandContainer,
 					this.progressHudContainer,
-					this.statusContainer,
-					this.pendingMessagesContainer,
-					this.editorTopGapContainer,
 					this.hookWidgetContainerAbove,
+					this.statusContainer,
+					{ component: this.#tray, feature: "tray" },
+					this.pendingMessagesContainer,
 					this.editorContainer,
 					this.hookWidgetContainerBelow,
 				],
 				// Deferred shell runs are transcript output: natively they flow at its
 				// end, where they stay when they move in, not pinned over the composer.
-				nativeTail: [this.pendingShellContainer],
+				// An ask waiting for answers follows them, right above the composer.
+				nativeTail: [this.pendingShellContainer, this.askContainer],
 			},
 		);
 		this.ui.setFocus(this.editor);
@@ -2926,6 +3127,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.#eventBusUnsubscribers.push(
 			this.session.subscribe(event => {
+				this.#followTrayMain(event);
 				if (event.type === "model_changed") {
 					this.#scheduleComposerStatusPersist();
 					this.session.prewarmModelConnection();
@@ -4227,6 +4429,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 	}
 
+	/** Lend replies' `<img>` and `<iframe>` tags the session's directory and the headless browser; off, they stay Markdown. */
+	#applyEmbedSetting(): void {
+		setEmbedHost(
+			cfgTuiRenderEmbeds.get(this.settings) ? { cwd: () => this.sessionManager.getCwd(), capturePage } : undefined,
+		);
+	}
+
 	/**
 	 * Apply live UI side effects for settings changed through any path (`/settings`,
 	 * `cfg://`, `settings.set()`, on-disk reload). One coalesced {@link cfgLiveUiSettings}
@@ -4358,6 +4567,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (any("tui.renderSvg")) {
 			setSvgFigureRendering(cfgTuiRenderSvg.get(this.settings));
+			rebuildChat = true;
+		}
+		if (any("tui.renderEmbeds")) {
+			this.#applyEmbedSetting();
 			rebuildChat = true;
 		}
 		// Components take the extension text renderers when built; the rebuild keeps the streaming
@@ -4781,6 +4994,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.editor.borderColor = theme.getBashModeBorderColor();
 		} else if (this.isPythonMode) {
 			this.editor.borderColor = theme.getPythonModeBorderColor();
+		} else if (this.isBtwMode) {
+			this.editor.borderColor = theme.getBtwModeBorderColor();
 		} else if (vimMode === "visual" || vimMode === "visual-line") {
 			this.editor.borderColor = (str: string) => theme.fg("warning", str);
 		} else if (vimMode === "normal" || vimMode === "replace") {
@@ -4880,7 +5095,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				? { kind: "bash", excluded: draft.startsWith("!!") }
 				: this.isPythonMode
 					? { kind: "python", excluded: draft.startsWith("$$") }
-					: undefined,
+					: this.isBtwMode
+						? { kind: "btw", excluded: false }
+						: undefined,
 			thinking: thinkingLevelWord(this.viewSession),
 			thinkingInModel: cfgStatusLineCompactThinkingLevel.get(settings),
 			rate: this.#nativeTokenRate(),
@@ -4892,6 +5109,8 @@ export class InteractiveMode implements InteractiveModeContext {
 						: dictation
 					: undefined,
 			viewing: this.#viewingLineage(),
+			btw: this.#btwController.isFocused(),
+			ask: this.#extensionUiController.composerAsk(),
 			title: this.sessionManager.getSessionName(),
 		};
 	}
@@ -4914,6 +5133,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Placeholder for the empty composer; see `COMPOSER_HINTS` for the registered hints. */
 	#composerHint(): string | undefined {
+		// An ask above holding the keys: its key hints; the keys here: what typing does.
+		const ask = this.#extensionUiController.composerAsk();
+		if (ask) return this.#extensionUiController.askKeyHints() ?? ASK_COMPOSER_HINT;
 		return resolveComposerHint({
 			runningAgents: this.#runningSubagentCount,
 			focusedOnAgent: this.focusedAgentId !== undefined,
@@ -5044,6 +5266,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.pendingTools.set(id, component);
 		}
 		this.#eventController.reconcileReadGroupAfterRebuild();
+		void this.#btwController.placeNotes();
 		// During the pre-streaming window — after `startPendingSubmission` has
 		// optimistically rendered the user's message but before the user
 		// `message_start` event lands it in `session` entries — any rebuild
@@ -5216,7 +5439,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		const descriptionsChanged = this.#getActiveSubagentDescriptions().join("\n") !== this.#todoHudSubagentKey;
 		if (descriptionsChanged) this.#renderTodoList();
 		const hudChanged = this.#renderSubagentList();
-		if (badgeChanged || descriptionsChanged || hudChanged) this.ui.requestRender();
+		const trayChanged = this.#trayShown() && this.#tray.refresh();
+		if (badgeChanged || descriptionsChanged || hudChanged || trayChanged) this.ui.requestRender();
 	}
 
 	#cancelObserverUiSyncTimer(): void {
@@ -5864,13 +6088,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		if (this.goalModeEnabled || this.goalModePaused) {
-			if (this.#goalModePreviousTools !== undefined) {
-				await this.session.setActiveToolsByName(this.#goalModePreviousTools);
-			}
+			await this.#removeGoalToolPreservingRoster();
 			this.session.setGoalModeState(undefined);
 			this.goalModeEnabled = false;
 			this.goalModePaused = false;
-			this.#goalModePreviousTools = undefined;
+			this.#goalToolAddedByMode = false;
 			this.#pendingGoalContinuationTurns = 0;
 			this.#previousGoalContinuationActivity = undefined;
 			this.#goalSuppressNextContinuation = false;
@@ -5956,9 +6178,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			// sdk.ts excludes "goal" from the initial active tool set unconditionally.
 			// Re-add it now so the agent can call resume, complete, or drop on this goal.
 			if (restored?.goal) {
-				const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
-				this.#goalModePreviousTools = previousTools;
-				await this.session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
+				const enabledTools = this.session.getEnabledToolNames();
+				if (!enabledTools.includes("goal")) this.#goalToolAddedByMode = true;
+				await this.session.setActiveToolsByName([...new Set([...enabledTools, "goal"])]);
 			}
 			this.#updateGoalModeStatus();
 			return;
@@ -6271,9 +6493,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit vibe mode first.");
 			return;
 		}
-		const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
-		const goalTools = [...new Set([...previousTools, "goal"])];
-		this.#goalModePreviousTools = previousTools;
+		const enabledTools = this.session.getEnabledToolNames();
+		const goalTools = [...new Set([...enabledTools, "goal"])];
+		const ownedGoalTool = this.#goalToolAddedByMode;
+		if (!enabledTools.includes("goal")) this.#goalToolAddedByMode = true;
 		let state: GoalModeState | undefined;
 		try {
 			state = options.resume
@@ -6284,7 +6507,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					});
 			await this.session.setActiveToolsByName(goalTools);
 		} catch (error) {
-			this.#goalModePreviousTools = undefined;
+			this.#goalToolAddedByMode = ownedGoalTool;
 			// The runtime already journaled the goal; without its tool it must not
 			// stay active, or every later entry is refused against a stuck goal.
 			if (state) {
@@ -6308,18 +6531,24 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	/** Undo only goal mode's own tool change; tools registered or enabled after entry stay live. */
+	async #removeGoalToolPreservingRoster(): Promise<void> {
+		if (!this.#goalToolAddedByMode) return;
+		const liveTools = this.session.getEnabledToolNames();
+		if (liveTools.includes("goal")) {
+			await this.session.setActiveToolsByName(liveTools.filter(name => name !== "goal"));
+		}
+	}
+
 	async #exitGoalMode(options?: {
 		silent?: boolean;
 		paused?: boolean;
 		reason?: "completed" | "paused" | "dropped";
 	}): Promise<void> {
 		using _hold = this.#holdModeChanges();
-		const previousTools = this.#goalModePreviousTools;
 		// Not gated on goalModeEnabled: a pause's goal_updated clears that flag
 		// before this runs, which used to leave the goal tool active.
-		if (previousTools) {
-			await this.session.setActiveToolsByName(previousTools);
-		}
+		await this.#removeGoalToolPreservingRoster();
 		const currentState = this.session.getGoalModeState();
 		if (options?.reason === "completed") {
 			this.session.setGoalModeState(undefined);
@@ -6333,7 +6562,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.goalModeEnabled = false;
 		this.goalModePaused = options?.paused ?? false;
-		this.#goalModePreviousTools = undefined;
+		this.#goalToolAddedByMode = false;
 		this.#pendingGoalContinuationTurns = 0;
 		this.#previousGoalContinuationActivity = undefined;
 		this.#goalSuppressNextContinuation = false;
@@ -6395,13 +6624,21 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	/**
+	 * Show the plan review; resolves with the picked choice id (an approval choice's,
+	 * or `dialogOptions.refine.id`), or undefined when cancelled. Save runs
+	 * `dialogOptions.onSave` and leaves the review open.
+	 */
 	showPlanReview(
 		planContent: string,
 		title: string,
-		options: string[],
+		options: readonly PlanReviewOverlayChoice[],
 		dialogOptions?: {
 			helpText?: string;
-			disabledIndices?: number[];
+			/** Refine, offered while the plan has feedback. */
+			refine?: { id: string; label: string };
+			/** Save with the overlay's current plan text; the review stays open. */
+			onSave?: (content: string) => void;
 			onExternalEditor?: () => void;
 			onPlanEdited?: (content: string) => void;
 			onFeedbackChange?: (feedback: string) => void;
@@ -6440,17 +6677,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			{
 				promptTitle: title,
 				options,
-				disabledIndices: dialogOptions?.disabledIndices,
+				refine: dialogOptions?.refine,
 				helpText: dialogOptions?.helpText,
 				initialIndex: dialogOptions?.initialIndex,
 				slider: extra?.slider,
 				externalEditorLabel: appKey(this.keybindings, "app.editor.external") || undefined,
-				externalEditorName: getEditorName(),
 				annotationState: dialogOptions?.annotationState,
 			},
 			{
 				onPick: choice => finish(choice),
 				onCancel: () => finish(undefined),
+				onSave: dialogOptions?.onSave,
 				onCopyPlan: content => void this.#copyPlanToClipboard(content),
 				onExternalEditor: dialogOptions?.onExternalEditor,
 				onAnnotationExternalEditor: (draft, commit) => void this.#openPlanAnnotationInExternalEditor(draft, commit),
@@ -6496,7 +6733,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * Answers the open plan review as if the operator picked `choice`: backs `ctx.resolvePlanReview`.
 	 * Refine feedback is sent verbatim; it only has to be non-blank. `input.role` moves an
 	 * approval's execution-tier selection before the pick; it is refused when it names no tier
-	 * or accompanies a non-approval choice.
+	 * or accompanies a non-approval choice. `save` writes the plan to its default file name and
+	 * leaves the review open, still answerable.
 	 */
 	resolvePlanReview(
 		reviewId: string,
@@ -6514,8 +6752,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			const approves = choice === "execute" || choice === "compact" || choice === "keep";
 			if (!approves || !pending.selectTier?.(input.role)) return false;
 		}
+		if (choice === "save") {
+			pending.save();
+			return true;
+		}
 		pending.remote = { choice, feedback };
-		if (pick(option.label)) return true;
+		if (pick(choice)) return true;
 		pending.remote = undefined;
 		return false;
 	}
@@ -6529,13 +6771,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.session.getContextUsage();
 	}
 
-	#formatKeepContextLabel(contextUsage: ContextUsage | undefined): string {
-		if (!contextUsage) {
-			return "Approve and keep context";
-		}
+	/** The context the keep-context approval carries over (`~378k / 1m`), when known. */
+	#formatKeepContextUsage(contextUsage: ContextUsage | undefined): string | undefined {
+		if (!contextUsage) return undefined;
 		const tokens = formatContextTokenCount(contextUsage.tokens);
 		const contextWindow = formatContextTokenCount(contextUsage.contextWindow);
-		return `Approve and keep context (~${tokens} / ${contextWindow})`;
+		return `~${tokens} / ${contextWindow}`;
 	}
 
 	#isKeepContextDisabled(contextUsage: ContextUsage | undefined): boolean {
@@ -6665,13 +6906,21 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	async #savePlanAndQuit(
-		planContent: string,
-		title: string,
-		annotationStateKey: string,
-		presetPath?: string,
-	): Promise<void> {
-		const selectedPath = presetPath ?? (await this.#promptPlanSavePath(planContent, title));
+	/**
+	 * The plan review's Save: write `planContent` to `presetPath`, or to a path the
+	 * operator picks (prefilled), and report it. The review stays open: its focus
+	 * comes back after the path prompt.
+	 */
+	async #savePlan(planContent: string, title: string, presetPath?: string): Promise<void> {
+		let selectedPath = presetPath;
+		if (selectedPath === undefined) {
+			try {
+				selectedPath = await this.#promptPlanSavePath(planContent, title);
+			} finally {
+				if (this.#planReviewOverlay) this.ui.setFocus(this.#planReviewOverlay);
+				this.ui.requestRender();
+			}
+		}
 		if (!selectedPath) return;
 
 		let destination: string;
@@ -6689,28 +6938,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 			return;
 		}
-		try {
-			await this.#exitPlanMode({ silent: true });
-		} catch (error) {
-			this.showError(
-				`Saved plan to ${shortenPath(destination)}, but could not exit plan mode: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
-			return;
-		}
-
-		this.#planReviewAnnotationState.delete(annotationStateKey);
-		try {
-			await this.handleClearCommand();
-			this.showStatus(`Saved plan to ${shortenPath(destination)}.`);
-		} catch (error) {
-			this.showError(
-				`Saved plan to ${shortenPath(destination)}, but could not start a new session: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
-		}
+		this.showStatus(`Saved plan to ${shortenPath(destination)}`);
 	}
 
 	async #openPlanInExternalEditor(planFilePath: string): Promise<void> {
@@ -7399,12 +7627,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 
 			// Expose the goal tool for the interview so the agent can finish by
-			// calling `goal create`. Record the pre-interview toolset first: the
+			// calling `goal create`. Remember that this mode added the tool: the
 			// tool-driven create flips goalModeEnabled via `goal_updated`, and the
-			// eventual goal exit restores this set (dropping the goal tool again).
+			// eventual goal exit drops only that tool from the live roster.
 			const enabledTools = this.session.getEnabledToolNames();
-			this.#goalModePreviousTools = enabledTools.filter(name => name !== "goal");
 			if (!enabledTools.includes("goal")) {
+				this.#goalToolAddedByMode = true;
 				await this.session.setActiveToolsByName([...enabledTools, "goal"]);
 			}
 			this.#guidedGoalInterviewActive = true;
@@ -7777,14 +8005,36 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		const contextUsage = this.#getPlanApprovalContextUsage();
-		const keepContextLabel = this.#formatKeepContextLabel(contextUsage);
+		const keepContextUsage = this.#formatKeepContextUsage(contextUsage);
 		const keepContextDisabled = this.#isKeepContextDisabled(contextUsage);
+		// The overlay offers Refine only while the plan has feedback; an extension may always refine
+		// with its own feedback, so the reported choices keep it.
 		const reviewOptions: PlanReviewOption[] = [
 			{ id: "execute", label: "Approve and execute", disabled: false },
 			{ id: "compact", label: "Approve and compact context", disabled: false },
-			{ id: "keep", label: keepContextLabel, disabled: keepContextDisabled },
+			{
+				id: "keep",
+				label: keepContextUsage ? `Approve and keep context (${keepContextUsage})` : "Approve and keep context",
+				disabled: keepContextDisabled,
+			},
 			{ id: "refine", label: "Refine plan", disabled: false },
-			{ id: "save", label: PLAN_SAVE_AND_QUIT_OPTION, disabled: false },
+			{ id: "save", label: "Save", disabled: false },
+		];
+		const approveChoices: PlanReviewOverlayChoice[] = [
+			{ id: "execute", label: "Approve and execute", detail: "Start fresh with just the plan" },
+			{
+				id: "compact",
+				label: "Approve and compact context",
+				detail: "Summarize this conversation, then execute",
+			},
+			{
+				id: "keep",
+				label: "Approve and keep context",
+				meta: keepContextUsage,
+				disabled: keepContextDisabled
+					? `Context is over ${PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT}% full`
+					: undefined,
+			},
 		];
 
 		// Model-tier slider: let the operator pick which configured role model
@@ -7840,8 +8090,22 @@ export class InteractiveMode implements InteractiveModeContext {
 				: undefined,
 		};
 		const reviewId = request.reviewId;
+		// Save writes the plan as it stands (in-overlay edits, else the file) and leaves the review open.
+		const savePlan = async (content: string | undefined, presetPath?: string): Promise<void> => {
+			try {
+				const latestPlanContent = content ?? editedContent ?? (await this.#readPlanFile(planFilePath));
+				if (latestPlanContent === null) {
+					this.showError(`Plan file not found at ${planFilePath}`);
+					return;
+				}
+				await this.#savePlan(latestPlanContent, details.title, presetPath);
+			} catch (error) {
+				this.showError(`Failed to save plan: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		};
 		this.#pendingPlanReview = {
 			request,
+			save: () => void savePlan(undefined, planSaveFileName(details.title)),
 			// Mirrors the slider's onChange for remote answers: a pick in `resolvePlanReview`
 			// moves the same `selectedTierIndex` the approval branch reads after the choice.
 			// Undefined when the slider is hidden — a lone tier is no selection, and pinning
@@ -7864,9 +8128,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		const choicePromise = this.showPlanReview(
 			planContent,
 			"Plan mode - next step",
-			reviewOptions.map(option => option.label),
+			approveChoices,
 			{
 				helpText,
+				refine: { id: "refine", label: "Refine plan" },
+				onSave: content => void savePlan(content),
 				onExternalEditor: () => void this.#openPlanInExternalEditor(planFilePath),
 				onPlanEdited: content => {
 					editedContent = content;
@@ -7880,14 +8146,13 @@ export class InteractiveMode implements InteractiveModeContext {
 					if (state.annotations.length > 0) this.#planReviewAnnotationState.set(annotationStateKey, state);
 					else this.#planReviewAnnotationState.delete(annotationStateKey);
 				},
-				disabledIndices: keepContextDisabled ? [PLAN_KEEP_CONTEXT_OPTION_INDEX] : undefined,
 				onClose: closedWith => {
 					if (!extensionRunner) return;
 					const resolved = {
 						type: "plan_review_resolved",
 						reviewId,
 						sessionId: reviewSessionId,
-						choice: reviewOptions.find(option => option.label === closedWith)?.id,
+						choice: reviewOptions.find(option => option.id === closedWith)?.id,
 						by: pending.remote ? "extension" : "local",
 					} as const;
 					void requestDelivered.promise.then(() => extensionRunner.emit(resolved));
@@ -7912,27 +8177,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		};
 
-		if (choice === PLAN_SAVE_AND_QUIT_OPTION) {
-			closePlanReview();
-			try {
-				const latestPlanContent = editedContent ?? (await this.#readPlanFile(planFilePath));
-				if (latestPlanContent === null) {
-					this.showError(`Plan file not found at ${planFilePath}`);
-					return;
-				}
-				await this.#savePlanAndQuit(
-					latestPlanContent,
-					details.title,
-					annotationStateKey,
-					remote?.choice === "save" ? planSaveFileName(details.title) : undefined,
-				);
-			} catch (error) {
-				this.showError(`Failed to save plan: ${error instanceof Error ? error.message : String(error)}`);
-			}
-			return;
-		}
-
-		if (choice === "Approve and execute" || choice === "Approve and compact context" || choice === keepContextLabel) {
+		if (choice === "execute" || choice === "compact" || choice === "keep") {
 			try {
 				// Prefer in-overlay edits (already in memory) over a disk re-read. The
 				// overlay mirrors edits as they happen, and approval awaits one final
@@ -7977,8 +8222,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				const executionDispatched = await this.#approvePlan(latestPlanContent, {
 					planFilePath,
 					title: details.title,
-					preserveContext: choice !== "Approve and execute",
-					compactBeforeExecute: choice === "Approve and compact context",
+					preserveContext: choice !== "execute",
+					compactBeforeExecute: choice === "compact",
 					executionModel,
 					reviewOwner: pending,
 				});
@@ -7992,20 +8237,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
-		if (choice === "Refine plan") {
+		if (choice === "refine") {
+			// Offered locally only with feedback; a remote refine brings its own (non-blank).
 			const refinement = remote?.choice === "refine" ? (remote.feedback ?? "") : feedback;
 			try {
-				if (refinement.trim()) {
-					if (this.onInputCallback) {
-						const input = this.startPendingSubmission({ text: refinement });
-						this.#planReviewAnnotationStateBySubmission.set(input, annotationStateKey);
-						this.onInputCallback(input);
-					} else {
-						await this.session.prompt(refinement);
-						this.#planReviewAnnotationState.delete(annotationStateKey);
-					}
+				if (this.onInputCallback) {
+					const input = this.startPendingSubmission({ text: refinement });
+					this.#planReviewAnnotationStateBySubmission.set(input, annotationStateKey);
+					this.onInputCallback(input);
 				} else {
-					this.showStatus("Refine plan: enter a follow-up prompt.");
+					await this.session.prompt(refinement);
+					this.#planReviewAnnotationState.delete(annotationStateKey);
 				}
 			} catch (error) {
 				this.showError(`Failed to refine plan: ${error instanceof Error ? error.message : String(error)}`);
@@ -8341,7 +8583,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Pass the profile explicitly: native exec does not inherit Bun's process.env updates.
 		const activeProfile = getActiveProfile();
 		const cmd = [
-			...resolveCliEntryCmd(),
+			...resolveRestartCmd(),
 			...restartArgv(
 				process.argv.slice(2),
 				sessionFile ? path.resolve(sessionFile) : undefined,
@@ -8353,7 +8595,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		await postmortem.drainStdout();
 		if (process.platform !== "win32") {
 			try {
-				execReplace(cmd); // never returns on success
+				const env: Record<string, string> = {};
+				for (const key in process.env) {
+					const value = process.env[key];
+					if (value !== undefined) env[key] = value;
+				}
+				execReplace(cmd[0], cmd, env, []); // never returns on success
 			} catch (err) {
 				process.stderr.write(`${chalk.red(`Restart exec failed: ${err instanceof Error ? err.message : err}`)}\n`);
 			}
@@ -8534,6 +8781,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.viewportRowsProvider = () => this.ui.terminal.rows;
 		nextEditor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		nextEditor.placeholder = () => this.#composerHint();
+		nextEditor.faint = () => this.#extensionUiController.askHoldsKeys();
+		nextEditor.onUpFromTop = () => this.#extensionUiController.focusAsk();
 		nextEditor.predictions = () => this.#eventController.composerPrediction.choices;
 		nextEditor.onPredictionAccepted = index => this.#eventController.composerPrediction.accepted(index);
 		nextEditor.onPredictionShown = () => this.#eventController.composerPrediction.shown();
@@ -8649,26 +8898,30 @@ export class InteractiveMode implements InteractiveModeContext {
 	 *
 	 * It lists the viewed session's jobs and its subagents' as a tree. A focused
 	 * subagent view opens it without the Cancel action: the view only watches
-	 * that agent, as `/jobs kill` stays main-session only.
+	 * that agent, as `/jobs kill` stays main-session only. `selected` opens it
+	 * on that job (a tray card's), when the sheet lists it.
 	 */
-	showJobsSheet(): void {
+	showJobsSheet(selected?: string): void {
 		if (this.#jobsSheetHandle) return;
 		const session = this.viewSession;
 		if (!session.getAsyncJobTree()) {
 			this.showWarning("Async background jobs are unavailable in this session.");
 			return;
 		}
-		const sheet = new JobsSheet({
-			load: () => session.getAsyncJobTree() ?? { running: [], recent: [] },
-			inspect: id => session.inspectAsyncJob(id),
-			cancel: this.focusedAgentId
-				? undefined
-				: id => {
-						session.cancelAsyncJob(id);
-						this.ui.requestRender();
-					},
-			close: () => this.#hideJobsSheet(),
-		});
+		const sheet = new JobsSheet(
+			{
+				load: () => session.getAsyncJobTree() ?? { running: [], recent: [] },
+				inspect: id => session.inspectAsyncJob(id),
+				cancel: this.focusedAgentId
+					? undefined
+					: id => {
+							session.cancelAsyncJob(id);
+							this.ui.requestRender();
+						},
+				close: () => this.#hideJobsSheet(),
+			},
+			{ selected },
+		);
 		this.#jobsSheetHandle = this.ui.showOverlay(sheet, { anchor: "center", width: "90%", maxHeight: "90%" });
 		this.#jobsSheetTimer = setInterval(() => this.ui.requestRender(), JOBS_SHEET_REFRESH_MS);
 		this.ui.setFocus(sheet);
@@ -9109,6 +9362,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#applyExtensionLinks();
 		this.#applyTranscriptPresenters();
 		await this.#uiHelpers.renderInitialMessages(options);
+		void this.#btwController.placeNotes();
 		this.syncRetryHintRow();
 		// A switch or tree move that replays the transcript strands a `/compact` queued for the old position.
 		this.#inputController.releaseStaleYieldCompaction();
@@ -9316,7 +9570,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		try {
 			if (
 				cfgWorktreeOnStart.get(this.settings) === "off" ||
-				!(await canAutoCreateWorktree(this.sessionManager.getCwd()))
+				!(await canAutoCreateWorktree(this.sessionManager.getCwd(), this.settings))
 			)
 				return;
 			if (
@@ -9484,6 +9738,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	showAgentHub(options?: AgentHubOpenOptions): void {
+		// The agents-hub key on a tray host: into the tray while it shows cards, else nothing, as
+		// the tray has no hub to fall back to. With its agents turned off, the key opens the hub.
+		if (options?.trayFirst && this.#trayShown()) {
+			if (this.#tray.focus() || cfgDisplayPinnedAgents.get(settings) !== "off") return;
+		}
 		this.#selectorController.showAgentHub(this.#observerRegistry, options);
 	}
 
@@ -9517,10 +9776,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		options?: Pick<CompactOptions, "internalGuidance" | "readerModel">,
 	): Promise<CompactionOutcome> {
 		return this.#commandController.handleCompactCommand(customInstructions, mode, beforeFlush, options);
-	}
-
-	handleHandoffCommand(customInstructions?: string): Promise<void> {
-		return this.#commandController.handleHandoffCommand(customInstructions);
 	}
 
 	handleShakeCommand(mode: ShakeMode): Promise<void> {
@@ -9703,6 +9958,18 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleBtwEscape(): boolean {
 		return this.#btwController.handleEscape();
+	}
+
+	focusAsk(): boolean {
+		return this.#extensionUiController.focusAsk();
+	}
+
+	get isBtwFocused(): boolean {
+		return this.#btwController.isFocused();
+	}
+
+	submitBtwFollowUp(question: string, images?: ImageContent[]): Promise<boolean> {
+		return this.#btwController.submitFollowUp(question, images);
 	}
 
 	canBranchBtw(): boolean {

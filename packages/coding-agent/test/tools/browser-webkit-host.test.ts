@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { TernError } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/wire";
 import { WebKitHost, WebKitUnavailableError } from "@oh-my-pi/pi-coding-agent/tools/browser/webkit/host";
+import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { createFakeHost, type FakeHost, isProcessAlive } from "./webkit-fake-host";
 
 let fake: FakeHost | undefined;
@@ -66,6 +67,47 @@ describe("WebKitHost", () => {
 
 		const absent = await WebKitHost.launch(`${fake.dir}/no-such-host`).catch((error: unknown) => error);
 		expect(absent).toBeInstanceOf(WebKitUnavailableError);
+	});
+
+	it("waits for a host that greets after a socket peer's limit, as on a first launch on macOS", async () => {
+		fake = await createFakeHost("late-welcome");
+		vi.useFakeTimers();
+		try {
+			const launching = WebKitHost.launch(fake.executable);
+			vi.advanceTimersByTime(11_000);
+			await fake.welcome();
+			host = await launching;
+			expect(host.client.connected).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("reports a host that never answers the greeting as unavailable", async () => {
+		fake = await createFakeHost("late-welcome");
+		vi.useFakeTimers();
+		try {
+			const launching = WebKitHost.launch(fake.executable).catch((error: unknown) => error);
+			vi.advanceTimersByTime(60_000);
+			const failure = await launching;
+			expect(failure).toBeInstanceOf(WebKitUnavailableError);
+			expect((failure as Error).message).toContain("did not answer the greeting in time");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("stops a host still starting when its open is abandoned", async () => {
+		fake = await createFakeHost("late-welcome");
+		const controller = new AbortController();
+		const launching = WebKitHost.launch(fake.executable, undefined, controller.signal).catch(
+			(error: unknown) => error,
+		);
+		while (!(await fake.pid())) await Bun.sleep(10);
+		const pid = await fake.pid();
+		controller.abort();
+		expect(await launching).toBeInstanceOf(ToolAbortError);
+		expect(isProcessAlive(pid)).toBe(false);
 	});
 
 	it("kills a host that keeps running after its input closed", async () => {
