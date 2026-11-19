@@ -227,6 +227,28 @@ describe("AgentSession prewalk", () => {
 		},
 	);
 
+	it("rejects a different upstream for an existing arm without partially restarting", async () => {
+		const row = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!row) throw new Error("Expected bundled OpenRouter model");
+		const target = parseModelPattern("openrouter/z-ai/glm-4.7@cerebras", [row]).model;
+		const other = parseModelPattern("openrouter/z-ai/glm-4.7@sambanova", [row]).model;
+		if (!target || !other) throw new Error("Expected routed prewalk models");
+		const created = createLifecycleSession([], { target });
+		const active = created.session.getPrewalkState();
+		const notices: string[] = [];
+		created.session.subscribe(event => {
+			if (event.type === "notice" && event.source === "prewalk") notices.push(event.message);
+		});
+
+		expect(created.session.armPrewalk({ ...target }, Effort.Low)).toBe(true);
+		expect(created.session.armPrewalk(other, Effort.Low)).toBe(false);
+		expect(notices.at(-1)).toContain("@cerebras");
+		expect(await created.session.restartPrewalk(other, Effort.Medium, other, Effort.Low)).toBe("rejected");
+		expect(created.session.getPrewalkState()).toBe(active);
+		expect(created.session.model).toBe(created.primary);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.High);
+	});
+
 	it("/new restores the previous prewalk source and effort, then requires a fresh todo before handoff", async () => {
 		const created = createLifecycleSession([
 			toolCall("old-todo", "todo"),
@@ -414,11 +436,14 @@ describe("AgentSession prewalk", () => {
 		expect(manager.getLastModelChangeRole({ skipEphemeral: true })).toBe("slow");
 	});
 
-	it("keeps the arm when a session with a recorded handoff resumes on a different model", () => {
-		const target = modelOrThrow("claude-sonnet-4-6");
+	it("keeps the arm when a literal model ID looks like the recorded pin", () => {
+		const row = getBundledModel("openrouter", "z-ai/glm-4.7")!;
+		const selector = "openrouter/z-ai/glm-4.7@sambanova";
+		const target = parseModelPattern(selector, [row]).model!;
+		const literal = { ...row, id: `${row.id}@sambanova` };
 		const manager = SessionManager.inMemory(tempDir.path());
-		manager.appendModelChange(`${target.provider}/${target.id}`, "prewalk");
-		const created = createLifecycleSession([], { sessionManager: manager, target });
+		manager.appendModelChange(selector, "prewalk");
+		const created = createLifecycleSession([], { sessionManager: manager, primary: literal, target });
 
 		expect(created.session.model?.id).toBe(created.primary.id);
 		expect(created.session.getPrewalkState()?.target.id).toBe(target.id);

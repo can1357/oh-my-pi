@@ -33,7 +33,9 @@ import {
 	resolveProviderModelReference,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 
 // Mock models for testing
 const mockModels: Model<"anthropic-messages">[] = [
@@ -1545,7 +1547,7 @@ describe("resolveExactModelIdentity", () => {
 describe("resolveSessionModelSelector", () => {
 	const registryFor = (models: Model<Api>[], authenticated = true) =>
 		({
-			find: (provider: string, id: string) => models.find(model => model.provider === provider && model.id === id),
+			find: (provider: string, id: string) => resolveProviderModelReference(provider, id, models),
 			hasConfiguredAuth: () => authenticated,
 		}) as unknown as Parameters<typeof resolveSessionModelSelector>[0];
 
@@ -1559,26 +1561,92 @@ describe("resolveSessionModelSelector", () => {
 		expect(restored?.thinkingLevel).toBe(thinking);
 	});
 
-	test("restores a bundled colon-containing model ID with routing and thinking", () => {
-		const model = getBundledModel("openrouter", "qwen/qwen3-coder:exacto");
-		if (!model) throw new Error("Expected bundled OpenRouter Qwen3 Coder Exacto model");
+	test("restores the wire model and pin separately for an OpenRouter colon variant", async () => {
+		const auth = await AuthStorage.create(":memory:");
+		try {
+			auth.keys.setRuntime("openrouter", "test-key");
+			const registry = new ModelRegistry(auth, undefined, {
+				settings: Settings.isolated(),
+				ignoreLocalModelConfig: true,
+				cacheDbPath: ":memory:",
+			});
+			const selected = parseModelPattern(
+				"openrouter/qwen/qwen3-coder@cerebras:exacto",
+				registry.getProviderModels("openrouter"),
+			);
+			const saved = formatModelStringWithRouting(selected.model!);
+			const restored = resolveSessionModelSelector(registry, `${saved}:high`);
+			expect(restored?.model.id).toBe("qwen/qwen3-coder:exacto");
+			expect(restored?.model.compat).toMatchObject({ openRouterRouting: { only: ["cerebras"] } });
+			expect(restored?.thinkingLevel).toBe(Effort.High);
+		} finally {
+			auth.close();
+		}
+	});
 
+	test("preserves configured gateway caching and order when restoring the same pin", () => {
+		const caching = { caching: "auto", cacheTtl: "1h", cacheAnchorItems: 2 } as const;
+		const order = ["anthropic"];
+		const model = buildModel({
+			...mockOpenRouterModels[2],
+			api: "openai-completions",
+			provider: "vercel-ai-gateway",
+			baseUrl: "https://ai-gateway.vercel.sh/v1",
+			compat: { vercelGatewayRouting: { only: ["anthropic"], order, ...caching } },
+		});
+		const registry = registryFor([model]);
+		const restored = resolveSessionModelSelector(registry, `vercel-ai-gateway/${model.id}@anthropic`);
+		expect(restored?.model.compat).toMatchObject({ vercelGatewayRouting: { only: ["anthropic"], order, ...caching } });
+	});
+
+	test("does not strip a literal thinking suffix before a saved pin", () => {
+		const model = { ...mockOpenRouterModels[2], id: "test/model:max" };
 		const restored = resolveSessionModelSelector(
-			registryFor([model]),
-			"openrouter/qwen/qwen3-coder:exacto@cerebras:high",
+			registryFor([{ ...model, id: "test/model" }, model]),
+			`openrouter/${model.id}@cerebras:high`,
 		);
-		expect(restored?.model && formatModelStringWithRouting(restored.model)).toBe(
-			"openrouter/qwen/qwen3-coder:exacto@cerebras",
-		);
+		expect(restored?.model.id).toBe(model.id);
+		expect(restored?.model.compat).toMatchObject({ openRouterRouting: { only: ["cerebras"] } });
 		expect(restored?.thinkingLevel).toBe(Effort.High);
 	});
 
-	test("prefers a registered literal @ model ID over interpreting it as a route", () => {
-		const base = mockOpenRouterModels.find(model => model.id === "z-ai/glm-4.7")!;
+	test("restores a legacy pin before :max when only the literal :max ID exists", () => {
+		const model = { ...mockOpenRouterModels[2], id: "test/model:max" };
+		const restored = resolveSessionModelSelector(registryFor([model]), "openrouter/test/model@cerebras:max");
+		expect(restored?.model.id).toBe(model.id);
+		expect(restored?.model.compat).toMatchObject({ openRouterRouting: { only: ["cerebras"] } });
+		expect(restored?.thinkingLevel).toBeUndefined();
+	});
+
+	test.each([
+		[":free", ""],
+		["-20260101", ""],
+		[":free", "@cerebras"],
+	])("round-trips a variant of a literal OpenRouter @ ID (%s%s)", (variant, pin) => {
+		const base = mockOpenRouterModels[2];
+		const literal = { ...base, id: `${base.id}@preview` };
+		const models = [base, literal];
+		const wireId = `${literal.id}${variant}`;
+		const selector = `openrouter/${wireId}${pin}`;
+		const selected = parseModelPattern(selector, models).model!;
+		const saved = formatModelStringWithRouting(selected);
+		const restored = resolveSessionModelSelector(registryFor(models), saved)?.model;
+
+		expect(selected.id).toBe(wireId);
+		expect(saved).toBe(selector);
+		expect(restored?.id).toBe(wireId);
+		expect(restored && formatModelStringWithRouting(restored)).toBe(selector);
+	});
+
+	test("prefers registered literal @ IDs and full spelling aliases over a route", () => {
+		const base = { ...mockOpenRouterModels[0], id: "test/model-5-1:exacto" };
 		const literal = { ...base, id: `${base.id}@cerebras` };
 		const registry = registryFor([base, literal]);
 
 		expect(resolveSessionModelSelector(registry, `openrouter/${literal.id}`)).toEqual({ model: literal });
+		expect(resolveSessionModelSelector(registry, "openrouter/test/model-5.1:exacto@cerebras")).toEqual({
+			model: literal,
+		});
 		expect(resolveSessionModelSelector(registry, `openrouter/${literal.id}:high`)).toEqual({
 			model: literal,
 			thinkingLevel: Effort.High,
@@ -2869,6 +2937,23 @@ describe("filterAvailableModelsByEnabledPatterns", () => {
 		const result = filterAvailableModelsByEnabledPatterns(openRouterModels, ["openrouter/qwen/qwen3-coder:exacto"]);
 		expect(result).toHaveLength(1);
 		expect(result[0].id).toBe("qwen/qwen3-coder:exacto");
+	});
+
+	test("keeps the free wire ID and pin in CLI scopes and enabled-model lists", async () => {
+		const base = { ...mockOpenRouterModels[2], id: "qwen/qwen3-coder" };
+		const free = { ...base, id: `${base.id}:free` };
+		const catalog = [free, base];
+		const patterns = [`openrouter/${free.id}@cerebras`];
+		const settings = Settings.isolated({ enabledModels: patterns });
+		const registry = { getAvailable: () => catalog };
+		const scoped = await resolveModelScope(patterns, registry);
+		for (const models of [
+			scoped.map(entry => entry.model),
+			await resolveAllowedModels(registry, settings),
+			filterAvailableModelsByEnabledPatterns(catalog, patterns),
+		]) {
+			expect(models).toMatchObject([{ id: free.id, compat: { openRouterRouting: { only: ["cerebras"] } } }]);
+		}
 	});
 
 	test("matches bare OpenRouter-style model id with slash but no provider prefix", () => {

@@ -1,10 +1,11 @@
 import type { Agent, AgentMessage, AgentToolResult, AgentTurnEndContext } from "@oh-my-pi/pi-agent-core";
 import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { AutoPrewalkDecision } from "../auto-prewalk/classifier";
 import { cfgOffline } from "../config/auxiliary-model-policy";
-import { formatModelString, formatModelStringWithRouting } from "../config/model-resolver";
+import { formatModelString, formatModelStringWithRouting, routedModelsAreEqual } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { resolveApprovedPlan } from "../plan-mode/approved-plan";
@@ -158,13 +159,15 @@ export class PrewalkCoordinator {
 		const handoff = prewalk ? host.sessionManager.getSessionLocalModelChange() : undefined;
 		// A revived session still on the target its recorded handoff switched to has spent this prewalk;
 		// one that starts elsewhere (an explicit startup model, a fallback) keeps the arm.
-		const target = prewalk ? formatModelStringWithRouting(prewalk.target) : undefined;
+		const target = prewalk?.target;
 		const current = host.model();
 		// Legacy handoff entries omitted the upstream route.
 		const spent =
 			handoff?.role === PREWALK_MODEL_CHANGE_ROLE &&
-			(handoff.model === target || (prewalk !== undefined && handoff.model === formatModelString(prewalk.target))) &&
+			target !== undefined &&
 			current !== undefined &&
+			modelsAreEqual(current, target) &&
+			(handoff.model === formatModelStringWithRouting(target) || handoff.model === formatModelString(target)) &&
 			formatModelStringWithRouting(current) === handoff.model;
 		this.#prewalk = spent ? undefined : prewalk;
 		this.#planYolo = options.planYolo;
@@ -432,7 +435,7 @@ export class PrewalkCoordinator {
 			// `disarm()` already reported its cancellation, and a newer arm owns what comes next.
 			if (disarmed || replaced) return;
 			const current = this.#host.model();
-			if (!current || formatModelStringWithRouting(current) !== formatModelStringWithRouting(target)) {
+			if (!routedModelsAreEqual(current, target)) {
 				this.#host.emitNotice(
 					"info",
 					`Prewalk: cancelled the switch to ${target.provider}/${target.id}; the model or thinking level changed while it was switching.`,
@@ -501,13 +504,10 @@ export class PrewalkCoordinator {
 		if (active) {
 			this.#host.emitNotice(
 				"info",
-				`Prewalk: already armed for ${active.target.provider}/${active.target.id}, waiting for the first edit/write.`,
+				`Prewalk: already armed for ${formatModelStringWithRouting(active.target)}, waiting for the first edit/write.`,
 				"prewalk",
 			);
-			const matches =
-				active.target.provider === target.provider &&
-				active.target.id === target.id &&
-				active.thinkingLevel === thinkingLevel;
+			const matches = routedModelsAreEqual(active.target, target) && active.thinkingLevel === thinkingLevel;
 			if (matches) this.#autoArm = undefined;
 			return matches;
 		}
@@ -554,12 +554,7 @@ export class PrewalkCoordinator {
 		targetThinkingLevel: ConfiguredThinkingLevel | undefined,
 	): Promise<PrewalkRestartResult> {
 		const active = this.#prewalk;
-		if (
-			active &&
-			(active.target.provider !== target.provider ||
-				active.target.id !== target.id ||
-				active.thinkingLevel !== targetThinkingLevel)
-		) {
+		if (active && (!routedModelsAreEqual(active.target, target) || active.thinkingLevel !== targetThinkingLevel)) {
 			this.arm(target, targetThinkingLevel);
 			return "rejected";
 		}

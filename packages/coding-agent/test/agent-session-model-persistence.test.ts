@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, type Context, Effort, type ImageContent, type Model } from "@oh-my-pi/pi-ai";
@@ -222,6 +222,22 @@ describe("AgentSession model persistence", () => {
 		expect(modelChangedCount).toBe(1);
 	});
 
+	it("publishes a model change when a literal ID displays like a pinned route", async () => {
+		const routed = routedModel("cerebras");
+		const literal = { ...routed, id: `${routed.id}@cerebras`, compat: undefined };
+		expect(formatModelStringWithRouting(literal)).toBe(formatModelStringWithRouting(routed));
+		const created = await createSession({ initialModel: literal });
+		const changedModels: Array<Model<Api> | undefined> = [];
+		created.session.subscribe(event => {
+			if (event.type === "model_changed") changedModels.push(created.session.model);
+		});
+
+		await created.session.setModel(routed);
+
+		expect(created.session.model?.id).toBe(routed.id);
+		expect(changedModels).toEqual([routed]);
+	});
+
 	it.each([
 		[TEMPORARY_MODEL_CHANGE_ROLE, undefined],
 		[EPHEMERAL_MODEL_CHANGE_ROLE, { ephemeral: true }],
@@ -438,6 +454,32 @@ describe("AgentSession model persistence", () => {
 		await created.session.setModel(routeA);
 		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
 		expect(formatModelStringWithRouting(created.session.model!)).toBe(selectorB);
+	});
+
+	it("announces the restored route after a late switch failure", async () => {
+		const routeA = routedModel("cerebras");
+		const routeB = routedModel("sambanova");
+		const selectorA = formatModelStringWithRouting(routeA);
+		const selectorB = formatModelStringWithRouting(routeB);
+		const targetSessionFile = await writeRoleModelSession(selectorB, selectorB, "default");
+		const created = await createSession({ initialModel: routeA, persist: true });
+		const changes: string[] = [];
+		created.session.subscribe(event => {
+			if (event.type === "model_changed") {
+				changes.push(formatModelStringWithRouting(created.session.model!));
+			}
+		});
+		const reconnect = spyOn(created.session.agent, "subscribe").mockImplementationOnce(() => {
+			throw new Error("late switch failure");
+		});
+		try {
+			await expect(created.session.switchSession(targetSessionFile)).rejects.toThrow("late switch failure");
+		} finally {
+			reconnect.mockRestore();
+		}
+
+		expect(changes).toEqual([selectorB, selectorA]);
+		expect(formatModelStringWithRouting(created.session.model!)).toBe(selectorA);
 	});
 
 	it("restores the last active role model when switching sessions", async () => {
