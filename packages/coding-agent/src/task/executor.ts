@@ -140,6 +140,7 @@ import { recordStepsSent, type StepProgress, type StepReportRoute, sendStepRepor
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
 	type AgentDefinition,
+	canSpawnAtDepth,
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
 	TASK_SUBAGENT_EVENT_CHANNEL,
@@ -528,6 +529,13 @@ export interface ExecutorOptions {
 	outputSchemaOverridesAgent?: boolean;
 	/** Parent task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	/** Parent spawn depth (see {@link ToolSession.spawnDepth}); defaults to {@link taskDepth}. */
+	parentSpawnDepth?: number;
+	/**
+	 * Spawn depth the child runs at; it gates the child's spawn capacity (`task.maxRecursionDepth`)
+	 * and its descendants count up from it. Defaults to the parent's spawn depth + 1.
+	 */
+	spawnDepth?: number;
 	/**
 	 * Override the `task.maxRuntimeMs` wall-clock cap for this run. When provided
 	 * it wins over the settings value; `0` disables the per-subagent wall-clock
@@ -4731,8 +4739,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	const { softRequestBudget, softRequestBudgetNotice } = softRequestBudgetFor(agent.name, settings);
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
+	const childSpawnDepth = options.spawnDepth ?? (options.parentSpawnDepth ?? parentDepth) + 1;
 	const restrictToolNames = options.restrictToolNames === true;
-	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
+	const atMaxDepth = !canSpawnAtDepth(maxRecursionDepth, childSpawnDepth);
 
 	// Add tools if specified. Unstructured runs never get `yield`, even when
 	// the frontmatter lists it.
@@ -5226,6 +5235,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					prewalk,
 					spawns: spawnsEnv,
 					taskDepth: childDepth,
+					spawnDepth: childSpawnDepth,
 					// The whole spawn tree shares the root session's observability bus,
 					// so nested lifecycle/progress/event frames reach its surfaces
 					// without leaking into another root session's traffic.
@@ -5462,6 +5472,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				// stamp the contract so cold revival leaves them transcript-only
 				// even when the workspace was retained for recovery.
 				isolated: worktree !== undefined || undefined,
+				// Recorded only when reset away from the task depth, so revival restores the
+				// spawn budget; absent = the task depth revival derives from the parent chain.
+				...(childSpawnDepth !== childDepth ? { spawnDepth: childSpawnDepth } : undefined),
 			});
 
 			abortSignal.addEventListener(

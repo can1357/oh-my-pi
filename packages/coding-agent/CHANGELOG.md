@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a spawn depth for the SDK and task executor (`createAgentSession({ spawnDepth })`, executor `spawnDepth`/`parentSpawnDepth`) that limits subagent nesting separately from task depth, so a long-lived worker started with a reset spawn depth keeps the full `task.maxRecursionDepth` helper budget, also after it is parked and revived
+
 ### Fixed
 
 - Fixed the shell's `dirname` builtin on Windows ignoring `\` separators and drive prefixes (`dirname 'C:\a\b'` printed `.`), which broke scripts like VS Code's `code` launcher (`./Code.exe: No such file or directory`)

@@ -281,12 +281,21 @@ export function getTaskSchema(options: {
 }
 
 /**
- * Whether an agent at `taskDepth` may still spawn children — i.e. it currently
- * holds the `task` tool. Mirrors the task-tool availability gate;
+ * Whether an agent at spawn depth `spawnDepth` may still spawn children — i.e. it
+ * currently holds the `task` tool. Mirrors the task-tool availability gate;
  * `maxRecursionDepth < 0` disables the cap entirely.
  */
-export function canSpawnAtDepth(maxRecursionDepth: number, taskDepth: number): boolean {
-	return maxRecursionDepth < 0 || taskDepth < maxRecursionDepth;
+export function canSpawnAtDepth(maxRecursionDepth: number, spawnDepth: number): boolean {
+	return maxRecursionDepth < 0 || spawnDepth < maxRecursionDepth;
+}
+
+/**
+ * A session's spawn depth: the depth that gates spawn capacity ({@link canSpawnAtDepth}).
+ * It equals `taskDepth` unless the session was launched with a reset spawn depth;
+ * every other depth-dependent behaviour keys on `taskDepth`.
+ */
+export function spawnDepthOf(session: { readonly taskDepth?: number; readonly spawnDepth?: number }): number {
+	return session.spawnDepth ?? session.taskDepth ?? 0;
 }
 
 /** Agent definition (bundled or discovered) */

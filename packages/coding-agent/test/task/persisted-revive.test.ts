@@ -177,6 +177,7 @@ async function createPersistedSession(
 		resolvedModel?: string;
 		perCallModelIdentity?: string;
 		perCallThinkingLevel?: ConfiguredThinkingLevel | null;
+		spawnDepth?: number;
 	},
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
@@ -197,6 +198,7 @@ async function createPersistedSession(
 		perCallModel: contract?.perCallModel,
 		perCallModelIdentity: contract?.perCallModelIdentity,
 		perCallThinkingLevel: contract?.perCallThinkingLevel,
+		spawnDepth: contract?.spawnDepth,
 		...(contract?.compactionThreshold !== undefined
 			? { compactionThreshold: contract.compactionThreshold }
 			: undefined),
@@ -556,6 +558,29 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.mcpManager).toBe(hostileMcp);
 		expect(capturedOptions?.mcpTools?.map(tool => tool.name)).toEqual(["mcp__server_read"]);
 		expect(capturedOptions?.customTools).toBeUndefined();
+	});
+
+	it("restores a persisted spawn depth and otherwise uses the derived task depth", async () => {
+		const cwd = makeTempDir("@pi-spawn-depth-revive-");
+		const reset = await createPersistedSession(cwd, undefined, undefined, undefined, { spawnDepth: 0 });
+		const legacy = await createPersistedSession(cwd);
+		const captured: Array<CreateAgentSessionOptions | undefined> = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			captured.push(options);
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		for (const sessionFile of [reset, legacy]) {
+			const ref = createRef(sessionFile);
+			const reviver = await createFactory(cwd)(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await reviver(ref);
+		}
+
+		expect(captured.map(options => [options?.taskDepth, options?.spawnDepth])).toEqual([
+			[1, 0],
+			[1, 1],
+		]);
 	});
 
 	it("leaves isolated sessions transcript-only even when the workspace still exists", async () => {

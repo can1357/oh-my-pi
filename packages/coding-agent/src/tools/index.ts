@@ -43,7 +43,7 @@ import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import type { PerCallModelAdvertisement } from "../task/model-approval";
 import type { AgentOutputManager } from "../task/output-manager";
-import { type AgentDefinition, canSpawnAtDepth } from "../task/types";
+import { type AgentDefinition, canSpawnAtDepth, spawnDepthOf } from "../task/types";
 import { type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { EventBus } from "../utils/event-bus";
@@ -359,6 +359,12 @@ export interface ToolSession {
 	restrictToolNames?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	/**
+	 * Depth that gates spawn capacity (the `task` tool, eval agent spawns); absent = {@link taskDepth}.
+	 * Read through `spawnDepthOf`. A session launched with a reset spawn depth keeps its full
+	 * nesting budget while every other depth-dependent behaviour still keys on `taskDepth`.
+	 */
+	spawnDepth?: number;
 	/** Get this agent's eval executor session ID; keys its retained JS/Python/Ruby/Julia state. */
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
@@ -858,7 +864,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 			);
 		}
 		if (name === "task") {
-			return canSpawnAtDepth(cfgTaskMaxRecursionDepth.get(session.settings), session.taskDepth ?? 0);
+			return canSpawnAtDepth(cfgTaskMaxRecursionDepth.get(session.settings), spawnDepthOf(session));
 		}
 		return true;
 	};
