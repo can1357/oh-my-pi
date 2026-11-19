@@ -20,6 +20,29 @@ function oversizedMessageHistory(prefix: string) {
 }
 
 describe("RPC frame encoding", () => {
+	// Generic frame transport only: arbitrary response data fields survive
+	// encoding and decoding untouched (the bash exit flags as the example).
+	// It is not an end-to-end typed-BashResult claim.
+	it("preserves arbitrary response data fields (bash exit flags) through frame encoding and decoding", () => {
+		for (const endedByExit of [false, true]) {
+			for (const ephemeralShell of [false, true]) {
+				const frame = {
+					type: "response",
+					command: "bash",
+					success: true,
+					data: { output: "", exitCode: 0, cancelled: false, truncated: false, endedByExit, ephemeralShell },
+				};
+				for (const version of [1, 2] as const) {
+					const encoder = new RpcFrameEncoder();
+					encoder.setProtocolVersion(version);
+					const decoder = new RpcFrameDecoder();
+					const decoded = decoder.push(JSON.parse(encoder.encode(frame)));
+					expect(decoded).toEqual(frame);
+				}
+			}
+		}
+	});
+
 	it("preserves fitting frames and serializes stateful message frames once", () => {
 		const frame = { id: "request-1", type: "response", command: "get_state", success: true, data: { ok: true } };
 		expect(encodeRpcFrame(frame)).toBe(`${JSON.stringify(frame)}\n`);

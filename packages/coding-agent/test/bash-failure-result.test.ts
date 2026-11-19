@@ -224,6 +224,7 @@ describe("BashTool execution results", () => {
 				exitCode: 1,
 				cancelled: false,
 				timedOut: false,
+				endedByExit: false,
 				workingDir: process.cwd(),
 				minimized: {
 					filter: "lint",
@@ -254,6 +255,7 @@ describe("BashTool execution results", () => {
 				exitCode: 1,
 				cancelled: false,
 				timedOut: false,
+				endedByExit: false,
 				workingDir: process.cwd(),
 				minimized: {
 					filter: "lint",

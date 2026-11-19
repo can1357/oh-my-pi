@@ -2,7 +2,7 @@
 //! per-op semantics, and frame control (calls, returns, unwinding).
 
 use std::{
-	collections::HashMap,
+	collections::{HashMap, HashSet},
 	fmt::NumBuffer,
 	sync::Arc,
 	task::{Context, Poll},
@@ -36,6 +36,16 @@ use crate::bash::{
 	zshopt::ZshOpt,
 };
 
+/// Why the shell terminated a run. Transient attribution, not image or wire
+/// state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitCause {
+	Exit,
+	ExecReplace,
+	PosixFatal,
+	FatalSignal,
+}
+
 /// Result of one op.
 pub enum Flow {
 	Next,
@@ -56,7 +66,10 @@ pub enum Flow {
 		cont: bool,
 	},
 	/// `exit n` (also a fatal expansion error).
-	Exit(i32),
+	Exit {
+		status: i32,
+		cause:  ExitCause,
+	},
 	/// An expansion or arithmetic error: abandon the current top-level command.
 	Discard(i32),
 }
@@ -413,7 +426,8 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 						unwind(&mut k.root, cx.store, vp, i);
 					}
 				} else if vp.parent.is_some() && in_function_scope(k, cx, vp) {
-					exit_shell(k, vp, cx, status);
+					let unrun = top_frame(vp).pc + 1;
+					exit_shell(k, vp, cx, status, unrun, None);
 				} else {
 					let line = line_of(vp, op.node);
 					let diag =
@@ -427,8 +441,19 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				zsh_break(k, vp, cx, n, cont);
 			},
 			Flow::Break { n, cont } => break_loops(k, vp, cx, n, cont, op),
-			Flow::Exit(status) if unit.mode.dialect() == Dialect::Zsh => zsh_exit(k, vp, cx, status),
-			Flow::Exit(status) => exit_shell(k, vp, cx, status),
+			Flow::Exit { status, cause } if unit.mode.dialect() == Dialect::Zsh => {
+				let unrun = top_frame(vp).pc + 1;
+				let cleanup_runs = vp
+					.frames
+					.iter()
+					.any(|f| matches!(f.kind, FrameKind::Function { .. }));
+				capture_exit_report(k, vp, cx, status, unrun, cause, cleanup_runs);
+				zsh_exit(k, vp, cx, status);
+			},
+			Flow::Exit { status, cause } => {
+				let unrun = top_frame(vp).pc + 1;
+				exit_shell(k, vp, cx, status, unrun, cause);
+			},
 			Flow::Discard(status) if unit.mode.dialect() == Dialect::Zsh => {
 				zsh_discard(k, vp, cx, status);
 			},
@@ -457,9 +482,11 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			finish_cancel(&mut k.root, cx.store, vp, cancellation.expect("checked"));
 			continue;
 		}
-		let errexit = errexit_failed
-			&& (errexit_on(k, cx, vp)
-				|| (unit.mode.dialect() == Dialect::Zsh && zsh_errreturn_exits(k, cx, vp)));
+		let armed_errexit = errexit_failed && errexit_on(k, cx, vp);
+		let errexit = armed_errexit
+			|| (errexit_failed
+				&& unit.mode.dialect() == Dialect::Zsh
+				&& zsh_errreturn_exits(k, cx, vp));
 		if failed_command && start_trap(k, vp, cx, TrapKey::Err) {
 			set_trap_line(vp, err_line);
 			for frame in &mut vp.frames[..fi.saturating_add(1)] {
@@ -467,10 +494,17 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			}
 			if errexit {
 				mark_trap_exit(vp);
+				if !armed_errexit {
+					// ERR_RETURN has already committed the run to end, even
+					// if its trap later invokes `exit` during cleanup.
+					capture_exit_report(k, vp, cx, vp.status, 0, None, false);
+				}
 			}
 		} else if errexit {
 			let status = vp.status;
-			exit_shell(k, vp, cx, status);
+			// `pc` advanced past the failed op already: its continuation is here.
+			let unrun = top_frame(vp).pc;
+			exit_shell(k, vp, cx, status, unrun, armed_errexit.then_some(ExitCause::Exit));
 		} else if errreturn_failed && unit.mode.dialect() == Dialect::Zsh && zsh_errreturn(k, cx, vp)
 		{
 			// zsh `ERR_RETURN`: a failed command returns from the function
@@ -510,7 +544,10 @@ fn zsh_return_flow(
 			set_trap_line(vp, line_of(vp, op.node));
 			mark_trap_exit(vp);
 		} else {
-			exit_shell(k, vp, cx, status);
+			{
+				let unrun = top_frame(vp).pc + 1;
+				exit_shell(k, vp, cx, status, unrun, ExitCause::Exit);
+			}
 		}
 	} else if run_always(k, vp, cx, target.unwrap_or(0), TryEnd::Return(status)) {
 		// The always-list runs first; it resumes the return.
@@ -541,8 +578,9 @@ fn zsh_return_flow(
 		}
 	} else {
 		// zsh `bin_break`: `return` outside a function or `.` file leaves
-		// a non-interactive shell (`zexit`).
-		exit_shell(k, vp, cx, status);
+		// a non-interactive shell (`zexit`), without explicit exit/errexit.
+		let unrun = top_frame(vp).pc + 1;
+		exit_shell(k, vp, cx, status, unrun, None);
 	}
 }
 
@@ -600,6 +638,499 @@ fn starts_command(unit: &Unit, op: Op) -> bool {
 	}
 }
 
+/// Whether unread script bytes hold another command. Alias text precedes
+/// source text, even when a comment or line continuation spans that boundary.
+/// Match the lexer: only space, tab, newline and escaped newline are trivia.
+fn script_has_command(src: impl Iterator<Item = u8>) -> bool {
+	let mut bytes = src.peekable();
+	while let Some(b) = bytes.next() {
+		match b {
+			b'#' => {
+				for b in bytes.by_ref() {
+					if b == b'\n' {
+						break;
+					}
+				}
+			},
+			b' ' | 0x09 | b'\n' => {},
+			b'\\' if bytes.peek() == Some(&b'\n') => {
+				bytes.next();
+			},
+			_ => return true,
+		}
+	}
+	false
+}
+
+/// Tri-state continuation status for the unrun-input walk. Branches test
+/// whether it is zero; `!` flips it; `SetStatus` re-derives it; `LoopExit`
+/// restores the loop record's saved status. `Unknown` marks a value the
+/// static walk cannot pin down, so both branch directions of a conditional
+/// jump stay reachable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum WalkStatus {
+	Zero,
+	NonZero,
+	Unknown,
+}
+
+impl WalkStatus {
+	const fn of(status: i32) -> Self {
+		if status == 0 {
+			Self::Zero
+		} else {
+			Self::NonZero
+		}
+	}
+
+	const fn negate(self) -> Self {
+		match self {
+			Self::Zero => Self::NonZero,
+			Self::NonZero => Self::Zero,
+			Self::Unknown => Self::Unknown,
+		}
+	}
+}
+
+/// What a frame's continuation does without the interruption: either it
+/// runs another command, or leaves outgoing status/transfer paths to resume
+/// in its caller. Keep the paths separate when their control transfers differ.
+#[derive(Debug)]
+enum FrameExit {
+	RunsInput,
+	Exits(Vec<WalkEnd>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum WalkTransfer {
+	Error,
+	Return(i32),
+	Break { n: u32, cont: bool },
+	Exit(i32),
+}
+
+impl From<TryEnd> for WalkTransfer {
+	fn from(end: TryEnd) -> Self {
+		match end {
+			TryEnd::Error => Self::Error,
+			TryEnd::Return(n) => Self::Return(n),
+			TryEnd::Break { n, cont } => Self::Break { n, cont },
+			TryEnd::Exit(n) => Self::Exit(n),
+		}
+	}
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct WalkEnd {
+	status:   WalkStatus,
+	transfer: Option<WalkTransfer>,
+}
+
+/// The walk mirrors record lifetime, not loop execution. `cleanup` is
+/// `Some(interrupted)` for a try record, and `None` for a loop. `end` is
+/// respectively after `AlwaysEnd` or at `LoopExit`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct WalkRecord {
+	status:  WalkStatus,
+	end:     u32,
+	cleanup: Option<bool>,
+	always:  bool,
+	start:   u32,
+	pending: Option<WalkTransfer>,
+}
+
+/// Resume the transfer saved by an always-list, not its abandoned suffix.
+/// Like `run_always`/`zsh_break`, unwind records until cleanup or the target
+/// loop is reached. A continue's next iteration is old input, so use the
+/// same structural loop exit as `LoopBack`.
+fn walk_transfer(
+	loops: &mut Vec<WalkRecord>,
+	mut end: WalkTransfer,
+	status: WalkStatus,
+) -> Result<u32, WalkTransfer> {
+	while let Some(mut rec) = loops.pop() {
+		if let Some(cleaned) = rec.cleanup {
+			if !rec.always && !cleaned {
+				rec.pending = Some(end);
+				let start = rec.start;
+				loops.push(rec);
+				return Ok(start);
+			}
+		} else if let WalkTransfer::Break { n, cont } = end {
+			if n <= 1 {
+				rec.status = status;
+				let target = rec.end;
+				loops.push(rec);
+				return Ok(target);
+			}
+			end = WalkTransfer::Break { n: n - 1, cont };
+		}
+	}
+	Err(end)
+}
+
+/// Walk the submitted continuation, preserving branch statuses but treating
+/// iteration edges as structural loop exits. Re-running a loop head/body
+/// would count old input; proving that a loop cannot terminate would hide
+/// submitted suffixes and make newline-parsed scripts behave differently.
+/// Interrupted always-lists are mandatory cleanup, not unrun input.
+fn frame_continuation(
+	unit: &Unit,
+	from: usize,
+	status: WalkStatus,
+	runtime_loops: &[LoopRec],
+	cleanup_runs: bool,
+	transfer: Option<WalkTransfer>,
+) -> FrameExit {
+	let ops = &unit.ops;
+	// Keep the complete record stack in the key: equal top records can
+	// hide different outer snapshots and cleanup ownership.
+	let mut visited = HashSet::new();
+	let seed: Vec<WalkRecord> = runtime_loops
+		.iter()
+		.map(|rec| {
+			let (cleanup, always, pending) = match rec.kind {
+				LoopKind::Try { always, pending } => {
+					(Some(cleanup_runs), always, pending.map(Into::into))
+				},
+				_ => (None, false, None),
+			};
+			WalkRecord {
+				status: WalkStatus::of(rec.status),
+				end: if cleanup.is_some() {
+					rec.cont
+				} else {
+					rec.exit
+				},
+				cleanup,
+				always,
+				start: rec.exit,
+				pending,
+			}
+		})
+		.collect();
+	let mut stack = vec![(from as u32, status, seed, transfer)];
+	let mut outcomes = Vec::new();
+	while let Some((mut index, status, mut loops, transfer)) = stack.pop() {
+		if let Some(end) = transfer {
+			match walk_transfer(&mut loops, end, status) {
+				Ok(target) => index = target,
+				Err(end) => {
+					outcomes.push(WalkEnd { status, transfer: Some(end) });
+					continue;
+				},
+			}
+		}
+		let i = index as usize;
+		if i >= ops.len() {
+			outcomes.push(WalkEnd { status, transfer: None });
+			continue;
+		}
+		if !visited.insert((index, status, loops.clone())) {
+			continue;
+		}
+		let op = ops[i];
+		// A terminator ends this frame's continuation: the path exits the
+		// unit with the status it carries (a function returning to its
+		// caller, or a script reaching its end).
+		if matches!(op.code, Opcode::End | Opcode::SubExit | Opcode::Abort) {
+			outcomes.push(WalkEnd { status, transfer: None });
+			continue;
+		}
+		// Mandatory cleanup already executed on the exit path is not
+		// unrun input, but its saved control transfer still resumes.
+		if op.code == Opcode::AlwaysEnter
+			&& let Some(top) = loops.last_mut()
+		{
+			top.status = status;
+			top.always = true;
+			if top.cleanup == Some(true) {
+				let rec = loops.pop().expect("checked above");
+				stack.push((rec.end, status, loops, rec.pending));
+				continue;
+			}
+		}
+		if op.code == Opcode::AlwaysEnd && loops.last().is_some_and(|rec| rec.cleanup.is_some()) {
+			let rec = loops.pop().expect("checked above");
+			let status = match rec.pending {
+				Some(WalkTransfer::Return(n) | WalkTransfer::Exit(n)) => WalkStatus::of(n),
+				Some(WalkTransfer::Error) if rec.status == WalkStatus::Zero => WalkStatus::NonZero,
+				_ => rec.status,
+			};
+			stack.push((index + 1, status, loops, rec.pending));
+			continue;
+		}
+		// A not-yet-started compound or spawn is submitted work too;
+		// do not scan a spawn's child descriptors as parent bytecode.
+		if starts_command(unit, op)
+			|| matches!(op.code, Opcode::Enter | Opcode::Spawn | Opcode::FuncDef | Opcode::CallAnon)
+		{
+			return FrameExit::RunsInput;
+		}
+		let status = match op.code {
+			Opcode::Not => status.negate(),
+			Opcode::SetStatus => WalkStatus::of(op.a as i32),
+			Opcode::Arith | Opcode::CondTest => WalkStatus::Unknown,
+			Opcode::LoopExit => loops.pop().map_or(WalkStatus::Zero, |r| r.status),
+			_ => status,
+		};
+		// Complete only the interrupted iteration, preserving its body
+		// status; never replay a loop head/body to predict termination.
+		if matches!(op.code, Opcode::LoopNote | Opcode::LoopBack)
+			&& let Some(top) = loops.last_mut()
+		{
+			top.status = status;
+			stack.push((top.end, status, loops, None));
+			continue;
+		}
+		match op.code {
+			Opcode::LoopEnter | Opcode::ForIn | Opcode::Repeat => {
+				let end = if op.code == Opcode::LoopEnter {
+					op.a
+				} else {
+					ops.get(i + 1).map_or(index + 1, |next| next.a)
+				};
+				loops.push(WalkRecord {
+					status: WalkStatus::Zero,
+					end,
+					cleanup: None,
+					always: false,
+					start: 0,
+					pending: None,
+				});
+			},
+			Opcode::TryEnter => {
+				loops.push(WalkRecord {
+					status:  WalkStatus::Zero,
+					end:     op.b,
+					cleanup: Some(false),
+					always:  false,
+					start:   op.a,
+					pending: None,
+				});
+			},
+			_ => {},
+		}
+		let branch_zero = match status {
+			WalkStatus::Zero => Some(true),
+			WalkStatus::NonZero => Some(false),
+			WalkStatus::Unknown => None,
+		};
+		let repeats_body = |target: u32| {
+			ops.get(target as usize)
+				.is_some_and(|op| op.code == Opcode::LoopExit)
+				&& runtime_loops
+					.iter()
+					.any(|rec| rec.exit == target && rec.iterations > 0)
+		};
+		let (target, falls_through) = match op.code {
+			Opcode::Jmp if op.a < index => (Some(loops.last().map_or(index + 1, |r| r.end)), false),
+			Opcode::Jmp => (Some(op.a), false),
+			Opcode::BrOk => match branch_zero {
+				Some(true) => (Some(op.a), false),
+				Some(false) => (None, true),
+				None if repeats_body(op.a) => (Some(op.a), false),
+				None => (Some(op.a), true),
+			},
+			Opcode::BrFail => match branch_zero {
+				Some(true) => (None, true),
+				Some(false) => (Some(op.a), false),
+				None if repeats_body(op.a) => (Some(op.a), false),
+				None => (Some(op.a), true),
+			},
+			Opcode::ForNext if repeats_body(op.a) => (Some(op.a), false),
+			Opcode::ForNext => (Some(op.a), true),
+			Opcode::CaseArm | Opcode::Redir => (Some(op.b), true),
+			_ => (None, true),
+		};
+		if let Some(target) = target {
+			stack.push((target, status, loops.clone(), None));
+		}
+		if falls_through {
+			stack.push((index + 1, status, loops, None));
+		}
+	}
+	FrameExit::Exits(outcomes)
+}
+
+/// Whether `exit`/`set -e` fired with commands still left to run: any frame
+/// (its own continuation first, then whatever resumes below it) has a
+/// command-starting op still ahead of it, or — for a script frame, which
+/// parses its source one command at a time — unparsed source that holds
+/// another command. `top_from` is the op index of the top frame's first
+/// unrun op: callers whose `pc` still sits on the op that triggered the
+/// exit pass `pc + 1`; callers running after the dispatch loop advanced `pc`
+/// (the errexit check) pass `pc`. Lower frames resume after the call op
+/// that led here, so their scan starts at `pc + 1`. A trailing `exit` at
+/// the end of the script's input has nothing ahead and ended the run
+/// exactly where the script's end would have; loops stay in their frame,
+/// so a loop whose body holds the `exit` reports unrun input only when a
+/// command follows the loop (the loop-back jump is not a command start).
+fn exit_cut_short(
+	vp: &Vproc,
+	top_from: u32,
+	status: i32,
+	cleanup_runs: bool,
+	options: &[super::exit_options::WalkOptions],
+	mut child_status: impl FnMut(Vpid) -> Option<i32>,
+) -> bool {
+	let initial = WalkEnd { status: WalkStatus::of(status), transfer: None };
+	let mut states = vec![(vp.frames.len(), initial, false)];
+	let mut visited = HashSet::new();
+	while let Some((count, mut end, resume_at_pc)) = states.pop() {
+		if !visited.insert((count, end, resume_at_pc)) {
+			continue;
+		}
+		let Some(index) = count.checked_sub(1) else {
+			continue;
+		};
+		let frame = &vp.frames[index];
+		let current_options =
+			options
+				.get(index)
+				.copied()
+				.unwrap_or(super::exit_options::WalkOptions {
+					pipefail:        false,
+					localloops:      false,
+					continueonerror: false,
+				});
+		let outcomes = if let Some(unit) = frame.unit.as_ref() {
+			let expanding = end.transfer.is_none()
+				&& frame.scratch.as_ref().is_some_and(|sc| {
+					matches!(
+						sc.sub,
+						Some(
+							PendingSub::NoFork { .. } | PendingSub::Here { .. } | PendingSub::Math { .. }
+						)
+					)
+				});
+			// An interrupted expansion still owns unfinished work; only a
+			// loop header belongs to the structural iteration machinery.
+			if expanding
+				&& unit.ops.get(frame.pc as usize).is_some_and(|op| {
+					op.code != Opcode::Arith
+						|| unit
+							.nodes
+							.get(op.node as usize)
+							.is_none_or(|n| n.kind != NodeKind::ArithFor)
+				}) {
+				return true;
+			}
+			let from = if index + 1 == vp.frames.len() {
+				top_from as usize
+			} else if resume_at_pc || expanding {
+				frame.pc as usize
+			} else if let Some(op) = unit.ops.get(frame.pc as usize)
+				&& op.code == Opcode::Spawn
+			{
+				if end.transfer.is_none()
+					&& current_options.pipefail
+					&& end.status != WalkStatus::NonZero
+					&& let Some(sc) = &frame.scratch
+				{
+					for &(vpid, saved) in &sc.children {
+						let prior = saved
+							.or_else(|| child_status(vpid))
+							.map_or(WalkStatus::Unknown, WalkStatus::of);
+						end.status = match (end.status, prior) {
+							(WalkStatus::NonZero, _) | (_, WalkStatus::NonZero) => WalkStatus::NonZero,
+							(WalkStatus::Zero, WalkStatus::Zero) => WalkStatus::Zero,
+							_ => WalkStatus::Unknown,
+						};
+					}
+				}
+				unit.spawns[op.a as usize].end as usize
+			} else {
+				frame.pc as usize + 1
+			};
+			match frame_continuation(unit, from, end.status, &frame.loops, cleanup_runs, end.transfer)
+			{
+				FrameExit::RunsInput => return true,
+				FrameExit::Exits(outcomes) => outcomes,
+			}
+		} else {
+			vec![end]
+		};
+		for mut end in outcomes {
+			// Check incremental source only on paths that would read it.
+			// A return/error already committed this frame to unwind.
+			let reads_source = end.transfer.is_none()
+				|| (end.transfer == Some(WalkTransfer::Error)
+					&& current_options.continueonerror
+					&& matches!(frame.kind, FrameKind::Script { what: ScriptKind::Run, .. }));
+			if reads_source && let FrameKind::Script { src, pos, aux, .. } = &frame.kind {
+				let pending = aux
+					.as_deref()
+					.and_then(|a| a.pending.as_ref())
+					.map_or(&[][..], |p| p.0.as_slice());
+				if script_has_command(pending.iter().chain(src[pos.0 as usize..].iter()).copied()) {
+					return true;
+				}
+			}
+			match end.transfer {
+				Some(WalkTransfer::Return(_))
+					if matches!(
+						frame.kind,
+						FrameKind::Function { .. }
+							| FrameKind::NoFork
+							| FrameKind::Script { what: ScriptKind::Source, .. }
+					) =>
+				{
+					end.transfer = None;
+				},
+				Some(WalkTransfer::Error)
+					if matches!(frame.kind, FrameKind::Script {
+						what: ScriptKind::Eval
+							| ScriptKind::Source
+							| ScriptKind::Trap { .. }
+							| ScriptKind::Code(_)
+							| ScriptKind::Hook,
+						..
+					}) =>
+				{
+					end.transfer = None;
+				},
+				Some(WalkTransfer::Break { .. }) => {
+					let function = matches!(frame.kind, FrameKind::Function { .. });
+					if function
+						&& index
+							.checked_sub(1)
+							.and_then(|i| options.get(i))
+							.is_some_and(|o| o.localloops)
+					{
+						end.transfer = None;
+					} else if !function
+						&& !matches!(
+							frame.kind,
+							FrameKind::NoFork
+								| FrameKind::Stage
+								| FrameKind::Script { what: ScriptKind::Eval, .. }
+						) {
+						continue;
+					}
+				},
+				Some(WalkTransfer::Exit(_)) => continue,
+				_ => {},
+			}
+			let resume_at_pc = matches!(frame.kind, FrameKind::Script {
+				what: ScriptKind::Trap { key: TrapKey::Debug | TrapKey::Err | TrapKey::Signal(_), .. },
+				..
+			});
+			let mut next = index;
+			if let FrameKind::Script {
+				what: ScriptKind::Trap { status: kept, return_target, .. },
+				..
+			} = &frame.kind
+			{
+				end.status = WalkStatus::of(*kept);
+				next = next.min(return_target.unwrap_or(next));
+			}
+			states.push((next, end, resume_at_pc));
+		}
+	}
+	false
+}
+
 /// Whether `vp` runs in a function scope (a store failure reads as no and
 /// is kept).
 fn in_function_scope(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
@@ -620,11 +1151,47 @@ fn errexit_on(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 	}
 }
 
-/// Leave the shell with `status` (`exit`, `set -e`): unwind every frame;
-/// a subshell runs its EXIT trap here, the root at the run boundary. An
-/// `exit` inside a function runs the root's trap first, above the
-/// function's frames: bash's trap sees its `FUNCNAME` and locals.
-pub(super) fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
+/// Capture attribution only: actual termination remains `exit_shell`'s job.
+/// Deferred zsh cleanup retains its existing serialized control carriers.
+pub(super) fn capture_exit_report(
+	k: &mut Kernel,
+	vp: &Vproc,
+	cx: &mut Cx<'_>,
+	status: i32,
+	top_unrun: u32,
+	cause: impl Into<Option<ExitCause>>,
+	cleanup_runs: bool,
+) {
+	let cause = cause.into();
+	if vp.parent.is_none()
+		&& let Some(run) = vp.runs.front()
+		&& k.exit_report.is_none_or(|(id, _)| id != run.id)
+	{
+		k.exit_report = Some((run.id, cause));
+		k.exited_cut_short = cause == Some(ExitCause::Exit) && {
+			let options = super::exit_options::by_frame(k, vp, cx).unwrap_or_else(|err| {
+				k.fail(err);
+				Vec::new()
+			});
+			exit_cut_short(vp, top_unrun, status, cleanup_runs, &options, |vpid| {
+				k.proc_state(cx.store, vpid)
+					.and_then(|state| state.exited())
+			})
+		};
+	}
+}
+
+/// Leave the shell with `status`: unwind frames and run existing EXIT cleanup.
+/// `top_unrun` is `pc + 1` at a terminating op, or `pc` after dispatch
+/// advances.
+pub(super) fn exit_shell(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	status: i32,
+	top_unrun: u32,
+	cause: impl Into<Option<ExitCause>>,
+) {
 	// zsh `zexit` while its hooks run: the hook calls end, the status is the
 	// new one.
 	if vp.zsh.is_some()
@@ -642,6 +1209,7 @@ pub(super) fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status
 		&& let Some(run) = vp.runs.front()
 	{
 		k.exited = Some(run.id);
+		capture_exit_report(k, vp, cx, status, top_unrun, cause, false);
 	}
 	if !in_exit_trap
 		&& vp
@@ -731,6 +1299,14 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 		return false;
 	}
 	run.started = true;
+	// The exit report describes one run's own end; one left over never
+	// applies to the next run (its scope ended without `exit_shell`). Only
+	// a root vproc's boundary may discard it: a child run started during a
+	// root run's EXIT cleanup (the timeout tool's trap child) must not
+	// clear the report that cleanup is still holding.
+	if vp.parent.is_none() {
+		k.exit_report = None;
+	}
 	if run.explicit_mode {
 		run.restore_mode = Some(vp.mode);
 		let mode = run.mode;
@@ -1139,7 +1715,9 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		} else if let Some(status) = status
 			&& exit
 		{
-			exit_shell(k, vp, cx, status);
+			// The trap frame that ran `exit` is popped; the interrupted
+			// frame's `pc` is its first unrun op.
+			exit_shell(k, vp, cx, status, vp.frames.last().map_or(0, |f| f.pc), ExitCause::Exit);
 		} else if func_trap && trap_status != 0 && vp.mode.dialect() == Dialect::Zsh {
 			// zsh `dotrapargs`: a function trap returning non-zero forces
 			// a return from the interrupted code, with the error flag set.
@@ -2178,7 +2756,7 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 				&& let Some(status) = exit_trap_status(vp)
 				&& !errexit_on(k, cx, vp)
 			{
-				return Flow::Exit(status);
+				return Flow::Exit { status, cause: ExitCause::PosixFatal };
 			}
 			// bash exits 127 from a `-c` string (`run_one_command`), 1 from a
 			// script and from a subshell (`execute_in_subshell` keeps the
@@ -2190,7 +2768,7 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 					state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
 					Ok(Some(Record::Misc(origin))) if origin.as_slice() == b"c"
 				);
-			Flow::Exit(if command { 127 } else { 1 })
+			Flow::Exit { status: if command { 127 } else { 1 }, cause: ExitCause::PosixFatal }
 		},
 		Stop::Store(err) => {
 			k.fail(err);
@@ -3126,7 +3704,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 				// POSIX interpretation 383: fatal in a non-interactive shell.
 				let msg = format!("`{}': is a special builtin", f.name).into();
 				k.diag(cx, vp, line, Diag::Usage { msg });
-				return Flow::Exit(2);
+				return Flow::Exit { status: 2, cause: ExitCause::PosixFatal };
 			}
 			// zsh: defining `TRAPNAL` sets the trap (`localtraps` saves the
 			// old one).
@@ -3668,7 +4246,7 @@ fn for_in(
 		if state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false) {
 			// Fatal to a posix shell.
 			clear_scratch(&mut k.root, cx.store, vp);
-			return Flow::Exit(1);
+			return Flow::Exit { status: 1, cause: ExitCause::PosixFatal };
 		}
 		items.clear();
 		1
@@ -3742,7 +4320,7 @@ fn for_next(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 		k.diag(cx, vp, line, d);
 		// An assignment error ends a posix shell.
 		if state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false) {
-			return Flow::Exit(1);
+			return Flow::Exit { status: 1, cause: ExitCause::PosixFatal };
 		}
 		if let Some(rec) = top_frame(vp).loops.last_mut() {
 			rec.status = 1;
@@ -5139,7 +5717,7 @@ fn always_end(vp: &mut Vproc) -> Flow {
 		Some(TryEnd::Error) => Flow::Discard(if rec.status == 0 { 1 } else { rec.status }),
 		Some(TryEnd::Return(n)) => Flow::Return(n),
 		Some(TryEnd::Break { n, cont }) => Flow::Break { n, cont },
-		Some(TryEnd::Exit(n)) => Flow::Exit(n),
+		Some(TryEnd::Exit(n)) => Flow::Exit { status: n, cause: ExitCause::Exit },
 	}
 }
 
@@ -5203,7 +5781,8 @@ pub fn zsh_return(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) 
 	if let Some(i) = target {
 		zsh_leave(k, vp, cx, i);
 	} else {
-		exit_shell(k, vp, cx, status);
+		let unrun = top_frame(vp).pc + 1;
+		exit_shell(k, vp, cx, status, unrun, None);
 	}
 }
 
@@ -5375,7 +5954,10 @@ fn zsh_exit(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		{
 			z.exit_from_function = true;
 		}
-		exit_shell(k, vp, cx, status);
+		{
+			let unrun = top_frame(vp).pc + 1;
+			exit_shell(k, vp, cx, status, unrun, ExitCause::Exit);
+		}
 		return;
 	}
 	let level = vp
@@ -5467,7 +6049,8 @@ fn zsh_discard(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		vp.status = status;
 	} else {
 		unwind(&mut k.root, cx.store, vp, 0);
-		exit_shell(k, vp, cx, status);
+		// Every frame is gone: nothing is left to scan.
+		exit_shell(k, vp, cx, status, 0, ExitCause::PosixFatal);
 	}
 }
 
@@ -5580,7 +6163,140 @@ fn run_func_trap(
 
 #[cfg(test)]
 mod tests {
-	use super::{BASH_TIMEFORMAT, POSIX_TIMEFORMAT, time_report};
+	use super::*;
+	use crate::bash::fd::FdTable;
+
+	#[test]
+	fn exit_classification_parked_expansions_resume_parent_command() {
+		// NoFork/Here/Math leave their owning operation unfinished, whether
+		// a simple command or an already-entered compound. Ordinary calls
+		// resume after it; forked substitutions own no frames in this vproc.
+		// zsh math calls use ordinary function frames, not a special kind.
+		for operation in
+			["Exec", "CondTest", "Arith", "CaseWord", "Redir b=1", "ForIn", "Repeat", "CallAnon"]
+		{
+			for (pending, expected) in [
+				(None, false),
+				(Some(PendingSub::Fork { vpid: Vpid(2), capture: Capture::default() }), false),
+				(Some(PendingSub::NoFork { capture: Capture::default(), value: false }), true),
+				(Some(PendingSub::NoFork { capture: Capture::default(), value: true }), true),
+				(Some(PendingSub::Here { status: 0 }), true),
+				(Some(PendingSub::Math { status: 1, slot: Slot::Words }), true),
+			] {
+				let mut vp =
+					Vproc::new(Vpid(1), None, FdTable::default(), BString::from("/"), None, false);
+				let unit = Arc::new(ir::asm::asm(&format!("0 {operation}\n1 End")).unwrap());
+				let mut parent = Frame::new(Some(Arc::clone(&unit)), 0, FrameKind::Subshell);
+				parent.scratch = Some(Box::new(Scratch { sub: pending, ..Default::default() }));
+				vp.frames.push(parent);
+				vp.frames
+					.push(Frame::new(Some(unit), 0, FrameKind::Function {
+						name:     BString::from("callee"),
+						zsh:      true,
+						autoload: false,
+					}));
+				assert_eq!(exit_cut_short(&vp, 1, 0, false, &[], |_| None), expected, "{operation}");
+			}
+		}
+	}
+
+	#[test]
+	fn exit_classification_alias_and_source_trivia_share_lexer_state() {
+		// The lexer reads pending alias bytes before source bytes. A
+		// comment/escaped newline may start in one and finish in the other.
+		for (alias, source, expected) in [
+			("# comment", "printf hidden", false),
+			("# comment", "\nprintf unrun", true),
+			("\\", "\n", false),
+			("\\", "\nprintf unrun", true),
+			(" ", "# comment", false),
+			("\\#literal", "", true),
+		] {
+			assert_eq!(
+				script_has_command(alias.bytes().chain(source.bytes())),
+				expected,
+				"alias={alias:?}, source={source:?}"
+			);
+		}
+	}
+
+	#[test]
+	fn exit_classification_trap_carriers_restore_status_with_or_without_a_unit() {
+		// push_trap/next_command restore the saved status on both text and
+		// unit-less function carriers. The victim resumes in place for
+		// DEBUG/ERR/signals, after its completed op for RETURN/EXIT.
+		for key in [
+			TrapKey::Debug,
+			TrapKey::Err,
+			TrapKey::Signal(crate::bash::Signal::Usr1),
+			TrapKey::Return,
+			TrapKey::Exit,
+		] {
+			for kept in [0, 1] {
+				for text in [false, true] {
+					let mut vp =
+						Vproc::new(Vpid(1), None, FdTable::default(), BString::from("/"), None, false);
+					let unit =
+						Arc::new(ir::asm::asm("0 Nop\n1 BrOk a=3\n2 Jmp a=4\n3 Exec\n4 End").unwrap());
+					let in_place = matches!(key, TrapKey::Debug | TrapKey::Err | TrapKey::Signal(_));
+					vp.frames
+						.push(Frame::new(Some(unit), u32::from(in_place), FrameKind::Subshell));
+					let action = Arc::new(ir::asm::asm("0 Exec\n1 End").unwrap());
+					let carrier = FrameKind::script(b"", Pos { offset: 0, line: 1 }, ScriptKind::Trap {
+						key,
+						status: kept,
+						cancel: None,
+						return_target: None,
+						exit: false,
+					});
+					vp.frames
+						.push(Frame::new(text.then(|| Arc::clone(&action)), 0, carrier));
+					if !text {
+						vp.frames
+							.push(Frame::new(Some(action), 0, FrameKind::Function {
+								name:     BString::from("trap"),
+								zsh:      true,
+								autoload: false,
+							}));
+					}
+					assert_eq!(
+						exit_cut_short(&vp, 1, 1 - kept, true, &[], |_| None),
+						kept == 0,
+						"{key:?}, kept={kept}, text={text}"
+					);
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn exit_classification_loop_and_try_records_have_balanced_lifetimes() {
+		// These empty IR regions do no command work: ForIn/Repeat seed 0,
+		// LoopExit pops that record, and the interrupted outer try's
+		// cleanup snapshots/restores it before its caller's branch.
+		for enter in ["ForIn", "Repeat", "LoopEnter a=5"] {
+			let unit = ir::asm::asm(&format!(
+				"0 Nop\n1 {enter}\n2 ForNext a=5\n3 SetStatus a=0\n4 LoopBack a=2\n5 LoopExit\n6 \
+				 AlwaysEnter\n7 AlwaysEnd\n8 End"
+			))
+			.unwrap();
+			let runtime = [LoopRec {
+				kind:       LoopKind::Try { always: false, pending: None },
+				status:     1,
+				iterations: 0,
+				exit:       6,
+				cont:       8,
+				depth:      Depths::default(),
+			}];
+			assert!(
+				matches!(
+					frame_continuation(&unit, 1, WalkStatus::NonZero, &runtime, true, None),
+					FrameExit::Exits(out) if !out.is_empty() && out.iter().all(|end| end.status == WalkStatus::Zero && end.transfer.is_none())
+				),
+				"{enter}"
+			);
+		}
+	}
 
 	// Golden: bash 5.3.20 `time -p` and the default format.
 	#[test]

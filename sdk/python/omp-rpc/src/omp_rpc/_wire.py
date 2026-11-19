@@ -714,6 +714,10 @@ class BashResult:
     artifact_error: JsonObject | None = None
     minimized: JsonObject | None = None
     working_dir: str | None = None
+    ended_by_exit: bool | None = None
+    """Whether `exit` or an armed `set -e` cut the run short with commands still left to run: whatever followed the abort did not run. A trailing `exit` at the end of the input is not reported."""
+    ephemeral_shell: bool | None = None
+    """Whether the run's state was not retained in the session's persistent shell after cleanup. A fork adopted into a retained session is not ephemeral; an unadopted fork or a released shell is."""
     images: tuple[ImageContent, ...] | None = None
     trace: JsonObject | None = None
     """The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."""
@@ -2117,6 +2121,8 @@ def parse_bash_result(value: object, path: str = "BashResult") -> BashResult:
         artifact_error=optional(payload, "artifactError", decode_json_object, path),
         minimized=optional(payload, "minimized", decode_json_object, path),
         working_dir=optional(payload, "workingDir", decode_str, path),
+        ended_by_exit=optional(payload, "endedByExit", decode_bool, path),
+        ephemeral_shell=optional(payload, "ephemeralShell", decode_bool, path),
         images=optional(payload, "images", array(parse_image_content), path),
         trace=optional(payload, "trace", decode_json_object, path),
         fork=optional(payload, "fork", parse_shell_fork_outcome, path),

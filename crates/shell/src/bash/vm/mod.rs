@@ -13,6 +13,8 @@ mod callstack;
 mod command;
 mod control;
 mod exec;
+mod exit_options;
+pub use exec::ExitCause;
 mod expand;
 mod fdprobe;
 mod frames;
@@ -518,6 +520,15 @@ pub struct Kernel {
 	/// The last root run that `exit` or `set -e` ended
 	/// ([`Shell::ended_by_exit`]); not imaged.
 	pub exited:             Option<RunId>,
+	/// Of that run, whether the abort cut the script short — commands were
+	/// still left to run — as opposed to a trailing `exit` at the end of
+	/// its input, which ended it exactly where it would have ended anyway;
+	/// meaningful only together with [`Kernel::exited`]. Not imaged.
+	pub exited_cut_short:   bool,
+	/// First attribution captured for a root run, before cleanup unwinds
+	/// its frames. `None` as a cause records a non-exit control transfer.
+	/// Not imaged; never drives execution.
+	pub exit_report:        Option<(RunId, Option<exec::ExitCause>)>,
 	/// Signal deaths of external programs replacing a submitted run, pending
 	/// its completion report; callouts do not survive frame restoration.
 	pub exec_signals:       HashMap<RunId, i32>,
@@ -645,6 +656,8 @@ impl Kernel {
 			callout_labels: Vec::new(),
 			prior_jobs: Vec::new(),
 			exited: None,
+			exited_cut_short: false,
+			exit_report: None,
 			exec_signals: HashMap::new(),
 			reported_signal: None,
 			bangs: Vec::new(),
@@ -2303,7 +2316,8 @@ impl Shell {
 		}
 		p.blocked = None;
 		p.stopped = false;
-		exec::exit_shell(&mut self.k, p, cx, status);
+		let top_unrun = p.frames.last().map_or(0, |frame| frame.pc);
+		exec::exit_shell(&mut self.k, p, cx, status, top_unrun, exec::ExitCause::FatalSignal);
 		true
 	}
 
@@ -2647,6 +2661,24 @@ impl Shell {
 	/// ask right after its [`Step::Done`].
 	pub fn ended_by_exit(&self, run: RunId) -> bool {
 		self.k.exited == Some(run)
+	}
+
+	/// Whether that `exit`/`set -e` abort also left commands unrun: a
+	/// trailing `exit` at the end of the script's input ends the run where
+	/// it would have ended anyway, so nothing was cut short. Meaningful
+	/// only when [`Shell::ended_by_exit`] returns true for the same run;
+	/// ask right after its [`Step::Done`].
+	pub fn ended_by_exit_cut_short(&self, run: RunId) -> bool {
+		self.k.exited == Some(run) && self.k.exited_cut_short
+	}
+
+	/// The first termination cause of `run`, excluding cleanup re-entries.
+	pub fn exit_cause(&self, run: RunId) -> Option<exec::ExitCause> {
+		self
+			.k
+			.exit_report
+			.filter(|(id, _)| *id == run)
+			.and_then(|(_, cause)| cause)
 	}
 
 	/// The signal that killed an external replacing `run`, if any. Ask

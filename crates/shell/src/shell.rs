@@ -200,11 +200,18 @@ pub struct MinimizerResult {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShellRunResult {
-	pub exit_code:   Option<i32>,
-	pub cancelled:   bool,
-	pub timed_out:   bool,
-	pub minimized:   Option<MinimizerResult>,
-	pub working_dir: Option<String>,
+	pub exit_code:     Option<i32>,
+	pub cancelled:     bool,
+	pub timed_out:     bool,
+	pub minimized:     Option<MinimizerResult>,
+	pub working_dir:   Option<String>,
+	/// The run was cut short by `exit` or an armed `set -e` with commands
+	/// still left to run: whatever followed the abort did not run. A
+	/// trailing `exit` at the end of the input — which ends the run where
+	/// the input's end would have — is not reported. The session stays
+	/// usable, with its state (including armed options) intact.
+	#[serde(default)]
+	pub ended_by_exit: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -524,19 +531,21 @@ const CANCEL_READER_GRACE: Duration = Duration::from_millis(1250);
 
 /// What a run reports when it ends normally.
 struct CommandResult {
-	status:      i32,
-	minimized:   Option<MinimizerResult>,
-	working_dir: String,
+	status:        i32,
+	minimized:     Option<MinimizerResult>,
+	working_dir:   String,
+	ended_by_exit: bool,
 }
 
 impl CommandResult {
 	fn into_run_result(self) -> ShellRunResult {
 		ShellRunResult {
-			exit_code:   Some(self.status),
-			cancelled:   false,
-			timed_out:   false,
-			minimized:   self.minimized,
-			working_dir: Some(self.working_dir),
+			exit_code:     Some(self.status),
+			cancelled:     false,
+			timed_out:     false,
+			minimized:     self.minimized,
+			working_dir:   Some(self.working_dir),
+			ended_by_exit: self.ended_by_exit,
 		}
 	}
 }
@@ -544,11 +553,12 @@ impl CommandResult {
 /// The result of a run cancelled by `reason`.
 const fn cancelled_result(reason: AbortReason) -> ShellRunResult {
 	ShellRunResult {
-		exit_code:   None,
-		cancelled:   matches!(reason, AbortReason::Signal),
-		timed_out:   matches!(reason, AbortReason::Timeout),
-		minimized:   None,
-		working_dir: None,
+		exit_code:     None,
+		cancelled:     matches!(reason, AbortReason::Signal),
+		timed_out:     matches!(reason, AbortReason::Timeout),
+		minimized:     None,
+		working_dir:   None,
+		ended_by_exit: false,
 	}
 }
 
@@ -1065,9 +1075,10 @@ async fn run_process_command(
 		}
 		let outcome = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
 		Ok(CommandResult {
-			status:      outcome.status,
-			minimized:   None,
-			working_dir: session.cwd.to_str_lossy().into_owned(),
+			status:        outcome.status,
+			minimized:     None,
+			working_dir:   session.cwd.to_str_lossy().into_owned(),
+			ended_by_exit: outcome.exited && outcome.cut_short,
 		})
 	}
 	.await;
@@ -1329,7 +1340,7 @@ async fn run_shell_command_in_filesystem(
 		minimizer::engine::MinimizerMode::None
 	};
 
-	let (status, minimized) = match minimizer_mode {
+	let (status, minimized, ended_by_exit) = match minimizer_mode {
 		minimizer::engine::MinimizerMode::SegmentedChain => {
 			run_shell_command_segmented_chain(session, &scope, cwd, on_chunk).await?
 		},
@@ -1338,7 +1349,12 @@ async fn run_shell_command_in_filesystem(
 		},
 	};
 
-	Ok(CommandResult { status, minimized, working_dir: session.cwd.to_str_lossy().into_owned() })
+	Ok(CommandResult {
+		status,
+		minimized,
+		working_dir: session.cwd.to_str_lossy().into_owned(),
+		ended_by_exit,
+	})
 }
 
 async fn run_shell_command_single(
@@ -1347,7 +1363,7 @@ async fn run_shell_command_single(
 	cwd: Option<BString>,
 	on_chunk: Option<Sender<String>>,
 	minimizer_mode: minimizer::engine::MinimizerMode,
-) -> Result<(i32, Option<MinimizerResult>)> {
+) -> Result<(i32, Option<MinimizerResult>, bool)> {
 	debug_assert!(!matches!(minimizer_mode, minimizer::engine::MinimizerMode::SegmentedChain));
 	let options = scope.options;
 
@@ -1373,6 +1389,11 @@ async fn run_shell_command_single(
 	)
 	.await?;
 	let status = command_run.outcome.status;
+	// `exit`/`set -e` cutting the script short is reported so callers can
+	// distinguish "the last statement failed" from "the rest never ran".
+	// A trailing `exit` at the end of the input ends the command exactly
+	// where its end would have; it is not a cut-short run.
+	let ended_by_exit = command_run.outcome.exited && command_run.outcome.cut_short;
 
 	let mut minimized_out = None;
 	if let Some(buffered) = command_run.buffered
@@ -1416,7 +1437,7 @@ async fn run_shell_command_single(
 		}
 	}
 
-	Ok((status, minimized_out))
+	Ok((status, minimized_out, ended_by_exit))
 }
 
 /// The source of a chain segment whose failure must not trip `set -e`: the
@@ -1432,7 +1453,7 @@ async fn run_shell_command_segmented_chain(
 	scope: &CommandScope<'_>,
 	cwd: Option<BString>,
 	on_chunk: Option<Sender<String>>,
-) -> Result<(i32, Option<MinimizerResult>)> {
+) -> Result<(i32, Option<MinimizerResult>, bool)> {
 	let options = scope.options;
 	let unsegmented = minimizer::engine::MinimizerMode::None;
 	let Some(config) = options.minimizer.as_ref() else {
@@ -1455,8 +1476,10 @@ async fn run_shell_command_segmented_chain(
 	let mut aggregate = Some(ChainCapture::new());
 	let mut previous_succeeded = true;
 	let mut last_status = None;
+	let mut ended_by_exit = false;
 	let max_capture_bytes = config.max_capture_bytes as usize;
-	for segment in segments {
+	let mut segments = segments.into_iter();
+	while let Some(segment) = segments.next() {
 		if segment.run_if_previous_succeeded && !previous_succeeded {
 			continue;
 		}
@@ -1527,6 +1550,18 @@ async fn run_shell_command_segmented_chain(
 		let keep_running = !command_run.outcome.exited && !scope.cancel.is_cancelled();
 		last_status = Some(exit);
 		if !keep_running {
+			// A suppressed segment already contains `&& :`: its continuation
+			// walk decides whether any conditional successor would run, even
+			// when a function's final `!` changes its outgoing status. Only
+			// unconditional later segments add input outside that walk; the
+			// raw exit status is not the counterfactual continuation status.
+			ended_by_exit = command_run.outcome.exited
+				&& command_run.outcome.exit_cause == Some(crate::bash::ExitCause::Exit)
+				&& !scope.cancel.is_cancelled()
+				&& (command_run.outcome.cut_short
+					|| segments
+						.by_ref()
+						.any(|segment| !segment.run_if_previous_succeeded));
 			break;
 		}
 	}
@@ -1563,7 +1598,7 @@ async fn run_shell_command_segmented_chain(
 	// not minimized — `minimized_out` stays `None`, matching the whole-command
 	// path and `apply_shell_minimizer`.
 
-	Ok((status, minimized_out))
+	Ok((status, minimized_out, ended_by_exit))
 }
 
 /// Run `command` once on the session, its stdout and stderr merged into one
@@ -1848,9 +1883,10 @@ async fn run_shell_command_streams_in_filesystem(
 
 	let outcome = result.map_err(|err| Error::msg(format!("Shell execution failed: {err}")))?;
 	Ok(CommandResult {
-		status:      outcome.status,
-		minimized:   None,
-		working_dir: session.cwd.to_str_lossy().into_owned(),
+		status:        outcome.status,
+		minimized:     None,
+		working_dir:   session.cwd.to_str_lossy().into_owned(),
+		ended_by_exit: outcome.exited && outcome.cut_short,
 	})
 }
 

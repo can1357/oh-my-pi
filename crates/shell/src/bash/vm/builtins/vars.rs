@@ -1162,7 +1162,7 @@ pub fn define_function(
 	if let Some(d) = rejected {
 		k.diag(cx, vp, line, d);
 		if posix {
-			return Flow::Exit(2);
+			return Flow::Exit { status: 2, cause: super::super::exec::ExitCause::PosixFatal };
 		}
 		vp.status = 1;
 		return Flow::Next;

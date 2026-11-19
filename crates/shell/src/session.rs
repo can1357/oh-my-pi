@@ -210,14 +210,21 @@ pub struct RunStdio {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunOutcome {
 	/// Exit status, bash semantics (127 not found, 128 + n for a signal).
-	pub status:    i32,
+	pub status:     i32,
 	/// The run was stopped by its cancellation token.
-	pub cancelled: bool,
+	pub cancelled:  bool,
 	/// `exit` or `set -e` ended the command (rather than its end): a caller
 	/// running one command as several runs stops here, as bash would have.
-	pub exited:    bool,
+	pub exited:     bool,
+	/// In-process attribution; never serialized into a shell image or native
+	/// result.
+	pub exit_cause: Option<crate::bash::ExitCause>,
+	/// Of such an abort, whether commands were still left to run: a trailing
+	/// `exit` at the end of the input ends the command exactly where its end
+	/// would have, and is not reported as cutting it short.
+	pub cut_short:  bool,
 	/// The shell's working directory after the command.
-	pub cwd:       BString,
+	pub cwd:        BString,
 }
 
 /// Failure of a [`Session`] call.
@@ -937,6 +944,8 @@ impl Driver {
 			}
 		}
 		let exited = self.shell.ended_by_exit(run);
+		let exit_cause = self.shell.exit_cause(run);
+		let cut_short = self.shell.ended_by_exit_cut_short(run);
 		self.settle().await;
 		self.children.set_active(false);
 		self.host.streams().clear();
@@ -948,7 +957,14 @@ impl Driver {
 		self.image.publish(&mut self.store);
 		let cwd = store_cwd(&self.store);
 		// The caller may have stopped waiting (dropped future).
-		let _ = reply.send(RunOutcome { status, cancelled: applied > 0, exited, cwd });
+		let _ = reply.send(RunOutcome {
+			status,
+			cancelled: applied > 0,
+			exited,
+			exit_cause,
+			cut_short,
+			cwd,
+		});
 	}
 
 	/// Let the background work a command started reach its first wait (an
@@ -1962,6 +1978,47 @@ mod tests {
 		assert!(sh(&mut s, "exit 0").await.outcome.exited);
 		assert!(sh(&mut s, "set -e; false; echo no").await.outcome.exited);
 		assert!(!sh(&mut s, "set +e; (exit 4)").await.outcome.exited);
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn exit_cut_short_skips_trailing_exit_and_counts_unrun_input() {
+		async fn outcome(s: &mut Session, cmd: &str) -> RunOutcome {
+			sh(s, cmd).await.outcome
+		}
+		let mut s = session();
+		// A trailing `exit` ends the run where the input's end would have:
+		// nothing was cut short.
+		assert!(!outcome(&mut s, "exit 0").await.cut_short);
+		assert!(!outcome(&mut s, "true; exit 0").await.cut_short);
+		assert!(!outcome(&mut s, "f() { exit 1; }; f").await.cut_short);
+		assert!(
+			!outcome(&mut s, "while true; do exit 1; done")
+				.await
+				.cut_short
+		);
+		assert!(!outcome(&mut s, "set -e; false").await.cut_short);
+		// Commands after the abort did not run.
+		assert!(outcome(&mut s, "exit 0; echo no").await.cut_short);
+		assert!(
+			outcome(&mut s, "f() { exit 1; }; f; echo no")
+				.await
+				.cut_short
+		);
+		assert!(
+			outcome(&mut s, "while true; do exit 1; done; echo no")
+				.await
+				.cut_short
+		);
+		assert!(
+			outcome(&mut s, "if true; then exit 1; fi; echo no")
+				.await
+				.cut_short
+		);
+		assert!(outcome(&mut s, "set -e; false; echo no").await.cut_short);
+		// `exited` still names every exit/errexit end, trailing or not.
+		assert!(outcome(&mut s, "exit 0").await.exited);
+		assert!(outcome(&mut s, "exit 0; echo no").await.exited);
+		assert!(!outcome(&mut s, "false").await.cut_short);
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

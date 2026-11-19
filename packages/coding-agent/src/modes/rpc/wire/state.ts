@@ -180,6 +180,14 @@ export const stateDefs = {
 		"artifactError?": JSON_OBJECT,
 		"minimized?": JSON_OBJECT,
 		"workingDir?": "string",
+		"endedByExit?": doc(
+			"boolean",
+			"Whether `exit` or an armed `set -e` cut the run short with commands still left to run: whatever followed the abort did not run. A trailing `exit` at the end of the input is not reported.",
+		),
+		"ephemeralShell?": doc(
+			"boolean",
+			"Whether the run's state was not retained in the session's persistent shell after cleanup. A fork adopted into a retained session is not ephemeral; an unadopted fork or a released shell is.",
+		),
 		"images?": "ImageContent[]",
 		"trace?": doc(
 			JSON_OBJECT,
