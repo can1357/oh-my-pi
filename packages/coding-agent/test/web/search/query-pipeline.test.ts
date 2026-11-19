@@ -1,17 +1,23 @@
 /**
  * Central directive pipeline: executeSearch parses the query once, hands the
- * StructuredQuery to the role-selected provider, then lenient-filters the
- * returned sources — enforcing constraints the provider ignored and relaxing
- * any dimension that would eliminate every result.
+ * StructuredQuery to the role-selected provider, then filters the returned
+ * sources — enforcing constraints the provider ignored, holding scope
+ * directives even when nothing is left, and relaxing any other dimension
+ * that would eliminate every result.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runSearchQuery, type SearchQueryParams } from "@oh-my-pi/pi-coding-agent/web/search";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import * as provider from "@oh-my-pi/pi-coding-agent/web/search/provider";
-import type { SearchProviderId, SearchResponse, SearchSource } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import {
+	type SearchProviderId,
+	SearchProviderError,
+	type SearchResponse,
+	type SearchSource,
+} from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 
 import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -35,6 +41,7 @@ async function stubRoleProvider(id: SearchProviderId, behaviour: (params: Search
 		label: id,
 		isAvailable: () => true,
 		isExplicitlyAvailable: () => true,
+		isKeyless: () => false,
 		search: behaviour,
 	};
 	const getProvider = vi.spyOn(provider, "getSearchProvider").mockImplementation(async requested => {
@@ -68,14 +75,24 @@ describe("web search directive pipeline", () => {
 		expect(result.content[0]?.text).not.toContain("Note:");
 	});
 
-	it("relaxes a constraint that matches nothing and leads the LLM text with a note", async () => {
+	it("returns an empty result, not off-site sources, when nothing matches a site: directive", async () => {
 		const context = await stubRoleProvider("brave", async () => ({ provider: "brave", sources: SOURCES }));
 
 		const result = await runSearchQuery({ query: "guide site:nowhere.example" }, context);
 
+		expect(result.details.error).toBeUndefined();
+		expect(result.details.response.sources).toEqual([]);
+		expect(result.content[0]?.text).toBe("No results from brave matched `site:nowhere.example`.");
+	});
+
+	it("relaxes a non-scope constraint that matches nothing and leads the LLM text with a note", async () => {
+		const context = await stubRoleProvider("brave", async () => ({ provider: "brave", sources: SOURCES }));
+
+		const result = await runSearchQuery({ query: "guide intitle:nowhere" }, context);
+
 		expect(result.details.response.sources).toHaveLength(SOURCES.length);
 		expect(result.content[0]?.text).toStartWith(
-			"Note: no results matched `site:nowhere.example`; the constraint was relaxed",
+			"Note: no results matched `intitle:nowhere`; the constraint was relaxed",
 		);
 	});
 
@@ -90,6 +107,7 @@ describe("web search directive pipeline", () => {
 			label: grounding,
 			isAvailable: () => true,
 			isExplicitlyAvailable: () => true,
+			isKeyless: () => false,
 			search: async () => ({ provider: "xai", sources: [{ title: "Post", url: "https://x.com/jack/status/20" }] }),
 		}));
 
@@ -125,6 +143,7 @@ describe("web search directive pipeline", () => {
 				label: "Hacker News",
 				isAvailable: () => true,
 				isExplicitlyAvailable: () => true,
+				isKeyless: () => false,
 				search: async () => ({
 					provider: "hackernews",
 					sources: [{ title: "Thread", url: "https://news.ycombinator.com/item?id=1" }],
@@ -137,6 +156,35 @@ describe("web search directive pipeline", () => {
 		expect(result.details.response.provider).toBe(expectedProvider);
 	});
 
+	it("skips an engine that answered 429 on later calls instead of paying the rate limit again", async () => {
+		let parallelCalls = 0;
+		const context = await stubRoleProvider("parallel", async () => {
+			parallelCalls++;
+			throw new SearchProviderError("parallel", "parallel: MCP rate limit reached (429)", 429);
+		});
+		cfgRetryFallbackChains.set(settings, { web: ["web/exa"] });
+		const parallel = await provider.getSearchProvider("parallel");
+		context.getProvider.mockImplementation(async requested => {
+			if (requested === "parallel") return parallel;
+			if (requested !== "exa") throw new Error(`Unexpected provider: ${requested}`);
+			return {
+				id: "exa",
+				label: "Exa",
+				isAvailable: () => true,
+				isExplicitlyAvailable: () => true,
+				isKeyless: () => false,
+				search: async () => ({ provider: "exa", sources: SOURCES }),
+			};
+		});
+
+		await runSearchQuery({ query: "first" }, context);
+		const second = await runSearchQuery({ query: "second" }, context);
+
+		expect(parallelCalls).toBe(1);
+		expect(second.details.response.provider).toBe("exa");
+		expect(second.content[0]?.text).toContain("rate-limited (429)");
+	});
+
 	it("uses a request model override instead of modelRoles.web", async () => {
 		const context = await stubRoleProvider("jina", async params => ({
 			provider: "jina",
@@ -147,6 +195,7 @@ describe("web search directive pipeline", () => {
 			label: "exa",
 			isAvailable: () => false,
 			isExplicitlyAvailable: () => true,
+			isKeyless: () => false,
 			search: async params => ({
 				provider: "exa",
 				sources: [{ title: params.model.id, url: "https://exa.example" }],

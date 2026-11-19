@@ -69,7 +69,7 @@ describe("SDK delayed quota error after a provider switch", () => {
 				enableMCP: false,
 				enableLsp: false,
 				skipPythonPreflight: true,
-				cacheWarming: false,
+				cacheWarming: "off",
 			});
 			cleanups.push(() => session.dispose());
 			const messages: AssistantMessage[] = [];
@@ -151,7 +151,7 @@ describe("SDK delayed quota error after a provider switch", () => {
 			enableMCP: false,
 			enableLsp: false,
 			skipPythonPreflight: true,
-			cacheWarming: false,
+			cacheWarming: "off",
 		});
 		cleanups.push(() => session.dispose());
 		const mark = vi.spyOn(auth.limits, "markReached").mockResolvedValue({ switched: false });

@@ -43,7 +43,9 @@ import {
 	followMCPTools,
 	replayRevivedAgentStart,
 	softRequestBudgetFor,
+	subagentLspWritethroughSettings,
 	subagentRetryFallbackRole,
+	usesYield,
 } from "./executor";
 import { isCompletionProbeEnabled } from "./completion-probe";
 import { discoverAgents, getAgent } from "./discovery";
@@ -345,6 +347,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	// in files written before that. Absent = unadvised (the
 	// createSubagentSettings default).
 	const subagentSettings = createSubagentSettings(spec.settings, {
+		...subagentLspWritethroughSettings(spec.settings),
 		...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 		...(init.advisor
 			? {
@@ -395,8 +398,6 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	// A restricted persisted contract must not consult process-global MCP
 	// state: same-name MCP tools are untrusted capability sources.
 	const restrictToolNames = init.restrictToolNames === true;
-	// The spawn's result contract: a session persisted without `yield` returned its final message.
-	const structured = revivedToolNames.includes("yield");
 	const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 	// Subscribe before minting proxies so a manager change during startup is replayed on bind.
 	// The revived session reopens its own view, keeping the tools its earlier requests rendered.
@@ -415,7 +416,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			modelRegistry: spec.modelRegistry,
 			...(perCallModel ? { model: perCallModel, thinkingLevel: init.perCallThinkingLevel ?? undefined } : {}),
 			...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
-			modelPatternAuthFallback: init.perCallModel ? undefined : init.resolvedModel,
+			modelPatternParentFallback: init.perCallModel ? undefined : init.resolvedModel,
 			settings: subagentSettings,
 			sessionManager: reopened,
 			agentId: ref.id,
@@ -448,7 +449,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			outputSchema: init.outputSchema,
 			outputSchemaMode: init.outputSchemaMode,
 			restrictToolNames: restrictToolNames || undefined,
-			requireYieldTool: structured,
+			requireYieldTool: usesYield(init.outputSchema),
 			systemPrompt: () => [...init.systemPrompt],
 			// Inherit current owner policy, never extension authority from a transcript.
 			extensionRoots: () => spec.root.effectiveExtensionRoots,
@@ -526,7 +527,6 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 		eventBus: spec.eventBus,
 		subagentEventBus: spec.subagentEventBus,
 		sessionFile,
-		structured,
 		outputSchema: init.outputSchema,
 		outputSchemaMode: init.outputSchemaMode,
 		// Anchor artifacts to the revived ref's own dir (its parent's children

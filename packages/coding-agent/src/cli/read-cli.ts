@@ -10,9 +10,9 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { initializeWithSettings } from "../discovery";
-import { releaseIdaDatabases } from "../ida";
+import { cfgDisasmBackend, installStatus, releaseDatabases, resolveWorkerRuntime } from "../disasm";
 import { loadSkills } from "../extensibility/skills";
-import { closeDaemonClients } from "../launch/client";
+import { closeDaemonClient } from "../daemon/client";
 import { discoverAndLoadMCPTools } from "../mcp/loader";
 import { MCPManager } from "../mcp/manager";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
@@ -126,6 +126,15 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 	} catch (err) {
 		process.stderr.write(`${chalk.red(renderError(err))}\n`);
 		failed = true;
+		const backend = cfgDisasmBackend.get(settings);
+		if (backend !== undefined && installStatus(backend) !== undefined) {
+			// The caller's deadline must not terminate a shared download or release its install lock mid-build.
+			try {
+				await resolveWorkerRuntime(session, backend);
+			} catch (error) {
+				process.stderr.write(`${chalk.red(renderError(error))}\n`);
+			}
+		}
 	} finally {
 		MCPManager.setDeferredInstance(undefined);
 		if (mcpManager) {
@@ -133,9 +142,9 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 			if (MCPManager.instance() === mcpManager) MCPManager.setInstance(undefined);
 		}
 		authStorage?.close();
-		// Saves unsaved IDA changes and drops the host sockets that would keep the event loop alive.
-		await releaseIdaDatabases();
-		await closeDaemonClients();
+		// Save backend changes and drop host sockets that would keep the event loop alive.
+		await releaseDatabases();
+		await closeDaemonClient();
 	}
 
 	if (failed) process.exit(1);

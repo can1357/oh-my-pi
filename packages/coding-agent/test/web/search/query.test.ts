@@ -235,11 +235,17 @@ describe("applyQueryConstraints", () => {
 		expect(dropped).toEqual([]);
 	});
 
-	it("drops a constraint that would eliminate every result and reports it", () => {
+	it("enforces a scope directive even when it leaves nothing", () => {
 		const q = parseSearchQuery("install site:nonexistent.example");
+		expect(applyQueryConstraints(sources, q)).toEqual({ sources: [], dropped: [] });
+		expect(applyQueryConstraints(sources, parseSearchQuery("k8s -inurl:/"))).toEqual({ sources: [], dropped: [] });
+	});
+
+	it("relaxes a non-scope directive that would eliminate every result and reports it", () => {
+		const q = parseSearchQuery("install intitle:nonexistent");
 		const { sources: out, dropped } = applyQueryConstraints(sources, q);
 		expect(out).toHaveLength(sources.length);
-		expect(dropped).toEqual(["site:nonexistent.example"]);
+		expect(dropped).toEqual(["intitle:nonexistent"]);
 	});
 
 	it("relaxes dimensions independently", () => {
