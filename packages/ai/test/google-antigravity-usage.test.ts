@@ -8,6 +8,7 @@ import { describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchContext, UsageFetchParams, UsageLimit } from "@oh-my-pi/pi-ai/usage";
 import {
+	antigravityCliUsageProvider,
 	antigravityRankingStrategy,
 	antigravityUsageProvider,
 	scopeAntigravityLimitsForModel,
@@ -74,6 +75,46 @@ function makeApiModel(
 // ── tests ────────────────────────────────────────────────────────────
 
 describe("antigravity usage provider", () => {
+	it("sends the manifest-discovered client version in the quota summary User-Agent", async () => {
+		const userAgents: string[] = [];
+		const fetchImpl: FetchImpl = async (input, init) => {
+			const url = String(input);
+			if (url.includes("manifest")) return new Response("version: 9.8.7\n", { status: 200 });
+			userAgents.push(new Headers(init?.headers).get("user-agent") ?? "");
+			return new Response(JSON.stringify({ groups: [] }), { status: 200 });
+		};
+		await antigravityUsageProvider.fetchUsage(
+			{ provider: "google-antigravity", credential: makeCredential() },
+			makeCtx(fetchImpl),
+		);
+		expect(userAgents[0]).toContain("antigravity/hub/9.8.7");
+	});
+
+	it("reports antigravity-cli quota with the default CLI project when the credential has none", async () => {
+		const bodies: string[] = [];
+		const fetchImpl: FetchImpl = async (input, init) => {
+			if (String(input).includes("manifest")) return new Response("", { status: 404 });
+			bodies.push(String(init?.body));
+			return new Response(
+				JSON.stringify({
+					groups: [
+						{
+							displayName: "Gemini Models",
+							buckets: [{ bucketId: "gemini-weekly", window: "weekly", remainingFraction: 0.4 }],
+						},
+					],
+				}),
+				{ status: 200 },
+			);
+		};
+		const params = { provider: "antigravity-cli", credential: makeCredential({ projectId: undefined }) };
+		expect(antigravityCliUsageProvider.supports?.(params)).toBe(true);
+		const report = await antigravityCliUsageProvider.fetchUsage(params, makeCtx(fetchImpl));
+		expect(JSON.parse(bodies[0])).toEqual({ project: "default-cli-project" });
+		expect(report?.provider).toBe("antigravity-cli");
+		expect(report?.limits[0]?.amount.remainingFraction).toBe(0.4);
+	});
+
 	it("reports the official five-hour and weekly quota summary", async () => {
 		const requestedUrls: string[] = [];
 		const summary = {
