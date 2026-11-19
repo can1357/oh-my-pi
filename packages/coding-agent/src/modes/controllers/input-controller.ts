@@ -13,6 +13,7 @@ import {
 	parseKey,
 	parseSgrMouse,
 	type PasteOptions,
+	isTerminalReport,
 	type SlashCommand,
 } from "@oh-my-pi/pi-tui";
 import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -98,6 +99,9 @@ import { cfgHideThinkingBlock } from "../../session/settings";
 
 /** Bare words that quit (as `/<word>`) when typed alone into a session with no messages. */
 const BARE_EXIT_WORDS: Record<string, true> = { exit: true, quit: true, q: true };
+
+/** Kitty key-release report (`CSI code;mod:3u` and friends); matched without the protocol gate. */
+const KEY_RELEASE_REPORT = /^\x1b\[[\d:;]*:3[u~ABCDHF]$/;
 
 const REMOTE_CLIPBOARD_STATUS =
 	"Clipboard here belongs to the SSH host — use your terminal's paste shortcut to paste from your machine";
@@ -327,6 +331,7 @@ export class InputController {
 	#expandToolsListenerInstalled = false;
 	#inlineMouseListenerInstalled = false;
 	#linkHintListenerInstalled = false;
+	#outputHoldListenerInstalled = false;
 
 	/** Click-candidate id the hover band currently tracks; repaint only on change. */
 	#lastHoverClickId: string | undefined;
@@ -376,6 +381,39 @@ export class InputController {
 	setupKeyHandlers(): void {
 		this.#draftText ??= this.ctx.editor.getText();
 		this.ctx.editor.setActionKeys("app.interrupt", this.ctx.keybindings.getKeys("app.interrupt"));
+		if (!this.#outputHoldListenerInstalled) {
+			this.#outputHoldListenerInstalled = true;
+			// First refusal: while output is held this either extends the hold or
+			// releases it before the key reaches its owner, so the repaint that shows
+			// the keystroke is already scheduled.
+			this.ctx.ui.addInputListener(
+				data => {
+					if (this.ctx.keybindings.matches(data, "app.display.hold")) {
+						if (this.ctx.ui.getOutputHold()) {
+							// Releasing always wins, overlay or not: a hold must never trap the
+							// user behind a prompt they cannot see.
+							this.ctx.ui.setOutputHold(false);
+							return { consume: true };
+						}
+						if (this.ctx.ui.hasOverlay()) return undefined;
+						const key = appKey(this.ctx.keybindings, "app.display.hold");
+						// The bottom-row notice is the whole message: a status row
+						// presented now could not paint until the release anyway.
+						this.ctx.ui.setOutputHold(true, `⏸ Output held · ${key} or any key resumes`);
+						return { consume: true };
+					}
+					// Only a real keystroke resumes. Terminal reports arrive unprompted on
+					// the same stream (a delayed cell-size reply, a cursor-position answer
+					// to a resize probe), and a key release or wheel tick is not the user
+					// asking to follow again — none of them may drop the hold.
+					if (!this.ctx.ui.getOutputHold()) return undefined;
+					if (isTerminalReport(data) || KEY_RELEASE_REPORT.test(data)) return undefined;
+					this.ctx.ui.setOutputHold(false);
+					return undefined;
+				},
+				{ prepend: true },
+			);
+		}
 		if (!this.#linkHintListenerInstalled) {
 			this.#linkHintListenerInstalled = true;
 			// First, so a tag letter typed in link-hint mode reaches no other listener or the editor.

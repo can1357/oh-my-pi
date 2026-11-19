@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `TUI.setOutputHold()` / `getOutputHold()`: an explicit output hold that composes, writes, and acknowledges no frames until release, then repaints the viewport once with a re-anchored viewport. In-flight resize transactions are abandoned on hold and overlays release it, so releasing never clears native scrollback ([#19751](https://github.com/can1357/oh-my-pi/pull/19751) by [@LangYa466](https://github.com/LangYa466)).
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes

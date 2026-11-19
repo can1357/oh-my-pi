@@ -29,6 +29,7 @@ interface AppKeybindings {
 	"app.exit": true;
 	"app.suspend": true;
 	"app.display.reset": true;
+	"app.display.hold": true;
 	"app.thinking.cycle": true;
 	"app.thinking.toggle": true;
 	"app.model.cycleForward": true;
@@ -113,6 +114,12 @@ export const KEYBINDINGS = {
 	"app.display.reset": {
 		defaultKeys: "alt+l",
 		description: "Reset terminal display",
+	},
+	"app.display.hold": {
+		// Holds the screen still while a turn streams, for reading native
+		// scrollback without the terminal following new rows. Any key resumes.
+		defaultKeys: "alt+s",
+		description: "Hold output (stop following new rows)",
 	},
 	"app.thinking.cycle": {
 		defaultKeys: "shift+tab",

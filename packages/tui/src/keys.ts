@@ -368,6 +368,35 @@ export function isKeyRepeat(data: string): boolean {
 	return KITTY_REPEAT_PATTERN.test(data);
 }
 
+/**
+ * Whether `data` is terminal report rather than a keystroke: device-attribute,
+ * cell-size, cursor-position, or private-mode replies, OSC/DCS/APC payloads, and
+ * SGR mouse reports.
+ *
+ * Replies arrive on the same stream as typing, unprompted and possibly seconds
+ * late (a cell-size answer to a startup query), so anything that reacts to "the
+ * user typed something" has to ask this first. Every key sequence is excluded by
+ * construction: no key starts with `ESC [ <`, `ESC [ ?`, or an OSC/DCS/APC
+ * introducer, and the numeric CSI replies below are matched in full.
+ */
+export function isTerminalReport(data: string): boolean {
+	if (data.length < 3 || data[0] !== "\x1b") return false;
+	const introducer = data[1];
+	if (introducer === "]") return true; // OSC (title, clipboard, cell size)
+	if (introducer === "P" || introducer === "_" || introducer === "^") return true; // DCS / APC / PM
+	if (introducer !== "[") return false;
+	const body = data.slice(2);
+	if (body.startsWith("<") || body.startsWith("?")) return true; // SGR mouse, private-mode replies
+	if (body.startsWith("M")) return true; // legacy X10 mouse report
+	return (
+		/^\d+;\d+R$/.test(body) || // cursor position report
+		/^\d+;\d+;\d*t$/.test(body) || // cell size in pixels
+		/^\d+;\d+t$/.test(body) ||
+		/^[\d;]*c$/.test(body) || // primary device attributes
+		/^\d+(;\d+)*\$y$/.test(body) // DECRQM
+	);
+}
+
 export function parseKittySequence(data: string): ParsedKittySequence | null {
 	const result = parseKittySequenceNative(data);
 	if (!result) return null;

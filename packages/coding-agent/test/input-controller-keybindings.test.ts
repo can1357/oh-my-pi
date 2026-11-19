@@ -79,6 +79,7 @@ async function createContext() {
 	let editorText = "";
 	const keyMap: Record<string, KeyId[]> = {
 		"app.display.reset": ["alt+l"],
+		"app.display.hold": ["alt+s"],
 		"app.stt.pushToTalk": ["space"],
 		"app.thinking.toggle": ["ctrl+t"],
 		"app.history.search": ["ctrl+r"],
@@ -104,8 +105,11 @@ async function createContext() {
 	const showModelSelector = vi.fn();
 	const requestRender = vi.fn();
 	const showError = vi.fn();
+	const showStatus = vi.fn();
 	let focused: unknown;
 	let overlayVisible = false;
+	let outputHold = false;
+	const holdNotices: (string | undefined)[] = [];
 	const addInputListener = vi.fn((listener: InputListener) => {
 		void listener;
 	});
@@ -190,6 +194,13 @@ async function createContext() {
 			addStartListener,
 			getFocused: vi.fn(() => focused),
 			hasOverlay: vi.fn(() => overlayVisible),
+			getOutputHold: () => outputHold,
+			setOutputHold: (hold: boolean, notice?: string) => {
+				if (outputHold === hold) return false;
+				outputHold = hold;
+				holdNotices.push(notice);
+				return true;
+			},
 			terminal: { write: terminalWrite, refreshAppearance },
 		} as unknown as InteractiveModeContext["ui"],
 		loadingAnimation: undefined,
@@ -265,7 +276,7 @@ async function createContext() {
 		canFollowUpBtw,
 		handleBtwFollowUpKey,
 		showError,
-		showStatus: vi.fn(),
+		showStatus,
 		isGuidedGoalInterviewActive,
 		sessionManager: { getSessionId: () => "session", getLeafId: () => null },
 	} as unknown as InteractiveModeContext;
@@ -281,6 +292,10 @@ async function createContext() {
 		setOverlayVisible(visible: boolean) {
 			overlayVisible = visible;
 		},
+		isOutputHeld() {
+			return outputHold;
+		},
+		holdNotices,
 		setKeybinding(action: string, keys: KeyId[]) {
 			keyMap[action] = keys;
 		},
@@ -307,6 +322,7 @@ async function createContext() {
 			canFollowUpBtw,
 			handleBtwFollowUpKey,
 			showError,
+			showStatus,
 			isGuidedGoalInterviewActive,
 		},
 	};
@@ -1960,5 +1976,62 @@ describe("InputController image paste into an ask form note", () => {
 		expect(context.editor.pendingImages).toHaveLength(0);
 		expect(form.optionNotes()).toEqual([]);
 		form.dispose();
+	});
+});
+
+describe("app.display.hold", () => {
+	it("holds output with a resume hint and resumes on any other key", async () => {
+		const { InputController, ctx, isOutputHeld, holdNotices, spies } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(spies.addInputListener);
+
+		expect(dispatchInput(listeners, "\x1bs")).toEqual({ consume: true });
+		expect(isOutputHeld()).toBe(true);
+		expect(holdNotices.at(-1)).toContain("any key resumes");
+
+		// An unrelated key is not consumed, and the hold is already gone before it
+		// reaches its owner, so the repaint it schedules is the visible one.
+		expect(dispatchInput(listeners, "a")).toBeUndefined();
+		expect(isOutputHeld()).toBe(false);
+		// Resuming by typing is silent: the keystroke's own repaint is the feedback.
+		expect(ctx.showStatus).not.toHaveBeenCalled();
+	});
+
+	it("releases instead of re-holding when pressed while held", async () => {
+		const { InputController, ctx, isOutputHeld, spies } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(spies.addInputListener);
+
+		dispatchInput(listeners, "\x1bs");
+		dispatchInput(listeners, "\x1bs");
+		expect(isOutputHeld()).toBe(false);
+	});
+
+	it("ignores terminal reports and key releases while held", async () => {
+		const { InputController, ctx, isOutputHeld, spies } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(spies.addInputListener);
+
+		dispatchInput(listeners, "\x1bs");
+		// A delayed cell-size answer, an SGR mouse wheel, and a key release must
+		// all leave the hold alone: none of them is the user asking to follow.
+		dispatchInput(listeners, "\x1b[6;16;8t");
+		dispatchInput(listeners, "\x1b[<64;10;5M");
+		dispatchInput(listeners, "\x1b[97;1:3u");
+		expect(isOutputHeld()).toBe(true);
+	});
+
+	it("leaves the key to an open overlay", async () => {
+		const { InputController, ctx, isOutputHeld, setOverlayVisible, spies } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(spies.addInputListener);
+
+		setOverlayVisible(true);
+		expect(dispatchInput(listeners, "\x1bs")).toBeUndefined();
+		expect(isOutputHeld()).toBe(false);
 	});
 });

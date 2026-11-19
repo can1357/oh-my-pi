@@ -1908,6 +1908,9 @@ export class ExtensionUiController {
 			this.#dialogActive = true;
 			// Held before `present` so a synchronous settle still releases it.
 			release = holdBlockedStatus({ state: "blocked", ...prompt });
+			// A held screen would keep the dialog invisible while the agent waits on
+			// an answer, so every blocking presentation resumes output first.
+			this.ctx.ui.setOutputHold(false);
 			try {
 				hide = present(settle);
 			} catch (error) {
