@@ -18,6 +18,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { detectHostAvx2Support, resolveLocalHostAddon } from "../../../scripts/host-detect";
+import { stampNativeVersion } from "../../../scripts/stamp-native-version";
 import packageJson from "../package.json" with { type: "json" };
 
 const packageDir = path.join(import.meta.dir, "..");
@@ -89,6 +90,11 @@ process.exit(0);
 let root = "";
 let loaderDir = "";
 let frame = "";
+/**
+ * The host addon stamped with this package's version: the loader rejects an
+ * addon whose stamp differs, as a build from before a version bump has.
+ */
+let addon = "";
 
 beforeAll(async () => {
 	if (!hasHostAddon) return;
@@ -100,10 +106,13 @@ beforeAll(async () => {
 	}
 	await fs.copyFile(path.join(packageDir, "package.json"), path.join(loaderDir, "package.json"));
 	await Bun.write(path.join(loaderDir, "probe.ts"), PROBE);
+	addon = path.join(root, hostAddonFilename);
+	await fs.copyFile(hostAddon, addon);
+	await stampNativeVersion(addon, packageJson.version);
 	// The embedded addon's zstd frame, as a standalone binary carries it; a low
 	// level keeps the test fast, and the loader reads any level.
 	frame = path.join(root, `${hostAddonFilename}.zst`);
-	await Bun.write(frame, Bun.zstdCompressSync(await Bun.file(hostAddon).bytes(), { level: 1 }));
+	await Bun.write(frame, Bun.zstdCompressSync(await Bun.file(addon).bytes(), { level: 1 }));
 });
 
 afterAll(async () => {
@@ -138,7 +147,7 @@ describe.skipIf(!hasHostAddon)("the addon loads from a directory whose path hold
 			const nativesDir = path.join(root, `natives-${dirname}`);
 			const addonPath = path.join(nativesDir, packageJson.version, hostAddonFilename);
 			await fs.mkdir(path.dirname(addonPath), { recursive: true });
-			await fs.copyFile(hostAddon, addonPath);
+			await fs.copyFile(addon, addonPath);
 			try {
 				const result = await probe({ PI_NATIVES_DIR: nativesDir, HOME: path.join(root, `home-of-${dirname}`) });
 				expect(result).toMatchObject({ ok: true, path: addonPath });
@@ -151,7 +160,7 @@ describe.skipIf(!hasHostAddon)("the addon loads from a directory whose path hold
 			const home = path.join(root, `home-${dirname}`);
 			const versionedDir = path.join(home, ".omp", "natives", packageJson.version);
 			await fs.mkdir(versionedDir, { recursive: true });
-			const size = (await fs.stat(hostAddon)).size;
+			const size = (await fs.stat(addon)).size;
 			try {
 				const result = await probe({
 					HOME: home,
@@ -170,8 +179,8 @@ describe.skipIf(!hasHostAddon)("the addon loads from a directory whose path hold
 
 describe.skipIf(!hasHostAddon)("openNativeAddon", () => {
 	it("gives the exports require gave: the same names, kinds and version stamp", async () => {
-		const required = await probe({ PROBE_REQUIRE: hostAddon });
-		const opened = await probe({ PROBE_OPEN: hostAddon });
+		const required = await probe({ PROBE_REQUIRE: addon });
+		const opened = await probe({ PROBE_OPEN: addon });
 		expect(required.ok).toBe(true);
 		expect(opened).toEqual(required);
 		expect(opened.exports?.length).toBeGreaterThan(0);
@@ -182,7 +191,7 @@ describe.skipIf(!hasHostAddon)("openNativeAddon", () => {
 		const nativesDir = path.join(root, "natives-twice");
 		const addonPath = path.join(nativesDir, packageJson.version, hostAddonFilename);
 		await fs.mkdir(path.dirname(addonPath), { recursive: true });
-		await fs.copyFile(hostAddon, addonPath);
+		await fs.copyFile(addon, addonPath);
 		try {
 			const result = await probe({
 				PI_NATIVES_DIR: nativesDir,
