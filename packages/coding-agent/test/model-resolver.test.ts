@@ -1596,7 +1596,9 @@ describe("resolveSessionModelSelector", () => {
 		});
 		const registry = registryFor([model]);
 		const restored = resolveSessionModelSelector(registry, `vercel-ai-gateway/${model.id}@anthropic`);
-		expect(restored?.model.compat).toMatchObject({ vercelGatewayRouting: { only: ["anthropic"], order, ...caching } });
+		expect(restored?.model.compat).toMatchObject({
+			vercelGatewayRouting: { only: ["anthropic"], order, ...caching },
+		});
 	});
 
 	test("does not strip a literal thinking suffix before a saved pin", () => {
