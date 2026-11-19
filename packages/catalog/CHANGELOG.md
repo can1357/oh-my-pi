@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Gemini 4 Neon (`gemini-4-neon`) to the Antigravity CLI provider with low, medium, high, and xhigh thinking levels ([#19730](https://github.com/can1357/oh-my-pi/pull/19730) by [@jmgilman](https://github.com/jmgilman))
+
 ## [19.0.0] - 2026-11-18
 
 ### Added
