@@ -67,6 +67,7 @@ import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { outputMeta, resolveInlineByteCapBudget } from "./output-meta";
 import { resolveShellDirectory, resolveToCwd } from "./path-utils";
 import {
+	BASH_APPROVAL_SHELL_CONTROL_CHARS,
 	extractAndChainSegments,
 	extractLeadingCdTarget,
 	extractLiteralAndChainSegments,
@@ -111,19 +112,6 @@ import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight
 import { SPOTLIGHT_FULL_OUTPUT_MAX_BYTES } from "../spotlight/types";
 import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
 
-const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
-	"\n": true,
-	"\r": true,
-	";": true,
-	"&": true,
-	"|": true,
-	"<": true,
-	">": true,
-	"`": true,
-	$: true,
-	"(": true,
-	")": true,
-};
 const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^-]*[ce]|--(?:command|eval))(?:[= \t]|$)/u;
 
 function hasBashApprovalShellControl(command: string): boolean {
@@ -353,9 +341,18 @@ function bashApprovalRuleMatches(
 ): boolean {
 	if (rule.approval === "allow") {
 		if (hasBashApprovalShellControl(command)) return false;
-		if (commandMatchesBashApprovalPattern(command, rule.match)) return true;
+		const trimmedCommand = command.trimStart();
+		const hasLeadingEnv =
+			withoutLeadingEnvironmentAssignments(trimmedCommand) !== null || isShellEnvironmentAssignment(trimmedCommand);
+		if (
+			(!hasLeadingEnv || isShellEnvironmentAssignment(rule.match)) &&
+			commandMatchesBashApprovalPattern(command, rule.match)
+		) {
+			return true;
+		}
+		if (!hasLeadingEnv) return false;
 		const effectiveEnv = rule.env ? [...rule.env, ...allowedEnvVars] : allowedEnvVars;
-		const stripped = stripAllowedLeadingEnvAssignments(command, effectiveEnv);
+		const stripped = stripAllowedLeadingEnvAssignments(trimmedCommand, effectiveEnv);
 		return stripped !== undefined && commandMatchesBashApprovalPattern(stripped, rule.match);
 	}
 	return commandSegmentMatchesBashApprovalPattern(command, rule.match);

@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Fixed `bash.allowCompoundCommands` rejecting `&&` chains (and marking segments uncovered in compound approval prompts) when a segment began with a leading `KEY=VALUE` environment assignment permitted by `bash.allowedEnvVars` or the matching rule's `env` list, or passed a single-dash flag containing `c` or `e` (such as `go test -race`) without shell-control arguments, and prevented wildcard `allow` rules (such as `match: "*"`) that do not begin with an assignment prefix from matching single commands with unlisted leading environment assignments ([#19681](https://github.com/can1357/oh-my-pi/pull/19681) by [@asuffield](https://github.com/asuffield)).
 - `urlmap` shell builtin maps a URL path onto a host directory or file for the shell and the programs it runs (`urlmap [-r] [-e] URL PATH`, `urlmap -d URL`, bare `urlmap` lists the mounts as commands); named services and `pty` commands get the session's `local://`, `skill://`, `artifact://` and `attachment://` paths through it
 - `tab.screenshot({path})` saves the capture to a chosen file and `format: "webp"` is supported on Chromium; unknown screenshot options are rejected
 - Session files now account for side-channel model calls such as compaction, recaps, memory extraction, commit drafts, image generation, and web search, with timing and compact replies where available
