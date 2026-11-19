@@ -46,6 +46,8 @@ const INSUFFICIENT_MODEL_CAPACITY = "INSUFFICIENT_MODEL_CAPACITY";
  * (`classify_error_kind` in aws/amazon-q-developer-cli `api_client/mod.rs`).
  */
 const INPUT_TOO_LONG = "Input is too long.";
+/** Kiro runtime's structured rejection when serialized input exceeds its content threshold. */
+const CONTENT_LENGTH_EXCEEDS_THRESHOLD = "CONTENT_LENGTH_EXCEEDS_THRESHOLD";
 /**
  * HTTP-equivalent status of in-stream exception shapes, keyed lowercase. Exception
  * frames ride inside an HTTP 200, so without this the shared retry classifier
@@ -116,7 +118,9 @@ async function httpError(response: Response, signal: AbortSignal | undefined): P
 	const message = `Kiro HTTP ${response.status}${code ? ` ${code}` : ""}${detail ? `: ${detail}` : ""}`;
 	const error = new KiroApiError(message, response.status, code, payload.reason, response.headers);
 	const overflow =
-		response.status === 413 || (body !== null && new TextDecoder().decode(body.bytes).includes(INPUT_TOO_LONG));
+		response.status === 413 ||
+		payload.reason === CONTENT_LENGTH_EXCEEDS_THRESHOLD ||
+		(body !== null && new TextDecoder().decode(body.bytes).includes(INPUT_TOO_LONG));
 	return overflow ? AIError.attach(error, AIError.create(AIError.Flag.ContextOverflow)) : error;
 }
 
