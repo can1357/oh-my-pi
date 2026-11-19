@@ -1040,11 +1040,6 @@ export class CustomEditor extends Editor {
 		);
 	};
 
-	override render(width: number): readonly string[] {
-		this.#refreshRoleMentionChips();
-		return super.render(width);
-	}
-
 	/** Catch the typed word up with the caret first: its leaving the word (or a blur) re-describes the typo marks. */
 	override describe(cx: DescribeContext): NativeNode {
 		this.#refreshRoleMentionChips();
@@ -1198,6 +1193,7 @@ export class CustomEditor extends Editor {
 	faint?: () => boolean;
 
 	override render(width: number): readonly string[] {
+		this.#refreshRoleMentionChips();
 		const lines = super.render(width);
 		if (!this.faint?.()) return lines;
 		// Faint every cell: re-applied after each reset the rows carry, so styled runs stay faint too.

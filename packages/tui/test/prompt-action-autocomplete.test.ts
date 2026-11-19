@@ -43,17 +43,18 @@ function mentionSource(
 	rank: (query: string) => readonly ModelBrowserItem[] = query =>
 		candidates.filter(candidate => candidate.selector.includes(query)),
 ): ModelMentionCandidateSource {
-	const accepted = new Map<string, ResolvedModelMention>();
-	for (const candidate of candidates) {
-		for (const effort of candidate.model.reasoning ? FIVE_LEVELS : []) {
-			const selector = `${candidate.selector}:${effort}`;
-			accepted.set(selector, { selector, name: `${candidate.model.name} · ${effort}`, thinkingLevel: effort });
-		}
-	}
-	for (const candidate of candidates) {
-		accepted.set(candidate.selector, { selector: candidate.selector, name: candidate.model.name });
-	}
-	return Object.assign(rank, { resolveMention: (selector: string) => accepted.get(selector) });
+	return Object.assign(rank, {
+		resolveMention: (selector: string): ResolvedModelMention | undefined => {
+			const exact = candidates.find(candidate => candidate.selector === selector);
+			if (exact) return { selector, name: exact.model.name };
+			for (const candidate of candidates) {
+				if (!candidate.model.reasoning) continue;
+				const effort = FIVE_LEVELS.find(level => `${candidate.selector}:${level}` === selector);
+				if (effort) return { selector, name: `${candidate.model.name} · ${effort}`, thinkingLevel: effort };
+			}
+			return undefined;
+		},
+	});
 }
 
 function mentionProvider(candidates: readonly ModelBrowserItem[], retryDiscovery?: () => Promise<void> | undefined) {
@@ -528,7 +529,12 @@ describe("prompt action autocomplete", () => {
 				defaultRoleChain: () => [],
 				resolveRoleValue: () => ({ model: undefined, explicitThinkingLevel: false }),
 			},
-			registry: { getAvailable: () => [], getAll: () => [], getError: () => undefined },
+			registry: {
+				getAvailable: () => [],
+				getAll: () => [],
+				getError: () => undefined,
+				retryUnavailableDiscovery: () => undefined,
+			},
 			scopedModels: () => [],
 			resolveMention: selector =>
 				selector === "@smol"
