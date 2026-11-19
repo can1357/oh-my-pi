@@ -2,16 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a coloured extension status variant to `omp gallery --segment status` ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
+
 ### Fixed
 
 - `read` suggests the line-range syntax for `file:1:2` when `file` exists, directly or by unique suffix, but `file:1` does not ([#19821](https://github.com/can1357/oh-my-pi/pull/19821) by [@baekjosh](https://github.com/baekjosh)).
+- Fixed in-memory text reads (including converted documents, URLs, notebooks, and internal resources) losing source line totals and continuation selectors to a second output truncation when their rendered page fits the inline budget.
 - Filling a search field in Chrome with the browser tool's `fill` updates its results again on pages that search as you type on key events, such as CyberChef's operation search, which showed nothing after a fill in 19.0.0 ([#19748](https://github.com/can1357/oh-my-pi/pull/19748) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `/commit` moving an insertion across another writer's unselected replacement. Insertions with no clear position in HEAD now go to review; lines already committed at the boundary stay out of later drafts ([#19786](https://github.com/can1357/oh-my-pi/pull/19786) by [@baekjosh](https://github.com/baekjosh))
+- Fixed every omp launch storing new copies of each loaded extension's modules in Bun's transpiler cache (`~/Library/Caches/bun/@t@` on macOS, `~/.bun/install/cache/@t@` elsewhere), which grew without limit; launches with unchanged extensions now reuse the cached copies ([#16600](https://github.com/can1357/oh-my-pi/pull/16600) by [@enieuwy](https://github.com/enieuwy))
+- Extensions, plugins, custom tools, hooks, custom commands and share scripts under a path containing `?` now fail with an error naming the path and the fix, instead of "Cannot find module" ([#19763](https://github.com/can1357/oh-my-pi/pull/19763) by [@sjawhar](https://github.com/sjawhar))
 
 ## [19.0.1] - 2026-11-19
-- Fixed every omp launch storing new copies of each loaded extension's modules in Bun's transpiler cache (`~/Library/Caches/bun/@t@` on macOS, `~/.bun/install/cache/@t@` elsewhere), which grew without limit; launches with unchanged extensions now reuse the cached copies ([#16600](https://github.com/can1357/oh-my-pi/pull/16600) by [@enieuwy](https://github.com/enieuwy))
-
-## [18.12.5] - 2026-10-21
 
 ### Added
 
@@ -39,11 +43,6 @@
 - Fixed `/loop` iterations and `/goal` continuations firing ~800ms after a turn yields to wait on background subagents or jobs; they now wait until the run finishes ([#19781](https://github.com/can1357/oh-my-pi/issues/19781))
 - Fixed Codex and OpenAI API web search ignoring the `web` role's thinking level (`openai-codex/gpt-6-luna:xhigh`); the level now reaches the request as `reasoning.effort` ([#19793](https://github.com/can1357/oh-my-pi/issues/19793))
 - Fixed plan review measuring "Approve and keep context" against the pre-plan model instead of the tier chosen in the "continue with" slider, so switching to a larger-context tier now enables it ([#19660](https://github.com/can1357/oh-my-pi/issues/19660))
-### Added
-
-- Added a coloured extension status variant to `omp gallery --segment status` ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
-- An extension, plugin, custom tool, hook, custom command or share script under a directory whose path contains `?` now fails at once with an error that names the path and says that Bun cannot load a module from such a path, and that moving the files to another directory fixes it; before, it failed with a bare "Cannot find module …" (with `?mtime=…` for an extension). Reached through a `?`-free link, a hook, custom command or share script failed with "ENOENT reading …"; a custom command could load instead, in an order where a hook load through the same link ran earlier in the process, before the command's file was written. It is now always refused
-- Extensions, plugins, custom tools, hooks, custom commands and share scripts under a path containing `?` now fail with an error naming the path and the fix, instead of "Cannot find module" ([#19763](https://github.com/can1357/oh-my-pi/pull/19763) by [@sjawhar](https://github.com/sjawhar))
 
 ## [19.0.0] - 2026-11-18
 
@@ -72,39 +71,6 @@
 - Added excludeFromContext to pi.sendMessage payloads so extensions can display and save per-turn messages without sending them to the model.
 - Added a 30-second retry window for CLI and print-mode commands while the authentication broker restarts or is briefly unavailable.
 - Added a notify option to the bash tool for reporting matching output from background commands and named services, waking idle sessions or ending blocked waits.
-- Fixed in-memory text reads (including converted documents, URLs, notebooks, and internal resources) losing source line totals and continuation selectors to a second output truncation when their rendered page fits the inline budget.
-- An agent that promised another a later reply, or whose subagent waits for its next message, and ends its turn with nothing left to wake it gets one notice naming each waiter (what it asked, what was promised, for how long) instead of leaving it blocked until someone notices
-- `wait` returns at once, naming the agent, when one that promised the caller a reply (or the caller's parent) is idle with nothing to wake it, or when any agent it would block on (asked agent, parent, or subagent whose result it waits for) is itself waiting on the caller, with the chain it waits through (e.g. "`B` is waiting on you (via `C`)"); a top-level session's wait no longer says to end the turn while an agent is blocked on it and nothing else will wake it
-- Resuming a session with supervised process exits or `proc://` service results from before the unified daemon no longer crashes with `undefined is not an object (evaluating 'text.includes')`
-- The model switcher's thinking slider shows the level auto settled on (as the status line does) instead of `Auto`, in subagents and any session running on auto
-- `/tan` tells a running agent about the tangent at its next step, as a `<tangent-notice>` naming the tangent's handle and work, instead of only after its turn ends
-- The Tern jobs pill counts and lists background jobs only; a subagent's task job and its widget no longer show up as a running job beside the agents count
-- `urlmap` shell builtin maps a URL path onto a host directory or file for the shell and the programs it runs (`urlmap [-r] [-e] URL PATH`, `urlmap -d URL`, bare `urlmap` lists the mounts as commands); named services and `pty` commands get the session's `local://`, `skill://`, `artifact://` and `attachment://` paths through it
-- `tab.screenshot({path})` saves the capture to a chosen file and `format: "webp"` is supported on Chromium; unknown screenshot options are rejected
-- Session files now account for side-channel model calls such as compaction, recaps, memory extraction, commit drafts, image generation, and web search, with timing and compact replies where available
-- Compaction spend is journaled per method (`compaction:remote`, `compaction:soft`, `compaction:handoff`), and OpenAI remote compaction requests are now recorded too, so `omp stats` shows what each method costs and whether it read the prompt cache
-- Session files record what jev and title requests asked and answered: `model_usage` entries carry the request time, a judgment's answers with the state id that joins `judgment-cache.db`, and a title request's prompt and reply (no prompt text is repeated); local-model titles now leave an entry and fork titles are journaled as `title-fork`
-- `ssh://` files can be edited with hashline edits; read now shows their `[PATH#TAG]` header
-- The shell's built-in `ast-grep`/`sg` supports `scan` (`--rule`, `--inline-rules`, `sgconfig.yml` rule and utility directories, `--filter`, `--json`, report styles, `-U` fixes), `outline`, `run --kind` and `--debug-query`, and `-l cpp` now searches C headers
-- Auto-QA reports record where the reported tool comes from (builtin, `eval:<namespace>`, `mcp:<server>`, extension, unknown)
-- `goal` tool `pause` op stops autonomous continuation while blocked on the user
-- Lsp references and rename warn about textual occurrences the server missed, and definition/references flag locations that do not mention the symbol (with clangd's missing compile_commands.json called out)
-- BMP and TIFF images are transcoded to PNG and read inline like PNG/JPEG
-- Turns the provider refuses (e.g. `reasoning_extraction`) are kept in the session file as a `provider_refusal` entry with the category, explanation, usage and whatever streamed before the refusal; the entry never reaches later requests
-- `say` now works in the bash tool on every platform. It speaks through omp's text-to-speech when that is set up (speech vocalization on, a `speech` model role, or the local TTS model installed) and through the system voice otherwise (macOS `say`, `spd-say`/`espeak-ng`/`espeak` on Linux, SAPI on Windows). It takes macOS `say`'s options (`-v` including `-v '?'`, `-r`, `-o` with `--file-format`/`--data-format`/`--channels`/`--bit-rate`/`--quality`, `-f`, `-i`, `--progress`, `-a`, `-n`), reads text from arguments, a file or stdin, and accepts internal URLs such as `local://notes.md` for `-f` and `-o`.
-- `open` and `xdg-open` are now shell builtins on macOS, Linux and Windows (with `start` on Windows): an internal URL such as `local://report.html` opens the file behind it, every macOS `open` option works (`-a`, `-b`, `-e`, `-t`, `-f`, `-F`, `-W`, `-R`, `-n`, `-g`, `-j`, `-h`, `-s`, `-u`, `--args`, `--env`, `--stdin`/`--stdout`/`--stderr`, `--arch`), and a session with no desktop gets a short error instead of hanging
-- `file` runs in the bash tool's shell as a builtin, so it identifies internal URLs (`file local://report.pdf`, `artifact://N`, `skill://…`) as well as paths, and works on Windows where there is no `file` program
-- `direnv` is now a bash-tool builtin: `.envrc`/`.env` files are evaluated inside the embedded shell with direnv's stdlib, `direnv exec DIR cmd…` runs the command in-shell with the loaded environment (builtins and internal URIs keep working), and `allow`/`deny`/`export`/`status`/`hook`/`reload`/`prune`/`edit`/`fetchurl` share the real direnv's allow list and config, so it works without direnv installed
-- In-process `flock` shell builtin matching util-linux (`flock FILE CMD…`, `flock FILE -c CMD`, `flock N` on the shell's own descriptors, `--fd N CMD`; `-s`/`-x`/`-u`/`-n`/`-w`/`-E`/`-o`/`-F`/`--fcntl`/`--start`/`--length`/`--verbose`), so lock scripts behave the same on macOS, Linux and Windows.
-- `watchexec` runs in the bash tool's own shell as a builtin with watchexec 2.3.2's options, messages and event formats (`-w`/`-W`/`-F`, `-e`/`-f`/`-i`, ignore files, `-r`, `-s`, `-o`, `--stop-signal`/`--stop-timeout`, `-d`, `-p`, `--poll`, `--emit-events-to`, `--only-emit-events`, …), so it works where the program is not installed, its command can use builtins and `scheme://` paths, and a stopped watcher leaves no process behind.
-- `fswatch` is a bash-tool builtin (fswatch 1.22 command line and output: `-0`, `-1`, `-o`, `-x`/`-n`, `-t`/`-u`/`-f`, `--format`, `--batch-marker`, `-e`/`-i`/`-E`/`-I`, `--filter-from`, `--event`, `-l`, `-r`, `-m`/`-M`, `--fire-idle-event`, …) on FSEvents, inotify and ReadDirectoryChangesW, so file watches work where fswatch is not installed and as background jobs or services; `fswatch -1 -o` exits after the first batch and a path that does not exist yet is reported once it appears
-- The shell's `entr` builtin (entr 5.9: `-a`, `-c`, `-d`, `-n`, `-p`, `-r`, `-s`, `-x`, `-z`, `/_`) runs its utility inside the shell on native change notification, so `ls *.rs | entr -r cmd` works where entr is not installed, without a terminal, with `scheme://` paths in the list, and as a background job or service
-- Fixed `/mcp reauth` hiding a rejected MCP dynamic client registration (e.g. Figma's remote MCP) behind "Please check your client credentials"; it now shows the registration endpoint, HTTP status, response detail, and the `oauth.clientId` remedy ([#19641](https://github.com/can1357/oh-my-pi/issues/19641))
-- Stopping `omp auth-broker serve` with SIGTERM or Ctrl-C no longer exits before a login refresh in flight saves its rotated token, which left the store with a spent refresh token and disabled the login; a requested stop now exits 0 ([#19599](https://github.com/can1357/oh-my-pi/pull/19599) by [@will-bogusz](https://github.com/will-bogusz))
-- `omp usage` judges an account's policy state and percent left by its account-wide windows, so a Claude account at 100% of its Fable weekly (or a Codex account with a spent Spark meter) with room left in its shared windows no longer shows as exhausted; the policy line names the spent row (`· Claude 7 Day (Fable) exhausted`) and `--json` lists its limit ids in `policy.scopedExhausted` ([#19606](https://github.com/can1357/oh-my-pi/pull/19606) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed the shell's `rm -r` failing with `Permission denied` on a Windows junction or directory symlink inside the tree; it is now removed without following it ([#19572](https://github.com/can1357/oh-my-pi/pull/19572) by [@zhivko-kocev](https://github.com/zhivko-kocev))
-- Fixed the shell's built-in `cat`, `grep`, `comm` and `diff` on Windows failing on process substitution (`cat <(echo x)` reported `/dev/fd/63: No such file or directory`) ([#19574](https://github.com/can1357/oh-my-pi/pull/19574) by [@zhivko-kocev](https://github.com/zhivko-kocev))
-- After a `computer` letter key on a macOS popup button, `ax()`, `find` and `value()` show the option the letters chose instead of the one from before the key ([#19516](https://github.com/can1357/oh-my-pi/pull/19516) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 

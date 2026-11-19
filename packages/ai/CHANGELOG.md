@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed thinking detection so a failed check of one request style no longer ignores another style that already worked, and the next request no longer repeats a style the server already refused. ([#19758](https://github.com/can1357/oh-my-pi/pull/19758) by [@eggpeat](https://github.com/eggpeat))
+- The auth broker now logs a warning when a transient OAuth refresh failure leaves a login's access token expiring before the next retry; these failures logged only at debug, so a login could stop refreshing and lapse unnoticed ([#19590](https://github.com/can1357/oh-my-pi/pull/19590) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.0.1] - 2026-11-19
 
 ### Fixed
@@ -13,9 +18,6 @@
 - Kiro `/usage` shows purchased add-on credits, and an account whose plan credits are spent keeps serving while add-on credits remain ([#19724](https://github.com/can1357/oh-my-pi/pull/19724) by [@emotionbug](https://github.com/emotionbug))
 - Kiro Identity Center logins in AWS GovCloud (US) now list profiles in `us-gov-west-1` and `us-gov-east-1` instead of the commercial regions, which reject GovCloud tokens ([#19726](https://github.com/can1357/oh-my-pi/pull/19726) by [@TechDufus](https://github.com/TechDufus))
 - Statusless gateway errors reading `stream interrupted` now retry like `stream was interrupted` instead of ending the turn ([#19709](https://github.com/can1357/oh-my-pi/issues/19709)).
-### Fixed
-
-- Fixed thinking detection so a failed check of one request style no longer ignores another style that already worked, and the next request no longer repeats a style the server already refused. ([#19758](https://github.com/can1357/oh-my-pi/pull/19758) by [@eggpeat](https://github.com/eggpeat))
 
 ## [19.0.0] - 2026-11-18
 
@@ -32,9 +34,6 @@
 - Improved authentication broker compatibility across client and broker versions by tolerating unknown credential, usage, and observed-usage fields and values.
 - Fixed Codex Spark usage meters so reports that identify the meter only by `metered_feature` remain correctly scoped to the Spark model.
 - Fixed Antigravity CLI requests for models whose available IDs include effort suffixes, such as resolving `gemini-4-hydrogen` when only `gemini-4-hydrogen-high` is offered.
-### Fixed
-
-- The auth broker now logs a warning when a transient OAuth refresh failure leaves a login's access token expiring before the next retry; these failures logged only at debug, so a login could stop refreshing and lapse unnoticed ([#19590](https://github.com/can1357/oh-my-pi/pull/19590) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 
