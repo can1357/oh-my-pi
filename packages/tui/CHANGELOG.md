@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the usage dashboard rendering exhausted or pressured prepaid-balance rows (no quota bar) as dim informational text; they now take the error or warning color their reported status calls for ([#19764](https://github.com/can1357/oh-my-pi/issues/19764))
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes

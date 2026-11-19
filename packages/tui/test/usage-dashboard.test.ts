@@ -479,6 +479,34 @@ describe("UsageDashboardComponent", () => {
 		}
 	});
 
+	it("tones a bar-less balance row by its reported status (issue #19764)", () => {
+		// A prepaid balance carries no fraction, so it renders as text; an
+		// exhausted verdict must still read as an error, while a balance that
+		// reports no status stays informational.
+		const balance = (id: string, label: string, status?: "exhausted") => ({
+			id,
+			label,
+			scope: { provider: "commandcode", accountId: "a", windowId: id },
+			amount: { remaining: 0, unit: "credits" as const },
+			...(status ? { status } : {}),
+		});
+		const component = dashboard([
+			report("commandcode", "a@test", [
+				balance("drained", "Drained balance", "exhausted"),
+				balance("plain", "Plain balance"),
+			]),
+		]);
+		try {
+			const lines = component.render(100);
+			const drained = lines.find(line => Bun.stripANSI(line).includes("Drained balance"));
+			const plain = lines.find(line => Bun.stripANSI(line).includes("Plain balance"));
+			expect(drained).toContain(theme.fg("error", "0 credits left"));
+			expect(plain).toContain(theme.fg("dim", "0 credits left"));
+		} finally {
+			component.dispose();
+		}
+	});
+
 	it("keeps distinct buckets that share a label and window separate in the detail view", () => {
 		// Same payload as the cards regression (issue #16790): two weekly
 		// Google-counter limits with one label, distinct ids. The detail rows
