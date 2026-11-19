@@ -146,7 +146,8 @@ describe("AbliteratedLLM provider discovery", () => {
 			},
 		]);
 		const bare = models.find(model => model.id === "abliteratedllm-test/bare-model");
-		expect(bare).toMatchObject({ provider: "abliteratedllm", reasoning: false, input: ["text"] });
+		expect(bare).toMatchObject({ provider: "abliteratedllm", input: ["text"] });
+		expect(bare?.reasoning).toBeUndefined();
 		expect(bare?.thinking).toBeUndefined();
 		expect(bare?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 	});
