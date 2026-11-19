@@ -1563,13 +1563,13 @@ fn native_window_for_frame(windows: &[DesktopWindow], pid: u32, title: &str) -> 
 }
 
 /// Whether `role` marks a top-level window: `Frame`, `Dialog` and `Window`
-/// anywhere, and `FileChooser` as a child of the application. GTK3 gives its
-/// Open and Save dialogs that role and gives it to the file chooser widget
-/// inside them too.
+/// anywhere, and `FileChooser` and `Alert` as a child of the application.
+/// GTK3 gives its Open and Save dialogs that role and gives it to the file
+/// chooser widget inside them too; its message dialogs are alerts.
 const fn top_level_role(role: Role, child_of_application: bool) -> bool {
 	match role {
 		Role::Frame | Role::Dialog | Role::Window => true,
-		Role::FileChooser => child_of_application,
+		Role::FileChooser | Role::Alert => child_of_application,
 		_ => false,
 	}
 }
@@ -3014,7 +3014,7 @@ mod tests {
 	}
 
 	#[test]
-	fn file_dialogs_are_top_levels_only_under_the_application() {
+	fn file_dialogs_and_alerts_are_top_levels_only_under_the_application() {
 		use atspi::zbus::{
 			connection::Builder as ConnectionBuilder, interface, zvariant::OwnedObjectPath,
 		};
@@ -3048,17 +3048,23 @@ mod tests {
 		let rt = Builder::new_current_thread().enable_all().build().unwrap();
 		let (top_levels, owners) = rt.block_on(async {
 			let (client, server) = tokio::net::UnixStream::pair().unwrap();
-			// A file dialog holding its own chooser widget, and a frame that
-			// embeds one.
+			// A file dialog holding its own chooser widget, a GTK message
+			// dialog (an alert), and a frame that embeds a chooser and an alert.
 			let tree = [
-				("/app", Role::Application, "/org/a11y/atspi/null", vec!["/dialog", "/frame"]),
+				("/app", Role::Application, "/org/a11y/atspi/null", vec![
+					"/dialog", "/alert", "/frame",
+				]),
 				("/dialog", Role::FileChooser, "/app", vec!["/filler"]),
 				("/filler", Role::Filler, "/dialog", vec!["/widget"]),
 				("/widget", Role::FileChooser, "/filler", vec!["/open"]),
 				("/open", Role::Button, "/widget", vec![]),
-				("/frame", Role::Frame, "/app", vec!["/embedded"]),
+				("/alert", Role::Alert, "/app", vec!["/yes"]),
+				("/yes", Role::Button, "/alert", vec![]),
+				("/frame", Role::Frame, "/app", vec!["/embedded", "/banner"]),
 				("/embedded", Role::FileChooser, "/frame", vec!["/ok"]),
 				("/ok", Role::Button, "/embedded", vec![]),
+				("/banner", Role::Alert, "/frame", vec!["/dismiss"]),
+				("/dismiss", Role::Button, "/banner", vec![]),
 			];
 			let mut server = ConnectionBuilder::unix_stream(server)
 				.server(atspi::zbus::Guid::generate())
@@ -3075,7 +3081,7 @@ mod tests {
 			let path = |object: ObjectRefOwned| object.path_as_str().to_owned();
 			let top_levels = AtSpiAx::frames(&client, &object("/app"), REPLY_TIMEOUT).await;
 			let mut owners = Vec::new();
-			for element in ["/open", "/dialog", "/ok"] {
+			for element in ["/open", "/dialog", "/ok", "/yes", "/dismiss"] {
 				owners.push(
 					AtSpiAx::top_level(&client, object(element), REPLY_TIMEOUT)
 						.await
@@ -3086,8 +3092,18 @@ mod tests {
 			drop(server);
 			(top_levels.map(|items| items.into_iter().map(path).collect::<Vec<_>>()), owners)
 		});
-		assert_eq!(top_levels.unwrap(), vec!["/dialog".to_owned(), "/frame".to_owned()]);
-		assert_eq!(owners, [Some("/dialog".into()), Some("/dialog".into()), Some("/frame".into())]);
+		assert_eq!(top_levels.unwrap(), vec![
+			"/dialog".to_owned(),
+			"/alert".to_owned(),
+			"/frame".to_owned()
+		]);
+		assert_eq!(owners, [
+			Some("/dialog".into()),
+			Some("/dialog".into()),
+			Some("/frame".into()),
+			Some("/alert".into()),
+			Some("/frame".into())
+		]);
 	}
 
 	#[test]
