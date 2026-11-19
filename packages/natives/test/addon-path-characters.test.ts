@@ -13,6 +13,7 @@
  * natives directory.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -26,6 +27,8 @@ const hostAddonFilename = resolveLocalHostAddon({
 	avx2: detectHostAvx2Support(),
 }).filename;
 const hostAddon = path.join(packageDir, "native", hostAddonFilename);
+/** A checkout without a native build has no host addon to load; its rows skip. */
+const hasHostAddon = existsSync(hostAddon);
 const variant = /-(modern|baseline)\.node$/.exec(hostAddonFilename)?.[1];
 
 /** Windows file names cannot hold `?`, so the `?` rows run on other systems only. */
@@ -88,6 +91,7 @@ let loaderDir = "";
 let frame = "";
 
 beforeAll(async () => {
+	if (!hasHostAddon) return;
 	root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-natives-path-chars-"));
 	loaderDir = path.join(root, "loader");
 	await fs.mkdir(path.join(loaderDir, "native"), { recursive: true });
@@ -103,7 +107,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-	await fs.rm(root, { recursive: true, force: true });
+	if (root) await fs.rm(root, { recursive: true, force: true });
 });
 
 async function probe(env: Record<string, string>): Promise<ProbeResult> {
@@ -128,7 +132,7 @@ async function probe(env: Record<string, string>): Promise<ProbeResult> {
 	return JSON.parse(stdout) as ProbeResult;
 }
 
-describe("the addon loads from a directory whose path holds", () => {
+describe.skipIf(!hasHostAddon)("the addon loads from a directory whose path holds", () => {
 	for (const [label, dirname] of CHARACTER_DIRS) {
 		it(`${label}: a PI_NATIVES_DIR that holds the addon`, async () => {
 			const nativesDir = path.join(root, `natives-${dirname}`);
@@ -164,7 +168,7 @@ describe("the addon loads from a directory whose path holds", () => {
 	}
 });
 
-describe("openNativeAddon", () => {
+describe.skipIf(!hasHostAddon)("openNativeAddon", () => {
 	it("gives the exports require gave: the same names, kinds and version stamp", async () => {
 		const required = await probe({ PROBE_REQUIRE: hostAddon });
 		const opened = await probe({ PROBE_OPEN: hostAddon });
