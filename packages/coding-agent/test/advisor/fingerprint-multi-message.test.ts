@@ -14,6 +14,7 @@
 // re-rendered (full replay); absence means only the new tail shipped.
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { spillUrl } from "@oh-my-pi/pi-utils";
 
 import { type AdvisorAgent, AdvisorRuntime, type AdvisorRuntimeHost } from "../../src/advisor/runtime";
 
@@ -102,7 +103,7 @@ describe("fingerprint: field-selective fingerprint (applied)", () => {
 			messages => {
 				messages[0] = {
 					...messages[0],
-					content: "[shaken ~10 tokens — recover: artifact://1 (region 1)]",
+					content: `[shaken ~10 tokens — recover: ${spillUrl(1)} (region 1)]`,
 				} as AgentMessage;
 			},
 			[mkMsg("user", "tail-body-002", 3)],

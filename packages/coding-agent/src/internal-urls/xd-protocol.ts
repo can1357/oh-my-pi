@@ -5,7 +5,9 @@ import { isResolutionDeviceName } from "@oh-my-pi/pi-tui/tools/resolve";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { parseXdTopicUrl, parseXdUrl } from "@oh-my-pi/pi-tui/tools/xd-url";
 import type { ToolSession } from "../tools";
+import { getEnabledEvalPreludes } from "../eval/preludes";
 import { resolveToolTier } from "../tools/approval";
+import { getEvalDocTopics } from "../tools/eval-doc-topics";
 import { dispatchReportIssueDevice, reportIssueDeviceUsage } from "../tools/report-tool-issue";
 import { dispatchResolutionDevice, resolutionDeviceUsage } from "../tools/resolve";
 import { dispatchXdevTool, resolveXdevTool, xdevDocs, xdevListing } from "../tools/xdev";
@@ -129,8 +131,17 @@ export class XdProtocolHandler implements ProtocolHandler {
 
 	/** `read xd://<tool>/<topic>`: one named doc topic of a tool. */
 	#topic(session: ToolSession, name: string, topic: string): string {
-		const topics = session.getToolByName?.(name)?.docTopics?.();
-		if (!topics) throw new ToolError(`Tool '${name}' has no doc topics.`);
+		const tool = session.getToolByName?.(name);
+		// A session without eval (a reviewer subagent, a cell's nested read) still reads the eval docs its
+		// assignment links: they describe the kernel, not this session's tool.
+		const topics =
+			tool?.docTopics?.() ??
+			(name === "eval" && !tool
+				? getEvalDocTopics({ preludes: getEnabledEvalPreludes(session.getEvalPreludes?.() ?? []) })
+				: undefined);
+		if (!topics) {
+			throw new ToolError(tool ? `Tool '${name}' has no doc topics.` : `No tool '${name}' in this session.`);
+		}
 		const doc = topics[topic];
 		if (doc === undefined) {
 			throw new ToolError(`Unknown topic '${topic}' for ${name}. Available: ${Object.keys(topics).join(", ")}.`);

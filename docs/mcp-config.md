@@ -94,7 +94,7 @@ Top-level keys:
 - `$schema` — optional JSON Schema URL for tooling
 - `mcpServers` — map of server name to server config
 - `disabledServers` — active-profile user denylist; it hides a discovered server by name regardless of the source entry's `enabled` value
-- `enabledServers` — active-profile user allowlist; it can force-enable a same-named entry whose source says `enabled: false`, but `disabledServers` still wins
+- `enabledServers` — active-profile user allowlist; it can force-enable a same-named entry whose source says `enabled: false` or that a [built-in transform](#built-in-transforms) would drop, but `disabledServers` still wins
 
 The config writer accepts names up to 100 characters containing letters, numbers, `_`, `-`, `.`, `:`, and single spaces between non-space name segments. The bundled schema omits colons and spaces from its name pattern, so names such as `cloudflare:cloudflare-api` or `MaaS Slack` may be valid at runtime while an editor reports a schema error.
 
@@ -111,7 +111,7 @@ Shared fields for every transport:
 
 Disable instructions when a server's guidance conflicts with your tool policy or adds unwanted context to every request, including subagent requests. If no connected server contributes instructions, the MCP Server Instructions section is omitted entirely. `instructions` does not distinguish connections: when two entries under different names describe the same endpoint, only the higher-priority entry is kept, together with its own `instructions` value, so set the option on the entry that wins (see `/mcp list`). A changed value applies to an already-connected server after `/mcp reload`.
 
-`OMP_MCP_TIMEOUT_MS` has process-wide precedence over every per-server `timeout`. Set it to `0` to disable client-side timeouts, or to a positive millisecond value such as `120000`. If it is unset or invalid, OMP uses the server value and then the 30-second default; invalid values are logged and ignored.
+`OMP_MCP_TIMEOUT_MS` has process-wide precedence over every per-server `timeout`. Set it to `0` to disable client-side timeouts, or to a positive millisecond value such as `120000`. If it is unset or invalid, OMP uses the server value and then the default (10 minutes for tool calls, 30 seconds otherwise); invalid values are logged and ignored.
 
 Claude marketplace plugins follow [Claude Code's per-server timeout rule](https://code.claude.com/docs/en/mcp): their `.mcp.json` values are milliseconds, and values below `1000` are ignored with a discovery warning so OMP's normal timeout fallback applies. This restriction does not change OMP-native configurations, where `0` still disables timeouts.
 
@@ -435,7 +435,7 @@ That means this is valid and convenient for local secrets:
 The active profile's user file supplies two cross-source overrides:
 
 - `disabledServers` is the highest-precedence denylist. It hides a same-named server from any source.
-- `enabledServers` force-enables a same-named entry whose source has `enabled: false`; it cannot override `disabledServers`.
+- `enabledServers` force-enables a same-named entry whose source has `enabled: false` or that a [built-in transform](#built-in-transforms) would drop; it cannot override `disabledServers`.
 
 ```json
 {
@@ -446,6 +446,24 @@ The active profile's user file supplies two cross-source overrides:
 ```
 
 `/mcp enable` and `/mcp disable` update `enabled` directly when the definition is in an OMP-owned writable file. OMP does not mutate another tool's config: for such sources, those commands maintain the user-level allowlist or denylist instead and remove a conflicting stale override.
+
+## Built-in transforms
+
+OMP recognizes some MCP servers and changes how it treats them without being asked. The only transform so far is a drop: a server whose job one of OMP's own tools already does is not connected.
+
+| Server | Recognized by | Dropped while |
+| --- | --- | --- |
+| Codex Desktop's bundled Node REPL (Codex registers it as `node_repl` in `~/.codex/config.toml`) | a stdio command whose file name is `node_repl` or `node_repl.exe`, under any server name | the `eval` tool is active and `eval.js` is on |
+
+A drop is decided from the server's config at discovery (startup and `/mcp reload`), before the server starts. `/mcp list` shows dropped servers under **Replaced by built-ins** with the reason and the file each came from, and the `/extensions` dashboard shows them as disabled.
+
+An explicit enable always wins:
+
+- `/mcp enable <name>` connects a dropped server and keeps it: it writes `enabled: true` on an OMP-owned entry, or adds the name to `enabledServers` for another tool's config.
+- `enabled: true` on the entry, or the name in `enabledServers`, has the same effect when written by hand.
+- `mcp.builtinTransforms: false` turns every built-in transform off.
+
+`omp read` does not apply built-in transforms.
 
 ## `/mcp add` vs editing JSON directly
 
@@ -525,6 +543,10 @@ The JSON is valid, but the server may still be unreachable. Use `/mcp test <name
 ### The server exists in another tool's config but not in OMP
 
 Run `/mcp list`. OMP discovers many third-party MCP files, but project-level loading can also be disabled via the `mcp.enableProjectConfig` setting, and a user-level `disabledServers` entry can suppress a server by name.
+
+### Codex's `node_repl` server is configured but never loads
+
+A [built-in transform](#built-in-transforms) drops it while `eval` can run JavaScript. Run `/mcp enable node_repl` to connect it anyway.
 
 ### A browser MCP server is configured but never loads
 

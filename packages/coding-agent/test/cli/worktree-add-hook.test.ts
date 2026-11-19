@@ -128,6 +128,7 @@ describe.skipIf(process.platform === "win32")("worktree add checkout hooks", () 
 		// GIT_EXEC_PATH set, GIT_PREFIX empty, and the exec path on PATH.
 		await hook(
 			'printf "%s\\n" "$PWD" "$1" "$2" "$3" > .post-checkout-ran; ' +
+				// oxlint-disable-next-line no-template-curly-in-string -- literal shell/JS text under test
 				'printf "%s\\n" "${GIT_EXEC_PATH:-unset}" "${GIT_PREFIX-UNSET}" > .post-checkout-env; ' +
 				'if [ -n "$GIT_EXEC_PATH" ]; then case ":$PATH:" in *":$GIT_EXEC_PATH:"*) echo prefixed >> .post-checkout-env;; esac; fi',
 		);

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, setSystemTime } from "bun:test";
 import {
 	type AuthCredential,
 	type AuthCredentialStore,
@@ -366,6 +366,58 @@ describe("claude usage-block healing", () => {
 			expect(blocks.has("1:")).toBe(true);
 		});
 	}
+
+	describe("tier block on a report carrying only the shared weekly window", () => {
+		const now = new Date("2026-11-17T12:00:00Z").getTime();
+		const resetAt = now + 60 * 60_000;
+		beforeEach(() => setSystemTime(now));
+		afterEach(() => setSystemTime());
+
+		it("heals once that window, whose reset the block carries, has room", async () => {
+			// A Fable 429 behind the shared weekly wall blocks `tier:fable` until
+			// that wall's reset; a report without the 5-hour window must lift it as
+			// it lifts the account-wide block, or failover never returns here.
+			const { storage, clearedScopes } = makeHarness(
+				claudeReport([sharedLimit("7d", "7d", 0.4, resetAt), tierLimit("fable", 0.8)]),
+				"tier:fable",
+				{ blockedUntilMs: resetAt },
+			);
+			storages.push(storage);
+			await storage.credentials.reload();
+
+			expect(await storage.keys.get("anthropic", "s-tier-reset-match", { modelId: "claude-fable-5-1" })).toBe(
+				"access-1",
+			);
+			expect(clearedScopes).toContain("tier:fable");
+		});
+
+		const tierKeepCases: { name: string; report: () => UsageReport }[] = [
+			{
+				name: "its weekly row is exhausted",
+				report: () =>
+					claudeReport([sharedLimit("7d", "7d", 0, resetAt), tierLimit("fable", 1, resetAt - 30 * 60_000)]),
+			},
+			{
+				name: "it comes from rate-limit headers",
+				report: () => ({
+					...claudeReport([sharedLimit("7d", "7d", 0, resetAt), tierLimit("fable", 0)]),
+					metadata: { accountId: "account-1", source: "ratelimit-headers" },
+				}),
+			},
+		];
+		for (const { name, report } of tierKeepCases) {
+			it(`keeps it when ${name}`, async () => {
+				const { storage, clearedScopes, blocks } = makeHarness(report(), "tier:fable", { blockedUntilMs: resetAt });
+				storages.push(storage);
+				await storage.credentials.reload();
+
+				await storage.health.model("anthropic", { modelId: "claude-fable-5-1", reserveFraction: 0.1 });
+
+				expect(clearedScopes).not.toContain("tier:fable");
+				expect(blocks.has("1:tier:fable")).toBe(true);
+			});
+		}
+	});
 
 	it("heals a stale account-wide block without claiming to clear an absent tier row", async () => {
 		const { storage, clearedScopes, probeCount } = makeHarness(

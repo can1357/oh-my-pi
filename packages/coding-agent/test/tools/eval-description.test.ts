@@ -8,7 +8,8 @@ import { JsRuntime, type RuntimeHooks } from "@oh-my-pi/pi-coding-agent/eval/js/
 import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
 import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { EvalTool, getEvalDocTopics, getEvalToolDescription } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import { EvalTool, getEvalToolDescription } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import { getEvalDocTopics } from "@oh-my-pi/pi-coding-agent/tools/eval-doc-topics";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { TempDir } from "@oh-my-pi/pi-utils";
 

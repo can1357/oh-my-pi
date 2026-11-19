@@ -10,7 +10,7 @@ export interface View {
 	spans: Span[] | null;
 }
 
-/** The pi call that prints lines `from`–`to` of `target` (a path or `artifact://N`). */
+/** The pi call that prints lines `from`–`to` of `target` (a path or `local://N.log`). */
 export function readCall(target: string, from: number, to: number): string {
 	return `read ${target}:${from}-${to}`;
 }
