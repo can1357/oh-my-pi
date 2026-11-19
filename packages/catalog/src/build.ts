@@ -314,7 +314,7 @@ function scheduledRates(
  * limits and pricing still win.
  */
 export function applyCatalogCorrections(
-	model: Pick<ModelSpec<Api>, "cost" | "contextWindow" | "maxTokens" | "input">,
+	model: Pick<ModelSpec<Api>, "cost" | "contextWindow" | "contextWindowReportedAsInput" | "maxTokens" | "input">,
 	catalog: Record<string, unknown>,
 ): void {
 	const upstream = model.cost;
@@ -341,7 +341,11 @@ export function applyCatalogCorrections(
 	const limitsPatch = objectPayload(catalog.limitsPatch);
 	if (limitsPatch !== undefined) {
 		const contextWindow = numberField(limitsPatch, "contextWindow");
-		if (contextWindow !== undefined) model.contextWindow = contextWindow;
+		const preserveReportedInputWindow =
+			model.contextWindowReportedAsInput === true &&
+			model.contextWindow !== null &&
+			Reflect.get(limitsPatch, "preserveReportedInputWindow") === true;
+		if (contextWindow !== undefined && !preserveReportedInputWindow) model.contextWindow = contextWindow;
 		const maxTokens = numberField(limitsPatch, "maxTokens");
 		if (maxTokens !== undefined) model.maxTokens = maxTokens;
 	}
