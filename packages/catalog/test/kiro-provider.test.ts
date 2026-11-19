@@ -104,12 +104,15 @@ describe("Kiro model discovery", () => {
 	});
 
 	test("an unpinned API key resolves to the single bootstrap region that accepts it", async () => {
+		// Kiro reads a bearer without `tokentype: API_KEY` as an OAuth token and 400s for a missing profile ARN.
 		const accepting =
 			(...regions: string[]): FetchImpl =>
-			async input =>
-				regions.some(region => String(input).includes(`.${region}.`))
-					? Response.json(catalog(model(`model-${new URL(String(input)).hostname}`)))
-					: new Response("{}", { status: 403 });
+			async (input, init) =>
+				new Headers(init?.headers).get("tokentype") !== "API_KEY"
+					? Response.json({ message: "Invalid profileArn." }, { status: 400 })
+					: regions.some(region => String(input).includes(`.${region}.`))
+						? Response.json(catalog(model(`model-${new URL(String(input)).hostname}`)))
+						: new Response("{}", { status: 403 });
 		const token = "ksk_unpinned";
 		expect(await resolveKiroApiKeyRegion({ token, fetch: accepting("eu-central-1") })).toBe("eu-central-1");
 		expect(await resolveKiroApiKeyRegion({ token, fetch: accepting() })).toBeNull();
