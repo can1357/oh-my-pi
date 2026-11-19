@@ -1830,15 +1830,25 @@ describe("AgentSession aside delivery", () => {
 	}
 
 	// The TUI's `->` queue shorthand while busy, messages held during compaction, RPC
-	// steer/follow_up, and ACP steering reach the session through these, not prompt().
-	it.each(["steer", "followUp", "joinActiveTurn"] as const)(
-		"a mention queued mid-run through session.%s() mints its alias and rides the session-agent notice",
+	// steer/follow_up, ACP steering, and extensions' queued sendUserMessage reach the
+	// session through these, not prompt().
+	const queueMentionVia = {
+		steer: (session: AgentSession, text: string) => session.steer(text),
+		followUp: (session: AgentSession, text: string) => session.followUp(text),
+		joinActiveTurn: (session: AgentSession, text: string) => session.joinActiveTurn(text),
+		"sendUserMessage({ deliverAs: 'steer' })": (session: AgentSession, text: string) =>
+			session.sendUserMessage(text, { deliverAs: "steer" }),
+		"sendUserMessage({ deliverAs: 'followUp' })": (session: AgentSession, text: string) =>
+			session.sendUserMessage(text, { deliverAs: "followUp" }),
+	};
+	it.each(Object.keys(queueMentionVia) as (keyof typeof queueMentionVia)[])(
+		"a mention queued mid-run through session.%s mints its alias and rides the session-agent notice",
 		async method => {
 			const { session, mock, started, release } = createMentionSession();
 			const run = session.prompt("go");
 			try {
 				await started.promise;
-				await session[method]("delegate to ^openai/gpt-test");
+				await queueMentionVia[method](session, "delegate to ^openai/gpt-test");
 				expect(session.getSessionAgents().map(agentDef => agentDef.name)).toContain("m1");
 			} finally {
 				release.resolve();
@@ -1848,6 +1858,49 @@ describe("AgentSession aside delivery", () => {
 			expectAnnouncedMention(mock.calls, "delegate to");
 		},
 	);
+
+	it.each(["steer", "followUp"] as const)(
+		"a message queued through session.%s() behind an announced mention carries no second notice",
+		async method => {
+			const { session, mock, started, release } = createMentionSession();
+			const run = session.prompt("go");
+			try {
+				await started.promise;
+				await session[method]("delegate to ^openai/gpt-test");
+				await session[method]("plain second");
+			} finally {
+				release.resolve();
+			}
+			await run;
+			await session.waitForIdle();
+			const texts = mock.calls.at(-1)!.context.messages.map(llmText);
+			const notices = texts.flatMap((text, index) => (text.includes("Now available:") ? [index] : []));
+			expect(notices).toEqual([texts.findIndex(text => text.startsWith('delegate to <model agent="m1"')) - 1]);
+			expect(texts).toContain("plain second");
+		},
+	);
+
+	it("a reused alias is announced on delivery when the message carrying its notice was withdrawn", async () => {
+		const { session, mock, started, release } = createMentionSession();
+		const run = session.prompt("go");
+		try {
+			await started.promise;
+			await session.followUp("delegate to ^openai/gpt-test");
+			// Reuses `m1`, whose notice rides on the message ahead.
+			await session.followUp("again ^openai/gpt-test");
+			expect(session.removeQueuedMessage("delegate to ^openai/gpt-test", "followUp")).toBe(true);
+		} finally {
+			release.resolve();
+		}
+		await run;
+		await session.waitForIdle();
+		const texts = mock.calls.at(-1)!.context.messages.map(llmText);
+		expect(texts.some(text => text.startsWith("delegate to"))).toBe(false);
+		expect(texts.some(text => text.startsWith('again <model agent="m1"'))).toBe(true);
+		const notices = texts.filter(text => text.includes("Now available:"));
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("`m1`");
+	});
 
 	it("an agent-attributed steer keeps its `^` text literal and mints no alias", async () => {
 		const { session, mock, started, release } = createMentionSession();

@@ -2225,16 +2225,19 @@ export class SessionTools {
 	 * mid-session keeps the provider cache prefix intact.
 	 *
 	 * Known agents are the committed base snapshot, then every agent notice still
-	 * in context, applied in order — mirroring {@link takeEvalPreludeNotice}.
+	 * in context, then every notice in `ahead` (messages queued to reach the model
+	 * before this one), applied in order — mirroring {@link takeEvalPreludeNotice}.
 	 */
-	takeSessionAgentNotice(): CustomMessage<SessionAgentNoticeDetails> | undefined {
+	takeSessionAgentNotice(ahead: Iterable<AgentMessage> = []): CustomMessage<SessionAgentNoticeDetails> | undefined {
 		const known = new Set(this.#promptSurface.sessionAgents.map(agent => agent.name));
-		for (const message of this.#host.agent.state.messages) {
-			if (message.role !== "custom" || message.customType !== SESSION_AGENT_NOTICE_TYPE) continue;
-			const details = message.details;
-			if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
-			for (const name of details.added) if (typeof name === "string") known.add(name);
-			for (const name of details.removed) if (typeof name === "string") known.delete(name);
+		for (const messages of [this.#host.agent.state.messages, ahead]) {
+			for (const message of messages) {
+				if (message.role !== "custom" || message.customType !== SESSION_AGENT_NOTICE_TYPE) continue;
+				const details = message.details;
+				if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
+				for (const name of details.added) if (typeof name === "string") known.add(name);
+				for (const name of details.removed) if (typeof name === "string") known.delete(name);
+			}
 		}
 		const live = this.#host.sessionAgents();
 		const liveNames = new Set(live.map(agent => agent.name));
