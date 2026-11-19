@@ -42,6 +42,7 @@ import type { MCPLoadResult } from "../mcp";
 import type { CacheWarmer } from "./cache-warmer";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
+import type { MCPEvalNamespaceCatalog } from "../mcp/eval-namespaces";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
@@ -268,6 +269,8 @@ export interface AgentSessionConfig {
 	skills?: Skill[];
 	/** Frozen routing hints shared with the system prompt and later skillful notices. */
 	skillDescriptions?: SkillDescriptionCatalog;
+	/** MCP eval namespace hints; {@link AgentSession.startHintCompression} starts them with the skill hints. */
+	mcpNamespaces?: MCPEvalNamespaceCatalog;
 	/** Skill loading warnings already captured by the SDK. */
 	skillWarnings?: SkillWarning[];
 	/** Whether runtime reloads may rediscover disk-backed skills. */
@@ -364,6 +367,10 @@ export interface AgentSessionConfig {
 	xdev?: XdevState;
 	/** Names pinned top-level during runtime repartitioning. */
 	presentationPinnedToolNames?: ReadonlySet<string>;
+	/** Whether enabled MCP tools present as eval namespaces (`mcp.evalNamespaces`); read at every apply. */
+	bindsMcpToEval?: () => boolean;
+	/** MCP tools of the initial slate presented as eval namespace methods. */
+	evalBoundToolNames?: Iterable<string>;
 	/** Accessor for live MCP server instructions. */
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	/** Installs a host-owned MCP instructions source; see {@link AgentSession.setMcpServerInstructionsSource}. */
@@ -547,18 +554,6 @@ export interface SendUserMessageOptions {
 	deliverAs?: "steer" | "followUp" | "aside";
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
-}
-
-/** Result from a handoff operation. */
-export interface HandoffResult {
-	document: string;
-	savedPath?: string;
-}
-
-/** Options controlling handoff generation. */
-export interface SessionHandoffOptions {
-	autoTriggered?: boolean;
-	signal?: AbortSignal;
 }
 
 /** Result from cycleModel(). */

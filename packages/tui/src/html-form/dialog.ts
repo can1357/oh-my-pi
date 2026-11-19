@@ -1,28 +1,32 @@
 /**
  * Terminal surface for an agent-written HTML form (parsed by `parse.ts`).
  *
- * Row rendering lays the whole form out as one column — section titles,
- * context, choice rows, one-row dropdowns, text fields, then a Submit row —
- * inside a fixed-height panel. When the column is taller than the panel
- * allows ({@link DIALOG_HEIGHT_RATIO} of the terminal), it splits into pages
- * ({@link paginate}) at section boundaries where possible; focus drives the
- * visible page, so moving past a page's last control turns the page. A native
- * (Tern) terminal gets the form as an inline card in its transcript instead
- * (`native/ask-card.ts`): the context before the first question on top, then
- * every question stacked (a top-level `<fieldset>`, or a field of loose
- * content between fieldsets, with the context before it). The question holding
- * focus is open, its context and the focused field's controls shown; every
- * other field folds to its question over its answer or option pills, which a
- * click picks without opening it. Focus on Submit folds them all. Clicks come
- * back through {@link HtmlFormDialog.handleNativeEvent}.
+ * Both surfaces stack the form in one column: the context before the first
+ * question on top, then every question (a top-level `<fieldset>`, or a field of
+ * loose content between fieldsets, with the context before it). The question
+ * holding focus is open, its context and the focused field's controls shown;
+ * every other field folds to its question over its answer or option pills.
+ * Focus on Submit folds them all. A native (Tern) terminal gets the column as
+ * an inline card in its transcript (`native/ask-card.ts`), whose clicks come
+ * back through {@link HtmlFormDialog.handleNativeEvent}, a pill picking its
+ * option without opening the question. Rows draw it in a fixed-height panel
+ * ({@link DIALOG_HEIGHT_RATIO} of the terminal at most) that scrolls to keep the
+ * focused row in view, with the open question's head when it fits, and past a
+ * picture it would cut at an edge when it can; one it must cut, which a terminal
+ * can't draw in part, is a dim frame naming it.
  *
- * Keys: ↑/↓ move between choices and fields, Tab/Shift+Tab jump fields,
- * Space toggles (or opens a dropdown), ←/→ change a dropdown, Enter picks a
- * radio (or the focused box of an empty checkbox group, or leaves a field) and moves on, Enter on Submit validates and
- * submits, PgUp/PgDn (←/→ on choices) turn pages (open the previous or next
- * question natively), `app.ask.hide` collapses the rows' form to one row, Esc
- * cancels. Notes use `n` on option rows and Alt+n on dropdowns, without
- * selecting the option.
+ * Keys: ↑/↓ move between choices and fields, crossing from a question's last
+ * row into the next, Tab/Shift+Tab jump fields, Space toggles (or opens a
+ * dropdown), ←/→ change a dropdown, Enter picks a radio (or the focused box of
+ * an empty checkbox group, or leaves a field) and moves on, Enter on Submit
+ * validates and submits or opens the first question to fix, PgUp/PgDn (←/→ on
+ * choices) open the previous or next question. Esc (outside an open dropdown or
+ * note) and Tab on Submit hand the keys to the composer under the form
+ * (`releaseKeys`), where Esc interrupts the turn and so cancels the ask. In rows,
+ * ↑ on a question's first row first scrolls up to its head when that is cut off,
+ * `app.ask.hide` collapses the form to one row, and the host draws
+ * {@link HtmlFormDialog.keyHints} under the panel. Notes use `n` on
+ * option rows and Alt+n on dropdowns, without selecting the option.
  * With a `timeout`, inactivity submits the current values through `onTimeout`.
  *
  * @example
@@ -36,12 +40,14 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { formatKeyHint } from "../app-keybindings";
 import { BracketedPasteHandler } from "../bracketed-paste";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
-import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
+import { ASK_RESERVED_ROWS, type FoldedRows, renderFoldedQuestion } from "../chrome/ask-fold";
+import { OverlayPanel, PanelRows } from "../chrome/overlay-box";
 import { SvgFigure } from "../chat/svg-figure";
 import { convertImageToPngShared } from "../chat/image-loading";
 import { Editor } from "../components/editor";
 import { Image, type ImageBudget, measureRender } from "../components/image";
 import { Input } from "../components/input";
+import { ScrollView } from "../components/scroll-view";
 import { renderTableRowLines, type TableColumn } from "../components/table";
 import {
 	matchesSelectCancel,
@@ -66,7 +72,6 @@ import {
 } from "../native/node";
 import { actionBar, actionButton, itemIndex } from "../native/overlay";
 import { isNativeRendering } from "../native/state";
-import type { AskDialogInputGuard } from "../overlays/ask-dialog";
 import { compactImageAttachments, formatVisionMarker, PLACEHOLDER_REGEX } from "../prompt/composer-attachments";
 import { classifyImagePaste } from "../prompt/custom-editor";
 import { OrderedPastes } from "../prompt/ordered-pastes";
@@ -87,7 +92,6 @@ import {
 	OTHER_LABEL,
 	textValue,
 } from "./data";
-import { BreakRank, type Page, type PageAtom, pageHeight, paginate } from "./paginate";
 import {
 	type ChoiceField,
 	type ChoiceOption,
@@ -116,8 +120,6 @@ export interface HtmlFormDialogOptions {
 	/** Inactivity in ms after which `onTimeout` receives the current values and notes; any input restarts it. */
 	timeout?: number;
 	onTimeout?(data: HtmlFormData, notes: OptionNote[]): void;
-	/** A composer draft that keeps typing until ↑/↓ hands the keyboard to the form (as the ask dialog). */
-	inputGuard?: AskDialogInputGuard;
 	/** Directory relative `<img src>` paths resolve against; the process's when omitted. */
 	cwd?: string;
 	/** Lets the open option note take pasted images; see {@link HtmlFormDialog.attachImage}. */
@@ -131,13 +133,13 @@ export interface HtmlFormDialogOptions {
 	/** Called once per file path when a bracketed paste into an open note is only image paths. */
 	onPasteImagePath?(path: string): void | Promise<void>;
 	/**
-	 * Natively, what the card warns while it returns text: sending the composer's draft would skip the
-	 * form. The host requests a render when it changes.
+	 * What the form warns while it returns text: sending the composer's draft would skip the form. Natively
+	 * the card's warning line; in rows the panel's last line. The host requests a render when it changes.
 	 */
 	skipNotice?(): string | undefined;
 	/** Natively, a pointer action on the card: the host gives it the keyboard, which the composer may hold. */
 	claimKeys?(): void;
-	/** Natively, Tab past Submit: the host hands the keyboard to the composer under the card. */
+	/** Esc, or Tab past Submit: the host hands the keyboard to the composer under the form. */
 	releaseKeys?(): void;
 	onSubmit(data: HtmlFormData, notes: OptionNote[]): void;
 	onCancel(): void;
@@ -145,15 +147,16 @@ export interface HtmlFormDialogOptions {
 
 /** Fraction of the terminal the panel may occupy, as the ask dialog. */
 const DIALOG_HEIGHT_RATIO = 0.7;
+/** Body rows the panel keeps even when the terminal is too short for them past its reserved rows. */
 const MIN_BODY_ROWS = 6;
-/** Top border, footer divider, footer, bottom border. */
-const CHROME_ROWS = 4;
+/** Top and bottom border. */
+const CHROME_ROWS = 2;
 /** Column where field inputs and errors start, under the cursor and marker. */
 const FIELD_INDENT = 4;
 const MAX_TEXTAREA_ROWS = 10;
 const DEFAULT_TITLE = "Ask";
 const SUBMIT_LABEL = "Submit";
-/** A text block this short right before a field is its caption and never splits from it. */
+/** A text block this short right before a field is its caption and sits right above it, without a blank row. */
 const CAPTION_MAX_ROWS = 4;
 /** Tallest a picture draws, in rows, and its share of the terminal below that. */
 const MAX_PICTURE_ROWS = 16;
@@ -187,17 +190,43 @@ type Stop =
 	| { kind: "text"; field: TextField }
 	| { kind: "submit" };
 
+/** A picture's rows in the column: measured, and rendered again only while the body shows it whole. */
+interface PlacedPicture {
+	start: number;
+	end: number;
+	component: Component;
+	alt: string;
+}
+
+/** The rows' stacked column at one width, and where focus, the open question and the overlays sit in it. */
 interface Layout {
-	atoms: PageAtom[];
-	/** Atom index of each stop, parallel to the dialog's stops. */
-	stopAtoms: number[];
-	/** Where the open dropdown hangs from: its field's atom and the value row inside it. */
-	dropdown?: { atom: number; row: number };
+	width: number;
+	lines: string[];
+	/** Rows `[start, end)` of the focused stop. */
+	focus: { start: number; end: number };
+	/** First row of the open question: 0 for the first (the intro above it too), Submit's row on Submit. */
+	head: number;
+	/** Where the open dropdown hangs from: its field's first row and its value row. */
+	dropdown?: { top: number; row: number };
+	/** Last row of the option whose note is open. */
+	noteRow?: number;
 	/**
-	 * Picture atoms, measured under {@link measureRender} so a picture on another page claims no
-	 * image slot; `#renderPage` renders the shown ones again, in display order.
+	 * Pictures, measured under {@link measureRender} so one scrolled out of view claims no image slot;
+	 * the body renders the ones it shows whole again, in display order.
 	 */
-	pictures: Map<PageAtom, Component>;
+	pictures: PlacedPicture[];
+}
+
+/** Rows of one block of the column, and the picture it draws, if any. */
+interface BlockRows {
+	lines: string[];
+	picture?: { component: Component; alt: string };
+}
+
+/** One run of a field's rows: an option, a control, its label or error; `stop` when focus rests on it. */
+interface FieldRun {
+	lines: string[];
+	stop: boolean;
 }
 
 /** Blocks `start` up to `end` (exclusive) of one form section. */
@@ -244,6 +273,11 @@ async function kittyReady(media: Media): Promise<Media> {
 		mimeType: media.mime,
 	});
 	return { bytes: Uint8Array.fromBase64(data), mime: "image/png" };
+}
+
+/** What a picture stands for in text: its alt, else its source or `drawing`. */
+function mediaName(block: MediaBlock): string {
+	return sanitize(block.alt || (block.kind === "image" ? block.src.slice(0, 80) : "drawing"));
 }
 
 /** A single select draws as a one-row dropdown; multi-selects keep option rows. */
@@ -347,7 +381,60 @@ function buildGroups(form: HtmlForm): { intro: FormPart[]; groups: QuestionGroup
 	return { intro, groups };
 }
 
-/** Interactive pager over an {@link HtmlForm}; see the module docs for layout and keys. */
+/**
+ * `offset` moved so fewer pictures straddle an edge of a body `rows` tall (a picture draws only whole;
+ * a cut one draws as a frame): among the offsets that put a picture's top or bottom on an edge, the one
+ * cutting the fewest, nearest `offset`, that keeps rows `keep` (the focused stop) in view and stays at
+ * or above `limit` (where ↑ peeks up from). `offset` itself when none cuts fewer.
+ */
+function clearPictureEdges(
+	offset: number,
+	rows: number,
+	max: number,
+	pictures: readonly PlacedPicture[],
+	keep: { start: number; end: number } | undefined,
+	limit: number,
+): number {
+	const cuts = (at: number): number =>
+		pictures.filter(
+			picture => (picture.start < at && at < picture.end) || (picture.start < at + rows && at + rows < picture.end),
+		).length;
+	const own = cuts(offset);
+	let best = offset;
+	let fewest = own;
+	for (const picture of pictures) {
+		for (const at of [picture.start, picture.end, picture.end - rows, picture.start - rows]) {
+			if (own === 0 || at < 0 || at > Math.min(max, limit)) continue;
+			if (keep && (keep.start < at || (keep.end > at + rows && keep.start !== at))) continue;
+			const count = cuts(at);
+			const nearer = Math.abs(at - offset) < Math.abs(best - offset);
+			if (count < fewest || (count === fewest && fewest < own && nearer)) {
+				best = at;
+				fewest = count;
+			}
+		}
+	}
+	return best;
+}
+
+/**
+ * The rows a picture the body cuts off draws instead of nothing: a dim frame naming it over its
+ * `visible` rows, open on each side the body cuts (`cut`), so its place reads as a picture to scroll to.
+ */
+function cutPictureRows(alt: string, visible: number, width: number, cut: { top: boolean; bottom: boolean }): string[] {
+	const name = `▣ ${alt}`;
+	if (visible <= 1) return [theme.fg("dim", truncateToWidth(name, width, Ellipsis.Unicode))];
+	// A column short of the body so the frame doesn't run into the scrollbar.
+	const inner = Math.max(0, width - 3);
+	const fill = (text: string, pad: string) => text + pad.repeat(Math.max(0, inner - visibleWidth(text)));
+	const label = truncateToWidth(cut.top ? ` ${name}` : `─ ${name} `, inner, Ellipsis.Unicode);
+	const rows = [cut.top ? `│${fill(label, " ")}│` : `╭${fill(label, "─")}╮`];
+	for (let row = 1; row < visible - 1; row++) rows.push(`│${" ".repeat(inner)}│`);
+	rows.push(cut.bottom ? `│${" ".repeat(inner)}│` : `╰${"─".repeat(inner)}╯`);
+	return rows.map(row => theme.fg("dim", row));
+}
+
+/** Interactive dialog over an {@link HtmlForm}; see the module docs for layout and keys. */
 export class HtmlFormDialog implements Component, Focusable {
 	readonly #form: HtmlForm;
 	readonly #options: HtmlFormDialogOptions;
@@ -367,21 +454,22 @@ export class HtmlFormDialog implements Component, Focusable {
 	readonly #errors = new Map<FormField, string>();
 	readonly #panel: OverlayPanel;
 	readonly #body = new PanelRows();
-	readonly #footer = new PanelRows();
+	/** The skip notice's warning row, under the body while there is one. */
+	readonly #notice = new PanelRows();
 	#focused = false;
 	#focus = 0;
-	#page = 0;
+	/** First column row the rows' body shows. */
+	#scrollOffset = 0;
 	/**
-	 * Whether the visible page follows focus. False while showing a page without
-	 * stops: at open when the form leads with context, or after turning to one.
+	 * Set while ↑ scrolls up to the open question's cut-off head (see {@link #moveStop}): the body
+	 * keeps its offset instead of following focus until another key brings focus back.
 	 */
-	#followFocus = false;
-	#pages: Page[] = [];
-	#stopAtoms: number[] = [];
+	#peek = false;
+	/** The last rows render's body: the focus it showed, its offset, height and the open question's head row. */
+	#view: { focus: number; offset: number; rows: number; head: number } | undefined;
 	#height: { key: string; rows: number } | undefined;
 	/** The dropdown showing its options, and the option its highlight sits on. */
 	#open: { field: ChoiceField; highlight: number } | undefined;
-	#guardReleased = false;
 	#deadline = 0;
 	#tick: NodeJS.Timeout | undefined;
 	/** Whole seconds left on the countdown; undefined without one. */
@@ -444,11 +532,11 @@ export class HtmlFormDialog implements Component, Focusable {
 			}
 		}
 		this.#stops.push({ kind: "submit" });
+		// Open where the answer is, so Enter accepts a preselected choice instead of overwriting it.
+		this.#focus = this.#answerStop(this.#fieldOfStop(0));
 		this.#panel = new OverlayPanel(options.title ?? DEFAULT_TITLE);
-		this.#footer.setHeight(1);
 		this.#panel.addChild(this.#body);
-		this.#panel.addChild(new PanelDivider());
-		this.#panel.addChild(this.#footer);
+		this.#panel.addChild(this.#notice);
 		this.#startCountdown();
 	}
 
@@ -529,8 +617,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	debugState(): Record<string, unknown> {
 		const stop = this.#stops[this.#focus];
 		return {
-			page: this.#page + 1,
-			pages: this.#pages.length,
+			scroll: this.#scrollOffset,
 			focus:
 				stop?.kind === "option"
 					? `${stop.field.name}=${stop.field.options[stop.option]?.value}`
@@ -574,46 +661,32 @@ export class HtmlFormDialog implements Component, Focusable {
 			this.#dropdownInput(this.#open, data);
 			return;
 		}
+		// Esc hands the keys to the composer, where Esc interrupts the turn and so cancels the ask.
 		if (matchesSelectCancel(data)) {
-			this.#cancel();
-			return;
-		}
-		if (this.#guardBlocks()) {
-			if (matchesSelectUp(data) || matchesSelectDown(data)) this.#releaseGuard();
-			else this.#options.inputGuard?.handleInput(data);
+			this.#options.releaseKeys?.();
 			return;
 		}
 		if (this.#hidden) {
 			if (getKeybindings().matches(data, "tui.select.confirm")) this.#setHidden(false);
 			return;
 		}
+		const confirm = getKeybindings().matches(data, "tui.select.confirm");
+		if (this.#peek && !matchesSelectUp(data)) {
+			// Focus sits below the rows shown: the keys that would act on it bring it back instead of acting unseen.
+			this.#peek = false;
+			if (matchesSelectDown(data) || matchesKey(data, "space") || confirm) return;
+		}
 		if (matchesSelectPageDown(data) || matchesSelectPageUp(data)) {
-			this.#turnPage(matchesSelectPageDown(data) ? 1 : -1);
+			this.#jumpQuestion(matchesSelectPageDown(data) ? 1 : -1);
 			return;
 		}
 		const stop = this.#stops[this.#focus]!;
-		if (matchesKey(data, "tab") && stop.kind === "submit" && isNativeRendering()) {
+		if (matchesKey(data, "tab") && stop.kind === "submit") {
 			this.#options.releaseKeys?.();
 			return;
 		}
 		if (matchesKey(data, "tab") || matchesKey(data, "shift+tab")) {
 			this.#moveField(matchesKey(data, "shift+tab") ? -1 : 1);
-			return;
-		}
-		// Only paged rows can hide focus; native terminals and an unrendered form never do.
-		if (!isNativeRendering() && !this.#followFocus && this.#pages.length > 1) {
-			// Focus sits on another page: ←/→ keep paging, and the keys that would act on
-			// it bring it into view instead of acting unseen. Anything else is ignored.
-			if (matchesKey(data, "left") || matchesKey(data, "right")) {
-				this.#turnPage(matchesKey(data, "right") ? 1 : -1);
-			} else if (
-				matchesSelectUp(data) ||
-				matchesSelectDown(data) ||
-				matchesKey(data, "space") ||
-				getKeybindings().matches(data, "tui.select.confirm")
-			) {
-				this.#followFocus = true;
-			}
 			return;
 		}
 		if (stop.kind === "text") {
@@ -633,10 +706,9 @@ export class HtmlFormDialog implements Component, Focusable {
 			return;
 		}
 		if (matchesKey(data, "left") || matchesKey(data, "right")) {
-			this.#turnPage(matchesKey(data, "right") ? 1 : -1);
+			this.#jumpQuestion(matchesKey(data, "right") ? 1 : -1);
 			return;
 		}
-		const confirm = getKeybindings().matches(data, "tui.select.confirm");
 		if (stop.kind === "submit") {
 			if (confirm) this.#submit();
 			return;
@@ -672,8 +744,6 @@ export class HtmlFormDialog implements Component, Focusable {
 				this.#cancel();
 				return;
 			}
-			// A pointer action on the dialog is an explicit hand-off from the draft.
-			this.#releaseGuardForPointer();
 			if (event.act === "submit") this.#submit();
 			else if (event.act === "note") this.#noteFromPointer(event.key);
 			else if (event.act.startsWith(OPEN_ACT)) this.#openField(Number(event.act.slice(OPEN_ACT.length)));
@@ -684,8 +754,6 @@ export class HtmlFormDialog implements Component, Focusable {
 			return;
 		}
 		if (event.type !== "select" && event.type !== "activate") return;
-		// A click on a row (the Other one especially) takes the keys the same way up/down do.
-		this.#releaseGuardForPointer();
 		const leaf = leafKey(event.key);
 		const field = leaf.startsWith("f") ? this.#form.fields[Number(leaf.slice(1))] : undefined;
 		if (field?.kind === "choice" && field.other && event.item === OTHER_ITEM) {
@@ -709,23 +777,29 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	render(width: number): readonly string[] {
-		this.#options.inputGuard?.syncPresentation?.(this.#guardBlocks());
 		if (this.#hidden) return this.#renderHidden(width);
 		const innerWidth = Math.max(1, width - 4);
-		const layout = this.#layout(innerWidth);
-		const rows = this.#bodyRows(innerWidth, layout.atoms);
-		this.#pages = paginate(layout.atoms, rows);
-		this.#stopAtoms = layout.stopAtoms;
-		const focusPage = this.#pageOfAtom(layout.stopAtoms[this.#focus] ?? 0);
-		if (this.#followFocus) this.#page = focusPage;
-		this.#page = Math.min(this.#page, this.#pages.length - 1);
-		if (this.#page === focusPage) this.#followFocus = true;
-		const paging = this.#pages.length > 1 ? ` · ${this.#page + 1}/${this.#pages.length}` : "";
-		this.#panel.title = `${this.#titleText()}${paging}`;
-		this.#body.setLines(this.#renderPage(layout, this.#pages[this.#page]!, rows, innerWidth));
+		const skip = this.#options.skipNotice?.();
+		// The notice takes a body row, so the panel keeps its height while it comes and goes.
+		const rows = Math.max(1, this.#bodyRows(innerWidth) - (skip ? 1 : 0));
+		const highlight = this.#focused ? this.#focus : -1;
+		let layout = this.#layout(innerWidth, this.#focus, highlight);
+		// An overflowing column gives the scrollbar a column.
+		if (layout.lines.length > rows && innerWidth > 1) layout = this.#layout(innerWidth - 1, this.#focus, highlight);
+		this.#panel.title = this.#titleText();
+		this.#body.setLines(this.#renderBody(layout, rows, innerWidth));
 		this.#body.setHeight(rows);
-		this.#footer.setLines([theme.fg("dim", this.#footerText())]);
+		this.#notice.setLines(skip ? [theme.fg("warning", `⚠ ${sanitize(skip).replace(/\s+/g, " ")}`)] : []);
 		return this.#panel.render(width);
+	}
+
+	/**
+	 * The rows form's key hints on one themed line, for the host to draw under the panel: the focused
+	 * stop's keys, moving, hiding, Esc to the composer and jumping questions; the open note's or
+	 * dropdown's keys while one is open.
+	 */
+	keyHints(): string {
+		return theme.fg("dim", this.#keyHintText());
 	}
 
 	/**
@@ -734,14 +808,12 @@ export class HtmlFormDialog implements Component, Focusable {
 	 * toggles); the focused text field is its live `Input`/`Editor`.
 	 */
 	describe(_cx: DescribeContext): NativeNode {
-		const blocked = this.#guardBlocks();
-		this.#options.inputGuard?.syncPresentation?.(blocked);
 		// Other answers are typed into the terminal's own inputs, which don't pass through handleInput.
 		const others = [...this.#others.values()].map(input => input.getValue()).join("\0");
 		const skip = this.#options.skipNotice?.();
-		const key = `${this.#version}\0${blocked}\0${others}\0${skip ?? ""}`;
+		const key = `${this.#version}\0${others}\0${skip ?? ""}`;
 		if (this.#native?.key === key) return this.#native.node;
-		const described = this.#describeForm(blocked, skip);
+		const described = this.#describeForm(skip);
 		this.#native = { key, node: described };
 		return described;
 	}
@@ -839,7 +911,7 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	/** One dim row standing in for a picture that is loading or could not be shown. */
 	#mediaNote(block: MediaBlock, slot: MediaSlot): string {
-		const name = sanitize(block.alt || (block.kind === "image" ? block.src.slice(0, 80) : "drawing"));
+		const name = mediaName(block);
 		if (slot.state === "failed") return `▣ ${name} — couldn't load: ${sanitize(slot.reason)}`;
 		return `▣ ${name} — loading…`;
 	}
@@ -1029,38 +1101,14 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	// ── Keys ─────────────────────────────────────────────────────────────────
 
-	/** True while a draft that predates the form still owns typing. */
-	#guardBlocks(): boolean {
-		return !this.#guardReleased && (this.#options.inputGuard?.isBlocked() ?? false);
-	}
-
-	/** Tells the guard right away, so its host stops owning the composer before the next render. */
-	#releaseGuard(): void {
-		this.#guardReleased = true;
-		this.#options.inputGuard?.syncPresentation?.(false);
-	}
-
-	/** A pointer pick or action on the form is the user handing the keys over, as up/down does. */
-	#releaseGuardForPointer(): void {
-		if (!this.#guardBlocks()) return;
-		this.#releaseGuard();
-		this.#changed();
-	}
-
-	#guardHint(guard: AskDialogInputGuard): string {
-		return `${editorKeys("tui.select.up", "tui.select.down")} answer · ${guard.hint}`;
-	}
-
 	#startNote(target?: number): void {
 		const stop = this.#stops[this.#focus];
-		if (this.#hidden || this.#guardBlocks() || (stop?.kind !== "option" && stop?.kind !== "select")) return;
-		// The editor draws under the focused stop, so its page must be the one shown.
-		this.#followFocus = true;
+		if (this.#hidden || (stop?.kind !== "option" && stop?.kind !== "select")) return;
+		// The editor draws under the focused stop, so the body must show it.
+		this.#peek = false;
 		const option =
 			target ?? (stop.kind === "option" ? stop.option : (this.#open?.highlight ?? this.#current(stop.field)));
 		if (option === undefined || stop.field.options[option]?.disabled !== false) return;
-		// Opening a note hands the keys over, as up/down does, so a draft that refills later can't claim pastes.
-		this.#releaseGuard();
 		const editor = (this.#savedNoteEditor ??= new Editor(getEditorTheme()));
 		editor.setBorderVisible(false);
 		editor.setMaxHeight(4);
@@ -1205,7 +1253,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	#noteFromPointer(key: string): void {
-		if (this.#hidden || this.#guardBlocks()) return;
+		if (this.#hidden) return;
 		const [listKey, rowKey] = key.split("/").slice(-2);
 		if (listKey && /^f\d+$/.test(listKey)) {
 			if (!rowKey || !/^o\d+$/.test(rowKey)) return;
@@ -1349,52 +1397,56 @@ export class HtmlFormDialog implements Component, Focusable {
 	#setFocus(index: number): void {
 		const group = this.#groupOfStop(this.#focus);
 		this.#focus = Math.max(0, Math.min(this.#stops.length - 1, index));
-		this.#followFocus = true;
+		this.#peek = false;
 		this.#syncControlFocus();
 		if (this.#groupOfStop(this.#focus) !== group) this.#reveal++;
 	}
 
+	/**
+	 * Move focus `delta` stops, across questions. In rows, ↑ on an open question's first stop whose head
+	 * the body cuts off scrolls up toward that head first, a body less a row at a time; the next ↑ at
+	 * the head crosses into the previous question.
+	 */
 	#moveStop(delta: number): void {
+		const view = this.#view;
+		const group = this.#groupOfStop(this.#focus);
+		if (
+			delta < 0 &&
+			view?.focus === this.#focus &&
+			view.offset > view.head &&
+			!isNativeRendering() &&
+			(this.#focus === 0 || this.#groupOfStop(this.#focus - 1) !== group)
+		) {
+			this.#peek = true;
+			this.#scrollOffset = Math.max(view.head, view.offset - Math.max(1, view.rows - 1));
+			return;
+		}
 		this.#setFocus(this.#focus + delta);
 	}
 
 	/** Jump to the first stop of the next (or previous) field; Submit counts as a field. */
 	#moveField(delta: number): void {
-		const fieldOf = (stop: Stop | undefined) => (stop && stop.kind !== "submit" ? stop.field : stop);
-		const current = fieldOf(this.#stops[this.#focus]);
+		const current = this.#fieldOfStop(this.#focus);
 		let index = this.#focus;
-		while (index + delta >= 0 && index + delta < this.#stops.length && fieldOf(this.#stops[index]) === current) {
+		while (index + delta >= 0 && index + delta < this.#stops.length && this.#fieldOfStop(index) === current) {
 			index += delta;
 		}
-		// Moving back lands on the previous field's first stop, not its last.
-		const target = fieldOf(this.#stops[index]);
-		while (delta < 0 && index > 0 && fieldOf(this.#stops[index - 1]) === target) index--;
-		this.#setFocus(index);
+		// Moving back lands on the previous field, not its last stop; either way at its answer.
+		const target = this.#fieldOfStop(index);
+		this.#setFocus(target ? this.#answerStop(target) : index);
 	}
 
-	#turnPage(delta: number): void {
-		if (isNativeRendering()) {
-			// Natively a page is a question group: open the previous or next one (past the last, Submit).
-			const target = this.#groupOfStop(this.#focus) + delta;
-			const first = this.#stops.findIndex((_, index) => this.#groupOfStop(index) === target);
-			if (first !== -1) this.#setFocus(first);
-			return;
-		}
-		if (this.#pages.length < 2) return;
-		const target = Math.max(0, Math.min(this.#pages.length - 1, this.#page + delta));
-		const page = this.#pages[target]!;
-		const stop = this.#stopAtoms.findIndex(atom => atom >= page.start && atom < page.end);
-		if (stop !== -1) {
-			this.#setFocus(stop);
-			return;
-		}
-		this.#page = target;
-		this.#followFocus = false;
+	/** The field of stop `index`; undefined for Submit. */
+	#fieldOfStop(index: number): FormField | undefined {
+		const stop = this.#stops[index];
+		return stop && stop.kind !== "submit" ? stop.field : undefined;
 	}
 
-	#pageOfAtom(atom: number): number {
-		const index = this.#pages.findIndex(page => atom >= page.start && atom < page.end);
-		return index === -1 ? 0 : index;
+	/** Open the previous or next question group at its first field's answer; past the last, Submit. */
+	#jumpQuestion(delta: number): void {
+		const target = this.#groupOfStop(this.#focus) + delta;
+		const first = this.#stops.findIndex((_, index) => this.#groupOfStop(index) === target);
+		if (first !== -1) this.#setFocus(this.#answerStop(this.#fieldOfStop(first)));
 	}
 
 	#syncControlFocus(): void {
@@ -1417,13 +1469,22 @@ export class HtmlFormDialog implements Component, Focusable {
 		return this.#fieldGroup.get(stop.field) ?? 0;
 	}
 
-	/** Focus field `index` where its answer is: the checked option, the chosen Other, else its first stop. */
+	/** Focus field `index` at its answer (see {@link #answerStop}). */
 	#openField(index: number): void {
 		const field = this.#form.fields[index];
-		if (!field) return;
+		if (field && this.#stops.some(stop => stop.kind !== "submit" && stop.field === field)) {
+			this.#setFocus(this.#answerStop(field));
+		}
+	}
+
+	/**
+	 * The stop where `field`'s answer is: its checked option, its chosen Other, else its first stop.
+	 * Submit's stop when `field` has none.
+	 */
+	#answerStop(field: FormField | undefined): number {
 		const stops = this.#stops.flatMap((stop, at) => (stop.kind !== "submit" && stop.field === field ? [at] : []));
-		if (stops.length === 0) return;
-		const checked = field.kind === "choice" ? this.#checked.get(field)! : undefined;
+		if (stops.length === 0) return this.#stops.length - 1;
+		const checked = field?.kind === "choice" ? this.#checked.get(field)! : undefined;
 		const answer = stops.find(at => {
 			const stop = this.#stops[at]!;
 			return (
@@ -1431,7 +1492,7 @@ export class HtmlFormDialog implements Component, Focusable {
 				(stop.kind === "other" && this.#otherChosen(stop.field))
 			);
 		});
-		this.#setFocus(answer ?? stops[0]!);
+		return answer ?? stops[0]!;
 	}
 
 	/** A folded field's pill: picks option `option` of `field` (flips it in a multi-select), focus staying put. */
@@ -1463,14 +1524,8 @@ export class HtmlFormDialog implements Component, Focusable {
 	#renderHidden(width: number): readonly string[] {
 		const hideKey = editorKey("app.ask.hide");
 		const enter = formatKeyHint("enter");
-		const guard = this.#options.inputGuard;
-		const blocked = this.#guardBlocks();
-		// While a draft owns input, Enter goes to the draft, so only the hide key restores.
-		const show = blocked ? hideKey : hideKey ? `${hideKey}/${enter}` : enter;
-		const hints: string[] = [];
-		if (blocked && guard) hints.push(this.#guardHint(guard));
-		if (show) hints.push(`${show} show`);
-		hints.push(`${editorKey("tui.select.cancel")} cancel`);
+		const show = hideKey ? `${hideKey}/${enter}` : enter;
+		const hints = [`${show} show`, `${editorKey("tui.select.cancel")} composer`];
 		const hint = theme.fg("dim", ` · ${hints.join(" · ")}`);
 		const label = theme.fg("accent", `${this.#titleText()} hidden:`);
 		const room = Math.max(1, width - visibleWidth(label) - visibleWidth(hint) - 1);
@@ -1481,50 +1536,92 @@ export class HtmlFormDialog implements Component, Focusable {
 	// ── Rows ─────────────────────────────────────────────────────────────────
 
 	#titleText(): string {
-		const title = this.#options.title ?? DEFAULT_TITLE;
+		const progress = this.#progress();
+		const title = `${this.#options.title ?? DEFAULT_TITLE}${progress ? ` · ${progress}` : ""}`;
 		return this.#remaining === undefined ? title : `${title} (${this.#remaining}s)`;
 	}
 
+	/** `2 of 5 answered`, for forms of two or more questions the keyboard reaches. */
+	#progress(): string | undefined {
+		const named = this.#form.fields.filter(field => field.name && reachable(field));
+		if (named.length < 2) return undefined;
+		return `${named.filter(field => this.#answered(field)).length} of ${named.length} answered`;
+	}
+
 	/**
-	 * Body rows: the whole form's natural height, capped by the terminal. Fixed
-	 * per width, terminal height and error count, so moving focus or typing
-	 * never resizes the panel; only a failed submit (new error rows) may.
+	 * Body rows: the column's natural height (the tallest it gets with any one question open, or with
+	 * Submit focused), capped by the terminal. Fixed per width, terminal height, pictures and errors, so
+	 * moving focus or typing never resizes the panel; only a failed submit (new error rows) may.
 	 */
-	#bodyRows(width: number, atoms: readonly PageAtom[]): number {
+	#bodyRows(width: number): number {
 		const termRows = this.#options.tui?.terminal.rows ?? process.stdout.rows ?? 40;
-		const key = `${width}:${termRows}:${this.#errors.size}:${this.#mediaVersion}`;
+		const errors = [...this.#errors].map(([field, error]) => `${this.#fieldIndex.get(field)}=${error}`).join("\0");
+		const key = `${width}:${termRows}:${this.#mediaVersion}:${errors}`;
 		if (this.#height?.key === key) return this.#height.rows;
-		const cap = Math.max(MIN_BODY_ROWS, Math.floor(termRows * DIALOG_HEIGHT_RATIO) - CHROME_ROWS);
-		const rows = Math.min(cap, Math.max(1, pageHeight(atoms, 0, atoms.length)));
+		// The panel leaves the composer and status its reserved rows, but keeps a usable body on a tiny terminal.
+		const panelRows = Math.min(Math.floor(termRows * DIALOG_HEIGHT_RATIO), termRows - ASK_RESERVED_ROWS);
+		const cap = Math.max(MIN_BODY_ROWS, panelRows - CHROME_ROWS);
+		let rows = 1;
+		// A field opens alike whichever of its stops holds focus, so its first stop measures it.
+		for (let stop = 0; stop < this.#stops.length && rows < cap; stop++) {
+			if (stop > 0 && this.#fieldOfStop(stop - 1) === this.#fieldOfStop(stop)) continue;
+			rows = Math.max(rows, this.#layout(width, stop, -1).lines.length);
+		}
+		rows = Math.min(cap, rows);
 		this.#height = { key, rows };
 		return rows;
 	}
 
-	#renderPage(layout: Layout, page: Page, rows: number, width: number): string[] {
-		const { atoms, dropdown, pictures } = layout;
-		const lines: string[] = [];
-		const continuation = atoms[page.start]?.continuation;
-		if (continuation !== undefined) {
-			lines.push(theme.fg("dim", truncateToWidth(`${continuation} (cont.)`, width, Ellipsis.Unicode)));
+	/**
+	 * `rows` rows of the column from the scroll offset, the shown pictures drawn, the open note editor or
+	 * dropdown over them, and a scrollbar while the column overflows.
+	 *
+	 * The offset moves as little as keeps the focused stop's rows in view (its top when it is taller than
+	 * the body), then up to the open question's head when that fits along, then to the nearest offset
+	 * that cuts fewer pictures ({@link clearPictureEdges}). While ↑ peeks at a cut-off head (`#peek`) it
+	 * keeps the peeked offset, or one above where the body was that cuts fewer. An open note keeps rows
+	 * under its option for the editor.
+	 */
+	#renderBody(layout: Layout, rows: number, width: number): string[] {
+		const { lines, focus, head } = layout;
+		const max = Math.max(0, lines.length - rows);
+		let offset = Math.min(this.#scrollOffset, max);
+		if (!this.#peek) {
+			if (focus.start < offset || focus.end - focus.start >= rows) offset = focus.start;
+			else if (focus.end > offset + rows) offset = focus.end - rows;
+			if (head < offset && focus.end - head <= rows) offset = head;
+			offset = Math.min(offset, max);
 		}
-		let anchor: { top: number; row: number } | undefined;
-		let noteRow: number | undefined;
-		for (let index = page.start; index < page.end; index++) {
-			const atom = atoms[index]!;
-			if (index > page.start) for (let gap = 0; gap < atom.gap; gap++) lines.push("");
-			if (dropdown?.atom === index) anchor = { top: lines.length, row: lines.length + dropdown.row };
-			// A picture measured off the display order is rendered again here, so only shown pictures take image slots.
-			const rendered = pictures.get(atom)?.render(width) ?? atom.lines;
-			if (this.#noteEditor && index === this.#stopAtoms[this.#focus]) noteRow = lines.length + rendered.length - 1;
-			lines.push(...rendered);
+		// Like the dropdown, the note editor covers the rows under its option rather than pushing them.
+		const noteRow = this.#noteEditor ? layout.noteRow : undefined;
+		if (noteRow !== undefined) offset = Math.max(offset, noteRow - Math.max(0, rows - 3));
+		else {
+			// ↑ peeking toward the head moves the body up at least a row, never back down.
+			const limit = this.#peek ? Math.max(offset, (this.#view?.offset ?? offset) - 1) : max;
+			offset = clearPictureEdges(offset, rows, max, layout.pictures, this.#peek ? undefined : focus, limit);
 		}
-		// Like the dropdown, the note editor covers the rows under its option rather than repaginating.
-		if (this.#noteEditor && noteRow !== undefined) {
-			const active = this.#noteEditor;
-			const inner = Math.max(1, width - FIELD_INDENT);
-			const start = Math.max(0, noteRow - Math.max(0, rows - 3));
-			const shown = lines.slice(start, start + rows);
-			const top = noteRow - start + 1;
+		this.#scrollOffset = offset;
+		this.#view = { focus: this.#focus, offset, rows, head };
+		const shown = lines.slice(offset, offset + rows);
+		while (shown.length < rows) shown.push("");
+		for (const picture of layout.pictures) {
+			const top = picture.start - offset;
+			const bottom = picture.end - offset;
+			if (bottom <= 0 || top >= rows) continue;
+			// Drawn only whole, so only shown pictures take image slots and none draws past the body's edge;
+			// a cut one is a frame naming it.
+			const from = Math.max(0, top);
+			const to = Math.min(rows, bottom);
+			const drawn =
+				top >= 0 && bottom <= rows
+					? picture.component.render(layout.width)
+					: cutPictureRows(picture.alt, to - from, layout.width, { top: top < 0, bottom: bottom > rows });
+			for (let row = from; row < to; row++) shown[row] = drawn[row - from] ?? "";
+		}
+		if (noteRow !== undefined) {
+			const active = this.#noteEditor!;
+			const inner = Math.max(1, layout.width - FIELD_INDENT);
+			const top = noteRow - offset + 1;
 			active.editor.setMaxHeight(Math.max(1, Math.min(4, rows - top - 1)));
 			const header = theme.fg(
 				"muted",
@@ -1535,17 +1632,25 @@ export class HtmlFormDialog implements Component, Focusable {
 			);
 			const editing = [header, ...active.editor.render(inner)].map(line => padding(FIELD_INDENT) + line);
 			shown.splice(top, editing.length, ...editing);
-			return shown.slice(0, rows);
+		} else if (layout.dropdown && this.#open) {
+			const row = layout.dropdown.row - offset;
+			const top = Math.max(0, layout.dropdown.top - offset);
+			if (row >= 0 && row < rows) this.#overlayDropdown(shown, { top, row }, rows, layout.width);
 		}
-		const shown = lines.slice(0, rows);
-		if (anchor && this.#open && anchor.row < rows) this.#overlayDropdown(shown, anchor, rows, width);
-		return shown;
+		const view = new ScrollView(shown.slice(0, rows), {
+			height: rows,
+			totalRows: Math.max(lines.length, offset + rows),
+			scrollbar: "auto",
+			theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
+		});
+		view.setScrollOffset(offset);
+		return [...view.render(width)];
 	}
 
 	/**
-	 * Draw the open dropdown over the page rows below its value row, or above
+	 * Draw the open dropdown over the body rows below its value row, or above
 	 * its field when there is more room there. It covers rows rather than
-	 * pushing them, so pages keep their layout while it is open.
+	 * pushing them, so the column keeps its layout while it is open.
 	 */
 	#overlayDropdown(lines: string[], anchor: { top: number; row: number }, rows: number, width: number): void {
 		const open = this.#open!;
@@ -1604,12 +1709,10 @@ export class HtmlFormDialog implements Component, Focusable {
 		return out;
 	}
 
-	#footerText(): string {
+	#keyHintText(): string {
 		if (this.#noteEditor) return this.#noteEditHint();
 		const hideKey = editorKey("app.ask.hide");
-		const cancel = `${editorKey("tui.select.cancel")} cancel${hideKey ? ` · ${hideKey} hide` : ""}`;
-		const guard = this.#options.inputGuard;
-		if (guard && this.#guardBlocks()) return `${this.#guardHint(guard)} · ${cancel}`;
+		const composer = `${editorKey("tui.select.cancel")} composer${hideKey ? ` · ${hideKey} hide` : ""}`;
 		const stop = this.#stops[this.#focus]!;
 		const [noteKey] = this.#noteKeys(stop.kind === "select");
 		const noteHint = noteKey ? ` · ${formatKeyHint(noteKey)} note` : "";
@@ -1626,91 +1729,109 @@ export class HtmlFormDialog implements Component, Focusable {
 		else if (stop.field.multi) action = `${formatKeyHint("space")} toggle · ${enter} next`;
 		else action = `${enter} choose`;
 		if (stop.kind === "option" || stop.kind === "select") action += noteHint;
-		const hints = [action, `${upDown} move`, `${formatKeyHint("tab")} next field`, cancel];
-		if (this.#pages.length > 1) {
+		const hints = [action, `${upDown} move`];
+		if (stop.kind !== "submit") hints.push(`${formatKeyHint("tab")} next field`);
+		hints.push(composer);
+		if (this.#groups.length > 1) {
 			const keys =
 				stop.kind === "text" || stop.kind === "select"
 					? editorKeys("tui.select.pageUp", "tui.select.pageDown")
 					: `${formatKeyHint("left")}/${formatKeyHint("right")}`;
-			hints.push(`${keys} page`);
+			hints.push(`${keys} question`);
 		}
 		return hints.join(" · ");
 	}
 
-	#layout(width: number): Layout {
-		const atoms: PageAtom[] = [];
-		const stopAtoms: number[] = [];
-		let dropdown: Layout["dropdown"];
-		const pictures: Layout["pictures"] = new Map();
-		let stop = 0;
-		const focusedStop = this.#focused ? this.#focus : -1;
-		this.#form.sections.forEach((section, sectionIndex) => {
-			const title = sanitize(spansText(section.title)).replace(/\s+/g, " ");
-			let gap = sectionIndex === 0 ? 0 : 1;
-			let rank = BreakRank.Section;
-			if (title) {
-				atoms.push({
-					lines: hang("", section.title, text => theme.bold(theme.fg("text", text)), width),
-					gap,
-					breakRank: rank,
-				});
-				gap = 0;
-				rank = BreakRank.Never;
-			}
-			/** Atom range of the text block just emitted, a candidate caption for a following field. */
-			let caption: { start: number; end: number } | undefined;
-			for (const block of section.blocks) {
-				const blockAtoms: PageAtom[] = [];
-				if (block.kind === "field") {
-					// Models ask a group's question in a `<p>` right before it: keep the two as one unit.
-					if (caption && caption.end - caption.start <= CAPTION_MAX_ROWS) {
-						for (let index = caption.start + 1; index < caption.end; index++) {
-							atoms[index]!.breakRank = BreakRank.Never;
-						}
-						gap = 0;
-						rank = BreakRank.Never;
+	/**
+	 * The stacked column at `width`, stop `focus` holding focus and stop `highlight` drawn focused (-1:
+	 * none): the intro, then each question group (the one holding focus open: its context, its focused
+	 * field's controls and its other fields folded; the rest folded field by field), then the Submit row.
+	 */
+	#layout(width: number, focus: number, highlight: number): Layout {
+		const lines: string[] = [];
+		const layout: Layout = { width, lines, focus: { start: 0, end: 0 }, head: 0, pictures: [] };
+		const focusField = this.#fieldOfStop(focus);
+		const open = this.#groupOfStop(focus);
+		/** Pushes `rows` a blank row under the rows before them (none when `tight`); returns their first row. */
+		const emit = (rows: readonly string[], tight = false): number => {
+			if (lines.length > 0 && !tight) lines.push("");
+			const start = lines.length;
+			lines.push(...rows);
+			return start;
+		};
+		const emitParts = (parts: readonly FormPart[]): void => {
+			for (const { section: index, start, end } of parts) {
+				const section = this.#form.sections[index]!;
+				// A title keeps the block after it under it; a short text block right before a field, that field.
+				let keep: "title" | "caption" | undefined;
+				if (start === 0 && section.title.length > 0) {
+					emit(hang("", section.title, text => theme.bold(theme.fg("text", text)), width));
+					keep = "title";
+				}
+				for (let at = start; at < end; at++) {
+					const block = section.blocks[at]!;
+					if (block.kind !== "field") {
+						if (this.#isFoldCaption(section.blocks, at, focusField)) continue;
+						const { lines: rows, picture } = this.#contextRows(block, width);
+						const top = emit(rows, keep === "title");
+						if (picture) layout.pictures.push({ start: top, end: top + rows.length, ...picture });
+						keep = block.kind === "text" && rows.length <= CAPTION_MAX_ROWS ? "caption" : undefined;
+						continue;
 					}
 					const field = block.field;
-					for (const [atom, isStop] of this.#fieldAtoms(field, width, focusedStop, stop)) {
-						if (isStop) stopAtoms[stop++] = atoms.length + blockAtoms.length;
-						blockAtoms.push(atom);
+					const tight = keep !== undefined;
+					keep = undefined;
+					if (field !== focusField) {
+						emit(renderFoldedQuestion(this.#folded(field), width), tight);
+						continue;
+					}
+					const first = this.#stops.findIndex(stop => stop.kind !== "submit" && stop.field === field);
+					const runs = this.#fieldRuns(field, width, highlight, first);
+					const top = emit(
+						runs.flatMap(run => run.lines),
+						tight,
+					);
+					let row = top;
+					let stop = first;
+					for (const run of runs) {
+						if (run.stop && stop++ === focus) layout.focus = { start: row, end: row + run.lines.length };
+						row += run.lines.length;
 					}
 					if (field.kind === "choice" && this.#open?.field === field) {
-						dropdown = { atom: atoms.length, row: field.label.length > 0 ? blockAtoms[0]!.lines.length - 1 : 0 };
+						// The value row, above the error.
+						const errorRows = this.#errors.has(field) ? 1 : 0;
+						layout.dropdown = { top, row: top + runs[0]!.lines.length - 1 - errorRows };
 					}
-				} else {
-					blockAtoms.push(...this.#contextAtoms(block, width, pictures));
+					if (this.#noteEditor?.field === field) layout.noteRow = layout.focus.end - 1;
 				}
-				if (blockAtoms.length === 0) continue;
-				blockAtoms[0]!.gap = gap;
-				blockAtoms[0]!.breakRank = rank;
-				// No orphans or widows: a split block keeps at least two atoms on each page.
-				if (blockAtoms.length > 1) {
-					blockAtoms[1]!.breakRank = BreakRank.Never;
-					blockAtoms[blockAtoms.length - 1]!.breakRank = BreakRank.Never;
-				}
-				caption =
-					block.kind === "text" ? { start: atoms.length, end: atoms.length + blockAtoms.length } : undefined;
-				for (const atom of blockAtoms) {
-					if (title) atom.continuation = title;
-					atoms.push(atom);
-				}
-				gap = 1;
-				rank = BreakRank.Block;
 			}
+		};
+		emitParts(this.#intro);
+		this.#groups.forEach((group, index) => {
+			if (index !== open) {
+				for (const field of group.fields) emit(renderFoldedQuestion(this.#folded(field), width));
+				return;
+			}
+			const before = lines.length;
+			emitParts(group.parts);
+			// The first group's head is the intro's too.
+			layout.head = index === 0 || before === 0 ? 0 : before + 1;
 		});
-		const submitFocused = focusedStop === this.#stops.length - 1;
-		const submit = submitFocused
-			? theme.fg("accent", theme.bold(`${theme.nav.cursor} ${SUBMIT_LABEL}`))
-			: theme.fg("muted", `  ${SUBMIT_LABEL}`);
+		const submit =
+			highlight === this.#stops.length - 1
+				? theme.fg("accent", theme.bold(`${theme.nav.cursor} ${SUBMIT_LABEL}`))
+				: theme.fg("muted", `  ${SUBMIT_LABEL}`);
 		const pending = this.#errors.size > 0 ? theme.fg("error", `  ${this.#errors.size} to fix`) : "";
-		stopAtoms[stop] = atoms.length;
-		atoms.push({ lines: [`${submit}${pending}`], gap: 1, breakRank: BreakRank.Block });
-		return { atoms, stopAtoms, dropdown, pictures };
+		const submitRow = emit([`${submit}${pending}`]);
+		if (focusField === undefined) {
+			layout.focus = { start: submitRow, end: submitRow + 1 };
+			layout.head = submitRow;
+		}
+		return layout;
 	}
 
-	/** Atoms of one field, each flagged when it is a focus stop; stops are numbered from `firstStop`. */
-	#fieldAtoms(field: FormField, width: number, focusedStop: number, firstStop: number): [PageAtom, boolean][] {
+	/** Rows of one open field in runs, each flagged when it is a focus stop; stops are numbered from `firstStop`. */
+	#fieldRuns(field: FormField, width: number, focusedStop: number, firstStop: number): FieldRun[] {
 		const error = this.#errors.get(field);
 		const errorLines = error
 			? [padding(FIELD_INDENT) + theme.fg("error", truncateToWidth(error, Math.max(1, width - FIELD_INDENT)))]
@@ -1721,19 +1842,12 @@ export class HtmlFormDialog implements Component, Focusable {
 				field.kind === "text"
 					? this.#textFieldLines(field, focused, width)
 					: this.#dropdownFieldLines(field, focused, width);
-			const hasStop = field.kind === "text" || field.options.some(option => !option.disabled);
-			return [[{ lines: [...lines, ...errorLines], gap: 0, breakRank: BreakRank.Inside }, hasStop]];
+			const stop = field.kind === "text" || field.options.some(option => !option.disabled);
+			return [{ lines: [...lines, ...errorLines], stop }];
 		}
-		const out: [PageAtom, boolean][] = [];
+		const out: FieldRun[] = [];
 		if (field.label.length > 0) {
-			out.push([
-				{
-					lines: hang("  ", field.label, text => theme.fg("text", text), width),
-					gap: 0,
-					breakRank: BreakRank.Inside,
-				},
-				false,
-			]);
+			out.push({ lines: hang("  ", field.label, text => theme.fg("text", text), width), stop: false });
 		}
 		const checked = this.#checked.get(field)!;
 		let stop = firstStop;
@@ -1753,14 +1867,10 @@ export class HtmlFormDialog implements Component, Focusable {
 				Math.max(1, width - visibleWidth(noteMarker)),
 			);
 			lines[0] = `${lines[0] ?? ""}${noteMarker}`;
-			out.push([{ lines, gap: 0, breakRank: BreakRank.Inside }, !option.disabled]);
+			out.push({ lines, stop: !option.disabled });
 		});
-		if (field.other)
-			out.push([
-				{ lines: [this.#otherLine(field, focusedStop === stop, width)], gap: 0, breakRank: BreakRank.Inside },
-				true,
-			]);
-		if (errorLines.length > 0) out.push([{ lines: errorLines, gap: 0, breakRank: BreakRank.Never }, false]);
+		if (field.other) out.push({ lines: [this.#otherLine(field, focusedStop === stop, width)], stop: true });
+		if (errorLines.length > 0) out.push({ lines: errorLines, stop: false });
 		return out;
 	}
 
@@ -1869,43 +1979,41 @@ export class HtmlFormDialog implements Component, Focusable {
 		return [...label, ...rows.map(row => `${prefix}${row}`)];
 	}
 
-	/** Atoms of a non-field block: one per wrapped line, list item or table row line. */
-	#contextAtoms(
-		block: Exclude<FormBlock, { kind: "field" }>,
-		width: number,
-		pictures: Layout["pictures"],
-	): PageAtom[] {
-		const atom = (lines: string[], breakRank = BreakRank.Inside): PageAtom => ({ lines, gap: 0, breakRank });
+	/** Rows of a non-field block: its wrapped lines, list items or table rows, or a picture. */
+	#contextRows(block: Exclude<FormBlock, { kind: "field" }>, width: number): BlockRows {
 		switch (block.kind) {
 			case "text": {
 				const base = block.heading
 					? (text: string) => theme.bold(theme.fg("text", text))
 					: (text: string) => theme.fg("muted", text);
-				return hang("", block.spans, base, width).map(line => atom([line]));
+				return { lines: hang("", block.spans, base, width) };
 			}
 			case "list":
-				return block.items.map((item, index) => {
-					const bullet = theme.fg("mdListBullet", block.ordered ? `${index + 1}. ` : "• ");
-					return atom(hang(bullet, item, text => theme.fg("muted", text), width));
-				});
+				return {
+					lines: block.items.flatMap((item, index) => {
+						const bullet = theme.fg("mdListBullet", block.ordered ? `${index + 1}. ` : "• ");
+						return hang(bullet, item, text => theme.fg("muted", text), width);
+					}),
+				};
 			case "pre":
-				return sanitize(block.text)
-					.split("\n")
-					.map(line =>
-						atom([
-							`  ${theme.fg("mdCodeBlock", truncateToWidth(line, Math.max(1, width - 2), Ellipsis.Unicode))}`,
-						]),
-					);
+				return {
+					lines: sanitize(block.text)
+						.split("\n")
+						.map(
+							line =>
+								`  ${theme.fg("mdCodeBlock", truncateToWidth(line, Math.max(1, width - 2), Ellipsis.Unicode))}`,
+						),
+				};
 			case "image":
 			case "svg": {
 				const slot = this.#media.get(block)!;
 				const rows = slot.state === "ready" ? measureRender(() => slot.rows.render(width)).value : [];
 				if (rows.length > 0 && slot.state === "ready") {
-					const picture = atom([...rows]);
-					pictures.set(picture, slot.rows);
-					return [picture];
+					return { lines: [...rows], picture: { component: slot.rows, alt: mediaName(block) } };
 				}
-				return [atom([theme.fg("dim", truncateToWidth(this.#mediaNote(block, slot), width, Ellipsis.Unicode))])];
+				return {
+					lines: [theme.fg("dim", truncateToWidth(this.#mediaNote(block, slot), width, Ellipsis.Unicode))],
+				};
 			}
 			case "table": {
 				const cells = block.rows.map(row => row.map(cell => sanitize(spansText(cell))));
@@ -1919,22 +2027,17 @@ export class HtmlFormDialog implements Component, Focusable {
 					align: "left",
 					overflow: "wrap",
 				}));
-				// A row's continuation lines refuse a break before them, so it pages whole unless taller than a page.
-				const atoms: PageAtom[] = [];
+				const lines: string[] = [];
 				cells.forEach((row, index) => {
-					if (index > 0 && index === block.headerRows) {
-						atoms.push(atom([theme.fg("dim", "─".repeat(width))], BreakRank.Never));
-					}
+					if (index > 0 && index === block.headerRows) lines.push(theme.fg("dim", "─".repeat(width)));
 					const style =
 						index < block.headerRows
 							? (text: string) => theme.bold(theme.fg("text", text))
 							: (text: string) => theme.fg("muted", text);
 					const padded = Array.from({ length: count }, (_, column) => ({ text: row[column] ?? "", style }));
-					renderTableRowLines(padded, columns, width, { gap: "  " }).forEach((line, part) => {
-						atoms.push(atom([line], part === 0 ? BreakRank.Inside : BreakRank.Never));
-					});
+					lines.push(...renderTableRowLines(padded, columns, width, { gap: "  " }));
 				});
-				return atoms;
+				return { lines };
 			}
 		}
 	}
@@ -1946,7 +2049,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	 * its focused field's controls, its other fields folded); every other one folds field by field. A
 	 * group of one field folds to that field under the group's motion key, so opening it glides.
 	 */
-	#describeForm(blocked: boolean, skip: string | undefined): NativeNode {
+	#describeForm(skip: string | undefined): NativeNode {
 		const open = this.#groupOfStop(this.#focus);
 		const body: NativeChild[] = [];
 		if (this.#intro.length > 0) {
@@ -1963,33 +2066,22 @@ export class HtmlFormDialog implements Component, Focusable {
 				body.push(withMotion(col(folds, { gap: "md", role: "omp.ask.group" }), key));
 			}
 		});
-		const named = this.#form.fields.filter(field => field.name && reachable(field));
-		const answered = named.filter(field => this.#answered(field)).length;
 		return askCard({
-			progress: named.length > 1 ? `${answered} of ${named.length} answered` : undefined,
+			progress: this.#progress(),
 			body,
 			skip,
-			actions: this.#describeActions(blocked),
+			actions: this.#describeActions(),
 		});
 	}
 
 	/** Section parts as the card's children: a fieldset's legend, its context and its fields. */
 	#describeParts(parts: readonly FormPart[]): NativeChild[] {
-		const stop = this.#stops[this.#focus];
-		const focused = stop && stop.kind !== "submit" ? stop.field : undefined;
+		const focused = this.#fieldOfStop(this.#focus);
 		return parts.flatMap(({ section: index, start, end }) => {
 			const section = this.#form.sections[index]!;
 			const children = section.blocks.slice(start, end).flatMap((block, offset) => {
 				const at = start + offset;
-				// A folded field shows its caption as its question; drawn above it too, it would read twice.
-				const next = section.blocks[at + 1];
-				if (
-					block.kind === "text" &&
-					next?.kind === "field" &&
-					next.field !== focused &&
-					this.#questions.get(next.field) === spansText(block.spans).replace(/\s+/g, " ").trim()
-				)
-					return [];
+				if (this.#isFoldCaption(section.blocks, at, focused)) return [];
 				const described = this.#describeBlock(block);
 				// Fields carry their own motion keys; context fades in and out with its group.
 				return [block.kind === "field" ? described : withMotion(described, `c${index}.${at}`)];
@@ -2009,17 +2101,39 @@ export class HtmlFormDialog implements Component, Focusable {
 		return fieldError(field, value) === undefined;
 	}
 
-	/** `field` folded under motion key `key`: its question over its answer, or its option pills. */
+	/**
+	 * Whether `blocks[at]` is the caption of a folded field right after it: the field shows it as its
+	 * question, so drawn above it too it would read twice.
+	 */
+	#isFoldCaption(blocks: readonly FormBlock[], at: number, focused: FormField | undefined): boolean {
+		const block = blocks[at];
+		const next = blocks[at + 1];
+		return (
+			block?.kind === "text" &&
+			next?.kind === "field" &&
+			next.field !== focused &&
+			this.#questions.get(next.field) === spansText(block.spans).replace(/\s+/g, " ").trim()
+		);
+	}
+
+	/** What `field` shows folded, natively and in rows: its question over its answer or option pills. */
+	#folded(field: FormField): FoldedRows {
+		return {
+			question: sanitize(this.#questions.get(field) ?? field.name),
+			answered: this.#answered(field),
+			error: this.#errors.get(field),
+			summary: this.#foldSummary(field, this.#fieldIndex.get(field)!),
+		};
+	}
+
+	/** `field` folded under motion key `key`. */
 	#foldField(field: FormField, key: string): NativeNode {
-		const index = this.#fieldIndex.get(field)!;
-		const error = this.#errors.get(field);
+		const { question, ...folded } = this.#folded(field);
 		return foldQuestion({
 			key,
-			question: [span(sanitize(this.#questions.get(field) ?? field.name))],
-			answered: this.#answered(field),
-			error,
-			summary: this.#foldSummary(field, index),
-			open: `${OPEN_ACT}${index}`,
+			question: [span(question)],
+			...folded,
+			open: `${OPEN_ACT}${this.#fieldIndex.get(field)}`,
 		});
 	}
 
@@ -2055,10 +2169,10 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	/**
-	 * The countdown or draft hint, then Cancel, Note on an option, and Submit, which validates the whole
-	 * form and opens the first answer that needs a fix. An open note shows Keep and Save instead.
+	 * The countdown, then Cancel, Note on an option, and Submit, which validates the whole form and opens
+	 * the first answer that needs a fix. An open note shows Keep and Save instead.
 	 */
-	#describeActions(blocked: boolean): NativeNode {
+	#describeActions(): NativeNode {
 		if (this.#noteEditor) {
 			return actionBar([
 				text(this.#noteEditHint(), { role: "omp.ask.note" }),
@@ -2066,20 +2180,14 @@ export class HtmlFormDialog implements Component, Focusable {
 				actionButton("Save", "save-note", { keys: "enter" }),
 			]);
 		}
-		const guard = this.#options.inputGuard;
-		const lead =
-			blocked && guard
-				? this.#guardHint(guard)
-				: this.#remaining !== undefined
-					? `Submits these answers in ${this.#remaining}s`
-					: undefined;
+		const lead = this.#remaining !== undefined ? `Submits these answers in ${this.#remaining}s` : undefined;
 		const stop = this.#stops[this.#focus]!;
 		const [noteKey] = this.#noteKeys(stop.kind === "select");
 		return actionBar([
 			lead ? text([span(lead, "muted")], { truncate: "end", role: "omp.ask.summary" }) : null,
 			...(lead ? [null] : []),
-			actionButton("Cancel", "cancel", { keys: "escape" }),
-			...(!blocked && (stop.kind === "option" || stop.kind === "select")
+			actionButton("Cancel", "cancel"),
+			...(stop.kind === "option" || stop.kind === "select"
 				? [
 						actionButton(
 							"Note",

@@ -3,7 +3,7 @@
  *
  * The embedded shell opens `local://…`, `skill://…` and the other file-backed
  * schemes itself and hands the programs it spawns the files they alias
- * (`crates/pi-shell/src/host/urls.rs`); a named service and a pty command run
+ * (`crates/shell/src/host/urls.rs`); a named service and a pty command run
  * in that shell too, as a process of their own. Only a client terminal (ACP)
  * runs a command under a shell omp does not provide, which knows none of the
  * schemes. {@link hostCommandUrls} gives such a command the same result: every

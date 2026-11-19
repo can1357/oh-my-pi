@@ -1,5 +1,5 @@
 import type { Theme } from "../theme/theme";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { parseSpillUrl, sanitizeText, spillUrl } from "@oh-my-pi/pi-utils";
 import {
 	flattenLine,
 	formatBytes,
@@ -74,8 +74,8 @@ export interface LimitsMeta {
 	/**
 	 * `unit` may be absent in sessions persisted before it was recorded. `lines` is
 	 * the first-to-last range of cut lines, and `selectorBase` the target a
-	 * `:raw:<line>-<line>` selector reads one of them whole from (an artifact's
-	 * `artifact://<id>` stands in when absent).
+	 * `:raw:<line>-<line>` selector reads one of them whole from (the spill's
+	 * `local://<id>.log` stands in when absent).
 	 */
 	columnTruncated?: {
 		maxColumn: number;
@@ -173,9 +173,9 @@ export function formatGroupedDiagnosticMessages(messages: string[]): string {
  */
 export function formatFullOutputReference(artifactId: string, artifactElidedBytes?: number): string {
 	if (artifactElidedBytes !== undefined && artifactElidedBytes > 0) {
-		return `Read artifact://${artifactId} for a head/tail sample of the output; ${formatBytes(artifactElidedBytes)} from its middle was not saved`;
+		return `Read ${spillUrl(artifactId)} for a head/tail sample of the output; ${formatBytes(artifactElidedBytes)} from its middle was not saved`;
 	}
-	return `Read artifact://${artifactId} for full output`;
+	return `Read ${spillUrl(artifactId)} for full output`;
 }
 
 /** Strip the last literal notice or a matching final line; optionally preserve surrounding whitespace. */
@@ -202,24 +202,24 @@ export function stripTrailingNotice(
 	return trimResult ? stripped.trimEnd() : stripped;
 }
 
-const RAW_OUTPUT_ARTIFACT_PREFIX = "[raw output: artifact://";
-const RAW_OUTPUT_ARTIFACT_SUFFIX = "]";
+const RAW_OUTPUT_PREFIX = "[raw output: ";
+const RAW_OUTPUT_SUFFIX = "]";
+
+/** The footer naming the spill that holds the raw output a tool result was cut from. */
+export function formatRawOutputNotice(artifactId: string): string {
+	return `${RAW_OUTPUT_PREFIX}${spillUrl(artifactId)}${RAW_OUTPUT_SUFFIX}`;
+}
 
 /** Remove the trailing bash raw-output artifact footer while preserving its artifact id. */
 export function stripRawOutputArtifactNotice(text: string): { text: string; artifactId?: string } {
 	let artifactId: string | undefined;
 	const stripped = stripTrailingNotice(text, line => {
-		if (!line.startsWith(RAW_OUTPUT_ARTIFACT_PREFIX) || !line.endsWith(RAW_OUTPUT_ARTIFACT_SUFFIX)) {
-			return false;
-		}
-		const idStart = RAW_OUTPUT_ARTIFACT_PREFIX.length;
-		const idEnd = line.length - RAW_OUTPUT_ARTIFACT_SUFFIX.length;
-		if (idStart === idEnd) return false;
-		for (let i = idStart; i < idEnd; i++) {
-			const code = line.charCodeAt(i);
-			if (code < 48 || code > 57) return false;
-		}
-		artifactId = line.slice(idStart, idEnd);
+		if (!line.startsWith(RAW_OUTPUT_PREFIX) || !line.endsWith(RAW_OUTPUT_SUFFIX)) return false;
+		const url = line.slice(RAW_OUTPUT_PREFIX.length, line.length - RAW_OUTPUT_SUFFIX.length);
+		const id = parseSpillUrl(url);
+		// The footer names the bare spill, never a selector into it.
+		if (id === undefined || spillUrl(id) !== url) return false;
+		artifactId = String(id);
 		return true;
 	});
 	return artifactId === undefined ? { text } : { text: stripped, artifactId };
@@ -275,7 +275,7 @@ export function formatTruncationMetaNotice(truncation: TruncationMeta, source?: 
 		truncation.artifactId == null
 			? undefined
 			: source?.type === "report"
-				? `Read artifact://${truncation.artifactId} for full report (${source.value})`
+				? `Read ${spillUrl(truncation.artifactId)} for full report (${source.value})`
 				: formatFullOutputReference(truncation.artifactId, truncation.artifactElidedBytes);
 
 	if (truncation.direction === "middle") {
@@ -404,7 +404,7 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 		let columnNotice = `${COLUMN_TRUNCATION_CLAUSE}${c.maxColumn} ${c.unit ?? "chars"}`;
 		// An artifact cut to a head/tail sample renumbers its lines, so only a complete one names a line.
 		const selectorBase =
-			c.selectorBase ?? (c.artifactId != null && !c.artifactElidedBytes ? `artifact://${c.artifactId}` : undefined);
+			c.selectorBase ?? (c.artifactId != null && !c.artifactElidedBytes ? spillUrl(c.artifactId) : undefined);
 		if (c.lines && selectorBase !== undefined) {
 			// One line per selector: a span of cut lines can exceed what one read returns.
 			const { first, last } = c.lines;

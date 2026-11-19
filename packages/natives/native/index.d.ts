@@ -269,6 +269,41 @@ export declare class EditStore {
   clear(): void
 }
 
+/** Async reader/writer over a raw fd (pipe end). */
+export declare class FdStream {
+  /** Take ownership of `fd` (Windows: a pipe handle value). */
+  constructor(fd: number)
+  /**
+   * Begin reading: every chunk goes to `onChunk`, then `onClose` fires once
+   * with `null` on EOF/`close()` or an error message.
+   */
+  start(onChunk: (chunk: Uint8Array) => void, onClose: (reason: string | null) => void): void
+  /**
+   * Stop reading without closing the fd. Resolves once every chunk read
+   * before the pause has been delivered to `onChunk`; unread bytes stay in
+   * the kernel buffer. Writes are unaffected. No-op (resolved) when not
+   * reading (not started, already paused, or closed).
+   *
+   * Windows: the blocking pipe read cannot be interrupted without losing its
+   * bytes, so this resolves immediately and reading continues.
+   */
+  pause(): Promise<void>
+  /**
+   * Restart the read loop after `pause()` with the callbacks given to
+   * `start`. No-op when not paused.
+   */
+  resume(): void
+  /**
+   * Queue `data`; false once more than 1 MiB is unwritten (or the stream is
+   * closed).
+   */
+  write(data: string | Uint8Array): boolean
+  /** Resolve once every queued byte was written or the stream closed. */
+  drained(): Promise<void>
+  /** Stop reading and writing, drop queued bytes, and close the fd. */
+  close(): void
+}
+
 /**
  * Process-owned cross-platform advisory lock.
  *
@@ -282,9 +317,10 @@ export declare class FileLock {
   /**
    * Whether any handle, in any process including this one, holds `path`.
    *
-   * Observes without locking or opening the lock: a `connect(2)` probe on
-   * Linux, an `F_GETLK` query on other Unix platforms, a `\BaseNamedObjects`
-   * directory listing on Windows. A concurrent `tryAcquire()` never meets it.
+   * Observes without taking the lock: an `F_OFD_GETLK` query plus a
+   * `connect(2)` probe of the older abstract-socket name on Linux, an
+   * `F_GETLK` query on other Unix platforms, a `\BaseNamedObjects` directory
+   * listing on Windows. A concurrent `tryAcquire()` never meets it.
    */
   static isHeld(path: string): boolean
   /** Whether this handle owns the requested lock. */
@@ -320,6 +356,12 @@ export declare class IpcConnection {
    */
   static connect(endpoint: string, options: IpcConnectOptions): Promise<IpcConnection>
   /**
+   * Dial TCP `host:port` (`TCP_NODELAY` set; no peer-credential check:
+   * authenticate in-band). Rejects with code ECONNREFUSED, ETIMEDOUT
+   * (`timeoutMs` expired), EADDRNOTAVAIL, or the OS errno name.
+   */
+  static connectTcp(host: string, port: number, options: IpcConnectOptions): Promise<IpcConnection>
+  /**
    * Begin delivery on a `lines` connection (throws `TypeError` on a `raw`
    * one). Call `start`/`startRaw` exactly once. Frames received before
    * start are buffered, never dropped. `onLine` gets each non-empty line
@@ -335,8 +377,21 @@ export declare class IpcConnection {
    */
   startRaw(onChunk: (chunk: Uint8Array) => void, onClose: (reason: string | null) => void): void
   /**
+   * On a started `lines` connection: stop line framing. Bytes received
+   * past the last line already passed to `onLine` — including the rest of
+   * the batch when called from inside `onLine` — and every later byte go to
+   * `onChunk`, in order, nothing lost or reframed. `send()` then takes raw
+   * strings (UTF-8) / `Uint8Array` written as-is, without an LF. The
+   * `onClose` given to `start` still fires exactly once, last.
+   * `maxFrameBytes` stops applying once the switch reaches the reader. Throws
+   * `TypeError` on a `raw` connection, `ERR_INVALID_STATE` before `start` or
+   * when already upgraded.
+   */
+  upgradeRaw(onChunk: (chunk: Uint8Array) => void): void
+  /**
    * Send one frame. lines: a string without LF (`TypeError` otherwise);
-   * LF is appended. raw: string (UTF-8) or `Uint8Array` written as-is.
+   * LF is appended. raw (or after `upgradeRaw`): string (UTF-8) or
+   * `Uint8Array` written as-is.
    * Frames sent during one JS task are written together when it ends (a
    * microtask), in order; `end()` writes them first. Returns false once
    * unwritten bytes exceed 1 MiB (await `drained()` before sending more).
@@ -377,8 +432,25 @@ export declare class IpcServer {
    * started).
    */
   static listen(endpoint: string, options: IpcListenOptions, onConnection: (connection: IpcConnection) => void): Promise<IpcServer>
-  /** The endpoint this server listens on. */
+  /**
+   * Bind and listen on TCP `host:port`; `port` 0 picks an ephemeral port
+   * (read it back from `port`). Loopback and non-loopback hosts are both
+   * allowed. No peer-credential check: authenticate in-band. Accepted
+   * sockets have `TCP_NODELAY` set. `onConnection` receives each accepted
+   * connection (not yet started). Rejects with code EADDRINUSE,
+   * EADDRNOTAVAIL, EACCES, or the OS errno name.
+   */
+  static listenTcp(host: string, port: number, options: IpcListenOptions, onConnection: (connection: IpcConnection) => void): Promise<IpcServer>
+  /**
+   * The endpoint this server listens on: the socket path / pipe name, or
+   * `"<ip>:<port>"` for TCP.
+   */
   get endpoint(): string
+  /**
+   * The bound TCP port (the real one when listening on port 0); `null` for
+   * Unix-socket / named-pipe servers.
+   */
+  get port(): number | null
   /**
    * Stop accepting. Unix: unlink the socket file if it is still the inode
    * this server bound. Accepted connections are untouched. Idempotent.
@@ -597,11 +669,25 @@ export declare class Process {
   children(): Array<Process>
   /** Current status of this process reference. */
   status(): ProcessStatus
+  /**
+   * Process start time in milliseconds since the Unix epoch, when the
+   * platform reports it; a pid-reuse guard for re-adopting processes.
+   */
+  startTime(): number | null
 }
 
 /** Stateful PTY session for interactive stdin/stdout passthrough. */
 export declare class PtySession {
   constructor()
+  /**
+   * Wrap an inherited pty master fd and its child pid (e.g. kept across
+   * `execReplace`); call `resume` to drive it like a started session.
+   */
+  static adopt(masterFd: number, pid: number): PtySession
+  /** Unix pty master fd of the running session, for `execReplace` keepFds. */
+  masterFd(): number | null
+  /** Process id of the running session's child. */
+  pid(): number | null
   /**
    * Start a shell command, stream output chunks, and report the spawned child
    * PID.
@@ -612,12 +698,33 @@ export declare class PtySession {
    * report the spawned child PID.
    */
   startArgv(options: PtyArgvStartOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null, onStart?: ((error: Error | null, pid: number) => void) | undefined | null): Promise<PtyRunResult>
+  /**
+   * Drive an adopted session: stream output chunks and resolve when the
+   * child exits (exit code via `waitpid`).
+   */
+  resume(onChunk: (error: Error | null, chunk: string) => void): Promise<PtyRunResult>
   /** Write raw input bytes to PTY stdin. */
   write(data: string): void
   /** Resize the active PTY. */
   resize(cols: number, rows: number): void
   /** Force-kill the active PTY command. */
   kill(): void
+  /**
+   * Stop reading output without closing the master. Resolves once every
+   * chunk read before the pause has been delivered to `onChunk`, including
+   * partial UTF-8 held by the decoder (flushed lossily); unread bytes stay in
+   * the kernel buffer. Input, resize, kill and child-exit handling keep
+   * working. No-op (resolved) when no session runs or output is already
+   * paused. A run whose child exits while paused stops waiting for output
+   * as for a slave held open elsewhere, leaving the unread bytes unread.
+   *
+   * Windows: `ConPTY` output is a blocking pipe read that cannot be
+   * interrupted without losing its bytes, so this resolves immediately and
+   * reading continues.
+   */
+  pauseOutput(): Promise<void>
+  /** Restart reading output after `pauseOutput()`. No-op when not paused. */
+  resumeOutput(): void
 }
 
 /**
@@ -659,7 +766,7 @@ export declare class RunTrace {
   present(options: ShellVizOptions): string
 }
 
-/** Persistent embedded bash engine (pi-shell) shell session. */
+/** Persistent embedded bash engine shell session. */
 export declare class Shell {
   /**
    * Create a new shell session from optional configuration.
@@ -2293,23 +2400,18 @@ export declare enum Encoding {
 }
 
 /**
- * Replace the current process image via `execvp(3)`.
+ * execve in place: clears CLOEXEC on keepFds, replaces the image, same PID.
+ * Throws ENOSYS on Windows.
  *
- * On success this never returns: the kernel tears down every other thread and
- * the new program takes over this PID, controlling terminal, and inherited
- * (non-`CLOEXEC`) file descriptors. Callers must flush logs and restore the
- * terminal first — no JS or native cleanup runs after a successful call.
- *
- * # Errors
- * Returns an error, leaving the process untouched, when `argv` is empty, an
- * argument contains an interior NUL byte, or the exec itself fails (e.g.
- * executable not found). Windows has no exec-replace semantics, so this
- * always errors there; callers fall back to spawn-and-wait.
+ * On success this never returns: no JS or native cleanup runs afterwards, so
+ * callers flush logs and restore the terminal first. On failure the
+ * `CLOEXEC` flags are restored and a JS error whose `code` is the errno name
+ * is thrown.
  */
-export declare function execReplace(argv: Array<string>): void
+export declare function execReplace(path: string, argv: Array<string>, env: Record<string, string>, keepFds: Array<number>): never
 
 /**
- * Execute a command in the embedded bash engine (pi-shell).
+ * Execute a command in the embedded bash engine.
  *
  * Creates a fresh session for each call. The `on_chunk` callback receives
  * streamed stdout/stderr output. Returns the exit code when the command
@@ -2797,7 +2899,7 @@ export interface InlineSloppyRegion {
  */
 export declare function installSqliteLockShim(): boolean
 
-/** Options for `IpcConnection.connect`. */
+/** Options for `IpcConnection.connect` / `IpcConnection.connectTcp`. */
 export interface IpcConnectOptions {
   /**
    * `lines`: UTF-8 text frames delimited by LF; `raw`: byte chunks as
@@ -2821,7 +2923,7 @@ export interface IpcConnectOptions {
  */
 export declare function ipcEndpoint(dir: string, name: string): string
 
-/** Options for `IpcServer.listen`. */
+/** Options for `IpcServer.listen` / `IpcServer.listenTcp`. */
 export interface IpcListenOptions {
   /**
    * `lines`: UTF-8 text frames delimited by LF; `raw`: byte chunks as
@@ -2863,7 +2965,7 @@ export declare enum IsoChangeKind {
 /**
  * Capture the changes between `lower` and `merged`.
  *
- * Uses [`pi_iso::IsolationBackend::diff`]'s default implementation —
+ * Uses [`omp_iso::IsolationBackend::diff`]'s default implementation —
  * `git diff` when `merged/.git` exists, otherwise a mtime-skipped tree
  * walk. The backend selection only affects the lifecycle methods; diff
  * behaviour is uniform.
@@ -2923,7 +3025,7 @@ export interface IsoProbeResult {
 /**
  * Pick the best backend available right now.
  *
- * `preferred` is treated as a hint — see [`pi_iso::resolve`] for the exact
+ * `preferred` is treated as a hint — see [`omp_iso::resolve`] for the exact
  * priority rules. Backend probes may spawn CLIs, so they run on the native
  * blocking pool.
  */
@@ -3213,9 +3315,9 @@ export interface MinimizerOptions {
  * Telemetry for a single minimization.
  *
  * Surfaced when the minimizer actually rewrote the command's output. The
- * session layer is expected to persist `original_text` via its
- * `ArtifactManager`, splice the resulting `artifact://<id>` reference
- * into `text`, and replace any previously streamed raw output with the
+ * session layer is expected to persist `original_text` as a session
+ * spill, splice the spill's URL (formatted only on the JS side) into
+ * `text`, and replace any previously streamed raw output with the
  * minimized text.
  */
 export interface MinimizerResult {
@@ -3620,6 +3722,27 @@ export interface PtyStartOptions {
 export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxHeightPx: number, scale?: number | undefined | null, cell?: SvgCell | undefined | null): Promise<Uint8Array>
 
 /**
+ * A child spawned by `spawnRaw`: its pid and the parent-side pipe ends.
+ *
+ * The fds are `CLOEXEC`, nonblocking raw fds (Windows: handle values) owned
+ * by the caller.
+ */
+export interface RawChild {
+  pid: number
+  stdin: number
+  stdout: number
+  stderr: number
+}
+
+/** Exit status of a reaped child. */
+export interface RawExit {
+  /** Exit code when the child exited normally. */
+  exitCode: number | null
+  /** Terminating signal when the child was killed by one (Unix). */
+  signal: number | null
+}
+
+/**
  * Read an image from the system clipboard.
  *
  * Returns `Ok(None)` when no image data is available.
@@ -3639,6 +3762,9 @@ export declare function readImageFromClipboard(): Promise<ClipboardImage | undef
  * Returns an error if clipboard access fails.
  */
 export declare function readTextFromClipboard(): Promise<string | undefined | null>
+
+/** waitpid for a direct child (also one inherited across execReplace). */
+export declare function reapChild(pid: number): Promise<RawExit>
 
 /**
  * Render Mermaid diagram text (flowchart, state, sequence, class, ER, or
@@ -3674,7 +3800,7 @@ export declare function renderMermaidAscii(text: string, options?: MermaidRender
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
 
 /**
- * Run the pi-shell engine as a process shell in this process (`omp zsh`,
+ * Run the shell engine as a process shell in this process (`omp zsh`,
  * `omp bash`, `omp sh`).
  *
  * `argv` is the shell's whole command line,
@@ -3749,8 +3875,8 @@ export declare function setHangulCompatJamoWidthOverride(value: number): void
 export declare function shellBuiltins(sessionEnv?: Record<string, string>): Array<string>
 
 /**
- * Options for executing a shell command via the embedded bash engine
- * (pi-shell).
+ *  Options for executing a shell command via the embedded bash engine
+ * .
  */
 export interface ShellExecuteOptions {
   /** Command string to execute in the shell. */
@@ -4148,8 +4274,8 @@ export interface ShellRunResult {
   /**
    * When the minimizer rewrote the captured output, this carries the
    * original buffer + telemetry so the session layer can persist it as
-   * an artifact and splice an `artifact://<id>` reference into the
-   * minimized text shown to the agent. `None` when nothing was rewritten.
+   * a spill and splice the spill's URL into the minimized text shown to
+   * the agent. `None` when nothing was rewritten.
    */
   minimized?: MinimizerResult
   /** Shell working directory after command completion. */
@@ -4321,6 +4447,24 @@ export interface SnapcompactRenderOptions {
  * considered renderable because they are interpreted outside font lookup.
  */
 export declare function snapcompactSupportedChars(font: string, chars: string): string
+
+/**
+ * Spawn in its own process group with three pipes; parent-side fds are
+ * CLOEXEC raw fds owned by the caller.
+ */
+export declare function spawnRaw(options: SpawnRawOptions): RawChild
+
+/** Options for `spawnRaw`. */
+export interface SpawnRawOptions {
+  /** Executable name or path (resolved against `env.PATH`). */
+  application: string
+  /** Arguments passed to the executable. */
+  args: Array<string>
+  /** Complete child environment; nothing is inherited from this process. */
+  env: Record<string, string>
+  /** Working directory of the child. */
+  cwd: string
+}
 
 /** A misspelled span measured in JavaScript/UTF-16 code units. */
 export interface SpellingRange {

@@ -5202,8 +5202,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 							}
 						: {}),
 					thinkingLevelCeiling: spawnEffortCeiling,
-					// Subagents are short-lived; never schedule background warm requests.
-					cacheWarming: false,
+					// Bridge long tool waits (a third of them happen in subagents), but never
+					// warm after the subagent settles; the user's `off` still wins.
+					cacheWarming: "streaming",
 					toolNames,
 					outputSchema,
 					outputSchemaMode: options.outputSchemaMode,

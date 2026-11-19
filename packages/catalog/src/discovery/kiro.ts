@@ -149,10 +149,16 @@ function stringEnum(schema: Record<string, unknown> | undefined): string[] {
 	return Array.isArray(schema?.enum) ? schema.enum.filter(value => typeof value === "string") : [];
 }
 
-/** Thinking controls advertised by `additionalModelRequestFieldsSchema`, or undefined for an unknown shape. */
+/**
+ * Thinking controls advertised by `additionalModelRequestFieldsSchema`, or
+ * undefined for an unknown shape. Kiro applies the schema's default effort
+ * when the fields are omitted, so a model with an advertised off value must
+ * send it (`suppressWhenOff`); one without it cannot turn thinking off.
+ */
 function mapThinking(schema: unknown): { thinking: ThinkingConfig; maxTokens?: number } | undefined {
 	const anthropicEffort = schemaAt(schema, "output_config", "effort");
-	if (stringEnum(schemaAt(schema, "thinking", "type")).includes("adaptive") && anthropicEffort) {
+	const thinkingTypes = stringEnum(schemaAt(schema, "thinking", "type"));
+	if (thinkingTypes.includes("adaptive") && anthropicEffort) {
 		const advertised = stringEnum(anthropicEffort);
 		const efforts = ANTHROPIC_EFFORTS.filter(effort => advertised.includes(effort));
 		if (efforts.length === 0) return undefined;
@@ -165,6 +171,7 @@ function mapThinking(schema: unknown): { thinking: ThinkingConfig; maxTokens?: n
 				...(defaultLevel ? { defaultLevel } : {}),
 				effortMap: { [Effort.Minimal]: efforts[0] },
 				supportsDisplay: true,
+				...(thinkingTypes.includes("disabled") ? { suppressWhenOff: true } : { requiresEffort: true }),
 			},
 			...(isPositiveInteger(maxTokens) ? { maxTokens } : {}),
 		};
@@ -181,7 +188,9 @@ function mapThinking(schema: unknown): { thinking: ThinkingConfig; maxTokens?: n
 			mode: "effort",
 			efforts: levels.map(([, effort]) => effort),
 			...(defaultLevel ? { defaultLevel } : {}),
-			...(advertised.includes("none") ? { effortMap: { [Effort.Minimal]: "none" } } : {}),
+			...(advertised.includes("none")
+				? { effortMap: { [Effort.Minimal]: "none" }, suppressWhenOff: true }
+				: { requiresEffort: true }),
 		},
 	};
 }

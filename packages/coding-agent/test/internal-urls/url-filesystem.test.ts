@@ -157,54 +157,54 @@ describe("InternalUrlFilesystem read selectors", () => {
 	}
 
 	beforeEach(async () => {
-		await fs.writeFile(path.join(tempDir, "7.bash.log"), '{"n":1}\n{"n":2}\n{"n":3}\n{"n":4}');
+		await fs.mkdir(localRoot, { recursive: true });
+		await fs.writeFile(path.join(localRoot, "7.log"), '{"n":1}\n{"n":2}\n{"n":3}\n{"n":4}');
 	});
 
 	it("opens the backing file itself for :raw, so external programs receive its path too", async () => {
 		const filesystem = shellFs();
-		const backing = path.join(tempDir, "7.bash.log");
+		const backing = path.join(localRoot, "7.log");
 
-		await expect(filesystem.handle({ op: ShellFsOp.Open, path: "artifact://7:raw", open: READ })).resolves.toEqual({
+		await expect(filesystem.handle({ op: ShellFsOp.Open, path: "local://7.log:raw", open: READ })).resolves.toEqual({
 			local: backing,
-			readonly: true,
 		});
-		await expect(filesystem.handle({ op: ShellFsOp.BackingPath, path: "artifact://7:raw" })).resolves.toEqual({
+		await expect(filesystem.handle({ op: ShellFsOp.BackingPath, path: "local://7.log:raw" })).resolves.toEqual({
 			path: backing,
 		});
 	});
 
 	it("serves exactly the selected lines, each with its terminator", async () => {
-		expect(await readUrl("artifact://7:2")).toBe('{"n":2}\n');
-		expect(await readUrl("artifact://7:raw:2-3")).toBe('{"n":2}\n{"n":3}\n');
-		expect(await readUrl("artifact://7:2-3:raw")).toBe('{"n":2}\n{"n":3}\n');
-		expect(await readUrl("artifact://7:1,3")).toBe('{"n":1}\n{"n":3}\n');
-		expect(await readUrl("artifact://7:2+2")).toBe('{"n":2}\n{"n":3}\n');
-		// The last line has no terminator in the artifact, so none is invented.
-		expect(await readUrl("artifact://7:3-")).toBe('{"n":3}\n{"n":4}');
-		expect(await readUrl("artifact://7:-2")).toBe('{"n":3}\n{"n":4}');
-		expect(await readUrl("artifact://7:1,-1")).toBe('{"n":1}\n{"n":4}');
+		expect(await readUrl("local://7.log:2")).toBe('{"n":2}\n');
+		expect(await readUrl("local://7.log:raw:2-3")).toBe('{"n":2}\n{"n":3}\n');
+		expect(await readUrl("local://7.log:2-3:raw")).toBe('{"n":2}\n{"n":3}\n');
+		expect(await readUrl("local://7.log:1,3")).toBe('{"n":1}\n{"n":3}\n');
+		expect(await readUrl("local://7.log:2+2")).toBe('{"n":2}\n{"n":3}\n');
+		// The last line has no terminator in the spill, so none is invented.
+		expect(await readUrl("local://7.log:3-")).toBe('{"n":3}\n{"n":4}');
+		expect(await readUrl("local://7.log:-2")).toBe('{"n":3}\n{"n":4}');
+		expect(await readUrl("local://7.log:1,-1")).toBe('{"n":1}\n{"n":4}');
 	});
 
 	it("reports the selected bytes as the file's size and refuses to write through a line selector", async () => {
 		const filesystem = shellFs();
 
-		await expect(filesystem.handle({ op: ShellFsOp.Metadata, path: "artifact://7:2-3" })).resolves.toEqual({
+		await expect(filesystem.handle({ op: ShellFsOp.Metadata, path: "local://7.log:2-3" })).resolves.toEqual({
 			metadata: { fileType: ShellFsFileType.File, size: 16, mode: 0o444 },
 		});
-		const removed = await filesystem.handle({ op: ShellFsOp.RemoveFile, path: "artifact://7:2-3" });
+		const removed = await filesystem.handle({ op: ShellFsOp.RemoveFile, path: "local://7.log:2-3" });
 		expect(removed.error?.code).toBe("EROFS");
 	});
 
 	it("selects nothing past the end and keeps missing resources missing", async () => {
-		expect(await readUrl("artifact://7:9-12")).toBe("");
-		expect(await readUrl("artifact://404:raw")).toBe("ENOENT");
-		expect(await readUrl("artifact://404:1-2")).toBe("ENOENT");
+		expect(await readUrl("local://7.log:9-12")).toBe("");
+		expect(await readUrl("local://404.log:raw")).toBe("ENOENT");
+		expect(await readUrl("local://404.log:1-2")).toBe("ENOENT");
 		expect(await readUrl("local://missing.json:1-2")).toBe("ENOENT");
 	});
 
 	it("rejects a malformed selector instead of reading the whole resource", async () => {
-		expect(await readUrl("artifact://7:0")).toBe("EINVAL");
-		expect(await readUrl("artifact://7:3-1")).toBe("EINVAL");
+		expect(await readUrl("local://7.log:0")).toBe("EINVAL");
+		expect(await readUrl("local://7.log:3-1")).toBe("EINVAL");
 	});
 
 	it("selects lines of local:// files and of rendered resources", async () => {

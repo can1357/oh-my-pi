@@ -108,12 +108,16 @@ function parseUrlPath(input: string, spec: SchemeSpec): UrlPath {
 	return { scheme, root: `${scheme}://${segments[0] ?? ""}`, segments: segments.slice(1) };
 }
 
+/** `scheme:`: a bare `scheme://` root once its slashes are trimmed. */
+const BARE_SCHEME_RE = /^[a-z][a-z0-9+.-]*:$/i;
+
 /** `url` followed by `segments`, without doubling the slash after a bare `scheme://`. */
 function appendSegments(url: string, segments: readonly string[]): string {
 	if (segments.length === 0) return url;
 	const trimmed = url.replace(/\/+$/, "");
-	// Trimming `scheme://` leaves `scheme:`; its segments follow the `//` directly.
-	return trimmed.endsWith(":") ? `${trimmed}//${segments.join("/")}` : `${trimmed}/${segments.join("/")}`;
+	// Trimming `scheme://` leaves `scheme:`; its segments follow the `//` directly. An authority
+	// may end in `:` too: a wrapped resource URI (`mcp://test://x`) keeps its `test:` authority.
+	return BARE_SCHEME_RE.test(trimmed) ? `${trimmed}//${segments.join("/")}` : `${trimmed}/${segments.join("/")}`;
 }
 
 function formatUrlPath(target: UrlPath): string {
@@ -148,7 +152,7 @@ function encodeSegment(name: string): string {
 
 /**
  * `base` URL followed by a `/`-separated path of raw entry names (a native
- * walk's root-relative result), each name percent-encoded as `pi_vfs::child_path` does.
+ * walk's root-relative result), each name percent-encoded as `omp_vfs::child_path` does.
  */
 export function joinUrlPath(base: string, relative: string): string {
 	return appendSegments(
@@ -915,7 +919,7 @@ export class InternalUrlFilesystem {
 				return { kind: "virtual", url, spec, directory: true, bytes: new Uint8Array(), entries };
 			}
 		}
-		let resource: InternalResource;
+		let resource: InternalResource<string | Buffer>;
 		try {
 			resource = await this.#router.resolve(url, this.#context);
 		} catch (error) {
@@ -939,7 +943,7 @@ export class InternalUrlFilesystem {
 			url,
 			spec,
 			directory: false,
-			bytes: Buffer.from(resource.content, "utf-8"),
+			bytes: typeof resource.content === "string" ? Buffer.from(resource.content, "utf-8") : resource.content,
 			...(resource.absent === true ? { absent: true } : {}),
 		};
 	}

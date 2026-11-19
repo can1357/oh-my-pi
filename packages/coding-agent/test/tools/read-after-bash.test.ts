@@ -192,9 +192,9 @@ function fetchSession(directory: string): ToolSession {
 			"fetch.enabled": true,
 		}),
 		getArtifactsDir: () => path.join(directory, "artifacts"),
-		allocateOutputArtifact: async (toolType: string) => ({
+		allocateOutputArtifact: async () => ({
 			id: "test",
-			path: path.join(directory, "artifacts", `test.${toolType}.log`),
+			path: path.join(directory, "artifacts", `test.log`),
 		}),
 	} as unknown as ToolSession;
 }

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { heapStats } from "bun:jsc";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -352,6 +353,53 @@ describe("selective commit flow", () => {
 				"kept/inside",
 			]);
 			await git(root, ["fsck", "--strict"]);
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"syncs the shared index to what a formatting pre-commit hook committed",
+		async () => {
+			const { root, journal, write } = await emptyRepo();
+			await Bun.write(path.join(root, "fixture.txt"), "let value = 0\n");
+			await Bun.write(path.join(root, "other.txt"), "other\n");
+			await git(root, ["add", "."]);
+			await git(root, ["commit", "-q", "-m", "seed"]);
+			await Bun.write(path.join(root, "other.txt"), "staged by the user\n");
+			await git(root, ["add", "other.txt"]);
+			await git(root, ["config", "core.hooksPath", ".git/hooks"]);
+			// Formats the file in place and stages the result into the index the hook was handed.
+			const hook = path.join(root, ".git/hooks/pre-commit");
+			await Bun.write(
+				hook,
+				[
+					"#!/bin/sh",
+					"set -eu",
+					"sed 's/value=/value = /' fixture.txt > fixture.tmp",
+					"mv fixture.tmp fixture.txt",
+					"blob=$(git hash-object -w fixture.txt)",
+					'git update-index --cacheinfo "100644,$blob,fixture.txt"',
+				].join("\n") + "\n",
+			);
+			await fs.chmod(hook, 0o755);
+
+			for (const value of [1, 2]) {
+				await write("Main", undefined, "fixture.txt", `let value=${value}\n`);
+				await journal.flush();
+				const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+				const outcome = await commitSelection(
+					draft,
+					{ subject: `fix: set value ${value}` },
+					{ journal, agent: { agent: "Main" } },
+				);
+
+				const formatted = `let value = ${value}\n`;
+				expect(outcome.indexNotes).toEqual([]);
+				expect(await git(root, ["show", "HEAD:fixture.txt"])).toBe(formatted);
+				expect(await git(root, ["show", ":fixture.txt"])).toBe(formatted);
+				expect(await Bun.file(path.join(root, "fixture.txt")).text()).toBe(formatted);
+				// The user's staged work is neither committed nor unstaged.
+				expect(await git(root, ["status", "--porcelain"])).toBe("M  other.txt\n");
+			}
 		},
 	);
 
@@ -915,6 +963,41 @@ describe("selective commit flow", () => {
 
 		expect(draft.summary()).toContain("No change journal: this session keeps no artifacts");
 		expect(draft.summary()).toContain("Not yours: 1 path(s).");
+	});
+
+	it("keeps a draft of many untracked files near their size", async () => {
+		const { root, journal } = await emptyRepo();
+		const body = Array.from({ length: 200 }, (_, line) => String(1_000_000 + line)).join("\n");
+		await Promise.all(
+			Array.from({ length: 1_000 }, (_, file) => Bun.write(path.join(root, "evidence", `${file}.txt`), `${body}\n`)),
+		);
+		Bun.gc(true);
+		const before = heapStats().heapSize;
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		Bun.gc(true);
+		const retained = heapStats().heapSize - before;
+
+		// 1.6 MB of text; per-line attribution of every file held ~60 MB.
+		expect(retained).toBeLessThan(20 * 1024 * 1024);
+		expect(draft.summary()).toContain("Not yours: 1000 path(s).");
+	});
+
+	it("commits one taken hunk of a file no edit record explains", async () => {
+		const { root, journal } = await emptyRepo();
+		const lines = Array.from({ length: 20 }, (_, line) => `line ${line}`);
+		await Bun.write(path.join(root, "notes.txt"), `${lines.join("\n")}\n`);
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-qm", "seed"]);
+		const edited = lines.map((line, index) => (index === 1 || index === 18 ? `${line} edited` : line));
+		await Bun.write(path.join(root, "notes.txt"), `${edited.join("\n")}\n`);
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+
+		draft.take({ path: "notes.txt", units: ["2"] });
+		expect(draft.show("notes.txt")).toContain("+line 18 edited");
+		await commitSelection(draft, { subject: "fix: notes" }, { journal, agent: { agent: "Main" } });
+
+		const committed = lines.map((line, index) => (index === 18 ? `${line} edited` : line));
+		expect(await git(root, ["show", "HEAD:notes.txt"])).toBe(`${committed.join("\n")}\n`);
 	});
 
 	it("reports an amend against the replaced commit's parent with all of its paths", async () => {

@@ -93,7 +93,7 @@ export function parseSel(sel: string | undefined): ParsedSelector {
 	// and accept exactly one line range (possibly multi) or tail plus the literal
 	// `raw`. Selector-like compounds that are not in that accepted set are invalid
 	// rather than "none"; otherwise `read` can silently widen a malformed selector
-	// like `artifact://5:conflicts:1-1` while `grep` rejects it.
+	// like `local://5.log:conflicts:1-1` while `grep` rejects it.
 	if (sel.includes(":")) {
 		const chunks = sel.split(":");
 		if (chunks.length === 2) {

@@ -26,6 +26,7 @@ import {
 } from "../extensibility/skills";
 import { type LocalProtocolOptions } from "../internal-urls";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
+import { isEvalNamespaceTool } from "../mcp/eval-namespaces";
 import { deduplicateMCPToolsByName, resolveMCPToolAlias } from "../mcp/tool-bridge";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
@@ -202,6 +203,13 @@ interface SessionToolsOptions {
 	reconcileSettingsGatedTools?: (isBuiltIn: (name: string) => boolean) => Promise<SettingsGatedToolDelta>;
 	rebuildSystemPrompt?: SystemPromptRebuilder;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
+	/**
+	 * Whether enabled MCP tools present as eval namespaces (`mcp.evalNamespaces`)
+	 * while `eval` is top-level; read at every apply.
+	 */
+	bindsMcpToEval?: () => boolean;
+	/** Eval-bound names of the construction slate ({@link SessionTools.getEvalBoundToolNames}). */
+	evalBoundToolNames?: Iterable<string>;
 	xdev?: XdevState;
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	baseSystemPrompt: string[];
@@ -490,6 +498,9 @@ export class SessionTools {
 	#promptRosterHeld = false;
 	/** Full enabled set, including tools demoted from the model-visible surface. */
 	#enabledToolNames = new Set<string>();
+	/** Enabled MCP tools presented only as eval namespace methods: neither top-level nor `xd://`. */
+	#evalBoundNames = new Set<string>();
+	#bindsMcpToEval: SessionToolsOptions["bindsMcpToEval"];
 	/**
 	 * `xd://` device names the current base system prompt renders in its catalog
 	 * (the last rebuild's {@link BuildSystemPromptResult.xdevCatalogNames}). Consulted
@@ -599,6 +610,7 @@ export class SessionTools {
 		this.#reconcileSettingsGatedTools = options.reconcileSettingsGatedTools;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
+		this.#bindsMcpToEval = options.bindsMcpToEval;
 		this.#xdev = options.xdev;
 		if (this.#xdev && this.#xdev.tools !== this.#toolRegistry) {
 			throw new Error("xd:// state must reference the canonical session tool map");
@@ -626,6 +638,10 @@ export class SessionTools {
 		// no tools and the prompt rebuild without `read` empties the skill list.
 		for (const tool of host.agent.state.tools) this.#enabledToolNames.add(tool.name);
 		for (const name of this.#xdev?.mountedNames ?? []) this.#enabledToolNames.add(name);
+		for (const name of options.evalBoundToolNames ?? []) {
+			this.#evalBoundNames.add(name);
+			this.#enabledToolNames.add(name);
+		}
 		this.#promptSurface = this.#derivePromptSurface();
 		this.#basePromptRoutedXdevNames = this.#routedSummaryXdevNames();
 		this.#promptModelKey = this.#currentPromptModelKey();
@@ -842,7 +858,8 @@ export class SessionTools {
 			skillHintVisible: cfgSkillful.get(this.#host.settings) === true && this.#promptSkills.length > 0,
 			evalPreludes: this.#host.evalPreludes(),
 			sessionAgents: this.#host.sessionAgents(),
-			evalToolNames: this.getEvalBridgeToolNames(),
+			// Eval-bound tools stay callable by name; their namespaces advertise them.
+			evalToolNames: this.getEvalBridgeToolNames().filter(name => !this.#evalBoundNames.has(name)),
 			perCallModelAdvertisement: getPerCallModelAdvertisement(
 				this.#host.settings,
 				this.#host.model(),
@@ -886,6 +903,11 @@ export class SessionTools {
 	/** Names currently presented as `xd://` devices. */
 	getMountedXdevToolNames(): string[] {
 		return [...(this.#xdev?.mountedNames ?? [])];
+	}
+
+	/** Enabled MCP tools presented as eval namespace methods (`mcp.evalNamespaces`); the SDK builds their preludes. */
+	getEvalBoundToolNames(): string[] {
+		return [...this.#evalBoundNames];
 	}
 
 	/** Whether the edit tool is registered. */
@@ -1501,11 +1523,19 @@ export class SessionTools {
 			(selectedTools.some(({ name }) => name === "write") || this.#deviceOnlyWriteTransportAvailable);
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
+		// The setting, not a pin, decides MCP presentation: eval namespaces replace
+		// both surfaces whenever `eval` (essential, so never mounted) is selected.
+		const evalBound = new Set(
+			this.#bindsMcpToEval?.() === true && selectedTools.some(({ name }) => name === "eval")
+				? selectedTools.filter(({ tool }) => isEvalNamespaceTool(tool)).map(({ name }) => name)
+				: [],
+		);
 		const mountCandidates = selectedTools.filter(
 			({ name, tool }) =>
 				this.#xdev !== undefined &&
 				xdevReadAvailable &&
 				xdevWriteAvailable &&
+				!evalBound.has(name) &&
 				!isPresentationPinned(name) &&
 				isMountableUnderXdev(tool),
 		);
@@ -1513,7 +1543,7 @@ export class SessionTools {
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
 		for (const { name, tool } of selectedTools) {
-			if (mountNames.has(name)) continue;
+			if (mountNames.has(name) || evalBound.has(name)) continue;
 			tools.push(this.#wrapToolForAcpPermission(tool));
 			validToolNames.push(name);
 		}
@@ -1562,7 +1592,9 @@ export class SessionTools {
 		const previousMounted = new Set(this.#xdev?.mountedNames ?? []);
 		const previousActiveToolNames = this.getActiveToolNames();
 		const previousEnabledToolNames = this.#enabledToolNames;
-		this.#enabledToolNames = new Set([...validToolNames, ...mountNames]);
+		const previousEvalBoundNames = this.#evalBoundNames;
+		this.#enabledToolNames = new Set([...validToolNames, ...mountNames, ...evalBound]);
+		this.#evalBoundNames = evalBound;
 		this.#setMountedNames(mountNames);
 		this.#setActiveToolNames?.(validToolNames);
 
@@ -1634,6 +1666,7 @@ export class SessionTools {
 			this.#setMountedNames(previousMounted);
 			this.#setActiveToolNames?.(previousActiveToolNames);
 			this.#enabledToolNames = previousEnabledToolNames;
+			this.#evalBoundNames = previousEvalBoundNames;
 			throw error;
 		}
 
@@ -1643,6 +1676,7 @@ export class SessionTools {
 			this.#setMountedNames(previousMounted);
 			this.#setActiveToolNames?.(previousActiveToolNames);
 			this.#enabledToolNames = previousEnabledToolNames;
+			this.#evalBoundNames = previousEvalBoundNames;
 			return;
 		}
 
@@ -2191,21 +2225,29 @@ export class SessionTools {
 	 * mid-session keeps the provider cache prefix intact.
 	 *
 	 * Known agents are the committed base snapshot, then every agent notice still
-	 * in context, applied in order — mirroring {@link takeEvalPreludeNotice}.
+	 * in context, then every notice in `ahead` (messages queued to reach the model
+	 * before this one), applied in order — mirroring {@link takeEvalPreludeNotice}.
+	 * `only` limits the notice to announcing those agents, leaving every other
+	 * change to the message that carries it.
 	 */
-	takeSessionAgentNotice(): CustomMessage<SessionAgentNoticeDetails> | undefined {
+	takeSessionAgentNotice(
+		ahead: Iterable<AgentMessage> = [],
+		only?: ReadonlySet<string>,
+	): CustomMessage<SessionAgentNoticeDetails> | undefined {
 		const known = new Set(this.#promptSurface.sessionAgents.map(agent => agent.name));
-		for (const message of this.#host.agent.state.messages) {
-			if (message.role !== "custom" || message.customType !== SESSION_AGENT_NOTICE_TYPE) continue;
-			const details = message.details;
-			if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
-			for (const name of details.added) if (typeof name === "string") known.add(name);
-			for (const name of details.removed) if (typeof name === "string") known.delete(name);
+		for (const messages of [this.#host.agent.state.messages, ahead]) {
+			for (const message of messages) {
+				if (message.role !== "custom" || message.customType !== SESSION_AGENT_NOTICE_TYPE) continue;
+				const details = message.details;
+				if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
+				for (const name of details.added) if (typeof name === "string") known.add(name);
+				for (const name of details.removed) if (typeof name === "string") known.delete(name);
+			}
 		}
 		const live = this.#host.sessionAgents();
 		const liveNames = new Set(live.map(agent => agent.name));
-		const added = live.filter(agent => !known.has(agent.name));
-		const removed = [...known].filter(name => !liveNames.has(name));
+		const added = live.filter(agent => !known.has(agent.name) && (!only || only.has(agent.name)));
+		const removed = only ? [] : [...known].filter(name => !liveNames.has(name));
 		if (added.length === 0 && removed.length === 0) return undefined;
 		return {
 			role: "custom",

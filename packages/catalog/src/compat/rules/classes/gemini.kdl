@@ -158,6 +158,20 @@ class "gemini" {
 		}
 	}
 
+	// Gemini 4 Neon: $3/$15, cache read $0.15 on the Gemini API; Antigravity
+	// discovery reports $0, so the collapsed row is pinned to the same card.
+	// https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-neon/
+	on "google-antigravity" {
+		models "gemini-4-neon" {
+			cost-patch {
+				input 3
+				output 15
+				cache-read 0.15
+				cache-write 0
+			}
+		}
+	}
+
 	revision ">=3" {
 		// Replaces the Google multimodal function-response baseline.
 		multimodal-function-response #true
