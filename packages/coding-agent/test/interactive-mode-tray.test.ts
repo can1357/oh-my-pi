@@ -346,6 +346,20 @@ describe("InteractiveMode tray", () => {
 		expect(children(bareJob)[1]!.p).toMatchObject({ text: "two\nthree", wrap: "none" });
 	});
 
+	it("keeps an aboveEditor hook widget off the status row the tray hangs from, with no spacer row", async () => {
+		await seed();
+		mode.setHookWidget("usage", ["usage: 42%"], { placement: "aboveEditor" });
+		const cx = context(true);
+		const described = dock(cx);
+		const roles = described.map(entry => role(entry.node ?? undefined));
+		const activity = roles.indexOf("omp.hud.activity");
+		expect(roles[activity + 1]).toBe("omp.tray");
+		const widget = described.findIndex(entry => entry.component === mode.hookWidgetContainerAbove);
+		expect(widget).toBeGreaterThanOrEqual(0);
+		expect(widget).toBeLessThan(activity);
+		expect(described.some(entry => nodes(entry.node ?? { k: "col" }).some(node => node.k === "spacer"))).toBe(false);
+	});
+
 	it("opens the jobs sheet on the job a tray card stands for, taking the keyboard", async () => {
 		await seed();
 		const cx = context(true);
