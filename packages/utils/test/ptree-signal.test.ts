@@ -17,7 +17,7 @@ describe("ptree signal abort handling", () => {
 
 		try {
 			const signal = AbortSignal.abort(new Error("pre-aborted"));
-			using child = spawn(["bun", "-e", "setInterval(() => {}, 1000)"], { signal });
+			using child = spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], { signal });
 			await child.nothrow().text();
 			await child.proc.exited;
 
@@ -41,7 +41,7 @@ describe("ptree signal abort handling", () => {
 
 		try {
 			const signal = AbortSignal.abort(new Error("pre-aborted"));
-			const result = await exec(["bun", "-e", "setInterval(() => {}, 1000)"], {
+			const result = await exec([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
 				signal,
 				allowAbort: true,
 			});
@@ -67,9 +67,15 @@ describe("ptree signal abort handling", () => {
 
 		try {
 			const controller = new AbortController();
-			using child = spawn(["bun", "-e", "setInterval(() => {}, 1000)"], {
+			using child = spawn([process.execPath, "-e", "console.log('ready'); setInterval(() => {}, 1000)"], {
 				signal: controller.signal,
 			});
+			// The abort must land mid-execution: a child that never started would pass the checks below too,
+			// so the test reads its first line before it aborts.
+			const reader = child.stdout.getReader();
+			const first = await reader.read();
+			reader.releaseLock();
+			expect(new TextDecoder().decode(first.value)).toContain("ready");
 			controller.abort(new Error("aborted mid-run"));
 			await child.nothrow().text();
 			await child.proc.exited;
