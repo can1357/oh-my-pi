@@ -2807,9 +2807,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				// their current height so streamed rows reach native history as
 				// they leave the screen.
 				billedChrome: [this.statusContainer, this.editorTopGapContainer],
-				// Natively the HUD pills lead the dock, queued messages sit between
-				// the working row and the composer, and the attachment chips live
-				// inside the composer.
+				// Natively the HUD pills lead the dock, aboveEditor hook widgets sit
+				// over the working row (the tray's header, so nothing comes between
+				// the two), queued messages sit between the working row and the
+				// composer, and the attachment chips live inside the composer. The
+				// terminal spaces the dock itself, so the editor's top margin stays out.
 				nativeDock: [
 					new HudPillsRow(this),
 					this.btwContainer,
@@ -2819,11 +2821,10 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.modelCycleContainer,
 					this.deferredCommandContainer,
 					this.progressHudContainer,
+					this.hookWidgetContainerAbove,
 					this.statusContainer,
 					{ component: this.#tray, feature: "tray" },
 					this.pendingMessagesContainer,
-					this.editorTopGapContainer,
-					this.hookWidgetContainerAbove,
 					this.editorContainer,
 					this.hookWidgetContainerBelow,
 				],
