@@ -1082,6 +1082,7 @@ describe("AgentSession message pipeline", () => {
 		if (!context.runEphemeralTurn) throw new Error("Host did not expose side turns");
 		const messagesBefore = structuredClone(session.agent.state.messages);
 		const entriesBefore = structuredClone(sessionManager.getEntries());
+		const transcriptBefore = structuredClone(sessionManager.buildSessionContext().messages);
 		const deltas: string[] = [];
 		const result = await context.runEphemeralTurn({
 			promptText: "Question?",
@@ -1092,7 +1093,17 @@ describe("AgentSession message pipeline", () => {
 		expect(deltas.join("")).toBe("Answer");
 		expect(JSON.stringify(capturedContext?.messages)).toContain("zephyr-42");
 		expect(session.agent.state.messages).toEqual(messagesBefore);
-		expect(sessionManager.getEntries()).toEqual(entriesBefore);
+		// Only the spend is journaled, off-transcript: the reply without the question, and no message entry.
+		const entriesAfter = sessionManager.getEntries();
+		expect(entriesAfter.slice(0, entriesBefore.length)).toEqual(entriesBefore);
+		expect(entriesAfter.slice(entriesBefore.length)).toEqual([
+			expect.objectContaining({
+				type: "model_usage",
+				purpose: "extension",
+				completion: { reply: "Answer" },
+			}),
+		]);
+		expect(sessionManager.buildSessionContext().messages).toEqual(transcriptBefore);
 
 		expect(result.replyText).toBe("Answer");
 		expect(capturedOptions?.promptCacheKey).toBe(promptCacheKey);

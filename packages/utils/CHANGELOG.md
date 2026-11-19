@@ -2,16 +2,19 @@
 
 ## [Unreleased]
 
+## [19.0.0] - 2026-11-18
+
 ### Added
 
-- `spillUrl`, `parseSpillUrl` and `spillUrlIds` format and parse a session spill's `local://N.log` URL
-- `postmortem.exitCleanlyOnStopSignals()` makes a long-running service exit 0 after its cleanup pass on SIGINT/SIGTERM instead of 130/143
+- Added utilities for formatting and parsing session spill URLs using the `local://N.log` format.
+- Added `postmortem.exitCleanlyOnStopSignals()` so long-running services exit successfully after completing cleanup on SIGINT or SIGTERM.
 
 ### Fixed
 
-- Windows shell discovery skips the WSL `bash.exe` launcher, so services no longer run in WSL
-- Opening an archive no longer fails because one unrelated member exceeds the 64 MiB extraction limit; the limit applies when that member is read
-- `OMP_LOG_LEVEL` now also limits what console-logging services such as `omp auth-broker serve` print to stdout; it applied only to the log file, so an `info` setting still let every debug line into the service's journal ([#19605](https://github.com/can1357/oh-my-pi/pull/19605) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Windows shell discovery incorrectly selecting the WSL `bash.exe` launcher, which could cause services to run under WSL.
+- Fixed archive opening so the extraction-size limit is enforced when an oversized member is read rather than preventing access to the entire archive.
+- Fixed `OMP_LOG_LEVEL` so it also controls console output from services such as `omp auth-broker serve`, not just log-file output.
+- Fixed Markdown parsing so emphasis and link labels are not prematurely terminated by marker characters inside code spans, autolinks, inline HTML tags, or link destinations.
 
 ## [18.22.2] - 2026-11-18
 
