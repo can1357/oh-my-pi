@@ -4916,11 +4916,7 @@ mod capture_tests {
 				.is_err()
 		);
 		assert_eq!(
-			worker
-				.registry
-				.require_actionable("e1")
-				.unwrap_err()
-				.code,
+			worker.registry.require_actionable("e1").unwrap_err().code,
 			ErrorCode::WindowUnavailable
 		);
 		documents.lock().destroyed.remove(&1);
