@@ -711,11 +711,14 @@ function isAlias(id: string): boolean {
 }
 
 function includeSyntheticAllowedModels(available: Model<Api>[], allowedModels: Iterable<Model<Api>>): Model<Api>[] {
-	const allowedByKey = new Map<string, Model<Api>>();
+	const allowedByKey = new Map<string, Model<Api>[]>();
 	for (const model of allowedModels) {
 		const key = formatModelString(model);
-		if (!allowedByKey.has(key)) {
-			allowedByKey.set(key, model);
+		const routes = allowedByKey.get(key);
+		if (!routes) {
+			allowedByKey.set(key, [model]);
+		} else if (!routes.some(route => routedModelsAreEqual(route, model))) {
+			routes.push(model);
 		}
 	}
 	if (allowedByKey.size === 0) return [];
@@ -725,12 +728,12 @@ function includeSyntheticAllowedModels(available: Model<Api>[], allowedModels: I
 		const key = formatModelString(model);
 		const allowed = allowedByKey.get(key);
 		if (allowed) {
-			result.push(allowed);
+			result.push(...allowed);
 			allowedByKey.delete(key);
 		}
 	}
 
-	result.push(...allowedByKey.values());
+	for (const routes of allowedByKey.values()) result.push(...routes);
 	return result;
 }
 
@@ -1997,7 +2000,7 @@ export async function resolveModelScope(
 	const context = buildPreferenceContext(availableModels, preferences);
 	const scopedModels: ScopedModel[] = [];
 	const addScopedModel = (model: Model<Api>, thinkingLevel: ThinkingLevel | undefined, explicit: boolean) => {
-		if (scopedModels.some(sm => modelsAreEqual(sm.model, model))) return;
+		if (scopedModels.some(sm => routedModelsAreEqual(sm.model, model))) return;
 		scopedModels.push({
 			model,
 			thinkingLevel: explicit

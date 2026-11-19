@@ -2941,11 +2941,13 @@ describe("filterAvailableModelsByEnabledPatterns", () => {
 		expect(result[0].id).toBe("qwen/qwen3-coder:exacto");
 	});
 
-	test("keeps the free wire ID and pin in CLI scopes and enabled-model lists", async () => {
+	test("keeps distinct upstream pins on the free wire ID in CLI scopes and enabled-model lists", async () => {
 		const base = { ...mockOpenRouterModels[2], id: "qwen/qwen3-coder" };
 		const free = { ...base, id: `${base.id}:free` };
 		const catalog = [free, base];
-		const patterns = [`openrouter/${free.id}@cerebras`];
+		const cerebras = `openrouter/${free.id}@cerebras`;
+		const sambanova = `openrouter/${free.id}@sambanova`;
+		const patterns = [cerebras, sambanova, cerebras, `openrouter/${base.id}`];
 		const settings = Settings.isolated({ enabledModels: patterns });
 		const registry = { getAvailable: () => catalog };
 		const scoped = await resolveModelScope(patterns, registry);
@@ -2954,7 +2956,7 @@ describe("filterAvailableModelsByEnabledPatterns", () => {
 			await resolveAllowedModels(registry, settings),
 			filterAvailableModelsByEnabledPatterns(catalog, patterns),
 		]) {
-			expect(models).toMatchObject([{ id: free.id, compat: { openRouterRouting: { only: ["cerebras"] } } }]);
+			expect(models.map(formatModelStringWithRouting)).toEqual([cerebras, sambanova, `openrouter/${base.id}`]);
 		}
 	});
 
