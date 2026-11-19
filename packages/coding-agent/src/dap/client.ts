@@ -771,6 +771,10 @@ export class DapClient {
 	#handleProcessExit(): void {
 		if (this.#disposed) return;
 		this.#disposed = true;
+		// The adapter is gone on its own; the job is the only thing still holding
+		// its debuggee tree, so close it instead of waiting for process exit.
+		this.#job?.close();
+		this.#job = undefined;
 		const stderr = this.proc.peekStderr().trim();
 		const exitCode = this.proc.exitCode;
 		const error = new Error(

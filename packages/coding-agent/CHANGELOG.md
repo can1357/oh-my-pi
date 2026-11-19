@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed detached DAP adapters and their debuggee trees surviving a crashed host on Windows: stdio adapters are now contained in a kill-on-close job object and reaped by `dispose()`, by adapter exit, or when the host dies.
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes

@@ -38,17 +38,21 @@ let kernel32: Kernel32 | undefined;
 function loadKernel32(): Kernel32 | undefined {
 	if (process.platform !== "win32") return undefined;
 	if (kernel32) return kernel32;
-	const { symbols } = dlopen("kernel32.dll", {
-		CreateJobObjectW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.ptr },
-		SetInformationJobObject: { args: [FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
-		AssignProcessToJobObject: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
-		OpenProcess: { args: [FFIType.u32, FFIType.i32, FFIType.u32], returns: FFIType.ptr },
-		CloseHandle: { args: [FFIType.ptr], returns: FFIType.i32 },
-		TerminateJobObject: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
-		GetLastError: { args: [], returns: FFIType.u32 },
-	});
-	kernel32 = symbols as unknown as Kernel32;
-	return kernel32;
+	try {
+		const { symbols } = dlopen("kernel32.dll", {
+			CreateJobObjectW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.ptr },
+			SetInformationJobObject: { args: [FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
+			AssignProcessToJobObject: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+			OpenProcess: { args: [FFIType.u32, FFIType.i32, FFIType.u32], returns: FFIType.ptr },
+			CloseHandle: { args: [FFIType.ptr], returns: FFIType.i32 },
+			TerminateJobObject: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
+			GetLastError: { args: [], returns: FFIType.u32 },
+		});
+		kernel32 = symbols as unknown as Kernel32;
+		return kernel32;
+	} catch {
+		return undefined;
+	}
 }
 
 export class WindowsJob {
