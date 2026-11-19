@@ -117,6 +117,7 @@ export interface PythonExecutorOptions {
 	 * not injected and any `tool.foo(...)` raises in Python.
 	 */
 	toolSession?: ToolSession;
+	parentToolCallId?: string;
 	/** Callback for status events emitted by tool bridge invocations. */
 	emitStatus?: (event: JsStatusEvent) => void;
 	/**

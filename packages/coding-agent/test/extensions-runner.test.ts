@@ -19,6 +19,8 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { disposeVmContextsByOwner } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
+import { disposeKernelSessionsByOwner } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import { ExtensionRuntime, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
@@ -38,6 +40,7 @@ import type {
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -1740,6 +1743,59 @@ describe("ExtensionRunner", () => {
 			const result = await loadTestExtensions();
 			return new ExtensionRunner(result.extensions, result.runtime, tempDir.path(), sessionManager, modelRegistry);
 		};
+
+		for (const language of ["js", "py"] as const) {
+			it.skipIf(language === "py" && Bun.env.PI_PYTHON_INTEGRATION !== "1")(
+				`links both extension hooks to the invoking ${language} eval, not the retained kernel`,
+				async () => {
+					const runner = await runnerFor(`
+						export default function(pi) {
+							const starts = new Map();
+							pi.on("tool_call", e => { starts.set(e.toolCallId, e.parentToolCallId ?? null); });
+							pi.on("tool_result", e => ({
+								content: [{ type: "text", text: JSON.stringify([e.toolCallId, starts.get(e.toolCallId), e.parentToolCallId ?? null]) }],
+							}));
+						}
+					`);
+					const child = new ExtensionToolWrapper({ ...flaggedTool, parameters: Type.Object({}) }, runner);
+					const owner = sessionManager.getSessionId();
+					const context = { ...runner.createContext(), hasQueuedMessages: () => false };
+					const tool = new EvalTool({
+						cwd: tempDir.path(),
+						hasUI: false,
+						settings: Settings.isolated({ "eval.autoBackground.enabled": false }),
+						getSessionFile: () => null,
+						getSessionSpawns: () => null,
+						getEvalSessionId: () => owner,
+						getEvalKernelOwnerId: () => owner,
+						getToolByName: name => (name === child.name ? child : undefined),
+						getToolContext: () => context,
+					});
+					const ids = new Set<string>();
+					try {
+						for (const parent of ["first-eval", "second-eval"]) {
+							const line = `print((await tool.flagged({}))["text"])`;
+							const result = await tool.execute(parent, { language, code: `${line}\n${line}` });
+							expect(result.isError).not.toBe(true);
+							const lines = result.details?.cells?.[0].output.trim().split("\n");
+							expect(lines).toHaveLength(2);
+							for (const text of lines!) {
+								const [id, start, end] = JSON.parse(text);
+								expect([start, end]).toEqual([parent, parent]);
+								expect(id).not.toBe(parent);
+								ids.add(id);
+							}
+						}
+						expect(ids.size).toBe(4);
+						const direct = await child.execute("direct", {}, undefined, undefined, context);
+						expect(firstText(direct)).toBe('["direct",null,null]');
+					} finally {
+						if (language === "js") await disposeVmContextsByOwner(owner);
+						else await disposeKernelSessionsByOwner(owner);
+					}
+				},
+			);
+		}
 
 		it("surfaces replacement content while keeping the call an error", async () => {
 			const runner = await runnerFor(`

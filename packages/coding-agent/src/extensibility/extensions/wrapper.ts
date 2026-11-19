@@ -310,6 +310,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 						type: "tool_call",
 						toolName: this.tool.name,
 						toolCallId,
+						...(context?.parentToolCallId !== undefined && { parentToolCallId: context.parentToolCallId }),
 						input: normalizeToolEventInput(
 							this.tool.name,
 							resolveToolEventInput(this.tool, toolEventArgs(params, context)),
@@ -543,6 +544,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					type: "tool_result",
 					toolName: this.tool.name,
 					toolCallId,
+					...(context?.parentToolCallId !== undefined && { parentToolCallId: context.parentToolCallId }),
 					input: normalizeToolEventInput(
 						this.tool.name,
 						resolveToolEventInput(this.tool, toolEventArgs(effectiveParams, context)),

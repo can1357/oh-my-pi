@@ -1560,9 +1560,14 @@ export interface ModeChangedEvent {
 	state: SessionModeState;
 }
 
-interface ToolCallEventBase {
-	type: "tool_call";
+interface ToolEventIdentity {
 	toolCallId: string;
+	/** ID of the eval call that dispatched this tool. Absent for direct calls. */
+	parentToolCallId?: string;
+}
+
+interface ToolCallEventBase extends ToolEventIdentity {
+	type: "tool_call";
 }
 
 export interface BashToolCallEvent extends ToolCallEventBase {
@@ -1610,9 +1615,8 @@ export type ToolCallEvent =
 	| GlobToolCallEvent
 	| CustomToolCallEvent;
 
-interface ToolResultEventBase {
+interface ToolResultEventBase extends ToolEventIdentity {
 	type: "tool_result";
-	toolCallId: string;
 	input: Record<string, unknown>;
 	content: (TextContent | ImageContent)[];
 	isError: boolean;
