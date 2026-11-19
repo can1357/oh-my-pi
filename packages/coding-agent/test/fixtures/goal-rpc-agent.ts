@@ -90,6 +90,13 @@ const { session } = await createAgentSession({
 					slowTurnRelease.resolve();
 				},
 			});
+			pi.registerCommand("goaltest-release-continuation", {
+				description: "release the goal-only continuation wait",
+				handler: async () => {
+					holdContinuation = false;
+					continuationHold.resolve();
+				},
+			});
 			pi.registerCommand("goaltest-navigate-here", {
 				description: "navigate to the current leaf (no session change)",
 				handler: async (_args, ctx) => {
@@ -101,7 +108,6 @@ const { session } = await createAgentSession({
 	],
 });
 const originalWaitForIdle = session.waitForIdle.bind(session);
-session.waitForIdle = () => (holdContinuation ? continuationHold.promise : originalWaitForIdle());
 const turns: MockResponse[] =
 	Bun.env.GOAL_RPC_SCRIPT === "complete" || Bun.env.GOAL_RPC_SCRIPT === undefined
 		? [
@@ -126,11 +132,6 @@ const mock = createMockModel({
 				if (idleModelCalls === 3) {
 					holdContinuation = true;
 					accelerateIdleTimers = true;
-					// Release admission without another RPC command or model turn.
-					setTimeout(() => {
-						holdContinuation = false;
-						continuationHold.resolve();
-					}, 500);
 				}
 				return { ...response, usage };
 			}
@@ -154,4 +155,6 @@ session.agent.streamFn = mock.stream;
 if (Bun.env.GOAL_RPC_PLAN === "1") {
 	session.setPlanModeState({ enabled: true, planFilePath: path.join(cwd, "plan.md") });
 }
-await runRpcMode(session);
+await runRpcMode(session, {
+	goalWaitForIdle: () => (holdContinuation ? continuationHold.promise : originalWaitForIdle()),
+});
