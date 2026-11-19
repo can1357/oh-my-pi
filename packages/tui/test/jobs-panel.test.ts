@@ -118,6 +118,19 @@ describe("JobsSheet", () => {
 		expect(source.cancel).toHaveBeenCalledTimes(1);
 	});
 
+	it("opens on the job asked for when it is listed, else on the first, as when opened any other way", () => {
+		const source = { load: () => JOBS, inspect: (id: string) => DETAILS[id], close: vi.fn() };
+		const onJob = new JobsSheet(source, { selected: "bash-2" });
+		expect(prop(list(onJob.describe(CX)), "selected")).toBe("bash-2");
+		expect(onJob.render(100).find(line => line.startsWith(">"))).toContain("bun lint");
+		// The keys move from there.
+		onJob.handleInput(UP);
+		expect(prop(list(onJob.describe(CX)), "selected")).toBe("bash-1");
+
+		const gone = new JobsSheet(source, { selected: "bg_9" });
+		expect(prop(list(gone.describe(CX)), "selected")).toBe("task-1");
+	});
+
 	it("keeps the selected settled job and its output after the session evicts it, until another is selected", () => {
 		let jobs: JobsPanelSnapshot = JOBS;
 		const details: Record<string, JobsPanelDetail | undefined> = { ...DETAILS };

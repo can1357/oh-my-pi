@@ -77,7 +77,7 @@ describe("in-memory range reads keep the requested lines", () => {
 		expect(shownLines(output)).toEqual([4]);
 		expect(output).not.toContain("AAAA");
 		// The continuation moves past the requested start instead of re-reading it.
-		expect(output).toContain("[Showing lines 4-4 of 6 (50.0KB limit). Use :5 to continue]");
+		expect(output).toContain("[Showing lines 4-4 of 6 (50.0KB limit). Use :5- to continue]");
 	});
 
 	it("drops a leading context line that alone exceeds the byte budget", async () => {
@@ -100,6 +100,6 @@ describe("in-memory range reads keep the requested lines", () => {
 
 		const output = await read("remote://host/rows.txt:1-200");
 
-		expect(output).toMatch(/\[Showing lines 1-\d+ of 200 \(50\.0KB limit\)\. Use :\d+ to continue\]/);
+		expect(output).toMatch(/\[Showing lines 1-\d+ of 200 \(50\.0KB limit\)\. Use :\d+- to continue\]/);
 	});
 });

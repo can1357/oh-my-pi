@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
-import { findFreeCdpPort, relayTargets } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
+import { cdpTargets, findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import {
 	DISCARDED_TABS_PROTOCOL_VERSION,
 	type TabSnapshot,
@@ -136,15 +136,38 @@ describe("browser targets in Tern", () => {
 });
 
 describe("browser targets elsewhere", () => {
-	it("explains that targets exist only inside Tern or with the relay", async () => {
+	it("explains that targets exist only inside Tern, with the relay, or at a CDP endpoint", async () => {
 		for (const key of ENV_KEYS) delete process.env[key];
 		const failure = await invoke(session(), { action: "targets", timeout: 5 }).catch((error: unknown) => error);
 		expect(String(failure)).toContain("targets exist only inside a Tern pane");
-		expect(String(failure)).toContain('app: "relay" or the browser.relay setting');
+		expect(String(failure)).toContain("at a CDP endpoint");
+	});
+
+	it("lists a CDP endpoint's pages from its /json list", async () => {
+		for (const key of ENV_KEYS) delete process.env[key];
+		using server = Bun.serve({
+			port: 0,
+			fetch: request =>
+				new URL(request.url).pathname === "/json"
+					? Response.json([
+							{ id: "A", type: "page", url: "https://mail.example/", title: "Mail" },
+							{ id: "B", type: "service_worker", url: "https://mail.example/sw.js", title: "sw" },
+						])
+					: new Response("not found", { status: 404 }),
+		});
+		const app = `http://127.0.0.1:${server.port}`;
+		const { text, value } = await invoke(session(), { action: "targets", timeout: 5, app });
+		expect(value).toStrictEqual([{ target: "https://mail.example/", title: "Mail", url: "https://mail.example/" }]);
+		expect(text).toBe(
+			`Pages at ${app} (adopt one with target set to its URL or a title substring):\n- "Mail" https://mail.example/`,
+		);
+		// The object `app` of older releases names the same endpoint.
+		const legacy = await invoke(session(), { action: "targets", timeout: 5, app: { cdp_url: app } });
+		expect(legacy.value).toStrictEqual(value);
 	});
 });
 
-describe("relayTargets", () => {
+describe("cdpTargets", () => {
 	it("keeps live, non-internal pages with their URL as the target", () => {
 		const entries = [
 			{ id: "a", type: "page", url: "https://mail.example/", title: "Mail", active: "true", discarded: "false" },
@@ -155,7 +178,7 @@ describe("relayTargets", () => {
 			{ id: "f", type: "page", title: "no url" },
 			"garbage",
 		];
-		expect(relayTargets(entries)).toEqual([
+		expect(cdpTargets(entries)).toEqual([
 			{ target: "https://mail.example/", title: "Mail", url: "https://mail.example/", shown: true },
 			{ target: "https://docs.example/", title: "Docs", url: "https://docs.example/", shown: false },
 		]);

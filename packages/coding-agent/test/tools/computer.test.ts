@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { inspect } from "node:util";
 import { createContext, runInContext } from "node:vm";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
+import type { EvalPreludeDefinition, HostEvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
 import { executeJs } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
 import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -456,7 +456,7 @@ function toolSession(): ToolSession {
 }
 
 /** Exercise the shipped host approval/call rendering and worker, with only native OS work substituted. */
-function workerPrelude(session: ToolSession, native: NativeDesktopSession): EvalPreludeDefinition {
+function workerPrelude(session: ToolSession, native: NativeDesktopSession): HostEvalPreludeDefinition {
 	const transport = new MemoryTransport();
 	new ComputerWorkerCore(transport, () => native);
 	return createComputerPrelude(session, () => ({

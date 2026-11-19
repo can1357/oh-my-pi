@@ -87,6 +87,7 @@
 				"thinkingXhigh",
 				"bashMode",
 				"pythonMode",
+				"btwMode",
 				"statusLineBg",
 				"statusLineSep",
 				"statusLineModel",
@@ -322,6 +323,10 @@
 				"pythonMode": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Editor border color in python mode"
+				},
+				"btwMode": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Editor border color in btw (side question) mode"
 				},
 				"statusLineBg": {
 					"$ref": "#/$defs/colorValue",

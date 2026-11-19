@@ -64,37 +64,35 @@ describe("issue #775: per-model defaultLevel", () => {
 		session.setThinkingLevel(Effort.Low);
 	}
 
-	it("setModel adopts model.thinking.defaultLevel when present", async () => {
-		const sonnet = getSonnet();
-		const opus = getOpus();
-		const opusWithDefault: Model = {
-			...opus,
+	function withDefaultLevel(model: Model, defaultLevel: Effort): Model {
+		return {
+			...model,
 			thinking: {
 				mode: "anthropic-adaptive",
 				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
-				defaultLevel: Effort.XHigh,
+				defaultLevel,
 			},
 		};
+	}
 
-		const settings = Settings.isolated({ defaultThinkingLevel: Effort.Medium });
-		await createSession(sonnet, settings);
-		expect(session.thinkingLevel).toBe(Effort.Low);
+	it("setModel carries the current level over the target's defaultLevel, clamped to its ladder", async () => {
+		const opus47 = getBundledModel("anthropic", "claude-opus-4-7");
+		if (!opus47) throw new Error("expected claude-opus-4-7");
+		await createSession(opus47, Settings.isolated({ defaultThinkingLevel: Effort.Medium }));
+		session.setThinkingLevel(Effort.Max);
 
-		await session.setModel(opusWithDefault);
+		await session.setModel(withDefaultLevel(getOpus(), Effort.Medium));
 
+		// The target has no max: the nearest level is xhigh, not its medium default.
 		expect(session.thinkingLevel).toBe(Effort.XHigh);
 	});
 
-	it("setModel preserves current level when model has no defaultLevel", async () => {
-		const sonnet = getSonnet();
-		const opus = getOpus();
+	it("setModel adopts the target's defaultLevel when the session has no level to carry", async () => {
+		await createSession(getSonnet(), Settings.isolated({ defaultThinkingLevel: Effort.Medium }));
+		session.setThinkingLevel(undefined);
 
-		const settings = Settings.isolated({ defaultThinkingLevel: Effort.Medium });
-		await createSession(sonnet, settings);
-		expect(session.thinkingLevel).toBe(Effort.Low);
+		await session.setModel(withDefaultLevel(getOpus(), Effort.XHigh));
 
-		await session.setModel(opus);
-
-		expect(session.thinkingLevel).toBe(Effort.Low);
+		expect(session.thinkingLevel).toBe(Effort.XHigh);
 	});
 });

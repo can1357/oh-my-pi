@@ -1770,7 +1770,7 @@ let updateAttemptSeq = 0;
 
 /**
  * Applies an HDiffPatch single-stream patch to `oldPath`, writing `outPath`;
- * `applyBinaryPatch` from pi-natives in production.
+ * `applyBinaryPatch` from omp-natives in production.
  */
 export type BinaryPatchApplier = (oldPath: string, patchPath: string, outPath: string) => Promise<number>;
 

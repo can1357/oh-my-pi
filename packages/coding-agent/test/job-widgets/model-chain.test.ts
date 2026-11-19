@@ -69,12 +69,24 @@ describe("job widget model chain", () => {
 
 	it("writes the spec with the role's fallback when the primary errors, charging both attempts", async () => {
 		const { options, sent, costGate } = setup(answered('{"rules":[]}'));
-		const author = createModelJobWidgetAuthor(options);
+		const reported: Array<{ cost: number; stopReason: string; prompt: string }> = [];
+		const author = createModelJobWidgetAuthor({
+			...options,
+			onUsage: (message, prompt) =>
+				reported.push({ cost: message.usage.cost.total, stopReason: message.stopReason, prompt }),
+		});
 		const request = { jobId: "job-1", brief: { kind: "bash" as const, command: "make" }, sources: [] };
 
 		expect(await author(request, new AbortController().signal)).toEqual({ rules: [] });
 		expect(sent).toEqual([primary.id, backup.id]);
 		expect(costGate.spent).toBe(0.75);
+		// Each attempt is reported once, with the same user turn it was sent.
+		expect(reported.map(({ cost, stopReason }) => ({ cost, stopReason }))).toEqual([
+			{ cost: 0.25, stopReason: "error" },
+			{ cost: 0.5, stopReason: "stop" },
+		]);
+		expect(reported[0]!.prompt).toContain("make");
+		expect(reported[1]!.prompt).toBe(reported[0]!.prompt);
 	});
 
 	it("fails with the last error once every candidate has failed", async () => {

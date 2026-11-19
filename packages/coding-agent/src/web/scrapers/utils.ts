@@ -6,7 +6,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { convertBufferWithMarkit } from "../../utils/markit";
 import type { LoadPageResult } from "./types";
-import { MAX_BYTES } from "./types";
+import { BLOCKED_STATUSES, MAX_BYTES, USER_AGENTS } from "./types";
 
 export function asRecord(value: unknown): Record<string, unknown> | null {
 	return isRecord(value) ? value : null;
@@ -185,13 +185,18 @@ async function readResponseWithLimit(
 export async function fetchBinary(url: string, timeout: number = 20, signal?: AbortSignal): Promise<BinaryFetchResult> {
 	const requestSignal = ptree.combineSignals(signal, timeout * 1000);
 	try {
-		const response = await fetch(url, {
-			signal: requestSignal,
-			headers: {
-				"User-Agent": "Mozilla/5.0 (compatible; TextBot/1.0)",
-			},
-			redirect: "follow",
-		});
+		// The user agents a page fetch tries, in its order: a site refusing one serves the next.
+		let response: Response | undefined;
+		for (const [attempt, userAgent] of USER_AGENTS.entries()) {
+			response = await fetch(url, {
+				signal: requestSignal,
+				headers: { "User-Agent": userAgent },
+				redirect: "follow",
+			});
+			if (!BLOCKED_STATUSES.has(response.status) || attempt === USER_AGENTS.length - 1) break;
+			void response.body?.cancel().catch(() => {});
+		}
+		if (!response) return { ok: false, error: "no request was made" };
 
 		if (!response.ok) {
 			return { ok: false, error: `HTTP ${response.status}` };
