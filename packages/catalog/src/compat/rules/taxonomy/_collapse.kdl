@@ -71,8 +71,11 @@ collapse {
 	// Gemini 4 Hydrogen adds an `-xhigh` SKU for the XHIGH level Google
 	// documents for it (LOW, MEDIUM, HIGH, XHIGH; no minimal).
 	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen
+	// The roster also lists `-tiered-high`/`-tiered-xhigh` SKUs under the same
+	// display names; they fold into this row unrouted, so the levels keep the
+	// plain SKUs (like the Flash `-tiered` alias).
 	variant-family "google-antigravity" "gemini-4-hydrogen" name="Gemini 4 Hydrogen" {
-		members "gemini-4-hydrogen-low" "gemini-4-hydrogen-medium" "gemini-4-hydrogen-high" "gemini-4-hydrogen-xhigh"
+		members "gemini-4-hydrogen-low" "gemini-4-hydrogen-medium" "gemini-4-hydrogen-high" "gemini-4-hydrogen-xhigh" "gemini-4-hydrogen-tiered-high" "gemini-4-hydrogen-tiered-xhigh"
 		route "low" "gemini-4-hydrogen-low"
 		route "medium" "gemini-4-hydrogen-medium"
 		route "high" "gemini-4-hydrogen-high"
