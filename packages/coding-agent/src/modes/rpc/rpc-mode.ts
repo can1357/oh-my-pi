@@ -1813,6 +1813,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	});
 	await goalController.reconcile();
 	await goalController.settled();
+	session.enableIdleMaintenance({ recap: false, scheduledTurn: goalTurnScheduled });
 
 	// Discriminates a store failure from any other dispose rejection below.
 	let persistenceFailure: Error | undefined;
