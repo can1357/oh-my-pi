@@ -1,7 +1,7 @@
 import * as os from "node:os";
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { DescribeContext } from "../src/native/node";
-import type { TspText } from "@oh-my-pi/pi-wire";
+import type { TspTableColumn, TspText } from "@oh-my-pi/pi-wire";
 import type { DailyActivityPoint, UnavailableUsageAccount } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 import {
@@ -38,6 +38,10 @@ function limit(
 		amount: { usedFraction, unit: "percent" },
 		status,
 	};
+}
+
+function plain(text: TspText | undefined): string {
+	return typeof text === "string" ? text : (text ?? []).map(span => span.t).join("");
 }
 
 describe("buildHeatmapLayout", () => {
@@ -302,10 +306,12 @@ describe("UsageDashboardComponent", () => {
 		reports: UsageReport[],
 		unavailableAccounts: UnavailableUsageAccount[] = [],
 		onClose: () => void = () => {},
+		isActiveAccount?: (report: UsageReport) => boolean,
 	): UsageDashboardComponent {
 		return new UsageDashboardComponent({
 			reports,
 			unavailableAccounts,
+			isActiveAccount,
 			renderDetail: () => "detail-content",
 			loadActivity: async push => {
 				push([]);
@@ -479,10 +485,89 @@ describe("UsageDashboardComponent", () => {
 		}
 	});
 
-	it("keeps distinct buckets that share a label and window separate in the detail view", () => {
-		// Same payload as the cards regression (issue #16790): two weekly
-		// Google-counter limits with one label, distinct ids. The detail rows
-		// must not merge them into one bucket with two identical account rows.
+	it("attributes every Anthropic quota to an account and highlights the account in use", () => {
+		const company = "company.account.with-a-long-name@example.test";
+		const personal = "personal.account.with-a-long-name@example.test";
+		const companyReport = report("anthropic", company, [
+			limit("anthropic", "company", "5h", "Claude 5 Hour", 0.1, "ok"),
+			limit("anthropic", "company", "7d", "Claude 7 Day", 0.2, "ok"),
+		]);
+		companyReport.resetCredits = {
+			availableCount: 1,
+			redeemableCount: 1,
+			credits: [{ id: "saved", remainingCount: 1, expiresAt: new Date(Date.now() + 86_400_000).toISOString() }],
+		};
+		const component = dashboard(
+			[
+				companyReport,
+				report("anthropic", personal, [limit("anthropic", "personal", "7d", "Claude 7 Day", 0.3, "ok")]),
+			],
+			[],
+			undefined,
+			candidate => candidate.metadata?.email === personal,
+		);
+		try {
+			component.handleInput("\r");
+			const cx: DescribeContext = {
+				cols: 80,
+				reduceMotion: false,
+				dark: true,
+				supports: () => true,
+				feature: () => true,
+			};
+			interface DescribedNode {
+				c?: unknown[];
+				k?: string;
+				p?: {
+					cols?: readonly TspTableColumn[];
+					role?: string;
+					rows?: readonly { cells?: Record<string, TspText> }[];
+					spans?: TspText;
+					text?: string;
+					truncate?: string;
+				};
+			}
+			const pending: unknown[] = [component.describe(cx)];
+			const accountGroups: DescribedNode[] = [];
+			let kvCount = 0;
+			for (let candidate = pending.pop(); candidate; candidate = pending.pop()) {
+				if (!candidate || typeof candidate !== "object" || !("c" in candidate)) continue;
+				const described = candidate as DescribedNode;
+				pending.push(...(described.c ?? []));
+				if (described.k === "kv") kvCount++;
+				if (described.p?.role === "omp.usage.account") accountGroups.push(described);
+			}
+			expect(kvCount).toBe(0);
+			expect(accountGroups).toHaveLength(2);
+			const accountBlocks = new Map(
+				accountGroups.map(group => {
+					const children = (group.c ?? []) as DescribedNode[];
+					const label = children.find(
+						child => child.p?.role === "omp.usage.account.name" || child.p?.role === "omp.usage.account.active",
+					);
+					const resets = children.find(child => child.p?.role === "omp.usage.account.resets");
+					const table = children.find(child => child.k === "table");
+					return [plain(label?.p?.spans ?? label?.p?.text), { label, resets, table }] as const;
+				}),
+			);
+			const companyBlock = accountBlocks.get(`Account · ${company}`);
+			const personalBlock = accountBlocks.get(`● In use · ${personal}`);
+			expect(companyBlock?.label?.p?.truncate).toBe("middle");
+			expect(companyBlock?.resets?.p?.truncate).toBe("end");
+			expect(plain(companyBlock?.resets?.p?.spans)).toStartWith("Resets · 1 saved reset");
+			expect(companyBlock?.table?.p?.cols?.map(column => column.id)).toEqual(["limit", "left", "reset"]);
+			expect(companyBlock?.table?.p?.rows?.map(row => plain(row.cells?.left))).toEqual(["90% left", "80% left"]);
+			expect(personalBlock?.label?.p?.role).toBe("omp.usage.account.active");
+			expect(personalBlock?.label?.p?.truncate).toBe("middle");
+			const activeLeft = personalBlock?.table?.p?.rows?.[0]?.cells?.left;
+			expect(typeof activeLeft === "string" ? [] : activeLeft?.map(part => part.s)).toContain("mono accent strong");
+			expect(personalBlock?.table?.p?.rows?.map(row => plain(row.cells?.left))).toEqual(["70% left"]);
+		} finally {
+			component.dispose();
+		}
+	});
+
+	it("keeps distinct limits that share a label and window in the detail view", () => {
 		const now = Date.now();
 		const withId = (id: string, frac: number, status: "ok" | "exhausted") => ({
 			...limit("google-antigravity", "account", "weekly", "Gemini", frac, status, now + 3_600_000),
@@ -496,7 +581,6 @@ describe("UsageDashboardComponent", () => {
 		]);
 		try {
 			component.handleInput("\r");
-			// The detail tables live in the native tree on real terminals.
 			const cx: DescribeContext = {
 				cols: 120,
 				reduceMotion: false,
@@ -505,23 +589,19 @@ describe("UsageDashboardComponent", () => {
 				feature: () => true,
 			};
 			const pending: unknown[] = [component.describe(cx)];
-			let bucketHeads = 0;
-			for (let node = pending.pop(); node; node = pending.pop()) {
-				if (!node || typeof node !== "object" || !("c" in node)) continue;
-				const described = node as {
+			let limitRows = 0;
+			for (let candidate = pending.pop(); candidate; candidate = pending.pop()) {
+				if (!candidate || typeof candidate !== "object" || !("c" in candidate)) continue;
+				const described = candidate as {
 					c?: unknown[];
 					k?: string;
 					p?: { rows?: { cells?: Record<string, TspText> }[] };
 				};
 				pending.push(...(described.c ?? []));
 				if (described.k !== "table" || !described.p?.rows) continue;
-				// A row whose limit cell is non-empty starts a bucket; follower
-				// rows (same bucket, other accounts) leave it empty.
-				for (const row of described.p.rows) if (row.cells?.limit && row.cells.limit.length > 0) bucketHeads++;
+				for (const row of described.p.rows) if (plain(row.cells?.limit) === "Gemini weekly") limitRows++;
 			}
-			// One bucket head per limit: the label|window-only key produced a
-			// single merged bucket holding both account rows.
-			expect(bucketHeads).toBe(2);
+			expect(limitRows).toBe(2);
 		} finally {
 			component.dispose();
 		}

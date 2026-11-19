@@ -155,6 +155,11 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--provider": (result, value) => {
 		result.provider = value;
 	},
+	"--account-pool": (result, value) => {
+		const name = value.trim();
+		if (!name) throw new CliUsageError("--account-pool requires a non-empty pool name.");
+		result.accountPool = name;
+	},
 	"--model": (result, value) => {
 		result.model = value;
 	},

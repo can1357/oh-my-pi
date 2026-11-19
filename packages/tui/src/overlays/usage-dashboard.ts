@@ -502,8 +502,15 @@ function statTile(
 }
 
 /** `62%` in mono, toned like the window's status, then a quiet `left`. */
-function leftSpans(fraction: number, status: UsageLimit["status"]): TspSpan[] {
-	const token = status === "exhausted" ? "mono error" : status === "warning" ? "mono warning" : "mono";
+function leftSpans(fraction: number, status: UsageLimit["status"], inUse = false): TspSpan[] {
+	const token =
+		status === "exhausted"
+			? "mono error"
+			: status === "warning"
+				? "mono warning"
+				: inUse
+					? "mono accent strong"
+					: "mono";
 	return [span(`${Math.max(0, Math.round((1 - fraction) * 100))}%`, token), span(" left", "dim")];
 }
 
@@ -623,6 +630,8 @@ function formatActivityTotals(layout: HeatmapLayout): string {
 export interface UsageDashboardOptions {
 	reports: UsageReport[];
 	unavailableAccounts?: readonly UnavailableUsageAccount[];
+	/** Whether a report belongs to the OAuth account currently serving this session. */
+	isActiveAccount?: (report: UsageReport) => boolean;
 	/**
 	 * Full classic `/usage` report of `reports` (the latest refresh) for the
 	 * expanded detail view; re-invoked per terminal width.
@@ -1599,9 +1608,9 @@ export class UsageDashboardComponent implements Component {
 	}
 
 	/**
-	 * Per provider: a head like the overview's provider column, notes and
-	 * saved resets as a `kv`, the limit buckets as a `table` (one row per
-	 * account).
+	 * Per provider: one account block per report, with a compact quota table.
+	 * The account label sits outside the table so it remains visible even when
+	 * narrow layouts hide reset timestamps or truncate quota labels.
 	 */
 	#describeDetail(): NativeChild[] {
 		const nowMs = this.#nowMs;
@@ -1636,99 +1645,102 @@ export class UsageDashboardComponent implements Component {
 				children.push(mutedText(`${sanitizeDisplayLine(account.label)}: no usage data`, true));
 			}
 
-			const facts: { k: TspText; v: TspText }[] = [];
 			const notes = [...new Set(reports.flatMap(report => report.notes ?? []))];
-			if (notes.length > 0) facts.push({ k: [span("Notes", "muted")], v: sanitizeDisplayLine(notes.join(" • ")) });
-			for (const [index, report] of reports.entries()) {
-				const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
-				if (!resets || resets.bankedCount <= 0) continue;
-				const value: TspSpan[] = [
-					span(
-						`${resets.bankedCount} saved reset${resets.bankedCount === 1 ? "" : "s"}`,
-						resets.redeemableCount > 0 ? "success" : "warning",
+			if (notes.length > 0) children.push(mutedText(`Notes · ${sanitizeDisplayLine(notes.join(" • "))}`, true));
+
+			for (const [reportIndex, report] of reports.entries()) {
+				const account = reportAccountLabel(report, report.limits[0], reportIndex);
+				const inUse = this.#options.isActiveAccount?.(report) ?? false;
+				const accountChildren: NativeChild[] = [
+					text(
+						[
+							span(inUse ? "● In use · " : "Account · ", inUse ? "accent strong" : "muted"),
+							span(account, inUse ? "accent strong" : undefined),
+						],
+						{
+							role: inUse ? "omp.usage.account.active" : "omp.usage.account.name",
+							title: inUse ? `${account} · in use by this session` : account,
+							truncate: "middle",
+						},
 					),
 				];
-				if (resets.redeemableCount !== resets.bankedCount) {
-					value.push(span(` · ${resets.redeemableCount} usable now`, "muted"));
-				}
-				if (resets.soonestExpiry) {
-					const remaining = Date.parse(resets.soonestExpiry) - nowMs;
-					const date = resets.soonestExpiry.slice(0, 10);
-					value.push(
+				const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
+				if (resets && resets.bankedCount > 0) {
+					const value: TspSpan[] = [
 						span(
-							remaining > 0 ? ` · expires in ${formatDuration(remaining)} (${date})` : ` · expired (${date})`,
-							"muted",
+							`${resets.bankedCount} saved reset${resets.bankedCount === 1 ? "" : "s"}`,
+							resets.redeemableCount > 0 ? "success" : "warning",
 						),
+					];
+					if (resets.redeemableCount !== resets.bankedCount) {
+						value.push(span(` · ${resets.redeemableCount} usable now`, "muted"));
+					}
+					if (resets.soonestExpiry) {
+						const remaining = Date.parse(resets.soonestExpiry) - nowMs;
+						const date = resets.soonestExpiry.slice(0, 10);
+						value.push(
+							span(
+								remaining > 0 ? ` · expires in ${formatDuration(remaining)} (${date})` : ` · expired (${date})`,
+								"muted",
+							),
+						);
+					}
+					if (resets.redeemableCount === 0 && resets.unavailableReason) {
+						value.push(span(` · unavailable: ${sanitizeDisplayLine(resets.unavailableReason)}`, "muted"));
+					}
+					accountChildren.push(
+						text([span("Resets · ", "muted"), ...value], {
+							role: "omp.usage.account.resets",
+							title: value.map(part => part.t).join(""),
+							truncate: "end",
+						}),
 					);
 				}
-				if (resets.redeemableCount === 0 && resets.unavailableReason) {
-					value.push(span(` · unavailable: ${sanitizeDisplayLine(resets.unavailableReason)}`, "muted"));
-				}
-				facts.push({
-					k: [span(`Resets · ${reportAccountLabel(report, report.limits[0], index)}`, "muted")],
-					v: value,
-				});
-			}
-			if (facts.length > 0) {
-				children.push(node("kv", { items: facts, layout: "grid", role: "omp.usage.facts" }, undefined, "facts"));
-			}
 
-			const buckets = new Map<string, { label: string; window?: string; rows: Record<string, TspText>[] }>();
-			const limitNotes: string[] = [];
-			for (const [index, report] of reports.entries()) {
-				for (const limit of report.limits) {
+				const rows: { id: string; cells: Record<string, TspText> }[] = [];
+				const limitNotes: string[] = [];
+				for (const [limitIndex, limit] of report.limits.entries()) {
 					const label = sanitizeDisplayLine(formatLimitTitle(limit));
-					// Same hybrid key as the cards: distinct buckets that share a
-					// label and window (Gemini vs Gemini (Argon) weekly) stay separate.
-					const key =
-						limit.scope.sharedGroup ??
-						`${label}|${limit.window?.id ?? limit.scope.windowId ?? "default"}|${limit.id}`;
-					let bucket = buckets.get(key);
-					if (!bucket) {
-						bucket = { label, window: detailWindowLabel(label, limit), rows: [] };
-						buckets.set(key, bucket);
-					}
+					const window = detailWindowLabel(label, limit);
 					const fraction = resolveUsedFraction(limit);
 					const resetsAt = limit.window?.resetsAt;
-					bucket.rows.push({
-						account: [span(reportAccountLabel(report, limit, index), "muted")],
-						left:
-							fraction === undefined
-								? [span(formatAbsoluteOnlyAmount([limit]) ?? "No data", "muted")]
-								: leftSpans(fraction, limit.status),
-						reset:
-							resetsAt !== undefined && resetsAt > nowMs
-								? [
-										span(
-											`${limit.window?.resetLabel ?? "resets"} in ${formatDuration(resetsAt - nowMs)}`,
-											"dim",
-										),
-									]
-								: "",
+					rows.push({
+						id: `r${limitIndex}`,
+						cells: {
+							limit: [span(label), ...(window ? [span(` ${window}`, "dim")] : [])],
+							left:
+								fraction === undefined
+									? [span(formatAbsoluteOnlyAmount([limit]) ?? "No data", "muted")]
+									: leftSpans(fraction, limit.status, inUse),
+							reset:
+								resetsAt !== undefined && resetsAt > nowMs
+									? [
+											span(
+												`${limit.window?.resetLabel ?? "resets"} in ${formatDuration(resetsAt - nowMs)}`,
+												"dim",
+											),
+										]
+									: "",
+						},
 					});
 					for (const note of limit.notes ?? []) limitNotes.push(sanitizeDisplayLine(note));
 				}
-			}
-			if (buckets.size > 0) {
-				const rows: { id: string; cells: Record<string, TspText> }[] = [];
-				for (const bucket of buckets.values()) {
-					for (const [index, cells] of bucket.rows.entries()) {
-						const limitCell: TspSpan[] =
-							index === 0
-								? [span(bucket.label), ...(bucket.window ? [span(` ${bucket.window}`, "dim")] : [])]
-								: [];
-						rows.push({ id: `r${rows.length}`, cells: { limit: limitCell, ...cells } });
-					}
+				if (rows.length > 0) {
+					const cols: TspTableColumn[] = [
+						{ id: "limit", head: "Limit", grow: 1, priority: 4 },
+						{ id: "left", head: "Left", align: "end", priority: 5 },
+						{ id: "reset", head: "Resets", align: "end", priority: 1 },
+					];
+					accountChildren.push(node("table", { cols, rows, role: "omp.usage.limits" }, undefined, "limits"));
+					for (const note of new Set(limitNotes)) accountChildren.push(mutedText(note, true));
+				} else {
+					accountChildren.push(mutedText("No quotas reported"));
 				}
-				const cols: TspTableColumn[] = [
-					{ id: "limit", head: "Limit", grow: 1, priority: 4 },
-					{ id: "account", head: "Account", truncate: "middle", priority: 1 },
-					{ id: "left", head: "Left", align: "end", priority: 3 },
-					{ id: "reset", head: "Resets", align: "end", priority: 2 },
-				];
-				children.push(node("table", { cols, rows, role: "omp.usage.limits" }, undefined, "limits"));
-				for (const note of new Set(limitNotes)) children.push(mutedText(note, true));
-			} else if (unavailable.every(account => account.provider !== entry.provider)) {
+				children.push(
+					node("col", { role: "omp.usage.account", gap: "xs" }, accountChildren, `account-${reportIndex}`),
+				);
+			}
+			if (reports.length === 0 && unavailable.every(account => account.provider !== entry.provider)) {
 				children.push(mutedText("No quotas reported"));
 			}
 			sections.push(node("col", { role: "omp.usage.report", gap: "sm" }, children, entry.provider));

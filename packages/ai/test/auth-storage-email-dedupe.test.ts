@@ -751,10 +751,11 @@ describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => 
 				projectId: "project-1",
 				email: "user-1@example.com",
 			};
-			await authStorage.oauth.login("unit-login-upgrade", {
+			const firstIdentity = await authStorage.oauth.login("unit-login-upgrade", {
 				onAuth: () => {},
 				onPrompt: async () => "",
 			});
+			expect(firstIdentity).toMatchObject({ type: "oauth", projectId: "project-1" });
 
 			// Legacy api_key should be gone/replaced, and first oauth account is active.
 			// getApiKey should now return the first OAuth access token (since the api_key is gone).

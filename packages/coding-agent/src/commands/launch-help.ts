@@ -39,6 +39,9 @@ export const launchHelp = {
 		}),
 		"plan-yolo-into": Flags.string({ description: 'Target model for plan-yolo execution (default the "smol" role)' }),
 		provider: Flags.string({ description: "Provider to use (legacy; prefer --model)" }),
+		"account-pool": Flags.string({
+			description: "Select a named auth.sessionAccountPools allowlist (the sole configured pool is automatic)",
+		}),
 		"api-key": Flags.string({ description: "API key (defaults to env vars)" }),
 		"system-prompt": Flags.string({ description: "System prompt (default: coding assistant prompt)" }),
 		"system-prompt-template": Flags.string({

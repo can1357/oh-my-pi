@@ -102,17 +102,32 @@ describe("UsageDashboardComponent.describe", () => {
 		expect(detail).not.toBe(overview);
 		const tabs = findAll(detail, n => n.k === "tabs")[0];
 		expect(tabs?.p).toEqual(expect.objectContaining({ active: "detail" }));
-		// One row per account in the detail table, not the bucket mean.
-		const table = findAll(detail, n => n.k === "table")[0];
-		const left = table?.k === "table" ? table.p?.rows.map(row => row.cells.left) : undefined;
-		expect(left).toEqual([
+		// Each account owns its own detail block and table; quotas must never be averaged across accounts.
+		const accounts = findAll(detail, n => n.p?.role === "omp.usage.account");
+		expect(
+			accounts.map(account =>
+				findAll(account, n => n.p?.role === "omp.usage.account.name")
+					.map(plain)
+					.join(""),
+			),
+		).toEqual(["Account · a@test", "Account · b@test"]);
+		expect(
+			accounts.map(account => {
+				const table = findAll(account, n => n.k === "table")[0];
+				return table?.k === "table" ? table.p?.rows.map(row => row.cells.left) : undefined;
+			}),
+		).toEqual([
 			[
-				{ t: "75%", s: "mono" },
-				{ t: " left", s: "dim" },
+				[
+					{ t: "75%", s: "mono" },
+					{ t: " left", s: "dim" },
+				],
 			],
 			[
-				{ t: "25%", s: "mono warning" },
-				{ t: " left", s: "dim" },
+				[
+					{ t: "25%", s: "mono warning" },
+					{ t: " left", s: "dim" },
+				],
 			],
 		]);
 	});

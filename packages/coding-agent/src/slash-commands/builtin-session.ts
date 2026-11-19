@@ -175,8 +175,16 @@ async function handleSessionPinCommand(
 		return;
 	}
 	const account = matches[0];
-	if (!account || !session.pinCurrentProviderOAuthAccount(account.credentialId)) {
-		await output(`${account?.label ?? selector} is no longer available to pin.`);
+	if (!account) {
+		await output(`${selector} is no longer available to pin.`);
+		return;
+	}
+	if (!session.isCurrentProviderOAuthAccountPermitted(account.credentialId)) {
+		await output(`${account.label} is outside this session's OAuth account pool and cannot be pinned.`);
+		return;
+	}
+	if (!session.pinCurrentProviderOAuthAccount(account.credentialId)) {
+		await output(`${account.label} is no longer available to pin.`);
 		return;
 	}
 	await output(`Pinned ${account.label} to this session for ${providerName}.`);

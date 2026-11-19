@@ -269,9 +269,10 @@ describe("default echo/printf redirect rule", () => {
 
 	it("matches commands with many stderr sinks without exponential backtracking", () => {
 		const start = performance.now();
+		// oxlint-disable-next-line eslint/no-template-curly-in-string -- Shell fixture contains a literal parameter expansion.
+		const repeatedSinks = " 2>/dev/null 2>>/dev/null 2>&1 \\; <&0 $(a; b) `c; d` ${e:-f;g}";
 		const echo = checkBashInterception(
-			// oxlint-disable-next-line no-template-curly-in-string -- literal shell/JS text under test
-			"echo hi" + " 2>/dev/null 2>>/dev/null 2>&1 \\; <&0 $(a; b) `c; d` ${e:-f;g}".repeat(20),
+			`echo hi${repeatedSinks.repeat(20)}`,
 			["write"],
 			DEFAULT_BASH_INTERCEPTOR_RULES,
 		);

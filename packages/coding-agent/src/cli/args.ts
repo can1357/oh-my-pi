@@ -32,6 +32,8 @@ export interface Args {
 	alias?: string;
 	allowHome?: boolean;
 	provider?: string;
+	/** Named `auth.sessionAccountPools` entry selected immutably for this session. */
+	accountPool?: string;
 	model?: string;
 	config?: string[];
 	smol?: string;
