@@ -22,6 +22,7 @@ function makeSession(opts: {
 	settings?: Record<string, unknown>;
 	preludes?: () => readonly EvalPreludeDefinition[];
 	taskDepth?: number;
+	spawnDepth?: number;
 	maxRecursionDepth?: number;
 	readActive?: boolean;
 }): ToolSession {
@@ -33,6 +34,7 @@ function makeSession(opts: {
 		getSessionFile: () => null,
 		getSessionSpawns: () => opts.spawns ?? "*",
 		taskDepth: opts.taskDepth,
+		spawnDepth: opts.spawnDepth,
 		isToolActive: (name: string) => name !== "read" || opts.readActive !== false,
 		...(opts.preludes ? { getEvalPreludes: opts.preludes } : {}),
 		settings,
@@ -93,6 +95,14 @@ describe("eval tool description", () => {
 			expect(tool.description).not.toContain("xd://eval/agents");
 			expect(tool.description).toContain("wait(handles");
 		}
+	});
+
+	it("advertises spawning to a session whose spawn depth was reset below the cap", () => {
+		// A long-lived worker at task depth 2 whose spawn depth was reset to 1 may still spawn at cap 2.
+		const reset = new EvalTool(makeSession({ taskDepth: 2, spawnDepth: 1, maxRecursionDepth: 2 }));
+
+		expect(reset.docTopics().agents).toContain("agent(prompt");
+		expect(reset.description).toContain("xd://eval/agents");
 	});
 
 	it("gates only tool-definition guidance, not budget or completion", () => {
