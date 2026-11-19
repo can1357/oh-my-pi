@@ -54,7 +54,7 @@ type DrainCallback = ThreadsafeFunction<(), (), (), Status, false, true>;
 
 enum DrainNotifier {
 	Js(DrainCallback),
-	#[cfg(test)]
+	#[cfg(all(test, unix))]
 	Test(Arc<std::sync::atomic::AtomicUsize>),
 }
 
@@ -66,7 +66,7 @@ impl DrainNotifier {
 				// queue makes this nonblocking without dropping threshold edges.
 				let _ = callback.call((), ThreadsafeFunctionCallMode::NonBlocking);
 			},
-			#[cfg(test)]
+			#[cfg(all(test, unix))]
 			Self::Test(count) => {
 				count.fetch_add(1, Ordering::AcqRel);
 			},
