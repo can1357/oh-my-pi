@@ -554,7 +554,7 @@ export interface SessionAdvisorsHost {
 		currentSelector: string,
 		currentModel?: Model | null,
 	): RetryFallbackSelector[];
-	isRetryFallbackSelectorSuppressed(selector: RetryFallbackSelector): boolean;
+	isRetryFallbackEntrySuppressed(selector: RetryFallbackSelector, model: Model): boolean;
 	noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void;
 	createCodexCompactionContext(options: {
 		trigger: CodexCompactionContext["trigger"];
@@ -2111,13 +2111,12 @@ export class SessionAdvisors {
 		}
 		const currentSelector = formatRetryFallbackSelector(advisor.agent.state.model, advisor.thinkingLevel);
 		if (currentSelector === originalSelector.raw) {
-			if (!this.#host.isRetryFallbackSelectorSuppressed(originalSelector)) {
+			if (!this.#host.isRetryFallbackEntrySuppressed(originalSelector, advisor.agent.state.model)) {
 				advisor.retryFallback = undefined;
 				advisor.retryFallbackPendingSuccess = false;
 			}
 			return;
 		}
-		if (this.#host.isRetryFallbackSelectorSuppressed(originalSelector)) return;
 
 		const resolvedPrimary = resolveModelOverride(
 			[originalSelector.raw],
@@ -2126,7 +2125,9 @@ export class SessionAdvisors {
 		);
 		const primaryModel =
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
-		if (!primaryModel || !this.#canReplayAdvisorHistory(advisor, primaryModel)) return;
+		if (!primaryModel) return;
+		if (this.#host.isRetryFallbackEntrySuppressed(originalSelector, primaryModel)) return;
+		if (!this.#canReplayAdvisorHistory(advisor, primaryModel)) return;
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, advisor.providerSessionId, { signal });
 		if (!apiKey) return;
 		signal.throwIfAborted();
@@ -2280,12 +2281,12 @@ export class SessionAdvisors {
 		if (!primaryRefused) this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message);
 		for (const role of chainKeys) {
 			for (const selector of this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
-				if (this.#host.isRetryFallbackSelectorSuppressed(selector)) continue;
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate || modelsAreEqual(candidate, currentModel)) continue;
 				if (cfgOffline.get(this.#host.settings) && candidate.provider !== this.#host.agent.state.model?.provider)
 					continue;
+				if (this.#host.isRetryFallbackEntrySuppressed(selector, candidate)) continue;
 				if (!this.#canReplayAdvisorHistory(advisor, candidate)) continue;
 				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisor.providerSessionId, { signal });
 				if (!apiKey) continue;
