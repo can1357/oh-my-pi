@@ -136,6 +136,18 @@ describe("buildModel", () => {
 		});
 	});
 
+	it.each(["openai-responses", "openai-codex-responses"] as const)(
+		"normalizes an unqualified Codex window on %s",
+		api => {
+			const model = buildModel({
+				...responsesSpec({ id: "gpt-5.1-codex", provider: "openai", contextWindow: 400_000 }),
+				api,
+			});
+
+			expect(model.contextWindow).toBe(272_000);
+		},
+	);
+
 	it("resolves a complete compat record for an openai-completions spec with no compat", () => {
 		const model = buildModel(completionsSpec());
 

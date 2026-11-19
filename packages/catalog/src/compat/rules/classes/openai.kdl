@@ -71,6 +71,7 @@ class "openai" {
 		revision ">=1" {
 			limits-patch {
 				context-window 272000
+				preserve-reported-input-window #true
 			}
 		}
 	}

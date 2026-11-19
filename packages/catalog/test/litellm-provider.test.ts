@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import {
 	fetchLiteLLMRichModels,
 	litellmModelManagerOptions,
@@ -207,6 +208,47 @@ describe("LiteLLM provider discovery", () => {
 		expect(spec.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 		expect(spec.contextWindow).toBe(196_000);
 		expect(spec.maxTokens).toBe(24_000);
+	});
+
+	test.each([
+		[500_000, 500_000],
+		[400_000, 400_000],
+		[64_000, 64_000],
+		[null, 272_000],
+		[0, 272_000],
+	])("uses the LiteLLM-reported Codex input limit %p when valid", async (reported, expected) => {
+		const id = "codex-gpt-6.1-sol";
+		const baseUrl = "http://proxy:4000";
+		const options = litellmModelManagerOptions({
+			apiKey: "sk-context-window",
+			baseUrl: `${baseUrl}/v1`,
+			fetch: async input => {
+				switch (inputUrl(input)) {
+					case `${baseUrl}/v1/models`:
+						return Response.json({ data: [{ id }] });
+					case `${baseUrl}/model_group/info`:
+						return Response.json({
+							data: [{ model_group: id, providers: ["openai"], max_input_tokens: reported }],
+						});
+					case `${baseUrl}/model/info`:
+						return Response.json({
+							data: [{ model_group: id, supports_vision: true, max_output_tokens: 24_000 }],
+						});
+					case MODELS_DEV_URL:
+						return Response.json({});
+					default:
+						return new Response(null, { status: 404 });
+				}
+			},
+		});
+
+		const [spec] = (await options.fetchDynamicModels?.()) ?? [];
+		if (!spec) throw new Error("expected the proxy's Codex alias");
+		const model = buildModel(spec);
+		expect(model).toMatchObject({ id, provider: "litellm", contextWindow: expected, maxTokens: 24_000 });
+		// Custom-discovery providers rebuild the row under a configured provider id.
+		const aliased = buildModel({ ...toModelSpec(model), provider: "workbench" });
+		expect(aliased.contextWindow).toBe(expected);
 	});
 
 	test("keeps a proxy's friendly Sol name ahead of the catalog reference", async () => {
