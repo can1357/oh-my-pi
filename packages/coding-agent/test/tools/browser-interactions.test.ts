@@ -1030,9 +1030,10 @@ return { value: await tab.value("#msg"), sent: await tab.evaluate(() => window.s
 		const prelude = createBrowserPrelude(session);
 		const tabName = `fill-keyup-${crypto.randomUUID()}`;
 		// `#q` searches only on `keyup`, as CyberChef's operation search does, and its input spends the page's user
-		// activation on a popup; input in `#opens` and a keydown in `#hops` move focus to a button; `#box` is no text field.
+		// activation on a popup; input in `#opens` and a keydown in `#hops` move focus to a button; a keydown in `#flip`
+		// makes it a checkbox; `#box` is a MathML element named like a text field.
 		const html = `<!doctype html><input id="q" value="old"><p id="results"></p><input id="opens"><input id="hops">
-<button id="ok">OK</button><div id="box" tabindex="0"></div>
+<input id="flip"><button id="ok">OK</button><math><textarea id="box" tabindex="0"></textarea></math>
 <script>
 window.events = [];
 for (const type of ["keydown", "keypress", "beforeinput", "input", "keyup", "click"]) {
@@ -1042,6 +1043,7 @@ q.addEventListener("input", () => window.open()?.close());
 q.addEventListener("keyup", () => { results.textContent = q.value + " active:" + navigator.userActivation.isActive; });
 opens.addEventListener("input", () => ok.focus());
 hops.addEventListener("keydown", () => ok.focus());
+flip.addEventListener("keydown", () => { flip.type = "checkbox"; });
 </script>`;
 		const context = { session, toolCallId: "browser-fill-keyup" };
 		await prelude.invoke(
@@ -1059,6 +1061,7 @@ await tab.fill("#q", "to base64");
 const results = await tab.text("#results");
 await tab.fill("#opens", " ");
 await tab.fill("#hops", "x");
+await tab.fill("#flip", "x");
 return { boxKeys, results, events: await tab.evaluate(() => window.events) };`,
 					timeout: 25,
 				},
@@ -1076,6 +1079,9 @@ return { boxKeys, results, events: await tab.evaluate(() => window.events) };`,
 					"beforeinput:hops::",
 					"input:hops::x",
 					"keydown:hops:x:x",
+					"beforeinput:flip::",
+					"input:flip::x",
+					"keydown:flip:x:x",
 				],
 				boxKeys: [],
 			});

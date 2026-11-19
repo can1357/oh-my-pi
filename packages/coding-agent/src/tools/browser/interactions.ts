@@ -827,15 +827,17 @@ const PICKER_VALUE_EXAMPLES: Record<string, string> = {
 const PICKER_INPUT_TYPES = Object.keys(PICKER_VALUE_EXAMPLES);
 
 /**
- * Run on a filled text field (`this`, a `<textarea>` or text-entry `<input>`) with the value's last character: a
- * keydown and then a keyup, each only while the field still has focus. Created in the page, they carry no text, held
- * modifier or default action.
+ * Run on a filled text field (`this`, an HTML `<textarea>` or text-entry `<input>`) with the value's last character: a
+ * keydown and then a keyup, each only while it is still such a field and has focus. Created in the page, they carry
+ * no text, held modifier or default action.
  */
 const FIELD_KEY_EVENTS = `function (key) {
 	const textEntry = ["text", "search", "email", "url", "tel", "password", "number"];
-	if (this.localName !== "textarea" && !(this.localName === "input" && textEntry.includes(this.type))) return;
 	for (const type of ["keydown", "keyup"]) {
-		if (this.getRootNode().activeElement !== this) return;
+		const field =
+			this.namespaceURI === "http://www.w3.org/1999/xhtml" &&
+			(this.localName === "textarea" || (this.localName === "input" && textEntry.includes(this.type)));
+		if (!field || this.getRootNode().activeElement !== this) return;
 		this.dispatchEvent(new KeyboardEvent(type, { key, bubbles: true, cancelable: true, composed: true }));
 	}
 }`;
