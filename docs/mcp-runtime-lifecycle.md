@@ -29,6 +29,7 @@ This document describes how MCP servers are discovered, connected, exposed as to
 Both paths:
 
 - pass `authStorage`, cache storage, `mcp.startupTimeoutMs`, and `mcp.enableProjectConfig`; browser-MCP filtering requires `browser.enabled`, registered and active Eval, and an unrestricted session,
+- pass the built-in transform context unless `mcp.builtinTransforms` is off: whether Eval is registered, active and allowed to run JavaScript (`eval.js`),
 - always set `filterExa: true`,
 - log per-server load/connect errors,
 - store the manager in `toolSession.mcpManager` and the session result.

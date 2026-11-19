@@ -110,7 +110,9 @@ describe("claude usage request headers", () => {
 			ctx,
 		);
 
-		const usageCalls = calls.filter(call => new URL(call.input).pathname.endsWith("/usage") && new URL(call.input).search === "");
+		const usageCalls = calls.filter(
+			call => new URL(call.input).pathname.endsWith("/usage") && new URL(call.input).search === "",
+		);
 		expect(usageCalls).toHaveLength(1);
 		expect(usageCalls[0]?.input).toBe("https://api.anthropic.com/api/oauth/usage");
 
