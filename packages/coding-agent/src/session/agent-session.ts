@@ -179,6 +179,7 @@ import { createExtensionModelQuery } from "../extensibility/extensions/model-api
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
+import type { MCPEvalNamespaceCatalog } from "../mcp/eval-namespaces";
 import {
 	type BuiltSkillPromptMessage,
 	loadSkillPrompt,
@@ -288,6 +289,7 @@ import { prewarmSubagentWorker } from "../thread/subagent-worker";
 import { SubagentSpawnSignal } from "../thread/subagent-spawn-signal";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { AgentDefinition } from "../task/types";
+import type { AgentOutputManager } from "../task/output-manager";
 import type { ModelMention } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { ModelMentionRegistry, type ResolvedModelMention } from "./model-mentions";
 import { parseCommandArgs } from "../utils/command-args";
@@ -1320,6 +1322,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#reconcileBrowserMcpFilter: AgentSessionConfig["reconcileBrowserMcpFilter"];
 	#setMcpServerInstructionsSource: AgentSessionConfig["setMcpServerInstructionsSource"];
 	#skillDescriptions: SkillDescriptionCatalog;
+	#mcpNamespaces: MCPEvalNamespaceCatalog | undefined;
 	#promptSkillsSource: readonly Skill[] | undefined;
 	#promptSkills: readonly Skill[] = [];
 	/**
@@ -2246,6 +2249,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#ownsCostGate = config.costGate === undefined;
 		this.#costGate = config.costGate ?? this.#createCostGate();
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
+		this.#mcpNamespaces = config.mcpNamespaces;
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
 		this.#allowSessionModelFallback = config.allowSessionModelFallback === true;
@@ -2800,6 +2804,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			reconcileSettingsGatedTools: config.reconcileSettingsGatedTools,
 			rebuildSystemPrompt: config.rebuildSystemPrompt,
 			getMcpServerInstructions: config.getMcpServerInstructions,
+			bindsMcpToEval: config.bindsMcpToEval,
+			evalBoundToolNames: config.evalBoundToolNames,
 			xdev: config.xdev,
 			setActiveToolNames: config.setActiveToolNames,
 			baseSystemPrompt: this.agent.state.systemPrompt,
@@ -3513,6 +3519,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	get asyncJobManager(): AsyncJobManagerApi | undefined {
 		return this.#asyncJobManager;
+	}
+
+	/**
+	 * Allocator of the ids this session's subagents nest under in its artifacts
+	 * directory; `/tan` claims clone ids from it so a tan and a task subagent
+	 * never share an id (and so a transcript file).
+	 */
+	get agentOutputManager(): AgentOutputManager | undefined {
+		return this.#evalToolSession?.agentOutputManager;
 	}
 
 	getAgentId(): string | undefined {
@@ -7901,6 +7916,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#tools.getEvalBridgeToolNames();
 	}
 
+	/** Enabled MCP tools presented as eval namespace methods (see {@link SessionTools.getEvalBoundToolNames}). */
+	getEvalBoundToolNames(): string[] {
+		return this.#tools.getEvalBoundToolNames();
+	}
+
 	/** Eval tool names frozen into the provider-visible eval description (see {@link SessionTools.advertisedEvalToolNames}). */
 	getAdvertisedEvalToolNames(): readonly string[] {
 		return this.#tools.advertisedEvalToolNames;
@@ -11980,9 +12000,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#promptSkills;
 	}
 
-	/** Start skill-description compression held by `deferSkillDescriptionCompression` (see `createAgentSession`). */
-	startSkillDescriptionCompression(): void {
+	/** Start skill and MCP namespace hint compression held by `deferHintCompression` (see `createAgentSession`). */
+	startHintCompression(): void {
 		this.#skillDescriptions.startCompression();
+		this.#mcpNamespaces?.startCompression();
 	}
 
 	/** Frozen skill-URI hint visibility snapshot (see {@link SessionTools.skillHintVisible}). */
