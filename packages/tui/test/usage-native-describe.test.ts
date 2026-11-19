@@ -91,6 +91,26 @@ describe("UsageDashboardComponent.describe", () => {
 		]);
 	});
 
+	it("labels an exhausted bar-less quota with no amount as Exhausted in the error tone", () => {
+		// Antigravity reports a spent quota as an unknown-unit limit with no
+		// measurable amount; without a label it would read as a red "No data".
+		const reports = [
+			report("google-antigravity", "a@test", [
+				{
+					id: "agy:quota",
+					label: "Gemini quota",
+					scope: { provider: "google-antigravity", windowId: "quota" },
+					amount: { remaining: 0, unit: "unknown" },
+					status: "exhausted",
+				},
+			]),
+		];
+		const amounts = findAll(dashboard(reports).describe(cx), n => n.p?.role === "omp.usage.amount").map(n =>
+			n.k === "text" ? n.p?.spans : undefined,
+		);
+		expect(amounts).toEqual([[{ t: "Exhausted", s: "error" }]]);
+	});
+
 	it("switches to the per-account detail table when the Details tab is selected", () => {
 		const component = dashboard([
 			report("anthropic", "a@test", [limit("anthropic", "5h", "Claude 5h", 0.25, "ok")]),
