@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Liquid AI's `d1.2` and `d1.2-ultra` judge models; `liquid` now defaults to `d1.2` ([#19753](https://github.com/can1357/oh-my-pi/pull/19753) by [@alphastorm](https://github.com/alphastorm))
+
 ## [19.0.0] - 2026-11-18
 
 ### Added
