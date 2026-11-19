@@ -325,6 +325,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"stream-idle-timeout-ms": wire("streamIdleTimeoutMs", [...OAI, "anthropic", "bedrock", "google"]),
 	"strip-image-input": wire("stripImageInput", [...OAI, "anthropic", "google"]),
 	"supports-forced-tool-choice": wire("supportsForcedToolChoice", [...OAI, "anthropic", "bedrock"]),
+	"requires-opencode-environment": wire("requiresOpenCodeEnvironment", [...OAI, "anthropic"]),
 	"supports-sampling-params": wire("supportsSamplingParams", [...OAI, "anthropic", "bedrock", "devin", "google"]),
 
 	// ── thinking control surface ──

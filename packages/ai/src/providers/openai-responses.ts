@@ -30,6 +30,7 @@ import {
 	resolveCacheRetention,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 } from "../utils";
+import { ensureOpenCodeSystemPrompt } from "./inference-headers";
 import { createAbortSourceTracker } from "../utils/abort";
 import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -1871,7 +1872,10 @@ export function buildParams(
 		dropEncryptedReasoning,
 	});
 
-	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
+	const normalizedPrompts = normalizeSystemPrompts(context.systemPrompt);
+	const systemPrompts = model.compat.requiresOpenCodeEnvironment
+		? ensureOpenCodeSystemPrompt(normalizedPrompts, options?.cwd)
+		: normalizedPrompts;
 	let systemInstructions: string | undefined;
 	if (systemPrompts.length > 0) {
 		const needsDeveloperRole = policy.messages.systemRole === "developer";
