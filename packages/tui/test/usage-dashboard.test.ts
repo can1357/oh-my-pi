@@ -482,26 +482,30 @@ describe("UsageDashboardComponent", () => {
 	it("tones a bar-less balance row by its reported status (issue #19764)", () => {
 		// A prepaid balance carries no fraction, so it renders as text; an
 		// exhausted verdict must still read as an error, while a balance that
-		// reports no status stays informational.
-		const balance = (id: string, label: string, status?: "exhausted") => ({
+		// reports no status stays informational. An exhausted quota with no
+		// measurable amount (Antigravity) says so instead of "no data".
+		const balance = (id: string, label: string, status?: "exhausted", unit: "credits" | "unknown" = "credits") => ({
 			id,
 			label,
 			scope: { provider: "commandcode", accountId: "a", windowId: id },
-			amount: { remaining: 0, unit: "credits" as const },
+			amount: { remaining: 0, unit },
 			...(status ? { status } : {}),
 		});
 		const component = dashboard([
 			report("commandcode", "a@test", [
 				balance("drained", "Drained balance", "exhausted"),
 				balance("plain", "Plain balance"),
+				balance("spent", "Spent quota", "exhausted", "unknown"),
 			]),
 		]);
 		try {
 			const lines = component.render(100);
 			const drained = lines.find(line => Bun.stripANSI(line).includes("Drained balance"));
 			const plain = lines.find(line => Bun.stripANSI(line).includes("Plain balance"));
+			const spent = lines.find(line => Bun.stripANSI(line).includes("Spent quota"));
 			expect(drained).toContain(theme.fg("error", "0 credits left"));
 			expect(plain).toContain(theme.fg("dim", "0 credits left"));
+			expect(spent).toContain(theme.fg("error", "exhausted"));
 		} finally {
 			component.dispose();
 		}
