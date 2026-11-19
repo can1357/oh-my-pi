@@ -5,12 +5,18 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { commitSelection, type CommitOutcome } from "@oh-my-pi/pi-coding-agent/commit/selective/apply";
 import { createDraft } from "@oh-my-pi/pi-coding-agent/commit/selective/draft";
 import { ChangeJournal, type JournalRecord } from "@oh-my-pi/pi-coding-agent/commit/selective/journal";
 import { createCommitPrelude } from "@oh-my-pi/pi-coding-agent/commit/selective/prelude-definition";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { createAgentSession, type ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgCommitRequireGuard } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -97,6 +103,129 @@ async function emptyRepo() {
 	};
 	return { root, artifacts, journal, write };
 }
+
+it("guards the looked-up prelude draft before writing to its repository", async () => {
+	const checkout = await emptyRepo();
+	const other = await emptyRepo();
+	await checkout.write("Main", undefined, "held.txt", "held\n");
+	await other.write("Main", undefined, "other.txt", "other\n");
+	const session: ToolSession = {
+		cwd: other.root,
+		hasUI: false,
+		getSessionFile: () => null,
+		getSessionSpawns: () => null,
+		settings: Settings.isolated({}),
+	};
+	const heldRoot = await fs.realpath(checkout.root);
+	const checked: string[] = [];
+	const prelude = createCommitPrelude(session, async repo => {
+		checked.push(await fs.realpath(repo));
+		if (checked.at(-1) !== heldRoot) throw new Error("unheld checkout");
+	});
+	const invoke = (params: unknown) => prelude.invoke(params, { session, toolCallId: "test" });
+	const draft = async (root: string, file: string) => {
+		const { details } = await invoke({ action: "draft", repo: root });
+		if (!details || typeof details !== "object" || !("id" in details) || typeof details.id !== "string") {
+			throw new Error("Expected a draft id");
+		}
+		await invoke({ action: "take", draft: details.id, path: file });
+		return details.id;
+	};
+	const unheld = await draft(other.root, "other.txt");
+	const held = await draft(checkout.root, "held.txt");
+	await expect(invoke({ action: "commit", draft: "missing", subject: "never" })).rejects.toThrow("expired");
+	expect(checked).toEqual([]);
+	await invoke({ action: "commit", draft: held, subject: "held" });
+	expect(await git(checkout.root, ["show", "HEAD:held.txt"])).toBe("held\n");
+	await expect(invoke({ action: "commit", draft: unheld, subject: "unheld", noVerify: true })).rejects.toThrow(
+		"unheld checkout",
+	);
+	expect(checked).toEqual([heldRoot, await fs.realpath(other.root)]);
+	expect(await git(other.root, ["for-each-ref", "refs/heads"])).toBe("");
+	expect(await git(other.root, ["status", "--porcelain"])).toBe("?? other.txt\n");
+	expect(await Bun.file(path.join(other.root, ".git", "index")).exists()).toBe(false);
+});
+
+it.each([true, false])(
+	"selective commit SDK policy (requireGuard = %s)",
+	async requireGuard => {
+		const { root, write } = await emptyRepo();
+		await write("Main", undefined, "selected.txt", "selected\n");
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-selective-agent-"));
+		tempDirs.push(agentDir);
+		const authStorage = await AuthStorage.create(":memory:");
+		const settings = Settings.isolated({
+			"eval.js": true,
+			"commit.enabled": true,
+			...(requireGuard ? { "commit.requireGuard": true } : {}),
+		});
+		let decision: "abstain" | "allow" | "veto" = "abstain";
+		try {
+			const { session } = await createAgentSession({
+				cwd: root,
+				agentDir,
+				authStorage,
+				sessionManager: SessionManager.create(root, path.join(agentDir, "sessions")),
+				settings,
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				bindProcessState: false,
+				enableMCP: false,
+				enableLsp: false,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				workspaceTree: { rootPath: root, rendered: ".\n", truncated: false, totalLines: 1, agentsMdFiles: [] },
+				toolNames: ["eval"],
+				extensions: [
+					pi => {
+						// An allowlist-style tool policy failing closed on unknown tools must not reach eval commits.
+						pi.on("tool_call", event =>
+							event.toolName === "eval" ? undefined : { block: true, reason: "unknown tool" },
+						);
+						pi.on("commit_selection", () => (decision === "allow" ? { allow: true } : undefined));
+						pi.on("commit_selection", () =>
+							decision === "veto" ? { block: true, reason: "policy veto" } : undefined,
+						);
+					},
+				],
+			});
+			try {
+				const evalTool = session.getToolByName("eval");
+				if (!evalTool) throw new Error("Expected eval tool");
+				const run = async (code: string) => {
+					const { content } = await evalTool.execute(crypto.randomUUID(), { language: "js", code });
+					return content.map(block => (block.type === "text" ? block.text : "")).join("");
+				};
+				const expectNothingWritten = async () => {
+					expect(await git(root, ["for-each-ref", "refs/heads"])).toBe("");
+					expect(await Bun.file(path.join(root, ".git", "index")).exists()).toBe(false);
+				};
+				await run('const selected = await commit.draft(); await selected.take("selected.txt");');
+				decision = "veto";
+				expect(await run('await selected.commit("veto")')).toContain("policy veto");
+				await expectNothingWritten();
+				decision = "abstain";
+				// The setting is read on every commit, so a mid-session toggle applies to the next one.
+				if (!requireGuard) cfgCommitRequireGuard.override(settings, true);
+				expect(await run('await selected.commit("unauthorized")')).toContain("commit.requireGuard");
+				await expectNothingWritten();
+				if (requireGuard) decision = "allow";
+				else cfgCommitRequireGuard.override(settings, false);
+				await run('await selected.commit("committed")');
+				expect(await git(root, ["show", "HEAD:selected.txt"])).toBe("selected\n");
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			authStorage.close();
+			AgentStorage.close();
+			closeModelCache();
+		}
+	},
+	30_000,
+);
 
 async function gitlinkWorkspace() {
 	const workspace = await emptyRepo();

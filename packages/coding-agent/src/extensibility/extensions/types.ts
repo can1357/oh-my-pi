@@ -1427,6 +1427,23 @@ export interface UserPythonEvent {
 }
 
 // ============================================================================
+// Commit Selection Events
+// ============================================================================
+
+/**
+ * Fired before the eval `commit` prelude writes a selective commit to Git, after the
+ * draft's patches are built and before any index or ref write. Not emitted for `/commit`
+ * or shell `git commit`.
+ */
+export interface CommitSelectionEvent {
+	type: "commit_selection";
+	/** Root of the Git worktree the commit will be written to (the draft's repository, not necessarily the session cwd). */
+	repo: string;
+	/** Host call id of the eval `commit()` invocation. */
+	toolCallId: string;
+}
+
+// ============================================================================
 // Input Events
 // ============================================================================
 
@@ -1737,6 +1754,7 @@ export type ExtensionEvent =
 	| LinkActivateEvent
 	| UserBashEvent
 	| UserPythonEvent
+	| CommitSelectionEvent
 	| InputEvent
 	| ToolCallEvent
 	| ToolResultEvent
@@ -1793,6 +1811,17 @@ export interface UserBashEventResult {
 export interface UserPythonEventResult {
 	/** Full replacement: extension handled execution, use this result */
 	result?: PythonResult;
+}
+
+/**
+ * Result from a commit_selection handler. Return nothing to abstain. `block` vetoes the
+ * commit and wins over any `allow`; `allow` authorizes it when `commit.requireGuard` is on.
+ */
+export interface CommitSelectionEventResult {
+	allow?: true;
+	block?: true;
+	/** Shown as the commit error when blocking. */
+	reason?: string;
 }
 
 export type { ToolResultEventResult } from "../shared-events";
@@ -1974,6 +2003,7 @@ export interface ExtensionAPI {
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
 	on(event: "user_python", handler: ExtensionHandler<UserPythonEvent, UserPythonEventResult>): void;
+	on(event: "commit_selection", handler: ExtensionHandler<CommitSelectionEvent, CommitSelectionEventResult>): void;
 	on(event: "mcp_notification", handler: ExtensionHandler<McpNotificationEvent>): void;
 	on(event: "link_activate", handler: ExtensionHandler<LinkActivateEvent>): void;
 

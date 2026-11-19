@@ -725,6 +725,19 @@ The runtime handles the JSON-RPC transport and its own list/update refresh first
 - `user_bash` (override with `{ result }`)
 - `user_python` (override with `{ result }`)
 
+### Commit selection guard
+
+- `commit_selection` → `{ allow?: true; block?: true; reason?: string }`. Fires before the eval `commit` prelude writes a draft, after its patches are built and before any index or ref write. The event carries `repo`, the root of the Git worktree the commit goes to (the draft's repository, which can differ from the session cwd), and the `toolCallId` of the eval `commit()` call. It is not a tool call: `tool_call`/`tool_result` handlers do not see it.
+
+Handlers run in extension order. The first `{ block: true }` rejects the commit with its `reason`, and a handler error or timeout also blocks (fail-closed); Git hooks do not need to be enabled. Returning nothing abstains. With `commit.requireGuard: true` (see [settings](./settings.md)), the commit is written only when at least one handler returns `{ allow: true }` and none blocks; any registered handler can allow, so turn it on only with trusted extensions. The guard covers the eval `commit` prelude only, not `/commit` or shell `git commit`.
+
+```ts
+pi.on("commit_selection", async event => {
+	if (!(await isLockedByMe(event.repo))) return { block: true, reason: `No lock held for ${event.repo}` };
+	return { allow: true };
+});
+```
+
 ### `resources_discover`
 
 `resources_discover` exists in extension types and `ExtensionRunner`.
@@ -1511,7 +1524,7 @@ Provide `renderCall` / `renderResult` on `registerTool` definitions for custom t
 ## Constraints and pitfalls
 
 - Session actions are unavailable during extension load; registration methods, `getFlag`, and `exec` are available.
-- `tool_call` errors and timeouts block execution (fail-closed). Its budget is `extensionHandlers.toolCallTimeoutMs` (default 30,000 ms), paused during extension UI waits.
+- `tool_call` errors and timeouts block execution (fail-closed). Its budget is `extensionHandlers.toolCallTimeoutMs` (default 30,000 ms), paused during extension UI waits. `commit_selection` errors and timeouts likewise block the commit.
 - Most dispatched handlers have a 30-second budget; `session_shutdown` handlers run concurrently with a 2-second budget. Timing out stops waiting and cancels handler UI, but cannot undo arbitrary extension side effects.
 - Command name conflicts with built-ins are skipped with diagnostics.
 - Reserved shortcuts are ignored (`ctrl+c`, `ctrl+d`, `ctrl+z`, `ctrl+k`, `ctrl+p`, `ctrl+l`, `ctrl+o`, `ctrl+t`, `ctrl+g`, `ctrl+q`, `alt+m`, `shift+tab`, `shift+ctrl+p`, `alt+enter`, `escape`, `enter`); `getShortcutConflict` reports them as `reserved`.

@@ -389,6 +389,7 @@ import {
 	cfgArchiveEnabled,
 	cfgAsyncMaxJobs,
 	cfgCommitEnabled,
+	cfgCommitRequireGuard,
 	cfgAsyncWidgets,
 	cfgComputerEnabled,
 	cfgRatchetEnabled,
@@ -2921,7 +2922,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				builtins.push(archivePrelude);
 			}
 			if (cfgCommitEnabled.get(settings)) {
-				commitPrelude ??= createCommitPrelude(toolSession);
+				commitPrelude ??= createCommitPrelude(toolSession, async (repo, { toolCallId, signal }) => {
+					const runner = session?.extensionRunner;
+					const verdict = runner?.hasHandlers("commit_selection")
+						? await runner.emitCommitSelection({ type: "commit_selection", repo, toolCallId }, signal)
+						: undefined;
+					if (verdict?.block) throw new Error(verdict.reason || "Selective commit was blocked by an extension.");
+					if (!verdict?.allow && cfgCommitRequireGuard.get(settings)) {
+						throw new Error(
+							"Selective commit requires an extension's commit_selection handler to allow it (commit.requireGuard).",
+						);
+					}
+				});
 				builtins.push(commitPrelude);
 			}
 			if (cfgDisasmBackend.get(settings) !== undefined) {

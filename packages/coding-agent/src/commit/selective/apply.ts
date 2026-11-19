@@ -163,7 +163,12 @@ async function patchFor(repo: VcsGitRepo, head: string | null, change: SelectedC
 export async function commitSelection(
 	draft: Draft,
 	request: CommitRequest,
-	context: { journal: ChangeJournal | null; agent: JournalAgent; signal?: AbortSignal },
+	context: {
+		journal: ChangeJournal | null;
+		agent: JournalAgent;
+		signal?: AbortSignal;
+		authorize?: (repoRoot: string) => Promise<void>;
+	},
 ): Promise<CommitOutcome> {
 	const changes = draft.selection();
 	if (changes.length === 0) {
@@ -184,7 +189,7 @@ export async function commitSelection(
 			`A ${operation === "am" ? "git am" : operation} is in progress; finish or abort it before using commit(). Use plain \`git commit\` for commits within that operation.`,
 		);
 	}
-	const gitDir = repo.info().gitDir;
+	const { gitDir, repoRoot } = repo.info();
 	const message = composeMessage(request);
 	const patches: PathPatch[] = [];
 	for (const change of changes) {
@@ -204,6 +209,7 @@ export async function commitSelection(
 		gitDir,
 		`omp-commit-${draft.id}-${Math.floor(Math.random() * 46656).toString(36)}.index`,
 	);
+	if (context.authorize) await context.authorize(repoRoot);
 	let sha: string | undefined;
 	/** HEAD the commit was built on; on amend, the commit it replaced. */
 	let base = draft.head;
