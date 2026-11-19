@@ -310,6 +310,39 @@ describe("StatusLineComponent effective settings cache", () => {
 		expect(visibleWidth(styledBar.getTopBorder(24).content)).toBeLessThanOrEqual(24);
 	});
 
+	it("keeps the focus-proxy faint on everything after a bold status", () => {
+		const component = makeComponent({
+			preset: "custom",
+			leftSegments: ["status", "model"],
+			rightSegments: [],
+			separator: "powerline-thin",
+			showHookStatus: false,
+			sessionAccent: false,
+			segmentOptions: { model: { showThinkingLevel: false } },
+		});
+		component.setSession(makeSession(), "worker");
+		component.setHookStatus("a", "\x1b[1mbold\x1b[0m");
+		component.setHookStatus("b", "plain");
+
+		const content = component.getTopBorder(120).content;
+		const faintBefore = (needle: string): boolean => {
+			let faint = false;
+			for (const [, params] of content.slice(0, content.indexOf(needle)).matchAll(/\x1b\[([0-9;]*)m/g)) {
+				const codes = params === "" ? ["0"] : params.split(";");
+				for (let i = 0; i < codes.length; i++) {
+					const code = codes[i];
+					// Skip the arguments of 256-colour and truecolor selectors; their numbers are not SGR codes.
+					if (code === "38" || code === "48") i += codes[i + 1] === "5" ? 2 : 4;
+					else if (code === "2") faint = true;
+					else if (code === "22" || code === "0") faint = false;
+				}
+			}
+			return faint;
+		};
+		expect(faintBefore("plain")).toBe(true);
+		expect(faintBefore("Test Model")).toBe(true);
+	});
+
 	it("does not mutate shared preset segment options during narrow renders", () => {
 		const before = { ...STATUS_LINE_PRESETS.default.segmentOptions?.path };
 		const component = makeComponent({ preset: "default", sessionAccent: false });

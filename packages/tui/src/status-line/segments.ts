@@ -271,7 +271,7 @@ const statusSegment: StatusLineSegment = {
 		const separator = `${theme.getFgAnsi("dim")}${theme.sep.dot}${accent}`;
 		let text = "";
 		for (const status of ctx.hookStatuses ?? []) {
-			const sanitized = sanitizeInlineStatusText(status);
+			const sanitized = sanitizeInlineStatusText(status, { fg: accent, faint: Boolean(ctx.focusedAgentId) });
 			if (!sanitized) continue;
 			text += text ? separator + sanitized : sanitized;
 		}

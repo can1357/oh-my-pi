@@ -84,6 +84,21 @@ describe("sanitizeInlineStatusText", () => {
 		expect(sanitizeInlineStatusText("\x1b[2mdim \x1b[0;32mok")).toBe("\x1b[2mdim \x1b[22;32mok\x1b[39m");
 	});
 
+	it("restores the inherited foreground after a reset leaves the status without its own", () => {
+		const fg = "\x1b[38;5;99m";
+		expect(sanitizeInlineStatusText("a \x1b[33mb\x1b[0m c", { fg })).toBe(`a \x1b[33mb\x1b[39m${fg} c`);
+		expect(sanitizeInlineStatusText("a \x1b[33mb\x1b[39m c", { fg })).toBe(`a \x1b[33mb\x1b[39m${fg} c`);
+		expect(sanitizeInlineStatusText("\x1b[33ma\x1b[0;31mb", { fg })).toBe(`\x1b[33ma\x1b[39;31mb\x1b[39m${fg}`);
+		// Without a foreground of its own nothing is reset, so nothing is restored.
+		expect(sanitizeInlineStatusText("\x1b[1mb\x1b[0m c", { fg })).toBe("\x1b[1mb\x1b[22m c");
+	});
+
+	it("re-opens the inherited faint after the 22 that closes bold or dim", () => {
+		expect(sanitizeInlineStatusText("\x1b[1mb\x1b[0m c", { faint: true })).toBe("\x1b[1mb\x1b[22m\x1b[2m c");
+		expect(sanitizeInlineStatusText("\x1b[2mb\x1b[22m c", { faint: true })).toBe("\x1b[2mb\x1b[22m\x1b[2m c");
+		expect(sanitizeInlineStatusText("\x1b[3mb\x1b[0m c", { faint: true })).toBe("\x1b[3mb\x1b[23m c");
+	});
+
 	it("never emits a full reset or a background, so the bar's own survive", () => {
 		const result = sanitizeInlineStatusText("\x1b[41;48;5;196;38;5;10mok\x1b[49m \x1b[48;2;1;2;3;104;7mx\x1b[0m");
 		expect(result).toBe("\x1b[38;5;10mok \x1b[7mx\x1b[27;39m");
