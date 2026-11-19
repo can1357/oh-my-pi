@@ -161,7 +161,7 @@ const codingAgentRuntimePathPatterns = [
 
 const codingAgentNativeContentMarkers = [
 	"@oh-my-pi/pi-natives",
-	"omp-natives",
+	"pi-natives",
 	"native",
 	"readImageMetadata",
 	"Bun.spawn",

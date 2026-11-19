@@ -618,6 +618,8 @@ describe("read tool URL handling", () => {
 		// URL selectors address response body lines, like grep's URL matches.
 		expect(pagedText?.text).toContain("Line 2");
 		expect(pagedText?.text).toContain("Line 3");
-		expect(fs.readdirSync(path.join(testDir, "session")).some(file => spillIdOfFileName(file) !== undefined)).toBe(true);
+		expect(fs.readdirSync(path.join(testDir, "session")).some(file => spillIdOfFileName(file) !== undefined)).toBe(
+			true,
+		);
 	});
 });
