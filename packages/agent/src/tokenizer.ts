@@ -154,9 +154,8 @@ export interface MessageCountOptions {
 	 * the provider charges, so the compaction floor (which only needs the
 	 * reliably-countable, on-wire-compressible content) excludes them to avoid
 	 * false triggers on thinking-heavy turns.
-	 * Native Responses reasoning that actually replays is not an opaque byte
-	 * guess: it is charged at the turn's provider-reported reasoning tokens in
-	 * both arms.
+	 * Known replay costs still count: native Responses reasoning uses reported
+	 * reasoning tokens, and retained signed length turns use billed output tokens.
 	 */
 	excludeEncryptedReasoning?: boolean;
 }
@@ -614,13 +613,11 @@ export class Tokenizer {
 						if (!excludeEncryptedReasoning) fragments.push(stringifyJson(block.block) ?? "null");
 					}
 				}
-				// The visible text undercounts a native replay: the provider rebuilds
-				// the full reasoning from its signature, billed at the turn's output
-				// size less the visible text shake has since elided from it. The
-				// floor keeps the visible count.
+				// A signed length turn still replays at the provider's output-token price.
+				// Count that in the floor too, so the whole continuation chain is priced.
 				if (
 					signedReasoning &&
-					!excludeEncryptedReasoning &&
+					(!excludeEncryptedReasoning || message.stopReason === "length") &&
 					!signaturesPriced &&
 					this.#replaysReasoningNatively(message)
 				) {

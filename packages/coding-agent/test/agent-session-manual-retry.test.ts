@@ -89,7 +89,7 @@ describe("AgentSession manual retry", () => {
 		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "recovered after manual retry" });
 	});
 
-	it("pauses goal mode at the reasoning continuation cap and retries the retained reasoning", async () => {
+	it("pauses goal mode at the reasoning cap and retries past a transcript-only row", async () => {
 		const pendingTurns = INCOMPLETE_RECOVERY_MAX_RETRIES + 1;
 		const mock = createMockModel({
 			provider: "anthropic",
@@ -155,11 +155,18 @@ describe("AgentSession manual retry", () => {
 		expect(session.getGoalModeState()?.enabled).toBe(false);
 		expect(session.getGoalModeState()?.goal.status).toBe("paused");
 		expect((await terminalFailure.promise)?.errorMessage).toContain("reasoning continuation allowance is exhausted");
+		await session.sendCustomMessage({
+			customType: "status",
+			content: "Transcript-only status",
+			display: true,
+			excludeFromContext: true,
+		});
 
 		await expect(session.retry()).resolves.toBe(true);
 		await session.waitForIdle();
 
 		expect(mock.calls).toHaveLength(pendingTurns + 1);
+		expect(mock.calls.at(-1)?.context.messages.at(-1)).toMatchObject({ role: "developer" });
 		expect(
 			mock.calls
 				.at(-1)

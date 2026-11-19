@@ -1085,10 +1085,8 @@ describe("AgentSession auto-compaction progress guard", () => {
 			]);
 		});
 
-		it("pauses instead of continuing when the reasoning the turn replays no longer fits", async () => {
-			// A 120k prompt budget. The provider billed a 1k prompt plus 100k of signed
-			// reasoning, so the window looks open, but the retained turn replays that
-			// reasoning on top of ~40k of stored history.
+		it("pauses when the combined signed reasoning chain exceeds the prompt budget", async () => {
+			// Either 65k turn fits a 120k budget alone; replaying both does not.
 			cfgCompactionEnabled.set(session.settings, false);
 			cfgCompactionReserveTokens.set(session.settings, 80_000);
 			const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
@@ -1096,16 +1094,13 @@ describe("AgentSession auto-compaction progress guard", () => {
 			session.subscribe(event => {
 				if (event.type === "notice" && event.level === "error") errorNotices.push(event.message);
 			});
-			session.agent.replaceMessages([
-				...session.agent.state.messages,
-				{ role: "user", content: "earlier findings ".repeat(20_000), timestamp: Date.now() },
-			]);
-			const reasoning = lengthStop([
+			const retained = lengthStop([
 				{ type: "thinking", thinking: "unfinished reasoning", thinkingSignature: "sig" },
 			]);
-			reasoning.usage = { ...reasoning.usage, input: 1_000, output: 100_000, totalTokens: 101_000 };
+			retained.usage = { ...retained.usage, input: 1_000, output: 65_000, totalTokens: 66_000 };
+			session.agent.appendMessage({ ...retained, timestamp: retained.timestamp - 1 });
 
-			await endTurn(reasoning);
+			await endTurn(retained);
 
 			expect(continueSpy).not.toHaveBeenCalled();
 			expect(errorNotices.some(message => message.includes("retained reasoning cannot fit"))).toBe(true);

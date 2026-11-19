@@ -7,6 +7,7 @@ import {
 	type AgentPreModelCallResult,
 	type AgentTurnEndContext,
 	lastContextIndex,
+	lastContextMessage,
 	type MessageCountOptions,
 	resolveTelemetry,
 	type StreamFn,
@@ -757,7 +758,7 @@ export class SessionMaintenance {
 	/** Preserve pending reasoning when an admitted manual retry starts a new model turn. */
 	prepareManualRetry(): void {
 		this.resetForNewPrompt();
-		const message = this.#host.messages().at(-1);
+		const message = lastContextMessage(this.#host.messages());
 		if (
 			message?.role === "assistant" &&
 			message.stopReason === "length" &&
@@ -2975,8 +2976,7 @@ export class SessionMaintenance {
 		// diverges from what the provider bills, so counting it would let a
 		// thinking-heavy turn falsely trip the floor. The provider usage (the
 		// other arm of compactionContextTokens) already accounts for it.
-		// Native Responses reasoning that replays still counts, at its reported
-		// reasoning tokens (see MessageCountOptions.excludeEncryptedReasoning).
+		// Known native replay prices still count (see MessageCountOptions).
 		const opts = { excludeEncryptedReasoning: true } as const;
 		return (
 			computeNonMessageTokens(this.#host.nonMessageTokenSource(), tokenizer, this.#host.settings.revision) +
@@ -4901,15 +4901,10 @@ export class SessionMaintenance {
 
 	/**
 	 * Retry-side check: whether an overflow/incomplete recovery rebuilt a prompt
-	 * that fits the active model's window again. Callers MUST invoke this AFTER
-	 * dropping the failed assistant from `this.#host.messages()` so the just-failed
-	 * turn (absent from the retry prompt) is excluded from the estimate. Unlike
-	 * the `COMPACTION_RECOVERY_BAND × threshold` hysteresis the auto-continue
-	 * thrash guard uses, a retry only needs to *fit* — a 200k-window prompt
-	 * compacted from overflow down to ~150k is retryable even though it sits above
-	 * `0.8 × 170k` (PR #3412 review).
-	 * Retained reasoning uses the stored estimate, its billed prompt predating the
-	 * rewrite, plus the reasoning the retained turn replays at its billed price.
+	 * that fits the active model's window again. Drop a failed turn before calling;
+	 * retained reasoning stays and is billed in the stored estimate. Its last
+	 * provider usage describes the pre-compaction prompt, not the retained history.
+	 * A retry only needs to fit, not cross the lower auto-compaction hysteresis band.
 	 */
 	#compactionCreatedRetryFit(): boolean {
 		const model = this.#model;
@@ -4923,17 +4918,9 @@ export class SessionMaintenance {
 			hasReplayableThinking(message, model)
 		) {
 			const contextWindow = model.contextWindow ?? 0;
-			if (contextWindow <= 0) return true;
-			// The stored estimate floors encrypted reasoning; the retained turn is the
-			// latest one, so its replay bills the reasoning its signature carries.
-			const replayedReasoning = Math.max(
-				0,
-				this.#tokenizer.countLatestTurn(message) -
-					this.#tokenizer.countMessage(message, { excludeEncryptedReasoning: true }),
-			);
 			return (
-				this.#estimateStoredContextTokens() + replayedReasoning <=
-				promptBudgetTokens(contextWindow, this.#compactionSettings)
+				contextWindow <= 0 ||
+				this.#estimateStoredContextTokens() <= promptBudgetTokens(contextWindow, this.#compactionSettings)
 			);
 		}
 		return this.contextFitsModel(model);
