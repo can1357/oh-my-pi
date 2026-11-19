@@ -7,13 +7,13 @@
 - Fixed the native addon failing to load when HOME, PI_NATIVES_DIR or the install directory contains `?` ([#19763](https://github.com/can1357/oh-my-pi/pull/19763) by [@sjawhar](https://github.com/sjawhar))
 - `commitCreate()` now reports a HEAD that moves after the expected-HEAD check, such as from a `commit-msg` hook, as a `HeadMoved` error instead of a generic `Backend` failure ([#19393](https://github.com/can1357/oh-my-pi/pull/19393) by [@eggpeat](https://github.com/eggpeat))
 - Fixed macOS window reads losing a window once it is minimized: an AX snapshot or query of that exact window ID still reads its tree, marks the root `(minimized)`, and keeps its refs inspection-only until a visible read of the restored window completes; menu reads and commands report `WindowUnavailable` instead of restoring it or using a sibling's menu ([#19825](https://github.com/can1357/oh-my-pi/pull/19825) by [@baekjosh](https://github.com/baekjosh))
+- Fixed Windows `computer` `setValue` on a classic text box (Win32 and WinForms, including Windows 10 Notepad) bringing its window in front of yours, so the keys you typed next went into that box ([#19814](https://github.com/can1357/oh-my-pi/pull/19814) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [19.0.1] - 2026-11-19
 
 ### Fixed
 
 - Fixed omp freezing for seconds to minutes on WSL2 while saving sessions: Linux `FileLock` now locks a sidecar file instead of binding a socket, which takes about 10 ms per call there. Older omp versions still running do not see these locks, so restart them after updating ([#19704](https://github.com/can1357/oh-my-pi/pull/19704) by [@turgaybulut](https://github.com/turgaybulut))
-- Fixed Windows `computer` `setValue` on a classic text box (Win32 and WinForms, including Windows 10 Notepad) bringing its window in front of yours, so the keys you typed next went into that box
 
 ## [19.0.0] - 2026-11-18
 
