@@ -235,7 +235,7 @@ describe("kiroRankingStrategy", () => {
 		const purchase = { currentUsage: 4.5, usageLimit: 250, expiresAt: BONUS_EXPIRES_S };
 		Object.assign(payload.usageBreakdownList[0]!, {
 			addOnMetadata: { addOnTotalUsage: 4.5, addOnTotalLimit: 250, addOns: [purchase] },
-			overageCredits: [purchase],
+			overageCredits: [{ ...purchase, currentUsage: 5 }],
 		});
 		const report = parseKiroUsage(payload)!;
 		expect(report.limits.map(limit => [limit.id, limit.status, limit.amount.remaining])).toEqual([
@@ -247,6 +247,40 @@ describe("kiroRankingStrategy", () => {
 		const legacy = livePayload({ used: 638, limit: 638, bonus: false });
 		Object.assign(legacy.usageBreakdownList[0]!, { overageCredits: [purchase] });
 		expect(parseKiroUsage(legacy)?.limits.map(limit => limit.id)).toEqual(["kiro:credits", "kiro:add-on:0"]);
+	});
+
+	it("uses legacy purchases when the current projection is empty", async () => {
+		const fetchedAt = Date.now();
+		const payload = livePayload({ used: 638, limit: 638, bonus: false });
+		Object.assign(payload.usageBreakdownList[0]!, {
+			addOnMetadata: { addOns: [] },
+			overageCredits: [{ currentUsage: 2, usageLimit: 250, expiresAt: fetchedAt / 1_000 + 86_400 }],
+		});
+
+		const report = parseKiroUsage(payload, fetchedAt)!;
+		expect(report.limits.map(limit => [limit.id, limit.status, limit.amount.remaining])).toEqual([
+			["kiro:credits", "warning", 0],
+			["kiro:add-on:0", "ok", 248],
+		]);
+		expect(await selectedAccount(report)).toBe("preferred");
+	});
+
+	it("omits purchases expired at or before the usage snapshot", () => {
+		const payload = livePayload({ used: 638, limit: 638, bonus: false });
+		Object.assign(payload.usageBreakdownList[0]!, {
+			addOnMetadata: {
+				addOns: [
+					{ currentUsage: 2, usageLimit: 10, expiresAt: RESET_S - 1 },
+					{ currentUsage: 2, usageLimit: 10, expiresAt: RESET_S },
+				],
+			},
+		});
+
+		const report = parseKiroUsage(payload, RESET_S * 1_000)!;
+		expect(report.limits.map(limit => [limit.id, limit.status, limit.amount.remaining])).toEqual([
+			["kiro:credits", "exhausted", 0],
+		]);
+		expect(report.limits[0]?.notes).toBeUndefined();
 	});
 
 	it("does not count a bonus grant that expired after the report was fetched", () => {

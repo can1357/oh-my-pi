@@ -37,6 +37,8 @@ Each OAuth login gets a random login id, and its identity key is `account:<login
 
 `/usage` shows each account's monthly plan credits with the reset date, active bonus and purchased add-on credits with their expiry, and overage credits when overage billing is enabled in your Kiro account. With several accounts, requests prefer accounts with plan, bonus, or add-on credits left; accounts that can only draw overage are used last.
 
+An add-on expires at the time reported by Kiro. OMP reads the legacy purchased-credit list only when the current list is missing or empty, so the same purchase is never counted twice.
+
 ## Logout and re-login
 
 Use `/logout` and select Kiro to remove stored Kiro credentials. It does not remove an environment-provided `KIRO_API_KEY`.

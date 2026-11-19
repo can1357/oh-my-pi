@@ -128,14 +128,16 @@ export function parseKiroUsage(payload: unknown, fetchedAt = Date.now()): UsageR
 		bonuses.push(grantLimit("bonus", bonuses.length, label, used, limit, parsePositiveTimestamp(entry.expiresAt)));
 	}
 
-	// Purchased credits. `addOnMetadata.addOns` and the legacy `overageCredits`
-	// list project the same purchases, so only one of them is read.
+	// The two lists project the same purchases. Use the legacy list when the
+	// current one is missing or empty; never combine them.
 	const addOnMetadata = isRecord(credit.addOnMetadata) ? credit.addOnMetadata : undefined;
-	const purchases = Array.isArray(addOnMetadata?.addOns)
-		? addOnMetadata.addOns
-		: Array.isArray(credit.overageCredits)
-			? credit.overageCredits
-			: [];
+	const currentPurchases = addOnMetadata?.addOns;
+	const purchases =
+		Array.isArray(currentPurchases) && currentPurchases.length > 0
+			? currentPurchases
+			: Array.isArray(credit.overageCredits)
+				? credit.overageCredits
+				: [];
 	const addOns: UsageLimit[] = [];
 	for (const entry of purchases) {
 		if (!isRecord(entry)) continue;
