@@ -834,6 +834,28 @@ mod tests {
 		}
 	}
 
+	/// How long `wait_until_dead` gives the worker to notice that the terminal
+	/// is gone: far longer than a late-scheduled worker takes.
+	const DEATH_WAIT: Duration = Duration::from_secs(30);
+
+	/// Polls until the writer is dead, or fails the test after `DEATH_WAIT`.
+	/// Unlike the other waits, this one has a deadline: a writer that misses
+	/// the hangup is not slow, it never gets there, and the test then fails by
+	/// name instead of holding the runner until its timeout. Under gVisor a
+	/// write to the slave still succeeds after the master closes and poll
+	/// reports no hangup, so there this test always fails.
+	fn wait_until_dead(writer: &TtyWriter) {
+		let deadline = Instant::now() + DEATH_WAIT;
+		while !writer.dead() {
+			assert!(
+				Instant::now() < deadline,
+				"the writer was never marked dead after the PTY's master closed (waited \
+				 {DEATH_WAIT:?})"
+			);
+			std::thread::sleep(Duration::from_millis(1));
+		}
+	}
+
 	fn read_available(fd: i32, output: &mut Vec<u8>) {
 		let mut buf = [0u8; 16 * 1024];
 		loop {
@@ -1012,7 +1034,7 @@ mod tests {
 		let (mut writer, notifications) = pty.writer(u32::MAX);
 		drop(pty.master);
 		push(&writer, &[b'x' as u16]);
-		wait_until(|| writer.dead());
+		wait_until_dead(&writer);
 		assert_eq!(writer.pending(), 0.0);
 		assert!(!writer.flush_sync(100));
 		// Dead writes must not read the JS string or resurrect the queue.
