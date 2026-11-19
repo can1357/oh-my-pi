@@ -4,6 +4,7 @@
 use std::{
 	collections::{HashMap, HashSet},
 	fmt::NumBuffer,
+	iter::Peekable,
 	sync::Arc,
 	task::{Context, Poll},
 };
@@ -32,7 +33,7 @@ use crate::bash::{
 	mem::{self, Capture},
 	pattern::PatOpts,
 	store::{Attrs, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, TrapKey},
-	syntax::{CompleteCommand, Features, ParseError, ParseErrorKind, Parser, Pos, Resume},
+	syntax::{AliasLookup, CompleteCommand, Features, ParseError, ParseErrorKind, Parser, Pos, Resume},
 	zshopt::ZshOpt,
 };
 
@@ -427,7 +428,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 					}
 				} else if vp.parent.is_some() && in_function_scope(k, cx, vp) {
 					let unrun = top_frame(vp).pc + 1;
-					exit_shell(k, vp, cx, status, unrun, None);
+					exit_shell(k, vp, cx, status, TopCut::At(unrun), None);
 				} else {
 					let line = line_of(vp, op.node);
 					let diag =
@@ -447,12 +448,12 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 					.frames
 					.iter()
 					.any(|f| matches!(f.kind, FrameKind::Function { .. }));
-				capture_exit_report(k, vp, cx, status, unrun, cause, cleanup_runs);
+				capture_exit_report(k, vp, cx, status, TopCut::At(unrun), cause, cleanup_runs);
 				zsh_exit(k, vp, cx, status);
 			},
 			Flow::Exit { status, cause } => {
 				let unrun = top_frame(vp).pc + 1;
-				exit_shell(k, vp, cx, status, unrun, cause);
+				exit_shell(k, vp, cx, status, TopCut::At(unrun), cause);
 			},
 			Flow::Discard(status) if unit.mode.dialect() == Dialect::Zsh => {
 				zsh_discard(k, vp, cx, status);
@@ -497,14 +498,14 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				if !armed_errexit {
 					// ERR_RETURN has already committed the run to end, even
 					// if its trap later invokes `exit` during cleanup.
-					capture_exit_report(k, vp, cx, vp.status, 0, None, false);
+					capture_exit_report(k, vp, cx, vp.status, TopCut::At(0), None, false);
 				}
 			}
 		} else if errexit {
 			let status = vp.status;
 			// `pc` advanced past the failed op already: its continuation is here.
 			let unrun = top_frame(vp).pc;
-			exit_shell(k, vp, cx, status, unrun, armed_errexit.then_some(ExitCause::Exit));
+			exit_shell(k, vp, cx, status, TopCut::At(unrun), armed_errexit.then_some(ExitCause::Exit));
 		} else if errreturn_failed && unit.mode.dialect() == Dialect::Zsh && zsh_errreturn(k, cx, vp)
 		{
 			// zsh `ERR_RETURN`: a failed command returns from the function
@@ -544,10 +545,16 @@ fn zsh_return_flow(
 			set_trap_line(vp, line_of(vp, op.node));
 			mark_trap_exit(vp);
 		} else {
-			{
-				let unrun = top_frame(vp).pc + 1;
-				exit_shell(k, vp, cx, status, unrun, ExitCause::Exit);
-			}
+			// The return already committed its frame to unwind: its own
+			// suffix is abandoned, and attribution resumes in the caller.
+			// A top-level `return` (no function or sourced file above)
+			// ends the script itself: like `exit`, its suffix is unrun.
+			let top = if target.is_some() {
+				TopCut::ReturnUnwind(status)
+			} else {
+				TopCut::At(top_frame(vp).pc + 1)
+			};
+			exit_shell(k, vp, cx, status, top, ExitCause::Exit);
 		}
 	} else if run_always(k, vp, cx, target.unwrap_or(0), TryEnd::Return(status)) {
 		// The always-list runs first; it resumes the return.
@@ -580,7 +587,7 @@ fn zsh_return_flow(
 		// zsh `bin_break`: `return` outside a function or `.` file leaves
 		// a non-interactive shell (`zexit`), without explicit exit/errexit.
 		let unrun = top_frame(vp).pc + 1;
-		exit_shell(k, vp, cx, status, unrun, None);
+		exit_shell(k, vp, cx, status, TopCut::At(unrun), None);
 	}
 }
 
@@ -640,26 +647,157 @@ fn starts_command(unit: &Unit, op: Op) -> bool {
 
 /// Whether unread script bytes hold another command. Alias text precedes
 /// source text, even when a comment or line continuation spans that boundary.
-/// Match the lexer: only space, tab, newline and escaped newline are trivia.
-fn script_has_command(src: impl Iterator<Item = u8>) -> bool {
-	let mut bytes = src.peekable();
-	while let Some(b) = bytes.next() {
-		match b {
-			b'#' => {
-				for b in bytes.by_ref() {
-					if b == b'\n' {
-						break;
-					}
-				}
-			},
-			b' ' | 0x09 | b'\n' => {},
-			b'\\' if bytes.peek() == Some(&b'\n') => {
-				bytes.next();
-			},
-			_ => return true,
-		}
+/// Match the lexer: only space, tab, newline and escaped newline are trivia,
+/// and a command-position word consults the alias table like the lexer's
+/// `alias_expand_token` — an alias whose expansion holds no command (empty,
+/// comment-only, chained to one) leaves nothing to run, while a quoted or
+/// escaped word, an unknown word, or any other byte is still input. `None`
+/// (expansion off) reads every word literally.
+fn script_has_command(src: impl Iterator<Item = u8>, aliases: Option<&dyn AliasLookup>) -> bool {
+	Source { src: src.peekable() }.holds_command(aliases, &mut Vec::new(), false)
+}
+
+/// A byte that ends a word: blanks, newlines and the shell's
+/// metacharacters, plus quote and escape starts. `#` only starts a comment
+/// at a word start, so it is not one.
+fn ends_word(b: u8) -> bool {
+	matches!(
+		b,
+		b' ' | 0x09 | b'\n' | b';' | b'|' | b'&' | b'(' | b')' | b'<' | b'>' | b'\'' | b'"'
+			| b'`' | b'\\'
+	)
+}
+
+/// The unread stream the exit walk judges: an alias's replacement text
+/// precedes the source text that followed its name, so both flow through
+/// one cursor.
+struct Source<S: Iterator<Item = u8>> {
+	src: Peekable<S>,
+}
+
+/// The replacement text for `word` when it names an alias that may expand
+/// now: unknown to the table, already in the active chain, or a chain
+/// deeper than nested expansions ever read all count as none.
+fn expansion<'a>(
+	aliases: &'a dyn AliasLookup,
+	word: &[u8],
+	chain: &[Vec<u8>],
+) -> Option<&'a [u8]> {
+	if chain.len() >= 32 || chain.iter().any(|name| name == word) {
+		return None;
 	}
-	false
+	aliases.alias(word)
+}
+
+impl<S: Iterator<Item = u8>> Source<S> {
+	fn next(&mut self) -> Option<u8> {
+		self.src.next()
+	}
+
+	fn peek(&mut self) -> Option<u8> {
+		self.src.peek().copied()
+	}
+
+	/// Whether a command word remains. `chain` holds the alias names whose
+	/// expansions are being read (bash's in-use marks: a repeated name stays
+	/// literal instead of looping); `comment` marks a comment left open by a
+	/// pending expansion that is still swallowing bytes.
+	fn holds_command(
+		&mut self,
+		aliases: Option<&dyn AliasLookup>,
+		chain: &mut Vec<Vec<u8>>,
+		mut comment: bool,
+	) -> bool {
+		while let Some(b) = self.next() {
+			if comment {
+				if b == b'\n' {
+					comment = false;
+				}
+				continue;
+			}
+			match b {
+				b'#' => comment = true,
+				b' ' | 0x09 | b'\n' => {},
+				b'\\' if self.peek() == Some(b'\n') => {
+					self.next();
+				},
+				b'\'' | b'"' | b'`' | b'\\' => return true,
+				first => {
+					let Some(aliases) = aliases else {
+						return true;
+					};
+					let mut word = vec![first];
+					while let Some(b) = self.peek().filter(|b| !ends_word(*b)) {
+						word.push(b);
+						self.next();
+					}
+					if let Some(value) = expansion(aliases, &word, chain) {
+						chain.push(word);
+						let holds = self.holds_expansion(value, aliases, chain);
+						chain.pop();
+						return holds;
+					}
+					return true;
+				},
+			}
+		}
+		false
+	}
+
+	/// Whether an alias's replacement text — then the rest of the stream —
+	/// holds a command word. A comment left open at the end of the
+	/// replacement keeps swallowing the following source, and a trailing
+	/// backslash escapes the first source byte, like the lexer's alias text
+	/// that precedes it.
+	fn holds_expansion(
+		&mut self,
+		value: &[u8],
+		aliases: &dyn AliasLookup,
+		chain: &mut Vec<Vec<u8>>,
+	) -> bool {
+		let mut i = 0;
+		let mut comment = false;
+		let mut escaped_end = false;
+		while i < value.len() {
+			let b = value[i];
+			i += 1;
+			if comment {
+				if b == b'\n' {
+					comment = false;
+				}
+				continue;
+			}
+			match b {
+				b'#' => comment = true,
+				b' ' | 0x09 | b'\n' => {},
+				b'\\' if value.get(i) == Some(&b'\n') => i += 1,
+				b'\\' if i == value.len() => escaped_end = true,
+				b'\'' | b'"' | b'`' | b'\\' => return true,
+				_ => {
+					let start = i - 1;
+					while i < value.len() && !ends_word(value[i]) {
+						i += 1;
+					}
+					let word = &value[start..i];
+					if let Some(next) = expansion(aliases, word, chain) {
+						chain.push(word.to_vec());
+						let holds = self.holds_expansion(next, aliases, chain);
+						chain.pop();
+						return holds;
+					}
+					return true;
+				},
+			}
+		}
+		if escaped_end {
+			return match self.next() {
+				None => false,
+				Some(b'\n') => self.holds_command(Some(aliases), chain, false),
+				Some(_) => true,
+			};
+		}
+		self.holds_command(Some(aliases), chain, comment)
+	}
 }
 
 /// Tri-state continuation status for the unrun-input walk. Branches test
@@ -953,14 +1091,24 @@ fn frame_continuation(
 	FrameExit::Exits(outcomes)
 }
 
+/// The top frame's resume point for the exit walk: at an op index, or past
+/// a `return` that already committed the frame to unwind — the walk then
+/// enters as the return transfer at the frame's boundary, never inside its
+/// abandoned suffix, and resumes in the caller.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum TopCut {
+	At(u32),
+	ReturnUnwind(i32),
+}
+
 /// Whether `exit`/`set -e` fired with commands still left to run: any frame
 /// (its own continuation first, then whatever resumes below it) has a
 /// command-starting op still ahead of it, or — for a script frame, which
 /// parses its source one command at a time — unparsed source that holds
-/// another command. `top_from` is the op index of the top frame's first
-/// unrun op: callers whose `pc` still sits on the op that triggered the
-/// exit pass `pc + 1`; callers running after the dispatch loop advanced `pc`
-/// (the errexit check) pass `pc`. Lower frames resume after the call op
+/// another command. `TopCut::At` carries the op index of the top frame's
+/// first unrun op: callers whose `pc` still sits on the op that triggered
+/// the exit pass `pc + 1`; callers running after the dispatch loop advanced
+/// `pc` (the errexit check) pass `pc`. Lower frames resume after the call op
 /// that led here, so their scan starts at `pc + 1`. A trailing `exit` at
 /// the end of the script's input has nothing ahead and ended the run
 /// exactly where the script's end would have; loops stay in their frame,
@@ -968,13 +1116,25 @@ fn frame_continuation(
 /// command follows the loop (the loop-back jump is not a command start).
 fn exit_cut_short(
 	vp: &Vproc,
-	top_from: u32,
+	top: TopCut,
 	status: i32,
 	cleanup_runs: bool,
 	options: &[super::exit_options::WalkOptions],
+	aliases: Option<&dyn AliasLookup>,
 	mut child_status: impl FnMut(Vpid) -> Option<i32>,
 ) -> bool {
-	let initial = WalkEnd { status: WalkStatus::of(status), transfer: None };
+	let (top_from, initial) = match top {
+		TopCut::At(from) => {
+			(from, WalkEnd { status: WalkStatus::of(status), transfer: None })
+		},
+		TopCut::ReturnUnwind(ret) => (
+			0,
+			WalkEnd {
+				status: WalkStatus::of(status),
+				transfer: Some(WalkTransfer::Return(ret)),
+			},
+		),
+	};
 	let mut states = vec![(vp.frames.len(), initial, false)];
 	let mut visited = HashSet::new();
 	while let Some((count, mut end, resume_at_pc)) = states.pop() {
@@ -1063,7 +1223,10 @@ fn exit_cut_short(
 					.as_deref()
 					.and_then(|a| a.pending.as_ref())
 					.map_or(&[][..], |p| p.0.as_slice());
-				if script_has_command(pending.iter().chain(src[pos.0 as usize..].iter()).copied()) {
+				if script_has_command(
+					pending.iter().chain(src[pos.0 as usize..].iter()).copied(),
+					aliases,
+				) {
 					return true;
 				}
 			}
@@ -1158,7 +1321,7 @@ pub(super) fn capture_exit_report(
 	vp: &Vproc,
 	cx: &mut Cx<'_>,
 	status: i32,
-	top_unrun: u32,
+	top: TopCut,
 	cause: impl Into<Option<ExitCause>>,
 	cleanup_runs: bool,
 ) {
@@ -1173,23 +1336,36 @@ pub(super) fn capture_exit_report(
 				k.fail(err);
 				Vec::new()
 			});
-			exit_cut_short(vp, top_unrun, status, cleanup_runs, &options, |vpid| {
-				k.proc_state(cx.store, vpid)
-					.and_then(|state| state.exited())
-			})
+			let aliases = builtins::alias_table(k, cx, vp).unwrap_or_else(|err| {
+				k.fail(err);
+				None
+			});
+			exit_cut_short(
+				vp,
+				top,
+				status,
+				cleanup_runs,
+				&options,
+				aliases.as_ref().map(|a| a as &dyn AliasLookup),
+				|vpid| {
+					k.proc_state(cx.store, vpid)
+						.and_then(|state| state.exited())
+				},
+			)
 		};
 	}
 }
 
 /// Leave the shell with `status`: unwind frames and run existing EXIT cleanup.
-/// `top_unrun` is `pc + 1` at a terminating op, or `pc` after dispatch
+/// `top` is the top frame's resume point for the attribution walk
+/// ([`TopCut`]): `pc + 1` at a terminating op, or `pc` after dispatch
 /// advances.
 pub(super) fn exit_shell(
 	k: &mut Kernel,
 	vp: &mut Vproc,
 	cx: &mut Cx<'_>,
 	status: i32,
-	top_unrun: u32,
+	top: TopCut,
 	cause: impl Into<Option<ExitCause>>,
 ) {
 	// zsh `zexit` while its hooks run: the hook calls end, the status is the
@@ -1209,7 +1385,7 @@ pub(super) fn exit_shell(
 		&& let Some(run) = vp.runs.front()
 	{
 		k.exited = Some(run.id);
-		capture_exit_report(k, vp, cx, status, top_unrun, cause, false);
+		capture_exit_report(k, vp, cx, status, top, cause, false);
 	}
 	if !in_exit_trap
 		&& vp
@@ -1717,7 +1893,14 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		{
 			// The trap frame that ran `exit` is popped; the interrupted
 			// frame's `pc` is its first unrun op.
-			exit_shell(k, vp, cx, status, vp.frames.last().map_or(0, |f| f.pc), ExitCause::Exit);
+			exit_shell(
+				k,
+				vp,
+				cx,
+				status,
+				TopCut::At(vp.frames.last().map_or(0, |f| f.pc)),
+				ExitCause::Exit,
+			);
 		} else if func_trap && trap_status != 0 && vp.mode.dialect() == Dialect::Zsh {
 			// zsh `dotrapargs`: a function trap returning non-zero forces
 			// a return from the interrupted code, with the error flag set.
@@ -5782,7 +5965,7 @@ pub fn zsh_return(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) 
 		zsh_leave(k, vp, cx, i);
 	} else {
 		let unrun = top_frame(vp).pc + 1;
-		exit_shell(k, vp, cx, status, unrun, None);
+		exit_shell(k, vp, cx, status, TopCut::At(unrun), None);
 	}
 }
 
@@ -5956,7 +6139,7 @@ fn zsh_exit(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		}
 		{
 			let unrun = top_frame(vp).pc + 1;
-			exit_shell(k, vp, cx, status, unrun, ExitCause::Exit);
+			exit_shell(k, vp, cx, status, TopCut::At(unrun), ExitCause::Exit);
 		}
 		return;
 	}
@@ -6050,7 +6233,7 @@ fn zsh_discard(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 	} else {
 		unwind(&mut k.root, cx.store, vp, 0);
 		// Every frame is gone: nothing is left to scan.
-		exit_shell(k, vp, cx, status, 0, ExitCause::PosixFatal);
+		exit_shell(k, vp, cx, status, TopCut::At(0), ExitCause::PosixFatal);
 	}
 }
 
@@ -6195,7 +6378,11 @@ mod tests {
 						zsh:      true,
 						autoload: false,
 					}));
-				assert_eq!(exit_cut_short(&vp, 1, 0, false, &[], |_| None), expected, "{operation}");
+				assert_eq!(
+					exit_cut_short(&vp, TopCut::At(1), 0, false, &[], None, |_| None),
+					expected,
+					"{operation}"
+				);
 			}
 		}
 	}
@@ -6213,7 +6400,7 @@ mod tests {
 			("\\#literal", "", true),
 		] {
 			assert_eq!(
-				script_has_command(alias.bytes().chain(source.bytes())),
+				script_has_command(alias.bytes().chain(source.bytes()), None),
 				expected,
 				"alias={alias:?}, source={source:?}"
 			);
@@ -6260,7 +6447,7 @@ mod tests {
 							}));
 					}
 					assert_eq!(
-						exit_cut_short(&vp, 1, 1 - kept, true, &[], |_| None),
+						exit_cut_short(&vp, TopCut::At(1), 1 - kept, true, &[], None, |_| None),
 						kept == 0,
 						"{key:?}, kept={kept}, text={text}"
 					);

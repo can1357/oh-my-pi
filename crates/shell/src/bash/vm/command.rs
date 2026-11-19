@@ -315,7 +315,7 @@ pub fn exec(
 									vp,
 									cx,
 									1,
-									unrun,
+									exec::TopCut::At(unrun),
 									exec::ExitCause::PosixFatal,
 									false,
 								);
@@ -4043,7 +4043,7 @@ fn settle_builtin(
 			vp,
 			cx,
 			outcome.status,
-			unrun,
+			exec::TopCut::At(unrun),
 			exec::ExitCause::PosixFatal,
 			false,
 		);

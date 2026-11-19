@@ -2317,7 +2317,7 @@ impl Shell {
 		p.blocked = None;
 		p.stopped = false;
 		let top_unrun = p.frames.last().map_or(0, |frame| frame.pc);
-		exec::exit_shell(&mut self.k, p, cx, status, top_unrun, exec::ExitCause::FatalSignal);
+		exec::exit_shell(&mut self.k, p, cx, status, exec::TopCut::At(top_unrun), exec::ExitCause::FatalSignal);
 		true
 	}
 

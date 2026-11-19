@@ -641,3 +641,99 @@ async fn exit_classification_counts_cleanup_only_when_it_is_left_unrun() {
 		}
 	}
 }
+
+/// Matrix: the unread-source scan must apply alias expansion to raw script
+/// words (F2). An alias whose value holds no command leaves nothing to run
+/// regardless of layout; a command-valued alias (or a plain word, a quoted
+/// word, or expansion being off) still counts as submitted input.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_alias_expanded_unread_source_scan() {
+	let _guard = shell_test_lock().lock().await;
+	for (name, command, expected) in [
+		("empty-newline", "shopt -s expand_aliases\nalias noop=''\nexit 0\nnoop", false),
+		("empty-semi", "shopt -s expand_aliases\nalias noop=''\nexit 0; noop", false),
+		("comment-newline", "shopt -s expand_aliases\nalias noop='# none'\nexit 0\nnoop", false),
+		("comment-semi", "shopt -s expand_aliases\nalias noop='# none'\nexit 0; noop", false),
+		("command-newline", "shopt -s expand_aliases\nalias noop=:\nexit 0\nnoop", true),
+		("command-semi", "shopt -s expand_aliases\nalias noop=:\nexit 0; noop", true),
+		("plain-word-newline", "shopt -s expand_aliases\nexit 0\nnosuchcmd", true),
+		("expansion-off", "shopt -u expand_aliases\nalias noop=''\nexit 0\nnoop", true),
+		("quoted-word", "shopt -s expand_aliases\nalias noop=''\nexit 0\n'noop'", true),
+		("escaped-word", "shopt -s expand_aliases\nalias noop=''\nexit 0\n\\noop", true),
+		("chain-empty", "shopt -s expand_aliases\nalias a=b\nalias b=''\nexit 0\na", false),
+		("chain-command", "shopt -s expand_aliases\nalias a=b\nalias b=:\nexit 0\na", true),
+		("self-alias", "shopt -s expand_aliases\nalias self='self'\nexit 0\nself", true),
+		("comment-then-next-line", "shopt -s expand_aliases\nalias noted='# n'\nexit 0\nnoted x\n:", true),
+		("zsh-empty", "emulate zsh\nalias noop=''\nexit 0\nnoop", false),
+	] {
+		let shell = Shell::new(None);
+		let (tx, rx) = flume::unbounded();
+		let result = shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await
+			.expect("shell run");
+		let output: String = rx.try_iter().collect();
+		assert!(output.is_empty(), "{name}: suffix ran: {command}");
+		assert_eq!(
+			result.ended_by_exit, expected,
+			"{name} (exit {:?}): {command}",
+			result.exit_code
+		);
+	}
+}
+
+/// Matrix: errexit after a function `return` attributes from the caller's
+/// continuation, not the function's already-abandoned suffix (F3). The
+/// return committed the frame to unwind; only input that would resume after
+/// the call counts. BASH twins pin the shared expectation.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_zsh_errexit_after_return_boundary() {
+	let _guard = shell_test_lock().lock().await;
+	for (name, dialect, command, expected_exit, expected_output, expected) in [
+		("fn-suffix", "zsh", "emulate zsh\nset -e; f() { return 1; printf unreachable; }; f", 1, "", false),
+		("caller-suffix", "zsh", "emulate zsh\nset -e; f() { return 1; }; f; printf live", 1, "", true),
+		(
+			"both-suffixes",
+			"zsh",
+			"emulate zsh\nset -e; f() { return 1; printf unreachable; }; f; printf live",
+			1,
+			"",
+			true,
+		),
+		("no-suffix", "zsh", "emulate zsh\nset -e; f() { return 1; }; f", 1, "", false),
+		("success-return", "zsh", "emulate zsh\nset -e; f() { return 0; printf unreachable; }; f; printf live", 0, "live", false),
+		("errexit-off", "zsh", "emulate zsh\nset +e; f() { return 1; printf unreachable; }; f", 1, "", false),
+		("bash-fn-suffix", "bash", "set -e; f() { return 1; printf unreachable; }; f", 1, "", false),
+		("bash-caller-suffix", "bash", "set -e; f() { return 1; printf unreachable; }; f; printf live", 1, "", true),
+		("bash-no-suffix", "bash", "set -e; f() { return 1; }; f", 1, "", false),
+		(
+			"zsh-return-in-loop",
+			"zsh",
+			"emulate zsh\nset -e; f() { for i in 1; do return 1; printf unreachable; done; }; f; printf live",
+			1,
+			"",
+			true,
+		),
+	] {
+		let shell = Shell::new(None);
+		let (tx, rx) = flume::unbounded();
+		let result = shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await
+			.expect("shell run");
+		let output: String = rx.try_iter().collect();
+		assert_eq!(output, expected_output, "{name}: {command}");
+		assert_eq!(result.exit_code, Some(expected_exit), "{name}: {command}");
+		assert_eq!(result.ended_by_exit, expected, "{dialect} {name}: {command}");
+	}
+}
