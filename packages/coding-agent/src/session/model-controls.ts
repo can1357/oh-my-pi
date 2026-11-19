@@ -88,7 +88,7 @@ export function resolveRoleModelCycle(
 	for (const role of roleOrder) {
 		const roleModelStr =
 			role === "default"
-				? (settings.getModelRole("default") ?? `${currentModel.provider}/${currentModel.id}`)
+				? (settings.getModelRole("default") ?? formatModelStringWithRouting(currentModel))
 				: settings.getModelRole(role);
 		if (!roleModelStr) continue;
 		const resolved = resolveModelRoleValue(roleModelStr, availableModels, { settings, matchPreferences });
@@ -108,8 +108,13 @@ export function resolveRoleModelCycle(
 	// pointing at a model the session no longer runs; cycling from that
 	// stale slot lands on the wrong neighbor and reads as a skipped entry.
 	let currentIndex = lastRole ? models.findIndex(entry => entry.role === lastRole) : -1;
-	if (currentIndex !== -1 && !modelsAreEqual(models[currentIndex].model, currentModel)) currentIndex = -1;
-	if (currentIndex === -1) currentIndex = models.findIndex(entry => modelsAreEqual(entry.model, currentModel));
+	const currentSelector = formatModelStringWithRouting(currentModel);
+	if (currentIndex !== -1 && formatModelStringWithRouting(models[currentIndex].model) !== currentSelector) {
+		currentIndex = -1;
+	}
+	if (currentIndex === -1) {
+		currentIndex = models.findIndex(entry => formatModelStringWithRouting(entry.model) === currentSelector);
+	}
 	if (currentIndex === -1) currentIndex = 0;
 	return { models, currentIndex };
 }
@@ -305,7 +310,7 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(targetModel);
-		this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
+		this.#host.sessionManager.appendModelChange(formatModelStringWithRouting(targetModel), role);
 		if (options?.persist) {
 			this.#host.settings.setModelRole(
 				role,
@@ -353,10 +358,12 @@ export class ModelControls {
 		await this.#host.setModelWithProviderSessionReset(targetModel, selection);
 		// Identity, not object equality: the agent's resolver and metadata rebinds swap in refitted rows of the
 		// same model. Only a different model means another selection replaced this one during reconciliation.
-		const landed = modelsAreEqual(this.#model, targetModel);
+		const landed =
+			this.#model !== undefined &&
+			formatModelStringWithRouting(this.#model) === formatModelStringWithRouting(targetModel);
 		if (landed) {
 			this.#host.sessionManager.appendModelChange(
-				`${targetModel.provider}/${targetModel.id}`,
+				formatModelStringWithRouting(targetModel),
 				options?.prewalk
 					? PREWALK_MODEL_CHANGE_ROLE
 					: options?.ephemeral
@@ -473,7 +480,8 @@ export class ModelControls {
 		if (scopedModels.length <= 1) return undefined;
 
 		const currentModel = this.#model;
-		let currentIndex = scopedModels.findIndex(sm => modelsAreEqual(sm.model, currentModel));
+		const currentSelector = currentModel && formatModelStringWithRouting(currentModel);
+		let currentIndex = scopedModels.findIndex(sm => formatModelStringWithRouting(sm.model) === currentSelector);
 
 		if (currentIndex === -1) currentIndex = 0;
 		const len = scopedModels.length;
@@ -484,7 +492,7 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(next.model);
-		this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
+		this.#host.sessionManager.appendModelChange(formatModelStringWithRouting(next.model));
 		this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
 
 		// Apply the scoped model's configured thinking level, preserving auto.
@@ -515,7 +523,7 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(nextModel);
-		this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
+		this.#host.sessionManager.appendModelChange(formatModelStringWithRouting(nextModel));
 		this.#host.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
 		// Re-apply the current thinking level (or auto) for the newly selected model
 		this.#reapplyThinkingLevel();

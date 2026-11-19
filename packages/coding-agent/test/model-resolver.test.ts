@@ -28,11 +28,14 @@ import {
 	resolveModelRoleValue,
 	resolveModelScope,
 	resolveRoleChain,
+	resolveSessionModelSelector,
 	rolePriorityDefaults,
 	resolveProviderModelReference,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 
 // Mock models for testing
 const mockModels: Model<"anthropic-messages">[] = [
@@ -1540,6 +1543,130 @@ describe("resolveExactModelIdentity", () => {
 		).toBeUndefined();
 	});
 });
+
+describe("resolveSessionModelSelector", () => {
+	const registryFor = (models: Model<Api>[], authenticated = true) =>
+		({
+			find: (provider: string, id: string) => resolveProviderModelReference(provider, id, models),
+			hasConfiguredAuth: () => authenticated,
+		}) as unknown as Parameters<typeof resolveSessionModelSelector>[0];
+
+	test.each([
+		["openrouter/z-ai/glm-4.7", "openrouter/z-ai/glm-4.7", undefined],
+		["openrouter/z-ai/glm-4.7@cerebras", "openrouter/z-ai/glm-4.7@cerebras", undefined],
+		["openrouter/z-ai/glm-4.7@cerebras:high", "openrouter/z-ai/glm-4.7@cerebras", Effort.High],
+	] as const)("restores saved selector %s without losing routing or thinking", (selector, expected, thinking) => {
+		const restored = resolveSessionModelSelector(registryFor(allModels), selector);
+		expect(restored?.model && formatModelStringWithRouting(restored.model)).toBe(expected);
+		expect(restored?.thinkingLevel).toBe(thinking);
+	});
+
+	test("restores the wire model and pin separately for an OpenRouter colon variant", async () => {
+		const auth = await AuthStorage.create(":memory:");
+		try {
+			auth.keys.setRuntime("openrouter", "test-key");
+			const registry = new ModelRegistry(auth, undefined, {
+				settings: Settings.isolated(),
+				ignoreLocalModelConfig: true,
+				cacheDbPath: ":memory:",
+			});
+			const selected = parseModelPattern(
+				"openrouter/qwen/qwen3-coder@cerebras:exacto",
+				registry.getProviderModels("openrouter"),
+			);
+			const saved = formatModelStringWithRouting(selected.model!);
+			const restored = resolveSessionModelSelector(registry, `${saved}:high`);
+			expect(restored?.model.id).toBe("qwen/qwen3-coder:exacto");
+			expect(restored?.model.compat).toMatchObject({ openRouterRouting: { only: ["cerebras"] } });
+			expect(restored?.thinkingLevel).toBe(Effort.High);
+		} finally {
+			auth.close();
+		}
+	});
+
+	test("preserves configured gateway caching and order when restoring the same pin", () => {
+		const caching = { caching: "auto", cacheTtl: "1h", cacheAnchorItems: 2 } as const;
+		const order = ["anthropic"];
+		const model = buildModel({
+			...mockOpenRouterModels[2],
+			api: "openai-completions",
+			provider: "vercel-ai-gateway",
+			baseUrl: "https://ai-gateway.vercel.sh/v1",
+			compat: { vercelGatewayRouting: { only: ["anthropic"], order, ...caching } },
+		});
+		const registry = registryFor([model]);
+		const restored = resolveSessionModelSelector(registry, `vercel-ai-gateway/${model.id}@anthropic`);
+		expect(restored?.model.compat).toMatchObject({
+			vercelGatewayRouting: { only: ["anthropic"], order, ...caching },
+		});
+	});
+
+	test("does not strip a literal thinking suffix before a saved pin", () => {
+		const model = { ...mockOpenRouterModels[2], id: "test/model:max" };
+		const restored = resolveSessionModelSelector(
+			registryFor([{ ...model, id: "test/model" }, model]),
+			`openrouter/${model.id}@cerebras:high`,
+		);
+		expect(restored?.model.id).toBe(model.id);
+		expect(restored?.model.compat).toMatchObject({ openRouterRouting: { only: ["cerebras"] } });
+		expect(restored?.thinkingLevel).toBe(Effort.High);
+	});
+
+	test("restores a legacy pin before :max when only the literal :max ID exists", () => {
+		const model = { ...mockOpenRouterModels[2], id: "test/model:max" };
+		const restored = resolveSessionModelSelector(registryFor([model]), "openrouter/test/model@cerebras:max");
+		expect(restored?.model.id).toBe(model.id);
+		expect(restored?.model.compat).toMatchObject({ openRouterRouting: { only: ["cerebras"] } });
+		expect(restored?.thinkingLevel).toBeUndefined();
+	});
+
+	test.each([
+		[":free", ""],
+		["-20260101", ""],
+		[":free", "@cerebras"],
+	])("round-trips a variant of a literal OpenRouter @ ID (%s%s)", (variant, pin) => {
+		const base = mockOpenRouterModels[2];
+		const literal = { ...base, id: `${base.id}@preview` };
+		const models = [base, literal];
+		const wireId = `${literal.id}${variant}`;
+		const selector = `openrouter/${wireId}${pin}`;
+		const selected = parseModelPattern(selector, models).model!;
+		const saved = formatModelStringWithRouting(selected);
+		const restored = resolveSessionModelSelector(registryFor(models), saved)?.model;
+
+		expect(selected.id).toBe(wireId);
+		expect(saved).toBe(selector);
+		expect(restored?.id).toBe(wireId);
+		expect(restored && formatModelStringWithRouting(restored)).toBe(selector);
+	});
+
+	test("prefers registered literal @ IDs and full spelling aliases over a route", () => {
+		const base = { ...mockOpenRouterModels[0], id: "test/model-5-1:exacto" };
+		const literal = { ...base, id: `${base.id}@cerebras` };
+		const registry = registryFor([base, literal]);
+
+		expect(resolveSessionModelSelector(registry, `openrouter/${literal.id}`)).toEqual({ model: literal });
+		expect(resolveSessionModelSelector(registry, "openrouter/test/model-5.1:exacto@cerebras")).toEqual({
+			model: literal,
+		});
+		expect(resolveSessionModelSelector(registry, `openrouter/${literal.id}:high`)).toEqual({
+			model: literal,
+			thinkingLevel: Effort.High,
+		});
+	});
+
+	test("rejects routed restore without configured auth", () => {
+		expect(
+			resolveSessionModelSelector(registryFor(allModels, false), "openrouter/z-ai/glm-4.7@cerebras:high"),
+		).toBeUndefined();
+	});
+
+	test("rejects an upstream suffix on a host without routing support", () => {
+		expect(
+			resolveSessionModelSelector(registryFor(allModels), "anthropic/claude-sonnet-4-5@cerebras:high"),
+		).toBeUndefined();
+	});
+});
 describe("resolveCliModel", () => {
 	const allModelsRegistry = { getAll: () => allModels, getAvailable: () => allModels };
 
@@ -2812,6 +2939,25 @@ describe("filterAvailableModelsByEnabledPatterns", () => {
 		const result = filterAvailableModelsByEnabledPatterns(openRouterModels, ["openrouter/qwen/qwen3-coder:exacto"]);
 		expect(result).toHaveLength(1);
 		expect(result[0].id).toBe("qwen/qwen3-coder:exacto");
+	});
+
+	test("keeps distinct upstream pins on the free wire ID in CLI scopes and enabled-model lists", async () => {
+		const base = { ...mockOpenRouterModels[2], id: "qwen/qwen3-coder" };
+		const free = { ...base, id: `${base.id}:free` };
+		const catalog = [free, base];
+		const cerebras = `openrouter/${free.id}@cerebras`;
+		const sambanova = `openrouter/${free.id}@sambanova`;
+		const patterns = [cerebras, sambanova, cerebras, `openrouter/${base.id}`];
+		const settings = Settings.isolated({ enabledModels: patterns });
+		const registry = { getAvailable: () => catalog };
+		const scoped = await resolveModelScope(patterns, registry);
+		for (const models of [
+			scoped.map(entry => entry.model),
+			await resolveAllowedModels(registry, settings),
+			filterAvailableModelsByEnabledPatterns(catalog, patterns),
+		]) {
+			expect(models.map(formatModelStringWithRouting)).toEqual([cerebras, sambanova, `openrouter/${base.id}`]);
+		}
 	});
 
 	test("matches bare OpenRouter-style model id with slash but no provider prefix", () => {
