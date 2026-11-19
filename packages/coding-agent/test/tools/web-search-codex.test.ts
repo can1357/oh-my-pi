@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { AuthStorage, type FetchImpl, type Model, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -466,6 +467,21 @@ describe("searchCodex model selection", () => {
 		expect(headers.get("authorization")).toBe("Bearer command-proxy-key");
 		expect(headers.has("chatgpt-account-id")).toBe(false);
 		expect(result.answer).toBe("Codex answer");
+	});
+
+	it.each([
+		{ level: undefined, reasoning: undefined },
+		{ level: ThinkingLevel.Off, reasoning: undefined },
+		{ level: ThinkingLevel.XHigh, reasoning: { effort: "xhigh" } },
+		// Below the model's `low…max` ladder: clamps up to its lowest tier, as chat does.
+		{ level: ThinkingLevel.Minimal, reasoning: { effort: "low" } },
+	])("maps the web role's $level thinking level to reasoning $reasoning (#19793)", async ({ level, reasoning }) => {
+		await searchCodex({
+			...makeSearchParams("role effort", mockCodexFetch("gpt-5.6-luna"), codexModel("gpt-5.6-luna")),
+			thinkingLevel: level,
+		});
+
+		expect(capturedRequest?.body?.reasoning).toEqual(reasoning);
 	});
 
 	it("keeps hosted web_search top-level for selected Responses-Lite catalog models (#7666)", async () => {

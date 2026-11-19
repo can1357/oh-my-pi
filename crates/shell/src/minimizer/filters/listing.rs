@@ -655,7 +655,7 @@ fn extract_single_path_arg(command: &str, program: &str) -> Option<String> {
 	let mut path: Option<String> = None;
 	for raw in command.split_whitespace() {
 		let token = raw.trim_matches(|ch| ch == '\'' || ch == '"');
-		let normalized = token.rsplit('/').next().unwrap_or(token);
+		let normalized = crate::minimizer::detect::program_name(token);
 		if !saw_program {
 			if normalized == program {
 				saw_program = true;

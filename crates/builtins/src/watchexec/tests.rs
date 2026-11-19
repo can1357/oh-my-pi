@@ -8,7 +8,7 @@ use std::{
 	ffi::OsString,
 	fs,
 	path::{Path, PathBuf},
-	time::{Duration, Instant},
+	time::Duration,
 };
 
 use clap::Parser as _;
@@ -348,7 +348,7 @@ fn project_origin_is_the_marked_directory_above_the_watched_paths() {
 
 #[cfg(unix)]
 mod running {
-	use std::collections::HashMap;
+	use std::{collections::HashMap, time::Instant};
 
 	use tokio_util::sync::CancellationToken;
 

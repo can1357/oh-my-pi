@@ -23,11 +23,9 @@ pub fn detect(command: &str) -> Option<CommandIdentity> {
 pub fn detect_tokens(tokens: &[String]) -> Option<CommandIdentity> {
 	let tokens = strip_launch_prefix(tokens)?;
 	let (program, rest) = tokens.split_first()?;
-	let normalized = normalize_program(program)?;
-	let is_docker_compose = program
-		.rsplit('/')
-		.next()
-		.is_some_and(|n| n.eq_ignore_ascii_case("docker-compose"));
+	let name = program_name(program);
+	let normalized = normalize_program(name)?;
+	let is_docker_compose = name.eq_ignore_ascii_case("docker-compose");
 	let subcommand = if is_docker_compose {
 		// docker-compose v1 flags that consume a value; skip them so the
 		// real action (up/down/ps/logs/etc.) is found, matching docker compose
@@ -119,8 +117,22 @@ fn is_env_assignment(token: &str) -> bool {
 		&& chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-fn normalize_program(program: &str) -> Option<String> {
-	let name = program.rsplit('/').next()?;
+/// The last component of `program`, as the filters name it. On Windows `\`
+/// separates components too and an `.exe` suffix is dropped:
+/// `"C:\Program Files\Git\cmd\git.exe"` and `git.exe` are both `git`.
+pub(crate) fn program_name(program: &str) -> &str {
+	if !cfg!(windows) {
+		return program.rsplit('/').next().unwrap_or(program);
+	}
+	let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+	name
+		.len()
+		.checked_sub(4)
+		.filter(|&stem| name.is_char_boundary(stem) && name[stem..].eq_ignore_ascii_case(".exe"))
+		.map_or(name, |stem| &name[..stem])
+}
+
+fn normalize_program(name: &str) -> Option<String> {
 	if name.is_empty() {
 		return None;
 	}
@@ -596,6 +608,21 @@ mod tests {
 		let command = detect("env FOO=1 /usr/bin/git status").expect("path command is detected");
 		assert_eq!(command.program, "git");
 		assert_eq!(command.subcommand.as_deref(), Some("status"));
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn normalizes_windows_executable_path() {
+		let command = detect(r#""C:\Program Files\Git\cmd\git.EXE" status"#)
+			.expect("windows path command is detected");
+		assert_eq!(command.program, "git");
+		assert_eq!(command.subcommand.as_deref(), Some("status"));
+		let compose = detect(r"C:\\bin\\docker-compose.exe -f a.yml up").expect("compose detected");
+		assert_eq!(compose.program, "docker");
+		assert_eq!(compose.subcommand.as_deref(), Some("up"));
+		let bare = detect("git.exe log").expect("bare .exe detected");
+		assert_eq!(bare.program, "git");
+		assert_eq!(detect(r"'C:\dir\' x"), None);
 	}
 
 	#[test]

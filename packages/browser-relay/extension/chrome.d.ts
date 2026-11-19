@@ -118,7 +118,9 @@ declare const chrome: {
 		onEvent: ChromeEvent<(source: ChromeDebuggerSession, method: string, params?: Record<string, unknown>) => void>;
 		onDetach: ChromeEvent<(source: ChromeDebuggerSession, reason: string) => void>;
 	};
-	downloads: {
+	// Optional: a browser that loaded the manifest before the `downloads` permission was added runs this
+	// script without the API, and the worker must survive that instead of dying in its top level.
+	downloads?: {
 		search(query: { id?: number }): Promise<ChromeDownloadItem[]>;
 		onCreated: ChromeEvent<(item: ChromeDownloadItem) => void>;
 		onChanged: ChromeEvent<(delta: { id: number; state?: { current: ChromeDownloadItem["state"] } }) => void>;
