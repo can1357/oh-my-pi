@@ -607,6 +607,79 @@ export default function(pi) {
 			},
 		});
 	}, 30_000);
+
+	it("routes a provider's login-warning acceptance to the host before any auth URL (#19523)", async () => {
+		await using temp = await TempDir.create("@rpc-login-warning-");
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				path.join(import.meta.dir, "..", "src", "cli.ts"),
+				"--mode",
+				"rpc",
+				"--provider",
+				"anthropic",
+				"--model",
+				"claude-sonnet-4-5",
+			],
+			{
+				cwd: temp.path(),
+				env: {
+					PATH: Bun.env.PATH,
+					HOME: temp.join("home"),
+					PI_CODING_AGENT_DIR: temp.join("agent"),
+					XDG_CONFIG_HOME: temp.join("config"),
+					XDG_DATA_HOME: temp.join("data"),
+					XDG_CACHE_HOME: temp.join("cache"),
+					CI: "true",
+					PI_NO_TITLE: "1",
+				},
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "pipe",
+				timeout: 20_000,
+			},
+		);
+		const stdout = new Response(child.stdout).body;
+		if (!stdout) throw new Error("RPC login fixture did not expose stdout");
+		const stderr = new Response(child.stderr).text();
+		const send = async (frame: object) => {
+			child.stdin.write(`${JSON.stringify(frame)}\n`);
+			await child.stdin.flush();
+		};
+		const inputTitles: string[] = [];
+		let loginResponse: unknown;
+		try {
+			// antigravity-cli declares `login-warning`; declining it must cancel before any login work starts.
+			await send({ type: "login", providerId: "antigravity-cli", id: "login" });
+			for await (const frame of readJsonl<unknown>(stdout)) {
+				if (!isRecord(frame)) continue;
+				if (frame.type === "extension_ui_request" && frame.method === "input") {
+					if (typeof frame.id !== "string" || typeof frame.title !== "string") {
+						throw new Error("RPC input request did not carry string id and title");
+					}
+					inputTitles.push(frame.title);
+					await send({ type: "extension_ui_response", id: frame.id, value: "no" });
+				} else if (frame.type === "response" && frame.id === "login") {
+					loginResponse = frame;
+					break;
+				}
+			}
+		} finally {
+			child.stdin.end();
+			child.kill();
+			await child.exited;
+		}
+
+		if (!loginResponse) throw new Error(`RPC login fixture did not finish: ${await stderr}`);
+		await stderr;
+		expect(inputTitles).toEqual([expect.stringContaining("use at your own risk")]);
+		expect(loginResponse).toMatchObject({
+			type: "response",
+			command: "login",
+			success: false,
+			error: "Login cancelled",
+		});
+	}, 30_000);
 });
 
 describe("RPC ask dialog", () => {

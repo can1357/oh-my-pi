@@ -3,7 +3,7 @@
  * and normalize line endings.
  *
  * Bun-native implementation of the former native `sanitizeText` (see
- * `crates/pi-natives/src/text.rs::sanitize_text`). JavaScript strings are
+ * `crates/natives/src/text.rs::sanitize_text`). JavaScript strings are
  * already UTF-16 code-unit arrays. `toWellFormed()` handles the uncommon
  * malformed path; when it changes the input, replacement characters are
  * dropped and the normalized result goes through the well-formed sanitizer.

@@ -2,11 +2,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { IsoBackendKind, VcsGitRepo, VcsWorktreeEntry } from "@oh-my-pi/pi-natives";
+import type { IsoBackendKind, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getWorktreeDir, hashPath, isEnoent, logger, slugify } from "@oh-my-pi/pi-utils";
+import { getWorktreeDir, hashPath, logger, slugify } from "@oh-my-pi/pi-utils";
 import { github } from "../utils/github";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
+import { resolveAvailableWorktreePath } from "../worktree/paths";
 import { withRepoLock } from "../utils/repo-lock";
 import type { ToolSession } from ".";
 import type { GhPrCheckoutSummary, GhToolDetails } from "@oh-my-pi/pi-tui/tools/github";
@@ -64,9 +65,6 @@ export function sanitizeRemoteName(value: string): string {
 	return sanitized.length > 0 ? `fork-${sanitized}` : "fork";
 }
 
-/** Maximum disambiguation suffixes we try before giving up on a worktree path. */
-export const WORKTREE_PATH_MAX_SUFFIX = 100;
-
 export function toLocalBranchRef(value: string): string {
 	return `refs/heads/${value}`;
 }
@@ -89,40 +87,6 @@ export async function requirePrimaryGitRepoRoot(cwd: string, signal?: AbortSigna
 	}
 
 	return primaryRepoRoot;
-}
-
-/**
- * Resolve a worktree path that is free of conflicts.
- *
- * Given a `basePath`, return either `basePath` itself or `${basePath}-2`,
- * `${basePath}-3`, … up to {@link WORKTREE_PATH_MAX_SUFFIX} — whichever is the
- * first variant that is **not** registered with git as another worktree and
- * **not** present on disk. The numeric tail salvages two rare cases that
- * would otherwise abort a checkout: stale leftover dirs from an interrupted
- * `git worktree add`, and the (vanishingly unlikely) `hashPath` collision
- * between two repos that happen to produce the same 7-hex digest.
- */
-export async function resolveAvailableWorktreePath(
-	basePath: string,
-	existingWorktrees: VcsWorktreeEntry[],
-): Promise<string> {
-	const registered = new Set(existingWorktrees.map(entry => path.resolve(entry.path)));
-	for (let attempt = 0; attempt < WORKTREE_PATH_MAX_SUFFIX; attempt += 1) {
-		const candidate = attempt === 0 ? basePath : `${basePath}-${attempt + 1}`;
-		const normalized = path.resolve(candidate);
-		if (registered.has(normalized)) continue;
-		try {
-			await fs.stat(normalized);
-		} catch (error) {
-			if (isEnoent(error)) {
-				return candidate;
-			}
-			throw error;
-		}
-	}
-	throw new ToolError(
-		`could not find an unused worktree path under ${basePath} (tried ${WORKTREE_PATH_MAX_SUFFIX} suffixes)`,
-	);
 }
 
 export function selectPrCloneUrl(originUrl: string | undefined, repo: Pick<GhRepoViewData, "url" | "sshUrl">): string {
@@ -551,6 +515,14 @@ export function outcomeToSummary(outcome: PrCheckoutOutcome): GhPrCheckoutSummar
 	};
 }
 
+/** The local branch `pr_checkout` made for `pr` (a number, `#N` or PR URL): `pr-N`, which its worktree holds. */
+function prCheckoutBranch(pr: string | string[] | undefined): string | undefined {
+	const [ref] = normalizePrIdentifierList(pr);
+	if (!ref) return undefined;
+	const number = /^#?(\d+)$/.exec(ref)?.[1] ?? parsePullRequestUrl(ref).prNumber;
+	return number === undefined ? undefined : `pr-${number}`;
+}
+
 export async function executePrPush(
 	session: ToolSession,
 	params: GithubInput,
@@ -558,7 +530,10 @@ export async function executePrPush(
 ): Promise<AgentToolResult<GhToolDetails>> {
 	const repoRoot = await requireGitRepoRoot(session.cwd, signal);
 	const repository = vcs.requireGit(repoRoot);
-	const localBranch = normalizeOptionalString(params.branch) ?? (await requireCurrentGitBranch(repoRoot, signal));
+	const localBranch =
+		normalizeOptionalString(params.branch) ??
+		prCheckoutBranch(params.pr) ??
+		(await requireCurrentGitBranch(repoRoot, signal));
 	const refExists = await repository.refExists(toLocalBranchRef(localBranch), signal);
 	if (!refExists) {
 		throw new ToolError(`local branch ${localBranch} does not exist`);

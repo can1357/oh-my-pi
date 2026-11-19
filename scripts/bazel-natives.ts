@@ -348,7 +348,7 @@ export async function verifyHostAddonLoads(
 /**
  * Every library a glibc addon may need: those the glibc 2.17 floor keeps out of
  * `libc.so.6`, minus the libm and libutil functions
- * crates/pi-natives/src/bundled_libc.rs links in.
+ * crates/natives/src/bundled_libc.rs links in.
  */
 export const GLIBC_ADDON_NEEDED: ReadonlySet<string> = new Set([
 	"libc.so.6",
@@ -358,7 +358,7 @@ export const GLIBC_ADDON_NEEDED: ReadonlySet<string> = new Set([
 	"ld-linux-aarch64.so.1",
 ]);
 
-/** The one symbol a Linux addon exports (`:exports_map` in crates/pi-natives/BUILD.bazel). */
+/** The one symbol a Linux addon exports (`:exports_map` in crates/natives/BUILD.bazel). */
 const LINUX_ADDON_EXPORT = "napi_register_module_v1";
 
 const SHT_DYNAMIC = 6;
@@ -449,14 +449,14 @@ export async function verifyLinuxAddon(file: string): Promise<void> {
 	if (exports.length > 0) {
 		problems.push(
 			`exports ${exports.length} symbols beside ${LINUX_ADDON_EXPORT} (${exports.slice(0, 3).join(", ")}, …): ` +
-				"the link did not apply :exports_map from crates/pi-natives/BUILD.bazel",
+				"the link did not apply :exports_map from crates/natives/BUILD.bazel",
 		);
 	}
 	const needed = image.needed.filter(library => !GLIBC_ADDON_NEEDED.has(library));
 	if (image.needed.includes("libc.so.6") && needed.length > 0) {
 		problems.push(
 			`needs ${needed.join(", ")}: define the functions it imports from there in ` +
-				"crates/pi-natives/src/bundled_libc.rs (`llvm-readelf --dyn-syms` lists them)",
+				"crates/natives/src/bundled_libc.rs (`llvm-readelf --dyn-syms` lists them)",
 		);
 	}
 	if (problems.length > 0) throw new Error(`built addon ${path.basename(file)} ${problems.join("; ")}`);
