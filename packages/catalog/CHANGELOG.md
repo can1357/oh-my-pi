@@ -4,7 +4,7 @@
 
 ### Added
 
-- Gemini 4 Neon on Google Antigravity now shows as one `gemini-4-neon` model whose thinking level (low, medium, high, xhigh) selects the matching `-low`/`-medium`/`-high`/`-xhigh` tier, like Gemini 4 Argon and Hydrogen
+- Gemini 4 Neon on Google Antigravity now shows as one `gemini-4-neon` model whose thinking level (low, medium, high, xhigh) selects the matching `-low`/`-medium`/`-high`/`-xhigh` tier, like Gemini 4 Argon and Hydrogen ([#19760](https://github.com/can1357/oh-my-pi/pull/19760) by [@johnnyshields](https://github.com/johnnyshields))
 
 ## [19.0.0] - 2026-11-18
 
