@@ -1840,6 +1840,8 @@ describe("AgentSession aside delivery", () => {
 			session.sendUserMessage(text, { deliverAs: "steer" }),
 		"sendUserMessage({ deliverAs: 'followUp' })": (session: AgentSession, text: string) =>
 			session.sendUserMessage(text, { deliverAs: "followUp" }),
+		"sendUserMessage({ deliverAs: 'aside' })": (session: AgentSession, text: string) =>
+			session.sendUserMessage(text, { deliverAs: "aside" }),
 	};
 	it.each(Object.keys(queueMentionVia) as (keyof typeof queueMentionVia)[])(
 		"a mention queued mid-run through session.%s mints its alias and rides the session-agent notice",
@@ -1859,26 +1861,29 @@ describe("AgentSession aside delivery", () => {
 		},
 	);
 
-	it.each(["steer", "followUp"] as const)(
-		"a message queued through session.%s() behind an announced mention carries no second notice",
-		async method => {
-			const { session, mock, started, release } = createMentionSession();
-			const run = session.prompt("go");
-			try {
-				await started.promise;
-				await session[method]("delegate to ^openai/gpt-test");
-				await session[method]("plain second");
-			} finally {
-				release.resolve();
-			}
-			await run;
-			await session.waitForIdle();
-			const texts = mock.calls.at(-1)!.context.messages.map(llmText);
-			const notices = texts.flatMap((text, index) => (text.includes("Now available:") ? [index] : []));
-			expect(notices).toEqual([texts.findIndex(text => text.startsWith('delegate to <model agent="m1"')) - 1]);
-			expect(texts).toContain("plain second");
-		},
-	);
+	// Plain-first separates the two into batches: the earlier batch must not announce
+	// the mention that is still queued behind it with its own notice.
+	it.each([
+		["steer", ["delegate to ^openai/gpt-test", "plain other"]],
+		["followUp", ["delegate to ^openai/gpt-test", "plain other"]],
+		["steer", ["plain other", "delegate to ^openai/gpt-test"]],
+		["followUp", ["plain other", "delegate to ^openai/gpt-test"]],
+	] as const)("messages queued through session.%s() as %j announce the mention once", async (method, queued) => {
+		const { session, mock, started, release } = createMentionSession();
+		const run = session.prompt("go");
+		try {
+			await started.promise;
+			for (const text of queued) await session[method](text);
+		} finally {
+			release.resolve();
+		}
+		await run;
+		await session.waitForIdle();
+		const texts = mock.calls.at(-1)!.context.messages.map(llmText);
+		const notices = texts.flatMap((text, index) => (text.includes("Now available:") ? [index] : []));
+		expect(notices).toEqual([texts.findIndex(text => text.startsWith('delegate to <model agent="m1"')) - 1]);
+		expect(texts).toContain("plain other");
+	});
 
 	it("a reused alias is announced on delivery when the message carrying its notice was withdrawn", async () => {
 		const { session, mock, started, release } = createMentionSession();

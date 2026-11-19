@@ -290,7 +290,7 @@ import { SubagentSpawnSignal } from "../thread/subagent-spawn-signal";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { AgentDefinition } from "../task/types";
 import type { AgentOutputManager } from "../task/output-manager";
-import type { ModelMention } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
+import { MODEL_MENTION_TAG_RE, type ModelMention } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { ModelMentionRegistry, type ResolvedModelMention } from "./model-mentions";
 import { parseCommandArgs } from "../utils/command-args";
 import type { EditModeSetting } from "../edit/settings";
@@ -9725,26 +9725,28 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * Finish a queued batch when it is delivered: apply `chillax`, so a steer relaxes the running
-	 * turn from its next request, and add any session-agent notice the batch still lacks. Queued
-	 * messages skip a notice queued ahead of them; when that message was withdrawn or reordered
-	 * behind this batch, the notice is announced here instead.
+	 * turn from its next request, and announce any `m<N>` agent the batch's text references
+	 * that no notice reaching the model first announces. Queued messages skip a notice queued
+	 * ahead of them; when that message was withdrawn or reordered behind this batch, the
+	 * reference is announced here instead.
 	 */
 	async #commitOnDelivery(
 		pending: Promise<QueuedMessagePreparation>,
 		messages: readonly AgentMessage[],
 		promptText: string,
 	): Promise<QueuedMessagePreparation> {
+		const referenced = new Set(Array.from(promptText.matchAll(MODEL_MENTION_TAG_RE), match => match[1]!));
 		const preparation = await pending;
 		return {
 			commit: () => {
 				const additional = preparation.commit();
 				if (additional === undefined) return undefined;
 				this.#models.applyChillax(promptText);
-				const notice = this.#tools.takeSessionAgentNotice([
-					...this.agent.peekUndeliveredQueuedMessages(),
-					...messages,
-					...additional,
-				]);
+				if (referenced.size === 0) return additional;
+				const notice = this.#tools.takeSessionAgentNotice(
+					[...this.agent.peekUndeliveredQueuedMessages(), ...messages, ...additional],
+					referenced,
+				);
 				return notice ? [...additional, notice] : additional;
 			},
 		};

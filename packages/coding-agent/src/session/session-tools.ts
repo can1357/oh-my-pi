@@ -2227,8 +2227,13 @@ export class SessionTools {
 	 * Known agents are the committed base snapshot, then every agent notice still
 	 * in context, then every notice in `ahead` (messages queued to reach the model
 	 * before this one), applied in order — mirroring {@link takeEvalPreludeNotice}.
+	 * `only` limits the notice to announcing those agents, leaving every other
+	 * change to the message that carries it.
 	 */
-	takeSessionAgentNotice(ahead: Iterable<AgentMessage> = []): CustomMessage<SessionAgentNoticeDetails> | undefined {
+	takeSessionAgentNotice(
+		ahead: Iterable<AgentMessage> = [],
+		only?: ReadonlySet<string>,
+	): CustomMessage<SessionAgentNoticeDetails> | undefined {
 		const known = new Set(this.#promptSurface.sessionAgents.map(agent => agent.name));
 		for (const messages of [this.#host.agent.state.messages, ahead]) {
 			for (const message of messages) {
@@ -2241,8 +2246,8 @@ export class SessionTools {
 		}
 		const live = this.#host.sessionAgents();
 		const liveNames = new Set(live.map(agent => agent.name));
-		const added = live.filter(agent => !known.has(agent.name));
-		const removed = [...known].filter(name => !liveNames.has(name));
+		const added = live.filter(agent => !known.has(agent.name) && (!only || only.has(agent.name)));
+		const removed = only ? [] : [...known].filter(name => !liveNames.has(name));
 		if (added.length === 0 && removed.length === 0) return undefined;
 		return {
 			role: "custom",
