@@ -22,7 +22,7 @@ import { HindsightSessionState } from "./state";
 
 import { cfgMemoryBackend } from "../memory-backend/settings";
 
-/** Reload the active session's mental-model cache and prompt. */
+/** Reload the active session's guidance; returns true only after the fetched snapshot is published. */
 export async function reloadMentalModelsForSession(session: AgentSession): Promise<boolean> {
 	const state = session.getHindsightSessionState();
 	if (!state) return false;

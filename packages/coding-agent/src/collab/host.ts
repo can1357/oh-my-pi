@@ -536,12 +536,16 @@ export class CollabHost {
 		// Frames are mirrored only while #broadcastAllowed() holds (at least one
 		// peer); a joining guest's welcome snapshot covers everything before that.
 		// The local registry work below is independent of this.
-		this.#unsubscribe = this.#ctx.session.subscribe(event => {
-			// Guests speak the per-loop `agent_end` wire shape (see loop-end-wire.ts).
-			const wireEvent = toWireEvent(event);
-			if (isWireAgentEvent(wireEvent)) this.#broadcastEvent(wireEvent);
-			this.#onEventForState(event);
-		});
+		// The mirror must not consume startup notices before the local UI subscribes.
+		this.#unsubscribe = this.#ctx.session.subscribe(
+			event => {
+				// Guests speak the per-loop `agent_end` wire shape (see loop-end-wire.ts).
+				const wireEvent = toWireEvent(event);
+				if (isWireAgentEvent(wireEvent)) this.#broadcastEvent(wireEvent);
+				this.#onEventForState(event);
+			},
+			{ internal: true },
+		);
 		// Subagent frames publish on the session tree's observability bus at
 		// any spawn depth; mirroring from it is what lets nested agents reach
 		// guests at all. Embedders on the previous constructor signature only

@@ -96,7 +96,7 @@ export class IdleMaintenance {
 		this.#session = session;
 		this.#options = options;
 		this.#stops = [
-			session.subscribe(event => this.#observe(event)),
+			session.subscribe(event => this.#observe(event), { internal: true }),
 			cfgRecap.listen(session.settings, () => this.refresh()),
 			cfgIdleCompaction.listen(session.settings, () => this.refresh()),
 		];

@@ -47,7 +47,11 @@ const serveHindsightClient: RpcServe<HindsightApi, HindsightClientProtocol> = {
 	getMentalModel: (client, bankId, mentalModelId, options) => client.getMentalModel(bankId, mentalModelId, options),
 	createMentalModel: (client, bankId, name, sourceQuery, options) =>
 		client.createMentalModel(bankId, name, sourceQuery, options),
-	refreshMentalModel: (client, bankId, mentalModelId) => client.refreshMentalModel(bankId, mentalModelId),
+	refreshMentalModel: (client, bankId, mentalModelId, options) =>
+		client.refreshMentalModel(bankId, mentalModelId, options),
+	getOperationStatus: (client, bankId, operationId, options) =>
+		client.getOperationStatus(bankId, operationId, options),
+	waitForOperation: (client, bankId, operationId, options) => client.waitForOperation(bankId, operationId, options),
 	deleteMentalModel: (client, bankId, mentalModelId) => client.deleteMentalModel(bankId, mentalModelId),
 	getMentalModelHistory: (client, bankId, mentalModelId) => client.getMentalModelHistory(bankId, mentalModelId),
 };
