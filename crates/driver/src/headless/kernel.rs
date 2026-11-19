@@ -2487,7 +2487,21 @@ pub async fn compose_kernel(
 	} else {
 		project_root.clone()
 	};
-	let native_extensions = crate::discovery::native::admit_native_extensions_contained(
+	let protected_home = omp_core::dirs::home_dir().unwrap_or_else(|| home.clone());
+	let configured_writable_roots = omp_envd::exec_settings::SV_SANDBOX_WRITABLE_ROOTS
+		.get(&ctx)
+		.into_iter()
+		.map(|path| PathBuf::from(path.as_str()))
+		.collect::<Vec<_>>();
+	let control_options = crate::discovery::native::NativeControlGrantOptions {
+		data_dir,
+		sandbox_mode: omp_envd::exec_settings::SV_SANDBOX_MODE.get(&ctx),
+		writable_roots: &configured_writable_roots,
+		sandbox_available: omp_envd::admission::probe_sandbox(&ctx, &project_root).confines(),
+	};
+	let protected_write_paths =
+		crate::discovery::native::protected_write_paths(data_dir, &protected_home);
+	let native_extensions = crate::discovery::native::admit_native_extensions_contained_with_control(
 		&project_root,
 		&home,
 		crate::discovery::native::NativeAdmissionOptions {
@@ -2500,6 +2514,7 @@ pub async fn compose_kernel(
 			setting_overrides: &options.extensions.setting_overrides,
 			disabled:          &disabled_extensions,
 		},
+		&control_options,
 	);
 	for error in &native_extensions.errors {
 		tracing::warn!(error = %error, "Python extension was not admitted");
@@ -2616,8 +2631,11 @@ pub async fn compose_kernel(
 		}
 	};
 
-	let mut trusted_extensions = options.extensions.trusted.clone();
-	for extension in &mut trusted_extensions {
+	// Control grants come only from the operator's grant records, which native
+	// admission has already applied to the native specs; the specs the caller
+	// supplied are cleared of any grant when the two lists are assembled below.
+	let mut caller_extensions = options.extensions.trusted.clone();
+	for extension in &mut caller_extensions {
 		omp_ext::config::apply_resolved_setting_overrides(
 			extension.key.extension().as_str(),
 			&extension.manifest.setting_schemas,
@@ -2625,12 +2643,11 @@ pub async fn compose_kernel(
 			&options.extensions.setting_overrides,
 		)?;
 	}
-	trusted_extensions.extend(
-		native_extensions
-			.extensions
-			.into_iter()
-			.map(|extension| extension.spec),
-	);
+	let native_specs: Vec<_> = native_extensions
+		.extensions
+		.into_iter()
+		.map(|extension| extension.spec)
+		.collect();
 	let terminal = terminal_identity();
 	let journal_path = select_journal_path(
 		&sessions_dir,
@@ -2655,7 +2672,27 @@ pub async fn compose_kernel(
 	// The environment fixes its sandbox, approval and workspace trust policy
 	// when it starts, so a resumed child's class is presented before it does.
 	con_journal::present_journaled_class(&ctx, &class_scope, &journal_path);
-	let environment_policy = omp_envd::daemon_policy::from_con(&ctx, workspace_trust.trust());
+	let sandbox_matches = crate::discovery::native::control_grant_sandbox_matches(
+		&control_options,
+		&ctx,
+		&project_root,
+	);
+	if !sandbox_matches {
+		tracing::warn!(
+			"withholding extension CONTROL grants because the journaled class changed the exec \
+			 sandbox"
+		);
+	}
+	let trusted_extensions = crate::discovery::native::assemble_trusted_specs(
+		caller_extensions,
+		native_specs,
+		sandbox_matches,
+	);
+	let environment_policy = omp_envd::daemon_policy::from_con_with_protected_write_paths(
+		&ctx,
+		workspace_trust.trust(),
+		&protected_write_paths,
+	);
 	// Without the policy the configuration files resolve, a spawned daemon's
 	// hello is checked instead.
 	let spawn_policy = match &cfg_files {
@@ -2668,8 +2705,10 @@ pub async fn compose_kernel(
 			None
 		},
 	};
-	let environment =
-		omp_envd::ProjectEnvironment::attach(&project_root, &state_dir, omp_envd::AttachOptions {
+	let environment = omp_envd::ProjectEnvironment::attach_with_protected_write_paths(
+		&project_root,
+		&state_dir,
+		omp_envd::AttachOptions {
 			py_eval: options.py_eval,
 			approval_mode: options.approval_mode,
 			trusted_extensions,
@@ -2678,8 +2717,10 @@ pub async fn compose_kernel(
 			bridges,
 			spawn_idle_timeout: options.spawn_idle_timeout,
 			spawn_policy,
-		})
-		.await?;
+		},
+		&protected_write_paths,
+	)
+	.await?;
 	let admission_gate = environment.admission_gate();
 	let hub_environment = environment.client().clone();
 	let mut component_registry = ComponentRegistry::standard();
@@ -2879,7 +2920,11 @@ pub async fn compose_kernel(
 	));
 	// The session never presents a policy its environment does not enforce:
 	// a class the early presentation could not read refuses the composition.
-	let presented_policy = omp_envd::daemon_policy::from_con(&ctx, workspace_trust.trust());
+	let presented_policy = omp_envd::daemon_policy::from_con_with_protected_write_paths(
+		&ctx,
+		workspace_trust.trust(),
+		&protected_write_paths,
+	);
 	if presented_policy != environment_policy {
 		return Err(HeadlessError::EnvironmentPolicyDrift {
 			composed:  environment_policy,

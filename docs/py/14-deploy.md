@@ -428,7 +428,9 @@ because pi conflated all four into one boolean flag.
 1. **Artifact ↔ author.** Enforced cryptographically: publisher ed25519 signature over the
    wheel digest, TOFU-pinned on first install (§3.10.2).
 2. **Declared ↔ granted.** Enforced by the grant record: a capability the manifest declares
-   is not a capability the extension has until a digest-pinned grant covers it (§3.9).
+   is not a capability the extension has until a digest-pinned grant covers it (§3.9). For
+   example, `omp.agents.set_continuation_policy` needs the grant `agents.continuation`
+   ([`12-agents.md`](12-agents.md)).
 3. **Tier ↔ process, and extension ↔ process.** Enforced by process separation:
    `(layer, tier, extension)` host keying (§2.2). A tier is a property of a host child, never
    of an extension inside a shared one; and by default an extension is alone in its child, so
@@ -1648,6 +1650,30 @@ Invariants — these are the security core of the layering design:
 5. **Declining is not an error.** The extension is omitted, one notification item names it,
    and the session continues. Exit code 5 only when consent was the point of the command
    (`omp ext install`).
+
+**Control grants for user-layer extensions.** `omp ext grant <NAME> [--revoke] [--yes]` issues or
+removes the operator grant that lets an extension use its declared CONTROL capabilities, such
+as `agents.continuation`. It is user-layer only: `<NAME>` must be installed under
+`<config>/agent/extensions`, and a workspace extension is refused, including one that shares
+the id of a missing user extension. Granting needs consent, either `--yes` or a `y`/`yes` answer at a
+terminal; a run without a terminal and without `--yes` refuses and writes nothing. An extension
+that declares no CONTROL capability is refused. The record is a client-layer, workspace-less
+`ship = "path"` grant with `granted_by = "explicit-grant"`. It is keyed by a publisher derived
+from the extension's canonical root and by a digest over its full declared capability set and its
+manifest text, and re-running the command replaces it.
+
+Admission honors the record only while all of these hold, and otherwise the extension does not
+receive its control capabilities:
+
+- **A kernel sandbox is active.** With the exec sandbox `Off`, or on a host that cannot enforce
+  one, no control grant is given, whether or not a record exists.
+- **The identity is unchanged.** Changing the manifest text, moving the extension root, or
+  changing the set of declared capabilities voids the grant. Run `omp ext grant <NAME>` again.
+- **The store is safe.** `<data>/ext`, its `grants.toml` and the user extension root must not be
+  symlinks, must be owned by the user running omp, and must not lie inside the workspace or an
+  exec-writable root. `omp ext grant` runs the same checks before it grants or revokes.
+
+**Revoking a control grant does not reach running sessions.** `omp ext grant --revoke <id>` removes the extension's path-grant record from `grants.toml` and leaves every other record alone, then reports how many it removed. Admission reads the record when a session starts, so revoke affects new sessions only: a session that is already running keeps the capability until it restarts.
 
 #### 3.9.4 `RECORD`-based ownership
 

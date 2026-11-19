@@ -186,7 +186,7 @@ source "$1" rust
             'python3 scripts/check-python-examples.py',
             '--test p1_doc_race', '--test p2_cancel_matrix', '--test p3_detached_jobs',
             '--test p4_schema_isolation', '--test p5_prefix_stability', '--test p6_crash_resume',
-            '--test p7_tui --test p7_tsp', '--test p12_daemon_approvals', '--test p8_baselines',
+            '--test p7_tui --test p7_tsp', '--test p12_daemon_approvals --test p9_continuation_grants', '--test p8_baselines',
             '::notice title=proved-tree::proved-tree',
         ):
             self.assertIn(command, done.stdout)

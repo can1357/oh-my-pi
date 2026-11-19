@@ -9,7 +9,10 @@
 //! decision Q8: a repository must not be able to switch off a guard
 //! extension), so there is no workspace scope to edit.
 
-use std::{collections::BTreeSet, path::Path};
+use std::{
+	collections::BTreeSet,
+	path::{Path, PathBuf},
+};
 
 use clap::Args;
 use miette::{IntoDiagnostic as _, miette};
@@ -17,7 +20,10 @@ use omp_con::{Ctx, Origin, Value};
 use omp_core::{Str, sf};
 use omp_driver::discovery::{
 	CL_DISABLED_EXTENSIONS,
-	native::{NativeAdmissionOptions, NativeLoadMode, admit_native_extensions},
+	native::{
+		NativeAdmissionOptions, NativeControlGrantOptions, NativeLoadMode,
+		admit_native_extensions_with_control,
+	},
 	skills::{ActiveSkills, SKILL_ID_PREFIX},
 };
 use omp_tui::{
@@ -173,13 +179,31 @@ fn load_items(project: &Path) -> miette::Result<Vec<SelectorItem>> {
 	let home = omp_core::dirs::home_dir()
 		.ok_or(omp_core::dirs::DataDirError::HomeUnset)
 		.into_diagnostic()?;
-	let extensions = admit_native_extensions(project, &home, NativeAdmissionOptions {
-		explicit_roots:    &[],
-		mode:              NativeLoadMode::Merge,
-		include_workspace: true,
-		setting_overrides: &[],
-		disabled:          &[],
-	})
+	let ctx = crate::process_ctx(project)?;
+	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
+	let writable_roots = omp_envd::exec_settings::SV_SANDBOX_WRITABLE_ROOTS
+		.get(&ctx)
+		.into_iter()
+		.map(|path| PathBuf::from(path.as_str()))
+		.collect::<Vec<_>>();
+	let control = NativeControlGrantOptions {
+		data_dir:          &data_dir,
+		sandbox_mode:      omp_envd::exec_settings::SV_SANDBOX_MODE.get(&ctx),
+		writable_roots:    &writable_roots,
+		sandbox_available: omp_envd::admission::probe_sandbox(&ctx, project).confines(),
+	};
+	let extensions = admit_native_extensions_with_control(
+		project,
+		&home,
+		NativeAdmissionOptions {
+			explicit_roots:    &[],
+			mode:              NativeLoadMode::Merge,
+			include_workspace: true,
+			setting_overrides: &[],
+			disabled:          &[],
+		},
+		&control,
+	)
 	.map_err(|error| miette!("{error}"))?;
 	let mut items = extensions
 		.into_iter()
@@ -192,8 +216,6 @@ fn load_items(project: &Path) -> miette::Result<Vec<SelectorItem>> {
 			}
 		})
 		.collect::<Vec<_>>();
-	let ctx = crate::process_ctx(project)?;
-	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
 	let plugins = omp_ext::claude_plugin::ClaudePlugins::resolve(
 		&data_dir,
 		project,

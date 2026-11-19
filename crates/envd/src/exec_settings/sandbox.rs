@@ -1,6 +1,12 @@
 //! Agent command sandbox posture and policy settings.
 
-use std::{collections::BTreeMap, path::Path};
+use std::{
+	borrow::Cow,
+	collections::BTreeMap,
+	fmt::Write as _,
+	fs, io,
+	path::{Path, PathBuf},
+};
 
 use omp_con::{Ctx, Kv, Value};
 use omp_core::Str;
@@ -330,96 +336,106 @@ omp_con::var! {
 #[serde(default, deny_unknown_fields)]
 pub struct SandboxSettings {
 	/// Sandbox posture applied to agent command execution.
-	pub mode:               ExecSandboxMode,
+	pub mode:                  ExecSandboxMode,
 	/// Network authority granted to sandboxed commands.
-	pub network_mode:       SandboxNetworkMode,
+	pub network_mode:          SandboxNetworkMode,
 	/// Whether the user set `network_mode` or it is the shipped default. A
 	/// defaulted mode never sandboxes an explicit `sv_sandbox_mode off`.
-	pub network_provenance: Provenance,
+	pub network_provenance:    Provenance,
 	/// CPU-core ceiling for one sandboxed command tree; zero is unlimited.
-	pub cpu_cores:          f64,
+	pub cpu_cores:             f64,
 	/// Resident-memory ceiling for one sandboxed command tree; zero is
 	/// unlimited.
-	pub memory_bytes:       i64,
+	pub memory_bytes:          i64,
 	/// Live-process ceiling for one sandboxed command tree; zero is unlimited.
-	pub pids:               u32,
+	pub pids:                  u32,
 	/// Exact or leading `*.` wildcard domain names allowed in scoped mode.
-	pub allow_domains:      Vec<Str>,
+	pub allow_domains:         Vec<Str>,
 	/// Domain names denied before scoped allow rules.
-	pub deny_domains:       Vec<Str>,
+	pub deny_domains:          Vec<Str>,
 	/// TCP ports allowed in scoped mode.
-	pub allow_ports:        Vec<u16>,
+	pub allow_ports:           Vec<u16>,
 	/// Most reruns one command may take on network endpoints approved for the
 	/// session; at least 1.
-	pub network_reruns:     u32,
+	pub network_reruns:        u32,
 	/// Whether scoped mode may connect to loopback addresses.
-	pub allow_localhost:    bool,
+	pub allow_localhost:       bool,
 	/// Existing absolute Unix-domain socket paths allowed independently of IP
 	/// networking.
-	pub allow_unix_sockets: Vec<Str>,
+	pub allow_unix_sockets:    Vec<Str>,
 	/// Additional absolute roots that workspace-write mode may modify.
-	pub writable_roots:     Vec<Str>,
+	pub writable_roots:        Vec<Str>,
 	/// Policy for writes outside configured roots in workspace-write mode.
-	pub unscoped_writes:    UnscopedWrites,
+	pub unscoped_writes:       UnscopedWrites,
 	/// Exported environment variable name globs withheld from external commands.
-	pub env_deny:           Vec<Str>,
+	pub env_deny:              Vec<Str>,
 	/// Base environment inherited by child processes.
-	pub env_inherit:        EnvironmentInheritance,
+	pub env_inherit:           EnvironmentInheritance,
 	/// Environment variable name globs retained before deny filtering.
-	pub env_include_only:   Vec<Str>,
+	pub env_include_only:      Vec<Str>,
 	/// Explicit child environment values applied after filtering.
-	pub env_set:            BTreeMap<Str, Str>,
+	pub env_set:               BTreeMap<Str, Str>,
 	/// Whether workspace-write excludes the platform temporary directory.
-	pub exclude_tmpdir:     bool,
+	pub exclude_tmpdir:        bool,
 	/// Whether workspace-write excludes `/tmp`.
-	pub exclude_slash_tmp:  bool,
+	pub exclude_slash_tmp:     bool,
 	/// Additional absolute paths hidden from sandboxed processes.
-	pub read_deny:          Vec<Str>,
+	pub read_deny:             Vec<Str>,
 	/// Additional absolute roots available for reads in scoped mode.
-	pub readable_roots:     Vec<Str>,
+	pub readable_roots:        Vec<Str>,
 	/// Read authority posture for shell operations and sandboxed children.
-	pub read_mode:          ReadMode,
+	pub read_mode:             ReadMode,
 	/// Denied path globs, rejected when the selected backend cannot enforce
 	/// future matches.
-	pub read_deny_globs:    Vec<Str>,
+	pub read_deny_globs:       Vec<Str>,
 	/// Additional absolute paths protected from writes in both policy lanes.
-	pub write_deny:         Vec<Str>,
+	pub write_deny:            Vec<Str>,
+	/// Absolute paths the session owner protects from sandboxed writes,
+	/// wherever a sandbox spec is built and enforced, whether they exist yet or
+	/// not: the operator grants store and the user extension root. Not a user
+	/// convar. Skipped when empty so the policy digest of settings without
+	/// protected paths is unchanged. Serialized lossily, so a path that is not
+	/// valid UTF-8 still digests: only the daemon policy digest serializes
+	/// settings, and enforcement reads the exact paths.
+	#[serde(skip_serializing_if = "Vec::is_empty", serialize_with = "serialize_paths_lossy")]
+	pub protected_write_paths: Vec<PathBuf>,
 	/// Whether the user set any `sv_sandbox_*` convar, rather than leaving the
 	/// shipped posture. A sandbox the user asked for that cannot be built is a
 	/// hard error; the shipped default degrades to unsandboxed commands under
 	/// approval.
-	pub explicit:           bool,
+	pub explicit:              bool,
 }
 
 impl Default for SandboxSettings {
 	fn default() -> Self {
 		Self {
-			mode:               ExecSandboxMode::WorkspaceWrite,
-			network_mode:       SandboxNetworkMode::Scoped,
-			network_provenance: Provenance::Default,
-			cpu_cores:          0.0,
-			memory_bytes:       0,
-			pids:               0,
-			allow_domains:      Vec::new(),
-			deny_domains:       Vec::new(),
-			allow_ports:        vec![80, 443],
-			network_reruns:     DEFAULT_NETWORK_SESSION_RERUNS,
-			allow_localhost:    false,
-			allow_unix_sockets: Vec::new(),
-			writable_roots:     Vec::new(),
-			unscoped_writes:    UnscopedWrites::Deny,
-			env_deny:           default_env_deny(),
-			env_inherit:        EnvironmentInheritance::All,
-			env_include_only:   Vec::new(),
-			env_set:            BTreeMap::new(),
-			exclude_tmpdir:     false,
-			exclude_slash_tmp:  false,
-			read_deny:          Vec::new(),
-			readable_roots:     Vec::new(),
-			read_mode:          ReadMode::Host,
-			read_deny_globs:    Vec::new(),
-			write_deny:         Vec::new(),
-			explicit:           false,
+			mode:                  ExecSandboxMode::WorkspaceWrite,
+			network_mode:          SandboxNetworkMode::Scoped,
+			network_provenance:    Provenance::Default,
+			cpu_cores:             0.0,
+			memory_bytes:          0,
+			pids:                  0,
+			allow_domains:         Vec::new(),
+			deny_domains:          Vec::new(),
+			allow_ports:           vec![80, 443],
+			network_reruns:        DEFAULT_NETWORK_SESSION_RERUNS,
+			allow_localhost:       false,
+			allow_unix_sockets:    Vec::new(),
+			writable_roots:        Vec::new(),
+			unscoped_writes:       UnscopedWrites::Deny,
+			env_deny:              default_env_deny(),
+			env_inherit:           EnvironmentInheritance::All,
+			env_include_only:      Vec::new(),
+			env_set:               BTreeMap::new(),
+			exclude_tmpdir:        false,
+			exclude_slash_tmp:     false,
+			read_deny:             Vec::new(),
+			readable_roots:        Vec::new(),
+			read_mode:             ReadMode::Host,
+			read_deny_globs:       Vec::new(),
+			write_deny:            Vec::new(),
+			protected_write_paths: Vec::new(),
+			explicit:              false,
 		}
 	}
 }
@@ -480,39 +496,130 @@ impl SandboxSettings {
 	#[must_use]
 	pub fn from_con(ctx: &Ctx) -> Self {
 		Self {
-			mode:               SV_SANDBOX_MODE.get(ctx),
-			network_mode:       SV_SANDBOX_NETWORK_MODE.get(ctx),
-			network_provenance: Provenance::of_convar(ctx, SV_SANDBOX_NETWORK_MODE.name()),
-			cpu_cores:          SV_SANDBOX_CPU_CORES.get(ctx),
-			memory_bytes:       SV_SANDBOX_MEMORY_BYTES.get(ctx),
-			pids:               SV_SANDBOX_PIDS.get(ctx),
-			allow_domains:      SV_SANDBOX_ALLOW_DOMAINS.get(ctx),
-			deny_domains:       SV_SANDBOX_DENY_DOMAINS.get(ctx),
-			allow_ports:        SV_SANDBOX_ALLOW_PORTS.get(ctx),
-			network_reruns:     SV_SANDBOX_NETWORK_SESSION_RERUNS.get(ctx),
-			allow_localhost:    SV_SANDBOX_ALLOW_LOCALHOST.get(ctx),
-			allow_unix_sockets: SV_SANDBOX_ALLOW_UNIX_SOCKETS.get(ctx),
-			writable_roots:     SV_SANDBOX_WRITABLE_ROOTS.get(ctx),
-			unscoped_writes:    SV_SANDBOX_UNSCOPED_WRITES.get(ctx),
-			env_deny:           SV_SANDBOX_ENV_DENY.get(ctx),
-			env_inherit:        SV_SANDBOX_ENV_INHERIT.get(ctx),
-			env_include_only:   SV_SANDBOX_ENV_INCLUDE_ONLY.get(ctx),
-			env_set:            SV_SANDBOX_ENV_SET
+			mode:                  SV_SANDBOX_MODE.get(ctx),
+			network_mode:          SV_SANDBOX_NETWORK_MODE.get(ctx),
+			network_provenance:    Provenance::of_convar(ctx, SV_SANDBOX_NETWORK_MODE.name()),
+			cpu_cores:             SV_SANDBOX_CPU_CORES.get(ctx),
+			memory_bytes:          SV_SANDBOX_MEMORY_BYTES.get(ctx),
+			pids:                  SV_SANDBOX_PIDS.get(ctx),
+			allow_domains:         SV_SANDBOX_ALLOW_DOMAINS.get(ctx),
+			deny_domains:          SV_SANDBOX_DENY_DOMAINS.get(ctx),
+			allow_ports:           SV_SANDBOX_ALLOW_PORTS.get(ctx),
+			network_reruns:        SV_SANDBOX_NETWORK_SESSION_RERUNS.get(ctx),
+			allow_localhost:       SV_SANDBOX_ALLOW_LOCALHOST.get(ctx),
+			allow_unix_sockets:    SV_SANDBOX_ALLOW_UNIX_SOCKETS.get(ctx),
+			writable_roots:        SV_SANDBOX_WRITABLE_ROOTS.get(ctx),
+			unscoped_writes:       SV_SANDBOX_UNSCOPED_WRITES.get(ctx),
+			env_deny:              SV_SANDBOX_ENV_DENY.get(ctx),
+			env_inherit:           SV_SANDBOX_ENV_INHERIT.get(ctx),
+			env_include_only:      SV_SANDBOX_ENV_INCLUDE_ONLY.get(ctx),
+			env_set:               SV_SANDBOX_ENV_SET
 				.get(ctx)
 				.0
 				.into_iter()
 				.filter_map(|(key, value)| Some((key, Str::new(value.as_str()?))))
 				.collect(),
-			exclude_tmpdir:     SV_SANDBOX_EXCLUDE_TMPDIR.get(ctx),
-			exclude_slash_tmp:  SV_SANDBOX_EXCLUDE_SLASH_TMP.get(ctx),
-			read_deny:          SV_SANDBOX_READ_DENY.get(ctx),
-			readable_roots:     SV_SANDBOX_READABLE_ROOTS.get(ctx),
-			read_mode:          SV_SANDBOX_READ_MODE.get(ctx),
-			read_deny_globs:    SV_SANDBOX_READ_DENY_GLOBS.get(ctx),
-			write_deny:         SV_SANDBOX_WRITE_DENY.get(ctx),
-			explicit:           ctx
+			exclude_tmpdir:        SV_SANDBOX_EXCLUDE_TMPDIR.get(ctx),
+			exclude_slash_tmp:     SV_SANDBOX_EXCLUDE_SLASH_TMP.get(ctx),
+			read_deny:             SV_SANDBOX_READ_DENY.get(ctx),
+			readable_roots:        SV_SANDBOX_READABLE_ROOTS.get(ctx),
+			read_mode:             SV_SANDBOX_READ_MODE.get(ctx),
+			read_deny_globs:       SV_SANDBOX_READ_DENY_GLOBS.get(ctx),
+			write_deny:            SV_SANDBOX_WRITE_DENY.get(ctx),
+			protected_write_paths: host_protected_write_paths(),
+			explicit:              ctx
 				.vars()
 				.any(|var| var.name.starts_with("sv_sandbox_") && ctx.is_user_set(var.name)),
+		}
+	}
+}
+
+/// Returns the same protected paths for both the launching process and its
+/// envd.
+pub fn protected_write_paths(data_dir: &Path, home: &Path) -> Vec<PathBuf> {
+	let mut candidates = vec![data_dir.join("ext")];
+	if let Ok(config_root) = omp_core::dirs::profile_config_dir(home) {
+		candidates.push(config_root.join("agent/extensions"));
+	}
+	let mut paths = candidates
+		.into_iter()
+		.map(protected_spelling)
+		.collect::<Vec<_>>();
+	paths.sort_unstable();
+	paths.dedup();
+	paths
+}
+
+/// Serializes paths as strings. A path that is not valid UTF-8 serializes as
+/// its lossy spelling, a NUL, and the hex of its exact bytes, so two distinct
+/// invalid paths never share one digest input. Valid UTF-8 serializes
+/// unchanged. Only the daemon policy digest serializes settings, and failing
+/// there would take the session down; enforcement reads the exact [`PathBuf`]s.
+fn serialize_paths_lossy<S: serde::Serializer>(
+	paths: &[PathBuf],
+	serializer: S,
+) -> Result<S::Ok, S::Error> {
+	serializer.collect_seq(paths.iter().map(|path| path_digest_spelling(path)))
+}
+
+fn path_digest_spelling(path: &Path) -> Cow<'_, str> {
+	if let Some(text) = path.to_str() {
+		return Cow::Borrowed(text);
+	}
+	let mut spelling = path.to_string_lossy().into_owned();
+	spelling.push('\0');
+	for byte in path.as_os_str().as_encoded_bytes() {
+		// Writing to a `String` never fails.
+		let _ = write!(spelling, "{byte:02x}");
+	}
+	Cow::Owned(spelling)
+}
+
+/// The canonical spelling of a protected location, or its absolute spelling
+/// when no ancestor of it can be canonicalized.
+fn protected_spelling(path: PathBuf) -> PathBuf {
+	canonical_protected_location(&path)
+		.unwrap_or_else(|_| std::path::absolute(&path).unwrap_or(path))
+}
+
+fn host_protected_write_paths() -> Vec<PathBuf> {
+	protected_paths_for_host(
+		omp_core::dirs::data_dir(None).ok().as_deref(),
+		omp_core::dirs::home_dir().as_deref(),
+	)
+}
+
+/// Without a home directory only the data directory's store can be protected,
+/// spelled like every other protected path; without a data directory, nothing.
+fn protected_paths_for_host(data_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+	match (data_dir, home) {
+		(Some(data_dir), Some(home)) => protected_write_paths(data_dir, home),
+		(Some(data_dir), None) => vec![protected_spelling(data_dir.join("ext"))],
+		(None, _) => Vec::new(),
+	}
+}
+
+/// Canonicalizes a protected path even if its final components do not exist.
+pub fn canonical_protected_location(path: &Path) -> io::Result<PathBuf> {
+	let absolute = std::path::absolute(path)?;
+	let mut probe = absolute.as_path();
+	let mut missing = Vec::new();
+	loop {
+		match fs::canonicalize(probe) {
+			Ok(mut canonical) => {
+				for component in missing.into_iter().rev() {
+					canonical.push(component);
+				}
+				return Ok(canonical);
+			},
+			Err(source) if source.kind() == io::ErrorKind::NotFound => {
+				let name = probe.file_name().ok_or(source)?;
+				missing.push(name.to_os_string());
+				probe = probe.parent().ok_or_else(|| {
+					io::Error::new(io::ErrorKind::NotFound, "protected path has no existing ancestor")
+				})?;
+			},
+			Err(source) => return Err(source),
 		}
 	}
 }
@@ -726,7 +833,10 @@ mod tests {
 	#[test]
 	fn default_sandbox_is_workspace_write_with_scoped_network() {
 		let settings = SandboxSettings::from_con(&Ctx::new());
-		assert_eq!(settings, SandboxSettings::default());
+		// Host-protected paths come from the machine, not the convars; the rest
+		// is the shipped posture.
+		let posture = SandboxSettings { protected_write_paths: Vec::new(), ..settings.clone() };
+		assert_eq!(posture, SandboxSettings::default());
 		assert_eq!(settings.mode, ExecSandboxMode::WorkspaceWrite);
 		assert_eq!(ExecSandboxMode::default(), ExecSandboxMode::WorkspaceWrite);
 		assert_eq!(settings.network_mode, SandboxNetworkMode::Scoped);
@@ -923,5 +1033,128 @@ mod tests {
 				.set(&ctx, vec![Str::new_static("[")])
 				.is_err()
 		);
+	}
+
+	/// The protected locations are the canonical data-directory store and user
+	/// extension root, so a spelling through a link cannot dodge the sandbox
+	/// deny.
+	#[cfg(unix)]
+	#[test]
+	fn protected_write_paths_are_the_canonical_store_and_extension_root() {
+		use std::os::unix::fs::symlink;
+
+		let tree = tempfile::tempdir().expect("tree");
+		let real = fs::canonicalize(tree.path()).expect("canonical tree");
+		fs::create_dir_all(real.join("data-real")).expect("data directory");
+		fs::create_dir_all(real.join("home-real")).expect("home directory");
+		symlink(real.join("data-real"), real.join("data")).expect("data link");
+		symlink(real.join("home-real"), real.join("home")).expect("home link");
+
+		// Both roots are handed over through links, as a launcher might receive them.
+		let data_dir = real.join("data");
+		let home = real.join("home");
+		let extension_root = omp_core::dirs::profile_config_dir(&home)
+			.expect("profile config root")
+			.join("agent/extensions");
+		// `<home>/.o2/agent/extensions`, unless a config override moved the root away.
+		let canonical_extension_root = match extension_root.strip_prefix(&home) {
+			Ok(inside) => real.join("home-real").join(inside),
+			Err(_) => extension_root,
+		};
+		let mut expected = vec![real.join("data-real/ext"), canonical_extension_root];
+		expected.sort_unstable();
+
+		assert_eq!(protected_write_paths(&data_dir, &home), expected);
+	}
+
+	/// Two spellings of one location collapse to a single protected path.
+	#[cfg(unix)]
+	#[test]
+	fn protected_write_paths_deduplicate_one_location() {
+		use std::os::unix::fs::symlink;
+
+		let tree = tempfile::tempdir().expect("tree");
+		let real = fs::canonicalize(tree.path()).expect("canonical tree");
+		let data_dir = real.join("data");
+		let home = real.join("home");
+		let extension_root = omp_core::dirs::profile_config_dir(&home)
+			.expect("profile config root")
+			.join("agent/extensions");
+		if !extension_root.starts_with(&real) {
+			eprintln!("skip: a config override places the extension root outside the test tree");
+			return;
+		}
+		fs::create_dir_all(&extension_root).expect("extension root");
+		fs::create_dir_all(&data_dir).expect("data directory");
+		// The store resolves to the extension root, so both candidates name it.
+		symlink(&extension_root, data_dir.join("ext")).expect("store link");
+
+		assert_eq!(protected_write_paths(&data_dir, &home), [extension_root]);
+	}
+
+	/// Without a home directory only the data directory's store is protected,
+	/// and it is canonical like the store of every other host.
+	#[cfg(unix)]
+	#[test]
+	fn host_protected_paths_without_a_home_keep_the_canonical_store() {
+		use std::os::unix::fs::symlink;
+
+		let tree = tempfile::tempdir().expect("tree");
+		let real = fs::canonicalize(tree.path()).expect("canonical tree");
+		fs::create_dir(real.join("data-real")).expect("data directory");
+		symlink(real.join("data-real"), real.join("data")).expect("data link");
+		let data_dir = real.join("data");
+
+		assert_eq!(protected_paths_for_host(Some(data_dir.as_path()), None), [
+			real.join("data-real/ext")
+		]);
+		assert!(
+			protected_paths_for_host(None, Some(real.as_path())).is_empty(),
+			"a host without a data directory protects nothing"
+		);
+	}
+
+	/// Settings without protected paths serialize exactly as before the field
+	/// existed, so the daemon policy digest of such a posture is unchanged; the
+	/// field defaults when absent and round-trips when set.
+	#[test]
+	fn empty_protected_write_paths_stay_out_of_serialized_settings() {
+		let plain = serde_json::to_value(SandboxSettings::default()).expect("settings JSON");
+		assert!(
+			plain.get("protected_write_paths").is_none(),
+			"empty protected paths changed the serialized settings: {plain}"
+		);
+		let restored: SandboxSettings =
+			serde_json::from_value(plain).expect("settings without the field");
+		assert_eq!(restored, SandboxSettings::default());
+
+		let protected = SandboxSettings {
+			protected_write_paths: vec![PathBuf::from("/srv/grants")],
+			..SandboxSettings::default()
+		};
+		let value = serde_json::to_value(&protected).expect("settings JSON");
+		assert_eq!(value["protected_write_paths"], serde_json::json!(["/srv/grants"]));
+		assert_eq!(serde_json::from_value::<SandboxSettings>(value).expect("round trip"), protected);
+	}
+
+	/// A protected path that is not valid UTF-8 serializes as its lossy spelling
+	/// plus the hex of its bytes, so the daemon policy digest never fails on it
+	/// and distinct invalid paths stay distinct; the in-memory path stays exact.
+	#[cfg(unix)]
+	#[test]
+	fn non_utf8_protected_write_paths_serialize_lossily() {
+		use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _};
+
+		let exact = PathBuf::from(OsStr::from_bytes(b"/srv/\xffstore"));
+		let settings = SandboxSettings {
+			protected_write_paths: vec![exact.clone()],
+			..SandboxSettings::default()
+		};
+		let value = serde_json::to_value(&settings).expect("non-UTF-8 paths still serialize");
+		let spelling = format!("/srv/\u{fffd}store\0{}", "2f7372762fff73746f7265");
+		assert_eq!(value["protected_write_paths"], serde_json::json!([spelling]));
+		assert_eq!(settings.protected_write_paths, [exact], "enforcement keeps the exact path");
+		let restored: SandboxSettings = serde_json::from_value(value).expect("round trip");
+		assert_eq!(restored.protected_write_paths, [PathBuf::from(spelling)]);
 	}
 }

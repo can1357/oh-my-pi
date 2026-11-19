@@ -1401,6 +1401,40 @@ fn policy_parts_with_approved_scope(
 		spec.allow_write(Path::new("/"))?;
 		writable.push(PathBuf::from("/"));
 	}
+	// The owner-protected locations are absolute by contract and denied under
+	// both their literal and resolved spellings wherever a sandbox spec is built
+	// and enforced; a location that does not exist yet is denied by spelling,
+	// like a missing carve-out.
+	for path in &settings.protected_write_paths {
+		if !path.is_absolute() {
+			return Err(SandboxError::InvalidDenyPath { path: path.clone() });
+		}
+		let literal = normalize_absolute(path)
+			.map_err(|source| SandboxError::Canonicalize { path: path.clone(), source })?;
+		let resolved = resolve_write_path(path)
+			.map_err(|source| SandboxError::Canonicalize { path: literal.clone(), source })?;
+		// A location that contains a writable root cannot be denied without denying
+		// that root itself, which would refuse in-process writes the session needs.
+		// Admission already withholds CONTROL grants for it
+		// (`ProtectedLocationError::ContainsWritable`), so nothing relies on this
+		// deny. The exception holds only while the protected path is itself outside
+		// every writable root: when it lies in scope, descendants it does not
+		// share with a nested root would otherwise stay writable, so the deny stays.
+		let contains_writable_root = |location: &Path| {
+			writable
+				.iter()
+				.any(|root| root.as_path() != location && root.starts_with(location))
+		};
+		let in_scope = |location: &Path| writable.iter().any(|root| location.starts_with(root));
+		if (contains_writable_root(&literal) || contains_writable_root(&resolved))
+			&& !in_scope(&literal)
+			&& !in_scope(&resolved)
+		{
+			continue;
+		}
+		record_write_deny(&mut spec, &writable, &mut denied, write, literal)?;
+		record_write_deny(&mut spec, &writable, &mut denied, write, resolved)?;
+	}
 	for path in &settings.write_deny {
 		let absolute = std::path::absolute(path.as_str()).map_err(|source| {
 			SandboxError::Canonicalize { path: PathBuf::from(path.as_str()), source }
@@ -2823,6 +2857,135 @@ mod tests {
 			.file_policy;
 		// The symlink resolves into the denied carve-out before matching.
 		assert!(policy.check_write(&workspace.join("link/config")).is_err());
+	}
+
+	/// The grants store and the user extension root are denied to sandboxed
+	/// writes even under a writable root, whether they exist yet or not; only
+	/// absolute paths are accepted.
+	#[test]
+	fn sandbox_denies_write_to_protected_paths() {
+		let workspace = tempfile::tempdir().expect("workspace");
+		let root = fs::canonicalize(workspace.path()).expect("canonical workspace");
+		let store = root.join("data/ext");
+		fs::create_dir_all(&store).expect("store");
+		fs::write(store.join("grants.toml"), "").expect("grants file");
+		let protected_file = root.join("protected.toml");
+		fs::write(&protected_file, "").expect("protected file");
+		let missing = root.join("config/agent/extensions");
+		let protected = vec![store.clone(), protected_file.clone(), missing.clone()];
+		let settings =
+			SandboxSettings { protected_write_paths: protected.clone(), ..SandboxSettings::default() };
+		let parts = policy_parts(&settings, &root, WriteMode::Scoped, None, None).expect("policy");
+		for denied in [
+			store.join("grants.toml"),
+			store.join("new.toml"),
+			store.clone(),
+			protected_file.clone(),
+			missing.clone(),
+			missing.join("evil/manifest.toml"),
+		] {
+			assert!(
+				parts.file_policy.check_write(&denied).is_err(),
+				"allowed a write to {}",
+				denied.display()
+			);
+		}
+		assert!(
+			parts
+				.file_policy
+				.check_write(&root.join("src/new.rs"))
+				.is_ok(),
+			"denied an ordinary workspace write"
+		);
+		let relative = SandboxSettings {
+			protected_write_paths: vec![PathBuf::from("relative/ext")],
+			..workspace_settings()
+		};
+		assert!(
+			policy_parts(&relative, &root, WriteMode::Scoped, None, None).is_err(),
+			"a relative protected path was accepted"
+		);
+		if native_backend() {
+			let settings =
+				SandboxSettings { protected_write_paths: protected, ..workspace_settings() };
+			ExecSandbox::compile(&settings, &root, true, SandboxConsumer::Probe)
+				.expect("native policy with protected paths");
+		}
+	}
+
+	/// A protected location that contains the workspace cannot be denied without
+	/// denying every in-process write the workspace needs. Admission already
+	/// withholds control grants for it, so the file lane keeps the workspace
+	/// writable while a protected location inside the workspace stays denied.
+	#[test]
+	fn workspace_under_a_protected_path_keeps_in_process_writes() {
+		let dir = tempfile::tempdir().expect("base");
+		let base = fs::canonicalize(dir.path()).expect("canonical base");
+		let extension_root = base.join("config/agent/extensions");
+		let workspace = extension_root.join("my-extension");
+		let inner_store = workspace.join("data/ext");
+		fs::create_dir_all(&inner_store).expect("workspace under the protected root");
+		let settings = SandboxSettings {
+			protected_write_paths: vec![extension_root, inner_store.clone()],
+			exclude_tmpdir: true,
+			exclude_slash_tmp: true,
+			..SandboxSettings::default()
+		};
+
+		let parts =
+			policy_parts(&settings, &workspace, WriteMode::Scoped, None, None).expect("policy");
+		assert!(
+			parts
+				.file_policy
+				.check_write(&workspace.join("src/lib.rs"))
+				.is_ok(),
+			"denied an ordinary write in a workspace under a protected path"
+		);
+		assert!(
+			parts
+				.file_policy
+				.check_write(&inner_store.join("grants.toml"))
+				.is_err(),
+			"a protected location inside the workspace must stay denied"
+		);
+	}
+
+	/// A protected location that contains a writable root is skipped only while
+	/// it is itself outside every writable root. When the workspace already
+	/// covers it, the deny stays, so a sibling of the nested root is not left
+	/// writable.
+	#[test]
+	fn protected_path_in_scope_stays_denied_when_it_contains_a_writable_root() {
+		let dir = tempfile::tempdir().expect("base");
+		let base = fs::canonicalize(dir.path()).expect("canonical base");
+		let outer = base.join("outer");
+		let protected = outer.join("ext");
+		let nested_root = protected.join("dev");
+		fs::create_dir_all(&nested_root).expect("nested writable root");
+		fs::create_dir_all(protected.join("other")).expect("sibling of the nested root");
+		let settings = SandboxSettings {
+			writable_roots: vec![Str::from(nested_root.to_string_lossy().as_ref())],
+			protected_write_paths: vec![protected.clone()],
+			exclude_tmpdir: true,
+			exclude_slash_tmp: true,
+			..SandboxSettings::default()
+		};
+
+		let parts = policy_parts(&settings, &outer, WriteMode::Scoped, None, None).expect("policy");
+		assert!(
+			parts
+				.file_policy
+				.check_write(&outer.join("src/lib.rs"))
+				.is_ok(),
+			"denied an ordinary write in the workspace"
+		);
+		assert!(
+			parts
+				.file_policy
+				.check_write(&protected.join("other/x"))
+				.is_err(),
+			"a protected path inside the workspace must stay denied beside a nested writable root"
+		);
 	}
 	#[cfg(unix)]
 	#[test]

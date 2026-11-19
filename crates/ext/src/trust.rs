@@ -1141,6 +1141,32 @@ pub fn capability_digest(
 	sf!("b3:{}", hasher.finalize().to_hex())
 }
 
+/// Identity of an operator path grant for one exact manifest.
+///
+/// Covers the full declared capability set. Each entry is length-prefixed so
+/// no name can stand in for two entries; the signed-install
+/// `capability_digest` is unchanged.
+pub fn path_grant_digest(
+	capabilities: impl IntoIterator<Item = Str>,
+	manifest_digest: &[u8; 32],
+) -> Str {
+	let entries: BTreeSet<Str> = capabilities.into_iter().collect();
+	let mut hasher = blake3::Hasher::new();
+	hasher.update(b"omp.path-grant.v1");
+	for entry in &entries {
+		hasher.update(&(entry.as_str().len() as u64).to_le_bytes());
+		hasher.update(entry.as_str().as_bytes());
+	}
+	hasher.update(manifest_digest);
+	sf!("b3:{}", hasher.finalize().to_hex())
+}
+
+/// Publisher recorded for an unsigned path-loaded native extension. The root
+/// must already be canonical so admission and `omp ext grant` agree.
+pub fn native_path_publisher(canonical_root: &Path) -> Str {
+	sf!("unsigned:path:{}", Hash32::sum(canonical_root.to_string_lossy().as_bytes()).to_hex())
+}
+
 /// Verifies an Ed25519 signature over `blake3 || sha256 || capability_digest`.
 #[tracing::instrument(name = "extension_artifact_signature_verify", level = "debug", skip_all)]
 pub fn verify_artifact_signature(
@@ -1228,6 +1254,64 @@ fn read_toml_or_default<T: for<'de> Deserialize<'de> + Default>(
 mod tests {
 	use super::*;
 	use crate::workspace_trust::{InputsDigest, TrustScope, WorkspaceTrust, evaluate};
+
+	#[test]
+	fn path_grant_digest_separates_entries() {
+		let manifest = [7_u8; 32];
+		assert_ne!(
+			path_grant_digest([sf!("a"), sf!("b\nc")], &manifest),
+			path_grant_digest([sf!("a"), sf!("b"), sf!("c")], &manifest)
+		);
+		assert_ne!(
+			path_grant_digest([sf!("ab"), sf!("c")], &manifest),
+			path_grant_digest([sf!("a"), sf!("bc")], &manifest)
+		);
+		// Pinned: blake3 over "omp.path-grant.v1", then 1u64 LE "a", 2u64 LE "bc",
+		// then the 32 manifest bytes. A change to the algorithm must fail here.
+		assert_eq!(
+			path_grant_digest([sf!("bc"), sf!("a")], &manifest).as_str(),
+			"b3:fa6b07326ab655f64fa4990b6a8e3b8624871256d314b641842a1eb5d5f1ecf2"
+		);
+	}
+
+	#[test]
+	fn path_grant_digest_binds_manifest() {
+		let capabilities = || [sf!("agents.continuation"), sf!("policy.write")];
+		let first = path_grant_digest(capabilities(), &[1_u8; 32]);
+		assert_eq!(first, path_grant_digest(capabilities(), &[1_u8; 32]));
+		assert_ne!(first, path_grant_digest(capabilities(), &[2_u8; 32]));
+		let mut edited = [1_u8; 32];
+		edited[31] = 0;
+		assert_ne!(first, path_grant_digest(capabilities(), &edited));
+	}
+
+	#[test]
+	fn path_grant_digest_ignores_order_and_duplicates() {
+		let manifest = [9_u8; 32];
+		let canonical = path_grant_digest([sf!("approvals.decide"), sf!("policy.write")], &manifest);
+		assert_eq!(
+			canonical,
+			path_grant_digest(
+				[sf!("policy.write"), sf!("approvals.decide"), sf!("policy.write")],
+				&manifest
+			)
+		);
+		assert_ne!(canonical, path_grant_digest([sf!("policy.write")], &manifest));
+		assert_ne!(canonical, capability_digest([sf!("approvals.decide"), sf!("policy.write")], []));
+	}
+
+	#[test]
+	fn native_path_publisher_matches_admission_format() {
+		let root = Path::new("/srv/ext/demo");
+		assert_eq!(
+			native_path_publisher(root).as_str(),
+			"unsigned:path:ed29064cbb8fcc615896f41000cf9f5c0af0324a0dc388f6b5c3637a84d04faf"
+		);
+		assert_eq!(
+			native_path_publisher(root).as_str(),
+			format!("unsigned:path:{}", Hash32::sum(root.to_string_lossy().as_bytes()).to_hex())
+		);
+	}
 
 	#[test]
 	fn stale_revocation_fails_open_unless_strict() {

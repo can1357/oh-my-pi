@@ -70,7 +70,7 @@ use crate::{
 		spawn::spawn,
 	},
 	fault, fault_in,
-	policy::{AuthorityTable, Grants},
+	policy::{AuthorityTable, CONTROL_CAPABILITIES, Grants},
 	tools::{HookControlFactory, HookEventPolicy, HookSubscription, RegistryControlFactory},
 	worker_pool::WorkerUnavailable,
 };
@@ -180,6 +180,9 @@ pub struct ExtHostSpec {
 	pub manifest:          ExtensionManifest,
 	/// Manifest-derived DATA capabilities for this extension.
 	pub data_grants:       Grants,
+	/// Operator-granted CONTROL capabilities, carried only by the CONTROL
+	/// identity and never by DATA authority.
+	pub control_grants:    BTreeSet<Str>,
 	/// Optional site-packages directory passed through as `OMP_PY_SITE`.
 	pub python_site:       Option<PathBuf>,
 	/// Exact entry file preloaded under the manifest module name.
@@ -204,6 +207,7 @@ impl ExtHostSpec {
 			key,
 			manifest,
 			data_grants: Grants::default(),
+			control_grants: BTreeSet::new(),
 			python_site: None,
 			entry_path: None,
 			data_socket: None,
@@ -1115,7 +1119,20 @@ fn control_connection_identity(
 		trust: spec.key.tier().clone(),
 		host_generation,
 		session_generation: config.session_generation,
-		capabilities: Arc::new(spec.data_grants.iter().map(Str::from).collect()),
+		capabilities: Arc::new(
+			spec
+				.data_grants
+				.iter()
+				.map(Str::from)
+				.chain(
+					spec
+						.control_grants
+						.iter()
+						.filter(|grant| CONTROL_CAPABILITIES.contains(&grant.as_str()))
+						.cloned(),
+				)
+				.collect(),
+		),
 	})
 }
 
@@ -4864,5 +4881,107 @@ mod tests {
 			"a registry that never arrived was not rejected as a protocol failure"
 		);
 		assert!(started.elapsed() >= budget, "freeze gave up before its configured budget");
+	}
+
+	/// A user-layer spec that admission gave two of the three control
+	/// capabilities beside one DATA grant.
+	fn control_grant_spec() -> ExtHostSpec {
+		let key = HostKey::new("user", "sandboxed", "granted");
+		let provenance = omp_core::Provenance::new(
+			sf!("publisher"),
+			key.extension().clone(),
+			sf!("1.0.0"),
+			omp_core::ArtifactDigest::new([9; 32]),
+			key.layer().clone(),
+			key.tier().clone(),
+			1,
+		);
+		let manifest = ExtensionManifest::new(
+			provenance,
+			"granted",
+			[],
+			crate::exthost::DeclarationSet::default(),
+			crate::exthost::ServiceManifest::default(),
+			[],
+			[ActivationTrigger::FirstReach],
+		);
+		let mut spec = ExtHostSpec::new(key, manifest);
+		spec.data_grants = Grants::supported(["env.exec"]);
+		spec.control_grants = BTreeSet::from([sf!("agents.continuation"), sf!("policy.write")]);
+		spec
+	}
+
+	fn control_grant_config() -> ExtHostConfig {
+		ExtHostConfig::new(
+			PathBuf::from("/nonexistent/omp-exthost"),
+			Principal::new(sf!("test"), sf!("Test")),
+			sf!("test-session"),
+			1,
+		)
+	}
+
+	/// The CONTROL identity carries the operator-granted control capabilities
+	/// next to the DATA grants, and nothing that was not granted.
+	#[test]
+	fn identity_carries_control_grants() {
+		let config = control_grant_config();
+		let spec = control_grant_spec();
+		let identity = control_connection_identity(&config, &spec, 1);
+		for capability in ["env.exec", "agents.continuation", "policy.write"] {
+			assert!(identity.capabilities.contains(capability), "identity lacks {capability}");
+		}
+		assert!(
+			!identity.capabilities.contains("approvals.decide"),
+			"an ungranted control capability reached the identity"
+		);
+
+		let mut ungranted = control_grant_spec();
+		ungranted.control_grants.clear();
+		let identity = control_connection_identity(&config, &ungranted, 1);
+		for capability in crate::policy::CONTROL_CAPABILITIES {
+			assert!(
+				!identity.capabilities.contains(*capability),
+				"{capability} reached an identity without a control grant"
+			);
+		}
+	}
+
+	/// Only names in `CONTROL_CAPABILITIES` pass from the control grants to the
+	/// CONTROL identity: a DATA capability or an unknown name placed there is
+	/// dropped, while the real control grant beside it still arrives.
+	#[test]
+	fn identity_drops_non_control_names_in_control_grants() {
+		let config = control_grant_config();
+		let mut spec = control_grant_spec();
+		spec.control_grants =
+			BTreeSet::from([sf!("policy.write"), sf!("env.lsp"), sf!("admin.root")]);
+		let identity = control_connection_identity(&config, &spec, 1);
+		assert!(identity.capabilities.contains("policy.write"), "the control grant was dropped");
+		for name in ["env.lsp", "admin.root"] {
+			assert!(
+				!identity.capabilities.contains(name),
+				"non-control name {name} reached the CONTROL identity"
+			);
+		}
+	}
+
+	/// Control grants never reach the DATA plane: the DATA grant set cannot
+	/// hold a control name, the spec's DATA grants stay as admitted, and the
+	/// manifest snapshot reports only DATA capabilities.
+	#[test]
+	fn data_authority_never_sees_control_grants() {
+		assert_eq!(
+			Grants::supported(crate::policy::CONTROL_CAPABILITIES.iter().copied())
+				.iter()
+				.len(),
+			0,
+			"a control capability is representable as a DATA grant"
+		);
+		let spec = control_grant_spec();
+		assert_eq!(spec.data_grants.iter().collect::<Vec<_>>(), ["env.exec"]);
+		let snapshot: serde_json::Value =
+			serde_json::from_str(control_manifest_snapshot(&spec).expect("snapshot").as_str())
+				.expect("snapshot JSON");
+		assert_eq!(snapshot["capabilities"], serde_json::json!(["env.exec"]));
 	}
 }

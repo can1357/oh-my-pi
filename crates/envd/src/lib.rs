@@ -835,20 +835,52 @@ impl ProjectEnvironment {
 	/// composition whose [`Self::fallback_notice`] explains the degraded
 	/// document-lifetime behavior.
 	#[cfg(any(unix, windows))]
-	#[tracing::instrument(
-		name = "environment_attach",
-		level = "debug",
-		skip_all,
-		fields(root = %root.display(), state_dir = %state_dir.display())
-	)]
 	pub async fn attach(
 		root: &Path,
 		state_dir: &Path,
 		options: AttachOptions,
 	) -> Result<Self, EnvdError> {
+		Self::attach_with_protected_write_paths(root, state_dir, options, &[]).await
+	}
+
+	/// Attaches with additional local paths denied by every command sandbox.
+	#[cfg(any(unix, windows))]
+	pub fn attach_with_protected_write_paths<'a>(
+		root: &'a Path,
+		state_dir: &'a Path,
+		options: AttachOptions,
+		protected_write_paths: &'a [PathBuf],
+	) -> futures::future::BoxFuture<'a, Result<Self, EnvdError>> {
+		let span = tracing::info_span!(
+			"environment_attach",
+			root = %root.display(),
+			state_dir = %state_dir.display()
+		);
+		Box::pin(tracing::Instrument::instrument(
+			Self::attach_with_protected_write_paths_inner(
+				root,
+				state_dir,
+				options,
+				protected_write_paths,
+			),
+			span,
+		))
+	}
+
+	#[cfg(any(unix, windows))]
+	async fn attach_with_protected_write_paths_inner(
+		root: &Path,
+		state_dir: &Path,
+		options: AttachOptions,
+		protected_write_paths: &[PathBuf],
+	) -> Result<Self, EnvdError> {
 		publish_launcher_build(state_dir)?;
 		let trust = options.bridges.content.workspace_trust;
-		let policy = daemon_policy::from_con(&options.con, trust);
+		let policy = daemon_policy::from_con_with_protected_write_paths(
+			&options.con,
+			trust,
+			protected_write_paths,
+		);
 		let socket = omp_env::project_state::environment_socket(state_dir, &policy)?;
 		let docserver_socket = omp_env::project_state::document_socket(state_dir);
 		let interrupt_grace = host_settings::SV_INTERRUPT_GRACE.get(&options.con);
@@ -881,6 +913,7 @@ impl ProjectEnvironment {
 					state_dir,
 					&socket,
 					&policy,
+					protected_write_paths,
 					py_eval,
 					approval_mode,
 					&trusted_extensions,
@@ -894,7 +927,15 @@ impl ProjectEnvironment {
 				.await
 			},
 			Err(error) => {
-				Self::start_attach_fallback(root, state_dir, &docserver_socket, options, error).await
+				Self::start_attach_fallback(
+					root,
+					state_dir,
+					&docserver_socket,
+					options,
+					protected_write_paths,
+					error,
+				)
+				.await
 			},
 		}
 	}
@@ -905,6 +946,7 @@ impl ProjectEnvironment {
 		state_dir: &Path,
 		docserver_socket: &Path,
 		options: AttachOptions,
+		protected_write_paths: &[PathBuf],
 		error: EnvdError,
 	) -> Result<Self, EnvdError> {
 		let notice = sf!(
@@ -912,7 +954,7 @@ impl ProjectEnvironment {
 			 sessions in this project may lose document access when this one exits"
 		);
 		tracing::warn!(%error, "project daemon unavailable; using embedded environment");
-		let mut environment = Self::start_embedded(
+		let mut environment = Self::start_embedded_with_protected_write_paths(
 			root,
 			state_dir,
 			docserver_socket,
@@ -921,6 +963,7 @@ impl ProjectEnvironment {
 			&options.contributed_values,
 			options.con,
 			options.bridges,
+			protected_write_paths,
 		)
 		.await?;
 		environment.fallback_notice = Some(notice);
@@ -931,6 +974,32 @@ impl ProjectEnvironment {
 	///
 	/// This path never joins or reuses an existing environment owner, so every
 	/// tool and security owner is composed from `con` for `root`.
+	pub(crate) async fn start_embedded(
+		root: &Path,
+		state_dir: &Path,
+		docserver_socket: &Path,
+		py_eval: bool,
+		trusted_extensions: &[ExtHostSpec],
+		contributed_values: &[ContributedCliValue],
+		con: Arc<Ctx>,
+		bridges: RegistryBridges,
+	) -> Result<Self, EnvdError> {
+		Self::start_embedded_with_protected_write_paths(
+			root,
+			state_dir,
+			docserver_socket,
+			py_eval,
+			trusted_extensions,
+			contributed_values,
+			con,
+			bridges,
+			&[],
+		)
+		.await
+	}
+
+	/// Starts an isolated environment and installs owner-supplied sandbox deny
+	/// paths.
 	#[tracing::instrument(
 		name = "environment_start",
 		level = "debug",
@@ -943,7 +1012,7 @@ impl ProjectEnvironment {
 			extensions = trusted_extensions.len()
 		)
 	)]
-	pub(crate) async fn start_embedded(
+	pub(crate) async fn start_embedded_with_protected_write_paths(
 		root: &Path,
 		state_dir: &Path,
 		docserver_socket: &Path,
@@ -952,6 +1021,7 @@ impl ProjectEnvironment {
 		contributed_values: &[ContributedCliValue],
 		con: Arc<Ctx>,
 		bridges: RegistryBridges,
+		protected_write_paths: &[PathBuf],
 	) -> Result<Self, EnvdError> {
 		let interrupt_grace = host_settings::SV_INTERRUPT_GRACE.get(&con);
 		let command_credentials = bridges.command_credentials.clone();
@@ -964,7 +1034,7 @@ impl ProjectEnvironment {
 			interrupt_grace,
 		)?;
 		let convars = Arc::new(exthost::ConvarControlFactory::new(Arc::clone(&con)));
-		let server = EnvServer::open_project(
+		let server = EnvServer::open_project_with_protected_write_paths(
 			root,
 			state_dir,
 			docserver_socket,
@@ -976,6 +1046,7 @@ impl ProjectEnvironment {
 			con.as_ref(),
 			convars,
 			bridges,
+			protected_write_paths.to_vec(),
 		)
 		.await?;
 		let server = Arc::new(server);
@@ -1040,6 +1111,7 @@ impl ProjectEnvironment {
 		state_dir: &Path,
 		socket: &Path,
 		policy: &DaemonPolicy,
+		protected_write_paths: &[PathBuf],
 		py_eval: bool,
 		approval_mode: Option<ApprovalMode>,
 		trusted_extensions: &[ExtHostSpec],
@@ -1063,7 +1135,7 @@ impl ProjectEnvironment {
 			interrupt_grace,
 		)?;
 		let convars = Arc::new(exthost::ConvarControlFactory::new(Arc::clone(&con)));
-		let server = EnvServer::open_session_host(
+		let server = EnvServer::open_session_host_with_protected_write_paths(
 			root,
 			state_dir,
 			Registry::new(),
@@ -1073,6 +1145,7 @@ impl ProjectEnvironment {
 			convars,
 			bridges,
 			owner_client,
+			protected_write_paths.to_vec(),
 		)
 		.await?;
 		let server = Arc::new(server);

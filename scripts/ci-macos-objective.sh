@@ -75,7 +75,7 @@ cargo nextest run --profile ci -p omp-e2e --locked \
 TERM=xterm-256color cargo nextest run --profile ci -p omp-e2e --test p7_tui --test p7_tsp --locked
 )
 (
-cargo nextest run --profile ci -p omp-e2e --test p12_daemon_approvals --locked
+cargo nextest run --profile ci -p omp-e2e --test p12_daemon_approvals --test p9_continuation_grants --locked
 )
 (
 cargo nextest run --profile ci -p omp-e2e --test p8_baselines --locked

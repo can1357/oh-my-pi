@@ -85,6 +85,24 @@ pub fn from_con(ctx: &Ctx, trust: WorkspaceTrust) -> DaemonPolicy {
 	)
 }
 
+/// Resolves the policy with extra session-protected paths merged into the
+/// host defaults. Paths already present leave the digest unchanged, so a
+/// session whose paths match the host defaults still joins the shared daemon.
+#[must_use]
+pub fn from_con_with_protected_write_paths(
+	ctx: &Ctx,
+	trust: WorkspaceTrust,
+	protected_write_paths: &[std::path::PathBuf],
+) -> DaemonPolicy {
+	let mut sandbox = SandboxSettings::from_con(ctx);
+	for path in protected_write_paths {
+		if !sandbox.protected_write_paths.contains(path) {
+			sandbox.protected_write_paths.push(path.clone());
+		}
+	}
+	of(&sandbox, &ToolSettings::from_con(ctx), &ShellSettings::from_con(ctx), trust)
+}
+
 /// Digests the policy of resolved `sandbox`, `tools` and `shell` settings,
 /// before any composition-level approval-mode override, under the workspace
 /// `trust`.
@@ -210,5 +228,85 @@ mod tests {
 					.expect("read setting");
 			})
 		);
+	}
+	/// Host-protected paths participate in daemon identity through shared
+	/// settings.
+	#[test]
+	fn protected_paths_participate_in_daemon_identity() {
+		let ctx = Ctx::new();
+		let trust = WorkspaceTrust::Untrusted;
+		let config_policy = from_con(&ctx, trust);
+		let mut sandbox = SandboxSettings::from_con(&ctx);
+		sandbox
+			.protected_write_paths
+			.push(std::path::PathBuf::from("/var/run/omp-protected-test"));
+		assert_ne!(
+			config_policy,
+			of(&sandbox, &ToolSettings::from_con(&ctx), &ShellSettings::from_con(&ctx), trust)
+		);
+	}
+
+	/// `SandboxSettings::from_con` derives the host-protected paths for every
+	/// local session, so a session that passes those same paths resolves the
+	/// daemon `from_con` alone resolves, and does not split the shared daemon.
+	#[test]
+	fn session_paths_equal_to_the_host_defaults_keep_the_policy() {
+		let ctx = Ctx::new();
+		let trust = WorkspaceTrust::Untrusted;
+		let host_defaults = SandboxSettings::from_con(&ctx).protected_write_paths;
+		assert!(!host_defaults.is_empty(), "a local session derives host-protected paths");
+
+		assert_eq!(
+			from_con_with_protected_write_paths(&ctx, trust, &host_defaults),
+			from_con(&ctx, trust)
+		);
+	}
+
+	/// A protected path that is not valid UTF-8 digests lossily instead of
+	/// panicking, and it still keys the daemon.
+	#[cfg(unix)]
+	#[test]
+	fn non_utf8_protected_paths_digest_without_panicking() {
+		use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _, path::PathBuf};
+
+		let ctx = Ctx::new();
+		let trust = WorkspaceTrust::Untrusted;
+		let mut sandbox = SandboxSettings::from_con(&ctx);
+		sandbox
+			.protected_write_paths
+			.push(PathBuf::from(OsStr::from_bytes(b"/srv/omp-\xff-store")));
+		let tools = ToolSettings::from_con(&ctx);
+		let shell = ShellSettings::from_con(&ctx);
+
+		let policy = of(&sandbox, &tools, &shell, trust);
+		assert_eq!(policy, of(&sandbox, &tools, &shell, trust), "the digest is deterministic");
+		assert_ne!(policy, from_con(&ctx, trust), "the path still keys the daemon");
+	}
+
+	/// Distinct protected paths key distinct daemons even when their lossy
+	/// spellings coincide: two different invalid byte strings and a path that
+	/// holds U+FFFD all digest differently.
+	#[cfg(unix)]
+	#[test]
+	fn protected_paths_with_one_lossy_spelling_digest_differently() {
+		use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _, path::PathBuf};
+
+		let ctx = Ctx::new();
+		let trust = WorkspaceTrust::Untrusted;
+		let tools = ToolSettings::from_con(&ctx);
+		let shell = ShellSettings::from_con(&ctx);
+		let digest = |path: PathBuf| {
+			let mut sandbox = SandboxSettings::from_con(&ctx);
+			sandbox.protected_write_paths.push(path);
+			of(&sandbox, &tools, &shell, trust)
+		};
+
+		let ff = digest(PathBuf::from(OsStr::from_bytes(b"/srv/\xffstore")));
+		let fe = digest(PathBuf::from(OsStr::from_bytes(b"/srv/\xfestore")));
+		let replacement = digest(PathBuf::from("/srv/\u{fffd}store"));
+
+		assert_ne!(ff, fe, "two invalid paths shared one digest");
+		assert_ne!(ff, replacement, "an invalid path shared a digest with its lossy spelling");
+		assert_ne!(fe, replacement, "an invalid path shared a digest with its lossy spelling");
 	}
 }

@@ -837,9 +837,31 @@ CONTROL, per-turn, fail-open.
 
 #### `async omp.agents.set_continuation_policy(policy: ContinuationPolicy) -> None`
 
-CONTROL, per-session, fail-closed. Raises `PolicyDenied` if the manifest did not
-grant continuation authority, which is the difference between an extension that
-may keep the loop alive and one that may only observe.
+CONTROL, per-session, fail-closed. Raises `PolicyDenied` (`code == "capability_denied"`)
+unless the extension holds the operator grant `agents.continuation`: the manifest declares
+it in `capabilities` and a digest-pinned grant covers it ([`14-deploy.md`](14-deploy.md) §3.9).
+The grant controls only who may set a policy. Reading `continuations()` needs no grant, and an
+`agent_settled` hook without it may still return `Continue`, which the core cap of 8 per
+submission still bounds.
+
+The operator issues that grant with `omp ext grant <NAME> [--revoke] [--yes]`, where
+`<NAME>` is the extension id. It applies to user-layer extensions only, the ones installed
+under `<config>/agent/extensions`; a workspace extension never receives a control grant.
+Granting needs your consent: `--yes`, or a `y`/`yes` answer at a terminal prompt. Without either it
+refuses and writes nothing. `--revoke` removes the grant instead and affects new sessions
+only; a running session keeps the capability until it restarts.
+
+A grant is only as good as the host that enforces it:
+
+- With the exec sandbox `Off`, or on a host with no kernel-enforced sandbox, admission gives
+  the extension no control grants, even when a grant record exists.
+- A grant is void, and the extension loads without control, when its manifest text changes,
+  when its root moves, or when the set of capabilities it declares changes. Run
+  `omp ext grant <NAME>` again to re-issue it.
+- `omp ext grant` and admission refuse a store that is unsafe. `<data>/ext`, its grant
+  file and the user extension root must not be symlinks, must be owned by you, and must not
+  sit inside the workspace or any exec-writable root, since code that can write there could
+  change its own grant.
 
 #### `@dataclass(frozen=True, slots=True) class omp.agents.LoopSignal`
 
