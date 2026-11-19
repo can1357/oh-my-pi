@@ -13,7 +13,7 @@ const NPM_PACKAGES: readonly (readonly [npmDir: string, name: string])[] = [
 	["pi-ai", "@oh-my-pi/pi-ai"],
 	["pi-catalog", "@oh-my-pi/pi-catalog"],
 	["pi-coding-agent", "@oh-my-pi/pi-coding-agent"],
-	["omp-natives", "@oh-my-pi/pi-natives"],
+	["pi-natives", "@oh-my-pi/pi-natives"],
 	["pi-tui", "@oh-my-pi/pi-tui"],
 	["pi-utils", "@oh-my-pi/pi-utils"],
 ];

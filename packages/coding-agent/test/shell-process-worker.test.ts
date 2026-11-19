@@ -26,6 +26,30 @@ async function run(spec: ShellProcessSpec, stdin = ""): Promise<{ stdout: string
 	return { stdout, stderr, exitCode };
 }
 
+/**
+ * Run `command` as a shell process on pipes, send it `signal` once it printed
+ * a first line, and collect everything it printed until its output closed.
+ */
+async function terminate(command: string, signal: NodeJS.Signals): Promise<{ exitCode: number; printed: string }> {
+	const { application, args } = shellProcessCommand({ command });
+	const child = Bun.spawn([application, ...args], { stdout: "pipe", stderr: "pipe" });
+	const reader = child.stdout.getReader();
+	const decoder = new TextDecoder();
+	let printed = "";
+	while (!printed.includes("\n")) {
+		const { value, done } = await reader.read();
+		if (done) break;
+		printed += decoder.decode(value, { stream: true });
+	}
+
+	child.kill(signal);
+	const exitCode = await child.exited;
+	for (let read = await reader.read(); !read.done; read = await reader.read()) {
+		printed += decoder.decode(read.value, { stream: true });
+	}
+	return { exitCode, printed };
+}
+
 /** A shell process on a pseudo-terminal it leads. */
 function onTerminal(
 	command: string,
@@ -116,30 +140,31 @@ describe("shell process on pipes", () => {
 	it.skipIf(process.platform === "win32")(
 		"ends its command and exits 143 when terminated",
 		async () => {
-			const { application, args } = shellProcessCommand({
-				command: "/bin/sh -c 'echo $$; exec sleep 60'; echo after",
-			});
-			const child = Bun.spawn([application, ...args], { stdout: "pipe", stderr: "pipe" });
-			const reader = child.stdout.getReader();
-			const decoder = new TextDecoder();
 			// The program prints its pid once it runs.
-			let printed = "";
-			while (!printed.includes("\n")) {
-				const { value, done } = await reader.read();
-				if (done) break;
-				printed += decoder.decode(value, { stream: true });
-			}
-
-			child.kill("SIGTERM");
-			const exitCode = await child.exited;
-			for (let read = await reader.read(); !read.done; read = await reader.read()) {
-				printed += decoder.decode(read.value, { stream: true });
-			}
+			const { exitCode, printed } = await terminate("/bin/sh -c 'echo $$; exec sleep 60'; echo after", "SIGTERM");
 
 			expect(exitCode).toBe(143);
 			// Nothing after the program ran, and the program is gone with its shell.
 			expect(printed).toMatch(/^\d+\n$/);
 			expect(() => process.kill(Number(printed), 0)).toThrow();
+		},
+		60_000,
+	);
+
+	it.skipIf(process.platform === "win32").each([
+		["SIGTERM", 143],
+		["SIGHUP", 129],
+	] as const)(
+		"stays on %s until its command's TERM trap ran to the end, then exits %d",
+		async (signal, status) => {
+			// The trap takes far longer than a process that exits on the signal
+			// itself, without waiting for the cancel to end its command.
+			const { exitCode, printed } = await terminate(
+				"trap 'sleep 0.3; echo trapped' TERM; echo started; sleep 60; echo after",
+				signal,
+			);
+
+			expect({ exitCode, printed }).toEqual({ exitCode: status, printed: "started\ntrapped\n" });
 		},
 		60_000,
 	);
