@@ -174,14 +174,25 @@ export interface SchemeHost {
  * Raw resource payload returned by protocol handlers. The router defaults
  * `immutable` from {@link SchemeSpec.immutable}, so handlers set it only to
  * override the scheme default for a specific URL.
+ *
+ * `Content` is text for most handlers; a handler that can serve binary
+ * (`mcp://` blobs) resolves `InternalResource<string | Buffer>`, which is also
+ * what {@link ProtocolHandler.resolve} and the router return.
  */
-export interface InternalResource {
+export interface InternalResource<Content extends string | Buffer = string> {
 	/** Canonical URL that was resolved */
 	url: string;
-	/** Resolved text content */
-	content: string;
-	/** MIME type: text/markdown, application/json, or text/plain */
-	contentType: "text/markdown" | "application/json" | "text/plain";
+	/**
+	 * Resolved text, or the raw bytes of a binary resource. `read` treats bytes
+	 * like a file of the same name and type (image, document, binary notice);
+	 * byte-oriented consumers (the bash URL filesystem) take them verbatim.
+	 */
+	content: Content;
+	/**
+	 * MIME type: text/markdown, application/json, or text/plain for text; the
+	 * reported type of byte `content` (`application/pdf`), when known.
+	 */
+	contentType: string;
 	/** Content size in bytes */
 	size?: number;
 	/** Underlying filesystem path (for debugging, not exposed to agent) */
@@ -386,7 +397,7 @@ export interface ProtocolHandler {
 	 *   preference to global state.
 	 * @throws Error with user-friendly message if resolution fails
 	 */
-	resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource>;
+	resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource<string | Buffer>>;
 	/**
 	 * Handler-owned write hook: present exactly when `spec.write.via` is
 	 * `"handler"` (the router enforces this at registration). The write tool
