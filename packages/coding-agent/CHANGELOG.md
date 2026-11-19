@@ -43,6 +43,7 @@
 
 - Added a coloured extension status variant to `omp gallery --segment status` ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
 - An extension, plugin, custom tool, hook, custom command or share script under a directory whose path contains `?` now fails at once with an error that names the path and says that Bun cannot load a module from such a path, and that moving the files to another directory fixes it; before, it failed with a bare "Cannot find module …" (with `?mtime=…` for an extension). Reached through a `?`-free link, a hook, custom command or share script failed with "ENOENT reading …"; a custom command could load instead, in an order where a hook load through the same link ran earlier in the process, before the command's file was written. It is now always refused
+- Extensions, plugins, custom tools, hooks, custom commands and share scripts under a path containing `?` now fail with an error naming the path and the fix, instead of "Cannot find module" ([#19763](https://github.com/can1357/oh-my-pi/pull/19763) by [@sjawhar](https://github.com/sjawhar))
 
 ## [19.0.0] - 2026-11-18
 
