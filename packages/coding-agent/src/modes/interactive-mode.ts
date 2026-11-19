@@ -55,7 +55,7 @@ import type { AsyncJobManagerApi } from "../async/job-manager";
 import { stopAgentRun } from "../async/job-control";
 import { IrcBus } from "../irc/bus";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { collectTrayInput, Tray } from "./tray";
+import { collectTrayInput, runsInlineAgent, Tray, TrayMainActivity } from "./tray";
 import type { JobWidgetRegistry } from "../job-widgets/types";
 import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
 import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
@@ -744,6 +744,8 @@ class AnchoredLiveContainer extends Container {}
 
 /** An empty HUD slot: the terminal owns spacing, so nothing is described. */
 const EMPTY_HUD: NativeNode = col([]);
+/** The activity line with nothing in it: on a tray host it stays while the tray has cards, the host's seat for them. */
+const EMPTY_ACTIVITY: NativeNode = row([], { role: "omp.hud.activity", align: "center", gap: "sm" });
 
 /** Renders through an ANSI component and describes as a node built alongside it. */
 class DescribedComponent implements Component {
@@ -1616,7 +1618,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				children: readonly Component[];
 				todo: NativeNode | undefined;
 				caption: NativeNode | undefined;
-				counts: NativeNode | undefined;
+				/** The tray had cards: an otherwise empty line stays as their seat. */
+				seat: boolean;
 				node: NativeNode;
 		  }
 		| undefined;
@@ -1735,8 +1738,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * other rows describe themselves) in an `omp.hud.status` column, then the
 	 * todo HUD, so the todo holds its place as the turn starts and ends.
 	 * Nothing to show describes the empty HUD. On a host with the tray, the
-	 * row is the tray's header: its counts go before the todo, and while the
-	 * main agent is idle its caption stands in for the status rows.
+	 * row is the tray's header: while the main agent is idle its caption
+	 * stands in for the status rows, and while the tray has cards the line
+	 * stays, empty if need be, as the seat the host draws them from.
 	 */
 	describeStatusHud(children: readonly Component[], cx: DescribeContext): NativeNode {
 		const hud = this.#todoHudNative;
@@ -1748,24 +1752,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		} else if (this.#tray.onHost) {
 			this.#releaseTray();
 		}
-		const { caption, counts } = this.#tray.header(children.length === 0);
+		const caption = this.#tray.caption(children.length === 0);
+		const seat = onTrayHost && this.#tray.items.length > 0;
 		const memo = this.#statusHudNative;
 		if (
 			memo &&
 			memo.todo === todo &&
 			memo.caption === caption &&
-			memo.counts === counts &&
+			memo.seat === seat &&
 			sameItems(memo.children, children)
 		)
 			return memo.node;
 		const parts: NativeChild[] = [];
 		if (children.length > 0) parts.push(node("col", { role: "omp.hud.status" }, children.slice(), "status"));
 		else if (caption) parts.push(caption);
-		if (counts) parts.push(counts);
 		if (todo) parts.push(todo);
 		const described =
-			parts.length === 0 ? EMPTY_HUD : row(parts, { role: "omp.hud.activity", align: "center", gap: "sm" });
-		this.#statusHudNative = { children: children.slice(), todo, caption, counts, node: described };
+			parts.length > 0
+				? row(parts, { role: "omp.hud.activity", align: "center", gap: "sm" })
+				: seat
+					? EMPTY_ACTIVITY
+					: EMPTY_HUD;
+		this.#statusHudNative = { children: children.slice(), todo, caption, seat, node: described };
 		return described;
 	}
 	/**
@@ -1805,9 +1813,26 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#traySyncTimer = undefined;
 		}
 	}
-	/** The agents-hub key on a host showing tray cards moves focus into the tray; false when it shows none. */
-	#focusTray(): boolean {
-		return this.#trayShown() && this.#tray.focus();
+	/**
+	 * Follow the main session's turn and calls for the tray's `main` prop, repainting
+	 * a tray host the moment it flips (a `wait` starting or ending, the turn yielding).
+	 */
+	#followTrayMain(event: AgentSessionEvent): void {
+		switch (event.type) {
+			case "agent_start":
+			case "agent_pause":
+			case "agent_end":
+			case "tool_execution_start":
+			case "tool_execution_end":
+				if (
+					this.#trayMain.handle(event, this.session.isRunActive, id =>
+						runsInlineAgent(this.#observerRegistry.getSessions(), id),
+					) &&
+					this.#trayShown() &&
+					this.#tray.mainChanged()
+				)
+					this.ui.requestRender();
+		}
 	}
 	/** Stop agent `id` for good from the tray, as cancelling its task job from the jobs sheet does. */
 	#stopTrayAgent(id: string): void {
@@ -2082,7 +2107,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.session.sessionName;
 	}
 	focusAgentSession(id: string): Promise<void> {
-		return this.#focusController.focusAgent(id);
+		// Viewing an agent may revive it, passing its registry status through `running`: the
+		// tray must not read that as work (cards would regroup, a quiet tray would wake).
+		// Off a tray host, or for an agent already at work, it is simply viewed.
+		if (!this.#trayShown() || AgentRegistry.global().get(id)?.status === "running") {
+			return this.#focusController.focusAgent(id);
+		}
+		this.#trayReviving.add(id);
+		return this.#focusController.focusAgent(id).finally(() => {
+			this.#trayReviving.delete(id);
+			if (this.#trayShown()) this.#scheduleTraySync();
+		});
 	}
 	focusParentSession(): Promise<void> {
 		return this.#focusController.focusParent();
@@ -2207,20 +2242,26 @@ export class InteractiveMode implements InteractiveModeContext {
 				snapshot: () => this.session.getAsyncJobSnapshot({ recentLimit: Number.POSITIVE_INFINITY }),
 				irc: IrcBus.existing(),
 				showAgents: cfgDisplayPinnedAgents.get(settings) !== "off",
+				canFocus: this.collabGuest === undefined,
+				reviving: this.#trayReviving,
 			}),
+		main: () => this.#trayMain.state(id => runsInlineAgent(this.#observerRegistry.getSessions(), id)),
 		focusAgent: id => {
 			this.focusAgentSession(id).catch((error: unknown) =>
 				this.showError(error instanceof Error ? error.message : String(error)),
 			);
 		},
-		showAgentHub: () => this.showAgentHub(),
-		showJobsSheet: () => this.showJobsSheet(),
+		showJobsSheet: selected => this.showJobsSheet(selected),
 		stopAgent: id => this.#stopTrayAgent(id),
 		cancelJob: id => {
 			this.session.cancelAsyncJob(id);
 		},
 		requestRender: () => this.ui.requestRender(),
 	});
+	/** Agents being opened for viewing; see `TrayInput.reviving`. */
+	readonly #trayReviving = new Set<string>();
+	/** What the main agent is doing, as the tray's `main` prop says; follows the main session's events. */
+	readonly #trayMain = new TrayMainActivity(false);
 	/** The root job manager the tray repaints on, and how to stop listening to it. */
 	#trayJobsListener: { manager: AsyncJobManagerApi; unsubscribe: () => void } | undefined;
 	#traySyncTimer?: NodeJS.Timeout;
@@ -3085,6 +3126,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.#eventBusUnsubscribers.push(
 			this.session.subscribe(event => {
+				this.#followTrayMain(event);
 				if (event.type === "model_changed") {
 					this.#scheduleComposerStatusPersist();
 					this.session.prewarmModelConnection();
@@ -8855,26 +8897,30 @@ export class InteractiveMode implements InteractiveModeContext {
 	 *
 	 * It lists the viewed session's jobs and its subagents' as a tree. A focused
 	 * subagent view opens it without the Cancel action: the view only watches
-	 * that agent, as `/jobs kill` stays main-session only.
+	 * that agent, as `/jobs kill` stays main-session only. `selected` opens it
+	 * on that job (a tray card's), when the sheet lists it.
 	 */
-	showJobsSheet(): void {
+	showJobsSheet(selected?: string): void {
 		if (this.#jobsSheetHandle) return;
 		const session = this.viewSession;
 		if (!session.getAsyncJobTree()) {
 			this.showWarning("Async background jobs are unavailable in this session.");
 			return;
 		}
-		const sheet = new JobsSheet({
-			load: () => session.getAsyncJobTree() ?? { running: [], recent: [] },
-			inspect: id => session.inspectAsyncJob(id),
-			cancel: this.focusedAgentId
-				? undefined
-				: id => {
-						session.cancelAsyncJob(id);
-						this.ui.requestRender();
-					},
-			close: () => this.#hideJobsSheet(),
-		});
+		const sheet = new JobsSheet(
+			{
+				load: () => session.getAsyncJobTree() ?? { running: [], recent: [] },
+				inspect: id => session.inspectAsyncJob(id),
+				cancel: this.focusedAgentId
+					? undefined
+					: id => {
+							session.cancelAsyncJob(id);
+							this.ui.requestRender();
+						},
+				close: () => this.#hideJobsSheet(),
+			},
+			{ selected },
+		);
 		this.#jobsSheetHandle = this.ui.showOverlay(sheet, { anchor: "center", width: "90%", maxHeight: "90%" });
 		this.#jobsSheetTimer = setInterval(() => this.ui.requestRender(), JOBS_SHEET_REFRESH_MS);
 		this.ui.setFocus(sheet);
@@ -9691,7 +9737,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	showAgentHub(options?: AgentHubOpenOptions): void {
-		if (options?.trayFirst && this.#focusTray()) return;
+		// The agents-hub key on a tray host: into the tray while it shows cards, else nothing, as
+		// the tray has no hub to fall back to. With its agents turned off, the key opens the hub.
+		if (options?.trayFirst && this.#trayShown()) {
+			if (this.#tray.focus() || cfgDisplayPinnedAgents.get(settings) !== "off") return;
+		}
 		this.#selectorController.showAgentHub(this.#observerRegistry, options);
 	}
 
