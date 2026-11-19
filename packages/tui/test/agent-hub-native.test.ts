@@ -200,6 +200,21 @@ test.each([60_000, 0])(
 	},
 );
 
+test("a selection change re-sends no roster rows, so large hubs stay responsive in Tern", () => {
+	const { hub, now } = observedWorker(60_000);
+	try {
+		const before = pickerProps(hub).items;
+		now.mockReturnValue(1_000_200);
+		hub.handleNativeEvent({ type: "select", key: "", item: "Idle" });
+		const after = pickerProps(hub);
+		expect(after.selected).toBe("Idle");
+		// The reconciler sends `items` whenever it differs; the running clock keeps ticking terminal-side.
+		expect(after.items).toEqual(before);
+	} finally {
+		hub.dispose();
+	}
+});
+
 test("a follow-up turn does not age the previous turn's snapshot across the idle gap", () => {
 	const { hub, now, emit } = observedWorker(60_000);
 	const lifecycle = { id: "Worker", agent: "task", agentSource: "bundled", index: 0 };

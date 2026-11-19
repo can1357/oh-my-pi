@@ -12,10 +12,9 @@ interface ContextCategoryDescriptor {
 
 /** Context categories in display order. */
 export const CONTEXT_CATEGORIES = [
-	// The Overview weight excludes the Skills listing; content views keep complete system blocks.
-	{ id: "system-prompt", label: "System Prompt", overviewLabel: "System Prompt (excluding Skills)" },
-	// An estimate of the prompt's skill listing, without entries of its own.
-	{ id: "skills", label: "Skills", openable: false },
+	{ id: "system-prompt", label: "System Prompt" },
+	{ id: "instruction-files", label: "Instruction Files" },
+	{ id: "skills", label: "Skills" },
 	{ id: "built-in-tools", label: "Built-in Tools" },
 	{ id: "custom-tools", label: "Custom Tools" },
 	{ id: "user-messages", label: "User / Developer Messages" },
@@ -43,6 +42,13 @@ export interface ContextThinkingGroup {
 	readonly interrupted?: boolean;
 }
 
+/** UTF-16 offsets into entry text of a viewer-only marker standing in for content shown in another category. */
+export interface ContextViewSourceMarker {
+	readonly start: number;
+	readonly end: number;
+	readonly category: ContextCategoryId;
+}
+
 export interface ContextViewEntry {
 	readonly id: string;
 	readonly label: string;
@@ -55,13 +61,15 @@ export interface ContextViewEntry {
 	readonly info?: string;
 	readonly timestamp?: number;
 	readonly callId?: string;
+	/** Sorted, non-overlapping markers in `text`, drawn in their category's color. */
+	readonly sourceMarkers?: readonly ContextViewSourceMarker[];
 }
 
 export interface ContextViewCategory {
 	id: ContextCategoryId;
 	key?: string;
 	label: string;
-	/** Overview attribution weight, not reported usage; may differ from the entry sum (e.g. Skills subtraction). */
+	/** Overview attribution weight, not reported usage. */
 	tokens: number;
 	entries: ContextViewEntry[];
 	children?: ContextViewCategory[];
@@ -70,4 +78,6 @@ export interface ContextViewCategory {
 export interface ContextViewData {
 	readonly breakdown: ContextBreakdown;
 	readonly categories: readonly ContextViewCategory[];
+	/** Snapshot caveats shown under the Overview legend. */
+	readonly notices?: readonly string[];
 }

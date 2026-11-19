@@ -23,9 +23,17 @@ export interface TabSnapshot {
 
 /** RPCs the relay may ask the extension to perform. */
 export type RelayRpcRequest =
-	| { op: "attach"; tabId: number }
+	/** `clearForeignFrames`: the tab is one omp drives, so another extension's frames may be emptied past a refusal. */
+	| { op: "attach"; tabId: number; clearForeignFrames?: boolean }
 	| { op: "detach"; tabId: number }
-	| { op: "send"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
+	| {
+			op: "send";
+			tabId: number;
+			sessionId?: string;
+			method: string;
+			params?: Record<string, unknown>;
+			clearForeignFrames?: boolean;
+	  }
 	/** `active: false` opens the tab without selecting it; absent keeps Chrome's default (selected). */
 	| { op: "createTab"; url: string; active?: boolean }
 	| { op: "removeTab"; tabId: number }
@@ -33,7 +41,15 @@ export type RelayRpcRequest =
 	/** Add tabs to the per-window omp group (created/reused by title), remembering prior membership. */
 	| { op: "group"; tabIds: number[]; title: string; color: string }
 	/** Return tabs to their pre-omp group (or ungroup); no-op for tabs the relay never grouped. */
-	| { op: "ungroup"; tabIds: number[] };
+	| { op: "ungroup"; tabIds: number[] }
+	/**
+	 * Where Chrome saved the download a driven page reported as `guid` (`Page.downloadWillBegin`), as a
+	 * {@link FoundDownload}.
+	 */
+	| { op: "findDownload"; guid: string };
+
+/** The extension's answer to `findDownload`: null when it paired no Chrome download with that report. */
+export type FoundDownload = { filename: string; state: "in_progress" | "interrupted" | "complete" } | null;
 
 /**
  * Messages sent relay → extension. `reload` asks the extension to run `chrome.runtime.reload()`, which
@@ -47,6 +63,34 @@ export const DISCARDED_TABS_PROTOCOL_VERSION = 1;
 /** Hello capability of an extension that reloads itself on a relay `reload` message. */
 export const EXTENSION_RELOAD_PROTOCOL_VERSION = 1;
 
+/** Chrome's refusal of a debugger request while another extension's frame (a password manager's menu) is in the tab. */
+export const FOREIGN_FRAME_REFUSAL = /chrome-extension:\/\/ URL of different extension/i;
+
+/** Another extension's frame the relay extension emptied and hid in a tab omp drives, so Chrome lets omp attach. */
+export interface HiddenFrame {
+	/** The id in the frame's `chrome-extension://<id>/` URL. */
+	extensionId: string;
+	/** The page the frame showed: its URL's path, without the query or fragment, which may carry tokens. */
+	path: string;
+	/** That page's own `<title>`, as the other extension wrote it, cut short. */
+	title?: string;
+}
+
+/** Whether `value`, read off a socket, is a well-formed `HiddenFrame`. */
+export function isHiddenFrame(value: unknown): value is HiddenFrame {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"extensionId" in value &&
+		typeof value.extensionId === "string" &&
+		"path" in value &&
+		typeof value.path === "string" &&
+		(!("title" in value) || value.title === undefined || typeof value.title === "string")
+	);
+}
+
+/** Hello capability of an extension that answers `findDownload` (it holds Chrome's `downloads` permission). */
+export const DOWNLOADS_PROTOCOL_VERSION = 1;
 /**
  * Whether a relay or extension reported a well-formed omp release version.
  * Stricter than `Bun.semver.order`, which ranks strings with trailing text;
@@ -109,9 +153,12 @@ export type ExtToRelayMessage =
 			ompVersion?: string;
 			/** {@link EXTENSION_RELOAD_PROTOCOL_VERSION} when the extension reloads itself on `reload`. Absent in older extensions. */
 			reloadProtocol?: number;
+			/** {@link DOWNLOADS_PROTOCOL_VERSION} when the extension answers `findDownload`. Absent in older extensions. */
+			downloadsProtocol?: number;
 	  }
 	| { t: "cdpEvent"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
 	| { t: "detached"; tabId: number; reason: string; relayInitiated?: boolean }
+	| { t: "framesHidden"; tabId: number; frames: HiddenFrame[] }
 	| { t: "tabCreated"; tab: TabSnapshot }
 	| { t: "tabUpdated"; tab: TabSnapshot }
 	| { t: "tabRemoved"; tabId: number }

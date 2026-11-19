@@ -25,6 +25,7 @@ import { disposeAllKernelSessions, type PythonResult } from "../../src/eval/py/e
 import type { ToolSession } from "../../src/tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { CostGate } from "../../src/session/cost-gate";
+import { SessionManager } from "../../src/session/session-manager";
 import { rejectionOf } from "../helpers/rejection";
 
 import { cfgRetryFallbackChains, cfgRetryMaxRetries } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -198,6 +199,7 @@ const session = {
 	settings,
 	modelRegistry: {
 		getAvailable: () => [SMOL],
+		find: (provider, id) => (provider === SMOL.provider && id === SMOL.id ? SMOL : undefined),
 		getApiKey: async () => "test-key",
 		resolver: () => async () => "test-key",
 	},
@@ -272,6 +274,27 @@ describe("runEvalCompletion", () => {
 		const refused = await rejectionOf(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session }));
 		expect(String(refused)).toContain("Cost cap reached");
 		expect(spy).toHaveBeenCalledTimes(1);
+	});
+
+	it("journals a completion once on the session, with its usage, prompt and reply", async () => {
+		const billed = assistant({ text: "ok" });
+		billed.usage.input = 7;
+		billed.usage.cost.total = 0.3;
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(billed);
+		const sessionManager = SessionManager.inMemory();
+		const session = { ...makeSession(), sessionManager } as ToolSession;
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		const journaled = sessionManager.getEntries().filter(entry => entry.type === "model_usage");
+		expect(journaled).toHaveLength(1);
+		expect(journaled[0]).toMatchObject({
+			purpose: "completion",
+			role: "smol",
+			usage: billed.usage,
+			completion: { prompt: "q", reply: "ok" },
+		});
+		expect(sessionManager.getUsageStatistics().cost).toBe(0.3);
 	});
 
 	it("prefers the session active model for the default tier, falling back to @default", async () => {
@@ -1121,6 +1144,23 @@ describe("completion() through eval runtimes", () => {
 		const result = await executeJs("print((await wait(handles))[0]);", options);
 		expect(result.exitCode).toBe(0);
 		expect(result.output.trim()).toBe("hello from the next cell");
+	});
+
+	it("refuses a number passed to wait() instead of returning at once as if it had slept", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-wait-number-");
+		const options = {
+			cwd: tempDir.path(),
+			sessionId: `js-wait-number:${crypto.randomUUID()}`,
+			session: makeSession({ cwd: tempDir.path() }),
+			sessionFile: path.join(tempDir.path(), "session.jsonl"),
+		};
+		const result = await executeJs(
+			"try { await wait(1800); print('returned'); } catch (error) { print(error.message); }",
+			options,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).not.toContain("returned");
+		expect(result.output).toContain("not a sleep");
 	});
 
 	it("times out waiting on a running completion started in an earlier JavaScript cell", async () => {

@@ -96,15 +96,22 @@ export interface ComposerOptions {
 	readonly now?: () => number;
 }
 
+/** A native dock root described only on terminals whose `hello` advertises `feature`. */
+export interface FeatureDockEntry {
+	readonly component: Component;
+	readonly feature: string;
+}
+
 /** How {@link Composer.setRuntimeChildren} lays out the roots below the transcript. */
 export interface RuntimeChildrenOptions {
 	/**
 	 * Dock order on a TSP terminal (no status strip; the composer carries its
 	 * facts): the native dock stacks HUD pills, the working row and queued messages over
-	 * the composer in its own order, and may add describe-only roots. Defaults
-	 * to the roots below the transcript in render order.
+	 * the composer in its own order, and may add describe-only roots, also
+	 * ones only a terminal with a given feature gets. Defaults to the roots
+	 * below the transcript in render order.
 	 */
-	readonly nativeDock?: readonly Component[];
+	readonly nativeDock?: readonly (Component | FeatureDockEntry)[];
 	/**
 	 * Below-transcript containers whose children continue `main` on a TSP
 	 * terminal, one block each after the transcript's, instead of riding in the
@@ -122,10 +129,24 @@ export interface RuntimeChildrenOptions {
 	 * Transient roots that clear themselves (todo and subagent HUDs, progress).
 	 * Their first paint can be their tallest, e.g. a restored todo list on a
 	 * resumed session, so unlike {@link transientChrome} it is never treated as
-	 * their resting height: all of their rows stay out of the floor. Roots listed
-	 * here are transient and need not also appear in `transientChrome`.
+	 * their resting height: their rows start outside the floor, and the rows they
+	 * displace are held back for them to clear. One still up once the idle settle
+	 * window has passed is billed like any other idle chrome, so the rows it
+	 * displaces retire to scrollback instead of staying hidden. Roots listed here
+	 * are transient and need not also appear in `transientChrome`.
 	 */
 	readonly selfClearingChrome?: readonly Component[];
+	/**
+	 * Roots whose rows are billed at their current height on every frame and
+	 * never folded into the floor: the working row, whose height changes with
+	 * each run. Their rows always count toward retirement, so finished transcript
+	 * rows reach native history as soon as they leave the screen instead of being
+	 * clipped above it while the root is taller than the floor. When a root
+	 * shrinks, the editor moves up into the rows it gave up. A root listed here
+	 * is billed even if it also appears in `transientChrome` or
+	 * `selfClearingChrome`.
+	 */
+	readonly billedChrome?: readonly Component[];
 }
 
 /** Controls the first terminal paint for a composer that does not already own the terminal. */
@@ -234,7 +255,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#headerBefore: readonly Component[] = [];
 	#headerAfter: readonly Component[] = [];
 	#runtimeChildren: readonly Component[] = [];
-	#nativeDock: readonly Component[] | undefined;
+	#nativeDock: readonly (Component | FeatureDockEntry)[] | undefined;
 	#nativeTail: readonly Container[] = [];
 	/** Cache-driven status line shown until {@link setStatusComponent} mounts the session's. */
 	#startupStatus: StatusLineComponent | undefined;
@@ -301,6 +322,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	// Settled idle chrome has retired rows; contraction must preserve native history.
 	#chromeFloorPromoted = false;
 	#runActive = false;
+	// Billed-chrome rows the last composition counted toward retirement; see renderFrame.
+	#billedChromeRows = 0;
+	// Billed chrome shrank and no emitted paint has moved the editor up yet.
+	#billedChromeContracted = false;
+	#billedChrome: ReadonlySet<Component> = new Set();
 	#transientChrome: ReadonlySet<Component> = new Set();
 	#selfClearingChrome: ReadonlySet<Component> = new Set();
 	// Fewest rows the user-driven transient roots have painted since mount; only rows above it are excluded from the floor.
@@ -441,22 +467,46 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const ends: { root: Component; end: number }[] = [];
 		let transientRows = 0;
 		let selfClearingRows = 0;
+		let billedRows = 0;
 		for (const root of afterRoots) {
 			const start = after.length;
 			this.#renderBelowRoot(root, width, after, afterSpans);
-			if (this.#selfClearingChrome.has(root)) selfClearingRows += after.length - start;
+			if (this.#billedChrome.has(root)) billedRows += after.length - start;
+			else if (this.#selfClearingChrome.has(root)) selfClearingRows += after.length - start;
 			else if (this.#transientChrome.has(root)) transientRows += after.length - start;
 			ends.push({ root, end: after.length });
 		}
 		this.#rowsBelow = new Map(ends.map(({ root, end }) => [root, after.length - end]));
 		const transientFloor = this.#syncTransientFloor(transientRows);
-		// Eligible chrome excludes user-driven transient rows above their resting height and every
-		// self-clearing row; contraction, floor and rebaseline all use it.
-		const eligibleChrome = after.length - (transientRows - transientFloor) - selfClearingRows;
-		const promotedChromeContracted = this.#chromeFloorPromoted && eligibleChrome < (this.#chromeFloor ?? 0);
-		this.#chromeFloor = Math.min(this.#chromeFloor ?? eligibleChrome, eligibleChrome);
-		this.#rebaselineChromeFloor(this.#runActive || transcript.hasActiveBlock(), eligibleChrome);
-		const belowFloor = this.#preferences.completeScrollback ? after.length : this.#chromeFloor;
+		// Billable chrome excludes user-driven transient rows above their resting height and every
+		// billed row (those count at their current height below). Eligible chrome also excludes
+		// every self-clearing row: those start outside the floor, so the rows a HUD displaces are
+		// held back for it to clear. A HUD that is still up once the idle settle window has passed
+		// is billed like any other idle chrome (see #rebaselineChromeFloor): held back rows are on
+		// no screen and in no scrollback, and a restored todo list or a subagent panel can stay up
+		// for the rest of the session.
+		const billableChrome = after.length - (transientRows - transientFloor) - billedRows;
+		const eligibleChrome = billableChrome - selfClearingRows;
+		const promotedChromeContracted = this.#chromeFloorPromoted && billableChrome < (this.#chromeFloor ?? 0);
+		// Contraction follows immediately: the floor never exceeds what is billable now, and before a
+		// promotion it never exceeds the eligible chrome either.
+		const floorCap = this.#chromeFloorPromoted ? billableChrome : eligibleChrome;
+		this.#chromeFloor = Math.min(this.#chromeFloor ?? eligibleChrome, floorCap);
+		this.#rebaselineChromeFloor(this.#runActive || transcript.hasActiveBlock(), billableChrome);
+		// The working row grows and shrinks with every run, so a floor (its
+		// smallest height) undercounts it whenever it is taller: retirement would
+		// clip that many finished rows off the top of the viewport before they
+		// reach native history, a scrolled-back terminal would watch that seam
+		// shift on every commit, and the rows would reappear, moving the whole
+		// screen, when it shrank. Bill its current rows on every frame instead;
+		// when it shrinks, the editor moves up into the rows it gave up, because
+		// committed rows cannot come back down. With `completeScrollback` all
+		// chrome counts at its current height, the working row included, and a
+		// shrink leaves its documented blank rows above the editor instead.
+		const completeScrollback = this.#preferences.completeScrollback;
+		if (!completeScrollback && billedRows < this.#billedChromeRows) this.#billedChromeContracted = true;
+		this.#billedChromeRows = billedRows;
+		const belowFloor = completeScrollback ? after.length : this.#chromeFloor + billedRows;
 		// Offer history under capacity pressure only: blocks stay live (and keep
 		// reflowing to the current width) while the screen has room. A batch
 		// leaves the mutable viewport in the same frame it is appended, so its
@@ -466,6 +516,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		// Retirement measures the same live blocks the viewport lays out below;
 		// one open frame renders each of them once for both.
 		transcript.beginFrame(frame);
+		transcript.completeScrollback = this.#preferences.completeScrollback;
 		const history = this.#offerHistory(transcript, width, rows, preRoots.length + belowFloor);
 		const headerVisible = !this.#headerRetired && this.#offeredHistory?.source !== "header";
 		const headerRows = headerVisible ? this.#header.render(width) : [];
@@ -502,10 +553,16 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		// rows back out of native scrollback. Let the editor move up instead of
 		// inserting a seam band; subsequent frames retain that natural anchor
 		// until new output fills the screen again. Shell history stays untouched.
-		const slack =
-			filledHistoryRows === undefined || promotedChromeContracted
+		const fillSlack =
+			filledHistoryRows === undefined
 				? 0
 				: Math.max(0, rows - Math.min(rows, filledHistoryRows + (history?.rows.length ?? 0)) - mutable.length);
+		// The TUI can discard a composition (an image-budget retry, a deferred
+		// first image paint), so a billed contraction holds until a paint lands
+		// where the screen has no slack to fill: the editor moved up, or output
+		// filled the rows back in.
+		if (fillSlack === 0) this.#billedChromeContracted = false;
+		const slack = promotedChromeContracted || this.#billedChromeContracted ? 0 : fillSlack;
 		// Park the slack below the live rows rather than above them. Above, it
 		// splits the on-screen history from the live tail and reads as a hole
 		// punched into whatever was streaming — a table's rows included — and
@@ -594,7 +651,14 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 				main.push(...roots.slice(0, transcriptIndex), ...transcript.nativeBlocks(cx));
 				for (const root of this.#nativeTail) main.push(...root.children);
 				const tail: readonly Component[] = this.#nativeTail;
-				dock.push(...(this.#nativeDock ?? roots.slice(transcriptIndex + 1).filter(root => !tail.includes(root))));
+				if (this.#nativeDock) {
+					for (const entry of this.#nativeDock) {
+						if (!("feature" in entry)) dock.push(entry);
+						else if (cx.feature(entry.feature)) dock.push(entry.component);
+					}
+				} else {
+					dock.push(...roots.slice(transcriptIndex + 1).filter(root => !tail.includes(root)));
+				}
 			}
 		}
 		const previous = this.#nativeSurface;
@@ -1177,6 +1241,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.#nativeTail = options.nativeTail ?? [];
 		this.#transientChrome = new Set(options.transientChrome);
 		this.#selfClearingChrome = new Set(options.selfClearingChrome);
+		this.#billedChrome = new Set(options.billedChrome);
+		this.#billedChromeRows = 0;
+		this.#billedChromeContracted = false;
 		this.#transientFloor = undefined;
 		this.ui.removeChild(this.#statusHost);
 		if (this.#runtimeMounted) {

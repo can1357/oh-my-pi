@@ -8,7 +8,7 @@
  */
 import { type AuthStorage, type FetchImpl, resolveApiKeyOnce, seedApiKeyResolver, withAuth } from "@oh-my-pi/pi-ai";
 import type { StructuredQuery } from "../query";
-import { formatQuery, parseSearchQuery } from "../query";
+import { parseSearchQuery } from "../query";
 import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../types";
 import { clampNumResults, dateToAgeSeconds } from "../utils";
@@ -16,6 +16,7 @@ import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import {
 	classifyProviderHttpError,
+	keywordQuery,
 	normalizeHttpUrl,
 	normalizeSearchText,
 	readLimitedText,
@@ -71,17 +72,10 @@ function buildKeenableBody(
 	recency: SearchParams["recency"],
 	maxResults: number,
 ): KeenableSearchBody {
-	// Blanking `raw` makes a directives-only query fall back to its constraint
-	// values (site hosts, intitle: words, …) as keywords, never to the operators.
-	const query = parsed.hasDirectives ? formatQuery({ ...parsed, raw: "" }, { phrases: true }) : parsed.raw.trim();
-	if (!query) {
-		throw new SearchProviderError(
-			"keenable",
-			"Keenable needs search terms; date-only queries are not supported",
-			400,
-		);
-	}
-	const body: KeenableSearchBody = { query, max_results: maxResults };
+	const body: KeenableSearchBody = {
+		query: keywordQuery("keenable", parsed, { phrases: true }),
+		max_results: maxResults,
+	};
 	const sites = siteHosts(parsed.sites);
 	if (sites.length === 1) body.site = sites[0];
 	const after = parsed.after ?? (recency ? RECENCY_DELTAS[recency] : undefined);
@@ -196,6 +190,11 @@ export class KeenableProvider extends SearchProvider {
 	/** An explicit `web/keenable` selection works without a key via the public endpoint. */
 	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
 		return true;
+	}
+
+	/** Without a key, search runs on the keyless public endpoint. */
+	override isKeyless(authStorage: AuthStorage): boolean {
+		return !this.isAvailable(authStorage);
 	}
 
 	search(params: SearchParamsWithFetch): Promise<SearchResponse> {

@@ -234,4 +234,59 @@ describe("transcript rows under chrome that outlives the turn", () => {
 			composer.stop();
 		}
 	});
+
+	// A self-clearing HUD (a restored todo list, a subagent panel) starts outside the chrome floor,
+	// so the rows it displaces are held back for it to clear rather than retired. Held back rows
+	// are on no screen and in no scrollback. A HUD that stays up for the rest of the session left a
+	// hole in the transcript, a few blocks above the composer, that moved with every resize.
+	for (const [rows, hudRows] of [
+		[43, 8],
+		[50, 8],
+	] as const) {
+		it(`keeps every paragraph on screen or in scrollback under a ${hudRows}-row HUD that outlives the turn at ${rows} rows`, async () => {
+			const terminal = new VirtualTerminal(COLUMNS, rows);
+			const scheduler = new VirtualRenderScheduler();
+			const composer = new Composer({
+				terminal,
+				tuiOptions: { renderScheduler: scheduler },
+				preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+			});
+			const transcript = new TranscriptContainer();
+			const hud = new TurnChrome();
+			const editor = new Container();
+			editor.addChild(new Text("EDITOR", 0, 0));
+			composer.setRuntimeChildren([transcript, hud, editor], { selfClearingChrome: [hud] });
+			composer.start({ playWelcomeIntro: false });
+			try {
+				await scheduler.settle(terminal);
+				const tokens: string[] = [];
+				for (let turn = 0; turn < 8; turn++) {
+					const message = new AssistantMessageComponent();
+					const paragraphs = Array.from({ length: 4 }, (_, p) => {
+						const token = `QZH${turn}${p}`;
+						tokens.push(token);
+						return `${token} ${Array.from({ length: 45 }, (_, i) => `w${(i * 7 + p) % 11}ord`).join(" ")}`;
+					});
+					message.updateContent(reply(paragraphs.join("\n\n")));
+					message.markTranscriptBlockFinalized();
+					transcript.addChild(message);
+					composer.ui.requestRender();
+					await scheduler.settle(terminal);
+				}
+				await scheduler.advance(terminal, 300);
+				// The HUD appears after the run and stays.
+				hud.rows = hudRows;
+				composer.ui.requestRender();
+				await scheduler.advance(terminal, 300);
+				const text = terminal
+					.getScrollBuffer()
+					.map(row => Bun.stripANSI(row))
+					.join("\n");
+				expect(tokens.filter(token => !text.includes(token))).toEqual([]);
+				expect(terminal.getViewport().filter(row => row.includes("Turn chrome row ")).length).toBe(hudRows);
+			} finally {
+				composer.stop();
+			}
+		});
+	}
 });

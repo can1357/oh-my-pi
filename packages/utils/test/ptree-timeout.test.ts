@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import {
 	AbortError,
-	type ChildProcess,
+	ChildProcess,
 	createLinuxSubreaperScript,
 	exec,
 	NonZeroExitError,
@@ -429,6 +429,34 @@ ${createLinuxSubreaperScript()}
 		}
 	});
 
+	it.skipIf(process.platform === "win32")(
+		"applies the deadline when the root exited before the timeout was attached",
+		async () => {
+			// Under load Bun can reap the root before spawn() returns, so
+			// attachTimeout() sees `proc.killed`; the orphan still holds stdout and
+			// only the deadline's cutoff ends the read. Real subprocess timing: the
+			// cutoff races a live pipe, which fake timers cannot drive.
+			const proc = Bun.spawn(["sh", "-c", "sleep 30 & echo token $!"], {
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			await proc.exited;
+			expect(proc.killed).toBe(true);
+			let orphanPid: number | undefined;
+			try {
+				const child = new ChildProcess(proc, false);
+				child.attachTimeout(250);
+				const text = await child.nothrow().text();
+				const match = /^token (\d+)$/.exec(text.trim());
+				orphanPid = match ? Number.parseInt(match[1], 10) : undefined;
+				expect(match, `stdout was: ${text}`).not.toBeNull();
+			} finally {
+				if (orphanPid) Process.fromPid(orphanPid)?.killTree(9);
+			}
+		},
+	);
+
 	it.skipIf(process.platform === "win32")("completes when an orphan holds stderr past the root's exit", async () => {
 		let orphanPid: number | undefined;
 		try {
@@ -561,10 +589,10 @@ describe.skipIf(process.platform !== "linux")("ptree subreaper stop", () => {
 		}, 30_000);
 	}
 
+	// Only a stop with a grace period can promise the handler runs: a zero grace
+	// sends SIGKILL right after SIGTERM, racing the trap.
 	for (const [name, stop] of [
 		["an AbortSignal", (_child: ChildProcess, controller: AbortController) => controller.abort()],
-		// A zero grace still means SIGTERM, then SIGKILL at once, as on every other kill path.
-		["a zero-grace kill", (child: ChildProcess) => child.kill(new AbortError(new Error("stop"), ""), 0)],
 	] as const) {
 		it(`gives the command its SIGTERM before the hard kill on ${name}`, async () => {
 			// A command that cleans up on SIGTERM must get the chance on a graceful

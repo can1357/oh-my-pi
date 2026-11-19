@@ -27,7 +27,7 @@ export const cfgSpotlightExperimentHoldout = register({
 	id: "spotlight.experiment.holdout",
 	env: { name: "PI_SPOTLIGHT_HOLDOUT", parse: parseShare },
 	type: "number",
-	default: 0.15,
+	default: 0.05,
 	validate: raw => validateShare("spotlight.experiment.holdout", raw),
 });
 
@@ -93,7 +93,7 @@ export const cfgSpotlightThinking = register({
 	id: "spotlight.thinking",
 	type: "enum",
 	values: ["low", "med", "high", "max"] as const,
-	default: "low",
+	default: "med",
 });
 
 /** Budget of one Spotlight ranking inside a tool call; past it the call falls back to unranked rules. */

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
@@ -9,6 +9,13 @@ import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { getModelMatchPreferences, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import type { Agent } from "@oh-my-pi/pi-agent-core";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionTools, type SessionToolsHost } from "@oh-my-pi/pi-coding-agent/session/session-tools";
+import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import {
@@ -369,6 +376,106 @@ describe("per-call model advertisement", () => {
 			allowlist: ["mock/other"],
 			parentModelWithheld: false,
 		});
+	});
+
+	it("keeps the rendered task and eval descriptions byte-stable across a role edit", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+		const settings = Settings.isolated({
+			"task.perCallModel": "on",
+			modelRoles: { default: "mock/target", slow: "mock/other" },
+		});
+		const host: SessionToolsHost = {
+			agent: {
+				state: { tools: [], messages: [], systemPrompt: [] },
+				setSystemPrompt: () => {},
+				setTools: () => {},
+			} as unknown as Agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			effectiveExtensionRoots: () => ({}) as never,
+			modelRegistry: registry as never,
+			extensionRunner: () => undefined,
+			clientBridge: () => undefined,
+			agentKind: () => "main",
+			isDisposed: () => false,
+			isStreaming: () => false,
+			steeringArrivalSignal: () => new AbortController().signal,
+			steeringArrivalSeq: () => 0,
+			steeringArrivalAdmitted: () => undefined,
+			steeringArrivalRelease: () => {},
+			queuedMessageCount: () => 0,
+			planModeEnabled: () => false,
+			model: () => undefined,
+			memoryBackendSession: () => ({}) as never,
+			clearInheritedProviderPromptCacheKey: () => {},
+			clearMemoryPromotionSnapshot: () => {},
+			captureMemoryPromotionSnapshot: () => {},
+			emitNotice: () => {},
+			notifyCommandMetadataChanged: () => {},
+			localProtocolOptions: () => ({}),
+			evalPreludes: () => [],
+			sessionAgents: () => [],
+			waitForUser: dialog => dialog(),
+		};
+		const surface = new SessionTools(host, {
+			baseSystemPrompt: [],
+			rebuildSystemPrompt: async () => ({ systemPrompt: ["base"] }),
+		});
+		const toolSession = {
+			cwd: "/tmp/omp-percallmodel-freeze",
+			hasUI: false,
+			settings,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			isToolActive: () => false,
+			advertisedPerCallModel: () => surface.advertisedPerCallModel,
+		} as unknown as ToolSession;
+		const taskTool = await TaskTool.create(toolSession);
+		const evalTool = new EvalTool(toolSession);
+
+		// Prime the applied signature so the later reapply exercises the
+		// steady-state path instead of a first-ever apply, which always builds.
+		await surface.applyActiveToolsByName(surface.getActiveToolNames());
+
+		const frozen = surface.advertisedPerCallModel;
+		expect(frozen.roles).toEqual([
+			{ role: "default", patterns: ["mock/target"] },
+			{ role: "slow", patterns: ["mock/other"] },
+		]);
+		const taskDescription = taskTool.description;
+		const evalDescription = evalTool.description;
+		expect(taskDescription).toContain("`mock/target` (default)");
+		expect(evalDescription).toContain("`mock/target` (default)");
+
+		// A second omp instance rewrites the shared config.yml; this session
+		// reloads it, but the frozen surface must not follow.
+		settings.setModelRole("default", "mock/edited");
+		expect(getPerCallModelAdvertisement(settings, undefined, registry).roles).toEqual([
+			{ role: "default", patterns: ["mock/edited"] },
+			{ role: "slow", patterns: ["mock/other"] },
+		]);
+		expect(surface.advertisedPerCallModel).toBe(frozen);
+		expect(taskTool.description).toBe(taskDescription);
+		expect(evalTool.description).toBe(evalDescription);
+
+		// An ordinary tool reapply after a config reload must not rebuild the
+		// base prompt or move the descriptions either.
+		await surface.applyActiveToolsByName(surface.getActiveToolNames());
+		expect(surface.advertisedPerCallModel).toBe(frozen);
+		expect(taskTool.description).toBe(taskDescription);
+		expect(evalTool.description).toBe(evalDescription);
+
+		// A real base-prompt rebuild is what absorbs the edit.
+		await surface.refreshBaseSystemPrompt();
+		expect(surface.advertisedPerCallModel.roles).toEqual([
+			{ role: "default", patterns: ["mock/edited"] },
+			{ role: "slow", patterns: ["mock/other"] },
+		]);
+		expect(taskTool.description).not.toBe(taskDescription);
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
 	});
 });
 

@@ -11,12 +11,11 @@ import {
 	refreshOpenFiles,
 	sendNotification,
 	sendRequest,
-	shutdownClientInstance,
+	shutdownClientServer,
 	syncContent,
 	WARMUP_TIMEOUT_MS,
 } from "./client";
 import { getServersForFile, type LspConfig, loadConfig } from "./config";
-import { MUX_RESTART_METHOD } from "./mux/protocol";
 import type { LspClient, ServerConfig } from "./types";
 
 /**
@@ -290,12 +289,7 @@ export async function reloadServer(client: LspClient, serverName: string, signal
 }
 
 async function restartServer(client: LspClient, serverName: string): Promise<string> {
-	// A per-session teardown only detaches from a broker-shared server; ask the
-	// mux to kill it first (best-effort: the link may be the thing that is wedged).
-	if (client.proc.sharedMux) {
-		await sendNotification(client, MUX_RESTART_METHOD, undefined, AbortSignal.timeout(2_000)).catch(() => {});
-	}
-	if (!(await shutdownClientInstance(client))) {
+	if (!(await shutdownClientServer(client))) {
 		throw new Error(`Failed to restart ${serverName}: server process did not exit after kill`);
 	}
 	return `Restarted ${serverName}`;

@@ -54,6 +54,7 @@ describe("startup timing after a headless runner starts", () => {
 			sessionManager: manager,
 			subscribe: () => {},
 			addDisposer: () => {},
+			setScopedModelsRefresher: () => {},
 			getAllToolNames: () => [],
 			validateRetryFallbackChains: () => {},
 			getLastAssistantMessage: () => undefined,

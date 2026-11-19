@@ -46,10 +46,6 @@ describe("normalizeSearchType", () => {
 	it("maps 'keyword' to 'fast'", () => {
 		expect(normalizeSearchType("keyword")).toBe("fast");
 	});
-
-	it("passes through 'neural' unchanged", () => {
-		expect(normalizeSearchType("neural")).toBe("neural");
-	});
 });
 
 describe("buildExaRequestBody", () => {
@@ -679,6 +675,23 @@ describe("searchExa", () => {
 			Promise.resolve(new ExaProvider().isAvailable(authStorage)),
 		);
 		expect(available).toBe(true);
+	});
+
+	it("errors instead of falling back to the public MCP when a configured credential does not resolve", async () => {
+		delete process.env.EXA_API_KEY;
+		let requests = 0;
+		const fetchMock: FetchImpl = () => {
+			requests++;
+			return Promise.resolve(new Response(JSON.stringify(makeMockExaResponse()), { status: 200 }));
+		};
+		await withInMemoryAuthStorage(async authStorage => {
+			// A `models.yml` apiKey whose `!command` failed: configured, but resolves to nothing.
+			vi.spyOn(authStorage.keys, "source").mockReturnValue({ kind: "config", concrete: true });
+			await expect(searchExa({ query: "private query", authStorage, fetch: fetchMock })).rejects.toThrow(
+				"Exa credentials could not be resolved",
+			);
+		});
+		expect(requests).toBe(0);
 	});
 
 	it("throws SearchProviderError on non-ok HTTP response", async () => {

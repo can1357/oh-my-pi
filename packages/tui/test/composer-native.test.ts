@@ -116,6 +116,42 @@ describe("native composer", () => {
 		expect(editor.onEscape).toHaveBeenCalledTimes(1);
 	});
 
+	it("folds while an ask above holds the keys, and marks a draft that would skip it", () => {
+		let ask: ComposerNativeState["ask"] = "pending";
+		const editor = new CustomEditor(getEditorTheme());
+		editor.composerState = () => ({ running: true, ask });
+		editor.onSubmit = vi.fn();
+
+		const away = editor.describe(cx);
+		expect(away.p).toMatchObject({ folded: true });
+		expect(nodes(away).find(n => n.k === "editor")?.p).toMatchObject({
+			placeholder: "Answer above, or type here to skip the questions",
+		});
+		expect(byRole(away, "omp.composer.stop")).toBeDefined();
+
+		editor.focused = true;
+		expect(editor.describe(cx).p).not.toHaveProperty("folded");
+
+		ask = "skip";
+		editor.setText("drop them instead");
+		const skipping = editor.describe(cx);
+		expect(nodes(byRole(skipping, "omp.composer.mode")!).some(n => n.k === "text")).toBe(true);
+		expect(byRole(skipping, "omp.composer.stop")).toBeUndefined();
+		expect(byRole(skipping, "omp.composer.skip")?.p).toMatchObject({ actions: { click: "submit" } });
+		editor.handleNativeEvent({ type: "action", key: "bar/skip", act: "submit", mods: [] });
+		expect(editor.onSubmit).toHaveBeenCalledWith("drop them instead");
+	});
+
+	it("routes a picked thinking level (`thinking.set` with the level as value)", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		editor.composerState = () => ({ running: false, thinking: "high" });
+		editor.onSetThinkingLevel = vi.fn();
+		editor.handleNativeEvent({ type: "action", key: "bar/effort", act: "thinking.set", value: "low", mods: [] });
+		editor.handleNativeEvent({ type: "action", key: "bar/effort", act: "thinking.set", mods: [] });
+		expect(editor.onSetThinkingLevel).toHaveBeenCalledTimes(1);
+		expect(editor.onSetThinkingLevel).toHaveBeenCalledWith("low");
+	});
+
 	it("quotes the session title in italics as the placeholder; a viewed subagent's name wins", () => {
 		const placeholder = (state: ComposerNativeState) =>
 			nodes(composer(state).describe(cx)).find(n => n.k === "editor")?.p;
@@ -528,6 +564,19 @@ describe("native autocomplete list", () => {
 			value: [{ t: "demo/demo", s: "muted" }],
 		});
 		expect(move!.p).toMatchObject({ label: [{ t: "mo", s: "mark" }, { t: "ve" }] });
+	});
+});
+
+describe("native composer queue shorthand", () => {
+	it("keeps typing on the prefix's line and dims the prefix", () => {
+		setNativeRendering(true);
+		for (const prefix of ["->", "=>"]) {
+			const editor = composer({ running: false });
+			for (const key of `${prefix} add`) editor.handleInput(key);
+			expect(editor.getText()).toBe(`${prefix} add`);
+			expect(editor.getCursor()).toEqual({ line: 0, col: 6 });
+			expect(editor.describeDecorations?.(editor.getLines())).toContainEqual({ from: 0, to: 2, s: "dim" });
+		}
 	});
 });
 

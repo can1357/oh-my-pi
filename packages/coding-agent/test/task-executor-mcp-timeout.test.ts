@@ -63,7 +63,7 @@ test("MCP proxy tool aborts underlying operation on caller abort", async () => {
 	const manager = new MCPManager(process.cwd());
 	mockSourceTool(manager, fake.connection);
 
-	const tools = createMCPProxyTools(manager);
+	const tools = createMCPProxyTools(manager, "child");
 	const proxyTool = tools[0];
 	if (!proxyTool?.execute) {
 		expect.unreachable("Tool execute method missing");
@@ -128,7 +128,7 @@ test.each([180_000, 0])("MCP proxy honors a transport deadline of %i beyond 60s"
 	});
 	try {
 		await transport.connect();
-		const [proxy] = createMCPProxyTools(manager);
+		const [proxy] = createMCPProxyTools(manager, "child");
 		if (!proxy?.execute) throw new Error("Tool execute method missing");
 		vi.useFakeTimers();
 		const resultPromise = proxy.execute("queued-report", {}, undefined, {} as CustomToolContext);

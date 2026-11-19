@@ -27,6 +27,7 @@ import type {
 	ModelRegistryRefreshOptions,
 	ProviderConfigInput,
 } from "../../config/model-registry";
+import { declaredTools } from "../../utils/tool-declarations";
 import { type RemoteObject, registerRpcError, rpcSync } from "../rpc";
 import type {
 	MainStreamSimple,
@@ -216,15 +217,25 @@ function streamOptionsForMain(options: SimpleStreamOptions | undefined): WireStr
 }
 
 /**
- * Worker side: a custom API `streamSimple` whose stream runs on main. Events
- * arrive in order; abort crosses with the signal; a stream that throws on main
- * fails this one with the same error, and one that ends without a terminal
- * event ends this one with main's final result.
+ * The request context a main-side `streamSimple` receives: tools as providers declare them, since a live tool
+ * object's own fields hold class instances the link cannot send.
+ */
+function contextForMain(context: Context): Context {
+	if (!context.tools && !context.inactiveTools) return context;
+	return { ...context, tools: declaredTools(context.tools), inactiveTools: declaredTools(context.inactiveTools) };
+}
+
+/**
+ * Worker side: a custom API `streamSimple` whose stream runs on main. The
+ * context's tools cross as their `Tool` fields; events arrive in order;
+ * abort crosses with the signal; a stream that throws on main fails this one
+ * with the same error, and one that ends without a terminal event ends this
+ * one with main's final result.
  */
 export function proxyStreamSimple(streamOnMain: MainStreamSimple): StreamSimple {
 	return (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => {
 		const stream = new AssistantMessageEventStream();
-		streamOnMain(model, context, streamOptionsForMain(options), (event: AssistantMessageEvent) =>
+		streamOnMain(model, contextForMain(context), streamOptionsForMain(options), (event: AssistantMessageEvent) =>
 			stream.push(event),
 		).then(
 			result => {

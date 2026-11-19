@@ -2,7 +2,8 @@
  * The Spotlight sheet: how shaping reduced one tool result. A large glass sheet (role
  * `omp.overlay.spotlight`; it fills a narrow pane) in one column: what Spotlight was asked (the intent, the other
  * request parameters a click away), a legend of why lines were shown or hidden beside the ranking step's budget and
- * cutoff, then the original as one `code` element. Every run of lines the model did not see folds into one row
+ * cutoff, then the original as one `code` element per window (a `;`/`,` path `read` joins several, each under its path
+ * and its own ranking's budget and cutoff). Every run of lines the model did not see folds into one row
  * labelled with the marker the model read in its place; each line's gutter takes the tone of why shaping showed or hid
  * it, and its row is washed by its score's parts, a gradient across it from left to right like a heat map (by
  * Spotlight's heat without a rank), and an overview strip above the lines maps the whole result. A fold hiding a hot
@@ -20,7 +21,9 @@ import {
 	type SpotlightRank,
 	type SpotlightReason,
 	type SpotlightRequestParams,
+	type SpotlightWindow,
 	heatAt,
+	originalWindows,
 	rankPartAt,
 	reasonAt,
 	reasonShows,
@@ -147,11 +150,24 @@ function lineClass(original: SpotlightOriginal, i: number): LineClass | undefine
 	return spotlightHot(original.heat, i) ? "hot" : "cut";
 }
 
+/** A ranking step's budget and cutoff, as the summary or a window's head says them. */
+function rankFacts(rank: SpotlightRank): string {
+	return rank.budget !== undefined
+		? `budget ${count(rank.used ?? 0)} of ${count(rank.budget)} chars · cutoff ${fixed(rank.cutoff)}`
+		: `cutoff ${fixed(rank.cutoff)}`;
+}
+
 /**
  * The summary row (role `omp.spotlight.summary`): a legend swatch and count per class of the shown lines (with
- * reasons), then the ranking step's budget and cutoff and whether the view is cut; undefined when it has nothing.
+ * reasons), then the ranking step's budget and cutoff (`rank`, of a one-window original) and whether the view is cut;
+ * undefined when it has nothing.
  */
-function summary(original: SpotlightOriginal, shown: number, total: number): NativeNode | undefined {
+function summary(
+	original: SpotlightOriginal,
+	rank: SpotlightRank | undefined,
+	shown: number,
+	total: number,
+): NativeNode | undefined {
 	const items: NativeNode[] = [];
 	if (original.why !== undefined) {
 		const counts = new Map<LineClass, number>();
@@ -165,14 +181,7 @@ function summary(original: SpotlightOriginal, shown: number, total: number): Nat
 		}
 	}
 	const facts: string[] = [];
-	const rank = original.rank;
-	if (rank) {
-		facts.push(
-			rank.budget !== undefined
-				? `budget ${count(rank.used ?? 0)} of ${count(rank.budget)} chars · cutoff ${fixed(rank.cutoff)}`
-				: `cutoff ${fixed(rank.cutoff)}`,
-		);
-	}
+	if (rank) facts.push(rankFacts(rank));
 	if (shown < total) facts.push(`first ${count(shown)} of ${count(total)} lines`);
 	if (items.length === 0 && facts.length === 0) return undefined;
 	const budget = facts.length > 0 && text([span(facts.join(" · "), "muted")], { role: "omp.spotlight.budget" });
@@ -184,24 +193,29 @@ function summary(original: SpotlightOriginal, shown: number, total: number): Nat
 	});
 }
 
-/** The parts of original line `i`'s (0-based) score, in the rank's order. */
+/** The parts of a window's line `i`'s (0-based, relative to the window) score, in the rank's order. */
 function rankParts(rank: SpotlightRank, i: number): number[] {
 	return rank.values.map(values => rankPartAt(values, i, rank.max));
 }
 
+/** The line number original line `i` (0-based) of `window` is drawn with. */
+function lineNumber(window: SpotlightWindow, i: number): number {
+	return window.start + i - window.at;
+}
+
 /**
- * The mark of original line `i` (0-based), numbered from its `start`: its heat, its reason's tone and its score's
- * parts as the row's wash (each a rank in [0, 1]); undefined for a line with neither heat nor tone (a bare mark would
- * draw the default accent bar).
+ * The mark of original line `i` (0-based) of `window`, numbered from the window's `start`: its heat, its reason's tone
+ * and its score's parts in the window's rank as the row's wash (each a rank in [0, 1]); undefined for a line with
+ * neither heat nor tone (a bare mark would draw the default accent bar).
  */
-function lineMark(original: SpotlightOriginal, i: number): TspCodeMark | undefined {
+function lineMark(original: SpotlightOriginal, window: SpotlightWindow, i: number): TspCodeMark | undefined {
 	const heat = heatAt(original.heat, i);
 	const tone = spotlightTone(original, i);
 	if (heat === undefined && tone === undefined) return undefined;
-	const mark: { line: number; heat?: number; tone?: TspTone; wash?: number[] } = { line: original.start + i };
+	const mark: { line: number; heat?: number; tone?: TspTone; wash?: number[] } = { line: lineNumber(window, i) };
 	if (heat !== undefined) mark.heat = heat;
 	if (tone !== undefined) mark.tone = tone;
-	if (original.rank) mark.wash = rankParts(original.rank, i);
+	if (window.rank) mark.wash = rankParts(window.rank, i - window.at);
 	return mark;
 }
 
@@ -221,11 +235,36 @@ function shownMask(original: SpotlightOriginal, shown: number): boolean[] {
 /** The original's lines as the sheet shows them, and the model-facing lines its trace maps them to. */
 interface SheetText {
 	original: SpotlightOriginal;
-	path: string | undefined;
 	/** The original's lines, up to the view cap. */
 	lines: readonly string[];
+	/** Whether each of {@link lines} reached the model ({@link shownMask}). */
+	shown: readonly boolean[];
 	/** The text the model saw, line by line. */
 	reduced: readonly string[];
+}
+
+/**
+ * One window as the sheet shows it: its 0-based original lines `from` to `end` (exclusive), within the view cap, of
+ * the `lines` it has.
+ */
+interface Section {
+	window: SpotlightWindow;
+	from: number;
+	end: number;
+	lines: number;
+}
+
+/**
+ * The original's windows, `shown` of its `total` lines in view; the last runs to the original's end, as the windows
+ * cover it. A window past the view keeps its section, empty.
+ */
+function sections(original: SpotlightOriginal, shown: number, total: number): Section[] {
+	const windows = originalWindows(original);
+	return windows.map((window, w) => {
+		const from = Math.max(0, window.at);
+		const full = w === windows.length - 1 ? Math.max(total, from) : window.at + window.lines;
+		return { window, from, end: Math.max(from, Math.min(full, shown)), lines: full - from };
+	});
 }
 
 /** The model-facing marker standing for 0-based original lines `from..to`: the one `map` pair covering them all. */
@@ -243,33 +282,40 @@ function foldLabel(sheet: SheetText, from: number, to: number): string | undefin
 	return label || undefined;
 }
 
-/** Why hot original line `i` (0-based) was cut, naming the line that took the budget's end when the budget cut it. */
-function cutWhy(original: SpotlightOriginal, i: number): string | undefined {
+/**
+ * Why hot original line `i` (0-based) of `window` was cut, naming the line that took the window's budget's end when
+ * the budget cut it.
+ */
+function cutWhy(original: SpotlightOriginal, window: SpotlightWindow, i: number): string | undefined {
 	const reason = reasonAt(original.why, i);
-	const last = original.rank?.last;
-	if (reason === "b" && original.rank && last) {
-		const total = rankParts(original.rank, last.line - 1).reduce((sum, part) => sum + part, 0);
-		return `cut by the budget: line ${original.start + last.line - 1} (${fixed(total)}) took the last ${count(last.chars)} chars`;
+	const rank = window.rank;
+	const last = rank?.last;
+	if (reason === "b" && rank && last) {
+		const total = rankParts(rank, last.line - 1).reduce((sum, part) => sum + part, 0);
+		return `cut by the budget: line ${window.start + last.line - 1} (${fixed(total)}) took the last ${count(last.chars)} chars`;
 	}
 	return reason === undefined ? undefined : CUT_WHY[reason];
 }
 
-/** The hover card of a fold hiding hot original line `i` (0-based): the line as the sheet draws it, its score, why it went. */
-function hotCard(sheet: SheetText, i: number): TspPropNode {
+/**
+ * The hover card of a fold hiding hot original line `i` (0-based) of `window`: the line as the sheet draws it, its
+ * score, why it went.
+ */
+function hotCard(sheet: SheetText, window: SpotlightWindow, i: number): TspPropNode {
 	const { original } = sheet;
-	const rank = original.rank;
-	const line = original.start + i;
-	const why = cutWhy(original, i);
-	const parts = rank ? rankParts(rank, i) : [];
+	const rank = window.rank;
+	const line = lineNumber(window, i);
+	const why = cutWhy(original, window, i);
+	const parts = rank ? rankParts(rank, i - window.at) : [];
 	return propNode(
 		col(
 			compact([
 				text([span(`line ${line} · the hottest line this fold hides`, "muted")]),
 				code(sheet.lines[i] ?? "", {
-					path: sheet.path,
+					path: window.path,
 					start: line,
 					numbers: true,
-					marks: compact([lineMark(original, i)]),
+					marks: compact([lineMark(original, window, i)]),
 				}),
 				rank &&
 					text([
@@ -286,10 +332,10 @@ function hotCard(sheet: SheetText, i: number): TspPropNode {
 }
 
 /**
- * The fold of 0-based original lines `from..to`, all hidden from the model: the marker it read for them, how many
+ * The fold of 0-based original lines `from..to` of `window`, all hidden from the model: the marker it read for them, how many
  * there are and their peak heat, and, when one scored hot, which and why it was cut (tinted, with a hover card).
  */
-function fold(sheet: SheetText, from: number, to: number): TspCodeFold {
+function fold(sheet: SheetText, window: SpotlightWindow, from: number, to: number): TspCodeFold {
 	const { original } = sheet;
 	let peak: number | undefined;
 	let hot = -1;
@@ -307,24 +353,24 @@ function fold(sheet: SheetText, from: number, to: number): TspCodeFold {
 	const note: TspSpan[] = [
 		span(`${count(n)} ${n === 1 ? "line" : "lines"}${peak === undefined ? "" : ` · peak ${fixed(peak)}`}`, "muted"),
 	];
-	const out: TspCodeFold = { from: original.start + from, to: original.start + to };
+	const out: TspCodeFold = { from: lineNumber(window, from), to: lineNumber(window, to) };
 	const label = foldLabel(sheet, from, to);
 	if (hot < 0) return { ...out, ...(label ? { label } : {}), note };
 	const why = CUT_WHY[reasonAt(original.why, hot) ?? "-"];
-	note.push(span(` · line ${original.start + hot}${why ? ` ${why}` : ""}`, "error"));
-	return { ...out, ...(label ? { label } : {}), note, tone: "error", hovercard: hotCard(sheet, hot) };
+	note.push(span(` · line ${lineNumber(window, hot)}${why ? ` ${why}` : ""}`, "error"));
+	return { ...out, ...(label ? { label } : {}), note, tone: "error", hovercard: hotCard(sheet, window, hot) };
 }
 
-/** One fold per maximal run of the shown lines the model did not see. */
-function folds(sheet: SheetText): TspCodeFold[] {
-	const mask = shownMask(sheet.original, sheet.lines.length);
+/** One fold per maximal run of a section's lines the model did not see; none spans two windows. */
+function folds(sheet: SheetText, { window, from, end }: Section): TspCodeFold[] {
+	const mask = sheet.shown;
 	const out: TspCodeFold[] = [];
-	for (let i = 0; i < mask.length; i++) {
+	for (let i = from; i < end; i++) {
 		if (mask[i]) continue;
-		let end = i;
-		while (end + 1 < mask.length && !mask[end + 1]) end++;
-		out.push(fold(sheet, i, end));
-		i = end;
+		let last = i;
+		while (last + 1 < end && !mask[last + 1]) last++;
+		out.push(fold(sheet, window, i, last));
+		i = last;
 	}
 	return out;
 }
@@ -333,23 +379,54 @@ function folds(sheet: SheetText): TspCodeFold[] {
 const OVERVIEW_MIN_LINES = 60;
 
 /**
- * The original as one `code` element (role `omp.spotlight.code`): marks, folds, and the overview past
- * {@link OVERVIEW_MIN_LINES}. Command output (no file) wraps, a file keeps its lines.
+ * One window of the original as a `code` element (role `omp.spotlight.code`), numbered from the window's start:
+ * marks, folds, and the overview past {@link OVERVIEW_MIN_LINES}. Command output (no file) wraps, a file keeps its
+ * lines.
  */
-function originalCode(sheet: SheetText): NativeNode {
+function windowCode(sheet: SheetText, section: Section): NativeNode {
 	const { original } = sheet;
-	const marks = compact(sheet.lines.map((_, i) => lineMark(original, i)));
-	const shut = folds(sheet);
-	return code(sheet.lines.join("\n"), {
+	const { window, from, end } = section;
+	const lines = sheet.lines.slice(from, end);
+	const marks = compact(lines.map((_, j) => lineMark(original, window, from + j)));
+	const shut = folds(sheet, section);
+	return code(lines.join("\n"), {
 		role: "omp.spotlight.code",
-		path: sheet.path,
-		start: original.start,
+		path: window.path,
+		start: window.start,
 		numbers: true,
-		...(sheet.path ? {} : { wrap: true }),
-		...(sheet.lines.length >= OVERVIEW_MIN_LINES ? { overview: true } : {}),
+		...(window.path ? {} : { wrap: true }),
+		...(lines.length >= OVERVIEW_MIN_LINES ? { overview: true } : {}),
 		...(marks.length > 0 ? { marks } : {}),
 		...(shut.length > 0 ? { folds: shut } : {}),
 	});
+}
+
+/**
+ * A window of several (role `omp.spotlight.window`): its head (role `omp.spotlight.head`: the file it shows, how much
+ * of it the view cap left (role `omp.spotlight.clip`), and its ranking's budget and cutoff, when it has any) over its
+ * code, absent when the cap left none of it.
+ */
+function windowSection(sheet: SheetText, section: Section): NativeNode {
+	const { path, rank } = section.window;
+	const shown = section.end - section.from;
+	const clip =
+		shown === 0
+			? `not shown: past the first ${count(SPOTLIGHT_VIEW_LINES)} lines`
+			: shown < section.lines
+				? `${count(shown)} of ${count(section.lines)} lines shown`
+				: undefined;
+	const head =
+		(path !== undefined || clip !== undefined || rank) &&
+		row(
+			compact([
+				path !== undefined && text([span(path, "mono")]),
+				clip !== undefined && text([span(clip, "muted")], { role: "omp.spotlight.clip" }),
+				node("spacer", { grow: 1 }),
+				rank && text([span(rankFacts(rank), "muted")], { role: "omp.spotlight.budget" }),
+			]),
+			{ gap: "md", align: "baseline", role: "omp.spotlight.head" },
+		);
+	return col(compact([head, shown > 0 && windowCode(sheet, section)]), { gap: "xs", role: "omp.spotlight.window" });
 }
 
 /**
@@ -372,13 +449,16 @@ function shapingNotes(sheet: SheetText, heldOut: boolean): NativeNode | undefine
 	});
 }
 
+/** A rank's parts in their order across a row, as its legend names them. */
+function rankLabel(rank: SpotlightRank): string {
+	return rank.parts.length > 1 ? `row tint, left to right: ${rank.parts.join(" → ")}` : `row tint: ${rank.parts[0]}`;
+}
+
 /**
  * The footer's key to the rows' wash (role `omp.spotlight.legend`): the heat ramp (role `omp.spotlight.ramp`, drawn
- * by the terminal) before the rank's parts in their order across a row.
+ * by the terminal) before a rank's parts in their order across a row ({@link rankLabel}).
  */
-function rankLegend(rank: SpotlightRank): NativeNode {
-	const label =
-		rank.parts.length > 1 ? `row tint, left to right: ${rank.parts.join(" → ")}` : `row tint: ${rank.parts[0]}`;
+function rankLegend(label: string): NativeNode {
 	return row([legendKey(text("", { role: "omp.spotlight.ramp" }), label)], {
 		align: "center",
 		role: "omp.spotlight.legend",
@@ -431,18 +511,24 @@ export class SpotlightSheet implements Component {
 		const { spotlight } = this.#options;
 		const original = spotlight.original;
 		const all = sanitizeText(this.#options.original).split("\n");
+		const lines = all.slice(0, SPOTLIGHT_VIEW_LINES);
 		const sheet: SheetText = {
 			original,
-			path: original.path,
-			lines: all.slice(0, SPOTLIGHT_VIEW_LINES),
+			lines,
+			shown: shownMask(original, lines.length),
 			reduced: sanitizeText(this.#options.reduced).split("\n"),
 		};
-		const rank = original.rank;
+		const windows = originalWindows(original);
+		const single = windows.length === 1;
+		// One legend per distinct order of rank parts across the windows.
+		const legends = [...new Set(compact(windows.map(window => window.rank && rankLabel(window.rank))))];
 		this.#body = compact([
-			summary(original, sheet.lines.length, all.length),
-			originalCode(sheet),
+			summary(original, single ? windows[0].rank : undefined, lines.length, all.length),
+			...sections(original, lines.length, all.length).map(section =>
+				single ? section.end > section.from && windowCode(sheet, section) : windowSection(sheet, section),
+			),
 			shapingNotes(sheet, spotlight.holdout === true || spotlight.gated === true),
-			actionBar([...(rank ? [rankLegend(rank)] : []), null, actionButton("Close", "close", { keys: "escape" })]),
+			actionBar([...legends.map(rankLegend), null, actionButton("Close", "close", { keys: "escape" })]),
 		]);
 		return this.#body;
 	}

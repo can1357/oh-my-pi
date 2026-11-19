@@ -25,10 +25,19 @@ import {
 	type EditWriteResponse,
 } from "@oh-my-pi/pi-natives";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
-import { extractUriScheme, InternalUrlRouter, type ResolveContext, sessionResolveContext } from "../internal-urls";
+import { type FileSnapshot, readSnapshot } from "../commit/selective/journal";
+import {
+	extractUriScheme,
+	InternalUrlRouter,
+	type ResolveContext,
+	sessionResolveContext,
+	sessionWriteContext,
+} from "../internal-urls";
+import { isRemoteTextWritable, remoteMirrorUrl, writeRemoteMirror } from "./remote-mirror";
 import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
 import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
-import { FileChangeType, notifyWorkspaceWatchedFiles } from "../lsp/client";
+import { notifyWorkspaceWatchedFiles } from "../lsp/client";
+import { FileChangeType } from "../lsp/types";
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 import type { ToolSession } from "../tools";
@@ -75,6 +84,7 @@ import {
 import {
 	cfgLspDiagnosticsDeduplicate,
 	cfgLspDiagnosticsOnEdit,
+	cfgLspEnabled,
 	cfgLspFormatOnWrite,
 	cfgLspRequestTimeout,
 } from "../lsp/settings";
@@ -170,7 +180,7 @@ export function resolveEditToolDescription(
 
 /** Builds the LSP writethrough from the current `lsp.*` settings; called per write so changes apply immediately. */
 function createEditWritethrough(session: ToolSession): WritethroughCallback {
-	const enableLsp = session.enableLsp ?? true;
+	const enableLsp = (session.enableLsp ?? true) && cfgLspEnabled.get(session.settings);
 	const enableDiagnostics = enableLsp && cfgLspDiagnosticsOnEdit.get(session.settings);
 	const enableFormat = enableLsp && cfgLspFormatOnWrite.get(session.settings);
 	const deduplicate = enableDiagnostics && cfgLspDiagnosticsDeduplicate.get(session.settings);
@@ -690,6 +700,13 @@ export class EditTool implements AgentTool<TInput> {
 			const scheme = extractUriScheme(target);
 			const spec = scheme === undefined ? undefined : router.spec(scheme);
 			if (!spec) return { error: `Unknown internal URL: ${url}`, planWritable: false };
+			if (isRemoteTextWritable(spec)) {
+				// Patched through a local mirror of the live remote text; `#write` sends it back.
+				const resource = await router.resolve(target, context);
+				if (resource.isDirectory) return { error: `${url} is a directory`, planWritable: false };
+				if (typeof resource.content !== "string") return { error: `${url} is binary`, planWritable: false };
+				return { path: await writeRemoteMirror(target, resource.content), planWritable: false };
+			}
 			if (!router.fileWritable(target)) {
 				const reason = spec.write?.via === "handler" ? "is written through `write`, not edited" : "is read-only";
 				return { error: `${url} ${reason}`, planWritable: false };
@@ -701,9 +718,36 @@ export class EditTool implements AgentTool<TInput> {
 		}
 	}
 
+	/** Send a patched remote mirror back through its scheme's handler; the mirror tracks what was written. */
+	async #writeRemote(url: string, request: EditWriteRequest, signal?: AbortSignal): Promise<EditWriteResponse> {
+		if (request.op !== "update" || request.content === undefined) {
+			throw new ToolError(`${url} can only be patched in place; use \`bash\` to delete or move it`, {
+				path: request.path,
+			});
+		}
+		await InternalUrlRouter.instance().write(url, request.content, sessionWriteContext(this.session, { signal }));
+		await Bun.write(request.path, request.content);
+		return { written: request.content };
+	}
+
 	async #write(request: EditWriteRequest, signal?: AbortSignal): Promise<EditWriteResponse> {
+		const remote = remoteMirrorUrl(request.path);
+		if (remote !== undefined) return this.#writeRemote(remote, request, signal);
+		const journaled = this.session.recordFileChange !== undefined;
+		const before = journaled ? await readSnapshot(request.path) : undefined;
+		const journal = (file: string, after: string | null, snapshot: FileSnapshot | undefined = before) => {
+			if (!snapshot) return;
+			this.session.recordFileChange?.({
+				path: file,
+				tool: "edit",
+				before: snapshot.text,
+				after,
+				beforeMtimeMs: snapshot.mtimeMs,
+			});
+		};
 		if (request.op === "delete") {
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
+			journal(request.path, null);
 			if (this.session.enableLsp ?? true) {
 				await notifyWorkspaceWatchedFiles(
 					this.session.cwd,
@@ -731,10 +775,13 @@ export class EditTool implements AgentTool<TInput> {
 				throw new ToolError("Native edit move request omitted destination", { path: request.path });
 			}
 			const mode = await movedFileMode(request.path);
+			const destination = journaled ? await readSnapshot(request.moveTo) : undefined;
 			await mkdirAllowingFallback(path.dirname(request.moveTo));
 			await writeFileWithFallback(request.moveTo, request.content);
 			if (mode !== undefined) await chmodMovedFile(request.moveTo, mode);
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
+			journal(request.path, null);
+			journal(request.moveTo, request.content, destination);
 			if (this.session.enableLsp ?? true) {
 				await notifyWorkspaceWatchedFiles(
 					this.session.cwd,
@@ -764,7 +811,10 @@ export class EditTool implements AgentTool<TInput> {
 			request.content,
 			signal,
 		);
-		if (bridge) return { written: bridge.text };
+		if (bridge) {
+			journal(request.path, bridge.text);
+			return { written: bridge.text };
+		}
 
 		// The pre-image is the only way to tell "the write never landed" from
 		// "something else rewrote the file"; a stat cannot (coarse mtimes).
@@ -819,6 +869,7 @@ export class EditTool implements AgentTool<TInput> {
 		}
 
 		if (!began) this.session.bumpFileMutationVersion?.(request.path);
+		journal(request.path, diagnostics.finalContent);
 		return {
 			written: diagnostics.finalContent,
 			diagnosticsJson: diagnostics.diagnostics ? JSON.stringify(diagnostics.diagnostics) : undefined,

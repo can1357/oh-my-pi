@@ -1,6 +1,4 @@
 import { beforeAll, describe, expect, it } from "bun:test";
-import * as os from "node:os";
-import * as path from "node:path";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import { taskToolRenderer } from "@oh-my-pi/pi-tui/tools/task";
@@ -64,33 +62,16 @@ describe("task renderer: streaming call preview", () => {
 		expect(out).toContain("First");
 	});
 
-	it("shows an unnamed streamed task file as a shortened, sanitized path in both renderers", () => {
-		const args: TaskParams = { taskFile: path.join(os.homedir(), "prompts", "review\t\x1b[31mauth\x1b[0m\n.md") };
-		const expected = "~/prompts/review auth .md";
-		const out = render(args);
-		const view = taskToolRenderer.describeCall(args, { argsComplete: false, expanded: false, isPartial: true });
-
-		expect(out).toContain(expected);
-		expect(out).not.toContain(os.homedir());
-		expect(view?.body).toMatchObject([{ k: "agent", p: { name: "agent", task: expected, status: "pending" } }]);
-	});
-
-	it("shows each batch task file in both pending previews", () => {
+	it("previews a stepped item by its first step and step count in both renderers", () => {
 		const args: TaskParams = {
-			tasks: [
-				{ taskFile: path.join(os.homedir(), "prompts", "review.md") },
-				{ name: "Implement", taskFile: "/tmp/implementation.md" },
-			],
+			tasks: [{ name: "Implement", steps: ["Add the parser.\nDetails follow.", "Wire it in.", "Test it."] }],
 		};
 		const out = render(args);
 		const view = taskToolRenderer.describeCall(args, { argsComplete: true, expanded: false, isPartial: false });
 
-		expect(out).toContain("#1: ~/prompts/review.md");
-		expect(out).toContain("Implement: /tmp/implementation.md");
-		expect(view?.body).toMatchObject([
-			{ k: "agent", p: { name: "#1", task: "~/prompts/review.md" } },
-			{ k: "agent", p: { name: "Implement", task: "/tmp/implementation.md" } },
-		]);
+		expect(out).toContain("Implement: Add the parser. [3 steps]");
+		expect(view?.body).toMatchObject([{ k: "agent", p: { name: "Implement" } }]);
+		expect(JSON.stringify(view?.body)).toContain("Add the parser.");
 	});
 
 	it("always renders the full task markdown, collapsed or expanded", () => {

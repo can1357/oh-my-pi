@@ -2,7 +2,7 @@
  * Hindsight memory backend.
  *
  * Wires the per-session lifecycle (recall on first turn, retain every Nth
- * agent_end, etc.) on top of the AgentSession event stream. Hindsight runtime
+ * finished model turn, etc.) on top of the AgentSession event stream. Hindsight runtime
  * state is owned by the AgentSession so lifetime follows the actual domain
  * owner instead of a parallel session-id registry.
  */
@@ -45,6 +45,7 @@ export const hindsightBackend: MemoryBackend = {
 			if (!parent) return;
 			const previous = session.setHindsightSessionState(
 				new HindsightSessionState({
+					agentDir: options.agentDir,
 					sessionId,
 					client: parent.client,
 					bankId: parent.bankId,
@@ -290,6 +291,7 @@ async function installPrimaryState(
 	}
 
 	const state = new HindsightSessionState({
+		agentDir: settings.getAgentDir(),
 		sessionId,
 		client,
 		bankId: scope.bankId,
@@ -310,6 +312,8 @@ async function installPrimaryState(
 	}
 	previous?.dispose();
 	state.attachSessionListeners();
+	// Deliver what earlier processes left in this destination's outbox; stored tags route each event.
+	void state.retainQueue.flush();
 
 	// Kick off mental-model bootstrap. Resolves asynchronously; the first
 	// turn races and is covered in `beforeAgentStartPrompt` via

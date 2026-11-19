@@ -76,4 +76,83 @@ describe("handleReadTheDocs versioned source guard", () => {
 		expect(result?.contentType).toBe("text/plain");
 		expect(result?.content).toContain("MAIN BRANCH RST SOURCE");
 	});
+
+	it("ignores body links to another repository's files", async () => {
+		// No Edit link on the page; a body link whose text contains "open-source"
+		// points at another project's file and must not replace the page.
+		const loadPage = stubLoadPage(
+			`<html><body><div class="document"><h1>Deployment</h1><p>Deploy with the <a href="https://github.com/mother-of-all-self-hosting/mash-playbook/blob/main/docs/supported-services.md">wide variety of open-source services</a> playbook.</p></div></body></html>`,
+			"UNRELATED REPOSITORY FILE",
+		);
+
+		const result = await handleReadTheDocs(
+			"https://docker-minecraft-server.readthedocs.io/en/latest/misc/deployment/",
+			20,
+		);
+
+		expect(result?.contentType).toBe("text/html");
+		expect(result?.content).toContain("Deploy with the");
+		expect(result?.content).not.toContain("UNRELATED REPOSITORY FILE");
+		expect(loadPage).toHaveBeenCalledTimes(1);
+	});
+
+	it("fetches the index file's raw source for the docs root page", async () => {
+		stubLoadPage(pageHtml("https://github.com/jawah/niquests/blob/main/docs/index.rst"), "INDEX RST SOURCE");
+
+		const result = await handleReadTheDocs("https://niquests.readthedocs.io/en/latest/", 20);
+
+		expect(result?.contentType).toBe("text/plain");
+		expect(result?.content).toContain("INDEX RST SOURCE");
+	});
+
+	it("ignores an Edit link to a subsection's index on the docs root page", async () => {
+		const loadPage = stubLoadPage(
+			pageHtml("https://github.com/other/project/blob/main/docs/subsection/index.rst"),
+			"UNRELATED REPOSITORY FILE",
+		);
+
+		const result = await handleReadTheDocs("https://niquests.readthedocs.io/en/latest/", 20);
+
+		expect(result?.contentType).toBe("text/html");
+		expect(loadPage).toHaveBeenCalledTimes(1);
+	});
+
+	it("ignores an Edit link to a file other than the page's source", async () => {
+		const loadPage = stubLoadPage(
+			pageHtml("https://github.com/other/project/blob/main/docs/supported-services.md"),
+			"UNRELATED REPOSITORY FILE",
+		);
+
+		const result = await handleReadTheDocs("https://niquests.readthedocs.io/en/latest/user/quickstart.html", 20);
+
+		expect(result?.contentType).toBe("text/html");
+		expect(loadPage).toHaveBeenCalledTimes(1);
+	});
+
+	it("matches a percent-encoded page path to its source file", async () => {
+		stubLoadPage(
+			pageHtml("https://github.com/jupyter/notebook/edit/main/docs/source/examples/Importing Notebooks.ipynb"),
+			"NOTEBOOK SOURCE",
+		);
+
+		const result = await handleReadTheDocs(
+			"https://jupyter-notebook.readthedocs.io/en/latest/examples/Importing%20Notebooks.html",
+			20,
+		);
+
+		expect(result?.contentType).toBe("text/plain");
+		expect(result?.content).toContain("NOTEBOOK SOURCE");
+	});
+
+	it("keeps dots in a directory-style page name", async () => {
+		stubLoadPage(
+			pageHtml("https://github.com/jawah/niquests/blob/main/docs/reference/package.module.rst"),
+			"MODULE RST SOURCE",
+		);
+
+		const result = await handleReadTheDocs("https://niquests.readthedocs.io/en/latest/reference/package.module/", 20);
+
+		expect(result?.contentType).toBe("text/plain");
+		expect(result?.content).toContain("MODULE RST SOURCE");
+	});
 });

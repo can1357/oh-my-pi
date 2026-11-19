@@ -14,7 +14,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { createInMemoryAuthStorage, fixedAdvisorTools } from "./helpers/agent-session-setup";
 
 const FILE_CONTENTS = "export const retryBudget = 3; // advisor investigation payload\n".repeat(32);
 const READ_CALL = { type: "toolCall", name: "read", arguments: { path: "src/retry.ts" } } as const;
@@ -69,7 +69,7 @@ describe("advisor stale tool-result eviction", () => {
 			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings,
 			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
-			advisorTools: [readTool],
+			advisorTools: fixedAdvisorTools(readTool),
 			advisorStreamFn: advisorMock.stream,
 		});
 		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");

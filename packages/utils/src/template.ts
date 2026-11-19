@@ -73,7 +73,36 @@ type Evaluation = {
 	partials: Map<string, Template>;
 	options: CompileOptions;
 	runtime: RuntimeOptions;
+	/** Items whose `{{#each}}` iterations are recorded as marks. */
+	tracked?: ReadonlySet<unknown>;
 };
+
+/** Range of the output one `{{#each}}` iteration rendered for a tracked item. */
+export interface TemplateMark {
+	readonly item: unknown;
+	readonly start: number;
+	readonly end: number;
+}
+
+/** Rendered text with the marks of its tracked items, in the order the iterations finished. */
+export interface MarkedRender {
+	readonly text: string;
+	readonly marks: readonly TemplateMark[];
+}
+
+/**
+ * A compiled template that also reports the range each `{{#each}}` iteration over an item in
+ * `tracked` rendered. Iterations inside a helper block or partial are not reported: helpers and
+ * partials produce plain strings.
+ */
+export type MarkedTemplateDelegate<T = unknown> = (
+	context: T | undefined,
+	tracked: ReadonlySet<unknown>,
+	options?: RuntimeOptions,
+) => MarkedRender;
+
+/** Render sink: nodes append to `text`, tracked iterations to `marks`. */
+type Output = { text: string; marks: TemplateMark[] };
 
 const helpers = new Map<string, HelperDelegate>();
 const partials = new Map<string, Template>();
@@ -375,16 +404,27 @@ function isConditionalTruthy(value: unknown, includeZero = false): boolean {
 }
 
 function renderNodes(nodes: Node[], frame: Frame, evaluation: Evaluation): string {
-	let result = "";
+	const output: Output = { text: "", marks: [] };
+	renderInto(nodes, frame, evaluation, output);
+	return output.text;
+}
+
+function renderInto(nodes: Node[], frame: Frame, evaluation: Evaluation, output: Output): void {
 	for (const node of nodes) {
-		if (node.kind === "text") result += node.value;
+		if (node.kind === "text") output.text += node.value;
 		else if (node.kind === "output") {
 			const value = evaluateCall(node.expression, frame, evaluation, false);
-			result += stringify(value, node.escaped && !evaluation.options.noEscape);
-		} else if (node.kind === "partial") result += renderPartial(node, frame, evaluation);
-		else result += evaluateBlock(node, frame, evaluation);
+			output.text += stringify(value, node.escaped && !evaluation.options.noEscape);
+		} else if (node.kind === "partial") output.text += renderPartial(node, frame, evaluation);
+		else evaluateBlock(node, frame, evaluation, output);
 	}
-	return result;
+}
+
+/** Renders one `{{#each}}` iteration, marking its output when `item` is tracked. */
+function renderIteration(body: Node[], frame: Frame, evaluation: Evaluation, output: Output, item: unknown): void {
+	const start = output.text.length;
+	renderInto(body, frame, evaluation, output);
+	if (evaluation.tracked?.has(item)) output.marks.push({ item, start, end: output.text.length });
 }
 
 function helperOptions(
@@ -437,24 +477,29 @@ function evaluateCall(
 	return resolvePath(call.name, frame);
 }
 
-function evaluateBlock(node: BlockNode, frame: Frame, evaluation: Evaluation): string {
+function evaluateBlock(node: BlockNode, frame: Frame, evaluation: Evaluation, output: Output): void {
 	const { name } = node.expression;
 	const helper = findHelper(name, evaluation);
-	if (helper) return stringify(evaluateCall(node.expression, frame, evaluation, true, node.body, node.inverse), false);
+	if (helper) {
+		output.text += stringify(evaluateCall(node.expression, frame, evaluation, true, node.body, node.inverse), false);
+		return;
+	}
 	const args = node.expression.args.map(argument => evaluateExpression(argument, frame, evaluation));
 	const value = args.length ? args[0] : resolvePath(name, frame);
 	const hash = evaluateHash(node.expression.hash, frame, evaluation);
 	if (name === "if" || name === "unless") {
 		const truthy = isConditionalTruthy(value, hash.includeZero === true);
 		const branch = name === "if" ? truthy : !truthy;
-		return renderNodes(branch ? node.body : node.inverse, frame, evaluation);
+		renderInto(branch ? node.body : node.inverse, frame, evaluation, output);
+		return;
 	}
 	if (name === "each") {
 		if (Array.isArray(value)) {
-			if (!value.length) return renderNodes(node.inverse, frame, evaluation);
-			return value
-				.map((item, index) =>
-					renderNodes(
+			if (!value.length) renderInto(node.inverse, frame, evaluation, output);
+			// `forEach` skips holes, as the `map().join("")` it replaces did.
+			else
+				value.forEach((item, index) =>
+					renderIteration(
 						node.body,
 						childFrame(frame, item, {
 							...frame.data,
@@ -464,16 +509,18 @@ function evaluateBlock(node: BlockNode, frame: Frame, evaluation: Evaluation): s
 							last: index === value.length - 1,
 						}),
 						evaluation,
+						output,
+						item,
 					),
-				)
-				.join("");
+				);
+			return;
 		}
 		if (value && typeof value === "object") {
 			const entries = Object.entries(value);
-			if (!entries.length) return renderNodes(node.inverse, frame, evaluation);
-			return entries
-				.map(([key, item], index) =>
-					renderNodes(
+			if (!entries.length) renderInto(node.inverse, frame, evaluation, output);
+			else
+				entries.forEach(([key, item], index) =>
+					renderIteration(
 						node.body,
 						childFrame(frame, item, {
 							...frame.data,
@@ -483,25 +530,30 @@ function evaluateBlock(node: BlockNode, frame: Frame, evaluation: Evaluation): s
 							last: index === entries.length - 1,
 						}),
 						evaluation,
+						output,
+						item,
 					),
-				)
-				.join("");
+				);
+			return;
 		}
-		return renderNodes(node.inverse, frame, evaluation);
+		renderInto(node.inverse, frame, evaluation, output);
+		return;
 	}
-	if (name === "with")
-		return isConditionalTruthy(value)
-			? renderNodes(node.body, childFrame(frame, value), evaluation)
-			: renderNodes(node.inverse, frame, evaluation);
+	if (name === "with") {
+		if (isConditionalTruthy(value)) renderInto(node.body, childFrame(frame, value), evaluation, output);
+		else renderInto(node.inverse, frame, evaluation, output);
+		return;
+	}
 	const resolved = resolvePath(name, frame);
-	if (Array.isArray(resolved))
-		return (
-			resolved.map(item => renderNodes(node.body, childFrame(frame, item), evaluation)).join("") ||
-			renderNodes(node.inverse, frame, evaluation)
-		);
-	return resolved === false || resolved == null
-		? renderNodes(node.inverse, frame, evaluation)
-		: renderNodes(node.body, childFrame(frame, resolved), evaluation);
+	if (Array.isArray(resolved)) {
+		const start = output.text.length;
+		resolved.forEach(item => renderInto(node.body, childFrame(frame, item), evaluation, output));
+		// Sections render their inverse when every item rendered empty.
+		if (output.text.length === start) renderInto(node.inverse, frame, evaluation, output);
+		return;
+	}
+	if (resolved === false || resolved == null) renderInto(node.inverse, frame, evaluation, output);
+	else renderInto(node.body, childFrame(frame, resolved), evaluation, output);
 }
 
 function renderPartial(node: PartialNode, frame: Frame, evaluation: Evaluation): string {
@@ -584,6 +636,23 @@ export class TemplateEngine {
 			const root = context ?? {};
 			const frame: Frame = { context: root, parents: [], root, data: { root, ...runtime.data } };
 			return renderNodes(nodes, frame, { helpers: this.#helpers, partials: this.#partials, options, runtime });
+		};
+	}
+
+	/** Compile a template that also reports where tracked values land, using this engine's registries. */
+	compileMarked<T = unknown>(source: string, options: CompileOptions = {}): MarkedTemplateDelegate<T> {
+		const nodes = parseTemplate(stripStandalone(source));
+		return (context, tracked, runtime = {}) => {
+			const root = context ?? {};
+			const frame: Frame = { context: root, parents: [], root, data: { root, ...runtime.data } };
+			const output: Output = { text: "", marks: [] };
+			renderInto(
+				nodes,
+				frame,
+				{ helpers: this.#helpers, partials: this.#partials, options, runtime, tracked },
+				output,
+			);
+			return output;
 		};
 	}
 }

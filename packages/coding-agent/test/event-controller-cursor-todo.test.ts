@@ -88,7 +88,10 @@ function evalEnd(
 		toolCallId,
 		toolName: "eval",
 		isError,
-		result: { content: [{ type: "text", text: "done" }], details: statusEvents ? { statusEvents } : undefined },
+		result: {
+			content: [{ type: "text", text: "done" }],
+			details: statusEvents ? { cells: [{ statusEvents }] } : undefined,
+		},
 	} as unknown as Extract<AgentSessionEvent, { type: "tool_execution_end" }>;
 }
 
@@ -197,6 +200,21 @@ describe("EventController + Cursor todo bridge", () => {
 		f.ctx.viewSession.getTodoPhases = () => current;
 
 		await f.controller.handleEvent(evalEnd("eval-todo-1", [{ op: "todo", committed: true, phases: recorded }]));
+
+		expect(f.ctx.setTodos).toHaveBeenCalledWith(current);
+	});
+
+	it("refreshes Todo phases from a nested update recorded on an Eval cell", async () => {
+		// Current eval results keep status events on each cell only, with no call-level copy.
+		const f = createFixture();
+		const current = [{ name: "Current", tasks: [{ content: "Later", status: "in_progress" as const }] }];
+		f.ctx.viewSession.getTodoPhases = () => current;
+		const end = evalEnd("eval-todo-cell");
+		end.result.details = {
+			cells: [{ statusEvents: [{ op: "read" }] }, { statusEvents: [{ op: "todo", committed: true }] }],
+		};
+
+		await f.controller.handleEvent(end);
 
 		expect(f.ctx.setTodos).toHaveBeenCalledWith(current);
 	});

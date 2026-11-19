@@ -1,4 +1,4 @@
-import { paletteToRgb, rgbToHex } from "@oh-my-pi/pi-utils/color";
+import { colorLuma, mixHex, paletteToRgb, rgbToHex } from "@oh-my-pi/pi-utils/color";
 import { detectTerminalId, getTerminalInfo } from "../terminal-capabilities";
 import type { ColorMode, ColorValue } from "./schema";
 
@@ -87,6 +87,16 @@ export function resolveThemeColors<T extends Record<string, ColorValue>>(
 	return resolved as Record<keyof T, string | number>;
 }
 
+/** True when a status-line luma (`colorLuma`) belongs to a light background; undefined (unknown) reads as dark. */
+export function isLightLuma(luma: number | undefined): boolean {
+	return luma !== undefined && luma > 0.5;
+}
+
+/** True when `surface` is a light background; `Theme` reads its status-line background this way. */
+export function isLightSurface(surface: string | number | undefined): boolean {
+	return isLightLuma(surface === undefined ? undefined : colorLuma(surface));
+}
+
 /**
  * Resolve a theme color value (hex string or 256-color index) to a CSS hex string.
  * Empty string represents the default terminal color.
@@ -95,6 +105,24 @@ export function resolveToHex(value: string | number, isLight: boolean): string {
 	if (typeof value === "number") return ansi256ToHex(value);
 	if (value === "") return isLight ? "#000000" : "#e5e5e7";
 	return value;
+}
+
+/**
+ * Blend two theme color values in sRGB: `t` = 0 gives `a`, 1 gives `b`.
+ * Values go through {@link resolveToHex}, so the result is approximate for
+ * colors the terminal owns: palette indices 0–15 use a stock palette, not the
+ * terminal's, and `""` (terminal default) uses a guessed foreground.
+ */
+export function mixThemeColors(a: string | number, b: string | number, t: number, isLight: boolean): string {
+	const hex = (value: string | number) => {
+		const resolved = resolveToHex(value, isLight);
+		// Resolved values are `#rgb`, `#rrggbb` or `#rrggbbaa`; normalize to the `#rrggbb` `mixHex` reads,
+		// and reject malformed hex, which `hexToRgb` would turn into NaN channels.
+		const normalized = Bun.color(resolved, "hex");
+		if (normalized === null) throw new Error(`Invalid color value: ${resolved}`);
+		return normalized;
+	};
+	return mixHex(hex(a), hex(b), t);
 }
 
 /**

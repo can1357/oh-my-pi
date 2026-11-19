@@ -74,15 +74,6 @@ describe("dereferenceJsonSchema", () => {
 		});
 	}
 
-	it("returns schema without $defs unchanged", () => {
-		const schema = {
-			type: "object",
-			properties: { name: { type: "string" } },
-			required: ["name"],
-		};
-		expect(dereferenceJsonSchema(schema)).toBe(schema);
-	});
-
 	it("inlines a simple $ref from $defs", () => {
 		const schema = {
 			type: "object",

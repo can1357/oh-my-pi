@@ -4,6 +4,9 @@ import { apiRouteFor } from "../compat/behavior";
 import { providerEntry, seedModels } from "../compat/providers";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
+import { fetchKiroModels } from "../discovery/kiro";
+import { decodeKiroCredential } from "../wire/kiro";
+
 import {
 	type FactoryDroidModelDiscoveryOptions,
 	factoryDroidSeedModels,
@@ -414,6 +417,24 @@ export function cloudflareWorkersAiModelManagerOptions(): ModelManagerOptions<"w
 	};
 }
 
+/** Liquid AI judges: the authored d1 rows. */
+export function liquidModelManagerOptions(): ModelManagerOptions<"liquid-systemone"> {
+	return {
+		providerId: "liquid",
+		cacheProviderId: resolveModelCacheProviderId("liquid"),
+		staticModels: seedModels<"liquid-systemone">("liquid"),
+	};
+}
+
+/** Nace Drex judges: the authored Drex rows. */
+export function naceModelManagerOptions(): ModelManagerOptions<"nace-systemone"> {
+	return {
+		providerId: "nace",
+		cacheProviderId: resolveModelCacheProviderId("nace"),
+		staticModels: seedModels<"nace-systemone">("nace"),
+	};
+}
+
 /** Credentials and endpoint overrides for the TypeSafe catalog manager. */
 export interface TypeSafeModelManagerConfig {
 	apiKey?: string;
@@ -449,6 +470,56 @@ export function typesafeModelManagerOptions(config: TypeSafeModelManagerConfig =
 			: undefined),
 	};
 }
+// ---------------------------------------------------------------------------
+// Kiro
+// ---------------------------------------------------------------------------
+
+export interface KiroDiscoveryAccount {
+	apiKey: string;
+	accountKey?: string;
+}
+
+export interface KiroModelManagerConfig {
+	apiKey?: string;
+	fetch?: FetchImpl;
+	resolveAccounts?: () => Promise<readonly KiroDiscoveryAccount[] | null>;
+}
+
+export function kiroModelManagerOptions(config: KiroModelManagerConfig = {}): ModelManagerOptions<"kiro-api"> {
+	const { apiKey, fetch, resolveAccounts } = config;
+	const discover = (key: string) => fetchKiroModels({ credential: decodeKiroCredential(key), fetch });
+	return {
+		providerId: "kiro",
+		staticModels: [],
+		dynamicModelsAuthoritative: true,
+		cacheProviderId: resolveModelCacheProviderId("kiro", { apiKey }),
+		// A credential that does not decode throws; the model manager keeps the last cache.
+		...(resolveAccounts
+			? {
+					fetchDynamicModels: async () => {
+						const accounts = await resolveAccounts();
+						if (!accounts || accounts.length === 0) return null;
+						const rosters = await Promise.all(accounts.map(account => discover(account.apiKey)));
+						const tagAccess = accounts.every(account => account.accountKey !== undefined);
+						const catalogs: ModelSpec<"kiro-api">[][] = [];
+						for (const [i, models] of rosters.entries()) {
+							if (!models) return null;
+							const accountKey = accounts[i].accountKey;
+							catalogs.push(
+								tagAccess && accountKey !== undefined
+									? models.map(model => ({ ...model, accountAccess: { [accountKey]: {} } }))
+									: models,
+							);
+						}
+						return unionAccountCatalogs(catalogs);
+					},
+				}
+			: apiKey
+				? { fetchDynamicModels: async () => discover(apiKey) }
+				: undefined),
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Zai
 // ---------------------------------------------------------------------------

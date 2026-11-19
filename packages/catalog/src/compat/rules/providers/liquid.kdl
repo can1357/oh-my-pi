@@ -1,0 +1,32 @@
+// Liquid AI decision models. d1.1 and d1-ultra answer typed questions over
+// JSON state with the TypeSafe System One body (`{model, state, questions}`,
+// plus top-level `images` data URLs) at `POST /decisions/v1/systemone`.
+
+provider "liquid" {
+	default-model "d1.1"
+	env "LIQUID_API_KEY"
+
+	// docs.liquid.ai/lfm/models/d1 and liquid.ai/pricing: both take text and
+	// image input and bill input tokens only. Context windows as listed on
+	// OpenRouter (liquid/d1.1, liquid/d1-ultra).
+	seed api="liquid-systemone" base-url="https://api.liquid.ai" bundle="always" {
+		model "d1.1" name="d1.1" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.02 output=0 cache-read=0.02 cache-write=0
+			limits context=65536
+			supports-tools #false
+		}
+		model "d1-ultra" name="d1-ultra" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.042 output=0 cache-read=0.042 cache-write=0
+			limits context=32768
+			supports-tools #false
+		}
+	}
+
+	models "*" {
+		kind "judge"
+	}
+}

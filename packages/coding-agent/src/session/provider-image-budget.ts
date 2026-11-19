@@ -6,7 +6,6 @@ import type {
 	Model,
 	ProviderPayload,
 	TextContent,
-	Tool,
 	ToolResultMessage,
 	ToolResultProviderMetadata,
 	UserMessage,
@@ -21,6 +20,7 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { capFrameDataBytes, frameDataBytesBudget, providerImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
+import { declaredTools } from "../utils/tool-declarations";
 import { imageDecodeFailureReason } from "@oh-my-pi/pi-tui/chat/image-loading";
 
 const IMAGE_OMISSION: TextContent = {
@@ -137,6 +137,7 @@ function clampContent(
 	state: ImageBudgetState,
 ): (TextContent | ImageContent)[] | undefined {
 	let clamped: (TextContent | ImageContent)[] | undefined;
+	let dropped = 0;
 	for (let index = 0; index < content.length; index++) {
 		const part = content[index];
 		if (part.type === "image" && needsImageDrop(state)) {
@@ -145,14 +146,22 @@ function clampContent(
 				clamped ??= content.slice(0, index);
 				if (state.remainingDrops > 0) state.remainingDrops--;
 				state.inlineBytes -= bytes;
+				dropped++;
 				continue;
 			}
 		}
 		clamped?.push(part);
 	}
+	if (!clamped) return undefined;
 	// An image-only message would otherwise go out empty; converters skip
 	// zero-block messages, silently losing the turn (e.g. an oversized pasted image).
-	return clamped && clamped.length === 0 ? [IMAGE_OMISSION] : clamped;
+	if (clamped.length === 0) return [IMAGE_OMISSION];
+	// Kept text must not read as the whole result: say images were there.
+	clamped.push({
+		type: "text",
+		text: `[${dropped} image${dropped === 1 ? "" : "s"} omitted: provider image limit]`,
+	});
+	return clamped;
 }
 
 function clampUserMessage(message: UserMessage, state: ImageBudgetState): UserMessage {
@@ -288,31 +297,6 @@ function measuredContent<T extends { type: string }>(content: readonly T[], stri
 		if (stringArguments && part.type === "toolCall" && "arguments" in part)
 			return { ...part, arguments: JSON.stringify(part.arguments) };
 		return part;
-	});
-}
-
-/**
- * Every {@link Tool} field and nothing else: `satisfies` stops compiling when `Tool` gains or drops a field, so the
- * measured declaration cannot drift from what providers serialize. Anything else on a live tool object (sessions,
- * runners, caches) is execution state that never reaches the wire (#17819).
- */
-const TOOL_DECLARATION_KEYS = Object.keys({
-	name: true,
-	description: true,
-	parameters: true,
-	strict: true,
-	deferLoading: true,
-	customFormat: true,
-	customWireName: true,
-	native: true,
-	examples: true,
-} satisfies Record<keyof Tool, true>) as (keyof Tool)[];
-
-function declaredTools(tools: readonly Tool[] | undefined): Tool[] | undefined {
-	return tools?.map(tool => {
-		const declared: Partial<Record<keyof Tool, unknown>> = {};
-		for (const key of TOOL_DECLARATION_KEYS) declared[key] = tool[key];
-		return declared as Tool;
 	});
 }
 

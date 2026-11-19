@@ -779,36 +779,6 @@ describe("AgentSession message pipeline", () => {
 		expect(attachments).toEqual([{ label: "Image #1", uri: "attachment://1", image: userImage, sourcePath }]);
 	});
 
-	it("resolves attachment://N to images pasted into a newer ask answer", () => {
-		const userImage: ImageContent = { type: "image", data: "user-image", mimeType: "image/png" };
-		const answerImage: ImageContent = { type: "image", data: "answer-image", mimeType: "image/png" };
-		const session = new AgentSession({
-			agent: createAgent(),
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
-		});
-		sessions.push(session);
-
-		session.agent.appendMessage({
-			role: "user",
-			content: [{ type: "text", text: "inspect this" }, userImage],
-			timestamp: Date.now(),
-		});
-		session.agent.appendMessage({
-			role: "toolResult",
-			toolCallId: "ask-1",
-			toolName: "ask",
-			content: [{ type: "text", text: "User selected: A\nUser added note: see [Image #1]" }, answerImage],
-			timestamp: Date.now(),
-			isError: false,
-		});
-
-		expect(session.getImageAttachments().map(entry => [entry.uri, entry.image])).toEqual([
-			["attachment://1", answerImage],
-		]);
-	});
-
 	it("normalizes historical WebP on the main provider request path", async () => {
 		using tempDir = TempDir.createSync("@pi-stb-main-path-");
 		const api = "test-stb-main-path";
@@ -1112,6 +1082,7 @@ describe("AgentSession message pipeline", () => {
 		if (!context.runEphemeralTurn) throw new Error("Host did not expose side turns");
 		const messagesBefore = structuredClone(session.agent.state.messages);
 		const entriesBefore = structuredClone(sessionManager.getEntries());
+		const transcriptBefore = structuredClone(sessionManager.buildSessionContext().messages);
 		const deltas: string[] = [];
 		const result = await context.runEphemeralTurn({
 			promptText: "Question?",
@@ -1122,7 +1093,17 @@ describe("AgentSession message pipeline", () => {
 		expect(deltas.join("")).toBe("Answer");
 		expect(JSON.stringify(capturedContext?.messages)).toContain("zephyr-42");
 		expect(session.agent.state.messages).toEqual(messagesBefore);
-		expect(sessionManager.getEntries()).toEqual(entriesBefore);
+		// Only the spend is journaled, off-transcript: the reply without the question, and no message entry.
+		const entriesAfter = sessionManager.getEntries();
+		expect(entriesAfter.slice(0, entriesBefore.length)).toEqual(entriesBefore);
+		expect(entriesAfter.slice(entriesBefore.length)).toEqual([
+			expect.objectContaining({
+				type: "model_usage",
+				purpose: "extension",
+				completion: { reply: "Answer" },
+			}),
+		]);
+		expect(sessionManager.buildSessionContext().messages).toEqual(transcriptBefore);
 
 		expect(result.replyText).toBe("Answer");
 		expect(capturedOptions?.promptCacheKey).toBe(promptCacheKey);

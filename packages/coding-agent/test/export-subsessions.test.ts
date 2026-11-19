@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { APP_NAME, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { $ } from "bun";
 import { exportFromFile, exportSessionToHtml, type SessionData } from "../src/export/html";
 import type { SessionHeader } from "../src/session/session-entries";
 import { SessionManager } from "../src/session/session-manager";
@@ -339,5 +340,37 @@ describe("collectSubSessions", () => {
 	test("returns empty record when no subagent dir exists", async () => {
 		expect(await collectSubSessions(mainFile)).toEqual({});
 		expect(await collectSubSessions(path.join(root, "not-a-session"))).toEqual({});
+	});
+});
+
+// Relative paths resolve against process cwd, so each export runs in a subprocess rooted at `root`.
+describe("HTML export relative output paths", () => {
+	let root: string;
+	let mainFile: string;
+
+	beforeEach(async () => {
+		root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-export-paths-")));
+		mainFile = path.join(root, "main.jsonl");
+		await Bun.write(mainFile, sessionJsonl("main", ["m1"]));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(root);
+	});
+
+	test.each([
+		["the default filename", undefined, `${APP_NAME}-session-main.html`],
+		["a path that normalizes to cwd", "sub/../export.html", "export.html"],
+	])("writes %s into cwd and returns its absolute path", async (_description, outputPath, written) => {
+		const probe = path.join(import.meta.dir, "fixtures", "html-export-path-probe.ts");
+		const result = await $`${process.execPath} ${probe} ${mainFile} ${outputPath ?? []}`
+			.cwd(root)
+			// Skip the development viewer asset, which CI does not build.
+			.env({ ...process.env, PI_BUNDLED: "1" })
+			.quiet()
+			.nothrow();
+		expect(result.exitCode, result.stderr.toString()).toBe(0);
+		expect(result.text()).toBe(path.join(root, written));
+		expect((await readExportData(path.join(root, written))).header?.id).toBe("main");
 	});
 });

@@ -469,20 +469,6 @@ export async function getAllPluginCommandPaths(cwd: string): Promise<string[]> {
 }
 
 /**
- * Get all extension module paths from all enabled plugins.
- */
-export async function getAllPluginExtensionPaths(cwd: string): Promise<string[]> {
-	const plugins = await getEnabledPlugins(cwd);
-	const paths: string[] = [];
-
-	for (const plugin of plugins) {
-		paths.push(...resolvePluginExtensionPaths(plugin));
-	}
-
-	return paths;
-}
-
-/**
  * Get plugin settings for use in tool/hook contexts.
  * Merges global settings with project overrides.
  */

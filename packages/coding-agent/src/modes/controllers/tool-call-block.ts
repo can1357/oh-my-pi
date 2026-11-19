@@ -29,7 +29,7 @@ export function createToolCallBlock(ctx: InteractiveModeContext, call: ToolCallB
 		reply.updateArgs(call.args);
 		return reply;
 	}
-	return new ToolExecutionComponent(
+	const component = new ToolExecutionComponent(
 		call.name,
 		call.args,
 		{ useBuiltInRenderer: builtIn, showImages: cfgTerminalShowImages.get(settings) },
@@ -38,4 +38,5 @@ export function createToolCallBlock(ctx: InteractiveModeContext, call: ToolCallB
 		call.cwd,
 		call.id,
 	);
+	return component;
 }

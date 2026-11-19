@@ -60,7 +60,7 @@ function makeComponent(
 		getAsyncJobSnapshot: () => ({ running }),
 		getRunningJobWidgets: widgets,
 		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
+		modelRegistry: { isUsingSubscription: () => false },
 		sessionManager: {
 			getSessionName: () => undefined,
 			getUsageStatistics: () => ({

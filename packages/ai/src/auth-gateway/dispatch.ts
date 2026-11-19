@@ -7,15 +7,20 @@
  * Everything credential-shaped lives here so each route drives the same
  * broker-backed rotation policy and the same usage ledger.
  */
-import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
-import { type ApiKeyResolver, createOAuthProvenance, type ResolvedApiKey } from "../auth-retry";
+import { logger } from "@oh-my-pi/pi-utils";
+import {
+	type ApiKeyResolver,
+	createOAuthProvenance,
+	NO_AUTH_SENTINEL,
+	type ResolvedApiKey,
+	resolveAfterRotation,
+} from "../auth-retry";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
-import { isUsageLimitOutcome } from "../error/rate-limit";
+import { getProviderDefinition } from "../registry";
 import type { Api, FetchImpl, Model, Usage } from "../types";
 import type { ClientUsageIdentity } from "../usage";
-import { extractProviderRetryHint } from "../utils/retry-after";
 import type { AuthGatewayClientScope } from "./clients";
 import type { AuthGatewayServerOptions } from "./types";
 
@@ -114,7 +119,8 @@ export function gatewayRequestLogFields(
  * and its OAuth identity together (refreshing through the broker when needed).
  * Keep this selection snapshot intact even if another request replaces the
  * stored token before dispatch. Storage failures map through
- * {@link classifyGatewayError}; a provider without any credential is a 401.
+ * {@link classifyGatewayError}; a provider without any credential is a 401
+ * unless its catalog policy allows keyless requests.
  */
 export async function resolveGatewayApiKey(
 	opts: AuthGatewayCredentialOptions,
@@ -136,6 +142,7 @@ export async function resolveGatewayApiKey(
 		return classified;
 	}
 	if (apiKey) return apiKey;
+	if (getProviderDefinition(model.provider)?.allowsMissingApiKey) return { apiKey: NO_AUTH_SENTINEL };
 	return {
 		status: 401,
 		type: "authentication_error",
@@ -144,26 +151,13 @@ export async function resolveGatewayApiKey(
 }
 
 /**
- * Hook fired by a pi-ai client when the upstream request fails in a way
- * that's rotatable — today that's HTTP 401 (credential is bad) and
- * usage-limit phrasing matched by {@link isUsageLimitError} (Codex's
- * `usage_limit_reached`, Anthropic's `usage_limit_reached`, Google's
- * `resource_exhausted`, …). The two cases need different storage actions:
- *
- * - **usage-limit** → {@link AuthStorage.limits.markReached}. Marks just
- *   the current session's credential as temporarily blocked (honouring
- *   `retry-after` / `resets_at` hints when present) and returns `true` only
- *   when a sibling credential is still available. Burning the credential
- *   with `invalidateCredentialMatching` here would orphan accounts whose
- *   reset window is several hours away — exactly the bug this helper exists
- *   to avoid.
- * - **auth-failure** → {@link AuthStorage.limits.invalidateMatching}.
- *   Suspect/delete the row so it doesn't get re-picked next request.
- *
- * In both branches we return the next `getWithCredential` result (sticky on the
- * same `sessionId`) so the client can transparently retry the pre-emit
- * failure with a fresh credential. Returning `undefined` aborts the retry
- * and surfaces the original error to the caller.
+ * Step (c) for a gateway request: hand the failure to
+ * {@link AuthStorage.limits.rotate}, the same policy local resolvers use. It
+ * blocks a usage-limited credential until its reset, blocks only the requested
+ * model after a model-entitlement denial, blocks an account-policy denial
+ * without suspecting the credential, and invalidates hard auth failures.
+ * The next `getWithCredential` result (sticky on the same `sessionId`) lets the
+ * client retry the pre-emit failure; `undefined` surfaces the original error.
  */
 async function refreshGatewayApiKeyAfterAuthError(
 	storage: AuthStorage,
@@ -176,41 +170,25 @@ async function refreshGatewayApiKeyAfterAuthError(
 	format: string,
 	peer: string,
 ): Promise<ResolvedApiKey | undefined> {
-	const message = error instanceof Error ? error.message : String(error);
-	const status = extractHttpStatusFromError(error);
-	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
-		const retryAfterMs = extractProviderRetryHint(provider, message);
-		const { switched, retryAtMs } = await storage.limits.markReached(provider, sessionId, {
-			retryAfterMs,
-			providerTimed: retryAfterMs !== undefined,
-			baseUrl: model.baseUrl,
-			modelId: model.id,
-			apiKey: oldKey,
-			signal,
-		});
-		const outcome = switched
-			? "auth-gateway retrying provider request after usage-limit block"
-			: "auth-gateway usage-limit block, returning the error without retry";
-		logger.debug(outcome, {
-			format,
-			provider,
-			peer,
-			switched,
-			retryAfterMs,
-			retryAtMs,
-			error: message,
-		});
-		if (!switched) return undefined;
-		return storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal));
-	}
-	await storage.limits.invalidateMatching(provider, oldKey, { sessionId, signal });
-	logger.debug("auth-gateway retrying provider request after credential invalidation", {
+	const rotation = await storage.limits.rotate(provider, sessionId, {
+		error,
+		modelId: model.id,
+		baseUrl: model.baseUrl,
+		apiKey: oldKey,
+		signal,
+	});
+	logger.debug("auth-gateway rotated credential after provider error", {
 		format,
 		provider,
 		peer,
-		error: message,
+		modelId: model.id,
+		switched: rotation.switched,
+		afterSiblingWait: rotation.afterSiblingWait,
+		error: error instanceof Error ? error.message : String(error),
 	});
-	return storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal));
+	return resolveAfterRotation(rotation, error, () =>
+		storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal)),
+	);
 }
 
 /** Model-scoped key options: usage ranking by model id, routing to accounts discovery saw serve it. */
@@ -225,8 +203,8 @@ function modelKeyOptions(model: Model<Api>, signal: AbortSignal): AuthApiKeyOpti
  * - initial resolve → the credential already resolved for this request.
  * - step (b) `!lastChance` → force-refresh the SAME session-sticky credential
  *   (a peer/broker may have rotated its token out from under our cached copy).
- * - step (c) `lastChance` → {@link refreshGatewayApiKeyAfterAuthError} switches
- *   to a sibling (usage-limit block vs credential invalidation by error class).
+ * - step (c) `lastChance` → {@link refreshGatewayApiKeyAfterAuthError} rotates
+ *   to a sibling through `limits.rotate`.
  *
  * `lastKey` tracks the most recent bearer so the switch step invalidates the
  * credential that actually failed; a retry context's `previousKey` wins, since
@@ -254,6 +232,9 @@ export function buildGatewayApiKeyResolver(
 	const provenance = createOAuthProvenance();
 	provenance.record(initialKey);
 	return async ({ lastChance, error, signal, previousKey }) => {
+		if (initialKey.apiKey === NO_AUTH_SENTINEL && initialKey.credentialId === undefined) {
+			return error === undefined ? initialKey : undefined;
+		}
 		const sig = signal ?? requestSignal;
 		// Only the bearer the failed request actually sent names the rejected
 		// token; a caller that cannot report it keeps the previous behaviour.

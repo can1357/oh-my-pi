@@ -1,7 +1,9 @@
+import { readBoundedBody } from "@oh-my-pi/pi-utils/bounded-json";
 import type { AgentStorageApi } from "../../../session/agent-storage";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, SearchProviderError } from "../../../web/search/types";
 import { SEARCH_PROVIDER_LABELS, type SearchProviderId, type SearchSource } from "../types";
-import { decodeBody, readBodyCapped } from "../../response-body";
+import { decodeBody } from "../../response-body";
+import { formatQuery, type QuerySyntax, type StructuredQuery } from "../query";
 import { dateToAgeSeconds } from "../utils";
 
 /**
@@ -151,6 +153,24 @@ export function siteHosts(sites: readonly string[]): string[] {
 }
 
 /**
+ * Query text for search APIs that take only plain terms in `syntax`. A query without
+ * directives passes through verbatim; otherwise its terms are rendered, and a
+ * directives-only query falls back to its constraint values (site hosts, `intitle:`
+ * words, …) as keywords, never the operators themselves.
+ *
+ * @throws {SearchProviderError} 400 when nothing searchable remains (a date-only query).
+ */
+export function keywordQuery(provider: SearchProviderId, parsed: StructuredQuery, syntax: QuerySyntax): string {
+	const query = parsed.hasDirectives ? formatQuery({ ...parsed, raw: "" }, syntax) : parsed.raw.trim();
+	if (query) return query;
+	throw new SearchProviderError(
+		provider,
+		`${SEARCH_PROVIDER_LABELS[provider]} needs search terms; date-only queries are not supported`,
+		400,
+	);
+}
+
+/**
  * Read a provider response body up to a byte cap, truncating or throwing when
  * the limit is exceeded. Shared so streaming-cap fixes land in one place.
  */
@@ -160,7 +180,7 @@ export async function readLimitedText(
 	maxBytes: number,
 	truncate = false,
 ): Promise<string> {
-	const body = await readBodyCapped(response, maxBytes);
+	const body = await readBoundedBody(response, maxBytes);
 	if (!body) return "";
 	if (body.truncated && !truncate) {
 		throw new SearchProviderError(provider, `${SEARCH_PROVIDER_LABELS[provider]} API response exceeded 2 MiB`, 500);

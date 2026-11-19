@@ -102,6 +102,15 @@ describe("multi-path tools tolerate missing entries", () => {
 			path: "nope/**/*.ts; also-nope/**/*.ts",
 		});
 
-		await expect(promise).rejects.toThrow(/Path not found.*nope.*also-nope/s);
+		await expect(promise).rejects.toThrow("None of the 2 paths exist:\n- nope/**/*.ts\n- also-nope/**/*.ts");
+	});
+
+	it("scopes a `pattern` argument under `path`, as the call implies", async () => {
+		const tool = new GlobTool(createTestSession(tempDir));
+		const params = { path: "src", pattern: "*alpha*;*beta*" };
+
+		const result = await tool.execute("glob-pattern", params);
+
+		expect(result.details?.files?.toSorted()).toEqual(["src/alpha.ts", "src/beta.ts"]);
 	});
 });

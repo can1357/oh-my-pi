@@ -143,7 +143,7 @@ continues with the existing access token.
 
 Before connect, manager normally resolves stdio `env` values and HTTP/SSE `headers` values via `resolveConfigValue()` (`src/config/resolve-config-value.ts`):
 
-- value starting with `!` => execute a shell command with a 10-second timeout, use trimmed stdout; successful output is cached, concurrent requests share one execution, and failures back off for 30 seconds
+- value starting with `!` => execute a shell command with a 10-second timeout, use trimmed stdout; successful output is cached, concurrent requests share one execution, and failures back off for 30 seconds. `MCPManager` invalidates a server's command values on every reconnect, on `disconnectAll()`, and on an HTTP/SSE 401/403 (`onAuthError`, which then retries once with the re-resolved headers)
 - failed, timed-out, or whitespace-only commands produce `undefined`, so that entry is omitted
 - otherwise, use a non-empty exact-name environment value, falling back to the literal value; empty resolved entries are omitted
 
@@ -265,7 +265,6 @@ Supported operations:
 - `reconnect`
 - `reload`
 - `resources`, `prompts`, `notifications`
-- Smithery search/login/logout flows
 
 Config writes are atomic (`writeMCPConfigFile`: unique temp file + rename), and
 read-modify-write operations hold a per-file lock.

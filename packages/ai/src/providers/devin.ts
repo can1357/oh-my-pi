@@ -653,6 +653,18 @@ function buildRouterPrompt(messages: Message[]): ChatMessagePrompt | undefined {
 }
 
 /**
+ * Raise an explicit `temperature` to the wire's floor. Cascade answers
+ * `temperature: 0` with an opaque `invalid_argument` while any positive value
+ * works, so the catalog's `temperature-floor` axis keeps deterministic callers
+ * (session titles, memory extraction) on this provider instead of failing.
+ * An unset floor or an unset temperature (wire default 1) passes through.
+ */
+function clampDevinTemperature(temperature: number | undefined, floor: number | undefined): number {
+	const value = temperature ?? 1;
+	return floor !== undefined && value < floor ? floor : value;
+}
+
+/**
  * Build a {@link GetChatMessageRequest} for one Cascade turn. Auth rides inside
  * `Metadata.apiKey`; the system prompt is the flattened `prompt` string and the
  * conversation history maps to `chatMessagePrompts`. `assignment` is present only
@@ -702,7 +714,7 @@ function buildDevinChatRequest(
 			numCompletions: 1n,
 			maxTokens: BigInt(options?.maxTokens ?? model.maxTokens ?? 64000),
 			maxNewlines: 400n,
-			temperature: options?.temperature ?? 1,
+			temperature: clampDevinTemperature(options?.temperature, model.compat.temperatureFloor),
 			topK: 40n,
 			// Devin's CLI sends topP as a float32 widened to double; round the same way.
 			topP: Math.fround(options?.topP ?? 0.95),

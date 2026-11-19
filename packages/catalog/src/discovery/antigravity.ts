@@ -19,6 +19,8 @@ const ANTIGRAVITY_THINKING_LEVELS: Readonly<Record<number, AntigravityModelWireP
 	1: "LOW",
 	2: "MEDIUM",
 	3: "HIGH",
+	// Gemini 4 Hydrogen's `-xhigh` SKU; Google documents this level in lowercase.
+	100: "xhigh",
 };
 
 /**
@@ -29,7 +31,7 @@ export interface AntigravityDiscoveryApiModel {
 	supportsImages?: boolean;
 	supportsThinking?: boolean;
 	thinkingBudget?: number;
-	/** SKU thinking level: 1 low, 2 medium, 3 high. */
+	/** SKU thinking level: 1 low, 2 medium, 3 high, 100 xhigh. */
 	thinkingLevel?: number;
 	recommended?: boolean;
 	maxTokens?: number;

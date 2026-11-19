@@ -178,6 +178,18 @@ describe("ReadToolGroupComponent", () => {
 		expect(plain).not.toContain("full file");
 	});
 
+	it("keeps a list written with colon dashes on one file row", () => {
+		const component = new ReadToolGroupComponent();
+		const examplePath = path.resolve("/tmp/example.ts");
+		component.updateArgs({ path: `${examplePath}:20:40,85:100` }, "read-colon-dash");
+		component.updateResult({ content: [{ type: "text", text: "ranges" }] }, false, "read-colon-dash");
+
+		const plain = Bun.stripANSI(component.render(120).join("\n"));
+
+		expect(plain).toContain(`Read ${examplePath}:20-40,85-100`);
+		expect(plain).not.toContain("Read (2)");
+	});
+
 	it("merges repeated same-file ranges and truncates long selector lists", () => {
 		const component = new ReadToolGroupComponent();
 		const renderPath = path.resolve("/tmp/render.ts");
@@ -451,7 +463,6 @@ describe("readArgsCollapseIntoGroup", () => {
 		["issue://123"],
 		["pr://can1357/oh-my-pi/456"],
 		["agent://abc"],
-		["artifact://abc"],
 		["memory://root"],
 		["rule://name"],
 		["mcp://server/resource"],

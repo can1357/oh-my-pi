@@ -2,11 +2,12 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { postmortem } from "@oh-my-pi/pi-utils";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import { runIsolatedSubprocess } from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
+import { nativeWorkspace, runIsolatedSubprocess } from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import * as worktreeModule from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
@@ -44,7 +45,12 @@ function result(id: string): SingleResult {
  * `runEndPatch` when it finishes and `releasePatch` when it is released, and
  * returns how many times a task branch was committed.
  */
-async function commitsAcrossRelease(id: string, runEndPatch: string, releasePatch: string): Promise<number> {
+async function commitsAcrossRelease(
+	id: string,
+	runEndPatch: string,
+	releasePatch: string,
+	options: { cleanup?: () => Promise<void>; afterRun?: () => Promise<void> } = {},
+): Promise<number> {
 	const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-release-"));
 	tempRoots.push(artifactsDir);
 	const baseline = {
@@ -58,7 +64,7 @@ async function commitsAcrossRelease(id: string, runEndPatch: string, releasePatc
 		fallbackReason: null,
 	});
 	vi.spyOn(worktreeModule, "captureIsolationBaseline").mockResolvedValue(baseline);
-	vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue();
+	vi.spyOn(worktreeModule, "cleanupIsolation").mockImplementation(options.cleanup ?? (async () => {}));
 	vi.spyOn(worktreeModule, "captureDeltaPatch").mockResolvedValue({ rootPatch: releasePatch, nestedPatches: [] });
 	const commitSpy = vi.spyOn(worktreeModule, "commitToBranch").mockImplementation(async () => {
 		events.push("commit");
@@ -102,13 +108,14 @@ async function commitsAcrossRelease(id: string, runEndPatch: string, releasePatc
 			id,
 		},
 		context: { repoRoot: "/repo" },
-		preferredBackend: undefined,
+		openWorkspace: nativeWorkspace(undefined),
 		agentId: id,
 		mergeMode: "branch",
 		artifactsDir,
 		buildFailureResult: error => ({ ...result(id), exitCode: 1, error: String(error) }),
 	});
-	await AgentLifecycleManager.global().release(id);
+	if (options.afterRun) await options.afterRun();
+	else await AgentLifecycleManager.global().release(id);
 	return commitSpy.mock.calls.length;
 }
 
@@ -126,5 +133,40 @@ describe("isolated agent release", () => {
 	it("lets held peer messages wake the agent only after the run-end branch is committed", async () => {
 		await commitsAcrossRelease("ReleaseAfterCapture", patch, patch);
 		expect(events).toEqual(["commit", "irc wakes released"]);
+	});
+
+	it("keeps a timed-out shutdown release alive until the sandbox is removed", async () => {
+		const sandbox = await fs.mkdtemp(path.join(os.tmpdir(), "omp-signal-isolation-"));
+		tempRoots.push(sandbox);
+		const finishCleanup = Promise.withResolvers<void>();
+		const registrations = vi.spyOn(postmortem, "register");
+		await commitsAcrossRelease("ReleaseAfterDeadline", patch, patch, {
+			cleanup: async () => {
+				await finishCleanup.promise;
+				await fs.rm(sandbox, { recursive: true });
+			},
+			afterRun: async () => {
+				await AgentLifecycleManager.global().dispose(Date.now());
+				expect(
+					await fs.stat(sandbox).then(
+						() => true,
+						() => false,
+					),
+				).toBe(true);
+				const signalRelease = registrations.mock.calls.find(
+					([id]) => id === "isolation-release:ReleaseAfterDeadline",
+				)?.[1];
+				expect(signalRelease).toBeDefined();
+				const awaitedCleanup = signalRelease?.(postmortem.Reason.SIGHUP);
+				finishCleanup.resolve();
+				await awaitedCleanup;
+				expect(
+					await fs.stat(sandbox).then(
+						() => true,
+						() => false,
+					),
+				).toBe(false);
+			},
+		});
 	});
 });

@@ -79,11 +79,15 @@ function formatFinding(finding: SecurityFinding): string {
 		`- Severity: **${finding.severity.level}**`,
 		`- Confidence: **${finding.confidence.level}**`,
 		`- Disposition: **${finding.disposition.status}**`,
+		`- Validation: **${finding.validation.status}**${finding.validation.validatedAt ? ` (${sanitizeText(finding.validation.validatedAt)})` : ""}`,
 		`- Fingerprint: \`${finding.fingerprint}\``,
 		"",
 		"## Summary",
 		"",
 		sanitizeText(finding.summary),
+		...(finding.validation.summary
+			? ["", "## Validation summary", "", sanitizeText(finding.validation.summary)]
+			: []),
 		"",
 		"## Locations",
 		"",
@@ -186,7 +190,7 @@ export class SecurityProtocolHandler implements ProtocolHandler {
 					const listing = bundle.findings.map(finding =>
 						[
 							`- \`${finding.id}\` **${finding.severity.level}** — ${sanitizeText(finding.title)}`,
-							` (\`${sanitizeText(finding.ruleId)}\`)`,
+							` (\`${sanitizeText(finding.ruleId)}\`) — **${finding.validation.status}**`,
 						].join(""),
 					);
 					return createSecurityResource({

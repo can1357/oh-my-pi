@@ -51,16 +51,12 @@ function assistantMessage(content: AssistantMessage["content"], stopReason: stri
 	} as unknown as AssistantMessage;
 }
 
+/**
+ * Transcript cards showing {@link CMD}. Counts cards, not text: a streaming card
+ * draws the command through the shell visualization, a finished one as `$ cmd`.
+ */
 function countCommand(mode: InteractiveMode): number {
-	const rendered = Bun.stripANSI(mode.chatContainer.render(120).join("\n"));
-	let count = 0;
-	let index = 0;
-	while (true) {
-		const found = rendered.indexOf(`$ ${CMD}`, index);
-		if (found === -1) return count;
-		count++;
-		index = found + CMD.length;
-	}
+	return mode.chatContainer.children.filter(child => Bun.stripANSI(child.render(120).join("\n")).includes(CMD)).length;
 }
 
 describe("issue #6879 — tool output appears twice after a superseded turn", () => {

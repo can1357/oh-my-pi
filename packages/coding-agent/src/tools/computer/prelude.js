@@ -1,4 +1,5 @@
 {
+	/* COMPUTER_OPTION_VALIDATOR */
 	const validateOptions = (label, options) => {
 		if (options === undefined) return {};
 		if (options === null || typeof options !== "object" || Array.isArray(options)) {
@@ -27,8 +28,16 @@
 	};
 	const invoke = async (action, options) => {
 		const response = await globalThis.__omp_prelude__("computer", { ...options, action });
-		if (response && typeof response.text === "string" && response.text.length > 0) {
-			globalThis.__omp_log__("log", response.text);
+		const failure = response?.hasError ? response.details?.error : undefined;
+		let text = typeof response?.text === "string" ? response.text : "";
+		// The result ends with the failure's `name: message` line for direct calls; the error thrown below carries it here.
+		const failureLine = failure ? `${failure.name}: ${failure.message}` : undefined;
+		if (failureLine && text.endsWith(failureLine)) text = text.slice(0, -failureLine.length);
+		if (text.length > 0) globalThis.__omp_log__("log", text);
+		if (response?.hasError) {
+			const error = new Error(response.details?.error?.message ?? response.text);
+			error.name = response.details?.error?.name ?? "Error";
+			throw error;
 		}
 		return response && typeof response.details === "object" && response.details !== null ? response.details : {};
 	};
@@ -234,6 +243,14 @@
 			throw new TypeError("computer.run() expects a function or code string");
 		}
 		const opts = validateOptions("computer.run", options);
+		const allowed = ["args", "read_only", "timeout"];
+		const message = unknownOptionsMessage(opts, allowed, "computer.run");
+		if (message) {
+			const error = new Error(message);
+			// Match the host's strict-option ToolError rather than the facade's argument-shape TypeErrors.
+			error.name = "ToolError";
+			throw error;
+		}
 		const args = opts.args ?? [];
 		if (typeof fnOrCode === "string" && (!Array.isArray(args) || args.length > 0)) {
 			throw new TypeError("computer.run() passes args only to a function; a code string receives none");

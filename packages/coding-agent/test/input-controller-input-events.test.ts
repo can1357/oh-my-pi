@@ -28,7 +28,7 @@ const transformedImage: ImageContent = { type: "image", mimeType: "image/jpeg", 
 async function createHarness(factory: ExtensionFactory) {
 	const runtime = new ExtensionRuntime();
 	const generatedMessages: Array<string | (TextContent | ImageContent)[]> = [];
-	runtime.sendUserMessage = (content?: string | (TextContent | ImageContent)[]) => {
+	runtime.sendUserMessage = async (content?: string | (TextContent | ImageContent)[]) => {
 		if (content !== undefined) generatedMessages.push(content);
 	};
 	const sessionManager = SessionManager.inMemory(process.cwd());
@@ -570,14 +570,16 @@ describe("interactive native input ingress", () => {
 
 	it.each([
 		["omfg", "handleOmfgCommand"],
-		["handoff", "handleHandoffCommand"],
+		["handoff", "handleCompactCommand"],
 		["cleanse", "handleCleanseCommand"],
 	] as const)("Enter /%s with an image keeps the draft and does not run", async (command, handler) => {
 		const h = await createHarness(() => {});
 		const showWarning = vi.fn();
 		Object.assign(h.session, { customCommands: [], promptTemplates: [] });
 		Object.assign(h.ctx, { showWarning });
-		const run = vi.fn(async () => {});
+		const run = vi.fn(() => {
+			throw new Error("Image submission should not run the command");
+		});
 		h.ctx[handler] = run;
 		h.draftWithImage(`/${command} look at this [Image #1]`);
 

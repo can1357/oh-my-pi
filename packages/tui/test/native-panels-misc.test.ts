@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, setSystemTime, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { KeybindingsManager } from "../src/app-keybindings";
 import { MoveOverlay, type MoveOverlayResult } from "../src/overlays/move-overlay";
@@ -420,6 +420,81 @@ describe("BtwHistoryPanel native events", () => {
 		const screen = Bun.stripANSI(history.render(80).join("\n"));
 		expect(screen).toContain("answer to only question");
 		expect(screen).not.toContain("switch pane");
+	});
+
+	it("dates history rows asked before today, in both the native sheet and text mode", () => {
+		setSystemTime(new Date(2026, 10, 5, 16, 0));
+		try {
+			const at = (id: string, createdAt: Date): BtwHistoryRecord => ({
+				...record(id, `question ${id}`),
+				createdAt: createdAt.getTime(),
+				updatedAt: createdAt.getTime(),
+			});
+			const history = new BtwHistoryPanel({
+				records: [
+					at("today", new Date(2026, 10, 5, 9, 5)),
+					at("yesterday", new Date(2026, 10, 4, 13, 18)),
+					at("last-year", new Date(2025, 10, 4, 8, 0)),
+				],
+				onClose: () => {},
+				onCopy: () => {},
+				onCancel: () => {},
+				requestRender: () => {},
+				getHeight: () => 30,
+			});
+			const stamps = listOf(history.describe()).c?.map(item => {
+				const detail = isNode(item) && item.k === "item" ? item.p?.detail : undefined;
+				return Array.isArray(detail) ? detail[0]?.t : detail;
+			});
+			expect(stamps).toEqual(["09:05", "Nov 4", "Nov 4, 2025"]);
+			const screen = Bun.stripANSI(history.render(120).join("\n"));
+			expect(screen).toContain("Nov 4, 2025");
+			// Yesterday's row shows its date: its bare time would read as today's, out of order.
+			expect(screen).not.toContain("13:18");
+		} finally {
+			setSystemTime();
+		}
+	});
+
+	it("dates a follow-up asked on a later day than its topic", () => {
+		const turn = (question: string, createdAt: Date) => ({
+			question,
+			answer: `answer to ${question}`,
+			status: "complete" as const,
+			createdAt: createdAt.getTime(),
+			updatedAt: createdAt.getTime(),
+		});
+		const history = new BtwHistoryPanel({
+			records: [
+				{
+					...record("a", "topic"),
+					...turn("topic", new Date(2026, 10, 4, 21, 0)),
+					followUps: [
+						turn("same day", new Date(2026, 10, 4, 22, 30)),
+						turn("next day", new Date(2026, 10, 5, 9, 15)),
+						// Same day as the previous follow-up, but the topic's header names only its own day.
+						turn("next day again", new Date(2026, 10, 5, 11, 0)),
+					],
+				},
+			],
+			onClose: () => {},
+			onCopy: () => {},
+			onCancel: () => {},
+			requestRender: () => {},
+			getHeight: () => 30,
+		});
+		const metas: string[] = [];
+		const collect = (root: NativeNode) => {
+			const spans = root.k === "text" ? root.p?.spans : undefined;
+			if (Array.isArray(spans) && spans[0]?.t === "Follow-up · ") metas.push(spans.map(part => part.t).join(""));
+			for (const child of root.c ?? []) if (isNode(child)) collect(child);
+		};
+		collect(history.describe());
+		expect(metas).toHaveLength(3);
+		expect(metas[0]).toBe("Follow-up · 22:30");
+		// ICU's date/time joiner varies by platform (" at " on macOS, ", " on Linux); pin the date and time, not the glue.
+		expect(metas[1]).toMatch(/^Follow-up · Nov 5, 2026\D+09:15$/);
+		expect(metas[2]).toMatch(/^Follow-up · Nov 5, 2026\D+11:00$/);
 	});
 });
 

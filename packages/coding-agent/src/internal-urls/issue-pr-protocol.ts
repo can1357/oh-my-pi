@@ -23,6 +23,7 @@
  *   not whatever the live row is after a background refresh.
  */
 import issueDoc from "../prompts/internal-urls/issue.md" with { type: "text" };
+import issueReferenceDoc from "../prompts/internal-urls/issue-reference.md" with { type: "text" };
 import {
 	formatRepoRef,
 	getOrFetchIssue,
@@ -445,6 +446,10 @@ export class IssueProtocolHandler implements ProtocolHandler {
 	/** Advertised when `gh` is on PATH; the entry documents `pr://` too. */
 	promptDoc(): string | undefined {
 		return github.available() ? issueDoc.trim() : undefined;
+	}
+
+	promptReference(): string | undefined {
+		return github.available() ? issueReferenceDoc.trim() : undefined;
 	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {

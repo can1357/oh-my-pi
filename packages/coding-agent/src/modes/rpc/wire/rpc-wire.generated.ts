@@ -91,10 +91,19 @@ export interface Usage {
 	credits?: Record<string, unknown>;
 }
 
+/** Parent-agent IRC message carried by a steer; render it instead of the model-facing `content` envelope. */
+export interface ParentIrc {
+	/** Sending parent agent id. */
+	from: string;
+	/** Message body as the parent wrote it. */
+	body: string;
+}
+
 export interface UserMessage {
 	role: "user";
 	content: MessageContent;
 	timestamp: number;
+	parentIrc?: ParentIrc;
 	synthetic?: boolean;
 	steering?: boolean;
 	liveSteered?: boolean;
@@ -180,6 +189,7 @@ export interface CustomMessage {
 	timestamp: number;
 	details?: unknown;
 	attribution?: Attribution;
+	excludeFromContext?: boolean;
 }
 
 export interface HookMessage {
@@ -381,7 +391,7 @@ export type CacheWarmingMode = "off" | "streaming" | "idle";
 /** `set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches. */
 export type MessageUpdates = "full" | "delta";
 
-export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
+export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned";
 
 export type GoalOp = "get" | "create" | "resume" | "pause" | "drop";
 
@@ -399,8 +409,6 @@ export type SubagentStatus = "pending" | "running" | "completed" | "failed" | "a
 export interface TodoItem {
 	content: string;
 	status: TodoStatus;
-	/** What a `blocked` task is waiting on. */
-	blocker?: string;
 	details?: string;
 	notes?: string[];
 }
@@ -506,7 +514,7 @@ export interface SessionState {
 	tokensPerSecond?: number | null;
 	messageCount?: number;
 	queuedMessageCount?: number;
-	/** Background jobs or deliveries can still inject a follow-up and wake the session. */
+	/** Background jobs, their deliveries, child agents or queued peer messages can still wake the session. */
 	hasPendingAsyncWork?: boolean;
 	/** Idle with nothing queued or pending; same predicate as `session_settled`. */
 	isSettled?: boolean;
@@ -550,6 +558,15 @@ export interface BashResult {
 	images?: ImageContent[];
 	/** The embedded shell's final `ShellTrace` of the run; only when the caller asked for one. */
 	trace?: Record<string, unknown>;
+	/** Set when the command overlapped another one on the session's persistent shell and ran in a fork of it. */
+	fork?: ShellForkOutcome;
+}
+
+export interface ShellForkOutcome {
+	/** What the command set carried back into the session's shell; `false`: it stayed in the fork. */
+	carried: boolean;
+	/** It left background jobs running in the fork, where later commands' `jobs`, `wait` and `%N` miss them. */
+	jobs: boolean;
 }
 
 export interface LineRange {
@@ -801,6 +818,8 @@ export type AutoCompactionAction = "context-full" | "remote" | "handoff" | "shak
 
 export type CacheWarmingPhase = "streaming" | "idle";
 
+export type CacheWarmingMethod = "prewarm" | "replay";
+
 export type CacheWarmingOutcome = "hit" | "miss" | "error" | "aborted";
 
 export type NotifyType = "info" | "warning" | "error";
@@ -907,7 +926,7 @@ export interface AutoCompactionEndEvent {
 	skipped?: boolean;
 }
 
-/** A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted. */
+/** A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle. */
 export interface ManualCompactionStartEvent {
 	type: "manual_compaction_start";
 	/** The `/compact <mode>` subcommand, when one was given. */
@@ -948,6 +967,7 @@ export interface AutoRetryEndEvent {
 export interface CacheWarmingStartEvent {
 	type: "cache_warming_start";
 	phase: CacheWarmingPhase;
+	method: CacheWarmingMethod;
 	provider: string;
 	model: string;
 }
@@ -956,6 +976,7 @@ export interface CacheWarmingStartEvent {
 export interface CacheWarmingEndEvent {
 	type: "cache_warming_end";
 	phase: CacheWarmingPhase;
+	method: CacheWarmingMethod;
 	provider: string;
 	model: string;
 	outcome: CacheWarmingOutcome;
@@ -1060,6 +1081,8 @@ export interface ReadyEvent {
 	supportedProtocolVersions?: number[];
 	maxFrameBytes?: number;
 	maxReassembledFrameBytes?: number;
+	/** `bash` accepts `excludeFromContext`; require exactly true before sending excluded commands. */
+	supportsBashExcludeFromContext?: boolean;
 }
 
 export type PromptStatus = "completed" | "aborted" | "error";
@@ -1280,6 +1303,14 @@ export interface SelectUiRequest {
 	title: string;
 	options: string[];
 	optionDetails?: SelectOptionDetail[];
+	/** Index into `options` to focus first. */
+	initialIndex?: number;
+	/** Marker style for the first `markableCount` options. */
+	selectionMarker?: "radio" | "checkbox";
+	/** For `checkbox`: indices into `options` currently checked. Authoritative; hosts render it per option. */
+	checkedIndices?: number[];
+	/** Leading options that get a marker; trailing ones are actions. Defaults to all options when `selectionMarker` is set. */
+	markableCount?: number;
 	timeout?: number;
 }
 
@@ -1311,7 +1342,7 @@ export interface EditorUiRequest {
 	promptStyle?: boolean;
 }
 
-/** Every question of one `ask` tool call; sent only after `set_ask_dialog` enables it. */
+/** Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it. */
 export interface AskUiRequest {
 	type: "extension_ui_request";
 	id: string;
@@ -1380,7 +1411,7 @@ export interface OpenUrlUiRequest {
 /** Extension UI request, discriminated by `method`. */
 export type ExtensionUiRequest = SelectUiRequest | ConfirmUiRequest | InputUiRequest | EditorUiRequest | AskUiRequest | CancelUiRequest | NotifyUiRequest | SetStatusUiRequest | SetWidgetUiRequest | SetTitleUiRequest | SetEditorTextUiRequest | OpenUrlUiRequest;
 
-/** Answer to one `ask` question: exact option labels, plus optional free text. */
+/** Answer to one `ui.askDialog` question: exact option labels, plus optional free text. */
 export interface AskAnswer {
 	id: string;
 	selectedOptions: string[];
@@ -1401,7 +1432,7 @@ export interface ConfirmUiResponse {
 	confirmed: boolean;
 }
 
-/** Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` then takes its recommended answers). */
+/** Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers). */
 export interface CancelUiResponse {
 	type: "extension_ui_response";
 	id: string;
@@ -1771,6 +1802,7 @@ export interface SetAutoRetryParams {
 
 export interface BashParams {
 	command: string;
+	excludeFromContext?: boolean;
 }
 
 export interface GetSessionLeaseParams {

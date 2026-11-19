@@ -205,78 +205,23 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		return elicitations;
 	}
 
-	it("restores a blocked turn with a reset expiring within five minutes and continues", async () => {
-		const account = {
-			accountId: "acct-a",
-			credentialId: 1,
-			weeklyUsed: 1,
-			limitReached: true,
-			creditExpiresInMs: 4 * MINUTE,
-		};
-		const { session, targets, notices } = buildSession({ accounts: [account], streamErrorFirst: true });
-		mockSchedulerWaitWithClock();
+	it.each([4 * MINUTE, 6 * HOUR])(
+		"never spends a reset expiring in %i ms without a prompt UI while auto-redeem is unset",
+		async creditExpiresInMs => {
+			const account = { accountId: "acct-a", credentialId: 1, weeklyUsed: 1, limitReached: true, creditExpiresInMs };
+			const { session, targets, notices } = buildSession({ accounts: [account], streamErrorFirst: true });
+			mockSchedulerWaitWithClock();
 
-		await session.prompt("trigger a codex usage limit");
-		await session.waitForIdle();
+			await session.prompt("trigger a codex usage limit");
+			await session.waitForIdle();
 
-		expect(targets).toEqual([
-			{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL, creditId: "credit-1" },
-		]);
-		expect(notices).toContainEqual(expect.stringContaining(`Spending a saved Codex reset for ${EMAIL}`));
-		expect(session.agent.state.messages.at(-1)).toMatchObject({
-			role: "assistant",
-			stopReason: "stop",
-			content: [{ type: "text", text: "recovered after reset redemption" }],
-		});
-	});
+			expect(targets).toEqual([]);
+			expect(notices).toContainEqual(expect.stringContaining("auto-redeem is unset and no prompt UI is available"));
+			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+		},
+	);
 
-	it("still needs consent to restore a blocked turn with a reset that has more time left", async () => {
-		const account = {
-			accountId: "acct-a",
-			credentialId: 1,
-			weeklyUsed: 1,
-			limitReached: true,
-			creditExpiresInMs: 6 * HOUR,
-		};
-		const { session, targets, notices } = buildSession({ accounts: [account], streamErrorFirst: true });
-		mockSchedulerWaitWithClock();
-
-		await session.prompt("trigger a codex usage limit");
-		await session.waitForIdle();
-
-		expect(targets).toEqual([]);
-		expect(notices).toContainEqual(expect.stringContaining("auto-redeem is unset and no prompt UI is available"));
-		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
-	});
-
-	it("spends only the reset about to expire from a mixed salvage batch", async () => {
-		const expiring = {
-			accountId: "acct-a",
-			credentialId: 1,
-			weeklyUsed: 0.1,
-			limitReached: false,
-			creditExpiresInMs: 4 * MINUTE,
-		};
-		const salvageable = {
-			accountId: "acct-b",
-			credentialId: 2,
-			weeklyUsed: 0.8,
-			limitReached: false,
-			creditExpiresInMs: 2 * HOUR,
-		};
-		const { session, coordinator, targets, notices } = buildSession({ accounts: [expiring, salvageable] });
-
-		await session.fetchUsageReports();
-		await coordinator.sweepPromise;
-
-		expect(targets).toEqual([
-			{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL, creditId: "credit-1" },
-		]);
-		expect(notices).toContainEqual(expect.stringContaining("auto-redeem is unset and no prompt UI is available"));
-		expect([...coordinator.attemptedKeys]).toEqual([expect.stringContaining("openai-codex|-|1|")]);
-	});
-
-	it("spends a reset about to expire for an ACP client without form elicitation", async () => {
+	it("never spends for an ACP client without form elicitation while auto-redeem is unset", async () => {
 		const account = {
 			accountId: "acct-a",
 			credentialId: 1,
@@ -298,11 +243,8 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		// Extensions keep ACP's UI context; only the consent prompt knows it cannot reach anyone.
 		expect(session.extensionRunner?.hasUI()).toBe(true);
 		expect(elicitations).toEqual([]);
-		expect(targets).toEqual([
-			{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL, creditId: "credit-1" },
-		]);
-		expect(notices).toContainEqual(expect.stringContaining(`Spending a saved Codex reset for ${EMAIL}`));
-		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		expect(targets).toEqual([]);
+		expect(notices).toContainEqual(expect.stringContaining("auto-redeem is unset and no prompt UI is available"));
 	});
 
 	it("still asks an ACP client with form elicitation about a reset about to expire", async () => {

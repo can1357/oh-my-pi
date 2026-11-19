@@ -5,6 +5,7 @@ import {
 	buildChart,
 	type ChartKind,
 	type ChartPlan,
+	isTransition,
 	planChart,
 	worthCharting,
 } from "@oh-my-pi/pi-tui/charts/chart-plan";
@@ -262,6 +263,7 @@ describe("parseCell", () => {
 		expect(parseCell("**4** ✅ (2 attempts)")).toMatchObject({ value: 4, emphasis: true, fit: "note" });
 		expect(parseCell("24–72 h")).toMatchObject({ value: 86_400, upper: 259_200, fit: "range" });
 		expect(parseCell("2,049 → 1,973")).toMatchObject({ value: 2049, to: 1973, toFigure: "1,973" });
+		expect(parseCell("402.7 → 13.3 µs")).toMatchObject({ value: 402.7e-6, to: 13.3e-6, dim: "duration" });
 		expect(parseCell("5/8")).toMatchObject({ value: 5, denominator: 8, dim: "fraction" });
 		expect(parseCell("-33pp")).toMatchObject({ value: -33, dim: "percent", signed: true });
 	});
@@ -304,6 +306,18 @@ describe("analyzeTable", () => {
 		expect(shares.rows).toEqual([0, 1, 2, 3]);
 		expect(shares.totals).toEqual([4]);
 		expect(shares.measures.map(column => column.header)).toEqual(["Tokens", "Share"]);
+	});
+
+	it("ignores cyclic near-equal sums without losing ordinary compositions", () => {
+		const ambiguous = analyze(
+			"| snake_id | label | metric_a | metric_b |\n|---|---|---|---|\n| 0 | none | - | - |\n| 3 | alpha | 85,000,000,000 | 85,000,000,000 |\n| 4 | beta | 86,000,000,000 | 86,000,000,000 |\n| 5 | gamma | 87,000,000,000 | 87,000,000,000 |",
+		);
+		expect(ambiguous.composition).toBeUndefined();
+
+		const exact = analyze(
+			"| label | first | second | total |\n|---|---:|---:|---:|\n| alpha | 2 | 7 | 9 |\n| beta | 4 | 9 | 13 |\n| gamma | 6 | 11 | 17 |",
+		);
+		expect(exact.composition).toEqual({ whole: 3, parts: [1, 2], exact: true });
 	});
 
 	it("drops measure columns that echo one setting", () => {
@@ -394,6 +408,33 @@ describe("analyzeTable", () => {
 			"| case | Go | Zig | speedup |\n|---|---|---|---|\n| a | 80 ms | 20 ms | 4.0× |\n| b | 90 ms | 60 ms | 1.5× |\n| c | 100 ms | 10.0 ms | 10.0× |",
 		);
 		expect(factors.measures.map(column => column.header)).toEqual(["Go", "Zig"]);
+	});
+});
+
+describe("isTransition", () => {
+	it("reads `with`/`to`/`from` as a condition only between headers naming one subject", () => {
+		expect(isTransition("Median", "Runs with ≥10")).toBe(false);
+		expect(isTransition("build without cache", "build with cache")).toBe(true);
+		expect(isTransition("Before (kata)", "After (vmon)")).toBe(true);
+	});
+});
+
+describe("row name nesting", () => {
+	it("keeps a leading number with the name before it", () => {
+		const table = analyzeTable(
+			["Detector", "AUC"],
+			[
+				["Step length alone", "0.690"],
+				["EmbeddingGemma 2 embedding", "0.743"],
+				["EmbeddingGemma 2, layer 14", "0.772"],
+				["Jev 15 + EmbeddingGemma", "0.759"],
+				["Jev 15 + layer 14", "0.783"],
+			],
+		);
+		const spec = buildChart(table, { kind: "bar", label: 0, series: [1], transpose: false });
+		const heads = (spec?.groups ?? []).map(group => group.name).filter(Boolean);
+		expect(heads).not.toContain("EmbeddingGemma");
+		expect(heads).not.toContain("Jev");
 	});
 });
 

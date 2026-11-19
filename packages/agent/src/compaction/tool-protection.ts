@@ -1,4 +1,5 @@
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { parseSpillUrl } from "@oh-my-pi/pi-utils";
 import type { AgentMessage, AgentToolCall } from "../types";
 import type { SessionEntry } from "./entries";
 
@@ -53,14 +54,17 @@ export function isSkillReadToolResult(context: ProtectedToolContext): boolean {
 	return getReadToolPath(context)?.startsWith(SKILL_INTERNAL_URL_PREFIX) ?? false;
 }
 
-const ARTIFACT_INTERNAL_URL_PREFIX = "artifact://";
+/** Whether `path` reads a session spill (`local://N.log`, with or without a selector). */
+function isSpillPath(path: string | undefined): boolean {
+	return path !== undefined && parseSpillUrl(path) !== undefined;
+}
 
-/** Recovery reads of session artifacts — eliding one only mints another artifact and can repeat indefinitely. */
+/** Recovery reads of session spills — eliding one only mints another spill and can repeat indefinitely. */
 export function isArtifactRecoveryToolResult(context: ProtectedToolContext): boolean {
-	if (getReadToolPath(context)?.startsWith(ARTIFACT_INTERNAL_URL_PREFIX)) return true;
+	if (isSpillPath(getReadToolPath(context))) return true;
 	const meta = (context.toolResult.details as { meta?: { source?: { type?: string; value?: string } } } | undefined)
 		?.meta;
-	return meta?.source?.type === "internal" && (meta.source.value?.startsWith(ARTIFACT_INTERNAL_URL_PREFIX) ?? false);
+	return meta?.source?.type === "internal" && isSpillPath(meta.source.value);
 }
 
 export function isProtectedToolResult(

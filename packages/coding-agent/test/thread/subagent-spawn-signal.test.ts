@@ -116,10 +116,10 @@ describe("prewarmSubagentWorker", () => {
 		try {
 			const settings = Settings.isolated();
 			const modelRegistry = new ModelRegistry(createInMemoryAuthStorage());
-			prewarmSubagentWorker(settings, modelRegistry, 3);
+			prewarmSubagentWorker(settings, modelRegistry, 8);
 			await nextImmediate();
 			expect(pool.workers()).toEqual([]);
-			prewarmSubagentWorker(settings, modelRegistry, 4);
+			prewarmSubagentWorker(settings, modelRegistry, 9);
 			expect(pool.workers()).toEqual([]);
 			await nextImmediate();
 			const [worker] = pool.workers();

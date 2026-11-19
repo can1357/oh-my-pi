@@ -1,9 +1,14 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
 
+/** A held sleep-prevention assertion; the session only needs to release it. */
+export interface PowerAssertionHandle {
+	stop(): void;
+}
+
 /**
  * Code prefix `PowerAssertion.start` puts on its error message on Linux when the
- * system D-Bus socket does not exist (crates/pi-natives/src/power.rs,
+ * system D-Bus socket does not exist (crates/natives/src/power.rs,
  * `start_login1`), the "platform backend not present" case headless containers
  * hit by design. Refused or rejected connections do not carry it.
  */
@@ -18,8 +23,8 @@ let powerBackendUnavailable = false;
  */
 export function startPowerAssertion(
 	options: PowerAssertionOptions,
-	start: (options: PowerAssertionOptions) => PowerAssertion = options => PowerAssertion.start(options),
-): PowerAssertion | undefined {
+	start: (options: PowerAssertionOptions) => PowerAssertionHandle = options => PowerAssertion.start(options),
+): PowerAssertionHandle | undefined {
 	if (powerBackendUnavailable) return undefined;
 	try {
 		return start(options);

@@ -8,9 +8,9 @@ export function detectLineEnding(content: string): LineEnding {
 	return crlfIndex < lfIndex ? "\r\n" : "\n";
 }
 
-/** Normalize every line ending to LF. */
+/** Normalize CRLF line endings to LF; a lone CR stays content, as grep and editors count lines. */
 export function normalizeToLF(text: string): string {
-	return text.indexOf("\r") === -1 ? text : text.replace(/\r\n?/g, "\n");
+	return text.indexOf("\r") === -1 ? text : text.replace(/\r\n/g, "\n");
 }
 
 /** Re-encode LF text with the requested line ending. */

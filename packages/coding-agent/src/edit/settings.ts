@@ -4,6 +4,7 @@
  */
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { register } from "../config/registry";
+import { compileModelPatterns } from "../utils/model-patterns";
 
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 
@@ -62,15 +63,10 @@ export const cfgEditModelVariants = register({
 	default: EMPTY_STRING_RECORD,
 });
 
-/** {@link cfgEditModelVariants} with lowercased patterns; entries naming an unknown mode are dropped. */
-export const editModelVariants = cfgEditModelVariants.map(variants => {
-	const entries: { patternLower: string; mode: EditMode }[] = [];
-	for (const pattern in variants) {
-		const mode = normalizeEditMode(variants[pattern]);
-		if (mode) entries.push({ patternLower: pattern.toLowerCase(), mode });
-	}
-	return entries;
-});
+/** {@link cfgEditModelVariants} compiled for `matchModelPattern`; entries naming an unknown mode are dropped. */
+export const editModelVariants = cfgEditModelVariants.map(variants =>
+	compileModelPatterns(variants, normalizeEditMode),
+);
 
 export const cfgEditFuzzyMatch = register({
 	id: "edit.fuzzyMatch",

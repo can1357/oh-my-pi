@@ -1,6 +1,7 @@
 import { type MessagePort, parentPort } from "node:worker_threads";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { hindsightBackend } from "../../src/hindsight/backend";
@@ -73,6 +74,7 @@ function buildProbe(): MemoryProbe {
 	let mnemopiChild: AgentSession | undefined;
 	return {
 		hindsightChild: async (parent, fact, query) => {
+			await using outboxDir = await TempDir.create("@memory-bridge-outbox-");
 			const settings = Settings.isolated({
 				"memory.backend": "hindsight",
 				"hindsight.apiUrl": "http://hindsight.invalid",
@@ -82,14 +84,14 @@ function buildProbe(): MemoryProbe {
 				session,
 				settings,
 				modelRegistry,
-				agentDir: "/tmp",
+				agentDir: outboxDir.path(),
 				taskDepth: 1,
 				parentHindsightSessionState: parent,
 			});
 			const alias = session.getHindsightSessionState();
 			if (!alias) throw new Error("hindsight alias was not installed");
 			// The retain/recall tools act on the session's own (alias) state.
-			alias.enqueueRetain(fact, "from worker");
+			await alias.enqueueRetain("worker-retain", [{ content: fact, context: "from worker" }]);
 			await alias.flushRetainQueue();
 			const { context } = await alias.recallForContext(query);
 			const instructions = await hindsightBackend.buildDeveloperInstructions("/tmp", "/tmp", settings, session);

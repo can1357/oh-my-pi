@@ -11,6 +11,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 
 import {
+	isBarePluginSourceName,
 	isValidNameSegment,
 	nameSegmentCollisionKey,
 	type MarketplaceCatalog,
@@ -145,6 +146,9 @@ export function parseMarketplaceCatalog(content: string, filePath: string): Mark
 	// plugins: required array
 	assertField(Array.isArray(obj.plugins), "plugins", filePath);
 
+	const metadata = obj.metadata as Record<string, unknown> | undefined;
+	const hasPluginRoot = typeof metadata?.pluginRoot === "string" && metadata.pluginRoot.length > 0;
+
 	const plugins = obj.plugins as unknown[];
 	const validPlugins: unknown[] = [];
 	const pluginNameKeys = new Set<string>();
@@ -165,9 +169,12 @@ export function parseMarketplaceCatalog(content: string, filePath: string): Mark
 				`plugins[${i}].source`,
 				filePath,
 			);
-			// String sources must be relative paths starting with "./"
 			if (typeof p.source === "string") {
-				assertField((p.source as string).startsWith("./"), `plugins[${i}].source (must start with "./")`, filePath);
+				assertField(
+					p.source.startsWith("./") || (hasPluginRoot && isBarePluginSourceName(p.source)),
+					`plugins[${i}].source (must start with "./", or be a bare name under metadata.pluginRoot)`,
+					filePath,
+				);
 			}
 			// Validate required fields for typed source variants
 			if (typeof p.source === "object" && p.source !== null) {

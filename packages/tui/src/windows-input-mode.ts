@@ -39,6 +39,7 @@ const VK_RETURN = 0x0d;
 const VK_MENU = 0x12;
 const VK_ESCAPE = 0x1b;
 const VK_SPACE = 0x20;
+const VK_J = 0x4a;
 const VK_PACKET = 0xe7;
 
 /** Keys encoded as fixed bytes that can still carry text a pending dead key composed. */
@@ -191,8 +192,13 @@ function encodeKey(record: KeyRecord): string | null {
 
 	const base = baseCodepointForVk(vk);
 	if (ctrl) {
+		// Windows Terminal / ConPTY report Ctrl+J as VK_J with Uc=LF. Returning the
+		// raw LF would make the editor treat it as Enter, so keep the key identity.
+		// Only J is special-cased: `ctrl+j` is a default `tui.input.newLine` binding,
+		// while Ctrl+M/I (CR/Tab) already decode to the keys their C0 bytes represent.
+		const ctrlJ = !alt && vk === VK_J && uc === 0x0a;
 		// Ctrl+Shift+letter collapses onto Ctrl+letter in legacy bytes; keep it distinct.
-		if ((shift || uc === 0) && base !== 0) return `\x1b[${base};${mod}u`;
+		if ((shift || uc === 0 || ctrlJ) && base !== 0) return `\x1b[${base};${mod}u`;
 		if (uc === 0) return null;
 		return alt ? `\x1b${text}` : text;
 	}
@@ -216,6 +222,19 @@ export class Win32InputModeDecoder {
 	/** Whether relayed VT text is held waiting for the rest of its sequence. */
 	get hasPendingSequence(): boolean {
 		return this.#pendingVt.length > 0;
+	}
+
+	/**
+	 * Whether the held relayed text is an OSC/DCS/APC string still waiting for
+	 * its terminator (a TSP event, a clipboard or colour reply). Unlike a lone
+	 * ESC or a short CSI, releasing it early cannot be mistaken for a key: the
+	 * head would be handed on as a fragment and the tail typed as text. A bare
+	 * two-byte introducer is not a string yet: it may be an Alt chord (Alt+]).
+	 */
+	get hasPendingString(): boolean {
+		if (this.#pendingVt.length < 3) return false;
+		const introducer = this.#pendingVt[1];
+		return introducer === "]" || introducer === "P" || introducer === "_";
 	}
 
 	/**
@@ -417,8 +436,13 @@ export class Win32PasteMarkerNormalizer {
 		if (output) this.#onInput(output);
 		if (this.#candidate || this.#pending) {
 			this.#timer = setTimeout(() => {
-				this.flush();
-				this.#onExpired?.();
+				// A stalled loop can have the rest of this record waiting in stdin's
+				// poll queue; release only after it has had a chance to arrive.
+				this.#timer = setTimeout(() => {
+					this.#timer = undefined;
+					this.flush();
+					this.#onExpired?.();
+				});
 			}, 75);
 		}
 	}

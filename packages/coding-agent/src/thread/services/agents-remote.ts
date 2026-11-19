@@ -11,8 +11,13 @@
  */
 import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { AgentAwaitsApi } from "../../registry/agent-awaits";
-import type { AdoptOptions, AgentLifecycleApi, PersistedSubagentReviverFactory } from "../../registry/agent-lifecycle";
+import type { AgentAwaitsApi, AwaitHoldOptions, AwaitWaiter } from "../../registry/agent-awaits";
+import type {
+	AdoptOptions,
+	AgentLifecycleApi,
+	AgentReleaseOptions,
+	PersistedSubagentReviverFactory,
+} from "../../registry/agent-lifecycle";
 import type {
 	AgentHistorySummary,
 	AgentRef,
@@ -23,10 +28,10 @@ import type {
 	RegistryEvent,
 	RegistryListener,
 } from "../../registry/agent-registry";
-import type { IrcBusApi, IrcWaitFilter } from "../../irc/bus";
+import type { IrcBusApi, IrcWaitFilter, UnansweredSend } from "../../irc/bus";
 import type { AgentSessionHandle } from "../../session/agent-session-handle";
 import type { RemoteObject } from "../rpc";
-import type { AgentLifecycleProtocol, AgentRegistryProtocol, IrcBusProtocol, UnansweredSend } from "./agents-protocol";
+import type { AgentLifecycleProtocol, AgentRegistryProtocol, IrcBusProtocol } from "./agents-protocol";
 
 /** Local listeners fed by one lazily opened remote subscription. */
 class ForwardedListeners<A extends unknown[]> {
@@ -52,6 +57,7 @@ class ForwardedListeners<A extends unknown[]> {
 	}
 
 	#emit(args: A): void {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- snapshot: the loop body may add or remove listeners
 		for (const listener of [...this.#listeners]) {
 			try {
 				listener(...args);
@@ -72,12 +78,20 @@ export class RemoteAgentAwaits implements AgentAwaitsApi {
 		this.#listeners = new ForwardedListeners("agent-awaits", forward => remote.callSync("awaitsSubscribe", forward));
 	}
 
-	hold(waiter: string, awaited: readonly string[], options: { interruptible: boolean }): () => void {
+	hold(waiter: string, awaited: readonly string[], options: AwaitHoldOptions): () => void {
 		return this.#remote.callSync("awaitsHold", waiter, awaited, options);
 	}
 
 	blocksOn(agent: string, target: string, sentAt: number): boolean {
 		return this.#remote.callSync("awaitsBlocksOn", agent, target, sentAt);
+	}
+
+	blockedVia(agent: string, target: string, sentAt: number): readonly string[] | undefined {
+		return this.#remote.callSync("awaitsBlockedVia", agent, target, sentAt);
+	}
+
+	waitersOn(target: string): AwaitWaiter[] {
+		return this.#remote.callSync("awaitsWaitersOn", target);
 	}
 
 	onChange(listener: () => void): () => void {
@@ -215,7 +229,7 @@ export class RemoteAgentLifecycle implements AgentLifecycleApi {
 		return this.#remote.call("ensureLive", id);
 	}
 
-	release(id: string, expected?: AgentRefExpectation, options?: { tombstone?: boolean }): Promise<boolean> {
+	release(id: string, expected?: AgentRefExpectation, options?: AgentReleaseOptions): Promise<boolean> {
 		return this.#remote.call("release", id, expected, options);
 	}
 
@@ -244,6 +258,10 @@ export class RemoteIrcBus implements IrcBusApi {
 		return this.#remote.callSync("unansweredSends", from, sinceTs);
 	}
 
+	lastMessageAt(from: string, to: string): number | undefined {
+		return this.#remote.callSync("lastMessageAt", from, to);
+	}
+
 	wait(
 		agentId: string,
 		filter: IrcWaitFilter,
@@ -256,6 +274,10 @@ export class RemoteIrcBus implements IrcBusApi {
 
 	take(agentId: string, from?: string): IrcMessage | undefined {
 		return this.#remote.callSync("take", agentId, from);
+	}
+
+	park(msg: Omit<IrcMessage, "id" | "ts">): IrcMessage {
+		return this.#remote.callSync("park", msg);
 	}
 
 	unreadCount(agentId: string): number {

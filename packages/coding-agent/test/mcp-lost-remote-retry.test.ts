@@ -65,6 +65,9 @@ describe("MCP lost remote server retry schedule", () => {
 		manager.addConnectionStatusListener(event => statuses.push(event.type));
 		const config: MCPHttpServerConfig = { type: "http", url: flaky.url, timeout: GUARD_MS };
 		await manager.connectServers({ flaky: config }, {});
+		// connectServers returns after a short non-blocking window; a loaded machine can leave the
+		// server connected with `tools/list` still in flight. Settle startup before reading tools.
+		expect((await manager.waitForStartup(0)).connected).toEqual(["flaky"]);
 		expect(manager.getConnectionStatus("flaky")).toBe("connected");
 		return { manager, flaky, statuses, config };
 	}
@@ -151,6 +154,7 @@ describe("MCP lost remote server retry schedule", () => {
 		manager = new MCPManager(workDir, null, undefined, FAST);
 		const config: MCPHttpServerConfig = { type: "http", url: flaky.url, timeout: GUARD_MS };
 		await manager.connectServers({ flaky: config }, {});
+		expect((await manager.waitForStartup(0)).failed.map(failure => failure.name)).toEqual(["flaky"]);
 		expect(manager.getConnectionStatus("flaky")).toBe("disconnected");
 
 		// The explicit paths that reach the ladder for a never-connected server.

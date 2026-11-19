@@ -555,6 +555,91 @@ describe("custom_tool_call stream receive", () => {
 		);
 		expect(endEvent?.toolCall.id).toStartWith("call_missing_item|fc_");
 	});
+
+	test.each([
+		{
+			name: "function_call",
+			added: {
+				type: "function_call" as const,
+				id: "fc_ns",
+				call_id: "call_ns",
+				name: "wait",
+				namespace: "functions",
+				arguments: "",
+			},
+			done: {
+				type: "function_call" as const,
+				id: "fc_ns",
+				call_id: "call_ns",
+				name: "wait",
+				namespace: "functions",
+				arguments: '{"cell_id":"cell_1"}',
+			},
+		},
+		{
+			name: "custom_tool_call",
+			added: {
+				type: "custom_tool_call" as const,
+				id: "ctc_ns",
+				call_id: "call_exec",
+				name: "exec",
+				namespace: "functions",
+				input: "",
+			},
+			done: {
+				type: "custom_tool_call" as const,
+				id: "ctc_ns",
+				call_id: "call_exec",
+				name: "exec",
+				namespace: "functions",
+				input: "ok",
+			},
+		},
+	])("keeps a namespaced $name on the emitted call and the stored block", async ({ added, done }) => {
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			timestamp: Date.now(),
+			provider: "openai",
+			model: "gpt-5",
+			api: "openai-responses",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+		};
+		const emitted: unknown[] = [];
+		const stream = {
+			push: (event: unknown) => emitted.push(event),
+			end: () => {},
+		} as never;
+
+		await processResponsesStream(
+			makeStream([
+				{ type: "response.output_item.added", output_index: 0, item: added },
+				{ type: "response.output_item.done", output_index: 0, item: done },
+			]),
+			output,
+			stream,
+			makeModel(),
+		);
+
+		const block = output.content[0];
+		expect(block).toMatchObject({ type: "toolCall", name: done.name, namespace: "functions" });
+		const endEvent = emitted.find(event => {
+			if (!event || typeof event !== "object" || !("type" in event) || event.type !== "toolcall_end") return false;
+			if (!("toolCall" in event)) return false;
+			const toolCall = event.toolCall;
+			if (!toolCall || typeof toolCall !== "object") return false;
+			return Reflect.get(toolCall, "namespace") === "functions";
+		});
+		expect(endEvent).toBeDefined();
+	});
 });
 
 describe("codex-backend convertTools (chatgpt.com/backend-api)", () => {

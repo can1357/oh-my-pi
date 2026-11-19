@@ -228,7 +228,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/goog
 ### Stream behavior
 
 - **`streamGenerateContent` SSE protocol**: Streams are consumed via `readSseJson<GenerateContentResponse>` in `streamGoogleGenAI`.
-- **Thought parts & signature retention**: `isThinkingPart` identifies reasoning text when `part.thought === true`. `GoogleTextBlocks` folds streamed text and thought parts into blocks and keeps each `part.thoughtSignature` on the block whose part carried it, including the empty text part Gemini sends after a text reply's last chunk to sign the reply. In `convertMessages`, thought signatures are retained only when message provider/model match the target (`msg.provider === model.provider && msg.model === model.id`) and pass `isValidThoughtSignature` (base64 check); that model's own thinking replays as a `thought: true` part, signed or not, while other models' thinking arrives already demoted to text by `transformMessages`. For Gemini 3 tool calls lacking a valid signature, the public Gemini API emits the `skip_thought_signature_validator` bypass sentinel on every unsigned call. Cloud Code Assist / Antigravity emits it only when the first call of a turn is unsigned; signed-first parallel turns omit it from unsigned secondary calls. Vertex AI always omits the sentinel (#9638, #10602).
+- **Thought parts & signature retention**: `isThinkingPart` identifies reasoning text when `part.thought === true`. `GoogleTextBlocks` folds streamed text and thought parts into blocks and keeps each `part.thoughtSignature` on the block whose part carried it, including the empty text part Gemini sends after a text reply's last chunk to sign the reply. In `convertMessages`, thought signatures are retained only when message provider/model match the target (`msg.provider === model.provider && msg.model === model.id`) and pass `isValidThoughtSignature` (base64 check); that model's own thinking replays as a `thought: true` part, signed or not, while other models' thinking arrives already demoted to text by `transformMessages`. For Gemini 3 tool calls lacking a valid signature, the public Gemini API emits the `skip_thought_signature_validator` bypass sentinel on every unsigned call. Cloud Code Assist / Antigravity and Vertex AI emit it only when the first call of a turn is unsigned; signed-first parallel turns omit it from unsigned secondary calls (#9638, #10602).
 - **Empty response retry loop**: `streamGoogleGenAI` guards against Gemini returning `finishReason: STOP` with blank content without calling tools. `hasMeaningfulGoogleContent` validates output; if empty, `streamGoogleGenAI` retries up to `MAX_EMPTY_STREAM_RETRIES` (2 retries, 3 total attempts) with exponential backoff (`EMPTY_STREAM_BASE_DELAY_MS * 2^attempt`) after resetting stream output via `resetGoogleStreamOutputForRetry`.
 - **Thinking loop guard**: Implemented in `packages/ai/src/utils/thinking-loop.ts` (`ThinkingLoopDetector`). The `thinking-loop-guard` catalog axis sets the level per model line (`loopGuardLevel`): Gemini, DeepSeek, and Grok are `semantic` (all shapes below), Claude is `off`, and every other model gets shape 1 only:
    1. _Verbatim tail repetition_ (`EXACT_TAIL_WINDOW = 4096`, >= 180 repeated chars; >= 1024 when the cycle is long or spans a line break, since summarizers repeat status lines).
@@ -246,6 +246,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/goog
 ### Catalog model handling
 
 - **Provider entry (`google`)**: `packages/catalog/src/compat/rules/providers/google.kdl` declares default model `gemini-3.1-pro-preview`. Environment keys: `GEMINI_API_KEY`.
+- **Authored seeds**: `gemini-decision-1`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows. `gemini-decision-1` is a `judge` row on the `google-decisions` API (`POST /v1beta/decisions`, key in `x-goog-api-key`).
 
 ## Google Vertex AI
 
@@ -662,9 +663,32 @@ The Devin integration (`devin-agent` API) communicates with Codeium Cascade back
 
 - **Provider entry (`devin`)**: `packages/catalog/src/compat/rules/providers/devin.kdl` declares default model `swe-1-6`, the boot-time fallback. Once discovery lands, the account default it reports (`defaultOverrideModelConfig`, marked `isProviderDefault`) is the provider default instead. When an effort routes to that lane (server family metadata or the static collapse table), its family starts at that wire id and effort; any other lane, such as a no-thinking `off` lane, starts the family on its own default. Environment keys: `DEVIN_API_KEY`.
 - **Discovery replacement**: Successful authoritative discovery replaces fallback provider rows rather than retaining retired seed models.
-- **Authored seeds**: `swe-1-6-fast`, `swe-1-6`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
+- **Authored seeds**: `swe-1-6`; bundle policy `always`. Limits, capabilities, and prices are authored alongside this row.
 
 * **Dynamic Discovery:** `fetchDevinModels` in `packages/catalog/src/discovery/devin.ts` invokes the unary Connect RPC `GetCliModelConfigs` (`/exa.api_server_pb.ApiServerService/GetCliModelConfigs`) with the native `chisel` discovery metadata from `packages/catalog/src/wire/devin.ts` and every supported display slot. `normalizeDevinModels` drops disabled/internal configs, converts `ClientModelConfig` into `ModelSpec<"devin-agent">` entries (context window from `ClientModelConfig.maxTokens`, else `ModelInfo.maxTokens`, where current catalogs carry it, else 200k; 64k max tokens by default), and preserves server-supplied output caps, pricing dimensions, tool/parallel-tool/image support, description, and `new`/`beta`/`recommended` badges. Exception: `DEVIN_IMAGE_BLIND_UIDS` strips the image modality from `swe-1-6`/`swe-1-6-fast`, whose configs advertise `supports_images` while the backend silently drops the `ChatMessagePrompt.images` field (verified live; every other model reads it). An empty-but-200 catalog response logs a stale-identity-pin warning. Router configs (`displayOption MODEL_ROUTER` or `isModelRouter`) stay standalone with `compat.modelRouter`.
+
+## Kiro
+
+The native Kiro provider (`kiro-api`) streams AWS event-stream frames from the Kiro API. The stream and request mapping live in `packages/ai/src/providers/kiro/` (`stream.ts`, `transform.ts`), login in `packages/ai/src/registry/oauth/kiro.ts`, usage in `packages/ai/src/usage/kiro.ts`, discovery in `packages/catalog/src/discovery/kiro.ts`, and routing plus the credential codec in `packages/catalog/src/wire/kiro.ts`. User-facing setup is in [Kiro](./kiro.md).
+
+### Special casings
+
+- **Request identity**: Every request (chat, model and profile discovery, AWS sign-in, Google/GitHub sign-in) uses the same headers and service targets as the official Kiro CLI 3.2.0. The one intentional difference is `x-amzn-codewhisperer-optout: true`: OMP opts out of content sharing, where the CLI opts in by default.
+- **Tool-result byte budgets**: Each tool result is capped at 800,000 UTF-8 bytes (Kiro's service limit) and ends with a marker stating how much was omitted. The request budget is 850,000 bytes per 200,000 tokens of context window. Over budget, historical tool results are shrunk to 25,000 bytes oldest first, then current-turn results (never below 25,000 bytes). A request still over budget is reported as a context overflow so OMP compacts.
+
+### Stream behavior
+
+- **Transient retry**: A request is retried at most once, with an identical body and a fresh request id, and only before any output, for a `ThrottlingError` with reason `INSUFFICIENT_MODEL_CAPACITY` (over HTTP or as an in-stream exception) and for HTTP 400 `ValidationException: Invalid tool use format.`. A billed request is never replayed; every other failure is terminal.
+- **Stop reasons**: `MAX_TOKENS` maps to `length` and a tool call whose arguments were cut off is dropped. `CONTENT_FILTERED` is reported as a refusal with the service's category and explanation and is not retried.
+- **Context size**: `contextUsageEvent` percentages are reported as context size, scaled to the model's context window.
+
+### Auth & usage
+
+- **Token usage**: Usage comes only from `metadataEvent.tokenUsage`; when none arrives, usage is zero, never estimated.
+
+### Catalog model handling
+
+- **Per-credential discovery**: The roster is discovered per credential and never bundled; default model `auto`. The model cache is scoped per OAuth login (login id, profile, region), or per API key and region.
 
 ## GitLab Duo
 
@@ -717,8 +741,8 @@ Pi Native is a lossless internal server/client transport protocol used when a pi
 
 - **Lossless Pass-through & Dialect Absence**: Unlike OpenAI/Anthropic routes, `pi-native` is not a textual tool-call dialect (`docs/toolconv/pi-native.md`). Tool calls remain canonical pi-ai `ToolCall` content blocks inside `Context` and `AssistantMessageEvent`. It preserves first-class pi-ai fields (service tier, cache markers, thinking budgets, tool-choice variants, image blocks, tool-call IDs) without foreign-wire quantization.
 - **Wire Request & Minimal Boundary Validation**: Client POSTs `{ modelId: "${provider}/${id}", context, options, stream: true }` to `${model.baseUrl}/v1/pi/stream` (`packages/ai/src/providers/pi-native-client.ts` `resolveStreamUrl`). `packages/ai/src/providers/pi-native-server.ts` `parseRequest` accepts `modelId`, `model.id`, or string `model` (supporting `streamProxy` target swaps). Validation checks only object shapes and arrays (`context.messages`, optional `context.systemPrompt`, `context.tools`), leaving message/tool internals unvalidated until downstream provider execution.
-- **Option Allow-list & Non-Wire Key Stripping**: Server filters `options` against `ALLOWED_OPTION_KEYS` in `packages/ai/src/providers/pi-native-server.ts` `parseRequest`, silently dropping unknown keys for cross-version compatibility. Client strips runtime-only and function-valued fields (`signal`, `apiKey`, `fetch`, `onPayload`, `onResponse`, `onSseEvent`, `execHandlers`, `cursorExecHandlers`, `cursorOnToolResult`, `providerSessionState`) via `NON_WIRE_KEYS` in `packages/ai/src/providers/pi-native-client.ts` `buildWireOptions`.
-- **Gateway Options Modification**: On the auth-gateway (`packages/ai/src/auth-gateway/server.ts`), sampling controls (`temperature`, `topP`, `topK`, `minP`, `stopSequences`, penalties) are stripped for `openai-codex-responses` models to prevent 400 errors, and passthrough request headers are captured (`captureRequestHeaders`) and merged under client headers.
+- **Option Allow-list & Non-Wire Key Stripping**: Server filters `options` against `WIRE_OPTION_KEYS` (the `client` and `gateway` tiers of `OPTION_TIERS` in `packages/ai/src/auth-gateway/caller-options.ts`) in `packages/ai/src/providers/pi-native-server.ts` `parseRequest`, silently dropping server-owned and unknown keys for cross-version compatibility. Client strips runtime-only and function-valued fields (`signal`, `apiKey`, `fetch`, `onPayload`, `onResponse`, `onSseEvent`, `execHandlers`, `cursorExecHandlers`, `cursorOnToolResult`, `providerSessionState`) via `NON_WIRE_KEYS` in `packages/ai/src/providers/pi-native-client.ts` `buildWireOptions`.
+- **Gateway Options Modification**: On the auth-gateway (`packages/ai/src/auth-gateway/server.ts`), sampling controls (`temperature`, `topP`, `topK`, `minP`, `stopSequences`, penalties) are stripped for `openai-codex-responses` models to prevent 400 errors. `applyCallerTrust` (`packages/ai/src/auth-gateway/caller-options.ts`) then merges the captured passthrough request headers (`captureRequestHeaders`) under the gateway token's own headers, while a scoped client token (`serve --clients`) loses every `gateway`-tier option, headers included.
 - **Dispatch Precedence & Cache Bypass**: In `packages/ai/src/stream.ts` `streamSimple`, `model.transport === "pi-native"` takes precedence over extension-registered custom APIs (`getCustomApi`). `packages/ai/src/stream.ts` `assertExplicitOpenAIResponsesPromptCacheSupport` explicitly bypasses prompt cache assertions for `pi-native` transports because validation is deferred to the gateway-resolved model.
 
 ### Stream behavior
@@ -872,6 +896,27 @@ Baseten provides high-performance infrastructure for hosting open-weight LLMs (i
 - **Model Manager Options**: `basetenModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts` configures model resolution with `defaultBaseUrl: "https://inference.baseten.co/v1"` and `requireApiKey: true`.
 - **Dynamic Model Discovery & Pricing**: `fetchDynamicModels` queries `https://inference.baseten.co/v1/models`. `mapModel` parses raw record metadata including `supported_features`, `input_modalities` (`image` for vision capability), context and completion token bounds (`context_length`, `max_completion_tokens`), and per-million token pricing (`prompt`, `completion`, `input_cache_read`).
 - **Native Reasoning Identification**: Flags `reasoning: true` for `openai/gpt-oss-120b`, `deepseek-ai/DeepSeek-V4-Pro`, and `zai-org/GLM-5.2` when dynamic features list `reasoning` or `reasoning_effort`.
+
+## Bifrost (`bifrost`)
+
+Bifrost is a self-hosted open-source AI gateway that serves every configured upstream provider behind one OpenAI-compatible API (default `http://localhost:8080/v1`). Chat models use the OpenAI Chat Completions transport (`openai-completions`); decision models use the gateway's OpenAI Decisions route (`openai-decisions`, `POST {baseUrl}/decisions`).
+
+### Special casings
+
+- **Gateway roster**: model ids are `<bifrost-provider>/<model>` (`anthropic/claude-opus-5-5`, `openrouter/google/gemini-decision-1`, or a custom provider name such as `custom/drex-max-v1.1`). Nothing is bundled: `bifrost` is in `DISCOVERY_ONLY_PROVIDERS` (`packages/catalog/scripts/generate-models.ts`), and runtime discovery is authoritative (`dynamic-models-authoritative`).
+- **Row mapping (`bifrostModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`)**: Bifrost rows are OpenRouter-shaped where its model datasheet knows the model: `context_length` / `top_provider.context_length` / `max_input_tokens`, `max_output_tokens` / `top_provider.max_completion_tokens`, `architecture.input_modalities`, `supported_parameters` (`tools`, `reasoning`), a `reasoning` capability object, and per-token USD `pricing` (`prompt`, `completion`, `input_cache_read`, `input_cache_write`). A row that sets `pricing.prompt` or `pricing.completion` is authoritative, so an explicit `"0"` stays free. Fields a row omits fall back to the bundled model of the upstream provider named by the id prefix, then to a bundled model with the same bare `<model>` id, then with the same full id; the reference's transport compat is not carried over.
+- **Decision usage**: Bifrost's `/decisions` responses report chat-style `usage.prompt_tokens` / `completion_tokens`; the `openai-decisions` decoder reads them when the Responses-style `input_tokens` / `output_tokens` are absent.
+- **Decision models**: Bifrost answers every upstream's decision models on `/decisions`, but its `/models` rows declare `decisions` output only for OpenRouter's. A row is an `openai-decisions` judge by the most specific evidence: its `architecture.output_modalities` when present; otherwise the upstream provider's bundled row for the same model (so `nanogpt/cloudflare/clef` stays chat); otherwise whether the full id or its `<model>` part is a bundled judge id anywhere (`cloudflare/clef`, `custom/drex-max-v1.1`). Decision ids omp does not bundle (self-hosted `ollama/nimble`, aliased `azure/Microsoft-Decision-1`) are listed as chat models.
+- **Judge retries and fallbacks**: omp sends no `fallbacks` to `/decisions`, but Bifrost can still retry (provider `network_config.max_retries`) and fall back (routing-rule `fallbacks`) on its side. Each native judge candidate also gets up to 3 HTTP attempts within `judgment.attemptTimeoutMs`, then the next `retry.fallbackChains.judge` entry, so the two layers multiply upstream calls during an outage, and omp can give up at its deadline while Bifrost keeps retrying. Keep one fallback layer: either omp's judge chain (Bifrost judge routes with `max_retries` 0 and no rule fallbacks), or Bifrost's (one omp judge candidate with `judgment.attemptTimeoutMs` above the gateway's worst case, and `judgment.hedgeAfterMs` off).
+- **Non-chat rows**: rows whose `architecture.output_modalities` contain neither `text` nor `decisions` are dropped in the mapper; metadata-less embedding, speech, transcription, image, and moderation ids are dropped by `exclude-models provider="bifrost"` in `runtime/behavior.kdl`.
+- **Proxy, not local server**: `bifrost` is in `PROXY_OPENAI_COMPAT_PROVIDERS` (`packages/catalog/src/compat/resolve.ts`), so a loopback base URL does not turn on the local-runtime request shaping (grammar tool schemas, reasoning-content replay, output clamping) meant for llama.cpp, vLLM, and similar servers.
+
+### Auth & usage
+
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/bifrost.kdl` and asks for a Bifrost virtual key (`sk-bf-...`). Environment key: `BIFROST_API_KEY`. A gateway without governance accepts any value.
+- `BIFROST_BASE_URL` sets the gateway's OpenAI-compatible root (`getDefaultModelDiscoveryBaseUrl` in `packages/catalog/src/provider-models/cache-provider-id.ts`); a `models.yml` provider `baseUrl` override wins. Discovery, chat, and judge requests all use it.
+- Discovery does not run without a credential: the default port `8080` is also llama.cpp's default, whose models must not appear as Bifrost models.
+- **Cache scope**: the model cache namespace hashes the API key and base URL (`bifrost` is in `CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS`), since virtual keys can restrict the roster.
 
 ## Cerebras (`cerebras`)
 
@@ -1340,6 +1385,7 @@ LiteLLM is an open-source AI proxy and gateway that unifies access to multiple L
 - **Credentials & env (`packages/catalog/src/compat/rules/providers/litellm.kdl`, `packages/catalog/src/compat/rules/auth/litellm.kdl`)**: Authenticates via `LITELLM_API_KEY`.
 - **Login onboarding (`packages/catalog/src/compat/rules/auth/litellm.kdl`)**: Declared as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`), directing users to setup docs (`https://docs.litellm.ai/docs/proxy/deploy`), prompting for master/virtual keys (`sk-...`), and noting `LITELLM_BASE_URL` for custom proxy endpoints. CLI `login` delegates to `SqliteAuthCredentialStore.login()`.
 - **Default base URL (`packages/catalog/src/provider-models/cache-provider-id.ts`)**: Resolves to `Bun.env.LITELLM_BASE_URL` or `http://localhost:4000/v1`.
+- **Usage reporting (`packages/ai/src/usage/litellm.ts`)**: reads `GET /key/info` (`sk-` keys only) and `GET /v2/user/info` from the management base (base URL minus a trailing `/v1`) and reports each as a USD budget (spend, `max_budget`, `budget_duration` window, reset), probing with the one key inference would send (`usesRequestKey`). `ModelRegistry` registers it through `usage.replaceConfiguredProviders` for `litellm` and every `discovery.type: litellm` provider not in `disabledProviders`. A 401 drops that scope; a 401 on every scope tried discards the cached report.
 
 ### Catalog model handling
 
@@ -1810,7 +1856,8 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/open
 
 - **Provider entry (`openrouter`)**: `packages/catalog/src/compat/rules/providers/openrouter.kdl` declares default model `openai/gpt-5.5`. Environment keys: `OPENROUTER_API_KEY`.
 - **Authored seeds**: `~typesafe/jev-latest`, `typesafe/jev-1.14`, `openai/whisper-1`, `openai/whisper-large-v3`, `openai/gpt-4o-transcribe`, `microsoft/mai-transcribe-1.5`, `microsoft/mai-transcribe-2`, `cohere/rerank-v3.5`, `openai/text-embedding-3-small`, `qwen/qwen3-embedding-8b`, `google/veo-3.1`, `minimax/hailuo-3`, `alibaba/wan-2.7`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
-- **Dynamic Discovery & Filter**: `openrouterModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts` queries `https://openrouter.ai/api/v1/models` using `fetchOpenAICompatibleModels` with `api: "openrouter"`. Cache entries are partitioned under `resolveModelCacheProviderId("openrouter")`. Discovered models are filtered to entries specifying `supported_parameters.includes("tools")`.
+- **Dynamic Discovery & Filter**: `openrouterModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts` queries `https://openrouter.ai/api/v1/models` using `fetchOpenAICompatibleModels` with `api: "openrouter"`. Cache entries are partitioned under `resolveModelCacheProviderId("openrouter", { apiKey, baseUrl })`, which hashes the key and base URL (`openrouter` is in `CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS`), so a keyless or wider-key roster is never served to a guardrailed key. Discovered models are filtered to entries specifying `supported_parameters.includes("tools")`.
+- **Guardrail-scoped roster**: with a key, `/models` returns only the models the key's workspace guardrails allow (model and provider allow-lists); without one it returns the public roster. Chat discovery is therefore authoritative (`dynamic-models-authoritative`): a successful fetch replaces bundled chat rows, so `/model` never lists models the workspace blocks. A failed chat listing returns no discovery result, so a media-only success cannot prune the chat roster. The `/images/models`, `/videos/models`, and `/embeddings/models` listings ignore guardrails (verified 2026-11-12), so blocked non-chat models can still appear.
 - **Spec Mapping**: `openrouterModelManagerOptions` maps `modality` (`text`/`image`), pricing per million tokens (`prompt`, `completion`, `input_cache_read`, `input_cache_write`), `context_length`, `top_provider.max_completion_tokens`, and reasoning effort ladders via `mapOpenRouterThinking`.
 
 ## Qianfan (`qianfan`)
@@ -1831,6 +1878,24 @@ Qianfan (Baidu Cloud) provides access to Baidu's hosted model family via an Open
 - **Provider entry (`qianfan`)**: `packages/catalog/src/compat/rules/providers/qianfan.kdl` declares default model `deepseek-v3.2`. Environment keys: `QIANFAN_API_KEY`.
 - **Model Options**: `qianfanModelManagerOptions` (`packages/catalog/src/provider-models/openai-compat.ts`) constructs `openai-completions` options bound to `https://qianfan.baidubce.com/v2` via `createSimpleOpenAICompletionsOptions`.
 - **Bundled Models**: Static model specifications in `packages/catalog/src/models.json` define Qianfan models (e.g. `deepseek-v3.2` with `reasoning: true` and `baseUrl: "https://qianfan.baidubce.com/v2"`).
+
+## Otari (`otari`)
+
+Otari is an AI gateway and control plane that routes requests to upstream model providers on a workspace's behalf over an OpenAI-compatible Chat Completions interface at `https://api.otari.ai/api/v1`.
+
+### Special casings
+
+- **Workspace-scoped roster**: a workspace enables upstream providers and models in Otari, so the catalog is per-credential and dynamic. Nothing is bundled — the provider is registered in `CREDENTIAL_SCOPED_PROVIDERS` (`packages/catalog/scripts/generate-models.ts`), so catalog generation never fetches or commits one workspace's roster. Runtime discovery is authoritative (`dynamic-models-authoritative`): a successful key-scoped `/models` fetch is the whole catalog and prunes whatever the workspace has since disabled.
+- **Live row ownership**: `/models` rows are OpenRouter-style: `supported_parameters` (contains `reasoning` for reasoning models), `architecture.input_modalities` / `output_modalities`, context and output caps, and per-million USD pricing (`input_price_per_million`, `output_price_per_million`, optional `cache_read_price_per_million` / `cache_write_price_per_million`). With no bundled reference to merge from, the live row owns every capability field (`otariModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`). Rows the gateway has no models.dev metadata for omit `supported_parameters` and `architecture` and map as text-only, non-reasoning, with unknown limits.
+- **Non-chat rows**: the roster lists every model a workspace enables, including embedding, rerank, speech, image, and realtime models. Rows whose `architecture.output_modalities` contain no `text` are dropped in the mapper; metadata-less non-chat rows are dropped by `exclude-models provider="otari"` in `runtime/behavior.kdl`.
+- **No `developer` role**: Otari forwards through any-llm to the upstream, and some upstreams reject the `developer` role (`anthropic/` rows answer 400), so `supports-developer-role #false` sends instructions as `system`. `store`, `max_completion_tokens`, tool calls, and `reasoning_effort` (`minimal`..`xhigh`) pass through; the gateway maps effort to each upstream's own control.
+- **No stable default**: because the roster depends on the workspace, no model id is guaranteed to be enabled for every token, and `/models` marks no workspace default. `default-model` (`deepseek/deepseek-v4.1-flash`, the example selector in Otari's `/models` API docs) is a placeholder that only ranks already-available models and never fabricates a row; when the workspace does not enable it, the resolver falls back to the first available model.
+
+### Auth & usage
+
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/otari.kdl`. Environment key: `OTARI_API_KEY`. Validation uses `models-endpoint` against `https://api.otari.ai/api/v1/models`, which answers 401 both without a key and with a rejected one (verified 2026-11-02), so the probe validates the pasted key and bills nothing.
+- Self-hosted deployments set `OTARI_BASE_URL` to the deployment's API root (`https://host.example.com/api/v1`). It redirects `/login otari` validation (`base-url-env`), discovery, and requests, so a self-hosted key is never sent to the hosted gateway. A `models.yml` provider `baseUrl` override also redirects discovery and requests, but login validation only reads `OTARI_BASE_URL`.
+- **Cache scope**: the model cache namespace hashes the API key and base URL (`resolveModelCacheProviderId`, `otari` is in `CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS`), so a second workspace or deployment never reads another's cached roster.
 
 ## Qwen Portal (`qwen-portal`)
 
@@ -2457,7 +2522,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 
 ### Special casings
 
-- Apple Foundation Models is an in-process pi-natives bridge for macOS 27+ on Apple silicon. Availability is discovered at runtime; no models are bundled.
+- Apple Foundation Models is an in-process omp-natives bridge for macOS 27+ on Apple silicon. Availability is discovered at runtime; no models are bundled.
 
 ### Auth & usage
 
@@ -2584,7 +2649,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 ### Catalog model handling
 
 - **Provider entry (`local`)**: `packages/catalog/src/compat/rules/providers/local.kdl` declares default model `lfm2.5-230m`. Model management permits unauthenticated access.
-- **Authored seeds**: `kokoro`, `parakeet-tdt-0.6b-v3`, `whisper-base`, `whisper-small`, `whisper-large-v3-turbo`, `lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`, `qwen3-1.7b`, `llama3.2:3b`, `gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
+- **Authored seeds**: `phonon-31m`, `parakeet-tdt-0.6b-v3`, `whisper-base`, `whisper-small`, `whisper-large-v3-turbo`, `lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`, `qwen3-1.7b`, `llama3.2:3b`, `gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
 - Runtime manager: `localModelManagerOptions` in `packages/catalog/src/provider-models/special.ts`.
 
 ## Muse Code (Subscription) (`muse-code`)
@@ -2699,7 +2764,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 ### Catalog model handling
 
 - **Provider entry (`web`)**: `packages/catalog/src/compat/rules/providers/web.kdl` declares default model `public`. Model management permits unauthenticated access.
-- **Authored seeds**: `hosted`, `parallel`, `perplexity`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `synthetic`, `ollama`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
+- **Authored seeds**: `hosted`, `parallel`, `perplexity`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `synthetic`, `ollama`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public`, `hackernews`; bundle policy `always`. Limits, capabilities, and prices are authored alongside these rows.
 - Runtime manager: `webModelManagerOptions` in `packages/catalog/src/provider-models/special.ts`.
 
 ## Yolo-Auto (`yolo-auto`)

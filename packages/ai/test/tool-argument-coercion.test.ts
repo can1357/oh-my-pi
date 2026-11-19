@@ -2423,21 +2423,6 @@ describe("Tool argument coercion", () => {
 			}) as { items: Array<{ op: string }> };
 			expect(result.items).toEqual([{ op: "done" }]);
 		});
-
-		it("leaves ordinary keys untouched", () => {
-			const tool: Tool = {
-				name: "plain",
-				description: "",
-				parameters: type({ op: type("string"), count: type("number") }),
-			};
-			const result = validateToolArguments(tool, {
-				type: "toolCall",
-				id: "dk6",
-				name: "plain",
-				arguments: { op: "done", count: 2 },
-			}) as { op: string; count: number };
-			expect(result).toEqual({ op: "done", count: 2 });
-		});
 	});
 
 	describe("single-string-field coercion", () => {

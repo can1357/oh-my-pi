@@ -473,12 +473,14 @@ export function parseCell(markdown: string): Cell {
 	const figureEnd = unit ? text.length - groups.rest!.length : text.indexOf(groups.num!) + groups.num!.length;
 	const figure = text.slice(0, figureEnd).trim();
 	if (groups.cur) unit = groups.cur;
-	// `24–72 h`: the unit after the range's end applies to its start too.
+	// `24–72 h`, `402.7 → 13.3 µs`: the unit after a range's end or a transition's target applies to its start too.
 	const range = RANGE_TAIL.exec(rest);
-	const rangeUnit = range?.[2] ? knownUnit(range[2]) : undefined;
-	if (!unit && rangeUnit) {
-		[dim, factor] = rangeUnit;
-		unit = range![2]!;
+	const arrow = range ? null : ARROW_TAIL.exec(rest);
+	const tailUnit = range?.[2] ?? arrow?.[3];
+	const carried = !unit && tailUnit ? knownUnit(tailUnit) : undefined;
+	if (carried) {
+		[dim, factor] = carried;
+		unit = tailUnit!;
 	}
 	// A magnitude suffix on money (`$6.0k`, `$1.2M`, `$4.4k–6.1k`) scales it; the amount stays currency.
 	if (groups.cur && dim === "count") {
@@ -519,7 +521,6 @@ export function parseCell(markdown: string): Cell {
 		const upper = toNumber(range[1]!) * tailFactor(range[2], factor);
 		return { ...cell, fit: "range", upper, figure: `${figure}${range[0].trim()}` };
 	}
-	const arrow = ARROW_TAIL.exec(rest);
 	if (arrow) {
 		const sign = arrow[1] === "-" || arrow[1] === "−" ? -1 : 1;
 		const to = sign * toNumber(arrow[2]!) * tailFactor(arrow[3], factor);
@@ -850,6 +851,22 @@ export function analyzeTable(header: readonly string[], rows: readonly (readonly
 	};
 }
 
+/**
+ * `table` read with `measures` (some of its own) as its only measures and
+ * `label` naming its rows: the table as a planner sees it once something
+ * that knows what the numbers mean (a judge) says which are results. A
+ * composition stands while every part is still a measure.
+ */
+export function withMeasures(
+	table: TableAnalysis,
+	measures: readonly TableColumn[],
+	label: TableColumn | undefined = table.label,
+): TableAnalysis {
+	const parts = table.composition?.parts ?? [];
+	const whole = parts.length > 0 && parts.every(index => measures.some(column => column.index === index));
+	return { ...table, label, measures, composition: whole ? table.composition : undefined };
+}
+
 /** A header with its numbers blanked: `scale 1 (200 tiles)` and `scale 8 (1600 tiles)` are one sweep. */
 const SWEEP_STEP = /\d+(?:\.\d+)?/g;
 
@@ -951,7 +968,7 @@ const LOOSE_QUOTIENT = 0.05;
 
 /**
  * `ratio = a ÷ b` in every row holding all three, `a` and `b` in one unit
- * (`Python (ms)` ÷ `old C++ (ms)` = `0.997`; `Go` ÷ `pi-walker` = `4.1×`),
+ * (`Python (ms)` ÷ `old C++ (ms)` = `0.997`; `Go` ÷ `omp-xfs` = `4.1×`),
  * within the precision each figure is written to, over three or more rows
  * pinned to {@link LOOSE_QUOTIENT}. Percent columns are left alone: a part's
  * share of a whole (`Share` = `Tokens` ÷ `Total`) is a measure the table states.
@@ -1059,12 +1076,25 @@ function findComposition(measures: readonly TableColumn[], rows: readonly number
 		}
 	}
 	if (sums.size > 0) {
-		// Parts are non-negative and non-zero somewhere, so no column sums into itself: the expansion ends.
-		const leaves = (index: number): number[] => sums.get(index)?.flatMap(part => leaves(part.index)) ?? [index];
+		// Rounding tolerance can admit both A ≈ B + C and B ≈ A + C; neither is a usable composition.
+		const active = new Set<number>();
+		const leaves = (index: number): number[] | undefined => {
+			if (active.has(index)) return undefined;
+			const parts = sums.get(index);
+			if (!parts) return [index];
+			active.add(index);
+			const branches = parts.map(part => leaves(part.index));
+			active.delete(index);
+			return branches.every((branch): branch is number[] => branch !== undefined) ? branches.flat() : undefined;
+		};
+		const expanded = new Map([...sums.keys()].map(index => [index, leaves(index)]));
+		if ([...expanded.values()].some(parts => parts === undefined)) return undefined;
+		// Acyclic now, so some whole is nobody's part.
 		const nested = new Set([...sums.values()].flatMap(parts => parts.map(part => part.index)));
-		const roots = [...sums.keys()].filter(index => !nested.has(index));
-		const root = roots.sort((a, b) => leaves(b).length - leaves(a).length)[0] ?? [...sums.keys()][0]!;
-		return { whole: root, parts: leaves(root).sort((a, b) => a - b), exact: true };
+		const root = [...sums.keys()]
+			.filter(index => !nested.has(index))
+			.sort((a, b) => expanded.get(b)!.length - expanded.get(a)!.length)[0]!;
+		return { whole: root, parts: expanded.get(root)!.sort((a, b) => a - b), exact: true };
 	}
 	const whole = pool.find(column => WHOLE_HEADER.test(column.header));
 	if (!whole) return undefined;

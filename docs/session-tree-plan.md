@@ -72,7 +72,7 @@ There are three leaf movement primitives:
 Flow:
 
 1. Validate the target and compute the abandoned path (`collectEntriesForBranchSummary`).
-2. For an interactive selection of an `ask` tool result whose original questions can be recovered, return a `reopenAsk` request without mutating the tree. The selector re-opens the question UI, then calls `navigateTree` again with the replacement result; that second call appends a new sibling `toolResult` at the original answer's parent.
+2. For an interactive selection of an `ask` tool result whose original form `html` can be recovered, return a `reopenAsk` request without mutating the tree. The selector re-opens the form, then calls `navigateTree` again with the replacement result; that second call appends a new sibling `toolResult` at the original answer's parent.
 3. Emit `session_before_tree` with `TreePreparation`.
 4. Optionally summarize abandoned entries (hook-provided summary or built-in summarizer).
 5. Compute the new leaf target:
@@ -116,7 +116,7 @@ The separate `AgentSession.branch(entryId)` API, used by extension/hook command 
 `buildSessionContext()` (in `session-context.ts`, exposed via `SessionManager.buildSessionContext()`) resolves the active root→leaf path and builds effective LLM context state:
 
 - Tracks latest configured/effective thinking, role-model, per-family service-tier, mode/data, and injected-TTSR state on the path.
-- Handles latest compaction on the path:
+- Handles the latest compaction on the path that the reading model (`options.model`) can replay:
    - emits compaction summary first
    - replays kept messages from `firstKeptEntryId` to compaction point
    - then replays post-compaction messages

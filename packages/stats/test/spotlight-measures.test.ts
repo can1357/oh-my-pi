@@ -5,7 +5,7 @@ import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import { closeDb, initDb } from "@oh-my-pi/omp-stats/db";
 import type { SpotlightAgentScope, SpotlightDashboardStats } from "@oh-my-pi/omp-stats/shared-types";
 import { buildSpotlightDashboard } from "@oh-my-pi/omp-stats/spotlight-aggregator";
-import { getSessionsDir } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, spillFileName, spillUrl } from "@oh-my-pi/pi-utils";
 import { type ShapeSpec, SpotlightSessionBuilder } from "./helpers/spotlight-session";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
@@ -43,7 +43,7 @@ function shaped(b: SpotlightSessionBuilder, name: string, args: Record<string, u
 	return id;
 }
 
-/** A shaped whole-file read of `file` (`lines` lines, original `artifact://N`) that kept `kept`. */
+/** A shaped whole-file read of `file` (`lines` lines, original spill `N`, or `url` as given) that kept `kept`. */
 function shapedRead(
 	b: SpotlightSessionBuilder,
 	file: string,
@@ -52,6 +52,7 @@ function shapedRead(
 		kept?: [number, number][];
 		heat?: string;
 		artifact?: number;
+		url?: string;
 	} & Partial<Pick<ShapeSpec, "holdout" | "scoreFree" | "inTokens" | "outTokens" | "gated">> = {},
 ): string {
 	return shaped(
@@ -66,7 +67,7 @@ function shapedRead(
 			...(opts.scoreFree ? { scoreFree: true } : {}),
 			...(opts.gated ? { gated: true } : {}),
 			original: {
-				url: `artifact://${opts.artifact ?? 0}`,
+				url: opts.url ?? spillUrl(opts.artifact ?? 0),
 				lines: opts.lines ?? 60,
 				path: file,
 				kept: opts.kept ?? [[1, 10]],
@@ -85,7 +86,7 @@ describe("Spotlight savings against plain", () => {
 	it("prefers the logged plain size, estimates older traces from the inline cap, and counts a cut wider than plain as a loss", async () => {
 		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
 		b.user("go");
-		const original = { url: "artifact://0", lines: 4000, kept: [[1, 10]] as [number, number][] };
+		const original = { url: spillUrl(0), lines: 4000, kept: [[1, 10]] as [number, number][] };
 		// 120,000 chars over bash's 52 KiB cap: plain shows 30,000 × 53,248 / 120,000 = 13,312 tokens.
 		shaped(b, "bash", { command: "make all" }, { inTokens: 30_000, outTokens: 1000, original });
 		const logged = shaped(
@@ -140,33 +141,39 @@ describe("Spotlight savings against plain", () => {
 });
 
 describe("Spotlight needed lines", () => {
-	it("records re-read selections and edit Find spans from a subagent's artifact in its parent's directory, until the first edit", async () => {
-		const parent = new SpotlightSessionBuilder(T0).header("/repo");
-		parent.user("delegate");
-		await write("main.jsonl", parent);
-		await Bun.write(sessionPath("main/3.spotlight-read.log"), TEN_LINES.join("\n"));
+	// Spills sit at the session's `local://` root; transcripts from before that named `artifact://N` (file `N.*`).
+	for (const [layout, url, file] of [
+		["spill", spillUrl(3), `main/local/${spillFileName(3)}`],
+		["legacy artifact", "artifact://3", "main/3.spotlight-read.log"],
+	] as const) {
+		it(`records re-read selections and edit Find spans from a subagent's ${layout} in its parent's directory, until the first edit`, async () => {
+			const parent = new SpotlightSessionBuilder(T0).header("/repo");
+			parent.user("delegate");
+			await write("main.jsonl", parent);
+			await Bun.write(sessionPath(file), TEN_LINES.join("\n"));
 
-		const b = new SpotlightSessionBuilder(T0 + 60_000).header("/repo").marker();
-		b.user("task");
-		shapedRead(b, "src/x.ts", { lines: 10, kept: [[1, 3]], artifact: 3 });
-		call(b, "read", { path: "src/x.ts:5-6" });
-		call(b, "read", { path: "src/other.ts:1-2" });
-		edit(b, "/repo/src/x.ts", ["line 7", "line 8"]);
-		// After the file's first edit: new content, not the original's lines.
-		call(b, "read", { path: "src/x.ts:9-10" });
-		await write("main/Sub.jsonl", b);
+			const b = new SpotlightSessionBuilder(T0 + 60_000).header("/repo").marker();
+			b.user("task");
+			shapedRead(b, "src/x.ts", { lines: 10, kept: [[1, 3]], url });
+			call(b, "read", { path: "src/x.ts:5-6" });
+			call(b, "read", { path: "src/other.ts:1-2" });
+			edit(b, "/repo/src/x.ts", ["line 7", "line 8"]);
+			// After the file's first edit: new content, not the original's lines.
+			call(b, "read", { path: "src/x.ts:9-10" });
+			await write("main/Sub.jsonl", b);
 
-		const stats = await dashboard();
-		expect(stats.ranking.sources).toEqual({ reread: 1, edit: 1 });
-		const cell = stats.ranking.cells.find(c => c.group === "applied");
-		expect(cell).toMatchObject({ results: 1, neededLines: 4 });
-		// None of lines 5–8 was kept: a random cut of the same size would have kept 3/10 of them.
-		expect(cell?.keptLift.value).toBe(0);
-	});
+			const stats = await dashboard();
+			expect(stats.ranking.sources).toEqual({ reread: 1, edit: 1 });
+			const cell = stats.ranking.cells.find(c => c.group === "applied");
+			expect(cell).toMatchObject({ results: 1, neededLines: 4 });
+			// None of lines 5–8 was kept: a random cut of the same size would have kept 3/10 of them.
+			expect(cell?.keptLift.value).toBe(0);
+		});
+	}
 
 	it("keeps collecting a shaped read's needs across tail parses", async () => {
 		const file = sessionPath("tail.jsonl");
-		await Bun.write(sessionPath("tail/0.spotlight-read.log"), TEN_LINES.join("\n"));
+		await Bun.write(sessionPath(`tail/local/${spillFileName(0)}`), TEN_LINES.join("\n"));
 		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
 		b.user("go");
 		shapedRead(b, "src/x.ts", { lines: 10, kept: [[1, 2]] });
@@ -225,9 +232,9 @@ describe("Spotlight holdout-adjusted net", () => {
 		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
 		b.user("go");
 		// Held out (the model saw them whole): one re-read of a would-be hidden line (100 tokens), one nothing.
-		shapedRead(b, "src/a.ts", { holdout: { shapedUrl: "artifact://9" } });
+		shapedRead(b, "src/a.ts", { holdout: { shapedUrl: spillUrl(9) } });
 		call(b, "read", { path: "src/a.ts:20-30" }, "x".repeat(400));
-		shapedRead(b, "src/b.ts", { holdout: { shapedUrl: "artifact://9" } });
+		shapedRead(b, "src/b.ts", { holdout: { shapedUrl: spillUrl(9) } });
 		// Applied: one recovered (200 tokens), one not.
 		shapedRead(b, "src/c.ts");
 		call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(800));
@@ -268,7 +275,7 @@ describe("Spotlight historical gated reads", () => {
 		call(b, "read", { path: "src/c.ts:20-30" }, "y".repeat(800));
 		shapedRead(b, "src/d.ts");
 		// Held out: shown whole, nothing fetched.
-		shapedRead(b, "src/h.ts", { holdout: { shapedUrl: "artifact://9" } });
+		shapedRead(b, "src/h.ts", { holdout: { shapedUrl: spillUrl(9) } });
 		await write("gate.jsonl", b);
 
 		const stats = await dashboard();
@@ -304,7 +311,7 @@ describe("Spotlight step economics", () => {
 	it("splits cuts by step combination and saved size, folding rare combinations into other", async () => {
 		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
 		b.user("go");
-		const original = { url: "artifact://0", lines: 100, kept: [[1, 5]] as [number, number][] };
+		const original = { url: spillUrl(0), lines: 100, kept: [[1, 5]] as [number, number][] };
 		for (let i = 0; i < 10; i++) {
 			shaped(
 				b,
@@ -359,5 +366,149 @@ describe("Spotlight needs backfill", () => {
 		// The restored heat ranks the two needed lines first.
 		expect(stats.ranking.cells.find(c => c.group === "applied")?.auc.value).toBe(1);
 		expect(stats.ranking.position.find(p => p.label === "line 1")?.meanHeat).toBe(9);
+	});
+});
+
+describe("Spotlight list reads' windows", () => {
+	/** A shaped `a.py;b.py` read: `a.py` (10 lines) first, then `b.py` (`bLines` lines), each its own window. */
+	function listRead(
+		b: SpotlightSessionBuilder,
+		opts: { kept: [number, number][]; bLines?: number; heat?: string; bWhole?: true },
+	): string {
+		const bLines = opts.bLines ?? 40;
+		return shaped(
+			b,
+			"read",
+			{ path: "a.py;b.py" },
+			{
+				inTokens: 3000,
+				outTokens: 1000,
+				costUsd: 0.001,
+				original: {
+					url: spillUrl(0),
+					lines: 10 + bLines,
+					kept: opts.kept,
+					...(opts.heat ? { heat: opts.heat } : {}),
+					windows: [
+						{ at: 0, lines: 10, start: 1, path: "a.py" },
+						{ at: 10, lines: bLines, start: 1, path: "b.py", ...(opts.bWhole ? { wholeFile: opts.bWhole } : {}) },
+					],
+				},
+			},
+		);
+	}
+
+	async function need(id: string): Promise<{ open: number; reread: string; edit: string } | null> {
+		const db = await initDb();
+		return db
+			.query<{ open: number; reread: string; edit: string }, [string]>(
+				"SELECT open, reread, edit FROM spotlight_needs WHERE tool_call_id = ?",
+			)
+			.get(id);
+	}
+
+	it("ranks a list's cut window as that read alone, and needs nothing of a window shown unchanged", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		// `a.py` shown whole (unscored); `b.py` cut to its two hottest lines, as `src/good.ts` alone above.
+		listRead(b, {
+			kept: [
+				[1, 10],
+				[11, 12],
+			],
+			heat: `${"-".repeat(10)}99${"0".repeat(38)}`,
+		});
+		call(b, "read", { path: "b.py:1-2" });
+		call(b, "read", { path: "a.py:1-6" });
+		await write("list-rank.jsonl", b);
+
+		const cell = (await dashboard()).ranking.cells.find(c => c.group === "applied");
+		expect(cell).toMatchObject({ results: 1, neededLines: 2, auc: { value: 1 } });
+		expect(cell?.topLift.value).toBeCloseTo(10, 12);
+		expect(cell?.keptLift.value).toBeCloseTo(20, 12);
+	});
+
+	it("fetches back a list's whole-file part on a tail read of its file", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		listRead(b, {
+			kept: [
+				[1, 10],
+				[11, 20],
+			],
+			bWhole: true,
+		});
+		call(b, "read", { path: "b.py:-5" });
+		await write("list-tail.jsonl", b);
+
+		const stats = await dashboard();
+		expect(stats.fetchBack.find(c => c.tool === "read" && c.group === "applied")).toMatchObject({
+			results: 1,
+			rate: { value: 1 },
+		});
+	});
+
+	it("locates an edit's Find in its own window and records it past the windows before", async () => {
+		// Both windows hold the same ten lines: only `b.py`'s own window places the Find once.
+		await Bun.write(sessionPath(`list-edit/local/${spillFileName(0)}`), [...TEN_LINES, ...TEN_LINES].join("\n"));
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const list = listRead(b, {
+			kept: [
+				[1, 2],
+				[11, 12],
+			],
+			bLines: 10,
+		});
+		edit(b, "b.py", ["line 7", "line 8"]);
+		await write("list-edit.jsonl", b);
+		await dashboard();
+
+		expect(JSON.parse((await need(list))?.edit ?? "null")).toEqual([[17, 18]]);
+	});
+
+	it("keeps a list's needs open until its last window stops collecting", async () => {
+		const file = sessionPath("list-open.jsonl");
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const list = listRead(b, {
+			kept: [
+				[1, 2],
+				[11, 12],
+			],
+		});
+		call(b, "read", { path: "a.py" });
+		const written = b.text();
+		await Bun.write(file, written);
+		await syncAllSessions({ workers: 1 });
+		expect((await need(list))?.open).toBe(1);
+
+		call(b, "read", { path: "b.py" });
+		await fs.appendFile(file, b.text().slice(written.length));
+		await syncAllSessions({ workers: 1 });
+		expect((await need(list))?.open).toBe(0);
+	});
+
+	it("reads an open read persisted before windows as one at the original's start", async () => {
+		const file = sessionPath("list-state.jsonl");
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const read = shapedRead(b, "src/x.ts", { lines: 10, kept: [[1, 2]] });
+		const written = b.text();
+		await Bun.write(file, written);
+		await syncAllSessions({ workers: 1 });
+		// The cursor as a stats build before windows wrote it: its open reads carry no `at`.
+		const db = await initDb();
+		const row = db
+			.query<{ parser_state: string }, [string]>("SELECT parser_state FROM file_offsets WHERE session_file = ?")
+			.get(file);
+		const state = JSON.parse(row?.parser_state ?? "null", (key, value) => (key === "at" ? undefined : value));
+		db.query("UPDATE file_offsets SET parser_state = ? WHERE session_file = ?").run(JSON.stringify(state), file);
+
+		call(b, "read", { path: "src/x.ts:3-4" });
+		await fs.appendFile(file, b.text().slice(written.length));
+		await syncAllSessions({ workers: 1 });
+
+		expect(JSON.parse((await need(read))?.reread ?? "null")).toEqual([[3, 4]]);
 	});
 });

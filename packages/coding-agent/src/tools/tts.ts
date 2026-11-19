@@ -8,13 +8,14 @@ import { MissingApiKeyError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { DEFAULT_XAI_VOICE_ID, synthesizeSpeech, XAI_MAX_TEXT_LENGTH } from "@oh-my-pi/pi-ai/speech";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { assertNotHeldOpen } from "@oh-my-pi/pi-utils/held-file";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleChain, type RoleChainCandidate } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import { settings, type Settings } from "../config/settings";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import ttsDescription from "../prompts/tools/tts.md" with { type: "text" };
-import { DEFAULT_TTS_VOICE, KOKORO_VOICES } from "../tts/models";
+import { DEFAULT_TTS_VOICE, TTS_LOCAL_VOICES } from "../tts/models";
 import { ttsClient } from "../tts/tts-client";
 import { encodeWav } from "../tts/wav";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
@@ -22,8 +23,9 @@ import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
 import { cfgTtsLocalSpeed, cfgTtsLocalVoice } from "../tts/settings";
 
 // Built-in voices per xAI Tier-1 docs (2026-05-16). xAI also accepts custom voice IDs,
-// so the schema does NOT enum-restrict voice_id; this constant only drives the description.
-const XAI_BUILTIN_VOICES = ["ara", "eve", "leo", "rex", "sal"] as const;
+// so the schema does NOT enum-restrict voice_id; this constant drives the description and
+// the voices the shell's `say` matches by name.
+export const XAI_BUILTIN_VOICES = ["ara", "eve", "leo", "rex", "sal"] as const;
 
 const formatVoiceList = (): string =>
 	XAI_BUILTIN_VOICES.map(v => (v === DEFAULT_XAI_VOICE_ID ? `${v} (default)` : v)).join(", ");
@@ -184,7 +186,7 @@ export const ttsTool: CustomTool<typeof ttsSchema, TtsToolDetails> = {
 	strict: false,
 	approval: "write",
 	description: prompt.render(ttsDescription, {
-		localVoices: KOKORO_VOICES.map(v => (v.id === DEFAULT_TTS_VOICE ? `${v.id} (default)` : v.id)).join(", "),
+		localVoices: TTS_LOCAL_VOICES.map(v => (v.id === DEFAULT_TTS_VOICE ? `${v.id} (default)` : v.id)).join(", "),
 		xaiVoices: formatVoiceList(),
 		maxLength: XAI_MAX_TEXT_LENGTH.toLocaleString("en-US"),
 	}),
@@ -212,6 +214,10 @@ export const ttsTool: CustomTool<typeof ttsSchema, TtsToolDetails> = {
 
 		const failures: string[] = [];
 		for (const { model } of candidates) {
+			if (cfgOffline.get(settingsInstance) && model.provider !== ctx.model?.provider) {
+				failures.push(`${model.provider}/${model.id}: not the active session provider in offline mode`);
+				continue;
+			}
 			try {
 				if (model.api === "local-inference") {
 					return await synthesizeLocal(model, params, settingsInstance, cwd, outputPath, signal);

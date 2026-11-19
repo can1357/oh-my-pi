@@ -198,9 +198,12 @@ describe("rebuildScopedModels after login", () => {
 		const session = new FakeSession([{ model: active }]);
 		const ctx = {
 			settings,
-			session: { model: active, modelRegistry: registry },
-			refreshScopedModelsAfterLogin: async () => {
-				await rebuildScopedModels(session, parseArgs([]), registry, settings);
+			session: {
+				model: active,
+				modelRegistry: registry,
+				refreshScopedModels: async () => {
+					await rebuildScopedModels(session, parseArgs([]), registry, settings);
+				},
 			},
 		};
 

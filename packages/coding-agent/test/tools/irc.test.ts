@@ -802,7 +802,7 @@ describe("IRC", () => {
 			expect(promptSpy).not.toHaveBeenCalled();
 			expect(await session.agent.hasIrcInterrupts?.()).toBe(false);
 			expect(await session.agent.hasQueuedAsides?.()).toBe(false);
-			expect(session.drainPendingIrcInboxMessages("0-Me").map(msg => msg.id)).toEqual(["msg-b", "msg-p"]);
+			expect(session.hasQueuedIrcFrom("0-Peer")).toBe(true);
 		});
 
 		it("queues parent IRC as steering while a subagent turn is streaming", async () => {

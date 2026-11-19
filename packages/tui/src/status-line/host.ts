@@ -10,6 +10,13 @@ export interface StatusAccountIdentity {
 	email?: string;
 	projectId?: string;
 	orgId?: string;
+	/**
+	 * Durable credential row id, set when the identity is credential-scoped
+	 * rather than OAuth-scoped (an API-key account carries no email/account
+	 * identifiers to attribute by). Usage reports probed from stored rows
+	 * carry the matching `metadata.credentialId`.
+	 */
+	credentialId?: number;
 }
 
 /** Nested repository selected as the active workspace context. */
@@ -38,7 +45,7 @@ export interface PromptCacheWarming {
 	state: "scheduled" | "refreshing" | "inactive";
 	/** When the armed refresh decides. */
 	nextWarmAt?: number;
-	/** When warming gives up: its 60-minute streaming or 30-minute idle safety window. */
+	/** When warming gives up: the 30-minute idle window, or while streaming, when refreshing stops paying at current prices. */
 	stopsAt?: number;
 	/** Why nothing is scheduled. */
 	reason?: string;
@@ -97,7 +104,7 @@ export interface StatusLineSession {
 		};
 	};
 	modelRegistry: {
-		isUsingOAuth(model: Model): boolean;
+		isUsingSubscription(model: Model): boolean;
 	};
 	getContextUsage(): { tokens: number; contextWindow: number; percent: number | null } | undefined;
 	autoResolvedThinkingLevel(): string | undefined;
@@ -124,7 +131,7 @@ export interface FooterSession {
 	isAutoThinking: boolean;
 	autoResolvedThinkingLevel(): string | undefined;
 	getContextUsage: StatusLineSession["getContextUsage"];
-	modelRegistry: Pick<StatusLineSession["modelRegistry"], "isUsingOAuth">;
+	modelRegistry: Pick<StatusLineSession["modelRegistry"], "isUsingSubscription">;
 	/**
 	 * Cumulative session rollup. Unlike the active-window stats it spans every
 	 * entry in the session, so compaction does not reset the counters, and it

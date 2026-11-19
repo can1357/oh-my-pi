@@ -74,9 +74,17 @@ export const launchHelp = {
 		"no-session": Flags.boolean({ description: "Don't save session (ephemeral)" }),
 		models: Flags.string({ description: `Comma-separated model patterns for ${formatKeyHint("ctrl+p")} cycling` }),
 		"no-tools": Flags.boolean({ description: "Disable all built-in tools" }),
+		"no-judge": Flags.boolean({ description: "Restrict judge calls to the active model's provider" }),
+		"no-spotlight": Flags.boolean({ description: "Restrict Spotlight calls to the active model's provider" }),
+		offline: Flags.boolean({
+			description: "Restrict auxiliary services to the active model's provider (not a network firewall)",
+		}),
 		"no-lsp": Flags.boolean({ description: "Disable LSP tools, formatting, and diagnostics" }),
 		"no-pty": Flags.boolean({ description: "Disable PTY-based interactive bash execution" }),
-		tools: Flags.string({ description: "Comma-separated list of tools to enable (default: all)" }),
+		tools: Flags.string({
+			description:
+				"Comma-separated built-in or extension tool names to enable (default: tools enabled in settings; see Built-in Tools)",
+		}),
 		thinking: Flags.string({
 			description: `Set thinking level: ${CLI_THINKING_LEVELS.join(", ")}`,
 			options: [...CLI_THINKING_LEVELS],

@@ -5,16 +5,19 @@
  * (`./async-jobs`).
  *
  * - `"cost-gate"` — one spend total per session tree, on main. A worker's
- *   `check`/`admit`/`spent`/`capped` are sync calls; `record` (and `meter`,
- *   which records when the stream finishes) is a notification ordered ahead of
- *   the worker's next check, so a cost recorded in a worker trips main's cap
- *   for every thread's next request.
+ *   `spent` and, while a cap is set, `check`/`admit` are sync calls; whether a
+ *   cap is set is pushed to the worker by one watch per gate (`capped`,
+ *   `onCapChange`), so an uncapped tree's checks stay in the worker. A cap set
+ *   on main applies to a worker's requests once that push arrives. `record`
+ *   (and `meter`, which records when the stream finishes) is a notification
+ *   ordered ahead of the worker's next check, so a cost recorded in a worker
+ *   trips main's cap for every thread's next request.
  * - `"event-bus"` — worker emits forward to main's bus; worker listeners
  *   subscribe on main. Frames for channels main has no listener on are dropped
  *   in the worker (see `RemoteEventBus`).
- * - `"artifact-manager"` — ids and paths are allocated on main (sync
- *   `allocateId`), so ids stay unique across the tree; workers write the
- *   content to the same paths. `dir` and the reserved-id scan stay main's.
+ * - `"artifact-manager"` — spill ids and their files are claimed on main
+ *   (`allocatePath`), so ids stay unique across the tree; workers write the
+ *   content to the same paths. `dir`, `sessionDir` and the id scan stay main's.
  * - `"agent-storage"` — main's open agent.db. Worker settings mirrors return it
  *   from `getStorage()` (seeded by `./settings`), so model usage, MCP tool
  *   cache, fetch credentials, startup verdicts and perf samples read and write
@@ -59,14 +62,23 @@ const cleanups = new PeerCleanups(SERVICE_NAME);
 function serveCostGate(peer: WorkerPeer): RpcServe<CostGate, CostGateProtocol> {
 	return {
 		spent: gate => gate.spent,
-		capped: gate => gate.capped,
 		check: gate => gate.check(),
 		record: (gate, cost) => gate.record(cost),
-		onCapChange: (gate, listener) =>
-			cleanups.track(
+		watchCap: (gate, listener) => {
+			const stop = cleanups.track(
 				peer.threadId,
-				gate.onCapChange(() => ignoreSettle(listener())),
-			),
+				gate.onCapChange(() => {
+					// A closed link rejects; the worker's exit releases the watch.
+					Promise.resolve(listener(gate.capped)).then(
+						alive => {
+							if (!alive) stop();
+						},
+						() => {},
+					);
+				}),
+			);
+			return gate.capped;
+		},
 	};
 }
 
@@ -90,10 +102,9 @@ function serveEventBus(peer: WorkerPeer): RpcServe<EventBus, EventBusProtocol> {
 
 const serveArtifactManager: RpcServe<ArtifactManager, ArtifactManagerProtocol> = {
 	dir: manager => manager.dir,
-	allocateId: manager => manager.allocateId(),
-	allocatePath: (manager, toolType) => manager.allocatePath(toolType),
+	sessionDir: manager => manager.sessionDir,
+	allocatePath: manager => manager.allocatePath(),
 	exists: (manager, id) => manager.exists(id),
-	listFiles: manager => manager.listFiles(),
 	getPath: (manager, id) => manager.getPath(id),
 };
 

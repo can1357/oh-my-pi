@@ -1,5 +1,34 @@
 import * as fs from "node:fs";
+import * as fsAsync from "node:fs/promises";
 import { hasFsCode, isEexist, isEnoent, logger, toError } from "@oh-my-pi/pi-utils";
+
+const RENAME_RETRY_BUDGET_MS = 2_000;
+const RENAME_RETRY_INITIAL_MS = 5;
+const RENAME_RETRY_MAX_MS = 100;
+
+/**
+ * Publish a staged sibling without moving the old destination aside, so readers
+ * never observe a missing file while transient Windows replacement denials clear.
+ */
+export async function replaceFileWithRetry(tempPath: string, targetPath: string): Promise<void> {
+	const deadline = Date.now() + RENAME_RETRY_BUDGET_MS;
+	for (let failures = 0; ; failures++) {
+		try {
+			await fsAsync.rename(tempPath, targetPath);
+			return;
+		} catch (error) {
+			if (
+				process.platform !== "win32" ||
+				(!hasFsCode(error, "EPERM") && !hasFsCode(error, "EACCES") && !isEexist(error))
+			) {
+				throw error;
+			}
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) throw error;
+			await Bun.sleep(Math.min(remaining, RENAME_RETRY_MAX_MS, RENAME_RETRY_INITIAL_MS * 2 ** failures));
+		}
+	}
+}
 
 /**
  * Publish a staged sibling file atomically, preserving an existing destination

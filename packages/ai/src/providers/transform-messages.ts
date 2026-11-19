@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
@@ -506,6 +507,24 @@ export function isSurvivingAssistant(msg: AssistantMessage, model?: Model): bool
 	);
 }
 
+/** Whether `msg` carries mid-conversation Anthropic request controls (`clearAt`, `effort`, `toolChanges`). */
+export function hasAnthropicMessageControls(msg: Message): boolean {
+	if (msg.role !== "developer" || msg.providerPayload?.type !== "anthropicMessage") return false;
+	const { clearAt, effort, toolChanges } = msg.providerPayload;
+	return clearAt !== undefined || effort !== undefined || (toolChanges !== undefined && toolChanges.length > 0);
+}
+
+/**
+ * Whether a `user` or `developer` message emits a non-tool-result wire turn
+ * that ends an assistant tool loop instead of being dropped as empty.
+ */
+export function isReplayTurnBoundary(msg: Message): boolean {
+	if (msg.role === "assistant" || msg.role === "toolResult") return false;
+	if (hasAnthropicMessageControls(msg)) return true;
+	if (typeof msg.content === "string") return msg.content.trim().length > 0;
+	return msg.content.some(block => (block.type === "text" && block.text.trim().length > 0) || block.type === "image");
+}
+
 function getLatestSurvivingAssistantIndex(messages: readonly Message[], model: Model): number {
 	for (let index = messages.length - 1; index >= 0; index -= 1) {
 		const msg = messages[index]!;
@@ -551,6 +570,8 @@ const DIRECT_REPLAY_APIS: Record<KnownApi, boolean> = {
 	"factory-droid-agent": false,
 	"gitlab-duo-agent": false,
 	"devin-agent": false,
+	"antigravity-acp": false,
+	"kiro-api": true,
 };
 
 /**
@@ -1018,6 +1039,18 @@ export function transformMessages<TApi extends Api>(
 				assistantMsg.credentialId !== undefined &&
 				targetCredentialId !== undefined &&
 				assistantMsg.credentialId !== targetCredentialId;
+			// Thinking bound to another credential, or to a prefix a history rewrite
+			// invalidated, is dropped. A model the catalog classes as non-Claude wrote
+			// plain reasoning that neither binding governs, so its visible thinking
+			// stays and replays as demoted text below. Claude's reasoning from another
+			// host or account, and an unclassified model's (an opaque proxy may serve
+			// Claude), keep being dropped.
+			const thinkingBound = foreignCredential || invalidBoundThinkingAssistantIndexes.has(index);
+			const sourceClass = thinkingBound
+				? classifyModel(assistantMsg.provider, assistantMsg.upstreamModel ?? assistantMsg.model, { lenient: true })
+						.class
+				: undefined;
+			const keepsBoundThinking = thinkingBound && sourceClass !== "anthropic" && sourceClass !== "unknown";
 			const signingAnthropicInvolved = isOfficialAnthropicSource || isSigningAnthropicTarget;
 			// Compatible Anthropic-messages reasoning targets that accept
 			// unsigned thinking natively (Z.AI, DeepSeek, the generic
@@ -1082,10 +1115,9 @@ export function transformMessages<TApi extends Api>(
 				!assistantMsg.content.some(anthropicVisibleThinkingSurvivesReplay);
 
 			const transformedContent = assistantMsg.content.flatMap((block, blockIndex) => {
-				if (foreignCredential && (block.type === "thinking" || block.type === "redactedThinking")) return [];
 				if (
-					invalidBoundThinkingAssistantIndexes.has(index) &&
-					(block.type === "thinking" || block.type === "redactedThinking")
+					thinkingBound &&
+					(block.type === "redactedThinking" || (block.type === "thinking" && !keepsBoundThinking))
 				) {
 					return [];
 				}
@@ -1193,7 +1225,7 @@ export function transformMessages<TApi extends Api>(
 					return {
 						type: "text" as const,
 						text: renderDemotedThinking(model.id, sanitized.thinking),
-						[kDemotedThinking]: true,
+						[kDemotedThinking]: sanitized.thinking,
 					};
 				}
 

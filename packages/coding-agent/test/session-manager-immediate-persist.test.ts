@@ -389,7 +389,7 @@ describe("SessionManager JSONL software-crash durability", () => {
 		}
 	});
 
-	it("reparents metadata children when durably discarding an entry", async () => {
+	it("reparents metadata children and keeps billed usage when durably discarding an entry", async () => {
 		const cwd = makeTempDir("@pi-discard-metadata-cwd-");
 		const sessionDir = path.join(cwd, "sessions");
 		const manager = SessionManager.create(cwd, sessionDir);
@@ -397,8 +397,10 @@ describe("SessionManager JSONL software-crash durability", () => {
 		if (!sessionFile) throw new Error("Expected a persisted session file path");
 
 		const priorId = manager.appendMessage(assistantMessage("prior turn"));
-		const discardedId = manager.appendMessage(assistantMessage(""));
+		const discarded = assistantMessage("");
+		const discardedId = manager.appendMessage(discarded);
 		const serviceTierId = manager.appendServiceTierChange(null);
+		const usageBefore = manager.getUsageStatistics();
 		await manager.discardEntryDurably(discardedId);
 		await manager.close();
 
@@ -406,12 +408,23 @@ describe("SessionManager JSONL software-crash durability", () => {
 		const branch = reloaded.getBranch();
 		expect(branch.some(entry => entry.id === discardedId)).toBe(false);
 		expect(branch).toContainEqual(expect.objectContaining({ id: serviceTierId, parentId: priorId }));
+		expect(branch.some(entry => entry.type === "model_usage")).toBe(false);
+		expect(reloaded.getEntries()).toContainEqual(
+			expect.objectContaining({
+				type: "model_usage",
+				parentId: serviceTierId,
+				provider: discarded.provider,
+				model: discarded.model,
+				usage: discarded.usage,
+			}),
+		);
 		expect(branch.at(-1)).toMatchObject({
 			type: "branch_summary",
 			summary: "",
 			details: { kind: "discarded-entry-branch", discardedEntryId: discardedId },
 			parentId: serviceTierId,
 		});
+		expect(reloaded.getUsageStatistics()).toEqual(usageBefore);
 		await reloaded.close();
 	});
 

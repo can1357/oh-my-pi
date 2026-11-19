@@ -283,32 +283,56 @@ describe("native backend", () => {
 		expect(h.terminal.rowBytes.slice(rows)).not.toContain("probe rows");
 	});
 
-	it("fills a narrow pane with centered lg and own-md sheets, follows resizes, and leaves anchored and option-sized sheets", async () => {
-		const sheet = (role: string, nativeOverlay?: Component["nativeOverlay"]): Component =>
-			Object.assign(new Probe(md(role)), nativeOverlay ? { nativeOverlay } : {});
+	it("fills a narrow pane with centered sheets whose content is tall, keeps them full, and leaves short or anchored ones", async () => {
+		const tall = Array.from({ length: 12 }, (_, i) => `line ${i}`).join("\n");
+		const sheet = (text: string, nativeOverlay?: Component["nativeOverlay"]): Probe =>
+			Object.assign(new Probe(md(text)), nativeOverlay ? { nativeOverlay } : {});
+		// An extension dialog without a description: measured through its `rows` fallback.
+		const rowsDialog = (lines: number): Component => ({
+			render: () => Array.from({ length: lines }, (_, i) => `row ${i}`),
+			invalidate: () => {},
+		});
+		const shrinking = sheet(tall, { role: "tall", size: "lg" });
 		harness = await TspHarness.start(
 			tui => {
-				tui.showOverlay(sheet("lg", { role: "lg", size: "lg" }));
-				tui.showOverlay(sheet("own-md", { role: "own-md", size: "md", anchor: "center" }));
-				tui.showOverlay(sheet("top-md", { role: "top-md", size: "md", anchor: "top" }));
-				// No sheet of its own: `md` comes from the overlay options, as for a generic dialog.
-				tui.showOverlay(sheet("dialog"), { width: "50%" });
+				tui.showOverlay(shrinking);
+				tui.showOverlay(sheet("short", { role: "short", size: "lg" }));
+				tui.showOverlay(sheet(tall, { role: "top-tall", size: "md", anchor: "top" }));
+				tui.showOverlay(rowsDialog(12), { width: "80%" });
+				tui.showOverlay(rowsDialog(2), { width: "80%" });
 			},
-			{ cols: 99 },
+			{ cols: 99, rows: 20 },
 		);
 		const h = harness;
-		const sizes = (): Record<string, unknown> =>
-			Object.fromEntries(
-				h
-					.findAll(n => n.k === "overlay")
-					.map(n => [n.p?.role ?? "dialog", n.p && "size" in n.p ? n.p.size : undefined]),
-			);
-		const narrow = { lg: "full", "own-md": "full", "top-md": "md", dialog: "md" };
+		await h.render();
+		// Role-less overlays are the generic dialogs, in show order.
+		const sizes = (): [string, unknown][] =>
+			h
+				.findAll(n => n.k === "overlay")
+				.map(n => [String(n.p?.role ?? "dialog"), n.p && "size" in n.p ? n.p.size : undefined]);
+		const narrow: [string, unknown][] = [
+			["tall", "full"],
+			["short", "lg"],
+			["top-tall", "md"],
+			["dialog", "full"],
+			["dialog", "lg"],
+		];
+		expect(sizes()).toEqual(narrow);
+
+		// Shrinking content (a filter, a reload) never makes a filled sheet jump back.
+		shrinking.current = md("one line");
+		await h.render();
 		expect(sizes()).toEqual(narrow);
 
 		h.event({ ev: "resize", cols: 100 });
 		await h.render();
-		expect(sizes()).toEqual({ lg: "lg", "own-md": "md", "top-md": "md", dialog: "md" });
+		expect(sizes()).toEqual([
+			["tall", "lg"],
+			["short", "lg"],
+			["top-tall", "md"],
+			["dialog", "lg"],
+			["dialog", "lg"],
+		]);
 
 		h.event({ ev: "resize", cols: 99 });
 		await h.render();

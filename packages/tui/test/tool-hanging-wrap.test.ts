@@ -133,57 +133,65 @@ describe("prefixed tool rows", () => {
 		expect(rows[branch + 1]).toContain("remaining details");
 	});
 
-	it("keeps long Ask answers beneath their markers after submission, including grouped questions", async () => {
+	it("keeps long Ask answers beneath their check after submission", async () => {
 		const theme = (await getThemeByName("dark"))!;
-		const chosen = "Choose the longer alternative because it contains information important at the end of its label";
-		const other = "Leave the other longer alternative visible so its ending still distinguishes the choices";
-		const answers = { question: "Pick?", options: [chosen, other], selectedOptions: [chosen] };
-		const cards = [
-			askToolRenderer.renderResult({ content: [], details: answers }, { expanded: false, isPartial: false }, theme),
-			askToolRenderer.renderResult(
-				{ content: [], details: { results: [{ id: "choice", multi: false, ...answers }] } },
-				{ expanded: false, isPartial: false },
-				theme,
-			),
-		];
-		for (const card of cards) {
-			const rows = plain(card.render(width));
-			const chosenRow = rows.findIndex(row => row.includes("◉ Choose"));
-			const otherRow = rows.findIndex(row => row.includes("○ Leave"));
-			expect(chosenRow).toBeGreaterThan(0);
-			expect(rows[chosenRow + 1]).toStartWith("│    ");
-			expect(rows[chosenRow + 1]).toContain("information important");
-			expect(otherRow).toBeGreaterThan(0);
-			expect(rows[otherRow + 1]).toStartWith("│    ");
-			expect(rows[otherRow + 1]).toContain("ending still");
-		}
-	});
-
-	it("hangs Ask option descriptions beneath their prefix and wraps LSP hover code", async () => {
-		const theme = (await getThemeByName("dark"))!;
-		const ask = plain(
+		const answer = "Choose the longer alternative because it contains information important at the end of its label";
+		const rows = plain(
 			askToolRenderer
-				.renderCall(
+				.renderResult(
 					{
-						question: "Pick?",
-						options: [
-							{
-								label: "A",
-								description:
-									"This detailed description is long enough to require a second row inside the narrow card.",
-							},
-						],
+						content: [],
+						details: {
+							answers: [
+								{
+									name: "choice",
+									question: "Which of these longer alternatives should be selected for the next deployment?",
+									answer,
+								},
+							],
+						},
 					},
-					{ expanded: false, isPartial: true },
+					{ expanded: false, isPartial: false },
 					theme,
 				)
 				.render(width),
 		);
-		const description = ask.findIndex(row => row.includes("↳"));
-		expect(description).toBeGreaterThan(0);
-		expect(ask[description + 1]).toStartWith("│     ");
-		expect(ask[description + 1]).toContain("card.");
+		const answerRow = rows.findIndex(row => row.includes("Choose the longer"));
+		expect(answerRow).toBeGreaterThan(0);
+		expect(rows[answerRow + 1]).toStartWith("│    ");
+		expect(rows[answerRow + 1]).toContain("information important");
+	});
 
+	it("renders selected Ask option notes beneath the matching answer", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const rows = plain(
+			askToolRenderer
+				.renderResult(
+					{
+						content: [],
+						details: {
+							answers: [
+								{ name: "unrelated", question: "Unrelated?", answer: "First" },
+								{ name: "db", question: "Database?", answer: "First" },
+							],
+							notes: [
+								{ name: "db", question: "Database?", option: "Second", value: "second", text: "Team standard" },
+							],
+						},
+					},
+					{ expanded: false, isPartial: false },
+					theme,
+				)
+				.render(width),
+		);
+		const note = rows.findIndex(row => row.includes("✎ Second: Team standard"));
+		expect(note).toBeGreaterThan(rows.findIndex(row => row.includes("Database?")));
+		expect(rows[note - 1]).toContain("First");
+		expect(rows.filter(row => row.includes("Team standard"))).toHaveLength(1);
+	});
+
+	it("wraps LSP hover code", async () => {
+		const theme = (await getThemeByName("dark"))!;
 		for (const expanded of [true, false]) {
 			const hover = plain(
 				renderLspResult(

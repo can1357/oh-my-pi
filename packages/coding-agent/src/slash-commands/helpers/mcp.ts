@@ -1,4 +1,3 @@
-import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { connectToServer, disconnectServer, listPrompts, listResources, listTools } from "../../mcp/client";
 import {
@@ -17,8 +16,6 @@ import {
 	McpReauthRefusalError,
 	reauthorizeMcpServer,
 } from "../../mcp/oauth-reauth";
-import { getSmitheryApiKey } from "../../mcp/smithery-auth";
-import { searchSmitheryRegistry } from "../../mcp/smithery-registry";
 import type { MCPServerConfig, MCPServerConnection } from "../../mcp/types";
 import { parseCommandArgs } from "../../utils/command-args";
 import { openPath } from "../../utils/open";
@@ -34,14 +31,6 @@ interface ParsedMcpAddArgs {
 	transport: "http" | "sse";
 	authToken?: string;
 	commandTokens?: string[];
-	error?: string;
-}
-
-interface ParsedMcpSearchArgs {
-	keyword: string;
-	scope: AcpMcpScope;
-	limit: number;
-	semantic: boolean;
 	error?: string;
 }
 
@@ -145,63 +134,6 @@ function parseMcpAddArgs(rest: string): ParsedMcpAddArgs {
 	}
 
 	return validateParsedMcpAddArgs(parsed);
-}
-
-function parseMcpSearchArgs(rest: string): ParsedMcpSearchArgs {
-	const tokens = parseCommandArgs(rest);
-	const missingKeyword: ParsedMcpSearchArgs = {
-		keyword: "",
-		scope: "project",
-		limit: 20,
-		semantic: false,
-		error: "Keyword required. Usage: /mcp smithery-search <keyword> [--scope project|user] [--limit <1-100>] [--semantic]",
-	};
-	if (tokens.length === 0) return missingKeyword;
-
-	const keywordParts: string[] = [];
-	let scope: AcpMcpScope = "project";
-	let limit = 20;
-	let semantic = false;
-
-	for (let index = 0; index < tokens.length; index++) {
-		const token = tokens[index]!;
-		if (token === "--scope") {
-			const value = tokens[index + 1];
-			if (!value || (value !== "project" && value !== "user")) {
-				return { keyword: "", scope, limit, semantic, error: "Invalid --scope value. Use project or user." };
-			}
-			scope = value;
-			index++;
-			continue;
-		}
-		if (token === "--limit") {
-			const value = tokens[index + 1];
-			if (!value) return { keyword: "", scope, limit, semantic, error: "Missing value for --limit." };
-			const parsed = Number(value);
-			if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
-				return {
-					keyword: "",
-					scope,
-					limit,
-					semantic,
-					error: "Invalid --limit value. Use an integer between 1 and 100.",
-				};
-			}
-			limit = parsed;
-			index++;
-			continue;
-		}
-		if (token === "--semantic") {
-			semantic = true;
-			continue;
-		}
-		if (token.startsWith("--")) return { keyword: "", scope, limit, semantic, error: `Unknown option: ${token}` };
-		keywordParts.push(token);
-	}
-
-	const keyword = keywordParts.join(" ").trim();
-	if (!keyword) return { ...missingKeyword, scope, limit, semantic };
-	return { keyword, scope, limit, semantic };
 }
 
 async function withPreparedMcpConnection<T>(
@@ -331,41 +263,6 @@ async function handleAddCommand(rest: string, runtime: SlashCommandRuntime): Pro
 		return commandConsumed();
 	} catch (err) {
 		return usage(`Failed to add server: ${errorMessage(err)}`, runtime);
-	}
-}
-
-async function handleSmitherySearchCommand(rest: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
-	const parsed = parseMcpSearchArgs(rest);
-	if (parsed.error) return usage(parsed.error, runtime);
-	try {
-		const apiKey = await getSmitheryApiKey();
-		const results = await searchSmitheryRegistry(parsed.keyword, {
-			limit: parsed.limit,
-			apiKey: apiKey ?? undefined,
-			includeSemantic: parsed.semantic,
-		});
-		if (results.length === 0) {
-			await runtime.output(`No Smithery results found for "${parsed.keyword}".`);
-			return commandConsumed();
-		}
-		await runtime.output(
-			results
-				.map(
-					result =>
-						`${result.display.displayName} (${result.name})${result.display.description ? ` — ${result.display.description}` : ""}`,
-				)
-				.join("\n"),
-		);
-		return commandConsumed();
-	} catch (err) {
-		const message = errorMessage(err);
-		if (AIError.is(AIError.classify(err), AIError.Flag.AuthFailed)) {
-			return usage(
-				"Smithery authentication required. Run /mcp smithery-login in the TUI client or add an API key to ~/.omp/agent/smithery.json.",
-				runtime,
-			);
-		}
-		return usage(`Smithery search failed: ${message}`, runtime);
 	}
 }
 
@@ -580,11 +477,10 @@ const MCP_HELP_TEXT = [
 	"  /mcp reauth <name>                                      Reauthorize OAuth for a server (opens browser)",
 	"  /mcp add <name> [--scope project|user] [--url <url>]    Add a server (non-interactive)",
 	"  /mcp add <name> [-- <command...>]                       Add a stdio server",
-	"  /mcp smithery-search <kw> [--scope project|user]        Search Smithery registry",
 	"  /mcp help                                               Show this help",
 ].join("\n");
 
-const TUI_ONLY_MCP_VERBS = new Set(["unauth", "smithery-login", "smithery-logout", "reconnect"]);
+const TUI_ONLY_MCP_VERBS = new Set(["unauth", "reconnect"]);
 
 /** ACP/text-mode `/mcp` handler. Shared by both dispatchers via the spec. */
 export async function handleMcpAcp(
@@ -616,8 +512,6 @@ export async function handleMcpAcp(
 			return await handleReauthCommand(rest, runtime);
 		case "add":
 			return await handleAddCommand(rest, runtime);
-		case "smithery-search":
-			return await handleSmitherySearchCommand(rest, runtime);
 		case "reload":
 			await runtime.refreshCommands();
 			await runtime.output("MCP runtime reload requested.");
