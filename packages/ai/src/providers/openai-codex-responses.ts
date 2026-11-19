@@ -2627,7 +2627,10 @@ class CodexStreamProcessor {
 				const nativeOutputItems = runtime.finalizeNativeOutputItems();
 				const replayableResponseItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 					cloneJsonTree(nativeOutputItems),
-					{ supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal },
+					{
+						supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal,
+						preserveReasoningOnly: status === "incomplete" && incompleteReason === "max_output_tokens",
+					},
 				);
 				if (responseId && replayableResponseItems && replayableResponseItems.length === nativeOutputItems.length) {
 					state.lastResponseId = responseId;
@@ -4384,6 +4387,7 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 			if (historyItems) {
 				const sanitizedHistoryItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(historyItems, {
 					supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal,
+					preserveReasoningOnly: assistantMsg.stopReason === "length",
 				});
 				if (sanitizedHistoryItems) {
 					const rawReplayItems =

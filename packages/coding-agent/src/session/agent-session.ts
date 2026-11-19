@@ -3197,6 +3197,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		syncCostCapGate();
 		this.addDisposer(this.#costGate.onCapChange(syncCostCapGate));
 		this.addDisposer(() => removeCostCapGate?.());
+		this.addDisposer(() => this.#maintenance.dispose());
 
 		const handoffHost: SessionHandoffHost = {
 			agent: this.agent,
@@ -4453,6 +4454,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// against live abort state, and a deferred start lets `abort()` settle first, so a
 			// deliberate empty abort reads as a reasonless one and is auto-retried.
 			await Promise.all([this.#processAgentEvent(event), computerControlRevocation]);
+			if (
+				loopEpoch === this.#runEpoch &&
+				this.#prunedTerminalFailure &&
+				this.#goalModeState?.enabled &&
+				this.agent.state.messages.findLast(message => message.role === "assistant")?.stopReason === "length"
+			)
+				await this.#goalRuntime.pauseGoal();
 		} catch (error) {
 			// Post-turn maintenance (compaction, pruning rewrites, hooks) threw before
 			// publishing the settle. Without it the run never reports idle and every
@@ -6186,6 +6194,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			void this.#notifyExtensionsLoopEnd(activeMessages, { awaiting: false });
 			return;
 		}
+		const failure = this.#prunedTerminalFailure;
+		const failureKey = failure && sessionMessagePersistenceKey(failure);
+		if (
+			failure &&
+			!event.messages.some(
+				message =>
+					message === failure ||
+					(message.role === "assistant" &&
+						message.errorMessage === failure.errorMessage &&
+						sessionMessagePersistenceKey(message) === failureKey),
+			)
+		)
+			event = { ...event, messages: [...event.messages, failure] };
 		// A loop whose start was never observed (it began while the agent was disconnected)
 		// still belongs to a run that must end.
 		this.#openRun();
@@ -13965,9 +13986,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Retry the last failed assistant turn when the session is idle. */
 	async retry(): Promise<boolean> {
 		const didRetry = await this.#recovery.retry(this.#prunedTerminalFailure);
-		// A manual retry is the user resuming the run they interrupted, so it lifts the
-		// interrupt's auto-resume suppression the same way a typed prompt does.
-		if (didRetry) this.#advisors.autoResumeSuppressed = false;
+		// An admitted manual retry is an explicit resume: renew length recovery
+		// and lift the interrupt's auto-resume suppression.
+		if (didRetry) {
+			this.#maintenance.prepareManualRetry();
+			this.#advisors.autoResumeSuppressed = false;
+		}
 		return didRetry;
 	}
 

@@ -101,7 +101,9 @@ describe("findCutPoint backward scan boundaries", () => {
 	describe("counts the reasoning the latest turn replays when its tool calls were abandoned", () => {
 		// The replay keeps the latest assistant turn byte-for-byte, so a turn
 		// whose tool calls ended on max_tokens still sends its 30,000 tokens of
-		// signed reasoning, and the kept tail must count them.
+		// signed reasoning, and the kept tail must count them. That reasoning is
+		// still pending, so the cut also keeps the prompt it answers (index 2);
+		// uncounted, everything fits and the cut lands at 0.
 		const opus = getBundledModel("anthropic", "claude-opus-5-5");
 		const fromOpus = (content: AssistantMessage["content"], stop: AssistantMessage["stopReason"]) => ({
 			...createAssistantMessage(content, stop),
@@ -114,13 +116,13 @@ describe("findCutPoint backward scan boundaries", () => {
 			type: "message",
 			message: content,
 		});
-		const abandoned = (): SessionMessageEntry => {
+		const abandoned = (stop: AssistantMessage["stopReason"] = "length"): SessionMessageEntry => {
 			const latest = fromOpus(
 				[
 					{ type: "thinking", thinking: "Plan the read.", thinkingSignature: "s".repeat(4000) },
 					{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "a.ts" } },
 				],
-				"length",
+				stop,
 			);
 			latest.usage = { ...latest.usage, output: 30_000, totalTokens: 30_000 };
 			return message(latest);
@@ -134,7 +136,7 @@ describe("findCutPoint backward scan boundaries", () => {
 		test("as the newest entry", () => {
 			const entries = [...history(), abandoned()];
 			const cut = findCutPoint(entries, new Tokenizer(opus), 0, entries.length, 20_000);
-			expect(cut.firstKeptEntryIndex).toBe(3);
+			expect(cut.firstKeptEntryIndex).toBe(2);
 		});
 
 		test("behind a newer turn the replay drops for its malformed tool call", () => {
@@ -143,7 +145,13 @@ describe("findCutPoint backward scan boundaries", () => {
 			const malformed = fromOpus([{ type: "toolCall", id: "call-2", name: "", arguments: {} }], "toolUse");
 			const entries = [...history(), abandoned(), message(malformed)];
 			const cut = findCutPoint(entries, new Tokenizer(opus), 0, entries.length, 20_000);
-			expect(cut.firstKeptEntryIndex).toBe(4);
+			expect(cut.firstKeptEntryIndex).toBe(2);
+		});
+
+		test("without keeping the prompt of a turn that finished", () => {
+			const entries = [...history(), abandoned("toolUse")];
+			const cut = findCutPoint(entries, new Tokenizer(opus), 0, entries.length, 20_000);
+			expect(cut.firstKeptEntryIndex).toBe(3);
 		});
 	});
 });

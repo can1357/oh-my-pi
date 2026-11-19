@@ -81,6 +81,8 @@ export function truncateResponseItemId(id: string, prefix: string): string {
 interface OpenAIResponsesReplaySanitizeOptions {
 	supportsImageDetailOriginal?: boolean;
 	supportsComputerUse?: boolean;
+	/** Keep native reasoning from an interrupted output-length continuation. */
+	preserveReasoningOnly?: boolean;
 }
 /**
  * Removes response-only lifecycle status from item types that reject it when replayed as input.
@@ -347,9 +349,9 @@ export function stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(items:
 /**
  * Sanitize assistant-native Responses history for replay.
  *
- * Returns `undefined` for hidden-empty turns that only contain reasoning and an
- * empty assistant message, allowing callers to rebuild visible transcript
- * history instead of replaying stale native state.
+ * Returns `undefined` for hidden-empty turns unless `preserveReasoningOnly`
+ * retains an interrupted reasoning continuation. Empty assistant-message slots
+ * are still removed rather than replayed.
  *
  * When the turn does carry replayable output, whitespace-only assistant
  * messages are dropped rather than replayed. gpt-5.6 Codex ends a turn whose
@@ -369,17 +371,15 @@ export function sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 	let hasEmptyAssistantMessage = false;
 
 	for (const item of sanitized) {
-		if (item.type === "reasoning") continue;
-		if (isEmptyAssistantMessage(item)) {
-			hasEmptyAssistantMessage = true;
-			continue;
-		}
-		hasReplayableAssistantOutput = true;
+		if (isEmptyAssistantMessage(item)) hasEmptyAssistantMessage = true;
+		else if (item.type !== "reasoning" || options.preserveReasoningOnly) hasReplayableAssistantOutput = true;
 	}
 
 	if (!hasReplayableAssistantOutput) return undefined;
 	if (!hasEmptyAssistantMessage) return sanitized;
-	return dropEmptyAssistantMessagesForReplay(sanitized);
+	return options.preserveReasoningOnly
+		? sanitized.filter(item => !isEmptyAssistantMessage(item))
+		: dropEmptyAssistantMessagesForReplay(sanitized);
 }
 
 function isEmptyAssistantMessage(item: OpenAIResponsesReplayItem): boolean {

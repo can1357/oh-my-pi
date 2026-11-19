@@ -615,6 +615,28 @@ describe("wrapLeakedThinkingStream", () => {
 		expect(thinks(result).map(b => [b.thinking, b.thinkingSignature])).toEqual([["recovered reasoning", signature]]);
 	});
 
+	it("keeps redacted thinking that emitted no per-block events at its source position", async () => {
+		const { result } = await runWrapper(inner => {
+			inner.push({ type: "start", partial: msg() });
+			inner.push({
+				type: "done",
+				reason: "length",
+				message: msg({
+					stopReason: "length",
+					content: [
+						{ type: "redactedThinking", data: "opaque" },
+						{ type: "text", text: "partial answer" },
+					],
+				}),
+			});
+		});
+
+		expect(result.content).toEqual([
+			{ type: "redactedThinking", data: "opaque" },
+			{ type: "text", text: "partial answer" },
+		]);
+	});
+
 	it("replays finalized signed reasoning once when deltas are absent or incomplete", async () => {
 		const text = "synthetic reasoning";
 		const signature = JSON.stringify({

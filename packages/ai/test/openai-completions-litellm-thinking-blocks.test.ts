@@ -30,7 +30,7 @@ const toolCallDelta = {
 	],
 };
 
-function sse(deltas: Record<string, unknown>[], finishReason: "stop" | "tool_calls"): Response {
+function sse(deltas: Record<string, unknown>[], finishReason: "length" | "stop" | "tool_calls"): Response {
 	const chunks = [
 		...deltas.map(delta => ({
 			id: "c",
@@ -50,41 +50,49 @@ function sse(deltas: Record<string, unknown>[], finishReason: "stop" | "tool_cal
 }
 
 /** First call streams `firstTurn`; every later call answers "done". Captures request bodies. */
-function createFetch(firstTurn: Record<string, unknown>[], payloads: unknown[]): FetchImpl {
+function createFetch(
+	firstTurn: Record<string, unknown>[],
+	payloads: unknown[],
+	finishReason: "tool_calls" | "length",
+): FetchImpl {
 	let requestIndex = 0;
 	async function mockFetch(_input: string | URL | Request, init?: RequestInit): Promise<Response> {
 		if (typeof init?.body === "string") payloads.push(JSON.parse(init.body));
-		if (requestIndex++ === 0) return sse(firstTurn, "tool_calls");
+		if (requestIndex++ === 0) return sse(firstTurn, finishReason);
 		return sse([{ role: "assistant", content: "done" }], "stop");
 	}
 	return Object.assign(mockFetch, { preconnect: fetch.preconnect });
 }
 
-/** Streams the tool-call turn, then sends the continuation to `replayModel` and returns its assistant turn. */
+/** Streams a turn, then captures its replay on the next request. */
 async function roundTrip(
 	firstTurn: Record<string, unknown>[],
 	replayModel = liteLLMModel(),
+	finishReason: "tool_calls" | "length" = "tool_calls",
 ): Promise<{ assistant: AssistantMessage; replayed: Record<string, unknown> }> {
 	const payloads: unknown[] = [];
-	const fetchMock = createFetch(firstTurn, payloads);
+	const fetchMock = createFetch(firstTurn, payloads, finishReason);
 	const assistant = await streamOpenAICompletions(
 		liteLLMModel(),
 		{ messages: [userMessage] },
 		{ apiKey: "k", fetch: fetchMock },
 	).result();
-	const toolCall = assistant.content.find(block => block.type === "toolCall");
-	if (toolCall?.type !== "toolCall") throw new Error("streamed tool call missing");
-	const toolResult: Message = {
-		role: "toolResult",
-		toolCallId: toolCall.id,
-		toolName: toolCall.name,
-		content: [{ type: "text", text: "hi" }],
-		isError: false,
-		timestamp: 2,
-	};
+	let next: Message = { role: "user", content: "continue", timestamp: 3 };
+	if (finishReason === "tool_calls") {
+		const toolCall = assistant.content.find(block => block.type === "toolCall");
+		if (!toolCall) throw new Error("streamed tool call missing");
+		next = {
+			role: "toolResult",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			content: [{ type: "text", text: "hi" }],
+			isError: false,
+			timestamp: 2,
+		};
+	}
 	await streamOpenAICompletions(
 		replayModel,
-		{ messages: [userMessage, assistant, toolResult] },
+		{ messages: [userMessage, assistant, next] },
 		{ apiKey: "k", fetch: fetchMock },
 	).result();
 	const messages = Reflect.get(payloads[1] as object, "messages");
@@ -161,5 +169,16 @@ describe("openai-completions LiteLLM thinking_blocks", () => {
 		const { replayed } = await roundTrip([{ role: "assistant", reasoning_content: "plain" }, toolCallDelta]);
 
 		expect(replayed.thinking_blocks).toBeUndefined();
+	});
+
+	it("replays a redacted-only turn cut off by the output cap so its reasoning continues", async () => {
+		const thinkingBlocks = [{ type: "redacted_thinking", data: "REDACTED_BLOB" }];
+		const { assistant, replayed } = await roundTrip(
+			[{ role: "assistant", thinking_blocks: thinkingBlocks }],
+			liteLLMModel(),
+			"length",
+		);
+		expect(assistant.stopReason).toBe("length");
+		expect(replayed.thinking_blocks).toEqual(thinkingBlocks);
 	});
 });

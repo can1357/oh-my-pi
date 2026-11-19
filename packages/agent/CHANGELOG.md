@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Compaction keeps interrupted reasoning with its prompt, and the context estimate counts all retained reasoning that the provider bills for replay ([#18064](https://github.com/can1357/oh-my-pi/pull/18064) by [@SergioHC95](https://github.com/SergioHC95))
+
 ## [19.0.0] - 2026-11-18
 
 ### Added

@@ -4,8 +4,10 @@ import { scheduler } from "node:timers/promises";
 import {
 	type Agent,
 	type AgentMessage,
+	type AgentPreModelCallResult,
 	type AgentTurnEndContext,
 	lastContextIndex,
+	lastContextMessage,
 	type MessageCountOptions,
 	resolveTelemetry,
 	type StreamFn,
@@ -68,6 +70,7 @@ import { completeSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { replaysNativeResponsesHistory } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
+import { hasReplayableThinking } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { resolvePromptCacheLookback } from "@oh-my-pi/pi-catalog/compat/prompt-cache-lookback";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -129,6 +132,7 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 import experimentalContextNotesReminderPrompt from "../prompts/system/experimental-context-notes-reminder.md" with { type: "text" };
 import experimentalContextRolloverPrompt from "../prompts/system/experimental-context-rollover.md" with { type: "text" };
+import lengthStopContinuePrompt from "../prompts/system/length-stop-continue.md" with { type: "text" };
 import lengthStopRetryTemplate from "../prompts/system/length-stop-retry.md" with { type: "text" };
 
 import {
@@ -656,6 +660,7 @@ export class SessionMaintenance {
 	 * prompt ({@link resetForNewPrompt}).
 	 */
 	#incompleteRecoveryAttempts = 0;
+	#removeLengthRecoveryGate: (() => void) | undefined;
 	/** Latest rollover boundary that already received its pre-threshold notebook reminder. */
 	#experimentalNotesReminderBoundaryId: string | undefined;
 	/** Each archive's no-reasoning view, rendered (or failed closed) once per compaction entry. */
@@ -747,7 +752,38 @@ export class SessionMaintenance {
 
 	/** Clears per-prompt recovery counters when a new user prompt starts. */
 	resetForNewPrompt(): void {
-		this.#incompleteRecoveryAttempts = 0;
+		this.#setIncompleteRecoveryAttempts(0);
+	}
+
+	/** Preserve pending reasoning when an admitted manual retry starts a new model turn. */
+	prepareManualRetry(): void {
+		this.resetForNewPrompt();
+		const message = lastContextMessage(this.#host.messages());
+		if (
+			message?.role === "assistant" &&
+			message.stopReason === "length" &&
+			!assistantTurnDelivered(message) &&
+			hasReplayableThinking(message)
+		) {
+			this.#appendLengthContinuationCue();
+		}
+	}
+
+	dispose(): void {
+		this.resetForNewPrompt();
+	}
+
+	#setIncompleteRecoveryAttempts(attempts: number): void {
+		this.#incompleteRecoveryAttempts = attempts;
+		if (attempts === 0) {
+			this.#removeLengthRecoveryGate?.();
+			this.#removeLengthRecoveryGate = undefined;
+		} else if (!this.#host.isDisposed()) {
+			// A permanent pre-model gate would turn ordinary user aborts into clean stops.
+			this.#removeLengthRecoveryGate ??= this.#host.agent.addBeforeModelCall((_context, signal) =>
+				this.#checkLengthContinuationBudget(signal),
+			);
+		}
 	}
 
 	/** Whether blocking compaction owns prompt admission. */
@@ -2940,8 +2976,7 @@ export class SessionMaintenance {
 		// diverges from what the provider bills, so counting it would let a
 		// thinking-heavy turn falsely trip the floor. The provider usage (the
 		// other arm of compactionContextTokens) already accounts for it.
-		// Native Responses reasoning that replays still counts, at its reported
-		// reasoning tokens (see MessageCountOptions.excludeEncryptedReasoning).
+		// Known native replay prices still count (see MessageCountOptions).
 		const opts = { excludeEncryptedReasoning: true } as const;
 		return (
 			computeNonMessageTokens(this.#host.nonMessageTokenSource(), tokenizer, this.#host.settings.revision) +
@@ -3104,6 +3139,11 @@ export class SessionMaintenance {
 		signal: AbortSignal | undefined,
 		context: AgentTurnEndContext | undefined,
 	): Promise<void> {
+		if (!signal?.aborted && context?.message.role === "assistant") {
+			if (assistantTurnDelivered(context.message)) this.#setIncompleteRecoveryAttempts(0);
+			else if (context.message.stopReason === "length" && hasReplayableThinking(context.message))
+				this.#setIncompleteRecoveryAttempts(this.#incompleteRecoveryAttempts + 1);
+		}
 		if (signal?.aborted || this.#host.isDisposed() || this.isCompacting) return;
 
 		const ready = this.#readyCompaction;
@@ -3313,7 +3353,7 @@ export class SessionMaintenance {
 		// the counter so a later isolated `length` stop starts fresh rather than
 		// inheriting a stale count from an earlier loop. Signed reasoning alone does
 		// not count, or a model burning every budget on thinking retries forever.
-		if (assistantTurnDelivered(assistantMessage)) this.#incompleteRecoveryAttempts = 0;
+		if (assistantTurnDelivered(assistantMessage)) this.#setIncompleteRecoveryAttempts(0);
 		// Skip overflow check if the message came from a different model.
 		// This handles the case where user switched from a smaller-context model (e.g. opus)
 		// to a larger-context model (e.g. codex) - the overflow error from the old model
@@ -3615,8 +3655,9 @@ export class SessionMaintenance {
 		if (sameModel && !errorIsFromBeforeCompaction && assistantMessage.stopReason === "length") {
 			const incompleteCompactionSettings = this.#compactionSettings;
 			const incompleteContextTokens = calculateContextTokens(assistantMessage.usage);
-			// The cut output is dropped before the next request, so only the prompt
-			// counts against the configured trigger (#15870). Subtract the output from
+			// A dropped cut output never reaches the next request, so only the prompt
+			// counts against the configured trigger (#15870); retained reasoning is held
+			// to the window's prompt budget below instead. Subtract the output from
 			// occupancy rather than reading prompt buckets: an authoritative
 			// `usage.contextTokens` (Cursor checkpoints) already includes this turn's
 			// output. Prompt + output still marks the window itself as what ran out
@@ -3645,6 +3686,35 @@ export class SessionMaintenance {
 				);
 				return COMPACTION_CHECK_NONE;
 			}
+			if (hasReplayableThinking(assistantMessage, this.#model)) {
+				if (
+					this.#incompleteRecoveryAttempts > INCOMPLETE_RECOVERY_MAX_RETRIES &&
+					this.#checkLengthContinuationBudget()
+				)
+					return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+				if (windowExhausted || !this.#compactionCreatedRetryFit()) {
+					const result = await this.runAutoCompaction("incomplete", true, {
+						autoContinue: false,
+						suppressContinuation: true,
+						triggerContextTokens: incompleteContextTokens,
+						phase: "mid_turn",
+					});
+					if (this.#host.promptGeneration() !== generation) return COMPACTION_CHECK_NONE;
+					if (
+						!result.historyRewritten ||
+						result.automaticContinuationBlocked ||
+						!this.#compactionCreatedRetryFit()
+					)
+						return this.#pauseLengthContinuation(
+							assistantMessage,
+							"The retained reasoning cannot fit after older-history compaction.",
+						);
+				}
+				if (!autoContinue) return COMPACTION_CHECK_NONE;
+				this.#appendLengthContinuationCue();
+				this.#host.scheduleAgentContinue({ source: "incomplete-retry", delayMs: 100, generation });
+				return COMPACTION_CHECK_CONTINUATION;
+			}
 
 			// Same active-context vs persisted-history split as the overflow path
 			// above: clear the dead turn from agent state so it cannot be replayed,
@@ -3654,7 +3724,7 @@ export class SessionMaintenance {
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (promoted) {
 				await this.#host.dropPersistedAssistantTurn(assistantMessage);
-				this.#incompleteRecoveryAttempts = 0;
+				this.#setIncompleteRecoveryAttempts(0);
 				logger.debug("Context promotion triggered by response.incomplete (length stop)", {
 					from: `${assistantMessage.provider}/${assistantMessage.model}`,
 				});
@@ -3680,7 +3750,7 @@ export class SessionMaintenance {
 				// after compaction is never cut short.
 				if (this.#incompleteRecoveryAttempts >= INCOMPLETE_RECOVERY_MAX_RETRIES) {
 					const attempts = this.#incompleteRecoveryAttempts;
-					this.#incompleteRecoveryAttempts = 0;
+					this.#setIncompleteRecoveryAttempts(0);
 					const droppedEntryId = await this.#host.dropPersistedAssistantTurn(assistantMessage);
 					// Reparenting the live branch is insufficient when this terminal path
 					// appends no successor: on restart, the loader selects the last physical
@@ -3698,7 +3768,7 @@ export class SessionMaintenance {
 					this.#host.retainTerminalFailure({ ...assistantMessage, stopReason: "error", errorMessage: finalError });
 					return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
 				}
-				this.#incompleteRecoveryAttempts++;
+				this.#setIncompleteRecoveryAttempts(this.#incompleteRecoveryAttempts + 1);
 				if (!windowExhausted) {
 					// Nothing delivered and the window still has room: compaction would
 					// only rewrite history the next attempt does not need shrunk.
@@ -3849,6 +3919,37 @@ export class SessionMaintenance {
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
 		}
 		return COMPACTION_CHECK_NONE;
+	}
+
+	#checkLengthContinuationBudget(signal?: AbortSignal): AgentPreModelCallResult {
+		if (signal?.aborted || this.#incompleteRecoveryAttempts === 0) return;
+		const exhausted = this.#incompleteRecoveryAttempts > INCOMPLETE_RECOVERY_MAX_RETRIES;
+		if (!exhausted && this.#compactionCreatedRetryFit()) return;
+		const message = this.#host
+			.messages()
+			.findLast((message): message is AssistantMessage => message.role === "assistant");
+		if (message?.stopReason !== "length" || !hasReplayableThinking(message)) return;
+		this.#pauseLengthContinuation(
+			message,
+			exhausted ? "The reasoning continuation allowance is exhausted." : "The retained reasoning cannot fit.",
+		);
+		return { stop: true };
+	}
+
+	#pauseLengthContinuation(message: AssistantMessage, reason: string): CompactionCheckResult {
+		const errorMessage = `${reason} The original reasoning is retained. Resume explicitly to continue.`;
+		this.#host.retainTerminalFailure({ ...message, stopReason: "error", errorMessage });
+		this.#host.emitNotice("error", errorMessage, "compaction");
+		return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+	}
+
+	#appendLengthContinuationCue(): void {
+		this.#host.agent.appendMessage({
+			role: "developer",
+			content: [{ type: "text", text: prompt.render(lengthStopContinuePrompt) }],
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
 	}
 
 	/**
@@ -4800,16 +4901,44 @@ export class SessionMaintenance {
 
 	/**
 	 * Retry-side check: whether an overflow/incomplete recovery rebuilt a prompt
-	 * that fits the active model's window again. Callers MUST invoke this AFTER
-	 * dropping the failed assistant from `this.#host.messages()` so the just-failed
-	 * turn (absent from the retry prompt) is excluded from the estimate. Unlike
-	 * the `COMPACTION_RECOVERY_BAND × threshold` hysteresis the auto-continue
-	 * thrash guard uses, a retry only needs to *fit* — a 200k-window prompt
-	 * compacted from overflow down to ~150k is retryable even though it sits above
-	 * `0.8 × 170k` (PR #3412 review).
+	 * that fits the active model's window again. Drop a failed turn before calling;
+	 * retained reasoning stays and is billed in the stored estimate. Its last
+	 * provider usage describes the pre-compaction prompt, not the retained history.
+	 * A retry only needs to fit, not cross the lower auto-compaction hysteresis band.
 	 */
 	#compactionCreatedRetryFit(): boolean {
-		return this.#model ? this.contextFitsModel(this.#model) : true;
+		const model = this.#model;
+		if (!model) return true;
+		const message = this.#host
+			.messages()
+			.findLast((message): message is AssistantMessage => message.role === "assistant");
+		if (
+			message?.stopReason === "length" &&
+			!assistantTurnDelivered(message) &&
+			hasReplayableThinking(message, model)
+		) {
+			const contextWindow = model.contextWindow ?? 0;
+			return (
+				contextWindow <= 0 ||
+				this.#estimateStoredContextTokens() <= promptBudgetTokens(contextWindow, this.#compactionSettings)
+			);
+		}
+		return this.contextFitsModel(model);
+	}
+
+	/** A rebuilt branch can contain the failed turn again, followed by excluded rows. */
+	#dropFailedCompactionTurn(dropLength: boolean): boolean {
+		const messages = this.#host.agent.state.messages;
+		const index = lastContextIndex(messages);
+		const tail = messages[index];
+		if (
+			tail?.role !== "assistant" ||
+			(tail.stopReason !== "error" && !(dropLength && tail.stopReason === "length" && !hasReplayableThinking(tail)))
+		) {
+			return false;
+		}
+		this.#host.agent.replaceMessages(messages.toSpliced(index, 1));
+		return true;
 	}
 
 	/**
@@ -5751,7 +5880,7 @@ export class SessionMaintenance {
 				// warning the user should see.
 				let frameRescueResult: snapcompact.CompactionResult | undefined;
 				let frameRescueCreatedHeadroom = false;
-				if (reason !== "idle") {
+				if (reason !== "idle" && reason !== "incomplete") {
 					frameRescueResult = await this.#rescueSnapcompactFrameOverflow(
 						pathEntriesForCompaction,
 						effectiveSettings,
@@ -6663,24 +6792,7 @@ export class SessionMaintenance {
 		let hasHeadroom = false;
 
 		if (willRetry) {
-			const messages = this.#host.agent.state.messages;
-			// Rows kept out of context may trail the failed turn; they stay, the turn goes.
-			const lastIndex = lastContextIndex(messages);
-			const lastMsg = messages[lastIndex];
-			if (lastMsg?.role === "assistant") {
-				const lastAssistant = lastMsg as AssistantMessage;
-				// Drop the prior turn before retry when it carries no actionable deliverable:
-				// - "error": failure was kept in history but must not re-enter the next turn's prompt.
-				// - reason === "incomplete" && stopReason === "length": truncated output (typically
-				//   reasoning-only) — re-running it produces the same dead-end.
-				const shouldDrop =
-					lastAssistant.stopReason === "error" ||
-					(reason === "incomplete" && lastAssistant.stopReason === "length");
-				if (shouldDrop) {
-					this.#host.agent.replaceMessages(messages.toSpliced(lastIndex, 1));
-					this.#host.rebaseAfterCompaction();
-				}
-			}
+			if (this.#dropFailedCompactionTurn(reason === "incomplete")) this.#host.rebaseAfterCompaction();
 
 			// Retry only needs the rebuilt prompt to fit the window again — measured
 			// AFTER the drop above so the just-failed turn (which the retry prompt
@@ -6688,7 +6800,7 @@ export class SessionMaintenance {
 			// here turned recoverable overflows into manual dead-ends (#3412 review),
 			// so use the looser fit budget.
 			retryFits = this.#compactionCreatedRetryFit();
-			if (!retryFits) {
+			if (!retryFits && reason !== "incomplete") {
 				retryFits = await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
 					skipElide: args.fallbackFromShake,
 					hasProgress: () => this.#compactionCreatedRetryFit(),
@@ -6750,7 +6862,7 @@ export class SessionMaintenance {
 			detachPostCommit,
 		);
 
-		if (retryFits) {
+		if (retryFits && !args.suppressContinuation) {
 			this.#host.scheduleAgentContinue({
 				source: "compaction-retry",
 				delayMs: 100,
@@ -6769,8 +6881,14 @@ export class SessionMaintenance {
 		if (deadEndWarning) {
 			this.#host.emitNotice("warning", deadEndWarning, "compaction");
 		}
-		if (continuationScheduled) return COMPACTION_CHECK_CONTINUATION;
-		return noProgressDeadEnd ? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION : COMPACTION_CHECK_NONE;
+		return {
+			...(continuationScheduled
+				? COMPACTION_CHECK_CONTINUATION
+				: noProgressDeadEnd
+					? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION
+					: COMPACTION_CHECK_NONE),
+			historyRewritten: true,
+		};
 	}
 
 	/**
@@ -6881,25 +6999,11 @@ export class SessionMaintenance {
 
 			let continuationScheduled = false;
 			if (willRetry) {
-				// The shake rebuild replays every entry, so a trailing error/length
-				// assistant from the failed turn re-enters agent state — drop it before
-				// retrying, same as the context-full tail.
-				const messages = this.#host.agent.state.messages;
-				const lastIndex = lastContextIndex(messages);
-				const lastMsg = messages[lastIndex];
-				if (lastMsg?.role === "assistant") {
-					const lastAssistant = lastMsg as AssistantMessage;
-					const shouldDrop =
-						lastAssistant.stopReason === "error" ||
-						(reason === "incomplete" && lastAssistant.stopReason === "length");
-					if (shouldDrop) this.#host.agent.replaceMessages(messages.toSpliced(lastIndex, 1));
+				this.#dropFailedCompactionTurn(reason === "incomplete");
+				if (!suppressContinuation) {
+					this.#host.scheduleAgentContinue({ source: "shake-retry", delayMs: 100, generation });
+					continuationScheduled = true;
 				}
-				this.#host.scheduleAgentContinue({
-					source: "shake-retry",
-					delayMs: 100,
-					generation,
-				});
-				continuationScheduled = true;
 			} else {
 				continuationScheduled = this.#host.scheduleCompactionContinuation({
 					generation,

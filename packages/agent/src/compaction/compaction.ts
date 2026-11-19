@@ -34,7 +34,7 @@ import {
 	calculateOpenAIUsageAccounting,
 	resolveOpenAICompatPolicy,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import { isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { hasReplayableThinking, isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { stripOpenAIResponsesOutputOnlyStatusesForReplay } from "@oh-my-pi/pi-ai/utils";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
@@ -579,6 +579,21 @@ export function findCutPoint(
 		if (accumulatedTokens > keepRecentTokens) break;
 		cutIndex = i;
 		cutPointIndex--;
+	}
+
+	const latestTurn = latestTurnIndex >= 0 ? getMessageFromEntry(entries[latestTurnIndex]) : undefined;
+	if (latestTurn?.role === "assistant" && latestTurn.stopReason === "length" && hasReplayableThinking(latestTurn)) {
+		// Explicit resumes and continuation cues do not finish pending reasoning.
+		let protectedStart = latestTurnIndex;
+		for (let i = latestTurnIndex - 1; i >= startIndex; i--) {
+			const message = getMessageFromEntry(entries[i]);
+			if (message?.role === "user" && message.attribution !== "agent") protectedStart = i;
+			if (message?.role === "assistant" && isSurvivingAssistant(message)) {
+				if (message.stopReason !== "length") break;
+				protectedStart = i;
+			}
+		}
+		cutIndex = Math.min(cutIndex, protectedStart);
 	}
 
 	const isTurnStart = isTurnStartEntry(entries[cutIndex]);
@@ -1931,11 +1946,16 @@ export async function compact(
 		...messagesToSummarize,
 		...turnPrefixMessages,
 	];
-	const remoteMessages: AgentMessage[] = [...remotePrefixMessages, ...recentMessages];
+	const latestAssistant = recentMessages.findLast(
+		(message): message is AssistantMessage => message.role === "assistant" && isSurvivingAssistant(message),
+	);
+	const preserveInterruptedReasoning =
+		latestAssistant?.stopReason === "length" && hasReplayableThinking(latestAssistant);
 	let usedRemoteCompaction = false;
 	let remoteReplayThroughEntryId: string | undefined;
 	let nativeCompactionError: unknown;
 	/**
+	 * Pending reasoning skips the whole-history attempt described below.
 	 * Remote compaction replaces the whole history, so its request carries the
 	 * kept tail too. A turn can leave that history over the window (a large
 	 * response or tool output after the last check), which no request can
@@ -1945,19 +1965,24 @@ export async function compact(
 	 * rewrite the tail's trailing tool outputs: the prefix keeps them intact.
 	 */
 	const canCompactBeforeTail = lastSummarizedEntryId !== undefined && recentMessages.length > 0;
+	// Pending reasoning stays in the kept tail, so remote compaction needs history
+	// before it; without that, the local prefix summary keeps the tail instead.
+	const remoteKeepsPendingReasoning = !preserveInterruptedReasoning || canCompactBeforeTail;
 	const reportRemoteUsage = (usage: ResponsesCompactionUsage | undefined, startedAt: number): void => {
 		if (usage && summaryOptions.onRemoteUsage) {
 			summaryOptions.onRemoteUsage(remoteCompactionUsageMessage(model, usage, startedAt));
 		}
 	};
 	const sendRemoteCompaction = async (
-		sendWhole: () => Promise<void>,
+		sendSelected: () => Promise<void>,
 		sendPrefix: () => Promise<boolean>,
 	): Promise<void> => {
 		try {
-			await sendWhole();
+			await sendSelected();
+			if (preserveInterruptedReasoning) remoteReplayThroughEntryId = lastSummarizedEntryId;
 		} catch (err) {
 			if (
+				preserveInterruptedReasoning ||
 				signal?.aborted ||
 				!canCompactBeforeTail ||
 				!AIError.is(AIError.classify(err), AIError.Flag.ContextOverflow)
@@ -1975,6 +2000,7 @@ export async function compact(
 		}
 	};
 	if (
+		remoteKeepsPendingReasoning &&
 		settings.remoteEnabled !== false &&
 		settings.remoteStreamingV2Enabled !== false &&
 		shouldUseCompactionV2Streaming(model)
@@ -1992,7 +2018,9 @@ export async function compact(
 		const isUserAuthored = summaryOptions.isUserAuthored ?? ((message: AgentMessage) => message.role === "user");
 		const remoteSystemPrompt = summaryOptions.remoteSystemPrompt ?? [SUMMARIZATION_SYSTEM_PROMPT];
 		const buildV2Input = async (includeTail: boolean): Promise<RemoteCompactionV2Input> => {
-			const messages = convertToLlm(includeTail ? remoteMessages : remotePrefixMessages);
+			const messages = convertToLlm(
+				includeTail ? [...remotePrefixMessages, ...recentMessages] : remotePrefixMessages,
+			);
 			const userMessages = convertToLlm(
 				[...messagesToSummarize, ...turnPrefixMessages, ...(includeTail ? recentMessages : [])].filter(
 					isUserAuthored,
@@ -2125,11 +2153,11 @@ export async function compact(
 			reportRemoteUsage(remote.usage, startedAt);
 			preserveData = { ...preserveData, ...storeCompactionV2PreserveData(remote, model) };
 		};
-		const whole = await buildV2Input(true);
-		if (whole.remoteHistory.length > 0) {
+		const selected = await buildV2Input(!preserveInterruptedReasoning);
+		if (selected.remoteHistory.length > 0) {
 			try {
 				await sendRemoteCompaction(
-					() => sendV2(whole, !canCompactBeforeTail),
+					() => sendV2(selected, preserveInterruptedReasoning || !canCompactBeforeTail),
 					async () => {
 						const prefix = await buildV2Input(false);
 						if (prefix.remoteHistory.length === 0) return false;
@@ -2159,7 +2187,12 @@ export async function compact(
 		}
 	}
 
-	if (!usedRemoteCompaction && settings.remoteEnabled !== false && shouldUseOpenAiRemoteCompaction(model)) {
+	if (
+		remoteKeepsPendingReasoning &&
+		!usedRemoteCompaction &&
+		settings.remoteEnabled !== false &&
+		shouldUseOpenAiRemoteCompaction(model)
+	) {
 		const previousRemoteCompaction = getPreservedOpenAiRemoteCompactionData(previousPreserveData);
 		const previousV2Compaction = getCompactionV2PreserveData(previousPreserveData);
 		const previousReplacementHistory =
@@ -2195,23 +2228,22 @@ export async function compact(
 			reportRemoteUsage(usage, startedAt);
 			preserveData = withOpenAiRemoteCompactionPreserveData(preserveData, remote);
 		};
-		const whole = buildOpenAiNativeHistory(
-			convertToLlm(remoteMessages),
-			model,
-			previousReplacementHistory,
-			supportsOriginalDetail,
-		);
-		if (whole.length > 0) {
+		const buildHistory = (includeTail: boolean) => {
+			const messages = includeTail ? [...remotePrefixMessages, ...recentMessages] : remotePrefixMessages;
+			return buildOpenAiNativeHistory(
+				convertToLlm(messages),
+				model,
+				previousReplacementHistory,
+				supportsOriginalDetail,
+			);
+		};
+		const selected = buildHistory(!preserveInterruptedReasoning);
+		if (selected.length > 0) {
 			try {
 				await sendRemoteCompaction(
-					() => sendV1(whole, !canCompactBeforeTail),
+					() => sendV1(selected, preserveInterruptedReasoning || !canCompactBeforeTail),
 					async () => {
-						const prefix = buildOpenAiNativeHistory(
-							convertToLlm(remotePrefixMessages),
-							model,
-							previousReplacementHistory,
-							supportsOriginalDetail,
-						);
+						const prefix = buildHistory(false);
 						if (prefix.length === 0) return false;
 						await sendV1(prefix, true);
 						return true;
@@ -2241,7 +2273,19 @@ export async function compact(
 	let nativeUsedTokens: number | undefined;
 	let nativeRetainedFiles: AnthropicCompactionFiles[] | undefined;
 	let nativeToolChanges: Record<string, unknown>[] | undefined;
-	if (!usedRemoteCompaction && settings.remoteEnabled !== false && shouldUseAnthropicNativeCompaction(model)) {
+	const allMessages =
+		!usedRemoteCompaction && settings.remoteEnabled !== false && shouldUseAnthropicNativeCompaction(model)
+			? [...messagesToSummarize, ...turnPrefixMessages, ...recentMessages]
+			: undefined;
+	const originalCut = messagesToSummarize.length + turnPrefixMessages.length;
+	const nativeCut = allMessages ? findAnthropicCompactionCut(allMessages, originalCut) : originalCut;
+	// Fall back to a local prefix summary if the native cut would eat the pending tail.
+	if (allMessages && (!preserveInterruptedReasoning || nativeCut <= originalCut)) {
+		// Without a persisted tail boundary, the native request must summarize it all.
+		const safeCut =
+			nativeCut > originalCut && nativeCut < allMessages.length && !recentEntryIds?.[nativeCut - originalCut]
+				? allMessages.length
+				: nativeCut;
 		const previousNative = getPreservedAnthropicCompactionData(previousPreserveData);
 		// Lead with the previous summary as the live context renders it:
 		// natively when this provider wrote it, as text otherwise.
@@ -2276,15 +2320,6 @@ export async function compact(
 					},
 				)
 			: undefined;
-		const allMessages = [...messagesToSummarize, ...turnPrefixMessages, ...recentMessages];
-		const originalCut = messagesToSummarize.length + turnPrefixMessages.length;
-		const nativeCut = findAnthropicCompactionCut(allMessages, originalCut);
-		// Hand-built preparations lacking entry IDs cannot move their persisted
-		// boundary into the tail. Summarizing all is still safe.
-		const safeCut =
-			nativeCut > originalCut && nativeCut < allMessages.length && !recentEntryIds?.[nativeCut - originalCut]
-				? allMessages.length
-				: nativeCut;
 		nativeFirstKeptEntryId =
 			safeCut === allMessages.length
 				? ""
@@ -2446,7 +2481,15 @@ export async function compact(
 
 	const shortSummary = usedRemoteCompaction
 		? "Remote compaction"
-		: await generateShortSummary(recentMessages, summary, model, reserveTokens, apiKey, signal, summaryOptions);
+		: await generateShortSummary(
+				preserveInterruptedReasoning ? remotePrefixMessages : recentMessages,
+				summary,
+				model,
+				reserveTokens,
+				apiKey,
+				signal,
+				summaryOptions,
+			);
 
 	// Compute file lists and append to summary
 	const { readFiles, modifiedFiles } = snapcompact.computeFileLists(fileOps);
