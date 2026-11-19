@@ -5,6 +5,10 @@ collapse {
 	// `sonar-pro`). Consumed only by thinking-pair derivation - never by
 	// identity suffix collapse, which stays on `thinking-suffix`.
 	pair-token "thinking" "reasoning" "reasoner"
+	// Providers whose ids use a pair token without naming a thinking sibling.
+	// AI Stupid Level's `auto-reasoning` and `auto-value-reasoning` are routing
+	// strategies listed beside `auto` and `auto-value`, not their thinking twins.
+	pair-token-exempt "aistupidlevel"
 	effort-suffix "-extra-high" tier="xhigh"
 	effort-suffix "-none" tier="off"
 	effort-suffix "-minimal" tier="minimal"

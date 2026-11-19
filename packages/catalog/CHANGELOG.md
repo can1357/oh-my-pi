@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added AI Stupid Level as a built-in provider with `/login aistupidlevel` or `AISTUPIDLEVEL_API_KEY`: its benchmark routing modes (default `auto-coding`) and the model ids it can pin come from live discovery as text-only models, and thinking levels are sent as `reasoning_effort` ([#16867](https://github.com/can1357/oh-my-pi/pull/16867) by [@StudioPlatforms](https://github.com/StudioPlatforms))
+
 ## [19.0.0] - 2026-11-18
 
 ### Added

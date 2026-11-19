@@ -508,7 +508,8 @@ export function reviewedVariantFamilyId(provider: string, memberId: string): str
  * - known pricing must match — all-zero cost rows count as unknown
  *   (aggregators routinely ship them), but twins that BOTH carry real,
  *   differing prices are distinct SKUs and never merge,
- * - ids claimed by the provider's reviewed table are skipped (curation wins).
+ * - ids claimed by the provider's reviewed table are skipped (curation wins),
+ * - a `pair-token-exempt` provider derives no pairs.
  * The capability surface prefers the thinking member's metadata, then the
  * bare member's, then the canonical deriver (aggregators often ship
  * `reasoning: false` and no thinking config on the twin), then a budget
@@ -528,7 +529,7 @@ export function deriveThinkingPairFamilies<TSpec extends VariantSpecLike>(
 	const families: EffortVariantFamily[] = [];
 	for (const spec of specs) {
 		const collapsed = provider === undefined ? undefined : collapseVariantId(provider, spec.id);
-		const baseId = collapsed?.thinkingVariant ? collapsed.logicalId : stripThinkingVariantSuffix(spec.id);
+		const baseId = collapsed?.thinkingVariant ? collapsed.logicalId : stripThinkingVariantSuffix(spec.id, provider);
 		if (baseId === undefined || baseId === spec.id) continue;
 		const base = byId.get(baseId);
 		if (!base) continue;
