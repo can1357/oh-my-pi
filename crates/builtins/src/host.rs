@@ -3948,7 +3948,7 @@ mod testing {
 		use super::MemStream;
 		use crate::host::{
 			Arc, AsyncUtility, AtomicBool, CommandCancel, GuardedStream, Host, OpenFile, Sigpipe, StreamWriter,
-			Write, async_out_for, run_caught_async,
+			Write, async_out_for,
 		};
 
 		/// Writes a line to stdout and a note to stderr, knowing nothing of
@@ -4004,7 +4004,7 @@ mod testing {
 			drop(reader);
 			host.set_test_stdout(OpenFile::from(writer));
 
-			let code = run_caught_async::<Chatty>(Chatty, &mut host).await;
+			let code = crate::host::run_caught_async::<Chatty>(Chatty, &mut host).await;
 
 			assert_eq!(code, crate::host::SIGPIPE_EXIT_CODE);
 			assert_eq!(capture.err(), "");
