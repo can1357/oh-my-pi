@@ -157,6 +157,12 @@ describe("read tool head+tail selectors", () => {
 		}
 	});
 
+	it("diagnoses a colon between line numbers when the path resolves only by unique suffix", async () => {
+		await Bun.write(path.join(testDir, "nested", "deep.txt"), rows(5));
+
+		await expect(tool.execute("read", { path: "deep.txt:1:2" })).rejects.toThrow(":1-2");
+	});
+
 	for (const selector of ["1-3,-3", "1-3,:-3", "1-3,:-3:raw", "raw:1-3,:-3"]) {
 		it(`reads the first and last lines of a file for :${selector}`, async () => {
 			const output = getTextOutput(await tool.execute("head-tail", { path: `${filePath}:${selector}` }));
