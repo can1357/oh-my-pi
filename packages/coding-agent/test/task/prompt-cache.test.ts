@@ -790,7 +790,7 @@ describe("task sibling prompt-cache routing", () => {
 					agentDir: directory.path(),
 					authStorage,
 					modelPattern: requested,
-					modelPatternAuthFallback: `${provider}/${modelId}`,
+					modelPatternParentFallback: `${provider}/${modelId}`,
 					taskPromptCacheKey: "parent:task",
 					sessionManager: SessionManager.inMemory(directory.path()),
 					settings: Settings.isolated({

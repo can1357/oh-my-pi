@@ -159,6 +159,12 @@ export interface ProbeCandidate {
 	env: Record<string, string | undefined>;
 	/** Human-readable identifier (typically the interpreter path). */
 	label: string;
+	/** Explains a non-zero exit code in failure messages (e.g. a rejected interpreter version). */
+	describeExit?: (exitCode: number) => string | undefined;
+}
+
+function describeProbeExit(candidate: ProbeCandidate, exitCode: number | null): string {
+	return (exitCode !== null && candidate.describeExit?.(exitCode)) || `exit code ${exitCode}`;
 }
 
 /** Outcome of probing an ordered candidate list under one shared deadline. */
@@ -205,7 +211,7 @@ export async function probeCandidates(
 			failures.push(
 				probe.timedOut
 					? `${candidate.label} (probe timed out)`
-					: `${candidate.label} (exit code ${probe.exitCode})`,
+					: `${candidate.label} (${describeProbeExit(candidate, probe.exitCode)})`,
 			);
 		} catch (err) {
 			failures.push(`${candidate.label} (${err instanceof Error ? err.message : String(err)})`);

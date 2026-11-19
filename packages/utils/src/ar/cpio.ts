@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { readUInt16BE, readUInt16LE } from "./bytes";
 import { ensureParentDirectories, upsertArchiveEntry } from "./entries";
 import { ArchiveError } from "./error";
-import { assertArchiveMemberSize, assertEntryCount, assertIndexSize, assertInMemorySize } from "./limits";
+import { assertArchiveMemberSizeField, assertEntryCount, assertIndexSize, assertInMemorySize } from "./limits";
 import { assertArchivePathBytes, normalizeArchiveEntryPath, normalizeArchiveLookupPath } from "./paths";
 import { readAllBytes } from "./source";
 import type { ArchiveIndexEntry, FormatReader, FormatReadOptions, MemberSource } from "./types";
@@ -226,7 +226,7 @@ export function readCpioEntriesFromBuffer(bytes: Uint8Array, options: FormatRead
 		if (header.mode > 0xffff) throw new ArchiveError("Invalid CPIO archive: mode exceeds 16 bits");
 		if (header.nameSize < 1) throw new ArchiveError("Invalid CPIO archive: name size must include a NUL terminator");
 		assertArchivePathBytes(header.nameSize - 1, "member path", options.limits.maxPathBytes);
-		assertArchiveMemberSize(header.fileSize, "(CPIO entry)", options.limits);
+		assertArchiveMemberSizeField(header.fileSize, "(CPIO entry)");
 
 		const nameStart = offset + header.headerSize;
 		const nameEnd = nameStart + header.nameSize;

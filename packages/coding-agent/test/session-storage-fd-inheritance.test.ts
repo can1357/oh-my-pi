@@ -58,7 +58,7 @@ logSink.write("entry");
 
 let output = "";
 try {
-	await new Shell().run({ command: "sh -c 'ls -l /proc/$$/fd'", cwd: ${JSON.stringify(root)} }, (_err, chunk) => {
+	await new Shell().run({ command: "/bin/sh -c 'ls -l /proc/$$/fd'", cwd: ${JSON.stringify(root)} }, (_err, chunk) => {
 		output += chunk;
 	});
 } finally {

@@ -68,9 +68,9 @@ With the `tui.colorfulMarkdown` setting on (the default), headings, `**strong**`
 `toolDiffAdded`, `toolDiffRemoved`, `toolDiffContext`,
 `syntaxComment`, `syntaxKeyword`, `syntaxFunction`, `syntaxVariable`, `syntaxString`, `syntaxNumber`, `syntaxType`, `syntaxOperator`, `syntaxPunctuation`
 
-### Mode/thinking borders (8 required, 1 optional)
+### Mode/thinking borders (9 required, 1 optional)
 
-`thinkingOff`, `thinkingMinimal`, `thinkingLow`, `thinkingMedium`, `thinkingHigh`, `thinkingXhigh`, optional `thinkingMax`, `bashMode`, `pythonMode`
+`thinkingOff`, `thinkingMinimal`, `thinkingLow`, `thinkingMedium`, `thinkingHigh`, `thinkingXhigh`, optional `thinkingMax`, `bashMode`, `pythonMode`, `btwMode`
 
 ### Status line segment colors (13)
 
@@ -340,6 +340,7 @@ Minimal skeleton:
 
 		"bashMode": "#2ac3de",
 		"pythonMode": "#bb9af7",
+		"btwMode": "#7aa2f7",
 
 		"statusLineBg": "#16161e",
 		"statusLineSep": 240,

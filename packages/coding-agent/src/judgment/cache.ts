@@ -113,6 +113,21 @@ function cacheStateIdentity(request: JudgmentRequest): string {
 	return `multimodal-judgment-cache-v1:${stableStringifyJson({ state, images })}`;
 }
 
+/** `request`'s state identity text and its `sha256`, the `states.id` its answers are cached under. */
+function stateKey(request: JudgmentRequest): Pick<CachedAnswers, "state" | "stateId"> {
+	const state = cacheStateIdentity(request);
+	return { state, stateId: new Bun.CryptoHasher("sha256").update(state).digest("hex") };
+}
+
+/**
+ * The `states.id` `request`'s answers are cached under: the reference a journaled judgment keeps
+ * instead of the state text.
+ * @throws {AIError.ValidationError} when an image is not valid embedded image content.
+ */
+export function judgmentStateId(request: JudgmentRequest): string {
+	return stateKey(request).stateId;
+}
+
 function unixSeconds(): number {
 	return Math.floor(Date.now() / 1000);
 }
@@ -182,8 +197,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
 	 * input is rejected before the best-effort database lookup.
 	 */
 	lookup(model: string, request: JudgmentRequest): CachedAnswers {
-		const state = cacheStateIdentity(request);
-		const stateId = new Bun.CryptoHasher("sha256").update(state).digest("hex");
+		const { state, stateId } = stateKey(request);
 		const answers: Record<string, Answer> = {};
 		try {
 			for (const name in request.questions) {

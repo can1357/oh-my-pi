@@ -318,16 +318,17 @@ describe("runtime thread services: cost gate, event bus, artifacts, storage", ()
 	});
 
 	it("allocates artifact ids on main so two workers never collide", async () => {
-		const artifacts = new ArtifactManager(path.join(tmp, "artifacts"));
+		const sessionDir = path.join(tmp, "session");
+		const artifacts = new ArtifactManager(path.join(sessionDir, "local"), sessionDir);
 		const [first, second] = await Promise.all([startWorker(), startWorker()]);
 		const [a, b] = await Promise.all([first("allocate", artifacts, 40), second("allocate", artifacts, 40)]);
 		if (!Array.isArray(a) || !Array.isArray(b)) throw new Error("allocate returned no ids");
 		const all = new Set<unknown>([...a, ...b]);
 		expect(all.size).toBe(80);
-		expect(artifacts.allocateId()).toBe(80);
+		expect((await artifacts.allocatePath()).id).toBe("80");
 
 		const saved = await first("save", artifacts, "worker content");
-		expect(saved).toMatchObject({ dir: artifacts.dir });
+		expect(saved).toMatchObject({ dir: artifacts.dir, sessionDir });
 		const id = typeof saved === "object" && saved !== null ? Reflect.get(saved, "id") : undefined;
 		if (typeof id !== "string") throw new Error("save returned no id");
 		const file = await artifacts.getPath(id);

@@ -13,13 +13,11 @@ export interface LineRange {
 export const LINE_RANGE_CHUNK_SOURCE = String.raw`L?(\d+)(?:(\.\.|[-+])L?(\d+)?)?`;
 const LINE_RANGE_CHUNK_RE = new RegExp(`^${LINE_RANGE_CHUNK_SOURCE}$`, "i");
 
-/** Parse a single `N`, `N-M`, `N-`, `N+K`, or `..`-aliased (`N..M`, `N..`) chunk. Throws via {@link ToolError} on invalid bounds. */
+/**
+ * Parse a single `N` (that one line), `N-` (from `N` onward), `N-M`, `N+K`, or `..`-aliased (`N..M`, `N..`)
+ * chunk. Throws via {@link ToolError} on invalid bounds.
+ */
 export function parseLineRangeChunk(sel: string): LineRange | null {
-	return parseChunk(sel, false);
-}
-
-/** `pinBare` makes a separator-less `N` the single line `N` instead of "from `N` onward". */
-function parseChunk(sel: string, pinBare: boolean): LineRange | null {
 	const lineMatch = LINE_RANGE_CHUNK_RE.exec(sel);
 	if (!lineMatch) return null;
 	const rawStart = Number.parseInt(lineMatch[1]!, 10);
@@ -36,35 +34,28 @@ function parseChunk(sel: string, pinBare: boolean): LineRange | null {
 		}
 		rawEnd = rawStart + rhs - 1;
 	} else if (sep === "-") {
-		// `301-` is shorthand for "from 301 onward" — equivalent to a lone bare `301`.
+		// `301-` is shorthand for "from 301 onward".
 		if (rhs !== undefined) {
 			if (rhs < rawStart) {
 				throw new ToolError(`Invalid range ${rawStart}-${rhs}: end must be >= start.`);
 			}
 			rawEnd = rhs;
 		}
-	} else if (pinBare) {
+	} else {
 		rawEnd = rawStart;
 	}
 	return { startLine: rawStart, endLine: rawEnd };
 }
-
-/** What a bare `N` selects in a one-chunk list: lines `N` onward (`:50`), or the single line `N`. */
-export type BareLineMode = "onward" | "single";
 
 /**
  * Parse a comma-separated list of line ranges (e.g. `5-16,960-973` or `19,59`). Returns
  * the ranges in ascending order with overlapping/adjacent ranges merged so
  * downstream consumers can stream the file in a single forward pass per range.
  */
-export function parseLineRanges(sel: string, bare: BareLineMode = "onward"): [LineRange, ...LineRange[]] | null {
-	const chunks = sel.split(",");
-	// A lone `:50` means "from line 50" unless `bare` pins it. Inside a comma list,
-	// a bare number is that one line; otherwise `:19,59` collapses to "from 19 through EOF".
-	const pinBare = bare === "single" || chunks.length > 1;
+export function parseLineRanges(sel: string): [LineRange, ...LineRange[]] | null {
 	const parsed: LineRange[] = [];
-	for (const chunk of chunks) {
-		const range = parseChunk(chunk, pinBare);
+	for (const chunk of sel.split(",")) {
+		const range = parseLineRangeChunk(chunk);
 		if (!range) return null;
 		parsed.push(range);
 	}
@@ -106,12 +97,10 @@ export function mergeLineRanges(ranges: readonly LineRange[]): [LineRange, ...Li
  */
 export function selectorLineRanges(sel: string | undefined): [LineRange, ...LineRange[]] | undefined {
 	if (!sel) return undefined;
-	const chunks = sel.split(":");
-	const bare = chunks.some(chunk => chunk.toLowerCase() === "raw") ? "single" : "onward";
-	for (const chunk of chunks) {
+	for (const chunk of sel.split(":")) {
 		const lower = chunk.toLowerCase();
 		if (lower === "raw" || lower === "conflicts") continue;
-		const ranges = parseLineRanges(chunk, bare);
+		const ranges = parseLineRanges(chunk);
 		if (ranges) return ranges;
 	}
 	return undefined;
