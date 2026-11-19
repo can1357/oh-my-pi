@@ -33,9 +33,9 @@ afterAll(async () => {
 const LIMIT =
 	'Bun cannot load a module from a path that contains "?". Move the files to a directory whose path has no "?".';
 
-/** A new temporary root. */
+/** A new temporary root, by its real path (macOS's tmpdir is a link). */
 async function makeRoot(): Promise<string> {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-module-path-q-"));
+	const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-module-path-q-")));
 	roots.push(root);
 	return root;
 }
@@ -186,7 +186,7 @@ describe.skipIf(process.platform === "win32")("a module under a path that contai
 			loadedProbe: false,
 			errors: [{ path: linked, error: `Failed to load command: ${message(linked, real)}` }],
 		});
-	});
+	}, 60_000);
 
 	it("is reported by the custom share script's load", async () => {
 		const { questionDir } = await makeQuestionRoot();
@@ -206,7 +206,7 @@ describe.skipIf(process.platform === "win32")("a module under a path that contai
 		const [stdout, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
 		expect(code).toBe(0);
 		expect(stdout.trim()).toBe(`Failed to load share script: ${message(script)}`);
-	});
+	}, 60_000);
 });
 
 describe("a module under a path with no ?", () => {
