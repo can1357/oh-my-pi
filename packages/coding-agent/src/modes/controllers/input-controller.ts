@@ -99,6 +99,9 @@ import { cfgHideThinkingBlock } from "../../session/settings";
 /** Bare words that quit (as `/<word>`) when typed alone into a session with no messages. */
 const BARE_EXIT_WORDS: Record<string, true> = { exit: true, quit: true, q: true };
 
+/** Kitty key-release report (`CSI code;mod:3u` and friends); matched without the protocol gate. */
+const KEY_RELEASE_REPORT = /^\x1b\[[\d:;]*:3[u~ABCDHF]$/;
+
 const REMOTE_CLIPBOARD_STATUS =
 	"Clipboard here belongs to the SSH host — use your terminal's paste shortcut to paste from your machine";
 
@@ -327,6 +330,7 @@ export class InputController {
 	#expandToolsListenerInstalled = false;
 	#inlineMouseListenerInstalled = false;
 	#linkHintListenerInstalled = false;
+	#outputHoldListenerInstalled = false;
 
 	/** Click-candidate id the hover band currently tracks; repaint only on change. */
 	#lastHoverClickId: string | undefined;
@@ -376,6 +380,38 @@ export class InputController {
 	setupKeyHandlers(): void {
 		this.#draftText ??= this.ctx.editor.getText();
 		this.ctx.editor.setActionKeys("app.interrupt", this.ctx.keybindings.getKeys("app.interrupt"));
+		if (!this.#outputHoldListenerInstalled) {
+			this.#outputHoldListenerInstalled = true;
+			// First refusal: while output is held this either extends the hold or
+			// releases it before the key reaches its owner, so the repaint that shows
+			// the keystroke is already scheduled.
+			this.ctx.ui.addInputListener(
+				data => {
+					if (this.ctx.keybindings.matches(data, "app.display.hold")) {
+						if (this.ctx.ui.hasOverlay()) return undefined;
+						if (this.ctx.ui.getOutputHold()) {
+							this.ctx.ui.setOutputHold(false);
+						} else {
+							const key = appKey(this.ctx.keybindings, "app.display.hold");
+							// The bottom-row notice is the whole message: a status row
+							// presented now could not paint until the release anyway.
+							this.ctx.ui.setOutputHold(true, `⏸ Output held · ${key} or any key resumes`);
+						}
+						return { consume: true };
+					}
+					// Only a real keystroke resumes: a wheel tick or a key release is not
+					// the user asking to follow again, and mouse capture (`tui.mouse`)
+					// would otherwise drop a hold the moment the wheel moves. The release
+					// marker is matched directly because `isKeyRelease` is inert until the
+					// kitty protocol is negotiated, and a release can only arrive after it.
+					if (!this.ctx.ui.getOutputHold()) return undefined;
+					if (data.startsWith("\x1b[<") || KEY_RELEASE_REPORT.test(data)) return undefined;
+					this.ctx.ui.setOutputHold(false);
+					return undefined;
+				},
+				{ prepend: true },
+			);
+		}
 		if (!this.#linkHintListenerInstalled) {
 			this.#linkHintListenerInstalled = true;
 			// First, so a tag letter typed in link-hint mode reaches no other listener or the editor.

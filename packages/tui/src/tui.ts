@@ -847,6 +847,9 @@ export class TUI extends Container {
 	terminal: Terminal;
 	#frameProvider: TerminalFrameProvider | undefined;
 	#acceptedHistoryBatchId = 0;
+	// Output hold: while set, no ordinary frame is composed, written, or
+	// acknowledged, so the terminal grid cannot scroll under the user.
+	#outputHold = false;
 	// Screen row where the provider's mutable viewport begins (0-based); rows
 	// above it hold history still visible on the physical screen.
 	#providerViewportTop = 0;
@@ -1233,6 +1236,56 @@ export class TUI extends Container {
 		this.#resizeScrollbackMode = mode;
 	}
 
+	/**
+	 * Hold all output: no frame is composed, written, or acknowledged until the
+	 * hold is released, so the terminal's screen — and with it whatever part of
+	 * the scrollback the user is reading — stops moving under a running turn.
+	 *
+	 * The renderer deliberately never probes the user's scroll position (see
+	 * `docs/tui-core-renderer.md` §7): following cannot be inferred from native
+	 * scrollback, so an explicit gesture supplies it instead. Nothing is lost
+	 * while held — the frame provider keeps its unacknowledged history batch (the
+	 * ack handshake exists for exactly this), live blocks keep streaming, and
+	 * releasing repaints the viewport once and retires the backlog. A resize that
+	 * settles while held is deferred to that release, so the terminal's reflow
+	 * cannot move the reading position either.
+	 *
+	 * A hold freezes the composer's echo too: painting any frame is painting the
+	 * screen. Callers therefore release on the next keystroke and before showing a
+	 * dialog the user must answer, which is the caller's job — it knows the keys
+	 * and the dialogs.
+	 *
+	 * @param notice Optional one-line hint painted into the last screen row
+	 *   without scrolling it (released with the next real frame).
+	 * @returns Whether the hold state changed.
+	 */
+	setOutputHold(hold: boolean, notice?: string): boolean {
+		if (this.#stopped || this.#outputHold === hold) return false;
+		this.#outputHold = hold;
+		if (hold) {
+			// Everything queued right now is exactly what the hold exists to stop.
+			this.#renderTimer?.cancel();
+			this.#renderTimer = undefined;
+			this.#renderRequested = false;
+			if (notice !== undefined && !this.#altActive && !this.#nativeLive) {
+				this.terminal.write(this.#holdNoticeSequence(notice, this.terminal.columns, this.terminal.rows));
+			}
+			return true;
+		}
+		// The terminal may have reflowed while held. Take its settled geometry as
+		// the new baseline so the repaint stays viewport-only: a hold must not
+		// hand the release a width change that clears native scrollback and
+		// replays the transcript (the very jump a hold exists to prevent).
+		this.#absorbHeldResize();
+		this.requestRender(true);
+		return true;
+	}
+
+	/** Whether {@link setOutputHold} is holding the output. */
+	getOutputHold(): boolean {
+		return this.#outputHold;
+	}
+
 	/** Delete every tracked Kitty image from the terminal graphics store. */
 	clearInlineImages(): void {
 		if (this.#stopped) return;
@@ -1545,6 +1598,7 @@ export class TUI extends Container {
 
 	start(options?: TUIStartOptions): void {
 		this.#renderSession++;
+		this.#outputHold = false;
 		this.#outputDrainWait?.unsubscribe?.();
 		this.#outputDrainWait = undefined;
 		this.#renderRequested = false;
@@ -1646,6 +1700,14 @@ export class TUI extends Container {
 		this.terminal.start(
 			data => this.#handleInput(data),
 			() => {
+				if (this.#outputHold) {
+					// The borrow, its erase and its replay are all output — the exact
+					// thing a hold suppresses. The release repaints at the geometry the
+					// terminal settled on instead of animating through it now, and it
+					// absorbs the new size first so the settle cannot become a
+					// scrollback-clearing rebuild the user never asked for.
+					return;
+				}
 				if (this.#nativeLive) {
 					// The terminal lays the surface out: a resize only refreshes the
 					// width `rows` fallback nodes render at. No replay.
@@ -1987,6 +2049,29 @@ export class TUI extends Container {
 			this.#resizeBurstResized = true;
 		}
 		this.#geometryEpoch++;
+	}
+
+	/**
+	 * Adopt the terminal's current geometry as the painted one after a hold.
+	 *
+	 * A hold swallows SIGWINCH, so nothing reflowed the screen under the app's
+	 * knowledge. Releasing has to repaint the viewport without handing the size
+	 * delta to {@link #prepareResizeReplay}: a width change there clears native
+	 * history (`rebuild`) or appends a second copy (`append`), and both are the
+	 * scrollback jump a hold exists to prevent. Clearing the burst accounting
+	 * makes the release a viewport repaint at the geometry the terminal already
+	 * settled on, which is `preserve` semantics for that one frame.
+	 */
+	#absorbHeldResize(): void {
+		this.#resizeBurstGrew = false;
+		this.#resizeBurstShrank = false;
+		this.#resizeBurstLastHeight = undefined;
+		this.#resizeBurstPull = 0;
+		this.#resizeBurstWidthChanged = false;
+		this.#resizeBurstResized = false;
+		this.#previousWidth = this.terminal.columns;
+		this.#previousHeight = this.terminal.rows;
+		this.#resizeReplaySize = undefined;
 	}
 
 	/**
@@ -2691,6 +2776,8 @@ export class TUI extends Container {
 
 	stop(): void {
 		this.#renderSession++;
+		// A flush or handoff must reach the terminal even from a held screen.
+		this.#outputHold = false;
 		this.#outputDrainWait?.unsubscribe?.();
 		this.#outputDrainWait = undefined;
 		this.#renderRequested = false;
@@ -2973,6 +3060,13 @@ export class TUI extends Container {
 	 * reads it re-entrantly) and compute the cost once the paint returns.
 	 */
 	#executeRender(): void {
+		if (this.#outputHold) {
+			// Held: compose nothing, write nothing, acknowledge nothing. The model
+			// keeps moving; the release repaints from it in one frame. The flag stays
+			// clear so this is not a self-rescheduling loop while spinners keep
+			// requesting frames.
+			return;
+		}
 		if (this.#deferRenderForOutputBacklog()) return;
 		this.#inputRenderPending = false;
 		const start = this.#renderScheduler.now();
@@ -3642,6 +3736,17 @@ export class TUI extends Container {
 	#rebuildNoticeSequence(width: number, height: number): string {
 		const label = truncateToWidth("↻ Rebuilding…", width, Ellipsis.Omit);
 		return `${this.#paintBeginSequence}\x1b7\x1b[${height};1H${SEGMENT_RESET}${ERASE_LINE}${label}${LINE_TERMINATOR}\x1b8${this.#paintEndSequence}`;
+	}
+
+	/**
+	 * Bottom-row hint for a held screen. Cursor save/restore and **no line
+	 * terminator**: a hold exists to keep the screen still, so the hint must not
+	 * push the last row into scrollback. It overwrites the live viewport's last
+	 * row until the release repaint rewrites it.
+	 */
+	#holdNoticeSequence(notice: string, width: number, height: number): string {
+		const label = truncateToWidth(notice, width, Ellipsis.Omit);
+		return `${this.#paintBeginSequence}\x1b7\x1b[${height};1H${SEGMENT_RESET}${ERASE_LINE}\x1b[2m${label}${SEGMENT_RESET}\x1b8${this.#paintEndSequence}`;
 	}
 
 	/**

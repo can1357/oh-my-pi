@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `TUI.setOutputHold()` / `getOutputHold()`: an explicit output hold that composes, writes, and acknowledges no frames until release, then repaints the viewport once. A resize that settles while held is absorbed instead of replayed, so releasing never clears native scrollback.
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes
