@@ -135,7 +135,7 @@ export async function readMcpResource(
 	mcpManager: MCPManagerApi,
 	url: InternalUrl,
 	options?: McpResourceReadOptions,
-): Promise<InternalResource | undefined> {
+): Promise<InternalResource<string | Buffer> | undefined> {
 	const { exact = false, waitMs, signal } = options ?? {};
 	const uri = extractResourceUri(url);
 	let targetServer = resolveTargetServer(mcpManager, uri, exact);
@@ -166,6 +166,18 @@ export async function readMcpResource(
 		throw new Error(`Server "${targetServer}" returned no content for "${uri}".`);
 	}
 
+	// A lone binary part is the resource's bytes, typed by the server's MIME type.
+	const [only] = result.contents;
+	if (result.contents.length === 1 && (only.text === undefined || only.text === null) && only.blob) {
+		const bytes = Buffer.from(only.blob, "base64");
+		return {
+			url: url.href,
+			content: bytes,
+			contentType: only.mimeType ?? "application/octet-stream",
+			size: bytes.length,
+			notes: [`MCP server: ${targetServer}`],
+		};
+	}
 	const textParts: string[] = [];
 	for (const item of result.contents) {
 		if (item.text !== undefined && item.text !== null) {
@@ -213,7 +225,7 @@ export class McpProtocolHandler implements ProtocolHandler {
 		return mcpDoc.trim();
 	}
 
-	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
+	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource<string | Buffer>> {
 		const mcpManager = await MCPManager.load();
 		if (!mcpManager) {
 			throw new Error("No MCP manager available. MCP servers may not be configured.");
