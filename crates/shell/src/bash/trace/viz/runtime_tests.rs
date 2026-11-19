@@ -395,27 +395,37 @@ async fn callout_scripts_are_drawn_by_their_command_but_eval_code_gets_a_frame()
 	assert_eq!(frames(&present(&trace, &Options::default())), 1);
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn executed_script_files_are_drawn_by_their_command() {
-	use std::os::unix::fs::PermissionsExt;
-	// The shape of an npm bin shim. Without `#!` the OS refuses it
-	// (`ENOEXEC`, as Windows refuses any `#!` file) and the engine runs it.
+	// The shape of an npm bin shim. Windows refuses any `#!` file
+	// (`ERROR_BAD_EXE_FORMAT`); elsewhere only a file without `#!` is refused
+	// (`ENOEXEC`). Either way the engine runs the script itself.
+	const SHIM: &str = "basedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")\ncase `uname` \
+	                    in\n  *CYGWIN*) basedir=`cygpath -w \"$basedir\"`;;\nesac\nif [ -x \
+	                    \"$basedir/node\" ]; then\n  exec \"$basedir/node\" \"$@\"\nelse\n  exec \
+	                    true \"$@\"\nfi\n";
 	let root = tempfile::tempdir().unwrap();
 	let shim = root.path().join("shim");
-	std::fs::write(
-		&shim,
-		"basedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")\ncase `uname` in\n  *CYGWIN*) \
-		 basedir=`cygpath -w \"$basedir\"`;;\nesac\nif [ -x \"$basedir/node\" ]; then\n  exec \
-		 \"$basedir/node\" \"$@\"\nelse\n  exec true \"$@\"\nfi\n",
-	)
-	.unwrap();
-	std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+	if cfg!(windows) {
+		std::fs::write(&shim, format!("#!/bin/sh\n{SHIM}")).unwrap();
+	} else {
+		std::fs::write(&shim, SHIM).unwrap();
+	}
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt;
+		std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+	}
 	let shell = Shell::new(None);
-	let trace = run(&shell, &format!("'{}' --version", shim.display())).await;
+	let command = format!("'{}' --version", shim.display());
+	let trace = run(&shell, &command).await;
 	for options in [Options::default(), Options { view: View::Raw, ..Options::default() }] {
 		let live = present(&trace, &options);
-		assert_eq!(rows(&live).len(), 1, "{live}");
+		let live_rows = rows(&live);
+		assert_eq!(live_rows.len(), 1, "{live}");
+		// The pseudo view drops the quoting; the row still reads as the
+		// invocation.
+		assert_eq!(live_rows[0].0.replace('\'', ""), command.replace('\'', ""), "{live}");
 		assert_eq!(live["watches"], serde_json::json!([]), "{live}");
 		let stored = StoredVisualization::from_snapshot_json(&trace.snapshot_json()).unwrap();
 		let restored: Value =
