@@ -17,6 +17,7 @@ import {
 	stripWindowsExtendedLengthPathPrefix,
 } from "@oh-my-pi/pi-utils";
 import { registerPluginCacheInvalidator } from "../../discovery/helpers";
+import { assertBunCanImport } from "../module-path";
 
 const USE_BUNDLED_PI_MODULES = isCompiledBinary() || Boolean(process.env.PI_BUNDLED);
 
@@ -2738,6 +2739,8 @@ export async function loadLegacyPiModule(resolvedPath: string, options: { reload
 	// `bun link`/pnpm installs) so the rewrite filter matches the path Bun
 	// actually hands the hook.
 	const entryRealPath = await realpathOrSelf(path.resolve(resolvedPath));
+	// The entry is imported by its real path, so that is the one Bun must read.
+	if (!isBundledVirtualSpecifier(entryRealPath)) await assertBunCanImport(entryRealPath);
 	await ensureLegacyPiOverridesReady();
 	const pendingSources = await ensureExtensionGraphHook(entryRealPath);
 	try {
