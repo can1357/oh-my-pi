@@ -407,6 +407,11 @@ export interface RoutingHintRequest {
 	readonly placeholder: string;
 	/** Download-HUD row that counts this hint while the model condenses it (`Optimizing skills`); none when omitted. */
 	readonly activity?: string;
+	/**
+	 * Whether the hint is still wanted. A request that has not gone to the model is dropped once this turns
+	 * false: when it is scheduled, when it gets a compression slot, and when it gets the machine-wide lock.
+	 */
+	wanted?(): boolean;
 	/** The model request; rendered only when compression runs. */
 	render(): string;
 }
@@ -420,8 +425,12 @@ export type RoutingHintLock = (job: string) => Promise<() => void>;
 
 /** Store, compressor, deferral and lock shared by every {@link RoutingHintCatalog}. */
 export interface RoutingHintCatalogOptions {
-	/** Defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep placeholders. */
-	store?: SkillDescriptionStore;
+	/**
+	 * Defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep placeholders. A function
+	 * supplies the store when the catalog first has a hint to look up (`undefined` from it: no store), so a
+	 * catalog that is never asked opens nothing.
+	 */
+	store?: SkillDescriptionStore | (() => SkillDescriptionStore | undefined);
 	compress?: SkillDescriptionCompressor;
 	/**
 	 * Hold model work until {@link RoutingHintCatalog.startCompression}: until the owning session's
@@ -439,15 +448,17 @@ export interface RoutingHintCatalogOptions {
  * ({@link SkillDescriptionCatalog}) and MCP eval namespaces (`mcp/eval-namespaces.ts`) use it.
  */
 export class RoutingHintCatalog {
-	readonly #store: SkillDescriptionStore | undefined;
+	readonly #storeSource: RoutingHintCatalogOptions["store"];
 	readonly #compress?: SkillDescriptionCompressor;
 	readonly #lock: RoutingHintLock | undefined;
 	readonly #snapshot = new Map<string, string>();
+	#store: SkillDescriptionStore | undefined;
+	#storeResolved = false;
 	/** Misses rendered before {@link startCompression}; `undefined` once compression runs. */
 	#deferred: Map<string, RoutingHintRequest> | undefined;
 
 	constructor(options: RoutingHintCatalogOptions = {}) {
-		this.#store = options.store ?? sharedSkillDescriptionStore();
+		this.#storeSource = options.store;
 		this.#compress = options.compress;
 		this.#lock = options.lock;
 		if (options.deferCompression) this.#deferred = new Map();
@@ -463,7 +474,9 @@ export class RoutingHintCatalog {
 	 * Misses schedule one compression batch (held while compression is deferred).
 	 */
 	hints(requests: readonly RoutingHintRequest[]): string[] {
-		const store = this.#store;
+		// Nothing to look up: a store supplied by a function stays unopened.
+		if (requests.length === 0) return [];
+		const store = this.#resolveStore();
 		const misses = new Map<string, RoutingHintRequest>();
 		const rendered = requests.map(request => {
 			let hint = this.#snapshot.get(request.key);
@@ -502,6 +515,15 @@ export class RoutingHintCatalog {
 		await Promise.all(pendingForStore(this.#store));
 	}
 
+	#resolveStore(): SkillDescriptionStore | undefined {
+		if (!this.#storeResolved) {
+			this.#storeResolved = true;
+			const source = this.#storeSource;
+			this.#store = typeof source === "function" ? source() : (source ?? sharedSkillDescriptionStore());
+		}
+		return this.#store;
+	}
+
 	#schedule(store: SkillDescriptionStore, misses: ReadonlyMap<string, RoutingHintRequest>): void {
 		const compressor = this.#compress;
 		if (!compressor || store.isClosing) return;
@@ -512,7 +534,7 @@ export class RoutingHintCatalog {
 		let batchModel: Promise<string | undefined> | undefined;
 		for (const [key, request] of misses) {
 			const job = `${store.path}:${key}`;
-			if (inFlight.has(job)) continue;
+			if (inFlight.has(job) || request.wanted?.() === false) continue;
 			batchModel ??= Promise.resolve().then(() => compressor.modelKey());
 			const pending = compressHint(store, compressor, batchModel, request, lock && (() => lock(job))).finally(() =>
 				inFlight.delete(job),
@@ -525,13 +547,28 @@ export class RoutingHintCatalog {
 /** Skill routing hints: one prompt/session snapshot over a {@link RoutingHintCatalog}. */
 export class SkillDescriptionCatalog {
 	readonly #hints: RoutingHintCatalog;
+	readonly #verbatim: boolean | (() => boolean);
 
-	constructor(options: RoutingHintCatalogOptions = {}) {
-		this.#hints = new RoutingHintCatalog(options);
+	/**
+	 * `verbatim` renders every description exactly as authored: no preview truncation, no store access,
+	 * and no compression work (`skills.compressDescriptions: false`). A function is read on every call,
+	 * so a setting changed in a live session applies to the next prompt build and to compressions still
+	 * queued. The other options are those of {@link RoutingHintCatalog}.
+	 */
+	constructor(options: RoutingHintCatalogOptions & { verbatim?: boolean | (() => boolean) } = {}) {
+		const { verbatim = false, ...hintOptions } = options;
+		this.#verbatim = verbatim;
+		this.#hints = new RoutingHintCatalog(hintOptions);
+	}
+
+	/** Whether descriptions currently render exactly as authored. */
+	get verbatim(): boolean {
+		return typeof this.#verbatim === "function" ? this.#verbatim() : this.#verbatim;
 	}
 
 	/** Read the session's frozen prompt hints without starting new model work. */
 	snapshot(skills: readonly Skill[]): Array<Skill & { description: string }> {
+		if (this.verbatim) return skills.map(skill => ({ ...skill }));
 		return skills.map(skill => ({
 			...skill,
 			description: this.#hints.peek(keyFor(skill), previewSkillDescription(skill.description)),
@@ -540,6 +577,9 @@ export class SkillDescriptionCatalog {
 
 	render(skills: readonly Skill[]): Array<Skill & { description: string }> {
 		if (skills.length === 0) return [];
+		if (this.verbatim) return skills.map(skill => ({ ...skill }));
+		// Read again by every queued job: switching to verbatim drops the requests not sent yet.
+		const wanted = (): boolean => !this.verbatim;
 		// Authored descriptions already within the preview budget need no model
 		// compression: use them verbatim so exclusions survive. Only truly
 		// short input qualifies — `previewSkillDescription` truncates longer
@@ -554,6 +594,7 @@ export class SkillDescriptionCatalog {
 						description: skill.description,
 						placeholder: previewSkillDescription(skill.description),
 						activity: "Optimizing skills",
+						wanted,
 						render: () =>
 							prompt.render(compressDescriptionPrompt, { name: skill.name, description: skill.description }),
 					},
@@ -581,6 +622,7 @@ export class SkillDescriptionCatalog {
  * Compress one routing hint into `store`. `batchModel` filters out requests that model already
  * answered unusably (and everything when no model is available) before taking a slot. `lock` makes
  * the request wait its turn among omp processes; a hint one of them stored meanwhile is not requested.
+ * A request that is no longer `wanted` after waiting for a slot or the lock goes no further.
  */
 async function compressHint(
 	store: SkillDescriptionStore,
@@ -600,9 +642,9 @@ async function compressHint(
 		await compressionSlots.acquire();
 		let unlock: (() => void) | undefined;
 		try {
-			if (store.isClosing) return;
+			if (store.isClosing || request.wanted?.() === false) return;
 			unlock = await lock?.();
-			if (store.isClosing || store.get(key) !== undefined) return;
+			if (store.isClosing || request.wanted?.() === false || store.get(key) !== undefined) return;
 			// Unusable answers are remembered per model: that model is not asked again, a newly selected one is.
 			// Re-resolved because the role can change while this job waits behind running requests.
 			const model = compressor.modelKey();

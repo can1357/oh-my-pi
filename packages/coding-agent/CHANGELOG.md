@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `skills.compressDescriptions` (default `true`). Set it to `false` to render skill descriptions in the system prompt exactly as authored, without the 100-character preview, the `skill-descriptions.db` cache, or background compression calls to the smol model ([#13291](https://github.com/can1357/oh-my-pi/issues/13291), [#13385](https://github.com/can1357/oh-my-pi/pull/13385) by [@mttzzz](https://github.com/mttzzz))
+
 ### Fixed
 
 - Fixed the shell's `dirname` builtin on Windows ignoring `\` separators and drive prefixes (`dirname 'C:\a\b'` printed `.`), which broke scripts like VS Code's `code` launcher (`./Code.exe: No such file or directory`)
