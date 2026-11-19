@@ -165,9 +165,9 @@ function capabilityFor(
 }
 
 interface ProbeSelection {
-	/** Present only when the chosen format's own ladder finished. */
+	/** Present only when the chosen format and every higher-precedence format finished probing. */
 	persist: ThinkingCapability | undefined;
-	/** Format and efforts this turn can send without repeating a rejected probe. */
+	/** Format and efforts for this turn, avoiding rejected probes unless even the plain check was refused. */
 	dispatch: ThinkingCapability;
 }
 
@@ -183,39 +183,11 @@ async function probe<TApi extends Api>(
 	// The neutral control distinguishes unsupported thinking from a model or
 	// endpoint that cannot serve even a plain request. It shares the first batch.
 	let baseline: ThinkingProbeAttempt | undefined;
-	const probed = new Map<ThinkingProbeFormat, ThinkingProbeAttempt[]>();
-	const rowsOf = (format: ThinkingProbeFormat): readonly ThinkingProbeAttempt[] => probed.get(format) ?? [];
-	// No format in the batches already run was accepted. Skip formats whose
-	// ladders finished as rejections, and do not send an effort those probes refused.
-	const selectDispatch = (): ThinkingCapability => {
-		for (const batch of batches) {
-			for (const format of batch) {
-				const rows = rowsOf(format);
-				if (ladderComplete(format, rows, efforts.length)) continue;
-				const rejected = new Set(
-					rows.flatMap(attempt => (!attempt.accepted && attempt.effort !== undefined ? [attempt.effort] : [])),
-				);
-				if (TOGGLE_FORMATS[format] || rejected.size === 0) return { ...hypothesis(format), attempts };
-				const usable = THINKING_EFFORTS.filter(effort => !rejected.has(effort));
-				if (usable.length === 0) continue;
-				return { checkedAt: Date.now(), format, efforts: usable, observed: false, attempts };
-			}
-		}
-		if (baseline?.accepted) {
-			return { checkedAt: Date.now(), format: "none", efforts: [], observed: baseline.observed, attempts };
-		}
-		// Every dialect already run finished as a rejection. A plain check that
-		// never completed is not a refusal, and resending a rejected dialect fails
-		// the turn. The caller does not save this guess.
-		if (!baseline) {
-			return { checkedAt: Date.now(), format: "none", efforts: [], observed: false, attempts };
-		}
-		const fallback = batches[0]?.[0] ?? "openai";
-		return { ...hypothesis(fallback), attempts };
-	};
 	for (let index = 0; index < batches.length; index++) {
 		const formats = batches[index];
 		if (!formats) continue;
+		const probed = new Map<ThinkingProbeFormat, ThinkingProbeAttempt[]>();
+		const rowsOf = (format: ThinkingProbeFormat): readonly ThinkingProbeAttempt[] => probed.get(format) ?? [];
 		const jobs: { format: ThinkingProbeFormat; promise: Promise<ThinkingProbeAttempt | undefined> }[] = [];
 		for (const format of formats) {
 			probed.set(format, []);
@@ -235,23 +207,35 @@ async function probe<TApi extends Api>(
 			else probed.get(job.format)?.push(result);
 		}
 		// A quota, auth, transport, or timeout failure is not a rejection, and it
-		// belongs only to the format that failed. Save a format once its own
-		// ladder has finished; an unfinished rival does not discard it.
+		// belongs only to the format that failed. Cache a winning format only when
+		// its own ladder and every preferred format ahead of it finished probing.
+		let priorComplete = true;
 		for (const format of formats) {
 			const rows = rowsOf(format);
-			if (!ladderComplete(format, rows, efforts.length)) continue;
+			const complete = ladderComplete(format, rows, efforts.length);
 			const accepted = rows.filter(attempt => attempt.accepted);
-			if (accepted.length === 0) continue;
-			const capability = capabilityFor(format, accepted, attempts);
-			return { persist: capability, dispatch: capability };
+			if (accepted.length > 0) {
+				const capability = capabilityFor(format, accepted, attempts);
+				return { persist: priorComplete && complete ? capability : undefined, dispatch: capability };
+			}
+			if (!complete) priorComplete = false;
 		}
+		// No format in this batch was accepted yet. If a format did not finish,
+		// stop before later batches and dispatch its first unrejected hypothesis.
 		for (const format of formats) {
-			const accepted = rowsOf(format).filter(attempt => attempt.accepted);
-			if (accepted.length === 0) continue;
-			return { persist: undefined, dispatch: capabilityFor(format, accepted, attempts) };
-		}
-		if (formats.some(format => !ladderComplete(format, rowsOf(format), efforts.length))) {
-			return { persist: undefined, dispatch: selectDispatch() };
+			const rows = rowsOf(format);
+			if (ladderComplete(format, rows, efforts.length)) continue;
+			const rejected = new Set(
+				rows.flatMap(attempt => (!attempt.accepted && attempt.effort !== undefined ? [attempt.effort] : [])),
+			);
+			if (TOGGLE_FORMATS[format] || rejected.size === 0) {
+				return { persist: undefined, dispatch: { ...hypothesis(format), attempts } };
+			}
+			const usable = THINKING_EFFORTS.filter(effort => !rejected.has(effort));
+			return {
+				persist: undefined,
+				dispatch: { checkedAt: Date.now(), format, efforts: usable, observed: false, attempts },
+			};
 		}
 	}
 	if (baseline?.accepted) {
@@ -264,7 +248,17 @@ async function probe<TApi extends Api>(
 		};
 		return { persist: capability, dispatch: capability };
 	}
-	return { persist: undefined, dispatch: selectDispatch() };
+	// Every thinking dialect finished as a rejection. A plain check that never
+	// completed is not a refusal, so send plain without saving; fall back to the
+	// primary hypothesis only when the plain check was refused too.
+	if (!baseline) {
+		return {
+			persist: undefined,
+			dispatch: { checkedAt: Date.now(), format: "none", efforts: [], observed: false, attempts },
+		};
+	}
+	const fallback = batches[0]?.[0] ?? "openai";
+	return { persist: undefined, dispatch: { ...hypothesis(fallback), attempts } };
 }
 
 async function learn<TApi extends Api>(
@@ -338,8 +332,8 @@ export function withProbedThinking<TApi extends Api>(
 		try {
 			const capability = await learn(model, options, run);
 			options.signal?.throwIfAborted();
-			// Use a format this run accepted, or else the first one it did not
-			// reject. Never repeat a dialect whose probes already came back refused.
+			// Use a format this run accepted, or the first unrejected one; fall
+			// back to the primary hypothesis only if even the plain check was refused.
 			const learned = applyThinkingCapability(model, capability);
 			const inner = run(learned, context, {
 				...options,
