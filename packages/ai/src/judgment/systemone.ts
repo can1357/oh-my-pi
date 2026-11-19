@@ -227,10 +227,11 @@ function encodeWithImageDataUrls(request: JudgmentRequest, model: string): Recor
 /** Liquid AI decision models (`d1.1`, `d1-ultra`). */
 export const liquidWire: JudgmentWire = {
 	...systemOneWire("/decisions/v1/systemone"),
-	// https://docs.liquid.ai/lfm/models/d1.md#image-requirements. The documented 4.5 MB cap covers the
-	// whole JSON body; 3 MB of images is 4 MB as base64, leaving room for state and questions.
+	// https://docs.liquid.ai/lfm/models/d1.md#image-requirements: JPEG, PNG and WebP only (the API answers
+	// a GIF with 422). The documented 4.5 MB cap covers the whole JSON body; 3 MB of images is 4 MB as
+	// base64, leaving room for state and questions.
 	images: {
-		mimeTypes: ["image/jpeg", "image/png", "image/webp", "image/gif"],
+		mimeTypes: ["image/jpeg", "image/png", "image/webp"],
 		maxCount: 8,
 		maxTotalBytes: 3_000_000,
 		maxTotalPatches: 10_000,
