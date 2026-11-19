@@ -190,14 +190,30 @@ export const cfgAdvisorEvictStaleResults = register({
 export const cfgAdvisorJudgeGate = register({
 	id: "advisor.judgeGate",
 	protocolDefault: ["rpc", "acp"],
-	type: "boolean",
-	default: false,
+	type: "enum",
+	values: ["off", "auto", "on"] as const,
+	default: "off",
 	ui: {
 		tab: "model",
 		group: "Advisor",
 		label: "Advisor Judge Gate (experimental)",
 		description:
 			"Before each in-progress review, ask the 'judge' model role whether the update shows risk. Low-risk updates are held for the next review instead of costing a full advisor turn, up to the hold count and age caps below. Final turns are never gated, though review cadence can still hold them; judge failures review anyway.",
+		options: [
+			{ value: "off", label: "Off", description: "Review every in-progress update. Default." },
+			{
+				value: "auto",
+				label: "Auto",
+				description:
+					"Gate only when the judge role resolves to a native judgment model (TypeSafe jev), whose calibrated probabilities the risk threshold assumes",
+			},
+			{
+				value: "on",
+				label: "On",
+				description:
+					"Gate with whichever model the judge role resolves to; prompted judges answer an uncalibrated yes/no",
+			},
+		],
 		condition: "advisorEnabled",
 	},
 });

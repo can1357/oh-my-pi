@@ -128,7 +128,6 @@ import {
 	cfgAdvisorContinueSeverity,
 	cfgAdvisorEvictStaleResults,
 	cfgAdvisorImmuneTurns,
-	cfgAdvisorJudgeGate,
 	cfgAdvisorJudgeGateMaxHoldMs,
 	cfgAdvisorJudgeGateMaxHolds,
 	cfgAdvisorMaxNotesPerUpdate,
@@ -1751,18 +1750,16 @@ export class SessionAdvisors {
 						.catch(err => logger.debug("advisor yield notification failed", { err: String(err) }));
 				},
 				gateReview: update =>
-					cfgAdvisorJudgeGate.get(this.#host.settings)
-						? judgeAdvisorReview(update, {
-								settings: this.#host.settings,
-								registry: this.#host.modelRegistry,
-								sessionId: this.#host.sessionId(),
-								model: this.#host.agent.state.model,
-								metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
-								onUsage: journalJudgmentUsage(this.#host.sessionManager),
-								telemetry: this.#host.agent.telemetry,
-								signal: AbortSignal.timeout(ADVISOR_REVIEW_GATE_TIMEOUT_MS),
-							})
-						: undefined,
+					judgeAdvisorReview(update, {
+						settings: this.#host.settings,
+						registry: this.#host.modelRegistry,
+						sessionId: this.#host.sessionId(),
+						model: this.#host.agent.state.model,
+						metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
+						onUsage: journalJudgmentUsage(this.#host.sessionManager),
+						telemetry: this.#host.agent.telemetry,
+						timeoutMs: ADVISOR_REVIEW_GATE_TIMEOUT_MS,
+					}),
 				gateLimits: () => ({
 					maxHolds: Math.max(1, Math.trunc(cfgAdvisorJudgeGateMaxHolds.get(this.#host.settings))),
 					maxHoldMs: cfgAdvisorJudgeGateMaxHoldMs.get(this.#host.settings),
