@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `read` suggests the line-range syntax for `file:1:2` when `file` exists, directly or by unique suffix, but `file:1` does not ([#19821](https://github.com/can1357/oh-my-pi/pull/19821) by [@baekjosh](https://github.com/baekjosh)).
+
 ## [19.0.1] - 2026-11-19
 
 ### Added
