@@ -260,8 +260,9 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 			"gemini-4-argon": threeTiers,
 			"gemini-4-carbon": threeTiers,
 			"gemini-4-hydrogen": [...threeTiers, Effort.XHigh],
+			"gemini-4-neon": [...threeTiers, Effort.XHigh],
 		};
-		// `fetchAvailableModels` numbers the SKU levels; Hydrogen's `-xhigh` SKU reports 100.
+		// `fetchAvailableModels` numbers the SKU levels; Hydrogen's and Neon's `-xhigh` SKU reports 100.
 		const advertisedLevel: Partial<Record<Effort, number>> = {
 			[Effort.Low]: 1,
 			[Effort.Medium]: 2,
