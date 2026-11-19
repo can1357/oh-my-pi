@@ -5,14 +5,14 @@
  * input and standard output, so no question can be asked there: they open the
  * session where it is stored, with the launch directory as its working
  * directory, as `--resume <path>` does. Interactive mode still asks whether to
- * move the session, print mode without a terminal still fails, a session from a
- * removed worktree is still moved with no question, and the path, continue,
- * automatic-resume and fork routes never reach the question.
+ * move the session, and a session from a removed worktree is still moved with
+ * no question.
  */
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readlinePromises from "node:readline/promises";
+import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
@@ -141,6 +141,8 @@ afterEach(async () => {
 	setProjectDir(originalProject);
 	for (const key of ENV_KEYS) restoreEnvValue(key, originalEnv[key]);
 	__resetDirsFromEnvForTests();
+	// Startup opens `<agent>/models.db` under the temp root; Windows cannot remove it while it is open.
+	closeModelCache();
 	await tempDir.remove();
 });
 
@@ -311,18 +313,13 @@ describe.skipIf(process.platform === "win32")("a removed worktree is still moved
 		setProjectDir(repo);
 	});
 
-	/** Resumes the session by id from the checkout, with a terminal on stdin, and checks it moved there unasked. */
-	async function expectMovedIntoCheckout(modeArgs: string[]): Promise<void> {
-		const run = await runCli([...modeArgs, "--resume", sessionId.slice(0, 8)], true);
+	it("resumes the session by id from the checkout with a terminal on stdin, moving it there unasked", async () => {
+		const run = await runCli(["--mode", "rpc", "--resume", sessionId.slice(0, 8)], true);
 
 		expect(createInterface).not.toHaveBeenCalled();
 		expect(openRelocatedSpy).toHaveBeenCalledTimes(1);
 		const moved = await relocatedManager();
 		expect(normalized(await headerCwd(moved?.getSessionFile()))).toBe(normalized(repo));
 		expect(run.error).toBeInstanceOf(StopSignal);
-	}
-
-	it("under rpc", async () => {
-		await expectMovedIntoCheckout(["--mode", "rpc"]);
 	}, 15_000);
 });
