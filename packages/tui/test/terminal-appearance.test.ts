@@ -1018,8 +1018,10 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		terminal.write("frame");
 		expect(writes).toEqual(["\x1b[?2004hframe"]);
 		terminal.stop();
+		// A stopped terminal retires its output until the next start().
+		const stopped = writes.length;
 		terminal.write("after stop");
-		expect(writes.at(-1)).toBe("after stop");
+		expect(writes.slice(stopped)).toEqual([]);
 	});
 
 	for (const { name, session } of [

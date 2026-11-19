@@ -342,13 +342,14 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 				// pre-cursor on resume, which skips every turn it already holds.
 				this.#appendCursor(this.lastRetainedTurn, this.#retainedMessages, this.#windowStart);
 			}
-			if (event.type !== "agent_end") return;
-			// agent_end fires once per run, after every continuation it could resume has finished
-			// (mid-run stops emit agent_pause), so the window never closes before the run's answer.
+			// The run's agent_end waits until no job, child agent or peer can resume it; a yielded pause is
+			// the model finishing its turn while such work keeps the run open (as for Hindsight and
+			// Mnemopi). Non-yielded pauses continue the model's own work, so the window stays open.
+			if (event.type !== "agent_end" && !(event.type === "agent_pause" && event.yielded)) return;
 			if (this.#config.autoRetain) {
 				// Snapshot the settled history now: a job queued behind a slow upload must not read a
 				// turn that started afterwards and close its window before the answer exists.
-				// Every run end: a manual continuation can extend the last window without a user turn.
+				// Every turn end: a manual continuation can extend the last window without a user turn.
 				const settled = this.#settledHistory();
 				void this.#enqueueRetention(() => this.#retainDue(settled));
 			}

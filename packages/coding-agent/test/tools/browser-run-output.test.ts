@@ -50,7 +50,7 @@ describe("browser run output — stream text reaches the tool result", () => {
 // raw puppeteer ElementHandles only expose `.type()`. `input.fill is not a function`
 // was a live failure.
 describe("browser handle enrichment — fill()", () => {
-	it("adds a fill() that clears the current value before typing", async () => {
+	it("adds a fill() that clears the current value before inserting the new one", async () => {
 		const node = { value: "old", focused: false };
 		const stub = {
 			evaluate: async (fn: (el: unknown) => unknown) =>
@@ -65,11 +65,14 @@ describe("browser handle enrichment — fill()", () => {
 						node.focused = true;
 					},
 					matches: () => false,
+					getRootNode() {
+						return { activeElement: this };
+					},
 				}),
 			frame: {
 				page: () => ({
 					keyboard: {
-						type: async (text: string) => {
+						sendCharacter: async (text: string) => {
 							node.value += text;
 						},
 					},
@@ -178,7 +181,13 @@ describe("browser handle enrichment — guarded actions", () => {
 		const stub = {
 			type: async () => {},
 			evaluate: async (fn: (el: unknown) => unknown) => {
-				fn({ focus: () => {}, matches: () => false });
+				fn({
+					focus: () => {},
+					matches: () => false,
+					getRootNode() {
+						return { activeElement: this };
+					},
+				});
 			},
 			frame: {
 				page: () => ({
@@ -259,12 +268,15 @@ describe("browser handle enrichment — guarded actions", () => {
 						node.focused = true;
 					},
 					matches: () => false,
+					getRootNode() {
+						return { activeElement: this };
+					},
 				}),
 			type: async () => {},
 			frame: {
 				page: () => ({
 					keyboard: {
-						type: async (text: string) => {
+						sendCharacter: async (text: string) => {
 							node.value += text;
 						},
 					},
@@ -277,7 +289,7 @@ describe("browser handle enrichment — guarded actions", () => {
 
 		expect(node.value).toBe("fresh");
 		expect(node.focused).toBe(true);
-		// fill() drives the signal-aware typer internally, so it is guarded once, not nested.
+		// fill() inserts the value itself, so it is guarded once, not nested.
 		expect(labels).toEqual(["handle.fill()"]);
 	});
 

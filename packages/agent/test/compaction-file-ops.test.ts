@@ -68,7 +68,6 @@ describe("extractFileOpsFromMessage", () => {
 		const fileOps = snapcompact.createFileOps();
 		const message = createAssistantMessage([
 			readCall("r1", "src/keep.ts"),
-			readCall("r2", "artifact://7"),
 			readCall("r3", "local://ctx.md"),
 			readCall("r4", "https://example.com/page"),
 			writeCall("w1", "conflict://1"),

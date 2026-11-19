@@ -117,6 +117,10 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 	// or silently retaining nothing forever. Hashing is orders of magnitude
 	// cheaper than the re-formatting this cache avoids.
 	#lastRetainedPrefixKey: string = "";
+	/** In-flight transcript retain run; see {@link #requestRetain}. */
+	#retainRun?: Promise<void>;
+	/** Retain requested while {@link #retainRun} is in flight. */
+	#pendingRetain?: "auto" | "forced";
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
 	#recallGeneration = 0;
@@ -326,9 +330,36 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		}
 	}
 
-	async maybeRetainOnAgentEnd(): Promise<void> {
+	/**
+	 * Single-flight entry for transcript retains. At most one retain runs per session;
+	 * requests arriving meanwhile coalesce into one follow-up that re-reads the session
+	 * when it starts, so it carries the latest turns. A forced request wins over a
+	 * pending auto one. Resolves once the queue drains.
+	 */
+	#requestRetain(forced: boolean): Promise<void> {
+		this.#pendingRetain = forced || this.#pendingRetain === "forced" ? "forced" : "auto";
+		// #drainRetains always awaits before returning, so its `finally` cannot clear
+		// #retainRun before this assignment lands.
+		this.#retainRun ??= this.#drainRetains();
+		return this.#retainRun;
+	}
+
+	async #drainRetains(): Promise<void> {
+		try {
+			while (this.#pendingRetain) {
+				const kind = this.#pendingRetain;
+				this.#pendingRetain = undefined;
+				if (kind === "forced") await this.#forceRetain();
+				else await this.#retainIfDue();
+			}
+		} finally {
+			this.#retainRun = undefined;
+		}
+	}
+
+	async #retainIfDue(): Promise<void> {
 		if (!this.config.autoRetain) return;
-		// Cheap gate first: most agent_end events are not retain turns, so skip text extraction.
+		// Cheap gate first: most turn ends are not retain turns, so skip text extraction.
 		const userTurns = countUserTurns(this.session.sessionManager);
 		if (userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns) return;
 		const messages = extractMessages(this.session.sessionManager);
@@ -354,7 +385,12 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		}
 	}
 
-	async forceRetainCurrentSession(): Promise<void> {
+	/** `/memory enqueue`: retain the whole transcript now, after any in-flight retain settles. */
+	forceRetainCurrentSession(): Promise<void> {
+		return this.#requestRetain(true);
+	}
+
+	async #forceRetain(): Promise<void> {
 		const messages = extractMessages(this.session.sessionManager);
 		if (messages.length === 0) return;
 		// Forced retains are user-initiated rebuilds (`/memory enqueue`): drop the
@@ -558,8 +594,11 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 	attachSessionListeners(): void {
 		this.unsubscribe?.();
 		this.unsubscribe = this.session.subscribe(event => {
-			if (event.type === "agent_end") {
-				void this.maybeRetainOnAgentEnd();
+			// The run's `agent_end` waits until no job, child agent or peer can resume it;
+			// a yielded pause is the model finishing its turn while such work keeps the run
+			// open. Non-yielded pauses continue the model's own work (retry, compaction).
+			if (event.type === "agent_end" || (event.type === "agent_pause" && event.yielded)) {
+				void this.#requestRetain(false);
 				// Drain any queued tool-initiated retain calls now that the turn
 				// is settled. The queue is also debounced/size-bounded, but
 				// flushing here keeps the bank fresh between turns.

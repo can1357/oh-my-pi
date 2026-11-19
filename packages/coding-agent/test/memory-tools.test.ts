@@ -1094,9 +1094,34 @@ describe("Mnemopi backend lifecycle", () => {
 
 		expect(warn).toHaveBeenCalledWith("Mnemopi: lifecycle hook failed", {
 			banks: ["test-bank"],
-			operation: "agent_end retention",
+			operation: "turn-end retention",
 			error: "Cannot use a closed database",
 		});
+	});
+
+	it("auto-retains on a yielded agent_pause but not a non-yielded one", async () => {
+		const listeners = new Set<AgentSessionEventListener>();
+		const entries = [{ type: "message", message: { role: "user", content: "turn one" } }];
+		const state = registerMnemopiState(makeMnemopiConfig({ retainEveryNTurns: 1 }), {
+			entries: () => entries,
+			listeners,
+		});
+		state.attachSessionListeners();
+		const retained = Promise.withResolvers<void>();
+		const retainSpy = vi.spyOn(state, "retainMessages").mockImplementation(async () => retained.resolve());
+		const emit = (yielded: boolean) => {
+			for (const listener of listeners) {
+				listener({ type: "agent_pause", messages: [], yielded, awaiting: yielded } as never);
+			}
+		};
+
+		emit(false);
+		expect(retainSpy).not.toHaveBeenCalled();
+		emit(true);
+		await retained.promise;
+
+		expect(retainSpy).toHaveBeenCalledTimes(1);
+		expect(retainSpy.mock.calls[0][0]).toEqual([{ role: "user", content: "turn one" }]);
 	});
 
 	it("contains failures before agent-start recall reaches its internal bank guard", async () => {

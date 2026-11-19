@@ -386,7 +386,19 @@ function resolveImportSpecifier(baseDir: string, source: string, packageRoot: st
 }
 
 function resolveBareSpecifierWithinProject(source: string, baseDir: string): string {
-	const resolved = Bun.resolveSync(source, baseDir);
+	let resolved: string;
+	try {
+		resolved = Bun.resolveSync(source, baseDir);
+	} catch (error) {
+		const installed = findInstalledPackageDir(source, baseDir);
+		if (!installed || !String(error).includes("Cannot find package")) throw error;
+		// Bun caches node_modules listings per process: a package installed after this worker
+		// first looked there stays invisible to it until the worker restarts.
+		throw new Error(
+			`${error instanceof Error ? error.message : String(error)}\n${installed} exists on disk but was installed after this JS worker first resolved packages there; rerun the cell with reset: true to load it.`,
+			{ cause: error },
+		);
+	}
 	if (!path.isAbsolute(resolved)) {
 		throw new Error(
 			`Refusing non-file resolution ${JSON.stringify(resolved)} for bare package ${JSON.stringify(source)} from ${baseDir}`,
@@ -408,6 +420,20 @@ function resolveBareSpecifierWithinProject(source: string, baseDir: string): str
 	throw new Error(
 		`Refusing package ${JSON.stringify(source)} resolved outside the importing project's ancestry: ${resolved}`,
 	);
+}
+
+/** The nearest `node_modules/<package>` directory with a manifest above `baseDir`, if any. */
+function findInstalledPackageDir(source: string, baseDir: string): string | undefined {
+	const segments = source.split("/");
+	const packageName = source.startsWith("@") ? segments.slice(0, 2) : segments.slice(0, 1);
+	let ancestor = path.resolve(baseDir);
+	for (;;) {
+		const candidate = path.join(ancestor, "node_modules", ...packageName);
+		if (fs.existsSync(path.join(candidate, "package.json"))) return candidate;
+		const parent = path.dirname(ancestor);
+		if (parent === ancestor) return undefined;
+		ancestor = parent;
+	}
 }
 
 function pathIsWithin(root: string, candidate: string): boolean {

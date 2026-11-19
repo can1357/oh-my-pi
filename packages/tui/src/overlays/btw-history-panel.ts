@@ -162,8 +162,8 @@ const STATUS: Record<BtwHistoryRecord["status"], { label: string; color: ThemeCo
 const SHEET = { role: "omp.overlay.btwHistory", anchor: "center", size: "lg", head: "BTW history" } as const;
 const EMPTY_SHEET = { role: "omp.overlay.btwHistory", anchor: "center", size: "md", head: "BTW history" } as const;
 
-/** A status worth naming next to an answer natively; an answered question needs none. */
-function describeStatus(status: BtwHistoryTurn["status"]): TspSpan[] | undefined {
+/** A status worth naming next to an answer natively (history rows, transcript notes); an answered question needs none. */
+export function describeBtwStatus(status: BtwHistoryTurn["status"]): TspSpan[] | undefined {
 	switch (status) {
 		case "running":
 			return [span("●", "accent", { fx: "pulse" }), span(" Answering", "accent")];
@@ -762,7 +762,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 			const followUps = record.followUps?.length ?? 0;
 			const detail: TspSpan[] = [span(this.#listStamp(record.createdAt, now), "mono")];
 			if (followUps > 0) detail.push(span(` · ${followUps} follow-up${followUps === 1 ? "" : "s"}`));
-			const status = describeStatus(getBtwLatestTurn(record).status);
+			const status = describeBtwStatus(getBtwLatestTurn(record).status);
 			// The question is markdown: its `code` reads as mono, without the backticks.
 			const label = sanitizeDisplayLine(getBtwTopicLabel(record))
 				.split(/`([^`]+)`/)
@@ -824,7 +824,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 							),
 						),
 					];
-		const status = describeStatus(turn.status);
+		const status = describeBtwStatus(turn.status);
 		if (status) meta.push(span("  ·  "), ...status);
 		// The question stays markdown so its inline code and links render.
 		const children: NativeChild[] = [

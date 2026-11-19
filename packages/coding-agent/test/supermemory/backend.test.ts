@@ -82,6 +82,11 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 			// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
 			for (const listener of [...listeners]) listener({ type: "agent_end", messages: [] } as never);
 		},
+		/** Dispatches `agent_pause` (the run stays open), yielded or not. */
+		emitPause(yielded: boolean) {
+			// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
+			for (const listener of [...listeners]) listener({ type: "agent_pause", messages: [], yielded } as never);
+		},
 		async endTurn() {
 			session.emitEnd();
 			await state?.flush();
@@ -1066,6 +1071,27 @@ describe("supermemoryBackend", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("retains on a yielded pause while background work keeps the run open, not on a non-yielded one", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		// A retry or compaction continues the model's own work: the window stays open.
+		session.emitPause(false);
+		await session.getSupermemorySessionState()?.flush();
+		expect(create).not.toHaveBeenCalled();
+		// The model finished its turn; agent_end waits for background jobs, but the window closes now.
+		session.emitPause(true);
+		await session.getSupermemorySessionState()?.flush();
+		expect(create).toHaveBeenCalledTimes(1);
+		expect(create.mock.calls[0]?.[1]?.content).toContain("reply to one");
+		// The run's later agent_end finds nothing new to send.
+		await session.endTurn();
+		expect(create).toHaveBeenCalledTimes(1);
 	});
 
 	it("a job queued behind a slow upload retains only turns settled when it was queued", async () => {

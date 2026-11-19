@@ -2,7 +2,7 @@
  * Hindsight memory backend.
  *
  * Wires the per-session lifecycle (recall on first turn, retain every Nth
- * agent_end, etc.) on top of the AgentSession event stream. Hindsight runtime
+ * finished model turn, etc.) on top of the AgentSession event stream. Hindsight runtime
  * state is owned by the AgentSession so lifetime follows the actual domain
  * owner instead of a parallel session-id registry.
  */
