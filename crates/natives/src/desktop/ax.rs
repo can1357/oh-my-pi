@@ -253,10 +253,24 @@ impl AxRegistry {
 		read
 	}
 
+	/// A minimized read locks the window's refs at once; only
+	/// [`Self::finish_visible_read`] unlocks them, so a visible read that fails
+	/// or reads no tree leaves refs from the minimized read inspection-only.
 	fn begin_read(&mut self, window: &WindowRoot, snapshot: bool) -> u64 {
 		let read = self.window_read(&window.id, snapshot);
-		read.minimized = matches!(window.state, RootState::Minimized);
+		if matches!(window.state, RootState::Minimized) {
+			read.minimized = true;
+		}
 		read.generation
+	}
+
+	/// Marks `window`'s refs actionable after a visible read produced its tree.
+	fn finish_visible_read(&mut self, window: &WindowRoot) {
+		if !matches!(window.state, RootState::Minimized)
+			&& let Some(read) = self.generations.get_mut(&window.id)
+		{
+			read.minimized = false;
+		}
 	}
 
 	/// Starts a snapshot of `target`, returning its generation.
@@ -1300,6 +1314,9 @@ pub(super) fn snapshot(
 	)
 	.line_states();
 	let tree = walk_raw(backend, root.clone(), 0, false, &mut state)?;
+	if tree.is_some() {
+		registry.finish_visible_read(window);
+	}
 	let identities = ReadIdentities::new(root, tree.as_ref(), &state);
 	let root = tree.and_then(|node| filter_node(node, options.all.unwrap_or(false)));
 	let mut text = String::new();
@@ -1379,6 +1396,7 @@ pub(super) fn query(
 	let Some(tree) = walk_raw(backend, root.clone(), 0, false, &mut state)? else {
 		return Ok(Vec::new());
 	};
+	registry.finish_visible_read(window);
 	let identities = ReadIdentities::new(root, Some(&tree), &state);
 	let role = query.role.as_deref().map(str::to_lowercase);
 	let compact_role = role

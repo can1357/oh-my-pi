@@ -4906,6 +4906,24 @@ mod capture_tests {
 				.code,
 			ErrorCode::WindowNotFound
 		);
+		// A visible read that fails before producing a tree keeps those refs
+		// inspection-only.
+		documents.lock().destroyed.insert(1);
+		worker.backend = Ok(Box::new(roster(false)));
+		assert!(
+			worker
+				.snapshot(&target, &AxSnapshotOptions::default())
+				.is_err()
+		);
+		assert_eq!(
+			worker
+				.registry
+				.require_actionable("e1")
+				.unwrap_err()
+				.code,
+			ErrorCode::WindowUnavailable
+		);
+		documents.lock().destroyed.remove(&1);
 		worker.backend = Ok(Box::new(roster(false)));
 		let restored = worker
 			.snapshot(&target, &AxSnapshotOptions::default())

@@ -158,9 +158,13 @@ impl Backend for MacosBackend {
 			self
 				.capture
 				.window(id)
-				.ok()?
-				.pid
+				.ok()
+				.and_then(|window| window.pid)
 				.and_then(|pid| libc::pid_t::try_from(pid).ok())
+				// The on-screen list omits a minimized window; its exact-ID owner is
+				// the same one `minimized_root` reads, so the user-input watch
+				// covers that read too.
+				.or_else(|| id.parse().ok().and_then(capture::window_owner_pid))
 		})
 	}
 
