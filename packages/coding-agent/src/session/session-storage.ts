@@ -610,8 +610,16 @@ function sessionLeasePath(sessionId: string, createDir: boolean): string {
 		if (createDir) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 		// The test-run dir sits in the shared OS temp dir, where another local
 		// user could pre-create it or plant a symlink: refuse anything but a
-		// directory this user owns that nobody else can enter.
-		const st = fs.lstatSync(dir);
+		// directory this user owns that nobody else can enter. A probe of a
+		// directory nobody created yet still goes to the lock, which on Linux
+		// also sees a lease an older build holds as an abstract socket.
+		let st: fs.Stats;
+		try {
+			st = fs.lstatSync(dir);
+		} catch (err) {
+			if (!createDir && isEnoent(err)) return path.join(dir, name);
+			throw err;
+		}
 		const uid = process.getuid?.();
 		if (!st.isDirectory() || (uid !== undefined && st.uid !== uid) || (st.mode & 0o077) !== 0) {
 			throw new Error(`Session ownership lease directory ${dir} is not a private directory owned by this user`);
@@ -640,9 +648,8 @@ export function tryAcquireSessionLease(sessionId: string): FileLockHandle | null
 export function isSessionLeaseHeld(sessionId: string): boolean | null {
 	try {
 		return isFileLockHeld(sessionLeasePath(sessionId, false));
-	} catch (err) {
-		// No sidecar directory yet: nobody has ever claimed a session here.
-		return isEnoent(err) ? false : null;
+	} catch {
+		return null;
 	}
 }
 
