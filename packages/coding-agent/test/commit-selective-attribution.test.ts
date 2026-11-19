@@ -173,6 +173,37 @@ describe("selective commit attribution", () => {
 		expect(content).toBeNull();
 	});
 
+	// HEAD advanced on its own, then writers reordered lines. Each case once preselected an
+	// insertion whose matching deletion went elsewhere, committing a second `A`.
+	for (const [head, steps] of [
+		["x B x D A", ["B x x A", "Main: B A x x C", "Other: A x x C D B", "Main: A x C D B x"]],
+		["D B x x A", ["A B x x", "Main: B A x x", "Other: B A D x x", "Main: B D A x"]],
+	] as const) {
+		it(`never preselects a line the net change would then hold twice (HEAD ${head})`, () => {
+			const lines = (text: string) => text.split(" ").join("\n");
+			const edits: Edit[] = [];
+			let before = lines(steps[0]);
+			for (const step of steps.slice(1)) {
+				const [actor, after] = step.split(": ");
+				edits.push({ actor, before, after: lines(after) });
+				before = lines(after);
+			}
+			const tally = (text: string | null) => {
+				const counts = new Map<string, number>();
+				for (const line of toLines(text)) counts.set(line, (counts.get(line) ?? 0) + 1);
+				return counts;
+			};
+			const headCounts = tally(lines(head));
+			const workCounts = tally(before);
+
+			const committed = tally(commitFor(lines(head), edits, before, ["Main"]).content);
+
+			for (const [line, count] of committed) {
+				expect(count).toBeLessThanOrEqual(Math.max(headCounts.get(line) ?? 0, workCounts.get(line) ?? 0));
+			}
+		});
+	}
+
 	describe("subagents", () => {
 		const mainAfter = CODE.replace("return 1", "return 10");
 		const subAfter = mainAfter.replace("return 2", "return 20");

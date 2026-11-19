@@ -256,43 +256,60 @@ export function attribute(head: readonly string[], steps: readonly Step[], work:
 	// After HEAD advances independently, crossing equal lines can strand a deletion and its
 	// reinsertion in different hunks. Selecting just one would commit a change neither side made.
 	if (steps[0]?.actor !== PRE || replay.ops.length === Math.abs(work.length - head.length)) return replay;
-	const net = changedRegions(head, work);
-	const netCount = net.reduce((count, r) => count + (r.i2 - r.i1) + (r.j2 - r.j1), 0);
-	if (netCount >= replay.ops.length) return replay;
-	return reconcileNetHunks(head, work, replay, net);
+	return reconcileNetHunks(head, work, replay, changedRegions(head, work));
 }
 
-/** Keep the replay's exact ops and ordering where it agrees with the net diff. Else offer only
- * the real hunk, for explicit review: matching repeated text is not proof of who wrote it. */
+/** Keep a replayed hunk only where it spans exactly a net HEAD → worktree hunk and shares no
+ * text with a hunk that does not; offer every other net hunk whole, for explicit review.
+ * Matching op counts or repeated text is not proof of who wrote a line. */
 function reconcileNetHunks(
 	head: readonly string[],
 	work: readonly string[],
 	replay: Attribution,
 	regions: readonly Region[],
 ): Attribution {
+	const byRange = new Map(replay.hunks.map(hunk => [`${hunk.headStart}:${hunk.workStart}`, hunk]));
+	const kept = regions.map(r => {
+		const hunk = byRange.get(`${r.i1}:${r.j1}`);
+		return hunk && hunk.headCount === r.i2 - r.i1 && hunk.workCount === r.j2 - r.j1 ? hunk : undefined;
+	});
+	if (regions.length === replay.hunks.length && kept.every(hunk => hunk !== undefined)) return replay;
+	// A kept hunk holding text a disputed hunk also changes could pair a line with its stranded
+	// twin there (a `+A` kept while its `-A` goes to review), so it is disputed too. Each pass
+	// disputes at least one more hunk, so this runs at most `regions.length` times.
+	const disputed = new Set<string>();
+	const dispute = (r: Region) => {
+		for (let i = r.i1; i < r.i2; i++) disputed.add(head[i]);
+		for (let j = r.j1; j < r.j2; j++) disputed.add(work[j]);
+	};
+	regions.forEach((r, n) => {
+		if (!kept[n]) dispute(r);
+	});
+	for (let grew = true; grew;) {
+		grew = false;
+		regions.forEach((r, n) => {
+			if (kept[n]?.ops.some(op => disputed.has(op.text))) {
+				kept[n] = undefined;
+				dispute(r);
+				grew = true;
+			}
+		});
+	}
 	const sources = replay.items.filter(item => item.op !== undefined);
 	const result: Item[] = [];
 	const base = { by: HEAD, over: [], step: -1 };
 	let i = 0;
-	let h = 0;
-	for (const r of regions) {
+	regions.forEach((r, n) => {
 		for (; i < r.i1; i++) result.push({ ...base, text: head[i], head: i, alive: true });
-		while (h < replay.hunks.length && (replay.hunks[h].headStart < i || replay.hunks[h].workStart < r.j1)) h++;
-		const old = replay.hunks[h];
-		if (
-			old &&
-			old.headStart === i &&
-			old.workStart === r.j1 &&
-			old.headCount === r.i2 - i &&
-			old.workCount === r.j2 - r.j1
-		) {
-			for (const op of old.ops) result.push(sources[op.id]);
+		const hunk = kept[n];
+		if (hunk) {
+			for (const op of hunk.ops) result.push(sources[op.id]);
 			i = r.i2;
-		} else {
-			for (; i < r.i2; i++) result.push({ ...base, text: head[i], head: i, alive: false, deletedBy: REORDERED });
-			for (let j = r.j1; j < r.j2; j++) result.push({ ...base, text: work[j], by: REORDERED, alive: true });
+			return;
 		}
-	}
+		for (; i < r.i2; i++) result.push({ ...base, text: head[i], head: i, alive: false, deletedBy: REORDERED });
+		for (let j = r.j1; j < r.j2; j++) result.push({ ...base, text: work[j], by: REORDERED, alive: true });
+	});
 	for (; i < head.length; i++) result.push({ ...base, text: head[i], head: i, alive: true });
 	return deriveOps(result);
 }
