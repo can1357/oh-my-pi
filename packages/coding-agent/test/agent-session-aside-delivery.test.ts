@@ -1862,18 +1862,41 @@ describe("AgentSession aside delivery", () => {
 	);
 
 	// Plain-first separates the two into batches: the earlier batch must not announce
-	// the mention that is still queued behind it with its own notice.
+	// the mention still queued behind it with its own notice. Cross-queue rows deliver
+	// the plain steer ahead of a mention whose notice waits in another queue.
+	const mention = "delegate to ^openai/gpt-test";
+	const plain = "plain other";
 	it.each([
-		["steer", ["delegate to ^openai/gpt-test", "plain other"]],
-		["followUp", ["delegate to ^openai/gpt-test", "plain other"]],
-		["steer", ["plain other", "delegate to ^openai/gpt-test"]],
-		["followUp", ["plain other", "delegate to ^openai/gpt-test"]],
-	] as const)("messages queued through session.%s() as %j announce the mention once", async (method, queued) => {
+		[
+			["steer", mention],
+			["steer", plain],
+		],
+		[
+			["followUp", mention],
+			["followUp", plain],
+		],
+		[
+			["steer", plain],
+			["steer", mention],
+		],
+		[
+			["followUp", plain],
+			["followUp", mention],
+		],
+		[
+			["followUp", mention],
+			["steer", plain],
+		],
+		[
+			["sendUserMessage({ deliverAs: 'aside' })", mention],
+			["steer", plain],
+		],
+	] as const)("messages queued as %j then %j announce the mention once", async (first, second) => {
 		const { session, mock, started, release } = createMentionSession();
 		const run = session.prompt("go");
 		try {
 			await started.promise;
-			for (const text of queued) await session[method](text);
+			for (const [method, text] of [first, second]) await queueMentionVia[method](session, text);
 		} finally {
 			release.resolve();
 		}
@@ -1882,7 +1905,7 @@ describe("AgentSession aside delivery", () => {
 		const texts = mock.calls.at(-1)!.context.messages.map(llmText);
 		const notices = texts.flatMap((text, index) => (text.includes("Now available:") ? [index] : []));
 		expect(notices).toEqual([texts.findIndex(text => text.startsWith('delegate to <model agent="m1"')) - 1]);
-		expect(texts).toContain("plain other");
+		expect(texts).toContain(plain);
 	});
 
 	it("a reused alias is announced on delivery when the message carrying its notice was withdrawn", async () => {

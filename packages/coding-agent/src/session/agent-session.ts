@@ -290,8 +290,8 @@ import { SubagentSpawnSignal } from "../thread/subagent-spawn-signal";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { AgentDefinition } from "../task/types";
 import type { AgentOutputManager } from "../task/output-manager";
-import { MODEL_MENTION_TAG_RE, type ModelMention } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
-import { ModelMentionRegistry, type ResolvedModelMention } from "./model-mentions";
+import type { ModelMention } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
+import { ModelMentionRegistry, type ResolvedModelMention, referencedModelAgents } from "./model-mentions";
 import { parseCommandArgs } from "../utils/command-args";
 import type { EditModeSetting } from "../edit/settings";
 import { getEditStore } from "../edit/store";
@@ -9282,11 +9282,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// A `^` mention in a non-synthetic prompt mints a new alias. The hidden
 		// session-agent notice (which tells the model about the alias) must ride
 		// with the message via prependMessages — not as a separate steer — so the
-		// model sees both in the same turn (#14093). A queued prompt skips what a
-		// notice queued ahead of it already announces.
+		// model sees both in the same turn (#14093). A queued prompt announces only
+		// the aliases it references and nothing queued ahead of it announces.
 		const sessionAgentNotice = options?.synthetic
 			? undefined
-			: this.#tools.takeSessionAgentNotice(this.isStreaming ? this.#queuedAhead(options?.streamingBehavior) : []);
+			: this.isStreaming
+				? this.#takeQueuedSessionAgentNotice(expandedText, options?.streamingBehavior)
+				: this.#tools.takeSessionAgentNotice();
 		const prependNotices = sessionAgentNotice ? [...keywordNotices, sessionAgentNotice] : keywordNotices;
 
 		// Agent-initiated synthetic prompts (auto-continue, plan, reminders) are not user turns.
@@ -9593,9 +9595,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				skillArgs = details.args;
 			}
 			keywordNotices = this.#createMagicKeywordNotices(skillArgs);
-			const queuedAhead =
-				options?.queueOnly || this.isStreaming ? this.#queuedAhead(options?.streamingBehavior) : [];
-			const sessionAgentNotice = this.#tools.takeSessionAgentNotice(queuedAhead);
+			const sessionAgentNotice =
+				options?.queueOnly || this.isStreaming
+					? this.#takeQueuedSessionAgentNotice(textContent, options?.streamingBehavior)
+					: this.#tools.takeSessionAgentNotice();
 			queuedNotices = sessionAgentNotice ? [...keywordNotices, sessionAgentNotice] : keywordNotices;
 		}
 
@@ -9735,7 +9738,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		messages: readonly AgentMessage[],
 		promptText: string,
 	): Promise<QueuedMessagePreparation> {
-		const referenced = new Set(Array.from(promptText.matchAll(MODEL_MENTION_TAG_RE), match => match[1]!));
+		const referenced = referencedModelAgents(promptText);
 		const preparation = await pending;
 		return {
 			commit: () => {
@@ -10424,8 +10427,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	): { text: string; prependMessages: CustomMessage[] } {
 		if (attribution !== "user") return { text, prependMessages: [] };
 		const expandedText = this.#modelMentions.expandMentions(text);
-		const sessionAgentNotice = this.#tools.takeSessionAgentNotice(this.#queuedAhead(mode));
+		const sessionAgentNotice = this.#takeQueuedSessionAgentNotice(expandedText, mode);
 		return { text: expandedText, prependMessages: sessionAgentNotice ? [sessionAgentNotice] : [] };
+	}
+
+	/**
+	 * The session-agent notice for a user message queued now in `mode`: the `m<N>` agents its
+	 * expanded `text` references that no notice in context or queued ahead of it announces.
+	 * Other roster changes ride the next direct prompt, so a message queued in another queue
+	 * never repeats them.
+	 */
+	#takeQueuedSessionAgentNotice(
+		text: string,
+		mode: "steer" | "followUp" | "aside" | undefined,
+	): CustomMessage | undefined {
+		const referenced = referencedModelAgents(text);
+		if (referenced.size === 0) return undefined;
+		return this.#tools.takeSessionAgentNotice(this.#queuedAhead(mode), referenced);
 	}
 
 	/**
