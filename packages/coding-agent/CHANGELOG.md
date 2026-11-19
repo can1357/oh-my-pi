@@ -8,6 +8,7 @@
 - Fixed bash output minimizing being skipped on Windows when a command is named by a `\` path or with `.exe` (`"C:\Program Files\Git\cmd\git.exe" status`, `git.exe log`)
 - Fixed the bundled `omp://tools` docs still describing the removed `ida` tool; `tools/dsm.md` now documents eval's `dsm` namespace and `disassembler.*` settings, and `tools/read.md` documents metadata-only executable reads ([#19608](https://github.com/can1357/oh-my-pi/issues/19608))
 - Fixed native terminal hosts such as Tern placing extension aboveEditor widgets and a blank row between the status row and the tray; the widgets now sit above the status row ([#19767](https://github.com/can1357/oh-my-pi/issues/19767))
+- Fixed isolated `task` subagents starting with no git work tree when the session cwd is a bare-repository container (`.git` with `core.bare=true`); isolation now refuses before spawning and names the repository's work trees to start from ([#19791](https://github.com/can1357/oh-my-pi/issues/19791))
 
 ## [19.0.0] - 2026-11-18
 
