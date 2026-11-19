@@ -1518,15 +1518,19 @@ describe("InteractiveMode plan review rendering", () => {
 		return planFilePath;
 	}
 
-	it("re-measures keep-context approval when the slider moves to a larger-context tier", async () => {
+	it("re-measures keep-context approval as the slider moves between context tiers", async () => {
 		const planFilePath = await openTieredPlanReview();
 		let keptOnDefault: boolean | undefined;
-		let slowMeta: string | undefined;
+		let keepLabelOnSlow: string | undefined;
+		let keptBackOnDefault: boolean | undefined;
 		vi.spyOn(mode.ui, "showOverlay").mockImplementation(component => {
 			const overlay = component as PlanReviewOverlay;
 			keptOnDefault = overlay.selectOption("keep");
 			overlay.handleInput("\x1b[C");
-			slowMeta = mode.getPendingPlanReview()?.options.find(option => option.id === "keep")?.label;
+			keepLabelOnSlow = mode.getPendingPlanReview()?.options.find(option => option.id === "keep")?.label;
+			overlay.handleInput("\x1b[D");
+			keptBackOnDefault = overlay.selectOption("keep");
+			overlay.handleInput("\x1b[C");
 			overlay.selectOption("keep");
 			return { hide: vi.fn() } as never;
 		});
@@ -1534,7 +1538,10 @@ describe("InteractiveMode plan review rendering", () => {
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 
 		expect(keptOnDefault).toBe(false);
-		expect(slowMeta).toBe(`Approve and keep context (~${compactNumber(300_000)} / ${compactNumber(1_000_000)})`);
+		expect(keepLabelOnSlow).toBe(
+			`Approve and keep context (~${compactNumber(300_000)} / ${compactNumber(1_000_000)})`,
+		);
+		expect(keptBackOnDefault).toBe(false);
 		expect(session.model?.id).toBe("claude-opus-4-6");
 		expect(session.getPlanModeState()?.enabled).not.toBe(true);
 	});

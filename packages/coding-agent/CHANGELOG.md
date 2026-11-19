@@ -7,6 +7,7 @@
 - Fixed the shell's `dirname` builtin on Windows ignoring `\` separators and drive prefixes (`dirname 'C:\a\b'` printed `.`), which broke scripts like VS Code's `code` launcher (`./Code.exe: No such file or directory`)
 - Fixed the bundled `omp://tools` docs still describing the removed `ida` tool; `tools/dsm.md` now documents eval's `dsm` namespace and `disassembler.*` settings, and `tools/read.md` documents metadata-only executable reads ([#19608](https://github.com/can1357/oh-my-pi/issues/19608))
 - Fixed native terminal hosts such as Tern placing extension aboveEditor widgets and a blank row between the status row and the tray; the widgets now sit above the status row ([#19767](https://github.com/can1357/oh-my-pi/issues/19767))
+- Fixed plan review measuring "Approve and keep context" against the pre-plan model instead of the tier chosen in the "continue with" slider, so switching to a larger-context tier now enables it ([#19660](https://github.com/can1357/oh-my-pi/issues/19660))
 
 ## [19.0.0] - 2026-11-18
 
