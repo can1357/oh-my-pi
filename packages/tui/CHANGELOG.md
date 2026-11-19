@@ -11,6 +11,7 @@
 ### Added
 
 - Added handling of `features` terminal events to update UI without waiting for a new hello
+- Added `SettingsRuntimeContext.runtimeOptions`: the host can supply the choices of a setting shown as a choice menu, keyed by setting path. Thinking levels, themes and composer shapes keep their own lists ([#17815](https://github.com/can1357/oh-my-pi/issues/17815) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Changed
 

@@ -402,6 +402,28 @@ describe("todo backend", () => {
 		expect(order).toEqual(["shutdown"]);
 	});
 
+	it("a label or description that is not text, or is blank once its control sequences are removed, is refused at registration", async () => {
+		const refused: string[] = [];
+		const attempt = (name: string, register: () => void) => {
+			try {
+				register();
+			} catch {
+				refused.push(name);
+			}
+		};
+		const { session } = await open([
+			pi => {
+				attempt("blank label", () => pi.registerTodoBackend({ id: "a", label: "\x1b[0m ", replace() {} }));
+				attempt("blank description", () => pi.registerTodoBackend({ id: "b", description: " ", replace() {} }));
+				// @ts-expect-error a JavaScript extension can pass anything
+				attempt("label not text", () => pi.registerTodoBackend({ id: "c", label: 42, replace() {} }));
+			},
+		]);
+
+		expect(refused).toEqual(["blank label", "blank description", "label not text"]);
+		expect(session.extensionRunner?.getTodoBackends().size).toBe(0);
+	});
+
 	it("an id two extensions registered goes to the first, and is still reported as unregistered once neither is enabled", async () => {
 		const first = tracker();
 		const second = tracker();

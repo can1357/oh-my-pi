@@ -1849,6 +1849,10 @@ export interface RegisteredCommand {
 export interface TodoBackendDefinition {
 	/** `todo.backend` value that selects this backend: letters, digits, `.`, `_` and `-`. `native` is reserved. */
 	id: string;
+	/** Name shown for the backend in Settings; the id when omitted. */
+	label?: string;
+	/** One line shown beside the label in Settings. */
+	description?: string;
 	/**
 	 * Called in the main session with the whole todo list after omp committed a change to it:
 	 * a `todo` call, a `/todo` edit, RPC `set_todos`, `/new`, or a resume, rewind, branch, fork or

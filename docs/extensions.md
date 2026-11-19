@@ -323,6 +323,8 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 export default function (pi: ExtensionAPI) {
 	pi.registerTodoBackend({
 		id: "my-tracker",
+		label: "My tracker",
+		description: "Mirrors the todo list into my tracker",
 		async replace(phases, ctx) {
 			await tracker.sync(ctx.sessionManager.getSessionId(), phases);
 		},
@@ -336,6 +338,7 @@ export default function (pi: ExtensionAPI) {
 - **Failure.** omp does not wait for the backend before it commits, and a backend cannot refuse a change. A throw, or no answer within the extension handler timeout, is reported as an extension error; omp's list stays as committed, and the next change sends the whole list again. Calls run one at a time, except that a call omp gave up on may still be running when the next one starts: a backend that finishes such a call late must not let it overwrite the newer list.
 - **Selection.** `todo.backend` holds a registered `id` (letters, digits, `.`, `_`, `-`). An id that no enabled extension registers is reported once as an extension error, and todos work as with `native`. Registering `native`, a malformed id or a backend without `replace` throws; an extension that registers an id again replaces its own earlier definition. When several extensions register an id, the first one loaded keeps it, and a warning is logged the first time omp looks a backend up. Inside a handler or a tool, an extension reads the selection with `lookup("todo.backend")?.get(pi.pi.settings)` (see below).
 - **Scope.** Main session only: subagents and `/tan` clones are not mirrored. An extension that registers a backend always loads at startup.
+- **Settings.** `/settings` → Tools → Todos → "Todo Backend" lists `Native` and every backend an enabled extension registers, with its `label` (the `id` when omitted) and `description`. Both are optional; a blank one throws at registration. A backend picked there mid-session gets the list with the next change, not at once.
 
 ### Runtime setting overrides
 

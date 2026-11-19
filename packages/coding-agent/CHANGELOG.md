@@ -29,6 +29,7 @@
 - Added redirected files to a background bash job's streams: `proc://<id>/streams`, the jobs sheet and job widgets (source `file:<n>`) read what a command writes with `> log` while it runs, as they do for `|` stages
 - Added Binary Ninja as a disassembler backend for read analysis views and the dsm namespace. Select it with disassembler.backend = binja; it uses a local install found through binja.installDir, $BN_INSTALL_DIR, or the default install locations ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 - Added `pi.registerTodoBackend()` and the `todo.backend` setting: an extension can mirror the main session's todo list into an external store, which gets the whole list after every change ([#19890](https://github.com/can1357/oh-my-pi/pull/19890) by [@Dangerboi](https://github.com/Dangerboi))
+- Added the "Todo Backend" choice to `/settings` → Tools → Todos, listing each registered todo backend with its optional `label` and `description` ([#17815](https://github.com/can1357/oh-my-pi/issues/17815) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Changed
 

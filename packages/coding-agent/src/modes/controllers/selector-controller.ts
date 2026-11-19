@@ -87,6 +87,7 @@ import {
 } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../../tools";
 import { AskTool } from "../../tools/ask";
+import { cfgTodoBackend, NATIVE_TODO_BACKEND } from "../../tools/settings";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { sanitizeDisplayWarnings, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolAbortError } from "../../tools/tool-errors";
@@ -326,6 +327,26 @@ export class SelectorController {
 						availableThinkingLevels: [...this.ctx.session.getAvailableThinkingLevels()],
 						thinkingLevel: this.ctx.session.thinkingLevel,
 						availableThemes,
+						runtimeOptions: new Map([
+							[
+								cfgTodoBackend.id,
+								[
+									{
+										value: NATIVE_TODO_BACKEND,
+										label: "Native",
+										description: "Keep the todo list in the session only",
+									},
+									...Array.from(
+										this.ctx.session.extensionRunner?.getTodoBackends() ?? [],
+										([id, { definition }]) => ({
+											value: id,
+											label: definition.label ?? id,
+											description: definition.description,
+										}),
+									),
+								],
+							],
+						]),
 						providers: [...new Set(this.ctx.session.getAvailableModels().map(model => model.provider))].sort(
 							(a, b) => a.localeCompare(b),
 						),
