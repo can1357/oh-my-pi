@@ -84,6 +84,18 @@ collapse {
 		efforts "low" "medium" "high" "xhigh"
 		requires-effort #true
 	}
+	// Gemini 4 Neon (released 2026-11-18) is served as four thinking-level
+	// SKUs, one per level Hydrogen has: low, medium, high, xhigh (no minimal).
+	variant-family "google-antigravity" "gemini-4-neon" name="Gemini 4 Neon" {
+		members "gemini-4-neon-low" "gemini-4-neon-medium" "gemini-4-neon-high" "gemini-4-neon-xhigh"
+		route "low" "gemini-4-neon-low"
+		route "medium" "gemini-4-neon-medium"
+		route "high" "gemini-4-neon-high"
+		route "xhigh" "gemini-4-neon-xhigh"
+		mode "google-level"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+	}
 	variant-family "google-antigravity" "gemini-3.5-flash" name="Gemini 3.5 Flash" {
 		members "gemini-3.5-flash-extra-low" "gemini-3.5-flash-low" "gemini-3-flash-agent"
 		route "off" "gemini-3.5-flash-extra-low"
