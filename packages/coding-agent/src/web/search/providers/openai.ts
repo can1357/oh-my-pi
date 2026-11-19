@@ -12,7 +12,7 @@ import { formatQuery, GOOGLE_QUERY_SYNTAX, parseSearchQuery } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { withHardTimeout } from "./utils";
+import { searchReasoningEffort, withHardTimeout } from "./utils";
 
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 100;
@@ -47,7 +47,11 @@ function buildRequestBody(params: SearchParams): Record<string, unknown> {
 		include: ["web_search_call.action.sources"],
 		store: false,
 	};
-	if (params.model.reasoningMode) body.reasoning = { mode: params.model.reasoningMode };
+	// Effort follows the web role's level; `mode` is the catalog pro alias. The
+	// fields are independent, and undefined members drop out of the JSON body.
+	const effort = searchReasoningEffort(params.model, params.thinkingLevel);
+	const mode = params.model.reasoningMode;
+	if (effort !== undefined || mode) body.reasoning = { effort, mode };
 	if (params.maxOutputTokens !== undefined) body.max_output_tokens = params.maxOutputTokens;
 	return body;
 }
