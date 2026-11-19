@@ -147,6 +147,16 @@ describe("read tool head+tail selectors", () => {
 		await fs.rm(testDir, { recursive: true, force: true });
 	});
 
+	it("diagnoses a colon between line numbers only when the underlying path exists", async () => {
+		const read = (input: string) => tool.execute("read", { path: input });
+		await expect(read(`${filePath}:1:2`)).rejects.toThrow(":1-2");
+		await expect(read(`${filePath}.missing:1:2`)).rejects.toThrow("not found");
+		if (process.platform !== "win32") {
+			await Bun.write(`${filePath}:1`, "literal first\nliteral second\n");
+			expect(getTextOutput(await read(`${filePath}:1:2`))).toContain("literal second");
+		}
+	});
+
 	for (const selector of ["1-3,-3", "1-3,:-3", "1-3,:-3:raw", "raw:1-3,:-3"]) {
 		it(`reads the first and last lines of a file for :${selector}`, async () => {
 			const output = getTextOutput(await tool.execute("head-tail", { path: `${filePath}:${selector}` }));
