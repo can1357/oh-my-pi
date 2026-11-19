@@ -1817,15 +1817,15 @@ describe("AgentSession aside delivery", () => {
 		return message.content.map(part => (part.type === "text" ? part.text : "")).join("");
 	}
 
-	/** The model call delivering `text` carries it with `m1` expanded, right after a notice announcing `m1`. */
+	/** The model call delivering `text` carries it with `m1` expanded, right after the only notice announcing `m1`. */
 	function expectAnnouncedMention(calls: readonly { context: Context }[], text: string): void {
 		expect(calls.length).toBe(2);
 		const texts = calls[1]!.context.messages.map(llmText);
 		const messageIndex = texts.findIndex(candidate => candidate.startsWith(`${text} <model agent="m1"`));
-		const noticeIndex = texts.findIndex(candidate => candidate.includes("Now available:"));
+		const noticeIndexes = texts.flatMap((candidate, index) => (candidate.includes("Now available:") ? [index] : []));
 		expect(messageIndex).toBeGreaterThan(-1);
-		expect(noticeIndex).toBe(messageIndex - 1);
-		expect(texts[noticeIndex]).toContain("`m1`");
+		expect(noticeIndexes).toEqual([messageIndex - 1]);
+		expect(texts[messageIndex - 1]).toContain("`m1`");
 		expect(texts.join("\n")).not.toContain("^openai/gpt-test");
 	}
 
@@ -1848,6 +1848,23 @@ describe("AgentSession aside delivery", () => {
 			expectAnnouncedMention(mock.calls, "delegate to");
 		},
 	);
+
+	it("an agent-attributed steer keeps its `^` text literal and mints no alias", async () => {
+		const { session, mock, started, release } = createMentionSession();
+		const run = session.prompt("go");
+		try {
+			await started.promise;
+			await session.steer("relay ^openai/gpt-test", undefined, { attribution: "agent" });
+		} finally {
+			release.resolve();
+		}
+		await run;
+		await session.waitForIdle();
+		expect(session.getSessionAgents().map(agentDef => agentDef.name)).not.toContain("m1");
+		const texts = mock.calls.at(-1)!.context.messages.map(llmText);
+		expect(texts).toContain("relay ^openai/gpt-test");
+		expect(texts.some(text => text.includes("Now available:"))).toBe(false);
+	});
 
 	it("a mention in a later item of a queued list mints its alias and rides the session-agent notice", async () => {
 		const { session, mock, started, release } = createMentionSession();
