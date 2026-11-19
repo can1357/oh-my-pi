@@ -3175,29 +3175,18 @@ export class ModelRegistry {
 		// A pi-native override routes the provider through a gateway, which is not
 		// the provider's listing API. Descriptors that ignore the override's base
 		// URL would also send the gateway key to the provider itself.
-		const standardProviderDescriptors = PROVIDER_DESCRIPTORS.filter(descriptor => {
-			if (disabledProviders.has(descriptor.providerId)) return false;
-			if (
-				(this.#runtimeProviderOverrides.get(descriptor.providerId)?.transport ??
-					this.#providerOverrides.get(descriptor.providerId)?.transport) === "pi-native"
-			) {
-				return false;
-			}
-			if (configuredDiscoveryProviders.has(descriptor.providerId)) return false;
-			if (this.#runtimeModelManagers.has(descriptor.providerId)) return false;
-			return providerFilter ? providerFilter.has(descriptor.providerId) : true;
-		});
-		const enabledSpecialProviderDescriptors = specialProviderDescriptors.filter(descriptor => {
-			if (disabledProviders.has(descriptor.providerId)) return false;
-			if (
-				(this.#runtimeProviderOverrides.get(descriptor.providerId)?.transport ??
-					this.#providerOverrides.get(descriptor.providerId)?.transport) === "pi-native"
-			) {
-				return false;
-			}
-			if (configuredDiscoveryProviders.has(descriptor.providerId)) return false;
-			return providerFilter ? providerFilter.has(descriptor.providerId) : true;
-		});
+		const discoverable = (providerId: string): boolean =>
+			!disabledProviders.has(providerId) &&
+			(this.#runtimeProviderOverrides.get(providerId)?.transport ??
+				this.#providerOverrides.get(providerId)?.transport) !== "pi-native" &&
+			!configuredDiscoveryProviders.has(providerId) &&
+			(providerFilter?.has(providerId) ?? true);
+		const standardProviderDescriptors = PROVIDER_DESCRIPTORS.filter(
+			descriptor => discoverable(descriptor.providerId) && !this.#runtimeModelManagers.has(descriptor.providerId),
+		);
+		const enabledSpecialProviderDescriptors = specialProviderDescriptors.filter(descriptor =>
+			discoverable(descriptor.providerId),
+		);
 		const standardProviderKeys = await Promise.all(
 			standardProviderDescriptors.map(descriptor => {
 				const cacheProviderId = isCredentialScopedModelCacheProvider(descriptor.providerId)
