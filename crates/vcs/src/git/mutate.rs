@@ -95,9 +95,8 @@ fn head_moved_at_commit(
 	expected: gix::hash::ObjectId,
 	err: &gix::reference::edit::Error,
 ) -> Option<Error> {
-	let prepare = match err {
-		gix::reference::edit::Error::FileTransactionPrepare(prepare) => prepare,
-		_ => return None,
+	let gix::reference::edit::Error::FileTransactionPrepare(prepare) = err else {
+		return None;
 	};
 	let actual = match prepare {
 		gix::refs::file::transaction::prepare::Error::ReferenceOutOfDate {
