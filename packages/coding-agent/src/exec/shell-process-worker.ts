@@ -57,8 +57,9 @@ export async function runShellProcess(args: readonly string[]): Promise<never> {
 			if (!running.some(pid => alive.has(pid))) stop(status);
 		}, INTERRUPT_SETTLE_MS);
 	};
-	// The CLI's own handler exits at once, leaving the command's programs behind.
-	process.removeAllListeners("SIGINT");
+	// The CLI's own handlers exit at once, racing the cancel that ends the
+	// command's programs: one that loses leaves them running behind this process.
+	for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.removeAllListeners(signal);
 	process.on("SIGINT", () => interrupt(130));
 	process.on("SIGTERM", () => stop(143));
 	process.on("SIGHUP", () => stop(129));

@@ -744,6 +744,8 @@ class AnchoredLiveContainer extends Container {}
 
 /** An empty HUD slot: the terminal owns spacing, so nothing is described. */
 const EMPTY_HUD: NativeNode = col([]);
+/** The activity line with nothing in it: on a tray host it stays while the tray has cards, the host's seat for them. */
+const EMPTY_ACTIVITY: NativeNode = row([], { role: "omp.hud.activity", align: "center", gap: "sm" });
 
 /** Renders through an ANSI component and describes as a node built alongside it. */
 class DescribedComponent implements Component {
@@ -1616,6 +1618,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				children: readonly Component[];
 				todo: NativeNode | undefined;
 				caption: NativeNode | undefined;
+				/** The tray had cards: an otherwise empty line stays as their seat. */
+				seat: boolean;
 				node: NativeNode;
 		  }
 		| undefined;
@@ -1735,7 +1739,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * todo HUD, so the todo holds its place as the turn starts and ends.
 	 * Nothing to show describes the empty HUD. On a host with the tray, the
 	 * row is the tray's header: while the main agent is idle its caption
-	 * stands in for the status rows.
+	 * stands in for the status rows, and while the tray has cards the line
+	 * stays, empty if need be, as the seat the host draws them from.
 	 */
 	describeStatusHud(children: readonly Component[], cx: DescribeContext): NativeNode {
 		const hud = this.#todoHudNative;
@@ -1748,16 +1753,27 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#releaseTray();
 		}
 		const caption = this.#tray.caption(children.length === 0);
+		const seat = onTrayHost && this.#tray.items.length > 0;
 		const memo = this.#statusHudNative;
-		if (memo && memo.todo === todo && memo.caption === caption && sameItems(memo.children, children))
+		if (
+			memo &&
+			memo.todo === todo &&
+			memo.caption === caption &&
+			memo.seat === seat &&
+			sameItems(memo.children, children)
+		)
 			return memo.node;
 		const parts: NativeChild[] = [];
 		if (children.length > 0) parts.push(node("col", { role: "omp.hud.status" }, children.slice(), "status"));
 		else if (caption) parts.push(caption);
 		if (todo) parts.push(todo);
 		const described =
-			parts.length === 0 ? EMPTY_HUD : row(parts, { role: "omp.hud.activity", align: "center", gap: "sm" });
-		this.#statusHudNative = { children: children.slice(), todo, caption, node: described };
+			parts.length > 0
+				? row(parts, { role: "omp.hud.activity", align: "center", gap: "sm" })
+				: seat
+					? EMPTY_ACTIVITY
+					: EMPTY_HUD;
+		this.#statusHudNative = { children: children.slice(), todo, caption, seat, node: described };
 		return described;
 	}
 	/**
@@ -2091,7 +2107,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.session.sessionName;
 	}
 	focusAgentSession(id: string): Promise<void> {
-		return this.#focusController.focusAgent(id);
+		// Viewing an agent may revive it, passing its registry status through `running`: the
+		// tray must not read that as work (cards would regroup, a quiet tray would wake).
+		// Off a tray host, or for an agent already at work, it is simply viewed.
+		if (!this.#trayShown() || AgentRegistry.global().get(id)?.status === "running") {
+			return this.#focusController.focusAgent(id);
+		}
+		this.#trayReviving.add(id);
+		return this.#focusController.focusAgent(id).finally(() => {
+			this.#trayReviving.delete(id);
+			if (this.#trayShown()) this.#scheduleTraySync();
+		});
 	}
 	focusParentSession(): Promise<void> {
 		return this.#focusController.focusParent();
@@ -2217,6 +2243,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				irc: IrcBus.existing(),
 				showAgents: cfgDisplayPinnedAgents.get(settings) !== "off",
 				canFocus: this.collabGuest === undefined,
+				reviving: this.#trayReviving,
 			}),
 		main: () => this.#trayMain.state(id => runsInlineAgent(this.#observerRegistry.getSessions(), id)),
 		focusAgent: id => {
@@ -2224,13 +2251,15 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.showError(error instanceof Error ? error.message : String(error)),
 			);
 		},
-		showJobsSheet: () => this.showJobsSheet(),
+		showJobsSheet: selected => this.showJobsSheet(selected),
 		stopAgent: id => this.#stopTrayAgent(id),
 		cancelJob: id => {
 			this.session.cancelAsyncJob(id);
 		},
 		requestRender: () => this.ui.requestRender(),
 	});
+	/** Agents being opened for viewing; see `TrayInput.reviving`. */
+	readonly #trayReviving = new Set<string>();
 	/** What the main agent is doing, as the tray's `main` prop says; follows the main session's events. */
 	readonly #trayMain = new TrayMainActivity(false);
 	/** The root job manager the tray repaints on, and how to stop listening to it. */
@@ -8868,26 +8897,30 @@ export class InteractiveMode implements InteractiveModeContext {
 	 *
 	 * It lists the viewed session's jobs and its subagents' as a tree. A focused
 	 * subagent view opens it without the Cancel action: the view only watches
-	 * that agent, as `/jobs kill` stays main-session only.
+	 * that agent, as `/jobs kill` stays main-session only. `selected` opens it
+	 * on that job (a tray card's), when the sheet lists it.
 	 */
-	showJobsSheet(): void {
+	showJobsSheet(selected?: string): void {
 		if (this.#jobsSheetHandle) return;
 		const session = this.viewSession;
 		if (!session.getAsyncJobTree()) {
 			this.showWarning("Async background jobs are unavailable in this session.");
 			return;
 		}
-		const sheet = new JobsSheet({
-			load: () => session.getAsyncJobTree() ?? { running: [], recent: [] },
-			inspect: id => session.inspectAsyncJob(id),
-			cancel: this.focusedAgentId
-				? undefined
-				: id => {
-						session.cancelAsyncJob(id);
-						this.ui.requestRender();
-					},
-			close: () => this.#hideJobsSheet(),
-		});
+		const sheet = new JobsSheet(
+			{
+				load: () => session.getAsyncJobTree() ?? { running: [], recent: [] },
+				inspect: id => session.inspectAsyncJob(id),
+				cancel: this.focusedAgentId
+					? undefined
+					: id => {
+							session.cancelAsyncJob(id);
+							this.ui.requestRender();
+						},
+				close: () => this.#hideJobsSheet(),
+			},
+			{ selected },
+		);
 		this.#jobsSheetHandle = this.ui.showOverlay(sheet, { anchor: "center", width: "90%", maxHeight: "90%" });
 		this.#jobsSheetTimer = setInterval(() => this.ui.requestRender(), JOBS_SHEET_REFRESH_MS);
 		this.ui.setFocus(sheet);
