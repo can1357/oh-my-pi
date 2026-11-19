@@ -3765,6 +3765,66 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(zeroCtx?.contextWindow).toBe(128000);
 	});
 
+	test("proxy discovery honors API-reported input modalities and output cap", async () => {
+		writeRawModelsJson({
+			"proxy-test": {
+				baseUrl: "http://127.0.0.1:9998",
+				auth: "none",
+				discovery: { type: "proxy" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9998/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "vision-row-model",
+								supported_endpoint_types: ["openai"],
+								context_length: 200000,
+								input_modalities: ["text", "image"],
+								max_output_tokens: 64000,
+							},
+							{
+								id: "architecture-row-model",
+								supported_endpoint_types: ["anthropic"],
+								context_length: 200000,
+								architecture: { input_modalities: ["text", "image", "pdf"] },
+								limits: { max_output_tokens: 32000 },
+							},
+							{
+								id: "clamped-row-model",
+								supported_endpoint_types: ["openai"],
+								context_length: 32000,
+								max_output_tokens: 999999,
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		const visionRow = registry.find("proxy-test", "vision-row-model");
+		expect(visionRow?.input).toEqual(["text", "image"]);
+		expect(visionRow?.maxTokens).toBe(64000);
+
+		// OpenRouter-shaped rows carry the modalities under `architecture`.
+		const architectureRow = registry.find("proxy-test", "architecture-row-model");
+		expect(architectureRow?.input).toEqual(["text", "image"]);
+		expect(architectureRow?.maxTokens).toBe(32000);
+
+		// A row that advertises no modalities stays text-only, and an output cap
+		// larger than the advertised context window is clamped to it.
+		const clampedRow = registry.find("proxy-test", "clamped-row-model");
+		expect(clampedRow?.input).toEqual(["text"]);
+		expect(clampedRow?.maxTokens).toBe(32000);
+	});
+
 	test("proxy discovery uses proxy-reported name over bundled placeholder", async () => {
 		writeRawModelsJson({
 			"proxy-test": {

@@ -1493,6 +1493,14 @@ export async function discoverProxyModels(
 					name?: string;
 					supported_endpoint_types?: string[];
 					context_length?: number;
+					max_output_tokens?: unknown;
+					max_completion_tokens?: unknown;
+					max_tokens?: unknown;
+					limits?: unknown;
+					top_provider?: unknown;
+					input?: unknown;
+					input_modalities?: unknown;
+					architecture?: unknown;
 					metadata?: unknown;
 					supported_reasoning_levels?: unknown;
 					default_reasoning_level?: unknown;
@@ -1536,6 +1544,23 @@ export async function discoverProxyModels(
 			reference?.name ??
 			stripBracketedModelIdAffixes(id) ??
 			id;
+		// Same row shapes the generic list discovery reads: Synthetic-style
+		// `input_modalities`, OpenRouter-style `architecture.input_modalities`,
+		// and a flat `input` array. Keep the bundled reference as the fallback so
+		// silent rows behave exactly as before.
+		const input = extractOpenAIModelsListInputCapabilities(item) ?? reference?.input ?? ["text"];
+		const limits = isRecord(item.limits) ? item.limits : undefined;
+		const topProvider = isRecord(item.top_provider) ? item.top_provider : undefined;
+		const reportedMaxTokens =
+			toTokenLimitOrUndefined(limits?.max_output_tokens) ??
+			toTokenLimitOrUndefined(item.max_output_tokens) ??
+			toTokenLimitOrUndefined(item.max_completion_tokens) ??
+			toTokenLimitOrUndefined(topProvider?.max_completion_tokens) ??
+			toTokenLimitOrUndefined(item.max_tokens);
+		const contextWindow =
+			toPositiveNumberOrUndefined(item.context_length) ??
+			reference?.contextWindow ??
+			DISCOVERY_DEFAULT_CONTEXT_WINDOW;
 		const spec = {
 			id,
 			name: displayName,
@@ -1544,18 +1569,19 @@ export async function discoverProxyModels(
 			baseUrl,
 			reasoning: reference?.reasoning,
 			thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
-			input: reference?.input ?? ["text"],
+			input,
 			// Proxy pricing is provider-specific and usually does not match
 			// upstream bundled catalogs, so keep costs local-unknown even when
 			// we successfully recover the upstream model identity.
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			// Prefer the context_length the API reports for this model; fall
-			// back to the bundled reference, then a sane default.
-			contextWindow:
-				toPositiveNumberOrUndefined(item.context_length) ??
-				reference?.contextWindow ??
-				DISCOVERY_DEFAULT_CONTEXT_WINDOW,
-			maxTokens: reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
+			// Prefer what the API reports for this model; fall back to the
+			// bundled reference, then a sane default. Cap the output limit at the
+			// context window so a row cannot request more tokens than it accepts.
+			contextWindow,
+			maxTokens: Math.min(
+				reportedMaxTokens ?? reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
+				contextWindow,
+			),
 			headers: baseHeaders,
 			// OpenAI-compat fields are no-ops on anthropic models; the
 			// Anthropic SDK ignores them. Provider-level disableStrictTools
