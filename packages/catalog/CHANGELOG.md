@@ -14,6 +14,7 @@
 - Kiro accepts AWS GovCloud (US) profile ARNs (`arn:aws-us-gov:codewhisperer:…`), which were previously skipped during profile listing ([#19726](https://github.com/can1357/oh-my-pi/pull/19726) by [@TechDufus](https://github.com/TechDufus))
 - Google Antigravity no longer lists Gemini 4 Hydrogen's sonar monitor slot or its tiered High/XHigh SKUs as separate models; the tiered SKUs fold into the one Gemini 4 Hydrogen model ([#19795](https://github.com/can1357/oh-my-pi/pull/19795) by [@eggpeat](https://github.com/eggpeat))
 - Gemini 4 Neon on Google Antigravity now shows as one model whose thinking level (low, medium, high, xhigh) selects the matching SKU, instead of four separate models, and is priced at $3/$15 per million tokens ($0.15 cached) instead of $0 ([#19789](https://github.com/can1357/oh-my-pi/pull/19789) by [@eggpeat](https://github.com/eggpeat))
+- Gemini 4 Neon now collapses into one model on Gemini CLI too, and on the Gemini API and Vertex AI offers the xhigh thinking level and long outputs up to 262,144 tokens, with its $3/$15 Gemini API price
 
 ## [19.0.0] - 2026-11-18
 
