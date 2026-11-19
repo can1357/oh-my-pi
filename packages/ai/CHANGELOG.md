@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Antigravity CLI (`antigravity-cli`) provider finishing a refused request as an answer: a reply made only of agy's relayed `⚠ API error (attempt N): …` and final `⚠ STATUS (code N): …` lines now fails the request with the CLI's reason, plus a quota and recovery hint for `RESOURCE_EXHAUSTED`.
+
 ## [19.0.0] - 2026-11-18
 
 ### Added

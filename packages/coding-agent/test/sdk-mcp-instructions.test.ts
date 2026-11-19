@@ -11,6 +11,7 @@ import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { ANTIGRAVITY_CLI_SYSTEM_PROMPT } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import {
@@ -268,6 +269,41 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			expect(boundary).toBeGreaterThan(prompt.indexOf(SERVER_INSTRUCTIONS));
 			expect(prompt.slice(prompt.indexOf("## MCP Server Instructions"), boundary)).not.toContain(USER_APPEND_MARKER);
 			expect(prompt.slice(boundary)).toContain(USER_APPEND_MARKER);
+		} finally {
+			await session.dispose();
+		}
+	}, 20_000);
+
+	it("keeps an antigravity-cli session's tools while dropping its MCP route and server-instruction text", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "mcp.startupTimeoutMs": 0 }),
+			model: getBundledModel("antigravity-cli", "gemini-4-hydrogen"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			skipPythonPreflight: true,
+			enableMCP: true,
+		});
+		try {
+			// The account tier refuses a request carrying the route docs, so the
+			// compact prompt and the connected server's instructions stay out of it.
+			const prompt = session.systemPrompt.join("\n");
+			expect(prompt).toContain(ANTIGRAVITY_CLI_SYSTEM_PROMPT);
+			expect(prompt).not.toContain("You are omp's trusted coding assistant.");
+			expect(prompt).not.toContain(MCP_ROUTE_SECTION);
+			expect(prompt).not.toContain(SERVER_INSTRUCTIONS);
+			expect(prompt).not.toContain("## MCP Server Instructions");
+			// The mounted tools remain available; only their documentation is gone.
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(MCP_TOOL_NAME);
+			const result = await session.getToolByName(MCP_TOOL_NAME)?.execute("antigravity-mcp-call", {});
+			expect(result?.content.find(part => part.type === "text")?.text).toBe(TOOL_RESULT);
 		} finally {
 			await session.dispose();
 		}

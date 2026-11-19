@@ -31,6 +31,7 @@ import { loadSkills, type Skill } from "./extensibility/skills";
 import { InternalUrlRouter } from "./internal-urls/router";
 import type { SchemeHost } from "./internal-urls/types";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
+import antigravityPrompt from "./prompts/system/antigravity-prompt.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
@@ -128,6 +129,25 @@ const PERSONALITY_SPECS: Record<Exclude<Personality, "none">, string> = {
 	friendly: friendlyPersonality,
 	pragmatic: pragmaticPersonality,
 };
+
+/** Provider whose account tier refuses omp's default instruction text and MCP route docs. */
+export const ANTIGRAVITY_CLI_PROVIDER = "antigravity-cli";
+
+/** True for the Antigravity CLI provider, which needs the compact prompt profile. */
+export function isAntigravityCliProvider(provider: string | undefined): boolean {
+	return provider === ANTIGRAVITY_CLI_PROVIDER;
+}
+
+/**
+ * Block 0 for `antigravity-cli` models. The account tier answers a request
+ * carrying omp's own system prompt with `RESOURCE_EXHAUSTED` (429) for the
+ * prompt's text rather than its size, so the session sends this short,
+ * provider-neutral brief through the plain custom route instead. That route
+ * also leaves out the tool inventory, internal-URL catalogue, and `xd://`
+ * protocol sections; skills, rules, project context, and the user's own
+ * prompt, template, and append text still apply.
+ */
+export const ANTIGRAVITY_CLI_SYSTEM_PROMPT = antigravityPrompt.trim();
 
 /**
  * Load the user-level PERSONALITY.md override for the system prompt's
@@ -616,6 +636,14 @@ export interface BuildSystemPromptOptions {
 	model?: string;
 	/** Whether to surface `model` in the workstation block. Default: true. */
 	includeModelInPrompt?: boolean;
+	/**
+	 * Whether the active model runs on the `antigravity-cli` provider. Its account tier refuses
+	 * requests carrying omp's default instruction text (and the MCP/xd route docs and eval prelude
+	 * guidance) with `RESOURCE_EXHAUSTED` (429), so block 0 becomes {@link ANTIGRAVITY_CLI_SYSTEM_PROMPT}
+	 * and prelude guidance is left out. An explicit or discovered custom prompt/template still wins
+	 * block 0. Default: false.
+	 */
+	antigravityCli?: boolean;
 	/** Personality preset rendered into the default system prompt. "none" omits the block. Default: "default" */
 	personality?: Personality;
 	/** Whether to include the workspace directory tree in the system prompt. Default: false */
@@ -763,6 +791,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		evalPreludes = [],
 		model,
 		includeModelInPrompt = true,
+		antigravityCli = false,
 		personality = "default",
 		includeWorkspaceTree = false,
 		renderMermaid = true,
@@ -847,6 +876,19 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		} satisfies WorkspaceTree,
 		activeRepoContext: null as ActiveRepoContext | null,
 	};
+	// Antigravity's account tier refuses a request carrying omp's own prompt text
+	// with RESOURCE_EXHAUSTED (429) — by text, not size — so an antigravity-cli
+	// model sends the compact brief through the plain custom route, which also
+	// drops the tool inventory, internal-URL catalogue, and xd:// sections. An
+	// explicit or discovered prompt/template above still wins.
+	if (
+		antigravityCli &&
+		resolvedSystemPromptTemplate === undefined &&
+		resolvedCustomPromptInput === undefined &&
+		!hasExplicitCustomPrompt
+	) {
+		resolvedCustomPromptInput = ANTIGRAVITY_CLI_SYSTEM_PROMPT;
+	}
 
 	const { promise: deadline, resolve: fireDeadline } = Promise.withResolvers<"__timeout__">();
 	const deadlineTimer = setTimeout(() => fireDeadline("__timeout__"), SYSTEM_PROMPT_PREP_TIMEOUT_MS);
@@ -1179,9 +1221,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	}
 	const systemPrompt = [rendered.text];
 	const sources = trackedSources(rendered, 0, sourceIdentities);
-	for (const prelude of evalPreludes) {
-		const guidance = prelude.guidance?.trim();
-		if (guidance) systemPrompt.push(guidance);
+	// Eval prelude guidance is omp's own text and draws the same RESOURCE_EXHAUSTED
+	// (429) on antigravity-cli (the `commit` namespace paragraph does), so those
+	// sessions keep the preludes callable from eval but leave their docs out.
+	if (!antigravityCli) {
+		for (const prelude of evalPreludes) {
+			const guidance = prelude.guidance?.trim();
+			if (guidance) systemPrompt.push(guidance);
+		}
 	}
 	// Working-directory content (context files with their paths, workspace
 	// tree/roots, active repo) and session append text form one trailing

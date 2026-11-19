@@ -66,6 +66,10 @@ Consequences:
 - To replace the default instruction template while retaining the bundled plain-custom generated sections, use `SYSTEM.md` or `--system-prompt`.
 - If a plain custom prompt still needs the default tool policy or workflow, copy and maintain the required guidance yourself; selective inheritance from `system-prompt.md` is not supported.
 
+### `antigravity-cli` models
+
+Sessions on the `antigravity-cli` provider take the plain-custom route automatically: block 0 is the bundled compact `antigravity-prompt.md` brief instead of `system-prompt.md`, because the Antigravity account tier answers omp's default instruction text with `RESOURCE_EXHAUSTED` (429) for its text rather than its size. The generated MCP route, server-instruction, and eval prelude guidance blocks are omitted for those sessions too (the preludes stay callable from `eval`). The footer, skills, rules, and any explicit or discovered `SYSTEM.md`, `SYSTEM_TEMPLATE.md`, `--system-prompt`, `--system-prompt-template`, or `systemPromptTemplates` entry are unchanged, and every other provider keeps the full default prompt. A mid-session switch onto or off the provider rebuilds the prompt before the next request.
+
 ### Append placement
 
 Without `SYSTEM.md` or `SYSTEM_TEMPLATE.md`, append text is rendered at the end of `project-prompt.md`, after the default instruction block and project/environment content.

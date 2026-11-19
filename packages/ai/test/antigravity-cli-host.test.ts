@@ -8,6 +8,7 @@ import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli
 import {
 	AgyHost,
 	describeToolArguments,
+	relayedApiFailure,
 	type AgyConnection,
 	type AgyHostOptions,
 	type AgyScheduler,
@@ -270,6 +271,84 @@ function textOf(blocks: ContentBlock[]): string {
 	return blocks.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
 }
 
+function assistantMessage(content: AssistantMessage["content"]): AssistantMessage {
+	return {
+		role: "assistant",
+		content,
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 0,
+	};
+}
+
+const RELAYED_LINE = "⚠ API error (attempt 1): RESOURCE_EXHAUSTED (code 429): quota";
+
+describe("relayedApiFailure", () => {
+	it("reports the CLI's final word after its retries, with the account-tier hint", () => {
+		// The sequence agy streams for a refused request: one line per retry, then the line it gives up with.
+		const reason = relayedApiFailure(
+			assistantMessage([
+				{ type: "text", text: `\n${RELAYED_LINE}\n` },
+				{ type: "text", text: "\n⚠ API error (attempt 2): RESOURCE_EXHAUSTED (code 429): quota\n" },
+				{ type: "text", text: "\n⚠ RESOURCE_EXHAUSTED (code 429): quota\n" },
+			]),
+		);
+		expect(reason).toStartWith("Antigravity CLI: RESOURCE_EXHAUSTED (code 429): quota");
+		expect(reason).toContain("/usage");
+		expect(reason).toContain("/login antigravity-cli");
+	});
+	it("reads through thinking beside the relayed lines", () => {
+		expect(
+			relayedApiFailure(
+				assistantMessage([
+					{ type: "thinking", thinking: "the account tier rejected the request" },
+					{ type: "text", text: RELAYED_LINE },
+				]),
+			),
+		).toStartWith("Antigravity CLI: API error (attempt 1): RESOURCE_EXHAUSTED");
+	});
+	it("leaves a quoted line, a tool call or an image as an answer", () => {
+		expect(
+			relayedApiFailure(assistantMessage([{ type: "text", text: `Here is the CLI error:\n${RELAYED_LINE}` }])),
+		).toBeUndefined();
+		expect(
+			relayedApiFailure(assistantMessage([{ type: "text", text: "⚠ The quota is RESOURCE_EXHAUSTED (code 429)." }])),
+		).toBeUndefined();
+		expect(
+			relayedApiFailure(
+				assistantMessage([
+					{ type: "text", text: RELAYED_LINE },
+					{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "a.txt" } },
+				]),
+			),
+		).toBeUndefined();
+		expect(
+			relayedApiFailure(
+				assistantMessage([
+					{ type: "text", text: RELAYED_LINE },
+					{ type: "image", data: "AA==", mimeType: "image/png" },
+				]),
+			),
+		).toBeUndefined();
+	});
+	it("omits the account-tier hint for another relayed failure", () => {
+		const reason = relayedApiFailure(
+			assistantMessage([{ type: "text", text: "⚠ API error (attempt 3): INTERNAL (code 500): upstream" }]),
+		);
+		expect(reason).toBe("Antigravity CLI: API error (attempt 3): INTERNAL (code 500): upstream");
+	});
+});
+
 describe("AgyHost stateful steps", () => {
 	it("rejects an ACP end that contains no usable model response", async () => {
 		const state = await fixture();
@@ -278,6 +357,19 @@ describe("AgyHost stateful steps", () => {
 		const prompt = await fake.prompts.next();
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await expect(run.done).rejects.toThrow("without a usable response");
+		expect(fake.closed).toBe(true);
+	});
+	it("fails a step whose whole reply is a relayed Antigravity API error", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text(`\n${RELAYED_LINE}\n`);
+		fake.text("\n⚠ API error (attempt 2): RESOURCE_EXHAUSTED (code 429): quota\n");
+		fake.text("\n⚠ RESOURCE_EXHAUSTED (code 429): quota\n");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await expect(run.done).rejects.toThrow(/Antigravity CLI: RESOURCE_EXHAUSTED \(code 429\): quota/);
+		await expect(run.done).rejects.toThrow(/check the account quota/);
 		expect(fake.closed).toBe(true);
 	});
 	it("selects the model and thought level agy advertises, including effort-suffixed rosters", async () => {

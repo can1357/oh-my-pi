@@ -72,7 +72,7 @@ import {
 	PERMISSION_REQUIRED_TOOLS,
 } from "./acp-permission-gate";
 import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridge";
-import { type BuildSystemPromptResult, toolReadsSkillUris } from "../system-prompt";
+import { type BuildSystemPromptResult, isAntigravityCliProvider, toolReadsSkillUris } from "../system-prompt";
 import { matchModelPattern } from "../utils/model-patterns";
 import { resolveToolWireName } from "../utils/tool-wire-name";
 
@@ -395,6 +395,18 @@ interface PromptSurface {
 }
 
 /**
+ * Provider prompt profile. `antigravity-cli` sends a compact prompt with no
+ * MCP/xd route docs, because its account tier answers omp's default prompt
+ * with `RESOURCE_EXHAUSTED` (429).
+ */
+type PromptProfile = "default" | "antigravity-cli";
+
+/** The profile a provider's next prompt render uses; one definition keeps the key and rebuild in lockstep. */
+function promptProfileFor(provider: string | undefined): PromptProfile {
+	return isAntigravityCliProvider(provider) ? "antigravity-cli" : "default";
+}
+
+/**
  * Tool roster a committed base prompt rendered, captured for prefix-bound
  * models. While a roster change is held out of that prompt, a forced rebuild
  * re-renders this roster first (see `SessionTools.#prepareHeldRosterPrompt`).
@@ -526,6 +538,8 @@ export class SessionTools {
 	#promptSurfaceScope = new AsyncLocalStorage<PromptSurface>();
 	#toolRegistryMutationTail: Promise<void> = Promise.resolve();
 	#promptModelKey: string | undefined;
+	/** Prompt profile the base prompt was rendered for (provider-specific prompt shape). */
+	#promptProfile: PromptProfile | undefined;
 	/** Inline-descriptor decision of the model the base prompt was rendered for. */
 	#promptInlineDescriptors: boolean | undefined;
 	/** `systemPromptTemplates` path selected for the model the base prompt was rendered for. */
@@ -645,6 +659,7 @@ export class SessionTools {
 		this.#promptSurface = this.#derivePromptSurface();
 		this.#basePromptRoutedXdevNames = this.#routedSummaryXdevNames();
 		this.#promptModelKey = this.#currentPromptModelKey();
+		this.#promptProfile = promptProfileFor(this.#host.model()?.provider);
 		this.#promptInlineDescriptors = this.#currentInlineDescriptors();
 		this.#promptTemplate = this.#currentPromptTemplate();
 	}
@@ -1179,10 +1194,13 @@ export class SessionTools {
 	#currentPromptModelKey(): string | undefined {
 		const activeModel = this.#host.model();
 		if (!activeModel) return undefined;
-		if (cfgIncludeModelInPrompt.get(this.#host.settings)) return formatModelString(activeModel);
+		// The profile is part of the key: a switch onto or off an antigravity-cli
+		// model replaces the instruction block even when the Model line is hidden.
+		const profile = promptProfileFor(activeModel.provider);
+		if (cfgIncludeModelInPrompt.get(this.#host.settings)) return `${profile}|${formatModelString(activeModel)}`;
 		// The inline-descriptor decision is per model and selects both the prompt's
 		// tool catalog and provider-side description pruning (see `sdk.ts`).
-		return `delegation-bias:${resolveDelegationBias(activeModel)}|inline-descriptors:${this.#currentInlineDescriptors()}`;
+		return `${profile}|delegation-bias:${resolveDelegationBias(activeModel)}|inline-descriptors:${this.#currentInlineDescriptors()}`;
 	}
 
 	/**
@@ -1193,16 +1211,18 @@ export class SessionTools {
 	 * and the provider then wrote the whole cached conversation again on every hop. It still rebuilds
 	 * when the hop changes what the request must carry for the new model: the edit-mode policy
 	 * (#11983), the inline-descriptor decision, which also turns provider-side description pruning
-	 * on or off (#14200), or the `systemPromptTemplates` entry the model selects. The kept key makes a
-	 * later switch back to the rendered model a no-op, and a deliberate switch (`/model`, `setModel`)
-	 * compares against the model the prompt describes.
+	 * on or off (#14200), the `systemPromptTemplates` entry the model selects, or a prompt-profile
+	 * change, which a hop onto an antigravity-cli model needs before its next request is accepted.
+	 * The kept key makes a later switch back to the rendered model a no-op, and a deliberate switch
+	 * (`/model`, `setModel`) compares against the model the prompt describes.
 	 */
 	async syncAfterModelChange(previousEditMode: EditModeSetting, options?: { retryFallback?: boolean }): Promise<void> {
 		const currentEditMode = this.resolveActiveEditMode();
 		const templateChanged = this.#currentPromptTemplate() !== this.#promptTemplate;
+		const profileChanged = promptProfileFor(this.#host.model()?.provider) !== this.#promptProfile;
 		if (options?.retryFallback) {
 			const inlineDescriptorsChanged = this.#currentInlineDescriptors() !== this.#promptInlineDescriptors;
-			if (previousEditMode !== currentEditMode || inlineDescriptorsChanged || templateChanged) {
+			if (previousEditMode !== currentEditMode || inlineDescriptorsChanged || templateChanged || profileChanged) {
 				await this.refreshBaseSystemPrompt();
 			}
 			return;
@@ -1714,6 +1734,7 @@ export class SessionTools {
 				this.#lastAppliedToolSignature = rebuiltSignature;
 				this.#recordPromptRoster(validToolNames);
 				this.#promptModelKey = this.#currentPromptModelKey();
+				this.#promptProfile = promptProfileFor(this.#host.model()?.provider);
 				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
 				this.#promptTemplate = this.#currentPromptTemplate();
 				this.#setBasePromptXdevNames(rebuiltXdevCatalogNames);
@@ -2404,6 +2425,13 @@ export class SessionTools {
 		if (addedNames.length === 0 && removedNames.length === 0) {
 			return { notice: undefined, announcedMounts };
 		}
+		// An antigravity-cli session sends no xd:// route docs, so a mount notice
+		// would add only the text its account tier refuses (RESOURCE_EXHAUSTED).
+		// The delta still lands in announcedMounts: a switch to another provider
+		// renders those devices into the rebuilt prompt instead of replaying them.
+		if (promptProfileFor(this.#host.model()?.provider) === "antigravity-cli") {
+			return { notice: undefined, announcedMounts };
+		}
 		const summaries = new Map(this.#xdev ? xdevEntries(this.#xdev).map(entry => [entry.name, entry.summary]) : []);
 		const added = addedNames.map(name => ({ name, summary: summaries.get(name) ?? "" }));
 		const removed = removedNames.map(name => ({ name }));
@@ -2736,6 +2764,7 @@ export class SessionTools {
 				this.#basePromptReflectsRosterDelta = true;
 				this.#pendingToolRosterDeltaAfterBase = undefined;
 				this.#promptModelKey = this.#currentPromptModelKey();
+				this.#promptProfile = promptProfileFor(this.#host.model()?.provider);
 				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
 				this.#promptTemplate = this.#currentPromptTemplate();
 				this.#lastAppliedToolSignature = signature;
@@ -2778,6 +2807,7 @@ export class SessionTools {
 				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 				invalidateToolSchemaMetadata(this.#host.agent.state.tools);
 				this.#promptModelKey = this.#currentPromptModelKey();
+				this.#promptProfile = promptProfileFor(this.#host.model()?.provider);
 				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
 				return true;
 			},
