@@ -13,6 +13,7 @@
 ### Fixed
 
 - Fixed omp freezing for seconds to minutes on WSL2 while saving sessions: Linux `FileLock` now locks a sidecar file instead of binding a socket, which takes about 10 ms per call there. Older omp versions still running do not see these locks, so restart them after updating ([#19704](https://github.com/can1357/oh-my-pi/pull/19704) by [@turgaybulut](https://github.com/turgaybulut))
+- Fixed Windows `computer` `setValue` on a classic text box (Win32 and WinForms, including Windows 10 Notepad) bringing its window in front of yours, so the keys you typed next went into that box
 
 ## [19.0.0] - 2026-11-18
 
