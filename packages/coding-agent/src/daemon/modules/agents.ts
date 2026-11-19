@@ -166,6 +166,7 @@ class RoomUnit implements ModuleUnit {
 	}
 
 	async stop(reason: string): Promise<void> {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- snapshot: the loop body may add or remove forwards
 		for (const id of [...this.#forwards.keys()]) this.#drop(id);
 		for (const member of this.#members.values()) member.tunnel.close();
 		this.#members.clear();

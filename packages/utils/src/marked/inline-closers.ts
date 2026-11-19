@@ -30,6 +30,25 @@ export function canCloseDelimiter(src: string, index: number, marker: string): b
 	return !PUNCTUATION.test(before) || /\s/.test(after) || PUNCTUATION.test(after);
 }
 
+const URL_AUTOLINK_SCHEME = /<(?:https?:\/\/|ftp:\/\/)/iy;
+const ADDRESS_AUTOLINK = /<[^ <>@]+@[^ <>@]+>/y;
+const TAG_START = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s|\/?>)/y;
+const LINK_DESTINATION = /^(<[^>]*>|\S+?)(?:\s+(?:"([\s\S]*)"|'([\s\S]*)'|\(([\s\S]*)\)))?$/;
+
+/**
+ * The destination (group 1) and title (group 2, 3 or 4 by its quotes) of an inline link whose parentheses hold
+ * `inside`, or `null` when they hold no destination and title.
+ */
+export function matchDestination(inside: string): RegExpExecArray | null {
+	return LINK_DESTINATION.exec(inside.trim());
+}
+
+/** Where a match of the sticky `pattern` at `at` ends, or -1. */
+function matchEndAt(pattern: RegExp, src: string, at: number): number {
+	pattern.lastIndex = at;
+	return pattern.test(src) ? pattern.lastIndex : -1;
+}
+
 /** Index of the first element of the ascending `values` at or above `target`. */
 function lowerBound(values: readonly number[], target: number): number {
 	let low = 0;
@@ -62,23 +81,78 @@ class ClosersByDepth {
 	}
 }
 
+/** Ascending, disjoint parts of the root source, the `i`th from `starts[i]` up to `ends[i]`. */
+class Spans {
+	readonly starts: number[] = [];
+	readonly ends: number[] = [];
+
+	/** Records the part from `start` up to `end`, which lies past every part recorded before it. */
+	add(start: number, end: number): void {
+		this.starts.push(start);
+		this.ends.push(end);
+	}
+
+	/** Where the part holding `at` ends, or -1 when none holds it. */
+	endAt(at: number): number {
+		const span = lowerBound(this.starts, at + 1) - 1;
+		return span >= 0 && at < this.ends[span]! ? this.ends[span]! : -1;
+	}
+}
+
+/** The first " " or ">" at or after an offset, asked at offsets that never decrease: each search starts past the last. */
+class SpaceOrAngle {
+	readonly #src: string;
+	#space = -1;
+	#angle = -1;
+
+	constructor(src: string) {
+		this.#src = src;
+	}
+
+	/** The first " " or ">" at or after `from`, or `Infinity`. */
+	from(from: number): number {
+		const src = this.#src;
+		if (this.#space < from) {
+			const at = src.indexOf(" ", from);
+			this.#space = at === -1 ? Infinity : at;
+		}
+		if (this.#angle < from) {
+			const at = src.indexOf(">", from);
+			this.#angle = at === -1 ? Infinity : at;
+		}
+		return Math.min(this.#space, this.#angle);
+	}
+}
+
 /**
  * Where a bracket opened in the root source closes. A search starts right after the opening bracket, and a bracket
  * never begins an escape, so the escape pairing from there is the pairing from the start of the root source. The
  * closer is then the first unescaped closing bracket at or after the start whose depth (openers minus closers
- * before it, from the start of the root source) equals the depth at the start.
+ * before it, from the start of the root source) equals the depth at the start. Brackets inside `skipped` count as
+ * neither.
  */
 class BracketDepths {
 	// The depth before each offset.
 	readonly #depth: Int32Array;
 	readonly #closers = new ClosersByDepth();
-	// Every unescaped closing bracket, ascending.
+	// Every unescaped closing bracket outside `skipped`, ascending.
 	readonly #all: number[] = [];
 
-	constructor(src: string, open: number, close: number) {
+	constructor(src: string, open: number, close: number, skipped?: Spans) {
 		const depth = new Int32Array(src.length + 1);
 		let level = 0;
+		let span = 0;
+		let skipFrom = skipped?.starts[0] ?? Infinity;
 		for (let i = 0; i < src.length; i++) {
+			if (i === skipFrom) {
+				// A skipped part never starts right after an escaping backslash: each starts at "`", "<" or "(", which
+				// that backslash would have escaped.
+				const end = skipped!.ends[span]!;
+				depth.fill(level, i, end);
+				i = end - 1;
+				skipFrom = skipped!.starts[++span] ?? Infinity;
+				continue;
+			}
 			depth[i] = level;
 			const code = src.charCodeAt(i);
 			if (code === 0x5c /* \ */) {
@@ -110,11 +184,11 @@ class BracketDepths {
 /**
  * The delimiters the emphasis rule's closer walk visits for one marker and width in the root source, typed the way
  * the walk types them: a delimiter that can close is a closer, else one that can open is an opener. For width 1 they
- * are every unescaped marker. For width 2 they are marker pairs taken two at a time from the start of each run of
- * markers (after it when an odd run of backslashes escapes the start), which is where a walk that reaches the run
- * from before it enters. The closer for an opener is then the first closer after it whose depth (openers minus
- * closers before it) equals the depth where its walk begins, the first point where the walk's nesting count would
- * drop below zero.
+ * are every unescaped marker outside `skipped`. For width 2 they are marker pairs taken two at a time from the start
+ * of each run of markers outside `skipped` (after it when an odd run of backslashes escapes the start), which is where
+ * a walk that reaches the run from before it enters. The closer for an opener is then the first closer after it whose
+ * depth (openers minus closers before it) equals the depth where its walk begins, the first point where the walk's
+ * nesting count would drop below zero.
  */
 class EmphasisDelimiters {
 	readonly #src: string;
@@ -125,12 +199,18 @@ class EmphasisDelimiters {
 	readonly #depth: number[] = [];
 	readonly #closers = new ClosersByDepth();
 
-	constructor(src: string, marker: string, width: number) {
+	constructor(src: string, marker: string, width: number, skipped: Spans) {
 		this.#src = src;
 		this.#marker = marker;
 		this.#width = width;
 		let level = 0;
 		for (let run = src.indexOf(marker); run !== -1;) {
+			// No skipped part starts or ends with a marker, so a run lies wholly inside one or outside all.
+			const skippedTo = skipped.endAt(run);
+			if (skippedTo !== -1) {
+				run = src.indexOf(marker, skippedTo);
+				continue;
+			}
 			let end = run + 1;
 			while (src[end] === marker) end++;
 			for (let at = escapedAt(src, run) ? run + width : run; at + width <= end; at += width) {
@@ -232,27 +312,95 @@ export class CloserIndexes {
 	#commentEnds: number[] | undefined;
 	#escapes: number[] | undefined;
 	#codeRuns: CodeRuns | undefined;
-	// The first " " and the first ">" at or after the offset each was last searched from.
-	#space = -1;
-	#angle = -1;
+	#consumed: Spans | undefined;
+	// The lexer's own cursor: its position never moves back, and the walk for `consumed` keeps one of its own.
+	readonly #spaceOrAngle: SpaceOrAngle;
 
 	constructor(src: string) {
 		this.#src = src;
+		this.#spaceOrAngle = new SpaceOrAngle(src);
 	}
 
+	/** The link label brackets; those a code span, an autolink, inline HTML or a link destination holds are none. */
 	get square(): BracketDepths {
-		return (this.#square ??= new BracketDepths(this.#src, 0x5b /* [ */, 0x5d /* ] */));
+		return (this.#square ??= new BracketDepths(this.#src, 0x5b /* [ */, 0x5d /* ] */, this.consumed));
 	}
 
 	get round(): BracketDepths {
 		return (this.#round ??= new BracketDepths(this.#src, 0x28 /* ( */, 0x29 /* ) */));
 	}
 
+	/** The emphasis delimiters; those a code span, an autolink, inline HTML or a link destination holds are none. */
 	emphasis(marker: string, width: number): EmphasisDelimiters {
 		const key = marker.repeat(width);
 		let delimiters = this.#emphasis.get(key);
-		if (!delimiters) this.#emphasis.set(key, (delimiters = new EmphasisDelimiters(this.#src, marker, width)));
+		if (!delimiters) {
+			delimiters = new EmphasisDelimiters(this.#src, marker, width, this.consumed);
+			this.#emphasis.set(key, delimiters);
+		}
 		return delimiters;
+	}
+
+	/**
+	 * The parts of the root source that code spans, autolinks, inline HTML and inline links' parenthesized destinations
+	 * and titles take, which take precedence over emphasis and link labels: a marker or bracket inside one neither opens
+	 * nor closes, so `*a `*` b*` is one emphasis around a code span and `[a `]` b](u)` one link. One walk finds them
+	 * where the lexer's rules match them, past escapes and each part it found. A "]" that closes an open "[" right
+	 * before "(" takes the parenthesized part when it holds a destination and title, as the link rule does.
+	 */
+	get consumed(): Spans {
+		if (this.#consumed) return this.#consumed;
+		const src = this.#src;
+		const spans = new Spans();
+		const runs = this.codeRuns;
+		const spaceOrAngle = new SpaceOrAngle(src);
+		const special = /[\\`<[\]]/g;
+		let openBrackets = 0;
+		for (let match = special.exec(src); match; match = special.exec(src)) {
+			const at = match.index;
+			let end = at + 1;
+			switch (src.charCodeAt(at)) {
+				case 0x5c /* \ */:
+					if (PUNCTUATION.test(src[at + 1] ?? "")) end = at + 2;
+					break;
+				case 0x60 /* ` */: {
+					// The backticks left after an escaped first one open a span as a whole run does.
+					const opener = runs.endOf(at);
+					const close = runs.closerAfter(opener, opener - at);
+					if (close === -1) {
+						end = opener;
+					} else {
+						end = close + opener - at;
+						spans.add(at, end);
+					}
+					break;
+				}
+				case 0x3c /* < */: {
+					const autolink = this.autolinkEnd(at, src.length, spaceOrAngle);
+					const close = autolink === -1 ? this.htmlEnd(at, src.length) : autolink;
+					if (close !== -1) {
+						end = close;
+						spans.add(at, end);
+					}
+					break;
+				}
+				case 0x5b /* [ */:
+					openBrackets++;
+					break;
+				case 0x5d /* ] */: {
+					if (openBrackets === 0) break;
+					openBrackets--;
+					if (src.charCodeAt(at + 1) !== 0x28 /* ( */) break;
+					const close = this.round.closeAfter(at + 2);
+					if (close !== -1 && matchDestination(src.slice(at + 2, close))) {
+						end = close + 1;
+						spans.add(at + 1, end);
+					}
+				}
+			}
+			special.lastIndex = end;
+		}
+		return (this.#consumed = spans);
 	}
 
 	/**
@@ -297,20 +445,37 @@ export class CloserIndexes {
 	}
 
 	/**
-	 * The first " " or ">" at or after `from`, or `Infinity`. Asked at offsets that never decrease, as the lexer's
-	 * position does, so each search starts past the last one's answer.
+	 * Where the autolink opened by the "<" at `at` ends, one past its ">", in a source that ends at `end`, or -1. A URL
+	 * runs from its scheme to the first " " or ">", which must be a ">" with text before it; an address holds no " ",
+	 * "<", ">" or second "@". An address that matches after a scheme ends where the URL does, so only the URL is tried
+	 * there. `spaceOrAngle` is asked at offsets that never decrease, as the lexer's position does.
 	 */
-	spaceOrAngleFrom(from: number): number {
+	autolinkEnd(at: number, end: number, spaceOrAngle = this.#spaceOrAngle): number {
 		const src = this.#src;
-		if (this.#space < from) {
-			const at = src.indexOf(" ", from);
-			this.#space = at === -1 ? Infinity : at;
+		const scheme = matchEndAt(URL_AUTOLINK_SCHEME, src, at);
+		if (scheme === -1) {
+			const address = matchEndAt(ADDRESS_AUTOLINK, src, at);
+			return address <= end ? address : -1;
 		}
-		if (this.#angle < from) {
-			const at = src.indexOf(">", from);
-			this.#angle = at === -1 ? Infinity : at;
+		const close = spaceOrAngle.from(scheme);
+		return close > scheme && close < end && src.charCodeAt(close) === 0x3e /* > */ ? close + 1 : -1;
+	}
+
+	/**
+	 * Where the inline HTML opened by the "<" at `at` ends, one past its last character, in a source that ends at
+	 * `end`, or -1: a comment ends at the first "-->" after "<!--", a tag at its first ">" outside quotes.
+	 */
+	htmlEnd(at: number, end: number): number {
+		const src = this.#src;
+		if (src.startsWith("<!--", at)) {
+			const ends = this.commentEnds;
+			const close = ends[lowerBound(ends, at + 4)];
+			return close === undefined || close + 3 > end ? -1 : close + 3;
 		}
-		return Math.min(this.#space, this.#angle);
+		const name = matchEndAt(TAG_START, src, at);
+		if (name === -1 || name > end) return -1;
+		const close = this.tagEnds[at + 1]!;
+		return close === -1 || close >= end ? -1 : close + 1;
 	}
 
 	/** Every offset of a backslash before ASCII punctuation, ascending: where unescaping drops a backslash. */
@@ -396,29 +561,35 @@ export class InlineClosers {
 		return close === -1 || close + width > this.end ? -1 : close - pos;
 	}
 
+	/** How long the autolink at the start of `rest` is, or -1 where none starts. */
+	autolinkLength(rest: string): number {
+		const pos = this.end - rest.length;
+		const end = this.#indexes.autolinkEnd(pos, this.end);
+		return end === -1 ? -1 : end - pos;
+	}
+
+	/** How long the inline HTML (a tag or a comment) at the start of `rest` is, or -1 where none starts. */
+	htmlLength(rest: string): number {
+		const pos = this.end - rest.length;
+		const end = this.#indexes.htmlEnd(pos, this.end);
+		return end === -1 ? -1 : end - pos;
+	}
+
 	/**
-	 * Where the URL autolink opened at the start of `rest` ends, its scheme ending at `from`: the first " " or ">"
-	 * after the scheme if it is a ">" with text before it, or -1. One past the end of `rest` reads as no ">".
+	 * The first unescaped `delimiter` in `rest` at or after `from` that no code span, autolink, inline HTML or link
+	 * destination holds, or -1.
 	 */
-	closeUrlAutolink(rest: string, from: number): number {
+	findDelimiter(rest: string, delimiter: string, from: number): number {
 		const pos = this.end - rest.length;
-		const close = this.#indexes.spaceOrAngleFrom(pos + from) - pos;
-		return close > from && rest.charCodeAt(close) === 0x3e /* > */ ? close : -1;
-	}
-
-	/** Where the HTML tag opened by the "<" at the start of `rest` ends: the first ">" after it outside quotes, or -1. */
-	closeTag(rest: string): number {
-		const pos = this.end - rest.length;
-		const close = this.#indexes.tagEnds[pos + 1]!;
-		return close === -1 || close >= this.end ? -1 : close - pos;
-	}
-
-	/** Where the first "-->" after the "<!--" at the start of `rest` starts, or -1. */
-	closeComment(rest: string): number {
-		const pos = this.end - rest.length;
-		const ends = this.#indexes.commentEnds;
-		const at = lowerBound(ends, pos + 4);
-		return at === ends.length || ends[at]! + 3 > this.end ? -1 : ends[at]! - pos;
+		const consumed = this.#indexes.consumed;
+		let at = rest.indexOf(delimiter, from);
+		while (at !== -1) {
+			const skippedTo = consumed.endAt(pos + at);
+			if (skippedTo !== -1) at = rest.indexOf(delimiter, skippedTo - pos);
+			else if (escapedAt(rest, at)) at = rest.indexOf(delimiter, at + delimiter.length);
+			else return at;
+		}
+		return -1;
 	}
 
 	#close(depths: BracketDepths, rest: string, start: number): number {
