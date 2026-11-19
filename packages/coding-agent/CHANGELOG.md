@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `inlineImageByteBudget` to custom models and `modelOverrides` in models.yml, so gateways can configure image byte limits and give snapcompact archives half that budget ([#15091](https://github.com/can1357/oh-my-pi/pull/15091) by [@Ikaleio](https://github.com/Ikaleio)).
+
 ### Fixed
 
 - Fixed the shell's `dirname` builtin on Windows ignoring `\` separators and drive prefixes (`dirname 'C:\a\b'` printed `.`), which broke scripts like VS Code's `code` launcher (`./Code.exe: No such file or directory`)

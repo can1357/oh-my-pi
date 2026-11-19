@@ -11,8 +11,10 @@ const IMAGE_BUDGET_CACHE_MAX = 8192;
  * The axis is a host contract: a rerouted endpoint (proxy, gateway) imposes its own limit, so the budget applies
  * only when `budgetedHost` says the request reaches the host the rules describe: pi-ai's `reachesBudgetedHost`
  * (the model's official endpoint, following request-time reroutes, or Factory's hosted API for a Factory Droid model).
+ * A configured `model.inlineImageByteBudget` wins on any endpoint: the user knows the host behind a custom gateway.
  */
 export function resolveInlineImageByteBudget(model: Model, budgetedHost: boolean): number | undefined {
+	if (model.inlineImageByteBudget !== undefined) return model.inlineImageByteBudget;
 	if (!budgetedHost) return undefined;
 	const key = `${model.provider} ${model.id} ${model.api}`;
 	let budget = imageBudgetCache.get(key);
@@ -27,7 +29,7 @@ export function resolveInlineImageByteBudget(model: Model, budgetedHost: boolean
 
 /**
  * Largest request body the deployment accepts (`request-body-byte-limit`), or `undefined` when no rule names it.
- * Same gate as {@link resolveInlineImageByteBudget}.
+ * Same host gate as the catalog fallback in {@link resolveInlineImageByteBudget}.
  */
 export function resolveRequestBodyByteLimit(model: Model, budgetedHost: boolean): number | undefined {
 	if (!budgetedHost) return undefined;
