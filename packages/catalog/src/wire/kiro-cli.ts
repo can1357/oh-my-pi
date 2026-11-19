@@ -4,6 +4,7 @@
  * login, and the Kiro social auth service — takes its headers from here, so
  * the identity lives in one place. Credential-free: callers pass the bearer.
  */
+import { KIRO_API_KEY_PREFIX } from "./kiro";
 
 const KIRO_CLI_APP_VERSION = "3.2.0";
 const AWS_SDK_RUST_UA = "aws-sdk-rust/1.6.0 ua/2.1";
@@ -104,7 +105,9 @@ function sdkRequest(attempt: KiroCliAttempt): Record<string, string> {
 
 /**
  * Headers for one attempt of a bearer-authenticated AWS JSON 1.0 call, in the
- * CLI's order. Each attempt gets a fresh invocation id.
+ * CLI's order. Each attempt gets a fresh invocation id. A `ksk_…` API key also
+ * carries `tokentype: API_KEY`; without it Kiro treats the key as an OAuth
+ * bearer and rejects the call for lacking a profile ARN (#19689).
  */
 export function kiroCliServiceHeaders(
 	operation: KiroCliOperation,
@@ -125,6 +128,7 @@ export function kiroCliServiceHeaders(
 				}
 			: {}),
 		authorization: `Bearer ${token}`,
+		...(token.startsWith(KIRO_API_KEY_PREFIX) ? { tokentype: "API_KEY" } : {}),
 		...sdkRequest(attempt),
 	};
 }
