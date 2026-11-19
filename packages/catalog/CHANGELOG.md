@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Codex models behind OpenAI-compatible proxies ignoring their deployment's reported context window ([#19713](https://github.com/can1357/oh-my-pi/pull/19713) by [@Ti-webdev](https://github.com/Ti-webdev)).
+
 ## [19.0.0] - 2026-11-18
 
 ### Added

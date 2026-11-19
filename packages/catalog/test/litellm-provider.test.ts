@@ -209,6 +209,42 @@ describe("LiteLLM provider discovery", () => {
 		expect(spec.maxTokens).toBe(24_000);
 	});
 
+	test("keeps a Codex alias's reported prompt window after materialization", async () => {
+		const options = litellmModelManagerOptions({
+			apiKey: "sk-context-window",
+			baseUrl: "http://primary:4000/v1",
+			fetch: vi.fn(async (input: string | URL | Request) => {
+				const url = inputUrl(input);
+				if (url === MODELS_DEV_URL) return Response.json({});
+				if (url === "http://primary:4000/v1/models") {
+					return Response.json({ data: [{ id: "codex-gpt-6.1-sol" }] });
+				}
+				if (url === "http://primary:4000/model_group/info") {
+					return Response.json({
+						data: [
+							{
+								model_group: "codex-gpt-6.1-sol",
+								providers: ["openai"],
+								supports_vision: true,
+								max_input_tokens: 500_000,
+								max_output_tokens: null,
+							},
+						],
+					});
+				}
+				return new Response("Not found", { status: 404 });
+			}) as FetchImpl,
+		});
+
+		const specs = await options.fetchDynamicModels?.();
+		const spec = specs?.find(model => model.id === "codex-gpt-6.1-sol");
+		if (!spec) throw new Error("expected the proxy's Codex alias");
+		const model = buildModel(spec);
+
+		expect(model.contextWindow).toBe(500_000);
+		expect(`${model.provider}/${model.id}`).toBe("litellm/codex-gpt-6.1-sol");
+	});
+
 	test("keeps a proxy's friendly Sol name ahead of the catalog reference", async () => {
 		const options = litellmModelManagerOptions({
 			apiKey: "sk-rich",

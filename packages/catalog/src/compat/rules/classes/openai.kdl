@@ -65,12 +65,15 @@ class "openai" {
 	revision ">=6 <7" {
 		supports-configuration-update #true
 	}
-	// Codex SKUs: the advertised 400K figure includes the output budget; the
-	// true prompt window is 272K. Spark budgets are its own family's.
-	family "codex" {
-		revision ">=1" {
-			limits-patch {
-				context-window 272000
+	// The legacy 400K Codex budget includes output; keep its 272K prompt
+	// correction on the native transport, not deployment-owned proxy limits.
+	// Spark budgets are its own family's.
+	on-api "openai-codex-responses" {
+		family "codex" {
+			revision ">=1" {
+				limits-patch {
+					context-window 272000
+				}
 			}
 		}
 	}
