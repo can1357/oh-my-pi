@@ -1999,8 +1999,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		| {
 				request: PlanReviewRequestedEvent;
 				remote?: { choice: PlanReviewChoice; feedback?: string };
-				/** Applies a remote tier pick to the review's slider selection; undefined when the slider is hidden. */
-				selectTier?: (role: string) => boolean;
+				/**
+				 * Applies a remote tier pick to the review's slider selection; false when `role` names no tier
+				 * or `choice` is disabled on it. Undefined when the slider is hidden.
+				 */
+				selectTier?: (role: string, choice: PlanReviewChoice) => boolean;
 				/** A remote Save: writes the plan to its default file name; the review stays open. */
 				save: () => void;
 		  }
@@ -6755,12 +6758,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		const pick = this.#planReviewPick;
 		if (!pending || pending.request.reviewId !== reviewId || !pick) return false;
 		const option = pending.request.options.find(item => item.id === choice);
-		if (!option || option.disabled) return false;
+		if (!option) return false;
 		const feedback = input?.feedback;
 		if (choice === "refine" && !feedback?.trim()) return false;
 		if (input?.role !== undefined) {
+			// The tier decides availability (keep-context is measured against its window).
 			const approves = choice === "execute" || choice === "compact" || choice === "keep";
-			if (!approves || !pending.selectTier?.(input.role)) return false;
+			if (!approves || !pending.selectTier?.(input.role, choice)) return false;
+		} else if (option.disabled) {
+			return false;
 		}
 		if (choice === "save") {
 			pending.save();
@@ -6772,25 +6778,38 @@ export class InteractiveMode implements InteractiveModeContext {
 		return false;
 	}
 
-	#getPlanApprovalContextUsage(): ContextUsage | undefined {
-		const executionModel = this.#planModePreviousModelState?.model ?? this.session.model;
+	/**
+	 * The keep-context approval as the review reports it and the overlay shows it, measured against
+	 * `executionModel`'s context window (the session's when it has none): disabled past
+	 * {@link PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT}.
+	 */
+	#planKeepContextChoice(executionModel: Model | undefined): {
+		option: PlanReviewOption;
+		choice: PlanReviewOverlayChoice;
+	} {
 		const contextWindow = executionModel?.contextWindow;
-		if (typeof contextWindow === "number") {
-			return this.session.getContextUsage({ contextWindow });
-		}
-		return this.session.getContextUsage();
-	}
-
-	/** The context the keep-context approval carries over (`~378k / 1m`), when known. */
-	#formatKeepContextUsage(contextUsage: ContextUsage | undefined): string | undefined {
-		if (!contextUsage) return undefined;
-		const tokens = formatContextTokenCount(contextUsage.tokens);
-		const contextWindow = formatContextTokenCount(contextUsage.contextWindow);
-		return `~${tokens} / ${contextWindow}`;
-	}
-
-	#isKeepContextDisabled(contextUsage: ContextUsage | undefined): boolean {
-		return contextUsage !== undefined && contextUsage.percent > PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT;
+		const usage =
+			typeof contextWindow === "number"
+				? this.session.getContextUsage({ contextWindow })
+				: this.session.getContextUsage();
+		// The context carried over (`~378k / 1m`), when known.
+		const meta = usage
+			? `~${formatContextTokenCount(usage.tokens)} / ${formatContextTokenCount(usage.contextWindow)}`
+			: undefined;
+		const disabled = usage !== undefined && usage.percent > PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT;
+		return {
+			option: {
+				id: "keep",
+				label: meta ? `Approve and keep context (${meta})` : "Approve and keep context",
+				disabled,
+			},
+			choice: {
+				id: "keep",
+				label: "Approve and keep context",
+				meta,
+				disabled: disabled ? `Context is over ${PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT}% full` : undefined,
+			},
+		};
 	}
 
 	/** Apply the `tui.vimMode` setting to an editor and route Visual-mode yanks to the clipboard. */
@@ -8014,39 +8033,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#notifyModeChanged();
 		}
 
-		const contextUsage = this.#getPlanApprovalContextUsage();
-		const keepContextUsage = this.#formatKeepContextUsage(contextUsage);
-		const keepContextDisabled = this.#isKeepContextDisabled(contextUsage);
-		// The overlay offers Refine only while the plan has feedback; an extension may always refine
-		// with its own feedback, so the reported choices keep it.
-		const reviewOptions: PlanReviewOption[] = [
-			{ id: "execute", label: "Approve and execute", disabled: false },
-			{ id: "compact", label: "Approve and compact context", disabled: false },
-			{
-				id: "keep",
-				label: keepContextUsage ? `Approve and keep context (${keepContextUsage})` : "Approve and keep context",
-				disabled: keepContextDisabled,
-			},
-			{ id: "refine", label: "Refine plan", disabled: false },
-			{ id: "save", label: "Save", disabled: false },
-		];
-		const approveChoices: PlanReviewOverlayChoice[] = [
-			{ id: "execute", label: "Approve and execute", detail: "Start fresh with just the plan" },
-			{
-				id: "compact",
-				label: "Approve and compact context",
-				detail: "Summarize this conversation, then execute",
-			},
-			{
-				id: "keep",
-				label: "Approve and keep context",
-				meta: keepContextUsage,
-				disabled: keepContextDisabled
-					? `Context is over ${PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT}% full`
-					: undefined,
-			},
-		];
-
 		// Model-tier slider: let the operator pick which configured role model
 		// (smol/default/slow/…) executes the approved plan. The slider always starts
 		// on the `default` tier so execution defaults to the default model no matter
@@ -8068,9 +8054,39 @@ export class InteractiveMode implements InteractiveModeContext {
 						})),
 						onChange: index => {
 							selectedTierIndex = index;
+							const next = choicesAt(index);
+							request.options = next.options;
+							this.#planReviewOverlay?.setChoices(next.choices);
 						},
 					}
 				: undefined;
+		// Keep-context availability follows the model that executes: the selected tier while the
+		// slider shows, else the pre-plan model #exitPlanMode restores. The overlay offers Refine
+		// only while the plan has feedback; an extension may always refine with its own feedback,
+		// so the reported options keep it.
+		const restoredModel = this.#planModePreviousModelState?.model ?? this.session.model;
+		const choicesAt = (tierIndex: number): { options: PlanReviewOption[]; choices: PlanReviewOverlayChoice[] } => {
+			const keep = this.#planKeepContextChoice(slider ? cycle!.models[tierIndex]?.model : restoredModel);
+			return {
+				options: [
+					{ id: "execute", label: "Approve and execute", disabled: false },
+					{ id: "compact", label: "Approve and compact context", disabled: false },
+					keep.option,
+					{ id: "refine", label: "Refine plan", disabled: false },
+					{ id: "save", label: "Save", disabled: false },
+				],
+				choices: [
+					{ id: "execute", label: "Approve and execute", detail: "Start fresh with just the plan" },
+					{
+						id: "compact",
+						label: "Approve and compact context",
+						detail: "Summarize this conversation, then execute",
+					},
+					keep.choice,
+				],
+			};
+		};
+		const initialChoices = choicesAt(startTierIndex);
 		// The overlay now owns the dynamic, focus-aware help line; the caller only
 		// supplies the trailing cancel hint.
 		const helpText = `${editorKey("tui.select.cancel")} cancel`;
@@ -8089,7 +8105,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			title: details.title,
 			planFilePath,
 			planContent,
-			options: reviewOptions,
+			options: initialChoices.options,
 			tiers: slider
 				? cycle!.models.map(entry => ({
 						role: entry.role,
@@ -8121,9 +8137,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			// Undefined when the slider is hidden — a lone tier is no selection, and pinning
 			// it would switch the session back to the plan model.
 			selectTier: slider
-				? role => {
+				? (role, choice) => {
 						const index = cycle!.models.findIndex(entry => entry.role === role);
-						if (index < 0) return false;
+						if (index < 0 || choicesAt(index).options.find(option => option.id === choice)?.disabled)
+							return false;
 						this.#planReviewOverlay?.setSliderIndex(index);
 						return true;
 					}
@@ -8138,7 +8155,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const choicePromise = this.showPlanReview(
 			planContent,
 			"Plan mode - next step",
-			approveChoices,
+			initialChoices.choices,
 			{
 				helpText,
 				refine: { id: "refine", label: "Refine plan" },
@@ -8162,7 +8179,7 @@ export class InteractiveMode implements InteractiveModeContext {
 						type: "plan_review_resolved",
 						reviewId,
 						sessionId: reviewSessionId,
-						choice: reviewOptions.find(option => option.id === closedWith)?.id,
+						choice: request.options.find(option => option.id === closedWith)?.id,
 						by: pending.remote ? "extension" : "local",
 					} as const;
 					void requestDelivered.promise.then(() => extensionRunner.emit(resolved));
