@@ -147,9 +147,19 @@ async function framePassthroughFlag(): Promise<string[]> {
 	return ["-fps_mode", "passthrough"];
 }
 
+/**
+ * Package-manager bin dirs a GUI-launched or service process often lacks on PATH: Homebrew on macOS (Apple
+ * Silicon, Intel) and WinGet's links dir on Windows.
+ */
+function mediaBinaryFallbackPath(): string {
+	const dirs = ["/opt/homebrew/bin", "/usr/local/bin"];
+	if (process.env.LOCALAPPDATA) dirs.push(path.join(process.env.LOCALAPPDATA, "Microsoft", "WinGet", "Links"));
+	return dirs.join(path.delimiter);
+}
+
 /** Resolve a system media binary or throw a user-facing install hint. */
 export function requireMediaBinary(name: "ffmpeg" | "ffprobe"): string {
-	const found = $which(name);
+	const found = $which(name) ?? $which(name, { PATH: mediaBinaryFallbackPath() });
 	if (!found) {
 		throw new VideoError(
 			`Video operations require ${name}, which was not found on PATH. Install it (e.g. \`brew install ffmpeg\`) and retry.`,

@@ -240,11 +240,14 @@ export async function listRemoteDir(
 		`elif [ -S "$p" ]; then t=socket; elif [ -c "$p" ]; then t=char; ` +
 		`elif [ -b "$p" ]; then t=block; else continue; fi; ` +
 		`printf '%s\\000%s\\000' "$t" "\${p#./}"; done`;
-	const command =
+	const script =
 		`cd ${quotePosixArgument(remotePath)} && ` +
-		`LC_ALL=C find . ! -name . -prune -exec ${shell} -c ${quotePosixArgument(classify)} ${shell} {} +`;
-	const args = await buildRemoteCommand(target, wrapInPosixShell(shell, command));
+		`LC_ALL=C find . ! -name . -prune -exec ${shell} -c ${quotePosixArgument(classify)} ${shell} {} +\n`;
+	// The script goes over stdin: as a `-c` argument its nested quoting passes through the login shell first, which
+	// fish and csh parse differently from POSIX shells.
+	const args = await buildRemoteCommand(target, `${shell} -s`, { allowStdin: true });
 	using child = ptree.spawn(["ssh", ...args], {
+		stdin: new TextEncoder().encode(script),
 		signal: ptree.combineSignals(opts.signal, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
 	});
 	const buffer = new ConcatSink();

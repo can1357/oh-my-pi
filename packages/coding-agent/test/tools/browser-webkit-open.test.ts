@@ -143,7 +143,7 @@ describe("browser.open on omp's WebKit host", () => {
 		const host = await useFakeHost(mode);
 		const preflight = stubChromium();
 		const text = await open(makeSession("session-fallback"), "wk-fallback");
-		expect(text).toStartWith('Opened tab "wk-fallback" on headless browser (hidden)');
+		expect(text).toStartWith('Opened tab "wk-fallback" on omp\'s headless Chromium');
 		expect(text).toContain("opened Chromium instead");
 		expect(text).toContain(reason);
 		// The driver is shared with Tern; nothing a WebKit tab reports may call the backend Tern.
@@ -218,10 +218,12 @@ describe("browser.open on omp's WebKit host", () => {
 		process.env.TERN_PANE_SOCKET = `${host.dir}/no-tern.sock`;
 		process.env.TERN_PANE = "3";
 		const text = await open(makeSession("session-chain"), "wk-chain");
-		expect(text).toStartWith('Opened tab "wk-chain" on headless browser (hidden)');
+		expect(text).toStartWith('Opened tab "wk-chain" on omp\'s headless Chromium');
 		// Both notes say where the tab ended up, not where the first fallback meant to go.
 		expect(text).toMatch(/Tern cannot show a browser here \(.*\); opened Chromium instead/);
-		expect(text).toMatch(/omp's WebKit browser could not start \(.*exited with code 3.*\); opened Chromium instead/);
+		expect(text).toMatch(
+			/omp's WebKit browser could not take this open \(.*exited with code 3.*\); opened Chromium instead/,
+		);
 	});
 
 	it("reports a failed navigation as the page's failure instead of switching browsers", async () => {

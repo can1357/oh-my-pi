@@ -73,7 +73,7 @@ export function filterProcessEnv(env: Record<string, string | undefined>): Recor
  * so forwarding them to a child shell makes `git` ignore the command's `cwd`
  * and mutate the wrong worktree or index. Stripped from child shell envs so git
  * rediscovers the repository from the working directory. Mirrors the
- * `env_remove` list in `crates/pi-vcs/src/git/cli.rs`.
+ * `env_remove` list in `crates/vcs/src/git/cli.rs`.
  */
 const GIT_REPO_LOCATION_ENV_NAMES = [
 	"GIT_DIR",

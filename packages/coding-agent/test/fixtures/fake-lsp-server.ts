@@ -188,6 +188,10 @@ function handleNotification(message: JsonRpcMessage): void {
 			watchedFileChanges.push(...changes);
 			break;
 		}
+		case "test/crash":
+			process.stderr.write("error: Unknown binary 'rust-analyzer' in official toolchain\n");
+			process.exit(3);
+			break;
 		case "exit":
 			process.exit(0);
 	}

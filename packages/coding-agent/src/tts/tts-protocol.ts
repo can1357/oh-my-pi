@@ -48,18 +48,18 @@ export type TtsWorkerOutbound =
 	| { type: "stream-done"; id: string };
 
 /**
- * Wire transport between the parent (`TtsClient`) and the local TTS subprocess.
- * The subprocess keeps native inference (model memory, any native fault) out of
- * the agent process. The parent owns its lifecycle (graceful work, hard SIGKILL
- * on shutdown); the protocol carries no explicit close handshake. See
- * `tts-client.ts` for the spawn/kill glue.
+ * Worker-side transport. Messages cross both hops (client tunnel <-> daemon
+ * `speech` module <-> worker stdio) as the binary frames of
+ * `daemon/modules/speech-frames.ts`; `pcm` travels as a raw f32le payload.
+ * The daemon owns the worker process (native inference stays out of every
+ * agent process) and SIGKILLs it on stop; there is no close handshake.
  */
 export interface TtsTransport {
 	send(message: TtsWorkerOutbound): void;
 	/**
-	 * Send and resolve once the message has drained into the IPC channel.
+	 * Send and resolve once the frame left the worker's stdout buffer.
 	 * Streaming synthesis awaits this per audio chunk, so each segment reaches
-	 * the parent before the next one synthesizes and the pipe never backs up.
+	 * the client before the next one synthesizes and the pipe never backs up.
 	 */
 	sendAndFlush(message: TtsWorkerOutbound): Promise<void>;
 	onMessage(handler: (message: TtsWorkerInbound) => void): () => void;
