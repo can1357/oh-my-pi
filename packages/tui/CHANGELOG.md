@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `<mark>` spans in ask form HTML now highlight their text (inverted) in the terminal UI, and reach Tern as a `mark` span token; useful for pointing at the exact findings a review form asks about ([#19559](https://github.com/can1357/oh-my-pi/pull/19559) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+
+### Changed
+
+- Table cells in ask forms now keep their `<strong>`, `<em>`, `<code>` and `<mark>` styling in the terminal UI instead of flattening to plain text ([#19559](https://github.com/can1357/oh-my-pi/pull/19559) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes

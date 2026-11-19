@@ -676,6 +676,144 @@ describe("html form", () => {
 			expect(form.fields.map(field => [field.name, spansText(field.label)])).toEqual([["domain", "Domain"]]);
 			expect(defaultFormData(form)).toEqual({ kind: "deploy", domain: "" });
 		});
+
+		it("keeps <mark> spans as their own style, in prose and in option labels", () => {
+			const form = parseHtmlForm(`<form><p>Watch <mark>this token</mark> closely</p>
+				<label><input type="radio" name="d" value="fix" checked> Fix the <mark>lease</mark></label></form>`);
+			expect(form.sections[0]!.blocks[0]).toEqual({
+				kind: "text",
+				spans: [{ text: "Watch " }, { text: "this token", style: "mark" }, { text: " closely" }],
+				heading: false,
+			});
+			const field = form.fields[0]!;
+			expect(field.kind === "choice" && field.options[0]!.label).toEqual([
+				{ text: "Fix the " },
+				{ text: "lease", style: "mark" },
+			]);
+			const { form: radios } = dialog(
+				`<form><label><input type="radio" name="d" value="fix" checked> Fix the <mark>lease</mark></label></form>`,
+			);
+			expect(radios.render(100).join("")).toMatch(/\x1b\[7m\x1b\[[0-9;]*mlease/);
+			radios.dispose();
+			const { form: view } = dialog(`<form><p>Watch <mark>this token</mark> closely</p></form>`);
+			expect(JSON.stringify(view.describe(CX))).toContain('"mark"');
+			expect(view.render(100).join("")).toMatch(/\x1b\[7m\x1b\[[0-9;]*mthis token/);
+			view.dispose();
+		});
+
+		it("keeps mark spans inside table cells in the terminal render", () => {
+			const { form } = dialog(
+				`<form><table><tr><th>Finding</th></tr><tr><td>Review <mark>stale</mark> token</td></tr></table></form>`,
+			);
+			expect(form.render(100).join("")).toMatch(/\x1b\[7m\x1b\[[0-9;]*mstale/);
+			form.dispose();
+		});
+
+		it("splits nested styles, merges equal neighbours and drops empty marks", () => {
+			const nested = parseHtmlForm(`<form><p>a <strong>b <mark>c</mark></strong> d</p></form>`);
+			expect(nested.sections[0]!.blocks[0]).toMatchObject({
+				spans: [{ text: "a " }, { text: "b ", style: "strong" }, { text: "c", style: "mark" }, { text: " d" }],
+			});
+			const outer = parseHtmlForm(`<form><p>a <mark>b <strong>c</strong></mark> d</p></form>`);
+			expect(outer.sections[0]!.blocks[0]).toMatchObject({
+				spans: [{ text: "a " }, { text: "b ", style: "mark" }, { text: "c", style: "strong" }, { text: " d" }],
+			});
+			const merged = parseHtmlForm(
+				`<form><p>a<mark>b</mark><mark>c</mark>d <code>x</code><mark>e</mark></p></form>`,
+			);
+			expect(merged.sections[0]!.blocks[0]).toMatchObject({
+				spans: [
+					{ text: "a" },
+					{ text: "bc", style: "mark" },
+					{ text: "d " },
+					{ text: "x", style: "code" },
+					{ text: "e", style: "mark" },
+				],
+			});
+			const empty = parseHtmlForm(`<form><p>a<mark></mark>b</p></form>`);
+			expect(empty.sections[0]!.blocks[0]).toMatchObject({ spans: [{ text: "ab" }] });
+		});
+
+		it("shows pre blocks as plain text: inline mark markup is gone", () => {
+			const form = parseHtmlForm(`<form><pre>a <mark>b</mark> c</pre></form>`);
+			expect(form.sections[0]!.blocks[0]).toEqual({ kind: "pre", text: "a b c" });
+		});
+
+		it("inverts marks in section legends, field labels and focused option rows", () => {
+			const { form } = dialog(`<form><fieldset><legend>Rate the <mark>lease</mark></legend>
+				<label for="d">Fix the <mark>lease</mark></label><input id="d" name="d"></fieldset></form>`);
+			const rows = form.render(100).join("");
+			expect((rows.match(/\x1b\[7m\x1b\[[0-9;]*mlease/g) ?? []).length).toBe(2);
+			expect(JSON.stringify(form.describe(CX))).toContain('"mark"');
+			form.dispose();
+		});
+
+		it("keeps a marked table header inverted and carries the mark token in the native table", () => {
+			const { form } = dialog(
+				`<form><table><tr><th><mark>col</mark></th></tr><tr><td>Review <mark>stale</mark></td></tr></table></form>`,
+			);
+			const rows = form.render(100).join("");
+			expect(rows).toMatch(/\x1b\[7m\x1b\[[0-9;]*mcol/);
+			expect(rows).toMatch(/\x1b\[7m\x1b\[[0-9;]*mstale/);
+			expect(JSON.stringify(form.describe(CX))).toContain('"mark"');
+			form.dispose();
+		});
+		it("flattens select option labels to plain text, so the value row never highlights", () => {
+			const form = parseHtmlForm(
+				`<form><select name="d"><option>Fix the <mark>lease</mark></option></select></form>`,
+			);
+			const field = form.fields[0]!;
+			expect(field.kind === "choice" && field.options[0]!.label).toEqual([{ text: "Fix the lease" }]);
+			const { form: view } = dialog(
+				`<form><select name="d"><option>Fix the <mark>lease</mark></option></select></form>`,
+			);
+			expect(view.render(100).join("")).not.toContain("\x1b[7m");
+			view.dispose();
+		});
+
+		it("keeps raw escapes in the parsed span and strips them only when rendering", () => {
+			const form = parseHtmlForm(`<form><p>a <mark>b\x1b[31mc</mark> d</p></form>`);
+			expect(form.sections[0]!.blocks[0]).toMatchObject({
+				spans: [{ text: "a " }, { text: "b\x1b[31mc", style: "mark" }, { text: " d" }],
+			});
+			const { form: view } = dialog(`<form><p>a <mark>b\x1b[31mc</mark> d</p></form>`);
+			expect(view.render(100).join("")).not.toContain("\x1b[31m");
+			view.dispose();
+		});
+
+		it("strips the escape byte inside marks and converts tabs to one space", () => {
+			const { form } = dialog(`<form><p>a <mark>b\x1b[31mc\td</mark> e</p></form>`);
+			const rows = form.render(100).join("");
+			expect(rows).not.toContain("\x1b[31m");
+			expect(rows).toMatch(/\x1b\[7m\x1b\[[0-9;]*mb\[31mc d/);
+			form.dispose();
+		});
+
+		it("inverts each side of a mark across a hard break, and wraps one span without re-inverting", () => {
+			const { form } = dialog(`<form><p><mark>one<br>two</mark></p></form>`);
+			const broken = form.render(100).join("");
+			expect((broken.match(/\x1b\[7m/g) ?? []).length).toBe(2);
+			expect((broken.match(/\x1b\[27m/g) ?? []).length).toBe(2);
+			form.dispose();
+			const { form: wrapped } = dialog(
+				`<form><label><input type="radio" name="d" value="fix" checked> <mark>${"word ".repeat(12)}end</mark></label></form>`,
+			);
+			const rows = wrapped.render(30).join("");
+			expect((rows.match(/\x1b\[7m/g) ?? []).length).toBe(1);
+			expect(rows).toContain("\x1b[27m");
+			wrapped.dispose();
+		});
+
+		it("still detects an Other option whose label carries a mark", () => {
+			const marked = parseHtmlForm(
+				`<form><label><input type="radio" name="a" value="1"> One</label><label><input type="radio" name="a" value="x"> <mark>Other</mark></label></form>`,
+			);
+			expect(marked.fields[0]!).toMatchObject({ kind: "choice", other: false });
+			const plain = parseHtmlForm(
+				`<form><label><input type="radio" name="a" value="1"> One</label><label><input type="radio" name="a" value="2"> <mark>Else</mark></label></form>`,
+			);
+			expect(plain.fields[0]!).toMatchObject({ kind: "choice", other: true });
+		});
 	});
 
 	describe("form data", () => {
