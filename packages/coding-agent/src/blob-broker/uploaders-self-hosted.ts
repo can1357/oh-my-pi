@@ -17,9 +17,13 @@ import {
 	publication,
 	requireCredential,
 	requireOption,
+	UPLOAD_TIMEOUT_MS,
 } from "./uploader-runtime";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
+
+/** curl connect-phase budget for FTP/FTPS uploads; the total budget defaults to UPLOAD_TIMEOUT_MS. */
+const FTP_CONNECT_TIMEOUT_S = 15;
 
 interface OwnCloudShare {
 	statusCode: unknown;
@@ -172,7 +176,7 @@ function ftpUploadUrl(protocol: "ftp" | "ftps", host: string, port: number, dest
 	return url.toString();
 }
 
-function createFtpUploader(config: DestinationRuntimeConfig): BlobUploader {
+function createFtpUploader(config: DestinationRuntimeConfig, uploadTimeoutMs: number): BlobUploader {
 	const protocol = optionString(config, "protocol", "sftp");
 	if (protocol !== "ftp" && protocol !== "ftps" && protocol !== "sftp") {
 		throw new Error("Destination option protocol must be ftp, ftps, or sftp");
@@ -234,6 +238,10 @@ function createFtpUploader(config: DestinationRuntimeConfig): BlobUploader {
 				"--fail",
 				"--silent",
 				"--show-error",
+				"--connect-timeout",
+				String(FTP_CONNECT_TIMEOUT_S),
+				"--max-time",
+				String(uploadTimeoutMs / 1000),
 				"--ftp-create-dirs",
 				"--upload-file",
 				"-",
@@ -251,8 +259,15 @@ function createFtpUploader(config: DestinationRuntimeConfig): BlobUploader {
 					env: { ...spawn.env },
 					cwd: spawn.cwd,
 				});
-				const stderr = await new Response(process.stderr as ReadableStream<Uint8Array>).text();
-				const exitCode = await process.exited;
+				const timeout = setTimeout(() => process.kill(), uploadTimeoutMs);
+				let stderr: string;
+				let exitCode: number;
+				try {
+					stderr = await new Response(process.stderr as ReadableStream<Uint8Array>).text();
+					exitCode = await process.exited;
+				} finally {
+					clearTimeout(timeout);
+				}
 				if (exitCode !== 0) {
 					throw new Error(
 						`${protocol.toUpperCase()} upload command exited with code ${exitCode}: ${stderr.trim().slice(-300)}`,
@@ -523,10 +538,12 @@ function createPlikUploader(config: DestinationRuntimeConfig): BlobUploader {
 export function createSelfHostedUploader(
 	destination: BlobDestinationId,
 	config: DestinationRuntimeConfig,
+	/** Total upload budget override for the curl transports (test seam; defaults to UPLOAD_TIMEOUT_MS). */
+	uploadTimeoutMs = UPLOAD_TIMEOUT_MS,
 ): BlobUploader | null {
 	switch (destination) {
 		case "ftp":
-			return createFtpUploader(config);
+			return createFtpUploader(config, uploadTimeoutMs);
 		case "shared-folder":
 			return createSharedFolderUploader(config);
 		case "owncloud":
