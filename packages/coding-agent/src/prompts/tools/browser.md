@@ -1,4 +1,4 @@
-Drive real browser tabs.
+Drive real browser tabs; start with `const tab = await browser.open({ name, url })`.
 
 <instruction>
 - Static content? Use `read`. Use `browser` for JavaScript execution, authenticated sessions, and interactive actions.
@@ -17,7 +17,7 @@ BrowserTab, every helper awaited:
 navigation: url title goto back forward reload pushState
 inspection: observe({selector?, compact?, viewportOnly?, includeAll?}) ariaSnapshot(selector?, {interactive?, compact?, urls?, diff?}) a11y extract(format?, {selector?, outline?, filter?}) text html value attr count box styles isVisible isEnabled isChecked
 capture: screenshot({selector?, fullPage?, silent?, annotate?, format?, quality?, ifChanged?, threshold?}) diffScreenshot(baselinePath, {threshold?, output?}) pdf({path?, format?, landscape?, scale?, printBackground?, margin?, pageRanges?})
-interaction: click(selector, {button?, count?}) dblclick hover focus check uncheck type fill press keyDown keyUp mouseMove mouseDown mouseUp clickAt(x, y, {button?, count?}) wheel scroll drag highlight scrollIntoView select uploadFile
+interaction: click(selector, {button?, count?}) dblclick hover focus check uncheck type(selector, text) fill(selector, text) press(key, {selector?}) keyDown keyUp mouseMove(x, y, {steps?, css?}) mouseDown mouseUp clickAt(x, y, {button?, count?, css?}) wheel scroll(dx, dy) drag(from, to) highlight scrollIntoView select(selector, …values) uploadFile(selector, …paths)
 waiting: waitFor waitForSelector waitForUrl(urlPattern, {timeout?}) waitForText
 frames: frames() → frame tree; frame(selectorOrNameOrUrl) → handle with click fill type press text html value attr count isVisible ariaSnapshot evaluate waitFor waitForSelector screenshot
 dialogs: dialog handleDialog setDialogs
@@ -31,7 +31,7 @@ recording: recordStart(path, options?) recordStop recordRestart(path, options?) 
 vitals, React: vitals reactEnable reactTree reactInspect reactRenders reactSuspense
 network: route(urlGlob, {abort?, status?, headers?, contentType?, body?, delay?, resourceType?}) unroute routes requests({filter?, type?, method?, status?, since?, limit?}) → metadata request(id) → with bodies clearRequests harStart harStop allowedDomains
 WebMCP (experimental, Chromium only): webmcpList webmcpInvoke webmcpEvents
-execution: evaluate run(fnOrCode, {args?, timeout?})
+execution: evaluate(fnOrExpression) run(fnOrCode, {args?, timeout?})
 elements: id(n) ref("e5") → BrowserElement with click dblclick check uncheck highlight type fill press hover focus select uploadFile scrollIntoView boundingBox isVisible isHidden text html value attr styles isEnabled isChecked evaluate
 close()
 
@@ -45,7 +45,11 @@ selectors: CSS, or Puppeteer aria/… text/… xpath/… pierce/… label/… pl
   - the relay's Chrome pages (`shown`: the active tab).
   - Pass an entry's `target`; never guess.
 - `viewportOnly`: on-screen elements only (ignored on cmux). `includeAll`: non-interactive nodes too. `text()` and `html()` without a selector read `<body>`.
-- `click`: `button` presses another mouse button (`"right"` opens a context menu); `count` clicks more than once. `<select>` elements: `select`, not `fill`.
+- `click`: `button` presses another mouse button (`"right"` opens a context menu); `count` clicks more than once.
+- `<select>` elements: `select(selector, …choices)` or `handle.select(…choices)`, not `fill`. Choices mix strings (exact value, then label), `{label: "full text"}`, `{value: "exact value"}`, or `{index: 0}`; labels match exactly or full option text with whitespace collapsed and trimmed.
+- `clickAt`, `mouseMove`, `drag` `{x, y}` points: the position as read off the tab's latest screenshot.
+  - That is viewport CSS pixels, unless the screenshot's line says it is scaled.
+  - After a scaled screenshot, pass values measured on the page (`box`, `evaluate`) with `css: true` instead of scaling them: `clickAt(x, y, {css: true})`, `{x, y, css: true}`.
 - `waitFor*` resolve as soon as the condition holds: after a click or navigation wait for the expected text, URL, or selector, never a fixed sleep.
 - The cell's own `wait(handles)` waits for agents and completions, not time; `wait(ms | predicate)` sleeps or polls only inside `tab.run`.
 - URL patterns (`waitForUrl`, `waitForResponse`, `requests({filter})`): a string with `*` is a glob (`*` within a path segment, `**` across: `"**/cart.php"`), any other string a substring; or a RegExp. `route` strings are always globs.
@@ -84,6 +88,7 @@ Browser choice:
   4. cmux
   5. omp's own browser: headless WebKit when installed, downloaded first when no browser is (off with the `browser.webkit` setting or `PI_BROWSER_WEBKIT=0`),
      else managed Chromium (installs on first use)
+- A subagent skips the relay, Tern and cmux: pass `app: "relay"` or `app: "tern"` when the task needs the user's browser or pane.
 - The open result names the browser and any fallback it took.
 - `app` is one string:
   - `"relay"` (the user's Chrome), `"tern"`, `"webkit"`, `"chromium"` (managed)
@@ -121,18 +126,7 @@ Relay (`app: "relay"`: the user's Chrome through the omp relay):
 - `target` borrows an existing tab by URL/title substring. Reopening an open name keeps its tab.
 - `app: "auto"` skips the relay however it is enabled; the next default applies.
 - It is the user's real logged-in browser: sites attribute actions to the user. NEVER navigate a borrowed tab without authorization.
-{{#if linux}}
-- On Linux under X11, Chrome 150 and later raises its window, taking the user's next keystrokes,
-  when a mouse or touch press lands in a tab its window shows (`shown` in the relay's `browser.targets()`) while another window is in front.
-  - Presses: `click`, `dblclick`, `tap`, `drag`, `mouseDown`, `clickAt`,
-    `check`/`uncheck` unless already in the requested state (a refused change still presses; unchecking a native radio does not),
-    `uploadFile` on anything but an `<input type=file>`.
-  - A control that opens a new tab or popup may raise Chrome however it is activated.
-  - Not presses: keys (`type`, `fill`, `press`), `focus`, `select`, `hover`, scrolling, screenshots.
-  - A tab its window is not showing never comes forward.
-  - When the user must keep their app in front, on a shown tab use
-    `focus()` then `press("Enter")` for a button, `press("Space")` for a checkbox, `uploadFile` on the file input itself.
-{{/if}}
+{{{x11Guidance}}}
 
 Tern:
 
@@ -168,7 +162,7 @@ Tern and WebKit tab limits:
 
 Lifetime:
 
-- Closing releases the managed tab and closes tabs omp opened in the relay, never borrowed relay tabs, CDP-attached pages, or adopted Tern blocks.
+- Closing releases the managed tab and closes pages omp opened, never borrowed pages or adopted Tern blocks.
 - `browser.close({ all: true })` releases the tabs you opened, not other agents'.
 - `kill: true` terminates only applications spawned by this process, never reused browser processes.
 - Idle tabs auto-freeze at turn settle, unfreeze on next use, and close past the idle-close timeout.

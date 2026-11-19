@@ -11,6 +11,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveMaxContextWindow } from "@oh-my-pi/pi-catalog/compat/context-window";
 import { factoryDroidRegistry, resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { writeThinkingCapability } from "@oh-my-pi/pi-catalog/thinking-capability";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import * as catalogModels from "@oh-my-pi/pi-catalog/models";
 import { calculateUsageCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
@@ -274,7 +275,7 @@ describe("ModelRegistry", () => {
 			expect(registry.getAll("all")).toEqual(
 				expect.arrayContaining([
 					expect.objectContaining({ provider: "local", id: "falcon-h1-90m", kind: "tiny" }),
-					expect.objectContaining({ provider: "local", id: "kokoro", kind: "tts" }),
+					expect.objectContaining({ provider: "local", id: "phonon-31m", kind: "tts" }),
 					expect.objectContaining({ provider: "local", id: "whisper-base", kind: "stt" }),
 					expect.objectContaining({ provider: "web", id: "duckduckgo", kind: "search" }),
 					expect.objectContaining({ provider: "typesafe", id: "jev-latest", kind: "judge" }),
@@ -284,7 +285,7 @@ describe("ModelRegistry", () => {
 				expect.objectContaining({ provider: "local", id: "falcon-h1-90m" }),
 			);
 			expect(registry.getAvailable("tts")).toContainEqual(
-				expect.objectContaining({ provider: "local", id: "kokoro" }),
+				expect.objectContaining({ provider: "local", id: "phonon-31m" }),
 			);
 			expect(registry.getAvailable("stt")).toContainEqual(
 				expect.objectContaining({ provider: "local", id: "whisper-base" }),
@@ -1876,6 +1877,67 @@ describe("ModelRegistry", () => {
 			expect(anthropicModels.some(m => m.id === "claude-custom")).toBe(false);
 			expect(anthropicModels.some(m => m.id.includes("claude"))).toBe(true);
 		});
+	});
+
+	describe("learned thinking capabilities", () => {
+		test.each([false, true])(
+			"loads saved capabilities from the registry's scoped database (override=%s)",
+			override => {
+				writeRawModelsJson({
+					"custom-thinking": {
+						api: "openai-completions",
+						baseUrl: "https://custom.example/v1",
+						apiKey: "test-key",
+						models: [
+							{ id: "unknown-local" },
+							{ id: "authored-plain", reasoning: false },
+							{
+								id: "authored-ladder",
+								reasoning: true,
+								thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] },
+							},
+							{ id: "gpt-5" },
+						],
+					},
+				});
+				const dbPath = path.join(tempDir, override ? "capabilities.db" : "models.db");
+				const options = override ? { cacheDbPath: dbPath } : undefined;
+				const initial = new ModelRegistry(authStorage, modelsJsonPath, options);
+				const unknown = initial.find("custom-thinking", "unknown-local");
+				expect(unknown?.thinking?.unverified).toBe(true);
+				for (const id of ["unknown-local", "authored-plain", "authored-ladder", "gpt-5"]) {
+					const model = initial.find("custom-thinking", id);
+					if (!model) throw new Error(`Expected custom-thinking/${id}`);
+					writeThinkingCapability(
+						model,
+						{
+							checkedAt: Date.now(),
+							format: "openai",
+							efforts: [Effort.Medium],
+							observed: false,
+							attempts: [{ format: "openai", effort: Effort.Medium, accepted: true, observed: false }],
+						},
+						dbPath,
+					);
+				}
+
+				const restored = new ModelRegistry(authStorage, modelsJsonPath, options);
+				const learned = restored.find("custom-thinking", "unknown-local");
+				expect(learned?.reasoning).toBe(true);
+				expect(learned?.thinking?.unverified).not.toBe(true);
+				expect(learned?.thinking?.efforts).toEqual([Effort.Medium]);
+				const plain = restored.find("custom-thinking", "authored-plain");
+				expect(plain?.reasoning).toBe(false);
+				expect(plain?.thinking).toBeUndefined();
+				expect(restored.find("custom-thinking", "authored-ladder")?.thinking?.efforts).toEqual([
+					Effort.Low,
+					Effort.High,
+				]);
+				expect(restored.find("custom-thinking", "gpt-5")?.thinking).toEqual(
+					initial.find("custom-thinking", "gpt-5")?.thinking,
+				);
+			},
+		);
 	});
 
 	describe("thinking metadata normalization", () => {

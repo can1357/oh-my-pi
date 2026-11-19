@@ -214,7 +214,7 @@ function buildSpeechComponents(settings: Settings, registry: ModelRegistry): Spe
 			isReady: () => isTtsModelCached(resolveLocalSpeechModelId("speech", settings, registry)),
 			status: async () => {
 				const key = resolveLocalSpeechModelId("speech", settings, registry);
-				return (await isTtsModelCached(key)) ? key : `${key} — model/runtime not installed`;
+				return (await isTtsModelCached(key)) ? key : `${key} — not downloaded`;
 			},
 			pick: async () => {
 				const current = resolveLocalSpeechModelId("speech", settings, registry);

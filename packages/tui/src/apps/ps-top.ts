@@ -1,12 +1,11 @@
 /**
  * Interactive alt-screen monitor for `omp ps` (btop idiom): a live process
- * table over every selected broker scope with in-place actions.
+ * table over the daemon's units, grouped by scope, with in-place actions.
  *
  * Keys — table: `↑/↓`/`j/k` select, `enter`/`i` info, `l` logs, `s` stop,
  * `x` kill, `r` restart, `a` toggle all scopes, `q`/`esc`/`ctrl+c` quit.
  * Sub-views (info, logs): `esc`/`q` back.
  */
-import * as path from "node:path";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { KeyValueList, type KeyValueRow } from "../components/key-value-list";
 import { ScrollView } from "../components/scroll-view";
@@ -22,29 +21,37 @@ import { Memo } from "../native/memo";
 import { truncateToWidth } from "../utils";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import type { DaemonSnapshot, DaemonSpec } from "../tools/daemon";
+import type { ProcSpec, UnitScope, UnitSnapshot } from "../tools/daemon";
 import {
 	collapseCommand,
-	daemonLabel,
+	daemonHeader,
+	flagsCell,
 	formatCommand,
-	type PsDaemonRow,
-	type PsScope,
+	idleCell,
+	type PsBoard,
 	type PsScopeReport,
 	type PsTarget,
+	pidsCell,
 	scopeHeader,
-	flagsCell,
+	scopeId,
+	scopeTitle,
 	TABLE_HEADER,
 	TERMINAL_STATES,
 	tableCells,
+	unitLabel,
+	unitName,
 } from "./ps-data";
 
+/** Fallback poll; unit events from the daemon refresh sooner. */
 const REFRESH_MS = 2_000;
+/** Coalesces bursts of unit events into one refresh. */
+const EVENT_REFRESH_MS = 100;
 const LOGS_POLL_MS = 1_000;
 const STATUS_TTL_MS = 5_000;
 
 interface FlatRow {
-	scope: PsScope;
-	row: PsDaemonRow;
+	scope: UnitScope;
+	unit: UnitSnapshot;
 }
 
 type PsTopView = "table" | "info" | "logs";
@@ -63,12 +70,29 @@ export interface PsTopOptions extends PsTarget {
 	all: boolean;
 }
 
-/** Broker capabilities supplied by the process command. */
+/** Unit detail shown by the info view. */
+export interface PsUnitInfo {
+	unit: UnitSnapshot;
+	proc?: ProcSpec;
+}
+
+/** Unit log window shown by the logs view. */
+export interface PsUnitLogs {
+	text: string;
+	/** PTY output replayed into terminal rows; empty for non-PTY units. */
+	terminalOutput: string;
+	state: string;
+}
+
+/** Daemon capabilities supplied by the process command. */
 export interface PsTopHost {
-	collectReports(all: boolean, target: PsTarget): Promise<PsScopeReport[]>;
-	act(scope: PsScope, name: string, verb: "stop" | "kill" | "restart"): Promise<DaemonSnapshot>;
-	describe(scope: PsScope, name: string): Promise<{ daemon: DaemonSnapshot; spec: DaemonSpec }>;
-	logs(scope: PsScope, name: string, lines: number): Promise<{ terminalRows?: string[]; text: string; state: string }>;
+	/** The board for the selection; never starts the daemon. */
+	collectBoard(all: boolean, target: PsTarget): Promise<PsBoard>;
+	/** Calls `onChange` on every unit transition while a daemon answers; returns the unsubscribe. */
+	watch(onChange: () => void): () => void;
+	act(unit: UnitSnapshot, verb: "stop" | "kill" | "restart"): Promise<UnitSnapshot>;
+	describe(unit: UnitSnapshot): Promise<PsUnitInfo>;
+	logs(unit: UnitSnapshot, lines: number): Promise<PsUnitLogs>;
 	close(): void;
 }
 
@@ -79,21 +103,24 @@ export class PsTopComponent implements Component {
 	readonly #done = Promise.withResolvers<void>();
 	readonly #host: PsTopHost;
 	#all: boolean;
+	#board: PsBoard | undefined;
 	#reports: PsScopeReport[] = [];
 	#flat: FlatRow[] = [];
 	#selected = 0;
-	/** `runtimeDir\u0000name` of the selection, kept stable across refreshes. */
+	/** Unit id of the selection, kept stable across refreshes. */
 	#selectedKey: string | undefined;
 	readonly #tableView = new ScrollView([], { height: 1 });
 	readonly #infoView = new ScrollView([], { height: 1 });
 	readonly #logsView = new ScrollView([], { height: 1, followTail: true, anchor: "end" });
 	readonly #infoList = new KeyValueList([], { indent: "   ", labelWidth: 9, gap: " " });
 	#view: PsTopView = "table";
-	#info: { daemon: DaemonSnapshot; spec: DaemonSpec } | undefined;
+	#info: PsUnitInfo | undefined;
 	#logsLines: string[] = [];
 	#logsState = "";
 	#logsTimer: NodeJS.Timeout | undefined;
 	#refreshTimer: NodeJS.Timeout | undefined;
+	#eventTimer: NodeJS.Timeout | undefined;
+	#unwatch: (() => void) | undefined;
 	#refreshing = false;
 	#lastRefresh = 0;
 	#status = "";
@@ -110,12 +137,19 @@ export class PsTopComponent implements Component {
 		this.#ui = ui;
 		this.#host = host;
 		this.#all = options.all;
-		this.#target = { dir: options.dir, global: options.global };
+		this.#target = { dir: options.dir };
 	}
 
 	run(): Promise<void> {
 		void this.#refresh();
 		this.#refreshTimer = setInterval(() => void this.#refresh(), REFRESH_MS);
+		this.#unwatch = this.#host.watch(() => {
+			if (this.#eventTimer) return;
+			this.#eventTimer = setTimeout(() => {
+				this.#eventTimer = undefined;
+				void this.#refresh();
+			}, EVENT_REFRESH_MS);
+		});
 		return this.#done.promise;
 	}
 
@@ -123,6 +157,8 @@ export class PsTopComponent implements Component {
 		if (this.#disposed) return;
 		this.#disposed = true;
 		clearInterval(this.#refreshTimer);
+		clearTimeout(this.#eventTimer);
+		this.#unwatch?.();
 		this.#stopLogsPoll();
 		this.#tableView.dispose();
 		this.#infoView.dispose();
@@ -136,10 +172,11 @@ export class PsTopComponent implements Component {
 		if (this.#refreshing || this.#disposed) return;
 		this.#refreshing = true;
 		try {
-			const reports = await this.#host.collectReports(this.#all, this.#target);
+			const board = await this.#host.collectBoard(this.#all, this.#target);
 			if (this.#disposed) return;
-			this.#reports = reports;
-			this.#flat = reports.flatMap(report => report.daemons.map(row => ({ scope: report.scope, row })));
+			this.#board = board;
+			this.#reports = board.reports;
+			this.#flat = board.reports.flatMap(report => report.units.map(unit => ({ scope: report.scope, unit })));
 			this.#lastRefresh = Date.now();
 			this.#restoreSelection();
 			this.#ui.requestRender();
@@ -175,13 +212,13 @@ export class PsTopComponent implements Component {
 	async #act(verb: "stop" | "kill" | "restart"): Promise<void> {
 		const entry = this.#flat[this.#selected];
 		if (!entry) return;
-		const name = entry.row.snapshot.name;
+		const name = unitName(entry.unit);
 		this.#setStatus("warning", `${verb} ${name}…`);
 		try {
-			const daemon = await this.#host.act(entry.scope, name, verb);
+			const unit = await this.#host.act(entry.unit, verb);
 			this.#setStatus(
 				"success",
-				`${verb === "restart" ? "Restarted" : verb === "kill" ? "Killed" : "Stopped"} ${daemonLabel(daemon)}`,
+				`${verb === "restart" ? "Restarted" : verb === "kill" ? "Killed" : "Stopped"} ${unitLabel(unit)}`,
 			);
 			void this.#refresh();
 		} catch (error) {
@@ -193,7 +230,7 @@ export class PsTopComponent implements Component {
 		const entry = this.#flat[this.#selected];
 		if (!entry) return;
 		try {
-			this.#info = await this.#host.describe(entry.scope, entry.row.snapshot.name);
+			this.#info = await this.#host.describe(entry.unit);
 			this.#view = "info";
 			this.#ui.requestRender();
 		} catch (error) {
@@ -212,12 +249,8 @@ export class PsTopComponent implements Component {
 			const current = this.#flat[this.#selected];
 			if (this.#disposed || this.#view !== "logs" || !current) return;
 			try {
-				const result = await this.#host.logs(
-					current.scope,
-					current.row.snapshot.name,
-					Math.max(10, this.#ui.terminal.rows - 4),
-				);
-				this.#logsLines = result.terminalRows ?? result.text.replace(/\n$/, "").split("\n");
+				const result = await this.#host.logs(current.unit, Math.max(10, this.#ui.terminal.rows - 4));
+				this.#logsLines = (result.terminalOutput || result.text).replace(/\n$/, "").split("\n");
 				this.#logsState = result.state;
 				this.#logsError = undefined;
 				this.#ui.requestRender();
@@ -344,7 +377,7 @@ export class PsTopComponent implements Component {
 
 	/**
 	 * The process monitor as a native page: a head (title, counts, the scope
-	 * control, freshness, close), one section per broker scope with a
+	 * control, freshness, close), one section per unit scope with a
 	 * selectable process list, the transient status, and an action bar that
 	 * mirrors the keys. Info and logs replace the list.
 	 */
@@ -353,7 +386,7 @@ export class PsTopComponent implements Component {
 		return this.#native.get(
 			[
 				this.#view,
-				this.#reports,
+				this.#board,
 				this.#selected,
 				this.#all,
 				this.#lastRefresh,
@@ -395,7 +428,7 @@ export class PsTopComponent implements Component {
 		const entry = this.#flat[this.#selected];
 		const left: NativeNode[] = [];
 		if (this.#view === "table") {
-			const running = this.#flat.filter(flat => !TERMINAL_STATES[flat.row.snapshot.state]).length;
+			const running = this.#flat.filter(flat => !TERMINAL_STATES[flat.unit.state]).length;
 			const stopped = this.#flat.length - running;
 			left.push(
 				text("Processes", { role: "omp.app.title" }),
@@ -404,6 +437,9 @@ export class PsTopComponent implements Component {
 						span(`${running} running`, running > 0 ? "success" : "muted"),
 						...(stopped > 0 ? [span(` · ${stopped} stopped`, "muted")] : []),
 						span(` · ${this.#reports.length} scope${this.#reports.length === 1 ? "" : "s"}`, "muted"),
+						this.#board?.daemon
+							? span(` · daemon pid ${this.#board.daemon.pid}`, "muted")
+							: span(" · daemon not running", "dim"),
 					],
 					{ truncate: "end" },
 				),
@@ -412,15 +448,19 @@ export class PsTopComponent implements Component {
 			left.push(
 				iconButton("back", "back", "Back  esc", { aria: "Back" }),
 				text(
-					this.#view === "logs" ? `Logs · ${entry?.row.snapshot.name ?? "?"}` : (entry?.row.snapshot.name ?? "?"),
+					this.#view === "logs"
+						? `Logs · ${entry ? unitName(entry.unit) : "?"}`
+						: entry
+							? unitName(entry.unit)
+							: "?",
 					{
 						role: "omp.app.title",
 						truncate: "end",
 					},
 				),
 			);
-			const daemon = this.#view === "info" ? this.#info?.daemon : entry?.row.snapshot;
-			if (daemon) left.push(node("badge", { text: stateLabel(daemon), tone: daemonTone(daemon) }));
+			const unit = this.#view === "info" ? this.#info?.unit : entry?.unit;
+			if (unit) left.push(node("badge", { text: stateLabel(unit), tone: unitTone(unit) }));
 			if (this.#view === "logs" && this.#logsState) left.push(text([span(this.#logsState, "muted")]));
 		}
 		const right: NativeNode[] = [];
@@ -431,10 +471,7 @@ export class PsTopComponent implements Component {
 						items: [
 							{
 								id: "current",
-								label:
-									this.#target.dir !== undefined || this.#target.global !== undefined
-										? "Target"
-										: "This project",
+								label: this.#target.dir !== undefined ? "Target" : "This project",
 							},
 							{ id: "all", label: "All scopes" },
 						],
@@ -483,13 +520,13 @@ export class PsTopComponent implements Component {
 			this.#killConfirm === this.#selectedKey &&
 			this.#killConfirm !== undefined
 		) {
-			const pid = entry.row.snapshot.pid;
+			const pids = pidsCell(entry.unit);
 			return keyed(
 				row(
 					[
 						text(
 							[
-								span(`Kill ${entry.row.snapshot.name}${pid === undefined ? "" : ` (pid ${pid})`}?`, "strong"),
+								span(`Kill ${unitName(entry.unit)}${pids === "-" ? "" : ` (pid ${pids})`}?`, "strong"),
 								span("  It stops at once, without cleanup.", "muted"),
 							],
 							{ truncate: "end", grow: 1 },
@@ -525,9 +562,12 @@ export class PsTopComponent implements Component {
 			return keyed(
 				col(
 					[
-						text("No broker scopes", { role: "omp.app.empty-title" }),
+						text("No units", { role: "omp.app.empty-title" }),
 						text([
-							span("No omp process broker runs here. ", "muted"),
+							span(
+								this.#board?.daemon ? "The omp daemon runs nothing here. " : "The omp daemon is not running. ",
+								"muted",
+							),
 							span(this.#all ? "Nothing runs anywhere." : "Show every scope with ", "muted"),
 							...(this.#all ? [] : [span("a", "key"), span(".", "muted")]),
 						]),
@@ -547,16 +587,16 @@ export class PsTopComponent implements Component {
 						"list",
 						{
 							selected:
-								selected && selected.scope.runtimeDir === report.scope.runtimeDir
+								selected && scopeId(selected.scope) === scopeId(report.scope)
 									? stableKey(flatKey(selected))
 									: null,
-							empty: "No processes",
+							empty: "No units",
 							role: "omp.ps.processes",
 						},
-						report.daemons.map(daemon => describeProcess(report.scope, daemon)),
+						report.units.map(unit => describeUnit(report.scope, unit)),
 					),
 				],
-				stableKey(report.scope.runtimeDir),
+				stableKey(scopeId(report.scope)),
 			),
 		);
 		return keyed(col(sections, { gap: "lg", grow: 1, role: "omp.app.ps.scopes" }), "scopes");
@@ -570,22 +610,29 @@ export class PsTopComponent implements Component {
 				"info",
 			);
 		}
-		const { daemon, spec } = info;
+		const { unit, proc } = info;
+		const command = collapseCommand(formatCommand(proc) ?? unit.command);
+		const cwd = proc?.cwd ?? unit.cwd;
 		const items: { k: string; v: TspText }[] = [
-			{ k: "Command", v: [span(collapseCommand(formatCommand(spec)), "mono")] },
-			{ k: "Directory", v: [span(spec.cwd, "path")] },
+			{ k: "Kind", v: unit.kind },
+			{ k: "Key", v: [span(unit.key, "mono")] },
+			{ k: "Id", v: [span(unit.id, "mono")] },
 		];
-		if (daemon.pid !== undefined && !TERMINAL_STATES[daemon.state])
-			items.push({ k: "PID", v: [span(String(daemon.pid), "num")] });
-		if (daemon.exitReason) items.push({ k: "Exit", v: [span(daemon.exitReason, "error")] });
-		items.push({ k: "Restarts", v: `${daemon.restartCount} (policy ${spec.restart})` });
-		items.push({ k: "Owner", v: daemon.owner ?? "—" });
-		const flags = [spec.pty && "pty", spec.persist && "persist", spec.detached && "detached"].filter(Boolean);
-		items.push({ k: "Flags", v: flags.length > 0 ? flags.join(" · ") : "—" });
+		if (command) items.push({ k: "Command", v: [span(command, "mono")] });
+		if (cwd) items.push({ k: "Directory", v: [span(cwd, "path")] });
+		const pids = pidsCell(unit);
+		if (pids !== "-") items.push({ k: "PID", v: [span(pids, "num")] });
+		if (unit.exitReason) items.push({ k: "Exit", v: [span(unit.exitReason, "error")] });
+		items.push({ k: "Restarts", v: `${unit.restartCount} (policy ${unit.policy.restart})` });
+		items.push({ k: "Leases", v: String(unit.leases) });
+		items.push({ k: "Idle", v: idleCell(unit) });
+		items.push({ k: "Owner", v: unit.owner ?? "—" });
+		const flags = [proc?.pty && "pty", `hold ${unit.policy.hold}`, `survive ${unit.policy.survive}`].filter(Boolean);
+		items.push({ k: "Flags", v: flags.join(" · ") });
 		const body: NativeNode[] = [];
-		if (!TERMINAL_STATES[daemon.state]) {
+		if (!TERMINAL_STATES[unit.state]) {
 			body.push(
-				row([text([span("Up for", "muted")]), elapsed(Date.now() - daemon.startedAt)], {
+				row([text([span("Up for", "muted")]), elapsed(Date.now() - unit.startedAt)], {
 					gap: "xs",
 					role: "omp.app.fresh",
 				}),
@@ -637,10 +684,10 @@ export class PsTopComponent implements Component {
 	#renderTable(width: number, height: number): string[] {
 		const scopeKind = this.#all
 			? "(all)"
-			: this.#target.dir !== undefined || this.#target.global !== undefined
-				? "(target)"
+			: this.#target.dir !== undefined
+				? "(target + global)"
 				: "(current + global)";
-		const scopesLabel = `${this.#flat.length} process${this.#flat.length === 1 ? "" : "es"} in ${this.#reports.length} scope${this.#reports.length === 1 ? "" : "s"} ${chalk.dim(scopeKind)}`;
+		const scopesLabel = `${this.#flat.length} unit${this.#flat.length === 1 ? "" : "s"} in ${this.#reports.length} scope${this.#reports.length === 1 ? "" : "s"} ${chalk.dim(scopeKind)}`;
 		const header = this.#header(width, scopesLabel);
 		const footer = this.#footer(
 			width,
@@ -648,7 +695,7 @@ export class PsTopComponent implements Component {
 		);
 		const bodyHeight = height - 1 - footer.length;
 
-		const cells = this.#flat.map(entry => tableCells(entry.row));
+		const cells = this.#flat.map(entry => tableCells(entry.unit));
 		const widths = TABLE_HEADER.map((title, column) =>
 			Math.max(title.length, ...cells.map(row => Bun.stringWidth(row[column]))),
 		);
@@ -666,18 +713,18 @@ export class PsTopComponent implements Component {
 			).trimEnd();
 
 		// Body lines with the flat index carried for selection highlighting.
-		const body: { text: string; flat?: number }[] = [];
+		const body: { text: string; flat?: number }[] = [{ text: ` ${daemonHeader(this.#board?.daemon)}` }, { text: "" }];
 		let flatIndex = 0;
 		for (const report of this.#reports) {
 			body.push({ text: ` ${scopeHeader(report.scope)}` });
-			if (report.daemons.length === 0) {
-				body.push({ text: chalk.dim("   no processes") });
+			if (report.units.length === 0) {
+				body.push({ text: chalk.dim("   no units") });
 			} else {
 				body.push({ text: chalk.dim(renderRow([...TABLE_HEADER])) });
-				for (const row of report.daemons) {
-					const line = renderRow(tableCells(row));
+				for (const unit of report.units) {
+					const line = renderRow(tableCells(unit));
 					body.push({
-						text: TERMINAL_STATES[row.snapshot.state] ? chalk.dim(line) : line,
+						text: TERMINAL_STATES[unit.state] ? chalk.dim(line) : line,
 						flat: flatIndex,
 					});
 					flatIndex++;
@@ -685,7 +732,7 @@ export class PsTopComponent implements Component {
 			}
 			body.push({ text: "" });
 		}
-		if (body.length === 0) body.push({ text: chalk.dim(" No daemon broker scopes found.") });
+		if (this.#reports.length === 0) body.push({ text: chalk.dim(" No units.") });
 
 		// Keep the selected logical row visible through refreshes and resizes.
 		const selectedLine = body.findIndex(line => line.flat === this.#selected);
@@ -708,25 +755,30 @@ export class PsTopComponent implements Component {
 
 	#renderInfo(width: number, height: number): string[] {
 		const info = this.#info;
-		const header = this.#header(width, "process info");
+		const header = this.#header(width, "unit info");
 		const footer = this.#footer(width, `${formatKeyHint("escape")} back · ${formatKeyHint("q")} back`);
 		const body = [""];
 		if (info) {
-			const daemon = info.daemon;
-			body.push(` ${chalk.bold(daemonLabel(daemon))}`);
+			const { unit, proc } = info;
+			body.push(` ${chalk.bold(unitLabel(unit))}`);
 			body.push("");
 			const rows: KeyValueRow[] = [
-				{ label: "command:", value: collapseCommand(formatCommand(info.spec)) },
-				{ label: "cwd:", value: info.spec.cwd },
+				{ label: "id:", value: unit.id },
+				{ label: "scope:", value: scopeHeader(unit.scope) },
 			];
-			if (!TERMINAL_STATES[daemon.state])
-				rows.push({ label: "uptime:", value: formatDuration(Date.now() - daemon.startedAt) });
-			if (daemon.exitReason) rows.push({ label: "exit:", value: daemon.exitReason });
-			rows.push({ label: "restarts:", value: `${daemon.restartCount} (policy: ${info.spec.restart})` });
-			rows.push({ label: "owner:", value: daemon.owner ?? "-" });
+			const command = formatCommand(proc) ?? unit.command;
+			if (command) rows.push({ label: "command:", value: collapseCommand(command) });
+			const cwd = proc?.cwd ?? unit.cwd;
+			if (cwd) rows.push({ label: "cwd:", value: cwd });
+			if (!TERMINAL_STATES[unit.state])
+				rows.push({ label: "uptime:", value: formatDuration(Date.now() - unit.startedAt) });
+			if (unit.exitReason) rows.push({ label: "exit:", value: unit.exitReason });
+			rows.push({ label: "restarts:", value: `${unit.restartCount} (policy: ${unit.policy.restart})` });
+			rows.push({ label: "leases:", value: `${unit.leases}  idle: ${idleCell(unit)}` });
+			rows.push({ label: "owner:", value: unit.owner ?? "-" });
 			this.#infoList.setRows(rows);
 			body.push(...this.#infoList.render(width));
-			body.push(`   pty: ${info.spec.pty}  persist: ${info.spec.persist}  detached: ${info.spec.detached}`);
+			body.push(`   pty: ${proc?.pty ?? false}  hold: ${unit.policy.hold}  survive: ${unit.policy.survive}`);
 		} else {
 			body.push(chalk.dim(" loading…"));
 		}
@@ -737,7 +789,7 @@ export class PsTopComponent implements Component {
 
 	#renderLogs(width: number, height: number): string[] {
 		const entry = this.#flat[this.#selected];
-		const name = entry?.row.snapshot.name ?? "?";
+		const name = entry ? unitName(entry.unit) : "?";
 		const header = this.#header(
 			width,
 			`logs ${chalk.bold(name)}${this.#logsState ? chalk.dim(` · ${this.#logsState}`) : ""}`,
@@ -757,39 +809,31 @@ export class PsTopComponent implements Component {
 }
 
 function flatKey(entry: FlatRow): string {
-	return `${entry.scope.runtimeDir}\u0000${entry.row.snapshot.name}`;
+	return entry.unit.id;
 }
 
-/** Semantic tone of a process state (the ANSI STATE cell's colour). */
-function daemonTone(snapshot: DaemonSnapshot): TspTone {
+/** Semantic tone of a unit state (the ANSI STATE cell's colour). */
+function unitTone(snapshot: UnitSnapshot): TspTone {
 	if (snapshot.state === "ready" || snapshot.state === "running") return "success";
 	if (snapshot.state === "failed") return "error";
 	return TERMINAL_STATES[snapshot.state] ? "muted" : "warning";
 }
 
-/** Scope heading spans, e.g. `project /work/pi — broker pid 1234`. */
-function scopeSpans(scope: PsScope): TspSpan[] {
-	const spans =
-		scope.kind === "global"
-			? [span("global "), span(scope.service ?? path.basename(scope.runtimeDir), "strong")]
-			: [span("project "), span(scope.projectDir ?? path.basename(scope.runtimeDir), "strong path")];
-	spans.push(span(" — ", "dim"));
-	spans.push(
-		scope.brokerPid !== undefined
-			? span(`broker pid ${scope.brokerPid}`, "success")
-			: span("broker not running", "dim"),
-	);
-	return spans;
+/** Scope heading spans, e.g. `project /work/pi`. */
+function scopeSpans(scope: UnitScope): TspSpan[] {
+	const { kind, name } = scopeTitle(scope);
+	if (!name) return [span(kind, "strong")];
+	return [span(`${kind} `), span(name, scope.kind === "project" ? "strong path" : "strong mono")];
 }
 
 /** A state as the table shows it: `ready`, `exited(143)`. */
-function stateLabel(snapshot: DaemonSnapshot): string {
+function stateLabel(snapshot: UnitSnapshot): string {
 	return TERMINAL_STATES[snapshot.state] && snapshot.exitCode !== undefined
 		? `${snapshot.state}(${snapshot.exitCode})`
 		: snapshot.state;
 }
 
-/** Status icon of a process state (tinted by {@link daemonTone}). */
+/** Status icon of a unit state (tinted by {@link unitTone}). */
 const STATE_ICON: Record<TspTone, string> = {
 	success: "check",
 	error: "x",
@@ -802,31 +846,35 @@ const STATE_ICON: Record<TspTone, string> = {
 	user: "user",
 };
 
-/** One selectable process row: name, state/pid/uptime/restarts/flags, and the launch command. */
-function describeProcess(scope: PsScope, daemon: PsDaemonRow): NativeNode {
-	const { snapshot } = daemon;
-	const terminal = TERMINAL_STATES[snapshot.state] === true;
-	const state = stateLabel(snapshot);
+/** One selectable unit row: kind and name, state/pids/uptime/leases/idle/flags, and the launch command. */
+function describeUnit(scope: UnitScope, unit: UnitSnapshot): NativeNode {
+	const terminal = TERMINAL_STATES[unit.state] === true;
+	const state = stateLabel(unit);
+	const pids = pidsCell(unit);
+	const idle = idleCell(unit);
 	const meta = [
-		snapshot.pid !== undefined && !terminal ? `pid ${snapshot.pid}` : undefined,
-		terminal ? undefined : formatDuration(Date.now() - snapshot.startedAt),
-		`${snapshot.restartCount} restart${snapshot.restartCount === 1 ? "" : "s"}`,
-		flagsCell(daemon) || undefined,
+		unit.kind,
+		pids === "-" ? undefined : `pid ${pids}`,
+		terminal ? undefined : formatDuration(Date.now() - unit.startedAt),
+		unit.leases > 0 ? `${unit.leases} lease${unit.leases === 1 ? "" : "s"}` : undefined,
+		idle === "-" ? undefined : `idle ${idle}`,
+		unit.restartCount > 0 ? `${unit.restartCount} restart${unit.restartCount === 1 ? "" : "s"}` : undefined,
+		flagsCell(unit) || undefined,
 	].filter(part => part !== undefined);
-	const command = collapseCommand(daemon.command);
-	const tone = daemonTone(snapshot);
+	const command = collapseCommand(unit.command);
+	const tone = unitTone(unit);
 	return node(
 		"item",
 		{
-			label: [span(snapshot.name, terminal ? "dim" : "strong")],
+			label: [span(unitName(unit), terminal ? "dim" : "strong")],
 			detail: command ? [span(command, "mono muted")] : undefined,
 			value: [span(state, tone === "muted" ? "dim" : tone), span(` · ${meta.join(" · ")}`, "muted")],
 			icon: STATE_ICON[tone],
 			tone,
-			title: daemonLabel(snapshot),
+			title: unitLabel(unit),
 		},
 		undefined,
-		stableKey(flatKey({ scope, row: daemon })),
+		stableKey(flatKey({ scope, unit })),
 	);
 }
 

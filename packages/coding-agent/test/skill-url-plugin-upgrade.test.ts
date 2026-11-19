@@ -667,7 +667,7 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 			return true;
 		});
 		const results = new RpcPromptResults(
-			{ isStreaming: false, hasAdmittedSubmission: false, queuedMessageCount: 0, hasPendingAsyncWork: () => false },
+			{ isStreaming: false, hasAdmittedSubmission: false, queuedMessageCount: 0, isRunActive: false },
 			() => {},
 		);
 		const result = await dispatchRpcSkillPrompt({

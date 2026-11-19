@@ -1,12 +1,13 @@
 /** Managed agy releases, installed from Google's manifest without running its shell-profile installer. */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { $env, getAntigravityCliDir, isEnoent, logger, withFileLock } from "@oh-my-pi/pi-utils";
+import { $env, formatBytes, getAntigravityCliDir, isEnoent, logger, withFileLock } from "@oh-my-pi/pi-utils";
 import type { FetchImpl } from "../../types";
 
 const MANIFEST_BASE_URL = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests";
 const UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const DOWNLOAD_TIMEOUT_MS = 180_000;
+/** Releases run to hundreds of MB, so only silence aborts a download; a total deadline would exclude slow links. */
+const DOWNLOAD_STALL_MS = 60_000;
 const operations = new Map<string, Promise<string>>();
 
 interface ReleaseManifest {
@@ -106,12 +107,7 @@ async function install(directory: string, fetchImpl: FetchImpl): Promise<string>
 			}
 			const binary = releasePath(directory, value.version);
 			if (!(await Bun.file(binary).exists())) {
-				const download = await fetchImpl(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
-				if (!download.ok) throw new Error(`Antigravity CLI download failed: HTTP ${download.status}`);
-				const payload = new Uint8Array(await download.arrayBuffer());
-				const digest = new Bun.CryptoHasher("sha512").update(payload).digest("hex");
-				if (digest !== value.sha512.toLowerCase())
-					throw new Error("Antigravity CLI download failed its SHA-512 check");
+				const payload = await download(url, value.sha512, fetchImpl);
 				const staging = `${binary}.${crypto.randomUUID()}.tmp`;
 				try {
 					if (url.pathname.endsWith(".tar.gz")) {
@@ -140,6 +136,37 @@ async function install(directory: string, fetchImpl: FetchImpl): Promise<string>
 		},
 		{ retries: 1800, retryDelayMs: 100 },
 	);
+}
+
+/** Fetches and SHA-512-verifies a release, aborting when no bytes arrive for `DOWNLOAD_STALL_MS`. */
+async function download(url: URL, sha512: string, fetchImpl: FetchImpl): Promise<Uint8Array> {
+	const stall = new AbortController();
+	const timer = setTimeout(() => stall.abort(), DOWNLOAD_STALL_MS);
+	let received = 0;
+	let total = 0;
+	try {
+		const response = await fetchImpl(url, { signal: stall.signal });
+		if (!response.ok) throw new Error(`Antigravity CLI download failed: HTTP ${response.status}`);
+		if (!response.body) throw new Error("Antigravity CLI download returned no body");
+		total = Number(response.headers.get("content-length")) || 0;
+		const hasher = new Bun.CryptoHasher("sha512");
+		const chunks: Uint8Array[] = [];
+		for await (const chunk of response.body) {
+			timer.refresh();
+			hasher.update(chunk);
+			chunks.push(chunk);
+			received += chunk.byteLength;
+		}
+		if (hasher.digest("hex") !== sha512.toLowerCase())
+			throw new Error("Antigravity CLI download failed its SHA-512 check");
+		return Bun.concatArrayBuffers(chunks, Infinity, true);
+	} catch (error) {
+		if (!stall.signal.aborted) throw error;
+		const progress = total ? `${formatBytes(received)} of ${formatBytes(total)}` : formatBytes(received);
+		throw new Error(`Antigravity CLI download stalled: no data for ${DOWNLOAD_STALL_MS / 1000}s after ${progress}`);
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 async function readRecord(directory: string): Promise<InstallRecord | undefined> {

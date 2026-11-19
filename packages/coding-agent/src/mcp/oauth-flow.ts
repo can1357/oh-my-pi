@@ -341,6 +341,17 @@ export interface MCPOAuthConfig {
 }
 
 /**
+ * Raised by {@link MCPOAuthFlow} when the provider requires a `client_id` that
+ * neither config nor dynamic client registration supplied. The message is the
+ * user-facing diagnostic (registration endpoint, HTTP status, redacted detail,
+ * `oauth.clientId` remedy), so callers surface it verbatim instead of folding it
+ * into generic status-code mappings (issue #19641).
+ */
+export class MCPOAuthClientIdRequiredError extends Error {
+	override name = "MCPOAuthClientIdRequiredError";
+}
+
+/**
  * Generic OAuth flow for MCP servers.
  * Supports standard OAuth 2.0 authorization code flow with PKCE.
  */
@@ -726,7 +737,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 				throw this.#missingClientIdError();
 			}
 		} catch (error) {
-			if (error instanceof Error && /client[_-]?id/i.test(error.message)) {
+			if (error instanceof MCPOAuthClientIdRequiredError) {
 				throw error;
 			}
 			// Ignore network/probe failures to avoid blocking flows that still work.
@@ -753,12 +764,12 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	 * status into the message and point the user at the manual `oauth.clientId`
 	 * workaround. Refs issue #4307.
 	 */
-	#missingClientIdError(): Error {
+	#missingClientIdError(): MCPOAuthClientIdRequiredError {
 		const failure = this.#registrationFailure;
 		const manualHint =
 			"Configure `oauth.clientId` (and `oauth.clientSecret` if the flow needs one) on the MCP server entry in mcp.json.";
 		if (!failure) {
-			return new Error(
+			return new MCPOAuthClientIdRequiredError(
 				`OAuth provider requires client_id, and no dynamic-client-registration endpoint was advertised. ${manualHint}`,
 			);
 		}
@@ -768,7 +779,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 				: failure.detail
 					? `network error — ${failure.detail}`
 					: "network error";
-		return new Error(
+		return new MCPOAuthClientIdRequiredError(
 			`OAuth provider requires client_id, and dynamic client registration was rejected ` +
 				`(POST ${failure.endpoint} → ${outcome}). The server likely restricts registration to pre-approved clients. ${manualHint}`,
 		);

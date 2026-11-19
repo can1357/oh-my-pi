@@ -137,6 +137,7 @@ function clampContent(
 	state: ImageBudgetState,
 ): (TextContent | ImageContent)[] | undefined {
 	let clamped: (TextContent | ImageContent)[] | undefined;
+	let dropped = 0;
 	for (let index = 0; index < content.length; index++) {
 		const part = content[index];
 		if (part.type === "image" && needsImageDrop(state)) {
@@ -145,14 +146,22 @@ function clampContent(
 				clamped ??= content.slice(0, index);
 				if (state.remainingDrops > 0) state.remainingDrops--;
 				state.inlineBytes -= bytes;
+				dropped++;
 				continue;
 			}
 		}
 		clamped?.push(part);
 	}
+	if (!clamped) return undefined;
 	// An image-only message would otherwise go out empty; converters skip
 	// zero-block messages, silently losing the turn (e.g. an oversized pasted image).
-	return clamped && clamped.length === 0 ? [IMAGE_OMISSION] : clamped;
+	if (clamped.length === 0) return [IMAGE_OMISSION];
+	// Kept text must not read as the whole result: say images were there.
+	clamped.push({
+		type: "text",
+		text: `[${dropped} image${dropped === 1 ? "" : "s"} omitted: provider image limit]`,
+	});
+	return clamped;
 }
 
 function clampUserMessage(message: UserMessage, state: ImageBudgetState): UserMessage {

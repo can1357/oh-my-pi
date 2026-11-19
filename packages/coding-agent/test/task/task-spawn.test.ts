@@ -131,6 +131,15 @@ describe("task spawn routing", () => {
 		const gate = deferred();
 		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
 			await gate.promise;
+			// A finished run leaves its agent registered, idle, with its session live.
+			AgentRegistry.global().register({
+				id: "Spawnling",
+				displayName: "Spawnling",
+				kind: "sub",
+				parentId: "Main",
+				session: { isStreaming: false } as never,
+				status: "idle",
+			});
 			return makeResult(options.id ?? "?");
 		});
 

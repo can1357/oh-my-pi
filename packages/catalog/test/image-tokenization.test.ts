@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
+	deliveredImageSize,
 	type ImageTokenization,
 	imageTokens,
 	resolveImageMaxEdge,
@@ -138,12 +139,18 @@ describe("resolveImageTokenization", () => {
 		}
 	});
 
-	it("marks the Gemini, Sonnet and Grok rules measured on Antigravity and xAI as verified", () => {
+	it("marks the Gemini, Sonnet and Grok rules measured on Antigravity, xAI and Devin as verified", () => {
 		// Cloud Code Assist bills every Gemini image 1,089 tokens; Google's own API keeps the documented 1,120.
 		for (const id of ["gemini-2.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash"]) {
 			expect(ruleFor("google-antigravity", id)).toEqual({ regime: "fixed", verified: true, tokens: 1089 });
 		}
 		expect(ruleFor("google", "gemini-3.8-flash")).toEqual({ regime: "fixed", tokens: 1120 });
+		// Devin bills the two Gemini models measured across sizes 1,089 (raw effort uids included); the rest keep the
+		// unverified lineage rule.
+		for (const id of ["gemini-3-7-flash", "gemini-4-carbon", "gemini-4-carbon-high"]) {
+			expect(ruleFor("devin", id)).toEqual({ regime: "fixed", verified: true, tokens: 1089 });
+		}
+		expect(ruleFor("devin", "gemini-3-8-flash")).toEqual({ regime: "fixed", tokens: 1120 });
 		// Sonnet's standard tier is verified on every host; Opus 4.6 is not measured.
 		expect(ruleFor("google-antigravity", "claude-sonnet-4-6")).toEqual({ ...STANDARD, verified: true });
 		expect(ruleFor("anthropic", "claude-sonnet-4-6").verified).toBe(true);
@@ -345,6 +352,57 @@ describe("imageTokens", () => {
 		expect(imageTokens(DEEPSEEK_PATCH, { width: 8192, height: 64 })).toBe(396);
 		expect(imageTokens(DEEPSEEK_PATCH, { width: 100, height: 2000 })).toBe(234);
 		expect(imageTokens(DEEPSEEK_PATCH, { width: 2000, height: 100 })).toBe(179);
+	});
+});
+
+describe("deliveredImageSize", () => {
+	it("resizes Anthropic images to the sizes the guide lists, in either orientation", () => {
+		// Guide examples on the standard tier: A4 scan 1075×1520 → 924×1307,
+		// 1920×1080 screenshot → 1456×819.
+		expect(deliveredImageSize(STANDARD, { width: 1075, height: 1520 })).toEqual({ width: 924, height: 1307 });
+		expect(deliveredImageSize(STANDARD, { width: 1920, height: 1080 })).toEqual({ width: 1456, height: 819 });
+		// The high-res tier takes the same screenshot as it is.
+		expect(deliveredImageSize(HIRES, { width: 1920, height: 1080 })).toEqual({ width: 1920, height: 1080 });
+	});
+
+	it("sizes an OpenAI image by the detail level the request carries", () => {
+		const size = { width: 2048, height: 2048 };
+		// `high` shrinks to its 2,500-patch budget (50×50 patches of 32px); `low` fits 512px.
+		expect(deliveredImageSize(GPT_PATCH, size, "high")).toEqual({ width: 1600, height: 1600 });
+		expect(deliveredImageSize(GPT_PATCH, size, "low")).toEqual({ width: 512, height: 512 });
+		// `auto` sizes like `original` here, whose 10,000-patch budget holds 64×64 patches.
+		expect(deliveredImageSize(GPT_PATCH, size)).toEqual(size);
+		expect(deliveredImageSize(GPT_PATCH, size, "original")).toEqual(size);
+	});
+
+	it("enlarges a DeepSeek image to the pixel floor and shrinks one past the token cap", () => {
+		// 256² is under the 544² floor; 4000² lands on 31×31 cells of 42px, the grid billed 994 tokens.
+		expect(deliveredImageSize(DEEPSEEK_PATCH, { width: 256, height: 256 })).toEqual({ width: 544, height: 544 });
+		expect(deliveredImageSize(DEEPSEEK_PATCH, { width: 4000, height: 4000 })).toEqual({ width: 1302, height: 1302 });
+	});
+
+	it("names no size for a rule that bills no pixel grid", () => {
+		expect(deliveredImageSize({ regime: "fixed", tokens: 1120 }, { width: 2048, height: 2048 })).toBeUndefined();
+	});
+
+	it("is a fixed point of the resize, billed like the image it came from", () => {
+		// A caller that sizes an image to the delivered size first must not see it resized, or billed, again.
+		const cases: [rule: ImageTokenization, width: number, height: number][] = [
+			[STANDARD, 1440, 900],
+			[STANDARD, 900, 1440],
+			[STANDARD, 3000, 2999],
+			[HIRES, 4000, 4000],
+			[GPT_PATCH, 1932, 1920],
+			[DEEPSEEK_PATCH, 2576, 1716],
+			[DEEPSEEK_PATCH, 8192, 64],
+		];
+		for (const [rule, width, height] of cases) {
+			const detail = rule.regime === "openai-patch" ? "high" : undefined;
+			const delivered = deliveredImageSize(rule, { width, height }, detail);
+			if (!delivered) throw new Error(`no delivered size for ${rule.regime} ${width}x${height}`);
+			expect(deliveredImageSize(rule, delivered, detail)).toEqual(delivered);
+			expect(imageTokens(rule, delivered, detail)).toBe(imageTokens(rule, { width, height }, detail));
+		}
 	});
 });
 

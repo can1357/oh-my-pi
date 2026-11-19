@@ -766,6 +766,11 @@ export class JsRuntime {
 	dispose(): void {
 		if (this.#disposed) return;
 		this.#disposed = true;
+		// Disposal releases realm run ownership, so a run abandoned by timeout cannot hold it forever.
+		if (activeGlobalRunOwner === this.#globalOwner) {
+			activeGlobalRunOwner = null;
+			activeGlobalRunDepth = 0;
+		}
 		RUN_HOOK_RESOLVERS.delete(this.#runHookResolver);
 		for (const key of this.#ownedGlobalKeys) releaseGlobalKey(key, this.#globalOwner);
 		this.#ownedGlobalKeys.clear();
@@ -873,6 +878,8 @@ function enterGlobalRun(owner: symbol, action: string): () => void {
 	return () => {
 		if (left) return;
 		left = true;
+		// A disposed owner's late leave must not touch another owner's depth.
+		if (activeGlobalRunOwner !== owner) return;
 		activeGlobalRunDepth--;
 		if (activeGlobalRunDepth === 0) activeGlobalRunOwner = null;
 	};

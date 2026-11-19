@@ -83,7 +83,7 @@ describe("manual /compact scrollback pairing", () => {
 	async function runCompact(collapseCompacted: boolean) {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true, overrides: { "display.collapseCompacted": collapseCompacted } });
-		const container = { addChild: vi.fn(), disposeChildren: vi.fn() };
+		const container = { addChild: vi.fn(), removeChild: vi.fn(), disposeChildren: vi.fn() };
 		const ctx = {
 			loadingAnimation: undefined,
 			statusContainer: container,
