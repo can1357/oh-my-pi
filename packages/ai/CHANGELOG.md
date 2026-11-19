@@ -8,6 +8,7 @@
 
 - Anthropic strict-tool fallback now treats a Vertex org-policy rejection of `structured_outputs` (`allowedPartnerModelFeatures` / "disallowed feature structured_outputs") as a strict-tools rejection, retries once without `strict`, and pins `strictToolsDisabled` ([#19576](https://github.com/can1357/oh-my-pi/issues/19576)) ([#19655](https://github.com/can1357/oh-my-pi/pull/19655) by [@koeria](https://github.com/koeria))
 - Kiro requests rejected with `Input is too long.` or `CONTENT_LENGTH_EXCEEDS_THRESHOLD` can now recover through conversation compaction ([#19723](https://github.com/can1357/oh-my-pi/pull/19723) by [@emotionbug](https://github.com/emotionbug))
+- Kiro thinking off now turns reasoning off instead of running the model's default effort; models that cannot disable reasoning use their lowest effort ([#19722](https://github.com/can1357/oh-my-pi/pull/19722) by [@emotionbug](https://github.com/emotionbug))
 
 ## [19.0.0] - 2026-11-18
 

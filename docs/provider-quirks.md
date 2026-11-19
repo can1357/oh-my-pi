@@ -675,6 +675,7 @@ The native Kiro provider (`kiro-api`) streams AWS event-stream frames from the K
 
 - **Request identity**: Every request (chat, model and profile discovery, AWS sign-in, Google/GitHub sign-in) uses the same headers and service targets as the official Kiro CLI 3.2.0. The one intentional difference is `x-amzn-codewhisperer-optout: true`: OMP opts out of content sharing, where the CLI opts in by default.
 - **Tool-result byte budgets**: Each tool result is capped at 800,000 UTF-8 bytes (Kiro's service limit) and ends with a marker stating how much was omitted. The request budget is 850,000 bytes per 200,000 tokens of context window. Over budget, historical tool results are shrunk to 25,000 bytes oldest first, then current-turn results (never below 25,000 bytes). A request still over budget is reported as a context overflow so OMP compacts.
+- **Thinking off**: Kiro applies a model's schema default effort when `additionalModelRequestFields` is omitted, so thinking off (including `disableReasoning` and `forceReasoningOff`) sends the advertised off value: `thinking.type: "disabled"` for adaptive Claude schemas, `reasoning.effort: "none"` for GPT schemas. Discovery marks such models `suppressWhenOff`; a schema without an off value is `requiresEffort`, so thinking off runs at its lowest effort.
 
 ### Stream behavior
 
