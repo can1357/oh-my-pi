@@ -9,7 +9,7 @@ import { Type } from "@oh-my-pi/omptype/typebox";
 import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import {
 	isPerCallContextMessage,
 	kCursorExecResolved,
@@ -1759,7 +1759,7 @@ describe("ExtensionRunner", () => {
 							}));
 						}
 					`);
-					const child = new ExtensionToolWrapper({ ...flaggedTool, parameters: Type.Object({}) }, runner);
+					const child = new ExtensionToolWrapper<TSchema>({ ...flaggedTool, parameters: Type.Object({}) }, runner);
 					const owner = sessionManager.getSessionId();
 					const context = { ...runner.createContext(), hasQueuedMessages: () => false };
 					const session: ToolSession = {
