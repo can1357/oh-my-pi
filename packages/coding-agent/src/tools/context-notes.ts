@@ -135,7 +135,7 @@ export class ContextNotesTool implements AgentTool<typeof contextNotesSchema, Co
 			!ownerId ||
 			this.session.getSessionId?.() !== ownerId ||
 			manager.getSessionId?.() !== ownerId ||
-			manager.getBranch().at(-1)?.id !== branchLeafId
+			(branchLeafId !== undefined && !manager.getBranch().some(entry => entry.id === branchLeafId))
 		) {
 			throw new ToolError("Experimental context notes were not saved because the session branch changed.");
 		}

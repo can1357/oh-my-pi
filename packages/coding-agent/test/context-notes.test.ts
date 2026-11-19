@@ -189,17 +189,61 @@ describe("experimental context notes", () => {
 		const advisorBound = toolSession(settings, SessionManager.inMemory(), "advisor-session");
 		expect(ContextNotesTool.createIf(advisorBound)).toBeNull();
 	});
+	it("saves a resumed rollover's notebook when its journal advances during disk preparation", async () => {
+		using tempDir = TempDir.createSync("@omp-context-notes-resume-");
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		const manager = SessionManager.create(tempDir.path(), sessionDir);
+		const settings = Settings.isolated({ "compaction.experimentalContextManagement": true });
+		const initialTool = new ContextNotesTool(toolSession(settings, manager));
+		await initialTool.execute("before-rollover", { text: "notebook before rollover" });
+		const firstKeptEntryId = manager.getLeafId();
+		if (!firstKeptEntryId) throw new Error("expected notebook entry");
+		manager.appendCompaction("", undefined, firstKeptEntryId, 0, {
+			details: { kind: "experimental-context-rollover", version: 1 },
+		});
+		await manager.flush();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("expected session file");
+		await manager.close();
+
+		const resumed = await SessionManager.open(sessionFile, sessionDir);
+		const tool = new ContextNotesTool(toolSession(settings, resumed));
+		const pendingEnsure = Promise.withResolvers<void>();
+		const ensureSpy = vi.spyOn(resumed, "ensureOnDisk").mockImplementation(() => pendingEnsure.promise);
+		try {
+			const pendingWrite = tool.execute("after-resume", { text: "updated notebook after resume" });
+			await Promise.resolve();
+			resumed.appendCustomEntry("concurrent_journal_entry");
+			pendingEnsure.resolve();
+			await pendingWrite;
+			expect((await tool.execute("read-after-resume", {})).content).toEqual([
+				{ type: "text", text: "updated notebook after resume" },
+			]);
+		} finally {
+			ensureSpy.mockRestore();
+			await resumed.close();
+		}
+		const reopened = await SessionManager.open(sessionFile, sessionDir);
+		try {
+			expect(getContextNotes(reopened.getBranch())?.text).toBe("updated notebook after resume");
+		} finally {
+			await reopened.close();
+		}
+	});
+
 	it("does not append notes when the branch changes while disk preparation is pending", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.experimentalContextManagement": true });
-		const tool = ContextNotesTool.createIf(toolSession(settings, sessionManager));
-		if (!tool) throw new Error("expected context notes tool");
+		const tool = new ContextNotesTool(toolSession(settings, sessionManager));
+		const branchPoint = sessionManager.appendCustomEntry("branch_point");
+		sessionManager.appendCustomEntry("old_branch");
 		const pendingEnsure = Promise.withResolvers<void>();
 		const ensureSpy = vi.spyOn(sessionManager, "ensureOnDisk").mockImplementation(() => pendingEnsure.promise);
 		try {
 			const pendingWrite = tool.execute("stale-branch", { text: "must not persist" });
 			await Promise.resolve();
-			sessionManager.appendCustomEntry("test_branch_change");
+			sessionManager.branch(branchPoint);
+			sessionManager.appendCustomEntry("new_branch");
 			pendingEnsure.resolve();
 			await expect(pendingWrite).rejects.toThrow("session branch changed");
 			expect(getContextNotes(sessionManager.getBranch())).toBeUndefined();
