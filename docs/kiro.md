@@ -10,7 +10,7 @@ Kiro is a native provider backed by the Kiro API (`kiro-api`). For general crede
 
 ## Login methods
 
-**Identity Center** runs an AWS IAM Identity Center device login. OMP asks for the **Start URL** (your HTTPS access portal URL, for example `https://company.awsapps.com/start`) and the **OIDC region**, shows a verification URL and one-time code, and waits for browser approval. When several Kiro profiles are available, you pick one; the selected profile decides the region requests and discovery use.
+**Identity Center** runs an AWS IAM Identity Center device login. OMP asks for the **Start URL** (your HTTPS access portal URL, for example `https://company.awsapps.com/start`) and the **OIDC region**, shows a verification URL and one-time code, and waits for browser approval. OMP then lists the Kiro profiles in the partition of that region: `us-east-1` and `eu-central-1` for commercial AWS, or `us-gov-west-1` and `us-gov-east-1` when the OIDC region is an AWS GovCloud (US) region. When several Kiro profiles are available, you pick one; the selected profile decides the region requests and discovery use. AWS GovCloud (US) supports only Identity Center: Builder ID and Google/GitHub sign-in are not available there.
 
 **Builder ID** signs in with a personal AWS Builder ID through the same device flow, pinned to the public Builder portal and `us-east-1`, so it asks for nothing.
 
