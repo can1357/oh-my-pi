@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Binary Ninja as a disassembler backend for read analysis views and the dsm namespace. Select it with disassembler.backend = binja; it uses a local install found through binja.installDir, $BN_INSTALL_DIR, or the default install locations ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes

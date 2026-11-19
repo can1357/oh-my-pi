@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgDisasmBackend } from "@oh-my-pi/pi-coding-agent/disasm/active";
+import { formatDatabaseHandle, parseDatabaseHandle } from "@oh-my-pi/pi-coding-agent/disasm/protocol";
 import { ghidraHostSupported } from "@oh-my-pi/pi-coding-agent/ghidra/platform";
 import { isExecutableHeader, parseFatSlices, selectSlice, splitSliceRef } from "@oh-my-pi/pi-coding-agent/disasm/store";
 import { type BinaryView, parseBinaryView } from "@oh-my-pi/pi-coding-agent/tools/read-binary";
@@ -115,18 +116,26 @@ describe("parseBinaryView", () => {
 describe("disassembler backend selection", () => {
 	let withIdalib: string;
 	let withoutIdalib: string;
+	let withBinja: string;
+	let withoutBinja: string;
 
 	beforeAll(async () => {
 		withIdalib = await fs.mkdtemp(path.join(os.tmpdir(), "ida-install-"));
 		withoutIdalib = await fs.mkdtemp(path.join(os.tmpdir(), "ida-empty-"));
+		withBinja = await fs.mkdtemp(path.join(os.tmpdir(), "binja-install-"));
+		withoutBinja = await fs.mkdtemp(path.join(os.tmpdir(), "binja-empty-"));
 		for (const lib of ["libidalib.dylib", "libidalib.so", "idalib.dll"]) {
 			await Bun.write(path.join(withIdalib, lib), "");
+		}
+		for (const lib of ["libbinaryninjacore.so.1", "libbinaryninjacore.dylib", "binaryninjacore.dll"]) {
+			await Bun.write(path.join(withBinja, lib), "");
 		}
 	});
 
 	afterAll(async () => {
-		await fs.rm(withIdalib, { recursive: true, force: true });
-		await fs.rm(withoutIdalib, { recursive: true, force: true });
+		for (const dir of [withIdalib, withoutIdalib, withBinja, withoutBinja]) {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("prefers an idalib install", () => {
@@ -134,7 +143,7 @@ describe("disassembler backend selection", () => {
 		expect(cfgDisasmBackend.get(settings)).toBe("ida");
 	});
 
-	it("disables both backends even with an idalib install", () => {
+	it("disables every backend even with an idalib install", () => {
 		expect(
 			cfgDisasmBackend.get(Settings.isolated({ "disassembler.backend": "none", "ida.installDir": withIdalib })),
 		).toBeUndefined();
@@ -155,5 +164,57 @@ describe("disassembler backend selection", () => {
 		expect(
 			cfgDisasmBackend.get(Settings.isolated({ "disassembler.backend": "ghidra", "ida.installDir": withIdalib })),
 		).toBe(ghidraHostSupported() ? "ghidra" : undefined);
+	});
+
+	it("keeps IDA first in auto when Binary Ninja is installed too", () => {
+		const settings = Settings.isolated({ "ida.installDir": withIdalib, "binja.installDir": withBinja });
+		expect(cfgDisasmBackend.get(settings)).toBe("ida");
+	});
+
+	it("reaches Binary Ninja in auto only when neither IDA nor Ghidra is available", () => {
+		const settings = Settings.isolated({ "ida.installDir": withoutIdalib, "binja.installDir": withBinja });
+		expect(cfgDisasmBackend.get(settings)).toBe(ghidraHostSupported() ? "ghidra" : "binja");
+	});
+
+	it("honors explicit Binary Ninja selection despite an idalib install", () => {
+		expect(
+			cfgDisasmBackend.get(
+				Settings.isolated({
+					"disassembler.backend": "binja",
+					"ida.installDir": withIdalib,
+					"binja.installDir": withBinja,
+				}),
+			),
+		).toBe("binja");
+	});
+
+	it("does not fall back when Binary Ninja is explicitly selected but unavailable", () => {
+		expect(
+			cfgDisasmBackend.get(
+				Settings.isolated({
+					"disassembler.backend": "binja",
+					"ida.installDir": withIdalib,
+					"binja.installDir": withoutBinja,
+				}),
+			),
+		).toBeUndefined();
+	});
+});
+
+describe("database handles", () => {
+	const instance = "0b9d2a52-6c1f-4f0e-9a57-3d1c5e8f7a10";
+
+	it("round-trips a Binary Ninja handle", () => {
+		const handle = formatDatabaseHandle({ backend: "binja", id: "1a2b3c4d5e6f7a8b-true", instance });
+		expect(handle).toBe(`dsm://binja/1a2b3c4d5e6f7a8b-true/${instance}`);
+		expect(parseDatabaseHandle(handle)).toEqual({ backend: "binja", id: "1a2b3c4d5e6f7a8b-true", instance });
+	});
+
+	it("rejects a handle whose host is not a backend", () => {
+		expect(() => parseDatabaseHandle(`dsm://radare/1a2b3c4d5e6f7a8b-true/${instance}`)).toThrow("Invalid dsm handle");
+	});
+
+	it("leaves ordinary paths to the caller", () => {
+		expect(parseDatabaseHandle("/tmp/binja/sample")).toBeUndefined();
 	});
 });

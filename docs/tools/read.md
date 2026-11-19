@@ -25,7 +25,7 @@
 ## Registration / Visibility
 
 - Metadata: `strict = true`, `loadMode = "essential"`. Approval normally uses the internal scheme's read tier; PDF page screenshots require `"exec"`.
-- The model-facing prompt renders hashline guidance from the live display mode; it names the special sources and links `xd://read/sources` for their selectors, which lists executable views only when IDA is available.
+- The model-facing prompt renders hashline guidance from the live display mode; it names the special sources and links `xd://read/sources` for their selectors, which lists executable analysis views only when a disassembler backend is active.
 
 ## Inputs
 
@@ -99,7 +99,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    - On success, `readArchive()` either lists a directory or decodes an entry as UTF-8 text.
 6. It tries SQLite resolution with `resolveSqliteReadPath()` in `read-sqlite.ts`.
    - `parseSqlitePathCandidates()` scans for `.sqlite`, `.sqlite3`, `.db`, `.db3` before any `:table`, `:key`, or `?query` suffix.
-   - `readSqlite()` dispatches on `parseSqliteSelector()`. Executable/IDA database view targets are then handled by `resolveBinaryViewPath()` and `readBinary()`.
+   - `readSqlite()` dispatches on `parseSqliteSelector()`. A file owned by a disassembler backend is not read as SQLite: a Binary Ninja `.bndb` is a SQLite file, yet it takes the disassembler route. Executable and disassembler-database view targets are then handled by `resolveBinaryViewPath()` and `readBinary()`.
 7. Otherwise it treats the input as a local filesystem path.
    - `resolveReadPath()` expands `~`, resolves relative to session cwd, treats bare `/` as session cwd, and retries macOS screenshot/NFD/curly-quote variants.
    - If the path does not exist, `findUniqueWorkspaceSuffix()` attempts a workspace-wide unique suffix match (skipped for remote mounts). A cwd-root filename matching the active `local://` plan basename may recover that plan. As a final guarded recovery, a mistakenly delimited list of existing paths is read part by part; callers should still issue one `read` per path.
@@ -162,12 +162,15 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 - Other file entries are UTF-8 decoded. Unsupported binary entries return `[Cannot read binary archive entry '...' (...)]` instead of bytes.
 - Text archive entries are paginated in memory as immutable resources (no hashline anchors) and accept [JSON queries](#json-queries).
 
-### Executables and IDA databases
+### Executables and disassembler databases
 
-- When IDA is available, ELF/PE/Mach-O binaries (including extensionless files) and IDA database files open an IDA-backed overview and function list instead of a binary-file notice.
-- Views: `:<func|0xaddr>` for pseudocode, `:<func>:asm`, `:imports`, `:exports`, `:strings`, and `:xrefs:<func|0xaddr>`. Append line selectors to page the rendered view (`bin:main:10-40`).
-- Universal Mach-O reads use the host-architecture slice by default; `bin:@x86_64:main` selects another slice.
-- Views are immutable generated text and do not seed hashline edits. First use may open or create an IDA database; `:raw` bypasses the view path.
+- A bare read of an ELF/PE/Mach-O binary (including extensionless files) or a disassembler database file returns on-disk metadata only, followed by the available analysis selectors. It never opens an analysis database and needs no backend.
+- Database files are IDA `.i64`/`.idb` and Binary Ninja `.bndb`. A `.bndb` is a SQLite file but takes the disassembler route, bare or with a view, rather than the SQLite one.
+- Analysis views need a selector and an active backend. `disassembler.backend` selects IDA, Ghidra, or Binary Ninja (`auto` tries them in that order); with none active a view selector throws a `ToolError` and the bare read says analysis is disabled.
+- Views: `:overview` for the summary and function list, `:<func|0xaddr>` for pseudocode, `:<func>:asm`, `:imports`, `:exports`, `:strings`, and `:xrefs:<func|0xaddr>`. Reserved view names win over same-named functions, which stay reachable by address. Append line selectors to page the rendered view (`bin:main:10-40`).
+- Universal Mach-O reads use the host-architecture slice by default; `bin:@x86_64:main` selects another slice, and `bin:@x86_64` alone is still metadata only.
+- A database file opens only under the backend that owns it; a view of an `.i64` under Ghidra or Binary Ninja, or of a `.bndb` under IDA or Ghidra, throws a `ToolError` naming the owner.
+- Views are immutable generated text and do not seed hashline edits. The first view may create or open an analysis database in the active backend; `:raw` bypasses the metadata and view paths.
 
 ### Video
 
@@ -336,7 +339,7 @@ Notes: ...
    - Uses Bun SQLite for `.db`/`.sqlite*`.
    - Reads archives through the unified `@oh-my-pi/pi-utils/ar` registry; ZIP is framed in `packages/utils/src/ar/zip.ts` over the `node:zlib` DEFLATE codec.
    - URL HTML rendering can delegate into site handlers and HTML-to-text backends from `packages/coding-agent/src/tools/fetch.ts`.
-   - Video invokes `ffmpeg`/`ffprobe`; PDF page screenshots use headless Chromium; executable views may create/open an IDA database and request rendered views.
+   - Video invokes `ffmpeg`/`ffprobe`; PDF page screenshots use headless Chromium; executable analysis views may create/open a database in the active disassembler backend (IDA, Ghidra, or Binary Ninja) and request rendered views.
 - Session state
    - Records local text snapshots and seen lines in the session's native `EditStore` for later stale-anchor recovery.
    - Passes session `cwd`, `settings`, and `localProtocolOptions` into the process-global `InternalUrlRouter.instance().resolve()` for internal URLs.
@@ -387,7 +390,7 @@ Notes: ...
 - Missing local/archive/sqlite paths first attempt unique suffix resolution; if no unique match or guarded recovery exists they error. Explicit semicolon lists fan out after literal/archive/SQLite precedence, including when the combined filename is too long; each member keeps its selectors and errors. A single overlong filename retains its filesystem error. Permission and I/O errors do not trigger missing-path recovery.
 - Targets that are neither regular files nor directories (character or block device, FIFO, socket) throw a `ToolError` naming the file kind; SQLite detection skips them rather than sniffing their header.
 - Out-of-bounds line reads do not throw. They return explanatory text with a suggestion such as `Use :1 ...` or `Use :<last line> ...`.
-- Probable binary local files return a notice unless `:raw` was requested or an available IDA-backed executable/database view handles them.
+- Probable binary local files return a notice unless `:raw` was requested or the file is an executable or disassembler database, which returns metadata (bare) or an analysis view (selector).
 - Binary archive entries return a text notice without throwing, unless a JSON selector is attached (JSON selectors on directory, PDF, or binary archive entries throw a `ToolError`).
 - Document conversion failure returns a text notice.
 - Image oversize/unsupported/invalid cases throw.

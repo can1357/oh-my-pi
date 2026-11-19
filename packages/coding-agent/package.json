@@ -296,6 +296,14 @@
 			"types": "./src/ghidra/*.ts",
 			"import": "./src/ghidra/*.ts"
 		},
+		"./binja": {
+			"types": "./src/binja/index.ts",
+			"import": "./src/binja/index.ts"
+		},
+		"./binja/*": {
+			"types": "./src/binja/*.ts",
+			"import": "./src/binja/*.ts"
+		},
 		"./ida": {
 			"types": "./src/ida/index.ts",
 			"import": "./src/ida/index.ts"

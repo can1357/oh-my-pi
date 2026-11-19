@@ -1,10 +1,15 @@
 import * as path from "node:path";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import binjaEngine from "../binja/worker.py" with { type: "text" };
 import ghidraWorker from "../ghidra/worker.py" with { type: "text" };
 import idaWorker from "../ida/worker.py" with { type: "text" };
+import workerTransport from "./worker-transport.py" with { type: "text" };
+
+/** Every backend id; handle hosts, unit params and eval arguments validate against this list. */
+export const DISASM_BACKEND_IDS = ["ida", "ghidra", "binja"] as const;
 
 /** Backend identity used by settings, host daemons, and executable views. */
-export type DisasmBackendId = "ida" | "ghidra";
+export type DisasmBackendId = (typeof DISASM_BACKEND_IDS)[number];
 
 /** Interpreter and environment used to spawn a backend's Python worker. */
 export interface WorkerRuntime {
@@ -61,4 +66,22 @@ export const DISASM_BACKENDS: Record<DisasmBackendId, DisasmBackend> = {
 		interrupt: "frame",
 		projectAlias: true,
 	},
+	binja: {
+		id: "binja",
+		label: "Binary Ninja",
+		storeDir: "bndbs",
+		databaseExt: ".bndb",
+		databaseName: name => `${name}.bndb`,
+		isDatabasePath: p => path.extname(p).toLowerCase() === ".bndb",
+		// The transport binds the listener before the engine part imports binaryninja.
+		workerScript: `${workerTransport}\n${binjaEngine}`,
+		workerStageDir: "omp-binja-worker",
+		interrupt: "signal",
+		projectAlias: false,
+	},
 };
+
+/** Backend whose database format `p` names, whichever backend is active; undefined for anything else. */
+export function databaseOwner(p: string): DisasmBackend | undefined {
+	return DISASM_BACKEND_IDS.map(id => DISASM_BACKENDS[id]).find(backend => backend.isDatabasePath(p));
+}
