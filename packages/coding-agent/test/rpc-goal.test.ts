@@ -49,7 +49,6 @@ describe("RPC goal command", () => {
 		script?: "complete" | "idle" | "slow";
 		plan?: boolean;
 		persist?: boolean;
-		idleMaintenance?: boolean;
 	}): Promise<RpcClient> {
 		directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-goal-"));
 		client = new RpcClient({
@@ -62,7 +61,6 @@ describe("RPC goal command", () => {
 				GOAL_RPC_SCRIPT: options.script ?? "complete",
 				GOAL_RPC_PLAN: options.plan ? "1" : "0",
 				GOAL_RPC_PERSIST: options.persist ? "1" : "0",
-				GOAL_RPC_IDLE_MAINTENANCE: options.idleMaintenance ? "1" : "0",
 			},
 		});
 		await client.start();
@@ -112,35 +110,6 @@ describe("RPC goal command", () => {
 			message => message.role === "custom" && message.customType === "goal-continuation",
 		);
 		expect(continuations).toHaveLength(1);
-	}, 30_000);
-
-	test("a held goal continuation blocks idle compaction and dropping it re-arms compaction", async () => {
-		const rpc = await start({ continuation: true, script: "complete", idleMaintenance: true });
-		await rpc.promptAndWait("setup for idle compaction");
-		const firstTurnEnd = Promise.withResolvers<void>();
-		const idleStart = Promise.withResolvers<void>();
-		let idleStarts = 0;
-		const unsubscribe = rpc.onSessionEvent(event => {
-			if (event.type === "agent_end") firstTurnEnd.resolve();
-			if (event.type === "auto_compaction_start" && event.reason === "idle") {
-				idleStarts++;
-				idleStart.resolve();
-			}
-		});
-		try {
-			await rpc.goal("create", { objective: "hold the second turn, then drop it" });
-			await withTimeout(firstTurnEnd.promise, 10_000, "First goal turn never finished");
-			await Bun.sleep(150);
-			expect(idleStarts).toBe(0);
-			const held = await rpc.getState();
-			expect(held.goal?.goal.status).toBe("active");
-			expect(held.isSettled).toBe(false);
-			await rpc.goal("drop");
-			await withTimeout(idleStart.promise, 5_000, "Dropped continuation did not re-arm idle compaction");
-			expect(idleStarts).toBe(1);
-		} finally {
-			unsubscribe();
-		}
 	}, 30_000);
 
 	test("create refuses a second goal, a paused goal, and invalid input; pause/resume/drop restore tools", async () => {

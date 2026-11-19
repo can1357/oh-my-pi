@@ -1,8 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent";
-import { isRecord, readJsonl, TempDir } from "@oh-my-pi/pi-utils";
+import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
+import { isRecord, readJsonl, removeWithRetries, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
 const RPC_TEST_TIMEOUT_MS = 30_000;
 const RPC_CHILD_TIMEOUT_MS = 20_000;
@@ -177,6 +180,64 @@ await runRpcMode(session, { headless: true });
 				}
 			}
 			expect(recapCount).toBe(0);
+		},
+		RPC_TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"keeps idle compaction blocked while a goal continuation is held and re-arms on drop",
+		async () => {
+			const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-goal-idle-"));
+			const rpc = new RpcClient({
+				command: [process.execPath, path.join(import.meta.dir, "fixtures", "goal-rpc-agent.ts")],
+				cwd: directory,
+				env: {
+					PI_CODING_AGENT_DIR: directory,
+					PI_NO_TITLE: "1",
+					GOAL_RPC_CONTINUATION: "1",
+					GOAL_RPC_SCRIPT: "complete",
+					GOAL_RPC_PLAN: "0",
+					GOAL_RPC_PERSIST: "0",
+					GOAL_RPC_IDLE_MAINTENANCE: "1",
+				},
+			});
+			try {
+				await rpc.start();
+				await rpc.promptAndWait("setup for idle compaction");
+				const firstTurnEnd = Promise.withResolvers<void>();
+				const idleStart = Promise.withResolvers<void>();
+				let idleStarts = 0;
+				let agentStartsAfterDrop = 0;
+				let dropped = false;
+				const unsubscribe = rpc.onSessionEvent(event => {
+					if (event.type === "agent_start" && dropped) agentStartsAfterDrop++;
+					if (event.type === "agent_end") firstTurnEnd.resolve();
+					if (event.type === "auto_compaction_start" && event.reason === "idle") {
+						idleStarts++;
+						idleStart.resolve();
+					}
+				});
+				try {
+					await rpc.goal("create", { objective: "hold the second turn, then drop it" });
+					await withTimeout(firstTurnEnd.promise, 10_000, "First goal turn never finished");
+					await Bun.sleep(150);
+					expect(idleStarts).toBe(0);
+					const held = await rpc.getState();
+					expect(held.goal?.goal.status).toBe("active");
+					expect(held.isSettled).toBe(false);
+					await rpc.goal("drop");
+					dropped = true;
+					await rpc.promptAndWait("/goaltest-release-continuation");
+					await withTimeout(idleStart.promise, 5_000, "Dropped continuation did not re-arm idle compaction");
+					expect(idleStarts).toBe(1);
+					expect(agentStartsAfterDrop).toBe(0);
+				} finally {
+					unsubscribe();
+				}
+			} finally {
+				await rpc.stop();
+				await removeWithRetries(directory);
+			}
 		},
 		RPC_TEST_TIMEOUT_MS,
 	);

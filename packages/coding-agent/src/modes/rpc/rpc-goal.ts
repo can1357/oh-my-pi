@@ -89,14 +89,17 @@ export class RpcGoalController {
 	 */
 	#changeOverlappedReconcile = false;
 	readonly #onContinuationDropped: (() => void) | undefined;
+	readonly #waitForIdle: () => Promise<void>;
 
 	/**
 	 * @param onContinuationDropped called when a pending continuation is abandoned
 	 *   (a gate closed while it waited), so settle reporting can re-check.
+	 * @param waitForIdle optional goal-only wait boundary; idle maintenance keeps the session's real wait.
 	 */
-	constructor(session: RpcGoalSession, onContinuationDropped?: () => void) {
+	constructor(session: RpcGoalSession, onContinuationDropped?: () => void, waitForIdle?: () => Promise<void>) {
 		this.#session = session;
 		this.#onContinuationDropped = onContinuationDropped;
+		this.#waitForIdle = waitForIdle ?? (() => session.waitForIdle());
 	}
 
 	/**
@@ -430,7 +433,7 @@ export class RpcGoalController {
 			const { promise, resolve } = Promise.withResolvers<void>();
 			setImmediate(resolve);
 			await promise;
-			await this.#session.waitForIdle();
+			await this.#waitForIdle();
 			if (!this.#continuationScheduled || generation !== this.#continuationGeneration) {
 				this.#onContinuationDropped?.();
 				return;
