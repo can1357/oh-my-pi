@@ -4,7 +4,7 @@ import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { AutocompleteItem, ModelMentionCompletion } from "../index";
 import type { ModelBrowserRegistry, ModelBrowserSource } from "../overlays/model-browser";
 import { subsequenceMatch } from "../autocomplete";
-import type { ResolvedModelMention } from "./model-mention-syntax";
+import { isModelMentionRoleSelector, type ResolvedModelMention } from "./model-mention-syntax";
 import type {
 	buildSearchAffinity as BuildSearchAffinity,
 	ModelBrowserItem,
@@ -170,6 +170,7 @@ export function createModelMentionSource(host: {
 			const info = host.source.getRoleInfo(role);
 			if (info.hidden || info.section !== "chat") continue;
 			const value = `@${role}`;
+			if (!isModelMentionRoleSelector(value) || role.includes(":")) continue;
 			if (!subsequenceMatch(roleQuery, value.toLowerCase())) continue;
 			if (typedEffort !== undefined) {
 				for (const effort of [...THINKING_EFFORTS, "auto"]) {

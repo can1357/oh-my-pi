@@ -22,6 +22,7 @@ import type { ComposerFacts, ComposerFactsSource } from "../status-line/types";
 import { allowsModelMentions, allowsSkillTokens, SKILL_TOKEN_RE } from "./skill-tokens";
 import {
 	expandModelMentionTags,
+	isModelMentionRoleSelector,
 	MODEL_MENTION_RE,
 	modelMentionToken,
 	resolveModelMentionToken,
@@ -687,58 +688,53 @@ export class CustomEditor extends Editor {
 
 	#mentionChipFor(selector: string): { label: string; selector: string } | undefined {
 		const chip = this.resolveModelMention(selector);
-		if (chip === undefined) return undefined;
-		const registered = this.atoms.get(chip.label);
-		return registered === undefined || registered === modelMentionToken(chip.selector) ? chip : undefined;
-	}
-
-	#refreshRoleMentionChips(): void {
-		let hasRole = false;
-		for (const expansion of this.atoms.values()) {
-			if (expansion.startsWith("^@")) {
-				hasRole = true;
-				break;
+		if (chip !== undefined) {
+			const registered = this.atoms.get(chip.label);
+			if (registered === undefined || registered === modelMentionToken(chip.selector)) {
+				this.#invalidRoleMentions.delete(modelMentionToken(selector));
+				return chip;
 			}
 		}
-		if (!hasRole) return;
+		if (isModelMentionRoleSelector(selector)) this.#invalidRoleMentions.add(modelMentionToken(selector));
+		return undefined;
+	}
+
+	#invalidRoleMentions = new Set<string>();
+
+	#refreshRoleMentionChips(): void {
+		const labels = [...this.atoms]
+			.filter(
+				([label, expansion]) =>
+					expansion.startsWith("^") &&
+					isModelMentionRoleSelector(expansion.slice(1)) &&
+					!this.pendingTexts.some(attachment => attachment.label === label),
+			)
+			.map(([label]) => label);
+		if (labels.length === 0 && this.#invalidRoleMentions.size === 0) return;
 		const text = this.getText();
 		if (!allowsModelMentions(text)) return;
 		const pattern = new RegExp(
-			[...this.atoms.keys()]
+			[
+				...labels.map(RegExp.escape),
+				...[...this.#invalidRoleMentions].map(token => `(?<!\\S)${RegExp.escape(token)}(?=\\s|$)`),
+			]
 				.sort((a, b) => b.length - a.length)
-				.map(RegExp.escape)
 				.join("|"),
 			"g",
 		);
-		const changes: { start: number; end: number; label: string; expansion: string }[] = [];
+		const replacements = new Map<string, string>();
 		for (const match of text.matchAll(pattern)) {
-			const expansion = this.atoms.get(match[0])!;
-			if (!expansion.startsWith("^@") || this.pendingTexts.some(attachment => attachment.label === match[0]))
-				continue;
+			const expansion = this.atoms.get(match[0]) ?? match[0];
 			const chip = this.#mentionChipFor(expansion.slice(1));
 			const label = chip?.label ?? expansion;
-			if (label !== match[0]) {
-				changes.push({ start: match.index, end: match.index + match[0].length, label, expansion });
-			}
+			if (chip === undefined) this.#invalidRoleMentions.add(expansion);
+			else this.#invalidRoleMentions.delete(expansion);
+			if (label === match[0]) continue;
+			replacements.set(match[0], label);
+			if (chip !== undefined) this.registerAtom(label, expansion);
 		}
-		if (changes.length === 0) return;
-		const caret = this.getCursor();
-		const lines = this.getLines();
-		let cursor = caret.col;
-		for (let line = 0; line < caret.line; line++) cursor += lines[line].length + 1;
-		let length = text.length;
-		for (const change of changes.reverse()) {
-			const delta = change.label.length - (change.end - change.start);
-			if (cursor >= change.end) cursor += delta;
-			else if (cursor > change.start) cursor = change.start + change.label.length;
-			if (change.label !== change.expansion) this.registerAtom(change.label, change.expansion);
-			super.applyHostEdit(
-				{ from: change.start, to: change.end, text: change.label, cursor, len: length },
-				{ recordUndo: false, verbatim: true },
-			);
-			length += delta;
-		}
-		this.#syncComposerTokenPattern();
+		this.relabelAtoms(replacements);
+		if (replacements.size > 0) this.#syncComposerTokenPattern();
 	}
 
 	/**
@@ -1046,14 +1042,12 @@ export class CustomEditor extends Editor {
 
 	override render(width: number): readonly string[] {
 		this.#refreshRoleMentionChips();
-		this.#collapseModelMentions();
 		return super.render(width);
 	}
 
 	/** Catch the typed word up with the caret first: its leaving the word (or a blur) re-describes the typo marks. */
 	override describe(cx: DescribeContext): NativeNode {
 		this.#refreshRoleMentionChips();
-		this.#collapseModelMentions();
 		const caret = this.getCursor();
 		if (this.#typing.update(this.textRevision, this.getLines(), caret.line, caret.col, this.focused)) {
 			this.invalidate();
@@ -1634,7 +1628,12 @@ export class CustomEditor extends Editor {
 			return;
 		}
 		if (event.type !== "action") {
+			const revision = this.textRevision;
 			super.handleNativeEvent(event);
+			if (event.type === "edit" && this.textRevision !== revision) {
+				this.#collapseSkillTokens();
+				this.#collapseModelMentions();
+			}
 			return;
 		}
 		switch (event.act) {
@@ -2190,7 +2189,9 @@ export class CustomEditor extends Editor {
 
 	/** Base text-editing pipeline, then snap any skill or model token the keystroke just completed. */
 	#forwardInput(data: string): void {
+		const undoRevision = this.undoRevision;
 		super.handleInput(data);
+		if (this.undoRevision !== undoRevision) return;
 		this.#collapseSkillTokens();
 		this.#collapseModelMentions();
 	}

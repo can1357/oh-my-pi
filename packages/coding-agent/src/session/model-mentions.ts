@@ -5,12 +5,18 @@ import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { getKnownRoleIds, getRoleInfo } from "../config/model-roles";
-import { formatModelString, formatModelStringWithRouting, resolveModelRoleValue } from "../config/model-resolver";
+import {
+	formatModelString,
+	formatModelStringWithRouting,
+	resolveExplicitModelRole,
+	resolveModelRoleValue,
+} from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import modelMentionDescription from "../prompts/agents/model-mention.md" with { type: "text" };
 import { getBundledAgent } from "../task/agents";
 import type { AgentDefinition } from "../task/types";
 import {
+	isModelMentionRoleSelector,
 	MODEL_MENTION_RE,
 	type ModelMention,
 	modelMentionDisplayName,
@@ -105,7 +111,7 @@ export class ModelMentionRegistry {
 		const scoped = this.#host.scopedModels();
 		const models = scoped.length > 0 ? scoped : this.#host.modelRegistry.getAvailable();
 		const isScoped = scoped.length > 0;
-		if (selector.startsWith("@")) return this.#resolveRole(selector, models, isScoped);
+		if (isModelMentionRoleSelector(selector)) return this.#resolveRole(selector, models, isScoped);
 		const exact = models.find(model => formatModelString(model) === selector);
 		if (exact) return this.#resolveModel(exact, undefined, models, isScoped);
 		const colon = selector.lastIndexOf(":");
@@ -129,7 +135,12 @@ export class ModelMentionRegistry {
 		const override = colon < 0 ? undefined : selector.slice(colon + 1);
 		const overrideEffort = parseEffort(override);
 		if (override !== undefined && override !== AUTO_THINKING && overrideEffort === undefined) return undefined;
-		const resolved = resolveModelRoleValue(`@${role}`, models.filter(info.accepts), { settings });
+		const alias = `@${role}`;
+		if (resolveExplicitModelRole(alias, settings) !== role) return undefined;
+		const resolved = resolveModelRoleValue(alias, models.filter(info.accepts), {
+			settings,
+			clampThinkingLevel: false,
+		});
 		if (!resolved.model) return undefined;
 		if (override !== undefined) return this.#resolveModel(resolved.model, overrideEffort, models, isScoped);
 		const thinkingLevel = resolved.explicitThinkingLevel

@@ -170,7 +170,7 @@
 
 ### Fixed
 
-- Refreshing model-role chips preserves text attachments and Unicode model names ([#18926](https://github.com/can1357/oh-my-pi/pull/18926) by [@royce-mathew](https://github.com/royce-mathew))
+- Refreshing model-role chips preserves text attachments, Unicode names, Undo, history navigation, and Vim repeat ([#18926](https://github.com/can1357/oh-my-pi/pull/18926) by [@royce-mathew](https://github.com/royce-mathew))
 - In Tern, an `ask` question outside a `<fieldset>` gets its own tab instead of sharing the tab of the question before it ([#18660](https://github.com/can1357/oh-my-pi/pull/18660) by [@DocksDocks](https://github.com/DocksDocks))
 - The `/resume` picker shows dates of sessions older than a week in the locale from `LC_ALL`, `LC_TIME` or `LANG` instead of always using `MM/DD/YYYY` ([#18863](https://github.com/can1357/oh-my-pi/pull/18863) by [@raoulkent](https://github.com/raoulkent))
 - Fixed an `ask` HTML form in Tern not taking typing after a click on its Other row or a text well while a composer draft held the keyboard: the click now hands the keys to the form, as ↑/↓ does, instead of every key still editing the draft

@@ -168,6 +168,7 @@ import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
 import type { ResolveContext } from "../internal-urls/index";
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
+import { isModelMentionRoleSelector } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { formatQueueShorthand } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import { isTranscriptEntry, type SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
@@ -1597,7 +1598,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#resolveModelMentionChip(selector: string): { label: string; selector: string } | undefined {
 		const resolved = this.session.resolveModelMention(selector);
 		if (!resolved) return undefined;
-		const role = selector.startsWith("@");
+		const role = isModelMentionRoleSelector(selector);
 		const name = resolved.warning ? `${resolved.name} · ${resolved.warning}` : resolved.name;
 		return {
 			label: modelMentionChipLabel(role ? `${selector} → ${name}` : name),

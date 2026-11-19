@@ -8,6 +8,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { cfgCycleOrder } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { dispatchRpcSkillPrompt } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import {
@@ -452,6 +453,42 @@ describe("model mentions", () => {
 		expect(mentions.expandMentions("^@smol")).toBe('<model agent="m1" name="R One"/>');
 		expect(readModelMentions(session.getBranch())).toEqual([{ agent: "m1", selector: "d/r", name: "R One" }]);
 		expect(mentions.resolve("@smol:off")).toBeUndefined();
+	});
+
+	test("omits an unsupported configured effort instead of promoting it to a supported level", () => {
+		scoped = [model("demo", "worker", "Worker", [Effort.High])];
+		settings.setModelRole("smol", "demo/worker:low");
+		expect(mentions.resolve("@smol")).toEqual({
+			selector: "demo/worker",
+			name: "Worker",
+			warning: "low unsupported; effort omitted",
+		});
+		expect(mentions.expandMentions("^@smol")).toBe('<model agent="m1" name="Worker"/>');
+		expect(readModelMentions(session.getBranch())).toEqual([
+			{ agent: "m1", selector: "demo/worker", name: "Worker" },
+		]);
+	});
+
+	test("does not fuzzy-match an unassigned custom role to a model", () => {
+		scoped = [model("demo", "worker@preview", "Worker")];
+		cfgCycleOrder.set(settings, ["preview"]);
+		expect(mentions.expandMentions("^@preview")).toBe("^@preview");
+		settings.setModelRole("preview", "demo/worker@preview");
+		expect(mentions.expandMentions("^@preview")).toBe('<model agent="m1" name="Worker"/>');
+		expect(readModelMentions(session.getBranch())).toEqual([
+			{ agent: "m1", selector: "demo/worker@preview", name: "Worker" },
+		]);
+	});
+
+	test("accepts concrete model mentions for providers whose names start with @", () => {
+		scoped = [model("@team", "worker", "Worker", [Effort.High])];
+		expect(mentions.expandMentions("^@team/worker ^@team/worker:hi")).toBe(
+			'<model agent="m1" name="Worker"/> <model agent="m2" name="Worker · high"/>',
+		);
+		expect(readModelMentions(session.getBranch())).toEqual([
+			{ agent: "m1", selector: "@team/worker", name: "Worker" },
+			{ agent: "m2", selector: "@team/worker:high", name: "Worker · high", thinkingLevel: Effort.High },
+		]);
 	});
 
 	test("accepts an OpenRouter route role only when its literal model is in scope", () => {

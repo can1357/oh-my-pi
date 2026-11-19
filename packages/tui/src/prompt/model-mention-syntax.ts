@@ -32,6 +32,12 @@ export function resolveModelMentionToken<T>(
 	}
 	return undefined;
 }
+
+/** Provider-qualified selectors are concrete even when their provider starts with `@`. */
+export function isModelMentionRoleSelector(selector: string): boolean {
+	return selector.length > 1 && selector.startsWith("@") && !/[/\s^]/.test(selector);
+}
+
 /** Submitted mention; groups are agent pseudonym and display name. */
 export const MODEL_MENTION_TAG_RE = /<model agent="(m\d+)" name="([^"]*)"\/>/g;
 

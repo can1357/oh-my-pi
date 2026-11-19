@@ -515,7 +515,7 @@ describe("prompt action autocomplete", () => {
 				revision: 0,
 				defaultThinkingLevel: "auto",
 				modelProviderOrder: [],
-				knownRoleIds: ["smol", "blocked", "hidden", "image"],
+				knownRoleIds: ["smol", "code review", "blocked", "hidden", "image"],
 				mruOrder: [],
 				modelPerf: new Map(),
 				getModelRole: () => undefined,
@@ -535,7 +535,9 @@ describe("prompt action autocomplete", () => {
 					? current
 					: selector === "@smol:high"
 						? { selector: "a/x:high", name: "X One · high", thinkingLevel: Effort.High }
-						: undefined,
+						: selector === "@code review"
+							? { selector: "a/x", name: "Worker" }
+							: undefined,
 		});
 		const provider = createPromptActionAutocompleteProvider({
 			commands: [],
