@@ -6,6 +6,11 @@ import type { ModelBrowserItem } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { setInternalUrlCompletionHost } from "@oh-my-pi/pi-tui/prompt/internal-url-autocomplete";
 import { Editor } from "@oh-my-pi/pi-tui/components/editor";
 import { createPromptActionAutocompleteProvider } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
+import {
+	createModelMentionSource,
+	type ModelMentionCandidateSource,
+} from "@oh-my-pi/pi-tui/prompt/model-mention-autocomplete";
+import type { ResolvedModelMention } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { getSelectListTheme, initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { defaultEditorTheme } from "./test-themes";
 import { KeybindingsManager, SelectList, setKeybindings, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui";
@@ -33,14 +38,30 @@ function modelMentionItem(provider: string, id: string, name: string, efforts?: 
 
 const FIVE_LEVELS = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
 
+function mentionSource(
+	candidates: readonly ModelBrowserItem[],
+	rank: (query: string) => readonly ModelBrowserItem[] = query =>
+		candidates.filter(candidate => candidate.selector.includes(query)),
+): ModelMentionCandidateSource {
+	return Object.assign(rank, {
+		resolveMention: (selector: string): ResolvedModelMention | undefined => {
+			const exact = candidates.find(candidate => candidate.selector === selector);
+			if (exact) return { selector, name: exact.model.name };
+			for (const candidate of candidates) {
+				if (!candidate.model.reasoning) continue;
+				const effort = FIVE_LEVELS.find(level => `${candidate.selector}:${level}` === selector);
+				if (effort) return { selector, name: `${candidate.model.name} · ${effort}`, thinkingLevel: effort };
+			}
+			return undefined;
+		},
+	});
+}
+
 function mentionProvider(candidates: readonly ModelBrowserItem[], retryDiscovery?: () => Promise<void> | undefined) {
 	return createPromptActionAutocompleteProvider({
 		commands: [{ name: "btw", description: "By the way", allowArgs: true }],
 		basePath: "/tmp",
-		modelMentions: Object.assign(
-			(query: string) => candidates.filter(candidate => candidate.selector.includes(query)),
-			{ retryDiscovery },
-		),
+		modelMentions: Object.assign(mentionSource(candidates), { retryDiscovery }),
 		keybindings: AppKeybindingsManager.inMemory(),
 		copyCurrentLine: () => {},
 		copyPrompt: () => {},
@@ -333,7 +354,7 @@ describe("prompt action autocomplete", () => {
 		const provider = createPromptActionAutocompleteProvider({
 			commands: [],
 			basePath: "/tmp",
-			modelMentions: query => (query === "" || candidate.selector.includes(query) ? [candidate] : []),
+			modelMentions: mentionSource([candidate]),
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
@@ -381,7 +402,7 @@ describe("prompt action autocomplete", () => {
 		const provider = createPromptActionAutocompleteProvider({
 			commands: [],
 			basePath: "/tmp",
-			modelMentions: () => candidates,
+			modelMentions: mentionSource(candidates, () => candidates),
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
@@ -420,7 +441,7 @@ describe("prompt action autocomplete", () => {
 		const provider = createPromptActionAutocompleteProvider({
 			commands: [],
 			basePath: "/tmp",
-			modelMentions: () => [modelMentionItem("a", "x", "X One")],
+			modelMentions: mentionSource([modelMentionItem("a", "x", "X One")]),
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
@@ -439,7 +460,7 @@ describe("prompt action autocomplete", () => {
 		const provider = createPromptActionAutocompleteProvider({
 			commands: [{ name: "btw", description: "By the way", allowArgs: true }],
 			basePath: "/tmp",
-			modelMentions: query => (candidate.selector.includes(query) ? [candidate] : []),
+			modelMentions: mentionSource([candidate]),
 			keybindings: AppKeybindingsManager.inMemory(),
 			copyCurrentLine: () => {},
 			copyPrompt: () => {},
@@ -485,6 +506,72 @@ describe("prompt action autocomplete", () => {
 			["a/glm:medium", "GLM · medium"],
 			["a/glm:high", "GLM · high"],
 			["a/glm:xhigh", "GLM · xhigh"],
+		]);
+	});
+
+	it("keeps accepted role completions late-bound and refreshes their descriptions", async () => {
+		let current: ResolvedModelMention = { selector: "a/x", name: "X One" };
+		const source = createModelMentionSource({
+			source: {
+				revision: 0,
+				defaultThinkingLevel: "auto",
+				modelProviderOrder: [],
+				knownRoleIds: ["smol", "code review", "blocked", "hidden", "image"],
+				mruOrder: [],
+				modelPerf: new Map(),
+				getModelRole: () => undefined,
+				getRoleInfo: role => ({
+					name: role,
+					section: role === "image" ? "kind" : "chat",
+					hidden: role === "hidden",
+					accepts: () => true,
+				}),
+				defaultRoleChain: () => [],
+				resolveRoleValue: () => ({ model: undefined, explicitThinkingLevel: false }),
+			},
+			registry: {
+				getAvailable: () => [],
+				getAll: () => [],
+				getError: () => undefined,
+				retryUnavailableDiscovery: () => undefined,
+			},
+			scopedModels: () => [],
+			resolveMention: selector =>
+				selector === "@smol"
+					? current
+					: selector === "@smol:high"
+						? { selector: "a/x:high", name: "X One · high", thinkingLevel: Effort.High }
+						: selector === "@code review"
+							? { selector: "a/x", name: "Worker" }
+							: undefined,
+		});
+		const provider = createPromptActionAutocompleteProvider({
+			commands: [],
+			basePath: "/tmp",
+			modelMentions: source,
+			keybindings: AppKeybindingsManager.inMemory(),
+			copyCurrentLine: () => {},
+			copyPrompt: () => {},
+			undo: () => {},
+			moveCursorToMessageEnd: () => {},
+			moveCursorToMessageStart: () => {},
+			moveCursorToLineStart: () => {},
+			moveCursorToLineEnd: () => {},
+		});
+		const initial = await provider.getSuggestions(["^"], 0, 1);
+		expect(initial?.items.map(item => [item.value, item.description])).toEqual([["@smol", "X One"]]);
+		const effort = await provider.getSuggestions(["^@smol:hi"], 0, 9);
+		expect(effort?.items.map(item => [item.value, item.description])).toEqual([["@smol:high", "X One · high"]]);
+		if (!effort) throw new Error("expected accepted role effort");
+		expect(provider.applyCompletion(["^@smol:hi"], 0, 9, effort.items[0]!, effort.prefix)).toEqual({
+			lines: ["^@smol:high "],
+			cursorLine: 0,
+			cursorCol: 12,
+		});
+		current = { selector: "b/y", name: "Y Two", warning: "off unsupported; effort omitted" };
+		const changed = await provider.getSuggestions(["^smol"], 0, 5);
+		expect(changed?.items.map(item => [item.value, item.description])).toEqual([
+			["@smol", "Y Two · off unsupported; effort omitted"],
 		]);
 	});
 

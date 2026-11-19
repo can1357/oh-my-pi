@@ -937,6 +937,7 @@ export class Editor implements Component, Focusable {
 	#suspendUndo = false;
 	/** Snapshots evicted from the front of {@link #undoStack}, so {@link UndoMark}s stay aligned. */
 	#undoShifts = 0;
+	protected undoRevision = 0;
 	/**
 	 * Undo mark whose first snapshot `u` must still reach: the open Insert/Replace segment, or the
 	 * Normal-mode key being applied (so a counted `.` stays one undo step past the stack cap).
@@ -3404,6 +3405,8 @@ export class Editor implements Component, Focusable {
 	collapseToAtom(line: number, start: number, end: number, label: string, expansion: string): void {
 		const text = this.#state.lines[line];
 		if (text === undefined || start < 0 || end > text.length || start >= end) return;
+		const session = this.#vimSession;
+		const linesBefore = session?.tracked && !session.replace ? this.#state.lines.slice() : undefined;
 		this.#resetKillSequence();
 		this.#recordUndoState();
 		this.registerAtom(label, expansion);
@@ -3413,7 +3416,61 @@ export class Editor implements Component, Focusable {
 			this.#setCursorCol(col >= end ? col - (end - start) + label.length : start + label.length);
 		}
 		this.#lastAction = null;
+		if (session !== null && linesBefore !== undefined) this.#trackVimSessionEdit(session, linesBefore);
 		this.#notifyChange();
+	}
+
+	/** Refresh atom labels without changing undo, history, autocomplete, or edit callbacks. */
+	protected relabelAtoms(replacements: ReadonlyMap<string, string>): void {
+		if (replacements.size === 0) return;
+		const pattern = new RegExp(
+			[...replacements.keys()]
+				.sort((a, b) => b.length - a.length)
+				.map(label => (this.#atoms.has(label) ? RegExp.escape(label) : `(?<!\\S)${RegExp.escape(label)}(?=\\s|$)`))
+				.join("|"),
+			"g",
+		);
+		const relabel = (source: string, offsets: readonly number[]) => {
+			const mapped = [...offsets];
+			const text = source.replace(pattern, (label: string, start: number) => {
+				const replacement = replacements.get(label)!;
+				const end = start + label.length;
+				for (let i = 0; i < offsets.length; i++) {
+					const offset = offsets[i]!;
+					if (offset > start) {
+						mapped[i] =
+							mapped[i]! +
+							(offset >= end ? replacement.length - label.length : start + replacement.length - offset);
+					}
+				}
+				return replacement;
+			});
+			return { text, offsets: mapped };
+		};
+		const current = flatten(this.#state);
+		const session = this.#vimSession;
+		const result = relabel(current.text, [
+			current.cursor,
+			...(session === null ? [] : [session.leftEnd, session.rightStart]),
+		]);
+		if (result.text === current.text) return;
+		if (session !== null) {
+			const baseline = relabel(session.text, [session.cursor]);
+			session.text = baseline.text;
+			session.cursor = baseline.offsets[0]!;
+			session.leftEnd = result.offsets[1]!;
+			session.rightStart = result.offsets[2]!;
+		}
+		this.#state.lines = result.text.split("\n");
+		let line = 0;
+		let col = result.offsets[0]!;
+		while (line < this.#state.lines.length - 1 && col > this.#state.lines[line]!.length) {
+			col -= this.#state.lines[line++]!.length + 1;
+		}
+		this.#state.cursorLine = line;
+		this.#setCursorCol(col);
+		this.#textRevision++;
+		this.invalidate();
 	}
 
 	/** Drop every registered atom expansion (draft cleared or replaced by the host). */
@@ -3563,10 +3620,11 @@ export class Editor implements Component, Focusable {
 	/**
 	 * Apply an edit the terminal made over its own selection (TSP `edit`):
 	 * replace `[from, to)` of the described text with `text` and put the caret
-	 * at `cursor`, as one undo unit that leaves history browsing and updates
-	 * autocomplete like typing. A range cutting through an atomic placeholder
-	 * token takes the whole token. Stale edits (`len` no longer the text's
-	 * length) are dropped; a pure caret move only moves the caret.
+	 * at `cursor`, leaving history browsing and updating autocomplete like typing.
+	 * Input is sanitized before insertion.
+	 * A range cutting through an atomic placeholder token takes the whole token.
+	 * Stale edits (`len` no longer the text's length) are dropped; a pure caret
+	 * move only moves the caret.
 	 */
 	applyHostEdit(edit: NativeTextEdit): void {
 		const current = this.getText();
@@ -3747,7 +3805,13 @@ export class Editor implements Component, Focusable {
 		if (this.#autocompleteRequestRunning && this.#autocompleteState === null) {
 			this.#invalidateAutocompleteRequests();
 		}
+		const session = this.#vimSession;
+		const revision = this.#textRevision;
+		const linesBefore = session?.tracked && !session.replace ? this.#state.lines.slice() : undefined;
 		this.#insertCharacter(text);
+		if (session !== null && session === this.#vimSession && linesBefore && revision !== this.#textRevision) {
+			this.#trackVimSessionEdit(session, linesBefore);
+		}
 	}
 
 	#insertCharacter(char: string): void {
@@ -4373,6 +4437,7 @@ export class Editor implements Component, Focusable {
 	#applyUndo(): void {
 		const snapshot = this.#undoStack.pop();
 		if (!snapshot) return;
+		this.undoRevision++;
 
 		this.#historyIndex = -1;
 		this.#resetKillSequence();

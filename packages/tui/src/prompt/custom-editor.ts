@@ -22,6 +22,7 @@ import type { ComposerFacts, ComposerFactsSource } from "../status-line/types";
 import { allowsModelMentions, allowsSkillTokens, SKILL_TOKEN_RE } from "./skill-tokens";
 import {
 	expandModelMentionTags,
+	isModelMentionRoleSelector,
 	MODEL_MENTION_RE,
 	modelMentionToken,
 	resolveModelMentionToken,
@@ -677,8 +678,8 @@ export class CustomEditor extends Editor {
 	skillFilePath: (name: string) => string | undefined = () => undefined;
 
 	/**
-	 * Host-owned model probe: a mentionable `provider/id[:level]` selector's chip label and
-	 * canonical selector, so equivalent spellings (`:hi`/`:high`, bare/`:auto`) share a chip.
+	 * Host-owned model probe: a mention's chip label and editable selector.
+	 * Role selectors stay late-bound; concrete selectors use their canonical spelling.
 	 */
 	resolveModelMention: (selector: string) => { label: string; selector: string } | undefined = () => undefined;
 
@@ -687,9 +688,53 @@ export class CustomEditor extends Editor {
 
 	#mentionChipFor(selector: string): { label: string; selector: string } | undefined {
 		const chip = this.resolveModelMention(selector);
-		if (chip === undefined) return undefined;
-		const registered = this.atoms.get(chip.label);
-		return registered === undefined || registered === modelMentionToken(chip.selector) ? chip : undefined;
+		if (chip !== undefined) {
+			const registered = this.atoms.get(chip.label);
+			if (registered === undefined || registered === modelMentionToken(chip.selector)) {
+				this.#invalidRoleMentions.delete(modelMentionToken(selector));
+				return chip;
+			}
+		}
+		if (isModelMentionRoleSelector(selector)) this.#invalidRoleMentions.add(modelMentionToken(selector));
+		return undefined;
+	}
+
+	#invalidRoleMentions = new Set<string>();
+
+	#refreshRoleMentionChips(): void {
+		const labels = [...this.atoms]
+			.filter(
+				([label, expansion]) =>
+					expansion.startsWith("^") &&
+					isModelMentionRoleSelector(expansion.slice(1)) &&
+					!this.pendingTexts.some(attachment => attachment.label === label),
+			)
+			.map(([label]) => label);
+		if (labels.length === 0 && this.#invalidRoleMentions.size === 0) return;
+		const text = this.getText();
+		if (!allowsModelMentions(text)) return;
+		const pattern = new RegExp(
+			[
+				...labels.map(RegExp.escape),
+				...[...this.#invalidRoleMentions].map(token => `(?<!\\S)${RegExp.escape(token)}(?=\\s|$)`),
+			]
+				.sort((a, b) => b.length - a.length)
+				.join("|"),
+			"g",
+		);
+		const replacements = new Map<string, string>();
+		for (const match of text.matchAll(pattern)) {
+			const expansion = this.atoms.get(match[0]) ?? match[0];
+			const chip = this.#mentionChipFor(expansion.slice(1));
+			const label = chip?.label ?? expansion;
+			if (chip === undefined) this.#invalidRoleMentions.add(expansion);
+			else this.#invalidRoleMentions.delete(expansion);
+			if (label === match[0]) continue;
+			replacements.set(match[0], label);
+			if (chip !== undefined) this.registerAtom(label, expansion);
+		}
+		this.relabelAtoms(replacements);
+		if (replacements.size > 0) this.#syncComposerTokenPattern();
 	}
 
 	/**
@@ -727,7 +772,7 @@ export class CustomEditor extends Editor {
 		}
 	}
 
-	/** Collapse every completed mentionable `^provider/id` selector into an atomic model chip. */
+	/** Collapse completed model and role mentions into atomic chips. */
 	#collapseModelMentions(): void {
 		const lines = this.getLines();
 		if (!lines.some(line => line.includes("^")) || !allowsModelMentions(this.getText())) return;
@@ -997,6 +1042,7 @@ export class CustomEditor extends Editor {
 
 	/** Catch the typed word up with the caret first: its leaving the word (or a blur) re-describes the typo marks. */
 	override describe(cx: DescribeContext): NativeNode {
+		this.#refreshRoleMentionChips();
 		const caret = this.getCursor();
 		if (this.#typing.update(this.textRevision, this.getLines(), caret.line, caret.col, this.focused)) {
 			this.invalidate();
@@ -1147,6 +1193,7 @@ export class CustomEditor extends Editor {
 	faint?: () => boolean;
 
 	override render(width: number): readonly string[] {
+		this.#refreshRoleMentionChips();
 		const lines = super.render(width);
 		if (!this.faint?.()) return lines;
 		// Faint every cell: re-applied after each reset the rows carry, so styled runs stay faint too.
@@ -1577,7 +1624,12 @@ export class CustomEditor extends Editor {
 			return;
 		}
 		if (event.type !== "action") {
+			const revision = this.textRevision;
 			super.handleNativeEvent(event);
+			if (event.type === "edit" && this.textRevision !== revision) {
+				this.#collapseSkillTokens();
+				this.#collapseModelMentions();
+			}
 			return;
 		}
 		switch (event.act) {
@@ -1770,6 +1822,7 @@ export class CustomEditor extends Editor {
 	}
 
 	override handleInput(data: string): void {
+		this.#refreshRoleMentionChips();
 		// Serialize behind any in-flight async paste so a trailing Enter / follow-up key can't
 		// submit before the clipboard image reaches `pendingImages` (Codex PR #3602 review).
 		if (this.#pasteInFlight > 0) {
@@ -2132,7 +2185,9 @@ export class CustomEditor extends Editor {
 
 	/** Base text-editing pipeline, then snap any skill or model token the keystroke just completed. */
 	#forwardInput(data: string): void {
+		const undoRevision = this.undoRevision;
 		super.handleInput(data);
+		if (this.undoRevision !== undoRevision) return;
 		this.#collapseSkillTokens();
 		this.#collapseModelMentions();
 	}

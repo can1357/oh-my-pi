@@ -308,6 +308,7 @@ export function buildModelSelectorCompletions(
 				),
 				registry: runtime.ctx.session.modelRegistry,
 				scopedModels: () => runtime.ctx.session.scopedModels.map(entry => entry.model),
+				resolveMention: selector => runtime.ctx.session.resolveModelMention(selector),
 			});
 			// Later keystrokes list whatever a retry of failed provider discovery recovers.
 			void rankModels.retryDiscovery?.();

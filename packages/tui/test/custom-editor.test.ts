@@ -544,6 +544,274 @@ describe("CustomEditor bracketed path paste", () => {
 			expect(editor.getExpandedText()).toBe("ask ^c/z:high ");
 		});
 
+		it("retains typed role selectors through chip expansion and submission", () => {
+			const editor = makeModelEditor();
+			editor.resolveModelMention = selector =>
+				selector === "@smol:hi" ? { label: modelMentionChipLabel("@smol:hi → X One · high"), selector } : undefined;
+			for (const ch of "ask ^@smol:hi ") editor.handleInput(ch);
+			expect(editor.getText()).toBe(`ask ${modelMentionChipLabel("@smol:hi → X One · high")} `);
+			expect(editor.getExpandedText()).toBe("ask ^@smol:hi ");
+			let submitted = "";
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+			editor.handleInput("\r");
+			expect(submitted).toBe("ask ^@smol:hi");
+		});
+
+		it("refreshes role chips without moving the logical caret or changing unrelated atoms", () => {
+			const editor = makeModelEditor();
+			let name: string | undefined = "X One";
+			editor.resolveModelMention = selector =>
+				selector === "@smol" && name !== undefined
+					? { label: modelMentionChipLabel(`@smol → ${name}`), selector }
+					: undefined;
+			editor.setCollapsedText("ask ^@smol then ");
+			editor.insertTextAttachment("pasted content");
+			const attachment = editor.pendingTexts[0]!.label;
+			editor.handleInput("\x02");
+			name = "Longer Model · high";
+			editor.render(140);
+			const changed = `ask ${modelMentionChipLabel("@smol → Longer Model · high")} then ${attachment} `;
+			expect(editor.getText()).toBe(changed);
+			expect(editor.getCursor()).toEqual({ line: 0, col: changed.length - 1 });
+			expect(editor.getExpandedText()).toBe("ask ^@smol then pasted content ");
+			name = undefined;
+			editor.render(140);
+			expect(editor.getText()).toBe(`ask ^@smol then ${attachment} `);
+			expect(editor.getCursor()).toEqual({ line: 0, col: `ask ^@smol then ${attachment}`.length });
+			expect(editor.getExpandedText()).toBe("ask ^@smol then pasted content ");
+			name = "Y Two";
+			editor.handleInput(" ");
+			expect(editor.getText()).toBe(`ask ${modelMentionChipLabel("@smol → Y Two")} then ${attachment}  `);
+			expect(editor.getExpandedText()).toBe("ask ^@smol then pasted content  ");
+		});
+
+		it("keeps role-like text attachments collapsed while refreshing actual role chips", () => {
+			for (const content of ["^@smol", "^@smol\npasted content\n".repeat(12)]) {
+				const editor = makeModelEditor();
+				let name = "X One";
+				editor.resolveModelMention = selector =>
+					selector === "@smol" ? { label: modelMentionChipLabel(`@smol → ${name}`), selector } : undefined;
+				editor.setCollapsedText("ask ^@smol then ");
+				editor.insertTextAttachment(content);
+				const attachment = editor.pendingTexts[0]!.label;
+				name = "Y Two";
+				editor.render(140);
+				expect(editor.getText()).toBe(`ask ${modelMentionChipLabel("@smol → Y Two")} then ${attachment} `);
+				expect(editor.getExpandedText()).toBe(`ask ^@smol then ${content} `);
+			}
+		});
+
+		it("preserves role expansion and submission when a refreshed label contains decomposed Unicode", () => {
+			const editor = makeModelEditor();
+			let name = "X One";
+			editor.resolveModelMention = selector =>
+				selector === "@smol" ? { label: modelMentionChipLabel(`@smol → ${name}`), selector } : undefined;
+			editor.setCollapsedText("ask ^@smol then ");
+			name = "Cafe\u0301";
+			editor.render(140);
+			expect(editor.getText().normalize("NFC")).toBe(`ask ${modelMentionChipLabel("@smol → Café")} then `);
+			expect(editor.getExpandedText()).toBe("ask ^@smol then ");
+			expect(editor.getCursor()).toEqual({ line: 0, col: editor.getText().length });
+			let submitted = "";
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+			editor.handleInput("\r");
+			expect(submitted).toBe("ask ^@smol then");
+		});
+
+		it("keeps automatic role relabeling out of the undo history", () => {
+			const editor = makeModelEditor();
+			let name = "X One";
+			editor.resolveModelMention = selector =>
+				selector === "@smol" ? { label: modelMentionChipLabel(`@smol → ${name}`), selector } : undefined;
+			editor.setCollapsedText("ask ^@smol ");
+			editor.handleInput("work");
+			name = "Y Two";
+			editor.render(140);
+			editor.handleInput("\x1b[45;5u");
+			expect(editor.getExpandedText()).toBe("ask ^@smol ");
+		});
+
+		it("lets native undo step past mention collapse across repeated renders", () => {
+			const editor = makeModelEditor();
+			for (const ch of "^a/x ") editor.handleInput(ch);
+			editor.handleNativeEvent({ type: "undo", key: "input" });
+			editor.render(140);
+			editor.render(140);
+			editor.describe({ cols: 140, reduceMotion: true, dark: true, supports: () => true, feature: () => false });
+			expect(editor.getText()).toBe("^a/x ");
+			editor.handleNativeEvent({ type: "undo", key: "input" });
+			editor.render(140);
+			expect(editor.getText()).toBe("^a/x");
+		});
+
+		it("collapses a native edit once and leaves its raw spelling available to undo", () => {
+			const editor = makeModelEditor();
+			editor.handleNativeEvent({
+				type: "edit",
+				key: "input",
+				from: 0,
+				to: 0,
+				text: "^a/x ",
+				cursor: 5,
+				len: 0,
+			});
+			expect(editor.getText()).toBe(`${modelMentionChipLabel("X One")} `);
+			editor.handleNativeEvent({ type: "undo", key: "input" });
+			editor.describe({ cols: 140, reduceMotion: true, dark: true, supports: () => true, feature: () => false });
+			expect(editor.getText()).toBe("^a/x ");
+			editor.handleNativeEvent({ type: "undo", key: "input" });
+			expect(editor.getText()).toBe("");
+		});
+
+		it("lets keyboard undo restore the uncollapsed spelling", () => {
+			const editor = makeModelEditor();
+			for (const ch of "^a/x ") editor.handleInput(ch);
+			editor.handleInput("\x1b[45;5u");
+			editor.render(140);
+			expect(editor.getText()).toBe("^a/x ");
+			editor.handleInput("\x1b[45;5u");
+			expect(editor.getText()).toBe("^a/x");
+		});
+
+		it("keeps browsing recalled prompts when a role label refreshes", () => {
+			const editor = makeModelEditor();
+			let name = "X One";
+			editor.resolveModelMention = selector =>
+				selector === "@smol" ? { label: modelMentionChipLabel(`@smol → ${name}`), selector } : undefined;
+			editor.setCollapsedText("older ^@smol ");
+			editor.rememberDraft();
+			editor.setCollapsedText("newer ^@smol ");
+			editor.rememberDraft();
+			editor.setText("");
+			editor.handleInput("\x1b[A");
+			name = "Y Two";
+			const changes: string[] = [];
+			editor.onChange = text => changes.push(text);
+			editor.render(140);
+			expect(editor.getText()).toBe(`newer ${modelMentionChipLabel("@smol → Y Two")} `);
+			expect(changes).toEqual([]);
+			editor.handleInput("\x1b[A");
+			expect(editor.getExpandedText()).toBe("older ^@smol ");
+			editor.handleInput("\x1b[B");
+			expect(editor.getExpandedText()).toBe("newer ^@smol ");
+		});
+
+		it("recovers a temporarily invalid role on render without making it a user edit", () => {
+			const editor = makeModelEditor();
+			let name: string | undefined = "X One";
+			editor.resolveModelMention = selector =>
+				selector === "@smol" && name !== undefined
+					? { label: modelMentionChipLabel(`@smol → ${name}`), selector }
+					: undefined;
+			editor.setCollapsedText("ask ^@smol ");
+			name = undefined;
+			editor.render(140);
+			expect(editor.getText()).toBe("ask ^@smol ");
+			name = "Y Two";
+			const changes: string[] = [];
+			editor.onChange = text => changes.push(text);
+			editor.render(140);
+			expect(editor.getText()).toBe(`ask ${modelMentionChipLabel("@smol → Y Two")} `);
+			expect(changes).toEqual([]);
+		});
+
+		it("collapses a previously unavailable typed role when its model becomes available", () => {
+			const editor = makeModelEditor();
+			let available = false;
+			editor.resolveModelMention = selector =>
+				selector === "@smol" && available ? { label: modelMentionChipLabel("@smol → X One"), selector } : undefined;
+			for (const ch of "ask ^@smol ") editor.handleInput(ch);
+			expect(editor.getText()).toBe("ask ^@smol ");
+			available = true;
+			editor.render(140);
+			expect(editor.getText()).toBe(`ask ${modelMentionChipLabel("@smol → X One")} `);
+			expect(editor.getExpandedText()).toBe("ask ^@smol ");
+		});
+
+		it("keeps an invalidated role's raw spelling editable one character at a time", () => {
+			const editor = makeModelEditor();
+			let available = true;
+			editor.resolveModelMention = selector =>
+				selector === "@smol" && available ? { label: modelMentionChipLabel("@smol → X One"), selector } : undefined;
+			editor.setCollapsedText("ask ^@smol ");
+			available = false;
+			editor.render(140);
+			editor.handleInput("\x02");
+			editor.handleInput("\x7f");
+			expect(editor.getText()).toBe("ask ^@smo ");
+			expect(editor.getExpandedText()).toBe("ask ^@smo ");
+		});
+
+		it("repeats a completed mention insertion in Vim without truncating the chip", () => {
+			const editor = makeModelEditor();
+			editor.setVimMode(true);
+			editor.setText("target\n");
+			for (const ch of "^a/x ") editor.handleInput(ch);
+			editor.handleInput("\x1b");
+			editor.handleInput("k");
+			editor.handleInput("0");
+			editor.handleInput(".");
+			expect(editor.getExpandedText()).toBe("^a/x target\n^a/x ");
+		});
+
+		it("keeps live role relabels out of Vim dot-repeat", () => {
+			const editor = makeModelEditor();
+			let name = "X One";
+			editor.resolveModelMention = selector =>
+				selector === "@smol" ? { label: modelMentionChipLabel(`@smol → ${name}`), selector } : undefined;
+			editor.setVimMode(true);
+			editor.setCollapsedText("target\n^@smol ");
+			editor.handleInput("work");
+			name = "A Much Longer Model";
+			editor.render(140);
+			editor.handleInput("\x1b");
+			editor.handleInput("k");
+			editor.handleInput("0");
+			editor.handleInput(".");
+			expect(editor.getExpandedText()).toBe("worktarget\n^@smol work");
+		});
+
+		it("repeats only the typed suffix after a role becomes invalid and recovers", () => {
+			const editor = makeModelEditor();
+			let name: string | undefined = "X One";
+			editor.resolveModelMention = selector =>
+				selector === "@smol" && name !== undefined
+					? { label: modelMentionChipLabel(`@smol → ${name}`), selector }
+					: undefined;
+			editor.setVimMode(true);
+			editor.setCollapsedText("target\n🦊 ^@smol ");
+			editor.handleInput("café");
+			name = undefined;
+			editor.render(140);
+			expect(editor.getExpandedText()).toBe("target\n🦊 ^@smol café");
+			name = "Cafe\u0301 Model";
+			editor.render(140);
+			editor.handleInput("\x1b");
+			editor.handleInput("k");
+			editor.handleInput("0");
+			editor.handleInput(".");
+			expect(editor.getExpandedText()).toBe("cafétarget\n🦊 ^@smol café");
+		});
+
+		it("does not relabel role atoms inside local execution drafts", () => {
+			const editor = makeModelEditor();
+			let name = "X One";
+			editor.resolveModelMention = selector =>
+				selector === "@smol" ? { label: modelMentionChipLabel(`@smol → ${name}`), selector } : undefined;
+			editor.setCollapsedText("ask ^@smol ");
+			const chip = modelMentionChipLabel("@smol → X One");
+			for (const prefix of ["!echo ", "$ ", "$$ "]) {
+				editor.setText(`${prefix}${chip} `);
+				name = "Y Two";
+				editor.handleInput("");
+				expect(editor.getText()).toBe(`${prefix}${chip} `);
+			}
+		});
+
 		it("collapses equivalent spellings of one mention into the same chip", () => {
 			const editor = makeModelEditor();
 			for (const ch of "^c/z then ^c/z:auto ") editor.handleInput(ch);

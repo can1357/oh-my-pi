@@ -1497,7 +1497,12 @@ export interface ResolvedModelRoleValue {
 export function resolveModelRoleValue(
 	roleValue: string | undefined,
 	availableModels: Model<Api>[],
-	options?: { settings?: Settings; roleLookup?: ModelRoleLookup; matchPreferences?: ModelMatchPreferences },
+	options?: {
+		settings?: Settings;
+		roleLookup?: ModelRoleLookup;
+		matchPreferences?: ModelMatchPreferences;
+		clampThinkingLevel?: boolean;
+	},
 ): ResolvedModelRoleValue {
 	if (!roleValue) {
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
@@ -1525,11 +1530,12 @@ export function resolveModelRoleValue(
 			return {
 				model: resolved.model,
 				matchedPatternIndex: patternIndex,
-				thinkingLevel: resolved.explicitThinkingLevel
-					? resolved.thinkingLevel === AUTO_THINKING
-						? AUTO_THINKING
-						: (resolveThinkingLevelForModel(resolved.model, resolved.thinkingLevel) ?? resolved.thinkingLevel)
-					: resolved.thinkingLevel,
+				thinkingLevel:
+					options?.clampThinkingLevel !== false &&
+					resolved.explicitThinkingLevel &&
+					resolved.thinkingLevel !== AUTO_THINKING
+						? (resolveThinkingLevelForModel(resolved.model, resolved.thinkingLevel) ?? resolved.thinkingLevel)
+						: resolved.thinkingLevel,
 				explicitThinkingLevel: resolved.explicitThinkingLevel,
 				warning: resolved.warning,
 			};
