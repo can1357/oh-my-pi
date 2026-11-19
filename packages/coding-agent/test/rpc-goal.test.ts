@@ -114,26 +114,33 @@ describe("RPC goal command", () => {
 		expect(continuations).toHaveLength(1);
 	}, 30_000);
 
-	test("dropping a held goal continuation refreshes idle maintenance", async () => {
-		const rpc = await start({ continuation: true, script: "idle", idleMaintenance: true });
-		const callsPath = path.join(directory!, "idle-refresh.calls");
-		const callCount = async () => {
-			const calls = await fs.readFile(callsPath, "utf8").catch(() => "");
-			return calls.trim() ? calls.trim().split("\n").length : 0;
-		};
-		await rpc.promptAndWait("/goaltest-hold-continuation");
-		await rpc.goal("create", { objective: "drop before admission" });
-		const beforeDrop = await callCount();
-		await rpc.goal("drop");
-		await rpc.promptAndWait("/goaltest-release-continuation");
-		await withTimeout(
-			(async () => {
-				while ((await callCount()) === beforeDrop) await Bun.sleep(10);
-			})(),
-			5_000,
-			"Dropped continuation did not refresh idle maintenance",
-		);
-		expect(await callCount()).toBe(beforeDrop + 1);
+	test("a held goal continuation blocks idle compaction and dropping it re-arms compaction", async () => {
+		const rpc = await start({ continuation: true, script: "complete", idleMaintenance: true });
+		await rpc.promptAndWait("setup for idle compaction");
+		const firstTurnEnd = Promise.withResolvers<void>();
+		const idleStart = Promise.withResolvers<void>();
+		let idleStarts = 0;
+		const unsubscribe = rpc.onSessionEvent(event => {
+			if (event.type === "agent_end") firstTurnEnd.resolve();
+			if (event.type === "auto_compaction_start" && event.reason === "idle") {
+				idleStarts++;
+				idleStart.resolve();
+			}
+		});
+		try {
+			await rpc.goal("create", { objective: "hold the second turn, then drop it" });
+			await withTimeout(firstTurnEnd.promise, 10_000, "First goal turn never finished");
+			await Bun.sleep(150);
+			expect(idleStarts).toBe(0);
+			const held = await rpc.getState();
+			expect(held.goal?.goal.status).toBe("active");
+			expect(held.isSettled).toBe(false);
+			await rpc.goal("drop");
+			await withTimeout(idleStart.promise, 5_000, "Dropped continuation did not re-arm idle compaction");
+			expect(idleStarts).toBe(1);
+		} finally {
+			unsubscribe();
+		}
 	}, 30_000);
 
 	test("create refuses a second goal, a paused goal, and invalid input; pause/resume/drop restore tools", async () => {
