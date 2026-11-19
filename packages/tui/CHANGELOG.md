@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
+- Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [19.0.1] - 2026-11-19
 
@@ -48,8 +49,6 @@
 - Fixed table chart unit display and change-factor calculations for measurements with scaled units.
 - Fixed checkbox groups so pressing Enter with nothing selected first checks the focused box.
 - Ask forms now open each question with its preselected answer, allowing Enter to accept the recommendation without replacing it.
-
-- Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.22.2] - 2026-11-18
 

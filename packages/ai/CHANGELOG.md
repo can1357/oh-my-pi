@@ -6,6 +6,8 @@
 
 - Fixed thinking detection so a failed check of one request style no longer ignores another style that already worked, and the next request no longer repeats a style the server already refused. ([#19758](https://github.com/can1357/oh-my-pi/pull/19758) by [@eggpeat](https://github.com/eggpeat))
 - The auth broker now logs a warning when a transient OAuth refresh failure leaves a login's access token expiring before the next retry; these failures logged only at debug, so a login could stop refreshing and lapse unnoticed ([#19590](https://github.com/can1357/oh-my-pi/pull/19590) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed chat completions dropping reasoning sent only as `reasoning_details` (Bifrost Gemini) ([#19595](https://github.com/can1357/oh-my-pi/pull/19595) by [@Xytronix](https://github.com/Xytronix))
+- Fixed Antigravity CLI quota exhaustion (`RESOURCE_EXHAUSTED`) streaming into replies as "API error" text; the request now fails with a 429 rate-limit error, so omp's retry, credential rotation and model fallback policy applies instead of a thinking-loop retry ([#19382](https://github.com/can1357/oh-my-pi/pull/19382) by [@gimso2x](https://github.com/gimso2x))
 
 ## [19.0.1] - 2026-11-19
 
@@ -18,7 +20,6 @@
 - Kiro `/usage` shows purchased add-on credits, and an account whose plan credits are spent keeps serving while add-on credits remain ([#19724](https://github.com/can1357/oh-my-pi/pull/19724) by [@emotionbug](https://github.com/emotionbug))
 - Kiro Identity Center logins in AWS GovCloud (US) now list profiles in `us-gov-west-1` and `us-gov-east-1` instead of the commercial regions, which reject GovCloud tokens ([#19726](https://github.com/can1357/oh-my-pi/pull/19726) by [@TechDufus](https://github.com/TechDufus))
 - Statusless gateway errors reading `stream interrupted` now retry like `stream was interrupted` instead of ending the turn ([#19709](https://github.com/can1357/oh-my-pi/issues/19709)).
-- Fixed chat completions dropping reasoning sent only as `reasoning_details` (Bifrost Gemini) ([#19595](https://github.com/can1357/oh-my-pi/pull/19595) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.0.0] - 2026-11-18
 
@@ -90,8 +91,6 @@
 ### Fixed
 
 - Fixed slow streaming of Gemma tool calls with large arguments.
-- Fixed Antigravity CLI quota exhaustion (`RESOURCE_EXHAUSTED`) streaming into replies as "API error" text; the request now fails with a 429 rate-limit error, so omp's retry, credential rotation and model fallback policy applies instead of a thinking-loop retry ([#19382](https://github.com/can1357/oh-my-pi/pull/19382) by [@gimso2x](https://github.com/gimso2x))
-- Gemma tool calls with large arguments no longer slow down as they stream ([#19487](https://github.com/can1357/oh-my-pi/pull/19487) by [@H4vC](https://github.com/H4vC))
 
 ## [18.21.0] - 2026-11-16
 
