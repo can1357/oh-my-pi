@@ -421,7 +421,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			const hasApprovalHandlers =
 				this.runner.hasHandlers("tool_approval_requested") || this.runner.hasHandlers("tool_approval_resolved");
 			const sessionId = context?.sessionManager?.getSessionId() ?? "";
-			recordToolApprovalRequested(this.runner.approvalRecords, {
+			await recordToolApprovalRequested(this.runner.approvalRecords, {
 				toolCallId,
 				toolName: this.tool.name,
 				approvalMode,
@@ -439,7 +439,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 
 			const emitApprovalResolved = async (approved: boolean, reason?: string) => {
-				recordToolApprovalResolved(this.runner.approvalRecords, {
+				await recordToolApprovalResolved(this.runner.approvalRecords, {
 					toolCallId,
 					toolName: this.tool.name,
 					approved,
