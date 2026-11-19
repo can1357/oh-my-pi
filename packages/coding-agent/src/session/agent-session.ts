@@ -291,7 +291,7 @@ import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { AgentDefinition } from "../task/types";
 import type { AgentOutputManager } from "../task/output-manager";
 import type { ModelMention } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
-import { ModelMentionRegistry, type ResolvedModelMention } from "./model-mentions";
+import { ModelMentionRegistry, type ResolvedModelMention, referencedModelAgents } from "./model-mentions";
 import { parseCommandArgs } from "../utils/command-args";
 import type { EditModeSetting } from "../edit/settings";
 import { getEditStore } from "../edit/store";
@@ -9282,8 +9282,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// A `^` mention in a non-synthetic prompt mints a new alias. The hidden
 		// session-agent notice (which tells the model about the alias) must ride
 		// with the message via prependMessages — not as a separate steer — so the
-		// model sees both in the same turn (#14093).
-		const sessionAgentNotice = options?.synthetic ? undefined : this.#tools.takeSessionAgentNotice();
+		// model sees both in the same turn (#14093). A queued prompt announces only
+		// the aliases it references and nothing queued ahead of it announces.
+		const sessionAgentNotice = options?.synthetic
+			? undefined
+			: this.isStreaming
+				? this.#takeQueuedSessionAgentNotice(expandedText, options?.streamingBehavior)
+				: this.#tools.takeSessionAgentNotice();
 		const prependNotices = sessionAgentNotice ? [...keywordNotices, sessionAgentNotice] : keywordNotices;
 
 		// Agent-initiated synthetic prompts (auto-continue, plan, reminders) are not user turns.
@@ -9590,7 +9595,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				skillArgs = details.args;
 			}
 			keywordNotices = this.#createMagicKeywordNotices(skillArgs);
-			const sessionAgentNotice = this.#tools.takeSessionAgentNotice();
+			const sessionAgentNotice =
+				options?.queueOnly || this.isStreaming
+					? this.#takeQueuedSessionAgentNotice(textContent, options?.streamingBehavior)
+					: this.#tools.takeSessionAgentNotice();
 			queuedNotices = sessionAgentNotice ? [...keywordNotices, sessionAgentNotice] : keywordNotices;
 		}
 
@@ -9715,20 +9723,34 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			queue === "followUp" && userMessages.some(message => this.#isUserTask(message))
 				? this.#prepareQueuedUserTask(first, promptText, preparationImages, signal)
 				: this.#prepareAgentStart(first, promptText, preparationImages, this.#promptGeneration, signal, "queued");
-		return this.#relaxOnDelivery(preparation, promptText);
+		return this.#commitOnDelivery(preparation, messages, promptText);
 	};
 
-	/** Apply `chillax` when the batch is delivered, so a steer relaxes the running turn from its next request. */
-	async #relaxOnDelivery(
+	/**
+	 * Finish a queued batch when it is delivered: apply `chillax`, so a steer relaxes the running
+	 * turn from its next request, and announce any `m<N>` agent the batch's text references
+	 * that no notice reaching the model first announces. Queued messages skip a notice queued
+	 * ahead of them; when that message was withdrawn or reordered behind this batch, the
+	 * reference is announced here instead.
+	 */
+	async #commitOnDelivery(
 		pending: Promise<QueuedMessagePreparation>,
+		messages: readonly AgentMessage[],
 		promptText: string,
 	): Promise<QueuedMessagePreparation> {
+		const referenced = referencedModelAgents(promptText);
 		const preparation = await pending;
 		return {
 			commit: () => {
 				const additional = preparation.commit();
-				if (additional !== undefined) this.#models.applyChillax(promptText);
-				return additional;
+				if (additional === undefined) return undefined;
+				this.#models.applyChillax(promptText);
+				if (referenced.size === 0) return additional;
+				const notice = this.#tools.takeSessionAgentNotice(
+					[...this.agent.peekUndeliveredQueuedMessages(), ...messages, ...additional],
+					referenced,
+				);
+				return notice ? [...additional, notice] : additional;
 			},
 		};
 	}
@@ -10378,6 +10400,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 		const queued = this.#expandQueuedMentions(
 			expandPromptTemplate(text, [...this.#promptTemplates]),
+			"steer",
 			options?.attribution,
 		);
 		// Stamp before image preprocessing so a queued image steer measures from
@@ -10399,12 +10422,41 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	#expandQueuedMentions(
 		text: string,
+		mode: "steer" | "followUp" | "aside",
 		attribution: MessageAttribution = "user",
 	): { text: string; prependMessages: CustomMessage[] } {
 		if (attribution !== "user") return { text, prependMessages: [] };
 		const expandedText = this.#modelMentions.expandMentions(text);
-		const sessionAgentNotice = this.#tools.takeSessionAgentNotice();
+		const sessionAgentNotice = this.#takeQueuedSessionAgentNotice(expandedText, mode);
 		return { text: expandedText, prependMessages: sessionAgentNotice ? [sessionAgentNotice] : [] };
+	}
+
+	/**
+	 * The session-agent notice for a user message queued now in `mode`: the `m<N>` agents its
+	 * expanded `text` references that no notice in context or queued ahead of it announces.
+	 * Other roster changes ride the next direct prompt, so a message queued in another queue
+	 * never repeats them.
+	 */
+	#takeQueuedSessionAgentNotice(
+		text: string,
+		mode: "steer" | "followUp" | "aside" | undefined,
+	): CustomMessage | undefined {
+		const referenced = referencedModelAgents(text);
+		if (referenced.size === 0) return undefined;
+		return this.#tools.takeSessionAgentNotice(this.#queuedAhead(mode), referenced);
+	}
+
+	/**
+	 * Queued messages that reach the model before one queued now in `mode`: batches
+	 * already being delivered, the steering queue, and for a follow-up the follow-up
+	 * queue. Asides fold in on their own schedule, so nothing counts as ahead of them.
+	 */
+	#queuedAhead(mode: "steer" | "followUp" | "aside" | undefined): AgentMessage[] {
+		if (mode !== "steer" && mode !== "followUp") return [];
+		const ahead = this.agent.peekUndeliveredQueuedMessages();
+		ahead.push(...this.agent.peekSteeringQueue());
+		if (mode === "followUp") ahead.push(...this.agent.peekFollowUpQueue());
+		return ahead;
 	}
 
 	/**
@@ -10425,7 +10477,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// from the operator's submission, not after the vision-model description.
 		const submittedAt = Date.now();
 		if (!options?.synthetic) {
-			const queued = this.#expandQueuedMentions(expandedText, options?.attribution);
+			const queued = this.#expandQueuedMentions(expandedText, "followUp", options?.attribution);
 			await this.#queueUserMessage(queued.text, images, "followUp", {
 				timestamp: submittedAt,
 				attribution: options?.attribution,
@@ -10544,7 +10596,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		}
 		const mode = options?.queue === "followUp" ? "followUp" : "steer";
-		const queued = this.#expandQueuedMentions(expandPromptTemplate(text, [...this.#promptTemplates]));
+		const queued = this.#expandQueuedMentions(expandPromptTemplate(text, [...this.#promptTemplates]), mode);
 		return await this.#queueUserMessage(queued.text, images, mode, {
 			timestamp: Date.now(),
 			prependMessages: queued.prependMessages,
@@ -10761,7 +10813,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#queueFollowUpTexts(texts: readonly string[]): void {
 		this.#advisors.autoResumeSuppressed = false;
 		for (const text of texts) {
-			const queued = this.#expandQueuedMentions(expandPromptTemplate(text, [...this.#promptTemplates]));
+			const queued = this.#expandQueuedMentions(expandPromptTemplate(text, [...this.#promptTemplates]), "followUp");
 			const content: TextContent[] = [{ type: "text", text: queued.text }];
 			this.#pushQueuedUserMessage("followUp", queued.prependMessages, content, "user", Date.now(), text);
 		}
@@ -11596,28 +11648,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (images.length === 0) images = undefined;
 		}
 
-		let deliveredAsAside = false;
-		if (options?.deliverAs === "aside") {
-			if (this.isStreaming) {
-				if (!(await this.#queueUserMessage(text, images, "aside", { attribution: options.attribution }))) {
-					throw new PromptDroppedError();
-				}
-				return;
-			}
-			// Idle: fall through to the prompt flow below (starts a turn, like an omitted
-			// deliverAs) — there is no live run to inject an aside into.
-			deliveredAsAside = true;
-		} else if (options?.deliverAs === "followUp") {
-			if (!(await this.#queueUserMessage(text, images, "followUp", { attribution: options.attribution }))) {
-				throw new PromptDroppedError();
-			}
-			return;
-		} else if (options?.deliverAs === "steer") {
-			if (!(await this.#queueUserMessage(text, images, "steer", { attribution: options.attribution }))) {
+		const queueMode = options?.deliverAs;
+		if (queueMode === "followUp" || queueMode === "steer" || (queueMode === "aside" && this.isStreaming)) {
+			const queued = this.#expandQueuedMentions(text, queueMode, options?.attribution);
+			if (
+				!(await this.#queueUserMessage(queued.text, images, queueMode, {
+					attribution: options?.attribution,
+					prependMessages: queued.prependMessages,
+					rawText: text,
+				}))
+			) {
 				throw new PromptDroppedError();
 			}
 			return;
 		}
+		// Idle aside: fall through to the prompt flow below (starts a turn, like an omitted
+		// deliverAs) — there is no live run to inject an aside into.
+		const deliveredAsAside = queueMode === "aside";
 
 		// Use prompt() with expandPromptTemplates: false to skip command handling and template
 		// expansion. prompt() awaits manual-compaction cleanup and (on the non-streaming path)
