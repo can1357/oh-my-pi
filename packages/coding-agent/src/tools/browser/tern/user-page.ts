@@ -8,6 +8,7 @@
  * the system browser.
  */
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
+import { redactUrlForLog } from "../../../mcp/json-rpc";
 import { resolveTernPane } from "./kind";
 import { TernError, TernSocketClient } from "./wire";
 
@@ -103,7 +104,12 @@ export async function openTernPage(url: string, how: TernPagePlacement): Promise
 		});
 		return new TernPage(client, pane.socketPath, block);
 	} catch (error) {
-		logger.debug("Tern could not open the page; using the system browser", { url, how, error: String(error) });
+		logger.debug("Tern could not open the page; using the system browser", {
+			url: redactUrlForLog(url),
+			how,
+			// Tern's free-text error can echo the original URL.
+			kind: error instanceof TernError ? error.kind : undefined,
+		});
 		client.close();
 		return null;
 	}

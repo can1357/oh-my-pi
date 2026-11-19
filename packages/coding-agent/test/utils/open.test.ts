@@ -222,13 +222,13 @@ describe("openPath", () => {
 		} as unknown as Subprocess;
 		vi.spyOn(Bun, "spawn").mockImplementation(() => failing);
 
-		openPath("https://example.com");
+		openPath("http://127.0.0.1:3849/#t=workspace-secret");
 		await failing.exited;
 		await Promise.resolve();
 
 		expect(warnSpy).toHaveBeenCalledWith(
 			"External opener exited with non-zero status",
-			expect.objectContaining({ exitCode: 1 }),
+			expect.objectContaining({ exitCode: 1, target: "http://127.0.0.1:3849/" }),
 		);
 	});
 });
