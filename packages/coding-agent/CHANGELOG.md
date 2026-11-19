@@ -9,7 +9,7 @@
 ### Fixed
 
 - Fixed the bundled `omp://tools` docs still describing the removed `ida` tool; `tools/dsm.md` now documents eval's `dsm` namespace and `disassembler.*` settings, and `tools/read.md` documents metadata-only executable reads ([#19608](https://github.com/can1357/oh-my-pi/issues/19608))
-- Fixed Hindsight startup warnings disappearing when collaboration auto-starts before the local UI is ready ([#16475](https://github.com/can1357/oh-my-pi/pull/16475) by [@shgew](https://github.com/shgew))
+- Fixed Hindsight startup warnings disappearing when collaboration auto-starts or idle maintenance subscribes before the local UI is ready ([#16475](https://github.com/can1357/oh-my-pi/pull/16475) by [@shgew](https://github.com/shgew))
 - Fixed `/memory mm refresh <id>` reloading cached guidance before the refresh completes; failed, cancelled, and timed-out refreshes preserve the cache, failed reloads warn that previous guidance remains, and Escape cancels the wait ([#16475](https://github.com/can1357/oh-my-pi/pull/16475) by [@shgew](https://github.com/shgew))
 - Fixed bank-wide `/memory mm refresh` skipping cron-managed mental models while continuing to leave manual-only models untouched, with at most four refreshes in progress at once ([#16475](https://github.com/can1357/oh-my-pi/pull/16475) by [@shgew](https://github.com/shgew))
 

@@ -116,6 +116,7 @@ describe("#emit listener isolation", () => {
 		it("delivers mental-model startup warnings past an auto-started collab mirror exactly once", async () => {
 			const client = new HindsightApi({ baseUrl: "https://hindsight.invalid" });
 			new AutoLearnController({ session, settings: Settings.isolated(), capture: async () => {} });
+			session.enableIdleMaintenance();
 			vi.spyOn(client, "listMentalModels").mockResolvedValue({
 				items: [
 					{
