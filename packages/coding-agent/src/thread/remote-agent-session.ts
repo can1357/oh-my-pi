@@ -904,6 +904,7 @@ export class RemoteAgentSession implements AgentViewSession {
 	applyEvent(event: AgentSessionEvent): void {
 		if (this.#closed !== undefined) return;
 		this.#trackEvent(event);
+		// oxlint-disable-next-line unicorn/no-useless-spread -- snapshot: the loop body may add or remove listeners
 		for (const listener of [...this.#listeners]) {
 			try {
 				listener(event);
@@ -919,6 +920,7 @@ export class RemoteAgentSession implements AgentViewSession {
 	/** Bridge only: report a run-state transition to run-state subscribers. */
 	applyRunState(state: SessionRunState): void {
 		if (this.#closed !== undefined) return;
+		// oxlint-disable-next-line unicorn/no-useless-spread -- snapshot: the loop body may add or remove listeners
 		for (const listener of [...this.#runStateListeners]) {
 			try {
 				listener(state);
