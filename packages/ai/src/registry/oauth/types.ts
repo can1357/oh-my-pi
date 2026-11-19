@@ -23,13 +23,24 @@ export type OAuthCredentials = {
 	 * Account residency region (e.g. `"eu"`), when the provider is
 	 * region-partitioned. Captured at login; refreshed identity may update it
 	 * when the account migrates, while failed lookups preserve the stored value.
-	 * Residency selects the API host, not inference eligibility.
+	 * Residency selects the API host, not inference eligibility. For Kiro, the
+	 * API region the login routes to.
 	 */
 	region?: string;
 	/** Factory organization inference scope, independent of account residency. */
 	inferenceRegion?: "global" | "eu" | "us";
 	/** WorkOS selected organization; never used as a Factory API organization header. */
 	activeOrganizationId?: string;
+	/**
+	 * Kiro AWS SSO-OIDC client binding (IAM Identity Center / Builder ID). Refresh
+	 * must reuse the registered client at `oidc.{kiroOidcRegion}`; a row without
+	 * `kiroClientId` is a Google/GitHub sign-in refreshed by the Kiro auth service.
+	 */
+	kiroClientId?: string;
+	kiroClientSecret?: string;
+	kiroOidcRegion?: string;
+	/** Kiro profile ARN the login routes by; absent for Builder ID. Embeds the AWS account id, so never displayed. */
+	kiroProfileArn?: string;
 	/**
 	 * Epoch ms of the interactive login that minted this grant. Set by
 	 * `AuthStorage.oauth.login`; token refreshes preserve it. Providers with an

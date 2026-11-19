@@ -26,6 +26,7 @@ import {
 	resolveOpenAIRequestSetup,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
+import { withResolvedHeaders } from "@oh-my-pi/pi-ai/utils/model-headers";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { isBedrockOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
@@ -67,12 +68,14 @@ const CONTEXTUAL_USER_PREFIXES = [
 	"<model_switch>",
 ];
 
-/** Token usage reported by the streamed V2 Responses completion. */
-export interface CompactionV2Usage {
+/** Token usage a Responses compaction request reported: the V1 `/responses/compact` body, or the V2 stream's completed response. */
+export interface ResponsesCompactionUsage {
 	inputTokens: number;
 	outputTokens: number;
 	totalTokens: number;
 	cachedInputTokens?: number;
+	/** Input tokens the request wrote to the prompt cache; part of `inputTokens`. */
+	cacheWriteTokens?: number;
 	reasoningOutputTokens?: number;
 }
 
@@ -92,7 +95,7 @@ export interface CompactionV2Response {
 	compactionItem: Record<string, unknown>;
 	replacementHistory: Array<Record<string, unknown>>;
 	usedTokens: number;
-	usage?: CompactionV2Usage;
+	usage?: ResponsesCompactionUsage;
 	retainedImageCount: number;
 }
 
@@ -283,6 +286,7 @@ export async function requestCompactionV2Streaming(
 		codexAccessPrograms?: boolean;
 	},
 ): Promise<CompactionV2Response> {
+	model = await withResolvedHeaders(model, signal);
 	let fetchImpl: FetchImpl = options?.fetch ?? globalThis.fetch;
 	if (isBedrockOpenAIUrl(model.baseUrl)) {
 		({
@@ -494,7 +498,7 @@ interface CompactionV2CollectionState {
 	outputItemCount: number;
 	compactionItems: Array<Record<string, unknown>>;
 	sawCompleted: boolean;
-	usage: CompactionV2Usage | undefined;
+	usage: ResponsesCompactionUsage | undefined;
 }
 
 function createCompactionV2CollectionState(): CompactionV2CollectionState {
@@ -636,7 +640,7 @@ function handleCompactionV2Event(
 
 	if (type === "response.completed" || type === "response.done") {
 		state.sawCompleted = true;
-		state.usage = parseCompactionV2Usage(event);
+		state.usage = parseResponsesCompactionUsage(isRecord(event.response) ? event.response.usage : undefined);
 		return;
 	}
 
@@ -653,10 +657,9 @@ function handleCompactionV2Event(
 	}
 }
 
-function parseCompactionV2Usage(event: Record<string, unknown>): CompactionV2Usage | undefined {
-	const response = isRecord(event.response) ? event.response : undefined;
-	const usage = response && isRecord(response.usage) ? response.usage : undefined;
-	if (!usage) return undefined;
+/** A Responses `usage` object; undefined when it is missing or lacks the token totals. */
+export function parseResponsesCompactionUsage(usage: unknown): ResponsesCompactionUsage | undefined {
+	if (!isRecord(usage)) return undefined;
 
 	const inputTokens = numberField(usage, "input_tokens");
 	const outputTokens = numberField(usage, "output_tokens");
@@ -666,12 +669,14 @@ function parseCompactionV2Usage(event: Record<string, unknown>): CompactionV2Usa
 	const inputDetails = isRecord(usage.input_tokens_details) ? usage.input_tokens_details : undefined;
 	const outputDetails = isRecord(usage.output_tokens_details) ? usage.output_tokens_details : undefined;
 	const cachedInputTokens = inputDetails ? numberField(inputDetails, "cached_tokens") : undefined;
+	const cacheWriteTokens = inputDetails ? numberField(inputDetails, "cache_write_tokens") : undefined;
 	const reasoningOutputTokens = outputDetails ? numberField(outputDetails, "reasoning_tokens") : undefined;
 	return {
 		inputTokens,
 		outputTokens,
 		totalTokens,
 		...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+		...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
 		...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
 	};
 }

@@ -384,7 +384,7 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	}
 	console.log();
 
-	// pi-natives addons carry no per-release Rust edit: every install stamps
+	// omp-natives addons carry no per-release Rust edit: every install stamps
 	// `packages/natives/package.json#version` into the addon post-link
 	// (scripts/stamp-native-version.ts via scripts/bazel-natives.ts), so the
 	// version bump above is the only native-facing change.

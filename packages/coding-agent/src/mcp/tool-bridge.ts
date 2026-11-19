@@ -66,6 +66,8 @@ const RETRIABLE_PATTERNS = [
 	"transport closed",
 	"network error",
 ];
+const EXPIRED_SESSION = /(?:unknown|expired|invalid) session|session (?:not found|expired|is invalid)/i;
+
 export function isRetriableConnectionError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	if (error instanceof MCPTransportError) {
@@ -77,7 +79,10 @@ export function isRetriableConnectionError(error: unknown): boolean {
 		) {
 			return error.retryable;
 		}
-		return error.failure === "http_status" && (error.code === 404 || error.code === 502 || error.code === 503);
+		if (error.failure === "http_status" && (error.code === 404 || error.code === 502 || error.code === 503))
+			return true;
+		// An expired HTTP session (`-32001 Unknown or expired session`) never ran the call: re-initialize and retry.
+		return (error.failure === "http_status" || error.failure === "json_rpc") && EXPIRED_SESSION.test(error.message);
 	}
 	const msg = error.message.toLowerCase();
 	// Stale session (server restarted, old session ID is gone)
@@ -236,6 +241,9 @@ function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageConte
 						? `[Resource: ${item.resource.uri}]\n${item.resource.text}`
 						: `[Resource: ${item.resource.uri}]`,
 				);
+				break;
+			case "resource_link":
+				appendText(`[Resource: ${item.uri}]`);
 				break;
 		}
 	}
@@ -518,18 +526,25 @@ function sanitizeMCPToolNamePart(value: string, fallback: string, keepDigits: bo
  * if the prefix-strip or cap rules change, the legacy alias changes with them.
  */
 function mintMCPToolName(serverName: string, toolName: string, keepDigits: boolean): string {
-	const sanitizedServerName = sanitizeMCPToolNamePart(serverName, "server", keepDigits);
-	const sanitizedToolName = sanitizeMCPToolNamePart(toolName, "tool", keepDigits);
+	const parts = nameParts(serverName, toolName, keepDigits);
+	return capMCPToolNameLength(`mcp__${parts.server}_${parts.tool}`);
+}
 
+function nameParts(serverName: string, toolName: string, keepDigits: boolean): { server: string; tool: string } {
+	const server = sanitizeMCPToolNamePart(serverName, "server", keepDigits);
+	const tool = sanitizeMCPToolNamePart(toolName, "tool", keepDigits);
 	// Strip redundant server name prefix from tool name if present
-	const prefixWithUnderscore = `${sanitizedServerName}_`;
+	const prefix = `${server}_`;
+	return { server, tool: tool.startsWith(prefix) ? tool.slice(prefix.length) : tool };
+}
 
-	let normalizedToolName = sanitizedToolName;
-	if (sanitizedToolName.startsWith(prefixWithUnderscore)) {
-		normalizedToolName = sanitizedToolName.slice(prefixWithUnderscore.length);
-	}
-
-	return capMCPToolNameLength(`mcp__${sanitizedServerName}_${normalizedToolName}`);
+/**
+ * Sanitized server and tool halves of {@link createMCPToolName}, before the
+ * length cap: `mcp__<server>_<tool>`. Eval namespaces (`mcp/eval-namespaces.ts`)
+ * present them as `<server>.<tool>(…)`.
+ */
+export function mcpToolNameParts(serverName: string, toolName: string): { server: string; tool: string } {
+	return nameParts(serverName, toolName, true);
 }
 
 /**

@@ -1,6 +1,6 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
-import type { EvalPreludeDefinition } from "../../eval/preludes";
+import type { HostEvalPreludeDefinition } from "../../eval/preludes";
 import { redactUrlForLog } from "../../mcp/json-rpc";
 import relayGuidance from "../../prompts/system/browser-relay.md" with { type: "text" };
 import userSessionGuidance from "../../prompts/system/browser-user-session.md" with { type: "text" };
@@ -33,11 +33,11 @@ function browserX11Guidance(settings: Settings, platform: NodeJS.Platform = proc
 /** Build the browser eval facade after an eval runtime first requests preludes. */
 export function createBrowserPreludeDefinition(
 	session: ToolSession,
-	host: Pick<EvalPreludeDefinition, "invoke" | "status"> & {
+	host: Pick<HostEvalPreludeDefinition, "invoke" | "status"> & {
 		/** Where an open with `app: "auto"` goes; set only while an open without `app` goes to the relay. */
 		relayFallback?: BrowserKind;
 	},
-): EvalPreludeDefinition {
+): HostEvalPreludeDefinition {
 	return {
 		name: "browser",
 		// Read per use: the definition is built once per session, while the browser settings it follows can change.
