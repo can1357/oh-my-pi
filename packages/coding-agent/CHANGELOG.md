@@ -32,7 +32,7 @@
 - Fixed plan review measuring "Approve and keep context" against the pre-plan model instead of the tier chosen in the "continue with" slider, so switching to a larger-context tier now enables it ([#19660](https://github.com/can1357/oh-my-pi/issues/19660))
 ### Fixed
 
-- Fixed `/commit` moving an insertion across another writer's unselected replacement. Insertions with no clear position in HEAD now go to review; lines already committed at the boundary stay out of later drafts.
+- Fixed `/commit` moving an insertion across another writer's unselected replacement. Insertions with no clear position in HEAD now go to review; lines already committed at the boundary stay out of later drafts ([#19786](https://github.com/can1357/oh-my-pi/pull/19786) by [@baekjosh](https://github.com/baekjosh))
 
 ## [19.0.0] - 2026-11-18
 
