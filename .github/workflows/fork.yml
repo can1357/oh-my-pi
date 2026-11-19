@@ -25,11 +25,11 @@ permissions:
 
 jobs:
   release:
-    uses: zysys/github-workflows/.github/workflows/fork.yml@57352e0aac9de4021b65725a1c62a442a197239b # v2.0.0
+    uses: zysys/github-workflows/.github/workflows/fork.yml@0fca7194bf940c020def89b3bed634cba31f5732 # v2.0.0+assemble-output
     permissions:
       contents: write
     with:
-      scripts_ref: 57352e0aac9de4021b65725a1c62a442a197239b
+      scripts_ref: 0fca7194bf940c020def89b3bed634cba31f5732
       mirror: main
       binary: omp
       check: 'bun install --frozen-lockfile && bun run check:ts'
