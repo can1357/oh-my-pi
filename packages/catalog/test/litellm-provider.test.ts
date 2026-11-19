@@ -666,7 +666,6 @@ describe("LiteLLM provider discovery", () => {
 							model_name: "merge-gpt",
 							model_info: {
 								supports_vision: false,
-								supports_anthropic_compaction: true,
 								remoteCompaction: { v2StreamingEnabled: false },
 							},
 						},
@@ -688,7 +687,38 @@ describe("LiteLLM provider discovery", () => {
 			v2StreamingEnabled: false,
 			endpoint: "https://gw/v1/responses/compact",
 		});
-		expect(specs[0].compat).toMatchObject({ supportsServerCompaction: true });
+	});
+
+	test("drops an unknown compaction adapter without disabling the V2 lane", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === MODELS_DEV_URL) return Response.json({});
+			if (url === "http://primary:4000/model_group/info") return new Response("{}", { status: 404 });
+			if (url === "http://primary:4000/v2/model/info") return new Response("{}", { status: 404 });
+			if (url === "http://primary:4000/model/info") {
+				return Response.json({
+					data: [
+						{
+							model_name: "aliased-gpt",
+							model_info: {
+								supports_vision: false,
+								remoteCompaction: { v2StreamingEnabled: true, api: "responses" },
+							},
+						},
+					],
+				});
+			}
+			return new Response("Not found", { status: 404 });
+		}) as FetchImpl;
+
+		const specs = await fetchLiteLLMRichModels<"openai-completions">({
+			api: "openai-completions",
+			provider: "private-litellm",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		});
+
+		expect(specs?.[0]?.remoteCompaction).toEqual({ v2StreamingEnabled: true });
 	});
 
 	test("enriches scoped /v1/models entries with matching rich LiteLLM metadata", async () => {

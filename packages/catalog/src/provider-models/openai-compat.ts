@@ -5978,6 +5978,15 @@ function getLiteLLMCost(entry: LiteLLMRichModelEntry): ModelSpec<Api>["cost"] | 
 	};
 }
 
+/** Compaction adapters OMP implements; everything else in `remoteCompaction.api` is unusable. */
+const LITELLM_REMOTE_COMPACTION_APIS: Record<string, Api> = {
+	"openai-responses": "openai-responses",
+	"azure-openai-responses": "azure-openai-responses",
+	"openai-codex-responses": "openai-codex-responses",
+	"anthropic-messages": "anthropic-messages",
+	"bedrock-converse-stream": "bedrock-converse-stream",
+};
+
 /**
  * Resolve the deployment's own provider-native compaction declaration.
  *
@@ -5985,7 +5994,9 @@ function getLiteLLMCost(entry: LiteLLMRichModelEntry): ModelSpec<Api>["cost"] | 
  * back verbatim (on `/model/info`) without validating it, so this block is the
  * only place a gateway can say "this group supports Responses V2 compaction".
  * Copy only the documented {@link RemoteCompactionConfig} keys, dropping
- * entries with the wrong type instead of trusting the payload shape.
+ * entries with the wrong type instead of trusting the payload shape. An
+ * unknown `api` name is dropped rather than stored: a bogus adapter id would
+ * disable the V2 lane that the same block enabled.
  */
 function getLiteLLMRemoteCompaction<TApi extends Api>(
 	entry: LiteLLMRichModelEntry,
@@ -5997,7 +6008,8 @@ function getLiteLLMRemoteCompaction<TApi extends Api>(
 	const config: RemoteCompactionConfig<TApi> = {};
 	if (typeof value.enabled === "boolean") config.enabled = value.enabled;
 	if (typeof value.v2StreamingEnabled === "boolean") config.v2StreamingEnabled = value.v2StreamingEnabled;
-	if (typeof value.api === "string" && value.api.trim().length > 0) config.api = value.api as TApi;
+	const declaredApi = typeof value.api === "string" ? LITELLM_REMOTE_COMPACTION_APIS[value.api] : undefined;
+	if (declaredApi !== undefined) config.api = declaredApi as TApi;
 	for (const key of ["endpoint", "v2Endpoint", "streamingEndpoint", "model"] as const) {
 		const raw = value[key];
 		if (typeof raw === "string" && raw.trim().length > 0) config[key] = raw;
@@ -6218,7 +6230,7 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 	// transport field from the discovered provider and model id, so only the
 	// effort vocabulary flows through here. Mirrors `discoverOpenAIModelsList`.
 	const referenceCompat = reference?.compat as OpenAICompat | undefined;
-	const compat: OpenAICompat & { supportsServerCompaction?: boolean } = {
+	const compat: OpenAICompat = {
 		supportsStore: false,
 		supportsDeveloperRole: false,
 		...(supportedOpenAIParams !== undefined
@@ -6229,12 +6241,6 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 		...(referenceCompat?.reasoningEffortMap ? { reasoningEffortMap: referenceCompat.reasoningEffortMap } : {}),
 		...(referenceCompat?.omitReasoningEffort !== undefined
 			? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
-			: {}),
-		// The deployment declares the Anthropic on-demand compaction beta for
-		// groups it fronts with `anthropic-messages`; without this the model only
-		// ever saw the local summarizer.
-		...(getLiteLLMMetadataValue(entry, "supports_anthropic_compaction") === true
-			? { supportsServerCompaction: true }
 			: {}),
 		// The deployment is authoritative about its own groups. When its
 		// `model_info.supports_vision` says the group reads images, the derived

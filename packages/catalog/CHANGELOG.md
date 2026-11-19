@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed LiteLLM discovery dropping an operator-declared `model_info.remoteCompaction` block and routing `chatgpt/*` groups to Completions, which left automatic compaction on `snapcompact` ([#19806](https://github.com/can1357/oh-my-pi/pull/19806) by [@lz37](https://github.com/lz37)).
+
 ## [19.0.0] - 2026-11-18
 
 ### Added
