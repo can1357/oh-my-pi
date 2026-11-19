@@ -343,6 +343,18 @@ describe("ProcessTerminal DA1 SIXEL detection", () => {
 
 		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
 	});
+	it("keeps SIXEL disabled when XTSMGRAPHICS contradicts a bare DA1 reply", () => {
+		// Konsole 26.08 answers DA1 with no attributes at all (ESC [ c — no
+		// attribute 4), yet succeeds the XTSMGRAPHICS geometry query and draws
+		// nothing when sent SIXEL data. The query success must not override the
+		// DA1 denial: upgrading leaves reserved blank rows over every chart.
+		harness = createProcessTerminalRenderHarness(80, 24, { conpty: false });
+
+		process.stdin.emit("data", "\x1b[c"); // bare DA1 reply: no attribute 4
+		process.stdin.emit("data", `${SIXEL_SUPPORTED_REPLY}x`);
+
+		expect(TERMINAL.imageProtocol).toBeNull();
+	});
 
 	for (const override of ["off", "none"]) {
 		it(`keeps graphics disabled by an explicit ${override} override`, () => {
