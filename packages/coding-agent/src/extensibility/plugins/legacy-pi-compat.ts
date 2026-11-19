@@ -821,7 +821,7 @@ const PI_PACKAGE_NAMES = [
 	"pi-ai",
 	"pi-catalog",
 	"pi-coding-agent",
-	"omp-natives",
+	"pi-natives",
 	"pi-tui",
 	"pi-utils",
 ] as const;
@@ -994,7 +994,7 @@ const LEGACY_PI_TUI_SHIM_PATH = USE_BUNDLED_PI_MODULES
 
 // Package-root overrides. Shim entries (`pi-ai`, `pi-coding-agent`, `pi-tui`)
 // always replace the canonical surface so legacy helpers stay reachable. The
-// other bundled host packages (`pi-agent-core`, `omp-natives`, `pi-utils`) are
+// other bundled host packages (`pi-agent-core`, `pi-natives`, `pi-utils`) are
 // added in compiled binaries and npm bundles to route extensions onto the
 // in-process module instance — in dev / source-link / source SDK mode the
 // canonical specifier resolves cleanly through `Bun.resolveSync`; hardcoding a
