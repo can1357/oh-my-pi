@@ -136,6 +136,7 @@ Core methods:
 - `getServiceTiers`, `setServiceTier`
 - `registerProvider`, `unregisterProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
+- `registerTodoBackend`
 - `events` (shared event bus)
 
 `ExtensionAPI` methods retain their extension binding when destructured or passed as callbacks.
@@ -311,6 +312,30 @@ Also exposed:
 - `pi.zod` (Zod-compatible builder backed by omptype)
 - `pi.typebox` (legacy TypeBox-compatible shim)
 - `pi.pi` (package exports)
+
+### Todo backends (`registerTodoBackend`)
+
+A todo backend copies the session's todo list into an external store: a task tracker, a file, a dashboard. omp keeps the list and its own `todo` tool, HUD, `/todo` and reminders. The backend the `todo.backend` setting names (default `native`: none) is handed the whole list after every change.
+
+```ts
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+	pi.registerTodoBackend({
+		id: "my-tracker",
+		async replace(phases, ctx) {
+			await tracker.sync(ctx.sessionManager.getSessionId(), phases);
+		},
+	});
+}
+```
+
+- **When.** After omp committed a change to the main session's list, whatever made it: a `todo` call, a `/todo` edit, RPC `set_todos`, the Cursor todo mirror, `/new` (an empty list), and a resume, rewind, tree navigation, branch or fork that leaves another list or another session id. A session that omp moves to another file (for instance because its file is open in another omp process) also gets a new id, with no `session_*` event; its list is sent again under that id. A resumed session's list is sent once `session_start` has gone out; a host that never emits `session_start` calls no backend. An empty list is sent only once omp has called a todo backend for the session (`/new`, a resume, a branch and a fork carry that over), so a fresh start makes no call. Selecting a backend mid-session sends nothing by itself; the backend gets the list with the next change.
+- **What.** The whole list, never an operation; tasks carry `content` and `status` only. Lists that change while a call runs collapse into the newest, so a slow backend skips intermediate lists. A list the backend already took for the same session is not sent again.
+- **Sessions.** When a call starts, `ctx.sessionManager.getSessionId()` is the session the list belongs to (after `/new` it is already the new id). Read it before the first `await`: `ctx` follows the live session. A list still waiting when the session changes is dropped, and the new session's list follows. A backend whose store outlives a session keys it by that id. There is no per-session instance: keep state in the extension and release it on `session_shutdown`. On exit omp waits for the calls already queued before it emits `session_shutdown`, for as long as a `session_shutdown` handler may take. A list committed after that wait began is not sent, and neither is one still waiting when the wait runs out.
+- **Failure.** omp does not wait for the backend before it commits, and a backend cannot refuse a change. A throw, or no answer within the extension handler timeout, is reported as an extension error; omp's list stays as committed, and the next change sends the whole list again. Calls run one at a time, except that a call omp gave up on may still be running when the next one starts: a backend that finishes such a call late must not let it overwrite the newer list.
+- **Selection.** `todo.backend` holds a registered `id` (letters, digits, `.`, `_`, `-`). An id that no enabled extension registers is reported once as an extension error, and todos work as with `native`. Registering `native`, a malformed id or a backend without `replace` throws; an extension that registers an id again replaces its own earlier definition. When several extensions register an id, the first one loaded keeps it, and a warning is logged the first time omp looks a backend up. Inside a handler or a tool, an extension reads the selection with `lookup("todo.backend")?.get(pi.pi.settings)` (see below).
+- **Scope.** Main session only: subagents and `/tan` clones are not mirrored. An extension that registers a backend always loads at startup.
 
 ### Runtime setting overrides
 

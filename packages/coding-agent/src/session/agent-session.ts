@@ -621,7 +621,9 @@ import {
 	cfgRatchetEnabled,
 	cfgDevAutoqa,
 	cfgDevAutoqaConsent,
+	cfgTodoBackend,
 	cfgTodoEnabled,
+	NATIVE_TODO_BACKEND,
 	cfgToolsApproval,
 } from "../tools/settings";
 import { cfgTtsrJudge } from "../export/ttsr-settings";
@@ -2372,6 +2374,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			prewalkWillHandoff: () => this.#prewalk.willHandoff,
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
+			phasesChanged: () => this.#mirrorTodoPhases(),
 		};
 		this.#todo = new TodoTracker(todoHost);
 		this.#autoParallel = new AutoParallelCoordinator({
@@ -3187,6 +3190,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#maintenance.renderArchiveForModel(context.messages),
 			),
 		);
+		// A session that moves to another file gets a new id for the same list: no list write tells the todo backend.
+		this.addDisposer(this.sessionManager.onPersistenceNotice(() => this.#mirrorTodoPhases()));
 		// A request past the cap mid-run stops the run before it is sent: no turn opens, nothing is billed.
 		// The gate is registered only while a cap is set: any before-model-call gate also turns a user abort
 		// before the next request into a clean stop, which leaves no interrupted turn for `/retry`.
@@ -7209,6 +7214,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#cancelExitRecorder = undefined;
 		this.#cancelFatalRecoveryHint?.();
 		this.#cancelFatalRecoveryHint = undefined;
+		// The last todo change may still be on its way to the backend: `omp -p` exits right after its final tool call.
+		// From here on a backend gets no further list: its extension releases state on `session_shutdown`. Not asked
+		// of the setting: a list can still be queued for a backend the user has since switched away from. As with
+		// the shutdown event below, a failure here must not keep the session from being torn down.
+		try {
+			await this.#extensionRunner?.closeTodoBackend();
+		} catch (error) {
+			logger.warn("Failed to close the todo backend", { error: String(error) });
+		}
 		try {
 			await emitSessionShutdownEvent(this.#extensionRunner);
 		} catch (error) {
@@ -12096,6 +12110,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
 	}
 
+	/** `todo.backend` when this main session mirrors its list to an extension backend. */
+	#todoBackend(): string | undefined {
+		if (this.#agentKind !== "main") return undefined;
+		const backend = cfgTodoBackend.get(this.settings);
+		return backend === NATIVE_TODO_BACKEND ? undefined : backend;
+	}
+
+	/** Hand the list to the selected todo backend. Native todos never reach the runner. */
+	#mirrorTodoPhases(): void {
+		const backend = this.#todoBackend();
+		if (backend) this.#extensionRunner?.syncTodoBackend(backend, this.#todo.phases);
+	}
+
 	/** Active item labels accepted by this pooled turn's incremental yield tool. */
 	getWorkPoolYieldItems(): readonly WorkPoolYieldItem[] {
 		return this.#workPoolYieldItems;
@@ -13082,6 +13109,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#freshProviderSessionId = undefined;
 			this.#adoptInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			// The list is the same, but under a new session id: no list write tells the backend.
+			this.#mirrorTodoPhases();
 			this.#memory.rekeyForCurrentSessionId();
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;

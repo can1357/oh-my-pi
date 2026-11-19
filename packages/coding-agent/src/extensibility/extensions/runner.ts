@@ -47,6 +47,8 @@ import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
 import {
 	notifyTranscriptPresentersChanged,
@@ -106,6 +108,7 @@ import type {
 	SessionStopEvent,
 	SessionStopEventResult,
 	ShortcutConflict,
+	TodoBackendDefinition,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolRegistrationListener,
@@ -587,6 +590,13 @@ interface DeliveryTurn {
 	release: () => void;
 }
 
+/** A todo list on its way to a backend: what the session committed, for which backend and session. */
+interface TodoBackendList {
+	backend: string;
+	sessionId: string;
+	phases: TodoPhase[];
+}
+
 /** Identity reported by a session that is not a subagent and received no explicit identity. */
 export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
 	kind: "main",
@@ -657,6 +667,22 @@ export class ExtensionRunner {
 	#contextProjections = new WeakMap<AgentMessage, number | bigint | null>();
 	/** Latest `session_start` broadcast, replayed to extensions added afterwards. */
 	#sessionStartEvent: RunnerEmitEvent | undefined;
+	/** The newest todo list not yet handed to its backend; see {@link syncTodoBackend}. */
+	#todoPending: TodoBackendList | undefined;
+	/** Tail of the todo backend calls, which run one at a time. Never rejects. */
+	#todoCalls: Promise<void> = Promise.resolve();
+	/**
+	 * The list the backend last took, which is not sent again. `undefined` while a call runs and
+	 * after one failed, so the next list is sent whatever it holds; `"none"` until the first call,
+	 * when an empty list has nothing to tell a backend.
+	 */
+	#todoSent: TodoBackendList | "none" | undefined = "none";
+	/** Set by {@link closeTodoBackend}: the session is going away and takes no more lists to its backend. */
+	#todoClosed = false;
+	/** `todo.backend` ids already reported as unregistered. */
+	#reportedTodoBackends = new Set<string>();
+	/** Todo backend ids already warned about as registered by several extensions. */
+	#warnedTodoBackends = new Set<string>();
 	/** Notified after {@link setSuspendedExtensions} suspends or resumes any extension. */
 	#suspensionListeners = new Set<() => void>();
 	/** Fail-open wrappers of transcript presenters, kept so their identity is stable. */
@@ -1692,6 +1718,95 @@ export class ExtensionRunner {
 		return [...owners.keys()];
 	}
 
+	/** Todo backends by id. When extensions reuse an id, the first one loaded keeps it. */
+	getTodoBackends(): Map<string, { extension: Extension; definition: TodoBackendDefinition }> {
+		const backends = new Map<string, { extension: Extension; definition: TodoBackendDefinition }>();
+		for (const extension of this.extensions) {
+			for (const [id, definition] of extension.todoBackends ?? []) {
+				const owner = backends.get(id);
+				if (!owner) backends.set(id, { extension, definition });
+				else if (!this.#warnedTodoBackends.has(id)) {
+					this.#warnedTodoBackends.add(id);
+					logger.warn("Todo backend id registered by several extensions; the first loaded keeps it", {
+						id,
+						owner: owner.extension.path,
+						ignored: extension.path,
+					});
+				}
+			}
+		}
+		return backends;
+	}
+
+	/**
+	 * Hand a todo list the session just committed to the backend `todo.backend` selects. Calls run
+	 * one at a time, and a list set while one runs replaces the one still waiting. Until
+	 * `session_start` has gone out the list only waits: handlers and the error listener are not
+	 * wired before then.
+	 */
+	syncTodoBackend(backend: string, phases: TodoPhase[]): void {
+		if (this.#todoClosed) return;
+		this.#todoPending = { backend, phases, sessionId: this.sessionManager.getSessionId() };
+		if (this.#sessionStartEvent) this.#queueTodoBackendCall();
+	}
+
+	/**
+	 * Resolves once the todo backend calls queued so far have settled, or when the `session_shutdown`
+	 * handler budget runs out: a hung backend must not hold exit.
+	 */
+	async todoBackendSettled(): Promise<void> {
+		await awaitDeliveryTurn(this.#todoCalls, performance.now() + handlerTimeoutForEvent("session_shutdown"));
+	}
+
+	/**
+	 * Take no more lists for the todo backend, then wait as {@link todoBackendSettled} does. A list
+	 * still waiting when that wait ends is dropped, so no call starts once `session_shutdown` is out.
+	 */
+	async closeTodoBackend(): Promise<void> {
+		this.#todoClosed = true;
+		await this.todoBackendSettled();
+		this.#todoPending = undefined;
+	}
+
+	#queueTodoBackendCall(): void {
+		this.#todoCalls = this.#todoCalls
+			.then(() => this.#sendTodoList())
+			.catch((error: unknown) => logger.warn("Todo backend call failed", { error: String(error) }));
+	}
+
+	async #sendTodoList(): Promise<void> {
+		const pending = this.#todoPending;
+		this.#todoPending = undefined;
+		// A list set before the session changed belongs to the session left behind; the change sets its own.
+		if (!pending || pending.sessionId !== this.sessionManager.getSessionId()) return;
+		const owner = this.getTodoBackends().get(pending.backend);
+		if (!owner) {
+			if (this.#reportedTodoBackends.has(pending.backend)) return;
+			this.#reportedTodoBackends.add(pending.backend);
+			this.emitError({
+				extensionPath: "<todo.backend>",
+				event: "todo_backend",
+				error: `No enabled extension registers the todo backend "${sanitizeDisplayLine(pending.backend)}"; the todo list is not mirrored.`,
+			});
+			return;
+		}
+		const { extension, definition } = owner;
+		const sent = this.#todoSent;
+		if (sent === "none" ? pending.phases.length === 0 : Bun.deepEquals(sent, pending)) return;
+		this.#todoSent = undefined;
+		const taken = await this.#runHandlerWithTimeout(
+			async (event, ctx) => {
+				await definition.replace(event.phases, ctx);
+				return true;
+			},
+			{ type: "todo_backend", phases: structuredClone(pending.phases) },
+			this.createContext(),
+			extension,
+			extensionHandlerTimeoutMs,
+		);
+		if (taken) this.#todoSent = pending;
+	}
+
 	/**
 	 * Deliver a click on `url` as `link_activate` to the extension that claimed its scheme (the first
 	 * one in load order, when several did). Returns whether an extension owns the link.
@@ -2036,7 +2151,10 @@ export class ExtensionRunner {
 		const result = await this.#emitTo(this.extensions, event);
 		// Recorded once the broadcast ends: an extension added mid-broadcast is
 		// reached by the live iteration, one added later gets the replay.
-		if (event.type === "session_start") this.#sessionStartEvent = event;
+		if (event.type === "session_start") {
+			this.#sessionStartEvent = event;
+			if (this.#todoPending && !this.#todoClosed) this.#queueTodoBackendCall();
+		}
 		return result;
 	}
 
