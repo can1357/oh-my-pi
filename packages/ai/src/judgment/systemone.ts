@@ -224,7 +224,7 @@ function encodeWithImageDataUrls(request: JudgmentRequest, model: string): Recor
 	};
 }
 
-/** Liquid AI decision models (`d1.1`, `d1-ultra`). */
+/** Liquid AI decision models (`d1.2`, `d1.2-ultra`, and the deprecated `d1.1` and `d1-ultra`). */
 export const liquidWire: JudgmentWire = {
 	...systemOneWire("/decisions/v1/systemone"),
 	// https://docs.liquid.ai/lfm/models/d1.md#image-requirements: JPEG, PNG and WebP only (the API answers
