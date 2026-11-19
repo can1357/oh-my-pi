@@ -2,28 +2,88 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { prompt, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, prompt, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import backgroundTanDispatchPrompt from "../../prompts/system/background-tan-dispatch.md" with { type: "text" };
 import tanContextSwitchPrompt from "../../prompts/system/tan-context-switch.md" with { type: "text" };
+import tanNamePrompt from "../../prompts/system/tan-name.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import * as sdk from "../../sdk";
 import type { AgentSession } from "../../session/agent-session";
 import { escapeHarnessTags } from "../../session/harness-tags";
-import { BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE } from "../../session/messages";
+import { BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE, buildTitleDriftTurns } from "../../session/messages";
 import { isHiddenUserCompanion } from "../../session/queued-messages";
 import { SessionManager } from "../../session/session-manager";
 import { createSubagentSettings, followMCPTools } from "../../task/executor";
+import { generateTaskName } from "../../task/name-generator";
+import { AgentOutputManager } from "../../task/output-manager";
+import { cleanTinyMessage, formatTitleConversationContext, MAX_TINY_MESSAGE_CHARS } from "../../tiny/message-preproc";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
 import type { InteractiveModeContext } from "../types";
 
 import { cfgTaskEnableLsp } from "../../task/settings";
 
 const TAN_LABEL_PREVIEW_LENGTH = 80;
+const TAN_NAME_SYSTEM_PROMPT = prompt.render(tanNamePrompt);
+/** How long dispatch waits on the small model for a name before falling back to a random one. */
+const TAN_NAME_TIMEOUT_MS = 30_000;
+/** Longest generated name, the task tool's bound on agent names. */
+const TAN_NAME_MAX_CHARS = 32;
+/** `<chat>` scaffolding around the name context's turns. */
+const CHAT_ENVELOPE_CHARS = "<chat>\n\n</chat>".length;
+/** Scaffolding one turn adds at most: the longest role's tags plus the turn separator. */
+const CHAT_TURN_TAG_CHARS = "<assistant>\n\n</assistant>\n\n".length;
 
 function previewWork(work: string): string {
 	const singleLine = work.trim().replace(/\s+/g, " ");
 	if (singleLine.length <= TAN_LABEL_PREVIEW_LENGTH) return singleLine;
 	return `${singleLine.slice(0, TAN_LABEL_PREVIEW_LENGTH - 1)}…`;
+}
+
+/**
+ * What the small model names a tan from: its request as the final `<user>`
+ * turn, after the newest parent turns that fit the tiny-model window beside it.
+ */
+function tanNameContext(work: string, messages: readonly AgentMessage[]): string {
+	const request = cleanTinyMessage(work);
+	let budget = MAX_TINY_MESSAGE_CHARS - CHAT_ENVELOPE_CHARS - CHAT_TURN_TAG_CHARS - request.length;
+	const recent = buildTitleDriftTurns(messages);
+	let start = recent.length;
+	while (start > 0) {
+		const cost = recent[start - 1]!.text.length + CHAT_TURN_TAG_CHARS;
+		if (cost > budget) break;
+		budget -= cost;
+		start--;
+	}
+	return formatTitleConversationContext([...recent.slice(start), { role: "user", text: request }]);
+}
+
+/** PascalCase agent id of a generated title (`Flaky retry test` → `FlakyRetryTest`): whole words, at most {@link TAN_NAME_MAX_CHARS}. */
+function tanNameFromTitle(title: string): string | undefined {
+	let name = "";
+	for (const word of title.split(/[^A-Za-z0-9]+/)) {
+		if (!word) continue;
+		const part = word.charAt(0).toUpperCase() + word.slice(1);
+		if (name.length + part.length > TAN_NAME_MAX_CHARS) break;
+		name += part;
+	}
+	return name || undefined;
+}
+
+/**
+ * The small model's name for a tan, from its request and the parent's latest
+ * turns; `undefined` when it names none, fails, or misses {@link TAN_NAME_TIMEOUT_MS}.
+ */
+async function generateTanName(session: AgentSession, work: string): Promise<string | undefined> {
+	const timeout = AbortSignal.timeout(TAN_NAME_TIMEOUT_MS);
+	try {
+		const context = tanNameContext(work, session.messages);
+		// The race bounds the wait even where a request path ignores the signal.
+		const title = await untilAborted(timeout, () => session.generateTitle(context, TAN_NAME_SYSTEM_PROMPT, timeout));
+		return title ? tanNameFromTitle(title) : undefined;
+	} catch (error) {
+		logger.debug("tan: name generation failed", { error: error instanceof Error ? error.message : String(error) });
+		return undefined;
+	}
 }
 
 function extractAssistantText(message: AssistantMessage | undefined): string {
@@ -121,12 +181,21 @@ export class TanCommandController {
 		const settings = createSubagentSettings(this.ctx.settings);
 		const enableLsp = cfgTaskEnableLsp.get(this.ctx.settings) !== false;
 		const agentRegistry = AgentRegistry.global();
-		const cloneId = `Tan-${Snowflake.next()}`;
-		const cloneFile = path.join(sessionDir, `${cloneId}.jsonl`);
 		const label = `/tan ${previewWork(trimmedWork)}`;
+		const naming = generateTanName(session, trimmedWork);
+		this.ctx.showStatus("Naming background tan…");
 
 		await this.ctx.sessionManager.ensureOnDisk();
 		await this.ctx.sessionManager.flush();
+
+		// The clone's transcript nests beside the parent's task subagents, so its id
+		// comes from the same allocator; registry ids cover agents not yet on disk.
+		const name = (await naming) ?? generateTaskName();
+		const ids =
+			session.agentOutputManager ?? new AgentOutputManager(() => sessionDir, { settings: this.ctx.settings });
+		await ids.reserve(agentRegistry.list().map(ref => ref.id));
+		const cloneId = await ids.allocate(name);
+		const cloneFile = path.join(sessionDir, `${cloneId}.jsonl`);
 
 		let jobId = "";
 		try {

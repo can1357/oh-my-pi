@@ -11,7 +11,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { IpcConnection } from "@oh-my-pi/pi-natives";
-import { isEexist, isEnoent, logger, postmortem, toError } from "@oh-my-pi/pi-utils";
+import { isEexist, isEnoent, isPidAlive, logger, postmortem, toError } from "@oh-my-pi/pi-utils";
 import { resolveCliEntryCmd, resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
 import { daemonBuildId } from "./build";
 import { canonicalProjectDir, daemonDir, daemonEndpoint, daemonTcpAddress, daemonTokenPath } from "./paths";
@@ -1151,6 +1151,9 @@ export async function probeDaemon(): Promise<DaemonClient | undefined> {
 	}
 }
 
+/** How long smoke-test cleanup waits for the shut-down daemon to exit before removing its dir. */
+const SMOKE_DAEMON_EXIT_MS = 10_000;
+
 /**
  * Point every daemon use of this process at a fresh private runtime dir (and
  * off any `OMP_DAEMON_TCP`), for the distribution smoke test. The returned
@@ -1171,6 +1174,7 @@ export async function isolateDaemonForSmokeTest(): Promise<() => Promise<void>> 
 		if (process.env[DAEMON_DIR_ENV] === root) {
 			const probe = await probeDaemon();
 			if (probe) {
+				const { pid } = probe.welcome.daemon;
 				try {
 					await probe.request({ op: "shutdown" });
 				} catch (error) {
@@ -1178,6 +1182,10 @@ export async function isolateDaemonForSmokeTest(): Promise<() => Promise<void>> 
 				} finally {
 					probe.close();
 				}
+				// The daemon acknowledges before it exits; on Windows its open files
+				// keep the dir busy until it is gone.
+				const deadline = Date.now() + SMOKE_DAEMON_EXIT_MS;
+				while (isPidAlive(pid) && Date.now() < deadline) await Bun.sleep(25);
 			}
 			if (previousDir === undefined) delete process.env[DAEMON_DIR_ENV];
 			else process.env[DAEMON_DIR_ENV] = previousDir;
