@@ -1,9 +1,13 @@
 import { expect, test } from "bun:test";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "../src/config/settings";
 import type { ToolSession } from "../src/sdk";
 import { postProcessToolResult } from "../src/tools/output-meta";
 import { buildInMemoryTextResult } from "../src/tools/read-format";
 import { cfgToolsArtifactSpillThreshold } from "../src/tools/settings";
+
+const spillContext = (settings: Settings, saveArtifact: (text: string) => Promise<string>) =>
+	({ settings, sessionManager: { saveArtifact } }) as AgentToolContext;
 
 for (const { words, count, threshold } of [
 	{ words: 20, count: 900, threshold: 50 },
@@ -18,15 +22,10 @@ for (const { words, count, threshold } of [
 			"\n",
 		);
 		let spills = 0;
-		const context = {
-			settings,
-			sessionManager: {
-				saveArtifact: async () => {
-					spills++;
-					return "unexpected";
-				},
-			},
-		} as unknown as Parameters<typeof postProcessToolResult>[2];
+		const context = spillContext(settings, async () => {
+			spills++;
+			return "unexpected";
+		});
 		const read = async (offset?: number) =>
 			postProcessToolResult(
 				await buildInMemoryTextResult(session, source, offset, undefined, {
@@ -67,15 +66,14 @@ test("an in-memory page exceeding the rendered allowance retains the spill fallb
 	});
 	expect(page.details?.meta?.pagedSource).not.toBe(true);
 	let saved = "";
-	const result = await postProcessToolResult(page, "read", {
-		settings,
-		sessionManager: {
-			saveArtifact: async (text: string) => {
-				saved = text;
-				return "bounded";
-			},
-		},
-	} as unknown as Parameters<typeof postProcessToolResult>[2]);
+	const result = await postProcessToolResult(
+		page,
+		"read",
+		spillContext(settings, async text => {
+			saved = text;
+			return "bounded";
+		}),
+	);
 	expect(saved).toBe(
 		page.content
 			.filter(c => c.type === "text")
@@ -102,15 +100,14 @@ test("formatting slack does not turn a complete in-memory read into an artifact 
 	expect(Buffer.byteLength(text)).toBeGreaterThan(20 * 1024);
 	expect(Buffer.byteLength(text)).toBeLessThanOrEqual(22 * 1024);
 	let spills = 0;
-	const result = await postProcessToolResult(page, "read", {
-		settings,
-		sessionManager: {
-			saveArtifact: async () => {
-				spills++;
-				return "unexpected";
-			},
-		},
-	} as unknown as Parameters<typeof postProcessToolResult>[2]);
+	const result = await postProcessToolResult(
+		page,
+		"read",
+		spillContext(settings, async () => {
+			spills++;
+			return "unexpected";
+		}),
+	);
 	expect(
 		result.content
 			.filter(c => c.type === "text")
