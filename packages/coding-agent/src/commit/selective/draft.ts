@@ -303,15 +303,26 @@ interface PendingFile {
 	finish(cleaned: readonly Uint8Array[]): FileChange | undefined;
 }
 
+/** Prevent Git HEAD updates from orphaning a Jujutsu working-copy change in a colocated workspace. */
+export async function assertGitSelectiveWorkspace(gitRoot: string): Promise<void> {
+	const jjRoot = vcs.jj(gitRoot)?.root();
+	if (jjRoot && (await fs.realpath(jjRoot)) === (await fs.realpath(gitRoot))) {
+		throw new Error(
+			"Selective commits cannot preserve a Jujutsu working copy; use `jj` to commit in this workspace.",
+		);
+	}
+}
+
 /**
  * Build a draft of the repository's current changes for the agents in scope.
- * @throws when `cwd` is not inside a git checkout or the scope names an unknown agent.
+ * @throws when `cwd` is not inside a Git checkout, is a Jujutsu workspace, or the scope names an unknown agent.
  */
 export async function createDraft(source: DraftSource): Promise<Draft> {
 	if (vcs.isPureJj(source.cwd)) throw new Error("Selective commits need git; this is a Jujutsu workspace.");
 	const repo = vcs.git(source.cwd);
 	if (!repo) throw new Error(`Not inside a git repository: ${source.cwd}`);
 	const root = repo.info().repoRoot;
+	await assertGitSelectiveWorkspace(root);
 	const [headSha, branch] = await Promise.all([repo.headSha(source.signal), repo.currentBranch(source.signal)]);
 	const head = headSha ?? null;
 

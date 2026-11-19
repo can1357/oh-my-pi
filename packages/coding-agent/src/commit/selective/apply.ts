@@ -14,7 +14,7 @@ import * as path from "node:path";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import type { Draft, SelectedChange } from "./draft";
+import { assertGitSelectiveWorkspace, type Draft, type SelectedChange } from "./draft";
 import type { ChangeJournal, JournalAgent } from "./journal";
 import { formatTextPatch } from "./patch";
 
@@ -158,7 +158,7 @@ async function patchFor(repo: VcsGitRepo, head: string | null, change: SelectedC
  * @throws when a merge, cherry-pick, revert, rebase, or git am is in progress, or the index has
  * unresolved conflicts; when nothing is selected;
  * on `amend` when HEAD is not a selective commit of this session; when HEAD moved onto changes
- * that conflict with the selection; or when a hook fails.
+ * that conflict with the selection; when a hook fails; or when the checkout becomes a Jujutsu workspace.
  */
 export async function commitSelection(
 	draft: Draft,
@@ -175,6 +175,7 @@ export async function commitSelection(
 		);
 	}
 	const repo = vcs.requireGit(draft.root);
+	await assertGitSelectiveWorkspace(draft.root);
 	const operation = await repo.operationKind(context.signal);
 	if (operation === "unmerged-index") {
 		throw new Error("The index has unresolved conflicts; resolve them before using commit().");
