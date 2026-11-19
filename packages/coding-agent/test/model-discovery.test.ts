@@ -23,6 +23,7 @@ import {
 import type { ModelKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { CODEX_CLIENT_VERSION } from "@oh-my-pi/pi-catalog/wire/codex";
 import {
+	DISCOVERY_DEFAULT_CONTEXT_WINDOW,
 	type DiscoveryProviderConfig,
 	discoverLlamaCppModels,
 	discoverLiteLLMModels,
@@ -2982,6 +2983,50 @@ describe("ModelRegistry runtime discovery", () => {
 			{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
 		);
 		expect(models.map(model => model.id)).toEqual(["mistral/mistral-large-latest"]);
+	});
+
+	test("proxy discovery derives the context window from nested token limits before clamping the output cap", async () => {
+		// A proxy that publishes only `limits.max_input_tokens` +
+		// `limits.max_output_tokens` states a 400K window without
+		// `context_length`. Ignoring the nested limits left the context at the
+		// 128K default, and the new `Math.min` clamp then also truncated a valid
+		// 200K output cap to 128K — diverging from the generic list discovery,
+		// which already derives the window from the same row shape.
+		const fetchMock: FetchImpl = async input => {
+			if (String(input) !== "http://127.0.0.1:9992/v1/models") throw new Error(`Unexpected URL: ${String(input)}`);
+			return Response.json({
+				data: [
+					{
+						id: "openai-test/nested-limits",
+						supported_endpoint_types: ["openai"],
+						limits: { max_input_tokens: 200_000, max_output_tokens: 200_000 },
+					},
+					{
+						id: "openai-test/incomplete-nested-limits",
+						supported_endpoint_types: ["openai"],
+						limits: { max_input_tokens: 200_000 },
+					},
+				],
+			});
+		};
+		const models = await discoverProxyModels(
+			{
+				provider: "proxy-test",
+				api: "openai-completions",
+				baseUrl: "http://127.0.0.1:9992/v1",
+				discovery: { type: "proxy" },
+			},
+			{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
+		);
+
+		const nested = models.find(model => model.id === "openai-test/nested-limits");
+		expect(nested?.contextWindow).toBe(400_000);
+		expect(nested?.maxTokens).toBe(200_000);
+
+		// Half a budget is not a window: the guarded fallback must stay silent.
+		const incomplete = models.find(model => model.id === "openai-test/incomplete-nested-limits");
+		expect(incomplete?.contextWindow).toBe(DISCOVERY_DEFAULT_CONTEXT_WINDOW);
+		expect(incomplete?.maxTokens).toBe(32_768);
 	});
 
 	test("litellm discovery skips a model group whose name names two vendors instead of dropping the provider (#18770)", async () => {

@@ -273,6 +273,49 @@ function toTokenLimitOrUndefined(value: unknown): number | undefined {
 	return parsed !== undefined && Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
+/**
+ * Context window a gateway implies by publishing both halves of its token
+ * budget (`limits.max_input_tokens` + `limits.max_output_tokens`). Either half
+ * alone is not a window, and a sum outside the safe-integer range is rejected
+ * so a malformed row cannot overflow into a bogus context.
+ */
+function nestedLimitsContextWindow(limits: Record<string, unknown> | undefined): number | undefined {
+	const maxInputTokens = toTokenLimitOrUndefined(limits?.max_input_tokens);
+	const maxOutputTokens = toTokenLimitOrUndefined(limits?.max_output_tokens);
+	if (maxInputTokens === undefined || maxOutputTokens === undefined) return undefined;
+	const total = maxInputTokens + maxOutputTokens;
+	return Number.isSafeInteger(total) ? total : undefined;
+}
+
+/**
+ * Output cap a `/v1/models` row advertises. Gateways spell it nested
+ * (`limits.max_output_tokens`), flat (`max_output_tokens`, OpenRouter-style
+ * `max_completion_tokens`, generic `max_tokens` (#13062)), or under
+ * OpenRouter's `top_provider.max_completion_tokens` (ModelRelay and other
+ * OpenRouter-shaped catalogs). Each spelling is validated on its own so a
+ * malformed one never masks a usable sibling. A `/v1/models` row declares what
+ * the endpoint accepts, so `max_tokens` here is a cap — unlike llama.cpp, whose
+ * positive `max_tokens` is only a per-request default.
+ */
+function advertisedOutputTokenLimit(
+	item: {
+		max_output_tokens?: unknown;
+		max_completion_tokens?: unknown;
+		max_tokens?: unknown;
+		top_provider?: unknown;
+	},
+	limits: Record<string, unknown> | undefined,
+): number | undefined {
+	const topProvider = isRecord(item.top_provider) ? item.top_provider : undefined;
+	return (
+		toTokenLimitOrUndefined(limits?.max_output_tokens) ??
+		toTokenLimitOrUndefined(item.max_output_tokens) ??
+		toTokenLimitOrUndefined(item.max_completion_tokens) ??
+		toTokenLimitOrUndefined(topProvider?.max_completion_tokens) ??
+		toTokenLimitOrUndefined(item.max_tokens)
+	);
+}
+
 function isLlamaCppUnlimitedSentinel(value: unknown): boolean {
 	if (typeof value === "number") {
 		return value === -1;
@@ -1242,29 +1285,8 @@ export async function discoverOpenAIModelsList(
 			extractOpenAIModelsListInputCapabilities(item) ??
 			reference?.input ?? ["text"];
 		const limits = isRecord(item.limits) ? item.limits : undefined;
-		const maxInputTokens = toTokenLimitOrUndefined(limits?.max_input_tokens);
-		const maxOutputTokens = toTokenLimitOrUndefined(limits?.max_output_tokens);
-		const reportedLimitsContextWindow =
-			maxInputTokens !== undefined &&
-			maxOutputTokens !== undefined &&
-			Number.isSafeInteger(maxInputTokens + maxOutputTokens)
-				? maxInputTokens + maxOutputTokens
-				: undefined;
-		// Gateways spell the output cap nested (`limits.max_output_tokens`),
-		// flat (`max_output_tokens`, OpenRouter-style `max_completion_tokens`,
-		// generic `max_tokens` (#13062)), or under OpenRouter's
-		// `top_provider.max_completion_tokens` (ModelRelay and other
-		// OpenRouter-shaped catalogs). Each spelling is validated on its own so a
-		// malformed one never masks a usable sibling. A `/v1/models` row declares
-		// what the endpoint accepts, so `max_tokens` here is a cap — unlike
-		// llama.cpp, whose positive `max_tokens` is only a per-request default.
-		const topProvider = isRecord(item.top_provider) ? item.top_provider : undefined;
-		const reportedMaxTokens =
-			maxOutputTokens ??
-			toTokenLimitOrUndefined(item.max_output_tokens) ??
-			toTokenLimitOrUndefined(item.max_completion_tokens) ??
-			toTokenLimitOrUndefined(topProvider?.max_completion_tokens) ??
-			toTokenLimitOrUndefined(item.max_tokens);
+		const reportedLimitsContextWindow = nestedLimitsContextWindow(limits);
+		const reportedMaxTokens = advertisedOutputTokenLimit(item, limits);
 		const reportedContextWindow =
 			toPositiveNumberOrUndefined(item.max_model_len) ??
 			toPositiveNumberOrUndefined(item.context_length) ??
@@ -1550,15 +1572,10 @@ export async function discoverProxyModels(
 		// silent rows behave exactly as before.
 		const input = extractOpenAIModelsListInputCapabilities(item) ?? reference?.input ?? ["text"];
 		const limits = isRecord(item.limits) ? item.limits : undefined;
-		const topProvider = isRecord(item.top_provider) ? item.top_provider : undefined;
-		const reportedMaxTokens =
-			toTokenLimitOrUndefined(limits?.max_output_tokens) ??
-			toTokenLimitOrUndefined(item.max_output_tokens) ??
-			toTokenLimitOrUndefined(item.max_completion_tokens) ??
-			toTokenLimitOrUndefined(topProvider?.max_completion_tokens) ??
-			toTokenLimitOrUndefined(item.max_tokens);
+		const reportedMaxTokens = advertisedOutputTokenLimit(item, limits);
 		const contextWindow =
 			toPositiveNumberOrUndefined(item.context_length) ??
+			nestedLimitsContextWindow(limits) ??
 			reference?.contextWindow ??
 			DISCOVERY_DEFAULT_CONTEXT_WINDOW;
 		const spec = {
