@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import {
 	available,
 	embed,
@@ -110,6 +110,20 @@ describe("embedding failure logging (#2322)", () => {
 });
 
 describe("embedding provider failure logging", () => {
+	// embed()/available() short-circuit on MNEMOPI_NO_EMBEDDINGS; keep an ambient value from masking the provider path.
+	let savedNoEmbeddings: string | undefined;
+	beforeEach(() => {
+		savedNoEmbeddings = process.env.MNEMOPI_NO_EMBEDDINGS;
+		delete process.env.MNEMOPI_NO_EMBEDDINGS;
+	});
+	afterEach(() => {
+		if (savedNoEmbeddings === undefined) {
+			delete process.env.MNEMOPI_NO_EMBEDDINGS;
+		} else {
+			process.env.MNEMOPI_NO_EMBEDDINGS = savedNoEmbeddings;
+		}
+	});
+
 	// Fails mid-stream, the way a provider whose backend drops does.
 	const failingProvider = (message: string) => ({
 		embed: async function* (_texts: readonly string[]): AsyncGenerator<number[][]> {
