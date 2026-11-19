@@ -43,7 +43,13 @@ import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
-import { type AgentDefinition, canSpawnAtDepth, getTaskSchema, type TaskToolSchemaInstance } from "./types";
+import {
+	type AgentDefinition,
+	canSpawnAtDepth,
+	getTaskSchema,
+	spawnDepthOf,
+	type TaskToolSchemaInstance,
+} from "./types";
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { AsyncJobError, type AsyncJobManagerApi } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
@@ -1140,7 +1146,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 		const depthCapacity = canSpawnAtDepth(
 			cfgTaskMaxRecursionDepth.get(this.session.settings),
-			this.session.taskDepth ?? 0,
+			spawnDepthOf(this.session),
 		);
 		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);
 

@@ -61,7 +61,7 @@ import { generateTaskName, sanitizeAgentId } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { ovnfsWorkspace } from "./ovnfs";
 import { resolveSpawnPolicy } from "./spawn-policy";
-import { type AgentDefinition, canSpawnAtDepth } from "./types";
+import { type AgentDefinition, canSpawnAtDepth, spawnDepthOf } from "./types";
 import type {
 	AgentProgress,
 	SingleResult,
@@ -332,12 +332,12 @@ function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode:
 }
 
 function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentName: string): void {
-	const taskDepth = request.session.taskDepth ?? 0;
+	const spawnDepth = spawnDepthOf(request.session);
 	const maxDepth = cfgTaskMaxRecursionDepth.get(request.session.settings);
-	if (!canSpawnAtDepth(maxDepth, taskDepth)) {
+	if (!canSpawnAtDepth(maxDepth, spawnDepth)) {
 		throw new StructuredSubagentError(
 			"preflight",
-			`Cannot spawn another agent at task depth ${taskDepth}; maximum depth is ${maxDepth}.`,
+			`Cannot spawn another agent at spawn depth ${spawnDepth}; maximum depth is ${maxDepth}.`,
 		);
 	}
 	const blockedAgent = request.blockedAgent ?? $env.PI_BLOCKED_AGENT;
@@ -771,6 +771,7 @@ function buildExecutorOptions(
 		detached: request.detached,
 		id,
 		taskDepth: session.taskDepth ?? 0,
+		parentSpawnDepth: spawnDepthOf(session),
 		invokedAt: request.invokedAt,
 		acquiredAt: request.acquiredAt,
 		modelOverride: policy.modelOverride,

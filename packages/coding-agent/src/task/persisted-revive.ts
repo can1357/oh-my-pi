@@ -183,9 +183,9 @@ export function createPersistedSubagentReviverFactory(
 		} catch {
 			return undefined;
 		}
-		// taskDepth drives real capability gating (task-spawn allowance, memory
-		// startup, …); derive it from the persisted parent chain rather than
-		// assuming a fixed level.
+		// taskDepth drives real capability gating (memory startup, …) and is the
+		// spawn depth unless the contract persisted a reset one; derive it from
+		// the persisted parent chain rather than assuming a fixed level.
 		let taskDepth = 1;
 		let parentId = ref.parentId;
 		const seen = new Set<string>();
@@ -442,6 +442,8 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 				: {}),
 			expectedAgentRef: expectedRef,
 			taskDepth,
+			// A spawn depth reset at launch is persisted; otherwise it equals the derived task depth.
+			spawnDepth: init.spawnDepth ?? taskDepth,
 			toolNames: revivedToolNames,
 			// `revivedToolNames` is the enabled set, devices included: keep those devices,
 			// or they come back as top-level tools and change the replayed tool list.

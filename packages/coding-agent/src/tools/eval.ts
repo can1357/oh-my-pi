@@ -49,7 +49,7 @@ import {
 	TailBuffer,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
-import { canSpawnAtDepth } from "../task/types";
+import { canSpawnAtDepth, spawnDepthOf } from "../task/types";
 import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import type { ToolSession } from ".";
@@ -325,7 +325,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const backends = resolveAdvertisedEvalBackends(session);
 		const depthAllowsSpawning = canSpawnAtDepth(
 			cfgTaskMaxRecursionDepth.get(session.settings),
-			session.taskDepth ?? 0,
+			spawnDepthOf(session),
 		);
 		const perCallModel = perCallModelEnabled(session.settings, "eval");
 		const perCallModelAdvertisement =
