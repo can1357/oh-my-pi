@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added OrcaRouter (`orcarouter`) as a provider: `/login orcarouter` with an API key (`ORCA_KEY`) and live discovery from `https://api.orcarouter.ai/v1/models` over the OpenAI Responses API ([#17734](https://github.com/can1357/oh-my-pi/pull/17734) by [@Naster17](https://github.com/Naster17))
+
 ## [19.0.0] - 2026-11-18
 
 ### Added
