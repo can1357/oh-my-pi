@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the OrcaRouter provider with live `/v1/models` discovery over the OpenAI Responses API.
+
 ## [19.0.0] - 2026-11-18
 
 ### Added
