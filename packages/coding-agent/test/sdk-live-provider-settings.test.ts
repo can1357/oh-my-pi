@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import type { Api, Context, Model, ModelSpec, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Context, Model, ModelSpec, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -104,5 +104,77 @@ describe("primary-agent provider settings changed mid-session", () => {
 		// Owned dialect: no native tool specs; the catalog rides in the system prompt.
 		expect(second?.context.tools).toBeUndefined();
 		expect((second?.context.systemPrompt?.length ?? 0) > (first?.context.systemPrompt?.length ?? 0)).toBe(true);
+	});
+	it("limits OpenAI HTTP requests to the turn retry budget on a repeated 500", async () => {
+		using tempDir = TempDir.createSync("@pi-retry-http-budget-");
+		let requests = 0;
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () => {
+				requests++;
+				return Response.json(
+					{ error: { code: 500, message: "Unsupported reasoning_effort high", type: "server_error" } },
+					{ status: 500 },
+				);
+			},
+		});
+		try {
+			const model = buildModel({
+				id: "retry-http-budget",
+				name: "Retry HTTP budget",
+				api: "openai-completions",
+				provider: "retry-http-budget",
+				baseUrl: `http://127.0.0.1:${server.port}/v1`,
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 8192,
+				maxTokens: 256,
+			} satisfies ModelSpec<"openai-completions">);
+			const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+			authStorage.keys.setRuntime(model.provider, "test-key");
+			const settings = Settings.isolated({
+				"retry.maxRetries": 1,
+				"retry.baseDelayMs": 0,
+				"retry.modelFallback": false,
+				"compaction.enabled": false,
+			});
+			const { session } = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				sessionManager: SessionManager.inMemory(tempDir.path()),
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
+				settings,
+				model,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				cacheWarming: "off",
+			});
+			sessions.push(session);
+			const failures: AssistantMessage[] = [];
+			session.subscribe(event => {
+				if (
+					event.type === "message_end" &&
+					event.message.role === "assistant" &&
+					event.message.stopReason === "error"
+				) {
+					failures.push(event.message);
+				}
+			});
+			await session.prompt("hello");
+
+			expect(requests).toBe(2);
+			expect(failures.at(-1)?.errorMessage).toContain("Unsupported reasoning_effort high");
+		} finally {
+			server.stop();
+		}
 	});
 });

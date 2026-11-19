@@ -420,6 +420,7 @@ import {
 	cfgProvidersCacheWarmingCompactTokens,
 	cfgProvidersCacheWarmingStrategy,
 	cfgProvidersKimiApiFormat,
+	cfgRetryEnabled,
 	cfgRetryFallbackChains,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
@@ -5165,6 +5166,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (streamOptions?.promptCacheKey === undefined) session?.promoteTaskSiblingCandidate(streamModel);
 				const merged: SimpleStreamOptions = {
 					...streamOptions,
+					// TurnRecovery counts requests, not transport attempts. Keep its
+					// advertised retry budget from multiplying the OpenAI wire's
+					// six attempts and the provider's pre-output replay.
+					maxHttpAttempts:
+						streamOptions?.maxHttpAttempts ??
+						(streamModel.api === "openai-completions" && cfgRetryEnabled.get(settings) ? 1 : undefined),
 					promptCacheKey: streamOptions?.promptCacheKey ?? session?.getPromptCacheKeyForModel(streamModel),
 					forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
 					omitDemotedReasoning: session?.omitsDemotedReasoning(streamModel) || streamOptions?.omitDemotedReasoning,

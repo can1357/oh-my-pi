@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Limited OpenAI-compatible HTTP retries to the displayed turn retry budget instead of multiplying requests behind each retry ([#19729](https://github.com/can1357/oh-my-pi/issues/19729)).
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes
