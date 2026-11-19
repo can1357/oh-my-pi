@@ -10,6 +10,7 @@
 - Kiro requests rejected with `Input is too long.` or `CONTENT_LENGTH_EXCEEDS_THRESHOLD` can now recover through conversation compaction ([#19723](https://github.com/can1357/oh-my-pi/pull/19723) by [@emotionbug](https://github.com/emotionbug))
 - Kiro thinking off now turns reasoning off instead of running the model's default effort; models that cannot disable reasoning use their lowest effort ([#19722](https://github.com/can1357/oh-my-pi/pull/19722) by [@emotionbug](https://github.com/emotionbug))
 - Kiro `/usage` shows purchased add-on credits, and an account whose plan credits are spent keeps serving while add-on credits remain ([#19724](https://github.com/can1357/oh-my-pi/pull/19724) by [@emotionbug](https://github.com/emotionbug))
+- Kiro Identity Center logins in AWS GovCloud (US) now list profiles in `us-gov-west-1` and `us-gov-east-1` instead of the commercial regions, which reject GovCloud tokens ([#19726](https://github.com/can1357/oh-my-pi/pull/19726) by [@TechDufus](https://github.com/TechDufus))
 
 ## [19.0.0] - 2026-11-18
 
