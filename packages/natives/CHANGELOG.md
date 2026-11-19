@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.0.1] - 2026-11-19
+
 ### Fixed
 
 - Fixed omp freezing for seconds to minutes on WSL2 while saving sessions: Linux `FileLock` now locks a sidecar file instead of binding a socket, which takes about 10 ms per call there. Older omp versions still running do not see these locks, so restart them after updating ([#19704](https://github.com/can1357/oh-my-pi/pull/19704) by [@turgaybulut](https://github.com/turgaybulut))

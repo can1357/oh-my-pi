@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.0.1] - 2026-11-19
+
 ### Added
 
 - The native session sheet shows a `Local` report line (the session's `local://` directory) as a copyable field beside the ID and file ([#19778](https://github.com/can1357/oh-my-pi/pull/19778) by [@farnoy](https://github.com/farnoy))

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.0.1] - 2026-11-19
+
 ### Fixed
 
 - Fixed GIF images failing Liquid AI judgments with HTTP 422; they are now sent as PNG ([#19757](https://github.com/can1357/oh-my-pi/pull/19757) by [@alphastorm](https://github.com/alphastorm))
@@ -10,6 +12,7 @@
 - Kiro thinking off now turns reasoning off instead of running the model's default effort; models that cannot disable reasoning use their lowest effort ([#19722](https://github.com/can1357/oh-my-pi/pull/19722) by [@emotionbug](https://github.com/emotionbug))
 - Kiro `/usage` shows purchased add-on credits, and an account whose plan credits are spent keeps serving while add-on credits remain ([#19724](https://github.com/can1357/oh-my-pi/pull/19724) by [@emotionbug](https://github.com/emotionbug))
 - Kiro Identity Center logins in AWS GovCloud (US) now list profiles in `us-gov-west-1` and `us-gov-east-1` instead of the commercial regions, which reject GovCloud tokens ([#19726](https://github.com/can1357/oh-my-pi/pull/19726) by [@TechDufus](https://github.com/TechDufus))
+- Statusless gateway errors reading `stream interrupted` now retry like `stream was interrupted` instead of ending the turn ([#19709](https://github.com/can1357/oh-my-pi/issues/19709)).
 
 ## [19.0.0] - 2026-11-18
 
@@ -20,7 +23,6 @@
 - Added `retryUnreachableBroker` and `onBrokerRetry` options to `discoverAuthStorage`, allowing hosts to control startup retries for temporarily unavailable authentication brokers and display retry status.
 
 ### Fixed
-- Statusless gateway errors reading `stream interrupted` now retry like `stream was interrupted` instead of ending the turn ([#19709](https://github.com/can1357/oh-my-pi/issues/19709)).
 
 - Fixed Claude account failover after a shared weekly usage limit recovers, ensuring accounts become available again when usage reporting no longer shows that window.
 - Authentication broker startup now tolerates temporary broker restarts and connection interruptions by retrying for up to 30 seconds, while still failing immediately for rejected tokens or malformed snapshots.
@@ -2191,16 +2193,4 @@
 - Automatically invalidate and rotate OAuth credentials when an "invalidated oauth token" error occurs
 - Fixed Anthropic usage reports treating the organization response header as the account identity, which caused the 5h/7d status-line segment to disappear for OAuth credentials without stored organization metadata. ([#5698](https://github.com/can1357/oh-my-pi/issues/5698))
 
-## [17.0.2] - 2026-07-17
-
-### Fixed
-
-- Automatically invalidate and rotate OAuth credentials when an "invalidated oauth token" error occurs.
-- Fixed auth-broker snapshot validation rejecting API keys stored via the `/login` flow, restoring support for gateway/broker setups serving login-sourced keys on custom hosts.
-- Fixed an issue where literal reasoning tags (e.g., `<think>`) inside Markdown code blocks or inline code were incorrectly treated as reasoning boundaries, which corrupted the rendered Markdown.
-- Classified HTTP 402 and "balance exhausted" quota responses as persistent usage limits, enabling automatic rotation of multi-account requests to a sibling credential.
-- Fixed `kimi-code` Anthropic-format requests ignoring custom provider base URLs.
-- Fixed an issue where GPT-5.6 Codex Responses-Lite requests failed with an HTTP 400 error due to invalid `tool_choice` parameters after tools were rewritten, by automatically downgrading forced hosted choices to `tool_choice: "auto"` while preserving explicit tool-use constraints.
-- Fixed Cursor streams prematurely reporting success before late CONNECT or gRPC terminal failures were observed, and resolved issues rejecting transport ends without a `turnEnded` signal.
-
-Older entries are archived in [packages/ai/CHANGELOG.md@727b7f828ddb](https://github.com/can1357/oh-my-pi/blob/727b7f828ddb087cdc3ef43c28776d817c096af6/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@f0b33d0e132f](https://github.com/can1357/oh-my-pi/blob/f0b33d0e132ff781c8617c04fa1ae66335876331/packages/ai/CHANGELOG.md).
