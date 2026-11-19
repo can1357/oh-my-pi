@@ -55,12 +55,13 @@ Supported frontmatter fields on the skill type:
 - `description?: string`
 - `globs?: string[]`
 - `alwaysApply?: boolean`
+- `requiresSkills?: string[]` (normalized from kebab-case `requires-skills`)
 - `hide?: boolean`
 - `disableModelInvocation?: boolean` (Agent Skills equivalent of `hide`; normalized from kebab-case `disable-model-invocation`)
 - additional keys are preserved as unknown metadata by conventional scanners
 - `enabled: false` skips a skill in conventional scanners and Skillshare discovery
 
-`globs` and `alwaysApply` are metadata here, not automatic skill-invocation controls. Agent Plugins packages use stricter Agent Skills validation instead of the permissive scanner: required name/description, directory-name agreement, valid naming, and a closed frontmatter field set. OMP-specific fields such as `hide` and `enabled` are not accepted there.
+`globs` is metadata here, not an automatic skill-invocation control. `alwaysApply` and `requiresSkills` are read only by the opt-in [decision layer](./decision-layer.md#skills): `requiresSkills` names skills selected and loaded alongside this one, and `alwaysApply: true` keeps a skill listed (and preloaded) under the progressive skill catalogue. Agent Plugins packages use stricter Agent Skills validation instead of the permissive scanner: required name/description, directory-name agreement, valid naming, and a closed frontmatter field set. OMP-specific fields such as `hide` and `enabled` are not accepted there.
 
 Current runtime behavior:
 
@@ -163,6 +164,8 @@ System prompt construction (`src/system-prompt.ts`) uses discovered skills as fo
 
 When no tool metadata is supplied, the prompt builder uses the presence of `read` as a compatibility fallback.
 
+With `decision.skills.variant: progressive` (and skill decisions in `suggest` or `automatic` mode), the main agent lists only `alwaysApply: true` skills and their `requiresSkills` closure, and per-turn judge hints plus `skill://?q=` search cover the rest; see [Decision layer](./decision-layer.md#progressive-catalogue).
+
 `hide: true` does not disable the skill. Hidden skills are still loaded and remain reachable through `skill://<name>` and `/skill:<name>` when skill commands are enabled.
 
 Task tool subagents receive the session's discovered/provided skills list via normal session creation; there is no per-task skill pinning override.
@@ -195,6 +198,7 @@ Invoked skill content is identified by invocation kind, each with its own prompt
 `src/internal-urls/skill-protocol.ts` supports:
 
 - `skill://<name>` → resolves to that skill's `SKILL.md` for `read`; in `bash` it is the skill directory (instructions at `skill://<name>/SKILL.md`), and `realpath`/`readlink` print the physical path
+- `skill://` → pages the non-hidden catalogue as JSON (`name`, `description`); `skill://?q=<query>` searches names and descriptions locally, with `limit` (1–100) and a `cursor` from `nextCursor`. Available only while the progressive catalogue is active (`decision.skills.variant: progressive` with skill decisions in `suggest` or `automatic` mode)
 - `skill://<name>/<relative-path>` → resolves inside that skill directory
 
 ```text

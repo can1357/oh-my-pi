@@ -14,6 +14,8 @@ export interface SkillFrontmatter {
 	description?: string;
 	globs?: string[];
 	alwaysApply?: boolean;
+	/** Exact names of skills loaded alongside this one (`requires-skills` in YAML). */
+	requiresSkills?: string[];
 	/**
 	 * When `true`, the skill is loaded and accessible via `skill://<name>` (and
 	 * `/skill:<name>` slash commands), but is omitted from the rendered system
