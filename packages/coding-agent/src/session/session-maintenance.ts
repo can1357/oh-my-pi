@@ -1869,6 +1869,9 @@ export class SessionMaintenance {
 			}
 			if (manualCompactionCleanup) {
 				this.#host.reconnectToAgent();
+				// `isCompacting` reads this barrier; drop it before the drain below or the
+				// scheduled continue sees a compaction still in progress and skips.
+				this.#manualCompactionCleanup = undefined;
 				// Compaction disconnected before `await abort()`, so abort's finally drain
 				// (and any steer/follow-up that arrived mid-compaction — async IRC, an
 				// `xd://` mount notice, an SDK/RPC steer) was suppressed while disconnected
@@ -1876,7 +1879,6 @@ export class SessionMaintenance {
 				// queues, so nothing else resumes them: re-drain now that the listener is back
 				// and `isCompacting` is false, or the queued turn hangs until the next prompt.
 				this.#host.drainStrandedQueuedMessages();
-				this.#manualCompactionCleanup = undefined;
 				manualCompactionCleanup.resolve();
 				// An inherited resume was earned by the pass that committed it; this
 				// pass's own outcome (hook cancel, summarizer failure) only decides the
