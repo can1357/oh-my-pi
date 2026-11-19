@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Discovered Kiro models that cannot turn reasoning off now use their lowest supported effort when thinking is set to off ([#19722](https://github.com/can1357/oh-my-pi/pull/19722) by [@emotionbug](https://github.com/emotionbug))
+
 ## [19.0.0] - 2026-11-18
 
 ### Added
