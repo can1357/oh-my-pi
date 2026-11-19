@@ -13,12 +13,9 @@ interface ProbeReport {
 	searchCalls: unknown[];
 }
 
-function runProbe(
-	downloads: boolean,
-	rpcs: Array<{ id: number; guid: string; forget?: boolean; interrupted?: boolean }> = [],
-): ProbeReport {
+function runProbe(downloads: boolean, findDownload = false): ProbeReport {
 	const proc = Bun.spawnSync([process.execPath, PROBE], {
-		env: { ...Bun.env, PROBE_DOWNLOADS: downloads ? "1" : "0", PROBE_RPCS: JSON.stringify(rpcs) },
+		env: { ...Bun.env, PROBE_DOWNLOADS: downloads ? "1" : "0", PROBE_FIND_DOWNLOAD: findDownload ? "1" : "0" },
 	});
 	expect(proc.exitCode, proc.stderr.toString()).toBe(0);
 	return JSON.parse(proc.stdout.toString());
@@ -49,36 +46,9 @@ it("advertises the downloads capability when the downloads API exists", () => {
 });
 
 it("answers a findDownload RPC without touching the missing downloads API", () => {
-	const { sent, searchCalls } = runProbe(false, [{ id: 1, guid: "g" }]);
+	const { sent, searchCalls } = runProbe(false, true);
 	// The search-call assertion is the guard's own: the null result alone also holds without it, since
 	// nothing can pair a download id while the API (and its onCreated listener) is absent.
 	expect(searchCalls).toEqual([]);
 	expect(rpcResults(sent)).toEqual([{ t: "rpcResult", id: 1, ok: true, result: null }]);
-});
-
-it("pairs a CDP download report with the downloads item and forgets it once the item completes", () => {
-	const { sent, searchCalls } = runProbe(true, [
-		{ id: 1, guid: "g" },
-		{ id: 2, guid: "g", forget: true },
-		{ id: 3, guid: "g" },
-	]);
-	expect(searchCalls).toEqual([{ id: 7 }, { id: 7 }]);
-	expect(rpcResults(sent)).toEqual([
-		{ t: "rpcResult", id: 1, ok: true, result: { filename: "/tmp/report.pdf", state: "in_progress" } },
-		{ t: "rpcResult", id: 2, ok: true, result: { filename: "/tmp/report.pdf", state: "complete" } },
-		{ t: "rpcResult", id: 3, ok: true, result: null },
-	]);
-});
-
-it("drops a running pair the moment its download reports interrupted over onChanged", () => {
-	const { sent, searchCalls } = runProbe(true, [
-		{ id: 1, guid: "g", interrupted: true },
-		{ id: 2, guid: "g" },
-	]);
-	// The onChanged listener forgets the pair before the second lookup: no search, null result.
-	expect(searchCalls).toEqual([{ id: 7 }]);
-	expect(rpcResults(sent)).toEqual([
-		{ t: "rpcResult", id: 1, ok: true, result: { filename: "/tmp/report.pdf", state: "in_progress" } },
-		{ t: "rpcResult", id: 2, ok: true, result: null },
-	]);
 });

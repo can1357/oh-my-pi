@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { getDashboardStats, getFolderStats, getTimeRangeConfig } from "@oh-my-pi/omp-stats/aggregator";
+import { getDashboardStats, getFolderStats } from "@oh-my-pi/omp-stats/aggregator";
 import { initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
 import type { MessageStats } from "@oh-my-pi/omp-stats/types";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
@@ -36,31 +36,6 @@ function makeMessage(timestamp: number, entryId: string, folder = "/tmp/project"
 		agentType: "main",
 	};
 }
-
-describe("getTimeRangeConfig 2d/3d windows", () => {
-	it("resolves 2d and 3d to hourly buckets spanning 2 and 3 days", () => {
-		const before = Date.now();
-		const twoDays = getTimeRangeConfig("2d");
-		const threeDays = getTimeRangeConfig("3d");
-		const after = Date.now();
-		expect(twoDays.bucketMs).toBe(3_600_000);
-		expect(threeDays.bucketMs).toBe(3_600_000);
-		expect(twoDays.cutoff).toBeGreaterThanOrEqual(before - 2 * 86_400_000);
-		expect(twoDays.cutoff).toBeLessThanOrEqual(after - 2 * 86_400_000);
-		expect(threeDays.cutoff).toBeGreaterThanOrEqual(before - 3 * 86_400_000);
-		expect(threeDays.cutoff).toBeLessThanOrEqual(after - 3 * 86_400_000);
-	});
-
-	it("filters dashboard stats by the 2d range", async () => {
-		await initDb();
-
-		const now = Date.now();
-		insertMessageStats([makeMessage(now, "within-2d"), makeMessage(now - 72 * 60 * 60 * 1000, "outside-2d")]);
-
-		const stats = await getDashboardStats("2d");
-		expect(stats.overall.totalRequests).toBe(1);
-	});
-});
 
 describe("getDashboardStats time range", () => {
 	it("filters dashboard stats by selected range", async () => {

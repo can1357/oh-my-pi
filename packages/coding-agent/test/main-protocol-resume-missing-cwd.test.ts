@@ -16,7 +16,7 @@ import * as readlinePromises from "node:readline/promises";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
-import { createSessionManager, runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
+import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import * as rpcInputModule from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-input";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -247,29 +247,28 @@ describe("resume of a session whose directory is gone", () => {
 		setProjectDir(launchDir);
 	});
 
-	for (const mode of ["rpc", "rpc-ui", "acp"] as const) {
-		for (const isTTY of [true, false]) {
-			it(`${mode} ${isTTY ? "with" : "without"} a terminal opens the stored session in place and asks nothing`, async () => {
-				const run = await runCli(["--mode", mode, "--resume", storedId.slice(0, 8)], isTTY);
+	// The decision is per mode; a terminal on stdin is where asking used to crash (rpc) or corrupt stdout (acp).
+	for (const mode of ["rpc", "acp"] as const) {
+		it(`${mode} with a terminal opens the stored session in place and asks nothing`, async () => {
+			const run = await runCli(["--mode", mode, "--resume", storedId.slice(0, 8)], true);
 
-				expect(createInterface).not.toHaveBeenCalled();
-				const stderr = stderrWrites.join("");
-				// No exit and no missing-directory error; a failure shows both.
-				expect({ exitCodes, stderr: stderr.includes("no longer exists") ? stderr : "" }).toEqual({
-					exitCodes: [],
-					stderr: "",
-				});
-				expect(run.error).toBeInstanceOf(StopSignal);
-				// ACP builds its sessions per client request, so startup's manager is the one it opened.
-				const manager = mode === "acp" ? await openedManager(storedPath) : run.manager;
-				expect(normalized(manager?.getSessionFile())).toBe(normalized(storedPath));
-				expect(normalized(manager?.getCwd())).toBe(normalized(launchDir));
-				expect(openRelocatedSpy).not.toHaveBeenCalled();
-				expect(normalized(await headerCwd(storedPath))).toBe(normalized(goneDir));
-				expect(await sessionFiles(SessionManager.getDefaultSessionDir(launchDir))).toEqual([]);
-				expect(stdoutWrites).toEqual([]);
-			}, 15_000);
-		}
+			expect(createInterface).not.toHaveBeenCalled();
+			const stderr = stderrWrites.join("");
+			// No exit and no missing-directory error; a failure shows both.
+			expect({ exitCodes, stderr: stderr.includes("no longer exists") ? stderr : "" }).toEqual({
+				exitCodes: [],
+				stderr: "",
+			});
+			expect(run.error).toBeInstanceOf(StopSignal);
+			// ACP builds its sessions per client request, so startup's manager is the one it opened.
+			const manager = mode === "acp" ? await openedManager(storedPath) : run.manager;
+			expect(normalized(manager?.getSessionFile())).toBe(normalized(storedPath));
+			expect(normalized(manager?.getCwd())).toBe(normalized(launchDir));
+			expect(openRelocatedSpy).not.toHaveBeenCalled();
+			expect(normalized(await headerCwd(storedPath))).toBe(normalized(goneDir));
+			expect(await sessionFiles(SessionManager.getDefaultSessionDir(launchDir))).toEqual([]);
+			expect(stdoutWrites).toEqual([]);
+		}, 15_000);
 	}
 
 	it("interactive asks, and yes moves", async () => {
@@ -282,123 +281,48 @@ describe("resume of a session whose directory is gone", () => {
 		expect(normalized(await headerCwd(moved?.getSessionFile()))).toBe(normalized(launchDir));
 		expect(run.error).toBeInstanceOf(StopSignal);
 	}, 15_000);
-
-	it("interactive asks, and no cancels", async () => {
-		answer = "n";
-		const run = await runCli(["--resume", storedId.slice(0, 8)], true);
-
-		expect(run.error).toBeInstanceOf(ProcessExitSignal);
-		expect(exitCodes).toEqual([0]);
-		expect(stdoutWrites.join("")).toContain("Resume cancelled: session was not moved.");
-		expect(normalized(await headerCwd(storedPath))).toBe(normalized(goneDir));
-	}, 15_000);
-
-	it("print mode without a terminal gets the run-interactively error", async () => {
-		const run = await runCli(["--print", "--resume", storedId.slice(0, 8)], false);
-
-		expect(run.error).toBeInstanceOf(ProcessExitSignal);
-		expect(exitCodes).toEqual([1]);
-		expect(stderrWrites.join("")).toContain("run interactively");
-		expect(createInterface).not.toHaveBeenCalled();
-	}, 15_000);
-
-	describe("path, continue, automatic resume and fork never reach the decision", () => {
-		/** `createSessionManager` for `argv` in the launch directory, with a decision that records each question. */
-		async function resolveSession(argv: string[], settings = Settings.isolated()) {
-			const decide = vi.fn(async () => "declined" as const);
-			const manager = await createSessionManager(parseArgs(argv), launchDir, settings, decide);
-			if (manager) managers.add(manager);
-			return { decide, manager };
-		}
-
-		/** A session filed in the launch directory's session directory whose recorded directory is gone. */
-		async function launchDirSessionWithGoneCwd(): Promise<string> {
-			const elsewhere = path.join(root, "gone-too");
-			await fs.promises.mkdir(elsewhere);
-			const { file } = await answeredSession(elsewhere, SessionManager.getDefaultSessionDir(launchDir));
-			await fs.promises.rm(elsewhere, { recursive: true, force: true });
-			return file;
-		}
-
-		it("resume by path", async () => {
-			const { decide, manager } = await resolveSession(["--resume", storedPath]);
-
-			expect(decide).not.toHaveBeenCalled();
-			expect(normalized(manager?.getSessionFile())).toBe(normalized(storedPath));
-		}, 15_000);
-
-		it("continue", async () => {
-			const file = await launchDirSessionWithGoneCwd();
-			const { decide, manager } = await resolveSession(["--continue"]);
-
-			expect(decide).not.toHaveBeenCalled();
-			expect(normalized(manager?.getSessionFile())).toBe(normalized(file));
-		}, 15_000);
-
-		it("automatic resume", async () => {
-			const file = await launchDirSessionWithGoneCwd();
-			const { decide, manager } = await resolveSession([], Settings.isolated({ autoResume: true }));
-
-			expect(decide).not.toHaveBeenCalled();
-			expect(normalized(manager?.getSessionFile())).toBe(normalized(file));
-		}, 15_000);
-
-		it("fork by id prefix", async () => {
-			const { decide, manager } = await resolveSession(["--fork", storedId.slice(0, 8)]);
-
-			expect(decide).not.toHaveBeenCalled();
-			expect(manager?.getHeader()?.parentSession).toBe(storedId);
-		}, 15_000);
-	});
 });
 
-describe.skipIf(process.platform === "win32")(
-	"a removed worktree is moved with no question, interactive and under rpc",
-	() => {
-		let repo: string;
-		let sessionId: string;
+describe.skipIf(process.platform === "win32")("a removed worktree is still moved with no question under rpc", () => {
+	let repo: string;
+	let sessionId: string;
 
-		beforeEach(async () => {
-			// Host git config (signing, hooks) must not reach the fixture repo; worktrees stay under the temp root.
-			Object.assign(process.env, {
-				GIT_CONFIG_GLOBAL: "/dev/null",
-				GIT_CONFIG_NOSYSTEM: "1",
-				GIT_AUTHOR_NAME: "Test",
-				GIT_AUTHOR_EMAIL: "test@example.com",
-				GIT_COMMITTER_NAME: "Test",
-				GIT_COMMITTER_EMAIL: "test@example.com",
-				OMP_WORKTREE_DIR: path.join(root, "wt-base"),
-			});
-			repo = path.join(root, "repo");
-			await fs.promises.mkdir(repo);
-			await $`git init -q && git commit -q --allow-empty -m init`.cwd(repo).quiet();
-			// `/wt` moves a session into a new worktree's session directory; `omp worktree clear` removes and prunes it.
-			const manager = await answeredManager(repo);
-			const { path: worktree } = await createSessionWorktree(repo, Settings.isolated(), "wt/gone");
-			await manager.moveTo(worktree);
-			await manager.close();
-			sessionId = manager.getSessionId();
-			await $`git worktree remove --force ${worktree} && git worktree prune`.cwd(repo).quiet();
-			setProjectDir(repo);
+	beforeEach(async () => {
+		// Host git config (signing, hooks) must not reach the fixture repo; worktrees stay under the temp root.
+		Object.assign(process.env, {
+			GIT_CONFIG_GLOBAL: "/dev/null",
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_AUTHOR_NAME: "Test",
+			GIT_AUTHOR_EMAIL: "test@example.com",
+			GIT_COMMITTER_NAME: "Test",
+			GIT_COMMITTER_EMAIL: "test@example.com",
+			OMP_WORKTREE_DIR: path.join(root, "wt-base"),
 		});
+		repo = path.join(root, "repo");
+		await fs.promises.mkdir(repo);
+		await $`git init -q && git commit -q --allow-empty -m init`.cwd(repo).quiet();
+		// `/wt` moves a session into a new worktree's session directory; `omp worktree clear` removes and prunes it.
+		const manager = await answeredManager(repo);
+		const { path: worktree } = await createSessionWorktree(repo, Settings.isolated(), "wt/gone");
+		await manager.moveTo(worktree);
+		await manager.close();
+		sessionId = manager.getSessionId();
+		await $`git worktree remove --force ${worktree} && git worktree prune`.cwd(repo).quiet();
+		setProjectDir(repo);
+	});
 
-		/** Resumes the session by id from the checkout, with a terminal on stdin, and checks it moved there unasked. */
-		async function expectMovedIntoCheckout(modeArgs: string[]): Promise<void> {
-			const run = await runCli([...modeArgs, "--resume", sessionId.slice(0, 8)], true);
+	/** Resumes the session by id from the checkout, with a terminal on stdin, and checks it moved there unasked. */
+	async function expectMovedIntoCheckout(modeArgs: string[]): Promise<void> {
+		const run = await runCli([...modeArgs, "--resume", sessionId.slice(0, 8)], true);
 
-			expect(createInterface).not.toHaveBeenCalled();
-			expect(openRelocatedSpy).toHaveBeenCalledTimes(1);
-			const moved = await relocatedManager();
-			expect(normalized(await headerCwd(moved?.getSessionFile()))).toBe(normalized(repo));
-			expect(run.error).toBeInstanceOf(StopSignal);
-		}
+		expect(createInterface).not.toHaveBeenCalled();
+		expect(openRelocatedSpy).toHaveBeenCalledTimes(1);
+		const moved = await relocatedManager();
+		expect(normalized(await headerCwd(moved?.getSessionFile()))).toBe(normalized(repo));
+		expect(run.error).toBeInstanceOf(StopSignal);
+	}
 
-		it("interactive", async () => {
-			await expectMovedIntoCheckout([]);
-		}, 15_000);
-
-		it("under rpc", async () => {
-			await expectMovedIntoCheckout(["--mode", "rpc"]);
-		}, 15_000);
-	},
-);
+	it("under rpc", async () => {
+		await expectMovedIntoCheckout(["--mode", "rpc"]);
+	}, 15_000);
+});

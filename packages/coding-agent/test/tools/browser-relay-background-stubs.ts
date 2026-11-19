@@ -11,7 +11,6 @@ export const probe = {
 	sockets: [] as FakeWebSocket[],
 	sent: [] as Array<Record<string, unknown>>,
 	searchCalls: [] as unknown[],
-	downloadItemState: "complete",
 };
 
 export class FakeWebSocket {
@@ -83,7 +82,7 @@ globals.chrome = {
 				downloads: {
 					search: async (query: unknown) => {
 						probe.searchCalls.push(query);
-						return [{ id: 7, filename: "/tmp/report.pdf", state: probe.downloadItemState }];
+						return [{ id: 7, filename: "/tmp/report.pdf", state: "complete" }];
 					},
 					onCreated: event("downloadsOnCreated"),
 					onChanged: event("downloadsOnChanged"),

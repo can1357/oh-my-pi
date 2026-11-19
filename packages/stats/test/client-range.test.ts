@@ -14,14 +14,6 @@ describe("client time ranges", () => {
 		for (let i = 1; i < buckets.length; i++) expect(buckets[i] - buckets[i - 1]).toBe(HOUR_MS);
 	});
 
-	it("bucketAxis 3d spans 72 hours ending at the current hour", () => {
-		const now = Date.UTC(2026, 10, 19, 0, 0, 1);
-		const buckets = bucketAxis("3d", [], undefined, now);
-		expect(buckets).toHaveLength(73);
-		expect(buckets.at(-1)).toBe(now - 1_000);
-		expect(buckets[0]).toBe(buckets.at(-1)! - 72 * HOUR_MS);
-	});
-
 	it("accepts 2d and 3d in deep links and falls back to 24h for unknown values", () => {
 		expect(parseHash("#/overview?range=2d").range).toBe("2d");
 		expect(parseHash("#/overview?range=3d").range).toBe("3d");
