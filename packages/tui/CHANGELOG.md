@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed images from a previous session reappearing at the top-left of the screen after `/new` in herdr-app ([#19749](https://github.com/can1357/oh-my-pi/pull/19749) by [@jaredlyon](https://github.com/jaredlyon))
+- Loop-stall diagnostics (`ui.loop-blocked`) no longer sample the JS thread while no TUI runs, such as in an external editor or after the session ends ([#19703](https://github.com/can1357/oh-my-pi/pull/19703) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [19.0.0] - 2026-11-18
 
