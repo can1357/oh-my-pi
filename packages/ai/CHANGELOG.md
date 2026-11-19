@@ -90,6 +90,8 @@
 ### Fixed
 
 - Fixed slow streaming of Gemma tool calls with large arguments.
+- Fixed Antigravity CLI quota exhaustion (`RESOURCE_EXHAUSTED`) streaming into replies as "API error" text; the request now fails with a 429 rate-limit error, so omp's retry, credential rotation and model fallback policy applies instead of a thinking-loop retry ([#19382](https://github.com/can1357/oh-my-pi/pull/19382) by [@gimso2x](https://github.com/gimso2x))
+- Gemma tool calls with large arguments no longer slow down as they stream ([#19487](https://github.com/can1357/oh-my-pi/pull/19487) by [@H4vC](https://github.com/H4vC))
 
 ## [18.21.0] - 2026-11-16
 
