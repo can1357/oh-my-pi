@@ -5,6 +5,7 @@
 ### Fixed
 
 - `read` suggests the line-range syntax for `file:1:2` when `file` exists, directly or by unique suffix, but `file:1` does not ([#19821](https://github.com/can1357/oh-my-pi/pull/19821) by [@baekjosh](https://github.com/baekjosh)).
+- Filling a search field in Chrome with the browser tool's `fill` updates its results again on pages that search as you type on key events, such as CyberChef's operation search, which showed nothing after a fill in 19.0.0 ([#19748](https://github.com/can1357/oh-my-pi/pull/19748) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [19.0.1] - 2026-11-19
 
