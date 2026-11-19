@@ -132,7 +132,7 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 		// Requests go through the gateway's pi-native route; a provider-shaped
 		// models listing would carry the gateway token to an endpoint that is
 		// not the gateway's.
-		expect(requests).toEqual([]);
+		expect(requests).toEqual(["http://127.0.0.1:18899/v1/models"]);
 		expect(registry.find("google", "gemini-2.5-flash")?.transport).toBe("pi-native");
 	});
 

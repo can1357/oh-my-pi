@@ -9,6 +9,8 @@
 
 ### Fixed
 
+- Fixed pi-native providers without explicit discovery retaining an outdated bundled chat roster; they now read the configured gateway's `/v1/models` with only its gateway credential and a permission-scoped cache ([#19818](https://github.com/can1357/oh-my-pi/issues/19818)).
+- Fixed unresolved configured task roles silently falling back to the parent's model; task execution now warns when the configured role cannot be resolved ([#19818](https://github.com/can1357/oh-my-pi/issues/19818)).
 - Fixed the shell's `dirname` builtin on Windows ignoring `\` separators and drive prefixes (`dirname 'C:\a\b'` printed `.`), which broke scripts like VS Code's `code` launcher (`./Code.exe: No such file or directory`)
 - Fixed bash output minimizing being skipped on Windows when a command is named by a `\` path or with `.exe` (`"C:\Program Files\Git\cmd\git.exe" status`, `git.exe log`)
 - Fixed the bundled `omp://tools` docs still describing the removed `ida` tool; `tools/dsm.md` now documents eval's `dsm` namespace and `disassembler.*` settings, and `tools/read.md` documents metadata-only executable reads ([#19608](https://github.com/can1357/oh-my-pi/issues/19608))

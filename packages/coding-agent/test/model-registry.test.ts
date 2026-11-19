@@ -639,10 +639,9 @@ describe("ModelRegistry", () => {
 			// background discovery refresh re-fetched the openrouter catalog and
 			// `mergeDiscoveredModel` dropped `transport: pi-native` (raw catalog
 			// rows carry no transport), so the next stream went out as plain
-			// openai-completions to `${baseUrl}/chat/completions` instead of the
-			// gateway's `/v1/pi/stream`. A pi-native provider no longer runs the
-			// provider's own discovery at all: the gateway serves none of
-			// OpenRouter's listing routes.
+			// openai-completions to `${baseUrl}/chat/completions` instead of the gateway's `/v1/pi/stream`.
+			// The gateway's `/v1/models` is consulted, never the provider's own
+			// catalog endpoint. A 404 keeps bundled models on pi-native transport.
 			writeRawModelsJson({
 				openrouter: {
 					baseUrl: "http://localhost:4000",
@@ -667,7 +666,7 @@ describe("ModelRegistry", () => {
 			expect(preRefresh.every(m => m.baseUrl === "http://localhost:4000")).toBe(true);
 
 			await registry.refreshProvider("openrouter", "online");
-			expect(requestedUrls).toEqual([]);
+			expect(requestedUrls).toEqual(["http://localhost:4000/v1/models"]);
 
 			// Post-refresh: every openrouter model must still route through the
 			// pi-native transport.

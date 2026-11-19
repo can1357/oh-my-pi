@@ -80,6 +80,7 @@ import {
 	type DiscoveryContext,
 	type DiscoveryProviderConfig,
 	discoverLlamaCppModelRuntimeMetadata,
+	discoverPiNativeGatewayModels,
 	discoverLmStudioModelRuntimeMetadata,
 	discoverModelsByProviderType,
 	ensureLlamaCppV1BaseUrl,
@@ -213,6 +214,7 @@ interface CustomModelsResult {
 interface ConfiguredModelDiscoveryResult {
 	models: Model<Api>[];
 	replaceRuntimeModels: boolean;
+	authoritative?: boolean;
 }
 
 /** One configured provider's discovery outcome within a discovery pass. */
@@ -224,6 +226,7 @@ interface RuntimeDiscoveryLanding {
 	discovered: Model<Api>[];
 	/** Configured providers whose runtime rows the pass replaces. */
 	replacedConfiguredProviders: string[];
+	authoritativeConfiguredProviders: Set<string>;
 	/** Every provider whose runtime layer the pass rewrites. */
 	touchedProviders: Set<string>;
 }
@@ -2150,6 +2153,14 @@ export class ModelRegistry {
 					this.#applyProviderCompat(providerConfig.compat, restoredCacheModels),
 				),
 			);
+			if (
+				providerConfig.discovery.type === "pi-native-gateway" &&
+				cache.fresh &&
+				cache.authoritative &&
+				models.length > 0
+			) {
+				this.#cachedAuthoritativeProviders.add(providerConfig.provider);
+			}
 			cachedModels.push(...models);
 			this.#providerDiscoveryStates.set(providerConfig.provider, {
 				provider: providerConfig.provider,
@@ -2415,7 +2426,10 @@ export class ModelRegistry {
 				keylessProviders.add(providerName);
 			}
 
-			if (providerConfig.discovery && (providerConfig.api || providerConfig.discovery.type === "proxy")) {
+			if (
+				(providerConfig.discovery && (providerConfig.api || providerConfig.discovery.type === "proxy")) ||
+				(providerConfig.transport === "pi-native" && !providerConfig.discovery && providerConfig.baseUrl)
+			) {
 				const disableStrictCompat = providerConfig.disableStrictTools ? { disableStrictTools: true } : undefined;
 				discoverableProviders.push({
 					provider: providerName,
@@ -2424,10 +2438,12 @@ export class ModelRegistry {
 					// fallback for entries that don't advertise one.
 					api: (providerConfig.api ?? "openai-completions") as Api,
 					baseUrl: providerConfig.baseUrl,
+					apiKey: providerConfig.apiKey,
 					headers: providerConfig.headers,
+					authMode,
 					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
 					remoteCompaction: providerConfig.remoteCompaction,
-					discovery: providerConfig.discovery,
+					discovery: providerConfig.discovery ?? { type: "pi-native-gateway" },
 					optional: false,
 				});
 			}
@@ -2542,12 +2558,18 @@ export class ModelRegistry {
 		const replacedConfiguredProviders = currentConfiguredDiscoveryResults.flatMap(result =>
 			result.replaceRuntimeModels ? [result.provider.provider] : [],
 		);
+		const authoritativeConfiguredProviders = new Set(
+			currentConfiguredDiscoveryResults
+				.filter(result => result.authoritative)
+				.map(result => result.provider.provider),
+		);
 		const discovered = [...configuredDiscovered, ...builtInDiscovery.models];
 		const touchedProviders = new Set(discovered.map(model => model.provider));
 		for (const provider of replacedConfiguredProviders) touchedProviders.add(provider);
 		for (const provider of builtInDiscovery.replaceRuntimeProviders) touchedProviders.add(provider);
 		for (const provider of builtInDiscovery.authoritativeProviders) touchedProviders.add(provider);
-		return { discovered, replacedConfiguredProviders, touchedProviders };
+		for (const provider of authoritativeConfiguredProviders) touchedProviders.add(provider);
+		return { discovered, replacedConfiguredProviders, touchedProviders, authoritativeConfiguredProviders };
 	}
 
 	/**
@@ -2615,10 +2637,8 @@ export class ModelRegistry {
 		providerFilter: ReadonlySet<string> | undefined,
 	): void {
 		this.#captureCatalogMetrics(builtInDiscovery.models, providerFilter === undefined);
-		const { discovered, replacedConfiguredProviders, touchedProviders } = this.#runtimeDiscoveryLanding(
-			configuredDiscoveryResults,
-			builtInDiscovery,
-		);
+		const { discovered, replacedConfiguredProviders, touchedProviders, authoritativeConfiguredProviders } =
+			this.#runtimeDiscoveryLanding(configuredDiscoveryResults, builtInDiscovery);
 		if (
 			discovered.length === 0 &&
 			builtInDiscovery.authoritativeProviders.size === 0 &&
@@ -2638,6 +2658,7 @@ export class ModelRegistry {
 			),
 		);
 		const authoritativeProviders = providersWithAuthoritativeProjectCatalog(discoveredModels);
+		for (const provider of authoritativeConfiguredProviders) authoritativeProviders.add(provider);
 		for (const provider of builtInDiscovery.authoritativeProviders) {
 			authoritativeProviders.add(provider);
 		}
@@ -2654,6 +2675,7 @@ export class ModelRegistry {
 			this.#cachedDiscoverableModels = this.#cachedDiscoverableModels.filter(
 				model => !replacedProviderSet.has(model.provider),
 			);
+			for (const provider of replacedProviderSet) this.#cachedAuthoritativeProviders.delete(provider);
 		}
 		this.#runtimeDiscoveredModels = this.#runtimeDiscoveredModels.filter(
 			model => !touchedProviders.has(model.provider),
@@ -2750,6 +2772,18 @@ export class ModelRegistry {
 	}
 
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
+		if (providerConfig.discovery.type === "pi-native-gateway") {
+			const fingerprint = (value: string | undefined) =>
+				value?.startsWith("!") ? value : value ? Bun.env[value] || value : "";
+			const headers = providerConfig.headers ?? {};
+			const scopedHeaders = Object.keys(headers)
+				.sort()
+				.map(key => [key, fingerprint(headers[key])]);
+			const hash = new Bun.CryptoHasher("sha256")
+				.update(JSON.stringify([providerConfig.baseUrl, fingerprint(providerConfig.apiKey), scopedHeaders]))
+				.digest("hex");
+			return `${providerConfig.provider}:pi-native-gateway-v2-${hash}`;
+		}
 		if (providerConfig.discovery.type === "ollama") {
 			return resolveOllamaModelCacheProviderId(providerConfig.provider, providerConfig.baseUrl);
 		}
@@ -2813,8 +2847,28 @@ export class ModelRegistry {
 			strategy === "online-if-uncached" && (cacheOlderThanConfig || bypassFreshCache) ? "online" : strategy;
 		const willFetch =
 			effectiveStrategy === "online" || (effectiveStrategy === "online-if-uncached" && cached === null);
+		if (
+			providerConfig.discovery.type === "pi-native-gateway" &&
+			willFetch &&
+			!providerConfig.apiKey &&
+			providerConfig.authMode !== "none" &&
+			!Object.keys(providerConfig.headers ?? {}).some(key => key.toLowerCase() === "authorization")
+		) {
+			this.#providerDiscoveryStates.set(providerConfig.provider, {
+				provider: providerConfig.provider,
+				status: "unauthenticated",
+				optional: false,
+				stale: cached !== null,
+				models: cached?.models.map(model => model.id) ?? [],
+			});
+			return {
+				models: cached?.models ?? [],
+				replaceRuntimeModels: false,
+				authoritative: cached?.fresh === true && cached.authoritative && cached.models.length > 0,
+			};
+		}
 		const requiresAuth = !this.#keylessProviders.has(providerConfig.provider);
-		if (requiresAuth && willFetch) {
+		if (providerConfig.discovery.type !== "pi-native-gateway" && requiresAuth && willFetch) {
 			const apiKey = await this.#peekApiKeyForProvider(providerConfig.provider);
 			if (!isAuthenticated(apiKey)) {
 				this.#providerDiscoveryStates.set(providerConfig.provider, {
@@ -2839,13 +2893,28 @@ export class ModelRegistry {
 		const fetchDynamicModels = async (): Promise<readonly ModelSpec<Api>[] | null> => {
 			try {
 				const resolvedHeaders = await resolveConfigHeaders(providerConfig.headers);
-				const requestConfig = { ...providerConfig, headers: resolvedHeaders };
-				const models = this.#applyProviderModelOverrides(
-					providerId,
-					await discoverModelsByProviderType(requestConfig, this.#discoveryContext()),
-				);
+				let models: Model<Api>[];
+				if (providerConfig.discovery.type === "pi-native-gateway") {
+					let hasHeaderCredential = false;
+					for (const key in resolvedHeaders) if (key.toLowerCase() === "authorization") hasHeaderCredential = true;
+					const apiKey = providerConfig.apiKey ? await resolveConfigValue(providerConfig.apiKey) : undefined;
+					if (!hasHeaderCredential && !apiKey && providerConfig.authMode !== "none") {
+						throw new Error("No configured pi-native gateway credential");
+					}
+					models = await discoverPiNativeGatewayModels(
+						{ ...providerConfig, headers: resolvedHeaders },
+						this.#fetch,
+						apiKey,
+					);
+				} else {
+					models = await discoverModelsByProviderType(
+						{ ...providerConfig, headers: resolvedHeaders },
+						this.#discoveryContext(),
+					);
+				}
+				const overridden = this.#applyProviderModelOverrides(providerId, models);
 				this.#lastDiscoveryWarnings.delete(providerId);
-				return models.map(toModelSpec);
+				return overridden.map(toModelSpec);
 			} catch (error) {
 				discoveryError = error instanceof Error ? error.message : String(error);
 				// A 401/403 means the endpoint is reachable but rejected the
@@ -2908,6 +2977,7 @@ export class ModelRegistry {
 				),
 			),
 			replaceRuntimeModels: result.source === "provider",
+			authoritative: providerConfig.discovery.type === "pi-native-gateway" && result.models.length > 0,
 		};
 	}
 

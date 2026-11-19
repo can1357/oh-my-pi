@@ -30,7 +30,7 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { createSessionDefaults } from "../helpers/session-defaults";
 import { manyToolName } from "../fixtures/many-tools-mcp";
-import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { logger, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgTierAnthropic, cfgTierGoogle, cfgTierOpenai } from "@oh-my-pi/pi-coding-agent/session/settings";
 
@@ -570,6 +570,92 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(initSpy).toHaveBeenCalledWith(expect.objectContaining({ modelRole: "reviewer" }));
+	});
+	it("warns once when an explicitly configured role misses and the child uses its parent model", async () => {
+		const parent = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!parent) throw new Error("Expected bundled parent model");
+		const session = yieldEmittingSession();
+		Object.assign(session, { model: parent });
+		const create = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			...createSessionResult(session),
+			modelFallbackMessage: "Deferred selection used the parent",
+		});
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const settings = Settings.isolated({ modelRoles: { task: "openai-codex/gpt-6.2-sol" } });
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-unavailable-role",
+			modelOverride: ["openai-codex/gpt-6.2-sol"],
+			modelRole: "task",
+			parentActiveModelPattern: "openai-codex/gpt-5.6-sol",
+			settings,
+			modelRegistry: createModelRegistry(parent),
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(create.mock.calls[0]?.[0]?.model).toBeUndefined();
+		expect(
+			warn.mock.calls.filter(
+				([message]) => message === "Configured subagent model role unavailable; using parent session model",
+			),
+		).toEqual([
+			[
+				"Configured subagent model role unavailable; using parent session model",
+				{
+					agent: "task",
+					role: "task",
+					configuredSelector: "openai-codex/gpt-6.2-sol",
+					fallbackModel: "openai-codex/gpt-5.6-sol",
+				},
+			],
+		]);
+	});
+
+	it("does not warn for a matched alternative or an inherited model", async () => {
+		const parent = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!parent) throw new Error("Expected bundled parent model");
+		const session = yieldEmittingSession();
+		Object.assign(session, { model: parent });
+		const create = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			...createSessionResult(session),
+			modelFallbackMessage: "A different SDK fallback diagnostic",
+		});
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const settings = Settings.isolated({
+			modelRoles: { task: "openai-codex/gpt-6.2-sol,openai-codex/gpt-5.6-sol" },
+		});
+		const options = {
+			...baseOptions,
+			modelOverride: ["openai-codex/gpt-6.2-sol", "openai-codex/gpt-5.6-sol"],
+			modelRole: "task",
+			parentActiveModelPattern: "openai-codex/gpt-5.6-sol",
+			settings,
+			modelRegistry: createModelRegistry(parent),
+		};
+
+		expect((await runSubprocess({ ...options, id: "subagent-matched-alternative" })).exitCode).toBe(0);
+		expect(create.mock.calls[0]?.[0]?.model).toBe(parent);
+		create.mockResolvedValue({
+			...createSessionResult(session),
+			modelFallbackMessage: "Deferred selection used the parent",
+		});
+		expect(
+			(
+				await runSubprocess({
+					...options,
+					id: "subagent-inherited-model",
+					modelOverride: ["missing"],
+					modelRole: undefined,
+					settings: Settings.isolated(),
+				})
+			).exitCode,
+		).toBe(0);
+		expect(
+			warn.mock.calls.some(
+				([message]) => message === "Configured subagent model role unavailable; using parent session model",
+			),
+		).toBe(false);
 	});
 });
 

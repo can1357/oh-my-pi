@@ -5319,6 +5319,27 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				throw err;
 			}
 			mcpFollower?.bind(session);
+			const selectedRole = modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings);
+			const configuredRoleSelector = selectedRole ? subagentSettings.getModelRole(selectedRole)?.trim() : undefined;
+			const parentFallbackModel =
+				!model && configuredRoleSelector && options.parentActiveModelPattern
+					? resolveModelOverride([options.parentActiveModelPattern], modelRegistry, settings).model
+					: undefined;
+			if (
+				parentFallbackModel &&
+				configuredRoleSelector &&
+				session.model &&
+				modelFallbackMessage &&
+				!resolveModelOverride(modelPatterns, modelRegistry, settings).model &&
+				formatModelStringWithRouting(session.model) === formatModelStringWithRouting(parentFallbackModel)
+			) {
+				logger.warn("Configured subagent model role unavailable; using parent session model", {
+					agent: agent.name,
+					role: selectedRole,
+					configuredSelector: configuredRoleSelector,
+					fallbackModel: formatModelStringWithRouting(session.model),
+				});
+			}
 			// The SDK records a new session's initial model as the default role.
 			// Pin the child's own chain so a parent default sharing that model
 			// cannot steal its fallback routing. Resumed history keeps its role.

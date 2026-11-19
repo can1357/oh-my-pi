@@ -6,6 +6,7 @@
  * discovery lives in pi-catalog's provider-models.
  */
 import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+import { isBuiltinApi } from "@oh-my-pi/pi-ai/api-registry";
 import { getAppleFoundationModelsAvailability } from "@oh-my-pi/pi-ai/providers/apple-foundation-models";
 import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -36,7 +37,8 @@ import {
 import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { parseServiceTierIds } from "@oh-my-pi/pi-catalog/utils";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
-import type { ProviderDiscovery } from "./models-config-schema";
+import type { ProviderAuthMode, ProviderDiscovery } from "./models-config-schema";
+import { redactUrlForLog } from "../mcp/json-rpc";
 
 // Default cap on `max_tokens` for auto-discovered models that do not advertise
 // their own output limit (OpenAI-models-list, Ollama, llama.cpp, new-api/
@@ -191,10 +193,14 @@ export interface DiscoveryProviderConfig {
 	provider: string;
 	api: Api;
 	baseUrl?: string;
+	apiKey?: string;
+	authMode?: ProviderAuthMode;
 	headers?: Record<string, string>;
 	compat?: ModelSpec<Api>["compat"];
 	remoteCompaction?: RemoteCompactionConfig<Api>;
-	discovery: ProviderDiscovery;
+	discovery:
+		| ProviderDiscovery
+		| { type: "pi-native-gateway"; timeoutMs?: number; injectV1?: boolean; advertisedReasoning?: boolean };
 	optional?: boolean;
 	/**
 	 * Extra roots probed in order when `baseUrl` yields no reachable server.
@@ -202,6 +208,100 @@ export interface DiscoveryProviderConfig {
 	 * and current (9931) default ports are discovered.
 	 */
 	fallbackBaseUrls?: string[];
+}
+
+/** Gateway-only discovery; never resolves an upstream provider credential. */
+export async function discoverPiNativeGatewayModels(
+	config: DiscoveryProviderConfig,
+	fetchImpl: FetchImpl,
+	apiKey?: string,
+): Promise<Model<Api>[]> {
+	const baseUrl = config.baseUrl;
+	if (!baseUrl) throw new Error("pi-native gateway discovery requires a baseUrl");
+	const url = `${baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "")}/v1/models`;
+	const headers = { ...config.headers };
+	let hasAuthorization = false;
+	for (const key in headers) if (key.toLowerCase() === "authorization") hasAuthorization = true;
+	if (apiKey && !hasAuthorization) {
+		headers.Authorization = `Bearer ${apiKey}`;
+	}
+	const response = await withTimeoutSignal(discoveryProbeTimeoutMs(baseUrl, 250), signal =>
+		fetchImpl(url, { method: "GET", headers, redirect: "manual", signal }),
+	);
+	if (!response.ok) {
+		const target = response.headers.get("location");
+		const origin = target ? new URL(target, url).origin : undefined;
+		throw new DiscoveryHttpError(
+			response.status,
+			`${redactUrlForLog(url)}${origin ? ` (redirect to ${origin})` : ""}`,
+		);
+	}
+	let payload: unknown;
+	try {
+		payload = await response.json();
+	} catch {
+		throw new Error(`Invalid model list from ${redactUrlForLog(url)}`);
+	}
+	if (!isRecord(payload) || !Array.isArray(payload.data)) {
+		throw new Error(`Invalid model list from ${redactUrlForLog(url)}`);
+	}
+	const prefix = `${config.provider}/`;
+	const models: Model<Api>[] = [];
+	const references = getBundledModelReferenceIndex();
+	for (const row of payload.data.slice(0, 2000)) {
+		if (
+			!isRecord(row) ||
+			typeof row.id !== "string" ||
+			!row.id.startsWith(prefix) ||
+			(row.kind !== undefined && row.kind !== "chat")
+		)
+			continue;
+		const id = row.id.slice(prefix.length);
+		if (!id || id.length > 256 || /[\x00-\x1f\x7f]/.test(id)) continue;
+		const advertisedApi = row.api;
+		if (advertisedApi !== undefined && (typeof advertisedApi !== "string" || !isBuiltinApi(advertisedApi))) continue;
+		const bundled = resolveModelReference(id, references);
+		const reference = bundled?.provider === config.provider ? bundled : undefined;
+		const api = advertisedApi ?? reference?.api ?? config.api;
+		if (runnerApiKind(api) !== undefined) continue;
+		const name =
+			typeof row.display_name === "string"
+				? row.display_name
+						.replace(/[\x00-\x1f\x7f]/g, "")
+						.slice(0, 200)
+						.trim()
+				: "";
+		const positiveInteger = (value: unknown): number | undefined =>
+			typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+		const contextWindow =
+			positiveInteger(row.context_length) ?? reference?.contextWindow ?? DISCOVERY_DEFAULT_CONTEXT_WINDOW;
+		const maxTokens =
+			positiveInteger(row.max_output_tokens) ?? reference?.maxTokens ?? discoveryDefaultMaxTokens(config.api);
+		const input = Array.isArray(row.input_modalities)
+			? row.input_modalities.includes("image")
+				? (["text", "image"] as const)
+				: (["text"] as const)
+			: (reference?.input ?? ["text"]);
+		models.push(
+			buildModel({
+				id,
+				name: name || reference?.name || id,
+				api,
+				provider: config.provider,
+				baseUrl,
+				kind: "chat",
+				input: [...input],
+				contextWindow,
+				maxTokens,
+				supportsTools:
+					typeof row.supports_tools === "boolean" ? row.supports_tools : (reference?.supportsTools ?? true),
+				reasoning: reference?.reasoning ?? false,
+				thinking: reference?.thinking,
+				cost: reference?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			}),
+		);
+	}
+	return models;
 }
 
 /** Registry-provided capabilities the protocol probes need; never the registry itself. */
@@ -498,6 +598,8 @@ export function discoverModelsByProviderType(
 	ctx: DiscoveryContext,
 ): Promise<Model<Api>[]> {
 	switch (providerConfig.discovery.type) {
+		case "pi-native-gateway":
+			throw new Error("pi-native gateway discovery requires configured gateway credentials");
 		case "ollama":
 			return discoverOllamaModels(providerConfig, ctx);
 		case "llama.cpp":
