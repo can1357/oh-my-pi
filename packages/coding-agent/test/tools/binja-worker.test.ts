@@ -7,11 +7,13 @@
  *
  * Skipped unless a Binary Ninja install resolves on the host and a Python 3 can start it headless
  * (which is where the licence is checked). Each test works in its own temp dir against a copy of
- * `/bin/true`, so it touches neither the agent dir nor the user's databases.
+ * `/bin/true` or a shared library it builds there, so it touches neither the agent dir nor the
+ * user's databases.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { $ } from "bun";
 import { binjaPythonDir, locateBinjaInstall } from "@oh-my-pi/pi-coding-agent/binja/install";
 import { DISASM_BACKENDS, type WorkerRuntime } from "@oh-my-pi/pi-coding-agent/disasm/backend";
 import type { DatabaseLocation } from "@oh-my-pi/pi-coding-agent/disasm/store";
@@ -61,6 +63,8 @@ function headlessRuntime(): WorkerRuntime | undefined {
 
 const runtime = headlessRuntime();
 const isRoot = process.getuid?.() === 0;
+/** Builds the shared-library fixture; the import test is skipped without it. */
+const cc = Bun.which("cc");
 
 interface ViewResult {
 	text: string;
@@ -116,25 +120,63 @@ describe.skipIf(!runtime)("Binary Ninja worker", () => {
 	});
 
 	/** A managed store directory holding the staged input, as `prepareStoreDir` leaves it. */
-	function stageInput(): string {
+	function stageInput(source: string = INPUT): string {
 		const dir = tmp.join("store");
 		fs.mkdirSync(dir);
-		fs.copyFileSync(INPUT, path.join(dir, "true"));
+		fs.copyFileSync(source, path.join(dir, path.basename(source)));
 		return dir;
 	}
 
-	function storeLocation(dir: string, isNew: boolean): DatabaseLocation {
-		const stagedPath = path.join(dir, "true");
+	function storeLocation(dir: string, isNew: boolean, source: string = INPUT): DatabaseLocation {
+		const stagedPath = path.join(dir, path.basename(source));
 		return {
 			id: "test-true",
 			dir,
-			sourcePath: INPUT,
+			sourcePath: source,
 			stagedPath,
 			kind: "store",
 			openPath: isNew ? stagedPath : BACKEND.databaseName(stagedPath),
 			isNew,
 			lockTarget: path.join(dir, "db"),
 		};
+	}
+
+	/**
+	 * A shared library whose `api` calls libc's `puts`, `dep_fn` from a second library under the
+	 * symbol version `DEP_1`, and its own exported `helper`, which the linker routes through the PLT.
+	 * `direct` and `tail` are built without a PLT: `direct` calls `puts` through the import slot,
+	 * and `tail` is nothing but a jump through it, which is also what a PLT entry looks like.
+	 */
+	async function buildLibrary(): Promise<string> {
+		if (!cc) throw new Error("no C compiler on PATH");
+		const src = tmp.join("src");
+		fs.mkdirSync(src);
+		await Bun.write(path.join(src, "dep.c"), "int dep_fn(int x) { return x * 3; }\n");
+		await Bun.write(path.join(src, "dep.map"), "DEP_1 { global: dep_fn; local: *; };\n");
+		await Bun.write(
+			path.join(src, "fix.c"),
+			[
+				"#include <stdio.h>",
+				"int dep_fn(int);",
+				"int helper(int x) { return x + 41; }",
+				"int api(const char *s) { return helper(dep_fn(puts(s))); }",
+				"",
+			].join("\n"),
+		);
+		await Bun.write(
+			path.join(src, "direct.c"),
+			["#include <stdio.h>", "int direct(const char *s) { return puts(s); }", ""].join("\n"),
+		);
+		await Bun.write(
+			path.join(src, "tail.c"),
+			["#include <stdio.h>", "int tail(const char *s) { return puts(s); }", ""].join("\n"),
+		);
+		await $`${cc} -shared -fPIC -O0 -Wl,--version-script=dep.map -o libdep.so dep.c`.cwd(src).quiet();
+		await $`${cc} -c -fPIC -O0 -o fix.o fix.c`.cwd(src).quiet();
+		await $`${cc} -c -fPIC -O0 -fno-plt -o direct.o direct.c`.cwd(src).quiet();
+		await $`${cc} -c -fPIC -O2 -fno-plt -fcf-protection=none -o tail.o tail.c`.cwd(src).quiet();
+		await $`${cc} -shared -o libfix.so fix.o direct.o tail.o -L. -ldep`.cwd(src).quiet();
+		return path.join(src, "libfix.so");
 	}
 
 	function inPlaceLocation(database: string): DatabaseLocation {
@@ -232,7 +274,25 @@ describe.skipIf(!runtime)("Binary Ninja worker", () => {
 			expect((await exec(worker, "callees('_start')")).value).toBe("['__libc_start_main']");
 			expect(await view(worker, "imports")).toMatch(/^0x[0-9a-f]+ {2}__libc_start_main$/m);
 			expect(await view(worker, "xrefs", "__libc_start_main")).toMatch(/^0x[0-9a-f]+ {2}CALL {2}in _start$/m);
-			expect(await view(worker, "strings")).toMatch(/^0x[0-9a-f]+ {2}"\/lib[^"]*\/ld-[^"]+"$/m);
+			const strings = await view(worker, "strings");
+			expect(strings).toMatch(/^0x[0-9a-f]+ {2}"\/lib[^"]*\/ld-[^"]+"$/m);
+			// Binary Ninja also finds "strings" in instruction bytes; the view lists none, and the
+			// overview counts what the view lists.
+			const inCode = "[hex(ea) for ea, _ in strings() if bv.get_functions_containing(ea)]";
+			expect((await exec(worker, inCode)).value).toBe("[]");
+			expect(overview).toContain(`, ${strings.split("\n").length} strings\n`);
+			// The lazy-binding stub jumps through a GOT slot that reads 0 in the file: not a callee.
+			const unresolvable = [
+				"missing = []",
+				"for ea, _ in functions():",
+				"    for callee in callees(ea):",
+				"        try:",
+				"            resolve(callee)",
+				"        except LookupError:",
+				"            missing.append(callee)",
+				"missing",
+			].join("\n");
+			expect((await exec(worker, unresolvable)).value).toBe("[]");
 			expect(await view(worker, "exports")).toMatch(/^0x[0-9a-f]+ {2}_start$/m);
 			const entryAsm = await view(worker, "asm", "_start");
 			const entryAddresses = [...new Set([...entryAsm.matchAll(/^0x([0-9a-f]+) {2}\S/gm)].map(m => m[1]))];
@@ -397,6 +457,68 @@ describe.skipIf(!runtime)("Binary Ninja worker", () => {
 
 			worker = await open(storeLocation(dir, false));
 			expect(await ompFunctions(worker)).toBe("['omp_saved', 'omp_sigterm']");
+			await worker.close({ save: false });
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it.skipIf(!cc)(
+		"lists as imports only what the loader resolves, resolves a name to the function rather than its PLT entry, and finds callers through the PLT entry and the import slot",
+		async () => {
+			const library = await buildLibrary();
+			const dir = stageInput(library);
+			const worker = await open(storeLocation(dir, true, library));
+
+			const imports = await view(worker, "imports");
+			const names = imports.split("\n").map(line => line.replace(/^0x[0-9a-f]+ {2}/, ""));
+			expect(names).toContain("puts");
+			// Binary Ninja also keeps the import as `dep_fn@DEP_1`.
+			expect(names.filter(name => name.startsWith("dep_fn"))).toEqual(["dep_fn"]);
+			// The PLT entry of the library's own `helper` is typed as an import.
+			expect(names).not.toContain("helper");
+			expect(await view(worker, "pseudocode", "helper")).toMatch(/\+ (41|0x29)\b/);
+
+			// By name, `puts` is its PLT entry: `api` calls that, `direct` calls through the import
+			// slot and `tail` jumps through it. The entry's own jump through the slot is no caller.
+			expect((await exec(worker, "callers('puts')")).value).toBe("['api', 'direct', 'tail']");
+			const byName = await view(worker, "xrefs", "puts");
+			expect(byName).toMatch(/^0x[0-9a-f]+ {2}CALL {2}in api$/m);
+			expect(byName).toMatch(/^0x[0-9a-f]+ {2}CALL {2}in direct$/m);
+			expect(byName).toMatch(/^0x[0-9a-f]+ {2}CODE {2}in tail$/m);
+			expect(byName).not.toMatch(/in puts$/m);
+			// Binary Ninja names `tail` `puts` as well; it is not the entry, and nothing calls it.
+			expect((await exec(worker, "callers('tail')")).value).toBe("[]");
+			// The library's own `helper` is only reached through its PLT entry.
+			expect((await exec(worker, "callers('helper')")).value).toBe("['api']");
+
+			// Asked by address, the slot shows the plumbing as it is. Binary Ninja reports the
+			// entry's jump as a call instruction; it is a jump.
+			const slot = /^(0x[0-9a-f]+) {2}puts$/m.exec(imports)?.[1];
+			if (!slot) throw new Error(`no import slot for puts in:\n${imports}`);
+			const bySlot = await view(worker, "xrefs", slot);
+			expect(bySlot).toMatch(/^0x[0-9a-f]+ {2}CODE {2}in puts$/m);
+			expect(bySlot).toMatch(/^0x[0-9a-f]+ {2}CALL {2}in direct$/m);
+			await worker.close({ save: false });
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"shows a function Binary Ninja skipped as disassembly and names the reason",
+		async () => {
+			const dir = stageInput();
+			const worker = await open(storeLocation(dir, true));
+			const skip = [
+				"from binaryninja.enums import FunctionAnalysisSkipOverride",
+				"func('_start').analysis_skip_override = FunctionAnalysisSkipOverride.AlwaysSkipFunctionAnalysis",
+				"wait_analysis()",
+			].join("\n");
+			expect((await exec(worker, skip)).error).toBeNull();
+
+			const [header, reason, ...body] = (await view(worker, "pseudocode", "_start")).split("\n");
+			expect(header).toStartWith("// _start @ 0x");
+			expect(reason).toContain("AlwaysSkipReason");
+			expect(body.join("\n")).toBe(await view(worker, "asm", "_start"));
 			await worker.close({ save: false });
 		},
 		TEST_TIMEOUT_MS,

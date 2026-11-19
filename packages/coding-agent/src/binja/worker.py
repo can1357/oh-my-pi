@@ -23,7 +23,7 @@ import traceback
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 
 import binaryninja
-from binaryninja import SectionSemantics, Symbol, SymbolBinding, SymbolType, TypeClass
+from binaryninja import BranchType, SectionSemantics, Symbol, SymbolBinding, SymbolType, TypeClass
 
 BV = None
 NS = {}
@@ -78,10 +78,14 @@ def wait_analysis():
 
 
 def _symbol_address(bv, name):
+    # Binary Ninja orders these by kind: a function before its PLT entry, the import slot last.
     symbols = bv.get_symbols_by_name(name)
-    for symbol in symbols:
-        if bv.get_function_at(symbol.address) is not None:
-            return symbol.address
+    owners = [(symbol, f) for symbol in symbols if (f := bv.get_function_at(symbol.address)) is not None]
+    if owners:
+        # Several functions of one kind can share a name, one of them only as a second symbol (an
+        # export that is also a `j_` thunk): prefer one that is listed under this name.
+        best = [f for symbol, f in owners if symbol.type == owners[0][0].type]
+        return next((f for f in best if f.name == name), best[0]).start
     if symbols:
         return symbols[0].address
     # Functions Binary Ninja named itself (`sub_401020`) have no symbol.
@@ -189,7 +193,9 @@ def pseudocode(t):
         hlil = f.hlil
         pseudo_c = f.pseudo_c
         if hlil is None or pseudo_c is None:
-            return _text([header, "// decompilation unavailable; showing disassembly", *_asm_lines(f)])
+            # Functions over the size or time limits are skipped; the reason says which limit.
+            why = f": Binary Ninja skipped analysis ({f.analysis_skip_reason.name})" if f.analysis_skipped else ""
+            return _text([header, f"// decompilation unavailable{why}; showing disassembly", *_asm_lines(f)])
         prototype = _prototype(f)
         body = [str(line).rstrip() for line in pseudo_c.get_linear_lines(hlil.root)]
     except Exception as e:
@@ -197,18 +203,81 @@ def pseudocode(t):
     return _text([header, prototype, *body])
 
 
+# A tail jump (`jmp free`, a PLT entry's `jmp [slot]`) is a call instruction to Binary Ninja; IDA and
+# Ghidra type the reference as a jump. The decoded branch tells them apart without lifting the function.
+_JUMP_BRANCHES = (
+    BranchType.UnconditionalBranch,
+    BranchType.UnresolvedBranch,
+    BranchType.IndirectBranch,
+    BranchType.TrueBranch,
+    BranchType.FalseBranch,
+)
+
+
+def _is_call(f, ea, arch=None):
+    if not f.is_call_instruction(ea, arch):
+        return False
+    arch = arch or f.arch
+    info = arch.get_instruction_info(_bv().read(ea, arch.max_instr_length), ea)
+    return info is None or all(branch.type not in _JUMP_BRANCHES for branch in info.branches)
+
+
+_EXPORTED = (SymbolBinding.GlobalBinding, SymbolBinding.WeakBinding)
+
+
+def _plumbing(bv, f):
+    """(entries, slots, inner) of a function: its PLT entries, its import slots, and the functions whose jump through a slot is plumbing."""
+    entries, slots, inner = set(), set(), set()
+    for own in bv.get_symbols(f.start, 1):
+        if own.type == SymbolType.ImportedFunctionSymbol:
+            # A function that only tail-jumps to an import carries the import's name as a second
+            # symbol. It calls the import; it is not the import's entry.
+            if own.name != f.name:
+                continue
+            inner.add(f.start)
+        elif own.type != SymbolType.FunctionSymbol or own.binding not in _EXPORTED:
+            # A PLT entry binds to the exported definition, never to a static function of that name.
+            continue
+        for other in bv.get_symbols_by_name(own.name, own.namespace):
+            if other.type == SymbolType.ImportAddressSymbol:
+                slots.add(other.address)
+            elif other.type == SymbolType.ImportedFunctionSymbol and other.address != f.start:
+                entry = bv.get_function_at(other.address)
+                if entry is not None and entry.name == own.name:
+                    entries.add(other.address)
+    return entries, slots, inner | entries
+
+
+def _code_refs(bv, ea):
+    """Code references to ea in address order; for a function, also those through its PLT entry or import slot."""
+    refs = list(bv.get_code_refs(ea))
+    # Binary Ninja gives a function, its PLT entry and its import slot one name, so by name only one
+    # of the three can be asked about, and a call through the other two would never be found.
+    f = bv.get_function_at(ea)
+    if f is not None:
+        entries, slots, inner = _plumbing(bv, f)
+        for entry in entries:
+            refs += bv.get_code_refs(entry)
+        for slot in slots:
+            # A PLT entry's own jump through the slot is not a caller.
+            refs += (ref for ref in bv.get_code_refs(slot) if ref.function is None or ref.function.start not in inner)
+    # Binary Ninja returns references in no particular order. Functions that share an instruction
+    # each reference from it.
+    return sorted(refs, key=lambda ref: ref.address)
+
+
 def xrefs_to(t):
-    """Cross-references to the target: [{"from", "type", "func"}], type CALL, CODE or DATA."""
+    """Cross-references to the target: [{"from", "type", "func"}], type CALL, CODE or DATA; code references to a function include those through its PLT entry or import slot."""
     bv = _bv()
     ea = resolve(t)
     out = []
-    for ref in bv.get_code_refs(ea):
+    for ref in _code_refs(bv, ea):
         f = ref.function
-        call = f is not None and f.is_call_instruction(ref.address, ref.arch)
+        call = f is not None and _is_call(f, ref.address, ref.arch)
         out.append({"from": ref.address, "type": "CALL" if call else "CODE", "func": f.name if f is not None else None})
     for source in bv.get_data_refs(ea):
         out.append({"from": source, "type": "DATA", "func": _func_name(source)})
-    return out
+    return sorted(out, key=lambda ref: ref["from"])
 
 
 def _instruction_addresses(f):
@@ -231,8 +300,9 @@ def xrefs_from(t):
     out = []
     for source, owner in sources:
         if owner is not None:
-            kind = "CALL" if owner.is_call_instruction(source) else "CODE"
-            for target in bv.get_code_refs_from(source, owner):
+            targets = bv.get_code_refs_from(source, owner)
+            kind = "CALL" if targets and _is_call(owner, source) else "CODE"
+            for target in targets:
                 out.append({"to": target, "type": kind, "func": _func_name(target)})
         for target in bv.get_data_refs_from(source):
             out.append({"to": target, "type": "DATA", "func": _func_name(target)})
@@ -244,14 +314,27 @@ def _unique(names):
 
 
 def callers(t):
-    """Unique names of functions with code references to the target."""
-    return _unique(ref.function.name for ref in _bv().get_code_refs(resolve(t)) if ref.function is not None)
+    """Unique names of functions with code references to the target; for a function, also through its PLT entry or import slot."""
+    return _unique(ref.function.name for ref in _code_refs(_bv(), resolve(t)) if ref.function is not None)
+
+
+def _callee_address(bv, ea):
+    # A pointer to a Thumb function has bit 0 set; a call through it lands on the function start.
+    if ea & 1 and bv.get_function_at(ea) is None:
+        target = bv.get_function_at(ea - 1)
+        if target is not None and target.arch.name.startswith("thumb"):
+            return ea - 1
+    return ea
 
 
 def callees(t):
     """Unique names of functions and imports called from the function body."""
-    # `Function.callees` drops imports called through a pointer; the addresses keep them.
-    return _unique(name_of(ea) for ea in func(t).callee_addresses)
+    bv = _bv()
+    # `Function.callees` drops imports called through a pointer; the addresses keep them. They also keep
+    # targets outside the image, such as the 0 a jump through an unfilled GOT slot reads.
+    return _unique(
+        name_of(_callee_address(bv, ea)) for ea in func(t).callee_addresses if bv.is_valid_offset(ea)
+    )
 
 
 def _funcs():
@@ -264,11 +347,18 @@ def functions(pattern=None):
     return [(f.start, f.name) for f in _funcs() if rx is None or rx.search(f.name)]
 
 
+def _strings():
+    # Binary Ninja also reports printable byte runs inside instructions as strings (`AWAVAUATUSH` is
+    # six pushes). IDA and Ghidra list neither.
+    bv = _bv()
+    return [item for item in bv.strings if not bv.get_basic_blocks_at(item.start)]
+
+
 def strings(pattern=None):
-    """[(ea, text)] of all strings, optionally filtered by case-insensitive regex."""
+    """[(ea, text)] of all strings outside code, optionally filtered by case-insensitive regex."""
     rx = _regex(pattern)
     out = []
-    for item in _bv().strings:
+    for item in _strings():
         value = item.value
         if rx is None or rx.search(value):
             out.append((item.start, value))
@@ -290,17 +380,30 @@ def imports(pattern=None):
     """[(ea, module, name)] of all imports, regex-filtered on "module!name"; module is "" when the format records none."""
     bv = _bv()
     rx = _regex(pattern)
+    # An ELF import with a symbol version has a second extern symbol, `name@VERSION`. Elsewhere `@` is
+    # part of the name (MSVC decoration).
+    versioned = bv.view_type == "ELF"
+
+    def bare(name):
+        return name.split("@", 1)[0] if versioned else name
+
+    # Only a name with an extern symbol is an import: the PLT and GOT entries of a library's own
+    # functions carry the import symbol types too.
+    external = {bare(symbol.name) for symbol in bv.get_symbols_of_type(SymbolType.ExternalSymbol)}
     found = {}
     named = set()
     for kind in _IMPORT_TYPES:
         for symbol in bv.get_symbols_of_type(kind):
+            name = bare(symbol.name)
+            if name not in external:
+                continue
             module = str(symbol.namespace or "")
             if module in _BUILTIN_NAMESPACES:
                 module = ""
             # The extern-section copy of an import that is already listed under its module.
-            if not module and kind == SymbolType.ExternalSymbol and symbol.name in named:
+            if not module and kind == SymbolType.ExternalSymbol and name in named:
                 continue
-            found.setdefault((module, symbol.name), symbol.address)
+            found.setdefault((module, name), symbol.address)
         named.update(name for _, name in found)
     out = [(ea, module, name) for (module, name), ea in found.items() if rx is None or rx.search(f"{module}!{name}")]
     return sorted(out)
@@ -312,7 +415,7 @@ def _exports():
     out = []
     for kind in (SymbolType.FunctionSymbol, SymbolType.DataSymbol):
         for symbol in bv.get_symbols_of_type(kind):
-            if symbol.binding in (SymbolBinding.GlobalBinding, SymbolBinding.WeakBinding):
+            if symbol.binding in _EXPORTED:
                 out.append((symbol.address, symbol.name))
     # A PE executable exports nothing, yet its entry is an entry point: IDA and Ghidra both list it.
     entry = bv.entry_point
@@ -560,7 +663,7 @@ def _view_overview():
     if len(entries) > _OVERVIEW_ENTRY_LIMIT:
         lines.append(f"  … {len(entries) - _OVERVIEW_ENTRY_LIMIT} more (:exports)")
     lines.append(
-        f"counts: {len(funcs)} functions, {len(imports())} imports, {len(entries)} exports, {len(bv.strings)} strings"
+        f"counts: {len(funcs)} functions, {len(imports())} imports, {len(entries)} exports, {len(_strings())} strings"
     )
     lines.append(f"functions ({len(funcs)}):")
     for f in funcs:
