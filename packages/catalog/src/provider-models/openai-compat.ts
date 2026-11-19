@@ -5781,11 +5781,20 @@ export interface FetchLiteLLMRichModelsOptions<TApi extends Api> {
 
 type LiteLLMRichModelEntry = Record<string, unknown>;
 type LiteLLMApiRoute = "openai" | "other" | "unknown";
+type LiteLLMReasoningState = "unknown" | "supported" | "unsupported";
+type LiteLLMLadderState =
+	| { kind: "unknown" }
+	| { kind: "declared"; efforts: Effort[]; allowsNone: boolean }
+	| { kind: "conflict" };
 type LiteLLMRichEndpointModel<TApi extends Api> = {
 	model: ModelSpec<TApi>;
 	apiRoute: LiteLLMApiRoute;
 	supportsVision: unknown;
-	supportsReasoning: unknown;
+	reasoning: LiteLLMReasoningState;
+	ladder: LiteLLMLadderState;
+	catalogThinking: ThinkingConfig | undefined;
+	catalogReasoning: boolean | undefined;
+	explicitEffortSupport: boolean | undefined;
 	hasContextWindow: boolean;
 	hasMaxTokens: boolean;
 	hasToolMetadata: boolean;
@@ -5984,6 +5993,139 @@ function getSupportedOpenAIParams(entry: LiteLLMRichModelEntry): string[] | unde
 	return value.flatMap(item => (typeof item === "string" ? [item] : []));
 }
 
+/**
+ * The reasoning-effort ladder the deployment declares for itself in
+ * `model_info.reasoning_effort_levels`. It is operator evidence, so it replaces
+ * the catalog ladder instead of being overwritten by it; the derived
+ * `supported_reasoning_efforts` on `/model_group/info` is advisory and is not
+ * read here.
+ */
+function getLiteLLMDeclaredReasoningEfforts(entry: LiteLLMRichModelEntry): Effort[] | undefined {
+	const raw = getLiteLLMMetadataValue(entry, "reasoning_effort_levels");
+	if (!Array.isArray(raw)) {
+		return undefined;
+	}
+	const declared = new Set<string>();
+	for (const level of raw) {
+		const normalized = typeof level === "string" ? level.trim().toLowerCase() : "";
+		if (normalized) {
+			declared.add(normalized);
+		}
+	}
+	return THINKING_EFFORTS.filter(effort => declared.has(effort));
+}
+
+function getLiteLLMAllowsNone(entry: LiteLLMRichModelEntry): boolean | undefined {
+	const raw = getLiteLLMMetadataValue(entry, "reasoning_effort_levels");
+	if (!Array.isArray(raw)) {
+		return undefined;
+	}
+	return raw.some(level => typeof level === "string" && level.trim().toLowerCase() === "none");
+}
+
+function getLiteLLMReasoningState(entry: LiteLLMRichModelEntry): LiteLLMReasoningState {
+	const supportsReasoning = getLiteLLMMetadataValue(entry, "supports_reasoning");
+	if (supportsReasoning === true) return "supported";
+	if (supportsReasoning === false) return "unsupported";
+	return "unknown";
+}
+
+function getLiteLLMLadderState(entry: LiteLLMRichModelEntry): LiteLLMLadderState {
+	if (getLiteLLMReasoningState(entry) === "unsupported") {
+		return { kind: "unknown" };
+	}
+	const raw = getLiteLLMMetadataValue(entry, "reasoning_effort_levels");
+	if (!Array.isArray(raw)) {
+		return { kind: "unknown" };
+	}
+	return {
+		kind: "declared",
+		efforts: getLiteLLMDeclaredReasoningEfforts(entry) ?? [],
+		allowsNone: getLiteLLMAllowsNone(entry) ?? false,
+	};
+}
+
+function mergeLiteLLMReasoningState(left: LiteLLMReasoningState, right: LiteLLMReasoningState): LiteLLMReasoningState {
+	if (left === "unsupported" || right === "unsupported") return "unsupported";
+	if (left === "supported" || right === "supported") return "supported";
+	return "unknown";
+}
+
+function mergeLiteLLMLadderState(left: LiteLLMLadderState, right: LiteLLMLadderState): LiteLLMLadderState {
+	if (left.kind === "conflict" || right.kind === "conflict") return { kind: "conflict" };
+	if (left.kind === "unknown") return right;
+	if (right.kind === "unknown") return left;
+	const efforts = THINKING_EFFORTS.filter(effort => left.efforts.includes(effort) && right.efforts.includes(effort));
+	if (efforts.length === 0) {
+		if ((left.efforts.length === 0 && right.efforts.length === 0) || (left.allowsNone && right.allowsNone)) {
+			return {
+				kind: "declared",
+				efforts: [],
+				allowsNone: left.allowsNone && right.allowsNone,
+			};
+		}
+		return { kind: "conflict" };
+	}
+	return { kind: "declared", efforts, allowsNone: left.allowsNone && right.allowsNone };
+}
+
+function liteLLMReasoningValue(
+	reasoning: LiteLLMReasoningState,
+	ladder: LiteLLMLadderState,
+	catalogReasoning: boolean | undefined,
+): boolean | undefined {
+	if (reasoning === "unsupported") return false;
+	if (reasoning === "supported" || ladder.kind === "declared" || ladder.kind === "conflict") return true;
+	return catalogReasoning;
+}
+
+function liteLLMIdentityEffortMap(efforts: readonly Effort[]): Partial<Record<Effort, string>> {
+	return Object.fromEntries(efforts.map(effort => [effort, effort])) as Partial<Record<Effort, string>>;
+}
+
+function liteLLMTrustsExplicitOnly(
+	reasoning: LiteLLMReasoningState,
+	ladder: LiteLLMLadderState,
+	explicitEffortSupport: boolean | undefined,
+): boolean {
+	return (
+		explicitEffortSupport === false ||
+		reasoning === "unsupported" ||
+		ladder.kind === "conflict" ||
+		(ladder.kind === "declared" && ladder.efforts.length === 0)
+	);
+}
+
+function liteLLMThinkingFor<TApi extends Api>(
+	model: ModelSpec<TApi>,
+	reasoning: LiteLLMReasoningState,
+	ladder: LiteLLMLadderState,
+	catalogThinking: ThinkingConfig | undefined,
+	explicitEffortSupport: boolean | undefined,
+): ThinkingConfig | undefined {
+	if (explicitEffortSupport === false || reasoning === "unsupported" || ladder.kind === "conflict") {
+		return undefined;
+	}
+	if (ladder.kind === "declared") {
+		if (ladder.efforts.length === 0) return undefined;
+		return {
+			mode: resolveLiteLLMDeclaredMode(model, catalogThinking?.mode),
+			efforts: ladder.efforts,
+			...(ladder.allowsNone ? { requiresEffort: false } : {}),
+		};
+	}
+	return catalogThinking;
+}
+
+function resolveLiteLLMDeclaredMode<TApi extends Api>(
+	spec: ModelSpec<TApi>,
+	fallback: ThinkingConfig["mode"] | undefined,
+): ThinkingConfig["mode"] {
+	return (
+		resolveModelPolicy({ ...spec, providerType: "litellm", reasoning: true }).thinking?.mode ?? fallback ?? "effort"
+	);
+}
+
 function getLiteLLMProviders(entry: LiteLLMRichModelEntry): string[] | undefined {
 	if (!Array.isArray(entry.providers)) {
 		return undefined;
@@ -6023,6 +6165,19 @@ function classifyLiteLLMApiRoute(entry: LiteLLMRichModelEntry | undefined, id: s
 
 	const modelId = id.toLowerCase().startsWith("openai/") ? id.slice("openai/".length) : id;
 	return isLikelyOpenAIResponsesModelId(modelId) ? "openai" : "unknown";
+}
+
+function apiSupportsNoneEffort(api: Api): boolean {
+	switch (api) {
+		case "openai-completions":
+		case "openai-responses":
+		case "openrouter":
+		case "azure-openai-responses":
+		case "openai-codex-responses":
+			return true;
+		default:
+			return false;
+	}
 }
 
 /**
@@ -6118,7 +6273,12 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 		reference?.maxTokens ?? Math.min(contextWindow, OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS),
 	);
 	const supportsVision = getLiteLLMMetadataValue(entry, "supports_vision");
-	const supportsReasoning = getLiteLLMMetadataValue(entry, "supports_reasoning");
+	const api = options.resolveApi?.(entry, id) ?? options.api;
+	const reasoningState = getLiteLLMReasoningState(entry);
+	const ladderState = getLiteLLMLadderState(entry);
+	const catalogThinking = reference?.thinking;
+	const catalogReasoning = reference?.reasoning;
+	const reasoning = liteLLMReasoningValue(reasoningState, ladderState, catalogReasoning);
 	const supportedOpenAIParams = getSupportedOpenAIParams(entry);
 	const supportsFunctionCalling = getLiteLLMMetadataValue(entry, "supports_function_calling");
 	const supportsTools =
@@ -6143,18 +6303,38 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 	// transport field from the discovered provider and model id, so only the
 	// effort vocabulary flows through here. Mirrors `discoverOpenAIModelsList`.
 	const referenceCompat = reference?.compat as OpenAICompat | undefined;
+	const hasDeclaredLadder = ladderState.kind === "declared" && ladderState.efforts.length > 0;
+	const hasDeclaredNone = ladderState.kind === "declared" && ladderState.allowsNone;
+	const declaresEffortSupport = hasDeclaredLadder || hasDeclaredNone;
+	const explicitEffortSupport =
+		supportedOpenAIParams !== undefined ? supportedOpenAIParams.includes("reasoning_effort") : undefined;
 	const compat: OpenAICompat = {
 		supportsStore: false,
 		supportsDeveloperRole: false,
-		...(supportedOpenAIParams !== undefined
-			? { supportsReasoningEffort: supportedOpenAIParams.includes("reasoning_effort") }
-			: referenceCompat?.supportsReasoningEffort !== undefined
-				? { supportsReasoningEffort: referenceCompat.supportsReasoningEffort }
-				: {}),
-		...(referenceCompat?.reasoningEffortMap ? { reasoningEffortMap: referenceCompat.reasoningEffortMap } : {}),
-		...(referenceCompat?.omitReasoningEffort !== undefined
-			? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
-			: {}),
+		...(explicitEffortSupport !== undefined
+			? { supportsReasoningEffort: explicitEffortSupport }
+			: declaresEffortSupport
+				? { supportsReasoningEffort: true }
+				: referenceCompat?.supportsReasoningEffort !== undefined
+					? { supportsReasoningEffort: referenceCompat.supportsReasoningEffort }
+					: {}),
+		...(hasDeclaredLadder
+			? {
+					reasoningEffortMap: liteLLMIdentityEffortMap(ladderState.efforts),
+					reasoningEffortMapAuthoritative: true,
+				}
+			: declaresEffortSupport
+				? {}
+				: referenceCompat?.reasoningEffortMap
+					? { reasoningEffortMap: referenceCompat.reasoningEffortMap }
+					: {}),
+		...(explicitEffortSupport !== undefined
+			? { omitReasoningEffort: !explicitEffortSupport }
+			: declaresEffortSupport
+				? { omitReasoningEffort: false }
+				: referenceCompat?.omitReasoningEffort !== undefined
+					? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
+					: {}),
 		// The deployment is authoritative about its own groups. When its
 		// `model_info.supports_vision` says the group reads images, the derived
 		// opt-out has to outrank the class-wide text-only guard
@@ -6169,8 +6349,27 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 		// compat merge (issue #11982).
 		...(supportsVision === true ? { stripImageInput: false } : {}),
 	};
-	const api = options.resolveApi?.(entry, id) ?? options.api;
-	return {
+	const allowsNone = ladderState.kind === "declared" ? ladderState.allowsNone : undefined;
+	if (explicitEffortSupport === false) {
+		delete compat.reasoningEffortMap;
+		delete compat.reasoningEffortMapAuthoritative;
+	}
+	const compatWithNone: OpenAICompat =
+		allowsNone === true && apiSupportsNoneEffort(api) ? { ...compat, reasoningDisableMode: "none-effort" } : compat;
+	if (liteLLMTrustsExplicitOnly(reasoningState, ladderState, explicitEffortSupport)) {
+		// Unsupported/conflict/empty declarations are authoritative: keep model
+		// materialization from rebuilding the catalog ladder.
+		compatWithNone.trustExplicitThinkingOnly = true;
+	}
+	if (ladderState.kind === "declared" && ladderState.efforts.length === 0 && !ladderState.allowsNone) {
+		// No dial exists and Off is not available; do not fall into the
+		// lowest-effort path during a disabled request.
+		compatWithNone.omitReasoningEffort = true;
+		delete compatWithNone.reasoningEffortMap;
+		delete compatWithNone.reasoningEffortMapAuthoritative;
+	}
+	const cost = getLiteLLMCost(entry) ?? reference?.cost ?? UNKNOWN_PROXY_COST;
+	const model: ModelSpec<TApi> = {
 		id,
 		name: toLiteLLMDisplayName(modelName, reference?.name, id),
 		api,
@@ -6185,12 +6384,14 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 				: supportsVision === false
 					? ["text"]
 					: (reference?.input ?? ["text"]),
-		reasoning: typeof supportsReasoning === "boolean" ? supportsReasoning : reference?.reasoning,
-		thinking: reference?.thinking,
-		cost: getLiteLLMCost(entry) ?? reference?.cost ?? UNKNOWN_PROXY_COST,
+		reasoning,
+		thinking: undefined,
+		cost,
 		...(supportsTools !== undefined ? { supportsTools } : {}),
-		compat: compat as ModelSpec<TApi>["compat"],
+		compat: compatWithNone as ModelSpec<TApi>["compat"],
 	};
+	model.thinking = liteLLMThinkingFor(model, reasoningState, ladderState, catalogThinking, explicitEffortSupport);
+	return model;
 }
 
 /**
@@ -6233,6 +6434,7 @@ function mergeLiteLLMCompat<TApi extends Api>(
 function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 	existing: LiteLLMRichEndpointModel<TApi>,
 	next: LiteLLMRichEndpointModel<TApi>,
+	sameEndpoint: boolean,
 ): LiteLLMRichEndpointModel<TApi> {
 	const apiRoute =
 		existing.apiRoute === "other" || next.apiRoute === "other"
@@ -6244,6 +6446,82 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 	// mode carries no news for it, so a runner api reported by either side wins.
 	const runnerApi = [next.model.api, existing.model.api].find(api => runnerApiKind(api) !== undefined);
 	const api = runnerApi ?? (next.apiRoute === apiRoute ? next.model.api : existing.model.api);
+	const reasoning = mergeLiteLLMReasoningState(existing.reasoning, next.reasoning);
+	const ladder = mergeLiteLLMLadderState(existing.ladder, next.ladder);
+	const catalogThinking = next.catalogThinking ?? existing.catalogThinking;
+	const catalogReasoning = next.catalogReasoning ?? existing.catalogReasoning;
+	const explicitEffortSupport = sameEndpoint
+		? existing.explicitEffortSupport === false || next.explicitEffortSupport === false
+			? false
+			: (next.explicitEffortSupport ?? existing.explicitEffortSupport)
+		: (next.explicitEffortSupport ?? existing.explicitEffortSupport);
+	const mergedCompat = mergeLiteLLMCompat(existing.model.compat, next.model.compat, {
+		existingReportedParams: existing.hasSupportedOpenAIParams,
+		nextReportedParams: next.hasSupportedOpenAIParams,
+	}) as OpenAICompat | undefined;
+	const compat = mergedCompat ? { ...mergedCompat } : mergedCompat;
+	if (compat) {
+		const allowsNone = ladder.kind === "declared" ? ladder.allowsNone : undefined;
+		if (allowsNone === true && apiSupportsNoneEffort(api)) {
+			compat.reasoningDisableMode = "none-effort";
+		} else {
+			delete compat.reasoningDisableMode;
+		}
+		if (ladder.kind === "declared" && ladder.efforts.length > 0) {
+			if (explicitEffortSupport === false) {
+				compat.supportsReasoningEffort = false;
+				compat.omitReasoningEffort = true;
+				delete compat.reasoningEffortMap;
+				delete compat.reasoningEffortMapAuthoritative;
+			} else {
+				compat.supportsReasoningEffort = true;
+				compat.omitReasoningEffort = false;
+				compat.reasoningEffortMap = liteLLMIdentityEffortMap(ladder.efforts);
+				compat.reasoningEffortMapAuthoritative = true;
+			}
+		}
+		if (explicitEffortSupport !== undefined) {
+			compat.supportsReasoningEffort = explicitEffortSupport;
+			compat.omitReasoningEffort = !explicitEffortSupport;
+			if (!explicitEffortSupport) {
+				delete compat.reasoningEffortMap;
+				delete compat.reasoningEffortMapAuthoritative;
+			}
+		}
+		if (ladder.kind === "conflict") {
+			// No shared dial exists, so an Off request must not fall into the
+			// lowest-effort path and fail configuration validation.
+			compat.omitReasoningEffort = true;
+			delete compat.reasoningEffortMap;
+			delete compat.reasoningEffortMapAuthoritative;
+		}
+		if (ladder.kind === "declared" && ladder.efforts.length === 0 && !ladder.allowsNone) {
+			// Same no-dial shape as conflict, but without a declared Off level.
+			compat.omitReasoningEffort = true;
+			delete compat.reasoningEffortMap;
+			delete compat.reasoningEffortMapAuthoritative;
+		}
+		if (ladder.kind === "declared" && ladder.efforts.length === 0 && ladder.allowsNone) {
+			if (explicitEffortSupport === false) {
+				compat.supportsReasoningEffort = false;
+				compat.omitReasoningEffort = true;
+			} else {
+				// "none" is an effort value, so Off must be serialized.
+				compat.supportsReasoningEffort = true;
+				compat.omitReasoningEffort = false;
+			}
+			delete compat.reasoningEffortMap;
+			delete compat.reasoningEffortMapAuthoritative;
+		}
+		if (liteLLMTrustsExplicitOnly(reasoning, ladder, explicitEffortSupport)) {
+			// Unsupported/conflict/empty declarations are terminal and must also
+			// block catalog rules during model materialization.
+			compat.trustExplicitThinkingOnly = true;
+		} else {
+			// A later explicit support verdict must clear an earlier veto marker.
+			delete compat.trustExplicitThinkingOnly;
+		}
+	}
 	const model: ModelSpec<TApi> = {
 		...existing.model,
 		api,
@@ -6252,19 +6530,23 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 		contextWindow: next.hasContextWindow ? next.model.contextWindow : existing.model.contextWindow,
 		maxTokens: next.hasMaxTokens ? next.model.maxTokens : existing.model.maxTokens,
 		input: next.supportsVision === true || next.supportsVision === false ? next.model.input : existing.model.input,
-		reasoning: typeof next.supportsReasoning === "boolean" ? next.model.reasoning : existing.model.reasoning,
+		reasoning: liteLLMReasoningValue(reasoning, ladder, catalogReasoning),
+		thinking: undefined,
 		cost: { ...existing.model.cost, ...existing.reportedCost, ...next.reportedCost },
-		compat: mergeLiteLLMCompat(existing.model.compat, next.model.compat, {
-			existingReportedParams: existing.hasSupportedOpenAIParams,
-			nextReportedParams: next.hasSupportedOpenAIParams,
-		}),
+		compat: compat as ModelSpec<TApi>["compat"],
 	};
 	if (next.hasToolMetadata) {
 		model.supportsTools = next.model.supportsTools;
 	}
+	model.thinking = liteLLMThinkingFor(model, reasoning, ladder, catalogThinking, explicitEffortSupport);
 	return {
 		...next,
 		apiRoute,
+		reasoning,
+		ladder,
+		catalogThinking,
+		catalogReasoning,
+		explicitEffortSupport,
 		model,
 		reportedCost: { ...existing.reportedCost, ...next.reportedCost },
 		hasContextWindow: existing.hasContextWindow || next.hasContextWindow,
@@ -6388,14 +6670,20 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 		const model = mapLiteLLMRichEntry(entry, options, runtimeBaseUrl);
 		if (model) {
 			const supportsVision = getLiteLLMMetadataValue(entry, "supports_vision");
-			const supportsReasoning = getLiteLLMMetadataValue(entry, "supports_reasoning");
 			const supportsFunctionCalling = getLiteLLMMetadataValue(entry, "supports_function_calling");
 			const supportedOpenAIParams = getSupportedOpenAIParams(entry);
+			const explicitEffortSupport =
+				supportedOpenAIParams !== undefined ? supportedOpenAIParams.includes("reasoning_effort") : undefined;
+			const reference = options.referenceResolver?.(model.id);
 			const next: LiteLLMRichEndpointModel<TApi> = {
 				model,
 				apiRoute: classifyLiteLLMApiRoute(entry, model.id),
 				supportsVision,
-				supportsReasoning,
+				reasoning: getLiteLLMReasoningState(entry),
+				ladder: getLiteLLMLadderState(entry),
+				catalogThinking: reference?.thinking,
+				catalogReasoning: reference?.reasoning,
+				explicitEffortSupport,
 				hasContextWindow: toPositiveNumber(getLiteLLMMetadataValue(entry, "max_input_tokens"), null) !== null,
 				hasMaxTokens: toPositiveNumber(getLiteLLMMetadataValue(entry, "max_output_tokens"), null) !== null,
 				hasToolMetadata:
@@ -6408,7 +6696,7 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 				reportedCost: getLiteLLMReportedCost(entry),
 			};
 			const existing = deduped.get(model.id);
-			deduped.set(model.id, existing ? mergeLiteLLMRichEndpointModels(existing, next) : next);
+			deduped.set(model.id, existing ? mergeLiteLLMRichEndpointModels(existing, next, true) : next);
 		}
 	}
 	if (deduped.size === 0 && excludedModelIds.size === 0) {
@@ -6437,7 +6725,39 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 		const excludedModelIds = new Set<string>();
 		let metadataFailure: LiteLLMRichEndpointFailure | undefined;
 		for (const endpoint of LITELLM_RICH_ENDPOINTS) {
-			const result = await fetchLiteLLMRichEndpoint(endpoint, options, managementBaseUrl, runtimeBaseUrl, signal);
+			const relevant = [...deduped.values()].filter(entry => entry.reasoning !== "unsupported");
+			const hasLadder = relevant.length > 0 && relevant.every(entry => entry.ladder.kind !== "unknown");
+			const metadataComplete = [...deduped.values()].every(
+				entry =>
+					entry.explicitEffortSupport !== undefined &&
+					(entry.supportsVision === true || entry.supportsVision === false) &&
+					!(options.resolveApi !== undefined && entry.apiRoute === "unknown") &&
+					!(
+						Object.keys(entry.reportedCost).length > 0 &&
+						(entry.reportedCost.input === undefined ||
+							entry.reportedCost.output === undefined ||
+							entry.reportedCost.cacheRead === undefined ||
+							entry.reportedCost.cacheWrite === undefined)
+					),
+			);
+			const probeController = hasLadder && metadataComplete ? new AbortController() : undefined;
+			const probeTimer = probeController ? setTimeout(() => probeController.abort(), 3_000) : undefined;
+			const probeSignal = probeController
+				? signal
+					? AbortSignal.any([signal, probeController.signal])
+					: probeController.signal
+				: signal;
+			const result = await fetchLiteLLMRichEndpoint(
+				endpoint,
+				options,
+				managementBaseUrl,
+				runtimeBaseUrl,
+				probeSignal,
+			);
+			if (probeTimer !== undefined) clearTimeout(probeTimer);
+			if ((!result || "failure" in result) && probeController?.signal.aborted && !signal?.aborted) {
+				continue;
+			}
 			if (!result) {
 				continue;
 			}
@@ -6472,7 +6792,7 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 					}
 					continue;
 				}
-				deduped.set(next.model.id, mergeLiteLLMRichEndpointModels(existing, next));
+				deduped.set(next.model.id, mergeLiteLLMRichEndpointModels(existing, next, false));
 			}
 			if (deduped.size === 0) {
 				continue;
@@ -6492,7 +6812,10 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 					break;
 				}
 			}
-			if (!needsMoreMetadata) {
+			// `/model_group/info` and `/model/info` can each omit the declared ladder.
+			// Keep reading every rich endpoint while any row is still non-terminal.
+			const needsDeploymentThinking = [...deduped.values()].some(entry => entry.reasoning !== "unsupported");
+			if (!needsMoreMetadata && !needsDeploymentThinking) {
 				break;
 			}
 		}

@@ -3639,11 +3639,11 @@ describe("ModelRegistry", () => {
 					maxTokens: 16_384,
 				});
 			litellmStaleNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
-				// Rows from rich-v6 may contain only the first /v2/model/info page;
-				// decisions-mode routing was already corrected in that namespace.
+				// Rows from rich-v7 may contain only the first /v2/model/info page;
+				// declared reasoning ladders moved the current namespace to rich-v8.
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v6",
+						"litellm-proxy:litellm-rich-v7",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3 (3x usage)")],
 						true,
@@ -3654,7 +3654,7 @@ describe("ModelRegistry", () => {
 			litellmCurrentNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v7",
+						"litellm-proxy:litellm-rich-v8",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3")],
 						true,
@@ -3734,12 +3734,12 @@ describe("ModelRegistry", () => {
 			});
 		});
 
-		test("ignores litellm discovery rows cached under the retired rich-v6 namespace", () => {
+		test("ignores litellm discovery rows cached under the retired rich-v7 namespace", () => {
 			expect(litellmStaleNamespaceCache.find("litellm-proxy", "minimax/minimax-m3")).toBeUndefined();
 			expect(getModelsForProvider(litellmStaleNamespaceCache, "litellm-proxy")).toHaveLength(0);
 		});
 
-		test("restores LiteLLM backend session policy from rich-v7 alias rows without changing their API", () => {
+		test("restores LiteLLM backend session policy from rich-v8 alias rows without changing their API", () => {
 			const model = litellmCurrentNamespaceCache.find("litellm-proxy", "minimax/minimax-m3");
 			expect(model?.name).toBe("MiniMax-M3");
 			expect(model?.provider).toBe("litellm-proxy");
