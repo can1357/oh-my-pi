@@ -40,6 +40,8 @@ import type {
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { createEvalCustomTools, describeEvalTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
@@ -1746,7 +1748,7 @@ describe("ExtensionRunner", () => {
 
 		for (const language of ["js", "py"] as const) {
 			it.skipIf(language === "py" && Bun.env.PI_PYTHON_INTEGRATION !== "1")(
-				`links both extension hooks to the invoking ${language} eval, not the retained kernel`,
+				`links both extension hooks to the invoking ${language} eval or kernel-defined tool, not the retained kernel`,
 				async () => {
 					const runner = await runnerFor(`
 						export default function(pi) {
@@ -1760,7 +1762,7 @@ describe("ExtensionRunner", () => {
 					const child = new ExtensionToolWrapper({ ...flaggedTool, parameters: Type.Object({}) }, runner);
 					const owner = sessionManager.getSessionId();
 					const context = { ...runner.createContext(), hasQueuedMessages: () => false };
-					const tool = new EvalTool({
+					const session: ToolSession = {
 						cwd: tempDir.path(),
 						hasUI: false,
 						settings: Settings.isolated({ "eval.autoBackground.enabled": false }),
@@ -1770,7 +1772,8 @@ describe("ExtensionRunner", () => {
 						getEvalKernelOwnerId: () => owner,
 						getToolByName: name => (name === child.name ? child : undefined),
 						getToolContext: () => context,
-					});
+					};
+					const tool = new EvalTool(session);
 					const ids = new Set<string>();
 					try {
 						for (const parent of ["first-eval", "second-eval"]) {
@@ -1787,6 +1790,21 @@ describe("ExtensionRunner", () => {
 							}
 						}
 						expect(ids.size).toBe(4);
+						const code =
+							language === "js"
+								? "tool(async function probe() { return (await tool.flagged({})).text; });"
+								: "@tool\nasync def probe() -> str:\n    return (await tool.flagged({}))['text']";
+						const definition = await tool.execute("define-probe", { language, code });
+						expect(definition.isError).not.toBe(true);
+						const [probe] = createEvalCustomTools(session, await describeEvalTools(session, ["probe"]));
+						for (const parent of ["first-probe", "second-probe"]) {
+							const result = await probe.execute(parent, {}, undefined, context);
+							const [id, start, end] = JSON.parse(firstText(result)!);
+							expect([start, end]).toEqual([parent, parent]);
+							expect(id).not.toBe(parent);
+							ids.add(id);
+						}
+						expect(ids.size).toBe(6);
 						const direct = await child.execute("direct", {}, undefined, undefined, context);
 						expect(firstText(direct)).toBe('["direct",null,null]');
 					} finally {

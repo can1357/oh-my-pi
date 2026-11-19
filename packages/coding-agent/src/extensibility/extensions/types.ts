@@ -1562,7 +1562,7 @@ export interface ModeChangedEvent {
 
 interface ToolEventIdentity {
 	toolCallId: string;
-	/** ID of the eval call that dispatched this tool. Absent for direct calls. */
+	/** ID of the eval or kernel-defined tool invocation that dispatched this call. Absent for direct calls. */
 	parentToolCallId?: string;
 }
 

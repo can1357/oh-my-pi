@@ -246,6 +246,7 @@ export async function invokeJsTool(
 	options: {
 		sessionKey: string;
 		session: ToolSession;
+		parentToolCallId?: string;
 		signal?: AbortSignal;
 	},
 ): Promise<EvalToolInvokeResult | { ok: true; tools: EvalToolDescriptor[]; missing: string[] }> {
@@ -257,7 +258,7 @@ export async function invokeJsTool(
 	let envelope: unknown;
 	const pending: PendingRun = {
 		runId,
-		runState: { signal: options.signal },
+		runState: { signal: options.signal, parentToolCallId: options.parentToolCallId },
 		toolSession: options.session,
 		resolve,
 		reject,
