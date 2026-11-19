@@ -30,6 +30,7 @@ export const DiffStream = nativeBindings.DiffStream ?? missingNativeClass("DiffS
 export const DirectoryWatcher = nativeBindings.DirectoryWatcher ?? missingNativeClass("DirectoryWatcher");
 export const EditSession = nativeBindings.EditSession ?? missingNativeClass("EditSession");
 export const EditStore = nativeBindings.EditStore ?? missingNativeClass("EditStore");
+export const FdStream = nativeBindings.FdStream ?? missingNativeClass("FdStream");
 export const FileLock = nativeBindings.FileLock ?? missingNativeClass("FileLock");
 export const HighlightStream = nativeBindings.HighlightStream ?? missingNativeClass("HighlightStream");
 export const IpcConnection = nativeBindings.IpcConnection ?? missingNativeClass("IpcConnection");
@@ -139,6 +140,7 @@ export const pdfToMarkdown = nativeBindings.pdfToMarkdown ?? missingNativeExport
 export const rasterizeSvg = nativeBindings.rasterizeSvg ?? missingNativeExport("rasterizeSvg");
 export const readImageFromClipboard = nativeBindings.readImageFromClipboard ?? missingNativeExport("readImageFromClipboard");
 export const readTextFromClipboard = nativeBindings.readTextFromClipboard ?? missingNativeExport("readTextFromClipboard");
+export const reapChild = nativeBindings.reapChild ?? missingNativeExport("reapChild");
 export const renderMermaidAscii = nativeBindings.renderMermaidAscii ?? missingNativeExport("renderMermaidAscii");
 export const renderSnapcompactPng = nativeBindings.renderSnapcompactPng ?? missingNativeExport("renderSnapcompactPng");
 export const runShellMain = nativeBindings.runShellMain ?? missingNativeExport("runShellMain");
@@ -147,6 +149,7 @@ export const setHangulCompatJamoWidthOverride = nativeBindings.setHangulCompatJa
 export const shellBuiltins = nativeBindings.shellBuiltins ?? missingNativeExport("shellBuiltins");
 export const sliceWithWidth = nativeBindings.sliceWithWidth ?? missingNativeExport("sliceWithWidth");
 export const snapcompactSupportedChars = nativeBindings.snapcompactSupportedChars ?? missingNativeExport("snapcompactSupportedChars");
+export const spawnRaw = nativeBindings.spawnRaw ?? missingNativeExport("spawnRaw");
 export const structuredPatchHunks = nativeBindings.structuredPatchHunks ?? missingNativeExport("structuredPatchHunks");
 export const summarizeCode = nativeBindings.summarizeCode ?? missingNativeExport("summarizeCode");
 export const summarizeCodeAsync = nativeBindings.summarizeCodeAsync ?? missingNativeExport("summarizeCodeAsync");
@@ -311,5 +314,10 @@ export const ShellFsResolve = {
 	Physical: "physical",
 	Logical: "logical",
 	None: "none",
+};
+export const ShellSpeechOp = {
+	Voices: "voices",
+	Speak: "speak",
+	Cancel: "cancel",
 };
 // --- end generated native exports ---

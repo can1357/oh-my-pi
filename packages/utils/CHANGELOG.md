@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added utilities for formatting and parsing session spill URLs using the `local://N.log` format.
+- Added `postmortem.exitCleanlyOnStopSignals()` so long-running services exit successfully after completing cleanup on SIGINT or SIGTERM.
+
+### Fixed
+
+- Fixed Windows shell discovery incorrectly selecting the WSL `bash.exe` launcher, which could cause services to run under WSL.
+- Fixed archive opening so the extraction-size limit is enforced when an oversized member is read rather than preventing access to the entire archive.
+- Fixed `OMP_LOG_LEVEL` so it also controls console output from services such as `omp auth-broker serve`, not just log-file output.
+- Fixed Markdown parsing so emphasis and link labels are not prematurely terminated by marker characters inside code spans, autolinks, inline HTML tags, or link destinations.
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

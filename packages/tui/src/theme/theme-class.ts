@@ -529,6 +529,10 @@ export class Theme {
 		return (str: string) => this.fg("pythonMode", str);
 	}
 
+	getBtwModeBorderColor(): (str: string) => string {
+		return (str: string) => this.fg("btwMode", str);
+	}
+
 	// ============================================================================
 	// Symbol Methods
 	// ============================================================================

@@ -1,20 +1,33 @@
-/** Session-scoped service supervision through the shared project broker. */
+/** Session-owned named services: `proc` units of the omp daemon in the session's project scope. */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TERMINAL_STATES } from "@oh-my-pi/pi-tui/apps/ps-data";
-import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { compileNotifyPattern } from "../async/notify";
-import { type DaemonBrokerClient, daemonClientForProject } from "./client";
-import { canonicalProjectDir } from "./paths";
-import { DAEMON_OUTPUT_PATTERN_FLAGS, type DaemonOperation, type DaemonRpcResult } from "./protocol";
-import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
+import { canonicalProjectDir, DaemonTimeoutError, daemonClient } from "../daemon/client";
+import { daemonDir, unitLogDir } from "../daemon/paths";
+import {
+	DAEMON_OUTPUT_PATTERN_FLAGS,
+	type DaemonClient,
+	type DaemonOp,
+	type DaemonResult,
+	type ProcSpec,
+	projectScope,
+	type UnitPolicy,
+	type UnitScope,
+	type UnitSnapshot,
+} from "../daemon/protocol";
+import { shellProcessCommand } from "../exec/shell-process";
+import { isUrlPath } from "../internal-urls/url-filesystem";
 import type { ToolSession } from "../tools";
+import { isSharedBrowserUnit } from "../tools/browser/shared-daemon";
 import { resolveToCwd } from "../tools/path-utils";
-import { isSharedBrowserDaemonName } from "../tools/browser/shared-daemon";
-
 import { cfgLaunchEnabled, cfgLaunchPersist } from "../tools/settings";
+
+/** Unit kind of every named service. */
+const SERVICE_KIND = "proc";
 
 export interface ServiceReady {
 	log?: string;
@@ -32,22 +45,59 @@ export interface ServiceStart {
 	notify?: string;
 	/** Overlay on the configured shell env; wins over it. */
 	env?: Record<string, string>;
+	/**
+	 * Script the service's shell sources first: the mounts behind the URL paths its command may
+	 * name (`local://…`, a URL `cwd`), then the functions and aliases of the session starting it.
+	 */
+	seed?: string;
 }
 
+/** The script a service's shell sources, beside the daemon's other per-service files. */
+const SERVICE_SEED_FILE = "shell.sh";
+
 const serviceStateKey = Symbol("ownedServices");
+interface OwnedService {
+	id: string;
+	startedAt: number;
+	scope: UnitScope;
+	/** The unit lives on this process's lease, which must be retaken after a daemon reconnect. */
+	leased: boolean;
+}
 interface ServiceSession extends ToolSession {
 	[serviceStateKey]?: {
-		owned: Map<string, { id: string; startedAt: number }>;
+		owned: Map<string, OwnedService>;
 		listeners: Set<() => void>;
-		subscribed: Set<DaemonBrokerClient>;
+		subscribed: boolean;
 	};
 }
 function serviceState(session: ToolSession): NonNullable<ServiceSession[typeof serviceStateKey]> {
 	return ((session as ServiceSession)[serviceStateKey] ??= {
 		owned: new Map(),
 		listeners: new Set(),
-		subscribed: new Set(),
+		subscribed: false,
 	});
+}
+
+async function sessionScope(session: ToolSession): Promise<UnitScope> {
+	return projectScope(await canonicalProjectDir(session.cwd));
+}
+
+/** Directory of the daemon-side files omp keeps for one named service in one project. */
+function serviceFilesDir(scope: UnitScope, name: string): string {
+	const scopeHash = Bun.hash
+		.wyhash(scope.kind === "project" ? scope.dir : scope.kind)
+		.toString(16)
+		.padStart(16, "0");
+	return path.join(daemonDir(), "services", scopeHash, name);
+}
+
+/** Write the script `name`'s shell sources at each start, where a daemon-side relaunch finds it again. */
+async function writeServiceSeed(scope: UnitScope, name: string, seed: string): Promise<string> {
+	const dir = serviceFilesDir(scope, name);
+	await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+	const file = path.join(dir, SERVICE_SEED_FILE);
+	await fs.writeFile(file, seed, { mode: 0o600 });
+	return file;
 }
 
 export function hasLiveOwnedService(session: ToolSession): boolean {
@@ -72,100 +122,129 @@ function serviceOwner(session: ToolSession): string | null | undefined {
 	return session.getSessionId?.() ?? session.getAgentId?.();
 }
 
-function track(session: ToolSession, daemon: DaemonSnapshot): void {
+function track(session: ToolSession, unit: UnitSnapshot): void {
+	if (unit.kind !== SERVICE_KIND) return;
 	const owner = serviceOwner(session);
-	if (daemon.owner !== owner) return;
+	if (unit.owner !== owner) return;
 	const services = serviceState(session).owned;
-	if (TERMINAL_STATES[daemon.state]) services.delete(daemon.name);
-	else services.set(daemon.name, { id: daemon.id, startedAt: daemon.startedAt });
+	if (TERMINAL_STATES[unit.state]) services.delete(unit.key);
+	else
+		services.set(unit.key, {
+			id: unit.id,
+			startedAt: unit.startedAt,
+			scope: unit.scope,
+			leased: unit.policy.hold === "leases",
+		});
 }
 
-function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
+function notifyListeners(session: ToolSession): void {
+	for (const listener of serviceState(session).listeners) listener();
+}
+
+function subscribe(session: ToolSession, client: DaemonClient): void {
 	const owner = serviceOwner(session);
 	if (!owner) return;
-	const clients = serviceState(session).subscribed;
-	if (clients.has(client)) return;
-	clients.add(client);
-	const unsubscribe = client.onCompletion(owner, notification => {
-		const tracked = serviceState(session).owned.get(notification.daemon.name);
-		if (tracked?.id === notification.daemon.id && tracked.startedAt === notification.daemon.startedAt) {
-			track(session, notification.daemon);
-			for (const listener of serviceState(session).listeners) listener();
+	const state = serviceState(session);
+	if (state.subscribed) return;
+	state.subscribed = true;
+	const unsubscribe = client.onCompletion(owner, event => {
+		const tracked = serviceState(session).owned.get(event.unit.key);
+		if (tracked?.id === event.unit.id && tracked.startedAt === event.unit.startedAt) {
+			track(session, event.unit);
+			notifyListeners(session);
 		}
-		return session.queueLaunchCompletion?.(notification);
+		return session.queueLaunchCompletion?.(event);
 	});
-	const unsubscribeNotify = client.onNotify(owner, notification => {
-		const { daemon } = notification;
+	const unsubscribeNotify = client.onNotify(owner, event => {
+		const { unit } = event;
 		// The match proves the service live: track it, so `running` answers even before this session lists its services.
-		track(session, daemon);
+		track(session, unit);
 		session.queueServiceNotify?.({
-			id: daemon.name,
+			id: unit.key,
 			type: "service",
-			pattern: notification.pattern,
-			running: () => serviceState(session).owned.get(daemon.name)?.id === daemon.id,
+			pattern: event.pattern,
+			running: () => serviceState(session).owned.get(unit.key)?.id === unit.id,
 			owner,
-			lines: notification.lines,
-			omitted: notification.omitted,
-			stopped: notification.stopped,
+			lines: event.lines,
+			omitted: event.omitted,
+			stopped: event.stopped,
 		});
 	});
-	session.registerDisposeCallback?.(() => {
-		unsubscribeNotify();
-		unsubscribe({ preservePending: true });
-		clients.delete(client);
-		serviceState(session).owned.clear();
-		for (const listener of serviceState(session).listeners) listener();
+	// Leases died with the old connection: retake them before the units' idle grace runs out.
+	const unsubscribeReconnect = client.onReconnect(() => {
+		for (const [key, service] of serviceState(session).owned) {
+			if (!service.leased) continue;
+			client
+				.open({ kind: SERVICE_KIND, scope: service.scope, key, owner, awaitReady: false })
+				.then(result => track(session, result.unit))
+				.catch(error => {
+					logger.warn("Failed to retake a service lease after a daemon reconnect", {
+						service: key,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				});
+		}
 	});
-	session.registerSessionChangeCallback?.(() => {
-		// The previous session stays resumable (`/resume`, fork parent), so keep its
-		// completions queued in the broker for replay when that session id re-subscribes.
-		// Its services' `notify` matches are not kept: they reach it again once it does.
+	const detach = (): void => {
 		unsubscribeNotify();
+		unsubscribeReconnect();
 		unsubscribe({ preservePending: true });
-		clients.delete(client);
-		serviceState(session).owned.clear();
-		for (const listener of serviceState(session).listeners) listener();
-	});
+		state.subscribed = false;
+		state.owned.clear();
+		notifyListeners(session);
+	};
+	session.registerDisposeCallback?.(detach);
+	// The previous session stays resumable (`/resume`, fork parent), so keep its completions
+	// queued in the daemon for replay when that session id re-subscribes. Its services' `notify`
+	// matches are not kept: they reach it again once it does.
+	session.registerSessionChangeCallback?.(detach);
 }
 
-async function request(
+async function request<O extends DaemonOp>(
 	session: ToolSession,
-	operation: DaemonOperation,
+	operation: O,
 	signal?: AbortSignal,
-): Promise<DaemonRpcResult> {
-	const client = await daemonClientForProject(session.cwd);
+): Promise<DaemonResult<O["op"]>> {
+	const client = await daemonClient();
 	subscribe(session, client);
-	const result = await client.request(operation, signal);
-	if (result.op === "list") {
-		const owner = serviceOwner(session);
-		serviceState(session).owned.clear();
-		for (const daemon of result.daemons) if (daemon.owner === owner) track(session, daemon);
-	} else if ("daemon" in result) track(session, result.daemon);
-	return result;
+	return client.request(operation, signal);
 }
 
-export async function listServices(session: ToolSession, signal?: AbortSignal): Promise<DaemonSnapshot[]> {
-	const result = await request(session, { op: "list" }, signal);
-	if (result.op !== "list") throw new Error("Unexpected daemon list response");
-	return result.daemons;
+async function serviceRef(
+	session: ToolSession,
+	name: string,
+): Promise<{ kind: string; scope: UnitScope; key: string }> {
+	return { kind: SERVICE_KIND, scope: await sessionScope(session), key: name };
+}
+
+export async function listServices(session: ToolSession, signal?: AbortSignal): Promise<UnitSnapshot[]> {
+	const { units } = await request(
+		session,
+		{ op: "list", scope: await sessionScope(session), kind: SERVICE_KIND },
+		signal,
+	);
+	const owner = serviceOwner(session);
+	serviceState(session).owned.clear();
+	for (const unit of units) if (unit.owner === owner) track(session, unit);
+	return units;
 }
 
 /**
  * {@link listServices} for callers whose jobs and agents live in-process (`wait`,
- * `proc://`): a broker failure (timeout, crash) must not hide that state. Returns
+ * `proc://`): a daemon failure (timeout, crash) must not hide that state. Returns
  * the failure message alongside an empty list; owned-service tracking keeps its
  * last known state. A caller abort still throws.
  */
 export async function listServicesTolerant(
 	session: ToolSession,
 	signal?: AbortSignal,
-): Promise<{ services: DaemonSnapshot[]; error?: string }> {
+): Promise<{ services: UnitSnapshot[]; error?: string }> {
 	try {
 		return { services: await listServices(session, signal) };
 	} catch (error) {
 		if (signal?.aborted) throw error;
 		const message = error instanceof Error ? error.message : String(error);
-		logger.warn("Daemon broker list failed; continuing without service state", { error: message });
+		logger.warn("Daemon list failed; continuing without service state", { error: message });
 		return { services: [], error: message };
 	}
 }
@@ -174,23 +253,19 @@ export async function findService(
 	session: ToolSession,
 	name: string,
 	signal?: AbortSignal,
-): Promise<DaemonSnapshot | undefined> {
-	return (await listServices(session, signal)).find(daemon => daemon.name === name);
+): Promise<UnitSnapshot | undefined> {
+	return (await listServices(session, signal)).find(unit => unit.key === name);
 }
 
-export async function serviceLogPath(session: ToolSession, name: string): Promise<string> {
-	const canonical = await canonicalProjectDir(session.cwd);
-	return path.join(getDaemonRuntimeDir(canonical), "daemons", name, "output.log");
+/** Output log of a service unit, as the daemon writes it. */
+export function serviceUnitLogPath(unit: UnitSnapshot): string {
+	return path.join(unitLogDir(unit.id), "output.log");
 }
 
-/** Render legacy broker PTY bytes outside the client process. */
-export async function renderServiceLogTerminalRows(
-	result: Extract<DaemonRpcResult, { op: "logs" }>,
-	lines = 1_000,
-): Promise<string[] | undefined> {
-	if (result.terminalRows !== undefined) return result.terminalRows;
-	if (result.terminalText === undefined) return undefined;
-	return renderTerminalOutputIsolated(result.terminalText, { head: false, maxRows: lines });
+/** Output log of service `name`; undefined when the daemon has no such service. */
+export async function serviceLogPath(session: ToolSession, name: string): Promise<string | undefined> {
+	const unit = await findService(session, name);
+	return unit ? serviceUnitLogPath(unit) : undefined;
 }
 
 export async function serviceLogsWithRows(
@@ -202,17 +277,16 @@ export async function serviceLogsWithRows(
 		session,
 		{
 			op: "logs",
-			name,
+			unit: await serviceRef(session, name),
 			lines: 1_000,
 			head: false,
 			follow: false,
 			timeoutMs: 1_000,
-			renderTerminalRows: true,
 		},
 		signal,
 	);
-	if (result.op !== "logs") throw new Error("Unexpected daemon logs response");
-	const rows = await renderServiceLogTerminalRows(result).catch(() => undefined);
+	track(session, result.unit);
+	const rows = result.terminalOutput ? result.terminalOutput.split("\n") : undefined;
 	return {
 		text: replaceTabs(sanitizeText(rows?.join("\n") ?? result.text)),
 		...(rows ? { terminalRows: rows } : {}),
@@ -234,12 +308,11 @@ function serviceDirectory(cwd: string | undefined, sessionCwd: string): string {
 }
 
 /**
- * Start a session-owned daemon and wait for its requested readiness condition.
- * `readyInterrupt` ends only the readiness wait, after the broker acknowledged
+ * Start a session-owned service and wait for its requested readiness condition.
+ * `readyInterrupt` ends only the readiness wait, after the daemon acknowledged
  * the launch: the call then resolves `readyInterrupted` with the launched
  * snapshot while the service keeps starting. Validation, connection, and launch
- * failures still reject. `notifyArmed` is false for a `notify` regex the broker
- * did not take: one from an older omp ignores it.
+ * failures still reject. `notifyArmed` reports whether a `notify` regex is watched.
  */
 export async function startService(
 	session: ToolSession,
@@ -247,7 +320,7 @@ export async function startService(
 	signal?: AbortSignal,
 	readyInterrupt?: AbortSignal,
 ): Promise<{
-	daemon: DaemonSnapshot;
+	daemon: UnitSnapshot;
 	readyTimedOut: boolean;
 	readyInterrupted: boolean;
 	notifyArmed: boolean;
@@ -267,13 +340,20 @@ export async function startService(
 		}
 	}
 	if (params.notify) compileNotifyPattern(params.notify);
+	const scope = await sessionScope(session);
 	const shell = session.settings.getShellConfig();
-	const spec: DaemonSpec = {
-		name: params.name,
-		application: shell.shell,
-		args: [...shell.args, `${shell.prefix ? `${shell.prefix} ` : ""}${params.command}`],
+	// The service is a shell process: the bash tool's shell, with omp's utilities and the mounts
+	// its script makes. A URL directory is entered by that shell; the process starts on the host.
+	const urlCwd = params.cwd !== undefined && isUrlPath(params.cwd) ? params.cwd : undefined;
+	const source = params.seed ? await writeServiceSeed(scope, params.name, params.seed) : undefined;
+	const proc: ProcSpec = {
+		...shellProcessCommand({
+			command: `${shell.prefix ? `${shell.prefix} ` : ""}${params.command}`,
+			source,
+			cwd: urlCwd,
+		}),
 		env: { ...shell.env, ...params.env },
-		cwd: serviceDirectory(params.cwd, session.cwd),
+		cwd: serviceDirectory(urlCwd === undefined ? params.cwd : undefined, session.cwd),
 		pty: params.pty ?? true,
 		ready: ready
 			? {
@@ -284,46 +364,56 @@ export async function startService(
 				}
 			: undefined,
 		notify: params.notify,
-		restart: "no",
-		persist: cfgLaunchPersist.get(session.settings),
-		detached: false,
 	};
-	const result = await request(
+	const persist = cfgLaunchPersist.get(session.settings);
+	// Session services live on this process's lease; persistent ones until stopped.
+	const policy: Partial<UnitPolicy> = persist
+		? { hold: "persist", restart: "no", survive: "exec" }
+		: { hold: "leases", idleMs: 0, onIdle: "stop", restart: "no", survive: "exec" };
+	const ref = { kind: SERVICE_KIND, scope, key: params.name };
+	const opened = await request(
 		session,
 		{
-			op: "start",
-			spec,
+			op: "open",
+			...ref,
+			label: params.name,
+			proc,
+			policy,
 			owner: serviceOwner(session) ?? undefined,
 			replace: true,
 			awaitReady: readyInterrupt === undefined,
+			lease: !persist,
 		},
 		signal,
-	);
-	if (result.op !== "start") throw new Error("Unexpected daemon start response");
-	const launched = result.daemon;
-	const notifyArmed = result.notifyArmed === true;
-	// A legacy broker ignores `awaitReady` and already waited: its result is
-	// ready, terminal, or timed out, so the wait phase is skipped.
-	if (
-		!readyInterrupt ||
-		!spec.ready ||
-		result.readyTimedOut ||
-		launched.readyAt !== undefined ||
-		TERMINAL_STATES[launched.state]
-	)
-		return { daemon: launched, readyTimedOut: result.readyTimedOut, readyInterrupted: false, notifyArmed };
-	const timeoutMs = Math.max(0, spec.ready.timeoutMs - (Date.now() - launched.startedAt));
+	).catch(async (error: unknown) => {
+		if (!(error instanceof DaemonTimeoutError)) throw error;
+		// The daemon may have started the service anyway: say where it stands.
+		const described = await request(session, { op: "describe", unit: ref }, signal).catch(() => undefined);
+		const pid = described?.unit.pids[0];
+		const state = described
+			? `${params.name} is ${described.unit.state}${pid === undefined ? "" : ` (pid ${pid})`}; read proc://${params.name}`
+			: "the daemon did not answer a status request either";
+		throw new ToolError(`Service start request timed out; ${state}.`);
+	});
+	const launched = opened.unit;
+	track(session, launched);
+	const notifyArmed = params.notify !== undefined;
+	const readyPending = (unit: UnitSnapshot): boolean =>
+		proc.ready !== undefined && unit.readyAt === undefined && !TERMINAL_STATES[unit.state];
+	if (!readyInterrupt || !readyPending(launched))
+		return { daemon: launched, readyTimedOut: readyPending(launched), readyInterrupted: false, notifyArmed };
+	const timeoutMs = Math.max(0, (proc.ready?.timeoutMs ?? 0) - (Date.now() - launched.startedAt));
 	try {
 		const waited = await request(
 			session,
-			{ op: "wait", name: params.name, for: "ready", timeoutMs },
+			{ op: "wait", unit: ref, for: "ready", timeoutMs },
 			signal ? AbortSignal.any([signal, readyInterrupt]) : readyInterrupt,
 		);
-		if (waited.op !== "wait") throw new Error("Unexpected daemon wait response");
+		track(session, waited.unit);
 		// A pre-ready exit is reported by its terminal state, not as a timeout.
 		return {
-			daemon: waited.daemon,
-			readyTimedOut: waited.timedOut && !TERMINAL_STATES[waited.daemon.state],
+			daemon: waited.unit,
+			readyTimedOut: !waited.matched && !TERMINAL_STATES[waited.unit.state],
 			readyInterrupted: false,
 			notifyArmed,
 		};
@@ -339,17 +429,21 @@ export async function sendService(
 	name: string,
 	content: string,
 	signal?: AbortSignal,
-): Promise<DaemonSnapshot> {
+): Promise<UnitSnapshot> {
 	const data = /[\r\n]$/.test(content) ? content : `${content}\r`;
-	const result = await request(session, { op: "send", name, data }, signal);
-	if (result.op !== "send") throw new Error("Unexpected daemon send response");
-	return result.daemon;
+	const { unit } = await request(session, { op: "send", unit: await serviceRef(session, name), data }, signal);
+	track(session, unit);
+	return unit;
 }
 
-export async function stopService(session: ToolSession, name: string, signal?: AbortSignal): Promise<DaemonSnapshot> {
-	const result = await request(session, { op: "stop", name, timeoutMs: 5_000 }, signal);
-	if (result.op !== "stop") throw new Error("Unexpected daemon stop response");
-	return result.daemon;
+export async function stopService(session: ToolSession, name: string, signal?: AbortSignal): Promise<UnitSnapshot> {
+	const { unit } = await request(
+		session,
+		{ op: "stop", unit: await serviceRef(session, name), timeoutMs: 5_000 },
+		signal,
+	);
+	track(session, unit);
+	return unit;
 }
 
 export async function modeService(
@@ -357,17 +451,45 @@ export async function modeService(
 	name: string,
 	mode: "persist" | "session" | "detached",
 	signal?: AbortSignal,
-): Promise<DaemonSnapshot> {
-	// The broker detaches a service by relaunching it, which would start the
-	// shared Chrome on an unprepared profile and reopen its previous pages.
-	if (mode === "detached" && isSharedBrowserDaemonName(name))
+): Promise<UnitSnapshot> {
+	const ref = await serviceRef(session, name);
+	// Detaching relaunches the service, which would start the shared Chrome on an
+	// unprepared profile and reopen its previous pages.
+	if (mode === "detached" && isSharedBrowserUnit((await request(session, { op: "describe", unit: ref }, signal)).unit))
 		throw new Error(`${name} is omp's project-shared browser and cannot be detached`);
-	const result = await request(session, { op: "mode", name, mode }, signal);
-	if (result.op !== "mode") throw new Error("Unexpected daemon mode response");
-	return result.daemon;
+	// A session-held service lives on a lease and `mode` takes none: hold one first, or the
+	// daemon's idle policy (idleMs 0) stops the service the moment it turns session-held.
+	const lease =
+		mode === "session"
+			? (
+					await request(
+						session,
+						{ op: "open", ...ref, owner: serviceOwner(session) ?? undefined, awaitReady: false },
+						signal,
+					)
+				).lease
+			: undefined;
+	let unit: UnitSnapshot;
+	try {
+		({ unit } = await request(session, { op: "mode", unit: ref, mode }, signal));
+	} catch (error) {
+		// The service did not turn session-held: the lease taken for it would pin it until this connection closes.
+		if (lease !== undefined) {
+			await request(session, { op: "release", lease }).catch(releaseError =>
+				logger.debug("Failed to release a service lease after a failed mode change", {
+					service: name,
+					error: releaseError instanceof Error ? releaseError.message : String(releaseError),
+				}),
+			);
+		}
+		throw error;
+	}
+	track(session, unit);
+	return unit;
 }
 
-export function serviceStatus(daemon: DaemonSnapshot): string {
-	const age = formatDuration(Math.max(0, (daemon.exitedAt ?? Date.now()) - daemon.startedAt));
-	return `${daemon.name} [service] — ${daemon.state} — up ${age}${daemon.pid === undefined ? "" : ` — pid ${daemon.pid}`}${daemon.persist ? " — persistent" : ""}${daemon.detached ? " — detached" : ""}`;
+export function serviceStatus(unit: UnitSnapshot): string {
+	const age = formatDuration(Math.max(0, (unit.exitedAt ?? Date.now()) - unit.startedAt));
+	const pid = unit.pids[0];
+	return `${unit.key} [service] — ${unit.state} — up ${age}${pid === undefined ? "" : ` — pid ${pid}`}${unit.policy.hold === "persist" ? " — persistent" : ""}${unit.policy.hold === "detached" ? " — detached" : ""}`;
 }

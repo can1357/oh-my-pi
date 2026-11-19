@@ -58,7 +58,7 @@ describe("stripOutputNotice", () => {
 	it("removes the notice for tail truncation including artifact reference", () => {
 		const body = "long output…";
 		const notice = formatOutputNotice(tailTruncation);
-		expect(notice).toContain("artifact://abc123");
+		expect(notice).toContain("local://abc123.log");
 
 		expect(stripOutputNotice(body + notice, tailTruncation)).toBe(body);
 	});

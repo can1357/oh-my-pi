@@ -15,7 +15,7 @@ describe("retained workspace teardown set", () => {
 			IsoBackendKind.Apfs,
 			// ZFS clones need dataset-aware teardown too, but isoStop locates
 			// the dataset by its recorded mountpoint property, which no longer
-			// matches after the retain rename — pi-iso mount-table support first.
+			// matches after the retain rename — omp-iso mount-table support first.
 			IsoBackendKind.Zfs,
 			IsoBackendKind.LinuxReflink,
 			IsoBackendKind.WindowsBlockClone,
