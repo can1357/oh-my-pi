@@ -2,7 +2,7 @@ import type { AstGrepToolDetails } from "@oh-my-pi/pi-tui/tools/ast-grep";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
-import { type AstFindMatch, astGrep, type ShellFilesystem } from "@oh-my-pi/pi-natives";
+import type { AstFindMatch, ShellFilesystem } from "@oh-my-pi/pi-natives";
 
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
@@ -10,6 +10,7 @@ import { getEditStore } from "../edit/store";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import astGrepDescription from "../prompts/tools/ast-grep.md" with { type: "text" };
+import { containedAstGrep, containToolExecute, recordFileSnapshot } from "../sandbox/file-access";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 
@@ -104,7 +105,7 @@ async function runMultiTargetAstGrep(
 	let filesSearched = 0;
 	let limitReached = false;
 	for (const target of targets) {
-		const targetResult = await astGrep({
+		const targetResult = await containedAstGrep({
 			patterns: options.patterns,
 			lang: options.lang,
 			path: target.basePath,
@@ -198,6 +199,10 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 
 	constructor(private readonly session: ToolSession) {}
 
+	static {
+		containToolExecute(this, tool => tool.session);
+	}
+
 	async execute(
 		_toolCallId: string,
 		params: typeof astGrepSchema.infer,
@@ -255,7 +260,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 							signal,
 							filesystem,
 						})
-					: astGrep({
+					: containedAstGrep({
 							patterns,
 							lang: params.lang,
 							path: resolvedSearchPath,
@@ -327,7 +332,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 					if (snapshotPath === undefined) continue;
 					// Whole-file content tag: any anchor validates while the file is
 					// unchanged; over-cap / unreadable files get no tag (plain output).
-					const tag = store.recordSnapshotFile(snapshotPath);
+					const tag = await recordFileSnapshot(store, snapshotPath);
 					if (tag) hashContexts.set(fileList[index], { tag, path: snapshotPath });
 				}
 			}

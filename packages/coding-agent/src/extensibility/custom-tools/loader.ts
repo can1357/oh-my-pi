@@ -164,7 +164,7 @@ export class CustomToolLoader {
 		this.#sharedApi = {
 			cwd,
 			exec: (command: string, args: string[], options?: ExecOptions) =>
-				execCommand(command, args, options?.cwd ?? cwd, options),
+				execCommand(command, args, options?.cwd ?? cwd, options, cwd),
 			ui: createNoOpUIContext(),
 			hasUI: false,
 			logger,

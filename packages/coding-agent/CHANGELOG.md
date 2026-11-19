@@ -2,9 +2,20 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Rust SDK: `SessionState` and `BashResult` struct literals need `sandbox: None` ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- A project `.env` can no longer set the names that choose omp's config (`PI_CONFIG_FILES`, agent/config dirs, profile, XDG roots, natives dir); set them in your shell or omp's own `.env` ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+
 ### Added
 
 - `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
+- Added an opt-in OS sandbox (seatbelt, bubblewrap, processcontainer) for agent commands, eval, the file tools, `read`'s binary analysis and eval's `dsm`, extension `exec`, opted-in MCP servers and language servers: workspace-only writes, secret stores unreadable, network off, open or allowlisted through an egress proxy; git config and hooks and the project config folders omp loads (`.omp/`, `.claude/`, `.mcp.json`, …) stay read-only inside the workspace, and one a sandboxed command creates or replaces is recorded and neither loaded nor used by omp's git until you trust it in `/sandbox`; omp's Chromium for the `browser` helper runs as its own process per workspace, behind the egress proxy in `allowlist` mode, with `file:` loads and page downloads restricted; network modes the host cannot enforce are refused with the missing packages named, a refusal names the exact path, host or `exec` action (something omp does outside the sandbox, such as a `debug` launch or attach, a `computer` call or a browser it cannot restrict) the agent can ask for with the `sandbox_request` tool, and edits to omp's own settings files always ask; configure with `/sandbox`, `sandbox.*` settings (a project can only tighten them) or `PI_SANDBOX=1`, with Windows opt-ins `sandbox.filesystem.windowsListDrives` and `sandbox.network.windowsLoopback`, and `omp --smoke-test` checks it (see `docs/sandbox.md`) ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- RPC clients can read and edit the sandbox, receive `sandbox_update`, opt in to answering host and access prompts, and revoke `exec` grants or trust and remove recorded sandbox-created paths (see `docs/rpc.md#sandbox`) ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+
+### Changed
+
+- Approval modes now gate `read` and search URLs on `192.0.0.0/24` and `198.18.0.0/15` like other non-public addresses, matching the sandbox egress proxy ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ### Fixed
 
@@ -18,6 +29,7 @@
 - Fixed `/usage` showing "Usage history unavailable (database is locked)" while another process was writing the stats database; the stored history stays visible, marked not synced when the refresh cannot finish ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 - `openai-models-list` discovery no longer offers a gateway's speech and transcription models as chat models: rows whose only output is `speech` or `transcription` (including OpenRouter's `text->speech` style `architecture.modality` summary) become `tts` and `stt` models ([#19900](https://github.com/can1357/oh-my-pi/pull/19900) by [@Xytronix](https://github.com/Xytronix))
 - Subagents stopped by their parent through `proc://<id>/kill` now record "Stopped by parent agent" in their transcripts instead of "Interrupted by user" ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- On Windows, cancelling a JavaScript eval cell no longer drops the output it printed just before the cancel, and a hung Python interpreter probe no longer delays backend discovery past its timeout ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ## [19.1.0] - 2026-11-21
 

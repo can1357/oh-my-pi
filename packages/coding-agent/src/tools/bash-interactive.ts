@@ -1,13 +1,17 @@
 import { BashInteractiveOverlayComponent } from "@oh-my-pi/pi-tui/tools/bash-interactive";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
+import { type PtyArgvStartOptions, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { loadXtermTerminal } from "@oh-my-pi/pi-tui/tools/terminal-output";
 import { Settings } from "../config/settings";
 import { buildNonInteractiveEnv } from "../exec/non-interactive-env";
 import { cfgPtyNotify } from "../modes/settings";
 import { type ArtifactAllocator, OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { containedProcessEnv } from "../sandbox/env";
+import { SandboxRuntime } from "../sandbox/runtime";
+import { SandboxedPtySession } from "../sandbox/shell-client";
+import type { SandboxResultMeta } from "../sandbox/types";
 import { StreamNewlineNormalizer } from "../utils/stream-newlines";
 import { holdBlockedStatus } from "../utils/run-status";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
@@ -20,6 +24,22 @@ export interface BashInteractiveResult extends OutputSummary {
 	timedOut: boolean;
 	/** Terminal graphics extracted from raw PTY output before transcript sanitization. */
 	images?: ImageContent[];
+	/** Set when the command ran inside the OS sandbox. */
+	sandbox?: SandboxResultMeta;
+}
+
+/** The `PtySession` surface this runner drives: native, or relayed from a sandbox host. */
+interface InteractivePty {
+	startArgv(
+		options: PtyArgvStartOptions,
+		onChunk?: (error: Error | null, chunk: string) => void,
+		onStart?: (error: Error | null, pid: number) => void,
+	): Promise<PtyRunResult>;
+	write(data: string): void;
+	resize(cols: number, rows: number): void;
+	kill(): void;
+	/** Whether the program waits on terminal input; `null` when that cannot be inspected. */
+	awaitsInput(): boolean | null;
 }
 
 /**
@@ -63,7 +83,7 @@ const USER_PRESENT_MS = 10_000;
 class InputWaitWatch {
 	readonly #command: string;
 	readonly #settings: Settings;
-	readonly #session: PtySession;
+	readonly #session: InteractivePty;
 	readonly #screen: BashInteractiveOverlayComponent;
 	readonly #timer: NodeJS.Timeout;
 	#lastOutput = Date.now();
@@ -71,7 +91,7 @@ class InputWaitWatch {
 	#streak = 0;
 	#release: (() => void) | undefined;
 
-	constructor(command: string, settings: Settings, session: PtySession, screen: BashInteractiveOverlayComponent) {
+	constructor(command: string, settings: Settings, session: InteractivePty, screen: BashInteractiveOverlayComponent) {
 		this.#command = command;
 		this.#settings = settings;
 		this.#session = session;
@@ -145,9 +165,16 @@ export async function runInteractiveBashPty(
 		allocateArtifact?: ArtifactAllocator;
 		/** Called with the program's pid once the terminal spawned it. */
 		onStart?: (pid: number) => void;
+		/** The agent session's workspace; the command runs in the OS sandbox when it applies there. */
+		sandboxWorkspace?: string;
+		/** Host directories a contained run may also write (the session's `local://` root). */
+		sandboxExtraWrite?: readonly string[];
 	},
 ): Promise<BashInteractiveResult> {
 	const settings = await Settings.init();
+	// Throws when the sandbox is required but unavailable: never a silent uncontained PTY.
+	const workspace = options.sandboxWorkspace;
+	const sandbox = workspace === undefined ? undefined : await SandboxRuntime.forScope(workspace, "bash");
 	// Load the xterm Terminal ctor here (async boundary) — the ui.custom factory below is sync.
 	const XtermTerminal = await loadXtermTerminal();
 	const graphics = new TerminalGraphicsDecoder();
@@ -162,7 +189,10 @@ export async function runInteractiveBashPty(
 	try {
 		const result = await ui.custom<BashInteractiveResult>(
 			(tui, uiTheme, _keybindings, done) => {
-				const session = new PtySession();
+				const session: InteractivePty = sandbox
+					? new SandboxedPtySession(sandbox, { cwd: workspace!, extraWrite: options.sandboxExtraWrite })
+					: new PtySession();
+				const blockedSince = Date.now();
 				const component = new BashInteractiveOverlayComponent(
 					options.command,
 					uiTheme,
@@ -190,6 +220,11 @@ export async function runInteractiveBashPty(
 							...summary,
 							output,
 							...(images.length > 0 ? { images } : {}),
+							sandbox: sandbox?.resultMeta({
+								blockedSince,
+								output: run.exitCode !== 0 ? summary.output : undefined,
+								exitCode: run.exitCode,
+							}),
 						});
 					})();
 				};
@@ -228,7 +263,8 @@ export async function runInteractiveBashPty(
 							args: options.args,
 							cwd: options.cwd,
 							timeoutMs: options.timeoutMs,
-							env: terminalEnv(options.env),
+							// Contained: the container's temp dir and (allowlist) proxy apply over the terminal env.
+							env: sandbox ? containedProcessEnv(sandbox, terminalEnv(options.env)) : terminalEnv(options.env),
 							signal: options.signal,
 							cols,
 							rows,

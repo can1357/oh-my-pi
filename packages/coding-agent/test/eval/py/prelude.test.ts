@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { $which, TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { PYTHON_PRELUDE } from "../../../src/eval/py/prelude";
-const pythonPath = Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python");
+import { TEST_PYTHON } from "../../helpers/python";
+
+const pythonPath = TEST_PYTHON ?? "python";
 
 async function runPrelude(
 	code: string,

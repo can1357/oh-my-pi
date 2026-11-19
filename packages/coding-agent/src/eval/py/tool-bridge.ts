@@ -1,12 +1,15 @@
 /**
- * HTTP loopback bridge that lets the Python kernel invoke host-side tools and
+ * HTTP bridge that lets the Python kernel invoke host-side tools and
  * enabled eval-prelude capabilities, mirroring the JavaScript worker bridge.
  *
- * The Python prelude POSTs to `/v1/tool` over a 127.0.0.1 loopback socket; the
- * host resolves the request against the `ToolSession` registered for the
- * current execution and forwards to the same `callSessionTool` implementation
- * the JavaScript bridge uses.
+ * The Python prelude POSTs to `/v1/tool` over a 127.0.0.1 loopback socket, or,
+ * for a kernel contained by the OS sandbox (which denies host loopback), over a
+ * Unix socket inside the sandbox's private temp dir (its writable root); the host resolves the
+ * request against the `ToolSession` registered for the current execution and
+ * forwards to the same `callSessionTool` implementation the JavaScript bridge uses.
  */
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import type { RuntimeCallIdentity } from "../js/shared/runtime";
@@ -39,17 +42,24 @@ export interface PyToolBridgeEntry {
 }
 
 export interface PyToolBridgeInfo {
+	/** `http://127.0.0.1:<port>`, or `unix:<socket path>` for the Unix-socket bridge. */
 	url: string;
 	token: string;
 }
 
+/** Socket file name inside the directory a `unix` bridge is given; short, for the 104-byte `sun_path`. */
+const BRIDGE_SOCKET_NAME = "py.sock";
+
 interface BridgeServer {
 	info: PyToolBridgeInfo;
 	stop: () => Promise<void>;
+	/** Stops accepting connections, lets in-flight calls finish, and leaves the socket path alone. */
+	retire: () => void;
 }
 
 const registrations = new Map<string, PyToolBridgeEntry>();
-let serverPromise: Promise<BridgeServer> | null = null;
+/** Started servers: `"tcp"`, or `unix:<socket dir>` per directory. */
+const serverPromises = new Map<string, Promise<BridgeServer>>();
 
 function markExpectedBridgeShutdownError(error: unknown): error is Error {
 	if (!(error instanceof Error)) return false;
@@ -155,12 +165,10 @@ async function callSessionToolPromptOnAbort(
 	}
 }
 
-async function startServer(): Promise<BridgeServer> {
-	const token = crypto.randomUUID();
-	const server = Bun.serve({
-		hostname: "127.0.0.1",
-		port: 0,
-		async fetch(req) {
+/** `token` defaults to a fresh one; a restart keeps the previous server's, so kernels holding it keep working. */
+async function startServer(socketDir: string | undefined, token: string = crypto.randomUUID()): Promise<BridgeServer> {
+	const handlers = {
+		async fetch(req: Request): Promise<Response> {
 			const url = new URL(req.url);
 			if (req.method !== "POST" || url.pathname !== "/v1/tool") {
 				return new Response("Not Found", { status: 404 });
@@ -219,7 +227,7 @@ async function startServer(): Promise<BridgeServer> {
 				});
 			}
 		},
-		error(err) {
+		error(err: Error): Response {
 			if (markExpectedBridgeShutdownError(err)) {
 				logger.debug("Python tool bridge connection closed during shutdown", { error: err.message });
 			} else {
@@ -229,10 +237,29 @@ async function startServer(): Promise<BridgeServer> {
 			// An empty body minimizes further writes to a closing socket.
 			return new Response(null, { status: 500 });
 		},
-	});
+	};
+	// A contained kernel can reach only sockets under its writable roots, so the caller passes its
+	// sandbox's private temp dir; the socket is removed when the server stops or the process exits.
+	const socketPath = socketDir ? path.join(socketDir, BRIDGE_SOCKET_NAME) : undefined;
+	const removeSocket = (): void => {
+		// Recursive: the directory is writable from inside the sandbox, so anything (even a directory) can sit there.
+		if (socketPath) fs.rmSync(socketPath, { force: true, recursive: true });
+	};
+	const server = (() => {
+		try {
+			if (!socketPath) return Bun.serve({ ...handlers, hostname: "127.0.0.1", port: 0 });
+			// The directory is writable from inside the sandbox: clear anything left at the socket path.
+			removeSocket();
+			return Bun.serve({ ...handlers, unix: socketPath });
+		} catch (error) {
+			removeSocket();
+			throw error;
+		}
+	})();
+	const cancelCleanup = socketPath ? postmortem.register("python-tool-bridge-socket", removeSocket) : undefined;
 
 	const info: PyToolBridgeInfo = {
-		url: `http://${server.hostname}:${server.port}`,
+		url: socketPath ? `unix:${socketPath}` : `http://${server.hostname}:${server.port}`,
 		token,
 	};
 	logger.debug("Python tool bridge listening", { url: info.url });
@@ -241,29 +268,74 @@ async function startServer(): Promise<BridgeServer> {
 	return {
 		info,
 		stop: () => {
-			stopPromise ??= Promise.try(() => server.stop(true)).catch(error => {
-				if (!markExpectedBridgeShutdownError(error)) throw error;
-				logger.debug("Python tool bridge stopped after its socket closed", {
-					error: error.message,
+			stopPromise ??= Promise.try(() => server.stop(true))
+				.catch(error => {
+					if (!markExpectedBridgeShutdownError(error)) throw error;
+					logger.debug("Python tool bridge stopped after its socket closed", {
+						error: error.message,
+					});
+				})
+				.finally(() => {
+					cancelCleanup?.();
+					removeSocket();
+				});
+			return stopPromise;
+		},
+		retire: () => {
+			// The socket path now belongs to the replacement server: leave it, and let in-flight calls finish.
+			cancelCleanup?.();
+			void Promise.try(() => server.stop(false)).catch(error => {
+				logger.debug("Failed to retire Python tool bridge", {
+					error: error instanceof Error ? error.message : String(error),
 				});
 			});
-			return stopPromise;
 		},
 	};
 }
 
-/** Starts the bridge server lazily and returns its connection info. */
-export async function ensurePyToolBridge(): Promise<PyToolBridgeInfo> {
-	if (!serverPromise) {
-		serverPromise = startServer();
+/**
+ * Starts the bridge server lazily and returns its connection info: TCP on loopback, or (with
+ * `socketDir`, for a sandbox-contained kernel; POSIX only) a Unix socket inside it, one server per directory.
+ * The socket directory is writable from inside the sandbox, so a started Unix bridge whose socket file
+ * is gone (a contained `rm -rf "$TMPDIR"/*`) is retired (its in-flight calls still finish) and replaced by a
+ * fresh one on the same path with the same token.
+ */
+export async function ensurePyToolBridge(socketDir?: string): Promise<PyToolBridgeInfo> {
+	const key = socketDir === undefined ? "tcp" : `unix:${socketDir}`;
+	let pending = serverPromises.get(key);
+	if (!pending) {
+		pending = startServer(socketDir);
+		serverPromises.set(key, pending);
 	}
+	let server: BridgeServer;
 	try {
-		const server = await serverPromise;
-		return server.info;
+		server = await pending;
 	} catch (err) {
-		serverPromise = null;
+		if (serverPromises.get(key) === pending) serverPromises.delete(key);
 		throw err;
 	}
+	if (socketDir === undefined) return server.info;
+	if (serverPromises.get(key) === pending) {
+		if (bridgeSocketPresent(socketDir)) return server.info;
+		logger.debug("Python tool bridge socket vanished; restarting", { socketDir });
+		const restarted = Promise.try(() => {
+			server.retire();
+			return startServer(socketDir, server.info.token);
+		});
+		serverPromises.set(key, restarted);
+	}
+	// Settle on the current entry (this caller's restart or a concurrent one) without rechecking.
+	const current = serverPromises.get(key) ?? pending;
+	try {
+		return (await current).info;
+	} catch (err) {
+		if (serverPromises.get(key) === current) serverPromises.delete(key);
+		throw err;
+	}
+}
+
+function bridgeSocketPresent(socketDir: string): boolean {
+	return fs.lstatSync(path.join(socketDir, BRIDGE_SOCKET_NAME), { throwIfNoEntry: false })?.isSocket() === true;
 }
 
 /**
@@ -284,18 +356,19 @@ export function registerPyToolBridge(sessionId: string, runId: string, entry: Py
 	};
 }
 
-/** Stop the bridge and clear registrations. Test-only / shutdown helper. */
+/** Stop the bridges and clear registrations. Test-only / shutdown helper. */
 export async function disposePyToolBridge(): Promise<void> {
 	registrations.clear();
-	const pending = serverPromise;
-	serverPromise = null;
-	if (!pending) return;
-	try {
-		const server = await pending;
-		await server.stop();
-	} catch (err) {
-		logger.debug("Failed to stop Python tool bridge", {
-			error: err instanceof Error ? err.message : String(err),
-		});
+	const pending = [...serverPromises.values()];
+	serverPromises.clear();
+	for (const started of pending) {
+		try {
+			const server = await started;
+			await server.stop();
+		} catch (err) {
+			logger.debug("Failed to stop Python tool bridge", {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
 	}
 }

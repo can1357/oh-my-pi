@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	ConcatSink,
+	LineTooLongError,
 	parseJsonlLenient,
 	readJsonl,
 	readLines,
@@ -66,6 +67,41 @@ describe("readLines", () => {
 		const lines = await collectAsync(readLines(readable));
 		const dec = new TextDecoder();
 		expect(lines.map(line => dec.decode(line))).toEqual(["hello", "world"]);
+	});
+});
+
+describe("readLines with maxLineBytes", () => {
+	const dec = new TextDecoder();
+	function streamOf(chunks: string[]): ReadableStream<Uint8Array> {
+		return new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+				controller.close();
+			},
+		});
+	}
+	async function capped(chunks: string[]): Promise<string[]> {
+		const lines = await collectAsync(readLines(streamOf(chunks), undefined, { maxLineBytes: 8 }));
+		return lines.map(line => dec.decode(line));
+	}
+
+	it("caps each line, not the stream: short lines totalling far over the cap all come through", async () => {
+		const chunks = ["abc\nde", "f\nghi\n", "jkl\nmn", "o\npqr\n", "stu\n"];
+		expect(await capped(chunks)).toEqual(["abc", "def", "ghi", "jkl", "mno", "pqr", "stu"]);
+	});
+
+	it("yields a line split across chunks that is exactly the cap", async () => {
+		expect(await capped(["abcd", "efgh", "\nx\n"])).toEqual(["abcdefgh", "x"]);
+	});
+
+	it("throws LineTooLongError exposing the cap for a line one byte over it", async () => {
+		const error = await capped(["abcd", "efghi", "\n"]).catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(LineTooLongError);
+		expect((error as LineTooLongError).maxLineBytes).toBe(8);
+	});
+
+	it("throws for a chunk whose newline leaves an over-cap tail", async () => {
+		await expect(capped(["ab\nabcdefghi"])).rejects.toThrow(LineTooLongError);
 	});
 });
 

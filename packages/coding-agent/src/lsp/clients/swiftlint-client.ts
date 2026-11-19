@@ -2,6 +2,7 @@
  * SwiftLint CLI-based linter client.
  * Parses SwiftLint's JSON reporter output into LSP Diagnostic format.
  */
+import { runLinterCli } from "../../exec/exec";
 import type { Diagnostic, DiagnosticSeverity, LinterClient, ServerConfig } from "../../lsp/types";
 
 /** Shape of a single violation from `swiftlint lint --reporter json`. */
@@ -26,33 +27,25 @@ function parseSeverity(severity: string): DiagnosticSeverity {
 	}
 }
 
+/**
+ * Run a SwiftLint CLI command. Under an applying sandbox (`lsp` scope) SwiftLint runs contained like
+ * the language servers; `fallback: block` without a backend rejects instead of running it.
+ */
 async function runSwiftLint(
 	args: string[],
 	cwd: string,
 	resolvedCommand?: string,
 	signal?: AbortSignal,
 ): Promise<{ stdout: string; stderr: string; success: boolean }> {
-	const command = resolvedCommand ?? "swiftlint";
-
-	try {
-		const proc = Bun.spawn([command, ...args], {
-			cwd,
-			stdout: "pipe",
-			stderr: "pipe",
-			windowsHide: true,
-			signal,
-		});
-
-		const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-		await proc.exited;
-		signal?.throwIfAborted();
-
-		// swiftlint exits non-zero when violations found — that's not a failure
-		return { stdout, stderr, success: stdout.length > 0 };
-	} catch (err) {
-		if (signal?.aborted) throw err;
-		return { stdout: "", stderr: String(err), success: false };
-	}
+	// swiftlint exits non-zero when violations are found — that's not a failure
+	return await runLinterCli(
+		resolvedCommand ?? "swiftlint",
+		args,
+		cwd,
+		"SwiftLint command",
+		({ stdout }) => stdout.length > 0,
+		signal,
+	);
 }
 
 /**

@@ -1,3 +1,4 @@
+import type { FileHandle } from "node:fs/promises";
 import { Readable, type Transform } from "node:stream";
 import { formatBytes } from "../format";
 import { LRUCache } from "../lru";
@@ -55,6 +56,28 @@ export function fileByteSource(filePath: string): ByteSource {
 				throw new ArchiveError("Invalid archive: truncated data");
 			}
 			return bytes;
+		},
+	};
+}
+
+/**
+ * Ranged reads through an open `handle` of a file `size` bytes long as a {@link ByteSource};
+ * reads past `size` are refused, as {@link fileByteSource} refuses them. The caller closes `handle`.
+ */
+export function handleByteSource(handle: FileHandle, size: number): ByteSource {
+	return {
+		size,
+		async read(start, end) {
+			assertValidRange(start, end);
+			if (end > size) throw new ArchiveError("Invalid archive: truncated data");
+			const buffer = Buffer.allocUnsafe(end - start);
+			let filled = 0;
+			while (filled < buffer.length) {
+				const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, start + filled);
+				if (bytesRead === 0) throw new ArchiveError("Invalid archive: truncated data");
+				filled += bytesRead;
+			}
+			return buffer;
 		},
 	};
 }

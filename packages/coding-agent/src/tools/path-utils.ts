@@ -6,7 +6,8 @@ import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as url from "node:url";
-import { glob } from "@oh-my-pi/pi-natives";
+import type { glob } from "@oh-my-pi/pi-natives";
+import { containedGlob } from "../sandbox/file-access";
 import {
 	expandTilde,
 	hasFsCode,
@@ -1454,7 +1455,7 @@ export async function findUniqueWorkspaceSuffix(
 	cwd: string,
 	signal?: AbortSignal,
 ): Promise<{ absolutePath: string; displayPath: string } | null> {
-	return findUniqueWorkspaceSuffixWithGlob(rawPath, cwd, signal, glob);
+	return findUniqueWorkspaceSuffixWithGlob(rawPath, cwd, signal, containedGlob);
 }
 
 /** Exercise the post-native cancellation boundary without a real filesystem walk. */

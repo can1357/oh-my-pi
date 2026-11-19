@@ -1,5 +1,6 @@
 import { pathToFileURL } from "node:url";
 import { untilAborted } from "@oh-my-pi/pi-utils";
+import { withReadableCopy } from "../sandbox/file-access";
 import type { ToolSession } from "../sdk";
 import type { BrowserHandle } from "./browser/registry";
 import type { ScreenshotResult } from "./browser/tab-protocol";
@@ -92,8 +93,21 @@ export function splitPdfImageReadPath(readPath: string): PdfImageReadTarget | nu
 	return { pdfPath, member, page };
 }
 
-/** Render one PDF page through the browser capability's shared headless Chromium. */
-export async function renderPdfPageScreenshot(
+/**
+ * Render one PDF page through the browser capability's shared headless Chromium. Chromium opens
+ * the PDF itself, outside any container, so a contained call hands it a private copy of the bytes
+ * read through the verified handle instead of the path.
+ */
+export function renderPdfPageScreenshot(
+	session: ToolSession,
+	absolutePdfPath: string,
+	page: number,
+	signal?: AbortSignal,
+): Promise<ScreenshotResult> {
+	return withReadableCopy(absolutePdfPath, "input.pdf", pdfPath => renderPdfFilePage(session, pdfPath, page, signal));
+}
+
+async function renderPdfFilePage(
 	session: ToolSession,
 	absolutePdfPath: string,
 	page: number,

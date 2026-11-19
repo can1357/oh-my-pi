@@ -138,6 +138,15 @@ import {
 	cfgTreeFilterMode,
 } from "../settings";
 import { cfgTaskAgentModelOverrides } from "../../task/settings";
+import { SandboxRuntime } from "../../sandbox/runtime";
+import { SandboxConfigOverlayComponent } from "@oh-my-pi/pi-tui/overlays/sandbox-config";
+import {
+	applySandboxChange,
+	replaceSandboxListEntry,
+	resetSandboxSetting,
+	sandboxPanelModel,
+	setSandboxListMember,
+} from "../sandbox-panel";
 
 /** First-use boundary for provider auth catalog and dialog components. */
 async function loadProviderAuthUi() {
@@ -159,7 +168,14 @@ async function loadProviderAuthUi() {
 }
 
 /** Menus that open at most once: a repeat request focuses the open one. */
-type MenuKind = "settings" | "model-picker" | "model-hub" | "agents-dashboard" | "agent-hub" | "usage-dashboard";
+type MenuKind =
+	| "settings"
+	| "model-picker"
+	| "model-hub"
+	| "agents-dashboard"
+	| "agent-hub"
+	| "usage-dashboard"
+	| "sandbox";
 
 /** An open menu: registered when the request runs, filled once its component mounts. */
 interface OpenMenu {
@@ -566,6 +582,70 @@ export class SelectorController {
 			this.ctx.ui.setFocus(overlay);
 			this.ctx.ui.requestRender();
 		})();
+	}
+
+	/**
+	 * Fullscreen `/sandbox` panel (the `/settings` idiom): status, settings and the resolved policy
+	 * of this workspace's sandbox. Edits write the global layer, like `/settings`; the panel
+	 * refreshes after each write and whenever the runtime's policy changes, and shows a rejected
+	 * edit's reason until the next successful one.
+	 */
+	showSandboxConfigure(): void {
+		if (this.#focusOpenMenu("sandbox")) return;
+		const menu = this.#claimMenu("sandbox");
+		SandboxRuntime.for(this.ctx.sessionManager.getCwd())
+			.then(runtime => {
+				const refresh = (): void => overlay.setModel(sandboxPanelModel(settings, runtime));
+				const reject = (error: unknown): void =>
+					overlay.setNotice(error instanceof Error ? error.message : String(error));
+				const write = (apply: () => void): void => {
+					try {
+						apply();
+						overlay.setNotice(undefined);
+					} catch (error) {
+						reject(error);
+					}
+					refresh();
+				};
+				const overlay = new SandboxConfigOverlayComponent(sandboxPanelModel(settings, runtime), {
+					set: change => write(() => applySandboxChange(settings, change)),
+					reset: id => write(() => resetSandboxSetting(settings, id)),
+					addEntry: (list, entry) => write(() => setSandboxListMember(settings, list, entry, true)),
+					removeEntry: (list, entry) => write(() => setSandboxListMember(settings, list, entry, false)),
+					replaceEntry: (list, previous, next) =>
+						write(() => replaceSandboxListEntry(settings, list, previous, next)),
+					// The panel edits configuration: an allowed host joins the global allowlist.
+					allowHost: host => write(() => runtime.grantHost(host, "always")),
+					revokePath: (kind, path) => write(() => runtime.revokePath(kind, path)),
+					revokeExec: target => write(() => runtime.revokeExec(target)),
+					trustCreated: target => write(() => runtime.trustCreated(target)),
+					forgetCreated: target => write(() => runtime.forgetCreated(target)),
+					close: () => {
+						unsubscribe();
+						menu.handle?.hide();
+						this.#releaseMenu("sandbox", menu);
+						this.focusActiveEditorArea();
+						this.ctx.ui.requestRender();
+					},
+					requestRender: () => this.ctx.ui.requestRender(),
+				});
+				// A burst of changes (refused connections) rebuilds the model once per tick, not per change.
+				let refreshScheduled = false;
+				const unsubscribe = runtime.onChange(() => {
+					if (refreshScheduled) return;
+					refreshScheduled = true;
+					setImmediate(() => {
+						refreshScheduled = false;
+						refresh();
+					});
+				});
+				this.#mountMenu(menu, overlay, () => this.#showFullscreenMenu(overlay));
+			})
+			.catch((error: unknown) => {
+				// A panel that never opened must not block the next `/sandbox`.
+				this.#releaseMenu("sandbox", menu);
+				this.ctx.showError(`Sandbox: ${error instanceof Error ? error.message : String(error)}`);
+			});
 	}
 
 	showHistorySearch(): void {

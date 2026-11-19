@@ -36,6 +36,7 @@ import {
 	type ShellFsResponse,
 } from "@oh-my-pi/pi-natives";
 import { isFsError } from "@oh-my-pi/pi-utils";
+import { peekReadableFile } from "../sandbox/file-access";
 import { TIER_RANK } from "../tools/approval";
 import { type ParsedSelector, parseSel, resolveTailSelector } from "../tools/read-selector";
 import { UrlContainmentError } from "./filesystem-resource";
@@ -431,7 +432,10 @@ export class InternalUrlFilesystem {
 	async readPrefix(input: string, maxBytes: number): Promise<Uint8Array> {
 		try {
 			const node = await this.#node(input, true, false);
-			if (node.kind !== "virtual") return await Bun.file(node.path).slice(0, maxBytes).bytes();
+			if (node.kind !== "virtual") {
+				// Contained, the bytes come through the container-verified handle, not a by-path read in omp.
+				return await peekReadableFile(node.path, maxBytes, header => header);
+			}
 			if (node.directory) throw new UrlFsError("EISDIR", `Is a directory: ${node.url}`);
 			return node.bytes.subarray(0, maxBytes);
 		} catch (error) {

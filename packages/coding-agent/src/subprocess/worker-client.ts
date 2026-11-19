@@ -103,7 +103,7 @@ export interface SpawnedSubprocess<Outbound> {
  * hold a full ONNX Runtime/glibc traceback (a few KiB) without letting a chatty
  * native runtime OOM the parent on repeated warnings.
  */
-const STDERR_TAIL_LIMIT_BYTES = 16 * 1024;
+export const STDERR_TAIL_LIMIT_BYTES = 16 * 1024;
 
 export interface WorkerSpawnCommand {
 	cmd: string[];
@@ -147,10 +147,12 @@ export function resolveExecutablePath(): string {
 /**
  * Resolve the command that re-enters this CLI's entrypoint: the compiled
  * binary itself, or the runtime plus the declared worker-host entry. Used by
- * the TUI `/restart` relaunch; workers go through {@link resolveWorkerSpawnCmd},
- * whose no-host fallback deliberately differs (cwd-relative entry pinned to the
- * package root for `bun test` IPC). Outside a CLI host this falls back to the
- * absolute path of `src/cli.ts` so the relaunch keeps the caller's cwd.
+ * the TUI `/restart` relaunch and by the sandbox-contained JS evaluator (which
+ * must run with an explicit cwd and an absolute entry); other workers go
+ * through {@link resolveWorkerSpawnCmd}, whose no-host fallback deliberately
+ * differs (cwd-relative entry pinned to the package root for `bun test` IPC).
+ * Outside a CLI host this falls back to the absolute path of `src/cli.ts` so
+ * the relaunch keeps the caller's cwd.
  */
 export function resolveCliEntryCmd(): string[] {
 	const executable = resolveExecutablePath();
@@ -408,7 +410,7 @@ export function createWorkerSubprocess<Outbound>(options: {
  * final `suffix()` always reflects the most recent output — where native
  * crash tracebacks land.
  */
-class StderrTail {
+export class StderrTail {
 	#chunks: Uint8Array[] = [];
 	#bytes = 0;
 	constructor(readonly limit: number) {}
@@ -429,8 +431,8 @@ class StderrTail {
 		}
 	}
 
-	/** Human-readable trailer for an exit error, or `""` when nothing was captured. */
-	suffix(): string {
+	/** The captured tail, decoded. */
+	text(): string {
 		if (this.#bytes === 0) return "";
 		const merged = new Uint8Array(this.#bytes);
 		let offset = 0;
@@ -438,9 +440,13 @@ class StderrTail {
 			merged.set(chunk, offset);
 			offset += chunk.length;
 		}
-		const text = new TextDecoder().decode(merged).replace(/\s+$/u, "");
-		if (text.length === 0) return "";
-		return `: ${text}`;
+		return new TextDecoder().decode(merged);
+	}
+
+	/** Human-readable trailer for an exit error, or `""` when nothing was captured. */
+	suffix(): string {
+		const text = this.text().replace(/\s+$/u, "");
+		return text.length === 0 ? "" : `: ${text}`;
 	}
 }
 

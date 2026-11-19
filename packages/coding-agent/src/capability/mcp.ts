@@ -6,6 +6,7 @@
  */
 
 import type { MCPRequestIdFormat } from "../mcp/types";
+import type { SandboxNetworkMode } from "../sandbox/types";
 import { defineCapability } from ".";
 import type { SourceMeta } from "./types";
 
@@ -38,6 +39,10 @@ export interface MCPServer {
 	envLiteralKeys?: string[];
 	/** Working directory for stdio transport */
 	cwd?: string;
+	/** Run the stdio server inside the OS sandbox while it is enabled */
+	sandbox?: boolean;
+	/** Network for the contained stdio server (default: `"allow"`) */
+	sandboxNetwork?: SandboxNetworkMode;
 	/** URL (for HTTP/SSE transport) */
 	url?: string;
 	/** HTTP headers (for HTTP transport) */
@@ -98,7 +103,10 @@ export function isSameMCPConnection(left: MCPServer, right: MCPServer): boolean 
 			Bun.deepEquals(left.args, right.args) &&
 			Bun.deepEquals(left.env, right.env) &&
 			Bun.deepEquals(literalKeysOf(left), literalKeysOf(right)) &&
-			left.cwd === right.cwd
+			left.cwd === right.cwd &&
+			(left.sandbox ?? false) === (right.sandbox ?? false) &&
+			// The network only takes effect for a contained server.
+			(left.sandbox !== true || (left.sandboxNetwork ?? "allow") === (right.sandboxNetwork ?? "allow"))
 		);
 	}
 

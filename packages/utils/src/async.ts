@@ -99,6 +99,20 @@ export function withTimeout<T>(
 }
 
 /**
+ * Wait for `promise` to settle, at most `ms`. Never rejects: a rejection, like the timeout,
+ * just ends the wait (unlike {@link withTimeout}).
+ */
+export async function settleWithin(promise: Promise<unknown>, ms: number): Promise<void> {
+	const bound = Promise.withResolvers<void>();
+	const timer = setTimeout(bound.resolve, ms);
+	try {
+		await Promise.race([promise.then(undefined, () => undefined), bound.promise]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/**
  * Coalesces rapid-fire writes into one deferred batch. `push` queues a value
  * and returns a promise for the batch flush; the first push of a batch arms a
  * timer (`delayMs`, or a microtask at 0), and every push before it fires joins

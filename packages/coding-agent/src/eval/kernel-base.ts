@@ -1,10 +1,39 @@
 import type { EvalStatusEvent, EvalView } from "@oh-my-pi/pi-tui/tools/eval";
 import { isRecord, logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
-import type { Subprocess } from "bun";
+import { Settings } from "../config/settings";
+import { readSandboxConfig } from "../sandbox/policy";
+import { SandboxRuntime } from "../sandbox/runtime";
+import type { PipedChild } from "../subprocess/piped-child";
 import type { ShadowBarrier, ShadowControlNode, ShadowOperation } from "./speculation/types";
 import { type EvalDisplayOutput, evalImageMetadata } from "./types";
 
+/** The runner process the kernel drives: Bun's piped `Subprocess`, or a sandboxed child adapted to it. */
+export type KernelProcess = PipedChild;
+
 const STARTUP_CONTROL_TIMEOUT_MS = 5_000;
+
+/**
+ * Fingerprint of the sandbox policy an `eval` kernel for `cwd` starts under now; `undefined` when
+ * it would run uncontained. Throws when the sandbox is required but unavailable (`fallback: block`).
+ * When the effective configuration already rules containment out (sandbox off, or `eval` outside
+ * its scope) this answers without awaiting, so the uncontained path keeps its exact ordering
+ * between concurrent callers sharing a retained kernel.
+ */
+export function evalSandboxFingerprint(cwd: string): Promise<string | undefined> | undefined {
+	if (evalSandboxRuledOut()) return undefined;
+	return SandboxRuntime.forScope(cwd, "eval").then(runtime => runtime?.fingerprint());
+}
+
+export function evalSandboxRuledOut(): boolean {
+	let settings: Settings;
+	try {
+		settings = Settings.instance;
+	} catch {
+		return false;
+	}
+	const config = readSandboxConfig(settings);
+	return !config.enabled || !config.scope.includes("eval");
+}
 
 async function raceControlTimeout<T>(promise: Promise<T>, timeoutMs: number, reason: string): Promise<T> {
 	const signal = AbortSignal.timeout(timeoutMs);
@@ -73,6 +102,8 @@ export interface KernelStartOptions {
 	interpreter?: string;
 	signal?: AbortSignal;
 	deadlineMs?: number;
+	/** Host directories a sandbox-contained runner may also write (the session's `local://` root). */
+	sandboxExtraWrite?: readonly string[];
 }
 
 /** Per-language configuration handed to {@link BaseKernel} by each subclass. */
@@ -233,8 +264,8 @@ export function isTimeoutReason(reason: unknown): boolean {
  */
 export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = KernelExecuteOptions> {
 	readonly id: string;
-	#proc: Subprocess | null = null;
-	#stdin: Bun.FileSink | null = null;
+	#proc: KernelProcess | null = null;
+	#stdin: KernelProcess["stdin"] | null = null;
 	#alive = true;
 	readonly #died = Promise.withResolvers<void>();
 	#disposed = false;
@@ -257,7 +288,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		this.#options = options;
 	}
 
-	setProcess(proc: Subprocess<"pipe", "pipe", "pipe">) {
+	setProcess(proc: KernelProcess) {
 		this.#proc = proc;
 		this.#stdin = proc.stdin;
 		this.#exitedPromise = proc.exited;
@@ -271,8 +302,8 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 			})
 			.catch(() => {});
 
-		this.#startReader(proc.stdout as ReadableStream<Uint8Array>);
-		this.#startStderrDrain(proc.stderr as ReadableStream<Uint8Array>);
+		this.#startReader(proc.stdout);
+		this.#startStderrDrain(proc.stderr);
 	}
 
 	isAlive(): boolean {

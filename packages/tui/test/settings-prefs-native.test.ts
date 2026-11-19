@@ -9,6 +9,9 @@ import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 const ENTER = "\n";
 const DOWN = "\x1b[B";
 
+const NET_REASON =
+	'Network mode "allow" is unavailable on this host: packages slirp4netns, iproute2 are missing (commands: slirp4netns, ip). Install them to use this mode.';
+
 const ENTRIES: SettingsDisplayEntry[] = [
 	{
 		path: "theme.dark",
@@ -51,6 +54,25 @@ const ENTRIES: SettingsDisplayEntry[] = [
 		enumValues: ["apply_patch", "hashline", "patch", "replace", "sloppy", "none"],
 		defaultValue: "hashline",
 		ui: { tab: "files", group: "Editing", label: "Edit Mode", description: "" },
+	},
+	{
+		// Shaped as the application's `/settings` host shapes it (`createSettingsHost`) where the host cannot
+		// enforce `allow`: the choice is labelled, disabled, and its reason also ends the row's description.
+		path: "sandbox.network.mode",
+		type: "enum",
+		enumValues: ["allowlist", "deny", "allow"],
+		defaultValue: "deny",
+		ui: {
+			tab: "tools",
+			group: "Sandbox",
+			label: "Sandbox Network",
+			description: `Network access of contained commands. ${NET_REASON}`,
+			options: [
+				{ value: "allowlist", label: "Allowlist (unavailable)", description: NET_REASON, disabled: true },
+				{ value: "deny", label: "Deny", description: "No network access." },
+				{ value: "allow", label: "Allow (unavailable)", description: NET_REASON, disabled: true },
+			],
+		},
 	},
 	{
 		path: "providers.order",
@@ -372,5 +394,44 @@ describe("settings as a native prefs page", () => {
 		expect(prefs(selector).props.focus).toBe("display.colorBlind");
 		send(selector, { type: "select", key: "", item: "display.risky" });
 		expect(prefs(selector).props.focus).toBe("display.risky");
+	});
+
+	it("names the missing packages at 80 columns in the plain terminal's network submenu", () => {
+		const { selector } = harness();
+		send(selector, { type: "action", key: "", act: "page", value: "tools", mods: [] });
+		send(selector, { type: "activate", key: "", item: "sandbox.network.mode" });
+		const lines = selector
+			.render(80)
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(lines).toContain("Allow (unavailable)");
+		// The reason wraps over rows at this width, so compare without the line breaks.
+		const flat = lines.replace(/\s+/g, " ");
+		expect(flat).toContain("slirp4netns");
+		expect(flat).toContain("iproute2");
+	});
+
+	it("labels unavailable choices natively and refuses picking one without opening or changing anything", () => {
+		const { selector, values, changes } = harness();
+		send(selector, { type: "action", key: "", act: "page", value: "tools", mods: [] });
+		const control = row(prefs(selector).props, "sandbox.network.mode").control;
+		if (control.k !== "choice") throw new Error(`control is ${control.k}`);
+		expect(control.options.map(option => option.label)).toEqual([
+			"Allowlist (unavailable)",
+			"Deny",
+			"Allow (unavailable)",
+		]);
+
+		send(selector, { type: "change", key: "", item: "sandbox.network.mode", value: "allow" });
+		expect(values.get("sandbox.network.mode")).toBe("deny");
+		expect(changes).toEqual([]);
+		expect(prefs(selector).props.editing).toBeNull();
+
+		// An already open menu closes on the refused pick.
+		send(selector, { type: "activate", key: "", item: "sandbox.network.mode" });
+		expect(prefs(selector).props.editing?.row).toBe("sandbox.network.mode");
+		send(selector, { type: "change", key: "", item: "sandbox.network.mode", value: "allowlist" });
+		expect(values.get("sandbox.network.mode")).toBe("deny");
+		expect(prefs(selector).props.editing).toBeNull();
 	});
 });

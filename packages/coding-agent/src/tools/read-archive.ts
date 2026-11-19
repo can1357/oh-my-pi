@@ -3,6 +3,7 @@ import type { TextContent } from "@oh-my-pi/pi-ai";
 import { type ImageMetadata, parseImageMetadata, TempDir } from "@oh-my-pi/pi-utils";
 import {
 	type ArchiveFormat,
+	ArchiveError,
 	type ArchiveReader,
 	archiveFormatFromPath,
 	formatArchiveEntryLines,
@@ -11,6 +12,12 @@ import {
 	sniffArchiveFormat,
 } from "@oh-my-pi/pi-utils/ar";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
+import {
+	containedFileAccess,
+	openReadableByteSource,
+	outsideContainedFileAccess,
+	peekReadableFile,
+} from "../sandbox/file-access";
 import type { ToolSession } from "../sdk";
 import { convertBufferWithMarkit } from "../utils/markit";
 import { truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -69,7 +76,7 @@ const isUnixArHeader = (bytes: Uint8Array): boolean => sniffArchiveFormat(bytes)
 /** Whether the file's first `length` bytes pass `sniff`; an unreadable file does not. */
 async function hasMagic(absolutePath: string, sniff: (bytes: Uint8Array) => boolean, length: number): Promise<boolean> {
 	try {
-		return sniff(await Bun.file(absolutePath).slice(0, length).bytes());
+		return await peekReadableFile(absolutePath, length, sniff);
 	} catch {
 		return false;
 	}
@@ -168,6 +175,36 @@ async function openArchiveCached(absolutePath: string, format?: ArchiveFormat): 
 	});
 	return reader;
 }
+
+export interface ReadableArchive {
+	archive: ArchiveReader;
+	[Symbol.asyncDispose](): Promise<void>;
+}
+
+/**
+ * Opens an archive to read. In a contained call its bytes are read through the container-verified
+ * handle, bypassing the path-keyed cache (a cached reader reads by path, which the container never
+ * decided); disposing the result closes that handle.
+ */
+export async function openReadableArchive(
+	absolutePath: string,
+	sniffedFormat?: ArchiveFormat,
+): Promise<ReadableArchive> {
+	if (!containedFileAccess()) {
+		return { archive: await openArchiveCached(absolutePath, sniffedFormat), [Symbol.asyncDispose]: async () => {} };
+	}
+	const format = sniffedFormat ?? archiveFormatFromPath(absolutePath);
+	if (!format) throw new ArchiveError(`Unsupported archive format: ${absolutePath}`);
+	const { source, close } = await openReadableByteSource(absolutePath);
+	try {
+		// An ASAR reads its `.unpacked` payloads by path next to the archive: contained, they are refused.
+		const archive = await openArchive({ source, format, path: format === "asar" ? undefined : absolutePath });
+		return { archive, [Symbol.asyncDispose]: close };
+	} catch (error) {
+		await close();
+		throw error;
+	}
+}
 export async function resolveArchiveReadPath(
 	session: ToolSession,
 	readPath: string,
@@ -264,7 +301,8 @@ export async function readArchive(
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<ReadToolDetails>> {
 	throwIfAborted(signal);
-	const archive = await openArchiveCached(resolvedArchivePath.absolutePath, resolvedArchivePath.format);
+	await using opened = await openReadableArchive(resolvedArchivePath.absolutePath, resolvedArchivePath.format);
+	const { archive } = opened;
 	throwIfAborted(signal);
 
 	const details: ReadToolDetails = markMarkdownContentType(
@@ -336,14 +374,17 @@ export async function readArchive(
 			const pdfPath = scratch.join("member.pdf");
 			await Bun.write(pdfPath, entry.bytes);
 			throwIfAborted(signal);
-			const result = await readPdfPage({
-				readPath,
-				absolutePdfPath: pdfPath,
-				page: pdfImageRead.page,
-				pdfFileSize: entry.size,
-				suffixResolution: resolvedArchivePath.suffixResolution,
-				signal,
-			});
+			// The scratch copy is omp's own, made from the verified member bytes: render it outside the contained call.
+			const result = await outsideContainedFileAccess(() =>
+				readPdfPage({
+					readPath,
+					absolutePdfPath: pdfPath,
+					page: pdfImageRead.page,
+					pdfFileSize: entry.size,
+					suffixResolution: resolvedArchivePath.suffixResolution,
+					signal,
+				}),
+			);
 			return toolResult<ReadToolDetails>({ ...result.details, ...pdfDetails })
 				.content(result.content)
 				.sourcePath(memberPath)

@@ -35,7 +35,7 @@ import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash
 import { shellMounts, shellProcessCommand } from "../exec/shell-process";
 import { createToolCommandHandler, toolCommandNames } from "../exec/tool-command-host";
 import { InternalUrlRouter } from "../internal-urls";
-import { sessionResolveContext } from "../internal-urls/context";
+import { sessionResolveContext, sessionSandboxWritableRoots } from "../internal-urls/context";
 import {
 	InternalUrlFilesystem,
 	type InternalUrlFilesystemOptions,
@@ -44,6 +44,9 @@ import {
 } from "../internal-urls/url-filesystem";
 import { PipeTextSources, TextTap } from "../job-widgets";
 import bashDescription from "../prompts/tools/bash.md" with { type: "text" };
+import sandboxDenialNotice from "../prompts/tools/sandbox-denial.md" with { type: "text" };
+import { SandboxRuntime } from "../sandbox/runtime";
+import type { SandboxResultMeta } from "../sandbox/types";
 import type {
 	ClientBridgeTerminalExitStatus,
 	ClientBridgeTerminalHandle,
@@ -1116,14 +1119,16 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	 * (a service, a pty command) to start from: `env` holds what it exports (PATH included), as a
 	 * child of that shell would see in the host directory `cwd` (its direnv environment
 	 * included), and `script` defines its functions and aliases. Shell bookkeeping variables
-	 * stay with the process's own shell.
+	 * stay with the process's own shell. With `sandbox`, the copy is of the session's contained
+	 * shell and is written to the sandbox's private temp dir, the only temp root it can write.
 	 */
 	async #sessionSeed(
 		sessionId: string | undefined,
 		cwd: string,
 		signal: AbortSignal | undefined,
+		sandbox?: { runtime: SandboxRuntime; extraWrite?: readonly string[] },
 	): Promise<{ env: Record<string, string>; script: string }> {
-		const dumpPath = path.join(os.tmpdir(), `omp-shell-env-${crypto.randomUUID()}`);
+		const dumpPath = path.join(sandbox?.runtime.tempDir() ?? os.tmpdir(), `omp-shell-env-${crypto.randomUUID()}`);
 		const scriptPath = `${dumpPath}.sh`;
 		const quote = (file: string): string => `'${file.replaceAll("'", `'\\''`)}'`;
 		try {
@@ -1134,6 +1139,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				// The same shell options as the session's calls, so the copy is of that session's shell.
 				sessionKey: `${sessionKey}:async:service-env:${crypto.randomUUID()}`,
 				seedSessionKey: sessionKey,
+				sandboxWorkspace: sandbox ? this.session.cwd : undefined,
+				sandboxExtraWrite: sandbox?.extraWrite,
 				minimize: !nativeShapingOff(this.session),
 				gitGuard: cfgBashGitGuard.get(this.session.settings),
 				ovnfs: ovnfsCommand(this.session.settings),
@@ -1141,7 +1148,23 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				signal,
 			});
 			if (result.exitCode !== 0) throw new Error(result.output || `env exited ${result.exitCode}`);
-			const [dumped, script] = await Promise.all([Bun.file(dumpPath).text(), Bun.file(scriptPath).text()]);
+			// A contained command wrote these where every contained process may write: read neither a link
+			// planted there (to a host file it cannot read) nor anything but a regular file.
+			const readWritten = async (file: string): Promise<string> => {
+				const listed = await fs.promises.lstat(file);
+				const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
+				const handle = await fs.promises.open(file, flags);
+				try {
+					const opened = await handle.stat();
+					if (!listed.isFile() || !opened.isFile() || opened.dev !== listed.dev || opened.ino !== listed.ino) {
+						throw new Error(`${file} is not the regular file the shell wrote`);
+					}
+					return await handle.readFile("utf8");
+				} finally {
+					await handle.close();
+				}
+			};
+			const [dumped, script] = await Promise.all([readWritten(dumpPath), readWritten(scriptPath)]);
 			const env: Record<string, string> = {};
 			for (const entry of dumped.split("\0")) {
 				const eq = entry.indexOf("=");
@@ -1164,7 +1187,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	/**
 	 * Run `command` as a shell process on a pseudo-terminal the user drives: the session's shell
 	 * (its exports, functions and aliases, and the host files `mounts` puts behind its URL paths)
-	 * leading a terminal of its own, so its programs own that terminal.
+	 * leading a terminal of its own, so its programs own that terminal. With `sandbox`, the
+	 * process runs in the OS sandbox and its seed script sits in the sandbox's private temp dir.
 	 */
 	async #runOnTerminal(
 		ui: Pick<NonNullable<AgentToolContext["ui"]>, "custom">,
@@ -1180,11 +1204,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			signal: AbortSignal | undefined;
 			/** `urlmap` commands for the session's URL paths ({@link shellMounts}). */
 			mounts: string;
+			/** The OS sandbox `bash` runs in here, and the host directories it may also write. */
+			sandbox: { runtime: SandboxRuntime; extraWrite?: readonly string[] } | undefined;
 		},
 	): Promise<BashInteractiveResult> {
-		const seed = await this.#sessionSeed(run.sessionId, run.hostCwd, run.signal);
+		const seed = await this.#sessionSeed(run.sessionId, run.hostCwd, run.signal, run.sandbox);
 		const script = run.mounts + seed.script;
-		const source = script ? path.join(os.tmpdir(), `omp-shell-seed-${crypto.randomUUID()}.sh`) : undefined;
+		const scratch = run.sandbox?.runtime.tempDir() ?? os.tmpdir();
+		const source = script ? path.join(scratch, `omp-shell-seed-${crypto.randomUUID()}.sh`) : undefined;
 		// Set from the pty's start callback; a holder keeps the type from narrowing to `undefined`.
 		const board: { entry?: BoardEntry } = {};
 		try {
@@ -1206,6 +1233,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						pid,
 					});
 				},
+				sandboxWorkspace: run.sandbox ? this.session.cwd : undefined,
+				sandboxExtraWrite: run.sandbox?.extraWrite,
 			});
 		} finally {
 			// Resolves only after the pty program exited.
@@ -1301,6 +1330,22 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const fork = "fork" in result ? result.fork : undefined;
 		if (fork && !fork.carried) notices.push(FORK_STATE_LOST_NOTICE);
 		if (fork?.jobs) notices.push(FORK_JOBS_NOTICE);
+		// A likely sandbox denial: tell the model it is policy, not something to retry around. Refused
+		// hosts are attributed by time process-wide, so they are named only for a failed command.
+		const sandbox = result.sandbox;
+		const blockedHosts = failedExit ? sandbox?.blockedHosts : undefined;
+		if (sandbox?.denied || sandbox?.startFailed || blockedHosts?.length) {
+			notices.push(
+				prompt
+					.render(sandboxDenialNotice, {
+						denied: sandbox?.denied,
+						startFailed: sandbox?.startFailed,
+						blockedHosts,
+						requestTool: this.session.isToolActive?.("sandbox_request") === true,
+					})
+					.trim(),
+			);
+		}
 		if (notices.length > 0) outputLines.push("", ...notices);
 		// Shaped output already leads with its exit status.
 		if (failedExit && !shaped?.text?.startsWith("[exit code ")) outputLines.push("", formatExitCodeNotice(exitCode));
@@ -1334,6 +1379,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// Native history is bounded; retain it whole so persisted calls remain replayable.
 		const trace = "trace" in result ? result.trace : undefined;
 		if (trace) details.trace = trace;
+		if (sandbox) details.sandbox = sandbox;
 
 		// Final-defense inline cap config, shared by the timeout and normal
 		// completion paths. The sink already bounds inline bodies to the spill
@@ -1443,12 +1489,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			replies?: readonly string[];
 			trace?: ShellTrace;
 			toolCommands?: readonly ToolCommandDispatch[];
+			/** The sandbox the job runs in; absent when it runs uncontained. */
+			sandbox?: SandboxResultMeta;
 		} = {},
 	): AgentToolResult<BashToolDetails> {
 		const details: BashToolDetails = {
 			async: { state: "running", jobId, type: "bash" },
 		};
 		if (options.trace) details.trace = options.trace;
+		if (options.sandbox) details.sandbox = options.sandbox;
 		if (options.replies?.length) details.replies = [...options.replies];
 		if (options.toolCommands?.length) details.toolCommands = [...options.toolCommands];
 		if (timeoutSec === undefined) {
@@ -1507,6 +1556,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		context?: AgentToolContext;
 		/** A tool command is about to ask the user for approval while the call still waits on the run. */
 		onApprovalPrompt?: () => void;
+		/** Host directories a contained run may also write. */
+		sandboxExtraWrite?: readonly string[];
+		/** The sandbox the run is contained by (no per-call notes); every live frame carries it. */
+		sandbox?: SandboxResultMeta;
 	}): ManagedBashJobHandle {
 		const manager = this.session.asyncJobManager;
 		if (!manager) {
@@ -1535,11 +1588,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		let liveTrace: ShellTrace | undefined;
 		// While the call waits on the run, every frame of its card carries the replies so far and the
 		// transcript draws the new ones. A backgrounded job's frames carry none: the call's result already did.
-		// Every frame of a live run carries its latest trace and its tool command dispatches so far.
+		// Every frame of a live run carries its latest trace, its tool command dispatches so far,
+		// and the sandbox it runs in until the result names it.
 		const withReplies = (details: BashProgressDetails): BashProgressDetails => {
-			const withTrace = liveTrace && details.trace === undefined ? { ...details, trace: liveTrace } : details;
-			const withCommands = { ...withTrace, ...toolCommandRecorder.details() };
-			return !backgrounded && replies.length > 0 ? { ...withCommands, replies: [...replies] } : withCommands;
+			let framed = liveTrace && details.trace === undefined ? { ...details, trace: liveTrace } : details;
+			framed = { ...framed, ...toolCommandRecorder.details() };
+			if (options.sandbox && framed.sandbox === undefined) framed = { ...framed, sandbox: options.sandbox };
+			return !backgrounded && replies.length > 0 ? { ...framed, replies: [...replies] } : framed;
 		};
 		// Replies reach the user only while the call waits on the run: once it returns, nothing draws them.
 		const onReply = (text: string): void => {
@@ -1604,6 +1659,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					const result = await executeBash(options.command, {
 						cwd: options.commandCwd,
 						env: options.sessionEnv,
+						sandboxWorkspace: this.session.cwd,
+						sandboxExtraWrite: options.sandboxExtraWrite,
 						minimize: !nativeShapingOff(this.session),
 						// A call that starts in the foreground runs in the session's
 						// persistent shell, like the direct path, so its variables,
@@ -1961,7 +2018,21 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			}
 		}
 
+		// The OS sandbox agent commands run in here (undefined when uncontained); throws when it is required but unavailable.
+		const bashSandbox = await SandboxRuntime.forScope(this.session.cwd, "bash");
+		const sandboxed = bashSandbox !== undefined;
+		// What the card shows while a contained run is live; the result replaces it with the per-call notes.
+		const liveSandbox = bashSandbox?.resultMeta();
+		// The session's `local://` root (and any other sandbox-scope URL root) stays writable when contained.
+		const sandboxExtraWrite = sandboxed ? sessionSandboxWritableRoots(this.session) : undefined;
+
 		if (name !== undefined) {
+			// Services run under the daemon, outside any sandbox host.
+			if (sandboxed) {
+				throw new ToolError(
+					"Services cannot run inside the OS sandbox. Run the command without `name` (`async: true` for long-running work), or ask the user to start it.",
+				);
+			}
 			// The service is the session's shell as a process of its own: it starts from this
 			// shell's exports, functions and aliases, with the host files behind its URL paths.
 			const seed = await this.#sessionSeed(sessionId, hostCwd, signal);
@@ -2057,25 +2128,34 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				notify,
 				toolCommands: toolCommandNameList,
 				context: ctx,
+				sandboxExtraWrite,
+				sandbox: liveSandbox,
 			});
 			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 				requestedTimeoutSec,
 				notices: notifyNotice ? [...pendingNotices, notifyNotice] : pendingNotices,
 				trace: job.getLatestTrace(),
+				sandbox: liveSandbox,
 			});
 		}
+
+		// A contained run is marked on its card from the start, before it streams any output.
+		if (liveSandbox) onUpdate?.({ content: [], details: { sandbox: liveSandbox } });
 
 		// The client-bridge terminal provides a live terminal card in the editor;
 		// when available it wins over auto-backgrounding (both are opt-in, and
 		// auto-background would otherwise silently disable the terminal route).
 		// A line naming a tool command stays on the embedded shell, the only one that has them.
+		// The client runs that terminal outside the OS sandbox, so a sandboxed
+		// command never takes it.
 		const clientBridge = this.session.getClientBridge?.();
 		const bridgeTerminalAvailable = Boolean(
 			clientBridge?.capabilities.terminal &&
 			clientBridge.createTerminal &&
 			!pty &&
 			virtualCwd === undefined &&
-			invokedCommand === undefined,
+			invokedCommand === undefined &&
+			!sandboxed,
 		);
 
 		const autoBgManager = this.session.asyncJobManager;
@@ -2112,6 +2192,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				toolCommands: toolCommandNameList,
 				context: ctx,
 				onApprovalPrompt: () => approvalPrompt.resolve({ kind: "approval" }),
+				sandboxExtraWrite,
+				sandbox: liveSandbox,
 			});
 			if (startBackgrounded) {
 				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
@@ -2119,6 +2201,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					notices: pendingNotices,
 					trace: job.getLatestTrace(),
 					toolCommands: job.toolCommands(),
+					sandbox: liveSandbox,
 				});
 			}
 			// The job was registered as foreground-backed: hidden from listings and
@@ -2164,6 +2247,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				replies: job.replies,
 				trace: job.getLatestTrace(),
 				toolCommands: job.toolCommands(),
+				sandbox: liveSandbox,
 			});
 		}
 
@@ -2191,14 +2275,16 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						signal,
 						timeoutMs: cfgBashDirenvLoadTimeoutMs.get(this.session.settings),
 						callerTimeoutMs: timeoutMs,
-						direnvSetting: cfgBashDirenv.get(this.session.settings),
+						// Contained commands skip the host-side direnv load (see `executeBash`).
+						direnvSetting: sandboxed ? "off" : cfgBashDirenv.get(this.session.settings),
 					},
 				)
 			: undefined;
 
 		// Route through the client terminal when the client advertises the terminal capability.
 		// Skip when pty=true (PTY needs the local terminal UI), the cwd is a URL
-		// (only the embedded shell's filesystem can enter it), or the line names a tool command.
+		// (only the embedded shell's filesystem can enter it), the line names a tool command,
+		// or the command is sandboxed (see `bridgeTerminalAvailable`).
 		if (bridgeTerminalAvailable && clientBridge?.createTerminal) {
 			// Invariant (ACP terminal bridge): createTerminal has no signal in its
 			// contract; allocation cannot be cancelled retroactively. Guard before
@@ -2499,6 +2585,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							...(replies.length > 0 ? { replies: [...replies] } : {}),
 							...(trace ? { trace } : {}),
 							...toolCommandRecorder.details(),
+							...(liveSandbox ? { sandbox: liveSandbox } : {}),
 						},
 					})
 			: undefined;
@@ -2512,6 +2599,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					timeoutMs,
 					signal,
 					mounts: await shellMounts(sessionResolveContext(this.session, { signal }), approvalTier),
+					sandbox: bashSandbox ? { runtime: bashSandbox, extraWrite: sandboxExtraWrite } : undefined,
 				})
 			: // executeBash runs its OWN direnv preflight internally — pass the RAW
 				// command here so the unset prefix is not applied twice.
@@ -2519,6 +2607,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					cwd: commandCwd,
 					env: sessionEnv,
 					sessionKey: sessionId,
+					sandboxWorkspace: this.session.cwd,
+					sandboxExtraWrite,
 					minimize: !nativeShapingOff(this.session),
 					isSessionCurrent: () => (this.session.getSessionId?.() ?? undefined) === sessionId,
 					timeout: timeoutMs ?? 0,

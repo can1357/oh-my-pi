@@ -4,7 +4,9 @@
  */
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
+import { runLinterCli } from "../../exec/exec";
 import type { Diagnostic, DiagnosticSeverity, LinterClient, ServerConfig } from "../../lsp/types";
+import { mutateFile, readFileText, withContainedFileAccess } from "../../sandbox/file-access";
 
 // =============================================================================
 // Biome JSON Output Types
@@ -55,7 +57,8 @@ function parseSeverity(severity: string): DiagnosticSeverity {
 }
 
 /**
- * Run a Biome CLI command.
+ * Run a Biome CLI command. Under an applying sandbox (`lsp` scope) Biome runs contained like the
+ * language servers; `fallback: block` without a backend rejects instead of running it.
  */
 async function runBiome(
 	args: string[],
@@ -63,26 +66,7 @@ async function runBiome(
 	resolvedCommand?: string,
 	signal?: AbortSignal,
 ): Promise<{ stdout: string; stderr: string; success: boolean }> {
-	const command = resolvedCommand ?? "biome";
-
-	try {
-		const proc = Bun.spawn([command, ...args], {
-			cwd,
-			stdout: "pipe",
-			stderr: "pipe",
-			windowsHide: true,
-			signal,
-		});
-
-		const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-		const exitCode = await proc.exited;
-		signal?.throwIfAborted();
-
-		return { stdout, stderr, success: exitCode === 0 };
-	} catch (err) {
-		if (signal?.aborted) throw err;
-		return { stdout: "", stderr: String(err), success: false };
-	}
+	return await runLinterCli(resolvedCommand ?? "biome", args, cwd, "Biome command", ({ code }) => code === 0, signal);
 }
 
 // Surface broken-binary / CLI failures once instead of silently reporting
@@ -116,17 +100,22 @@ export class BiomeClient implements LinterClient {
 
 	async format(filePath: string, content: string): Promise<string> {
 		// Keep the standalone LinterClient contract: callers supply the content to
-		// format, regardless of what is currently on disk.
-		await Bun.write(filePath, content);
+		// format, regardless of what is currently on disk. The write and the read-back
+		// run in contained file access (the calling tool's, else this workspace's): the
+		// contained Biome rewrote the file, and could have swapped it for a symlink.
+		const run = async () => {
+			await mutateFile({ kind: "write", path: filePath, data: content });
 
-		const result = await runBiome(["format", "--write", filePath], this.cwd, this.config.resolvedCommand);
+			const result = await runBiome(["format", "--write", filePath], this.cwd, this.config.resolvedCommand);
 
-		if (result.success) {
-			return await Bun.file(filePath).text();
-		}
+			if (result.success) {
+				return await readFileText(filePath);
+			}
 
-		// Format failed, return original
-		return content;
+			// Format failed, return original
+			return content;
+		};
+		return withContainedFileAccess({ cwd: this.cwd }, run);
 	}
 
 	async lint(filePath: string, signal?: AbortSignal): Promise<Diagnostic[]> {

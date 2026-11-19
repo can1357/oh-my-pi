@@ -1089,6 +1089,12 @@ export class SettingsSelectorComponent implements Component {
 							? value
 							: undefined;
 				if (choice === undefined) return;
+				// A disabled choice (labelled unavailable; its description says why) is refused like the keys refuse it: the
+				// value stays and the row's menu closes instead of opening onto a no-op.
+				if (this.#submenuOptions(def).find(o => o.value === choice)?.disabled) {
+					if (list.openSubmenu?.id === id) list.handleInput(ESCAPE);
+					return;
+				}
 				const field = list.openSubmenuFor(id);
 				if (field instanceof SelectFormField) {
 					field.selectList.handleNativeEvent({ type: "activate", key: "", item: choice });

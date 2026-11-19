@@ -23,6 +23,35 @@ export function localUnsubscribe(unsubscribe: WireUnsubscribe): () => void {
 	return () => ignoreSettle(unsubscribe());
 }
 
+/** A main-thread snapshot tagged with a sequence number; receivers drop ones not newer than the last. */
+export interface Sequenced<T> {
+	readonly seq: number;
+	readonly value: T;
+}
+
+/** `apply` for snapshots newer than every one seen so far; an older or repeated one is dropped. */
+export function applyNewer<T>(apply: (value: T) => void): (snapshot: Sequenced<T>) => void {
+	let last = -1;
+	return snapshot => {
+		if (snapshot.seq <= last) return;
+		last = snapshot.seq;
+		apply(snapshot.value);
+	};
+}
+
+/** `push` once per microtask, however many times the returned trigger runs in between. */
+export function coalesce(push: () => void): () => void {
+	let queued = false;
+	return () => {
+		if (queued) return;
+		queued = true;
+		queueMicrotask(() => {
+			queued = false;
+			push();
+		});
+	};
+}
+
 /**
  * `off` as a run-once function that forgets `off` after it ran. A worker that subscribed
  * keeps its proxy of the returned function for as long as its own listener's scope

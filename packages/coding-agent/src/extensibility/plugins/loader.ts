@@ -17,6 +17,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { getConfigDirPaths } from "../../config";
 import { registerPluginCacheInvalidator, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
+import { currentSandboxCreated, sandboxCreatedSkip } from "../../sandbox/ledger";
 import { findExtensionDirectoryIndex, resolveExtensionDirectory } from "../extensions/directory-resolution";
 import { installLegacyPiSpecifierShim } from "./legacy-pi-compat";
 import { normalizePluginRuntimeConfig } from "./runtime-config";
@@ -67,7 +68,10 @@ async function loadRuntimeConfig(home?: string): Promise<PluginRuntimeConfig> {
  * Load project-local plugin overrides (checks .omp and .pi directories).
  */
 async function loadProjectOverrides(cwd: string): Promise<ProjectPluginOverrides> {
+	// An overrides file a sandboxed command created or replaced is ignored until trusted (logged by the skip).
+	const ledger = currentSandboxCreated();
 	for (const overridesPath of getConfigDirPaths("plugin-overrides.json", { user: false, cwd })) {
+		if (sandboxCreatedSkip(overridesPath, cwd, ledger)) continue;
 		try {
 			return await Bun.file(overridesPath).json();
 		} catch (err) {

@@ -5,6 +5,7 @@
 ### Added
 
 - Added `AGENT_KILL_LABEL`, `InterruptReason` and `isInterruptReason` so hosts can tell a parent agent's kill apart from a user interrupt ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
+- Added the `/sandbox` panel (ANSI fullscreen and native Tern sheet: overview, filesystem, network and effective-policy pages, network modes the host cannot enforce shown disabled with the reason), the sandbox access dialog, the `sandbox_request` tool card, and a `sandboxed` badge with blocked-host and likely-denial notes on bash and eval cards ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ### Fixed
 

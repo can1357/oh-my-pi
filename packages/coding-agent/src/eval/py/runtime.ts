@@ -7,7 +7,11 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $env, $whichAll, getPythonEnvDir } from "@oh-my-pi/pi-utils";
+import { $ } from "bun";
+import { $env, $whichAll, directoryExists, getPythonEnvDir } from "@oh-my-pi/pi-utils";
+import { containedEnv } from "../../sandbox/env";
+import type { SandboxRuntime } from "../../sandbox/runtime";
+import { awaitBoundedProbe, type BoundedProbeResult, type BoundedProbeRunner, probeBound } from "../probe";
 
 const DEFAULT_ENV_ALLOWLIST = new Set([
 	"PATH",
@@ -280,4 +284,164 @@ export function resolvePythonRuntime(cwd: string, baseEnv: Record<string, string
 		throw new Error("Python executable not found on PATH");
 	}
 	return runtime;
+}
+
+/**
+ * Directories a contained Python process must read beyond the configured read roots: the staged runner
+ * script (when there is one), the virtual environment, and the real interpreter's installation root
+ * when recognisable, else its directory (never the symlink's own parent, which can be `~/.local` or
+ * `/opt/homebrew`).
+ */
+export async function pythonReadRoots(runtime: PythonRuntime, scriptPath?: string): Promise<string[]> {
+	const roots = scriptPath ? [path.dirname(scriptPath)] : [];
+	if (runtime.venvPath) roots.push(runtime.venvPath);
+	try {
+		roots.push(await interpreterReadRoot(await fs.promises.realpath(runtime.pythonPath)));
+	} catch {
+		// Unresolvable interpreter: the spawn reports it.
+	}
+	return roots;
+}
+
+/**
+ * The installation root of the resolved interpreter `executable` when it is recognisably one, else the
+ * executable's own directory, so a `~/bin/python3` never exposes all of home. Candidates, first match wins:
+ * - a version manager's shim directory (`shims/`) whose parent holds `versions/` (pyenv) or `installs/`
+ *   (asdf): that parent;
+ * - POSIX: the parent of the interpreter's directory, holding `pyvenv.cfg` or `lib/python3*`;
+ * - Windows: the interpreter's directory, then the parent of a `Scripts` one, holding `Lib` or `python*.dll`.
+ * A candidate that is the home directory or an ancestor of it is never the root.
+ */
+async function interpreterReadRoot(executable: string): Promise<string> {
+	const exeDir = path.dirname(executable);
+	const parent = path.dirname(exeDir);
+	const candidates: Array<{ dir: string; marked: () => Promise<boolean> }> = [];
+	if (path.basename(exeDir).toLowerCase() === "shims") {
+		candidates.push({
+			dir: parent,
+			marked: async () =>
+				(await directoryExists(path.join(parent, "versions"))) || directoryExists(path.join(parent, "installs")),
+		});
+	}
+	if (process.platform === "win32") {
+		candidates.push({ dir: exeDir, marked: () => isWindowsInstallRoot(exeDir) });
+		if (path.basename(exeDir).toLowerCase() === "scripts") {
+			candidates.push({ dir: parent, marked: () => isWindowsInstallRoot(parent) });
+		}
+	} else {
+		candidates.push({ dir: parent, marked: () => isPosixInstallRoot(parent) });
+	}
+	for (const { dir, marked } of candidates) {
+		if ((await marked()) && !(await containsHome(dir))) return dir;
+	}
+	return exeDir;
+}
+
+/** `dir` holds `pyvenv.cfg` or a `lib/python3*` directory (symlinks followed). */
+async function isPosixInstallRoot(dir: string): Promise<boolean> {
+	if ((await statOrUndefined(path.join(dir, "pyvenv.cfg")))?.isFile()) return true;
+	const lib = path.join(dir, "lib");
+	if (!(await directoryExists(lib))) return false;
+	for (const name of await fs.promises.readdir(lib).catch(() => [])) {
+		if (name.startsWith("python3") && (await directoryExists(path.join(lib, name)))) return true;
+	}
+	return false;
+}
+
+/** `dir` holds a `Lib` directory or a `python*.dll` (symlinks followed). */
+async function isWindowsInstallRoot(dir: string): Promise<boolean> {
+	if (await directoryExists(path.join(dir, "Lib"))) return true;
+	for (const name of await fs.promises.readdir(dir).catch(() => [])) {
+		if (/^python.*\.dll$/i.test(name) && (await statOrUndefined(path.join(dir, name)))?.isFile()) return true;
+	}
+	return false;
+}
+
+/** `stat` (symlinks followed), `undefined` when the target is missing or unreadable. */
+async function statOrUndefined(target: string): Promise<fs.Stats | undefined> {
+	return await fs.promises.stat(target).catch(() => undefined);
+}
+
+/** Whether `dir` is the home directory or one of its ancestors (lexically or after resolving symlinks). */
+async function containsHome(dir: string): Promise<boolean> {
+	const home = os.homedir();
+	const homes = [path.resolve(home)];
+	try {
+		homes.push(await fs.promises.realpath(home));
+	} catch {
+		// Home missing: the lexical path is all there is to compare.
+	}
+	return homes.some(candidate => {
+		const relative = path.relative(dir, candidate);
+		return relative === "" || (relative.split(path.sep)[0] !== ".." && !path.isAbsolute(relative));
+	});
+}
+
+/**
+ * Run an interpreter probe inside `sandbox` with no network and `runtime`'s roots readable, so a
+ * workspace-controlled interpreter never runs on the host. Same bound/abort/result semantics as
+ * `runBoundedProbe`.
+ */
+async function runContainedProbe(
+	sandbox: SandboxRuntime,
+	command: string[],
+	options: {
+		cwd: string;
+		env: Record<string, string | undefined>;
+		runtime?: PythonRuntime;
+		signal?: AbortSignal;
+		timeoutMs?: number;
+	},
+): Promise<BoundedProbeResult> {
+	const { cwd, env, runtime, signal, timeoutMs } = options;
+	if (signal?.aborted) return { exitCode: null, timedOut: false, aborted: true };
+	const child = await sandbox.spawn({
+		argv: command,
+		cwd,
+		env: containedEnv(env),
+		extraRead: runtime ? await pythonReadRoots(runtime) : undefined,
+		network: "deny",
+	});
+	child.stdin.end();
+	void new Response(child.stdout).arrayBuffer().catch(() => undefined);
+	void new Response(child.stderr).arrayBuffer().catch(() => undefined);
+	return awaitBoundedProbe(child.exited, () => child.kill(), probeBound(timeoutMs), signal);
+}
+
+/**
+ * A probe runner that executes each candidate inside `sandbox` (see {@link runContainedProbe}),
+ * granting the read roots of the `runtimes` entry whose interpreter is the probed command.
+ */
+export function containedProbeRunner(
+	sandbox: SandboxRuntime,
+	cwd: string,
+	runtimes: readonly PythonRuntime[],
+): BoundedProbeRunner {
+	return (command, { env, signal, timeoutMs }) =>
+		runContainedProbe(sandbox, command, {
+			cwd,
+			env,
+			runtime: runtimes.find(candidate => candidate.pythonPath === command[0]),
+			signal,
+			timeoutMs,
+		});
+}
+
+/**
+ * Run `<interpreter> -c <code>` and report whether it exited 0. Under an active OS sandbox the probe runs
+ * inside it so a workspace-controlled interpreter never executes on the host; otherwise it runs on the host
+ * in `hostCwd` (the process cwd when omitted).
+ */
+export async function probeInterpreter(
+	sandbox: SandboxRuntime | undefined,
+	cwd: string,
+	candidate: PythonRuntime,
+	code: string,
+	env: Record<string, string | undefined>,
+	hostCwd?: string,
+): Promise<boolean> {
+	const argv = [candidate.pythonPath, "-c", code];
+	if (sandbox) return (await containedProbeRunner(sandbox, cwd, [candidate])(argv, { cwd, env })).exitCode === 0;
+	const run = $`${argv}`.env(env).quiet().nothrow();
+	return (await (hostCwd === undefined ? run : run.cwd(hostCwd))).exitCode === 0;
 }

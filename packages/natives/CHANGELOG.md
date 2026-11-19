@@ -2,11 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added OS-level process containment through MXC (seatbelt, bubblewrap, processcontainer): `sandboxSupport()`, `sandboxDiscoverPaths(env)` and `SandboxProcess.spawn()` run an argv under read-write/read-only/denied path lists with an `allow`, `deny` or loopback-`proxy` network posture, with the Windows-only `listVolumeRoots` and `loopback` opt-ins; `SandboxSupport.networkMissing`/`networkReason` name the host commands and reason when network modes other than `deny` are unavailable ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+
 ### Fixed
 
 - Fixed `grep()` with a match limit resolving with a short result when its directory walk panicked; it now rejects with the panic ([#20013](https://github.com/can1357/oh-my-pi/pull/20013) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a use-after-free in `grep()`, `glob()`, `fuzzyFind()`, `astGrep()` and `astEdit()` when a timeout or an abort cancelled them just after they started ([#20014](https://github.com/can1357/oh-my-pi/pull/20014) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the `computer` tool on Linux Wayland leaving GTK 3 message dialogs (OK/Cancel and Yes/No boxes) out of `windows()`, so their buttons could not be found or pressed ([#19884](https://github.com/can1357/oh-my-pi/pull/19884) by [@will-bogusz](https://github.com/will-bogusz))
+- The native addon loader ignores `PI_NATIVES_DIR`, `XDG_DATA_HOME` and `LOCALAPPDATA` values that come from the project's dotenv files, so a repository cannot choose where the addon is extracted or loaded from ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ## [19.1.0] - 2026-11-21
 

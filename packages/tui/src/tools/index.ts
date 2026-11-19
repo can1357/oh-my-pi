@@ -22,6 +22,7 @@ import { readToolRenderer } from "./read";
 import type { ToolRenderer } from "./renderer";
 import { proposeRenderer, rejectRenderer, resolveRenderer } from "./resolve";
 import { reportIssueRenderer } from "./report-tool-issue";
+import { sandboxRequestToolRenderer } from "./sandbox-request";
 import { taskToolRenderer } from "./task";
 import { thinkToolRenderer } from "./think";
 import { todoToolRenderer } from "./todo";
@@ -56,6 +57,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	retain: retainToolRenderer,
 	recall: recallToolRenderer,
 	reflect: reflectToolRenderer,
+	sandbox_request: sandboxRequestToolRenderer,
 	task: taskToolRenderer,
 	think: thinkToolRenderer,
 	todo: todoToolRenderer,

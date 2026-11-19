@@ -54,7 +54,7 @@ describe("read tool ACP fs routing", () => {
 		};
 		const bridgeSpy = spyOn(bridge, "readTextFile");
 
-		// Wrap Bun.file() to detect any .text() calls
+		// Wrap Bun.file() to detect any .text() read of the file itself (settings the sandbox check loads are not it)
 		let textCallCount = 0;
 		const origBunFile = Bun.file.bind(Bun);
 		const bunFileSpy = spyOn(Bun, "file").mockImplementation(
@@ -62,7 +62,7 @@ describe("read tool ACP fs routing", () => {
 				const bunFile = origBunFile(arg as string, opts);
 				const origText = bunFile.text.bind(bunFile);
 				bunFile.text = async () => {
-					textCallCount++;
+					if (arg === filePath) textCallCount++;
 					return origText();
 				};
 				return bunFile;

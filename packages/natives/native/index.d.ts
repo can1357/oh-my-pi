@@ -781,6 +781,27 @@ export declare class RunTrace {
   present(options: ShellVizOptions): string
 }
 
+/** A process tree running inside an MXC container. */
+export declare class SandboxProcess {
+  /**
+   * Spawn `argv` contained by `policy`. Rejects with the MXC code, message
+   * and remediation when the request is refused or the backend cannot
+   * launch. Each callback receives output chunks, then one zero-length
+   * chunk at EOF.
+   */
+  static spawn(options: SandboxSpawnOptions, onStdout: (err: Error | null, chunk: Uint8Array) => void, onStderr: (err: Error | null, chunk: Uint8Array) => void): Promise<SandboxProcess>
+  /** The contained process id. */
+  get pid(): number
+  /** Write bytes to the process's stdin. Writes are delivered in call order. */
+  write(data: Uint8Array): Promise<void>
+  /** Close stdin after pending writes. Idempotent. */
+  closeStdin(): void
+  /** Kill the whole contained process tree. Idempotent. */
+  kill(): void
+  /** Resolves once the process exited. */
+  wait(): Promise<SandboxExit>
+}
+
 /** Persistent embedded bash engine shell session. */
 export declare class Shell {
   /**
@@ -3891,6 +3912,109 @@ export declare function restoreConsoleInputMode(mode: number): boolean
  * their defaults for the run and restored after it.
  */
 export declare function runShellMain(argv: Array<string>): number
+
+/** Directories MXC's policy helpers discover from an environment. */
+export interface SandboxDiscoveredPaths {
+  /**
+   * Tool, SDK and user-profile program directories (PATH and well-known
+   * tool variables).
+   */
+  readonlyPaths: Array<string>
+  /** The temporary directory, plus tool directories that need write access. */
+  readwritePaths: Array<string>
+}
+
+/** PATH/tool/profile/temp directories MXC's policy helpers discover for `env`. */
+export declare function sandboxDiscoverPaths(env: Record<string, string>): SandboxDiscoveredPaths
+
+/** How a contained process ended. */
+export interface SandboxExit {
+  /** Exit code; `-1` when a signal terminated the process on Unix. */
+  exitCode?: number
+}
+
+/** Filesystem and network restrictions for one contained process. */
+export interface SandboxPolicy {
+  /** Read-write grants. */
+  readwritePaths: Array<string>
+  /** Read-only grants. */
+  readonlyPaths: Array<string>
+  /** No read, no write; outranks the other two lists. */
+  deniedPaths: Array<string>
+  /** Network posture. */
+  network: "allow" | "deny" | "proxy"
+  /** Required when network is "proxy": `http://127.0.0.1:<port>`. */
+  proxyUrl?: string
+  /**
+   * Windows: make the volume roots of the granted paths enumerable, which
+   * lets contained processes list and stat the whole volume (Node needs it to
+   * resolve script paths). Ignored where the native tier cannot enforce it.
+   */
+  listVolumeRoots?: boolean
+  /**
+   * Windows, `deny` and `proxy` networks: let contained processes connect to
+   * loopback (`127.0.0.0/8`, `::1`), their own listeners and every host
+   * service on it; all other egress stays denied. Under a proxy the native
+   * proxy form is replaced by that loopback-only form, with `HTTP(S)_PROXY`
+   * pointed at `proxyUrl`. Ignored where the native tier cannot grant host
+   * loopback.
+   */
+  loopback?: boolean
+}
+
+/** Options for [`SandboxProcess::spawn`]. */
+export interface SandboxSpawnOptions {
+  /** Program and arguments; delivered to the child byte-exact. */
+  argv: Array<string>
+  /** Working directory of the contained process. */
+  cwd?: string
+  /**
+   * Complete environment; nothing is inherited. On bubblewrap MXC passes it
+   * on the host-side `bwrap` command line, readable by other local users
+   * through `/proc/<pid>/cmdline` while the process runs.
+   */
+  env: Record<string, string>
+  /** Containment policy. */
+  policy: SandboxPolicy
+}
+
+/**
+ * Report whether OS containment is available. Probed once per process; never
+ * throws.
+ */
+export declare function sandboxSupport(): SandboxSupport
+
+/** Containment availability on this host. */
+export interface SandboxSupport {
+  /** Whether `SandboxProcess.spawn` can contain processes on this host. */
+  supported: boolean
+  /** The backend MXC selects for process containment. */
+  backend?: "seatbelt" | "bubblewrap" | "processcontainer"
+  /** Why containment is unavailable, with remediation when MXC supplies it. */
+  reason?: string
+  /**
+   * Loopback-proxy egress confinement is usable on this host. On bubblewrap
+   * `false` also means `network: "allow"` is refused: unrestricted egress
+   * runs through the same slirp-backed private namespace as the proxy.
+   */
+  proxy: boolean
+  /** Capability diagnostics reported by MXC. */
+  warnings: Array<string>
+  /**
+   * Bubblewrap only: host commands the network modes other than `deny`
+   * need that are not installed (neither on `PATH` nor in the standard
+   * system directories): `unshare`, `slirp4netns`, `nsenter`, `ip` and the
+   * `iptables` family. Empty when the proxy is usable, and also when the
+   * network modes are unavailable for another reason (see `networkReason`).
+   */
+  networkMissing: Array<string>
+  /**
+   * Why network modes other than `deny` are unavailable (`proxy` is
+   * `false`): MXC's bubblewrap network warnings, or the processcontainer
+   * capability that is missing. `undefined` when `proxy` is `true`.
+   */
+  networkReason?: string
+}
 
 /**
  * Search content for a pattern (one-shot, compiles pattern each time).

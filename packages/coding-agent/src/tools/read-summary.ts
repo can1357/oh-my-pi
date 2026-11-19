@@ -7,6 +7,7 @@ import type { ToolSession } from "../sdk";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { ensureGrammar } from "../utils/grammars";
 import { countTextLines } from "./read-format";
+import { readFileText } from "../sandbox/file-access";
 import { formatReadSummary } from "@oh-my-pi/pi-tui/tools/read";
 import { throwIfAborted } from "./tool-errors";
 import { getToolConversationState } from "./tool-state";
@@ -80,7 +81,7 @@ export async function trySummarize(
 	try {
 		throwIfAborted(signal);
 		const bridgePromise = routeReadThroughBridge(session, absolutePath);
-		const readDisk = async () => diskText ?? (await Bun.file(absolutePath).text());
+		const readDisk = async () => diskText ?? (await readFileText(absolutePath));
 		const code = bridgePromise !== undefined ? await bridgePromise.catch(readDisk) : await readDisk();
 		throwIfAborted(signal);
 		const lineCount = countTextLines(code);

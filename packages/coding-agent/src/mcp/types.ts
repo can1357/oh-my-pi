@@ -6,6 +6,7 @@ import type {
 	MCPResourceContent,
 	MCPTextContent,
 } from "@oh-my-pi/pi-tui/tools/mcp";
+import type { SandboxNetworkMode } from "../sandbox/types";
 /**
  * MCP (Model Context Protocol) type definitions.
  *
@@ -125,6 +126,10 @@ export interface MCPStdioServerConfig extends MCPServerConfigBase {
 	/** Env keys whose values are final package data; auth resolution keeps them verbatim. */
 	envLiteralKeys?: string[];
 	cwd?: string;
+	/** Run the server inside the OS sandbox while `sandbox.enabled` is on (default: false); see docs/sandbox.md. OMP-specific. */
+	sandbox?: boolean;
+	/** Network for the contained server (default: `"allow"`). Only meaningful with `sandbox: true`. */
+	sandboxNetwork?: SandboxNetworkMode;
 }
 
 /** HTTP server configuration (Streamable HTTP transport) */

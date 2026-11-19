@@ -1,0 +1,1 @@
+A sandboxed command created or replaced {{path}}, which omp loads or runs outside the sandbox (project config, git metadata). Until you allow it, omp keeps it protected{{#if git}}, skips the project config it holds and refuses to run git on its repository{{else}} and skips the project config it holds{{/if}}.

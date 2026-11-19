@@ -44,6 +44,7 @@ import type { ThreadId } from "../identity";
 import type { WorkerThreadLink } from "../protocol";
 import { RpcClosedError, type RpcMethod, type RpcServe } from "../rpc";
 import type { ThreadService, WorkerPeer } from "../services";
+import { applyNewer, coalesce, type Sequenced } from "./support";
 
 /** Worker-side receiver of main-instance states; returns `false` once its mirror was collected. */
 export type SettingsMirrorListener = (state: SettingsMirrorState) => boolean | Promise<boolean>;
@@ -65,12 +66,6 @@ export type SettingsMirrorProtocol = {
 	refresh: RpcMethod<[refresh: SettingsMirrorRefresh], SettingsMirrorState>;
 	cloneForCwd: RpcMethod<[cwd: string], Settings>;
 };
-
-/** A main-thread snapshot tagged with a sequence number; receivers drop ones not newer than the last. */
-export interface Sequenced<T> {
-	readonly seq: number;
-	readonly value: T;
-}
 
 /** Snapshots returned by {@link SettingsThreadGlobals.watch}. */
 export interface SettingsWatchSnapshot {
@@ -127,19 +122,6 @@ function installProcessHooks(): void {
 		rulesSeq++;
 		for (const watcher of Array.from(rulesWatchers)) watcher();
 	});
-}
-
-/** `push` once per microtask, however many times the returned trigger runs in between. */
-function coalesce(push: () => void): () => void {
-	let queued = false;
-	return () => {
-		if (queued) return;
-		queued = true;
-		queueMicrotask(() => {
-			queued = false;
-			push();
-		});
-	};
 }
 
 /** Settles one push to a worker function: a closed link or a dead receiver ends the subscription. */
@@ -312,18 +294,8 @@ async function bootWorker(globals: unknown): Promise<void> {
 	if (!isSettingsThreadGlobals(globals)) throw new Error("settings thread service: malformed boot globals");
 	if (globals.global) Settings.installGlobalMirror(globals.global);
 	if (globals.effects && globals.effects !== globals.global) bindEffects(globals.effects);
-	let lastSwitches = -1;
-	let lastRules = -1;
-	const onSwitches = (switches: Sequenced<ProviderSwitches>): void => {
-		if (switches.seq <= lastSwitches) return;
-		lastSwitches = switches.seq;
-		installProviderSwitches(switches.value);
-	};
-	const onRules = (rules: Sequenced<readonly Rule[]>): void => {
-		if (rules.seq <= lastRules) return;
-		lastRules = rules.seq;
-		setActiveRules(rules.value);
-	};
+	const onSwitches = applyNewer<ProviderSwitches>(installProviderSwitches);
+	const onRules = applyNewer<readonly Rule[]>(setActiveRules);
 	const current = await globals.watch(onSwitches, onRules);
 	onSwitches(current.switches);
 	onRules(current.rules);
