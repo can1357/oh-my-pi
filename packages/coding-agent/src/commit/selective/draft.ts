@@ -197,6 +197,8 @@ function describeReason(reason: ReviewReason): string {
 	switch (reason.kind) {
 		case "entangled":
 			return `edits lines added by ${reason.with.map(actorName).join(", ")} that were never committed`;
+		case "placement":
+			return `placement depends on an uncommitted replacement by ${reason.with.map(actorName).join(", ")}`;
 		case "rewritten":
 			return reason.by === GAP || reason.by === TAIL
 				? `in-scope lines rewritten afterwards by an unrecorded change${reason.by === GAP ? " before a later edit" : ""}`
