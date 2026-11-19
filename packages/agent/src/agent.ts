@@ -31,6 +31,8 @@ import {
 	abortReasonText,
 	agentLoop,
 	agentLoopContinue,
+	INPUT_DELIVERY_ACK,
+	type InputDeliveryAck,
 	createSyntheticToolResultMessage,
 	lastContextMessage,
 	normalizeMessagesForProvider,
@@ -403,6 +405,7 @@ interface LiveSteeredEntry {
 	controller: AbortController | undefined;
 	/** Context preparation committed for the batch, carried by its last adopted entry. Never requeued. */
 	additional?: readonly AgentMessage[];
+	onDelivered?: (signal?: AbortSignal, batch?: object) => void;
 }
 
 interface QueuedMessageClaim {
@@ -451,6 +454,7 @@ export class Agent {
 		messages: AgentMessage[];
 		next: number;
 		additional: readonly AgentMessage[];
+		onDelivered?: (signal?: AbortSignal, batch?: object) => void;
 	}>();
 	/** Messages {@link withdrawUndeliveredQueuedMessages} took back, keyed to the run that must not record them. */
 	#withdrawnMessages = new WeakMap<AgentMessage, AbortController>();
@@ -1095,6 +1099,7 @@ export class Agent {
 				messages,
 				next: 0,
 				additional: additional ?? [],
+				onDelivered: preparation?.onDelivered?.bind(preparation),
 			});
 			this.#emitQueueChanged();
 			return additional?.length ? [...messages, ...additional] : messages;
@@ -1172,7 +1177,10 @@ export class Agent {
 			}
 			if (kept.length === 0) {
 				// The delivery record goes away; keep its context withdrawable with the adopted batch.
-				if (last && delivery.additional.length > 0) last.additional = delivery.additional;
+				if (last) {
+					if (delivery.additional.length > 0) last.additional = delivery.additional;
+					last.onDelivered = delivery.onDelivered;
+				}
 				this.#queuedMessageDeliveries.delete(delivery);
 			} else {
 				delivery.messages = kept;
@@ -1183,6 +1191,17 @@ export class Agent {
 		// (peekLiveSteeredMessages) count as still pending; listeners must hear
 		// about the swap or their queue view goes stale for the rest of the turn.
 		if (adopted) this.#emitQueueChanged();
+	}
+
+	#hasPendingQueuedDeliveryCallbacks(messages: readonly AgentMessage[]): boolean {
+		if (this.#liveSteered.some(entry => entry.onDelivered && messages.includes(entry.message))) return true;
+		for (const delivery of this.#queuedMessageDeliveries) {
+			if (!delivery.onDelivered) continue;
+			for (let i = delivery.next; i < delivery.messages.length; i++) {
+				if (messages.includes(delivery.messages[i])) return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -1445,19 +1464,24 @@ export class Agent {
 		this.#emitQueueChanged();
 	}
 
-	appendMessage(m: AgentMessage) {
+	appendMessage(m: AgentMessage, signal?: AbortSignal, deliveryBatch?: object) {
 		this.#state.messages.push(m);
 		const live = this.#liveSteered.findIndex(entry => entry.message === m);
 		if (live >= 0) {
+			const entry = this.#liveSteered[live]!;
 			this.#liveSteered.splice(live, 1);
 			// The message landed in the transcript, so it stops counting as
 			// queued pending input; snapshots shrink and listeners must hear it.
 			this.#emitQueueChanged();
+			if (!signal?.aborted && !entry.controller?.signal.aborted) entry.onDelivered?.(signal, deliveryBatch);
 			return;
 		}
 		for (const delivery of this.#queuedMessageDeliveries) {
 			if (delivery.messages[delivery.next] !== m) continue;
-			if (++delivery.next === delivery.messages.length) this.#queuedMessageDeliveries.delete(delivery);
+			if (++delivery.next === delivery.messages.length) {
+				this.#queuedMessageDeliveries.delete(delivery);
+				if (!signal?.aborted && !delivery.controller?.signal.aborted) delivery.onDelivered?.(signal, deliveryBatch);
+			}
 			break;
 		}
 	}
@@ -2059,6 +2083,11 @@ export class Agent {
 				this.#onModelCallSystemPrompt?.(context.systemPrompt);
 				context.tools = this.#toolsForModel(this.#state.model ?? model);
 			},
+			refreshContextAfterDelivery: context => {
+				context.systemPrompt = this.#state.systemPrompt;
+				this.#onModelCallSystemPrompt?.(context.systemPrompt);
+				context.tools = this.#toolsForModel(this.#state.model ?? model);
+			},
 			beforeModelCall:
 				this.#beforeModelCall || this.#additionalBeforeModelCalls.size > 0
 					? async (context, signal) => {
@@ -2126,6 +2155,7 @@ export class Agent {
 				),
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			onLiveSteeringTaken: messages => this.#adoptLiveSteering(messages),
+			hasPendingQueuedDeliveryCallbacks: messages => this.#hasPendingQueuedDeliveryCallbacks(messages),
 			hasIrcInterrupts: this.hasIrcInterrupts,
 			hasBackgroundCompletions: this.hasBackgroundCompletions,
 			hasQueuedAsides: this.hasQueuedAsides,
@@ -2139,6 +2169,7 @@ export class Agent {
 		let partial: AgentMessage | null = null;
 		const completedToolCallIds = new Set<string>();
 		let turnOpen = false;
+		let inputDeliveryBatch: object | undefined;
 
 		try {
 			const stream = messages
@@ -2146,20 +2177,31 @@ export class Agent {
 				: agentLoopContinue(context, config, loopSignal, this.streamFn);
 
 			for await (let event of stream) {
-				if (this.#abortController !== loopAbortController) return;
+				const deliveryAck = (event as AgentEvent & { [INPUT_DELIVERY_ACK]?: InputDeliveryAck })[INPUT_DELIVERY_ACK];
+				if (this.#abortController !== loopAbortController) {
+					deliveryAck?.fail(new DOMException("Agent run replaced", "AbortError"));
+					return;
+				}
 				// Withdrawn input the loop already holds for this run never reaches the transcript.
 				if (
 					(event.type === "message_start" || event.type === "message_end") &&
 					this.#withdrawnMessages.get(event.message) === loopAbortController
 				) {
+					deliveryAck?.done();
 					continue;
 				}
 				if (event.type === "agent_end") {
 					const messages = event.messages.filter(m => this.#withdrawnMessages.get(m) !== loopAbortController);
 					if (messages.length < event.messages.length) event = { ...event, messages };
 				}
-				if (event.type === "turn_start") turnOpen = true;
-				if (event.type === "turn_end") turnOpen = false;
+				if (event.type === "turn_start") {
+					turnOpen = true;
+					inputDeliveryBatch = undefined;
+				}
+				if (event.type === "turn_end") {
+					turnOpen = false;
+					inputDeliveryBatch = undefined;
+				}
 				// Update internal state based on events
 				switch (event.type) {
 					case "message_start":
@@ -2180,11 +2222,26 @@ export class Agent {
 						// Check if this is an assistant message with buffered Cursor tool results.
 						// If so, split the message to emit tool results at the correct position.
 						if (event.message.role === "assistant" && this.#cursorToolResultBuffer.length > 0) {
-							await this.#emitCursorSplitAssistantMessage(event.message as AssistantMessage);
+							try {
+								await this.#emitCursorSplitAssistantMessage(event.message as AssistantMessage);
+							} catch (error) {
+								deliveryAck?.fail(error);
+								throw error;
+							}
+							deliveryAck?.done();
 							continue; // Skip default emit - split method handles everything
 						}
 						this.#state.streamMessage = null;
-						this.appendMessage(event.message);
+						try {
+							this.appendMessage(
+								event.message,
+								deliveryAck?.signal ?? loopSignal,
+								deliveryAck ?? (inputDeliveryBatch ??= {}),
+							);
+						} catch (error) {
+							deliveryAck?.fail(error);
+							throw error;
+						}
 						break;
 
 					case "tool_execution_start":
@@ -2209,6 +2266,7 @@ export class Agent {
 
 				// Emit to listeners
 				this.#emit(event);
+				deliveryAck?.done();
 			}
 
 			// Handle any remaining partial message
