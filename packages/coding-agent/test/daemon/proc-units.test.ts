@@ -355,6 +355,36 @@ describe.skipIf(process.platform === "win32")("daemon proc units", () => {
 		},
 		TEST_TIMEOUT_MS,
 	);
+	it(
+		"an unreadable detached log degrades that unit's refresh instead of failing describe and stop",
+		async () => {
+			const { conn, root } = await startDaemon();
+			const opened = await conn.openProc(
+				"stucklog",
+				shProc("echo up; exec sleep 30", root, { ready: { log: "^up$", timeoutMs: 5_000 } }),
+				{ policy: { hold: "detached" } },
+			);
+			expect(opened.unit.state).toBe("ready");
+
+			// Replace the log file with a directory: stat succeeds, but reading it
+			// fails on every platform and even when tests run as root.
+			const logPath = path.join(root, "daemon", "units", opened.unit.id, "output.log");
+			await fs.rm(logPath);
+			await fs.mkdir(logPath);
+			// Degradation is per file: a readable previous log must still serve.
+			await fs.writeFile(path.join(path.dirname(logPath), "output.previous.log"), "earlier-output\n");
+			const after = await logs(conn, "stucklog");
+			expect(after.text).toContain("earlier-output");
+
+			const described = await conn.describe("stucklog");
+			expect(described.state).toBe("ready");
+
+			const stopped = await conn.request({ op: "stop", unit: "stucklog", timeoutMs: 5_000 });
+			expect(["stopped", "exited"]).toContain(stopped.unit.state);
+			await until(() => (pidAlive(opened.unit.pids[0]) ? undefined : true), "detached child to exit");
+		},
+		TEST_TIMEOUT_MS,
+	);
 
 	it(
 		"a detached unit asking for a PTY is rejected at open and never reaches the board",
