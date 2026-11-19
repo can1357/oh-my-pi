@@ -1,0 +1,349 @@
+import { describe, expect, it } from "bun:test";
+import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
+import {
+	formatSelectorMatchHint,
+	type HandleOpGuard,
+	toActionableHandle,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
+import type { ElementHandle } from "puppeteer-core";
+
+// Regression coverage for the invisible-output failure mode: `console.log` and
+// `print` reach the runtime as `onText` chunks, which the browser
+// embedders used to route to the debug log only — the tool result showed a bare
+// "Ran code on tab" while the displayed text vanished.
+describe("browser run output — stream text reaches the tool result", () => {
+	it("surfaces buffered stream text as a display entry on finish", () => {
+		const output = new RunOutput();
+		output.pushText("plain string via print()\n");
+		output.pushText("console.log line\n");
+
+		expect(output.finish()).toEqual([{ type: "text", text: "plain string via print()\nconsole.log line" }]);
+	});
+
+	it("adds nothing for views, whose text is already in the stream", () => {
+		const output = new RunOutput();
+		output.pushText("{ a: 1 }\n");
+		output.pushDisplay({ type: "view", text: "{ a: 1 }\n", view: { kind: "json", value: { a: 1 } } });
+
+		expect(output.finish()).toEqual([{ type: "text", text: "{ a: 1 }" }]);
+	});
+
+	it("flushes pending text before pre-built entries (screenshot captions) and emits images verbatim", () => {
+		const output = new RunOutput();
+		output.pushText("shot incoming\n");
+		output.push({ type: "image", data: "aGk=", mimeType: "image/png" });
+		output.pushDisplay({ type: "image", data: "eW8=", mimeType: "image/webp" });
+
+		expect(output.finish()).toEqual([
+			{ type: "text", text: "shot incoming" },
+			{ type: "image", data: "aGk=", mimeType: "image/png" },
+			{ type: "image", data: "eW8=", mimeType: "image/webp" },
+		]);
+	});
+
+	it("returns no entries when nothing was displayed", () => {
+		expect(new RunOutput().finish()).toEqual([]);
+	});
+});
+
+// The tool docs promise `.fill()` on handles from tab.id()/tab.ref()/tab.waitFor();
+// raw puppeteer ElementHandles only expose `.type()`. `input.fill is not a function`
+// was a live failure.
+describe("browser handle enrichment — fill()", () => {
+	it("adds a fill() that clears the current value before inserting the new one", async () => {
+		const node = { value: "old", focused: false };
+		const stub = {
+			evaluate: async (fn: (el: unknown) => unknown) =>
+				fn({
+					get value() {
+						return node.value;
+					},
+					set value(v: string) {
+						node.value = v;
+					},
+					focus: () => {
+						node.focused = true;
+					},
+					matches: () => false,
+					getRootNode() {
+						return { activeElement: this };
+					},
+				}),
+			frame: {
+				page: () => ({
+					keyboard: {
+						sendCharacter: async (text: string) => {
+							node.value += text;
+						},
+					},
+				}),
+			},
+		} as unknown as ElementHandle;
+
+		await toActionableHandle(stub).fill("fresh");
+
+		expect(node.focused).toBe(true);
+		expect(node.value).toBe("fresh");
+	});
+});
+
+// Regression (#9535): handles from tab.id()/tab.ref()/tab.waitFor() used to return raw
+// puppeteer methods that ran outside the per-op guard, so a stalled `(await tab.id(n)).click()`
+// consumed the whole 30s cell instead of failing fast with a named per-op error. A guard now
+// routes each interactive method through the same fail-fast wrapper as tab.click(selector).
+describe("browser handle enrichment — guarded actions", () => {
+	// Minimal stand-in for #runOp: names the op, installs a per-op deadline, and rewrites an
+	// abort into the same `<label> timed out after <ms>ms` shape the real guard surfaces.
+	const makeGuard = (perOpMs: number): { guard: HandleOpGuard; labels: string[] } => {
+		const labels: string[] = [];
+		const guard: HandleOpGuard = (label, fn) => {
+			labels.push(label);
+			const timeout = AbortSignal.timeout(perOpMs);
+			return fn(timeout).catch((err: unknown) => {
+				if (timeout.aborted) throw new Error(`${label} timed out after ${perOpMs}ms`);
+				throw err;
+			});
+		};
+		return { guard, labels };
+	};
+
+	// handle.click() resolves a stable, unoccluded click point (boundingBox + the
+	// actionability probe), checks the page has not replaced the element, watches
+	// for the page receiving the click, and then dispatches through the page mouse,
+	// so a stub stands in for those seams rather than a raw `click` method. The
+	// watch's in-page state reports the element attached and the click delivered.
+	// The element sits in the main frame, which outlives any press.
+	/** A clickable handle whose page's mouse press is `mousePress`; the move before it and the release succeed. */
+	const clickableStub = (mousePress: () => Promise<void>, extra: Record<string, unknown> = {}): ElementHandle => {
+		const page = {
+			mouse: { move: async () => {}, down: mousePress, up: async () => {} },
+			mainFrame: () => frame,
+		};
+		const frame = { page: () => page };
+		return {
+			boundingBox: async () => ({ x: 10, y: 10, width: 20, height: 20 }),
+			evaluate: async () => ({ ok: true, x: 20, y: 20 }),
+			evaluateHandle: async () => ({
+				evaluate: async (fn: (state: unknown) => unknown) =>
+					fn({ detached: false, delivered: () => true, stop: () => {} }),
+				dispose: async () => {},
+			}),
+			frame,
+			type: async () => {},
+			dispose: async () => {},
+			...extra,
+		} as unknown as ElementHandle;
+	};
+
+	it("fails a stalled handle.click() fast with a named error instead of hanging", async () => {
+		const stalled = Promise.withResolvers<void>();
+		// never settles — a busy popup/navigation stall
+		const stub = clickableStub(() => stalled.promise);
+		const { guard, labels } = makeGuard(50);
+
+		await expect(toActionableHandle(stub, guard).click()).rejects.toThrow("handle.click() timed out after 50ms");
+		expect(labels).toEqual(["handle.click()"]);
+	});
+
+	it("invalidates a timed-out handle before rejecting and blocks a caught retry", async () => {
+		let clicks = 0;
+		let disposed = false;
+		let cacheCleared = false;
+		const stalled = Promise.withResolvers<void>();
+		const stub = clickableStub(
+			() => {
+				clicks++;
+				return stalled.promise;
+			},
+			{
+				dispose: async () => {
+					disposed = true;
+				},
+			},
+		);
+		const { guard } = makeGuard(50);
+		const handle = toActionableHandle(stub, guard, async () => {
+			cacheCleared = true;
+		});
+
+		await expect(handle.click()).rejects.toThrow("handle.click() timed out after 50ms");
+		expect(disposed).toBe(true);
+		expect(cacheCleared).toBe(true);
+		await expect(handle.click()).rejects.toThrow("this handle was invalidated after handle.click() timed out");
+		expect(clicks).toBe(1);
+	});
+
+	it("stops handle.type() before dispatching more characters after timeout", async () => {
+		const typed: string[] = [];
+		const firstStarted = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const firstFinished = Promise.withResolvers<void>();
+		const stub = {
+			type: async () => {},
+			evaluate: async (fn: (el: unknown) => unknown) => {
+				fn({
+					focus: () => {},
+					matches: () => false,
+					getRootNode() {
+						return { activeElement: this };
+					},
+				});
+			},
+			frame: {
+				page: () => ({
+					keyboard: {
+						type: async (character: string) => {
+							firstStarted.resolve();
+							await releaseFirst.promise;
+							typed.push(character);
+							firstFinished.resolve();
+						},
+					},
+				}),
+			},
+			dispose: async () => {},
+		} as unknown as ElementHandle;
+		const deadline = new AbortController();
+		const guard: HandleOpGuard = (_label, fn) => fn(deadline.signal);
+		const action = toActionableHandle(stub, guard).type("abc");
+
+		await firstStarted.promise;
+		deadline.abort(new Error("action deadline"));
+		await expect(action).rejects.toThrow("action deadline");
+		releaseFirst.resolve();
+		await firstFinished.promise;
+
+		expect(typed).toEqual(["a"]);
+	});
+
+	it("passes arguments and return values through the guarded method unchanged", async () => {
+		const received: unknown[][] = [];
+		const stub = {
+			drag: async (...args: unknown[]) => {
+				received.push(args);
+				return { items: [], dragOperationsMask: 1 };
+			},
+			type: async () => {},
+			evaluate: async () => {},
+		} as unknown as ElementHandle;
+		const { guard, labels } = makeGuard(1_000);
+
+		expect(await toActionableHandle(stub, guard).drag({ x: 1, y: 2 })).toEqual({ items: [], dragOperationsMask: 1 });
+		expect(received).toEqual([[{ x: 1, y: 2 }]]);
+		expect(labels).toEqual(["handle.drag()"]);
+	});
+
+	it("guards drag and touch input methods, not just click/type", async () => {
+		const makeStalled = (method: string): ElementHandle =>
+			({
+				[method]: () => Promise.withResolvers<void>().promise, // stalled CDP input
+				type: async () => {},
+				evaluate: async () => {},
+				dispose: async () => {},
+			}) as unknown as ElementHandle;
+		const { guard, labels } = makeGuard(50);
+
+		const drag = toActionableHandle(makeStalled("drag"), guard) as unknown as Record<string, () => Promise<void>>;
+		await expect(drag.drag!()).rejects.toThrow("handle.drag() timed out after 50ms");
+		const touch = toActionableHandle(makeStalled("touchStart"), guard) as unknown as Record<
+			string,
+			() => Promise<void>
+		>;
+		await expect(touch.touchStart!()).rejects.toThrow("handle.touchStart() timed out after 50ms");
+		expect(labels).toEqual(["handle.drag()", "handle.touchStart()"]);
+	});
+
+	it("runs the guarded fill as a single op without re-entering the wrapped type()", async () => {
+		const node = { value: "old", focused: false };
+		const stub = {
+			evaluate: async (fn: (el: unknown) => unknown) =>
+				fn({
+					get value() {
+						return node.value;
+					},
+					set value(v: string) {
+						node.value = v;
+					},
+					focus: () => {
+						node.focused = true;
+					},
+					matches: () => false,
+					getRootNode() {
+						return { activeElement: this };
+					},
+				}),
+			type: async () => {},
+			frame: {
+				page: () => ({
+					keyboard: {
+						sendCharacter: async (text: string) => {
+							node.value += text;
+						},
+					},
+				}),
+			},
+		} as unknown as ElementHandle;
+		const { guard, labels } = makeGuard(1_000);
+
+		await toActionableHandle(stub, guard).fill("fresh");
+
+		expect(node.value).toBe("fresh");
+		expect(node.focused).toBe(true);
+		// fill() inserts the value itself, so it is guarded once, not nested.
+		expect(labels).toEqual(["handle.fill()"]);
+	});
+
+	it("rewraps a cached handle from its original methods for each browser run", async () => {
+		let clicks = 0;
+		const stub = clickableStub(async () => {
+			clicks++;
+		});
+		const firstLabels: string[] = [];
+		const firstGuard: HandleOpGuard = (label, fn) => {
+			firstLabels.push(label);
+			return fn(AbortSignal.abort(new Error("first run ended")));
+		};
+		const secondLabels: string[] = [];
+		const secondGuard: HandleOpGuard = (label, fn) => {
+			secondLabels.push(label);
+			return fn(new AbortController().signal);
+		};
+
+		toActionableHandle(stub, firstGuard);
+		await toActionableHandle(stub, secondGuard).click();
+
+		expect(clicks).toBe(1);
+		expect(firstLabels).toEqual([]);
+		expect(secondLabels).toEqual(["handle.click()"]);
+	});
+
+	it("does not dispatch through a handle retained after its browser run ended", async () => {
+		let clicks = 0;
+		const stub = {
+			click: async () => {
+				clicks++;
+			},
+			type: async () => {},
+			evaluate: async () => {},
+		} as unknown as ElementHandle;
+		const guard: HandleOpGuard = (_label, fn) => fn(AbortSignal.abort(new Error("run ended")));
+
+		await expect(toActionableHandle(stub, guard).click()).rejects.toThrow("Operation aborted");
+		expect(clicks).toBe(0);
+	});
+});
+
+// A selector op's fail-fast timeout must diagnose *why*: a missing element (consent
+// wall, wrong page) needs a different recovery than a present-but-unactionable one.
+describe("browser selector timeout hint", () => {
+	it("points at observe/ariaSnapshot when nothing matches", () => {
+		expect(formatSelectorMatchHint(0)).toContain("matches no elements");
+		expect(formatSelectorMatchHint(0)).toContain("tab.observe()");
+	});
+
+	it("reports the match count when elements exist but the action stalled", () => {
+		const hint = formatSelectorMatchHint(3);
+		expect(hint).toContain("3 element(s)");
+		expect(hint).toContain("hidden or covered");
+	});
+});

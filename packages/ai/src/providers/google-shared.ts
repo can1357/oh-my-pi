@@ -1,0 +1,1431 @@
+/**
+ * Shared utilities for Google Generative AI and Google Cloud Code Assist providers.
+ */
+
+import { scheduler } from "node:timers/promises";
+import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+import { fetchWithRetry, readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
+import { renderDemotedThinking } from "../dialect/demotion";
+import { ThinkingFenceStripper } from "../dialect/thinking-fence-strip";
+import * as AIError from "../error";
+import type {
+	Api,
+	AssistantMessage,
+	Context,
+	FetchImpl,
+	ImageContent,
+	Model,
+	ServiceTier,
+	StopReason,
+	StreamOptions,
+	TextContent,
+	ThinkingContent,
+	Tool,
+	ToolCall,
+	Usage,
+} from "../types";
+import { shouldSendServiceTier } from "../types";
+import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
+import { AssistantMessageEventStream } from "../utils/event-stream";
+import type { RawHttpRequestDump } from "../utils/http-inspector";
+import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
+import { notifyProviderResponse } from "../utils/provider-response";
+import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
+import type {
+	Content,
+	FinishReason,
+	FunctionCallingConfigMode,
+	GenerateContentConfig,
+	GenerateContentParameters,
+	GenerateContentResponse,
+	Part,
+	ThinkingConfig,
+	ThinkingLevel,
+	UsageMetadata,
+} from "./google-types";
+import { transformMessages } from "./transform-messages";
+import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
+
+export type {
+	Content,
+	FunctionCallingConfigMode,
+	GenerateContentParameters,
+	GenerateContentResponse,
+	ThinkingConfig,
+} from "./google-types";
+export { normalizeSchemaForGoogle };
+
+type GoogleApiType = "google-generative-ai" | "google-gemini-cli" | "google-vertex";
+
+function convertGoogleImagePart(image: ImageContent): Part {
+	if (image.providerFile?.provider === "google" && image.providerFile.uri) {
+		return { fileData: { fileUri: image.providerFile.uri, mimeType: image.mimeType } };
+	}
+	return image.url
+		? { fileData: { fileUri: image.url, mimeType: image.mimeType } }
+		: { inlineData: { mimeType: image.mimeType, data: image.data } };
+}
+
+/**
+ * Thinking level for Gemini 3+ models. Mirrors Google's `ThinkingLevel` enum values,
+ * plus the API-documented lowercase `xhigh` (Gemini 4 Hydrogen) the SDK enum lacks.
+ * Defined here (not in any specific provider) so all Google providers can reference it
+ * without inducing a circular dependency.
+ */
+export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | "xhigh";
+
+/**
+ * Sampling/thinking options shared by `streamGoogle` and `streamGoogleVertex`.
+ * `google-gemini-cli` uses a different transport and request shape — do not extend this for it.
+ */
+export interface GoogleSharedStreamOptions extends StreamOptions {
+	/**
+	 * Tool selection mode. String forms map directly to Gemini
+	 * `FunctionCallingConfigMode`. The object form forces a single named tool
+	 * — `mode: "ANY"` is wire-required when `allowedFunctionNames` is set.
+	 */
+	toolChoice?: "auto" | "none" | "any" | { mode: "ANY"; allowedFunctionNames: [string, ...string[]] };
+	thinking?: {
+		enabled: boolean;
+		budgetTokens?: number;
+		level?: GoogleThinkingLevel;
+	};
+	/** Request that Google omit human-readable thought summaries while still allowing internal reasoning. */
+	hideThinkingSummary?: boolean;
+	/** Gemini/Vertex serving tier (`flex`/`priority`); other values are omitted. */
+	serviceTier?: ServiceTier;
+	/**
+	 * Caller-owned Google context-cache resource name for GenerateContent.
+	 * Passed through opaquely as the wire `cachedContent` field on
+	 * `google-generative-ai` and `google-vertex` only. OMP does not create,
+	 * refresh, validate model/project/location compatibility, or delete the
+	 * resource — callers own that lifecycle.
+	 *
+	 * @see https://ai.google.dev/api/generate-content
+	 * @see `@google/genai` `GenerateContentConfig.cachedContent`
+	 */
+	cachedContent?: string;
+}
+
+/**
+ * Determines whether a streamed Gemini `Part` should be treated as "thinking".
+ *
+ * Protocol note (Gemini / Vertex AI thought signatures):
+ * - `thought: true` is the definitive marker for thinking content (thought summaries).
+ * - `thoughtSignature` is an encrypted representation of the model's internal thought process
+ *   used to preserve reasoning context across multi-turn interactions.
+ * - `thoughtSignature` can appear on ANY part type (text, functionCall, etc.) - it does NOT
+ *   indicate the part itself is thinking content.
+ * - For non-functionCall responses, the signature appears on the last part for context replay.
+ * - When persisting/replaying model outputs, signature-bearing parts must be preserved as-is;
+ *   do not merge/move signatures across parts.
+ *
+ * See: https://ai.google.dev/gemini-api/docs/thought-signatures
+ */
+export function isThinkingPart(part: Pick<Part, "thought" | "thoughtSignature">): boolean {
+	return part.thought === true;
+}
+
+/**
+ * Retain thought signatures during streaming.
+ *
+ * Some backends only send `thoughtSignature` on the first delta for a given part/block; later deltas may omit it.
+ * This helper preserves the last non-empty signature for the current block.
+ *
+ * Note: this does NOT merge or move signatures across distinct response parts. It only prevents
+ * a signature from being overwritten with `undefined` within the same streamed block.
+ */
+export function retainThoughtSignature(existing: string | undefined, incoming: string | undefined): string | undefined {
+	if (typeof incoming === "string" && incoming.length > 0) return incoming;
+	return existing;
+}
+
+// Thought signatures must be base64 for Google APIs (TYPE_BYTES).
+const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
+
+export const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
+const SKIP_THOUGHT_SIGNATURE_BASE64 = Buffer.from(SKIP_THOUGHT_SIGNATURE).toString("base64");
+
+function isValidThoughtSignature(signature: string | undefined): boolean {
+	if (!signature) return false;
+	if (signature.length % 4 !== 0) return false;
+	return base64SignaturePattern.test(signature);
+}
+
+/**
+ * Only keep signatures from the same provider/model and with valid base64.
+ */
+function resolveThoughtSignature(isSameProviderAndModel: boolean, signature: string | undefined): string | undefined {
+	return isSameProviderAndModel && isValidThoughtSignature(signature) ? signature : undefined;
+}
+
+/** Sort the items whose key is known into key order within the slots they occupy; others stay put. */
+function sortKnownInPlace<T>(items: T[], keyOf: (item: T) => number | undefined): void {
+	const known: Array<{ position: number; key: number; item: T }> = [];
+	items.forEach((item, position) => {
+		const key = keyOf(item);
+		if (key !== undefined) known.push({ position, key, item });
+	});
+	if (known.length < 2) return;
+	const inOrder = [...known].sort((a, b) => a.key - b.key);
+	known.forEach(({ position }, index) => {
+		items[position] = inOrder[index].item;
+	});
+}
+
+/**
+ * Gemini pairs id-less function responses with calls by position. The agent loop stores
+ * parallel results in call order, but histories can still arrive out of call order (sessions
+ * saved by older versions, contexts built through the SDK), so the converters guard the wire:
+ * record each call as it is emitted and each response with its call, then {@link apply} sorts
+ * every turn's matched responses back into call order within the slots they already occupy.
+ */
+export class FunctionCallOrder {
+	#ordinals = new Map<string, number>();
+	#responses = new Map<Part, number>();
+	#next = 0;
+
+	call(id: string): void {
+		this.#ordinals.set(id, this.#next++);
+	}
+
+	/** The call ordinal of `id`, if that call was recorded. */
+	ordinal(id: string): number | undefined {
+		return this.#ordinals.get(id);
+	}
+
+	response(part: Part, callId: string): void {
+		const ordinal = this.#ordinals.get(callId);
+		if (ordinal !== undefined) this.#responses.set(part, ordinal);
+	}
+
+	apply(contents: readonly { parts?: Part[] }[]): void {
+		for (const content of contents) {
+			if (content.parts) sortKnownInPlace(content.parts, part => this.#responses.get(part));
+		}
+	}
+}
+
+/**
+ * Convert internal messages to Gemini Content[] format.
+ */
+export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: Context): Content[] {
+	const contents: Content[] = [];
+	const emittedToolCallNames = new Map<string, string>();
+	const callOrder = new FunctionCallOrder();
+
+	const transformedMessages = transformMessages(context.messages, model, id => normalizeToolCallId(id));
+
+	// Gemini < 3 image tool results go in a separate user turn, but parallel tool results must
+	// stay a single contiguous functionResponse turn ("number of function response parts is not
+	// equal to number of function call parts"). Buffer image turns and flush them only after the
+	// merged functionResponse turn is complete, each result's images in its call's order.
+	let pendingToolImages: Array<{ ordinal: number | undefined; parts: Part[] }> = [];
+	const flushPendingToolImages = () => {
+		if (pendingToolImages.length === 0) return;
+		sortKnownInPlace(pendingToolImages, group => group.ordinal);
+		contents.push({ role: "user", parts: pendingToolImages.flatMap(group => group.parts) });
+		pendingToolImages = [];
+	};
+
+	for (const msg of transformedMessages) {
+		if (msg.role !== "toolResult") flushPendingToolImages();
+		if (msg.role === "user" || msg.role === "developer") {
+			if (typeof msg.content === "string") {
+				// Skip empty user messages
+				if (!msg.content || msg.content.trim() === "") continue;
+				contents.push({
+					role: "user",
+					parts: [{ text: msg.content.toWellFormed() }],
+				});
+			} else {
+				const supportsImages = model.input.includes("image");
+				const parts: Part[] = [];
+				let omittedImages = false;
+				for (const item of msg.content) {
+					if (item.type === "text") {
+						const text = item.text.toWellFormed();
+						if (text.trim().length === 0) continue;
+						parts.push({ text });
+					} else if (supportsImages) {
+						parts.push(convertGoogleImagePart(item));
+					} else {
+						omittedImages = true;
+					}
+				}
+				if (omittedImages) {
+					parts.push({ text: NON_VISION_IMAGE_PLACEHOLDER });
+				}
+				if (parts.length === 0) continue;
+				contents.push({
+					role: "user",
+					parts,
+				});
+			}
+		} else if (msg.role === "assistant") {
+			const parts: Part[] = [];
+			// Check if message is from same provider and model - only then keep thinking blocks
+			const isSameProviderAndModel = msg.provider === model.provider && msg.model === model.id;
+			const dropsUnsignedThinking = model.compat.dropUnsignedThinking;
+			let isFirstToolCall = true;
+
+			for (const block of msg.content) {
+				if (block.type === "text") {
+					// Skip empty text blocks - they can cause issues with some models (e.g. Claude via Antigravity)
+					if (!block.text || block.text.trim() === "") continue;
+					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.textSignature);
+					parts.push({
+						text: block.text.toWellFormed(),
+						...(thoughtSignature && { thoughtSignature }),
+					});
+				} else if (block.type === "thinking") {
+					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
+					// Skip empty thinking unless it carries the signature of a signature-only thought part
+					if ((!block.thinking || block.thinking.trim() === "") && !thoughtSignature) continue;
+					if (dropsUnsignedThinking && !thoughtSignature) continue;
+					if (isSameProviderAndModel) {
+						// The model's own thinking replays in the thought slot even unsigned: Gemini
+						// signs the part after a thought summary, not the summary, and replayed as
+						// visible text the summary's fence leaks into later answers.
+						parts.push({
+							thought: true,
+							text: block.thinking.toWellFormed(),
+							...(thoughtSignature && { thoughtSignature }),
+						});
+					} else {
+						parts.push({
+							text: renderDemotedThinking(model.id, block.thinking),
+						});
+					}
+				} else if (block.type === "toolCall") {
+					emittedToolCallNames.set(block.id, block.name);
+					callOrder.call(block.id);
+					// Gemini 3 requires a thought signature on function calls it makes. The
+					// public API requires the bypass sentinel on every unsigned call. Cloud
+					// Code Assist and Vertex AI require it only when the first call itself is
+					// unsigned; signed-first parallel turns must leave unsigned secondary calls
+					// bare. (#9638, #10602)
+					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thoughtSignature);
+					const requiresFallback =
+						model.compat.requiresSkipThoughtSignature ||
+						(isFirstToolCall && model.compat.requiresSkipThoughtSignatureOnFirstFunctionCall);
+					const skipSignature = model.compat.base64SkipThoughtSignature
+						? SKIP_THOUGHT_SIGNATURE_BASE64
+						: SKIP_THOUGHT_SIGNATURE;
+					const effectiveSignature = thoughtSignature || (requiresFallback ? skipSignature : undefined);
+					isFirstToolCall = false;
+
+					const part: Part = {
+						functionCall: {
+							name: block.name,
+							args: block.arguments ?? {},
+							...(model.compat.supportsFunctionPartId ? { id: block.id } : {}),
+						},
+					};
+					if (effectiveSignature) {
+						part.thoughtSignature = effectiveSignature;
+					}
+					parts.push(part);
+				}
+			}
+
+			if (parts.length === 0) continue;
+			contents.push({
+				role: "model",
+				parts,
+			});
+		} else if (msg.role === "toolResult") {
+			// Extract text and image content
+			const supportsImages = model.input.includes("image");
+			const textContent = msg.content.filter((c): c is TextContent => c.type === "text");
+			const textResult = textContent.map(c => c.text).join("\n");
+			const imageContent = supportsImages ? msg.content.filter((c): c is ImageContent => c.type === "image") : [];
+			const omittedImages = !supportsImages && msg.content.some((c): c is ImageContent => c.type === "image");
+
+			const hasText = textResult.length > 0;
+			const hasImages = imageContent.length > 0;
+
+			// Gemini 3+ models support multimodal function responses with images nested inside
+			// functionResponse.parts. Claude and other non-Gemini models behind Cloud Code Assist /
+			// Antigravity also accept this shape. Gemini < 3 still needs a separate user image turn.
+			const modelSupportsMultimodalFunctionResponse = model.compat.multimodalFunctionResponse;
+
+			// Use "output" key for success, "error" key for errors as per SDK documentation
+			const responseValue = omittedImages
+				? [hasText ? textResult.toWellFormed() : "", NON_VISION_IMAGE_PLACEHOLDER].filter(Boolean).join("\n")
+				: hasText
+					? textResult.toWellFormed()
+					: hasImages
+						? "(see attached image)"
+						: "";
+
+			const imageParts = imageContent.map(convertGoogleImagePart);
+
+			const includeId = model.compat.supportsFunctionPartId;
+			const emittedName = emittedToolCallNames.get(msg.toolCallId);
+			const functionResponsePart: Part = {
+				functionResponse: {
+					name: emittedName ?? msg.toolName,
+					response: msg.isError ? { error: responseValue } : { output: responseValue },
+					...(hasImages && modelSupportsMultimodalFunctionResponse && { parts: imageParts }),
+					...(includeId ? { id: msg.toolCallId } : {}),
+				},
+			};
+			callOrder.response(functionResponsePart, msg.toolCallId);
+
+			// Cloud Code Assist API requires all function responses to be in a single user turn.
+			// Check if the last content is already a user turn with function responses and merge.
+			const lastContent = contents[contents.length - 1];
+			if (lastContent?.role === "user" && lastContent.parts?.some(p => p.functionResponse)) {
+				lastContent.parts.push(functionResponsePart);
+			} else {
+				contents.push({
+					role: "user",
+					parts: [functionResponsePart],
+				});
+			}
+
+			// For Gemini < 3, buffer images for a separate user message after the functionResponse turn
+			if (hasImages && !modelSupportsMultimodalFunctionResponse) {
+				pendingToolImages.push({
+					ordinal: callOrder.ordinal(msg.toolCallId),
+					parts: [{ text: "Tool result image:" }, ...imageParts],
+				});
+			}
+		}
+	}
+	flushPendingToolImages();
+	callOrder.apply(contents);
+
+	return contents;
+}
+
+/**
+ * Convert tools to Gemini function declarations format.
+ *
+ * We prefer `parametersJsonSchema` (full JSON Schema: anyOf/oneOf/const/etc.).
+ *
+ * Claude models via Cloud Code Assist require the legacy `parameters` field; the API
+ * translates it into Anthropic's `input_schema`. When using that path, we sanitize the
+ * schema to remove Google-unsupported JSON Schema keywords.
+ */
+export function convertTools(
+	tools: Tool[],
+	model: Model<"google-generative-ai" | "google-gemini-cli" | "google-vertex">,
+): { functionDeclarations: Record<string, unknown>[] }[] | undefined {
+	if (tools.length === 0) return undefined;
+
+	/**
+	 * Claude models on Cloud Code Assist need the legacy `parameters` field;
+	 * the API translates it into Anthropic's `input_schema`.
+	 */
+	const useParameters = model.compat.ccaLegacyParametersSchema;
+
+	return [
+		{
+			functionDeclarations: tools.map(tool => ({
+				name: tool.name,
+				description: tool.description || "",
+				...(useParameters
+					? { parameters: normalizeSchemaForCCA(toolWireSchema(tool)) }
+					: { parametersJsonSchema: normalizeSchemaForGoogle(toolWireSchema(tool)) }),
+			})),
+		},
+	];
+}
+
+/**
+ * Map tool choice string to Gemini FunctionCallingConfigMode.
+ */
+export function mapToolChoice(choice: string): FunctionCallingConfigMode {
+	switch (choice) {
+		case "auto":
+			return "AUTO";
+		case "none":
+			return "NONE";
+		case "any":
+			return "ANY";
+		default:
+			return "AUTO";
+	}
+}
+
+/**
+ * Map Gemini FinishReason to our StopReason.
+ */
+export function mapStopReason(reason: FinishReason): StopReason {
+	switch (reason) {
+		case "STOP":
+			return "stop";
+		case "MAX_TOKENS":
+		// Only reached when a segment ends without a token to resume from: the output was cut short.
+		case "CONTINUATION":
+			return "length";
+		case "BLOCKLIST":
+		case "PROHIBITED_CONTENT":
+		case "SPII":
+		case "SAFETY":
+		case "IMAGE_SAFETY":
+		case "IMAGE_PROHIBITED_CONTENT":
+		case "IMAGE_RECITATION":
+		case "IMAGE_OTHER":
+		case "RECITATION":
+		case "FINISH_REASON_UNSPECIFIED":
+		case "OTHER":
+		case "LANGUAGE":
+		case "MALFORMED_FUNCTION_CALL":
+		case "MALFORMED_RESPONSE":
+		case "UNEXPECTED_TOOL_CALL":
+		case "NO_IMAGE":
+			return "error";
+		default: {
+			throw new AIError.ConfigurationError(`Unhandled stop reason: ${reason satisfies never}`);
+		}
+	}
+}
+
+/**
+ * Map string finish reason to our StopReason (for raw API responses).
+ */
+export function mapStopReasonString(reason: string): StopReason {
+	switch (reason) {
+		case "STOP":
+			return "stop";
+		case "MAX_TOKENS":
+		case "CONTINUATION":
+			return "length";
+		default:
+			return "error";
+	}
+}
+
+/**
+ * Bounded retries for the well-known Gemini "empty response" failure: a benign
+ * `finishReason: STOP` carrying only an empty/whitespace text part and no tool call.
+ * Shared by the public/Vertex `streamGoogleGenAI` path and the Cloud Code Assist
+ * (`google-gemini-cli`/`google-antigravity`) provider so both apply the same policy.
+ */
+export const MAX_EMPTY_STREAM_RETRIES = 2;
+export const EMPTY_STREAM_BASE_DELAY_MS = 500;
+
+/**
+ * Attempts per continuation request of a segmented generation (`followGoogleContinuations`).
+ * A failed resume discards every segment already streamed, so transient failures (429, 5xx,
+ * network errors, a resume that never returns headers) retry here instead of restarting the
+ * whole generation upstream.
+ */
+export const CONTINUATION_MAX_ATTEMPTS = 4;
+
+/**
+ * Whether a completed Google assistant message carries content worth delivering.
+ *
+ * A tool call or any non-whitespace text counts as meaningful. An empty/whitespace-only
+ * text part — or thinking that never produced an answer — is the "empty response" failure:
+ * delivered as-is the agent loop has nothing to act on and silently halts, so the request
+ * must be retried instead of surfaced.
+ */
+export function hasMeaningfulGoogleContent(output: AssistantMessage): boolean {
+	for (const block of output.content) {
+		if (block.type === "toolCall") return true;
+		if (block.type === "text" && block.text.trim().length > 0) return true;
+	}
+	return false;
+}
+
+/** Wipe a streamed message between empty-response retries so the next attempt starts clean. */
+function resetGoogleStreamOutputForRetry(output: AssistantMessage): void {
+	output.content = [];
+	output.usage = {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+	output.stopReason = "stop";
+	output.errorMessage = undefined;
+	output.timestamp = Date.now();
+}
+
+/** `usageMetadata` of a generation Google split into segments, as `followGoogleContinuations` passes it on. */
+export interface ContinuedUsageMetadata extends UsageMetadata {
+	/**
+	 * Not sent by Google. The current segment's own total: its prompt is the original
+	 * prompt plus all earlier output, so it is the conversation's real size, while the
+	 * counts above are summed across the segments' requests (each is billed).
+	 */
+	contextTokenCount?: number;
+}
+
+/**
+ * Maps Gemini `usageMetadata` onto {@link Usage} (cost zeroed for `calculateCost`).
+ *
+ * `promptTokenCount` includes `cachedContentTokenCount`, so input = prompt − cached,
+ * matching the OpenAI convention where input + cacheRead = total prompt tokens.
+ * Upstream sometimes omits `promptTokenCount` or reports a cache count above the
+ * prompt (Antigravity), so the prompt falls back to `total − candidates − thoughts`
+ * and cached tokens are clamped to it: input is never negative.
+ * Ref: https://ai.google.dev/api/generate-content#v1beta.GenerateContentResponse.UsageMetadata
+ */
+export function mapGoogleUsage(metadata: ContinuedUsageMetadata): Usage {
+	const candidates = metadata.candidatesTokenCount || 0;
+	const thinking = metadata.thoughtsTokenCount || 0;
+	const total = metadata.totalTokenCount || 0;
+	const prompt = metadata.promptTokenCount || Math.max(0, total - candidates - thinking);
+	const cacheRead = Math.min(metadata.cachedContentTokenCount || 0, prompt);
+	return {
+		input: prompt - cacheRead,
+		output: candidates + thinking,
+		cacheRead,
+		cacheWrite: 0,
+		totalTokens: total,
+		...(thinking > 0 ? { reasoningTokens: thinking } : {}),
+		...(metadata.contextTokenCount !== undefined ? { contextTokens: metadata.contextTokenCount } : {}),
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
+const USAGE_COUNTS = [
+	"promptTokenCount",
+	"candidatesTokenCount",
+	"thoughtsTokenCount",
+	"totalTokenCount",
+	"cachedContentTokenCount",
+] as const;
+
+/**
+ * Usage of a generation split into segments: every count is summed, since each segment's
+ * request is billed in full, and `contextTokenCount` is the latest segment's own total.
+ * That segment's prompt is the original prompt plus all earlier output, so its total is
+ * what one unsplit request would report; the summed total re-counts the earlier output
+ * once per later segment and would make the conversation look several times its size.
+ */
+function addGoogleUsage(earlier: UsageMetadata, segment: UsageMetadata): ContinuedUsageMetadata {
+	const sum: ContinuedUsageMetadata = { ...segment };
+	for (const key of USAGE_COUNTS) {
+		if (earlier[key] !== undefined || segment[key] !== undefined)
+			sum[key] = (earlier[key] ?? 0) + (segment[key] ?? 0);
+	}
+	// Some chunks omit `totalTokenCount`; fall back to the segment's parts, as `mapGoogleUsage` does.
+	const segmentTotal =
+		segment.totalTokenCount ||
+		(segment.promptTokenCount ?? 0) + (segment.candidatesTokenCount ?? 0) + (segment.thoughtsTokenCount ?? 0);
+	if (segmentTotal > 0) sum.contextTokenCount = segmentTotal;
+	return sum;
+}
+
+/**
+ * Streams a generation Google splits into output segments as one stream of chunks.
+ *
+ * Gemini 4 Hydrogen ends each 65,536-token segment of a longer generation with
+ * `finishReason: CONTINUATION` and a `continuationToken`; resending the same request with
+ * that token streams the next segment. `resume` sends that request. Chunks pass through
+ * as they arrive, except that a CONTINUATION finish carrying a token is dropped (the next
+ * segment follows it), so the consumer sees one generation. From the second segment on,
+ * usage is summed across segments (see `addGoogleUsage`): each segment reports only its
+ * own request, whose prompt is the original prompt plus all output so far.
+ * A CONTINUATION without a token is passed on and ends the generation as cut short.
+ * Each resume resends the request unchanged, so Google caps the whole generation at its
+ * `maxOutputTokens`: the segment that reaches it ends with MAX_TOKENS (verified live on
+ * the Gemini API, ending at exactly the requested total), which passes through as `length`.
+ * Ref: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen
+ */
+export async function* followGoogleContinuations<C>(
+	firstSegment: AsyncIterable<C>,
+	responseOf: (chunk: C) =>
+		| {
+				candidates?: { finishReason?: string; continuationToken?: string }[];
+				usageMetadata?: UsageMetadata;
+		  }
+		| undefined,
+	resume: (continuationToken: string) => Promise<AsyncIterable<C>>,
+): AsyncGenerator<C> {
+	let segment: AsyncIterable<C> | undefined = firstSegment;
+	// Unset until a segment ends in CONTINUATION, so an unsplit generation keeps Google's usage as sent.
+	let earlierUsage: UsageMetadata | undefined;
+	while (segment) {
+		let continuationToken: string | undefined;
+		let segmentUsage: UsageMetadata | undefined;
+		for await (const chunk of segment) {
+			const response = responseOf(chunk);
+			const candidate = response?.candidates?.[0];
+			if (candidate?.finishReason === "CONTINUATION" && candidate.continuationToken) {
+				continuationToken = candidate.continuationToken;
+				candidate.finishReason = undefined;
+			}
+			if (response?.usageMetadata) {
+				segmentUsage = response.usageMetadata;
+				if (earlierUsage) response.usageMetadata = addGoogleUsage(earlierUsage, segmentUsage);
+			}
+			yield chunk;
+		}
+		segment = undefined;
+		if (continuationToken) {
+			earlierUsage = addGoogleUsage(earlierUsage ?? {}, segmentUsage ?? {});
+			segment = await resume(continuationToken);
+		}
+	}
+}
+
+/**
+ * Module-local counter for generating unique tool call IDs across Google providers.
+ * Shared so that a single monotonically-increasing sequence is used regardless of which
+ * Google API surface produced the stream — purely for uniqueness, not ordering semantics.
+ */
+let toolCallCounter = 0;
+
+export function nextToolCallId(name: string): string {
+	return `${name}_${Date.now()}_${++toolCallCounter}`;
+}
+
+/**
+ * Push the appropriate `text_end` / `thinking_end` event for the given block.
+ * Shared between the SDK-backed stream consumer and the gemini-cli SSE consumer so
+ * the end-of-block event shape stays in lockstep.
+ */
+export function pushBlockEndEvent(
+	block: TextContent | ThinkingContent,
+	contentIndex: number,
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+): void {
+	if (block.type === "text") {
+		stream.push({ type: "text_end", contentIndex, content: block.text, partial: output });
+	} else {
+		stream.push({ type: "thinking_end", contentIndex, content: block.thinking, partial: output });
+	}
+}
+
+/**
+ * Push the three lifecycle events (`toolcall_start` / `toolcall_delta` / `toolcall_end`) for a
+ * fully-assembled `ToolCall`. Caller is responsible for appending the toolCall to `output.content`
+ * before invoking — this helper does not mutate `output.content`.
+ */
+export function pushToolCallEvents(
+	toolCall: ToolCall,
+	contentIndex: number,
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+): void {
+	stream.push({ type: "toolcall_start", contentIndex, partial: output });
+	stream.push({
+		type: "toolcall_delta",
+		contentIndex,
+		delta: JSON.stringify(toolCall.arguments),
+		partial: output,
+	});
+	stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
+}
+
+/** How {@link GoogleTextBlocks} keeps thought text: healed of leaked fence delimiters (#8719), or as received. */
+export type GoogleThoughtText = "healed" | "verbatim";
+
+/**
+ * Folds streamed generateContent text and thought parts into text and thinking
+ * blocks, opening a new block whenever the part kind changes. A part's
+ * `thoughtSignature` stays on the block it belongs to; the empty text part
+ * Gemini sends after a reply's last chunk signs the open block.
+ *
+ * {@link push} folds whole parts. A route that rewrites visible text before it
+ * lands (Gemini CLI's planning-leak buffer and markup healing) feeds the
+ * rewritten text through {@link appendText}/{@link appendThinking} and
+ * signature-only parts through {@link sign}, so block and signature placement
+ * live only here.
+ */
+export class GoogleTextBlocks {
+	readonly #output: AssistantMessage;
+	readonly #stream: AssistantMessageEventStream;
+	readonly #thoughtText: GoogleThoughtText;
+	readonly #onBlockStart: (() => void) | undefined;
+	#block: TextContent | ThinkingContent | null = null;
+	#contentIndex = -1;
+	// Heals a leaked reasoning-fence opener (```thinking / ``````thinking) that some
+	// Gemini thought summaries emit as a between-summary delimiter (#8719). One
+	// stripper per thinking block; created lazily on first thinking delta.
+	#thinkingStripper: ThinkingFenceStripper | null = null;
+
+	/** `onBlockStart` runs before each `text_start`/`thinking_start`, e.g. to emit the stream's `start` first. */
+	constructor(
+		output: AssistantMessage,
+		stream: AssistantMessageEventStream,
+		thoughtText: GoogleThoughtText,
+		onBlockStart?: () => void,
+	) {
+		this.#output = output;
+		this.#stream = stream;
+		this.#thoughtText = thoughtText;
+		this.#onBlockStart = onBlockStart;
+	}
+
+	/** Folds one response part; parts without text are ignored. */
+	push(part: Part): void {
+		const { text, thoughtSignature } = part;
+		if (text === undefined) return;
+		const isThinking = isThinkingPart(part);
+		if (text === "") {
+			if (thoughtSignature && !part.functionCall) this.sign(thoughtSignature, isThinking);
+			return;
+		}
+		if (isThinking) this.appendThinking(text, thoughtSignature);
+		else this.appendText(text, thoughtSignature);
+	}
+
+	/**
+	 * Places a signature-only part's signature: an unmarked one signs the open block
+	 * (Gemini's trailing part after a reply), a thought part signs thinking of its own.
+	 */
+	sign(signature: string, isThought: boolean): void {
+		const signed = isThought && this.#block?.type !== "thinking" ? this.#open(true) : this.#block;
+		if (signed) this.#sign(signed, signature);
+	}
+
+	/** Appends reply text to the open text block, opening one if needed. */
+	appendText(text: string, signature?: string): void {
+		const block = this.#block?.type === "text" ? this.#block : this.#open(false);
+		this.#sign(block, signature);
+		block.text += text;
+		this.#stream.push({ type: "text_delta", contentIndex: this.#contentIndex, delta: text, partial: this.#output });
+	}
+
+	/** Appends thought text to the open thinking block, opening one if needed. */
+	appendThinking(text: string, signature?: string): void {
+		const block = this.#block?.type === "thinking" ? this.#block : this.#open(true);
+		this.#sign(block, signature);
+		if (this.#thoughtText === "healed") this.#thinkingStripper ??= new ThinkingFenceStripper();
+		const delta = this.#thinkingStripper ? this.#thinkingStripper.push(text) : text;
+		if (!delta) return;
+		block.thinking += delta;
+		this.#stream.push({ type: "thinking_delta", contentIndex: this.#contentIndex, delta, partial: this.#output });
+	}
+
+	/** Ends the open block, releasing thinking text the fence stripper held back. */
+	close(): void {
+		const block = this.#block;
+		if (!block) return;
+		if (block.type === "thinking" && this.#thinkingStripper) {
+			const tail = this.#thinkingStripper.flush();
+			if (tail) {
+				block.thinking += tail;
+				this.#stream.push({
+					type: "thinking_delta",
+					contentIndex: this.#contentIndex,
+					delta: tail,
+					partial: this.#output,
+				});
+			}
+		}
+		this.#thinkingStripper = null;
+		this.#block = null;
+		pushBlockEndEvent(block, this.#contentIndex, this.#output, this.#stream);
+	}
+
+	#open(isThinking: true): ThinkingContent;
+	#open(isThinking: false): TextContent;
+	#open(isThinking: boolean): TextContent | ThinkingContent;
+	#open(isThinking: boolean): TextContent | ThinkingContent {
+		this.close();
+		const block = startTextOrThinkingBlock(isThinking, this.#output, this.#stream, this.#onBlockStart);
+		this.#block = block;
+		this.#contentIndex = this.#output.content.length - 1;
+		return block;
+	}
+
+	/** Keeps the newest non-empty signature a block's parts carried; an unsigned block gets no signature key. */
+	#sign(block: TextContent | ThinkingContent, signature: string | undefined): void {
+		if (!signature) return;
+		if (block.type === "thinking")
+			block.thinkingSignature = retainThoughtSignature(block.thinkingSignature, signature);
+		else block.textSignature = retainThoughtSignature(block.textSignature, signature);
+	}
+}
+
+/**
+ * Append a new text- or thinking-block to `output.content` and push the matching
+ * `text_start` / `thinking_start` event. `onBeforeStartEvent` lets the SSE consumer
+ * inject its `ensureStarted()` first-token side effect into the canonical event order.
+ */
+export function startTextOrThinkingBlock(
+	isThinking: true,
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	onBeforeStartEvent?: () => void,
+): ThinkingContent;
+export function startTextOrThinkingBlock(
+	isThinking: false,
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	onBeforeStartEvent?: () => void,
+): TextContent;
+export function startTextOrThinkingBlock(
+	isThinking: boolean,
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	onBeforeStartEvent?: () => void,
+): TextContent | ThinkingContent;
+export function startTextOrThinkingBlock(
+	isThinking: boolean,
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	onBeforeStartEvent?: () => void,
+): TextContent | ThinkingContent {
+	// Gemini returns thought summaries, never the raw thoughts.
+	const block: TextContent | ThinkingContent = isThinking
+		? { type: "thinking", thinking: "", thinkingSignature: undefined, summary: true }
+		: { type: "text", text: "" };
+	output.content.push(block);
+	onBeforeStartEvent?.();
+	const contentIndex = output.content.length - 1;
+	if (isThinking) {
+		stream.push({ type: "thinking_start", contentIndex, partial: output });
+	} else {
+		stream.push({ type: "text_start", contentIndex, partial: output });
+	}
+	return block;
+}
+
+/**
+ * Error for an in-band `error` frame in a 200 generateContent stream. Keeps the
+ * RPC status alongside the message: an in-band quota failure is classified
+ * from this text, and `RESOURCE_EXHAUSTED` is the only account-exhaustion
+ * signal some of these chunks carry (#13090).
+ */
+export function googleStreamChunkError(error: NonNullable<GenerateContentResponse["error"]>, provider: string): Error {
+	const detail =
+		error.message && error.status
+			? `${error.message} (${error.status})`
+			: error.message || error.status || "unknown error";
+	const residue =
+		Array.isArray(error.details) && error.details.length > 0
+			? ` ${JSON.stringify({ error: { status: error.status, details: error.details } })}`
+			: "";
+	const message = `Google API stream error: ${detail}${residue}`;
+	return typeof error.code === "number" && error.code >= 400
+		? new AIError.GoogleApiError(message, error.code)
+		: new AIError.ProviderResponseError(message, { provider, kind: "output" });
+}
+/**
+ * Drives the chunked `generateContentStream` iterator into an `AssistantMessage` and
+ * the corresponding `AssistantMessageEventStream`. Shared between `streamGoogle` and
+ * `streamGoogleVertex` — every observable event order and stop-reason rule is preserved.
+ *
+ * The caller still owns: `output` construction, timing fields (`duration`/`ttft`),
+ * `rawRequestDump`, the `client.models.generateContentStream(params)` call itself,
+ * pushing `start`/`done`/`error` events, and the surrounding try/catch that translates
+ * thrown errors into `output.stopReason`/`errorMessage`.
+ *
+ * This helper handles: the chunk loop, text/thinking blocks ({@link GoogleTextBlocks}), usage metadata
+ * decoding (`calculateCost` included), tool-call id collision avoidance, finish-reason
+ * mapping, and the abort/stop-reason post-checks that re-throw to bubble into the
+ * caller's catch.
+ */
+export async function consumeGoogleStream<T extends GoogleApiType>(args: {
+	googleStream: AsyncIterable<GenerateContentResponse>;
+	output: AssistantMessage;
+	stream: AssistantMessageEventStream;
+	model: Model<T>;
+	options: { signal?: AbortSignal } | undefined;
+	onFirstToken?: () => void;
+}): Promise<void> {
+	const { googleStream, output, stream, model, options, onFirstToken } = args;
+	const blocks = output.content;
+	const blockIndex = () => blocks.length - 1;
+	const textBlocks = new GoogleTextBlocks(output, stream, "healed");
+	let firstTokenSeen = false;
+	let sawFinishReason = false;
+
+	for await (const chunk of googleStream) {
+		if (chunk.error) throw googleStreamChunkError(chunk.error, model.provider);
+		if (!chunk.candidates?.length && chunk.promptFeedback?.blockReason) {
+			const detail = chunk.promptFeedback.blockReasonMessage;
+			throw new AIError.ProviderResponseError(
+				`Request blocked by Google (${chunk.promptFeedback.blockReason})${detail ? `: ${detail}` : ""}`,
+				{ provider: model.provider, kind: "content-blocked" },
+			);
+		}
+		const candidate = chunk.candidates?.[0];
+		if (candidate?.content?.parts) {
+			for (const part of candidate.content.parts) {
+				if (part.text && !firstTokenSeen) {
+					firstTokenSeen = true;
+					onFirstToken?.();
+				}
+				textBlocks.push(part);
+
+				if (part.functionCall) {
+					textBlocks.close();
+
+					// Generate unique ID if not provided or if it's a duplicate
+					const providedId = part.functionCall.id;
+					const needsNewId = !providedId || output.content.some(b => b.type === "toolCall" && b.id === providedId);
+					const toolCallId = needsNewId ? nextToolCallId(part.functionCall.name || "tool") : providedId;
+
+					const toolCall: ToolCall = {
+						type: "toolCall",
+						id: toolCallId,
+						name: part.functionCall.name || "",
+						arguments: (part.functionCall.args ?? {}) as Record<string, any>,
+						...(part.thoughtSignature && { thoughtSignature: part.thoughtSignature }),
+					};
+
+					output.content.push(toolCall);
+					pushToolCallEvents(toolCall, blockIndex(), output, stream);
+				}
+			}
+		}
+
+		if (candidate?.finishReason) {
+			sawFinishReason = true;
+			const mapped = mapStopReason(candidate.finishReason);
+			// Only let a trailing tool call upgrade benign finishes; SAFETY/MALFORMED_FUNCTION_CALL
+			// and friends must surface as errors even when earlier chunks carried valid tool calls.
+			if ((mapped === "stop" || mapped === "length") && output.content.some(b => b.type === "toolCall")) {
+				output.stopReason = "toolUse";
+			} else {
+				output.stopReason = mapped;
+				if (mapped === "error") {
+					output.errorMessage = `Generation failed with finish reason: ${candidate.finishReason}`;
+				}
+			}
+		}
+
+		if (chunk.usageMetadata) {
+			output.usage = mapGoogleUsage(chunk.usageMetadata);
+			calculateCost(model, output.usage, output.timestamp);
+		}
+	}
+
+	textBlocks.close();
+
+	if (options?.signal?.aborted) {
+		throw new AIError.AbortError();
+	}
+
+	if (!sawFinishReason) {
+		throw new AIError.ProviderResponseError(
+			"Google API stream ended without a finish reason (connection dropped or response truncated)",
+			{ provider: model.provider, kind: "incomplete-stream" },
+		);
+	}
+
+	if (output.stopReason === "aborted" || output.stopReason === "error") {
+		throw new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {
+			provider: model.provider,
+			kind: "output",
+		});
+	}
+}
+
+/**
+ * Build the `GenerateContentParameters` payload for the public Gemini API and Vertex AI.
+ * Both surfaces accept the same `GenerateContentConfig` shape — every numeric/string knob,
+ * tool-config, thinking-config, and system-instruction conversion is identical.
+ *
+ * `google-gemini-cli` is NOT routed through here: its `CloudCodeAssistRequest` body has a
+ * distinct top-level shape (project/request/requestType) and a different thinking-config
+ * placement on `generationConfig`.
+ */
+export function buildGoogleGenerateContentParams<T extends "google-generative-ai" | "google-vertex">(
+	model: Model<T>,
+	context: Context,
+	options: GoogleSharedStreamOptions,
+): GenerateContentParameters {
+	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
+	const contents = convertMessages(model, context);
+
+	const generationConfig: GenerateContentConfig = {};
+	if (options.temperature !== undefined) generationConfig.temperature = options.temperature;
+	if (options.maxTokens !== undefined) generationConfig.maxOutputTokens = options.maxTokens;
+	if (options.topP !== undefined) generationConfig.topP = options.topP;
+	if (options.topK !== undefined) generationConfig.topK = options.topK;
+	if (options.presencePenalty !== undefined) generationConfig.presencePenalty = options.presencePenalty;
+
+	const config: GenerateContentConfig = {
+		...(Object.keys(generationConfig).length > 0 && generationConfig),
+		...(systemPrompts.length > 0 && { systemInstruction: { parts: systemPrompts.map(text => ({ text })) } }),
+		...(context.tools && context.tools.length > 0 && { tools: convertTools(context.tools, model) }),
+	};
+
+	// Gemini API (google-generative-ai) reads the tier from the request body;
+	// Vertex AI ignores a body field and requires the
+	// `X-Vertex-AI-LLM-Shared-Request-Type` header instead (added in
+	// streamGoogleVertex), so only emit the body field for the direct API.
+	const serviceTier = options.serviceTier;
+	// `!== "ultrafast"` narrows to the Gemini wire type; `shouldSendServiceTier` already rejects it for Google.
+	if (
+		model.provider === "google" &&
+		serviceTier !== "ultrafast" &&
+		shouldSendServiceTier(serviceTier, model.provider)
+	) {
+		config.serviceTier = serviceTier;
+	}
+
+	if (context.tools && context.tools.length > 0 && options.toolChoice) {
+		const choice = options.toolChoice;
+		if (typeof choice === "string") {
+			const mode = mapToolChoice(choice);
+			if (mode !== "AUTO") {
+				config.toolConfig = {
+					functionCallingConfig: { mode },
+				};
+			}
+		} else {
+			// Named-tool routing — `mode: "ANY"` plus an explicit allow-list. The
+			// caller is responsible for ensuring the names exist in `context.tools`.
+			config.toolConfig = {
+				functionCallingConfig: {
+					mode: "ANY",
+					allowedFunctionNames: [...choice.allowedFunctionNames],
+				},
+			};
+		}
+	} else {
+		config.toolConfig = undefined;
+	}
+
+	const thinking = options.thinking;
+	if (
+		thinking &&
+		model.reasoning &&
+		(thinking.enabled || thinking.level !== undefined || thinking.budgetTokens !== undefined)
+	) {
+		const cfg: ThinkingConfig = { includeThoughts: thinking.enabled && !options.hideThinkingSummary };
+		if (thinking.level !== undefined) {
+			// GoogleThinkingLevel mirrors the SDK's ThinkingLevel string enum values 1:1.
+			cfg.thinkingLevel = thinking.level as ThinkingLevel;
+		} else if (thinking.budgetTokens !== undefined) {
+			cfg.thinkingBudget = thinking.budgetTokens;
+		}
+		config.thinkingConfig = cfg;
+	}
+
+	if (options.signal) {
+		if (options.signal.aborted) {
+			throw new AIError.AbortError("Request aborted");
+		}
+		config.abortSignal = options.signal;
+	}
+
+	if (options.cachedContent !== undefined) {
+		// Blank names are never valid resource references; anything else stays
+		// opaque so we do not invent format/model/project checks here.
+		if (options.cachedContent.trim().length === 0) {
+			throw new AIError.ValidationError("cachedContent must not be blank");
+		}
+		const incompatibleFields = [
+			config.systemInstruction !== undefined && "systemInstruction",
+			config.tools !== undefined && "tools",
+			config.toolConfig !== undefined && "toolConfig",
+		].filter((field): field is string => Boolean(field));
+		if (incompatibleFields.length > 0) {
+			throw new AIError.ValidationError(
+				`cachedContent cannot be combined with request-level ${incompatibleFields.join(", ")}`,
+			);
+		}
+		config.cachedContent = options.cachedContent;
+	}
+
+	return {
+		model: model.id,
+		contents,
+		config,
+	};
+}
+
+/**
+ * Drive the `streamGoogle` / `streamGoogleVertex` event flow: build the assistant message,
+ * push start/done/error events, run `consumeGoogleStream`, and translate thrown errors into
+ * the canonical `error` event shape.
+ *
+ * Caller-supplied `prepare()` runs inside the try-block so any failure (missing project,
+ * bad auth, etc.) is funneled through the same error path as a streaming failure.
+ */
+export interface GoogleGenAIRequestPlan {
+	params: GenerateContentParameters;
+	url: string;
+	headers: Record<string, string>;
+	fetch?: FetchImpl;
+	/** Optional URL retried once when {@link url} returns 404 (regional Vertex endpoint missing a global-only model). */
+	fallbackUrl?: string;
+}
+
+/** Request id from a Google or Vertex HTTP response, if the host sent one. */
+export function googleStreamRequestId(response: Response): string | null {
+	return (
+		response.headers.get("x-goog-request-id") ??
+		response.headers.get("x-request-id") ??
+		response.headers.get("request-id")
+	);
+}
+
+export function streamGoogleGenAI<T extends "google-generative-ai" | "google-vertex">(args: {
+	model: Model<T>;
+	options: GoogleSharedStreamOptions | undefined;
+	api: T;
+	prepare: () => GoogleGenAIRequestPlan | Promise<GoogleGenAIRequestPlan>;
+}): AssistantMessageEventStream {
+	const { model, options, api, prepare } = args;
+	const stream = new AssistantMessageEventStream();
+
+	(async () => {
+		const startTime = performance.now();
+		let firstTokenTime: number | undefined;
+
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: api as Api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		let rawRequestDump: RawHttpRequestDump | undefined;
+
+		try {
+			const plan = await prepare();
+			let params = plan.params;
+			const replacement = await options?.onPayload?.(params, model);
+			if (replacement !== undefined) {
+				params = replacement as GenerateContentParameters;
+			}
+			rawRequestDump = {
+				provider: model.provider,
+				api: output.api,
+				model: model.id,
+				method: "POST",
+				url: plan.url,
+				body: params,
+				headers: plan.headers,
+			};
+
+			const wireBody = paramsToWireBody(params);
+			const bodyJson = JSON.stringify(wireBody);
+			const fetchImpl = plan.fetch ?? options?.fetch ?? (globalThis.fetch.bind(globalThis) as FetchImpl);
+			// Bun's native fetch ceiling is disabled (`timeout: false`) so configurable
+			// watchdogs govern slow-prefill streams (issues #2422, #16991). Direct callers
+			// that bypass `register-builtins` (which installs the iterator-level
+			// first-event watchdog) still need this pre-response timer, otherwise an
+			// endpoint that accepts the POST and never sends headers would hang forever.
+			const firstEventTimeoutMs =
+				options?.streamFirstEventTimeoutMs ??
+				getStreamFirstEventTimeoutMs(options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs());
+			// Each attempt arms its own pre-response watchdog, cleared once headers (or a finite
+			// error body) arrive: an absolute deadline would keep aborting an actively streaming
+			// body. Stream liveness belongs to the event iterator's idle watchdog.
+			const openStreamAt = async (
+				requestUrl: string,
+				requestBody: string,
+				maxAttempts: number,
+			): Promise<ReadableStream<Uint8Array>> => {
+				let clearWatchdog: (() => void) | undefined;
+				let response: Response;
+				try {
+					response = await fetchWithRetry(requestUrl, {
+						method: "POST",
+						headers: { ...plan.headers, "Content-Type": "application/json", Accept: "text/event-stream" },
+						body: requestBody,
+						signal: options?.signal,
+						prepareInit: () => {
+							clearWatchdog?.();
+							const watchdog = armPreResponseTimeout(options?.signal, firstEventTimeoutMs);
+							clearWatchdog = watchdog.clear;
+							return { signal: watchdog.signal };
+						},
+						maxAttempts,
+						maxDelayMs: options?.maxRetryDelayMs,
+						fetch: fetchImpl,
+						timeout: false,
+					});
+					if (!response.ok) {
+						const errorText = await response.text().catch(() => "");
+						throw new AIError.GoogleApiError(
+							`Google API error (${response.status}): ${extractGoogleErrorMessage(errorText, response.status)}`,
+							response.status,
+							{ headers: response.headers },
+						);
+					}
+				} finally {
+					clearWatchdog?.();
+				}
+				// Accepted headers are in and the pre-response watchdog is already cleared,
+				// so a slow observer cannot abort the connected stream. Notify before the
+				// body is read. Rejections throw above and are not reported here. Initial,
+				// regional-fallback, empty-retry, and continuation requests all enter here.
+				await notifyProviderResponse(options, response, model, googleStreamRequestId(response));
+				if (!response.body) {
+					throw new AIError.ProviderResponseError("Google API returned an empty response body", {
+						provider: model.provider,
+						kind: "empty-body",
+					});
+				}
+				return response.body as ReadableStream<Uint8Array>;
+			};
+			// A regional Vertex endpoint 404s for models published only on the
+			// global endpoint; retry global once so a stale/ambient region never
+			// breaks a request that worked before regional routing existed.
+			// The initial request makes one attempt (its caller owns retries); a continuation
+			// resume retries transient failures itself (`CONTINUATION_MAX_ATTEMPTS`).
+			const openStream = async (requestBody = bodyJson, maxAttempts = 1): Promise<ReadableStream<Uint8Array>> => {
+				if (!plan.fallbackUrl) return openStreamAt(plan.url, requestBody, maxAttempts);
+				try {
+					return await openStreamAt(plan.url, requestBody, maxAttempts);
+				} catch (error) {
+					if (error instanceof AIError.GoogleApiError && error.status === 404) {
+						return openStreamAt(plan.fallbackUrl, requestBody, maxAttempts);
+					}
+					throw error;
+				}
+			};
+
+			let body = await openStream();
+			stream.push({ type: "start", partial: output });
+
+			// Attach the observer only when a diagnostic listener exists: any
+			// observer turns on per-line raw capture in `readSseJson`.
+			const onSseEvent = options?.onSseEvent;
+			const sseObserver: SseEventObserver | undefined = onSseEvent
+				? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model)
+				: undefined;
+			// Gemini occasionally finishes with `finishReason: STOP` while emitting only an empty
+			// text part and no tool call. Delivered as-is the agent receives a blank message and
+			// silently halts mid-task, so retry a bounded number of times before giving up.
+			for (let emptyAttempt = 0; ; emptyAttempt++) {
+				const googleStream = followGoogleContinuations(
+					readSseJson<GenerateContentResponse>(body, options?.signal, sseObserver),
+					chunk => chunk,
+					async continuationToken =>
+						readSseJson<GenerateContentResponse>(
+							await openStream(JSON.stringify({ ...wireBody, continuationToken }), CONTINUATION_MAX_ATTEMPTS),
+							options?.signal,
+							sseObserver,
+						),
+				);
+				await consumeGoogleStream({
+					googleStream,
+					output,
+					stream,
+					model,
+					options,
+					onFirstToken: () => {
+						firstTokenTime = performance.now();
+					},
+				});
+
+				if (
+					output.stopReason !== "stop" ||
+					hasMeaningfulGoogleContent(output) ||
+					options?.acceptEmptyResponse === true
+				) {
+					break;
+				}
+				if (emptyAttempt >= MAX_EMPTY_STREAM_RETRIES) {
+					throw new AIError.ProviderResponseError(
+						`Google API returned an empty response (finishReason STOP with no content) after ${MAX_EMPTY_STREAM_RETRIES + 1} attempts`,
+						{ provider: model.provider, kind: "empty-body" },
+					);
+				}
+				try {
+					await scheduler.wait(EMPTY_STREAM_BASE_DELAY_MS * 2 ** emptyAttempt, { signal: options?.signal });
+				} catch {
+					throw new AIError.AbortError();
+				}
+				resetGoogleStreamOutputForRetry(output);
+				body = await openStream();
+			}
+
+			output.duration = performance.now() - startTime;
+			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
+			stream.push({ type: "done", reason: output.stopReason as "length" | "stop" | "toolUse", message: output });
+			stream.end();
+		} catch (error) {
+			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
+			output.stopReason = result.stopReason;
+			output.errorStatus = result.status;
+			output.errorId = result.id;
+			output.errorMessage = result.message;
+			output.duration = performance.now() - startTime;
+			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
+			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.end();
+		}
+	})();
+
+	return stream;
+}
+
+/**
+ * Lift the SDK's `params.config` fields out of `config` and place them where the
+ * Gemini / Vertex AI REST API expects them on the request body. Mirrors the
+ * generateContentParametersTo{Mldev,Vertex} transformation in @google/genai
+ * for the subset of fields this codebase actually sets.
+ *
+ * `abortSignal` is intentionally dropped — the SDK propagates it via `fetch.signal`,
+ * which our caller already wires up through `options.signal`.
+ */
+function paramsToWireBody(params: GenerateContentParameters): Record<string, unknown> {
+	const body: Record<string, unknown> = { contents: params.contents };
+	const config = params.config;
+	if (!config) return body;
+
+	if (config.systemInstruction !== undefined) body.systemInstruction = config.systemInstruction;
+	if (config.tools !== undefined) body.tools = config.tools;
+	if (config.toolConfig !== undefined) body.toolConfig = config.toolConfig;
+	if (config.safetySettings !== undefined) body.safetySettings = config.safetySettings;
+	if (config.cachedContent !== undefined) body.cachedContent = config.cachedContent;
+	if (config.serviceTier !== undefined) body.serviceTier = config.serviceTier;
+
+	const gen: Record<string, unknown> = {};
+	if (config.temperature !== undefined) gen.temperature = config.temperature;
+	if (config.maxOutputTokens !== undefined) gen.maxOutputTokens = config.maxOutputTokens;
+	if (config.topP !== undefined) gen.topP = config.topP;
+	if (config.topK !== undefined) gen.topK = config.topK;
+	if (config.candidateCount !== undefined) gen.candidateCount = config.candidateCount;
+	if (config.stopSequences !== undefined) gen.stopSequences = config.stopSequences;
+	if (config.presencePenalty !== undefined) gen.presencePenalty = config.presencePenalty;
+	if (config.frequencyPenalty !== undefined) gen.frequencyPenalty = config.frequencyPenalty;
+	if (config.seed !== undefined) gen.seed = config.seed;
+	if (config.responseMimeType !== undefined) gen.responseMimeType = config.responseMimeType;
+	if (config.responseSchema !== undefined) gen.responseSchema = config.responseSchema;
+	if (config.responseJsonSchema !== undefined) gen.responseJsonSchema = config.responseJsonSchema;
+	if (config.responseModalities !== undefined) gen.responseModalities = config.responseModalities;
+	if (config.thinkingConfig !== undefined) gen.thinkingConfig = config.thinkingConfig;
+	if (Object.keys(gen).length > 0) body.generationConfig = gen;
+	return body;
+}
+
+/**
+ * Human-readable message for a non-2xx Google response.
+ *
+ * On a usage-limit status the RPC `status`/`details` residue is kept after the
+ * message: `parseGoogleRpcRateLimitReason` reads `RESOURCE_EXHAUSTED` plus the
+ * `google.rpc.ErrorInfo` reason to tell an account billing cap (terminal) from
+ * a per-minute throttle (retryable), and reducing the body to `error.message`
+ * hid both, so every billing 429 replayed as a transient rate limit (#13090).
+ * The Cloud Code Assist path keeps the whole raw body for the same reason.
+ */
+export function extractGoogleErrorMessage(errorText: string, status: number): string {
+	if (!errorText) return "Unknown error";
+	try {
+		const parsed = JSON.parse(errorText) as {
+			error?: { message?: string; status?: string; details?: unknown[] };
+		};
+		const error = parsed.error;
+		if (!error?.message) return errorText;
+		if (!AIError.isUsageLimitStatus(status)) return error.message;
+		const residue = { error: { status: error.status, details: error.details } };
+		return error.status === undefined && error.details === undefined
+			? error.message
+			: `${error.message} ${JSON.stringify(residue)}`;
+	} catch {
+		return errorText;
+	}
+}

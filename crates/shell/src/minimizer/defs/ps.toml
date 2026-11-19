@@ -1,0 +1,17 @@
+# ps aux / -ef: long process listings compact to head+tail with an omitted
+# marker. Short listings (fewer lines than head+tail) pass through unchanged.
+
+[filters.ps]
+description = "Compact long ps listings"
+match_command = "^ps$"
+strip_ansi = true
+truncate_lines_at = 250
+head_lines = 20
+tail_lines = 20
+max_lines = 60
+on_empty = "ps: empty"
+
+[[tests.ps]]
+name = "short listing passes through"
+input = "  PID TTY          TIME CMD\n 1234 pts/0    00:00:00 bash\n 5678 pts/0    00:00:00 ps\n"
+expected = "  PID TTY          TIME CMD\n 1234 pts/0    00:00:00 bash\n 5678 pts/0    00:00:00 ps\n"

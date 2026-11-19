@@ -1,0 +1,87 @@
+# Ported from snip/filters/npx.yaml (declarative DSL → local TOML schema).
+# match_command adapted for the local (program, subcommand) dispatch model.
+#
+# This def is the catch-all for UNKNOWN `npx <tool>` invocations only. It is NOT
+# safe by construction on `match_command` alone: engine.rs reaches a pipeline
+# along TWO paths, and a bare `^npx$` with no subcommand gate leaks on both.
+#   1. Standalone (apply_identity -> resolve_pipeline): fires when
+#      filters::supports("npx", sub) is FALSE. `npx nx` lands here, and a bare
+#      npx def sorts before `nx-wrapped` (npx.toml < nx.toml in build.rs file
+#      order), so find() would return THIS def first and shadow nx-wrapped's
+#      NX-banner strip.
+#   2. Overlay (apply_pipeline_overlay): fires AFTER the Rust filter when
+#      filters::supports("npx", sub) is TRUE. `npx eslint`/`npx jest`/... run
+#      their Rust lint/test filter, then resolve_pipeline re-selects this def
+#      and re-applies max_lines/strip on top, truncating diagnostics the Rust
+#      filter intentionally kept.
+# match_subcommand below excludes every subcommand owned elsewhere so neither
+# path leaks. The excluded set is the SOURCE-OF-TRUTH union of:
+#   - filters::supports("npx", _) == true  (mod.rs npx arm: tsc, eslint, biome,
+#     jest, vitest, playwright; js_tools NPX_ROUTABLE_TOOLS: tsc, eslint, prisma,
+#     prettier, next), and
+#   - nx  (claimed by nx-wrapped in nx.toml).
+# The pattern is the lookahead-free anchored COMPLEMENT of that word set: the
+# `regex` crate is RE2-style with no look-around, so a `(?!...)` negative cannot
+# be used and a positive allowlist would match the wrong (excluded) tokens. It
+# was machine-generated as the trie-complement and verified against the full
+# known set plus prefix/suffix edge cases (e.g. `eslint-config`, `nextfoo`,
+# `playwrigh` must still be claimed; `eslint`, `next`, `playwright` must not).
+# If a tool is ever added to the npx routing in filters::supports, add it here
+# too — the engine regression tests in engine.rs (npx_def_does_not_shadow_*/
+# npx_def_does_not_overlay_*/npx_def_fires_for_unknown_tool) fail loudly on
+# desync.
+#
+# snip's `^Need to install` / `^Ok to proceed` patterns are widened here to the
+# full literal npm install-prompt lines so the strip is unambiguous against
+# default human output (the JSON-reporter tiers never apply to npx preambles).
+
+[filters.npx]
+description = "Condensed npx output for unknown tools — strip install prompts, npm warn/notice noise, and blank lines"
+match_command = "^npx$"
+# Anchored complement of {nx, tsc, eslint, biome, jest, vitest, playwright,
+# prisma, prettier, next}: matches any npx subcommand EXCEPT those routed/owned
+# elsewhere (see header). Lookahead-free for the RE2-style `regex` crate.
+match_subcommand = "^(?:|[^bejnptv].*|b(?:|[^i].*|i(?:|[^o].*|o(?:|[^m].*|m(?:|[^e].*|e(?:.+)))))|e(?:|[^s].*|s(?:|[^l].*|l(?:|[^i].*|i(?:|[^n].*|n(?:|[^t].*|t(?:.+))))))|j(?:|[^e].*|e(?:|[^s].*|s(?:|[^t].*|t(?:.+))))|n(?:|[^ex].*|e(?:|[^x].*|x(?:|[^t].*|t(?:.+)))|x(?:.+))|p(?:|[^lr].*|l(?:|[^a].*|a(?:|[^y].*|y(?:|[^w].*|w(?:|[^r].*|r(?:|[^i].*|i(?:|[^g].*|g(?:|[^h].*|h(?:|[^t].*|t(?:.+)))))))))|r(?:|[^ei].*|e(?:|[^t].*|t(?:|[^t].*|t(?:|[^i].*|i(?:|[^e].*|e(?:|[^r].*|r(?:.+))))))|i(?:|[^s].*|s(?:|[^m].*|m(?:|[^a].*|a(?:.+))))))|t(?:|[^s].*|s(?:|[^c].*|c(?:.+)))|v(?:|[^i].*|i(?:|[^t].*|t(?:|[^e].*|e(?:|[^s].*|s(?:|[^t].*|t(?:.+)))))))$"
+strip_ansi = true
+strip_lines_matching = [
+  "^Need to install the following packages",
+  "^Ok to proceed\\? \\(y\\)",
+  "^npm warn",
+  "^npm notice",
+  "^\\s*$",
+]
+truncate_lines_at = 120
+max_lines = 50
+
+[[tests.npx]]
+name = "first-run strips install preamble + npm warn/notice, keeps tool output"
+# Exercises every content-strip pattern: the install-prompt header, the
+# `Ok to proceed?` line, npm warn/notice noise, and blank lines. snip's port
+# does not strip the bare `name@version` package line, so it survives — that
+# residue is faithful to the donor and documented here.
+input = """
+Need to install the following packages:
+cowsay@1.6.0
+Ok to proceed? (y)
+
+npm warn deprecated foo@1.0.0: use bar instead
+npm notice New major version of npm available!
+ _______
+< Hello >
+ -------
+        \\   ^__^
+         \\  (oo)\\_______
+            (__)\\       )\\/\\
+                ||----w |
+                ||     ||
+"""
+expected = """cowsay@1.6.0
+ _______
+< Hello >
+ -------
+        \\   ^__^
+         \\  (oo)\\_______
+            (__)\\       )\\/\\
+                ||----w |
+                ||     ||
+"""

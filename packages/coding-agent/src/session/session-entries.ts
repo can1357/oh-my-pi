@@ -1,0 +1,486 @@
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type {
+	ImageContent,
+	MessageAttribution,
+	ServiceTierByFamily,
+	StopReason,
+	TextContent,
+	Usage,
+} from "@oh-my-pi/pi-ai";
+import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { CompactionMethod } from "./compaction-methods";
+import type { WorkPoolYieldItem } from "../task/workpool-yield";
+import type { RetryFallbackRole } from "./retry-fallback-chains";
+import type { RuntimeIdentity } from "./runtime-identity";
+
+export const CURRENT_SESSION_VERSION = 3;
+
+export const SESSION_TITLE_SLOT_BYTES = 256;
+
+export const SESSION_TITLE_SLOT_ENTRY_TYPE = "title";
+
+export const TITLE_CHANGE_ENTRY_TYPE = "title_change";
+
+export type SessionTitleSource = "auto" | "user";
+
+/** Fixed-width first-line slot carrying the mutable current session title. */
+export interface SessionTitleSlotEntry {
+	type: typeof SESSION_TITLE_SLOT_ENTRY_TYPE;
+	v: 1;
+	title: string;
+	source?: SessionTitleSource;
+	updatedAt: string;
+	pad: string;
+}
+
+export const EPHEMERAL_MODEL_CHANGE_ROLE = "fallback";
+
+/** A prewalk or plan-yolo handoff: restored on resume, passed over when looking up the assigned role. */
+export const PREWALK_MODEL_CHANGE_ROLE = "prewalk";
+
+/** A model picked for this session only (the model selector, `/model`), not through a configured role. */
+export const TEMPORARY_MODEL_CHANGE_ROLE = "temporary";
+
+/**
+ * The configured model role a `model_change` entry's `role` assigned; undefined for the markers of
+ * switches no role made (retry fallback, prewalk handoff, temporary pick). The Agent Hub labels rows with it.
+ */
+export function modelRoleOf(role: string | undefined): string | undefined {
+	return role === EPHEMERAL_MODEL_CHANGE_ROLE ||
+		role === PREWALK_MODEL_CHANGE_ROLE ||
+		role === TEMPORARY_MODEL_CHANGE_ROLE
+		? undefined
+		: role;
+}
+
+export interface SessionHeader {
+	type: "session";
+	version?: number; // v1 sessions don't have this
+	id: string;
+	title?: string; // Auto-generated title from first message
+	titleSource?: SessionTitleSource;
+	timestamp: string;
+	cwd: string;
+	/**
+	 * Additional workspace directories beyond `cwd` (multi-root workspace).
+	 * Absolute, normalized, deduplicated. Absent on legacy single-cwd sessions.
+	 * See {@link SessionWorkspace} in `./session-workspace`.
+	 */
+	additionalDirectories?: string[];
+	parentSession?: string;
+	/**
+	 * Set, to the `parentSession` id, when this session is that same conversation
+	 * continued in a new file because it could not keep writing its own (another
+	 * live process held it, or the file changed under it). Resuming the parent
+	 * resumes the most recently active continuation instead. Forks never set it.
+	 */
+	continuationOf?: string;
+	/** Prior absolute JSONL locations recorded by successful session moves. */
+	previousSessionFiles?: string[];
+	/** Local-only provider prompt-cache identity inherited by exact-route full forks; omitted from shares and HTML. */
+	providerPromptCacheKey?: string;
+	/** Local-only Task candidate, gated by the actual request model's cache policy; omitted from shares and HTML. */
+	taskPromptCacheKey?: string;
+}
+
+export interface NewSessionOptions {
+	parentSession?: string;
+	/** Provider prompt-cache identity to seed on the new session header. */
+	providerPromptCacheKey?: string;
+	taskPromptCacheKey?: string;
+	/**
+	 * Skip flushing the current session and delete it instead of saving. The
+	 * successor starts lazy: no empty header is written until it has content.
+	 */
+	drop?: boolean;
+	/** Additional workspace directories to seed on the new session. */
+	additionalDirectories?: string[];
+	/** Directory for the new session file (and later `/new` sessions); defaults to the current session directory. */
+	sessionDir?: string;
+}
+
+export interface SessionEntryBase {
+	type: string;
+	id: string;
+	parentId: string | null;
+	timestamp: string;
+	/**
+	 * omp build that wrote this entry, set on every entry this session's process authors. Copies
+	 * (forks, branches, collab replicas) keep the original writer. Absent on older entries.
+	 */
+	runtime?: RuntimeIdentity;
+	/**
+	 * Active leaf at append time, for an entry written off the active branch (late usage,
+	 * a background bash result routed back to the branch it started on). The loader replays
+	 * it instead of treating this entry as the leaf, so resume keeps the branch the live
+	 * session was on. Absence keeps the ordinary last-entry semantics; null records a
+	 * cleared leaf.
+	 */
+	activeLeafId?: string | null;
+}
+
+export interface SessionMessageEntry extends SessionEntryBase {
+	type: "message";
+	message: AgentMessage;
+}
+
+/**
+ * One judgment answer as journaled: a noul's probability of yes; `[label, confidence]` for a choice;
+ * `[score, confidence]` for a score; `[top, bottom, left, right, confidence]` for a box. Full
+ * distributions stay in the judgment answer cache.
+ */
+export type JudgmentRecordAnswer =
+	| number
+	| [choice: string, confidence: number]
+	| [score: number, confidence: number]
+	| [top: number, bottom: number, left: number, right: number, confidence: number];
+
+/**
+ * A native judgment as journaled on its {@link ModelUsageEntry}. No prompt text is written: the
+ * judgment answer cache (`judgment-cache.db`) keeps the state once under `states.id` and each
+ * question's rendered instructions under `oracle(state, name)`, so `state` plus a question id
+ * recovers the whole query.
+ */
+export interface JudgmentRecord {
+	/** `sha256` of the canonical state (and image digests): the cache's `states.id`. */
+	state: string;
+	/** Answers the request produced, by question id; empty when it failed. */
+	answers: Record<string, JudgmentRecordAnswer>;
+	/** Questions of the same judgment the cache answered: not billed and not in `answers`. */
+	cached?: number;
+}
+
+/**
+ * An off-transcript text completion as journaled on its {@link ModelUsageEntry}. The entry's
+ * `purpose` names the static prompt, which is never written; text too long to journal is left out.
+ */
+export interface CompletionRecord {
+	/** User-turn text the model was sent; absent when the request read the conversation at the entry's `parentId`. */
+	prompt?: string;
+	/** Reply text as the model produced it, before parsing. */
+	reply?: string;
+}
+
+/** Usage from a model call that does not belong in the conversation transcript. */
+export interface ModelUsageEntry extends SessionEntryBase {
+	type: "model_usage";
+	purpose: string;
+	/** Resolved model role used for the call, such as `tiny` or `smol`. */
+	role?: string;
+	api: string;
+	provider: string;
+	model: string;
+	usage: Usage;
+	stopReason: StopReason;
+	errorMessage?: string;
+	/**
+	 * A cache-warm refresh that answered for the conversation as it stood: when it was sent (a hit restarts
+	 * the cache lifetime then) and whether it read the cache. Absent on a failed, replaced or outdated refresh.
+	 */
+	cacheRefresh?: { sentAt: number; hit: boolean };
+	/** Wall time of the request in milliseconds. */
+	duration?: number;
+	/** Milliseconds until the first streamed token. */
+	ttft?: number;
+	/** What a native judge was asked and answered. */
+	judgment?: JudgmentRecord;
+	/** What a text side channel (title generation) was sent and replied. */
+	completion?: CompletionRecord;
+}
+
+/** A {@link ModelUsageEntry} as its writer supplies it; the session adds identity, position, and time. */
+export type ModelUsageRecord = Omit<ModelUsageEntry, keyof SessionEntryBase>;
+
+export interface ThinkingLevelChangeEntry extends SessionEntryBase {
+	type: "thinking_level_change";
+	thinkingLevel?: string | null;
+	/**
+	 * The user-configured selector at the time of this change: `"auto"` when auto
+	 * mode was active, otherwise the concrete level. Absent on entries written
+	 * before auto-mode persistence existed; readers fall back to `thinkingLevel`.
+	 */
+	configured?: string | null;
+}
+
+export interface ModelChangeEntry extends SessionEntryBase {
+	type: "model_change";
+	/** Model in "provider/modelId" format */
+	model: string;
+	/** Role: "default", "smol", "slow", etc. Undefined treated as "default" */
+	role?: string;
+	/** True when this transition selected a retry-fallback model rather than the configured model. */
+	resolvedModelIsFallback?: boolean;
+}
+
+export interface ServiceTierChangeEntry extends SessionEntryBase {
+	type: "service_tier_change";
+	serviceTier: ServiceTierByFamily | null;
+}
+
+export interface CompactionEntry<T = unknown> extends SessionEntryBase {
+	type: "compaction";
+	summary: string;
+	shortSummary?: string;
+	firstKeptEntryId: string;
+	tokensBefore: number;
+	/** Estimated context tokens after the rewrite (display metadata). */
+	tokensAfter?: number;
+	/** Method that produced this entry; absent on legacy sessions and extension-provided compactions. */
+	method?: CompactionMethod;
+	/** Last branch entry represented by provider-native replay history; later entries replay normally. */
+	providerReplayThroughEntryId?: string;
+	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
+	details?: T;
+	/** Hook-provided data to persist across compaction */
+	preserveData?: Record<string, unknown>;
+	/** True if generated by an extension, undefined/false if pi-generated (backward compatible) */
+	fromExtension?: boolean;
+	/**
+	 * Dead-end warning from the post-pass progress guard: the pass completed
+	 * but freed too little for maintenance to continue. Rendered on the
+	 * compaction divider.
+	 */
+	warning?: string;
+}
+
+export interface BranchSummaryEntry<T = unknown> extends SessionEntryBase {
+	type: "branch_summary";
+	fromId: string;
+	summary: string;
+	/** Extension-specific data (not sent to LLM) */
+	details?: T;
+	/** True if generated by an extension, false if pi-generated */
+	fromExtension?: boolean;
+}
+
+/**
+ * Pure marker entry recorded by `/clear` (resetSessionContext). It carries no
+ * payload — its presence on the branch is a durable boundary the collapsed
+ * live transcript and the model-context rebuild start emission after, so a
+ * rebuild (theme change, focus attach, /shake, resume) does not resurrect the
+ * pre-reset conversation. The on-disk record and the plain `transcript:true`
+ * export path keep the full pre-reset history.
+ */
+export interface ResetBoundaryEntry extends SessionEntryBase {
+	type: "reset_boundary";
+}
+
+/**
+ * Custom entry for extensions to store extension-specific data in the session.
+ * Use customType to identify your extension's entries.
+ *
+ * Purpose: Persist extension state across session reloads. On reload, extensions can
+ * scan entries for their customType and reconstruct internal state.
+ *
+ * Does NOT participate in LLM context (ignored by buildSessionContext).
+ * For injecting content into context, see CustomMessageEntry.
+ */
+export interface CustomEntry<T = unknown> extends SessionEntryBase {
+	type: "custom";
+	customType: string;
+	data?: T;
+}
+
+/** Label entry for user-defined bookmarks/markers on entries. */
+export interface LabelEntry extends SessionEntryBase {
+	type: "label";
+	targetId: string;
+	label: string | undefined;
+}
+
+/** Append-only audit entry recording a session title change. */
+export interface TitleChangeEntry extends SessionEntryBase {
+	type: typeof TITLE_CHANGE_ENTRY_TYPE;
+	title: string;
+	previousTitle?: string;
+	source: SessionTitleSource;
+	trigger?: string;
+}
+
+declare module "@oh-my-pi/pi-agent-core/compaction/entries" {
+	interface CustomCompactionSessionEntries {
+		titleChange: TitleChangeEntry;
+		credentialPin: CredentialPinEntry;
+		modelUsage: ModelUsageEntry;
+	}
+}
+
+/** TTSR injection entry - tracks which time-traveling rules have been injected this session. */
+export interface TtsrInjectionEntry extends SessionEntryBase {
+	type: "ttsr_injection";
+	/** Names of rules that were injected */
+	injectedRules: string[];
+}
+
+/**
+ * Records which OAuth account served this session's requests for a provider.
+ *
+ * Provider prompt caches (Anthropic in particular) are account-scoped, and the
+ * auth store's session-sticky routing is process-local under a remote auth
+ * broker, so resume must re-pin the same account to reuse the warm cache
+ * prefix. Stores a sha-256 of the account + billing-scope tuple instead of
+ * the raw email/uuid/org; note an unsalted digest of a guessable email is
+ * still linkable, so exported sessions are pseudonymous, not anonymous.
+ */
+export interface CredentialPinEntry extends SessionEntryBase {
+	type: "credential_pin";
+	/** Provider id the pin applies to (e.g. "anthropic"). */
+	provider: string;
+	/** `credentialPinHash()` of the serving account's identity + scope tuple. */
+	hash: string;
+}
+
+/** Session init entry - captures initial context for subagent sessions (debugging/replay). */
+export interface SessionInitEntry extends SessionEntryBase {
+	type: "session_init";
+	/** System prompt blocks exactly as sent to the model; files written before blocks were kept store one joined string. */
+	systemPrompt: string[] | string;
+	/** Initial task/user message */
+	task: string;
+	/** Tools available to the agent */
+	tools: string[];
+	/** Names in `tools` presented as `xd://` devices instead of top-level tools (absent from older files). */
+	mountedTools?: string[];
+	/** Agent definition name (for example `scout` or `reviewer`). */
+	agent?: string;
+	/** Semantic model role declared by the agent, retained even after concrete model resolution. */
+	modelRole?: string;
+	/** Initially resolved provider/model selector for historical display. */
+	resolvedModel?: string;
+	/** The model came from a per-call `model`; cold revival re-checks it against the current operator grants. */
+	perCallModel?: boolean;
+	/** Exact canonical provider/id[@upstream] identity, without a thinking suffix; required for per-call revival. */
+	perCallModelIdentity?: string;
+	/** Configured thinking selector, or null when unset; required for per-call revival. */
+	perCallThinkingLevel?: ConfiguredThinkingLevel | null;
+	/** Subagent's `subagent:<id>` retry fallback role as installed at spawn; cold revival reinstalls it. Absent when none was installed or on older files. */
+	retryFallback?: RetryFallbackRole;
+	/** Whether the agent definition is read-only, allowing an exact zero-LoC attribution. */
+	readOnly?: boolean;
+	/** Output schema if structured output was requested. */
+	outputSchema?: unknown;
+	/** Enforcement policy recorded with the output schema for faithful revival. */
+	outputSchemaMode?: StructuredSubagentSchemaMode;
+	/** Whether revival must retain only the explicitly persisted tool names. */
+	restrictToolNames?: boolean;
+	/** Spawn allowlist the subagent ran with ("" = none, "*" = any, else CSV); absent on pre-spawns files. */
+	spawns?: string;
+	/** The agent's `readSummarize` setting (`false` = read summarization disabled); absent uses the session default. */
+	readSummarize?: boolean;
+	/** Effective advisor for this subagent: `"on"` = advisor-role model, else an explicit model pattern; absent = unadvised. */
+	advisor?: string;
+	/** Effective thresholds for a child with an explicit compaction override. */
+	compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
+	/** True when the subagent ran inside an isolation worktree: never revivable, transcript-only after park. Absent on older files. */
+	isolated?: boolean;
+	/** Work-pool yield items of the last model call; revival restores them so the yield tool matches. Absent when none. */
+	workPoolYieldItems?: WorkPoolYieldItem[];
+}
+
+/** Mode change entry - tracks agent mode transitions (e.g. plan mode). */
+export interface ModeChangeEntry extends SessionEntryBase {
+	type: "mode_change";
+	/** Current mode name, or "none" when exiting a mode */
+	mode: string;
+	/** Optional mode-specific data (e.g. plan file path) */
+	data?: Record<string, unknown>;
+}
+
+/**
+ * Custom message entry for extensions to inject messages into LLM context.
+ * Use customType to identify your extension's entries.
+ *
+ * Unlike CustomEntry, this DOES participate in LLM context unless `excludeFromContext` is set.
+ * The content participates in LLM context through convertToLlm().
+ * Use details for extension-specific metadata (not sent to LLM).
+ *
+ * display controls TUI rendering:
+ * - false: hidden entirely
+ * - true: rendered with distinct styling (different from user messages)
+ */
+export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
+	type: "custom_message";
+	customType: string;
+	content: string | (TextContent | ImageContent)[];
+	details?: T;
+	display: boolean;
+	/** Who initiated this message for billing/attribution semantics. */
+	attribution?: MessageAttribution;
+	/** Rendered and saved, never sent to the model (like `!!` bash rows). */
+	excludeFromContext?: boolean;
+}
+
+/** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
+export type SessionEntry =
+	| SessionMessageEntry
+	| ModelUsageEntry
+	| ThinkingLevelChangeEntry
+	| ModelChangeEntry
+	| ServiceTierChangeEntry
+	| CompactionEntry
+	| BranchSummaryEntry
+	| CustomEntry
+	| CustomMessageEntry
+	| LabelEntry
+	| TitleChangeEntry
+	| TtsrInjectionEntry
+	| SessionInitEntry
+	| ModeChangeEntry
+	| CredentialPinEntry
+	| ResetBoundaryEntry;
+
+/** Leaf selected when replaying one entry; an off-branch entry restores the active leaf captured at append time. */
+export function sessionEntryLeafId(entry: SessionEntry): string | null {
+	return entry.activeLeafId !== undefined ? entry.activeLeafId : entry.id;
+}
+
+/** Newest entry that selects itself on replay; skips late-usage markers. */
+export function lastSelfSelectedLeafId(entries: readonly SessionEntry[]): string | null {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (sessionEntryLeafId(entry) === entry.id) return entry.id;
+	}
+	return null;
+}
+
+/**
+ * Active leaf after replaying entries in file order; an empty or cleared session has no leaf.
+ * A captured leaf that no longer exists (rollback, rewrite) falls back to the newest self-selecting entry.
+ */
+export function resolveSessionLeafId(entries: readonly SessionEntry[]): string | null {
+	const last = entries.at(-1);
+	if (!last) return null;
+	const leafId = sessionEntryLeafId(last);
+	if (leafId === null || leafId === last.id || entries.some(entry => entry.id === leafId)) return leafId;
+	return lastSelfSelectedLeafId(entries);
+}
+
+/** Raw logical file entry after loaders strip any fixed-width title slot. */
+export type FileEntry = SessionHeader | SessionEntry;
+
+/** Physical JSONL entry before slot-aware loaders fold the title slot. */
+export type RawFileEntry = SessionTitleSlotEntry | FileEntry;
+
+/** Tree node for getTree() - defensive copy of session structure */
+export interface SessionTreeNode {
+	entry: SessionEntry;
+	children: SessionTreeNode[];
+	/** Resolved label for this entry, if any */
+	label?: string;
+}
+
+export interface UsageStatistics {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	totalTokens: number;
+	orchestrationInput: number;
+	orchestrationOutput: number;
+	orchestrationCacheRead: number;
+	premiumRequests: number;
+	cost: number;
+	/** Portion of {@link cost} carried by completed `task` results (direct children's spend). */
+	subagentCost: number;
+}

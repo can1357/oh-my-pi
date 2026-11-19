@@ -1,0 +1,11 @@
+{
+	"extends": "./tsconfig.base.json",
+	"compilerOptions": {
+		"composite": true,
+		"noEmit": true,
+		"emitDeclarationOnly": false,
+		"allowImportingTsExtensions": true
+	},
+	"include": ["scripts", "packages/natives/scripts/gen-npm-packages.ts"],
+	"exclude": ["node_modules"]
+}

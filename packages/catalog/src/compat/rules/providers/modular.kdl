@@ -1,0 +1,35 @@
+// Provider-wire compat for "modular". Modular Cloud serves open models on an
+// OpenAI-compatible API. The provider is catalog-only: models, prices, and
+// limits come from the models.dev `modular` entry. Reasoning controls differ
+// per model and were measured against the API.
+
+provider "modular" {
+	default-model "google/gemma-4-31b-it"
+	env "MODULAR_API_KEY"
+
+	thinking-mode "effort"
+	// The API takes OpenRouter's `reasoning` object for every model, so a model
+	// models.dev adds later works without its own block: on sends
+	// `reasoning.effort`, off sends `reasoning.enabled = false`.
+	thinking-format "openrouter"
+
+	// MiniMax M3.1 Flash takes a nested `reasoning.effort` and always thinks:
+	// `reasoning.enabled = false` still returns reasoning tokens.
+	models "MiniMaxAI/MiniMax-M3.1-Flash" {
+		thinking-requires-effort #true
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+	}
+	// MiniMax M3 and Gemma 4 31B switch reasoning with `reasoning.enabled` and
+	// ignore any effort, so the ladder is one on-rung beside off: off sends
+	// `enabled: false`, and on replaces the effort with `enabled: true`.
+	models "minimax/minimax-m3" "google/gemma-4-31b-it" {
+		thinking-efforts "high"
+		when-thinking {
+			extra-body {
+				reasoning {
+					enabled #true
+				}
+			}
+		}
+	}
+}

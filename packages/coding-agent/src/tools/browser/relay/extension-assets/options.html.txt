@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<title>OMP Browser Relay settings</title>
+		<style>
+			body {
+				font-family: system-ui, sans-serif;
+				max-width: 28rem;
+				margin: 2rem auto;
+				padding: 0 1rem;
+				color: #1f2328;
+			}
+			label {
+				display: block;
+				margin: 1rem 0 0.25rem;
+				font-weight: 600;
+			}
+			input {
+				width: 100%;
+				padding: 0.4rem 0.5rem;
+				font: inherit;
+				box-sizing: border-box;
+			}
+			button {
+				margin-top: 1.25rem;
+				padding: 0.45rem 1.1rem;
+				font: inherit;
+			}
+			#status {
+				margin-left: 0.75rem;
+				color: #1a7f37;
+			}
+			p.hint {
+				color: #57606a;
+				font-size: 0.85rem;
+			}
+		</style>
+	</head>
+	<body>
+		<h1>OMP Browser Relay</h1>
+		<p class="hint">
+			The extension connects to a local <code>omp-browser-relay</code> process. Values here must match the flags the
+			relay was started with.
+		</p>
+		<label for="port">Relay port</label>
+		<input id="port" type="number" min="1" max="65535" />
+		<label for="token">Token (optional)</label>
+		<input id="token" type="text" autocomplete="off" />
+		<button id="save">Save</button><span id="status"></span>
+		<script src="options.js"></script>
+	</body>
+</html>

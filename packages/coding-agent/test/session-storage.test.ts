@@ -1,0 +1,1065 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { Database } from "bun:sqlite";
+import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import {
+	IndexedSessionStorage,
+	type SessionStorageBackend,
+	type SessionStorageIndexEntry,
+} from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
+import {
+	FileSessionStorage,
+	SessionLockError,
+	SessionWriteConflictError,
+	type WriteTextAtomicOptions,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { type SessionTitleUpdate, serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
+
+class ControlledTitleUpdateBackend implements SessionStorageBackend {
+	readonly #sessionPath: string;
+	readonly #initialEntry: SessionStorageIndexEntry;
+	#content: string;
+	#firstUpdate: PromiseWithResolvers<void> | undefined;
+	#updateCount = 0;
+
+	constructor(sessionPath: string, content: string) {
+		this.#sessionPath = sessionPath;
+		this.#content = content;
+		this.#initialEntry = {
+			path: sessionPath,
+			size: content.length,
+			mtimeMs: 1,
+			title: "Old",
+			titleSource: "auto",
+			titleUpdatedAt: "t0",
+		};
+	}
+
+	init(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>> {
+		return Promise.resolve([this.#initialEntry]);
+	}
+
+	readFull(path: string): Promise<string | null> {
+		return Promise.resolve(path === this.#sessionPath ? this.#content : null);
+	}
+
+	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
+		if (path !== this.#sessionPath) return Promise.resolve(["", ""]);
+		const suffix = suffixBytes > 0 ? this.#content.slice(-suffixBytes) : "";
+		return Promise.resolve([this.#content.slice(0, prefixBytes), suffix]);
+	}
+
+	writeFull(_path: string, content: string, _mtimeMs: number, _title?: SessionTitleUpdate): Promise<void> {
+		this.#content = content;
+		return Promise.resolve();
+	}
+
+	append(_path: string, line: string, _mtimeMs: number): Promise<void> {
+		this.#content += line;
+		return Promise.resolve();
+	}
+
+	updateSessionTitle(_path: string, _title: SessionTitleUpdate, _mtimeMs: number): Promise<void> {
+		this.#updateCount++;
+		if (this.#updateCount === 1) {
+			this.#firstUpdate = Promise.withResolvers<void>();
+			return this.#firstUpdate.promise;
+		}
+		return Promise.resolve();
+	}
+
+	truncate(_path: string, _mtimeMs: number): Promise<void> {
+		this.#content = "";
+		return Promise.resolve();
+	}
+
+	remove(_paths: string[]): Promise<void> {
+		this.#content = "";
+		return Promise.resolve();
+	}
+
+	move(_src: string, _dst: string, _mtimeMs: number): Promise<void> {
+		return Promise.resolve();
+	}
+
+	rejectFirstUpdate(error: Error): void {
+		if (!this.#firstUpdate) throw new Error("First title update has not started");
+		this.#firstUpdate.reject(error);
+	}
+}
+
+class FileBackedSessionBackend implements SessionStorageBackend {
+	readonly #sessionPath: string;
+
+	constructor(sessionPath: string) {
+		this.#sessionPath = sessionPath;
+	}
+
+	init(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>> {
+		return Promise.resolve([{ path: this.#sessionPath, size: 1, mtimeMs: 1 }]);
+	}
+
+	readFull(path: string): Promise<string | null> {
+		if (path !== this.#sessionPath) return Promise.resolve(null);
+		try {
+			return Promise.resolve(fs.readFileSync(path, "utf8"));
+		} catch {
+			return Promise.resolve(null);
+		}
+	}
+
+	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
+		if (path !== this.#sessionPath) return Promise.resolve(["", ""]);
+		const content = fs.readFileSync(path, "utf8");
+		const suffix = suffixBytes > 0 ? content.slice(-suffixBytes) : "";
+		return Promise.resolve([content.slice(0, prefixBytes), suffix]);
+	}
+
+	writeFull(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	append(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	updateSessionTitle(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	truncate(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	remove(paths: string[]): Promise<void> {
+		for (const target of paths) fs.rmSync(target, { recursive: true, force: true });
+		return Promise.resolve();
+	}
+
+	move(): Promise<void> {
+		return Promise.resolve();
+	}
+}
+
+describe("FileSessionStorage writer", () => {
+	let tempDir: string;
+	let storage: FileSessionStorage;
+
+	beforeEach(async () => {
+		tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-writer-"));
+		storage = new FileSessionStorage();
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await fsp.rm(tempDir, { recursive: true, force: true });
+	});
+
+	it("makes each append visible on disk without awaiting a microtask", () => {
+		const sessionPath = path.join(tempDir, "immediate.jsonl");
+		const writer = storage.openWriter(sessionPath, { flags: "w" });
+		// Contract: visibility must not depend on awaiting the returned Promise
+		// (or a microtask drain). appendSync / the sync body of append writes
+		// before return; awaiting alone would pass on the old microtask writer.
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		appendSync("one\n");
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("one\n");
+		appendSync("two\n");
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("one\ntwo\n");
+		void writer.close();
+	});
+
+	it("lands a fire-and-forget append before a size-checked rewrite in the same turn", () => {
+		const sessionPath = path.join(tempDir, "submit.jsonl");
+		fs.writeFileSync(sessionPath, "header\n");
+		const writer = storage.openWriter(sessionPath);
+		// The session manager counts a line durable once append returns and hands
+		// that size to its next synchronous rewrite (exit flush, recovery) as the
+		// conflict check. A line still in flight then would fail the check, or land
+		// on the inode the rewrite replaced and be lost.
+		void writer.append("prompt\n");
+		storage.writeTextSync(sessionPath, "header\nprompt\nreply\n", {
+			expectedSize: Buffer.byteLength("header\nprompt\n"),
+		});
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("header\nprompt\nreply\n");
+		void writer.close();
+	});
+
+	it("appends without creating or removing a lockfile beside the session", () => {
+		const sessionPath = path.join(tempDir, "no-lockfile.jsonl");
+		const writer = storage.openWriter(sessionPath, { flags: "w" });
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		// Each transcript line used to claim `.<session>.lock` (create, record,
+		// stat, close) and unlink it again: two directory mutations per append.
+		// The OS gate alone serializes current writers, so appends must leave
+		// the session directory untouched apart from the transcript itself.
+		const openSpy = vi.spyOn(fs, "openSync");
+		const unlinkSpy = vi.spyOn(fs, "unlinkSync");
+		for (const line of ["one\n", "two\n", "three\n"]) appendSync(line);
+		const touched = [...openSpy.mock.calls, ...unlinkSpy.mock.calls].map(call => String(call[0]));
+		vi.restoreAllMocks();
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("one\ntwo\nthree\n");
+		expect(touched.filter(file => file.endsWith(".lock"))).toEqual([]);
+		void writer.close();
+	});
+
+	it("fails an append closed while a previous-binary publisher holds the lockfile", async () => {
+		const sessionPath = path.join(tempDir, "legacy-held.jsonl");
+		fs.writeFileSync(sessionPath, "old\n");
+		const writer = storage.openWriter(sessionPath);
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		// A binary that predates the OS gate publishes under the lockfile alone:
+		// it claimed the name and passed its size check, and its rename will
+		// replace this file. Appending now would land a line that rename erases.
+		fs.writeFileSync(path.join(tempDir, ".legacy-held.jsonl.lock"), `${process.pid}:${Date.now()}\n`);
+		expect(() => appendSync("new-entry\n")).toThrow(SessionLockError);
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("old\n");
+		await expect(writer.close()).rejects.toBeInstanceOf(SessionLockError);
+	});
+
+	it("re-appends a line a previous-binary publisher renamed away mid-append", () => {
+		const sessionPath = path.join(tempDir, "legacy-race.jsonl");
+		const lockPath = path.join(tempDir, ".legacy-race.jsonl.lock");
+		const stagedPath = path.join(tempDir, ".legacy-race.jsonl.staged.tmp");
+		fs.writeFileSync(sessionPath, "old\n");
+		fs.writeFileSync(stagedPath, "old\nrewrite\n");
+		const writer = storage.openWriter(sessionPath);
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		// The previous binary claims the lockfile after our check, sizes the
+		// session before our line lands, then publishes its rewrite over the path
+		// and releases: the line is now only in the replaced inode. Publishing
+		// moves the old file aside first, as Windows publishers do when a writer
+		// still holds it open.
+		const existsSync = fs.existsSync;
+		let published = false;
+		vi.spyOn(fs, "existsSync").mockImplementation((file: fs.PathLike) => {
+			if (!published && String(file) === lockPath && fs.readFileSync(sessionPath, "utf8") === "old\nnew-entry\n") {
+				published = true;
+				fs.renameSync(sessionPath, path.join(tempDir, "legacy-race.jsonl.bak"));
+				fs.renameSync(stagedPath, sessionPath);
+			}
+			return existsSync(file);
+		});
+		appendSync("new-entry\n");
+		vi.restoreAllMocks();
+		expect(published).toBe(true);
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("old\nrewrite\nnew-entry\n");
+		expect(fs.existsSync(lockPath)).toBe(false);
+		void writer.close();
+	});
+
+	it("preserves append order through flush and close", async () => {
+		const sessionPath = path.join(tempDir, "ordered.jsonl");
+		const writer = storage.openWriter(sessionPath, { flags: "w" });
+		await writer.append("one\n");
+		await writer.append("two\n");
+
+		await writer.flush();
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("one\ntwo\n");
+		await writer.close();
+	});
+
+	it("flushes queued appends before closing", async () => {
+		const sessionPath = path.join(tempDir, "closed.jsonl");
+		const writer = storage.openWriter(sessionPath, { flags: "w" });
+		await writer.append("one\n");
+		await writer.append("two\n");
+		await writer.close();
+
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("one\ntwo\n");
+	});
+
+	it("rejects appendSync and append when the underlying write fails", async () => {
+		const sessionPath = path.join(tempDir, "append-error.jsonl");
+		const writer = storage.openWriter(sessionPath, { flags: "w" });
+		vi.spyOn(fs, "writeSync").mockImplementation(() => {
+			throw new Error("disk full");
+		});
+
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		expect(() => appendSync("one\n")).toThrow("disk full");
+		await expect(writer.append("two\n")).rejects.toThrow("disk full");
+		await expect(writer.close()).rejects.toThrow("disk full");
+	});
+
+	it("rolls back bytes from a partial append before surfacing the error", () => {
+		const sessionPath = path.join(tempDir, "partial-append.jsonl");
+		fs.writeFileSync(sessionPath, "complete\n");
+		const writer = storage.openWriter(sessionPath);
+		vi.spyOn(fs, "writeSync")
+			.mockImplementationOnce(() => {
+				fs.appendFileSync(sessionPath, "par");
+				return 3;
+			})
+			.mockImplementation(() => {
+				throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+			});
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		expect(() => appendSync("partial entry\n")).toThrow("ENOSPC");
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("complete\n");
+	});
+
+	it("rolls back a partial append through a reopened handle when the append handle refuses truncation", () => {
+		const sessionPath = path.join(tempDir, "append-handle-no-truncate.jsonl");
+		fs.writeFileSync(sessionPath, "complete\n");
+		const writer = storage.openWriter(sessionPath);
+		const ftruncateSync = fs.ftruncateSync;
+		// Windows refuses ftruncate on an O_APPEND handle; the reopened handle must succeed.
+		vi.spyOn(fs, "ftruncateSync")
+			.mockImplementationOnce(() => {
+				throw Object.assign(new Error("EPERM: operation not permitted, ftruncate"), { code: "EPERM" });
+			})
+			.mockImplementation((fd, len) => ftruncateSync(fd, len));
+		vi.spyOn(fs, "writeSync")
+			.mockImplementationOnce(() => {
+				fs.appendFileSync(sessionPath, "par");
+				return 3;
+			})
+			.mockImplementation(() => {
+				throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+			});
+
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		expect(() => appendSync("partial entry\n")).toThrow("ENOSPC");
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("complete\n");
+	});
+
+	it("does not truncate a replacement session when append rollback reopens the path", async () => {
+		const sessionPath = path.join(tempDir, "original.jsonl");
+		const replacementPath = path.join(tempDir, "replacement.jsonl");
+		fs.writeFileSync(sessionPath, "old\n");
+		fs.writeFileSync(replacementPath, "replacement session\n");
+		const writer = storage.openWriter(sessionPath);
+		const openSync = fs.openSync;
+		vi.spyOn(fs, "writeSync").mockImplementation(() => {
+			throw new Error("disk full");
+		});
+		vi.spyOn(fs, "ftruncateSync").mockImplementationOnce(() => {
+			throw new Error("append handle cannot truncate");
+		});
+		vi.spyOn(fs, "openSync").mockImplementation((file, flags, mode) =>
+			openSync(file === sessionPath && flags === "r+" ? replacementPath : file, flags, mode),
+		);
+
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		expect(() => appendSync("new\n")).toThrow("partial bytes could not be rolled back");
+		expect(fs.readFileSync(replacementPath, "utf8")).toBe("replacement session\n");
+		await expect(writer.close()).rejects.toThrow("partial bytes could not be rolled back");
+	});
+});
+
+describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
+	let tempDir: string;
+	let storage: FileSessionStorage;
+
+	beforeEach(async () => {
+		tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-storage-"));
+		storage = new FileSessionStorage();
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await fsp.rm(tempDir, { recursive: true, force: true });
+	});
+
+	async function createSessionFile(name: string): Promise<string> {
+		const sessionPath = path.join(tempDir, `${name}.jsonl`);
+		await Bun.write(
+			sessionPath,
+			`${JSON.stringify({ type: "session", id: "session-id", timestamp: "2025-01-01T00:00:00Z", cwd: tempDir })}\n`,
+		);
+		return sessionPath;
+	}
+
+	it("succeeds when the artifact directory is already absent", async () => {
+		const sessionPath = await createSessionFile("missing-artifacts");
+		const artifactsDir = sessionPath.slice(0, -6);
+
+		expect(fs.existsSync(sessionPath)).toBe(true);
+		expect(fs.existsSync(artifactsDir)).toBe(false);
+
+		await expect(storage.deleteSessionWithArtifacts(sessionPath)).resolves.toBeUndefined();
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(artifactsDir)).toBe(false);
+	});
+
+	it("throws when artifact cleanup fails after the session file is deleted", async () => {
+		const sessionPath = await createSessionFile("cleanup-failure");
+		const artifactsDir = sessionPath.slice(0, -6);
+		await fsp.mkdir(artifactsDir, { recursive: true });
+		await Bun.write(path.join(artifactsDir, "artifact.txt"), "artifact payload");
+
+		const rmError = new Error("permission denied");
+		const rmSpy = vi.spyOn(fsp, "rm").mockRejectedValueOnce(rmError);
+
+		await expect(storage.deleteSessionWithArtifacts(sessionPath)).rejects.toThrow(
+			`Session file deleted but failed to remove artifacts directory ${artifactsDir}: permission denied`,
+		);
+		expect(rmSpy).toHaveBeenCalledWith(artifactsDir, { recursive: true, force: true });
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(artifactsDir)).toBe(true);
+	});
+
+	it("purges history and stats rows for the deleted session (#18674)", async () => {
+		const marker = "delete-me-marker-purge-regression";
+		const sessionId = "purge-regression-session";
+		const projectDir = path.join(tempDir, "project");
+		await fsp.mkdir(projectDir, { recursive: true });
+		const sessionPath = path.join(projectDir, `20260101_${sessionId}.jsonl`);
+		await Bun.write(
+			sessionPath,
+			`${JSON.stringify({ type: "session", id: sessionId, timestamp: "2025-01-01T00:00:00Z", cwd: projectDir })}\n${JSON.stringify({ type: "message", id: "m1", message: { role: "user", content: marker } })}\n`,
+		);
+		// Nested subagent transcript under the artifacts dir, like a real run leaves.
+		const nestedPath = path.join(sessionPath.slice(0, -".jsonl".length), "subagent.jsonl");
+		await fsp.mkdir(path.dirname(nestedPath), { recursive: true });
+		await Bun.write(nestedPath, "{}\n");
+
+		const historyDbPath = path.join(tempDir, "history.db");
+		const historyDb = new Database(historyDbPath);
+		historyDb.run(
+			"CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, prompt TEXT NOT NULL, session_id TEXT)",
+		);
+		historyDb.run("CREATE VIRTUAL TABLE history_fts USING fts5(prompt, content='history', content_rowid='id')");
+		historyDb.run("INSERT INTO history (prompt, session_id) VALUES (?, ?)", [marker, sessionId]);
+		historyDb.run("INSERT INTO history (prompt, session_id) VALUES ('other prompt', 'other-session')");
+		historyDb.run("INSERT INTO history_fts(history_fts) VALUES('rebuild')");
+		historyDb.run("CREATE TABLE session_titles (session_id TEXT PRIMARY KEY, title TEXT NOT NULL)");
+		historyDb.run("INSERT INTO session_titles (session_id, title) VALUES (?, 'old title')", [sessionId]);
+		historyDb.run("INSERT INTO session_titles (session_id, title) VALUES ('other-session', 'live title')");
+		historyDb.run("CREATE TABLE session_recaps (id INTEGER PRIMARY KEY, session_id TEXT, cwd TEXT, recap TEXT)");
+		historyDb.run("INSERT INTO session_recaps (session_id, cwd, recap) VALUES (?, '/p', 'old recap')", [sessionId]);
+		historyDb.run("INSERT INTO session_recaps (session_id, cwd, recap) VALUES ('other-session', '/p', 'live recap')");
+		historyDb.close();
+
+		const statsDbPath = path.join(tempDir, "stats.db");
+		const statsDb = new Database(statsDbPath);
+		const statsTables = [
+			"messages",
+			"user_messages",
+			"tool_calls",
+			"file_offsets",
+			"session_rollup",
+			"session_dirty",
+		];
+		for (const table of statsTables) {
+			statsDb.run(`CREATE TABLE ${table} (session_file TEXT NOT NULL)`);
+			statsDb.query(`INSERT INTO ${table} (session_file) VALUES (?)`).run(sessionPath);
+			statsDb.query(`INSERT INTO ${table} (session_file) VALUES (?)`).run(nestedPath);
+			statsDb.query(`INSERT INTO ${table} (session_file) VALUES (?)`).run(path.join(tempDir, "keep.jsonl"));
+		}
+		statsDb.close();
+
+		await storage.deleteSessionWithArtifacts(sessionPath, { historyDbPath, statsDbPath });
+
+		const check = new Database(historyDbPath);
+		const prompts = check.query("SELECT prompt FROM history").all() as Array<{ prompt: string }>;
+		const titles = check.query("SELECT session_id FROM session_titles").all() as Array<{ session_id: string }>;
+		const recaps = check.query("SELECT session_id FROM session_recaps").all() as Array<{ session_id: string }>;
+		const fts = check
+			.query(
+				"SELECT h.prompt AS prompt FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ?",
+			)
+			.all(`"${marker}"`) as Array<{ prompt: string }>;
+		check.close();
+		expect(prompts.map(row => row.prompt)).toEqual(["other prompt"]);
+		expect(titles.map(row => row.session_id)).toEqual(["other-session"]);
+		expect(recaps.map(row => row.session_id)).toEqual(["other-session"]);
+		expect(fts).toEqual([]);
+
+		const statsCheck = new Database(statsDbPath);
+		for (const table of statsTables) {
+			const rows = statsCheck.query(`SELECT session_file FROM ${table}`).all() as Array<{
+				session_file: string;
+			}>;
+			expect(rows.map(row => row.session_file)).toEqual([path.join(tempDir, "keep.jsonl")]);
+		}
+		statsCheck.close();
+		expect(fs.existsSync(sessionPath)).toBe(false);
+	});
+
+	it("purges history rows for a pretty-printed header (#18674)", async () => {
+		const marker = "delete-me-marker-pretty-header";
+		const prettyId = "purge-pretty-only-session";
+		const projectDir = path.join(tempDir, "project-pretty");
+		await fsp.mkdir(projectDir, { recursive: true });
+		const prettyPath = path.join(projectDir, `20260101_${prettyId}.jsonl`);
+		await Bun.write(
+			prettyPath,
+			`${JSON.stringify({ type: "session", id: prettyId, timestamp: "2025-01-01T00:00:00Z", cwd: projectDir }, null, 2)}\n${JSON.stringify({ type: "message", id: "m1", message: { role: "user", content: marker } })}\n`,
+		);
+
+		const historyDbPath = path.join(tempDir, "history.db");
+		const historyDb = new Database(historyDbPath);
+		historyDb.run(
+			"CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, prompt TEXT NOT NULL, session_id TEXT)",
+		);
+		historyDb.run("INSERT INTO history (prompt, session_id) VALUES (?, ?)", [marker, prettyId]);
+		historyDb.run("INSERT INTO history (prompt, session_id) VALUES ('other prompt', 'other-session')");
+		historyDb.close();
+
+		await storage.deleteSessionWithArtifacts(prettyPath, {
+			historyDbPath,
+			statsDbPath: path.join(tempDir, "stats.db"),
+		});
+
+		const check = new Database(historyDbPath);
+		const prompts = check.query("SELECT prompt FROM history").all() as Array<{ prompt: string }>;
+		check.close();
+		expect(prompts.map(row => row.prompt)).toEqual(["other prompt"]);
+		expect(fs.existsSync(prettyPath)).toBe(false);
+	});
+
+	it("IndexedSessionStorage.deleteSessionWithArtifacts purges history and stats rows (#18674)", async () => {
+		const marker = "delete-me-marker-indexed-purge";
+		const sessionId = "purge-indexed-session";
+		const projectDir = path.join(tempDir, "project-indexed");
+		await fsp.mkdir(projectDir, { recursive: true });
+		const sessionPath = path.join(projectDir, `20260101_${sessionId}.jsonl`);
+		await Bun.write(
+			sessionPath,
+			`${JSON.stringify({ type: "session", id: sessionId, timestamp: "2025-01-01T00:00:00Z", cwd: projectDir })}\n${JSON.stringify({ type: "message", id: "m1", message: { role: "user", content: marker } })}\n`,
+		);
+
+		const historyDbPath = path.join(tempDir, "history.db");
+		const historyDb = new Database(historyDbPath);
+		historyDb.run(
+			"CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, prompt TEXT NOT NULL, session_id TEXT)",
+		);
+		historyDb.run("INSERT INTO history (prompt, session_id) VALUES (?, ?)", [marker, sessionId]);
+		historyDb.run("INSERT INTO history (prompt, session_id) VALUES ('other prompt', 'other-session')");
+		historyDb.close();
+
+		const statsDbPath = path.join(tempDir, "stats.db");
+		const statsDb = new Database(statsDbPath);
+		statsDb.run("CREATE TABLE messages (session_file TEXT NOT NULL)");
+		statsDb.query("INSERT INTO messages (session_file) VALUES (?)").run(sessionPath);
+		statsDb.query("INSERT INTO messages (session_file) VALUES (?)").run(path.join(tempDir, "keep.jsonl"));
+		statsDb.run("CREATE TABLE session_rollup (session_file TEXT NOT NULL)");
+		statsDb.query("INSERT INTO session_rollup (session_file) VALUES (?)").run(sessionPath);
+		statsDb.query("INSERT INTO session_rollup (session_file) VALUES (?)").run(path.join(tempDir, "keep.jsonl"));
+		statsDb.close();
+
+		const indexed = new IndexedSessionStorage(new FileBackedSessionBackend(sessionPath));
+		await indexed.initialize();
+		await indexed.deleteSessionWithArtifacts(sessionPath, { historyDbPath, statsDbPath });
+
+		const check = new Database(historyDbPath);
+		const prompts = check.query("SELECT prompt FROM history").all() as Array<{ prompt: string }>;
+		check.close();
+		expect(prompts.map(row => row.prompt)).toEqual(["other prompt"]);
+
+		const statsCheck = new Database(statsDbPath);
+		const messageRows = statsCheck.query("SELECT session_file FROM messages").all() as Array<{
+			session_file: string;
+		}>;
+		const rollupRows = statsCheck.query("SELECT session_file FROM session_rollup").all() as Array<{
+			session_file: string;
+		}>;
+		statsCheck.close();
+		expect(messageRows.map(row => row.session_file)).toEqual([path.join(tempDir, "keep.jsonl")]);
+		expect(rollupRows.map(row => row.session_file)).toEqual([path.join(tempDir, "keep.jsonl")]);
+	});
+
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"deletes an unreadable transcript even though its rows cannot be resolved",
+		async () => {
+			const sessionPath = await createSessionFile("unreadable");
+			const historyDbPath = path.join(tempDir, "history.db");
+			new Database(historyDbPath).close();
+			await fsp.chmod(sessionPath, 0o000);
+
+			await storage.deleteSessionWithArtifacts(sessionPath, {
+				historyDbPath,
+				statsDbPath: path.join(tempDir, "stats.db"),
+			});
+
+			expect(fs.existsSync(sessionPath)).toBe(false);
+		},
+	);
+
+	it("deleteSessionWithArtifacts removes the transcript and its artifacts dir", async () => {
+		const sessionPath = await createSessionFile("purge-wires-delete");
+		const nestedDir = sessionPath.slice(0, -".jsonl".length);
+		await fsp.mkdir(nestedDir, { recursive: true });
+		await Bun.write(path.join(nestedDir, "subagent.jsonl"), "{}\n");
+
+		await storage.deleteSessionWithArtifacts(sessionPath);
+
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(nestedDir)).toBe(false);
+	});
+});
+
+describe("FileSessionStorage.writeTextSync", () => {
+	let tempDir: string;
+
+	beforeEach(async () => {
+		tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-storage-"));
+	});
+
+	afterEach(async () => {
+		await fsp.rm(tempDir, { recursive: true, force: true });
+	});
+
+	it("replaces the file identity so transcript tailers detect rewrites", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+
+		storage.writeTextSync(sessionPath, "first\n");
+		const first = fs.statSync(sessionPath);
+		storage.writeTextSync(sessionPath, "second\n");
+		const second = fs.statSync(sessionPath);
+
+		expect(second.ino).not.toBe(first.ino);
+		expect(await Bun.file(sessionPath).text()).toBe("second\n");
+	});
+
+	it("keeps open readers on the old file when replacement initially fails with EPERM", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original snapshot\n");
+		const reader = fs.openSync(sessionPath, "r");
+		const original = fs.fstatSync(reader);
+		const rename = fs.renameSync;
+		let failed = false;
+		const renameSpy = vi.spyOn(fs, "renameSync").mockImplementation((source, target) => {
+			if (!failed && target === sessionPath) {
+				failed = true;
+				throw Object.assign(new Error("replace blocked"), { code: "EPERM" });
+			}
+			rename(source, target);
+		});
+		try {
+			storage.writeTextSync(sessionPath, "replacement snapshot\n");
+			expect(fs.readFileSync(reader, "utf8")).toBe("original snapshot\n");
+			expect(fs.statSync(sessionPath).ino).not.toBe(original.ino);
+			expect(await Bun.file(sessionPath).text()).toBe("replacement snapshot\n");
+			expect((await fsp.readdir(tempDir)).filter(file => file !== ".session.jsonl.lock.os")).toEqual([
+				"session.jsonl",
+			]);
+		} finally {
+			renameSpy.mockRestore();
+			fs.closeSync(reader);
+		}
+	});
+
+	it("restores the original identity and content if the EPERM replacement retry fails", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original\n");
+		const original = fs.statSync(sessionPath);
+		const rename = fs.renameSync;
+		let attempts = 0;
+		const renameSpy = vi.spyOn(fs, "renameSync").mockImplementation((source, target) => {
+			if (typeof source === "string" && source.endsWith(".tmp") && target === sessionPath) {
+				attempts++;
+				throw Object.assign(new Error(attempts === 1 ? "replace blocked" : "retry failed"), {
+					code: attempts === 1 ? "EPERM" : "EIO",
+				});
+			}
+			rename(source, target);
+		});
+		try {
+			expect(() => storage.writeTextSync(sessionPath, "replacement\n")).toThrow("retry failed");
+			expect(fs.statSync(sessionPath).ino).toBe(original.ino);
+			expect(await Bun.file(sessionPath).text()).toBe("original\n");
+			expect((await fsp.readdir(tempDir)).filter(file => file !== ".session.jsonl.lock.os")).toEqual([
+				"session.jsonl",
+			]);
+		} finally {
+			renameSpy.mockRestore();
+		}
+	});
+
+	it("preserves the original when staging the replacement fails with EPERM", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original\n");
+		const original = fs.statSync(sessionPath);
+		const write = fs.writeFileSync;
+		const writeSpy = vi.spyOn(fs, "writeFileSync").mockImplementation((file, content, options) => {
+			if (typeof file === "string" && path.dirname(file) === tempDir && file.endsWith(".tmp")) {
+				throw Object.assign(new Error("staging denied"), { code: "EPERM" });
+			}
+			write(file, content, options);
+		});
+		try {
+			expect(() => storage.writeTextSync(sessionPath, "replacement\n")).toThrow("staging denied");
+			expect(fs.statSync(sessionPath).ino).toBe(original.ino);
+			expect(await Bun.file(sessionPath).text()).toBe("original\n");
+			expect((await fsp.readdir(tempDir)).filter(file => file !== ".session.jsonl.lock.os")).toEqual([
+				"session.jsonl",
+			]);
+		} finally {
+			writeSpy.mockRestore();
+		}
+	});
+
+	it("keeps an open writer appending to the replaced file after a rewrite", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "header\n");
+		const writer = storage.openWriter(sessionPath);
+		try {
+			// A rewrite renames a fresh inode over the path; a writer opened before
+			// it would otherwise keep appending to the orphaned file and lose the
+			// turn. Re-opening the live path under the publish lock must place the
+			// line in the replaced file, also after an earlier append recorded the
+			// path's identity.
+			const appendSync = writer.appendSync?.bind(writer);
+			if (!appendSync) throw new Error("File writer must expose appendSync");
+			appendSync("before\n");
+			storage.writeTextSync(sessionPath, "rewritten\n");
+			appendSync("appended\n");
+			expect(await Bun.file(sessionPath).text()).toBe("rewritten\nappended\n");
+			const files = await fsp.readdir(tempDir);
+			expect(files).not.toContain(".session.jsonl.lock");
+			expect(files.some(file => file.endsWith(".tmp"))).toBe(false);
+		} finally {
+			await writer.close();
+		}
+	});
+
+	it("fails closed for a held publish lock instead of writing outside it", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original\n");
+		const lockPath = path.join(tempDir, ".session.jsonl.lock");
+		// A live holder (this process) is never stolen: both the writer and the
+		// rewrite must wait out the bounded retry window and then reject rather
+		// than publish around the lock.
+		fs.writeFileSync(lockPath, `${process.pid}:${Date.now()}\n`);
+		try {
+			await expect(storage.writeTextAtomic(sessionPath, "replacement\n")).rejects.toBeInstanceOf(SessionLockError);
+			expect(() => storage.writeTextSync(sessionPath, "replacement\n")).toThrow(SessionLockError);
+			expect(await Bun.file(sessionPath).text()).toBe("original\n");
+		} finally {
+			fs.unlinkSync(lockPath);
+		}
+	});
+
+	it("steals a contentless publish lock orphaned by a crash instead of bricking the file", () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original\n");
+		const lockPath = path.join(tempDir, ".session.jsonl.lock");
+		// A kill between lock create and holder record leaves a contentless
+		// file no live process owns. Once older than the acquisition budget
+		// it must be stealable, or every later publish fails until manual
+		// removal (hV-oE).
+		fs.writeFileSync(lockPath, "");
+		const aged = new Date(Date.now() - 60_000);
+		fs.utimesSync(lockPath, aged, aged);
+		storage.writeTextSync(sessionPath, "replacement\n");
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("replacement\n");
+	});
+
+	it("waits out the budget before stealing a sub-budget contentless lock", () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original\n");
+		const lockPath = path.join(tempDir, ".session.jsonl.lock");
+		// A live acquirer may still be between create and record, so a
+		// contentless file younger than the acquisition budget must not be
+		// stolen on sight: backdate to 400ms (100ms shy of the 500ms budget)
+		// and require the acquisition to wait for it to age out instead of
+		// succeeding instantly (hV-oE).
+		fs.writeFileSync(lockPath, "");
+		const backdated = new Date(Date.now() - 400);
+		fs.utimesSync(lockPath, backdated, backdated);
+		const start = Date.now();
+		storage.writeTextSync(sessionPath, "replacement\n");
+		expect(Date.now() - start).toBeGreaterThanOrEqual(50);
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("replacement\n");
+	});
+
+	it("steals a dead holder publish lock", () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original\n");
+		const lockPath = path.join(tempDir, ".session.jsonl.lock");
+		// 2^30 is above any real PID maximum: recovery must reclaim the lock.
+		fs.writeFileSync(lockPath, `${2 ** 30}:${Date.now()}\n`);
+		storage.writeTextSync(sessionPath, "replacement\n");
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("replacement\n");
+	});
+
+	it("publishes and appends once when by-name stat reports a different identity than the handle", async () => {
+		// Windows FSLogix profile disks report a different dev/ino from a path
+		// stat than from an fstat of an open handle to the same file.
+		const realStat = fs.statSync;
+		const statSpy = vi.spyOn(fs, "statSync").mockImplementation(((p: fs.PathLike, opts?: fs.StatSyncOptions) => {
+			if (!opts?.bigint) return realStat(p, { ...opts, bigint: false });
+			const s = realStat(p, { bigint: true });
+			s.dev += 1n;
+			return s;
+		}) as typeof fs.statSync);
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		const lockPath = path.join(tempDir, ".session.jsonl.lock");
+		try {
+			storage.writeTextSync(sessionPath, "original\n");
+			expect(fs.readFileSync(sessionPath, "utf8")).toBe("original\n");
+			expect(fs.existsSync(lockPath)).toBe(false);
+
+			const writer = storage.openWriter(sessionPath);
+			writer.appendSync!("a\n");
+			writer.appendSync!("b\n");
+			expect(fs.readFileSync(sessionPath, "utf8")).toBe("original\na\nb\n");
+			expect(fs.existsSync(lockPath)).toBe(false);
+			await writer.close();
+		} finally {
+			statSpy.mockRestore();
+		}
+	});
+});
+
+describe("FileSessionStorage line streaming", () => {
+	let tempDir: string;
+
+	beforeEach(async () => {
+		tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-storage-lines-"));
+	});
+
+	afterEach(async () => {
+		await fsp.rm(tempDir, { recursive: true, force: true });
+	});
+
+	// Multi-byte text and a line past the 1 MiB chunk size cross every chunk boundary.
+	const lines = ['{"title":"é 😀"}\n', `${"x".repeat((1 << 20) + 7)}\n`, '{"tail":"ü"}\n'];
+	const body = lines.join("");
+
+	it("publishes the joined lines under the same size check as text", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+
+		storage.writeLinesSync(sessionPath, lines, { expectedSize: null });
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe(body);
+		await storage.writeLinesAtomic(sessionPath, [...lines].reverse(), { expectedSize: Buffer.byteLength(body) });
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe([...lines].reverse().join(""));
+
+		expect(() => storage.writeLinesSync(sessionPath, ["stale\n"], { expectedSize: 1 })).toThrow(
+			SessionWriteConflictError,
+		);
+		expect(fs.readdirSync(tempDir).filter(name => name.endsWith(".tmp"))).toEqual([]);
+	});
+
+	it("routes streamed rewrites through overridden text writers", async () => {
+		const seen: string[] = [];
+		class InterceptingStorage extends FileSessionStorage {
+			override writeTextSync(fpath: string, content: string): void {
+				seen.push(`sync:${content}`);
+				super.writeTextSync(fpath, content);
+			}
+			override async writeTextAtomic(fpath: string, content: string, options?: WriteTextAtomicOptions) {
+				seen.push(`atomic:${content}`);
+				await super.writeTextAtomic(fpath, content, options);
+			}
+		}
+		const storage = new InterceptingStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+
+		storage.writeLinesSync(sessionPath, ["a\n", "b\n"]);
+		await storage.writeLinesAtomic(sessionPath, ["c\n", "d\n"]);
+
+		expect(seen).toEqual(["sync:a\nb\n", "atomic:c\nd\n"]);
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("c\nd\n");
+	});
+});
+
+describe("FileSessionStorage.updateSessionTitle", () => {
+	let tempDir: string;
+	let storage: FileSessionStorage;
+
+	beforeEach(async () => {
+		tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-storage-"));
+		storage = new FileSessionStorage();
+	});
+
+	afterEach(async () => {
+		await fsp.rm(tempDir, { recursive: true, force: true });
+	});
+
+	it("updates the fixed title slot without truncating the tail", async () => {
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		const tail = `${JSON.stringify({ type: "session", id: "s", timestamp: "t", cwd: tempDir })}\n`;
+		storage.writeTextSync(
+			sessionPath,
+			`${serializeTitleSlot({ title: "Old", source: "auto", updatedAt: "t1" })}${tail}`,
+		);
+
+		await storage.updateSessionTitle(sessionPath, { title: "New", source: "user", updatedAt: "t2" });
+
+		const content = await Bun.file(sessionPath).text();
+		const [slotLine, ...rest] = content.split("\n");
+		expect(JSON.parse(slotLine)).toMatchObject({ type: "title", title: "New", source: "user", updatedAt: "t2" });
+		expect(`${rest.join("\n")}`).toBe(tail);
+		expect(fs.statSync(sessionPath).size).toBe(
+			Buffer.byteLength(`${serializeTitleSlot({ title: "Old", source: "auto", updatedAt: "t1" })}${tail}`, "utf-8"),
+		);
+	});
+
+	it("uses the existing file-open error for missing paths", async () => {
+		const sessionPath = path.join(tempDir, "missing.jsonl");
+
+		await expect(
+			storage.updateSessionTitle(sessionPath, { title: "New", source: "user", updatedAt: "t2" }),
+		).rejects.toThrow(/ENOENT|no such file/i);
+	});
+});
+
+describe("IndexedSessionStorage.updateSessionTitle", () => {
+	it("does not roll a newer optimistic title back when an older backend write fails", async () => {
+		const sessionPath = "/sessions/session.jsonl";
+		const content = `${serializeTitleSlot({ title: "Old", source: "auto", updatedAt: "t0" })}${JSON.stringify({
+			type: "session",
+			id: "session-id",
+			timestamp: "t0",
+			cwd: "/cwd",
+		})}\n`;
+		const backend = new ControlledTitleUpdateBackend(sessionPath, content);
+		const storage = new IndexedSessionStorage(backend);
+		await storage.initialize();
+
+		const first = storage.updateSessionTitle(sessionPath, { title: "First", source: "auto", updatedAt: "t1" });
+		const second = storage.updateSessionTitle(sessionPath, { title: "Second", source: "user", updatedAt: "t2" });
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+
+		backend.rejectFirstUpdate(new Error("first title write failed"));
+		await expect(first).rejects.toThrow("first title write failed");
+		await expect(second).resolves.toBeUndefined();
+
+		const [slotLine] = (await storage.readText(sessionPath)).split("\n");
+		expect(JSON.parse(slotLine)).toMatchObject({ type: "title", title: "Second", source: "user", updatedAt: "t2" });
+	});
+});
+
+class PausableWriteFullBackend implements SessionStorageBackend {
+	readonly writeFullCalls: Array<{ content: string; mtimeMs: number }> = [];
+	readonly firstWriteStarted = Promise.withResolvers<void>();
+	readonly firstWriteRelease = Promise.withResolvers<void>();
+	#firstReleased = false;
+
+	init(): Promise<void> {
+		return Promise.resolve();
+	}
+	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>> {
+		return Promise.resolve([]);
+	}
+	readFull(): Promise<string | null> {
+		return Promise.resolve(null);
+	}
+	readSlices(): Promise<[string, string]> {
+		return Promise.resolve(["", ""]);
+	}
+	async writeFull(_path: string, content: string, mtimeMs: number): Promise<void> {
+		if (!this.#firstReleased) {
+			this.#firstReleased = true;
+			this.firstWriteStarted.resolve();
+			await this.firstWriteRelease.promise;
+		}
+		this.writeFullCalls.push({ content, mtimeMs });
+	}
+	append(): Promise<void> {
+		return Promise.resolve();
+	}
+	updateSessionTitle(): Promise<void> {
+		return Promise.resolve();
+	}
+	truncate(): Promise<void> {
+		return Promise.resolve();
+	}
+	remove(): Promise<void> {
+		return Promise.resolve();
+	}
+	move(): Promise<void> {
+		return Promise.resolve();
+	}
+}
+
+describe("IndexedSessionStorage.writeTextAtomic commitGuard", () => {
+	it("aborts before touching the backend when the guard rejects up front", async () => {
+		const backend = new PausableWriteFullBackend();
+		const storage = new IndexedSessionStorage(backend);
+		await storage.initialize();
+
+		await storage.writeTextAtomic("/sessions/s.jsonl", "stale", { commitGuard: () => false });
+		expect(backend.writeFullCalls).toEqual([]);
+		expect(storage.existsSync("/sessions/s.jsonl")).toBe(false);
+	});
+
+	it("re-checks the guard inside the enqueued task so a concurrent write cannot be overwritten", async () => {
+		const backend = new PausableWriteFullBackend();
+		const storage = new IndexedSessionStorage(backend);
+		await storage.initialize();
+
+		// First write parks the backend inside writeFull, holding the per-path
+		// tail. The second write awaits behind it. When the first releases,
+		// the second's awaitPath resumes — but by then the guard has flipped
+		// (simulated flushSync epoch bump), and the backend MUST NOT see the
+		// stale second body.
+		const first = storage.writeTextAtomic("/sessions/s.jsonl", "seed", {});
+		let epochBumped = false;
+		const second = storage.writeTextAtomic("/sessions/s.jsonl", "stale", {
+			commitGuard: () => !epochBumped,
+		});
+
+		await backend.firstWriteStarted.promise;
+		epochBumped = true;
+		backend.firstWriteRelease.resolve();
+		await first;
+		await second;
+
+		expect(backend.writeFullCalls.map(call => call.content)).toEqual(["seed"]);
+	});
+
+	it("drain waits for an in-flight atomic publish that passed its guard before the seal", async () => {
+		const backend = new PausableWriteFullBackend();
+		const storage = new IndexedSessionStorage(backend);
+		await storage.initialize();
+
+		// The guard passes at enqueue time, then the backend write parks on the
+		// wire (Redis/SQL). A terminal seal lands while it is in flight. drain()
+		// — what SessionManager.close() awaits before dispose returns — must not
+		// resolve until the publish settles, or a revival could reopen the path
+		// and be overwritten afterwards.
+		let sealed = false;
+		const write = storage.writeTextAtomic("/sessions/s.jsonl", "pre-seal body", {
+			commitGuard: () => !sealed,
+		});
+		await backend.firstWriteStarted.promise;
+		sealed = true;
+
+		let drained = false;
+		const drainP = storage.drain().then(() => {
+			drained = true;
+		});
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		expect(drained).toBe(false);
+
+		backend.firstWriteRelease.resolve();
+		await drainP;
+		await write;
+		expect(drained).toBe(true);
+		expect(backend.writeFullCalls.map(call => call.content)).toEqual(["pre-seal body"]);
+	});
+});

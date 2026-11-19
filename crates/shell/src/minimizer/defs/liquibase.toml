@@ -1,0 +1,51 @@
+# Liquibase update / rollback / status / --version output. Strip the ASCII-art
+# banner (hash border + body rows), the INFO/FINE log chatter, and the startup
+# environment dump (Java Home / Libraries / jar list) from --version. The
+# Liquibase Version line is the one meaningful line of --version output, so it
+# is deliberately kept.
+
+[filters.liquibase]
+description = "Compact liquibase output"
+match_command = "^liquibase$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^INFO ",
+	"^FINE ",
+	"^FINER ",
+	"^FINEST ",
+	"^\\[\\S+\\] INFO ",
+	"^\\[\\S+\\] FINE ",
+	"^Starting Liquibase",
+	"^Liquibase (Community|Open Source)",
+	"^Liquibase Home:",
+	"^Running Changeset:",
+	"^\\s*##",
+	"^\\[INFO\\]\\s*#+$",
+	"^Java Home",
+	"^Libraries:",
+	"^\\s*-\\s+\\S+\\.jar",
+]
+truncate_lines_at = 300
+max_lines = 80
+on_empty = "liquibase: ok"
+
+[[tests.liquibase]]
+name = "strips banner and info keeps severe"
+input = "####################################################\n##   _     _             _ _                      ##\n####################################################\nINFO Parsing changelog\nRunning Changeset: db/changelog.xml::1::author\nSEVERE ChangeSet failed: ORA-00942\n"
+expected = "SEVERE ChangeSet failed: ORA-00942\n"
+
+[[tests.liquibase]]
+name = "version output reduces to the version line"
+input = "####################################################\n##   _     _             _ _                      ##\n####################################################\nStarting Liquibase at 13:45:24 (version 4.30.0)\nLiquibase Version: 4.30.0\nLiquibase Open Source 4.30.0 by Liquibase\nJava Home C:\\Program Files\\Java\\jdk-17.0.15\nLibraries:\n  - internal\\lib\\commons-io.jar: Apache Commons IO\n"
+expected = "Liquibase Version: 4.30.0\n"
+
+[[tests.liquibase]]
+name = "status passthrough without changeset line"
+input = "Starting Liquibase at 10:00:00 (version 4.30.0)\nLiquibase Version: 4.30.0\nLiquibase Open Source 4.30.0 by Liquibase\nRunning Changeset: filepath::id::author\nHR@jdbc:oracle:thin:@localhost:1523:XE is up to date\nLiquibase command 'status' was executed successfully.\n"
+expected = "Liquibase Version: 4.30.0\nHR@jdbc:oracle:thin:@localhost:1523:XE is up to date\nLiquibase command 'status' was executed successfully.\n"
+
+[[tests.liquibase]]
+name = "info noise collapses"
+input = "INFO Parsing changelog\nINFO Successful update"
+expected = "liquibase: ok"

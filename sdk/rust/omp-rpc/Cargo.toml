@@ -1,0 +1,20 @@
+[package]
+name = "omp-rpc"
+version = "0.1.0"
+edition = "2024"
+description = "Rust client for the omp RPC protocol (`omp --mode rpc`)"
+license = "MIT"
+publish = false
+
+[lib]
+name = "omp_rpc"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Standalone crate: not a member of the repository's root workspace.
+[workspace]

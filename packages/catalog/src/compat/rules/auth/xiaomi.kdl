@@ -1,0 +1,6 @@
+auth "xiaomi" {
+	name "Xiaomi MiMo"
+	// Generic login accepts both pay-as-you-go and regional token-plan keys and
+	// preserves the historical SGP → AMS → CN validation fallback.
+	login "custom" hook="xiaomi"
+}

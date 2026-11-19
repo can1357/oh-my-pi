@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package exa.dev_pb;
+
+import "exa/codeium_common_pb/codeium_common.proto";
+
+message DevRequest {
+  string command = 1;
+}
+
+message DevResponse {
+}
+
+message GetLSPCompletionItemsRequest {
+  string document_uri = 1;
+  .exa.codeium_common_pb.DocumentPosition position = 2;
+}
+
+message GetLSPCompletionItemsResponse {
+  string completion_items_json = 1;
+}
+
+service DevService {
+  rpc Dev (.exa.dev_pb.DevRequest) returns (.exa.dev_pb.DevResponse);
+  rpc GetLSPCompletionItems (.exa.dev_pb.GetLSPCompletionItemsRequest) returns (.exa.dev_pb.GetLSPCompletionItemsResponse);
+}

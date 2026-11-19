@@ -1,0 +1,810 @@
+if (!globalThis.__omp_js_prelude_loaded__) {
+	globalThis.__omp_js_prelude_loaded__ = true;
+
+	const isNil = value => value === undefined || value === null;
+	const isPlainObject = value => value !== null && typeof value === "object" && !Array.isArray(value);
+	const positionalOptions = (name, args, keys, example) => {
+		for (let index = keys.length; index < args.length; index++) {
+			if (!isNil(args[index])) {
+				throw new TypeError(
+					`${name}() accepts at most ${keys.length} positional optional args; got ${args.length}. Pass ${name}(..., ${example}) for named options.`,
+				);
+			}
+		}
+		const options = {};
+		for (let index = 0; index < keys.length && index < args.length; index++) {
+			const value = args[index];
+			if (!isNil(value)) options[keys[index]] = value;
+		}
+		return options;
+	};
+	const optionsArg = (name, value, rest, keys, example) => {
+		if (isNil(value)) return positionalOptions(name, [value, ...rest], keys, example);
+		if (isPlainObject(value)) {
+			if (rest.some(arg => !isNil(arg))) {
+				throw new TypeError(
+					`${name}() takes either a single trailing options object like ${example} or positional optional args; do not mix both forms.`,
+				);
+			}
+			return value;
+		}
+		if (typeof value === "object") {
+			const kind = Array.isArray(value) ? "an array" : value.constructor?.name ?? "object";
+			throw new TypeError(
+				`${name}() options must be a plain object like ${example}, null/undefined, or positional optional args, not ${kind}.`,
+			);
+		}
+		return positionalOptions(name, [value, ...rest], keys, example);
+	};
+	const callHelper = (name, ...args) => globalThis.__omp_helpers__[name](...args);
+	const hasScheme = path => typeof path === "string" && /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(path);
+	const shouldDelegateRead = path => hasScheme(path) && !callHelper("hasRoot", path);
+	const withReadLineSelector = (path, options) => {
+		const offset = typeof options.offset === "number" ? options.offset : 1;
+		const limit = typeof options.limit === "number" ? options.limit : undefined;
+		if (offset <= 1 && limit === undefined) return path;
+		if (limit !== undefined && limit <= 0) return null;
+		const start = Math.max(1, offset);
+		if (limit === undefined) return `${path}:${start}-`;
+		return `${path}:${start}-${start + limit - 1}`;
+	};
+	const readToolText = async path => {
+		const res = await globalThis.__omp_call_tool__("read", { path });
+		return res && typeof res === "object" && "text" in res ? res.text : res;
+	};
+	// Delegated reads ask for `:raw`, which the bridge returns whole: no row prefixes, pages or cut lines.
+	// Web URLs keep their reader text; `:raw` there means the original HTML.
+	const rawReadPath = path =>
+		/^https?:\/\//i.test(path) || /:raw(?::|$)/i.test(path) ? path : `${path}:raw`;
+
+
+	const read = async (path, opts, ...rest) => {
+		const options = optionsArg("read", opts, rest, ["offset", "limit"], "{ offset, limit }");
+		if (!shouldDelegateRead(path)) {
+			const text = await callHelper("read", path, options);
+			if (text !== undefined) return text;
+		}
+		// Protocol paths and directories (whose listing it renders) go through the read tool.
+		const toolPath = withReadLineSelector(rawReadPath(path), options);
+		return toolPath === null ? "" : readToolText(toolPath);
+	};
+	const write = async (path, data) => {
+		// Schemes without an on-disk root (agent://, out://, ssh://, …) go through the write tool.
+		if (!shouldDelegateRead(path)) return callHelper("writeFile", path, data);
+		if (typeof data !== "string") throw new TypeError(`write() to ${path} expects string data`);
+		await globalThis.__omp_call_tool__("write", { path, content: data });
+		return path;
+	};
+	const env = (key, value) => callHelper("env", key, value);
+
+	// `sh` runs a command on the embedded bash engine (see `eval/shell-bridge.ts`) and resolves to its output.
+	// A template literal keeps its raw text and single-quotes each interpolation; an array becomes one word per element.
+	const shellQuote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+	const templateCommand = (strings, values) => {
+		let command = strings.raw[0];
+		for (let index = 0; index < values.length; index++) {
+			const value = values[index];
+			const words = Array.isArray(value) ? value.map(shellQuote).join(" ") : shellQuote(value);
+			command += words + strings.raw[index + 1];
+		}
+		return command;
+	};
+	const sh = async (command, ...rest) => {
+		let args;
+		if (Array.isArray(command) && Array.isArray(command.raw)) {
+			args = { command: templateCommand(command, rest) };
+		} else if (typeof command === "string") {
+			args = { ...optionsArg("sh", rest[0], rest.slice(1), ["cwd", "timeout"], "{ cwd, timeout }"), command };
+		} else {
+			throw new TypeError('sh() expects a command string or a template literal: sh("ls -la") or sh`ls ${dir}`');
+		}
+		const { output, exitCode, timedOut } = await globalThis.__omp_call_tool__("__shell__", args);
+		if (exitCode === 0) return output;
+		const status = timedOut ? `timed out after ${args.timeout}s` : `exited with code ${exitCode}`;
+		const error = new Error(`$ ${args.command}: ${status}${output ? `\n${output.trimEnd()}` : ""}`);
+		error.name = "ShellError";
+		error.exitCode = exitCode;
+		error.output = output;
+		throw error;
+	};
+
+	const __tools = new Map();
+	globalThis.__omp_tools__ = __tools;
+	const registerTool = (fn, opts = {}) => {
+		if (typeof fn !== "function") throw new TypeError("tool() expects a function");
+		if (!isPlainObject(opts)) throw new TypeError("tool() options must be a plain object");
+		const name = opts.name ?? fn.name;
+		if (typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(name)) {
+			throw new TypeError(`invalid tool name ${JSON.stringify(name)}`);
+		}
+		const description = opts.description ?? `JS tool ${name}`;
+		const parameters = opts.parameters ?? { type: "object", properties: {}, additionalProperties: true };
+		__tools.set(name, { name, fn, description, parameters });
+		globalThis.__omp_emit_status__("tool_define", {
+			name,
+			params: Object.keys(parameters.properties ?? {}),
+		});
+		return fn;
+	};
+	const tool = new Proxy(registerTool, {
+		apply(_target, _thisArg, args) {
+			return registerTool(args[0], args[1]);
+		},
+		get(_target, prop) {
+			if (prop === "defined") return () => [...__tools.keys()];
+			if (prop === "undefine") return name => __tools.delete(name);
+			if (typeof prop !== "string") return undefined;
+			return async args => globalThis.__omp_call_tool__(prop, args ?? {});
+		},
+	});
+
+	// `.key`, `[index]`, `["key"]` chains, as Python `output(query=)`: a missing key or index yields null.
+	const queryTokens = query => {
+		let text = query.trim();
+		if (text.startsWith(".")) text = text.slice(1);
+		const tokens = [];
+		let key = "";
+		for (let i = 0; i < text.length; i++) {
+			const ch = text[i];
+			if (ch !== "." && ch !== "[") {
+				key += ch;
+				continue;
+			}
+			if (key) tokens.push(key);
+			key = "";
+			if (ch === "[") {
+				const close = text.indexOf("]", i + 1);
+				const end = close === -1 ? text.length : close;
+				const inner = text.slice(i + 1, end);
+				if (inner.length >= 2 && inner.startsWith('"') && inner.endsWith('"')) tokens.push(inner.slice(1, -1));
+				else if (/^\s*-?\d+\s*$/.test(inner)) tokens.push(Number(inner));
+				else throw new TypeError(`output() query has an invalid index [${inner}] in ${JSON.stringify(query)}`);
+				i = end;
+			}
+		}
+		if (key) tokens.push(key);
+		return tokens;
+	};
+	const applyQuery = (data, query) => {
+		let current = data;
+		for (const token of queryTokens(query)) {
+			if (typeof token === "number") {
+				if (!Array.isArray(current) || token >= current.length || token < -current.length) return null;
+				current = current.at(token);
+			} else {
+				if (!isPlainObject(current) || !Object.hasOwn(current, token)) return null;
+				current = current[token];
+			}
+		}
+		return current;
+	};
+	// A bounded raw read locates a published `<id>.md`, which the helper can read verbatim past the
+	// read tool's page limit. A protocol resource can also name that file while prepending a warning
+	// (for a superseded run); only bypass the protocol when the preview matches the file's first line.
+	// `published` is the unannotated file, which a query parses as `agent://<id>/<path>` extraction does.
+	const outputSource = async id => {
+		const path = `agent://${id}`;
+		const located = await globalThis.__omp_call_tool__("read", { path: `${path}:raw:1-1` });
+		const filePath = located?.details?.resolvedPath;
+		const published = typeof filePath === "string" ? await callHelper("read", filePath) : undefined;
+		if (published !== undefined) {
+			const lineEnd = published.indexOf("\n");
+			const prefixLength = Math.min(lineEnd < 0 ? published.length : lineEnd, 100);
+			if (prefixLength > 0 ? located?.text?.startsWith(published.slice(0, prefixLength)) : located?.text === "") {
+				return { path: filePath, content: published, published };
+			}
+		}
+		return { path, content: await readToolText(path), published };
+	};
+	// Lines as Python's `splitlines()` counts them: a trailing newline adds no empty line.
+	const sourceLines = content => {
+		const lines = content.split(/\r?\n/);
+		if (lines.at(-1) === "") lines.pop();
+		return lines;
+	};
+	// One output's selection; options, results and errors match Python `output()` in `eval/py/prelude.py`.
+	const selectOutput = async (id, { format = "raw", query, offset, limit }) => {
+		const { path, content, published } = await outputSource(id);
+		let selected = content;
+		let range;
+		let lines;
+		if (query) {
+			let value;
+			try {
+				value = JSON.parse(published ?? content);
+			} catch (error) {
+				throw new Error(`Output ${id} is not valid JSON: ${error.message}`);
+			}
+			selected = JSON.stringify(applyQuery(value, query), null, 2) ?? "null";
+		} else if (!isNil(offset) || !isNil(limit)) {
+			lines = sourceLines(content);
+			const totalLines = lines.length;
+			const startLine = Math.max(1, offset ?? 1);
+			if (startLine > totalLines) {
+				throw new RangeError(`Offset ${startLine} is beyond end of output (${totalLines} lines) for ${id}`);
+			}
+			const endLine = Math.min(totalLines, startLine + (limit ?? totalLines - startLine + 1) - 1);
+			selected = lines.slice(startLine - 1, endLine).join("\n");
+			range = { start_line: startLine, end_line: endLine, total_lines: totalLines };
+		}
+		if (format === "stripped") selected = selected.replace(/\x1b\[[0-9;]*m/g, "");
+		if (format !== "json") return { id, content: selected };
+		const entry = {
+			id,
+			path,
+			line_count: (lines ?? sourceLines(query ? selected : content)).length,
+			char_count: query ? selected.length : content.length,
+			content: selected,
+		};
+		if (range) entry.range = range;
+		if (query) entry.query = query;
+		return entry;
+	};
+	const output = async (...args) => {
+		const last = args.at(-1);
+		const opts = isPlainObject(last) ? last : {};
+		const ids = isPlainObject(last) ? args.slice(0, -1) : args;
+		if (ids.length === 0) throw new TypeError("output() requires at least one output ID");
+		if (opts.query && (!isNil(opts.offset) || !isNil(opts.limit))) {
+			throw new TypeError("output() query cannot be combined with offset/limit");
+		}
+		const results = await Promise.all(ids.map(id => selectOutput(id, opts)));
+		if (results.length > 1) return results;
+		return opts.format === "json" ? results[0] : results[0].content;
+	};
+
+	const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+	const HANDLE_UNSET = Symbol("handle-unset");
+	const timeoutError = message => {
+		const error = new Error(message);
+		error.name = "TimeoutError";
+		return error;
+	};
+
+	class EvalHandle {
+		constructor(kind, id, schema) {
+			this.kind = kind;
+			this.id = id;
+			this._schema = schema;
+			this._result = HANDLE_UNSET;
+		}
+
+		async status() {
+			const snapshot = await globalThis.__omp_call_tool__("__status__", {
+				item: { kind: this.kind, id: this.id },
+			});
+			return snapshot?.status ?? "failed";
+		}
+
+		async done() {
+			return (await this.status()) !== "running";
+		}
+
+		async wait(opts, ...rest) {
+			if (this._result !== HANDLE_UNSET) return this._result;
+			const options = optionsArg("AgentHandle.wait", opts, rest, ["timeout"], "{ timeout }");
+			return (await wait([this], options))[0];
+		}
+
+		async cancel() {
+			const result = await globalThis.__omp_call_tool__("__cancel__", {
+				item: { kind: this.kind, id: this.id },
+			});
+			return Boolean(result?.cancelled);
+		}
+	}
+
+	class AgentHandle extends EvalHandle {
+		constructor(id, agentName, schema) {
+			super("agent", id, schema);
+			this.agent = agentName;
+			this.handle = `agent://${id}`;
+		}
+
+		toString() {
+			return `<agent ${this.id} (${this.agent})>`;
+		}
+
+		async send(message) {
+			return await globalThis.__omp_call_tool__("write", {
+				path: this.handle,
+				content: String(message),
+				i: "Messaging agent",
+			});
+		}
+
+		async output(opts = {}) {
+			return await output(this.id, opts);
+		}
+	}
+
+	class CompletionHandle extends EvalHandle {
+		constructor(id, schema) {
+			super("completion", id, schema);
+		}
+
+		async attempts() {
+			const snapshot = await globalThis.__omp_call_tool__("__status__", {
+				item: { kind: this.kind, id: this.id },
+			});
+			return snapshot?.attempts ?? [];
+		}
+
+		toString() {
+			return `<completion ${this.id}>`;
+		}
+	}
+
+	// Immediate-return wrapper for the async `completion()`/`agent()` factories.
+	// JS cannot hand back a handle synchronously — the bridge allocates the id
+	// over an async round-trip — so the factory returns this thenable instead:
+	// `await` it to get the resolved handle (for dag wiring via `.id`/`.handle`),
+	// or call the handle methods directly (`h.wait()`, `h.status()`, …) and they
+	// await resolution internally. This matches the documented immediate-handle
+	// contract that Python satisfies natively via its synchronous bridge.
+	class PendingHandle {
+		constructor(promise) {
+			this._promise = promise;
+		}
+
+		then(onFulfilled, onRejected) {
+			return this._promise.then(onFulfilled, onRejected);
+		}
+
+		catch(onRejected) {
+			return this._promise.catch(onRejected);
+		}
+
+		finally(onFinally) {
+			return this._promise.finally(onFinally);
+		}
+
+		async status() {
+			return (await this._promise).status();
+		}
+
+		async attempts() {
+			return (await this._promise).attempts();
+		}
+
+		async done() {
+			return (await this._promise).done();
+		}
+
+		async wait(...args) {
+			return (await this._promise).wait(...args);
+		}
+
+		async cancel() {
+			return (await this._promise).cancel();
+		}
+
+		async send(message) {
+			return (await this._promise).send(message);
+		}
+
+		async output(options) {
+			return (await this._promise).output(options);
+		}
+	}
+
+	const resolveHandleSnapshot = (handle, snapshot) => {
+		const status = snapshot?.status ?? "failed";
+		if (status === "running") throw timeoutError(`${handle.kind} handle ${handle.id} is still running`);
+		if (status === "failed" || status === "cancelled") {
+			throw new Error(snapshot?.error || `${handle.kind} handle ${handle.id} failed`);
+		}
+		const value = hasOwn(snapshot ?? {}, "data")
+			? snapshot.data
+			: handle._schema !== undefined
+				? JSON.parse(snapshot?.text ?? "")
+				: (snapshot?.text ?? "");
+		handle._result = value;
+		return value;
+	};
+
+	const WAIT_NOT_A_SLEEP =
+		"wait() takes agent or completion handles; it is not a sleep. Wait for page state with tab.waitFor*(…), or pause with await Bun.sleep(ms).";
+	const wait = async (handles, opts, ...rest) => {
+		const { timeout, raiseErrors = true } = optionsArg("wait", opts, rest, ["timeout", "raiseErrors"], "{ timeout, raiseErrors }");
+		const isHandleLike = value => value instanceof EvalHandle || value instanceof PendingHandle;
+		// `Array.from(1800)` is `[]`: a number would otherwise return at once, silently, where a sleep was meant.
+		if (typeof handles === "number") throw new TypeError(WAIT_NOT_A_SLEEP);
+		const raw = isHandleLike(handles) ? [handles] : Array.from(handles ?? []);
+		const items = await Promise.all(raw);
+		for (const handle of items) {
+			if (!(handle instanceof EvalHandle)) throw new TypeError("wait() expects agent or completion handles");
+		}
+		const results = new Array(items.length);
+		const pending = [];
+		const pendingIndexes = [];
+		for (let index = 0; index < items.length; index++) {
+			const handle = items[index];
+			if (handle._result === HANDLE_UNSET) {
+				pending.push({ kind: handle.kind, id: handle.id });
+				pendingIndexes.push(index);
+			} else {
+				results[index] = handle._result;
+			}
+		}
+		if (pending.length > 0) {
+			const args = { items: pending };
+			if (timeout !== undefined) args.timeoutMs = Math.max(0, Number(timeout) * 1000);
+			const response = await globalThis.__omp_call_tool__("__wait__", args);
+			const snapshots = Array.isArray(response?.items) ? response.items : [];
+			if (snapshots.length !== pending.length) throw new Error("wait() returned an incomplete handle result");
+			for (let offset = 0; offset < pendingIndexes.length; offset++) {
+				const index = pendingIndexes[offset];
+				try {
+					results[index] = resolveHandleSnapshot(items[index], snapshots[offset]);
+				} catch (error) {
+					if (error?.name === "TimeoutError") throw error;
+					results[index] = error instanceof Error ? error : new Error(String(error));
+				}
+			}
+		}
+		if (raiseErrors) {
+			const failure = results.find(value => value instanceof Error);
+			if (failure) throw failure;
+		}
+		return results;
+	};
+
+	const completion = (prompt, opts, ...rest) => {
+		const promise = (async () => {
+			const options = optionsArg("completion", opts, rest, ["model", "system", "schema"], "{ model, system, schema }");
+			const result = await globalThis.__omp_call_tool__("__completion__", { prompt, ...options });
+			if (!result || typeof result.id !== "string") throw new Error("completion() did not return a handle");
+			return new CompletionHandle(result.id, options.schema);
+		})();
+		return new PendingHandle(promise);
+	};
+
+	const checkQuestions = questions => {
+		if (questions === null || typeof questions !== "object" || Array.isArray(questions)) {
+			throw new TypeError("judge(state, questions) expects questions as an object keyed by id");
+		}
+	};
+
+	// Optional `images` is a list of local paths or embedded `{ type: "image", data, mimeType }` attachments.
+	const judge = async (state, questions, opts) => {
+		checkQuestions(questions);
+		const { images } = optionsArg("judge", opts, [], ["images"], "{ images }");
+		const args = { state, questions };
+		if (images !== undefined) args.images = images;
+		const result = await globalThis.__omp_call_tool__("__judge__", args);
+		if (!result || !isPlainObject(result.answers)) throw new Error("judge() did not return answers");
+		return result.answers;
+	};
+
+	// One settled judgeBatch item: `answers` on success, else `error`.
+	class JudgmentItem {
+		constructor(item) {
+			this.key = item.key;
+			this.answers = item.answers;
+			this.error = item.error;
+			this.model = item.model;
+		}
+
+		get ok() {
+			return this.error === undefined;
+		}
+
+		toString() {
+			return this.error === undefined
+				? `<judgment ${JSON.stringify(this.key)} ${JSON.stringify(this.answers)}>`
+				: `<judgment ${JSON.stringify(this.key)} error=${JSON.stringify(this.error)}>`;
+		}
+	}
+
+	// Host-owned bulk judgment run. Pull settled items with `drain()` across as
+	// many cells as needed; the run outlives any single cell.
+	class JudgmentBatch {
+		constructor(id, total, intent) {
+			this.id = id;
+			this.total = total;
+			this.intent = intent;
+		}
+
+		async _call(op, args = {}) {
+			return await globalThis.__omp_call_tool__("__judge_batch__", { op, id: this.id, ...args });
+		}
+
+		async status() {
+			return await this._call("status");
+		}
+
+		// Items settled since the last drain as `[[key, JudgmentItem]]`; waits up
+		// to `timeout` seconds for at least one, else returns `[]`.
+		async drain(opts, ...rest) {
+			const { timeout } = optionsArg("JudgmentBatch.drain", opts, rest, ["timeout"], "{ timeout }");
+			const args = timeout === undefined ? {} : { timeoutMs: Math.max(0, Number(timeout) * 1000) };
+			const result = await this._call("drain", args);
+			const items = Array.isArray(result?.items) ? result.items : [];
+			return items.map(item => [item.key, new JudgmentItem(item)]);
+		}
+
+		// Yield `[key, JudgmentItem]` as items settle until `timeout` seconds
+		// elapse or the run completes.
+		async *drainIter(opts, ...rest) {
+			const { timeout } = optionsArg("JudgmentBatch.drainIter", opts, rest, ["timeout"], "{ timeout }");
+			const deadline = timeout === undefined ? undefined : Date.now() + Number(timeout) * 1000;
+			while (true) {
+				const remaining = deadline === undefined ? undefined : Math.max(0, (deadline - Date.now()) / 1000);
+				const items = await this.drain({ timeout: remaining });
+				if (items.length === 0) return;
+				yield* items;
+			}
+		}
+
+		async results() {
+			return (await this._call("results"))?.results ?? {};
+		}
+
+		async failed() {
+			return (await this._call("failed"))?.failed ?? {};
+		}
+
+		async cancel() {
+			return Boolean((await this._call("cancel"))?.cancelled);
+		}
+
+		async close() {
+			await this._call("close");
+		}
+
+		toString() {
+			return `<judgeBatch ${this.id} total=${this.total}>`;
+		}
+	}
+
+	const judgeBatchFrom = result => {
+		if (!result || typeof result.id !== "string") throw new Error("judgeBatch() did not return a batch");
+		return new JudgmentBatch(result.id, Number(result.total) || 0, result.intent ?? "Judging");
+	};
+
+	// Judge every state with the same questions on the host. `states` is
+	// `{ key: state }` or an array (keys are indices); `images` maps keys to
+	// lists of local paths or embedded image attachments. `intent` is an
+	// optional nonempty progress/job label. Item failures land in
+	// `JudgmentItem.error`; only a run that dies wholesale rejects `drain()`.
+	const judgeBatch = async (states, questions, opts, ...rest) => {
+		checkQuestions(questions);
+		const options = optionsArg(
+			"judgeBatch",
+			opts,
+			rest,
+			["concurrency", "retries", "minOk", "intent", "images"],
+			"{ intent, concurrency, retries, minOk, images }",
+		);
+		if (
+			options.intent !== undefined &&
+			(typeof options.intent !== "string" || options.intent.trim().length === 0)
+		) {
+			throw new TypeError("judgeBatch() intent must be a non-empty string");
+		}
+		let items;
+		if (Array.isArray(states)) items = states.map((state, key) => ({ key, state }));
+		else if (isPlainObject(states)) items = Object.entries(states).map(([key, state]) => ({ key, state }));
+		else throw new TypeError("judgeBatch(states, questions) expects states as an object or array");
+		const { images, ...batchOptions } = options;
+		if (images !== undefined) {
+			if (!isPlainObject(images)) throw new TypeError("judgeBatch() images must be an object keyed by state key");
+			const itemsByKey = new Map(items.map(item => [String(item.key), item]));
+			for (const key of Object.keys(images)) {
+				const item = itemsByKey.get(key);
+				if (!item) throw new TypeError(`images contains unknown input key ${JSON.stringify(key)}`);
+				item.images = images[key];
+			}
+		}
+		// `op` goes last so a caller-supplied `op` cannot turn create into close/cancel on an existing batch.
+		return judgeBatchFrom(
+			await globalThis.__omp_call_tool__("__judge_batch__", {
+				...batchOptions,
+				items,
+				questions,
+				op: "create",
+			}),
+		);
+	};
+
+	// Re-create a batch ref by id (after a VM reset or from another runtime).
+	judgeBatch.attach = async id =>
+		judgeBatchFrom(await globalThis.__omp_call_tool__("__judge_batch__", { op: "attach", id: String(id) }));
+
+	const agent = (prompt, opts, ...rest) => {
+		const promise = (async () => {
+			const options = optionsArg(
+				"agent",
+				opts,
+				rest,
+				["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools", "model"],
+				"{ agent, label, schema, schemaMode, isolated, apply, merge, tools, model }",
+			);
+			const result = await globalThis.__omp_call_tool__("__agent__", { prompt, ...options });
+			if (!result || typeof result.id !== "string") throw new Error("agent() did not return a handle");
+			return new AgentHandle(result.id, result.agent, options.schema);
+		})();
+		return new PendingHandle(promise);
+	};
+
+	class WorkPool {
+		constructor(name, agentName, limit) {
+			this.name = name;
+			this.agent = agentName;
+			this.limit = limit;
+		}
+
+		async push(...items) {
+			if (!items.every(item => typeof item === "string")) {
+				throw new TypeError("WorkPool.push() expects string items");
+			}
+			const result = await globalThis.__omp_call_tool__("__workpool__", {
+				op: "push",
+				name: this.name,
+				items,
+			});
+			return result?.ids ?? [];
+		}
+
+		async status() {
+			return await globalThis.__omp_call_tool__("__workpool__", {
+				op: "status",
+				name: this.name,
+			});
+		}
+
+		async peek() {
+			return await globalThis.__omp_call_tool__("__workpool__", {
+				op: "peek",
+				name: this.name,
+			});
+		}
+
+		async close() {
+			return await globalThis.__omp_call_tool__("__workpool__", {
+				op: "close",
+				name: this.name,
+			});
+		}
+
+		toString() {
+			return `<workpool ${this.name} (${this.agent}) ${this.limit} agents>`;
+		}
+	}
+
+	const workpool = async (agentName, opts, ...rest) => {
+		if (isPlainObject(agentName) && isNil(opts) && rest.every(isNil)) {
+			opts = agentName;
+			agentName = undefined;
+		}
+		const options = optionsArg(
+			"workpool",
+			opts,
+			rest,
+			["name", "context", "tools", "model"],
+			"{ name, context, tools, model }",
+		);
+		// `op` goes last so a caller-supplied `op` cannot turn create into close/push on an existing pool.
+		const result = await globalThis.__omp_call_tool__("__workpool__", {
+			...(agentName === undefined ? {} : { agent: agentName }),
+			...options,
+			op: "create",
+		});
+		if (!result || typeof result.name !== "string") throw new Error("workpool() did not return a pool");
+		return new WorkPool(result.name, result.agent, result.limit);
+	};
+
+	const log = message => globalThis.__omp_emit_status__("log", { message: String(message) });
+
+	const phase = title => {
+		globalThis.__omp_phase__ = String(title);
+		globalThis.__omp_emit_status__("phase", { title: String(title) });
+	};
+
+	const __budgetSnap = async () => {
+		const r = await globalThis.__omp_call_tool__("__budget__", {});
+		return r && typeof r === "object" ? r : {};
+	};
+
+	const budget = {
+		total: async () => {
+			const s = await __budgetSnap();
+			return s.total ?? null;
+		},
+		spent: async () => Number((await __budgetSnap()).spent ?? 0),
+		remaining: async () => {
+			const s = await __budgetSnap();
+			return s.total == null ? Infinity : Math.max(0, Number(s.total) - Number(s.spent ?? 0));
+		},
+		hard: async () => Boolean((await __budgetSnap()).hard),
+	};
+
+	const formatArgs = args => args.map(arg => (typeof arg === "string" ? arg : arg));
+
+	const consoleTimers = new Map();
+	const consoleCounts = new Map();
+	const consoleBridge = {
+		log: (...args) => globalThis.__omp_log__("log", ...formatArgs(args)),
+		info: (...args) => globalThis.__omp_log__("info", ...formatArgs(args)),
+		warn: (...args) => globalThis.__omp_log__("warn", ...formatArgs(args)),
+		error: (...args) => globalThis.__omp_log__("error", ...formatArgs(args)),
+		debug: (...args) => globalThis.__omp_log__("debug", ...formatArgs(args)),
+		table: (data, columns) =>
+			columns === undefined
+				? globalThis.__omp_table__(data)
+				: globalThis.__omp_table__(data, columns),
+		dir: (value, _options) => globalThis.__omp_log__("log", value),
+		dirxml: (...args) => globalThis.__omp_log__("log", ...formatArgs(args)),
+		trace: (...args) => {
+			const stack = (new Error().stack ?? "").split("\n").slice(2).join("\n");
+			globalThis.__omp_log__("log", args.length > 0 ? `Trace: ${formatArgs(args).join(" ")}` : "Trace", `\n${stack}`);
+		},
+		assert: (condition, ...args) => {
+			if (condition) return;
+			if (args.length > 0) globalThis.__omp_log__("error", "Assertion failed:", ...formatArgs(args));
+			else globalThis.__omp_log__("error", "Assertion failed");
+		},
+		group: (...args) => {
+			if (args.length > 0) globalThis.__omp_log__("log", ...formatArgs(args));
+		},
+		groupCollapsed: (...args) => {
+			if (args.length > 0) globalThis.__omp_log__("log", ...formatArgs(args));
+		},
+		groupEnd: () => {},
+		time: label => {
+			consoleTimers.set(String(label ?? "default"), Date.now());
+		},
+		timeLog: (label, ...args) => {
+			const key = String(label ?? "default");
+			const start = consoleTimers.get(key);
+			if (start === undefined) {
+				globalThis.__omp_log__("warn", `Timer '${key}' does not exist`);
+				return;
+			}
+			globalThis.__omp_log__("log", `${key}: ${Date.now() - start}ms`, ...formatArgs(args));
+		},
+		timeEnd: label => {
+			const key = String(label ?? "default");
+			const start = consoleTimers.get(key);
+			if (start === undefined) {
+				globalThis.__omp_log__("warn", `Timer '${key}' does not exist`);
+				return;
+			}
+			consoleTimers.delete(key);
+			globalThis.__omp_log__("log", `${key}: ${Date.now() - start}ms`);
+		},
+		count: label => {
+			const key = String(label ?? "default");
+			const next = (consoleCounts.get(key) ?? 0) + 1;
+			consoleCounts.set(key, next);
+			globalThis.__omp_log__("log", `${key}: ${next}`);
+		},
+		countReset: label => {
+			consoleCounts.delete(String(label ?? "default"));
+		},
+	};
+
+	globalThis.console = consoleBridge;
+	globalThis.print = consoleBridge.log;
+	globalThis.tool = tool;
+	globalThis.completion = completion;
+	globalThis.output = output;
+	globalThis.agent = agent;
+	globalThis.wait = wait;
+	globalThis.AgentHandle = AgentHandle;
+	globalThis.CompletionHandle = CompletionHandle;
+	globalThis.judge = judge;
+	globalThis.judgeBatch = judgeBatch;
+	globalThis.JudgmentBatch = JudgmentBatch;
+	globalThis.JudgmentItem = JudgmentItem;
+	globalThis.workpool = workpool;
+	globalThis.WorkPool = WorkPool;
+	globalThis.log = log;
+	globalThis.phase = phase;
+	globalThis.budget = budget;
+	globalThis.read = read;
+	globalThis.write = write;
+	globalThis.env = env;
+	globalThis.sh = sh;
+}

@@ -1,0 +1,10 @@
+{
+	"references": [
+		{
+			"path": "./packages/tsconfig.workspace.json"
+		},
+		{
+			"path": "./tsconfig.tools.json"
+		}
+	]
+}

@@ -1,0 +1,181 @@
+import { retryResetTimezoneOffsetFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { extractRetryHint } from "@oh-my-pi/pi-utils";
+
+export type HeadersLike = Headers | Record<string, string | undefined> | undefined | null;
+
+/** Extracts retry timing using the provider or its upstream's declared timestamp timezone. */
+export function extractProviderRetryHint(
+	provider: string | undefined,
+	message: string | undefined,
+	baseUrl?: string,
+): number | undefined {
+	const naiveResetTimezoneOffset = provider === undefined ? undefined : retryResetTimezoneOffsetFor(provider, baseUrl);
+	return extractRetryHint(undefined, message, { naiveResetTimezoneOffset });
+}
+
+const RETRY_AFTER_HINT = "retry-after-ms=";
+
+export function errorMessageText(error: unknown): string {
+	return error instanceof Error ? error.message : JSON.stringify(error);
+}
+
+export function appendRetryAfterHint(message: string, headers: HeadersLike): string {
+	if (message.includes(RETRY_AFTER_HINT)) {
+		return message;
+	}
+
+	const retryAfterMs = getRetryAfterMsFromHeaders(headers);
+	if (retryAfterMs === undefined) {
+		return message;
+	}
+
+	return `${message} ${RETRY_AFTER_HINT}${retryAfterMs}`;
+}
+
+export function formatErrorMessageWithRetryAfter(error: unknown): string {
+	return appendRetryAfterHint(errorMessageText(error), getHeadersFromError(error));
+}
+
+export function getRetryAfterMsFromHeaders(headers: HeadersLike): number | undefined {
+	if (!headers) return undefined;
+
+	const retryAfterMs = parseRetryAfterMsHeader(getHeaderValue(headers, "retry-after-ms"));
+	const retryAfter = parseRetryAfterHeader(getHeaderValue(headers, "retry-after"));
+	const resetMs = parseResetHeader(getHeaderValue(headers, "x-ratelimit-reset-ms"), "ms");
+	const resetSeconds = parseResetHeader(getHeaderValue(headers, "x-ratelimit-reset"), "s");
+
+	const candidates = [retryAfterMs, retryAfter, resetMs, resetSeconds].filter(
+		(value): value is number => value !== undefined,
+	);
+	if (candidates.length === 0) return undefined;
+	return Math.max(...candidates);
+}
+
+/**
+ * The server's explicit `x-should-retry` verdict: `true`/`false` when the
+ * header says so, `undefined` when absent or unrecognised. Non-standard
+ * (Stainless-SDK convention) but emitted by OpenAI, Anthropic, and retrying
+ * gateways; when present it overrides status/text retry heuristics.
+ */
+export function getShouldRetryFromHeaders(headers: HeadersLike): boolean | undefined {
+	if (!headers) return undefined;
+	const value = getHeaderValue(headers, "x-should-retry");
+	if (value === "true") return true;
+	if (value === "false") return false;
+	return undefined;
+}
+
+const RATE_LIMIT_LIMIT_HEADER_PREFIX = "x-ratelimit-limit-";
+
+/**
+ * Name of the first `x-ratelimit-limit-*` header that reports a zero
+ * allowance (Mistral `x-ratelimit-limit-req-minute: 0`, OpenAI
+ * `x-ratelimit-limit-requests: 0`), or `undefined` when none does.
+ *
+ * A zero limit means the plan grants no quota for the model at all, so a 429
+ * carrying one never clears by waiting; `captureOpenAIHttpError` and the
+ * OpenAI-wire transport use it to fail fast instead of replaying.
+ */
+export function getZeroRateLimitHeader(headers: HeadersLike): string | undefined {
+	if (!headers) return undefined;
+	if (headers instanceof Headers) {
+		for (const [name, value] of headers) {
+			if (name.startsWith(RATE_LIMIT_LIMIT_HEADER_PREFIX) && value.trim() === "0") return name;
+		}
+		return undefined;
+	}
+	for (const key in headers) {
+		const name = key.toLowerCase();
+		if (name.startsWith(RATE_LIMIT_LIMIT_HEADER_PREFIX) && headers[key]?.trim() === "0") return name;
+	}
+	return undefined;
+}
+
+export function getHeadersFromError(error: unknown): HeadersLike {
+	if (!error || typeof error !== "object") return undefined;
+	const record = error as { headers?: unknown; response?: { headers?: unknown }; cause?: unknown };
+	const direct = extractHeaders(record.headers) ?? extractHeaders(record.response?.headers);
+	if (direct) return direct;
+	if (record.cause) return getHeadersFromError(record.cause);
+	return undefined;
+}
+
+function extractHeaders(value: unknown): HeadersLike {
+	if (!value) return undefined;
+	if (value instanceof Headers) return value;
+	if (typeof value === "object") return value as Record<string, string | undefined>;
+	return undefined;
+}
+
+function getHeaderValue(headers: Headers | Record<string, string | undefined>, name: string): string | undefined {
+	if (headers instanceof Headers) {
+		const value = headers.get(name);
+		return value ?? undefined;
+	}
+
+	const target = name.toLowerCase();
+	for (const [key, value] of Object.entries(headers)) {
+		if (key.toLowerCase() === target && typeof value === "string") {
+			return value;
+		}
+	}
+	return undefined;
+}
+
+/** `retry-after-ms` (Anthropic-style): a plain millisecond delta. */
+function parseRetryAfterMsHeader(value: string | undefined): number | undefined {
+	if (!value) return undefined;
+	const ms = Number(value.trim());
+	if (!Number.isFinite(ms) || ms <= 0) return undefined;
+	return Math.ceil(ms);
+}
+
+function parseRetryAfterHeader(value: string | undefined): number | undefined {
+	if (!value) return undefined;
+	const trimmed = value.trim();
+	if (!trimmed) return undefined;
+
+	const numeric = Number(trimmed);
+	if (Number.isFinite(numeric)) {
+		if (numeric <= 0) return undefined;
+		return Math.ceil(numeric * 1000);
+	}
+
+	const dateMs = Date.parse(trimmed);
+	if (!Number.isNaN(dateMs)) {
+		const delay = dateMs - Date.now();
+		return delay > 0 ? Math.ceil(delay) : undefined;
+	}
+
+	return undefined;
+}
+
+function parseResetHeader(value: string | undefined, unit: "ms" | "s"): number | undefined {
+	if (!value) return undefined;
+	const numeric = Number(value);
+	if (!Number.isFinite(numeric) || numeric <= 0) return undefined;
+
+	const nowMs = Date.now();
+	let targetMs: number | undefined;
+
+	if (unit === "ms") {
+		if (numeric > 1e12) {
+			targetMs = numeric;
+		} else if (numeric > 1e9) {
+			targetMs = numeric * 1000;
+		} else {
+			return Math.ceil(numeric);
+		}
+	} else {
+		if (numeric > 1e12) {
+			targetMs = numeric;
+		} else if (numeric > 1e9) {
+			targetMs = numeric * 1000;
+		} else {
+			return Math.ceil(numeric * 1000);
+		}
+	}
+
+	if (targetMs <= nowMs) return undefined;
+	return Math.ceil(targetMs - nowMs);
+}

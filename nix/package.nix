@@ -1,0 +1,351 @@
+{
+  addDriverRunpath,
+  autoPatchelfHook,
+  alsa-lib,
+  apple-sdk_27 ? null,
+  bun,
+  bun2nix,
+  callPackage,
+  config,
+  craneLib,
+  cudaPackages_13 ? null,
+  darwin,
+  lib,
+  libpulseaudio,
+  makeBinaryWrapper,
+  pipewire,
+  removeReferencesTo,
+  source,
+  stdenv,
+  # onnxruntime-node (downloaded into the agent cache on first use) ships CUDA
+  # execution providers that dlopen vendor libraries absent from the NixOS
+  # loader path. Enabling this appends them to the inference workers'
+  # LD_LIBRARY_PATH so the GPU provider loads instead of quietly degrading to
+  # CPU. Mirrors nixpkgs' `cudaSupport` convention (sunshine, obs-studio,
+  # btop). Note the closure cost — libcublas ~745 MB, libcurand ~136 MB,
+  # cuda_cudart ~74 MB — so this stays opt-in and off by default.
+  cudaSupport ? config.cudaSupport,
+  # Wayland screencast loads libpipewire at runtime; this puts it on the addon's
+  # RUNPATH, whose runtime closure adds ~750 MB (gstreamer, ffmpeg, systemd,
+  # ...). Default to the lean build; opt in via `.override`.
+  withWaylandScreencast ? false,
+  # Downstream callers can opt out of the Swift/SDK dependency. The official
+  # Apple Silicon package must include the bridge by default.
+  withAppleFm ? stdenv.hostPlatform.system == "aarch64-darwin",
+  # Release builds use fat LTO with one codegen unit, which is slow. Set this
+  # to false for faster local builds with thin LTO and 16 codegen units.
+  withFatLto ? true,
+}:
+let
+  packageJson = lib.importJSON ../packages/coding-agent/package.json;
+  rootPackageJson = lib.importJSON ../package.json;
+  nativeBuild = callPackage ./native.nix {
+    inherit
+      source
+      craneLib
+      withFatLto
+      withAppleFm
+      apple-sdk_27
+      ;
+  };
+  inherit (nativeBuild) platform;
+  bunRuntimeTemplate = callPackage ./bun-runtime.nix { inherit bun; };
+  patchedDependencies = lib.mapAttrs (
+    _: patch: source + "/${patch}"
+  ) rootPackageJson.patchedDependencies;
+  patchOverrides = bun2nix.patchedDependenciesToOverrides { inherit patchedDependencies; };
+  # Vendor libraries the on-demand onnxruntime-node CUDA execution provider
+  # dlopens. These are not needed for the addon itself to load (postFixup's
+  # DT_NEEDED covers libstdc++/libgcc), but the provider is its own .so whose
+  # dependencies sit outside the NixOS loader path, so the worker needs them on
+  # LD_LIBRARY_PATH to load a GPU provider instead of degrading to CPU.
+  #
+  # CUDA 13 specifically: the shipped provider's sonames are libcublasLt.so.13 /
+  # libcublas.so.13 / libcurand.so.10 / libcudart.so.13. CUDA 12 (nixpkgs'
+  # default `cudaPackages`) only provides .so.12, so taking this build's
+  # `cudaPackages` would silently fail to resolve them; pin the 13.x series.
+  # Verified by dlopen: without these the provider dies on libcublasLt.so.13.
+  cudaRuntimeLibraries =
+    let
+      # The driver itself (libcuda.so.1) is not a redistributable: it only
+      # exists at the host's driver link, which is stable across driver
+      # upgrades and present exactly when the machine can run CUDA at all.
+      driver = addDriverRunpath.driverLink;
+      libDirs = lib.concatMap (p: [ (lib.getLib p) ]) [
+        cudaPackages_13.libcublas
+        cudaPackages_13.libcurand
+        cudaPackages_13.cuda_cudart
+      ];
+    in
+    lib.optionals (cudaSupport && stdenv.hostPlatform.isLinux && cudaPackages_13 != null) (
+      [ driver ] ++ libDirs
+    );
+  runtimeNativeLibraries =
+    lib.optionals stdenv.hostPlatform.isLinux (
+      [ stdenv.cc.cc.lib ] ++ lib.optional (stdenv.cc.cc ? libgcc) stdenv.cc.cc.libgcc
+    )
+    ++ cudaRuntimeLibraries;
+in
+stdenv.mkDerivation {
+  pname = "omp";
+  inherit (packageJson) version;
+  src = source;
+
+  passthru = { inherit nativeBuild; };
+  bunDeps = bun2nix.fetchBunDeps {
+    bunNix = ./bun.nix;
+    overrides = patchOverrides;
+  };
+
+  nativeBuildInputs = [
+    bun
+    bun2nix.hook
+    removeReferencesTo
+  ]
+  ++ lib.optionals stdenv.hostPlatform.isLinux [
+    autoPatchelfHook
+    makeBinaryWrapper
+  ]
+  ++ lib.optionals stdenv.hostPlatform.isDarwin [ darwin.autoSignDarwinBinariesHook ];
+
+  # libgcc_s is resolved from the compiler's lib output during autoPatchelf.
+  buildInputs = lib.optionals stdenv.hostPlatform.isLinux [ stdenv.cc.cc.lib ];
+
+  strictDeps = true;
+  # Nix builders cannot reliably hardlink cache files into node_modules
+  # (and Darwin's clonefile backend also rejects store permissions).
+  bunInstallFlags = [
+    "--linker=isolated"
+    "--backend=copyfile"
+  ];
+  dontConfigure = true;
+  dontRunLifecycleScripts = true;
+  dontUseBunBuild = true;
+  dontUseBunCheck = true;
+  dontUseBunInstall = true;
+  dontStrip = true;
+
+  env = {
+    SOURCE_DATE_EPOCH = "1";
+  }
+  // lib.optionalAttrs stdenv.hostPlatform.isDarwin { BUN_NO_CODESIGN_MACHO_BINARY = "1"; };
+
+  buildPhase = ''
+    runHook preBuild
+
+    echo "Preparing omp-natives"
+    install -Dm755 "${nativeBuild}/lib/${platform.nativeLibrary}" \
+      "packages/natives/native/${platform.addon}"
+    # The loader and embed-native.ts require the release version, which is
+    # written into the addon after linking (build-bindings.ts does this for
+    # local builds; this raw cargo build must do it itself). Darwin re-signs
+    # through signIfRequired below; the sandbox has no system codesign.
+    bun scripts/stamp-native-version.ts --no-sign \
+      "packages/natives/native/${platform.addon}"
+    ${lib.optionalString stdenv.hostPlatform.isLinux ''
+      # The loader extracts this archived addon at runtime, so fix its
+      # interpreter-independent Nix RPATH before Bun embeds it.
+      autoPatchelf -- "packages/natives/native/${platform.addon}"
+      # omp-voice dlopens libpulse-simple.so.0 / libpulse.so.0 / libasound.so.2,
+      # and Wayland capture libpipewire-0.3.so.0, by bare name; glibc resolves
+      # those through the calling object's RUNPATH, so append the client
+      # libraries here. Nothing links them, so autoPatchelf cannot discover
+      # them on its own.
+      patchelf --add-rpath "${
+        lib.makeLibraryPath (
+          [
+            libpulseaudio
+            alsa-lib
+          ]
+          ++ lib.optional withWaylandScreencast pipewire
+        )
+      }" \
+        "packages/natives/native/${platform.addon}"
+    ''}
+    ${lib.optionalString stdenv.hostPlatform.isDarwin ''
+      # The darwin stdenv links C code against darwin.libiconv, whose install
+      # name is an absolute /nix/store path. The addon is gzip-embedded in the
+      # bun binary, so that reference is invisible to the output scanner and the
+      # library is absent from the runtime closure on target machines. Repoint
+      # it at the system libiconv (dyld shared cache, same ABI).
+      install_name_tool -change "${darwin.libiconv}/lib/libiconv.2.dylib" \
+        /usr/lib/libiconv.2.dylib "packages/natives/native/${platform.addon}"
+      # arm64 Darwin requires even locally-built Mach-O addons to carry an
+      # ad-hoc signature. The install-name rewrite invalidates it, so sign
+      # after the change and before Bun archives the file.
+      signIfRequired "packages/natives/native/${platform.addon}"
+    ''}
+
+    echo "Compiling OMP"
+    BUN_COMPILE_EXECUTABLE_PATH="${bunRuntimeTemplate}/libexec/bun" \
+      bun --cwd="$PWD/packages/coding-agent" run build
+
+    runHook postBuild
+  '';
+
+  installPhase = ''
+    runHook preInstall
+
+    install -Dm755 packages/coding-agent/dist/omp "$out/bin/omp"
+    install -Dm644 LICENSE "$out/share/doc/omp/LICENSE"
+    # The executable embeds the CLI and the native addon; ship both notices.
+    {
+      cat packages/coding-agent/THIRD-PARTY-NOTICES.txt
+      echo
+      cat packages/natives/THIRD-PARTY-NOTICES.txt
+    } > "$out/share/doc/omp/THIRD-PARTY-NOTICES.txt"
+
+    ${lib.optionalString stdenv.hostPlatform.isLinux ''
+      # The addon is gzip-compressed inside the compiled binary, so its linked
+      # store paths are invisible to the output reference scanner.
+      mkdir -p "$out/nix-support"
+      patchelf --print-rpath "packages/natives/native/${platform.addon}" \
+        > "$out/nix-support/embedded-addon-runpath"
+    ''}
+
+    runHook postInstall
+  '';
+
+  # Bun serializes the build interpreter path into the bundled entrypoint's
+  # inert shebang. Remove its hash before Nix scans output references; this
+  # runs before Darwin's binary-signing fixup hook.
+  preFixup = ''
+    remove-references-to -t ${bun} "$out/bin/omp"
+  '';
+
+  # Prebuilt addons that omp bun-installs into its cache at first use
+  # (onnxruntime-node, sherpa-onnx-node, sharp, fastembed) are process.dlopen'd and
+  # need libstdc++.so.6 / libgcc_s.so.1, which nix glibc's default loader path lacks;
+  # their own DT_RUNPATH means this executable's RPATH is never consulted for their
+  # dependencies, so only LD_LIBRARY_PATH resolves them. The agent injects this value
+  # into the inference worker subprocesses' LD_LIBRARY_PATH alone (see
+  # packages/coding-agent/src/subprocess/worker-client.ts) instead of exporting
+  # LD_LIBRARY_PATH process-wide, where it would also reorder the loader search path
+  # of every user command the bash tool, daemon PTY sessions and eval kernels spawn.
+  # Additionally, force libstdc++ to load at process start via DT_NEEDED: addons the
+  # main process itself dlopen's then resolve libstdc++.so.6 / libgcc_s.so.1 by
+  # soname from the already-loaded set, regardless of the addon's own DT_RUNPATH.
+  # stdenv.cc.cc.lib is already in buildInputs, so the autoPatchelfHook pass that
+  # follows resolves the new dependency and sets the RPATH. patchelf must run before
+  # wrapProgram: the wrapper replaces $out/bin/omp with a script and moves the ELF
+  # to $out/bin/.omp-wrapped.
+  postFixup = lib.optionalString stdenv.hostPlatform.isLinux ''
+    patchelf --add-needed libstdc++.so.6 "$out/bin/omp"
+    wrapProgram "$out/bin/omp" \
+      --set-default OMP_NATIVE_LIBRARY_PATH "${lib.makeLibraryPath runtimeNativeLibraries}"
+  '';
+
+  disallowedReferences = [ bun ];
+
+  # patchelf leaves DT_VERDEF pointing at the pre-relocation `.gnu.version_d`
+  # address whenever it grows `.dynamic`: both the `--add-needed libstdc++.so.6`
+  # above and the autoPatchelfHook RPATH pass that follows it do. bun --compile
+  # output defines its own symbol versions (DT_VERDEFNUM), so glibc follows that
+  # stale pointer in `_dl_check_map_versions` and the binary SIGSEGVs in the
+  # loader before `main()` runs (issue #9881). Repoint DT_VERDEF at the current
+  # section address. preInstallCheck runs after every fixupPhase hook, including
+  # the autoPatchelfHook pass that follows postFixup, so it is the last point at
+  # which the field can be corrected; wrapProgram moved the real ELF to
+  # `.omp-wrapped`.
+  preInstallCheck = lib.optionalString stdenv.hostPlatform.isLinux ''
+    bun ${../scripts/fix-dt-verdef.ts} "$out/bin/.omp-wrapped"
+  '';
+
+  doInstallCheck = true;
+  installCheckPhase = ''
+    runHook preInstallCheck
+    # Capture rather than pipe into grep: piping masks a signal death of omp
+    # under `set -o pipefail` (grep -q's exit status wins), which hid the
+    # loader SIGSEGV in issue #9881. With a variable, errexit surfaces omp's
+    # real exit status and stderr in the build log.
+    smokeOutput="$(HOME="$TMPDIR" "$out/bin/omp" --smoke-test)"
+    grep -q "smoke-test: ok" <<<"$smokeOutput"
+    BUN_BE_BUN=1 "$out/bin/omp" -e \
+      'if (Bun.version !== "${bun.version}" || typeof Bun.Image !== "function") process.exit(1)'
+    ${lib.optionalString stdenv.hostPlatform.isLinux ''
+      # The addons are dlopen'd, so prove the advertised directories actually
+      # resolve the libraries rather than merely carrying a plausible string.
+      env -u LD_LIBRARY_PATH BUN_BE_BUN=1 "$out/bin/omp" -e \
+        'const {dlopen}=require("bun:ffi");const dirs=(process.env.OMP_NATIVE_LIBRARY_PATH||"").split(":").filter(Boolean);const need={"libstdc++.so.6":{__cxa_demangle:{args:["ptr","ptr","ptr","ptr"],returns:"ptr"}},"libgcc_s.so.1":{_Unwind_Backtrace:{args:["ptr","ptr"],returns:"i32"}}};for(const lib of Object.keys(need)){let ok=false;for(const d of dirs){try{dlopen(d+"/"+lib,need[lib]);ok=true;break}catch(e){}}if(!ok){console.error("unresolved: "+lib);process.exit(1)}}'
+      # The libstdc++ preload (see postFixup) must survive: without it addons the
+      # main process dlopen's directly fail to resolve libstdc++.so.6 on NixOS.
+      # wrapProgram moved the real ELF to .omp-wrapped.
+      patchelf --print-needed "$out/bin/.omp-wrapped" | grep -q '^libstdc++\.so\.6$'
+    ''}${
+      lib.optionalString (cudaSupport && stdenv.hostPlatform.isLinux && cudaPackages_13 != null) ''
+        # The CUDA provider must actually resolve, not merely be advertised: the
+        # wrong CUDA major is invisible at runtime (onnxruntime silently falls
+        # back to CPU), so assert the exact sonames the provider dlopens. Only the
+        # redistributable libraries are checked here — the driver's libcuda.so.1
+        # lives at the host's driver link, which does not exist in this sandbox
+        # and is not a property of the build.
+        env -u LD_LIBRARY_PATH BUN_BE_BUN=1 "$out/bin/omp" -e \
+          'const {dlopen}=require("bun:ffi");const dirs=(process.env.OMP_NATIVE_LIBRARY_PATH||"").split(":").filter(Boolean);const need={"libcublasLt.so.13":{cublasLtGetVersion:{args:[],returns:"ptr"}},"libcublas.so.13":{cublasGetVersion:{args:[],returns:"ptr"}},"libcurand.so.10":{curandGetVersion:{args:["ptr"],returns:"i32"}},"libcudart.so.13":{cudaRuntimeGetVersion:{args:["ptr"],returns:"i32"}}};for(const lib of Object.keys(need)){let ok=false;for(const d of dirs){try{dlopen(d+"/"+lib,need[lib]);ok=true;break}catch(e){}}if(!ok){console.error("unresolved: "+lib);process.exit(1)}}'
+      ''
+    }
+    ${lib.optionalString stdenv.hostPlatform.isDarwin ''
+      # The smoke test above can pass in the build sandbox because
+      # darwin.libiconv is present there, while a Mac after GC is not. Fail
+      # the build if the embedded addon references any /nix/store path.
+      # Capture, don't pipe: under `set -o pipefail` a failing otool would
+      # take the false branch and the check would silently pass.
+      addonDeps="$(otool -L "packages/natives/native/${platform.addon}")"
+      if grep -q "/nix/store/" <<<"$addonDeps"; then
+        echo "embedded addon references /nix/store paths:" >&2
+        echo "$addonDeps" >&2
+        exit 1
+      fi
+      # Linking against a newer SDK (apple-sdk_27 for the Foundation Models
+      # bridge) must not raise the addon's minimum macOS above the platform
+      # floor; only the embedded bridge targets macOS 27.
+      addonLoadCommands="$(otool -l "packages/natives/native/${platform.addon}")"
+      addonMinos="$(awk '$1 == "cmd" { build = $2 == "LC_BUILD_VERSION" } build && $1 == "minos" { print $2; exit }' <<<"$addonLoadCommands")"
+      darwinFloor=${stdenv.hostPlatform.darwinMinVersion}
+      if [ -z "$addonMinos" ] || [ "$(printf '%s\n' "$addonMinos" "$darwinFloor" | sort -V | tail -n 1)" != "$darwinFloor" ]; then
+        echo "embedded addon requires macOS ''${addonMinos:-unknown}, above the platform floor $darwinFloor" >&2
+        exit 1
+      fi
+    ''}
+    ${lib.optionalString withAppleFm ''
+      # Model/device eligibility is not a build requirement. On macOS 27+,
+      # this exercises materialization/dlopen. On older macOS, unsupported_os
+      # only proves the embedded bridge is non-empty; it is not loaded.
+      HOME="$TMPDIR" bun -e '
+        const native = require("./packages/natives/native/${platform.addon}");
+        const status = JSON.parse(await native.appleFmAvailability());
+        console.log("Apple Foundation Models:", status);
+        const eligibilityReasons = [
+          "unsupported_os",
+          "device_not_eligible",
+          "apple_intelligence_not_enabled",
+          "model_not_ready",
+          "unavailable",
+        ];
+        if (
+          status?.type !== "availability" ||
+          !(status.available === true ||
+            (status.available === false && eligibilityReasons.includes(status.reason)))
+        ) process.exit(1);
+      '
+    ''}
+    runHook postInstallCheck
+  '';
+
+  meta = {
+    description = "Terminal-based coding agent with multi-model support";
+    homepage = "https://omp.sh";
+    changelog = "https://github.com/can1357/oh-my-pi/releases/tag/v${packageJson.version}";
+    license = lib.licenses.mit;
+    mainProgram = "omp";
+    platforms = [
+      "aarch64-darwin"
+      "aarch64-linux"
+      "x86_64-darwin"
+      "x86_64-linux"
+    ];
+    sourceProvenance = with lib.sourceTypes; [
+      binaryNativeCode
+      fromSource
+    ];
+  };
+}

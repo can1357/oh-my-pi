@@ -1,0 +1,301 @@
+import * as path from "node:path";
+import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
+
+/** Build-time specifier resolved to bundled legacy Pi module namespaces. */
+export const LEGACY_PI_MODULES_SPECIFIER = "omp-legacy-pi-modules";
+
+const VIRTUAL_NAMESPACE = "omp-legacy-pi-modules-build";
+
+/**
+ * Where the bundled Pi packages live. The monorepo keeps them under
+ * `packages/<dir>`; an npm install puts them next to the installed
+ * `@oh-my-pi/pi-coding-agent` under the `@oh-my-pi` scope.
+ */
+export interface LegacyPiLayout {
+	/** Root of the `@oh-my-pi/pi-coding-agent` package holding this script. */
+	readonly packageDir: string;
+	/** Root the monorepo layout hangs off: the repository root, which holds `packages/<dir>`. */
+	readonly repoRoot: string;
+}
+
+const DEFAULT_LAYOUT: LegacyPiLayout = {
+	packageDir: path.resolve(import.meta.dir, ".."),
+	repoRoot: path.resolve(import.meta.dir, "..", "..", ".."),
+};
+
+/**
+ * How much of a package's root `./*` catch-all export enters the registry.
+ * `null` keeps it out (coding-agent exposes `cli.ts`/`main.ts` there, which
+ * would pull the binary entry's graph into the registry); `"flat"` takes only
+ * top-level files; `"nested"` mirrors Node, where `*` also matches across `/`.
+ */
+type RootWildcard = "flat" | "nested" | null;
+
+interface BundledPackage {
+	readonly dir: string;
+	/** Directory of the package under the `@oh-my-pi` scope in an npm install (`agent` ships as `pi-agent-core`). */
+	readonly npmDir: string;
+	readonly identifier: string;
+	readonly rootShim: string | null;
+	readonly rootWildcard: RootWildcard;
+}
+
+const BUNDLED_PACKAGES: readonly BundledPackage[] = [
+	{ dir: "agent", npmDir: "pi-agent-core", identifier: "PiAgentCore", rootShim: null, rootWildcard: null },
+	{ dir: "ai", npmDir: "pi-ai", identifier: "PiAi", rootShim: "legacy-pi-ai-shim.ts", rootWildcard: null },
+	{ dir: "catalog", npmDir: "pi-catalog", identifier: "PiCatalog", rootShim: null, rootWildcard: "flat" },
+	{
+		dir: "coding-agent",
+		npmDir: "pi-coding-agent",
+		identifier: "PiCodingAgent",
+		rootShim: "legacy-pi-coding-agent-shim.ts",
+		rootWildcard: null,
+	},
+	{ dir: "natives", npmDir: "pi-natives", identifier: "PiNatives", rootShim: null, rootWildcard: null },
+	// pi-tui keeps stateful singletons (`TERMINAL`, theme, figure settings) in
+	// root-level and nested modules; extensions must share the host's records.
+	{ dir: "tui", npmDir: "pi-tui", identifier: "PiTui", rootShim: "legacy-pi-tui-shim.ts", rootWildcard: "nested" },
+	{ dir: "utils", npmDir: "pi-utils", identifier: "PiUtils", rootShim: null, rootWildcard: "flat" },
+];
+
+const TYPEBOX_MODULE_KEY = "typebox";
+const TYPEBOX_COMPAT_MODULE = "legacy-typebox.ts";
+const MAIN_THREAD_UNSAFE_WILDCARD_BASENAMES = new Set(["worker-entry"]);
+
+/** One namespace module the binary must retain for legacy extension imports. */
+export interface BundledPiEntry {
+	/** Canonical import key exposed to extensions. */
+	readonly key: string;
+	/** Unique identifier used by the virtual module's generated import. */
+	readonly binding: string;
+	/** Package or absolute source specifier compiled into the binary. */
+	readonly importSpecifier: string;
+}
+
+interface WildcardPattern {
+	readonly exportPrefix: string;
+	readonly exportSuffix: string;
+	readonly sourcePrefix: string;
+	readonly sourceSuffix: string;
+}
+
+function bindingForSubpath(identifier: string, subpath: string): string {
+	const segments = subpath
+		.split("/")
+		.filter(Boolean)
+		.map(segment =>
+			segment
+				.split(/[^a-zA-Z0-9]+/)
+				.filter(Boolean)
+				.map(part => part.charAt(0).toUpperCase() + part.slice(1))
+				.join(""),
+		);
+	return `bundled${identifier}${segments.join("")}`;
+}
+
+function isSafeWildcardBasename(basename: string): boolean {
+	if (!basename || basename.startsWith(".") || basename.startsWith("_")) return false;
+	if (MAIN_THREAD_UNSAFE_WILDCARD_BASENAMES.has(basename)) return false;
+	return !/\.(test|spec|d|d\.json|generated|bench)$/.test(basename);
+}
+
+function parseWildcardPattern(exportKey: string, sourcePattern: string): WildcardPattern | null {
+	const exportStar = exportKey.indexOf("*");
+	const sourceStar = sourcePattern.indexOf("*");
+	if (exportStar === -1 || sourceStar === -1) return null;
+	if (exportKey.indexOf("*", exportStar + 1) !== -1) return null;
+	if (sourcePattern.indexOf("*", sourceStar + 1) !== -1) return null;
+	if (!sourcePattern.startsWith("./")) return null;
+	return {
+		exportPrefix: exportKey.slice(2, exportStar),
+		exportSuffix: exportKey.slice(exportStar + 1),
+		sourcePrefix: sourcePattern.slice(2, sourceStar),
+		sourceSuffix: sourcePattern.slice(sourceStar + 1),
+	};
+}
+
+function exportImportTarget(value: unknown): string | null {
+	if (typeof value === "string") return value;
+	if (isRecord(value) && typeof value.import === "string") return value.import;
+	return null;
+}
+
+function shimSpecifier(file: string, layout: LegacyPiLayout): string {
+	return path.join(layout.packageDir, "src", "extensibility", file);
+}
+
+/**
+ * Locate an installed bundled package's root and manifest. Node resolution
+ * rooted at this package decides where the dependency lives, so npm's install
+ * strategy (hoisted siblings, nested `node_modules`, shallow, pnpm links) is
+ * honored instead of a hard-coded sibling path.
+ */
+async function resolveInstalledPackage(
+	pkg: BundledPackage,
+	layout: LegacyPiLayout,
+): Promise<{ root: string; manifest: unknown }> {
+	const specifier = `@oh-my-pi/${pkg.npmDir}`;
+	let entry: string;
+	try {
+		entry = Bun.resolveSync(specifier, path.join(layout.packageDir, "package.json"));
+	} catch (error) {
+		throw new Error(`Bundled Pi package ${specifier} is not installed for ${layout.packageDir}`, { cause: error });
+	}
+	// The entry lives inside the package; walk up to the manifest that names it.
+	let dir = path.dirname(entry);
+	while (true) {
+		try {
+			const manifest: unknown = await Bun.file(path.join(dir, "package.json")).json();
+			if (isRecord(manifest) && manifest.name === specifier) return { root: dir, manifest };
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	throw new Error(`Bundled Pi package manifest not found for ${specifier} (resolved to ${entry})`);
+}
+
+/**
+ * Locate a bundled package's root and manifest. The monorepo keeps the
+ * packages under `packages/<dir>`; an npm install has no such tree, so the
+ * package is resolved from the installed dependency graph instead.
+ */
+async function resolvePackageRoot(
+	pkg: BundledPackage,
+	layout: LegacyPiLayout,
+): Promise<{ root: string; manifest: unknown }> {
+	const monorepoRoot = path.join(layout.repoRoot, "packages", pkg.dir);
+	try {
+		return { root: monorepoRoot, manifest: await Bun.file(path.join(monorepoRoot, "package.json")).json() };
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
+	return resolveInstalledPackage(pkg, layout);
+}
+
+/**
+ * Derive the bundled legacy Pi module surface from current package exports.
+ * Named wildcard exports are expanded from source, including `x/index`
+ * spellings; root catch-alls only per {@link BundledPackage.rootWildcard}.
+ */
+export async function collectBundledPiEntries(layout: LegacyPiLayout = DEFAULT_LAYOUT): Promise<BundledPiEntry[]> {
+	const entries: BundledPiEntry[] = [];
+	const seenKeys = new Set<string>();
+	const seenBindings = new Set<string>();
+	function addEntry(key: string, binding: string, importSpecifier: string): void {
+		if (seenKeys.has(key)) return;
+		if (seenBindings.has(binding)) {
+			throw new Error(`Duplicate bundled Pi binding ${binding} for ${key}`);
+		}
+		seenKeys.add(key);
+		seenBindings.add(binding);
+		entries.push({ key, binding, importSpecifier });
+	}
+
+	for (const pkg of BUNDLED_PACKAGES) {
+		const { root: packageRoot, manifest } = await resolvePackageRoot(pkg, layout);
+		const manifestPath = path.join(packageRoot, "package.json");
+		if (!isRecord(manifest) || typeof manifest.name !== "string") {
+			throw new Error(`Bundled Pi package manifest has no name: ${manifestPath}`);
+		}
+		const exportsField = isRecord(manifest.exports) ? manifest.exports : {};
+		const rootSpecifier = pkg.rootShim ? shimSpecifier(pkg.rootShim, layout) : manifest.name;
+		addEntry(manifest.name, `bundled${pkg.identifier}`, rootSpecifier);
+
+		for (const exportKey in exportsField) {
+			if (!exportKey.startsWith("./") || exportKey === "." || exportKey.includes("*")) continue;
+			const subpath = exportKey.slice(2);
+			const key = `${manifest.name}/${subpath}`;
+			addEntry(key, bindingForSubpath(pkg.identifier, subpath), key);
+		}
+
+		for (const exportKey in exportsField) {
+			if (!exportKey.startsWith("./") || exportKey === "." || !exportKey.includes("*")) continue;
+			const sourcePattern = exportImportTarget(exportsField[exportKey]);
+			if (!sourcePattern) continue;
+			const pattern = parseWildcardPattern(exportKey, sourcePattern);
+			if (!pattern || !/\.(ts|tsx|mts|cts|js|mjs|cjs|jsx)$/.test(pattern.sourceSuffix)) continue;
+			const rootWildcard = pattern.exportPrefix === "" || pattern.exportPrefix === "/";
+			if (rootWildcard && !pkg.rootWildcard) continue;
+
+			const sourceDir = path.join(packageRoot, pattern.sourcePrefix);
+			try {
+				// Recursive on purpose: Node matches `*` in an `exports` pattern across
+				// `/`, so `./slash-commands/*` genuinely serves
+				// `slash-commands/helpers/active-oauth-account`. Enumerating only the
+				// top level left every nested key out of the compiled registry, where
+				// it fell through to `Bun.resolveSync` and died under bunfs — so such
+				// an import worked from source and failed inside a binary.
+				const glob = new Bun.Glob(`**/*${pattern.sourceSuffix}`);
+				const matches: string[] = [];
+				for await (const match of glob.scan({ cwd: sourceDir, onlyFiles: true })) {
+					// Bun.Glob yields host separators; the export keys and generated
+					// identifiers below are `/`-shaped. Same normalization as
+					// `generate-docs-index.ts`.
+					matches.push(match.split(path.sep).join("/"));
+				}
+				matches.sort();
+				for (const match of matches) {
+					if (!match.endsWith(pattern.sourceSuffix)) continue;
+					if (rootWildcard && pkg.rootWildcard === "flat" && match.includes("/")) continue;
+					const basename = match.slice(0, match.length - pattern.sourceSuffix.length);
+					const segments = basename.split("/");
+					// Every directory on the way has to be importable too: a private or
+					// hidden folder is no more exported than a private file.
+					if (segments.some(segment => segment.startsWith(".") || segment.startsWith("_"))) continue;
+					if (!isSafeWildcardBasename(segments.at(-1) ?? "")) continue;
+					const subpath = `${pattern.exportPrefix}${basename}${pattern.exportSuffix}`;
+					const key = `${manifest.name}/${subpath}`;
+					addEntry(key, bindingForSubpath(pkg.identifier, subpath), key);
+				}
+			} catch (error) {
+				if (!isEnoent(error)) throw error;
+			}
+		}
+	}
+
+	addEntry(TYPEBOX_MODULE_KEY, "bundledTypeBoxShim", shimSpecifier(TYPEBOX_COMPAT_MODULE, layout));
+	return entries;
+}
+
+/** Render the lazy loader registry; exported so tests can execute the generated module. */
+export function __renderLegacyPiVirtualModule(entries: readonly BundledPiEntry[]): string {
+	const loaders = entries.map(
+		entry => `const ${entry.binding} = () => import(${JSON.stringify(entry.importSpecifier)});`,
+	);
+	const modules = entries.map(entry => `\t${JSON.stringify(entry.key)}: ${entry.binding},`);
+	return [...loaders, "", "export const BUNDLED_PI_MODULE_LOADERS = {", ...modules, "};", ""].join("\n");
+}
+
+/**
+ * Build plugin that materializes lazy legacy Pi module loaders entirely in
+ * memory. Literal dynamic imports retain every compile-time edge without
+ * evaluating unrelated host modules during extension bootstrap.
+ *
+ * The virtual module is anchored inside the installed package. Bun resolves
+ * the bare specifiers of the generated loaders against the importing module's
+ * directory, so anchoring it there makes Node resolution look through that
+ * package's own dependency graph (nested `node_modules`, hoisted siblings,
+ * pnpm links) instead of the host project's — a host that installs
+ * `@oh-my-pi/pi-coding-agent` without its dependencies hoisted to the top
+ * level would otherwise fail to resolve `@oh-my-pi/pi-agent-core`.
+ */
+export async function createLegacyPiVirtualModulePlugin(
+	layout: LegacyPiLayout = DEFAULT_LAYOUT,
+): Promise<Bun.BunPlugin> {
+	const source = __renderLegacyPiVirtualModule(await collectBundledPiEntries(layout));
+	const virtualPath = path.join(layout.packageDir, LEGACY_PI_MODULES_SPECIFIER);
+	return {
+		name: "omp:legacy-pi-modules",
+		setup(build) {
+			build.onResolve({ filter: /^omp-legacy-pi-modules$/ }, () => ({
+				path: virtualPath,
+				namespace: VIRTUAL_NAMESPACE,
+			}));
+			build.onLoad({ filter: /.*/, namespace: VIRTUAL_NAMESPACE }, () => ({ contents: source, loader: "ts" }));
+		},
+	};
+}

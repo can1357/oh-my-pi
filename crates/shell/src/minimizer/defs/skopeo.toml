@@ -1,0 +1,39 @@
+# skopeo copy / inspect output.
+# Drops the verbose layer-by-layer copy progress while keeping manifests and
+# errors (FATA / level=error).
+
+[filters.skopeo]
+description = "Compact skopeo copy/inspect output"
+match_command = "^skopeo$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^Getting image source signatures$",
+	"^Copying blob ",
+	"^Copying config ",
+	"^Writing manifest to image destination",
+	"^Storing signatures$",
+]
+truncate_lines_at = 300
+max_lines = 80
+on_empty = "skopeo: ok"
+
+[[tests.skopeo]]
+name = "strip copy progress"
+input = "Getting image source signatures\nCopying blob abc123 done\nCopying config def456 done\nWriting manifest to image destination\nStoring signatures\n"
+expected = "skopeo: ok"
+
+[[tests.skopeo]]
+name = "keep fatal errors"
+input = "Copying blob abc123 done\nFATA[0000] Error parsing image name\n"
+expected = "FATA[0000] Error parsing image name\n"
+
+[[tests.skopeo]]
+name = "inspect keeps output"
+input = "{\n    \"Name\": \"docker.io/library/nginx\",\n    \"Tag\": \"latest\",\n    \"Digest\": \"sha256:abc123\",\n    \"RepoTags\": [\"latest\", \"1.25\"],\n    \"Created\": \"2026-01-01T00:00:00Z\"\n}\n"
+expected = "{\n    \"Name\": \"docker.io/library/nginx\",\n    \"Tag\": \"latest\",\n    \"Digest\": \"sha256:abc123\",\n    \"RepoTags\": [\"latest\", \"1.25\"],\n    \"Created\": \"2026-01-01T00:00:00Z\"\n}\n"
+
+[[tests.skopeo]]
+name = "empty input returns on_empty message"
+input = ""
+expected = "skopeo: ok"

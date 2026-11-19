@@ -1,0 +1,24 @@
+# go-task task runner output.
+# Drop "is up to date" lines, keep executed task output.
+
+[filters.task]
+description = "Compact go-task task runner output"
+match_command = "^task$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^task: Task \".*\" is up to date$",
+]
+truncate_lines_at = 250
+max_lines = 80
+on_empty = "task: ok"
+
+[[tests.task]]
+name = "strips up-to-date keeps executed"
+input = "task: Task \"lint\" is up to date\ntask: [build] go build ./...\nok  \tfoo\n"
+expected = "task: [build] go build ./...\nok  \tfoo\n"
+
+[[tests.task]]
+name = "all up to date"
+input = "task: Task \"build\" is up to date\n"
+expected = "task: ok"

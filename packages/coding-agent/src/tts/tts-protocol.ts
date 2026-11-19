@@ -1,0 +1,66 @@
+import type { TtsLocalModelKey } from "./models";
+
+export type TtsProgressStatus = "initiate" | "download" | "progress" | "progress_total" | "done" | "ready" | "error";
+
+export interface TtsProgressFileState {
+	loaded: number;
+	total: number;
+}
+
+export interface TtsProgressEvent {
+	modelKey: TtsLocalModelKey;
+	status: TtsProgressStatus;
+	name?: string;
+	file?: string;
+	progress?: number;
+	loaded?: number;
+	total?: number;
+	files?: Record<string, TtsProgressFileState>;
+	task?: string;
+	model?: string;
+}
+
+export type TtsWorkerInbound =
+	| { type: "ping"; id: string }
+	| { type: "synthesize"; id: string; modelKey: TtsLocalModelKey; text: string; voice?: string; speed?: number }
+	| { type: "download"; id: string; modelKey: TtsLocalModelKey }
+	// Streaming synthesis: a session is opened with `stream-start`, fed complete
+	// speakable segments with `stream-push` (the parent's SpeakableStream does all
+	// splitting/normalization; the worker synthesizes each push as-is), and closed
+	// with `stream-end`. `stream-cancel` interrupts without a final drain. The
+	// worker emits an `audio-chunk` per segment and a final `stream-done` only for
+	// non-cancelled sessions.
+	| { type: "stream-start"; id: string; modelKey: TtsLocalModelKey; voice?: string; speed?: number }
+	| { type: "stream-push"; id: string; text: string }
+	| { type: "stream-end"; id: string }
+	| { type: "stream-cancel"; id: string };
+
+export type TtsWorkerOutbound =
+	| { type: "pong"; id: string }
+	| { type: "audio"; id: string; pcm: Float32Array; sampleRate: number }
+	| { type: "downloaded"; id: string }
+	| { type: "error"; id: string; error: string }
+	| { type: "progress"; id: string; event: TtsProgressEvent }
+	| { type: "log"; level: "debug" | "warn" | "error"; msg: string; meta?: Record<string, unknown> }
+	// One synthesized segment of a streaming session, in emission order, followed
+	// by a single `stream-done` once the input stream is closed and drained.
+	| { type: "audio-chunk"; id: string; index: number; text: string; pcm: Float32Array; sampleRate: number }
+	| { type: "stream-done"; id: string };
+
+/**
+ * Worker-side transport. Messages cross both hops (client tunnel <-> daemon
+ * `speech` module <-> worker stdio) as the binary frames of
+ * `daemon/modules/speech-frames.ts`; `pcm` travels as a raw f32le payload.
+ * The daemon owns the worker process (native inference stays out of every
+ * agent process) and SIGKILLs it on stop; there is no close handshake.
+ */
+export interface TtsTransport {
+	send(message: TtsWorkerOutbound): void;
+	/**
+	 * Send and resolve once the frame left the worker's stdout buffer.
+	 * Streaming synthesis awaits this per audio chunk, so each segment reaches
+	 * the client before the next one synthesizes and the pipe never backs up.
+	 */
+	sendAndFlush(message: TtsWorkerOutbound): Promise<void>;
+	onMessage(handler: (message: TtsWorkerInbound) => void): () => void;
+}

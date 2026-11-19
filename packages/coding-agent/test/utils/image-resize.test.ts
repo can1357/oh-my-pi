@@ -1,0 +1,428 @@
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import * as zlib from "node:zlib";
+import { decodePng } from "@oh-my-pi/pi-coding-agent/tools/browser/screenshot";
+import { fitImage, formatDimensionNote, resizeImage } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
+import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
+
+// 1x1 red PNG (69 bytes) — used as a Bun.Image seed to synthesize larger fixtures
+// without checking binary blobs into the repo.
+const RED_1X1_PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+
+async function makeRedPng(width: number, height: number): Promise<string> {
+	const seed = Buffer.from(RED_1X1_PNG_BASE64, "base64");
+	const upscaled = await new Bun.Image(seed).resize(width, height, { filter: "nearest" }).png().bytes();
+	return Buffer.from(upscaled).toBase64();
+}
+
+async function makeRedWebP(width: number, height: number): Promise<string> {
+	const seed = Buffer.from(RED_1X1_PNG_BASE64, "base64");
+	const upscaled = await new Bun.Image(seed)
+		.resize(width, height, { filter: "nearest" })
+		.webp({ quality: 90 })
+		.bytes();
+	return Buffer.from(upscaled).toBase64();
+}
+
+// Fixtures are synthesized once and shared read-only — `resizeImage` never mutates
+// its input, so a single decodable source per shape serves every test. Real image
+// encode/decode is the only cost here, so each source is the smallest solid-red
+// image that still crosses the threshold under test:
+//   - oversizedPng: a strip whose long edge exceeds the 1568 default cap, so
+//     re-encodes touch ~1568×392 px instead of 1568×1568. A uniform red keeps format
+//     selection deterministic (WebP is always smallest; PNG always beats JPEG), so
+//     the strip exercises the same format/budget logic as a large square.
+//   - smallPng / smallWebp: 200×200, comfortably inside every default cap (fast path).
+let oversizedPng: string;
+let smallPng: string;
+let smallWebp: string;
+
+beforeAll(async () => {
+	[oversizedPng, smallPng, smallWebp] = await Promise.all([
+		makeRedPng(1600, 400),
+		makeRedPng(200, 200),
+		makeRedWebP(200, 200),
+	]);
+});
+
+describe("resizeImage defaults", () => {
+	it("downscales inputs larger than 1568px on the long edge", async () => {
+		// 1600px wide — exceeds the default 1568 cap on the long edge.
+		const result = await resizeImage({ type: "image", data: oversizedPng, mimeType: "image/png" });
+
+		expect(result.wasResized).toBe(true);
+		expect(result.width).toBeLessThanOrEqual(1568);
+		expect(result.height).toBeLessThanOrEqual(1568);
+		// Aspect ratio of the 1600x400 source preserved (with rounding tolerance).
+		expect(Math.abs(result.width / result.height - 1600 / 400)).toBeLessThan(0.01);
+	});
+
+	it("pads a thin read-image strip to the provider's short-edge floor without distorting its content", async () => {
+		const pixels = new Uint8Array(320 * 8 * 4);
+		for (let i = 0; i < pixels.length; i += 4) pixels.set([255, 0, 0, 255], i);
+		pixels.set([0, 0, 255, 255], 0);
+
+		const result = await resizeImage(encodeRawPng(pixels, 320, 8, 4));
+		const decoded = decodePng(await new Bun.Image(result.buffer).png().bytes());
+		expect([decoded.width, decoded.height]).toEqual([1568, 200]);
+		expect([...decoded.pixels.subarray(800 * 4, 801 * 4)]).toEqual([0, 0, 255, 255]);
+		const center = (100 * decoded.width + 800) * 4;
+		expect([...decoded.pixels.subarray(center, center + 4)]).toEqual([255, 0, 0, 255]);
+		expect(formatDimensionNote(result)).toContain("Subtract padding offset (0, 80)");
+	});
+
+	it("preserves inputs already within budget and dimensions (fast path)", async () => {
+		// 200x200 red square encodes to ~few hundred bytes — well below budget/4.
+		const result = await resizeImage({ type: "image", data: smallPng, mimeType: "image/png" });
+
+		expect(result.wasResized).toBe(false);
+		expect(result.width).toBe(200);
+		expect(result.height).toBe(200);
+		expect(result.mimeType).toBe("image/png");
+	});
+
+	it("respects custom maxWidth/maxHeight overrides (browser-tool case)", async () => {
+		// 1600px wide — exceeds the 1024 cap from the browser screenshot override.
+		const result = await resizeImage(
+			{ type: "image", data: oversizedPng, mimeType: "image/png" },
+			{ maxWidth: 1024, maxHeight: 1024, maxBytes: 150 * 1024, jpegQuality: 70 },
+		);
+
+		expect(result.wasResized).toBe(true);
+		expect(result.width).toBeLessThanOrEqual(1024);
+		expect(result.height).toBeLessThanOrEqual(1024);
+		expect(result.buffer.length).toBeLessThanOrEqual(150 * 1024);
+	});
+
+	it("uses lossy WebP or JPEG (not PNG) for oversized inputs", async () => {
+		// Oversized red strip exceeds the dimension cap, triggering encodeSmallest.
+		// Lossy formats (JPEG/WebP) should win over PNG for a solid-color image
+		// because they compress more aggressively.
+		const result = await resizeImage({ type: "image", data: oversizedPng, mimeType: "image/png" });
+
+		expect(result.wasResized).toBe(true);
+		// The result should be a lossy format (JPEG or WebP), not PNG,
+		// because lossy encoding for a solid strip is trivially small.
+		expect(["image/jpeg", "image/webp"]).toContain(result.mimeType);
+		expect(result.buffer.length).toBeLessThanOrEqual(500 * 1024);
+	});
+
+	it("excludes WebP when excludeWebP option is true", async () => {
+		const result = await resizeImage(
+			{ type: "image", data: oversizedPng, mimeType: "image/png" },
+			{ excludeWebP: true },
+		);
+
+		expect(result.wasResized).toBe(true);
+		expect(["image/png", "image/jpeg"]).toContain(result.mimeType);
+		expect(result.mimeType).not.toBe("image/webp");
+	});
+
+	it("re-encodes a WebP source out of WebP when excludeWebP is set, even on the fast path", async () => {
+		// 200x200 WebP — well below 1568px and ~tiny bytes, so it would hit the
+		// fast path and pass through as image/webp. excludeWebP MUST force a
+		// re-encode to a non-WebP format.
+		const result = await resizeImage(
+			{ type: "image", data: smallWebp, mimeType: "image/webp" },
+			{ excludeWebP: true },
+		);
+
+		expect(result.mimeType).not.toBe("image/webp");
+		expect(["image/png", "image/jpeg"]).toContain(result.mimeType);
+	});
+});
+
+// Deterministic xorshift RGB noise as a PNG. Noise defeats every encoder, so a
+// small budget reliably forces the quality and dimension fallback ladders.
+function makeNoisePng(width: number, height: number): Uint8Array {
+	const chunk = (type: string, data: Buffer): Buffer => {
+		const length = Buffer.alloc(4);
+		length.writeUInt32BE(data.length);
+		const typed = Buffer.concat([Buffer.from(type), data]);
+		const crc = Buffer.alloc(4);
+		crc.writeUInt32BE(zlib.crc32(typed));
+		return Buffer.concat([length, typed, crc]);
+	};
+	const stride = width * 3 + 1;
+	const raw = Buffer.alloc(stride * height);
+	let state = 0x12345678;
+	for (let y = 0; y < height; y++) {
+		for (let i = 1; i < stride; i++) {
+			state ^= state << 13;
+			state ^= state >>> 17;
+			state ^= state << 5;
+			raw[y * stride + i] = state & 0xff;
+		}
+	}
+	const header = Buffer.alloc(13);
+	header.writeUInt32BE(width, 0);
+	header.writeUInt32BE(height, 4);
+	header[8] = 8; // bit depth
+	header[9] = 2; // truecolor RGB
+	return Buffer.concat([
+		Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+		chunk("IHDR", header),
+		chunk("IDAT", zlib.deflateSync(raw)),
+		chunk("IEND", Buffer.alloc(0)),
+	]);
+}
+
+describe("resizeImage tight budget fallback", () => {
+	const maxBytes = 20 * 1024;
+	let noisePng: Uint8Array;
+
+	beforeAll(() => {
+		noisePng = makeNoisePng(400, 400);
+	});
+
+	for (const excludeWebP of [false, true]) {
+		it(`returns bytes that decode at the reported size within budget (excludeWebP: ${excludeWebP})`, async () => {
+			// Precondition: the first full-size encode misses the budget, so the result
+			// must come from the fallback ladder.
+			const firstJpeg = await new Bun.Image(noisePng).jpeg({ quality: 80 }).bytes();
+			expect(firstJpeg.length).toBeGreaterThan(maxBytes);
+
+			const result = await resizeImage({ bytes: noisePng, mimeType: "image/png" }, { maxBytes, excludeWebP });
+
+			expect(result.wasResized).toBe(true);
+			expect(result.buffer.length).toBeLessThanOrEqual(maxBytes);
+			expect(result.width).toBeLessThan(400);
+			expect(result.height).toBeLessThan(400);
+			const decoded = await new Bun.Image(result.buffer).metadata();
+			expect(decoded.width).toBe(result.width);
+			expect(decoded.height).toBe(result.height);
+			expect(`image/${decoded.format}`).toBe(result.mimeType);
+			if (excludeWebP) expect(result.mimeType).not.toBe("image/webp");
+		});
+	}
+});
+
+describe("resizeImage decode fallback", () => {
+	it("reports PNG header dimensions when Bun.Image rejects after reading IHDR", async () => {
+		const png = Buffer.alloc(33);
+		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png, 0);
+		png.writeUInt32BE(13, 8);
+		png.write("IHDR", 12, "ascii");
+		png.writeUInt32BE(1900, 16);
+		png.writeUInt32BE(2474, 20);
+		png[24] = 8;
+		png[25] = 2;
+
+		const result = await resizeImage({ type: "image", data: png.toBase64(), mimeType: "image/png" });
+
+		expect(result.width).toBe(1900);
+		expect(result.height).toBe(2474);
+		expect(result.originalWidth).toBe(1900);
+		expect(result.originalHeight).toBe(2474);
+		expect(result.wasResized).toBe(false);
+		expect(result.buffer.length).toBe(png.length);
+	});
+
+	it("reports JPEG SOF dimensions when Bun.Image rejects after reading the header", async () => {
+		const jpeg = Buffer.alloc(12);
+		jpeg[0] = 0xff;
+		jpeg[1] = 0xd8;
+		jpeg[2] = 0xff;
+		jpeg[3] = 0xc0;
+		jpeg.writeUInt16BE(8, 4);
+		jpeg[6] = 8;
+		jpeg.writeUInt16BE(2474, 7);
+		jpeg.writeUInt16BE(1900, 9);
+		jpeg[11] = 3;
+
+		const result = await resizeImage({ type: "image", data: jpeg.toBase64(), mimeType: "image/jpeg" });
+
+		expect(result.width).toBe(1900);
+		expect(result.height).toBe(2474);
+		expect(result.originalWidth).toBe(1900);
+		expect(result.originalHeight).toBe(2474);
+		expect(result.wasResized).toBe(false);
+		expect(result.buffer.length).toBe(jpeg.length);
+	});
+});
+
+describe("resizeImage minimum dimension", () => {
+	it("upscales a degenerate 1x1 image up to the 200px floor", async () => {
+		// A 1x1 PNG (e.g. an empty chart render) would sail through the fast path
+		// untouched and trip a provider 400 "Could not process image".
+		const result = await resizeImage({ type: "image", data: RED_1X1_PNG_BASE64, mimeType: "image/png" });
+
+		expect(result.wasResized).toBe(true);
+		// Square source stays square at the floor.
+		expect(result.width).toBe(200);
+		expect(result.height).toBe(200);
+		// The encoded bytes actually carry those dimensions.
+		const meta = await new Bun.Image(Buffer.from(result.data, "base64")).metadata();
+		expect(meta.width).toBeGreaterThanOrEqual(200);
+		expect(meta.height).toBeGreaterThanOrEqual(200);
+	});
+
+	it("honors a custom minDimension override", async () => {
+		const result = await resizeImage(
+			{ type: "image", data: RED_1X1_PNG_BASE64, mimeType: "image/png" },
+			{ minDimension: 64 },
+		);
+
+		expect(result.width).toBe(64);
+		expect(result.height).toBe(64);
+	});
+});
+
+describe("fitImage", () => {
+	// TypeSafe Jev's documented bounds.
+	const JEV = { minSide: 280, maxSide: 1568, minPixels: 78_400, maxPixels: 2_458_624, maxBytes: 16 * 1024 * 1024 };
+
+	async function size(data: string): Promise<[number, number]> {
+		const { width, height } = await new Bun.Image(Buffer.from(data, "base64")).metadata();
+		return [width, height];
+	}
+
+	it("downscales past the max side keeping the aspect ratio", async () => {
+		const { image, content } = await fitImage(
+			{ type: "image", data: await makeRedPng(2000, 1000), mimeType: "image/png" },
+			JEV,
+		);
+
+		expect(await size(image.data)).toEqual([1568, 784]);
+		expect(image.mimeType).toBe("image/png");
+		// Scaling alone keeps the source on the whole canvas, so fractions of it still measure the source.
+		expect(content).toEqual({ top: 0, bottom: 1, left: 0, right: 1 });
+	});
+
+	it("upscales a tiny image to the min side", async () => {
+		const { image } = await fitImage({ type: "image", data: RED_1X1_PNG_BASE64, mimeType: "image/png" }, JEV);
+
+		expect(await size(image.data)).toEqual([280, 280]);
+	});
+
+	it("pads a strip the max side stops short of the min with its top-left pixel, content centered", async () => {
+		// 401x41 red strip with a blue top-left pixel: scaling stops at 1568x160, padding makes 1568x280.
+		const pixels = new Uint8Array(401 * 41 * 4);
+		for (let i = 0; i < pixels.length; i += 4) pixels.set([255, 0, 0, 255], i);
+		pixels.set([0, 0, 255, 255], 0);
+		const strip = encodeRawPng(pixels, 401, 41, 4).toBase64();
+
+		const { image, content } = await fitImage({ type: "image", data: strip, mimeType: "image/png" }, JEV);
+
+		const { width, height, pixels: out } = decodePng(Buffer.from(image.data, "base64"));
+		expect([width, height]).toEqual([1568, 280]);
+		const pixel = (x: number, y: number) => [...out.subarray((y * width + x) * 4, (y * width + x) * 4 + 4)];
+		expect(pixel(784, 0)).toEqual([0, 0, 255, 255]);
+		expect(pixel(784, 279)).toEqual([0, 0, 255, 255]);
+		expect(pixel(784, 140)).toEqual([255, 0, 0, 255]);
+		// The content edges bound exactly the source rows: padding just outside, source just inside.
+		expect(content).toEqual({ top: 60 / 280, bottom: 220 / 280, left: 0, right: 1 });
+		expect(pixel(784, 59)).toEqual([0, 0, 255, 255]);
+		expect(pixel(784, 60)).toEqual([255, 0, 0, 255]);
+		expect(pixel(784, 219)).toEqual([255, 0, 0, 255]);
+		expect(pixel(784, 220)).toEqual([0, 0, 255, 255]);
+	});
+
+	it("falls back to JPEG when the PNG exceeds the byte cap", async () => {
+		const noise = makeNoisePng(400, 400);
+		const maxBytes = noise.length / 2;
+
+		const { image } = await fitImage(
+			{ type: "image", data: noise.toBase64(), mimeType: "image/png" },
+			{ ...JEV, maxBytes },
+		);
+
+		expect(image.mimeType).toBe("image/jpeg");
+		expect(Buffer.byteLength(image.data, "base64")).toBeLessThanOrEqual(maxBytes);
+		expect(await size(image.data)).toEqual([400, 400]);
+	});
+
+	it("trims a size within the patch area to whole 32x32 patches", async () => {
+		// 321x319 is under 100 patches of area but covers 11x10 patches; trimming the width to 320 covers 10x10.
+		const { image } = await fitImage(
+			{ type: "image", data: await makeRedPng(321, 319), mimeType: "image/png" },
+			{ maxPatches: 100 },
+		);
+
+		expect(await size(image.data)).toEqual([320, 319]);
+	});
+
+	it("throws when no encoding fits the byte cap", async () => {
+		const noise = makeNoisePng(400, 400);
+
+		await expect(
+			fitImage({ type: "image", data: noise.toBase64(), mimeType: "image/png" }, { ...JEV, maxBytes: 64 }),
+		).rejects.toThrow("no encoding fits 64 bytes");
+	});
+});
+
+describe("resizeImage translucency", () => {
+	// A white disk with an antialiased rim on transparent black, the way icons store it.
+	function whiteDiskPng(side: number): Uint8Array {
+		const pixels = new Uint8Array(side * side * 4);
+		const center = side / 2;
+		for (let y = 0; y < side; y++) {
+			for (let x = 0; x < side; x++) {
+				const coverage = Math.min(
+					1,
+					Math.max(0, center - 4 - Math.hypot(x + 0.5 - center, y + 0.5 - center) + 0.5),
+				);
+				if (coverage > 0) pixels.set([255, 255, 255, Math.round(coverage * 255)], (y * side + x) * 4);
+			}
+		}
+		return encodeRawPng(pixels, side, side, 4);
+	}
+
+	// JPEG would show the transparent black; resampling straight alpha would gray the rim.
+	// Both the first candidate and the ladders (an impossible budget) keep the disk white.
+	for (const excludeWebP of [false, true]) {
+		for (const maxBytes of [500 * 1024, 1]) {
+			it(`keeps a small icon's alpha without dark rims (excludeWebP: ${excludeWebP}, maxBytes: ${maxBytes})`, async () => {
+				const result = await resizeImage(
+					{ bytes: whiteDiskPng(64), mimeType: "image/png" },
+					{ excludeWebP, maxBytes },
+				);
+
+				expect(result.wasResized).toBe(true);
+				expect(result.mimeType).not.toBe("image/jpeg");
+				if (excludeWebP) expect(result.mimeType).toBe("image/png");
+				const { width, height, pixels } = decodePng(await new Bun.Image(result.buffer).png().bytes());
+				expect([width, height]).toEqual([result.width, result.height]);
+				expect(pixels[3]).toBe(0);
+				expect(pixels[((height >> 1) * width + (width >> 1)) * 4 + 3]).toBe(255);
+				let darkest = 255;
+				for (let i = 0; i < pixels.length; i += 4) {
+					if (pixels[i + 3] >= 32) darkest = Math.min(darkest, pixels[i], pixels[i + 1], pixels[i + 2]);
+				}
+				// Lossy WebP shifts colors a little; a rim bleeding black would be far darker.
+				expect(darkest).toBeGreaterThan(230);
+			});
+		}
+	}
+});
+
+describe("resizeImage env wiring", () => {
+	const prior = Bun.env.OMP_NO_WEBP;
+
+	beforeEach(() => {
+		delete (Bun.env as Record<string, string | undefined>).OMP_NO_WEBP;
+	});
+
+	afterEach(() => {
+		if (prior === undefined) delete (Bun.env as Record<string, string | undefined>).OMP_NO_WEBP;
+		else Bun.env.OMP_NO_WEBP = prior;
+	});
+
+	it("treats OMP_NO_WEBP=1 set at call time as exclusion (not baked at module load)", async () => {
+		Bun.env.OMP_NO_WEBP = "1";
+
+		const result = await resizeImage({ type: "image", data: smallWebp, mimeType: "image/webp" });
+
+		expect(result.mimeType).not.toBe("image/webp");
+	});
+
+	it("treats OMP_NO_WEBP='' / '0' as NOT excluded", async () => {
+		Bun.env.OMP_NO_WEBP = "";
+		const empty = await resizeImage({ type: "image", data: smallWebp, mimeType: "image/webp" });
+		expect(empty.mimeType).toBe("image/webp");
+
+		Bun.env.OMP_NO_WEBP = "0";
+		const zero = await resizeImage({ type: "image", data: smallWebp, mimeType: "image/webp" });
+		expect(zero.mimeType).toBe("image/webp");
+	});
+});

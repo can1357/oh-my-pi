@@ -1,0 +1,51 @@
+[filters.conda]
+description = "Compact conda install/create/update output — strip download progress and transaction noise"
+match_command = "^conda$"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^(Downloading|Extracting|Preparing transaction|Verifying transaction|Executing transaction)",
+  "^\\s*##",
+  "^\\s*\\d+%",
+  "^\\s*[#=]{3,}",
+]
+max_lines = 50
+on_empty = "ok"
+
+[[tests.conda]]
+name = "successful install strips progress and keeps package list"
+input = """
+Collecting package metadata (current_repodata.json): done
+Solving environment: done
+
+## Package Plan ##
+
+  environment location: /opt/conda
+
+  added / updated specs:
+    - numpy
+
+
+The following packages will be downloaded:
+
+    package                    |            build
+    ---------------------------|-----------------
+    numpy-1.24.3               |   py310h8e6c1ab_0         5.5 MB
+
+Preparing transaction: done
+Verifying transaction: done
+Executing transaction: done
+"""
+expected = "Collecting package metadata (current_repodata.json): done\nSolving environment: done\n  environment location: /opt/conda\n  added / updated specs:\n    - numpy\nThe following packages will be downloaded:\n    package                    |            build\n    ---------------------------|-----------------\n    numpy-1.24.3               |   py310h8e6c1ab_0         5.5 MB\n"
+
+[[tests.conda]]
+name = "failed install passes through error"
+input = """
+Collecting package metadata (current_repodata.json): done
+Solving environment: failed
+
+PackagesNotFoundError: The following packages are not available from current channels:
+
+  - fake-package-xyz
+"""
+expected = "Collecting package metadata (current_repodata.json): done\nSolving environment: failed\nPackagesNotFoundError: The following packages are not available from current channels:\n  - fake-package-xyz\n"

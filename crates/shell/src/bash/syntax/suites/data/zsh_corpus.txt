@@ -1,0 +1,4350 @@
+A01grammar70  mkdir basic.tmp && cd basic.tmpA01grammar90  touch foo bar
+  echo "'" >unmatched_quote.txtA01grammar170  # Test skipping early to ensure we run the remainder...
+  if [[ -n $ZTST_test_skip ]]; then
+    ZTST_skip="Test system verification for skipping"
+  else
+    print "This is standard output"
+    print "This is standard error" >&2
+    false
+  fiA01grammar290  echo foo | cat | sed 's/foo/bar/'A01grammar330  false | trueA01grammar360  true | falseA01grammar390  false
+  $nonexistent_variableA01grammar430  false
+  sleep 1 &
+  print $?
+  # a tidy test is a happy test
+  wait $!A01grammar510  false
+  . /dev/nullA01grammar550  fn() { local foo; read foo; print $foo; }
+  coproc fn
+  print -p coproc test output
+  read -p bar
+  print $barA01grammar630  true | false && print true || print falseA01grammar670  false | true && print true || print falseA01grammar710  (cd /NonExistentDirectory >&/dev/null) || print falseA01grammar750  { cd /NonExistentDirectory >&/dev/null } || print falseA01grammar790  fn() { : && ! ; : }
+  functions -x3 fn
+  fnA01grammar880  if [[ m -eq y ]]; then
+    : && !
+    :
+  fiA01grammar940  fn() { ! {!} && ! (!) || ! {!} }
+  functions -x2 fn
+  fnA01grammar1081parse error near `|'  ! | trueA01grammar1150  - $ZTST_testdir/../Src/zsh -fc "[[ \$0 = \"-$ZTST_testdir/../Src/zsh\" ]]"A01grammar1180  echo f*
+  noglob echo f*A01grammar1240  (exec /bin/sh; echo bar)A01grammar1270  (exec -l $ZTST_testdir/../Src/zsh -fc 'echo $0' | sed 's%/.*/%%' )A01grammar1310  (exec -a /bin/SPLATTER /bin/sh -c 'echo $0')A01grammar1350  (exec -a/bin/SPLOOSH /bin/sh -c 'echo $0')A01grammar1390  (exec -a foo* $ZTST_testdir/../Src/zsh -fc 'print -r -- ${(V)0}')
+  (exec -a "" $ZTST_testdir/../Src/zsh -fc 'print -r -- ${(V)0}')A01grammar1450  (
+    opts=(-a /bin/WHOOOSH)
+    exec $opts /bin/sh -c 'echo $0'
+  )A01grammar1520  (export FOO=bar; exec -c /bin/sh -c 'echo x${FOO}x')A01grammar1560  (\exec /bin/sh -c 'echo Test one'; print Not reached)
+  ('exec' /bin/sh -c 'echo Test two'; print Not reached)
+  (\exec -c /bin/sh -c 'echo Test three'; print Not reached)A01grammar1640  cat() { echo Function cat executed; }
+  command cat && unfunction catA01grammar1700  (command -p echo this is output)
+  (\command -p echo this is more output)
+  ('command' -p echo this is yet more output)A01grammar1780  command -pv cat
+  command -pv echo
+  command -p -V cat
+  command -p -V -- echoA01grammar1880  args=(
+  'command -pv cat'
+  'command -pv echo'
+  'command -p -V cat'
+  'command -p -V -- echo'
+  )
+  for arg in $args; do
+    ${=arg}
+  doneA01grammar2030  cd() { echo Not cd at all; }
+  builtin cd . && unfunction cdA01grammar2110  if true; then
+    print true-1
+  elif true; then
+    print true-2
+  else
+    print false
+  fiA01grammar2210  if false; then
+    print true-1
+  elif true; then
+    print true-2
+  else
+    print false
+  fiA01grammar2310  if false; then
+    print true-1
+  elif false; then
+    print true-2
+  else
+    print false
+  fiA01grammar2411parse error near `fi'  if true;
+    :
+  fiA01grammar2470  for name in word to term; do
+    print $name
+  doneA01grammar2550  for name
+  in word to term; do
+    print $name
+  doneA01grammar2640  for (( name = 0; name < 3; name++ )); do
+    print $name
+  doneA01grammar2720  for (( $(true); ; )); do break; done
+  for (( ; $(true); )); do break; done
+  for (( ; ; $(true) )); do break; done
+  for (( ; $((1)); )); do break; doneA01grammar2780  for keyvar valvar in key1 val1 key2 val2; do
+     print key=$keyvar val=$valvar
+  doneA01grammar2850  for keyvar valvar stuffvar in keyA valA stuffA keyB valB stuffB; do
+     print key=$keyvar val=$valvar stuff=$stuffvar
+  doneA01grammar2920  for in in in in in stop; do
+    print in=$in
+  doneA01grammar3010  name=0
+  while (( name < 3 )); do
+    print $name
+    (( name++ ))
+  doneA01grammar3110  name=0
+  until (( name == 3 )); do
+    print $name
+    (( name++ ))
+  doneA01grammar3210  repeat 3 do
+    echo over and over
+  doneA01grammar3290  word=Trinity
+  case $word in
+    Michaelmas) print 0
+                ;;
+    Hilary) print 1
+            ;;
+    Trinity) print 2
+             ;;
+    *) print 3
+       ;;
+  esacA01grammar3430  word=Trinity
+  case $word in
+    (Michaelmas) print 0
+                ;;
+    (Hilary) print 1
+            ;;
+    (Trinity) print 2
+             ;;
+    (*) print 3
+       ;;
+  esacA01grammar3570  word=Hilary
+  case $word in
+    (Michaelmas) print 0
+                ;;
+    (Hilary) print 1
+            ;&
+    (Trinity) print 2
+             ;&
+    (*) print 3
+       ;;
+  esacA01grammar3730  case whatever in
+  (*) print yeah, right ;&
+  esac
+  print but wellA01grammar3830  (COLUMNS=80 LINES=3
+  PS3="input> "
+  select name in one two three; do
+    print $name
+  done)A01grammar3940  function name1 name2 () { print This is $0; }
+  name2
+  name1 name2() { print This is still $0; }
+  name2A01grammar4020  (time cat) >&/dev/nullA01grammar4050  TIMEFMT='%E %mE %uE %* %m%mm %u%uu'; time (:)A01grammar4090  if [[ -f foo && -d . && -n $ZTST_testdir ]]; then
+    true
+  else
+    false
+  fiA01grammar4220  {
+     print The try block.
+  } always {
+     print The always block.
+  }
+  print After the always block.A01grammar4330  ({
+    print Position one.
+    print ${*this is an error*}
+    print Position two.
+  } always {
+    if (( TRY_BLOCK_ERROR )); then
+      print An error occurred.
+    else
+      print No error occurred.
+    fi
+  }
+  print Position three)A01grammar4500  ({
+    print Stelle eins.
+    print ${*voici une erreur}
+    print Posizione due.
+  } always {
+    if (( TRY_BLOCK_ERROR )); then
+      print Erratum factum est. Retro ponetur.
+      (( TRY_BLOCK_ERROR = 0 ))
+    else
+      print unray touay foay anguageslay
+    fi
+  }
+  print Status after always block is $?.)A01grammar4710  fn1() { { echo foo; } }
+  fn2() { { echo foo; } always { echo bar; } }
+  fn3() { ( echo foo; ) }
+  functions fn1 fn2 fn3A01grammar4990  if (true) { print true-1 } elif (true) { print true-2 } else { print false }
+  if (false) { print true-1 } elif (true) { print true-2 } else { print false }
+  if (false) { print true-1 } elif (false) { print true-2 } else { print false }A01grammar5070  if { true } print true
+  if { false } print falseA01grammar5120  eval "if"A01grammar5160  for name ( word1 word2 word3 ) print $nameA01grammar5220  for name in alpha beta gamma; print $nameA01grammar5280  for (( val = 2; val < 10; val *= val )) print $valA01grammar5330  foreach name ( verbiage words periphrasis )
+    print $name
+  endA01grammar5420  val=0;
+  while (( val < 2 )) { print $((val++)); }A01grammar5480  val=2;
+  until (( val == 0 )) { print $((val--)); }A01grammar5540  repeat 3 print Hip hip hoorayA01grammar5600  repeat 2*2 print yeahA01grammar5670  case bravo {
+    (alpha) print schmalpha
+	    ;;
+    (bravo) print schmavo
+	    ;;
+    (charlie) print schmarlie
+	    ;;
+  }A01grammar5780  for word in artichoke bladderwort chrysanthemum Zanzibar
+  case $word in
+    (*der*) print $word contains the forbidden incantation der
+         ;;
+    (a*) print $word begins with a
+         ;&
+    ([[:upper:]]*) print $word either begins with a or an upper case letter
+         ;|
+    ([[:lower:]]*) print $word begins with a lower case letter
+         ;|
+    (*e*) print $word contains an e
+         ;;
+  esacA01grammar6010  print -u $ZTST_fd 'This test hangs the shell when it fails...'
+  name=0
+  while (( name < 4375 )); do
+    print -n $name
+    (( name++ ))
+  done < /dev/null | { read name; print done }A01grammar6120  for f in 1 2 3 4; do
+    print $f || break
+  done && print XA01grammar6230  for f in 1 2 3 4; do
+    false && print strange
+  done || print noA01grammar6290  $ZTST_testdir/../Src/zsh -f unmatched_quote.txtA01grammar6330  $ZTST_testdir/../Src/zsh -f <unmatched_quote.txtA01grammar6370  $ZTST_testdir/../Src/zsh -f -c "'"A01grammar6410  $ZTST_testdir/../Src/zsh -f NonExistentScriptA01grammar6450  (setopt nonomatch
+  # use this to get stuff at start of line
+  contents=$'# comment \'\necho value #with " stuff\n# comment\n#comment
+  echo not#comment\n'
+  eval 'VAR=$('"$contents"')'
+  print -l $VAR)A01grammar6550  . ./nonexistentA01grammar6590  echo '[[' >bad_syntax
+  . ./bad_syntaxA01grammar6650  echo 'false' >dot_false
+  . ./dot_false
+  print $?
+  echo 'true' >dot_true
+  . ./dot_true
+  print $?A01grammar6750  echo 'echo dot
+  until return 42; do
+    :
+  done' >until_dot
+  . ./until_dot
+  echo After dotA01grammar6850  echo 'echo $?' >dot_status
+  false
+  . ./dot_statusA01grammar6910  mkdir test_path_script
+  print "#!/bin/sh\necho Found the script." >test_path_script/myscript
+  chmod u+x test_path_script/myscript
+  path=($PWD/test_path_script $path)
+  export PATH
+  $ZTST_testdir/../Src/zsh -f -o pathscript myscriptA01grammar7000  $ZTST_testdir/../Src/zsh -f myscriptA01grammar7050  $ZTST_testdir/../Src/zsh -fc 'echo $0; echo $1' myargzero myargoneA01grammar7100  (setopt shglob
+  eval '
+  if ! (echo success1); then echo failure1; fi
+  if !(echo success2); then echo failure2; fi
+  print -l one two | while(read foo)do(print read it)done
+  ')A01grammar7220  fn() { { return } always { echo always 1 }; echo not executed }
+  fn
+  fn() { { echo try 2 } always { return }; echo not executed }
+  fnA01grammar7300  (
+  mywrap() { echo BEGIN; true; echo END }
+  mytest() { { exit 3 } always { mywrap }; print Exited before this }
+  mytest
+  print Exited before this, too
+  )A01grammar7410  (
+  mytrue() { echo mytrue; return 0 }
+  mywrap() { echo BEGIN; mytrue; echo END }
+  mytest() { { exit 4 } always { mywrap }; print Exited before this }
+  mytest
+  print Exited before this, too
+  )A01grammar7540  (emulate sh -c '
+   fn() {
+    case $1 in
+      ( one | two | three )
+      print Matched $1
+      ;;
+      ( fo* | fi* | si* )
+      print Pattern matched $1
+      ;;
+      ( []x | a[b]* )
+      print Character class matched $1
+      ;;
+    esac
+  }
+  '
+  which fn
+  fn one
+  fn two
+  fn three
+  fn four
+  fn five
+  fn six
+  fn abecedinarian
+  fn xylophone)A01grammar7940  case grumph in
+    ( no | (grumph) )
+    print 1 OK
+    ;;
+  esac
+  case snruf in
+    ( fleer | (|snr(|[au]f)) )
+    print 2 OK
+    ;;
+  esacA01grammar8080  case horrible in
+    ([a-m])(|[n-z])rr(|ib(um|le|ah)))
+    print It worked
+    ;;
+  esac
+  case "a string with separate words" in
+    (*with separate*))
+    print That worked, too
+    ;;
+  esacA01grammar8220  case horrible in
+    (([a-m])(|[n-z])rr(|ib(um|le|ah)))
+    print It worked
+    ;;
+  esac
+  case "a string with separate words" in
+    (*with separate*)
+    print That worked, too
+    ;;
+  esacA01grammar8360  fn() {
+    typeset ac_file="the else branch"
+    case $ac_file in
+      *.$ac_ext | *.xcoff | *.tds | *.d | *.pdb | *.xSYM | *.bb | *.bbg | *.map | *.inf | *.dSYM | *.o | *.obj ) ;;
+      *.* ) break;;
+      *)
+      ;;
+    esac
+    print Stuff here
+  }
+  which fn
+  fnA01grammar8600  (exit 37)
+  case $? in
+    (37) echo $?
+    ;;
+  esacA01grammar8680  false
+  case stuff in
+    (nomatch) foo
+    ;;
+  esac
+  echo $?A01grammar8770  case match in
+    (match) true; false; (exit 37)
+    ;;
+  esac
+  echo $?A01grammar8850  case '' in
+    burble) print No.
+    ;;
+    spurble|) print Yes!
+    ;;
+    |burble) print Not quite.
+    ;;
+  esac
+  case '' in
+    burble) print No.
+    ;;
+    |burble) print Wow!
+    ;;
+    spurble|) print Sorry.
+    ;;
+  esac
+  case '' in
+    gurgle) print No.
+    ;;
+    wurgle||jurgle) print Yikes!
+    ;;
+    durgle|) print Hmm.
+    ;;
+    |zurgle) print Hah.
+    ;;
+  esac
+  case '' in
+    # Useless doubled empty string to check special case.
+    ||jurgle) print Ok.
+    ;;
+  esacA01grammar9220  x=1
+  x=2 | echo $x
+  echo $xA01grammar9290 echo pipe | ; sed s/pipe/PIPE/
+ true && ; echo and true
+ false && ; echo and false
+ true || ; echo or true
+ false || ; echo or falseA01grammar9390 $ZTST_testdir/../Src/zsh -fc '{ ( ) } always { echo foo }'A01grammar9430 a='${'
+ if : ${(e)a}; then echo x; fiA01grammar9480 echo 'echo foo # comment
+  echo $(
+  echo bar # comment
+ )' >source_comments.zsh
+ $ZTST_testdir/../Src/zsh -f -o extendedglob -is -c '. ./source_comments.zsh'A01grammar9570 function 'ls,/' () {echo success}
+ {ls,/}A01grammar9650 (
+   export VALUE=first
+   print -l 'echo Value is $VALUE' 'VALUE=second sh' 'echo Value is $VALUE' |
+   $ZTST_testdir/../Src/zsh -f
+ )A02alias60  alias ThisCommandDefinitelyDoesNotExist=echoA02alias80  alias -g bar=echoA02alias100  alias '\bar=echo'A02alias130  ThisCommandDefinitelyDoesNotExist ThisCommandDefinitelyDoesNotExistA02alias170  bar barA02alias210  \ThisCommandDefinitelyDoesNotExist ThisCommandDefinitelyDoesNotExistA02alias250  \bar \barA02alias290  (alias '!=echo This command has the argument'
+  eval 'print Without
+  ! true'
+  setopt posixaliases
+  eval 'print With
+  ! true')A02alias400  print -u $ZTST_fd 'This test hangs the shell when it fails...'
+  alias cat='LC_ALL=C cat'
+  cat <(echo foo | cat)A02alias460  alias -g '&&=(){ return $?; } && '
+  alias not_the_print_command=print
+  eval 'print This is output
+  && print And so is this
+  && { print And this too; false; }
+  && print But not this
+  && print Nor this
+  true
+  && not_the_print_command And aliases are expanded'A02alias610  $ZTST_testdir/../Src/zsh -fis <<<'
+  unsetopt PROMPT_SP
+  PROMPT="" PS2="" PS3="" PS4="" RPS1="" RPS2=""
+  exec 2>&1
+  alias \{=echo
+  { begin
+  {end
+  fc -l -2' 2>/dev/nullA02alias750  $ZTST_testdir/../Src/zsh -fis <<<'
+  unsetopt PROMPT_SP
+  PROMPT="" PS2="" PS3="" PS4="" RPS1="" RPS2=""
+  exec 2>&1
+  alias -g S=\"
+  echo S a string S "
+  fc -l -1' 2>/dev/nullA02alias880  (
+  unalias -a
+  alias
+  )A02alias940  alias -s foo=print
+  type bar.foo; type -w bar.foo
+  unalias -asA02alias1010  aliases[x=y]=z
+  alias -L | grep x=y
+  echo $pipestatus[1]A02alias1090  alias -s mysuff='print -r "You said it.";'
+  eval 'thingummy.mysuff'A02alias1150  alias +x; alias -zA02alias1200  # Usual issue that aliases aren't expanded until we
+  # trigger a new parse...
+  (alias badalias=notacommand
+  eval 'badalias() { print does not work; }')A02alias1280  (alias goodalias=isafunc
+  setopt ALIAS_FUNC_DEF
+  eval 'goodalias() { print does now work; }'
+  isafunc)A02alias1350  (alias thisisokthough='thisworks() { print That worked; }'
+  eval thisisokthough
+  thisworks)A02alias1410 type \bar
+ type -w \bar
+ type \\bar
+ type -w \\barA03quoting20  print 'single  quotes'  "double  quotes"  `echo backquotes`A03quoting60  foo=text
+  print -r '$foo\\\' "$foo\$foo\\\"\``echo bar`\`\"" `print -r $foo\\\``A03quoting110  print -r $'\'ut queant laxis\'\n"resonare fibris"'A03quoting160  print -r $'\'a \\\' is \'a backslash\' is \'a \\\''A03quoting200  chars=$(print -r $'BS\\MBS\M-\\')
+  for (( i = 1; i <= $#chars; i++ )); do
+    char=$chars[$i]
+    print $(( [#16] #char ))
+  doneA03quoting340  print -r ''''
+  setopt rcquotesA03quoting410  print -r ''''
+  unsetopt rcquotesA03quoting470  print '<\u0041>'
+  printf '%s\n' $'<\u0042>'
+  print '<\u0043>'
+  printf '%s\n' $'<\u0044>'A03quoting570  null1="$(print -r a$'b\0c'd)"
+  null2="$(setopt posixstrings; print -r a$'b\0c'd)"
+  for string in $null1 $null2; do
+    print ":"
+    for (( i = 1; i <= $#string; i++ )); do
+      char=$string[$i]
+      print $(( [#16] #char ))
+    done
+  doneA03quoting780 () { print $# } '' "" $''A03quoting820 foo=$'one\\two\n\'buckle\'\tmy\\shoe\n'
+ print -r ${(q+)foo}A04redirect40  mkdir redir.tmp && cd redir.tmpA04redirect60  myfd=99
+  (echo >&$myfd) 2>msg
+  bad_fd_msg="${$(<msg)##*:}"A04redirect120  print 'This is file redir' >redir  &&  cat redirA04redirect160  rm -f redir
+  print 'This is still file redir' <>redir >&0  &&  cat <>redirA04redirect210  rm -f redir
+  print 'With a bar' >|redir  &&  cat redirA04redirect260  rm -f redir
+  print 'With a bang' >!redir  &&  cat redirA04redirect310  rm -f redir
+  print 'Line 1' >>redir  &&  print 'Line 2' >>redir  &&  cat redirA04redirect370  rm -f redir
+  print 'Line a' >>|redir  &&  print 'Line b' >>!redirA04redirect410  foo=bar
+  cat <<'  HERE'
+  $foo
+  HERE
+  eval "$(print 'cat <<HERE\n$foo\nHERE')"A04redirect500  cat <<-HERE
+	$foo$foo
+	HEREA04redirect570  cat <<-$'$HERE '`$(THERE) `'$((AND)) '"\EVERYWHERE" #
+	Here's a funny thing.  Here is a funny thing.
+	I went home last night.  There's a funny thing.
+	Man walks into a $foo.  Ouch, it's an iron $foo.
+	$HERE `$(THERE) `$((AND)) \EVERYWHEREA04redirect680  cat <<-$'\x45\x4e\x44\t\x44\x4f\x43'
+	This message is unfathomable.
+	END	DOCA04redirect750  cat <<<"This is a line with a $foo in it"A04redirect790  cat <<<$'a\nb\nc'A04redirect910  heretest() {
+    print First line
+    cat <<-HERE
+	$foo$foo met celeste  'but with extra'  "stuff to test quoting"
+	HERE
+    print Last line
+  }
+  heretest
+  eval "$(functions heretest)"
+  heretest
+  eval "$(functions heretest)"
+  heretestA04redirect1140  heretest() {
+    print First line
+    cat <<'    HERE'
+    $foo$foo met celeste  'but with extra'  "stuff to test quoting"\
+    HERE
+    print Last line
+  }
+  heretest
+  eval "$(functions heretest)"
+  heretest
+  eval "$(functions heretest)"
+  heretestA04redirect1370  read -r line <<'  HERE'
+  HEREA04redirect1410  heretest() {
+    print First line
+    cat <<-HERE
+	$foo\
+	$foo
+	some\
+	stuff
+	to\
+  test
+	tab\stripping
+	HERE
+    print Last line
+  }
+  heretest
+  eval "$(functions heretest)"
+  heretest
+  eval "$(functions heretest)"
+  heretestA04redirect1790  heretest() {
+    print First line
+    cat <<-HERE
+	$foo\\
+	$foo
+	some\\ \
+	stuff
+	to\
+  test \\
+	more backslash craziness\\\\\\\\\
+	wild
+	HERE
+    print Last line
+  }
+  heretestA04redirect2030  #
+  # exec tests: perform these in subshells so if they fail the
+  # shell won't exit.
+  #
+  (exec 3>redir  &&  print hello >&3  &&  print goodbye >&3  && cat redir)A04redirect2120  (exec 3<redir && read foo <&3 && print $foo && read foo <&3 && print $foo)A04redirect2170  ({exec 3<&- } 2>/dev/null
+   exec 3<&-
+   read foo <&-)A04redirect2220  (exec {varid}<&0
+  exec {varid}<&-
+  print About to close a second time >&2
+  read {varid}<&-)A04redirect2300  eval $'fn-varid() { print {\x18}<<0 }'
+  { which -x2 fn-varid; fn-varid } | tr $'\x18' '?'A04redirect2390  print foo >&-A04redirect2420  (exec >&-
+  print foo)A04redirect2470  fn() { local foo; read foo; print $foo; }
+  coproc fn
+  print test output >&p
+  read bar <&p
+  print $barA04redirect2550  ( print Output; print Error >& 2 ) >&errout  &&  cat erroutA04redirect2600  rm -f errout
+  ( print Output2; print Error2 >& 2 ) &>errout  &&  cat erroutA04redirect2660  rm -f errout
+  ( print Output3; print Error3 >& 2 ) >&|errout  &&  cat errout
+  ( print Output4; print Error4 >& 2 ) >&!errout  &&  cat errout
+  ( print Output5; print Error5 >& 2 ) &>|errout  &&  cat errout
+  ( print Output6; print Error6 >& 2 ) &>!errout  &&
+  ( print Output7; print Error7 >& 2 ) >>&errout  &&
+  ( print Output8; print Error8 >& 2 ) &>>errout  &&
+  ( print Output9; print Error9 >& 2 ) >>&|errout  &&
+  ( print Output10; print Error10 >& 2 ) &>>|errout  &&
+  ( print Output11; print Error11 >& 2 ) >>&!errout  &&
+  ( print Output12; print Error12 >& 2 ) &>>!errout  &&  cat erroutA04redirect2990  rm -f errout
+  ( print Output; print Error 1>&2 ) 1>errout 2>&1  && cat erroutA04redirect3050  rm -f errout
+  ( print Output; print Error 1>&2 ) 2>&1 1>errout   &&  print errout:  &&
+  cat erroutA04redirect3130no such file or directory: foo  rm -f errout
+  print doo be doo be doo >foo >bar 
+  print "foo: $(<foo)\nbar: $(<bar)"A04redirect3200  rm -f foo bar
+  print dont be dont be dont >foo | sed 's/dont/wont/g' >barA04redirect3240no such file or directory: foo  print "foo: $(<foo)\nbar: $(<bar)"A04redirect3290no such file or directory: out1  rm -f *
+  touch out1 out2
+  print All files >*
+  print *
+  print "out1: $(<out1)\nout2: $(<out2)"A04redirect3390  print This is out1 >out1
+  print This is out2 >out2A04redirect3440  cat <out*A04redirect3490  cat out1 | sed s/out/bout/ <out2A04redirect3540  unset NULLCMD
+  >out1A04redirect3590no such file or directory: out1  echo this should still work >out1
+  print "$(<out1)"A04redirect3640  READNULLCMD=cat
+  print cat input >out1
+  <out1A04redirect3700  NULLCMD=:
+  >out1
+  [[ ! -s out1 ]] || print out1 is not emptyA04redirect3760  print cat input >out1
+  <out1A04redirect3810  NULLCMD=cat
+  >out1
+  cat out1A04redirect3880  (myfd=
+  exec {myfd}>logfile
+  if [[ -z $myfd ]]; then
+    print "Ooops, failed to set myfd to a file descriptor." >&2
+  else
+    print This is my logfile. >&$myfd
+    print Examining contents of logfile...
+    cat logfile
+  fi)A04redirect4010  (setopt noclobber
+   exec {myfd}>logfile2
+   echo $myfd
+   exec {myfd}>logfile3) | read myfd
+  (( ! ${pipestatus[1]} ))A04redirect4090  (setopt noclobber
+   exec {myfd}>logfile2b
+   print First open >&$myfd
+   rm -f logfile2b # prevent normal file no_clobberation
+   myotherfd="${myfd}+0"
+   exec {myotherfd}>logfile2b
+   print Overwritten >&$myotherfd)
+   cat logfile2bA04redirect4200  (exec {myfd}>logfile4
+  echo $myfd
+  exec {myfd}>&-
+  print This message should disappear >&$myfd) | read myfd
+  (( ! ${pipestatus[1]} ))A04redirect4280  typeset -r myfd
+  echo This should not appear {myfd}>nologfileA04redirect4330  (typeset +r myfd
+  exec {myfd}>newlogfile
+  typeset -r myfd
+  exec {myfd}>&-)A04redirect4430  cat =(<<<$'This string has been replaced\nby a file containing it.')A04redirect4480  print This f$'\x69'le contains d$'\x61'ta. >redirfile
+  print redirection:
+  cat<redirfile>outfile
+  print output:
+  cat outfile
+  print append:
+  cat>>outfile<redirfile
+  print more output:
+  cat outfileA04redirect4660  $ZTST_testdir/../Src/zsh -fc 'exec >/nonexistent/nonexistent
+  echo output'A04redirect4720  $ZTST_testdir/../Src/zsh -f -o POSIX_BUILTINS -c '
+  exec >/nonexistent/nonexistent
+  echo output'A04redirect4780  $ZTST_testdir/../Src/zsh -f -o POSIX_BUILTINS -c '
+  set >/nonexistent/nonexistent
+  echo output'A04redirect4840  $ZTST_testdir/../Src/zsh -f -o POSIX_BUILTINS -c '
+  command set >/nonexistent/nonexistent
+  echo output'A04redirect4910  $ZTST_testdir/../Src/zsh -f -o POSIX_BUILTINS -c '
+  echo >/nonexistent/nonexistent
+  echo output'A04redirect4980  $ZTST_testdir/../Src/zsh -f -o POSIX_BUILTINS -c '
+  . /nonexistent/nonexistent
+  echo output'A04redirect5040  $ZTST_testdir/../Src/zsh -f -c '
+  . /nonexistent/nonexistent
+  echo output'A04redirect5110  $ZTST_testdir/../Src/zsh -f -o CONTINUE_ON_ERROR <<<'
+  readonly foo
+  foo=bar set output
+  echo output'A04redirect5190  $ZTST_testdir/../Src/zsh -f <<<'
+  readonly foo
+  foo=bar set output
+  echo output'A04redirect5260  $ZTST_testdir/../Src/zsh -f -o CONTINUE_ON_ERROR <<<'
+  readonly foo
+  foo=bar echo output
+  echo output'A04redirect5340  [</dev/null ]A04redirect5370  print any old rubbish >input1
+  () {
+    local var
+    read var
+    print I just read $var
+  } <input1 >output1
+  print Nothing output yet
+  cat output1A04redirect5490  print you cannot be serious >input1
+  () {
+    local var
+    read var
+    print $1 $var $2
+  } <input1 Shirley >output1 dude
+  print Nothing output yet
+  cat output1A04redirect5610  redirfn() {
+    local var
+    read var
+    print I want to tell you about $var
+    print Also, this might be an error >&2
+  } <input2 >output2 2>&1
+  print something I heard on the radio >input2
+  redirfn
+  print No output until after this
+  cat output2A04redirect5760  which redirfnA04redirect5850  1func 2func 3func() { print Ich heisse $0 } >output3
+  for i in 1 2 3; do
+    f=${i}func
+    print Running $f
+    $f
+    cat output3
+    unfunction $f
+  doneA04redirect6010  redirfn2() { print The latest output; } >&3
+  redirfn2 3>output4
+  print No output yet
+  cat output4A04redirect6110  print $functions[redirfn]A04redirect6200  noredirfn() { print This rather boring function has no redirection.; }
+  print $functions[noredirfn]A04redirect6250  (x=43
+   x=$(print This should appear, really >&2; print Not used) exec >test.log
+   print x=$x)
+   cat test.logA04redirect6330  (setopt POSIX_BUILTINS
+   x=45
+   x=$(print This should appear, too >&2; print And this) exec >test.log
+   print x=$x)
+   cat test.logA04redirect6420  fn-two-heres() {
+    cat <<-x <<-y
+	foo
+	x
+	bar
+	y
+  }
+  which -x2 fn-two-heres
+  fn-two-heres
+  eval "$(which -x2 fn-two-heres)"
+  fn-two-heres
+  print $functions[fn-two-heres]A04redirect6730  fn-here-pipe() {
+    cat <<-HERE |& cat
+	FOO
+	HERE
+  }
+  fn-here-pipe
+  which fn-here-pipeA04redirect6880  a=b 2>/dev/null c=d
+  print $a
+  print $cA04redirect6950  (umask 0777
+  cat <<'  HERE'
+  look ma, no permissions
+  HERE
+  cat <<<"it's a miracle"
+  )A04redirect7050file number expected  exec {testfd}<<'  HERE'
+  This is, in some sense, a here document.
+  HERE
+  cat <&$testfdA04redirect7120  (setopt noclobber clobberempty
+  rm -f foo
+  touch foo
+  print Works >foo
+  cat foo
+  print Works not >foo
+  # Make sure the file was not harmed
+  cat foo
+  )A05execution30  storepath=($path)A05execution50  mkdir command.tmp command.tmp/dir1 command.tmp/dir2A05execution70  cd command.tmpA05execution90  shcmd="$(which sh)"
+  shpath=${shcmd:h}
+  echocmd="$(which -p echo)"
+  echopath=${echocmd:h}
+  print "#!${shcmd}\necho This is top" >tstcmdA05execution150  print "#!${shcmd}\necho This is dir1" >dir1/tstcmdA05execution170  print "#!${shcmd}\necho This is dir2" >dir2/tstcmdA05execution190  print -n '#!sh\necho This is slashless' >tstcmd-slashless
+  print -n '#!echo foo\necho This is arg' >tstcmd-arg
+  print '#!xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxnyyy' >tstcmd-interp-too-long
+  print "#!${sh}\necho should not execute; exit 1" >xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxnA05execution240  chmod 755 tstcmd dir1/tstcmd dir2/tstcmd
+  chmod 755 tstcmd-slashless tstcmd-arg tstcmd-interp-too-long
+  chmod 755 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxnA05execution290  ./tstcmdA05execution330  path=($ZTST_testdir/command.tmp/dir1
+        $ZTST_testdir/command.tmp/dir2
+        .)
+  tstcmd
+  path=($storepath)A05execution410  path=(. command.tmp/dir{1,2})
+  tstcmd
+  path=($storepath)A05execution470  PATH=${shpath}:${ZTST_testdir}/command.tmp/ tstcmd-slashlessA05execution510  PATH=${echopath}:${ZTST_testdir}/command.tmp tstcmd-argA05execution550  # Just check this exits with non-zero status,
+  # as output and status code can differ.
+  (
+    path=($shpath $echopath ${ZTST_testdir}/command.tmp/)
+    if tstcmd-interp-too-long >/dev/null 2>&1; then
+      exit 0
+    else
+      exit 1
+    fi
+  )A05execution670  functst() { print $# arguments:; print -l $*; }
+  functst "Eines Morgens" "als Gregor Samsa"
+  functst ""
+  functst "aus unrühigen Träumen erwachte"
+  foo="fand er sich in seinem Bett"
+  bar=
+  rod="zu einem ungeheuren Ungeziefer verwandelt."
+  functst $foo $bar $rod
+  alias foo='print This is alias one'A05execution890  alias foo='print This is alias two'
+  fn() { foo; }
+  fnA05execution950  foo='Global foo'
+  traptst() { local foo="Local foo"; trap 'print $foo' EXIT; }
+  traptstA05execution1010  functst() { return 0; print Ha ha; return 1; }
+  functstA05execution1050  functst() { return 1; print Ho ho; return 0; }
+  functstA05execution1090  unfunction functst
+  fpath=(.)
+  print "print This is functst." >functst
+  autoload functst
+  functstA05execution1170  unfunction functst
+  print "functst() { print This, too, is functst; }; print Hello." >functst
+  typeset -fu functst
+  functst
+  functstA05execution1260  unfunction functst
+  print "print Yet another version" >functst
+  functst() { autoload -X; }
+  functstA05execution1330  chpwd() { print Changed to $PWD; }
+  cd .
+  unfunction chpwdA05execution1390  chpwd() { print chpwd: changed to $PWD; }
+  chpwdfn1()  { print chpwdfn1: changed to $PWD; }
+  chpwdfn2()  { print chpwdfn2: changed to $PWD; }
+  chpwd_functions=(chpwdfn1 '' chpwdnonexistentfn chpwdfn2)
+  cd .
+  unfunction chpwd
+  unset chpwd_functionsA05execution1530  fn() { TRAPEXIT() { print Exit; }; }
+  fnA05execution1580  unsetopt DEBUG_BEFORE_CMD
+  unfunction fn
+  print 'TRAPDEBUG() {
+      print Line $LINENO
+    }
+    :
+    unfunction TRAPDEBUG
+  ' > fn
+  autoload fn
+  fn
+  rm fnA05execution1730  unsetopt DEBUG_BEFORE_CMD
+  unfunction fn
+  print 'trap '\''print Line $LINENO'\'' DEBUG
+    :
+    trap - DEBUG
+  ' > fn
+  autoload fn
+  fn
+  rm fnA05execution1860  TRAPZERR() { print Command failed; }
+  true
+  false
+  true
+  false
+  unfunction TRAPZERRA05execution1960  trap 'print Command failed again.' ZERR
+  true
+  false
+  true
+  false
+  trap - ZERRA05execution2060  false
+  sleep 1000 &
+  print $?
+  kill $!A05execution2130  { setopt MONITOR } 2>/dev/null
+  [[ -o MONITOR ]] || print -u $ZTST_fd 'Unable to change MONITOR option'
+  repeat 2048; do (return 2 |
+                   return 1 |
+                   while true; do
+                             false
+                             break
+                           done;
+                   print "${pipestatus[@]}")
+	ZTST_hashmark
+  done | sort | uniq -c | sed 's/^ *//'A05execution2290  { setopt MONITOR } 2>/dev/null
+  externFunc() { awk >/dev/null 2>&1; true; }
+  false | true | false | true | externFunc
+  echo $pipestatusA05execution2370  { unsetopt MONITOR } 2>/dev/null
+  coproc { read -et 5 || { print -u $ZTST_fd KILLED; kill -HUP -$$ } }
+  print -u $ZTST_fd 'This test takes 5 seconds to fail...'
+  { printf "%d\n" {1..20000} } 2>/dev/null | ( read -e )
+  hang(){ printf "%d\n" {2..20000} | cat }; hang 2>/dev/null | ( read -e )
+  print -p done
+  read -et 6 -pA05execution2510  { setopt MONITOR } 2>/dev/null
+  if [[ -o MONITOR ]]
+  then
+   ( while :; do print "This is a line"; done ) | () : &
+   sleep 1
+   jobs -l
+  else
+   print -u $ZTST_fd "Skipping pipe leak test, requires MONITOR option"
+   print "[0] 0 0"
+  fiA05execution2660  print "autoload_redir() { print Autoloaded ksh style; } >autoload.log" >autoload_redir
+  autoload -Uk autoload_redir
+  autoload_redir
+  print No output yet
+  cat autoload.log
+  functions autoload_redirA05execution2880  { unsetopt MONITOR } 2>/dev/null
+  (exit 1) &
+  one=$!
+  (exit 2) &
+  two=$!
+  (exit 3) &
+  three=$!
+  wait $three
+  print $?
+  wait $two
+  print $?
+  wait $one
+  print $?A05execution3070  setopt ERR_EXIT NULL_GLOB
+  if false; then :; else echo if:$?; fi
+  if false; then :; else for x in _*_; do :; done; echo for:$?; fiA05execution3150  select x; do :; done; echo $?
+  select x in; do :; done; echo $?
+  select x in _*_; do :; done; echo $?
+  unsetopt ERR_EXIT NULL_GLOBA05execution3250  print -u $ZTST_fd 'This test takes 3 seconds and hangs the shell when it fails...'
+  callfromchld() { true && { print CHLD } }
+  TRAPCHLD() { callfromchld }
+  sleep 2 & sleep 3; print OK
+  unfunction TRAPCHLD # don't affect future testsA05execution3350  () { if return 11; then :; fi }; echo $?
+  () { while return 13; do :; done }; echo $?
+  () { until return 17; do :; done }; echo $?
+  () { until false; do return 19; done }; echo $?A05execution3460  wait 1
+  echo $?
+  wait %%
+  echo $?
+  wait %+
+  echo $?
+  wait %-
+  echo $?
+  wait %1
+  echo $?
+  wait %foo
+  echo $?
+  wait %\?barA05execution3750  (setopt POSIX_BUILTINS
+  wait 1
+  echo $?
+  wait %%
+  echo $?
+  wait %+
+  echo $?
+  wait %-
+  echo $?
+  wait %1
+  echo $?
+  wait %foo
+  echo $?
+  wait %\?bar)A05execution4010 (( exit 130 ) | { sleep 1; echo hello })A05execution4050  (exit 3); repeat "$?" echo x
+  (exit 3); repeat '?' echo yA05execution4150 (exit 4); repeat 0 do doneA06assign40  mkdir assign.tmp && cd assign.tmpA06assign60  touch tmpfile1 tmpfile2A06assign100 typeset -A assoc
+ assoc=(one 1 two 2 odd)A06assign170 array=(1 2 3 4 5)
+ array[1]=42
+ print $arrayA06assign230 array=(1 2 3 4 5)
+ array[1]=(42 43)
+ print $arrayA06assign290 array=(1 2 3 4 5)
+ array[1,2]=(42 43)
+ print $arrayA06assign350 array=(1 2 3 4 5)
+ array[1,4]=(42 43)
+ print $arrayA06assign410 array=(1 2 3 4 5)
+ array[1,6]=(42 43)
+ print $arrayA06assign470 array=(1 2 3 4 5)
+ array[3]=(42 43)
+ print $arrayA06assign530 array=(1 2 3 4 5)
+ array[3,4]=(42 43 44)
+ print $arrayA06assign590 array=(1 2 3 4 5)
+ array[7,8]=(42 43)
+ print $array
+ # check that [6] was left empty...
+ array[6]=41
+ print $arrayA06assign690 array=(1 2 3 4 5)
+ array[-1]=42
+ print $arrayA06assign750 array=(1 2 3 4 5)
+ array[-1]=(42 43)
+ print $arrayA06assign810 array=(1 2 3 4 5)
+ array[-3,-2]=(42 43 44)
+ print $arrayA06assign870 array=(1 2 3 4 5)
+ array[-5,-1]=(42 43)
+ print $arrayA06assign930 array=(1 2 3 4 5)
+ array[-7,-1]=(42 43)
+ print $arrayA06assign990 array=(1 2 3 4 5)
+ array[-7]=42
+ print $arrayA06assign1050 array=(1 2 3 4 5)
+ array[-7]=42
+ array[-6]=43
+ print $arrayA06assign1120 array=(1 2 3 4 5)
+ array[1,-1]=(42 43)
+ print $array
+ array[-3,3]=(1 2 3 4 5)
+ print $arrayA06assign1210 array=(1 2 3 4 5)
+ array[-7,7]=(42 43)
+ print $arrayA06assign1270 array=(1 2 3 4 5)
+ array[3,-2]=(42 43 44)
+ print $array
+ array[-3,5]=(100 99)
+ print $arrayA06assign1380 array=( )
+ array[5,6]=( 1 2 3 )
+ print $array
+ print "${(q@)array}"A06assign1460 array=( a )
+ array[5,6]=( 1 2 3 )
+ print $array
+ print "${(q@)array}"A06assign1540 array=( a b )
+ array[5,6]=( 1 2 3 )
+ print $array
+ print "${(q@)array}"A06assign1620 array=( a b )
+ array[5,5]=( 1 2 3 )
+ print $array
+ print "${(q@)array}"A06assign1700 array=( a b c d )
+ array[5,6]=( 1 2 3 )
+ print $array
+ print "${(q@)array}"A06assign1780 array=( a b c d )
+ array[5,5]=( 1 2 3 )
+ print $array
+ print "${(q@)array}"A06assign1860 array=( )
+ array+=( 1 2 3 )
+ print $array
+ print "${(q@)array}"A06assign1940 array=( a )
+ array+=( 1 2 3 )
+ print $array
+ print "${(q@)array}"A06assign2040  true
+  array=( $? )
+  print $arrayA06assign2100  false
+  array=( $? )
+  print $arrayA06assign2160  true
+  typeset array=( $? )
+  print $arrayA06assign2220  false
+  typeset array=( $? )
+  print $arrayA06assign2280  array=( )
+  true
+  array+=( $? )
+  false
+  array+=( $? )
+  print $arrayA06assign2390 s+=foo
+ echo $sA06assign2440 s=foo
+ s+=bar
+ echo $sA06assign2500 set -- a b c
+ 2+=end
+ echo $2A06assign2560 a=(first second)
+ a+=last
+ print -l $aA06assign2640 setopt ksharrays
+ a=(first second)
+ a+=last
+ print -l $a
+ unsetopt ksharraysA06assign2720 a=(1 2)
+ a[@]+=3
+ print -l $aA06assign2800 integer i=10
+ i+=20
+ (( i == 30 ))A06assign2850 float f=3.4
+ f+=2.3
+ printf "%g\n" fA06assign2910 typeset -A hash
+ hash=(one 1)
+ hash+=string
+ [[ $hash[@] == string ]]A06assign2990 unset a
+ a+=(1 2 3)
+ print -l $aA06assign3070 a=(a)
+ a+=(b)
+ print -l $aA06assign3140 s=foo
+ s+=(bar)
+ print -l $sA06assign3210 integer i=1
+ i+=(2 3)
+ print -l $iA06assign3290 float f=2.5
+ f+=(3.5 4.5)
+ printf '%g\n' $fA06assign3370 typeset -A h
+ h+=(a 1 b 2)
+ print -l $hA06assign3440 typeset -A h
+ h=(a 1)
+ h+=(b 2 c 3)
+ print -l $hA06assign3530 typeset -A h
+ h=(a 1 b 2)
+ h+=()
+ print -l $hA06assign3630 s=sting
+ s[2]+=art
+ echo $sA06assign3690 s=inert
+ s[-4]+=s
+ echo $sA06assign3750 s=append
+ s[2,6]+=age
+ echo $sA06assign3810 s=123456789
+ s[3,-5]+=X
+ echo $sA06assign3870 a=(a b c)
+ a[2]+=oo
+ echo $aA06assign3930 a=(a b c d)
+ a[-2]+=ool
+ echo $aA06assign3990 a=(a b c d)
+ a[2,-1]+=oom
+ echo $aA06assign4050 setopt ksharrays
+ a=(a b c d)
+ a[0]+=0
+ echo $a
+ unsetopt ksharraysA06assign4130 typeset -A h
+ h=(one foo)
+ h[one]+=bar
+ echo $hA06assign4200 typeset -A h
+ h[foo]+=bar
+ echo ${(kv)h}A06assign4260 typeset -A h
+ h=(one a two b three c four d)
+ h[(I)*o*]+=appendA06assign4320 integer i=123
+ i[2]+=6A06assign4370 float f=1234.5
+ f[2,4]+=3A06assign4420 unset u
+ u[3]+=third
+ echo $u[1]:$u[3]A06assign4500 a=(1 2 3)
+ a[2]+=(a b)
+ echo $aA06assign4560 a=(a b c)
+ a[-1]+=(d)
+ echo $aA06assign4620 a=(1 2 3 4)
+ a[-1,-3]+=(x)
+ echo $aA06assign4680 s=string
+ s[2]+=(a b)A06assign4730 integer i=365
+ i[2]+=(1 2)A06assign4780 typeset -A h
+ h=(a 1)
+ h[a]+=(b 2)A06assign4840 unset u
+ u[-34,-2]+=(a z)
+ echo $uA06assign4900 repeat 10 PATH=. echo helloA06assign5030 repeat 10 FOO=BAR BAR=FOO echo $FOO $BARA06assign5160  call() { print $HELLO; }
+  export HELLO=world
+  call
+  HELLO=universe call
+  call
+  HELLO=${HELLO}liness call
+  call
+  unset HELLOA06assign5310 (integer i n x
+ float f
+ setopt globassign
+ i=tmpfile1
+ n=tmpf*
+ x=*2
+ f=2+2
+ typeset -p i n x f)A06assign5450  setopt globassign
+  foo=tmpf*
+  print $foo
+  unsetopt globassign
+  foo=tmpf*
+  print $fooA06assign5550  (setopt globassign
+  typeset -A foo
+  touch gatest1 gatest2
+  foo=(gatest*)
+  print ${(t)foo}
+  rm -rf gatest*)A06assign5640 A=(first second)
+ A="${A[*]}" /bin/sh -c 'echo $A'
+ print -l "${A[@]}"A06assign5720 setopt ksharrays
+ A=(first second)
+ A="${A[*]}" /bin/sh -c 'echo $A'
+ print -l "${A[@]}"
+ unsetopt ksharraysA06assign5820 typeset -aU unique_array=(first second)
+ unique_array[1]=second
+ print $unique_arrayA06assign5880 typeset -a array=(first)
+ array[1,3]=(FIRST)
+ print $arrayA06assign5960 a="abc"
+ a[1]=x
+ print $aA06assign6020 a="abc"
+ a[2]="x"
+ print $aA06assign6080 a="abc"
+ a[3]="x"
+ print $aA06assign6140 a="abc"
+ a[-1]="x"
+ print $aA06assign6200 a="abc"
+ a[-2]="x"
+ print $aA06assign6260 a="ab"
+ a[-2]="x"
+ print $aA06assign6320 a="abc"
+ a[-3]="x"
+ print $aA06assign6380 a="abc"
+ a[-4]="x"
+ print $aA06assign6440 a="abc"
+ a[-5]="x"
+ print $aA06assign6500 a="abc"
+ a[-4,0]="x"
+ print $aA06assign6560 a="abc"
+ a[-4,-4]="x"
+ print $aA06assign6620 a="abc"
+ a[-40,-30]="x"
+ print $aA06assign6680 a="abc"
+ a[-40,1]="x"
+ print $aA06assign6740 a="abc"
+ a[-40,40]="x"
+ print $aA06assign6800 a="abc"
+ a[2,40]="x"
+ print $aA06assign6860 a="abc"
+ a[2,-1]="x"
+ print $aA06assign6920 a="abc"
+ a[-2,-1]="x"
+ print $aA06assign6980 a="a"
+ a[-1]="xx"
+ print $aA06assign7040 a="a"
+ a[-2]="xx"
+ print $aA06assign7100 a="a"
+ a[2]="xx"
+ print $aA06assign7160 a=""
+ a[1]="xx"
+ print $aA06assign7220 a=""
+ a[-1]="xx"
+ print $aA06assign7280 a=""
+ a[2]="xx"
+ print $aA07control50  fn3() { return $1; print Error }
+  fn2() { fn3 $1 }
+  fn() {
+    print start $1
+    fn2 $1
+    return
+    print Error
+  }
+  for val in -1 0 1 255; do
+    fn $val; print $?
+  doneA07control260  $ZTST_testdir/../Src/zsh -fc 'fn() {
+    continue
+  }
+  fn'A07control330  for outer in 0 1 2 3; do
+    print outer $outer
+    for inner in 0 1 2 3; do
+      print inner $inner
+      continue $(( (outer & 1) ? 2 : 1 ))
+      print error
+    done
+    print outer end
+  doneA07control600  for outer in 0 1; do
+    continue 0
+    print -- $outer got here, status $?
+  doneA07control670  for outer in 0 1; do
+    continue -1
+    print -- $outer got here, status $?
+  doneA07control740  fn() {
+    break
+  }
+  for outer in 0 1; do
+    print $outer
+    fn
+  doneA07control840  for outer in 0 1 2 3; do
+    print outer $outer
+    for inner in 0 1 2 3; do
+      print inner $inner
+      break $(( (outer & 1) ? 2 : 1 ))
+      print error
+    done
+    print outer end
+  doneA07control1000  for outer in 0 1; do
+    break 0
+    print -- $outer got here, status $?
+  doneA07control1070  for outer in 0 1; do
+    break -1
+    print -- $outer got here, status $?
+  doneA07control1140  false
+  for x in; do
+    print nothing executed
+  doneA07control1200  set --
+  false
+  for x; do
+    print nothing executed
+  doneA07control1270  (exit 2)
+  for x in 1 2; do
+    print $?
+  doneA07control1350  false
+  for x in $(echo 1 2; (exit 3)); do
+    print $?
+  doneA07control1430  false
+  for x in $(exit 4); do
+    print not executed
+  doneA07control1490  false
+  for x in NonExistentFilePrefix*(N); do
+    print not executed, either
+  doneA07control1550  for x in $(echo 1; false); do
+  doneA07control1590  false
+  for x in $(echo 1; false); do
+    echo $?
+    (exit 4)  
+  doneB02typeset320  ## Do not remove the next line, it's used by V10private.ztst
+  # test_zsh_param_privateB02typeset350  mkdir typeset.tmp && cd typeset.tmpB02typeset370  setopt noglobB02typeset390  scalar=scalar
+  array=(a r r a y)B02typeset420  scope00() {
+    typeset scalar
+    scalar=local
+    typeset -a array
+    array=(l o c a l)
+    print $scalar $array
+    typeset -p scalar array
+    typeset -m scalar array
+    typeset +m scalar array
+  }
+  scope01() {
+    local scalar
+    scalar=local
+    local -a array
+    array=(l o c a l)
+    print $scalar $array
+    typeset -p scalar array
+    typeset -m scalar array
+    typeset +m scalar array
+  }
+  scope02() {
+    declare scalar
+    scalar=local
+    declare -a array
+    array=(l o c a l)
+    print $scalar $array
+    typeset -p scalar array
+    typeset -m scalar array
+    typeset +m scalar array
+  }
+  scope10() {
+    export outer=outer
+    /bin/sh -fc 'echo $outer'
+    typeset -p outer
+    typeset -m outer
+    typeset +m outer
+  }
+  scope11() {
+    typeset -x outer=outer
+    /bin/sh -fc 'echo $outer'
+  }
+  scope12() {
+    local -x outer=inner
+    /bin/sh -fc 'echo $outer'
+  }
+  scope13() {
+    local -xT OUTER outer
+    outer=(i n n e r)
+    /bin/sh -fc 'echo $OUTER'
+    typeset -p OUTER outer
+    typeset -m OUTER outer
+    typeset +m OUTER outer
+  }B02typeset960  # Bug?  `typeset -h' complains that ! # $ * - ? @ are not identifiers.
+  stress00() {
+    typeset -h +g -m [[:alpha:]_]*
+    unset -m [[:alpha:]_]*
+    typeset +m [[:alpha:]_]*
+  }B02typeset1050 typeset -p scalar array
+ typeset -m scalar array
+ typeset +m scalar arrayB02typeset1160 scope00
+ print $scalar $arrayB02typeset1280 scope01
+ print $scalar $arrayB02typeset1400 scope02
+ print $scalar $arrayB02typeset1520 declare +m scalarB02typeset1560 scope10
+ print $outerB02typeset1650 scope11
+ print $outerB02typeset1710 scope12
+ print $outerB02typeset1770 float f=3.14159
+ typeset +m f
+ float -E3 f
+ print $f
+ float -F f
+ print $f
+ typeset -p f
+ typeset -m f
+ typeset +m fB02typeset1940 integer i=3.141
+ typeset +m i
+ integer -i2 i
+ print $i
+ typeset -p i
+ typeset -m i
+ typeset +m iB02typeset2080 float -E3 f=3.141
+ typeset +m f
+ integer -i2 f
+ typeset +m f
+ print $fB02typeset2180 typeset -fB02typeset2220 readonly r=success
+ print $r
+ r=failureB02typeset2290 typeset r=success
+ readonly r
+ print $r
+ r=failureB02typeset2370 typeset -gU array
+ print $array
+ typeset -p array
+ typeset -m array
+ typeset +m arrayB02typeset2480 typeset -T SCALAR=l:o:c:a:l array
+ print $array
+ typeset -U SCALAR
+ print $SCALAR $array
+ typeset -p SCALAR array
+ typeset -m SCALAR array
+ typeset +m SCALAR array
+ print ${(t)SCALAR} ${(t)array}B02typeset2670 (setopt NO_multibyte cbases
+ LC_ALL=C 2>/dev/null
+ typeset -T SCALAR=$'l\x83o\x83c\x83a\x83l' array $'\x83'
+ print $array
+ typeset -U SCALAR
+ for (( i = 1; i <= ${#SCALAR}; i++ )); do
+   char=$SCALAR[i]
+   print $(( [#16] #char ))
+ done
+ print $array)B02typeset2880 typeset -T SCALAR=$'l\000o\000c\000a\000l' array $'\000'
+ typeset -U SCALAR
+ print $array
+ typeset -p SCALAR array
+ typeset -m SCALAR array
+ typeset +m SCALAR array
+ [[ $SCALAR == $'l\000o\000c\000a' ]]B02typeset3040 typeset -T SCALAR array
+ typeset +T SCALARB02typeset3090 OUTER=outer
+ scope13
+ print $OUTERB02typeset3220 typeset -TU MORESTUFF=here-we-go-go-again morestuff '-'
+ print -l $morestuff
+ typeset -p MORESTUFF morestuff
+ typeset -m MORESTUFF morestuff
+ typeset +m MORESTUFF morestuffB02typeset3390 typeset -T THIS will not workB02typeset3430 local array[2]=xB02typeset3470 local -a array
+ typeset array[1]=a array[2]=b array[3]=c
+ print $arrayB02typeset3530 local -A assoc
+ local b=1 ;: to stomp assoc[1] if assoc[b] is broken
+ typeset assoc[1]=a assoc[b]=2 assoc[3]=c
+ print $assoc[1] $assoc[b] $assoc[3]
+ typeset -p assoc
+ typeset -m assoc
+ typeset +m assocB02typeset3660 local scalar scalar[1]=a scalar[2]=b scalar[3]=c
+ print $scalar
+ typeset -p scalar
+ typeset -m scalar
+ typeset +m scalarB02typeset3770 typeset -L 10 fools
+ for fools in "   once" "twice"  "      thrice" "   oops too long here"; do
+   print "'$fools'"
+ doneB02typeset3870 typeset -L 10 -F 3 foolf
+ for foolf in 1.3 4.6 -2.987 -4.91031; do
+   print "'$foolf'"
+ done
+ typeset -p foolf
+ typeset -m foolf
+ typeset +m foolfB02typeset4030 typeset -L 10 -Z foolzs
+ for foolzs in 001.3 04.6 -2.987 -04.91231; do
+   print "'$foolzs'"
+ doneB02typeset4130 typeset -R 10 foors
+ for foors in short longer even-longer; do
+   print "'$foors'"
+ done
+ typeset -p foors
+ typeset -m foors
+ typeset +m foorsB02typeset4280 typeset -Z 10 foozs
+ for foozs in 42 -42 " 43" " -43"; do
+   print "'$foozs'"
+ doneB02typeset4380 integer -Z 10 foozi
+ for foozi in 42 -42 " 43" " -43"; do
+   print "'$foozi'"
+ doneB02typeset4500 unsetopt cbases
+ integer -Z 10 -i 16 foozi16
+ for foozi16 in 42 -42 " 43" " -43"; do
+   print "'$foozi16'"
+ doneB02typeset4610 setopt cbases
+ integer -Z 10 -i 16 foozi16c
+ for foozi16c in 42 -42 " 43" " -43"; do
+   print "'$foozi16c'"
+ doneB02typeset4720 setopt cbases
+ integer -Z 10 -i 16 foozi16c
+ for foozi16c in 0x1234 -0x1234; do
+   for (( i = 1; i <= 5; i++ )); do
+       print "'${foozi16c[i,11-i]}'"
+   done
+   print "'${foozi16c[-2]}'"
+ doneB02typeset4940 typeset -F 3 -Z 10 foozf
+ for foozf in 3.14159 -3.14159 4 -4; do
+   print "'$foozf'"
+ doneB02typeset5040 stress00
+ print $scalar $arrayB02typeset5090 local parentenv=preserved
+ fn() {
+  typeset -h +g -m \*
+  unset -m \*
+  integer i=9
+  float -H f=9
+  declare -t scalar
+  declare -H -a array
+  typeset
+  typeset +
+ }
+ fn
+ echo $parentenvB02typeset5330 export ENVFOO=bar
+ print ENVFOO in environment
+ env | grep '^ENVFOO'
+ print Changing ENVFOO
+ ENVFOO="not bar any more"
+ env | grep '^ENVFOO'
+ unset ENVFOO
+ print ENVFOO no longer in environment
+ env | grep '^ENVFOO'B02typeset5490 (export FOOENV=BAR
+ env | grep '^FOOENV'
+ print Exec
+ exec $ZTST_testdir/../Src/zsh -fc '
+ print Unset
+ unset FOOENV
+ env | grep "^FOOENV"')B02typeset5610 local case1=upper
+ typeset -u case1
+ print $case1
+ upper="VALUE OF \$UPPER"
+ print ${(P)case1}
+ typeset -p case1
+ typeset -m case1
+ typeset +m case1B02typeset5760 local case2=LOWER
+ typeset -l case2
+ print $case2
+ LOWER="value of \$lower"
+ print ${(P)case2}
+ typeset -p case2
+ typeset -m case2
+ typeset +m case2B02typeset5910 typeset -a array
+ array=(foo bar)
+ fn() { typeset -p array nonexistent; }
+ fnB02typeset5990 unsetopt typesetsilent
+ silent1(){ typeset -g silence; }
+ silent2(){ local silence; silent1; }
+ silent2B02typeset6050 typeset -T TIED_SCALAR tied_array
+ TIED_SCALAR=foo:bar
+ print $tied_array
+ typeset -T TIED_SCALAR=goo:car tied_array
+ print $tied_array
+ typeset -T TIED_SCALAR tied_array=(poo par)
+ print $TIED_SCALARB02typeset6170 (
+   setopt POSIXBUILTINS
+   readonly pbro
+   print ${+pbro} >&2
+   (typeset -g pbro=3)
+   (pbro=4)
+   readonly -p >&2        # shows up as "readonly" although unset
+   typeset -gr pbro       # idempotent (no error)...
+   print ${+pbro} >&2     # ...so still readonly...
+   typeset -g +r pbro     # ...can't turn it off
+ )B02typeset6360  readonly foo=bar novalue
+  readonly -pB02typeset6420  local -a a1 a2
+  local -r r1=yes r2=no
+  a1=(one two) a2=(three four)
+  readonly a1
+  typeset -pm 'a[12]'
+  typeset -pm 'r[12]'B02typeset6540  one=hidden two=hidden three=hidden four=hidden five=hidden
+  fn() {
+     local bleugh="four=vier"
+     typeset -R10 one=eins two=(zwei dio) three $bleugh five=(cinq cinque)
+     three=drei
+     print -l $one $two $three $four $five
+  }
+  fn
+  print -l $one $two $three $four $fiveB02typeset6770  (
+  setopt glob
+  mkdir -p arrayglob
+  touch arrayglob/{one,two,three,four,five,six,seven}
+  fn() {
+    typeset array=(arrayglob/[tf]*)
+    print -l ${array:t}
+    #
+    typeset {first,second,third}=the_same_value array=(
+    extends
+    over
+    multiple
+    lines
+    )
+    print -l $first $second $third "$array"
+    #
+    integer i=$(echo 1 + 2 + 3 + 4)
+    print $i
+    #
+    # only noted by accident this was broken..
+    # we need to turn off special recognition
+    # of assignments within assignments...
+    typeset careful=( i=1 j=2 k=3 )
+    print -l $careful
+  }
+  fn
+  )B02typeset7180  (
+     # reserved word is recognised at parsing.
+     # yes, this is documented.
+     # anyway, that means we need to
+     # re-eval the function...
+     fn='
+     fn() {
+        typeset foo=`echo one word=two`
+        print $foo
+        print $word
+     }
+     '
+     print reserved
+     eval $fn; fn
+     print builtin
+     disable -r typeset
+     eval $fn; fn
+     enable -r typeset
+     disable typeset
+     print reserved
+     eval $fn; fn
+  )B02typeset7510  fn() {
+    emulate -L zsh
+    setopt typeset_silent
+    local k
+    typeset -A hash=(k1 v1 k2 v2)
+    typeset foo=word array=(more than one word)
+    for k in ${(ko)hash}; do
+      print $k $hash[$k]
+    done
+    print -l $foo $array
+    typeset -A hash
+    typeset foo array
+    for k in ${(ko)hash}; do
+      print $k $hash[$k]
+    done
+    print -l $foo $array
+    typeset hash=(k3 v3 k4 v4) array=(odd number here)
+    for k in ${(ko)hash}; do
+      print $k $hash[$k]
+    done
+    print -l $array
+  }
+  fnB02typeset7950  fn() { typeset foo bar thing=this stuff=(that other) more=woevva; }
+  which -x2 fn
+  fn2() { typeset assignfirst=(why not); }
+  which -x2 fn2B02typeset8070  fn() {
+    typeset array=()
+    print ${(t)array} ${#array}
+    typeset gnothergarray=() gnothergarray[1]=yes gnothergarray[2]=no
+    print -l ${(t)gnothergarray} $gnothergarray
+  }
+  fnB02typeset8200  array=(nothing to see here)
+  fn() {
+    typeset array=(one two three four five)
+    typeset array[2,4]=(umm er)
+    print ${#array} $array
+    typeset array[2,3]=()
+    print ${#array} $array
+  }
+  fn
+  print ${#array} $arrayB02typeset8350  array=(no really nothing here)
+  fn() {
+    typeset array=() array[2]=two array[4]=four
+    typeset -p array
+    typeset array=() array[3]=three array[1]=one
+    typeset -p array
+  }
+  fn
+  print $arrayB02typeset8490  readonly isreadonly=yes
+  typeset isreadonly=stillB02typeset8540  if (( UID )); then
+    UID=$((UID+1)) date; echo "Status is printed, $?"
+  else
+    ZTST_skip="cannot test setuid error when tests run as superuser"
+  fiB02typeset8640bad subscript for direct array assignment: three typeset -A keyvalhash=([one]=eins [two]=zwei)
+ keyvalhash+=([three]=drei)
+ for key in ${(ok)keyvalhash}; do
+   print $key $keyvalhash[$key]
+ doneB02typeset8740  local keyvalarray=([1]=one [3]=three)
+  print -l "${keyvalarray[@]}"
+  keyvalarray+=([2]=two)
+  print -l "${keyvalarray[@]}"
+  local keyvalarray=([1]=one [3]=three)
+  print -l "${keyvalarray[@]}"B02typeset8910 touch foo Xnot_globbedX
+ inkey="another key" val="another value"
+ typeset -A keyvalhash=([$(echo the key)]=$(echo the value)
+                        [$inkey]=$val
+	                [*]=?not_globbed?)
+ for key in ${(ok)keyvalhash}; do
+   print -l $key $keyvalhash[$key]
+ done
+ typeset -A keyvalhash=([$(echo the key)]=$(echo the value)
+                        [$inkey]=$val
+	                [*]=?not_globbed?)
+ for key in ${(ok)keyvalhash}; do
+   print -l $key $keyvalhash[$key]
+ done
+ typeset -p keyvalhashB02typeset9210  local keyvalarray=(first [2]=second third [6]=sixth seventh [5]=fifth new_sixth)
+  print -l "${keyvalarray[@]}"B02typeset9320  local -A keyvalhash=(1 one [2]=two 3 three)B02typeset9360  local -a myarray
+  typeset -p1 myarray
+  myarray=("&" sand '""' "" plugh)
+  typeset -p1 myarrayB02typeset9500bad subscript for direct array assignment: one  local -A myhash
+  typeset -p1 myhash
+  myhash=([one]=two [three]= [four]="[]")
+  typeset -p1 myhashB02typeset9620 (export PATH MANPATH
+ path=(/bin)
+ MANPATH=/
+ # read-only special params like zsh_eval_context are not output by typeset -p
+ specials=(path PATH manpath MANPATH zsh_eval_context ZSH_EVAL_CONTEXT)
+ typeset -p $specials
+ typeset -m $specials
+ typeset +m $specials
+ for var ($specials) print $var: ${(Pt)var}
+ )B02typeset9960 typeset -T VAR var=(a b a b)
+ typeset -UuT VAR var +
+ print $VARB02typeset10020 typeset -T VAR=a+b var
+ typeset -T VAR var +
+ print $varB02typeset10080 readonly -T VAR var=(a b)
+ readonly -T VAR var +B02typeset10130 typeset -T FOO manpathB02typeset10170 typeset -T MANPATH fooB02typeset10210 typeset -T MANPATH manpath +B02typeset10250 (){
+   typeset -h path
+   typeset -T PATH path=(x)
+ }
+ (){
+   typeset -h PATH
+   typeset -T PATH path=(x)
+ }B02typeset10370 typeset MANPATH
+ manpath=(/ /)
+ typeset -UT MANPATH manpath
+ print $manpathB02typeset10440 typeset FOO=a:b
+ export FOO
+ typeset +x -T FOO foo
+ typeset -p FOOB02typeset10510 $ZTST_testdir/../Src/zsh --emulate sh -f -c '
+ PATH=/bin; export PATH; readonly PATH
+ export -p PATH		# Should be a no-op, -p ignored
+ typeset -p PATH
+ readonly -p'B02typeset10600 function {
+ emulate -L sh
+ MANPATH=/bin; export MANPATH; readonly MANPATH
+ export -p MANPATH	# Should be a no-op, -p ignored
+ typeset -p MANPATH
+ readonly -p
+ }B02typeset10710 function {
+   local -rax zsh_exported_readonly_array=(2)
+   local -rAx zsh_exported_readonly_hash=(3 3)
+   local -rx zsh_exported_readonly_scalar=1
+   print zsh:
+   export -p | grep zsh_exported_readonly
+   readonly -p | grep zsh_exported_readonly
+   print sh:
+   emulate -L sh
+   export -p | grep zsh_exported_readonly
+   readonly -p | grep zsh_exported_readonly
+   print still asking for arrays:
+   export -ap | grep zsh_exported_readonly
+   readonly -ap | grep zsh_exported_readonly
+ }B02typeset11030  # The second case was buggy as it needs special handling in postassigns
+  (typeset {X})
+  (typeset Q= {X})C01arith50  integer light there
+  (( light = 42 )) &&
+  let 'there = light' &&
+  print $(( there ))C01arith120  float light there
+  integer rnd
+  (( light = 3.1415 )) &&
+  let 'there = light' &&
+  print -- $(( rnd = there * 10000 ))C01arith210  integer rnd
+  (( rnd = ((29.1 % 13.0 * 10) + 0.5) ))
+  print $rndC01arith270  print $(( 0x10 + 0X01 + 2#1010 ))C01arith310  float light
+  (( light = 4 ))
+  print $light
+  typeset -F light
+  print $lightC01arith400  integer i
+  (( i = 32.5 ))
+  print $iC01arith460  integer i
+  (( i = 4 - - 3 * 7 << 1 & 7 ^ 1 | 16 ** 2 ))
+  print $iC01arith520  fn() {
+    setopt localoptions c_precedences
+    integer i
+    (( i = 4 - - 3 * 7 << 1 & 7 ^ 1 | 16 ** 2 ))
+    print $i
+  }
+  fnC01arith620  print $(( 1 < 2 || 2 < 2 && 3 > 4 ))C01arith660  print $(( 1 + 4 ? 3 + 2 ? 4 + 3 ? 5 + 6 ? 4 * 8 : 0 : 0 : 0 : 0 ))C01arith700  print $(( 3 ? 2 ))C01arith740  print $(( 3 ? 2 : 1 : 4 ))C01arith780  print $(( 0, 4 ? 3 : 1, 5 ))C01arith820  foo=000
+  print $(( ##A + ##\C-a + #foo + $#foo ))C01arith870  print $((##))C01arith910  print $((## ))C01arith950  integer i
+  (( i = 3 + 5 * 1.75 ))
+  print $iC01arith1010  typeset x      &&
+  (( x = 3.5 ))  &&
+  print $x       &&
+  (( x = 4 ))    &&
+  print $xC01arith1100  (( newarray[unsetvar] = 1 ))C01arith1140  integer setvar=1
+  (( newarray[setvar]++ ))
+  (( newarray[setvar]++ ))
+  print ${(t)newarray} ${#newarray} ${newarray[1]}C01arith1210  xarr=()
+  (( xarr = 3 ))
+  print ${(t)xarr} $xarrC01arith1270  print $(( 13 = 42 ))C01arith1310  x=/bar
+  (( x = 32 ))
+  print $xC01arith1370  print $(( ))C01arith1410  print $(( a = ))C01arith1450  print $(( 3, ))C01arith1490  print $(( 3,,4 ))C01arith1530  print $(( (3 + 7, 4), 5 ))C01arith1570  print $(( 5, (3 + 7, 4) ))C01arith1610  print $(( 07.5 ))
+  (setopt octalzeroes; print $(( 09.5 )))C01arith1670  (setopt octalzeroes; print $(( 09 )))C01arith1710  (setopt octalzeroes; print $(( 08#77 )))C01arith1750  print $(( 36#z ))C01arith1790  print $(( 37#z ))C01arith1830  fail=39
+  print $(( 3 + "fail" ))C01arith1880  alias 3=echo
+  print $(( 3 + "OK"); echo "Worked")C01arith1930  fn() {
+    emulate -L zsh
+    print $(( [#16] 255 ))
+    print $(( [##16] 255 ))
+    setopt cbases
+    print $(( [#16] 255 ))
+    print $(( [##16] 255 ))
+  }
+  fnC01arith2080  array=(1)
+  x=0
+  (( array[++x]++ ))
+  print $x
+  print $#array
+  print $arrayC01arith2190  # This is a bit naughty...  the value of array
+  # isn't well defined since there's no sequence point
+  # between the increments of x, however we just want
+  # to be sure that in this case, unlike the above,
+  # x does get incremented twice.
+  x=0
+  array=(1 2)
+  (( array[++x] = array[++x] + 1 ))
+  print $xC01arith2310  # Floating point.  Default precision should take care of rounding errors.
+  print $(( 1_0.000_000e0_1 ))
+  # Integer.
+  print $(( 0x_ff_ff_ ))
+  # _ are parts of variable names that don't start with a digit
+  __myvar__=42
+  print $(( __myvar__ + $__myvar__ ))
+  # _ is not part of variable name that does start with a digit
+  # (which are substituted before math eval)
+  set -- 6
+  print $(( $1_000_000 ))
+  # Underscores in expressions with no whitespace
+  print $(( 3_000_+4_000_/2 ))
+  # Underscores may appear in the base descriptor, for what it's worth...
+  print $(( 1_6_#f_f_ ))C01arith2540  # Force floating point.
+  for expr in "3/4" "0x100/0x200" "0x30/0x10"; do
+    print $(( $expr ))
+    setopt force_float
+    print $(( $expr ))
+    unsetopt force_float
+  doneC01arith2690  print $(( 0x30 + 0.5 ))
+  print $(( 077 + 0.5 ))
+  (setopt octalzeroes; print $(( 077 + 0.5 )) )C01arith2770  underscore_integer() {
+    setopt cbases localoptions
+    print $(( [#_] 1000000 ))
+    print $(( [#16_] 65536 ))
+    print $(( [#16_4] 65536 * 32768 ))
+  }
+  underscore_integerC01arith2890  print $(( [#_] (5. ** 10) / 16. ))C01arith2930  env SHLVL=1+RANDOM $ZTST_testdir/../Src/zsh -f -c 'print $SHLVL'C01arith2970  print $(( 0b0 + 0b1 + 0b11 + 0b110 ))C01arith3010  print $(( 0b2 ))C01arith3060  in=1 info=2 Infinity=3 Inf=4
+  print $(( in )) $(( info )) $(( Infinity )) $(( $Inf )) $(( inf )) $(( INF )) $(( Inf )) $(( iNF ))C01arith3110  integer Inf
+  print $(( Inf[0] ))C01arith3160  (( NaN = 1 ))C01arith3200  a='Inf'
+  (( b = 1e500 ))
+  print $((1e500)) $(($((1e500)))) $(( a )) $b $(( b )) $(( 3.0 / 0 ))C01arith3260  print $((1e500))
+  print $(( $((1e500)) ))C01arith3320  print $((1e500/1e500)) $((-1e500/1e500)) $(( 24. % 0 ))C01arith3360  (( 3 / 0 ))C01arith3400  integer varassi
+  print $(( varassi = 5.5 / 2.0 ))
+  print $varassiC01arith3480  integer ff1=3 ff2=4
+  print $(( ff1/ff2 ))
+  setopt force_float
+  print $(( ff1/ff2 ))
+  unsetopt force_floatC01arith3580  # The following tests for a bug that only happens when
+  # backing up over input read a line at a time, so we'll
+  # read the input from stdin.
+  $ZTST_testdir/../Src/zsh -f <<<'
+  print $((echo first command
+  ); echo second command)
+  print third command
+  'C01arith3700  $ZTST_testdir/../Src/zsh -f <<<'
+  print $((3 +
+  4))
+  print next line
+  'C01arith3790  $ZTST_testdir/../Src/zsh -f <<<'
+  print $((case foo in
+  bar)
+  echo not this no, no
+  ;;
+  foo)
+  echo yes, this one
+  ;;
+  esac)
+  print after case in subshell)
+  'C01arith3930  print "a$((echo one subst)
+  (echo two subst))b"C01arith3990  print "x$((echo one frob); (echo two frob))y"C01arith4040  # This case actually only works by accident: if it wasn't for the
+  # unbalanced parenthesis this would be a valid math substitution.
+  # Hence it's definitely not recommended code.  However, it does give
+  # the algorithm an extra check.
+  print $((case foo in
+  foo)
+  print Worked OK
+  ;;
+  esac))C01arith4160  (setopt extendedglob
+  set -- 32.463
+  print ${$(( $1 * 100 ))%%.[0-9]#})C01arith4220  print $((`:`))C01arith4260  print $(( 1 + $(( 2 + 3 )) ))
+  print $(($((3+4))))
+  print $((1*$((2*$((3))*4))*5))C01arith4340  foo="(1)"
+  print $((foo))
+  print $(($foo))
+  print $(((2)))
+  foo="3)"
+  (print $((foo))) 2>&1
+  (print $(($foo))) 2>&1C01arith4480  unset number
+  (( number = 3 ))
+  print ${(t)number}
+  unset number
+  (setopt posix_identifiers
+  (( number = 3 ))
+  print ${(t)number})C01arith4590  integer a=1
+  print $(( ++a * 2 ))
+  print $(( ++a ))
+  print $(( a++ * 2 ))
+  print $(( a ))
+  print $(( ++a++ * 2 ))C01arith4720  print $(( -2#101-16#f ))C01arith4760  ( set -o nounset
+  true $(( noexist + 1 ))
+  echo 'should never get here' )C01arith4820  ( setopt nounset
+  (( noexist++ )) )C01arith4870  ( unsetopt unset
+  let noexist==0 )C01arith4920  print $(( "6+2" / "1+3" ))C02cond50  umask 077C02cond70  mkdir cond.tmpC02cond90  cd cond.tmpC02cond110  typeset -gi isnfs
+  [[ "$(find . -prune -fstype nfs 2>/dev/null)" == "." ]] && isnfs=1
+  if (( isnfs )) &&
+    (cd -q ${ZTST_tmp} >/dev/null 2>&1 &&
+     [[ "$(find . -prune -fstype nfs 2>/dev/null)" != "." ]]); then
+    filetmpprefix=${ZTST_tmp}/condtest-$$-
+    isnfs=0
+  else
+    filetmpprefix=
+  fi
+  newnewnew=${filetmpprefix}newnewnew
+  unmodified=${filetmpprefix}unmodified
+  zlnfs=${filetmpprefix}zlnfsC02cond250  touch $unmodifiedC02cond270  touch zerolength
+  chgrp $EGID zerolengthC02cond300  touch $zlnfs
+  chgrp $EGID $zlnfsC02cond330  print 'Garbuglio' >nonzerolengthC02cond350  mkdir modish
+  chgrp $EGID modishC02cond380  chmod 7710 modish  # g+xs,u+s,+t
+  chmod g+s modish   # two lines combined work around chmod bugsC02cond410  touch unmodish
+  chmod 000 unmodishC02cond440  print 'MZ' > cmd.exe
+  chmod +x cmd.exeC02cond480  [[ -a zerolength && ! -a nonexistent ]]C02cond510  # Find a block special file system.  This is a little tricky.
+  block=$(find /dev(|ices)/ -type b -print)
+  if [[ -n $block ]]; then
+    [[ -b $block[(f)1] && ! -b zerolength ]]
+  else
+    print -u$ZTST_fd 'Warning: Not testing [[ -b blockdevice ]] (no devices found)'
+    [[ ! -b zerolength ]]
+  fiC02cond610  # Use hardcoded /dev/tty because globbing inside /dev fails on Cygwin
+  char=/dev/tty
+  [[ -c $char && ! -c $zerolength ]]C02cond660  [[ -d . && ! -d zerolength ]]C02cond690  [[ -e zerolength && ! -e nonexistent ]]C02cond720  if [[ -n $block ]]; then
+    [[ -f zerolength && ! -f cond && ! -f $char && ! -f $block[(f)1] && ! -f . ]]
+  else
+    print -u$ZTST_fd 'Warning: Not testing [[ -f blockdevice ]] (no devices found)'
+    [[ -f zerolength && ! -f cond && ! -f $char && ! -f . ]]
+  fiC02cond800  [[ -g modish && ! -g zerolength ]]C02cond830  ln -s zerolength link
+  [[ -h link && ! -h zerolength ]]C02cond870  [[ -k modish && ! -k zerolength ]]C02cond900  foo=foo
+  bar=
+  [[ -n $foo && ! -n $bar && ! -n '' ]]C02cond950  [[ -o rcs && ! -o norcs && -o noerrexit && ! -o errexit ]]C02cond980  if ! grep '#define HAVE_FIFOS' $ZTST_testdir/../config.h; then
+    print -u$ZTST_fd 'Warning: Not testing [[ -p pipe ]] (FIFOs not supported)'
+    [[ ! -p zerolength ]]
+  else
+    if whence mkfifo && mkfifo pipe || mknod pipe p; then
+      [[ -p pipe && ! -p zerolength ]]
+    else
+      print -u$ZTST_fd 'Warning: Not testing [[ -p pipe ]] (cannot create FIFO)'
+      [[ ! -p zerolength ]]
+    fi
+  fiC02cond1110  if (( EUID == 0 )); then
+    print -u$ZTST_fd 'Warning: Not testing [[ ! -r file ]] (root reads anything)'
+    [[ -r zerolength && -r unmodish ]]
+  elif [[ $OSTYPE = cygwin ]]; then
+    print -u$ZTST_fd 'Warning: Not testing [[ ! -r file ]]
+   (all files created by user may be readable)'
+   [[ -r zerolength ]]
+  else
+    [[ -r zerolength && ! -r unmodish ]]
+  fiC02cond1230  [[ -s nonzerolength && ! -s zerolength ]]C02cond1280  [[ -u modish && ! -u zerolength ]]C02cond1310  [[ -x cmd.exe && ! -x zerolength ]]C02cond1340  [[ -z $bar && -z '' && ! -z $foo ]]C02cond1370  [[ -L link && ! -L zerolength ]]C02cond1410  [[ -O zerolength ]]C02cond1440  [[ -G zerolength ]]C02cond1490  print -ru $ZTST_fd 'This test may take two seconds...'
+  touch $newnewnew
+  if [[ $OSTYPE == "cygwin" ]]; then
+    ZTST_skip="[[ -N file ]] not supported on Cygwin"
+  elif (( isnfs )); then
+    ZTST_skip="[[ -N file ]] not supported with NFS"
+  elif ! zmodload -F zsh/stat b:zstat 2> /dev/null; then
+    ZTST_skip='[[ -N file ]] not tested; zsh/stat not available'
+  elif ! { sleep 2; touch -a $unmodified 2> /dev/null }; then
+    ZTST_skip='[[ -N file ]] not tested; touch failed'
+  elif [[ "$(zstat +atime $unmodified)" == "$(zstat +mtime $unmodified)" ]]; then
+    ZTST_skip='[[ -N file ]] not supported on this file system'
+  else
+    [[ -N $newnewnew && ! -N $unmodified ]]
+  fiC02cond1710  [[ $newnewnew -nt $zlnfs && ! ($unmodified -nt $zlnfs) ]]C02cond1740  [[ $zlnfs -ot $newnewnew && ! ($zlnfs -ot $unmodified) ]]C02cond1770  [[ link -ef zerolength && ! (link -ef nonzerolength) ]]C02cond1800  [[ foo = foo && foo != bar && foo == foo && foo != '' ]]C02cond1830  [[ bar < foo && foo > bar ]]C02cond1860  [[ $(( 3 + 4 )) -eq 0x07 && $(( 5 * 2 )) -ne 0x10 ]]C02cond1890  [[ 3 -lt 04 && 05 -gt 2 ]]C02cond1920  [[ 3 -le 3 && ! (4 -le 3) ]]C02cond1950  [[ 3 -ge 3 && ! (3 -ge 4) ]]C02cond1980  [[ 1 -lt 2 || 2 -lt 2 && 3 -gt 4 ]]C02cond2010  if ! grep '#define PATH_DEV_FD' $ZTST_testdir/../config.h; then
+    print -u$ZTST_fd "Warning: not testing [[ -e /dev/fd/0 ]] (/dev/fd not supported)"
+    true
+  else
+    [[ -e /dev/fd/0 ]]
+  fiC02cond2090  if ! grep '#define PATH_DEV_FD' $ZTST_testdir/../config.h; then
+    print -u$ZTST_fd "Warning: not testing [[ -O /dev/fd/0 ]] (/dev/fd not supported)"
+    true
+  else
+    [[ -O /dev/fd/0 ]]
+  fiC02cond2170  [[ ( -z foo && -z foo ) || -z foo ]]C02cond2200  [ '' != bar -a '' = '' ]C02cond2230  [ `echo 0` -lt `echo 1` ]C02cond2260  [ -n foo scrimble ]C02cond2300  test -n foo scrambleC02cond2340  [ -n foo scrimble scromble ]C02cond2380  test -n foo scramble scrumbleC02cond2420  [ -n foo -a -n bar scrimble ]C02cond2460  test -n foo -a -z "" scrambleC02cond2500  fn() {
+    # careful: first file must exist to trigger bug
+    [[ -e $unmodified ]] || print Where\'s my file\?
+    [[ $unmodified -nt NonExistentFile ]]
+    print status = $?
+  }
+  fnC02cond2600  str='string' empty=''
+  [[ -v IFS && -v str && -v empty && ! -v str[3] && ! -v not_a_variable ]]C02cond2640  arr=( 1 2 3 4 ) empty=()
+  [[ -v arr && -v arr[1,4] && -v arr[1] && -v arr[4] && -v arr[-4] &&
+    -v arr[(i)3] && ! -v arr[(i)x] &&
+    ! -v arr[0] && ! -v arr[5] && ! -v arr[-5] && ! -v arr[2][1] &&
+    ! -v arr[3]extra && -v empty && ! -v empty[1] ]]C02cond2710  typeset -A assoc=( key val num 4 )
+  [[ -v assoc && -v assoc[key] && -v assoc[(i)*] && -v assoc[(I)*] &&
+    ! -v assoc[x] && ! -v assoc[key][1] ]]C02cond2760  () { [[ -v 0 && -v 1 && -v 2 && ! -v 3 ]] } arg ''C02cond2800  if zmodload zsh/regex 2>/dev/null; then
+     echo >regex_test.sh 'if [[ $# = 1 ]]; then
+	if [[ $1 =~ /?[^/]+:[0-9]+:$ ]]; then
+	  :
+	fi
+      fi
+      exit 0'
+      $ZTST_testdir/../Src/zsh -f ./regex_test.sh
+  fiC02cond2910  if zmodload zsh/regex 2>/dev/null; then
+   ( # subshell in case coredump test failed
+    string="this has stuff in it"
+    bad_regex=0
+    if [[ $string =~ "h([a-z]*) s([a-z]*) " ]]; then
+      if [[ "$MATCH $MBEGIN $MEND" != "has stuff  6 15" ]]; then
+	print -r "regex variables MATCH MBEGIN MEND:
+  '$MATCH $MBEGIN $MEND'
+  should be:
+  'has stuff  6 15'"
+        bad_regex=1
+      else
+	results=("as 7 8" "tuff 11 14")
+	for i in 1 2; do
+	  if [[ "$match[$i] $mbegin[$i] $mend[$i]" != $results[i] ]]; then
+	    print -r "regex variables match[$i] mbegin[$i] mend[$i]:
+  '$match[$i] $mbegin[$i] $mend[$i]'
+  should be
+  '$results[$i]'"
+            bad_regex=1
+	    break
+	  fi
+	done
+      fi
+      (( bad_regex )) || print OK
+    else
+      print -r "regex failed to match '$string'"
+    fi
+   )
+  else
+    # if it didn't load, tough, but not a test error
+    ZTST_skip="regexp library not found."
+  fiC02cond3270  if zmodload zsh/regex 2>/dev/null; then
+   ( # subshell because regex module may dump core, see above
+    if [[ a =~ a && b == b ]]; then
+      print OK
+    else
+      print "regex =~ inverted following test"
+    fi
+   )
+  else
+    # not a test error
+    ZTST_skip="regexp library not found."
+  fiC02cond3420  [[ -fail badly ]]C02cond3460  [[ really -fail badly ]]C02cond3500  crashme() {
+    if [[ $1 =~ ^http:* ]]
+    then
+      url=${1#*=}
+    fi
+  }
+  which crashmeC02cond3650  weirdies=(
+    '! -a !'
+    '! -o !'
+    '! -a'
+    '! -o'
+    '! -a ! -a !'
+    '! = !'
+    '! !'
+    '= -a o'
+    '! = -a o')
+  for w in $weirdies; do
+     eval test $w
+     print $?
+  doneC02cond3900  foo=''
+  [[ $foo ]] || print foo is empty
+  foo=full
+  [[ $foo ]] && print foo is fullC02cond3980  test -z \( || print Not zero 1
+  test -z \< || print Not zero 2
+  test -n \( && print Not zero 3
+  test -n \) && print Not zero 4
+  [ -n \> ] && print Not zero 5
+  [ -n \! ] && print Not zero 6C02cond4120  [ '(' = ')' ] || print OK 1
+  [ '((' = '))' ] || print OK 2
+  [ '(' = '(' ] && print OK 3
+  [ '(' non-empty-string ')' ] && echo OK 4
+  [ '(' '' ')' ] || echo OK 5C02cond4240  fn() { [[ 'a' == 'b' || 'b' = 'c' || 'c' != 'd' ]] }
+  which -x2 fnC02cond4310  (setopt posixbuiltins; [[ -o invalidoption ]]; echo set: $?; echo "line 1: no warning" >&2)
+  (unsetopt posixbuiltins; [[ -o invalidoption ]]; echo unset: $?)
+  [[ -o invalidoption || -n nonempty ]]; echo "in disjunction, true: $?"
+  [[ -o invalidoption || -z nonempty ]]; echo "in disjunction, false: $?"
+  [[ ! -o invalidoption ]]; echo "negated: $?"
+  [[ -o invalidoption && -n nonempty ]] || echo "in conjunction: $?"C02cond4520  # This works around a bug in rm -f in some versions of Cygwin
+  chmod 644 unmodish
+  for tmpfile in $newnewnew $unmodified $zlnfs; do
+    [[ -f $tmpfile  ]] && rm -f $tmpfile
+  doneC03traps50  setopt localtraps
+  mkdir traps.tmp && cd traps.tmpC03traps100  fn1() {
+    trap 'print EXIT1' EXIT
+    fn2() { trap 'print EXIT2' EXIT; }
+    fn2
+  }
+  fn1C03traps200  fn1() {
+    TRAPEXIT() { print EXIT1; }
+    fn2() { TRAPEXIT() { print EXIT2; }; }
+    fn2
+  }
+  fn1C03traps300  fn1() {
+    trap 'print EXIT1' EXIT
+    fn2() { trap - EXIT; }
+    fn2
+  }
+  fn1C03traps390  fn1() {
+    TRAPEXIT() { print EXIT1; }
+    fn2() { trap - EXIT; }
+    fn2
+  }
+  fn1C03traps520  ( fn1() { trap 'print Function 1 going' EXIT; exit; print Not reached; }
+    fn2() { trap 'print Function 2 going' EXIT; fn1; print Not reached; }
+    fn2
+  )C03traps620  (cd ..
+  $ZTST_exe -fc 'TRAPEXIT() { print Exited.; }')C03traps670  trap -
+  trap
+  trap int INT
+  trap sigterm SIGTERM
+  trap quit 3
+  trapC03traps780  fn1() {
+    trap -
+    trap
+    trap 'print INT1' INT
+    fn2() { trap 'print INT2' INT; trap; }
+    trap
+    fn2
+    trap
+  }
+  fn1C03traps930   fn1() {
+    trap -
+    trap
+    TRAPINT() { print INT1; }
+    fn2() { TRAPINT() { print INT2; }; trap; }
+    trap
+    fn2
+    trap
+  }
+  fn1C03traps1140  fn1() {
+    trap -
+    trap 'print INT1' INT
+    fn2() { trap - INT; trap; }
+    trap
+    fn2
+    trap
+  }
+  fn1C03traps1360  print -u $ZTST_fd 'This test takes at least three seconds...'
+  fn1() {
+    trap 'print TERM1' TERM
+    fn2() { trap 'print TERM2; return 1' TERM; sleep 2; }
+    fn2 &
+    sleep 1
+    kill -TERM $!
+    sleep 2
+  }
+  fn1C03traps1490  print -u $ZTST_fd 'This test, too, takes at least three seconds...'
+  fn1() {
+    trap 'print TERM1; return 1' TERM
+    fn2() { trap 'print TERM2; return 1' TERM; }
+    fn2
+    sleep 2
+  }
+  fn1 &
+  sleep 1
+  kill -TERM $!
+  sleep 2C03traps1630  TRAPZERR() { print error activated; }
+  fn() { print start of fn; false; print end of fn; }
+  fn
+  fn() {
+    setopt localoptions localtraps
+    unfunction TRAPZERR
+    print start of fn
+    false
+    print end of fn
+  }
+  fn
+  unfunction TRAPZERR
+  print finishC03traps1840  TRAPZERR() { print 'ERR-or!'; }
+  f() { print f; false; }
+  t() { print t; }
+  f
+  f && t
+  t && f && true
+  t && f
+  testunset() {
+    setopt localtraps
+    unset -f TRAPZERR
+    print testunset
+    false
+    true
+  }
+  testunset
+  f
+  print status $?
+  unfunction TRAPZERRC03traps2160  f() {
+    setopt localtraps
+    TRAPWINCH() { print "Window changed.  That wrecked the test."; }
+  }
+  f
+  f
+  functions TRAPWINCHC03traps2330  fn() { trap 'true' EXIT; return 1; }
+  fnC03traps2370  inner() { trap 'return 3' EXIT; return 2; }
+  outer() { inner; return 1; }
+  outerC03traps2440  echo "print Running exit trap" >TRAPEXIT
+  ${${ZTST_exe##[^/]*}:-$ZTST_testdir/$ZTST_exe} -fc '
+    fpath=(. $fpath)
+    autoload TRAPEXIT
+    print "Exiting, attempt 1"
+    exit
+    print "What?"
+  '
+  ${${ZTST_exe##[^/]*}:-$ZTST_testdir/$ZTST_exe} -fc '
+    fpath=(. $fpath)
+    autoload TRAPEXIT;
+    fn() { print Some function }
+    fn
+    print "Exiting, attempt 2"
+    exit
+  'C03traps2670  print -u $ZTST_fd Another test that takes three seconds
+  gotsig=0
+  signal_handler() {
+   echo "parent received signal"
+   gotsig=1
+  }
+  child() {
+   sleep 1
+   echo "child sending signal"
+   kill -15 $parentpid
+   sleep 2
+   echo "child exiting" 
+   exit 33
+  } 
+  parentpid=$$
+  child &
+  childpid=$!
+  trap signal_handler 15
+  echo "parent waiting"
+  wait $childpid
+  cstatus=$?
+  echo "wait #1 finished, gotsig=$gotsig, status=$cstatus"
+  gotsig=0
+  wait $childpid
+  cstatus=$?
+  echo "wait #2 finished, gotsig=$gotsig, status=$cstatus"C03traps3010  fn1() {
+    setopt errexit
+    trap 'echo error1' ZERR
+    false
+    print Shouldn\'t get here 1a
+  }
+  fn2() {
+    setopt errexit
+    trap 'echo error2' ZERR
+    return 1
+    print Shouldn\'t get here 2a
+  }
+  fn3() {
+    setopt errexit
+    TRAPZERR() { echo error3; }
+    false
+    print Shouldn\'t get here 3a
+  }
+  fn4() {
+    setopt errexit
+    TRAPZERR() { echo error4; }
+    return 1
+    print Shouldn\'t get here 4a
+  }
+  (fn1; print Shouldn\'t get here 1b)
+  (fn2; print Shouldn\'t get here 2b)
+  (fn3; print Shouldn\'t get here 3b)
+  (fn4; print Shouldn\'t get here 4b)C03traps3350   fn1() { TRAPZERR() { print trap; return 42; }; false; print Broken; }
+   (fn1)
+   print Working $?C03traps3420   fn2() { trap 'print trap; return 42' ZERR; false; print Broken }
+   (fn2)
+   print Working $?C03traps3490   fn3() { TRAPZERR() { print trap; return 0; }; false; print OK this time; }
+   (fn3)
+   print Working $?C03traps3570   fn4() { trap 'print trap; return 0' ZERR; false; print Broken; }
+   (fn4)
+   print Working $?C03traps3640   { trap 'echo This subshell is exiting' EXIT; } | catC03traps3680   ( trap 'echo This subshell is also exiting' EXIT; ) | catC03traps3720   ( trap 'echo Should only appear once at the end' EXIT
+     ( : trap reset here ) | cat
+     : trap not reset but not part of shell command list | cat
+     echo nothing after this should appear $( : trap reset here too)
+   )C03traps3810   echo $( trap 'echo command substitution exited' EXIT )C03traps3850   (cd ..; $ZTST_exe -fc 'setopt posixtraps;
+   TRAPEXIT() { print Exited; }
+   fn1() { trap; }
+   setopt localtraps # should be ignored by EXIT
+   fn2() { TRAPEXIT() { print No, really exited; } }
+   fn1
+   fn2
+   fn1')C03traps4020   (cd ..; $ZTST_exe -fc 'unsetopt posixtraps;
+   echo start program
+   emulate sh -c '\''testfn() {
+     echo start function
+     set -o | grep posixtraps
+     trap "echo EXIT TRAP TRIGGERED" EXIT
+     echo end function
+   }'\''
+   testfn
+   echo program continuing
+   echo end of program')C03traps4220   (cd ..; $ZTST_exe -fc '
+     echo entering program
+     emulate sh -c '\''trap "echo POSIX exit trap triggered" EXIT'\''
+     fn() {
+        trap "echo native zsh function-local exit trap triggered" EXIT
+        echo entering native zsh function
+     }
+     fn
+     echo exiting program
+   ')C03traps4390   (cd ..; $ZTST_exe -fc '
+     echo entering program
+     emulate sh -c '\''spt() { trap "echo POSIX exit trap triggered" EXIT; }'\''
+     fn() {
+	trap "echo native zsh function-local exit trap triggered" EXIT
+	echo entering native zsh function
+     }
+     spt
+     fn
+     echo exiting program
+   ')C03traps4570    (set -e
+    printf "a\nb\n" | while read line
+    do
+       [[ $line = a* ]] || continue
+       ((ctr++))
+       [[ $line = foo ]]
+    done
+    echo "ctr = $ctr"
+   )C03traps4680  (set -e
+  f()
+  {
+    false && false
+  }
+  if false; then
+    :
+  else
+    # ERR_EXIT should trigger on return from function, not in function.
+    f
+    echo Fail 1
+    echo Fail 2
+    f
+    echo Fail 3
+  fi)C03traps4850  (set -e
+  f()
+  {
+  }
+  if false; then
+    :
+  else
+    f
+    echo Succeed 1
+    echo Succeed 2
+    f
+    echo Succeed 3
+  fi)C03traps5030  (set -e
+   if false; then
+   else
+       a=$(false)
+       print This should not appear
+   fi
+  )C03traps5120  fn() {
+    emulate -L zsh
+    setopt errreturn
+    if false; then
+      false
+      print No.
+    else
+      print Oh, yes
+    fi
+  }
+  fnC03traps5260  fn() {
+    emulate -L zsh
+    setopt errreturn
+    if true; then
+      false
+      print No.
+    else
+      print No, no.
+    fi
+  }
+  fnC03traps5390  fn() {
+    emulate -L zsh
+    setopt errreturn
+    if false; then
+      print No.
+    else
+      false
+      print No, no.
+    fi
+  }
+  fnC03traps5520  $ZTST_testdir/../Src/zsh -f =(<<<"
+  if false; then
+    :
+  else
+    if [[ -n '' ]]; then
+        a=2  
+    fi
+    print Yes
+  fi
+  ")C03traps5660  fn() {
+      emulate -L zsh
+      setopt errreturn
+      print before
+      false
+      print after
+  }
+  fnC03traps5770  fn() {
+      emulate -L zsh
+      setopt errreturn
+      print before
+      ! true
+      ! false
+      print after
+  }
+  fnC03traps5900  fn() {
+      emulate -L zsh
+      setopt errreturn
+      print before
+      ! true
+      ! false
+      false
+      print after
+  }
+  fnC03traps6030  fn() {
+      emulate -L zsh
+      setopt errreturn
+      print before
+      ! if true; then
+        false
+      fi
+      print after
+  }
+  fnC03traps6170  fn() {
+      emulate -L zsh
+      setopt errreturn
+      print before
+      if true; then
+        false
+      fi
+      print after
+  }
+  fnC03traps6300  (setopt err_return
+    fn() {
+      print before-in
+      false && false
+    }
+    print before-out
+    fn
+    print after-out
+  )C03traps6430  (setopt err_return
+    fn() {
+      print before-in
+      false && false
+      print after-in
+    }
+    print before-out
+    fn
+    print after-out
+  )C03traps6590  (setopt err_return
+    fn() {
+      print before-in
+      true && false
+      print after-in
+    }
+    print before-out
+    fn
+    print after-out
+  )C03traps6730  mkdir -p zdotdir
+  print >zdotdir/.zshenv '
+  setopt norcs errreturn
+  fn() {
+    if false; then
+      print Bad
+    else
+      print Good
+    fi
+    print Better
+  }
+  fn
+  print In .zshenv'
+  ZDOTDIR=$PWD/zdotdir $ZTST_testdir/../Src/zsh -c 'true'C03traps6920  unsetopt errreturn
+  fn2() {
+    if true; then
+      false
+    fi
+  }
+  fn1() {
+    setopt localoptions errreturn
+    fn2
+    print $?
+  }
+  fn1
+  print fn1 doneC03traps7080  fn2() {
+    if false; then
+      print Bad
+    else
+      print Good
+    fi
+  }
+  fn() {
+    setopt err_return
+    fn2 || true
+  }
+  fnC03traps7230  (setopt err_exit
+  for x in y; do
+    false && true
+  done
+  print OK
+  )C03traps7320  (setopt err_exit
+  integer x=0
+  while (( ! x++ )); do
+    false && true
+  done
+  print OK
+  )C03traps7420  (setopt err_exit
+  repeat 1; do
+    false && true
+  done
+  print OK
+  )C03traps7510  (setopt err_exit
+  if true; then
+    false && true
+  fi
+  print OK
+  )C03traps7600  (setopt err_exit
+  {
+    false && true
+  }
+  print OK
+  )C03traps7690  unsetopt err_exit err_return
+  (setopt err_exit
+  for x in y; do
+    false
+  done
+  print OK
+  )C03traps7780  (setopt err_exit
+  integer x=0
+  while (( ! x++ )); do
+    false
+  done
+  print OK
+  )C03traps7870  (setopt err_exit
+  repeat 1; do
+    false
+  done
+  print OK
+  )C03traps7950  (setopt err_exit
+  if true; then
+    false
+  fi
+  print OK
+  )C03traps8030  (setopt err_exit
+  {
+    false
+  }
+  print OK
+  )C03traps8110  (setopt err_exit
+  () {
+     false && true
+     print Still functioning
+     false && true
+  }
+  print OK
+  )C03traps8220  if zmodload zsh/system 2>/dev/null; then
+  (
+    trap 'echo TERM; exit 2' TERM
+    trap 'echo EXIT' EXIT
+    kill -s TERM "$sysparams[pid]"
+    echo 'FATAL: we should never get here!' 1>&2
+    exit 1
+  )
+  else
+    ZTST_skip="zsh/system library not found."
+  fiC03traps8370  # Should not get "hello" in the single quotes.
+  (
+    trap "echo hello" EXIT;
+    { :; } | { read line; print "'$line'"; }
+  )C03traps8460  (
+    trap "echo hello" EXIT;
+    cat </dev/null | { read line; print "'$line'"; }
+  )C03traps8540  $ZTST_testdir/../Src/zsh -f =(<<<"
+    trap handler EXIT
+    handler() {
+      echoa
+      echo b
+    }
+    echoa() {
+      echo a
+    }
+    exit0() {
+      exit
+    }
+    main() {
+      exit0
+    }
+    main
+  ")C03traps8750  $ZTST_testdir/../Src/zsh -fc 'fn() { exit 13; }; trap fn EXIT; exit'C03traps8780  $ZTST_testdir/../Src/zsh -fc 'fn() { exit $?+8; }; trap fn EXIT; exit 7'C03traps8810  $ZTST_testdir/../Src/zsh -fc 'fn() { exit 13; }; trap fn EXIT'C03traps8840  $ZTST_testdir/../Src/zsh -fc 'fn() { exit 0; }; trap fn EXIT; false'C03traps8870  $ZTST_testdir/../Src/zsh -f <<<'fn() { exit 13; }; trap fn EXIT; false'C03traps8900  $ZTST_testdir/../Src/zsh -f <<<'fn() { exit 0; }; trap fn EXIT; false'C03traps8930 $ZTST_testdir/../Src/zsh -f <<<$'
+ trap \'echo $1; exit; echo $2\' USR1
+ fn() {
+         echo fn1
+         kill -s USR1 $$
+         echo fn2
+ }
+ echo out1
+ fn trap1 trap2
+ echo out2
+ 'C03traps9120  rm -f TRAPEXITD02glob40  mkdir glob.tmp
+  mkdir glob.tmp/dir{1,2,3,4}
+  mkdir glob.tmp/dir3/subdir
+  : >glob.tmp/{,{dir1,dir2}/}{a,b,c}D02glob90  globtest () {
+    $ZTST_testdir/../Src/zsh -f $ZTST_srcdir/../Misc/$1
+  }D02glob130  regress_absolute_path_and_core_dump() {
+    local absolute_dir=$(cd glob.tmp && pwd -P)
+    [[ -n $absolute_dir ]] || return 1
+    setopt localoptions extendedglob nullglob
+    print $absolute_dir/**/*~/*
+    setopt nonullglob nomatch
+    print glob.tmp/**/*~(.)#
+  }D02glob240  globtest globtestsD02glob2070  globtest globtests.kshD02glob2920 (unsetopt multibyte
+ [[ björn = *[åäöÅÄÖ]* ]])D02glob2960  ( regress_absolute_path_and_core_dump )D02glob3010 print glob.tmp/*(/)D02glob3050 print glob.tmp/*(.)D02glob3090 print glob.tmp/*(.e^'reply=( glob.tmp/*/${REPLY:t} )'^:t)D02glob3130 print glob.tmp/*/*(e:'reply=( glob.tmp/**/*([1]) )'::t)D02glob3170 print glob.tmp/**/(:h) D02glob3210 print glob.tmp(:r)D02glob3250 print glob.tmp/*(:s/./_/)D02glob3290 print glob.tmp/*(F)D02glob3330 print glob.tmp/*(^F)D02glob3370 print glob.tmp/*(/^F)D02glob3410 setopt extendedglob
+ print glob.tmp/**/*~*/dir3(/*|(#e))(/)D02glob3460 print -l -- glob.tmp/*(P:-f:)D02glob3630 print -l -- glob.tmp/*(P:one word:P:another word:)D02glob3870 [[ "" = "" ]] && echo OKD02glob3910 foo="this string has a : colon in it"
+ print ${foo%% #:*}D02glob3960 mkdir glob.tmp/ra=1.0_et=3.5
+ touch glob.tmp/ra=1.0_et=3.5/foo
+ print glob.tmp/ra=1.0_et=3.5/???D02glob4020 doesmatch() {
+   setopt localoptions extendedglob
+   print -n $1 $2\ 
+   if [[ $1 = $~2 ]]; then print yes; else print no; fi;
+ }
+ doesmatch MY_IDENTIFIER '[[:IDENT:]]##'
+ doesmatch YOUR:IDENTIFIER '[[:IDENT:]]##'
+ IFS=$'\n' doesmatch $'\n' '[[:IFS:]]'
+ IFS=' ' doesmatch $'\n' '[[:IFS:]]'
+ IFS=':' doesmatch : '[[:IFSSPACE:]]'
+ IFS=' ' doesmatch ' ' '[[:IFSSPACE:]]'
+ WORDCHARS="" doesmatch / '[[:WORD:]]'
+ WORDCHARS="/" doesmatch / '[[:WORD:]]'D02glob4270 [[ foo = (#c0)foo ]]D02glob4310 mkdir glob.tmp/dir5
+ touch glob.tmp/dir5/N123
+ print glob.tmp/dir5/N<->(N)
+ rm -rf glob.tmp/dir5D02glob4380 tpd() {
+   [[ $1 = $~2 ]]
+  print -r "$1, $2: $?"
+ }
+ test_pattern_disables() {
+   emulate -L zsh
+   tpd 'forthcoming' 'f*g'
+   disable -p '*'
+   tpd 'forthcoming' 'f*g'
+   tpd 'f*g' 'f*g'
+   tpd '[frog]' '[frog]'
+   tpd '[frog]' '\[[f]rog\]'
+   disable -p '['
+   tpd '[frog]' '[frog]'
+   tpd '[frog]' '\[[f]rog\]'
+   setopt extendedglob
+   tpd 'foo' '^bar'
+   disable -p '^'
+   tpd 'foo' '^bar'
+   tpd '^bar' '^bar'
+   tpd 'rumble' '(rumble|bluster)'
+   tpd '(thunder)' '(thunder)'
+   disable -p '('
+   tpd 'rumble' '(rumble|bluster)'
+   tpd '(thunder)' '(thunder)'
+   setopt kshglob
+   tpd 'scramble' '@(panic|frenzy|scramble)'
+   tpd '@(scrimf)' '@(scrimf)'
+   disable -p '@('
+   tpd 'scramble' '@(panic|frenzy|scramble)'
+   tpd '@(scrimf)' '@(scrimf)'
+   disable -p
+ }
+ test_pattern_disables
+ print Nothing should be disabled.
+ disable -pD02glob4960  (
+   setopt nomatch
+   x=( '' )
+   print $^x(N)
+  )D02glob5040  (setopt kshglob
+   test_array=(
+     '+fours'    '+*'
+     '@titude'   '@*'
+     '!bang'     '!*'
+     # and check they work in the real kshglob cases too...
+     '+bus+bus'  '+(+bus|-car)'
+     '@sinhats'  '@(@sinhats|wrensinfens)'
+     '!kerror'   '!(!somethingelse)'
+     # and these don't match, to be sure
+     '+more'      '+(+less)'
+     '@all@all'   '@(@all)'
+     '!goesitall' '!(!goesitall)'
+   )
+   for str pat in $test_array; do
+     eval "[[ $str = $pat ]]" && print "$str matches $pat"
+   done
+   true
+  )D02glob5310  (
+    setopt extendedglob
+    cd glob.tmp
+    [[ -n a*(#qN) ]] && print File beginning with a
+    [[ -z z*(#qN) ]] && print No file beginning with z
+    setopt nonomatch
+    [[ -n z*(#q) ]] && print Normal string if nullglob not set
+  )D02glob5440 (){ print $#@ } glob.tmp/dir*(Y1)
+ (){ print $#@ } glob.tmp/file*(NY1)
+ (){ [[ "$*" == */dir?\ */dir? ]] && print Returns matching filenames } glob.tmp/dir*(Y2)
+ (){ print "Limit is upper bound:" ${(o)@:t} } glob.tmp/dir*(Y5)
+ (){ print "Negated:" $@:t } glob.tmp/dir*(Y1^Y)
+ (){ print "Sorting:" $@:t } glob.tmp/dir*(Y4On)
+ (){ [[ $#@ -eq 1 ]] && print Globs before last path component } glob.tmp/dir?/subdir(NY1)
+ (){ [[ $1 == glob.tmp/a ]] } glob.tmp/**/a(Y1) && print Breadth first
+ (){ [[ $#@ -eq 0 ]] && print Respects qualifiers } glob.tmp/dir*(NY1.)
+ (print -- *(Y)) 2>/dev/null || print "Argument required"D02glob5660  [[ "ce fichier n'existe pas"  = (#b)ce\ (f[^ ]#)\ *s(#q./) ]]
+  print $match[1]D02glob5720  print glob.tmp/*.*
+  print glob.tmp/**************************.*************************D02glob5780  [[ 1_2_ = (*_)(#c1) ]] && print 1 OK  # because * matches 1_2
+  [[ 1_2_ = (*_)(#c2) ]] && print 2 OK
+  [[ 1_2_ = (*_)(#c3) ]] || print 3 OKD02glob5860  [[ foo = 'f'\o"o" ]]D02glob5890  [[ foo = 'f'('o'|'a')('o'|'b') ]]D02glob5920  [[ fob = 'f'('o'|'a')('o'|'b') ]]D02glob5950  [[ fab = 'f'('o'|'a')('o'|'b') ]]D02glob5980  [[ fib != 'f'('o'|'a')('o'|'b') ]]D02glob6010  [[ - != [a-z] ]]D02glob6040  [[ - = ['a-z'] ]]D02glob6070  [[ b-1 = [a-z]-[0-9] ]]D02glob6100  [[ b-1 = []a-z]-[]0-9] ]]D02glob6130  headremove="bcdef"
+  print ${headremove#[a-z]}D02glob6180  headremove="bcdef"
+  print ${headremove#['a-z']}
+  headremove="-cdef"
+  print ${headremove#['a-z']}D02glob6260  [[ a != [^a] ]]D02glob6290  [[ a = ['^a'] ]]D02glob6320  [[ a != [!a] ]]D02glob6350  [[ a = ['!a'] ]]D02glob6380  # Actually, we don't need the quoting here,
+  # c.f. the next test.  This just makes it look
+  # more standard.
+  cset="^a-z"
+  [[ "^" = ["$cset"] ]] || print Fail 1
+  [[ "a" = ["$cset"] ]] || print Fail 2
+  [[ "-" = ["$cset"] ]] || print Fail 3
+  [[ "z" = ["$cset"] ]] || print Fail 4
+  [[ "1" != ["$cset"] ]] || print Fail 5
+  [[ "b" != ["$cset"] ]] || print Fail 6D02glob6500  cset="^a-z"
+  [[ "^" = [$~cset] ]] || print Fail 1
+  [[ "a" != [$~cset] ]] || print Fail 2
+  [[ "-" = [$~cset] ]] || print Fail 3
+  [[ "z" != [$~cset] ]] || print Fail 4
+  [[ "1" = [$~cset] ]] || print Fail 5
+  [[ "b" != [$~cset] ]] || print Fail 6D02glob6590 () { print -l -- $@:a } / /..{,/} /1 /nonexistent/..{,/} /deeper/nonexistent/..{,/}D02glob6700 () { set -- ${PWD}/$^@; print -l -- $@:A } glob.tmp/nonexistent/foo/bar/bazD02glob6740 ln -s dir3/subdir glob.tmp/link
+ () {
+   print ${1:A} | grep glob.tmp
+ } glob.tmp/link/../../hello
+ rm glob.tmp/linkD02glob6820 ln -s dir3/subdir glob.tmp/link
+ () {
+   print ${1:P}
+ } glob.tmp/link/../../hello/world
+ rm glob.tmp/linkD02glob6900 # This is a bit brittle as it depends on PATH_MAX.
+ # We could use sysconf..
+ bad_pwd="/${(l:16000:: :):-}"
+ print ${#${bad_pwd:P}}D02glob6970 foo=a
+ value="ac"
+ print ${value//[${foo}b-z]/x}D02glob7030 pathtotest=glob.tmp/my/test/dir/that/does/not/exist
+ mkdir -p $pathtotest
+ print $pathtotest(:h)
+ print $pathtotest(:h0)
+ print $pathtotest(:h10)
+ print $pathtotest(:h3)
+ print $pathtotest(:h2)
+ print $pathtotest(:h1)
+ print $pathtotest(:t)
+ print $pathtotest(:t0)
+ print $pathtotest(:t10)
+ print $pathtotest(:t3)
+ print $pathtotest(:t2)
+ print $pathtotest(:t1)D02glob7310 mkdir -m 000 glob.tmp/secret-d000
+ mkdir -m 111 glob.tmp/secret-d111
+ mkdir -m 444 glob.tmp/secret-d444
+ for 1 in 000 111 444 ; do ln -s secret-d$1 glob.tmp/secret-s$1; done
+ print -rC 2 -- glob.tmp/secret-*/ glob.tmp/secret-*(-/)D02glob7440 for 1 in 000 111 444 ; do
+  chmod 777 glob.tmp/secret-d$1
+  touch glob.tmp/secret-d$1/file
+  mkdir -m 777 glob.tmp/secret-d$1/dir
+  touch glob.tmp/secret-d$1/dir/file
+  chmod $1 glob.tmp/secret-d$1
+ done
+ if (( EUID == 0 )); then
+   ZTST_skip='Not testing unreadable directories (root reads anything)'
+ else
+   print -raC 2 -- glob.tmp/secret-*/* glob.tmp/secret-*/file
+ fiD02glob7610 if (( EUID == 0 )); then
+   ZTST_skip='Not testing unreadable directories (root reads anything)'
+ else
+   print -rC 2 -- glob.tmp/secret-*/dir/*
+ fiD02glob7690 # On macOS, stat(2) allows files to be treated as directories if the calling
+ # process has super-user privileges. e.g., stat() on /my/regular/file/. will
+ # succeed as root but (correctly) fail otherwise. This can produce strange
+ # results when globbing, depending on how it's implemented. This test should,
+ # when run with privileges, confirm that the implementation avoids this
+ # problem. See workers/42891 and workers/45291
+ : > glob.tmp/not-a-directory
+ print -r - glob.tmp/not-a-dir*(N) , glob.tmp/not-a-dir*/(N)D02glob7800 () { echo $1:P } ////devD02glob7840  ln -s loop glob.tmp/loop
+  ln -s loop glob.tmp/trap
+  { 
+    (set -- glob.tmp/trap; echo $1:P)
+    (set -- glob.tmp/loop; echo $1:P)
+  } always {
+    rm -f glob.tmp/trap glob.tmp/loop
+  }D02glob7960  ln -s loop glob.tmp/loop
+  ln -s loop glob.tmp/trap
+  { 
+    (set -- glob.tmp/loop/trailing/components; echo $1:P)
+    (set -- glob.tmp/trap/trailing/components; echo $1:P)
+  } always {
+    rm -f glob.tmp/trap glob.tmp/loop
+  }D02glob8080  ln -s flip glob.tmp/flop
+  ln -s flop glob.tmp/flip
+  {
+    (set -- glob.tmp/flip; echo $1:P)
+    (set -- glob.tmp/flip/trailing/components; echo $1:P)
+  } always {
+    rm -f glob.tmp/flip glob.tmp/flop
+  }D02glob8200  unsetopt extendedglob
+  print -r -- ${(*)=${(@s.+.):-A+B}/(#b)(?)/-${(L)match[1]} ${match[1]}}D02glob8270 # Fix unreadable-directory permissions so ztst can clean up properly
+ chmod +rwx glob.tmp/secret-*(N) 2> /dev/nullD04parameter60  mkdir parameter.tmpD04parameter80  cd parameter.tmpD04parameter100  touch boringfile evenmoreboringfileD04parameter140  foo='the first parameter'
+  bar='the second parameter'
+  print -l $foo ${bar}D04parameter210  array1=(the first array)
+  array2=(the second array)
+  print -l $array1 ${array2}D04parameter320  setopt ksharrays
+  print -l $array1 ${array2}
+  unsetopt ksharraysD04parameter390  setopt shwordsplit
+  print -l $foo ${bar}
+  print -l ${==bar}
+  unsetopt shwordsplitD04parameter520  print $+foo ${+foo} $+notappearinginthistest ${+notappearinginthistest}D04parameter560  x=()
+  print ${+x} ${+x[1]} ${+x[(r)foo]} ${+x[(r)bar]}
+  x=(foo)
+  print ${+x} ${+x[1]} ${+x[(r)foo]} ${+x[(r)bar]}D04parameter640  set1=set1v
+  null1=
+  print ${set1:-set1d} ${set1-set2d} ${null1:-null1d} ${null1-null2d} x
+  print ${unset1:-unset1d} ${unset1-unset2d} xD04parameter720  set2=irrelevant
+  print ${set1:=set1d} ${set2::=set2d}
+  print $set2
+  wasnull1=
+  wasnull2=
+  print ${wasnull1=wasnull1d} ${wasnull2:=wasnull2d}
+  print $wasnull1 $wasnull2D04parameter850  unset array
+  print ${#${(A)=array=word}}D04parameter900  (print ${set1:?okhere}; print ${unset1:?exiting1}; print not reached;)
+  (print ${null1?okhere}; print ${null1:?exiting2}; print not reached;)D04parameter980  PROMPT="" $ZTST_testdir/../Src/zsh -fis <<<'
+  unsetopt PROMPT_SP
+  PS1="" PS2="" PS3="" PS4="" RPS1="" RPS2=""
+  exec 2>&1
+  foo() {
+      print ${1:?no arguments given}
+      print not reached
+  }
+  foo
+  print reached
+  ' 2>/dev/nullD04parameter1130  print ${set1:+word1} ${set1+word2} ${null1:+word3} ${null1+word4}
+  print ${unset1:+word5} ${unset1+word6}D04parameter1190  str1='This is very boring indeed.'
+  print ${str1#*s}
+  print ${str1##*s}
+  print $str1##sD04parameter1280  str2='If you'\''re reading this you should go and fix some bugs instead.'
+  print ${str2%d*}
+  print ${str2%%d*}D04parameter1350  str1='does match'
+  str2='does not match'
+  print ${str1:#does * match}
+  print ${str2:#does * match}D04parameter1430  array1=(arthur boldly claws dogs every fight)
+  print ${array1:#[aeiou]*}
+  print ${(M)array1:#[aeiou]*}D04parameter1500  str1="$array1"
+  print ${str1/[aeiou]*g/a braw bricht moonlicht nicht the nic}
+  print ${(S)str1/[aeiou]*g/relishe}D04parameter1570  print ${array1/[aeiou]*/Y}
+  print ${(S)array1/[aeiou]*/Y}D04parameter1630  str1='o this is so, so so very dull'
+  print ${str1//o*/Please no}
+  print ${(S)str1//o*/Please no}D04parameter1700  print ${array1//[aeiou]*/Y}
+  print ${(S)array1//[aeiou]*/Y}D04parameter1760  print ${array1:/[aeiou]*/expletive deleted}D04parameter1800  str1='a\string\with\backslashes'
+  str2='a/string/with/slashes'
+  print "${str1//\\/-}"
+  print ${str1//\\/-}
+  print "${str2//\//-}"
+  print ${str2//\//-}D04parameter1920  args=('one' '#foo' '(bar' "'three'" two)
+  mod=('#foo' '(bar' "'three'" sir_not_appearing_in_this_film)
+  print ${args:|mod}
+  print ${args:*mod}
+  print "${(@)args:|mod}"
+  print "${(@)args:*mod}"
+  args=(two words)
+  mod=('one word' 'two words')
+  print "${args:|mod}"
+  print "${args:*mod}"
+  scalar='two words'
+  print ${scalar:|mod}
+  print ${scalar:*mod}
+  print ${args:*nonexistent}
+  empty=
+  print ${args:*empty}D04parameter2200  str1='twocubed'
+  array=(the number of protons in an oxygen nucleus)
+  print $#str1 ${#str1} "$#str1 ${#str1}" $#array ${#array} "$#array ${#array}"D04parameter2260  set 1 2 3 4 5 6 7 8 9
+  print ${##}
+  set 1 2 3 4 5 6 7 8 9 10
+  print ${##}
+  print ${##""}
+  print ${##1}
+  print ${##2}
+  print ${###<->} # oh, for pete's sake...D04parameter2420  array=(once bitten twice shy)
+  print IF${array}THEN
+  print IF${^array}THEND04parameter2490  # Quote ${array} here because {...,...} doesn't like unquoted spaces.
+  print IF{"${array}",THEN}ELSE
+  print IF{${^array},THEN}ELSED04parameter2560  str1='one word'
+  print -l $str1 ${=str1} "split ${=str1}wise"D04parameter2650  str1='*'
+  print $str1 ${~str1} $~str1
+  setopt globsubst
+  print $str1
+  unsetopt globsubstD04parameter2760  str1='\\*\\'
+  (
+  setopt globsubst nonomatch
+  [[ \\\\ = $str1 ]] && print -r '\\ matched by' $str1
+  [[ \\foo\\ = $str1 ]] && print -r '\\foo matched by' $str1
+  [[ a\\b\\ = $str1 ]] || print -r 'a\\b not matched by' $str1
+  )D04parameter2880  (
+    setopt globsubst
+    foo="boring*"
+    print ${foo+$foo}
+    print ${foo+"$foo"}
+    print ${~foo+"$foo"}
+  )D04parameter3000  print -l "${$(print one word)}" "${=$(print two words)}"D04parameter3060  (setopt shwordsplit # ensure this doesn't get set in main shell...
+  test_splitting ()
+  {
+    array="one two three"
+    for e in $array; do
+      echo "'$e'"
+    done
+  }
+  test_split_var=
+  echo _${test_split_var:=$(test_splitting)}_
+  echo "_${test_split_var}_")D04parameter3230  print -l "${(f)$(print first line\\nsecond line\\nthird line)}"D04parameter3290  array1=( uno )
+  print -l ${(A)newarray=splitting by numbers}
+  print -l ${(t)newarray}
+  print -l ${(A)=newarray::=splitting by spaces, actually}
+  print -l ${(t)newarray}
+  print -l ${(A)newarray::=$array1}
+  print -l ${(t)newarray}
+  print -l ${newarray::=$array1}
+  print -l ${(t)newarray}
+  print -l ${newarray::=$array2}
+  print -l ${(t)newarray}D04parameter3550  newarray=("split me" "split me" "I\'m yours")
+  print -l "${(@)newarray}"D04parameter3620  foo='$(print Howzat usay)'
+  print -l ${(e)foo}D04parameter3680  foo='`print Howzat usay`'
+  print -l ${(e)foo}D04parameter3740  foo='\u65\123'
+  print -r ${(g:o:)foo}
+  foo='\u65\0123^X\C-x'
+  print -r ${(g::)foo}
+  foo='^X'
+  bar='\C-\130'
+  [[ ${(g:c:)foo} == ${(g:oe:)bar} ]]
+  echo $?D04parameter3870  foo='I'\''m nearly out of my mind with tedium'
+  bar=foo
+  print ${(P)bar}D04parameter3940  foo=(I could be watching that programme I recorded)
+  print ${(o)foo}
+  print ${(oi)foo}
+  print ${(O)foo}
+  print ${(Oi)foo}D04parameter4050  foo=(yOU KNOW, THE ONE WITH wILLIAM dALRYMPLE)
+  bar=(doing that tour of India.)
+  print ${(L)foo}
+  print ${(U)bar}D04parameter4130  foo='instead here I am stuck by the computer'
+  print ${(C)foo}D04parameter4180  foo=$'\x7f\x00'
+  print -r -- ${(V)foo}D04parameter4230  foo='playing '\''stupid'\'' "games" \w\i\t\h $quoting.'
+  print -r ${(q)foo}
+  print -r ${(qq)foo}
+  print -r ${(qqq)foo}
+  print -r ${(qqqq)foo}
+  print -r ${(q-)foo}D04parameter4360  print -r ${(qqqq):-""}D04parameter4400  x=( a '' '\b' 'c d' '$e' )
+  print -r ${(q)x}
+  print -r ${(q-)x}D04parameter4470  print -r -- ${(q-):-foo}
+  print -r -- ${(q-):-foo bar}
+  print -r -- ${(q-):-"*(.)"}
+  print -r -- ${(q-):-"wow 'this is cool' or is it?"}
+  print -r -- ${(q-):-"no-it's-not"}D04parameter4590  foo="'and now' \"even the pubs\" \\a\\r\\e shut."
+  print -r ${(Q)foo}D04parameter4640  foo="X$'\x41'$'\x42'Y"
+  print -r ${(Q)foo}D04parameter4690  # The following may look a bit random.
+  # For the split we are checking that anything that
+  # would normally be followed by a different word has
+  # an argument break after it and anything that wouldn't doesn't.
+  # For the (Q) we are simply checking that nothing disappears
+  # in the parsing.
+  foo='<five> {six} (seven) >eight< }nine{ |forty-two| $many$ )ten( more'
+  array=(${(z)foo})
+  print -l ${(Q)array}D04parameter4970  strings=(
+    'foo=(1 2 3)'
+    '(( 3 + 1 == 8 / 2 ))'
+    'for (( i = 1 ; i < 10 ; i++ ))'
+    '((0.25542 * 60) - 15)*60'
+    'repeat 3 (x)'
+    'repeat 3 (echo foo; echo bar)'
+    'repeat $(( 2 + 4 )) (x)'
+    'repeat $( : foo bar; echo 4) (x)'
+    'repeat "1"'\''2'\''$(( 3 + 0 ))$((echo 4);)\ 5 (x)'
+  )
+  for string in $strings; do
+    array=(${(z)string})
+    for (( i = 1; i <= ${#array}; i++ )); do
+      print -r -- "${i}:${array[i]}:"
+    done
+  doneD04parameter5730  line=$'A line with # someone\'s comment\nanother line # (1 more\nanother one'
+  print "*** Normal ***"
+  print -l ${(z)line}
+  print "*** Kept ***"
+  print -l ${(Z+c+)line}
+  print "*** Removed ***"
+  print -l ${(Z+C+)line}D04parameter6120  line='with comment # at the end'
+  print -l ${(Z+C+)line}D04parameter6180  line=$'echo one\necho two # with a comment\necho three'
+  print -l ${(Z+nc+)line}D04parameter6290  print -rl - ${(z):-":;(( echo 42 "}D04parameter6350  # From parse error on it's not possible to split.
+  # Just check we get the complete string.
+  foo='echo $(|||) bar'
+  print -rl ${(z)foo}D04parameter6430 argv=(
+  $'a=() b=()'
+  $'a=(foo) b=(bar)'
+  $'a=(foo) b=() c=() d=(bar) e=(baz) f=() g=()'
+  $'a=(foo) b=() c=() d=(bar)\ne=(baz) f=() g=()'
+  $'a=(foo) b=() d=(bar)'
+ )
+ for 1; print -rl -- ${(z)1} && printD04parameter7110  foo=$'\x06ZUI\x1f text-field example: \x1azuitfieldtfield1_1\x1a\'\'\x1a\'\'\x1a1\x1aZUI\\[my_tfield1_width\\]\x1aZUI\\[my_tfield1_start\\]\x1aZUI\\[my_tfield1_data\\]\x1c'
+  print "${#${(z@)foo}}"D04parameter7160  psvar=(dog)
+  setopt promptsubst
+  foo='It shouldn'\''t $(happen) to a %1v.'
+  bar='But `echo what can you do\?`'
+  print -r ${(%)foo}
+  print -r ${(%%)bar}D04parameter7260  foo='unmatched "'
+  print ${(QX)foo}D04parameter7320  array=(characters in an array)
+  print ${(c)#array}D04parameter7370  print ${(w)#array}
+  str='colon::bolon::solon'
+  print ${(ws.:.)#str}
+  print ${(Ws.:.)#str}D04parameter7460  typeset -A assoc
+  assoc=(key1 val1 key2 val2)
+  print ${(o)assoc}
+  print ${(ok)assoc}
+  print ${(ov)assoc}
+  print ${(okv)assoc}D04parameter7580  word="obfuscatory"
+  print !${(l.16.)word}! +${(r.16.)word}+D04parameter7630  foo=(resulting words uproariously padded)
+  print ${(pl.10..\x22..X.)foo}D04parameter7690  print ${(l.5..X.r.5..Y.)foo}
+  print ${(l.6..X.r.4..Y.)foo}
+  print ${(l.7..X.r.3..Y.)foo}
+  print ${(l.6..X..A.r.6..Y..B.)foo}
+  print ${(l.6..X..AROOGA.r.6..Y..BARSOOM.)foo}D04parameter7810  foo=(why in goodness name am I doing this)
+  print ${(r.5..!..?.)foo}D04parameter7860  array=(I\'m simply putting a brave face on)
+  print ${(j:--:)array}D04parameter7910  print ${(F)array}D04parameter8010  string='zometimez zis getz zplit on a z'
+  print -l ${(s?z?)string}D04parameter8100  str=s
+  arr=(a)
+  typeset -A ass
+  ass=(a a)
+  integer i
+  float f
+  print ${(t)str} ${(t)arr} ${(t)ass} ${(t)i} ${(t)f}D04parameter8200  # it's not quite clear that these are actually right unless you know
+  # the algorithm:  search along the string for the point at which the
+  # first (last) match occurs, for ## (%%), then take the shortest possible
+  # version of that for # (%).  it's as good a definition as anything.
+  string='where is the white windmill, whispered walter wisely'
+  print ${(S)string#h*e}
+  print ${(S)string##h*e}
+  print ${(S)string%h*e}
+  print ${(S)string%%h*e}D04parameter8350  setopt extendedglob
+  print ${(SI:1:)string##w[^[:space:]]# }
+  print ${(SI:1+1:)string##w[^[:space:]]# }
+  print ${(SI:1+1+1:)string##w[^[:space:]]# }
+  print ${(SI:1+1+1+1:)string##w[^[:space:]]# }D04parameter8460  print ${(MSI:1:)string##w[^[:space:]]# }D04parameter8500  print ${(R)string//w[a-z]# #}D04parameter8540  # Although there's no reliance on multibyte here, the
+  # code exercised is different, so test both paths in the following group.
+  # If the shell isn't multibyte capable the tests are the same;
+  # that's not a problem.
+  # This (1) doesn't work with // or /
+  #      (2) perhaps ought to be 18, to be consistent with normal zsh
+  #          substring indexing and with backreferences.
+  print ${(BES)string##white}
+  (unsetopt multibyte; print ${(BES)string##white})D04parameter8670  print ${(NS)string##white}
+  (unsetopt multibyte; print ${(NS)string##white})D04parameter8730  fn() {
+    emulate -L zsh
+    local a=abcdef
+    print ${(SNBE)a#abcd}
+    unsetopt multibyte
+    print ${(SNBE)a#abcd}
+  }
+  fnD04parameter8850  string='abcdefghijklmnopqrstuvwxyz'
+  print ${${string%[aeiou]*}/(#m)?(#e)/${(U)MATCH}}D04parameter8900  array=(et Swann avec cette muflerie intermittente)
+  string="qui reparaissait chez lui"
+  print ${array[4,5]}
+  print ${array[4,5][1]}
+  print ${array[4,5][1][2,3]}
+  print ${string[4,5]}
+  print ${string[4,5][1]}D04parameter9040  foo=stringalongamax
+  print ${${(P)foo[1,6]}[1,3]}D04parameter9090  print "${array[5,6]}"
+  print "${(j.:.)array[1,2]}"D04parameter9150  print "${${array}[5,7]}"
+  print "${${(@)array}[1,2]}"D04parameter9210  print "${${(@)array}[1,2]#?}"
+  print "${(@)${(@)array}[1,2]#?}"D04parameter9270  array=(she sells z shells by the z shore)
+  (IFS='+'; print ${(s.s.)array})D04parameter9320  setopt shwordsplit
+  string='another poxy boring string'
+  print -l ${${string}/o/ }
+  unsetopt shwordsplitD04parameter9450  setopt nonomatch
+  foo='b* e*'
+  print ${(e)~foo}
+  print ${(e)~=foo}
+  setopt nomatchD04parameter9540  # ${bar} -> $bar  here would yield "bad substitution".
+  bar=confinement
+  print ${(el.20..X.)${bar}}D04parameter9600  foo=(bar baz)
+  bar=(ax1 bx1)
+  print "${(@)${foo}[1]}"
+  print "${${(@)foo}[1]}"
+  print -l ${(s/x/)bar}
+  print -l ${(j/x/s/x/)bar}
+  print -l ${(s/x/)bar%%1*}D04parameter9800  set If "this test fails" "we have broken" the shell again
+  print -l ${1+"$@"}D04parameter9900  set If "this test fails" "we have broken" the shell again
+  print -l "${(A)foo::=$@}"
+  print -l ${(t)foo}
+  print -l $fooD04parameter10040  local sure_that='sure that' varieties_of='varieties of' one=1 two=2
+  extra=(5 4 3)
+  unset foo
+  set Make $sure_that "this test keeps" on 'preserving all' "$varieties_of" quoted whitespace
+  print -l ${=1+"$@"}
+  print -l ${(A)=foo=Make $sure_that "this test keeps" on 'preserving all' "$varieties_of" quoted whitespace}
+  print ${(t)foo}
+  print -l ${=1+$one $two}
+  print -l ${1+$extra$two$one}D04parameter10380  splitfn() {
+    emulate -L sh
+    local HOME="/differs from/bash" foo='1 2' bar='3 4'
+    print -l ${1:-~}
+    touch has\ space
+    print -l ${1:-*[ ]*}
+    print -l ${1:-*[\ ]*}
+    print -l ${1:-*}
+    print -l ${1:-"$foo" $bar}
+    print -l ${==1:-$foo $bar}
+    rm has\ space
+  }
+  splitfnD04parameter10640  splitfn() {
+    local IFS=.-
+    local foo=1-2.3-4
+    #
+    print "Called with argument '$1'"
+    print "No quotes"
+    print -l ${=1:-1-2.3-4} ${=1:-$foo}
+    print "With quotes on default argument only"
+    print -l ${=1:-"1-2.3-4"} ${=1:-"$foo"}
+  }
+  print 'Using "="'
+  splitfn
+  splitfn 5.6-7.8
+  #
+  splitfn() {
+    emulate -L zsh
+    setopt shwordsplit
+    local IFS=.-
+    local foo=1-2.3-4
+    #
+    print "Called with argument '$1'"
+    print "No quotes"
+    print -l ${1:-1-2.3-4} ${1:-$foo}
+    print "With quotes on default argument only"
+    print -l ${1:-"1-2.3-4"} ${1:-"$foo"}
+  }
+  print Using shwordsplit
+  splitfn
+  splitfn 5.6-7.8D04parameter11620  (array=(one two three)
+  IFS=$'\0'
+  foo="$array"
+  for (( i = 1; i <= ${#foo}; i++ )); do
+    char=${foo[i]}
+    print $(( #char ))
+  done)D04parameter11840  unset SHLVL
+  (( SHLVL++ ))
+  print $SHLVLD04parameter11900  unset manpath
+  print $+MANPATH
+  manpath=(/here /there)
+  print $MANPATH
+  unset MANPATH
+  print $+manpath
+  MANPATH=/elsewhere:/somewhere
+  print $manpathD04parameter12040  local STRING=a:b
+  typeset -T STRING string
+  print $STRING $string
+  unset STRING
+  set -A string x y z
+  print $STRING $string
+  STRING=a:b
+  typeset -T STRING string
+  print $STRING $string
+  unset STRING
+  set -A string x y z
+  print $STRING $string
+  STRING=a:b
+  typeset -T STRING string
+  print $STRING $string
+  unset string
+  STRING=x:y:z
+  print $STRING $string
+  STRING=a:b
+  typeset -T STRING string
+  print $STRING $string
+  unset string
+  STRING=x:y:z
+  print $STRING $stringD04parameter12380  typeset -T tied1 tied2 +
+  typeset -T tied2 tied1 +D04parameter12430  string='look for a match in here'
+  if [[ ${string%%(#b)(match)*} = "look for a " ]]; then
+    print $match[1] $mbegin[1] $mend[1] $string[$mbegin[1],$mend[1]]
+    print $#match $#mbegin $#mend
+  else
+    print That didn\'t work.
+  fiD04parameter12550  string='and look for a MATCH in here'
+  if [[ ${(S)string%%(#m)M*H} = "and look for a  in here" ]]; then
+    print $MATCH $MBEGIN $MEND $string[$MBEGIN,$MEND]
+    print $#MATCH
+  else
+    print Oh, dear.  Back to the drawing board.
+  fiD04parameter12660  string='this is a string'
+  print ${string//(#m)s/$MATCH $MBEGIN $MEND}D04parameter12710  print ${${~:-*}//(#m)*/$MATCH=$MATCH}D04parameter12750  print -l JAMES${(u)${=:-$(echo yes yes)}}JOYCE
+  print -l JAMES${(u)${=:-$(echo yes yes she said yes i will yes)}}JOYCED04parameter12850  print -l JAMES${(u)${=:-$(echo yes yes she said yes i will yes she said she will and yes she did yes)}}JOYCED04parameter12950  foo=
+  print "${${foo}/?*/replacement}"D04parameter13000  file=aleftkept
+  print ${file//(#b)(*)left/${match/a/andsome}}
+  print ${file//(#b)(*)left/${match//a/andsome}}D04parameter13070  file=/one/two/three/four
+  print ${file:fh}
+  print ${file:F.1.h}
+  print ${file:F+2+h}
+  print ${file:F(3)h}
+  print ${file:F<4>h}
+  print ${file:F{5}h}D04parameter13220  baz=foo/bar
+  zab=oof+rab
+  print ${baz:s/\//+/}
+  print "${baz:s/\//+/}"
+  print ${zab:s/+/\//}
+  print "${zab:s/+/\//}"D04parameter13340  bsbs='X\\\\Y'
+  print -r -- ${bsbs:s/\\/\\/}
+  print -r -- "${bsbs:s/\\/\\/}"
+  print -r -- ${bsbs:s/\\\\/\\\\/}
+  print -r -- "${bsbs:s/\\\\/\\\\/}"
+  print -r -- ${bsbs:gs/\\/\\/}
+  print -r -- "${bsbs:gs/\\/\\/}"
+  print -r -- ${bsbs:gs/\\\\/\\\\/}
+  print -r -- "${bsbs:gs/\\\\/\\\\/}"D04parameter13530  print -r ${${:-one/two}:s,/,X&Y,}
+  print -r ${${:-one/two}:s,/,X\&Y,}
+  print -r ${${:-one/two}:s,/,X\\&Y,}
+  print -r "${${:-one/two}:s,/,X&Y,}"
+  print -r "${${:-one/two}:s,/,X\&Y,}"
+  print -r "${${:-one/two}:s,/,X\\&Y,}"D04parameter13670  nully=($'a\0c' $'a\0b\0b' $'a\0b\0a' $'a\0b\0' $'a\0b' $'a\0' $'a')
+  for string in ${(o)nully}; do
+    for (( i = 1; i <= ${#string}; i++ )); do
+      foo=$string[i]
+      printf "%02x" $(( #foo ))
+    done
+    print
+  doneD04parameter13840  array=(X)
+  patterns=("*X*" "spong" "a[b")
+  for pat in $patterns; do
+    print A${array[(r)$pat]}B C${array[(I)$pat]}D
+  doneD04parameter13940  foo=(a6 a117 a17 b6 b117 b17)
+  print ${(n)foo}
+  print ${(On)foo}D04parameter14010  foo=(a-6 a117 a-17 a-34 b6 b-117 b17 b-2)
+  print ${(-)foo}
+  print ${(O-)foo}D04parameter14080  x=sprodj
+  x[-10]=scrumf
+  print $xD04parameter14140  a=(some sunny day)
+  a[-10]=(we\'ll meet again)
+  print -l $aD04parameter14270  a=(sping spang spong bumble)
+  print ${a[(i)spong]}
+  print ${a[(i)spung]}
+  print ${a[(ib.1.)spong]}
+  print ${a[(ib.4.)spong]}
+  print ${a[(ib.10.)spong]}D04parameter14400  a="thrimblewuddlefrong"
+  print ${a[(i)w]}
+  print ${a[(i)x]}
+  print ${a[(ib.3.)w]}
+  print ${a[(ib.10.)w]}
+  print ${a[(ib.30.)w]}D04parameter14530  foo="line:with::missing::fields:in:it"
+  print -l ${(s.:.)foo}D04parameter14630  foo="line:with::missing::fields:in:it"
+  print -l "${(s.:.)foo}"D04parameter14730  foo="line:with::missing::fields:in:it:"
+  print -l "${(@s.:.)foo}"D04parameter14860  str=abcd
+  print -l ${(s..)str}
+  print -l "${(s..)str}"D04parameter14990  array=('%' '$' 'j' '*' '$foo')
+  print ${array[(i)*]} "${array[(i)*]}"
+  print ${array[(ie)*]} "${array[(ie)*]}"
+  key='$foo'
+  print ${array[(ie)$key]} "${array[(ie)$key]}"
+  key='*'
+  print ${array[(ie)$key]} "${array[(ie)$key]}"D04parameter15140  typeset -A assoc_r
+  assoc_r=(star '*' of '*this*' and '!that!' or '(the|other)')
+  print ${(kv)assoc_r[(re)*]}
+  print ${(kv)assoc_r[(re)*this*]}
+  print ${(kv)assoc_r[(re)!that!]}
+  print ${(kv)assoc_r[(re)(the|other)]}
+  print ${(kv)assoc_r[(r)*at*]}
+  print ${(kv)assoc_r[(r)*(ywis|bliss|kiss|miss|this)*]}
+  print ${(kv)assoc_r[(r)(this|that|\(the\|other\))]}D04parameter15320  print $ZSH_SUBSHELL
+  (print $ZSH_SUBSHELL)
+  ( (print $ZSH_SUBSHELL) )
+  ( (print $ZSH_SUBSHELL); print $ZSH_SUBSHELL )
+  print $(print $ZSH_SUBSHELL)
+  cat =(print $ZSH_SUBSHELL)D04parameter15470  foo=("|" "?")
+  [[ "|" = ${(j.|.)foo} ]] && print yes || print no
+  [[ "|" = ${(j.|.)~foo} ]] && print yes || print no
+  [[ "|" = ${(~j.|.)foo} ]] && print yes || print no
+  [[ "|" = ${(~~j.|.)foo} ]] && print yes || print no
+  [[ "|" = ${(j.|.~)foo} ]] && print yes || print no
+  [[ "x" = ${(j.|.)foo} ]] && print yes || print no
+  [[ "x" = ${(j.|.)~foo} ]] && print yes || print no
+  [[ "x" = ${(~j.|.)foo} ]] && print yes || print no
+  [[ "x" = ${(~~j.|.)foo} ]] && print yes || print no
+  [[ "x" = ${(j.|.~)foo} ]] && print yes || print noD04parameter15700  rcexbug() {
+    emulate -L zsh
+    setopt rcexpandparam
+    local -A hash
+    local -a full empty
+    full=(X x)
+    hash=(X x)
+    print ORDINARY ARRAYS
+    : The following behaves as documented in zshoptions
+    print FULL expand=$full
+    : Empty arrays remove the adjacent argument
+    print EMPTY expand=$empty
+    print ASSOCIATIVE ARRAY
+    print Subscript flags returning many values
+    print FOUND key=$hash[(I)X] val=$hash[(R)x]
+    : This should behave like $empty, and does
+    print LOST key=$hash[(I)y] val=$hash[(R)Y]
+    print Subscript flags returning single values
+    : Doc says "substitutes ... empty string"
+    : so must not behave like an empty array
+    print STRING key=$hash[(i)y] val=$hash[(r)Y]
+  }
+  rcexbugD04parameter16040   print $zsh_eval_context[1]
+   [[ $ZSH_EVAL_CONTEXT = ${(j.:.)zsh_eval_context} ]] || print Not equal!
+   (( icontext = ${#zsh_eval_context} + 1 ))
+   contextfn() { print $(print $zsh_eval_context[icontext,-1]); }
+   contextfnD04parameter16130bad math expression: ')' expected   foo="123456789"
+   print ${foo:3}
+   print ${foo: 1 + 3}
+   print ${foo:$(( 2 + 3))}
+   print ${foo:$(echo 3 + 3)}
+   print ${foo:3:1}
+   print ${foo: 1 + 3:(4-2)/2}
+   print ${foo:$(( 2 + 3)):$(( 7 - 6 ))}
+   print ${foo:$(echo 3 + 3):`echo 4 - 3`}
+   print ${foo: -1}
+   print ${foo: -10}
+   print ${foo:5:-2}
+   print ${foo::3}
+   print ${foo: }D04parameter16420bad math expression: ')' expected   foo=(1 2 3 4 5 6 7 8 9)
+   print ${foo:3}
+   print ${foo: 1 + 3}
+   print ${foo:$(( 2 + 3))}
+   print ${foo:$(echo 3 + 3)}
+   print ${foo:3:1}
+   print ${foo: 1 + 3:(4-2)/2}
+   print ${foo:$(( 2 + 3)):$(( 7 - 6 ))}
+   print ${foo:$(echo 3 + 3):`echo 4 - 3`}
+   print ${foo: -1}
+   print ${foo: -10}
+   print ${foo:5:-2}D04parameter16670   testfn() {
+     emulate -L sh
+     set -A foo 1 2 3
+     set -- 1 2 3
+     str=abc
+     echo ${foo[*]:0:1}
+     echo ${foo[*]:1:1}
+     echo ${foo[*]: -1:1}
+     :
+     echo ${*:0:1}
+     echo ${*:1:1}
+     echo ${*: -1:1}
+     :
+     echo ${str:0:1}
+     echo ${str:1:1}
+     echo ${str: -1:1}
+   }
+   testfnD04parameter16960   () {
+     emulate -L sh
+     local a=( one two three )
+     printf '<%s><%s>\n' ${a[*]:0:2}
+     printf '<%s><%s>\n' "${a[*]:0:2}"
+     printf '<%s><%s>\n' ${a[@]:0:2}
+     printf '<%s><%s>\n' "${a[@]:0:2}"
+     printf '<%s><%s>\n' "${a:0:2}"
+     printf '<%s><%s>\n' ${*:1:2}
+     printf '<%s><%s>\n' "${*:1:2}"
+     printf '<%s><%s>\n' ${@:1:2}
+     printf '<%s><%s>\n' "${@:1:2}"
+     printf '<%s><%s>\n' ${*:0:2}
+     printf '<%s><%s>\n' "${*:0:2}"
+     printf '<%s><%s>\n' ${@:0:2}
+     printf '<%s><%s>\n' "${@:0:2}"
+   } one two threeD04parameter17280   printf "%n" '[0]'D04parameter17320unrecognized modifier   str=rts
+   print ${str:0: }
+   print ${str:0:}D04parameter17390substring expression: -6 < 5   foo="123456789"
+   print ${foo:5:-6}D04parameter17440substring expression: -6 < 5   foo=(1 2 3 4 5 6 7 8 9)
+   print ${foo:5:-6}D04parameter17490   foo=(${(0)"$(print -n)"})
+   print ${#foo}D04parameter17540   (set -- a b c
+    setopt shwordsplit
+    IFS=
+    print -rl "$*"
+    unset IFS
+    print -rl "$*")D04parameter17640   foo=
+   print ${foo:wq}
+   print ${:wq}D04parameter17730   args() { print $#; }
+   args ${:*}
+   args ${:|}D04parameter17800  foo=(a b c)
+  bar=(1 2 3)
+  print ${foo:^bar}
+  print ${foo:^^bar}
+  foo=(a b c d)
+  bar=(1 2)
+  print ${foo:^bar}
+  print ${foo:^^bar}
+  foo=('a a' b)
+  bar=(1 '2 2')
+  print -l "${foo:^bar}"
+  print -l "${(@)foo:^bar}"D04parameter18050  foo=(a b c)
+  bar=()
+  print ${foo:^bar}
+  print ${foo:^^bar}
+  print ${bar:^foo}
+  print ${bar:^^foo}
+  print ${bar:^bar}
+  print ${bar:^^bar}D04parameter18210  foo=text
+  bar=()
+  print ${foo:^bar}
+  print ${bar:^^foo}
+  bar=other
+  print ${foo:^bar}
+  bar=(array elements)
+  print ${foo:^bar}
+  print ${foo:^^bar}
+  print ${bar:^foo}
+  print ${bar:^^foo}D04parameter18410not an identifier: ^bar  foo=(a b c)
+  print ${foo:^^^bar}D04parameter18460  (setopt nounset
+  print ${foo:^noexist})D04parameter18510  (setopt nounset
+  print ${noexist:^foo})D04parameter18560  expr="a@b,c@d:e@f,g@h:i@j,k@l"
+  for sep in : , @; do
+    print -l ${(ps.$sep.)expr}
+  doneD04parameter18760  SHLVL=1
+  $ZTST_testdir/../Src/zsh -fc 'echo $SHLVL'
+  $ZTST_testdir/../Src/zsh -fc '(echo $SHLVL)'D04parameter18830  # SHLVL is incremented twice and decremented once in between.
+  SHLVL=1
+  $ZTST_testdir/../Src/zsh -fc $ZTST_testdir/../Src/zsh' -fc "echo \$SHLVL"'
+  $ZTST_testdir/../Src/zsh -fc '('$ZTST_testdir/../Src/zsh' -fc "echo \$SHLVL")'
+  $ZTST_testdir/../Src/zsh -fc '( ('$ZTST_testdir/../Src/zsh' -fc "echo \$SHLVL"))'D04parameter18930  # SHLVL is incremented twice with no decrement in between.
+  SHLVL=1
+  $ZTST_testdir/../Src/zsh -fc '('$ZTST_testdir/../Src/zsh' -fc "echo \$SHLVL"); exit'
+  $ZTST_testdir/../Src/zsh -fc '(exec '$ZTST_testdir/../Src/zsh' -fc "echo \$SHLVL"); exit'
+  $ZTST_testdir/../Src/zsh -fc '( ('$ZTST_testdir/../Src/zsh' -fc "echo \$SHLVL"); exit)'D04parameter19040  alias param-test-alias='print $'\''\x45xpanded in substitution'\' 
+  param='$(param-test-alias)'
+  print ${(e)param}D04parameter19100  a=1 b=2 c=3
+  : One;
+  function {
+      : Two
+      echo $_
+      print -l $argv
+  } $_ Three
+  print -l $_ Four;D04parameter19250  a=1 b=2 c=3
+  : One
+  function {
+      : Two
+      echo $_
+      print -l $argv
+  }
+  print -l "$_" FourD04parameter19390  funnychars='The qu*nk br!wan f@x j/mps o[]r \(e la~# ^"&;'
+  [[ $funnychars = ${~${(b)funnychars}} ]]D04parameter19430  set -- foo
+  echo $(( $#*3 ))
+  emulate sh -c 'nolenwithoutbrace() { echo $#-1; }'
+  nolenwithoutbraceD04parameter19510  a="aaa bab cac"
+  b=d
+  echo $a:gs/a/${b}/
+  a=(aaa bab cac)
+  echo $a:gs/a/${b}/D04parameter19600 a=1_2_3_4_5_6
+ print ${a#(*_)(#c2)}
+ print ${a#(*_)(#c5)}
+ print ${a#(*_)(#c7)}D04parameter19690 (setopt shwordsplit
+ do_test() {
+   print $#: "$@"
+ }
+ foo=bar
+ foo2="bar bar"
+ do_test ${:- foo }
+ do_test ${:- foo bar }
+ do_test ${:- $foo }
+ do_test ${:- $foo2 }
+ do_test x${:- foo }y
+ do_test x${:- foo bar }y
+ do_test x${:- $foo }y
+ do_test x${:- $foo2 }y
+ do_test x${foo:+ $foo }y
+ )D04parameter19960 (unsetopt shwordsplit # default, for clarity
+ do_test() {
+   print $#: "$@"
+ }
+ foo=bar
+ foo2="bar bar"
+ do_test ${:- foo }
+ do_test ${:- foo bar }
+ do_test ${:- $foo }
+ do_test ${:- $foo2 }
+ do_test x${:- foo }y
+ do_test x${:- foo bar }y
+ do_test x${:- $foo }y
+ do_test x${:- $foo2 }y
+ do_test x${foo:+ $foo }y
+ )D04parameter20230  testfn() {
+    local scalar=obfuscation
+    local -a array=(alpha bravo charlie delta echo foxtrot)
+    local -A assoc=(one eins two zwei three drei four vier)
+    local name subscript
+    for name subscript in scalar 3 array 5 assoc three; do
+      print ${${(P)name}[$subscript]}
+    done
+  }
+  testfnD04parameter20380  testfn() {
+    local s1=foo s2=bar
+    local -a val=(s1)
+    print ${${(P)val}[1,3]}
+    val=(s1 s2)
+    print ${${(P)val}[1,3]}
+  }
+  testfnD04parameter20500  testfn() {
+    local -A assoc=(one buckle two show three knock four door)
+    local name='assoc[two]'
+    print ${${(P)name}[2,3]}
+  }
+  testfnD04parameter20590  testfn() {
+    local one=two
+    local two=three
+    local three=four
+    local -a four=(all these worlds belong to foo)
+    print ${(P)${(P)${(P)one}}}
+    print ${${(P)${(P)${(P)one}}}[3]}
+  }
+  testfnD04parameter20720  (
+  path=(/random /value)
+  testfn1() {
+    local path=
+    print $#path
+  }
+  testfn1
+  testfn2() {
+    local path=/somewhere
+    print $#path $path
+  }
+  testfn2
+  print $#path $path
+  )D04parameter20910  print -r -- ${(q+):-}
+  print -r -- ${(q+)IFS}
+  print -r -- ${(q+):-oneword}
+  print -r -- ${(q+):-two words}
+  print -r -- ${(q+):-three so-called \'words\'}
+  (setopt rcquotes; print -r -- ${(q+):-three so-called \'words\'})D04parameter21050  array=(one two three)
+  array[1]=${nonexistent:-foo}
+  print $arrayD04parameter21110  (
+  setopt shwordsplit
+  set -- whim:wham:whom
+  IFS=:
+  print -l $@
+  )D04parameter21220  (
+  setopt shwordsplit
+  set -- one:two bucklemy:shoe
+  IFS=:
+  print -l $@
+  )D04parameter21350  (
+  set -- one:two bucklemy:shoe
+  print -l ${(s.:.)@}
+  )D04parameter21450  (
+  set -- one:two bucklemy:shoe
+  print -l ${(@s.:.)@}
+  )D04parameter21560  (
+  set -- one:two bucklemy:shoe
+  IFS=
+  setopt shwordsplit
+  print -l ${@} ${(s.:.)*} ${(s.:.j.-.)*}
+  )D04parameter21720  (
+  set -- "one two" "bucklemy shoe"
+  IFS=
+  setopt shwordsplit rcexpandparam
+  print -l "X${(@j.-.)*}"
+  )D04parameter21810  () { print -r -- "${(q)1}" "${(b)1}" "${(qq)1}" } '=foo'D04parameter21850  args() { print $#; }
+  a=(foo)
+  args "${a[3,-1]}"
+  args "${(@)a[3,-1]}"D04parameter21930  a='~-/'; echo $~aD04parameter21980  (
+  set -- one 'two three' four
+  for ifs in default null unset; do
+    for wordsplit in native sh; do
+      print -r -- "--- $ifs IFS, $wordsplit splitting ---"
+      case $ifs in
+      default) IFS=$' \t\n\00' ;;
+      null)    IFS= ;;
+      unset)   unset -v IFS ;;
+      esac
+      case $wordsplit in
+      native)  unsetopt shwordsplit ;;
+      sh)      setopt shwordsplit ;;
+      esac
+      for testcmd in 'var=$@' 'var=$*' 'var="$@"' 'var="$*"'; do
+	print -r -- "> $testcmd"
+        eval "$testcmd"
+	printf '[%s]\n' "${var[@]}"
+      done
+    done
+  done
+  )D04parameter22780  () {
+    setopt localoptions extendedglob
+    [[ $- = [[:alnum:]]## ]] || print Failed 1
+    [[ ${-} = [[:alnum:]]## ]] || print Failed 2
+  }D04parameter22850  a=(1 "" 3)
+  print -rl -- "${(@)a//*/x}"
+  a=""
+  print -rl -- "${(@)a//*/y}"D04parameter22950  a=(1 "" 3)
+  print -rl -- "${(@)a//#%*/x}"
+  a=""
+  print -rl -- "${(@)a//#%*/y}"D04parameter23050  my_width=6
+  my_index=1
+  my_options=Option1
+  hyperlink=$'\034'"MYID"$'\034'"DATA1"$'\034'"DATA2"$'\034'"DATA3"$'\034'"my_width"$'\034'"my_index"$'\034'"my_options"$'\02'
+  array=( $hyperlink "Regular text" $hyperlink )
+  array=( "${array[@]//(#b)$'\034'[^$'\034']#$'\034'[^$'\034']#$'\034'[^$'\034']#$'\034'[^$'\034']#$'\034'([^$'\034']#)$'\034'([^$'\034']#)$'\034'([^$'\02']#)$'\02'/${(mr:${(P)${(Q)match[1]}}:: :)${(As:;:)${(P)${(Q)match[3]}}}[${(P)${(Q)match[2]}}]}}" )
+  print -rl -- "${array[@]}"D04parameter23170 (setopt nonomatch
+  print ${(z):-foo-bar*thingy?}
+ )D04parameter23230bad subscript for direct array assignment: one typeset -A keyvalhash
+ keyvalhash=([one]=eins [two]=zwei)
+ keyvalhash+=([three]=drei)
+ for key in ${(ok)keyvalhash}; do
+   print $key $keyvalhash[$key]
+ doneD04parameter23340  local keyvalarray
+  keyvalarray=([1]=one [3]=three)
+  print -l "${keyvalarray[@]}"
+  keyvalarray+=([2]=two)
+  print -l "${keyvalarray[@]}"D04parameter23470  (setopt KSH_ARRAYS
+  local keyvalarray
+  keyvalarray=([0]=one [2]=three)
+  print -l "${keyvalarray[@]}"
+  keyvalarray+=([1]=two)
+  print -l "${keyvalarray[@]}")D04parameter23610bad subscript for direct array assignment: typeset -A keyvalhash
+ touch foo Xnot_globbedX
+ key="another key" val="another value"
+ keyvalhash=([$(echo the key)]=$(echo the value)
+             [$key]=$val
+	     [*]=?not_globbed?)
+ for key in ${(ok)keyvalhash}; do
+   print -l $key $keyvalhash[$key]
+ doneD04parameter23780 local keyvalarray
+ keyvalarray=(1 2 3)
+ keyvalarray+=([5]=5 [7]=7)
+ keyvalarray+=([4]=4 [6]=6)
+ print $#keyvalarray
+ print $keyvalarrayD04parameter23880 (setopt KSH_ARRAYS
+ local keyvalarray
+ keyvalarray=(1 2 3)
+ keyvalarray+=([4]=5 [6]=7)
+ keyvalarray+=([3]=4 [5]=6)
+ print ${#keyvalarray[*]}
+ print ${keyvalarray[*]})D04parameter23990bad math expression: operator expected at `first elem...' local -A keyvalhash
+ keyvalhash=(['1first element!']=first' 'value
+	     ["2second element?"]=second" "value
+	     [$'3third element#']=third$' 'value
+	     [\4\f\o\u\r\t\h\ \e\l\e\m\e\n\t\\]=fourth\ value)
+ for key in ${(ok)keyvalhash}; do
+   print -rl -- $key $keyvalhash[$key]
+ doneD04parameter24170  local keyvalarray
+  keyvalarray=(first [2]=second third [6]=sixth seventh [5]=fifth new_sixth)
+  print -l "${keyvalarray[@]}"D04parameter24290  (setopt KSH_ARRAYS
+  local keyvalarray
+  keyvalarray=(first [1]=second third [5]=sixth seventh [4]=fifth new_sixth)
+  print -l "${keyvalarray[@]}")D04parameter24420  local -A keyvalhash
+  keyvalhash=(1 one [2]=two 3 three)D04parameter24470  touch KVA1one KVA2two KVA3three
+  local keyvalarray
+  keyvalarray=(KVA* [4]=*)
+  print -l "${keyvalarray[@]}"D04parameter24570  (setopt KSH_ARRAYS
+  touch KVA1one KVA2two KVA3three
+  local keyvalarray
+  keyvalarray=(KVA* [3]=*)
+  print -l "${keyvalarray[@]}")D04parameter24680  local -a keyvalarray
+  keyvalarray=(1 2 3)
+  keyvalarray+=([1]+=a [2]=b)
+  print $keyvalarrayD04parameter24750  (setopt KSH_ARRAYS
+  local -a keyvalarray
+  keyvalarray=(1 2 3)
+  keyvalarray+=([0]+=a [1]=b)
+  print ${keyvalarray[*]})D04parameter24830bad subscript for direct array assignment: a  local -A keyvalhash
+  keyvalhash=([a]=a [b]=b [c]=c)
+  keyvalhash+=([a]+=yee [b]=ee)
+  local key val
+  for key in "${(ok)keyvalhash[@]}"; do
+    val=${keyvalhash[$key]}
+    print -r -- $key $val
+  doneD04parameter24960  local -a keyvalarray
+  keyvalarray=([1]=who [2]=anyway [1]+=is [1]+=that [1]+=mysterious [1]+=man)
+  print -rl -- "${keyvalarray[@]}"D04parameter25030  (setopt KSH_ARRAYS
+  local -a keyvalarray
+  keyvalarray=([0]=who [1]=anyway [0]+=is [0]+=that [0]+=mysterious [0]+=man)
+  print -rl -- "${keyvalarray[@]}")D04parameter25110bad subscript for direct array assignment: one  local -A keyvalhash
+  keyvalhash=([one]=hows [one]+=your [one]+=father [one]+=today)
+  print -rl -- ${(kv)keyvalhash}D04parameter25180  local b=$'a+=(${(o)$(ls -1 \'.*\' | perl -alne \'\nEND{ print " "; }\'\n)})'
+  printf ': %s\n' "${(@Z+cn+)b}"D04parameter25270  local b=$'# \' single\n# \" double\n# ` backtick\nword'
+  (setopt CSH_JUNKIE_QUOTES
+  printf ': %s\n' "${(@Z+n+)b}")D04parameter25410  (
+    setopt KSH_ARRAYS
+    typeset -A ksh_assoc
+    print ${+assoc[unset]}
+  )D04parameter25490 for baz in "" "inga"; do
+   echo ${#${baz}} "${#${baz}}" ${#baz} "${#baz}"
+ doneD04parameter25560  () {
+    local -a x
+    : <<< ${(F)x/y}
+  }D04parameter25620  testpath=/one/two/three/four
+  for (( i = 0; i <= 6; ++i )); do
+    eval "print \$testpath:t$i"
+    eval "print \${testpath:t$i}"
+  doneD04parameter25830  testpath=/one/two/three/four
+  for (( i = 0; i <= 6; ++i )); do
+    eval "print \$testpath:h$i"
+    eval "print \${testpath:h$i}"
+  doneD04parameter26040  testpath=/a/quite/long/path/to/do/messy/stuff/with
+  print $testpath:h2:t3:h5:t16:h2n2
+  print ${testpath:t5:h2}
+  print ${testpath:t5:h2:t}
+  print ${testpath:h6:t4:h3:t2:h}
+  print ${testpath:h10:t10:t6:h3}
+  print ${testpath:t9:h}
+  print ${testpath:t9:h:t}D04parameter26210 testpath=///this//has////lots//and////lots//of////slashes
+ print ${testpath:h3}
+ print ${testpath:t4}D04parameter26280 testpath=trailing/slashes/are/removed///
+ print ${testpath:h}
+ print ${testpath:h2}
+ print ${testpath:t}
+ print ${testpath:t2}D04parameter26390 foo=global-value
+ fn() {
+    local foo=function-value
+    foo=export-value true
+    print $foo
+ }
+ fn
+ print $fooD04parameter26510 foo=pws
+ print ${foo%*}D04parameter26560 foo=pws
+ print ${foo%?}D04parameter26610 setopt extendedglob
+ foo=pws
+ print ${foo%s#}
+ print ${foo%%s#}D04parameter26690 foo=pws
+ print ${foo%%*}D04parameter26740 foo=pws
+ print 1: ${(S)foo#*}
+ print 2: ${(S)foo##*}
+ print 3: ${(S)foo#?}
+ print 4: ${(S)foo##?}D04parameter26850 foo=pws
+ print 2: ${(S)foo%%*}D04parameter26900 foo=pws
+ print 1: ${(S)foo%*}
+ print 3: ${(S)foo%?}
+ print 4: ${(S)foo%%?}D04parameter26990unrecognized modifier `$' : "${foo:0:${\"}}"D04parameter27030 $ZTST_testdir/../Src/zsh -fc $'$\\\n('D04parameter27090 eval $'echo $\\\n(printf "%d\\n" $(( 4 + 2 )) )'D04parameter27130 eval $'echo $\\\n(( 14 / 2 ))'D04parameter27170 eval $'echo $(\\\n( 15 / 3 ))'D04parameter27210  function '*' { echo What a star; }
+  eval 'echo $(\*)'D04parameter27260error in flags near position 7 in '${(zZ+x+):-}' : ${(zZ+x+):-}D06subscript50  s='Twinkle, twinkle, little *, [how] I [wonder] what?  You are!'
+  a=('1' ']'  '?' '\2'  '\]' '\?'  '\\3' '\\]'  '\\?' '\\\4'  '\\\]' '\\\?')
+  typeset -g -A A
+  A=($a)D06subscript120  x=','
+  print $s[(i)winkle] $s[(I)winkle]
+  print ${s[(i)You are]} $#s
+  print ${s[(r)$x,(R)$x]}D06subscript210  x='*'
+  print $s[(i)*] $s[(i)\*] $s[(i)$x*] $s[(i)${(q)x}*] $s[(I)$x\*]
+  print $s[(r)?,(R)\?] $s[(r)\?,(R)?]
+  print $s[(r)\*,(R)*]
+  print $s[(r)\],(R)\[]D06subscript320  print $s[(i)x] : $s[(I)x]
+  print $s[(r)x] : $s[(R)x]D06subscript380  print -R $s[$s[(i)\[]] $s[(i)$s[(r)\*]] $s[(i)${(q)s[(r)\]]}]D06subscript420  print -R $a[(r)?] $a[(R)?]
+  print $a[(n:2:i)?] $a[(n:2:I)?]
+  print $a[(i)\?] $a[(I)\?]
+  print $a[(i)*] $a[(i)\*]D06subscript520  # It'd be nice to do some of the following with (r), but we run into
+  # limitations of the ztst script parsing of backslashes in the output.
+  print -R $a[(i)\\\\?] $a[(i)\\\\\?]
+  print -R $a[(i)\\\\\\\\?] $a[(i)\\\\\\\\\?]
+  print -R ${a[(i)\\\\\\\\?]} ${a[(i)\\\\\\\\\?]}
+  print -R "$a[(i)\\\\\\\\?] $a[(i)\\\\\\\\\?]"
+  print -R $a[(i)\]] $a[(i)\\\\\]] $a[(i)\\\\\\\\\]] $a[(i)\\\\\\\\\\\\\]]
+  print -R $a[(i)${(q)a[5]}] $a[(i)${(q)a[8]}] $a[(i)${(q)a[11]}]
+  print -R $a[(i)${a[3]}] $a[(i)${a[6]}] $a[(i)${a[9]}] $a[(i)${a[12]}]D06subscript700  print -R $A[1] $A[?] $A[\\\\3] $A[\\\]]
+  print -R $A[$a[11]]
+  print -R $A[${(q)a[5]}]D06subscript780  # The (o) is necessary here for predictable output ordering
+  print -R $A[(I)\?] ${(o)A[(I)?]}
+  print -R $A[(i)\\\\\\\\3]
+  print -R $A[(I)\\\\\\\\\?] ${(o)A[(I)\\\\\\\\?]}D06subscript870  print -R $A[(R)\?] : ${(o)A[(R)?]}
+  print -R $A[(R)\\\\\?] ${(o)A[(R)\\\\?]} ${(o)A[(R)\\\\\?]}
+  print -R ${(o)A[(R)\\\\\\\\\]]}D06subscript950  eval 'A[*]=star'D06subscript990  x='*'
+  A[$x]=xstar
+  A[${(q)x}]=qxstar
+  print -R ${(k)A[(r)xstar]} $A[$x]
+  print -R ${(k)A[(r)qxstar]} $A[${(q)x}]
+  A[(e)*]=star
+  A[\*]=backstar
+  print -R ${(k)A[(r)star]} $A[(e)*]
+  print -R ${(k)A[(r)backstar]} $A[\*]D06subscript1140  o='['
+  c=']'
+  A[\]]=cbrack
+  A[\[]=obrack
+  A[\\\[]=backobrack
+  A[\\\]]=backcbrack
+  print -R $A[$o] $A[$c] $A[\[] $A[\]] $A[\\\[] $A[\\\]]
+  print -R $A[(i)\[] $A[(i)\]] $A[(i)\\\\\[] $A[(i)\\\\\]]D06subscript1260  print -R $A[$o] $A[$s[(r)\[]]
+  print -R $A[(r)$c] $A[(r)$s[(r)\]]]
+  print -R $A[$A[(i)\\\\\]]]D06subscript1340  print -R ${A[${A[(r)\\\\\\\\\]]}]::=zounds}
+  print -R ${A[${A[(r)\\\\\\\\\]]}]}
+  print -R $A[\\\\\]]D06subscript1420  print -R ${(o)A[(K)\]]}
+  print -R ${(o)A[(K)\\\]]}D06subscript1500  array=(${(o)A[(k)\]]})
+  print ${#array}
+  array=(${(o)A[(k)\\\]]})
+  print ${#array}D06subscript1580  typeset -g "A[one\"two\"three\"quotes]"=QQQ
+  typeset -g 'A[one\"two\"three\"quotes]'=qqq
+  print -R "$A[one\"two\"three\"quotes]"
+  print -R $A[one\"two\"three\"quotes]
+  A[one"two"three"four"quotes]=QqQq
+  print -R $A[one"two"three"four"quotes]
+  print -R $A[$A[(i)one\"two\"three\"quotes]]
+  print -R "$A[$A[(i)one\"two\"three\"quotes]]"D06subscript1730  print ${x::=$A[$A[(i)one\"two\"three\"quotes]]}
+  print $x
+  print ${x::="$A[$A[(i)one\"two\"three\"quotes]]"}
+  print $xD06subscript1830  qqq=lower
+  QQQ=upper
+  print ${(P)A[one\"two\"three\"quotes]}
+  print "${(P)A[$A[(i)one\"two\"three\"quotes]]}"D06subscript1910  typeset -ga empty
+  echo X${${empty##*}[-1]}XD06subscript1960  print $empty[(i)] $empty[(I)]D06subscript2000  array=(one two three four)
+  print X$array[0]XD06subscript2050  array[0]=fumbleD06subscript2090  print X$array[(R)notfound]XD06subscript2130  setopt KSH_ZERO_SUBSCRIPT
+  print X$array[0]XD06subscript2180  array[0]=fimble
+  print $arrayD06subscript2230  print X$array[(R)notfound]XD06subscript2270  unsetopt KSH_ZERO_SUBSCRIPT
+  array[(R)notfound,(r)notfound]=(help help here come the seventies retreads)
+  print $arrayD06subscript2330  string="Why, if it isn't Officer Dibble"
+  print "[${string[0]}][${string[1]}][${string[0,3]}]"D06subscript2380  setopt KSH_ZERO_SUBSCRIPT
+  print "[${string[0]}][${string[1]}][${string[0,3]}]"D06subscript2430  unsetopt KSH_ZERO_SUBSCRIPT
+  string[0,3]="Goodness"
+  print $stringD06subscript2490  string[0]=!D06subscript2530  typeset -A assoc=(leader topcat officer dibble sidekick choochoo)
+  alias myind='echo leader' myletter='echo 1' myletter2='echo 4'
+  print ${assoc[$(myind)]}
+  print $assoc[$(myind)]
+  print ${assoc[$(myind)][$(myletter)]}${assoc[$(myind)][$(myletter2)]}
+  assoc[$(myind)]='of the gang'
+  print ${assoc[$(myind)]}
+  print $assoc[$(myind)]
+  print $assoc[leader]D06subscript2700 string='abcde'
+ twoarg() { return $(( $2 - $1 )) }
+ functions -M twoarg
+ print ${string[1,twoarg(1,4)]}D06subscript2770  string='foobarbaz foob?rbaz foob?rbaz'
+  print $string[(i)b?r] $string[(I)b?r]
+  print $string[(r)b?r] $string[(R)b?r]
+  print $string[(r)b?r,(R)b?r]
+  print $string[(ei)b?r] $string[(eI)b?r]
+  print $string[(er)b?r] $string[(eR)b?r]
+  print $string[(er)b?r,(eR)b?r]D06subscript2930  i=1,3
+  [[ ${a[$i]} = ${a[i]} ]]E01options820  mkdir options.tmp && cd options.tmpE01options840  mkdir tmpcd homedirE01options860  touch tmpfile1 tmpfile2E01options880  mydir=$PWD
+  mydirt=`print -P %~`
+  mydirhome=`export HOME=$mydir/homedir; print -P %~`
+  catpath=$(which cat)
+  lspath==lsE01options940  # If the module fails to load, individual test points will skip.
+  zmodload zsh/zpty 2>/dev/null || true E01options990  # setopt should move on to the next operation in the face of an error, but
+  # preserve the >0 return code
+  unsetopt aliases
+  setopt not_a_real_option aliases && return 2
+  print -r - $options[aliases]E01options1080  alias echo='print foo'
+  unsetopt aliases
+  # use eval else aliases are all parsed at start
+  eval echo bar
+  setopt aliases
+  eval echo bar
+  unalias echoE01options1190  setopt allexport
+  testpm1=exported
+  unsetopt allexport
+  testpm2=unexported
+  print ${(t)testpm1}
+  print ${(t)testpm2}E01options1290  # Count the number of directories on the stack.  Don't care what they are.
+  dircount() { dirs -v | tail -1 | awk '{ print $1 + 1}'; }
+  unsetopt autopushd
+  cd tmpcd
+  dircount
+  cd ..
+  setopt autopushd
+  cd tmpcd
+  dircount
+  unsetopt autopushd
+  popd >/dev/nullE01options1440  unsetopt badpattern
+  print [a
+  setopt badpattern
+  print [bE01options1520  unsetopt bareglobqual nomatch
+  print *(.)
+  setopt bareglobqual nomatch
+  print *(.)E01options1600  setopt braceccl
+  print {abcd}
+  unsetopt braceccl
+  print {abcd}E01options1690  setopt braceccl
+  print {$'\0'-$'\5'} | IFS=' ' read -A chars
+  for c in $chars; do print $(( #c )); done
+  unsetopt bracecclE01options1810  setopt bsdecho
+  echo "histon\nimpington"
+  echo -e "girton\ncottenham"
+  unsetopt bsdecho
+  echo "newnham\ncomberton"E01options1930  unsetopt c_bases
+  print $(( [#16]15 ))
+  print $(( [#8]9 ))
+  setopt c_bases
+  print $(( [#16]31 ))
+  print $(( [#8]17 ))
+  setopt octal_zeroes
+  print $(( [#8]19 ))
+  unsetopt c_bases octal_zeroesE01options2090  setopt cdablevars
+  # only absolute paths are eligible for ~-expansion
+  cdablevar1=tmpcd
+  (cd cdablevar1)
+  cdablevar2=$PWD/tmpcd
+  cd cdablevar2
+  cd ..
+  print back in ${PWD:t}
+  unsetopt cdablevars
+  cd cdablevar2E01options2270  setopt noclobber
+  rm -f foo1 bar1 rod1
+  echo waterbeach >foo1
+  (echo landbeach >foo1)
+  cat foo1
+  (echo lode >>bar1)
+  [[ -f bar1 ]] && print That shouldn\'t be there.
+  echo denny >rod1
+  echo wicken >>rod1
+  cat rod1
+  unsetopt noclobber
+  rm -f foo2 bar2 rod2
+  echo ely >foo2
+  echo march >foo2
+  cat foo2
+  echo wimpole >>bar2
+  cat bar2
+  echo royston >rod2
+  echo foxton >>rod2
+  cat rod2
+  rm -f foo* bar* rod*E01options2590   setopt cshjunkieloops
+   eval 'for f in swaffham bulbeck; print $f; end'
+   print next one should fail >&2
+   unsetopt cshjunkieloops
+   eval 'for f in chesterton arbury; print $f; end'E01options2720  setopt cshjunkiequotes
+  print this should cause an error >&2
+  eval "print 'line one
+  line two'"
+  print this should not >&2
+  eval "print 'line three\\
+  line four'"
+  unsetopt cshjunkiequotesE01options2890  nullcmd() { print '$NULLCMD run'; }
+  readnullcmd() { print 'Running $READNULLCMD'; cat; }
+  NULLCMD=nullcmd
+  READNULLCMD=readnullcmd
+  setopt cshnullcmd
+  rm -f foo
+  print "This should fail" >&2
+  (>foo)
+  print "This should succeed" >&2
+  print "These are the contents of foo" >foo
+  cat foo
+  print "This should also fail" >&2
+  (<foo)
+  unsetopt cshnullcmd
+  rm -f foo
+  >foo
+  <foo
+  rm -f fooE01options3180  setopt nomatch cshnullglob
+  print tmp* nothing* blah
+  print -n 'hoping for no match: ' >&2
+  (print nothing* blah)
+  print >&2
+  unsetopt cshnullglob nomatch
+  print tmp* nothing* blah
+  print nothing* blahE01options3340  setopt NO_equals
+  print -n trick; print =cat
+  setopt equals
+  print -n trick; print =catE01options3450  TRAPZERR() { print ZERR trapped; }
+  testfn() { setopt localoptions $2; print $1 before; false; print $1 after; }
+  (testfn on errexit)
+  testfn off
+  unfunction TRAPZERR testfnE01options3580  (
+    setopt ERR_EXIT
+    () { false; print is executed; } && true
+    () { false; print is not executed; }
+    print is not executed
+  )E01options3670  (
+    setopt ERR_RETURN
+    () { false; print is not executed; } || print is executed
+    print is also executed
+  )E01options3760  (
+    setopt ERR_RETURN
+    () {
+      () { false; print Not executed 1; } || true
+      print Executed
+      () { false; print Not executed 2; }
+      print Not executed 3;
+    } && false
+  )E01options3880  (print before; setopt noexec; print after)E01options3920  (setopt noexec
+  typeset -A hash
+  hash['this is a string'])E01options3970  (setopt noexec nomatch
+  echo *NonExistentFile*)E01options4010  (setopt noexec
+  echo ${unset_var?Not an error})E01options4050  (setopt noexec
+  : ${${string%[aeiou]*}/(#m)?(#e)/${(U)MATCH}}  Rule 1
+  : ${array[4,5][1][2,3]}                        Rule 2
+  : ${${(P)foo[1,6]}[1,3]}                       Rule 3
+  : "${${(@)array}[1,2]}"                        Rule 5
+  : "${(@)${(@)array}[1,2]#?}"                   Rule 6
+  : ${(el.20..X.)${bar}}                         Rule 11 success case)E01options4140  (setopt noexec
+  : ${(el.20..X.)$bar}                           Rule 11 failure case)E01options4190  setopt NO_eval_lineno
+  eval 'print $LINENO'
+  setopt eval_lineno
+  eval 'print $LINENO'E01options4270  # The EXTENDED_GLOB test doesn't test globbing fully --- it just tests
+  # that certain patterns are treated literally with the option off
+  # and as patterns with the option on.
+  testfn() { print -n "$1 $2 $3 "; if [[ $1 = ${~2} ]];
+             then print yes; else print no; fi; }
+  tests=('a#' '?~b' '^aa')
+  strings=('a' 'aa' 'b' 'a#' '?~b' '^aa')
+  for opt in noextendedglob extendedglob; do
+    setopt $opt
+    for test in $tests; do
+      for string in $strings; do
+         testfn $string $test $opt
+      done
+    done
+  doneE01options4800  foo() { print My name is $0; }
+  unsetopt functionargzero
+  foo
+  setopt functionargzero
+  foo
+  unfunction fooE01options4900  setopt _NO_glob_
+  print tmp*
+  set -o glob
+  print tmp*E01options4980  showit() { local v;
+             for v in first second third; do
+               eval print \$$v \$\{\(t\)$v\}
+	     done;
+           }      
+  setit() { typeset -x first=inside1;
+            typeset +g -x second=inside2;
+            typeset -g -x third=inside3;
+            showit;
+          }
+  first=outside1 second=outside2 third=outside3
+  unsetopt globalexport
+  setit
+  showit
+  setopt globalexport
+  setit
+  showit
+  unfunction setit showitE01options5320  mkdir onlysomefiles
+  touch onlysomefiles/.thisfile onlysomefiles/thatfile
+  setopt globdots
+  print onlysomefiles/*
+  unsetopt globdots
+  print onlysomefiles/*
+  rm -rf onlysomefilesE01options5430  # we've tested this enough times already...
+  # could add some stuff for other sorts of expansion
+  foo='tmp*'
+  setopt globsubst
+  print ${foo}
+  unsetopt globsubst
+  print ${foo}E01options5540  setopt histsubstpattern
+  print *(:s/t??/TING/)
+  foo=(tmp*)
+  print ${foo:s/??p/THUMP/}
+  foo=(one.c two.c three.c)
+  print ${foo:s/#%(#b)t(*).c/T${match[1]}.X/}
+  print *(#q:s/#(#b)tmp(*e)/'scrunchy${match[1]}'/)
+  unsetopt histsubstpatternE01options5680  setopt ignorebraces
+  echo X{a,b}Y
+  unsetopt ignorebraces
+  echo X{a,b}YE01options5760  setopt ksh_arrays
+  array=(one two three)
+  print $array $array[2]
+  print ${array[0]} ${array[1]} ${array[2]} ${array[3]}
+  unsetopt ksh_arrays
+  print $array $array[2]
+  print ${array[0]} ${array[1]} ${array[2]} ${array[3]}
+  unset arrayE01options5900  fpath=(.)
+  echo >foo 'echo foo loaded; foo() { echo foo run; }'
+  echo >bar 'bar() { echo bar run; }'
+  setopt kshautoload
+  autoload foo bar
+  foo
+  bar
+  unfunction foo bar
+  unsetopt kshautoload
+  autoload foo bar
+  foo
+  barE01options6110  setopt kshoptionprint globassign
+  print set
+  setopt | grep kshoptionprint
+  setopt | grep globassign
+  unsetopt kshoptionprint
+  print unset
+  setopt | grep kshoptionprint
+  setopt | grep globassign
+  unsetopt globassignE01options6270  # This test is now somewhat artificial as
+  # KSH_TYPESET only applies to the builtin
+  # interface.  Tests to the more standard
+  # reserved word interface appear elsewhere.
+  (
+  # reserved words are handled during parsing,
+  # hence eval...
+  disable -r typeset
+  eval '
+  setopt kshtypeset
+  ktvars=(ktv1 ktv2)
+  typeset ktfoo=`echo arg1 arg2` $ktvars
+  print $+ktv1 $+ktv2 $+ktv3
+  print $ktfoo
+  unsetopt kshtypeset
+  typeset noktfoo=`echo noktarg1 noktarg2`
+  print $noktfoo
+  print $+noktarg1 $+noktarg2
+  unset ktfoo ktv1 ktv2 noktfoo noktarg2
+  '
+  )E01options6540  showopt() { setopt | egrep 'localoptions|ksharrays'; }
+  f1() { setopt localoptions ksharrays; showopt }
+  f2() { setopt ksharrays; showopt }
+  setopt kshoptionprint
+  showopt
+  f1
+  showopt
+  f2
+  showopt
+  unsetopt ksh_arraysE01options6780  fn() {
+    local HOME=/any/old/name
+    print -l var=~ 'anything goes/here'=~ split=`echo maybe not`;
+  }
+  setopt magicequalsubst
+  fn
+  setopt kshtypeset
+  fn
+  unsetopt magicequalsubst kshtypeset
+  fnE01options7010  setopt MARK_DIRS
+  print tmp*
+  unsetopt MARK_DIRS
+  print tmp*E01options7100no such file or directory: foo1  print "This is in1" >in1
+  print "This is in2" >in2
+  unsetopt multios
+  print Test message >foo1 >foo2
+  print foo1: $(<foo1)
+  print foo2: $(<foo2)
+  cat <in1 <in2
+  setopt multios
+  print Test message >foo1 >foo2
+  sleep 1   # damn, race in multios
+  print foo1: $(<foo1)
+  print foo2: $(<foo2)
+  cat <in1 <in2
+  rm -f foo1 foo2 in1 in2E01options7390  setopt multios
+  ( echo hello ) >multio_out1 >multio_out2 && cat multio_out*E01options7460  print -u $ZTST_fd 'This test hangs the shell when it fails...'
+  setopt multios
+  echo These are the contents of the file >multio_race.out
+  multio_race_fn() { cat; }
+  multio_race_fn <$(echo multio_race.out multio_race.out)E01options7560  ( exec 3>&1 3>&2; print -u 3 some words )
+  sleep 1	# let background multi thread catch upE01options7630  unsetopt nomatch
+  print with nonomatch: flooble*
+  setopt nomatch
+  print with nomatch flooble*E01options7720  setopt nullglob nomatch
+  print frooble* tmp*
+  unsetopt nullglob nomatch
+  print frooble* tmp*E01options7800  touch ngs1.txt ngs2.txt ngs10.txt ngs20.txt ngs100.txt ngs200.txt
+  setopt numericglobsort
+  print -l ngs*
+  unsetopt numericglobsort
+  print -l ngs*E01options7990  typeset -i 10 oznum
+  setopt octalzeroes
+  (( oznum = 012 + 013 ))
+  print $oznum
+  unsetopt octalzeroes
+  (( oznum = 012 + 013 ))
+  print $oznum
+  unset oznumE01options8110  typeset -a oldpath
+  oldpath=($path)
+  mkdir pdt_topdir pathtestdir pdt_topdir/pathtestdir
+  print "#!/bin/sh\necho File in upper dir" >pathtestdir/findme
+  print "#!/bin/sh\necho File in lower dir" >pdt_topdir/pathtestdir/findme
+  chmod u+x pathtestdir/findme pdt_topdir/pathtestdir/findme
+  pathtestdir/findme
+  rm -f pathtestdir/findme
+  setopt pathdirs
+  path=($PWD $PWD/pdt_topdir)
+  pathtestdir/findme
+  print unsetting option...
+  unsetopt pathdirs
+  pathtestdir/findme
+  path=($oldpath)
+  unset oldpath
+  rm -rf pdt_topdir pathtestdirE01options8340  (setopt pathdirs; path+=( /usr/bin ); type ./env)E01options8380  setopt posixbuiltins
+  PATH= command -v print
+  PATH= command -V print
+  PATH= command print foo
+  unsetopt posixbuiltins
+  print unsetting...
+  PATH= command -V print
+  PATH= command print fooE01options8540  (
+     setopt posixbuiltins
+     opts=()
+     command $opts print foo
+     opts=(-v)
+     command $opts print
+     opts=(-V)
+     command $opts print
+  )E01options8680  # With non-special command: original value restored
+  # With special builtin: new value kept
+  # With special builtin preceded by "command": original value restored.
+  (setopt posixbuiltins
+  FOO=val0
+  FOO=val1 true; echo $FOO
+  FOO=val2 times 1>/dev/null 2>&1; echo $FOO
+  FOO=val3 command times 1>/dev/null 2>&1; echo $FOO)E01options8810  print "Contents of file" >cat_arg
+  (
+     cat() { print Function with argument $1 }
+     print Without
+     (exec cat cat_arg; print Not reached)
+     print With
+     (setopt posixbuiltins; exec cat cat_arg; print Not reached)
+  )E01options8970  $ZTST_testdir/../Src/zsh -f <<<'
+      setopt printexitvalue
+      func() {
+	  false
+      }
+      func
+  'E01options9070  $ZTST_testdir/../Src/zsh -f <<<'
+      setopt printexitvalue
+      () { false; }
+  'E01options9140  setopt promptbang
+  print -P !
+  setopt nopromptbang
+  print -P !E01options9220  unsetopt promptpercent
+  print -P '%/'
+  setopt promptpercent
+  print -P '%/'E01options9300  setopt promptsubst
+  print -P '`echo waaah`'
+  unsetopt promptsubst
+  print -P '`echo waaah`'E01options9380  dirs
+  pushd $mydir/tmpcd
+  dirs
+  pushd $mydir/tmpcd
+  dirs
+  setopt pushdignoredups
+  pushd $mydir/tmpcd
+  dirs
+  unsetopt pushdignoredups
+  popd >/dev/null
+  popd >/dev/nullE01options9550  mkdir newcd
+  cd $mydir
+  pushd $mydir/tmpcd
+  pushd $mydir/newcd
+  dirs
+  pushd -0
+  dirs
+  setopt pushdminus pushdsilent
+  pushd -0
+  dirs
+  unsetopt pushdminus
+  popd >/dev/null
+  popd >/dev/null
+  cd $mydir  E01options9760  (export HOME=$mydir/homedir
+  pushd $mydir/tmpcd
+  pushd
+  dirs
+  setopt pushdtohome
+  pushd
+  dirs
+  unsetopt pushdtohome
+  popd
+  pushd
+  popd
+  dirs)E01options9930  array=(one two three four)
+  setopt rcexpandparam
+  print aa${array}bb
+  unsetopt rcexpandparam
+  print aa${array}bbE01options10020  setopt rcquotes
+  # careful, this is done when parsing a complete block
+  eval "print 'one''quoted''expression'"
+  unsetopt rcquotes
+  eval "print 'another''quoted''expression'"E01options10120  (setopt restricted; cd /)
+  (setopt restricted; PATH=/bin:/usr/bin)
+  (setopt restricted; /bin/ls)
+  (setopt restricted; hash ls=/bin/ls)
+  (setopt restricted; print ha >outputfile)
+  (setopt restricted; exec ls)
+  (setopt restricted; unsetopt restricted)
+  :E01options10310  fn() {
+    print =ls ={ls,}
+    local foo='=ls'
+    print ${~foo}
+  }
+  setopt shfileexpansion
+  fn
+  unsetopt shfileexpansion
+  fnE01options10460  () {
+    emulate -L sh
+    v='~/one ~/two'
+    print -l -- $v $v
+  }E01options10580  (
+    setopt shfileexpansion
+    set -- also appearing
+    print -l $*$*
+  )E01options10680  testpat() {
+    if [[ $1 = ${~2} ]]; then print $1 $2 yes; else print $1 $2 no; fi
+  }
+  print option on
+  setopt shglob
+  repeat 2; do
+    for str in 'a(b|c)' ab; do
+      testpat $str 'a(b|c)'
+    done
+    for str in 'a<1-10>' a9; do
+      testpat $str 'a<1-10>'
+    done
+    [[ ! -o shglob ]] && break
+    print option off
+    unsetopt shglob
+  doneE01options10960  print this is bar >bar
+  fn() {
+    local NULLCMD=cat READNULLCMD=cat
+    { echo hello | >foo } 2>/dev/null
+    cat foo
+    <bar
+  }
+  setopt shnullcmd
+  print option set
+  fn
+  unsetopt shnullcmd
+  print option unset
+  fn
+  rm -f foo barE01options11160  fn() { 
+    eval 'for f in foo bar; print $f'
+    eval 'for f (word1 word2) print $f'
+    eval 'repeat 3 print nonsense'
+  }
+  unsetopt shortloops shortrepeat
+  print shortloops and shortrepeat unset
+  fn
+  setopt shortrepeat
+  print shortrepeat set
+  fn
+  setopt shortloops
+  print shortloops set
+  fnE01options11500  fn() { print -l $*; }
+  setopt shwordsplit
+  print option set
+  repeat 2; do
+    foo='two words'
+    fn $foo
+    fn "${=foo}"
+    [[ ! -o shwordsplit ]] && break
+    unsetopt shwordsplit
+    print option unset
+  doneE01options11720  fn() { unset foo; print value is $foo; }
+  setopt nounset
+  print option unset unset by setting nounset
+  eval fn
+  print option unset reset
+  setopt unset
+  fnE01options11850  fn1() { unset foo; print value 1 is ${foo#bar}; }
+  fn2() { unset foo; print value 2 is ${foo%bar}; }
+  fn3() { unset foo; print value 3 is ${foo/bar}; }
+  setopt nounset
+  print option unset unset by setting nounset
+  eval fn1
+  eval fn2
+  eval fn3
+  print option unset reset
+  setopt unset
+  fn1
+  fn2
+  fn3E01options12080  fn() {
+    emulate -L zsh
+    setopt warncreateglobal
+    foo1=bar1
+    unset foo1
+    foo1=bar2
+    local foo2=bar3
+    unset foo2
+    foo2=bar4
+    typeset -g foo3
+    foo3=bar5
+    fn2() {
+      foo3=bar6
+    }
+    foo4=bar7 =true
+    (( foo5=8 ))
+    integer foo6=9
+    (( foo6=10 ))
+  }
+  # don't pollute the test environment with the variables...
+  (fn)E01options12340  fn() {
+    emulate -L zsh
+    setopt warncreateglobal
+    TZ=UTC date >&/dev/null
+    local um=$(TZ=UTC date 2>/dev/null)
+  }
+  fnE01options12430  (
+    foo1=global1 foo2=global2 foo3=global3 foo4=global4
+    integer foo5=5
+    # skip foo6, defined in fn_wnv
+    foo7=(one two)
+    fn_wnv() {
+       # warns
+       foo1=bar1
+       # doesn't warn
+       local foo2=bar3
+       unset foo2
+       # still doesn't warn
+       foo2=bar4
+       # doesn't warn
+       typeset -g foo3=bar5
+       # warns
+       foo3=bar6
+       fn2() {
+          # warns if global option, not attribute
+          foo3=bar6
+       }
+       fn2
+       # doesn't warn
+       foo4=bar7 =true
+       # warns
+       (( foo5=8 ))
+       integer foo6=9
+       # doesn't warn
+       (( foo6=10 ))
+       foo7[3]=three
+       foo7[4]=(four)
+    }
+    print option off >&2
+    fn_wnv
+    print option on >&2
+    setopt warnnestedvar
+    fn_wnv
+    unsetopt warnnestedvar
+    print function attribute on >&2
+    functions -W fn_wnv
+    fn_wnv
+    print all off again >&2
+    functions +W fn_wnv
+    fn_wnv
+  )E01options13020  (
+    setopt warnnestedvar
+    () {
+      typeset -A a
+      : ${a[hello world]::=foo}
+      print ${(t)a}
+      key="hello world"
+      print $a[$key]
+    }
+  )E01options13160  (
+    setopt warnnestedvar
+    () {
+      local var=(one two)
+      () { var=three; }
+      print $var
+    }
+  )E01options13280  (
+    setopt warnnestedvar
+    () {
+      local var=three
+      () { var=(one two); }
+      print $var
+    }
+  )E01options13420  fn() { print message; }
+  PS4='+%N:%i> '
+  setopt xtrace
+  fn
+  unsetopt xtrace
+  fnE01options13550  setopt ignoreclosebraces
+  eval "icb_test() { echo this is OK; }"
+  icb_test
+  icb_args() { print $#; }
+  eval "icb_args { this, is, ok, too }"E01options13640  (setopt pipefail
+  true | true | true
+  print $?
+  true | false | true
+  print $?
+  exit 2 | false | true
+  print $?
+  false | exit 2 | true
+  print $?)E01options13790  for (( i = 0; i < 10; i++ )); do
+     () {
+        print $i
+        break
+     }
+  doneE01options13880  () {
+      emulate -L zsh
+      setopt localloops
+      for (( i = 0; i < 10; i++ )); do
+	  () {
+              setopt nolocalloops # ignored in parent
+              print $i
+              break
+	  }
+      done
+  }E01options14220 if [[ -o privileged ]]; then
+   unsetopt privileged
+ fi
+ unsetopt privilegedE01options14290  if [[ -o privileged ]]; then
+    (( UID != EUID ))
+  else
+    (( UID == EUID ))
+  fiE01options14360  if zmodload -e zsh/zpty 2>/dev/null; then
+    for target_dir target_pattern in \
+      '.' '*' \
+      '/' '/*'
+    do
+      before=`ls -a -- $target_dir`
+      zpty subshell $ZTST_testdir/../Src/zsh -f +Z
+      [[ $PWD == */options.tmp ]] || return 1 # Sanity check before calling rm(1).
+      zpty -w subshell 'PS1=PROMPT'
+      zpty -r -m subshell REPLY $'*PROMPT'
+      zpty -w subshell "rm $target_pattern"
+      zpty -w -n subshell 'n'
+      sleep 1
+      zpty -rt subshell REPLY && print -r -- ${REPLY%%$'\r\n'}
+      zpty -d subshell
+      after=`ls -a -- $target_dir`
+      [[ $before == $after ]] || return 1
+    done
+  else
+    ZTST_skip="the zsh/zpty module is not available"
+  fi
+  BEL=$'\a'E01options14620  () {
+    local var
+    print ${(t)var}
+  }E01options14690  () {
+    readonly var
+    typeset -p var
+  }

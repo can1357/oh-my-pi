@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "nonProduction": true,
+  "seeds": [
+    {
+      "id": "command-injection",
+      "path": "src/command-injection.ts",
+      "expectedClass": "command-injection",
+      "expectedDisposition": "finding"
+    },
+    {
+      "id": "path-traversal",
+      "path": "src/path-traversal.ts",
+      "expectedClass": "path-traversal",
+      "expectedDisposition": "finding"
+    },
+    {
+      "id": "sql-injection",
+      "path": "src/sql-injection.ts",
+      "expectedClass": "sql-injection",
+      "expectedDisposition": "finding"
+    },
+    {
+      "id": "ssrf",
+      "path": "src/ssrf.ts",
+      "expectedClass": "ssrf",
+      "expectedDisposition": "finding"
+    },
+    {
+      "id": "authorization-bypass",
+      "path": "src/authorization-bypass.ts",
+      "expectedClass": "authorization",
+      "expectedDisposition": "finding"
+    },
+    {
+      "id": "unsafe-deserialization",
+      "path": "src/unsafe-deserialization.ts",
+      "expectedClass": "unsafe-deserialization",
+      "expectedDisposition": "finding"
+    },
+    {
+      "id": "fake-secret",
+      "path": "src/fake-secret.ts",
+      "expectedClass": "hard-coded-secret",
+      "expectedDisposition": "finding",
+      "notes": "Clearly fake canary; never a live credential"
+    },
+    {
+      "id": "safe-lookalike",
+      "path": "src/safe-lookalike.ts",
+      "expectedClass": "path-traversal",
+      "expectedDisposition": "no-finding"
+    }
+  ]
+}

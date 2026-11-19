@@ -1,0 +1,15 @@
+On branch feature/new-filters
+Your branch is up to date with 'origin/feature/new-filters'.
+
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	new file:   internal/filter/kubectl.go
+	modified:   internal/filter/registry.go
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+	modified:   README.md
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	internal/filter/npm.go

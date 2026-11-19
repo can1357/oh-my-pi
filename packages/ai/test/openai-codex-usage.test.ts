@@ -1,0 +1,690 @@
+/**
+ * Codex usage parser regressions. The widget client (osx-widgets) keys spark
+ * detection off `limit.id.includes("spark")`, so the parser MUST surface
+ * `additional_rate_limits[].metered_feature == "codex_bengalfox"` (the upstream
+ * codename for GPT-5.3-Codex-Spark) as separate `UsageLimit` entries with
+ * `spark` in the id. If this contract breaks, both the TUI and the macOS
+ * widget lose per-model visibility.
+ */
+import { describe, expect, it } from "bun:test";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { codexRankingStrategy, openaiCodexUsageProvider } from "@oh-my-pi/pi-ai/usage/openai-codex";
+
+const accessTokenFixture = (() => {
+	const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
+	const body = Buffer.from(
+		JSON.stringify({
+			"https://api.openai.com/auth": { chatgpt_account_id: "acct-fixture" },
+			"https://api.openai.com/profile": { email: "fixture@example.com" },
+		}),
+	).toString("base64url");
+	return `${header}.${body}.sig`;
+})();
+
+function makePayload() {
+	return {
+		plan_type: "pro",
+		rate_limit: {
+			allowed: true,
+			limit_reached: false,
+			primary_window: { used_percent: 4, limit_window_seconds: 17940, reset_at: 2_000_000_000 },
+			secondary_window: { used_percent: 1, limit_window_seconds: 604740, reset_at: 2_000_500_000 },
+		},
+		additional_rate_limits: [
+			{
+				limit_name: "GPT-5.3-Codex-Spark",
+				metered_feature: "codex_bengalfox",
+				rate_limit: {
+					allowed: true,
+					limit_reached: false,
+					primary_window: { used_percent: 17, limit_window_seconds: 18000, reset_at: 2_000_001_000 },
+					secondary_window: { used_percent: 61, limit_window_seconds: 604800, reset_at: 2_000_600_000 },
+				},
+			},
+		],
+	};
+}
+
+function fakeFetch(payload: unknown): FetchImpl {
+	const fn = async () =>
+		new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+	return fn as unknown as typeof fetch;
+}
+
+describe("openai-codex usage parser", () => {
+	it("reports active cyber access without letting a failed entitlement request hide usage", async () => {
+		for (const status of [200, 500]) {
+			const requests: string[] = [];
+			const fetchImpl: FetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+				const path = typeof url === "string" ? url : url.toString();
+				requests.push(path);
+				expect(init?.headers).toMatchObject({
+					Authorization: `Bearer ${accessTokenFixture}`,
+					"ChatGPT-Account-Id": "acct-1",
+				});
+				if (path.endsWith("/accounts/verified_access")) {
+					return new Response(
+						JSON.stringify({ programs: [{ program: "cyber", state: "active", grants: [{ level: "tac1" }] }] }),
+						{ status },
+					);
+				}
+				return new Response(JSON.stringify(makePayload()));
+			}) as unknown as FetchImpl;
+			const report = await openaiCodexUsageProvider.fetchUsage(
+				{
+					provider: "openai-codex",
+					credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1" },
+					baseUrl: "https://chatgpt.com/backend-api/codex/responses",
+				},
+				{ fetch: fetchImpl },
+			);
+			expect(requests).toEqual([
+				"https://chatgpt.com/backend-api/accounts/verified_access",
+				"https://chatgpt.com/backend-api/wham/usage",
+			]);
+			expect(report?.limits.map(limit => limit.id)).toContain("openai-codex:primary");
+			if (status === 200) expect(report?.metadata?.daybreak).toBe(true);
+			else expect(report?.metadata).not.toHaveProperty("daybreak");
+		}
+	});
+
+	it("throws on a rejected token so the cached report is purged, but treats 5xx as transient", async () => {
+		// AuthStorage purges last-good quota and health checks report `ok: false`
+		// only for a thrown 401/403; `null` keeps serving the old report.
+		for (const status of [401, 403, 503]) {
+			const outcome = await openaiCodexUsageProvider
+				.fetchUsage(
+					{
+						provider: "openai-codex",
+						credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1" },
+					},
+					{ fetch: (async () => new Response("{}", { status })) as unknown as FetchImpl },
+				)
+				.catch((err: unknown) => err);
+			if (status === 503) {
+				expect(outcome).toBeNull();
+			} else {
+				expect(outcome).toBeInstanceOf(ProviderHttpError);
+				expect((outcome as ProviderHttpError).status).toBe(status);
+			}
+		}
+	});
+
+	it("emits primary + secondary limits from the main rate_limit block", async () => {
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fakeFetch(makePayload()) },
+		);
+		expect(report).not.toBeNull();
+		const main = report?.limits.filter(l => l.id === "openai-codex:primary" || l.id === "openai-codex:secondary");
+		expect(main?.map(l => l.id)).toEqual(["openai-codex:primary", "openai-codex:secondary"]);
+		expect(main?.[0].scope).toEqual({ provider: "openai-codex", windowId: "5h", shared: true });
+		expect(main?.[0].amount.usedFraction).toBeCloseTo(0.04, 5);
+	});
+
+	it("keeps an explicitly allowed Team window usable at 100% reported usage", async () => {
+		const payload = makePayload();
+		payload.plan_type = "team";
+		payload.rate_limit.secondary_window.used_percent = 100;
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+
+		const secondary = report?.limits.find(limit => limit.id === "openai-codex:secondary");
+		expect(secondary?.amount.usedFraction).toBe(1);
+		expect(secondary?.status).toBe("warning");
+		expect(report?.metadata).toMatchObject({ planType: "team", allowed: true, limitReached: false });
+	});
+
+	// A Pro account whose weekly plan window is spent keeps serving requests off
+	// its credit balance — Codex CLI never gates on /wham/usage, so it just
+	// works. `/wham/usage` still reports the *plan* verdict as
+	// allowed:false/limit_reached:true, so ignoring `credits` parks a usable
+	// account (status "exhausted" → credential block until the weekly reset,
+	// and metadata that can never satisfy the block-healing predicate).
+	it("keeps a plan-exhausted account usable when credits fund overage", async () => {
+		const payload: Record<string, unknown> = makePayload();
+		payload.rate_limit = {
+			allowed: false,
+			limit_reached: true,
+			primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+			secondary_window: null,
+		};
+		payload.credits = { has_credits: true, unlimited: false, overage_limit_reached: false, balance: "489.25" };
+		payload.spend_control = { reached: false };
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+
+		const primary = report?.limits.find(limit => limit.id === "openai-codex:primary");
+		expect(primary?.amount.usedFraction).toBe(1);
+		expect(primary?.status).toBe("warning");
+		expect(report?.metadata).toMatchObject({ allowed: true, limitReached: false });
+		expect(report?.metadata?.meterStates).toMatchObject({ chat: { allowed: true, limitReached: false } });
+	});
+
+	it.each([
+		["no credit balance", { has_credits: false, balance: "0" }, undefined],
+		["overage cap hit", { has_credits: true, overage_limit_reached: true, balance: "12" }, undefined],
+		["spend control tripped", { has_credits: true, balance: "12" }, { reached: true }],
+	])("keeps a plan-exhausted account blocked with %s", async (_name, credits, spendControl) => {
+		const payload: Record<string, unknown> = makePayload();
+		payload.rate_limit = {
+			allowed: false,
+			limit_reached: true,
+			primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+			secondary_window: null,
+		};
+		payload.credits = credits;
+		if (spendControl) payload.spend_control = spendControl;
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+
+		expect(report?.limits.find(limit => limit.id === "openai-codex:primary")?.status).toBe("exhausted");
+		expect(report?.metadata).toMatchObject({ allowed: false, limitReached: true });
+	});
+
+	// Credits pay for plan overage, nothing else. A refusal that is not plan
+	// exhaustion has no funding story, so the verdict must survive untouched —
+	// otherwise selection keeps a refused credential and burns request after
+	// request on it.
+	it("keeps a refused account blocked when the denial is not plan exhaustion", async () => {
+		const payload: Record<string, unknown> = makePayload();
+		payload.rate_limit = {
+			allowed: false,
+			limit_reached: false,
+			primary_window: { used_percent: 12, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+			secondary_window: null,
+		};
+		payload.credits = { has_credits: true, overage_limit_reached: false, balance: "489.25" };
+		payload.spend_control = { reached: false };
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+
+		expect(report?.metadata).toMatchObject({ allowed: false, limitReached: false });
+		expect(report?.metadata?.meterStates).toMatchObject({ chat: { allowed: false, limitReached: false } });
+	});
+
+	// Spark is a separate allowance with its own block scope. A plan credit
+	// balance says nothing about it, so an exhausted Spark meter must stay
+	// exhausted even while the chat windows run on credits — otherwise healing
+	// clears the Spark block and every Spark request is rejected again.
+	it("leaves an exhausted Spark meter blocked while credits fund the plan windows", async () => {
+		const payload: Record<string, unknown> = makePayload();
+		payload.rate_limit = {
+			allowed: false,
+			limit_reached: true,
+			primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+			secondary_window: null,
+		};
+		payload.additional_rate_limits = [
+			{
+				limit_name: "GPT-5.3-Codex-Spark",
+				metered_feature: "codex_bengalfox",
+				rate_limit: {
+					allowed: false,
+					limit_reached: true,
+					primary_window: { used_percent: 100, limit_window_seconds: 18000, reset_at: 2_000_001_000 },
+					secondary_window: null,
+				},
+			},
+		];
+		payload.credits = { has_credits: true, overage_limit_reached: false, balance: "489.25" };
+		payload.spend_control = { reached: false };
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+
+		expect(report?.limits.find(limit => limit.id === "openai-codex:primary")?.status).toBe("warning");
+		expect(report?.limits.find(limit => limit.id === "openai-codex:spark:primary")?.status).toBe("exhausted");
+		expect(report?.metadata?.meterStates).toMatchObject({
+			chat: { allowed: true, limitReached: false },
+			spark: { allowed: false, limitReached: true },
+		});
+	});
+
+	it("surfaces additional_rate_limits as spark UsageLimit entries the widget can detect", async () => {
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fakeFetch(makePayload()) },
+		);
+		const spark = report?.limits.filter(l => l.id.includes("spark"));
+		expect(spark?.map(l => l.id)).toEqual(["openai-codex:spark:primary", "openai-codex:spark:secondary"]);
+		expect(spark?.[0].label).toBe("5 hours (Spark)");
+		expect(spark?.[1].label).toBe("7 days (Spark)");
+		expect(spark?.[0].scope.tier).toBe("spark");
+		expect(spark?.[0].scope.modelId).toBe("GPT-5.3-Codex-Spark");
+		expect(spark?.[0].amount.usedFraction).toBeCloseTo(0.17, 5);
+		expect(spark?.[1].amount.usedFraction).toBeCloseTo(0.61, 5);
+	});
+
+	it("treats bengalfox codename as spark even without explicit limit_name", async () => {
+		const payload = makePayload();
+		payload.additional_rate_limits[0].limit_name = undefined as unknown as string;
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+		const spark = report?.limits.find(l => l.id === "openai-codex:spark:primary");
+		expect(spark).toBeTruthy();
+		expect(spark?.scope.tier).toBe("spark");
+		expect(spark?.scope.modelId).toBe("codex_bengalfox");
+	});
+
+	it("returns a report even when only additional_rate_limits are present (no main rate_limit)", async () => {
+		const payload = {
+			plan_type: "pro",
+			rate_limit: null,
+			additional_rate_limits: [
+				{
+					limit_name: "GPT-5.3-Codex-Spark",
+					metered_feature: "codex_bengalfox",
+					rate_limit: {
+						allowed: true,
+						limit_reached: false,
+						primary_window: { used_percent: 5, limit_window_seconds: 18000, reset_at: 2_000_000_000 },
+					},
+				},
+			],
+		};
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+		expect(report).not.toBeNull();
+		expect(report?.limits.map(l => l.id)).toEqual(["openai-codex:spark:primary"]);
+	});
+
+	// Credit-billed workspace seats (Business/Enterprise flexible pricing) report
+	// `rate_limit: null`; the per-user credit cap under `spend_control` is their
+	// only quota, and dropping it left these accounts with no usage at all.
+	function makeSpendCapPayload(reached: boolean, used: string) {
+		return {
+			plan_type: "business",
+			rate_limit: null,
+			additional_rate_limits: null,
+			credits: { has_credits: true, unlimited: false, overage_limit_reached: false, balance: null },
+			spend_control: {
+				reached,
+				individual_limit: {
+					source: "account_user_spend_controls",
+					unit: "credit",
+					limit: "500000",
+					used,
+					remaining: String(500_000 - Number(used)),
+					used_percent: Math.round((Number(used) / 500_000) * 100),
+					reset_after_seconds: 584638,
+					reset_at: 1_793_491_200,
+				},
+			},
+		};
+	}
+
+	it.each([
+		["under the cap", false, "663.0780472755432", "ok", true],
+		["at the cap", true, "500000", "exhausted", false],
+		// The backend can deny before the reported amount reaches the limit.
+		["reached below 100%", true, "450000", "exhausted", false],
+	] as const)(
+		"reports a credit-billed seat's spend cap %s as its chat quota",
+		async (_name, reached, used, status, allowed) => {
+			const report = await openaiCodexUsageProvider.fetchUsage(
+				{
+					provider: "openai-codex",
+					credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1" },
+				},
+				{ fetch: fakeFetch(makeSpendCapPayload(reached, used)) },
+			);
+			expect(report?.limits.map(l => l.id)).toEqual(["openai-codex:spend-cap"]);
+			const cap = report?.limits[0];
+			expect(cap?.amount).toMatchObject({ used: Number(used), limit: 500_000, unit: "credits" });
+			expect(cap?.amount.usedFraction).toBeCloseTo(Number(used) / 500_000, 9);
+			expect(cap?.window?.resetsAt).toBe(1_793_491_200_000);
+			expect(cap?.status).toBe(status);
+			expect(report?.metadata).toMatchObject({ planType: "business", allowed, limitReached: !allowed });
+
+			// The cap gates chat requests (and heals the chat block) but not Spark.
+			const chatIds = report ? codexRankingStrategy.scopeLimits?.(report, { modelId: "gpt-5.3-codex" }) : [];
+			const sparkIds = report ? codexRankingStrategy.scopeLimits?.(report, { modelId: "gpt-5.3-codex-spark" }) : [];
+			expect(chatIds?.map(l => l.id)).toEqual(["openai-codex:spend-cap"]);
+			expect(sparkIds).toEqual([]);
+		},
+	);
+
+	it("shows a spend cap alongside plan windows without letting it gate them", async () => {
+		// With plan windows the cap only bounds credit-funded overage; a request
+		// inside the plan allowance is served regardless.
+		const payload = { ...makePayload(), spend_control: makeSpendCapPayload(true, "500000").spend_control };
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+		expect(report?.limits.map(l => l.id)).toContain("openai-codex:spend-cap");
+		expect(report?.metadata).toMatchObject({ allowed: true, limitReached: false });
+		const chatIds = report ? codexRankingStrategy.scopeLimits?.(report, { modelId: "gpt-5.3-codex" }) : [];
+		expect(chatIds?.map(l => l.id)).toEqual(["openai-codex:primary", "openai-codex:secondary"]);
+		// The display-only cap must not keep a legacy shared block from healing.
+		const shared = codexRankingStrategy.healableBlockScopes?.(report!).find(s => s.blockScope === "shared");
+		expect(shared?.limits.map(l => l.id)).not.toContain("openai-codex:spend-cap");
+		expect(shared?.healthy).toBe(true);
+	});
+
+	it("leaves an omitted spend-cap verdict to the counters instead of reading it as allowed", async () => {
+		const base = makeSpendCapPayload(false, "500000");
+		const { reached: _omitted, ...spendControl } = base.spend_control;
+		const payload = { ...base, spend_control: spendControl };
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+		expect(report?.limits[0]?.status).toBe("exhausted");
+		expect(report?.metadata?.allowed).toBeUndefined();
+		expect(report?.metadata?.limitReached).toBeUndefined();
+		const chat = codexRankingStrategy.healableBlockScopes?.(report!).find(s => s.blockScope === "chat");
+		expect(chat?.healthy).toBe(false);
+	});
+
+	it.each([
+		["full counters", (cap: Record<string, unknown>) => cap],
+		["only remaining: 0", (cap: Record<string, unknown>) => ({ unit: cap.unit, remaining: "0" })],
+	] as const)(
+		"does not let credits fund plan overage when the spend cap has %s and the verdict is omitted",
+		async (_name, shape) => {
+			const { reached: _omitted, ...rest } = makeSpendCapPayload(false, "500000").spend_control;
+			const spendControl = { ...rest, individual_limit: shape(rest.individual_limit) };
+			const payload = {
+				...makePayload(),
+				rate_limit: {
+					allowed: false,
+					limit_reached: true,
+					primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+					secondary_window: null,
+				},
+				credits: { has_credits: true, unlimited: false, overage_limit_reached: false, balance: "489.25" },
+				spend_control: spendControl,
+			};
+			const report = await openaiCodexUsageProvider.fetchUsage(
+				{
+					provider: "openai-codex",
+					credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1" },
+				},
+				{ fetch: fakeFetch(payload) },
+			);
+			expect(report?.metadata).toMatchObject({ allowed: false, limitReached: true });
+			const chat = report ? (codexRankingStrategy.scopeLimits?.(report, { modelId: "gpt-5.3-codex" }) ?? []) : [];
+			expect(chat.find(l => l.id === "openai-codex:primary")?.status).toBe("exhausted");
+			const scopes = report ? (codexRankingStrategy.healableBlockScopes?.(report) ?? []) : [];
+			expect(scopes.find(s => s.blockScope === "chat")?.healthy).toBe(false);
+			expect(scopes.find(s => s.blockScope === "shared")?.healthy).toBe(false);
+		},
+	);
+
+	it("surfaces rate_limit_reset_credits.available_count as report.resetCredits", async () => {
+		const usagePayload = { ...makePayload(), rate_limit_reset_credits: { available_count: 1 } };
+		const fetchImpl: FetchImpl = (async (url: string | URL | Request) => {
+			const path = typeof url === "string" ? url : url.toString();
+			// Return an empty credits list for the detail endpoint — the count
+			// from /wham/usage should be synced from the live response.
+			const body = path.includes("rate-limit-reset-credits") ? { available_count: 1, credits: [] } : usagePayload;
+			return new Response(JSON.stringify(body), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as unknown as FetchImpl;
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fetchImpl },
+		);
+		expect(report?.resetCredits).toEqual({ availableCount: 1 });
+	});
+
+	it("omits resetCredits when the account has no saved resets block", async () => {
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fakeFetch(makePayload()) },
+		);
+		expect(report?.resetCredits).toBeUndefined();
+	});
+	it("populates resetCredits.credits with expiry dates when available_count > 0", async () => {
+		const usagePayload = { ...makePayload(), rate_limit_reset_credits: { available_count: 2 } };
+		const creditsPayload = {
+			available_count: 2,
+			credits: [
+				{
+					id: "RateLimitResetCredit_1",
+					status: "available",
+					granted_at: "2025-01-15T00:00:00Z",
+					expires_at: "2025-02-14T00:00:00Z",
+				},
+				{
+					id: "RateLimitResetCredit_2",
+					status: "available",
+					granted_at: "2025-01-20T00:00:00Z",
+					expires_at: "2025-02-19T00:00:00Z",
+				},
+				{
+					id: "RateLimitResetCredit_3",
+					status: "redeemed",
+					granted_at: "2025-01-01T00:00:00Z",
+					expires_at: "2025-01-31T00:00:00Z",
+				},
+			],
+		};
+		const fetchImpl: FetchImpl = (async (url: string | URL | Request) => {
+			const path = typeof url === "string" ? url : url.toString();
+			const body = path.includes("rate-limit-reset-credits") ? creditsPayload : usagePayload;
+			return new Response(JSON.stringify(body), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as unknown as FetchImpl;
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fetchImpl },
+		);
+		expect(report?.resetCredits?.availableCount).toBe(2);
+		// Redeemed credits are filtered out; only available ones surface
+		expect(report?.resetCredits?.credits).toHaveLength(2);
+		expect(report?.resetCredits?.credits?.[0]?.expiresAt).toBe("2025-02-14T00:00:00Z");
+		expect(report?.resetCredits?.credits?.[1]?.expiresAt).toBe("2025-02-19T00:00:00Z");
+	});
+
+	it("does not call listCodexResetCredits when available_count is 0", async () => {
+		const usagePayload = { ...makePayload(), rate_limit_reset_credits: { available_count: 0 } };
+		let extraFetchCalls = 0;
+		const fetchImpl: FetchImpl = (async (url: string | URL | Request) => {
+			const path = typeof url === "string" ? url : url.toString();
+			if (path.includes("rate-limit-reset-credits")) extraFetchCalls++;
+			return new Response(JSON.stringify(usagePayload), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as unknown as FetchImpl;
+		await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fetchImpl },
+		);
+		expect(extraFetchCalls).toBe(0);
+	});
+
+	it("ignores non-canonical provider baseUrl overrides for wham/usage (#3679)", async () => {
+		// Headroom + similar /responses proxies don't serve ChatGPT account
+		// endpoints; without this fall-back `/usage show` 404s on the proxy.
+		const requested: string[] = [];
+		const fetchImpl: FetchImpl = (async (url: string | URL | Request) => {
+			requested.push(typeof url === "string" ? url : url.toString());
+			return new Response(JSON.stringify(makePayload()), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as unknown as FetchImpl;
+		await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+				baseUrl: "http://127.0.0.1:8787/v1",
+			},
+			{ fetch: fetchImpl },
+		);
+		expect(requested).toEqual([
+			"https://chatgpt.com/backend-api/accounts/verified_access",
+			"https://chatgpt.com/backend-api/wham/usage",
+		]);
+	});
+
+	it("keeps a canonical chatgpt.com baseUrl override (and adds /backend-api when missing)", async () => {
+		const requested: string[] = [];
+		const fetchImpl: FetchImpl = (async (url: string | URL | Request) => {
+			requested.push(typeof url === "string" ? url : url.toString());
+			return new Response(JSON.stringify(makePayload()), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as unknown as FetchImpl;
+		await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+				baseUrl: "https://chatgpt.com",
+			},
+			{ fetch: fetchImpl },
+		);
+		expect(requested).toEqual([
+			"https://chatgpt.com/backend-api/accounts/verified_access",
+			"https://chatgpt.com/backend-api/wham/usage",
+		]);
+	});
+
+	it("keeps a window with headroom usable when the account flag is set", async () => {
+		// The account-level flag covers the whole account, so applying it to each
+		// window marked one with real headroom as exhausted. This is the original
+		// bug: the fixture below has `limit_reached: true` with the primary window
+		// at 4%.
+		const payload = makePayload();
+		payload.rate_limit.limit_reached = true;
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+
+		const primary = report?.limits.find(l => l.id === "openai-codex:primary");
+		expect(primary).toBeDefined();
+		expect(primary?.amount.usedFraction).toBeLessThan(1);
+		expect(primary?.status).not.toBe("exhausted");
+	});
+
+	it("keeps each Spark window independent of the shared meter flag", async () => {
+		const payload = makePayload();
+		payload.additional_rate_limits[0].rate_limit.limit_reached = true;
+		payload.additional_rate_limits[0].rate_limit.primary_window.used_percent = 17;
+		payload.additional_rate_limits[0].rate_limit.secondary_window.used_percent = 100;
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+
+		const primary = report?.limits.find(limit => limit.id === "openai-codex:spark:primary");
+		const secondary = report?.limits.find(limit => limit.id === "openai-codex:spark:secondary");
+		expect(primary?.status).toBe("ok");
+		expect(secondary?.status).toBe("exhausted");
+	});
+
+	it("scopes a request to the meters it actually spends", async () => {
+		const payload = makePayload();
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+		const scope = codexRankingStrategy.scopeLimits;
+		expect(scope).toBeDefined();
+
+		const chatIds = (report ? (scope?.(report, { modelId: "gpt-5.3-codex" }) ?? []) : []).map(l => l.id);
+		const sparkIds = (report ? (scope?.(report, { modelId: "gpt-5.3-codex-spark" }) ?? []) : []).map(l => l.id);
+
+		// A chat request gates on the chat windows and never on the Spark meter.
+		expect(chatIds).toContain("openai-codex:primary");
+		expect(chatIds).toContain("openai-codex:secondary");
+		expect(chatIds.some(id => id.includes("spark"))).toBe(false);
+
+		// A Spark request gates only on the Spark meter.
+		expect(sparkIds.some(id => id.includes("spark"))).toBe(true);
+		expect(sparkIds).not.toContain("openai-codex:primary");
+		expect(sparkIds).not.toContain("openai-codex:secondary");
+	});
+
+	it("backs off Spark and chat under separate scopes", () => {
+		// A reactive `usage_limit_reached` must not persist a block the other meter
+		// honours, or the request-level isolation above is undone on the reactive
+		// path. "shared" stays in both lists because blocks written before scoping
+		// meant "block everything".
+		const chat = codexRankingStrategy.blockScope?.({ modelId: "gpt-5.3-codex" });
+		const spark = codexRankingStrategy.blockScope?.({ modelId: "gpt-5.3-codex-spark" });
+		expect(chat).not.toBe(spark);
+		expect(codexRankingStrategy.blockScopes?.({ modelId: "gpt-5.3-codex" })).toEqual(["chat", "shared"]);
+		expect(codexRankingStrategy.blockScopes?.({ modelId: "gpt-5.3-codex-spark" })).toEqual(["spark", "shared"]);
+		// Reconciliation runs with no request context and must heal every scope.
+		expect(codexRankingStrategy.blockScopes?.()).toEqual(["chat", "spark", "shared"]);
+	});
+});

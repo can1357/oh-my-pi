@@ -1,0 +1,48 @@
+   Compiling proc-macro2 v1.0.86
+   Compiling unicode-ident v1.0.12
+   Compiling libc v0.2.155
+   Compiling autocfg v1.3.0
+   Compiling quote v1.0.36
+   Compiling syn v2.0.72
+   Compiling serde_derive v1.0.204
+   Compiling serde v1.0.204
+   Compiling thiserror-impl v1.0.63
+   Compiling thiserror v1.0.63
+   Compiling pi-shell v0.1.0 (/home/alpha/odin/omp/crates/pi-shell)
+warning: unused variable: `ctx`
+  --> crates/pi-shell/src/minimizer/filters/mod.rs:134:30
+   |
+134 | pub fn filter(ctx: &MinimizerCtx, input: &str) -> MinimizerOutput {
+   |                              ^^^ help: if this is intentional, prefix it with an underscore: `_ctx`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.84s
+     Running unittests src/lib.rs (target/debug/deps/pi_shell-9a1b2c3d4e5f6a7b)
+
+running 42 tests
+test minimizer::detect::tests::detects_git_status ... ok
+test minimizer::detect::tests::detects_cargo_test ... ok
+test minimizer::engine::tests::enabled_known_filter_minimizes ... ok
+test minimizer::engine::tests::unknown_command_is_passthrough ... ok
+test minimizer::filters::cargo::tests::passing_run_summarizes ... ok
+test minimizer::filters::go::tests::go_test_pass_condenses ... ok
+test minimizer::plan::tests::single_command_is_single ... ok
+test minimizer::plan::tests::chain_splits_on_and ... ok
+
+test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured; 0 filtered; finished in 0.31s
+
+     Running tests/minimizer_fixtures.rs (target/debug/deps/minimizer_fixtures-1122334455667788)
+
+running 8 tests
+test fixture_cargo_test_pass ... ok
+test fixture_npm_install ... ok
+test fixture_go_test_pass ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered; finished in 0.02s
+
+   Doc-tests pi-shell
+
+running 3 tests
+test crates/pi-shell/src/minimizer.rs - minimizer (line 12) ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered; finished in 0.45s

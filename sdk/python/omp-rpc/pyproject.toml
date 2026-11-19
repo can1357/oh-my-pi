@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omp-rpc"
+version = "0.1.0"
+description = "Typed Python client for the omp coding-agent RPC protocol"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Stencil Labs, Inc." }]
+keywords = ["omp", "rpc", "agent", "coding-agent", "jsonl", "stdio"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://omp.sh/"
+Repository = "https://github.com/can1357/oh-my-pi"
+Documentation = "https://github.com/can1357/oh-my-pi/blob/main/docs/rpc.md"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+omp_rpc = ["py.typed"]

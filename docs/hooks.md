@@ -1,0 +1,418 @@
+# Hooks
+
+This document describes the **current hook subsystem code** in `packages/coding-agent/src/extensibility/hooks/*`.
+
+## Current status in runtime
+
+The default CLI runtime initializes the **extension runner** path. In current startup flow:
+
+- `--hook` is treated as an alias for `--extension` (CLI paths are merged into `additionalExtensionPaths`)
+- JS/TS hook factories discovered through `hookCapability` (for example `.omp/hooks/pre/*.ts`) are loaded as extension modules so their `pi.on(...)` handlers bind to the runtime event bus
+- tools are wrapped by `ExtensionToolWrapper`, not `HookToolWrapper`
+- context transforms and lifecycle emissions go through `ExtensionRunner`
+
+So this file documents the legacy hook subsystem implementation itself (types/loader/runner/wrapper), plus the factory shape still accepted when a discovered hook path is loaded by the extension runner.
+
+A discovered factory receives `ExtensionAPI`/`ExtensionContext` in normal
+sessions, not an instance of `HookAPI`/`HookContext`. Shared `pi.on(...)`
+handlers work, but legacy-only context names are not shimmed: for example,
+use `ctx.hasPendingMessages()` in extensions rather than the legacy
+`ctx.hasQueuedMessages()`. Prefer [Extensions](./extensions.md) for new runtime
+integrations. The runner/wrapper behavior below is specifically the legacy
+library path unless stated otherwise.
+
+## Key files
+
+- `packages/coding-agent/src/extensibility/hooks/types.ts` — hook context, event types, and result contracts
+- `packages/coding-agent/src/extensibility/hooks/loader.ts` — module loading and hook discovery bridge
+- `packages/coding-agent/src/extensibility/hooks/runner.ts` — event dispatch, command lookup, error signaling
+- `packages/coding-agent/src/extensibility/hooks/tool-wrapper.ts` — pre/post tool interception wrapper
+- `packages/coding-agent/src/extensibility/hooks/index.ts` — exports/re-exports
+- `packages/coding-agent/src/extensibility/shared-events.ts` — shared event/result contracts
+- `packages/coding-agent/src/extensibility/extensions/loader.ts` — current runtime discovery
+- `packages/coding-agent/src/extensibility/extensions/wrapper.ts` — current tool wrapper and approval gate
+
+## What a hook module is
+
+A hook module must default-export a factory:
+
+```ts
+import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
+
+export default function hook(pi: HookAPI): void {
+	pi.on("tool_call", async (event, ctx) => {
+		if (event.toolName === "bash" && String(event.input.command ?? "").includes("rm -rf")) {
+			return { block: true, reason: "blocked by policy" };
+		}
+	});
+}
+```
+
+The factory can:
+
+- register event handlers with `pi.on(...)`
+- send persistent custom messages with `pi.sendMessage(...)`
+- persist non-LLM state with `pi.appendEntry(...)`
+- register slash commands via `pi.registerCommand(...)`
+- register custom message renderers via `pi.registerMessageRenderer(...)`
+- run shell commands via `pi.exec(...)` and log through `pi.logger`
+- use the injected Zod-compatible builder `pi.zod`, native omptype builder `pi.arktype`, legacy `pi.typebox`, and package exports via `pi.pi`
+
+## Discovery and loading
+
+With ambient discovery enabled, sessions load JS/TS hook factories discovered
+by `hookCapability` through the extension runner.
+`discoverExtensionPaths(configuredPaths, cwd, disabledExtensionIds?, options?)`:
+
+1. Loads extension modules from the native provider only
+2. Loads importable `.ts`/`.js` hook factories from the hook capability registry (unless `includeAmbientHooks: false`)
+3. Appends enabled plugin extension entry points
+4. Resolves explicitly configured files/directories
+
+Paths are deduplicated by absolute path. With `ambient: false`, native/installed
+discovery is skipped, but configured package roots can still contribute hook
+factories. Foreign user sources require opt-in via `enabledProviders`; project
+sources are unaffected by that user-level gate.
+
+### Native discovery location
+
+The native provider scans only two subdirectories per config root — a factory placed **directly** in `hooks/` is not discovered:
+
+- Project: `<cwd>/.omp/hooks/pre/*.{ts,js}` and `<cwd>/.omp/hooks/post/*.{ts,js}`
+- User: `<agentDir>/hooks/pre/*.{ts,js}` and `<agentDir>/hooks/post/*.{ts,js}` (default `~/.omp/agent/hooks/...`; profile- and `PI_CODING_AGENT_DIR`-aware)
+
+A factory directly under `<cwd>/.omp/hooks/` is not found by ambient native
+discovery; put it in `pre/` or `post/`, or supply its path explicitly. Dot-prefixed
+entries and non-files are skipped. The directory and basename supply capability
+metadata/deduplication keys, not automatic event registration: the factory must
+still call `pi.on(...)`. This mirrors `.claude/hooks/pre|post/`. Only `.ts`/`.js`
+factories from the hook capability are appended to the extension pipeline.
+Explicit extension paths use the shared module resolver. See
+[Extension Loading](./extension-loading.md) for load order and disable controls.
+
+The legacy `discoverAndLoadHooks(configuredPaths, cwd)` helper still exists and does:
+
+1. Load discovered hooks from capability registry (`loadCapability("hooks")`)
+2. Append explicitly configured paths (deduped by absolute path)
+3. Call `loadHooks(allPaths, cwd)`
+
+`loadHooks` then imports each path and expects a `default` function.
+
+### Path resolution
+
+`loader.ts` resolves hook paths as:
+
+- absolute path: used as-is
+- `~` path: expanded
+- relative path: resolved against `cwd`
+
+## Event surfaces
+
+Hook events are strongly typed in `types.ts`.
+
+### Session events
+
+- `session_start`
+- `session_before_switch` → can return `{ cancel?: boolean }`
+- `session_switch`
+- `session_clear`
+- `session_before_branch` → can return `{ cancel?: boolean; skipConversationRestore?: boolean }`
+- `session_branch`
+- `session_before_compact` → can return `{ cancel?: boolean; compaction?: CompactionResult }`
+- `session.compacting` → can return `{ context?: string[]; prompt?: string; preserveData?: Record<string, unknown> }`
+- `session_compact`
+- `session_before_tree` → can return `{ cancel?: boolean; summary?: { summary: string; details?: unknown } }`
+- `session_tree`
+- `session_shutdown`
+
+`session_before_branch` and `session_branch` carry `reason`, which decides what `session_before_branch.entryId` means. For `"branch"` (`branch(entryId)`, `/branch`) it is the user message being rewound: it and everything after it are dropped. For `"fork"` (`AgentSession.fork(entryId)`, RPC `fork` with an `entryId`) and `"btw"` (`/btw` promotion) it is the last entry kept in the new session.
+
+`session_clear` is a non-cancellable notification after `/clear` (or
+`AgentSession.resetSessionContext()`) successfully resets context in place.
+Use it to invalidate cached "already injected" instructions; handlers finish
+before the reset returns. It also fires for an empty successful clear, never
+for a busy/rejected reset, and does not change the session id, file, or history.
+
+### Agent/context events
+
+- `context` → can return `{ messages?: Message[] }`
+- `before_agent_start` → can return `{ message?: { customType; content; display; details; attribution } }`
+- `agent_start`
+- `agent_end`
+- `turn_start`
+- `turn_end`
+- `auto_compaction_start`
+- `auto_compaction_end`
+- `auto_retry_start`
+- `auto_retry_end`
+- `ttsr_triggered`
+- `todo_reminder`
+
+### Tool events (pre/post model)
+
+- `tool_call` (pre-execution) → can return `{ block?: boolean; reason?: string; input?: Record<string, unknown>; additionalContext?: string }`. A non-blocking handler that returns `input` replaces the arguments the tool executes with (the raw execution input, not the normalized `event.input` view); ignored when `block` is true. Distinct non-empty `additionalContext` values from all non-blocking handlers carry trusted handler-authored instructions delivered after the tool results and before the next provider request, with developer/system priority where the transport supports it; raw tool output and other untrusted data must stay in the tool result.
+- `tool_result` (post-execution) → can return `{ content?; details?; isError?; additionalContext?: string }`. Context is delivered outside tool output on both success and failure; check `event.isError` when guidance applies to only one outcome. Overrides merge per field across handlers, so a later return that omits a field (including a context-only return) never erases an earlier handler's value for it.
+
+Returned `input` is not applied to provider-native `computer` calls, whose event
+input is a synthetic view rather than the execution parameters. `edit` event
+input can also contain derived `path`/`paths` fields; those are for policy
+inspection, not necessarily valid execution arguments.
+
+In the normal extension-runner path, model-issued `tool_call` runs during
+argument preparation, before scheduling, `tool_execution_start`, and approval.
+Replacement input is revalidated and becomes the displayed/persisted/executed
+call. The extension wrapper emits the event for nested or direct dispatches
+the loop did not handle, and approval evaluates the revised input. This differs
+from the standalone `HookToolWrapper` described below.
+
+Eval prelude invocations such as `browser.open(...)`, direct `BrowserTab`
+helpers, `tab.run(...)`, direct `computer` helpers, and
+`computer.run(fnOrCode, options)` are host bridge calls, not AgentTool calls,
+so they do not emit `tool_call` or `tool_result`.
+
+```text
+Hook tool interception flow
+
+tool_call handlers
+   │
+   ├─ any { block: true }? ── yes ──> throw (tool blocked)
+   │
+   └─ no
+      │
+      ▼
+   execute underlying tool
+      │
+      ├─ success ──> tool_result handlers can override { content, details }
+      │                    and attach passive additionalContext
+      │
+      └─ error   ──> emit tool_result(isError=true), deliver returned
+                     additionalContext, then rethrow original error
+```
+
+## Execution model and mutation semantics
+
+### 1) Pre-execution: `tool_call`
+
+`HookToolWrapper.execute()` emits `tool_call` before tool execution.
+
+- if any handler returns `{ block: true }`, execution stops and context already collected for that call is discarded
+- if handler throws, wrapper fails closed, blocks execution, and discards collected context
+- collected context is forwarded only after the tool returns a non-error result; a throwing or `isError` result discards it
+- returned `reason` becomes the thrown error text
+
+### 2) Tool execution
+
+Underlying tool executes normally if not blocked.
+
+### 3) Post-execution: `tool_result`
+
+After the tool returns (including a returned error result), the wrapper emits
+`tool_result` with:
+
+- `toolName`, `toolCallId`, normalized `input` for the effective execution arguments
+- `content`
+- `details`
+- `isError: result.isError === true`
+
+If a handler returns overrides:
+
+- `content` can replace result content
+- `details` can replace result details
+- `additionalContext` carries trusted guidance outside the tool result; distinct non-blank values from every handler are joined in registration order (repeats, compared ignoring surrounding whitespace, are dropped) and delivered before the call's `tool_call` context. A call whose joined context is identical to an earlier call's in the same batch is delivered once
+
+If execution throws, the wrapper emits `tool_result` with `isError: true` and
+error text content, delivers returned `additionalContext`, then rethrows the
+original error; returned content/details patches cannot replace that exception.
+If the tool instead returns an `isError: true` result, content/details patches
+are applied but the error flag stays true. A handler that should run only after
+failure must test `event.isError`; a `PostToolUse`-equivalent handler must reject it.
+
+### What hooks can mutate
+
+- LLM context for a single call via `context` (`messages` replacement chain)
+- passive context for the next provider request via `additionalContext` from `tool_call` or `tool_result`
+- raw tool execution arguments by returning `input` from `tool_call`
+- tool output content/details on returned results, including returned error results (`tool_result` path)
+- pre-agent injected message via `before_agent_start`
+- cancellation/custom compaction/tree behavior via `session_before_*` and `session.compacting`
+
+### What hooks cannot mutate in this implementation
+
+- execution continuation after thrown tool errors (error path rethrows)
+- final success/error status in wrapper behavior (returned `isError` is typed but not applied by `HookToolWrapper`)
+
+These limitations are not the current extension wrapper's contract:
+`ExtensionToolWrapper` applies `tool_result` content/details/`isError` patches,
+including on its converted execution-error result. See the extension docs for
+that path.
+
+## Ordering and conflict behavior
+
+### Discovery-level ordering
+
+Capability providers are priority-sorted (higher first). Dedupe is by capability key, first wins.
+
+For `hooks`, capability key is `${type}:${tool}:${name}`. Shadowed duplicates from lower-priority providers are marked and excluded from effective discovered list.
+
+### Load order
+
+`discoverAndLoadHooks` builds a flat `allPaths` list, deduped by resolved absolute path, then `loadHooks` iterates in that order.
+File order within each discovered directory depends on `readdir` output; the hook loader does not perform an additional sort.
+
+### Runtime handler order
+
+Inside `HookRunner`, order is deterministic by registration sequence:
+
+1. hooks array order
+2. handler registration order per hook/event
+
+Conflict behavior by event type:
+
+- `tool_call`: every distinct non-empty `additionalContext` is preserved in handler order (a value identical to an earlier handler's on the same call is dropped, as is a call's joined context identical to an earlier call's in the same batch); `input` remains last-wins; first block short-circuits and discards context collected for that call. Handlers do not observe each other's input revisions
+- `tool_result`: `content`/`details`/`isError` overrides merge per field across handlers (no short-circuit): a later handler's defined field wins and a field it leaves unset keeps the earlier handler's value, so a details-only, isError-only, or context-only return never erases an earlier redaction. Every distinct non-empty `additionalContext` is preserved in handler order, with the same repeat-dropping as `tool_call`
+- `context`: chained; each handler receives prior handler’s message output
+- `before_agent_start`: first returned message is kept; later messages ignored
+- `session_before_*`: latest returned result is tracked; `cancel: true` short-circuits immediately
+- `session.compacting`: latest returned result wins
+
+Command/renderer conflicts:
+
+- `getCommand(name)` returns first match across hooks (first loaded wins)
+- `getMessageRenderer(customType)` returns first match
+- `getRegisteredCommands()` returns all commands (no dedupe)
+
+## UI interactions (`HookContext.ui`)
+
+`HookUIContext` includes:
+
+- `select`, `confirm`, `input`, `editor`
+- `notify`
+- `setStatus`
+- `custom`
+- `setEditorText`, `getEditorText`
+- `theme` getter
+
+`ctx` includes `hasUI`, `cwd`, `sessionManager`, `modelRegistry`, current `model`, `isIdle()`, `abort()`, and `hasQueuedMessages()`.
+
+When running with no UI, the default no-op context behavior is:
+
+- `select/input/editor/custom` return `undefined`
+- `confirm` returns `false`
+- `notify`, `setStatus`, `setEditorText` are no-ops
+- `getEditorText` returns `""`
+
+### Status line behavior
+
+Hook status text set via `ctx.ui.setStatus(key, text)` is:
+
+- stored per key
+- sorted by key name
+- sanitized (ANSI/VT escape sequences stripped; control characters mapped to spaces; repeated spaces collapsed; trimmed)
+- joined and width-truncated for display
+
+## Error propagation and fallback
+
+### Load-time
+
+- invalid module or missing default export → captured in `LoadHooksResult.errors`
+- loading continues for other hooks
+
+### Event-time
+
+`HookRunner.emit(...)` catches handler errors for most events and emits `HookError` to listeners (`hookPath`, `event`, `error`), then continues.
+
+`emitToolCall(...)` is stricter: handler errors are not swallowed there; they propagate to caller. In `HookToolWrapper`, this blocks the tool call (fail-safe).
+
+The legacy runner imposes no `tool_call` timeout; it can wait for UI input.
+The extension runner has separate handler-timeout and cancellation behavior.
+
+## Realistic API examples
+
+### Block unsafe bash commands
+
+```ts
+import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
+
+export default function (pi: HookAPI): void {
+	pi.on("tool_call", async (event, ctx) => {
+		if (event.toolName !== "bash") return;
+		const cmd = String(event.input.command ?? "");
+		if (!cmd.includes("rm -rf")) return;
+
+		if (!ctx.hasUI) return { block: true, reason: "rm -rf blocked (no UI)" };
+		const ok = await ctx.ui.confirm("Dangerous command", `Allow: ${cmd}`);
+		if (!ok) return { block: true, reason: "user denied command" };
+	});
+}
+```
+
+### Redact tool output on post-execution
+
+```ts
+import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
+
+export default function (pi: HookAPI): void {
+	pi.on("tool_result", async event => {
+		if (event.toolName !== "read" || event.isError) return;
+
+		const redacted = event.content.map(chunk => {
+			if (chunk.type !== "text") return chunk;
+			return {
+				...chunk,
+				text: chunk.text.replaceAll(/API_KEY=\S+/g, "API_KEY=[REDACTED]"),
+			};
+		});
+
+		return { content: redacted };
+	});
+}
+```
+
+### Modify model context per LLM call
+
+```ts
+import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
+
+export default function (pi: HookAPI): void {
+	pi.on("context", async event => {
+		const filtered = event.messages.filter(msg => !(msg.role === "custom" && msg.customType === "debug-only"));
+		return { messages: filtered };
+	});
+}
+```
+
+### Register slash command with command-safe context methods
+
+```ts
+import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
+
+export default function (pi: HookAPI): void {
+	pi.registerCommand("handoff", {
+		description: "Create a new session with setup message",
+		handler: async (_args, ctx) => {
+			await ctx.waitForIdle();
+			await ctx.newSession({
+				parentSession: ctx.sessionManager.getSessionFile(),
+				setup: async sm => {
+					sm.appendMessage({
+						role: "user",
+						content: [{ type: "text", text: "Continue from prior session summary." }],
+						timestamp: Date.now(),
+					});
+				},
+			});
+		},
+	});
+}
+```
+
+## Export surface
+
+`packages/coding-agent/src/extensibility/hooks/index.ts` and the package subpath `@oh-my-pi/pi-coding-agent/extensibility/hooks` export:
+
+- loading APIs (`discoverAndLoadHooks`, `loadHooks`)
+- runner and wrapper (`HookRunner`, `HookToolWrapper`)
+- all hook types
+- `execCommand` re-export
+
+The package root (`@oh-my-pi/pi-coding-agent`) does not re-export `HookAPI`; import legacy hook types from the hooks subpath.

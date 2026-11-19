@@ -1,0 +1,147 @@
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
+
+/** `lsp` settings turn LSP on for the session; without them its writes bypass LSP. */
+function createSession(cwd: string, lsp?: Record<string, unknown>): ToolSession {
+	return {
+		cwd,
+		hasUI: false,
+		getSessionFile: () => path.join(cwd, "session.jsonl"),
+		getSessionSpawns: () => "*",
+		getArtifactsDir: () => path.join(cwd, "artifacts"),
+		allocateOutputArtifact: async () => ({ id: "artifact-1", path: path.join(cwd, "artifact-1.log") }),
+		settings: Settings.isolated(lsp),
+		enableLsp: lsp !== undefined,
+	};
+}
+
+function resultText(result: { content: { type: string; text?: string }[] }): string {
+	return result.content
+		.filter((b): b is { type: "text"; text: string } => b.type === "text" && typeof b.text === "string")
+		.map(b => b.text)
+		.join("\n");
+}
+
+function details(result: { details?: { madeExecutable?: boolean } }): { madeExecutable?: boolean } {
+	return result.details ?? {};
+}
+
+describe("write tool shebang chmod", () => {
+	let tmpDir: string;
+
+	beforeAll(async () => {
+		await Settings.init({ inMemory: true });
+	});
+
+	beforeEach(async () => {
+		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-shebang-test-"));
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await removeWithRetries(tmpDir);
+	});
+
+	// POSIX execute bits: Windows accepts chmod but keeps no execute bits.
+	const posixIt = it.skipIf(process.platform === "win32");
+
+	posixIt("marks files starting with #! as executable and flags the result", async () => {
+		const filePath = path.join(tmpDir, "run.sh");
+		const tool = new WriteTool(createSession(tmpDir));
+
+		const result = await tool.execute("call-1", {
+			path: filePath,
+			content: "#!/bin/sh\necho hi\n",
+		});
+
+		const stat = await fs.stat(filePath);
+		// All three execute bits flipped on (chmod a+x semantics).
+		expect(stat.mode & 0o111).toBe(0o111);
+		// Notice remains model-facing so callers see that chmod changed the file mode.
+		expect(details(result).madeExecutable).toBe(true);
+		expect(resultText(result)).toContain("[Notice: Made executable via chmod +x]");
+	});
+
+	// LSP on, yet nothing to format or diagnose: the writethrough commits without servers.
+	posixIt.each([
+		["has no server for the file", {}],
+		["neither formats nor diagnoses writes", { "lsp.formatOnWrite": false, "lsp.diagnosticsOnWrite": false }],
+	] as const)("marks a shebang file executable when LSP %s", async (_condition, lsp) => {
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([]);
+		const filePath = path.join(tmpDir, "run.sh");
+		const tool = new WriteTool(createSession(tmpDir, lsp));
+
+		const result = await tool.execute("call-lsp", { path: filePath, content: "#!/bin/sh\necho hi\n" });
+
+		expect((await fs.stat(filePath)).mode & 0o111).toBe(0o111);
+		expect(details(result).madeExecutable).toBe(true);
+	});
+
+	it.skipIf(process.platform !== "win32")("does not claim chmod +x where execute bits cannot stick", async () => {
+		const filePath = path.join(tmpDir, "run.sh");
+		const tool = new WriteTool(createSession(tmpDir));
+
+		const result = await tool.execute("call-win", {
+			path: filePath,
+			content: "#!/bin/sh\necho hi\n",
+		});
+
+		expect(details(result).madeExecutable).toBeUndefined();
+		expect(resultText(result)).not.toContain("[Notice: Made executable via chmod +x]");
+	});
+
+	it("does not chmod files without a shebang", async () => {
+		const filePath = path.join(tmpDir, "data.txt");
+		const tool = new WriteTool(createSession(tmpDir));
+
+		const result = await tool.execute("call-2", {
+			path: filePath,
+			content: "no shebang here\n",
+		});
+
+		const stat = await fs.stat(filePath);
+		expect(stat.mode & 0o111).toBe(0);
+		expect(details(result).madeExecutable).toBeUndefined();
+	});
+
+	posixIt("preserves mode for Rust inner attributes without an executable notice", async () => {
+		const filePath = path.join(tmpDir, "lib.rs");
+		await fs.writeFile(filePath, "fn main() {}\n");
+		await fs.chmod(filePath, 0o644);
+
+		const tool = new WriteTool(createSession(tmpDir));
+		const result = await tool.execute("call-rust", {
+			path: filePath,
+			content: "#![allow(dead_code)]\nfn main() {}\n",
+		});
+
+		expect((await fs.stat(filePath)).mode & 0o777).toBe(0o644);
+		expect(details(result).madeExecutable).toBeUndefined();
+		expect(resultText(result)).not.toContain("[Notice: Made executable via chmod +x]");
+	});
+
+	posixIt("does not re-flag when file is already executable", async () => {
+		const filePath = path.join(tmpDir, "preexec.sh");
+		await fs.writeFile(filePath, "#!/bin/sh\nold\n");
+		await fs.chmod(filePath, 0o755);
+
+		const tool = new WriteTool(createSession(tmpDir));
+		const result = await tool.execute("call-3", {
+			path: filePath,
+			content: "#!/usr/bin/env python3\nprint('hi')\n",
+		});
+
+		const stat = await fs.stat(filePath);
+		expect(stat.mode & 0o111).toBe(0o111);
+		// Mode didn't change, so no flag.
+		expect(details(result).madeExecutable).toBeUndefined();
+	});
+});

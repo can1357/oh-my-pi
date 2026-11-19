@@ -1,0 +1,90 @@
+# Compact rails db:migrate / db:rollback output.
+
+[filters.rails-migrate]
+description = "Compact rails db:migrate / db:rollback output"
+match_command = "^(rails|rake)$"
+match_subcommand = "^db:(migrate|rollback)$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^\\s*(--|->)",
+]
+keep_lines_matching = ["(migrating|migrated|aborted|error|Error|reverting|reverted)"]
+replace_after = [
+	{ pattern = "^== \\d+ ([\\w:]+): (?:migrated|reverted).*$", replacement = "✓ $1" },
+]
+max_lines = 40
+on_empty = "ok (no pending migrations)"
+
+[[tests.rails-migrate]]
+name = "strips step lines and compacts migrations"
+input = """\
+== 20240115123456 CreateUsers: migrating ======================================
+-- create_table(:users)
+   -> 0.0234s
+== 20240115123456 CreateUsers: migrated (0.0235s) =============================
+
+== 20240116789012 AddIndexToOrders: migrating =================================
+-- add_index(:orders, :user_id)
+   -> 0.0123s
+== 20240116789012 AddIndexToOrders: migrated (0.0124s) ========================
+
+== 20240117111111 CreateProducts: migrating ===================================
+-- create_table(:products)
+   -> 0.0456s
+-- add_index(:products, :category_id)
+   -> 0.0078s
+== 20240117111111 CreateProducts: migrated (0.0534s) ==========================
+"""
+expected = """\
+== 20240115123456 CreateUsers: migrating ======================================
+✓ CreateUsers
+== 20240116789012 AddIndexToOrders: migrating =================================
+✓ AddIndexToOrders
+== 20240117111111 CreateProducts: migrating ===================================
+✓ CreateProducts
+"""
+
+[[tests.rails-migrate]]
+name = "rollback keeps revert lines and compacts"
+input = """\
+== 20240115123456 CreateUsers: reverting ======================================
+-- drop_table(:users)
+   -> 0.0234s
+== 20240115123456 CreateUsers: reverted (0.0235s) =============================
+
+== 20240116789012 AddIndexToOrders: reverting =================================
+-- remove_index(:orders, :user_id)
+   -> 0.0123s
+== 20240116789012 AddIndexToOrders: reverted (0.0124s) ========================
+"""
+expected = """\
+== 20240115123456 CreateUsers: reverting ======================================
+✓ CreateUsers
+== 20240116789012 AddIndexToOrders: reverting =================================
+✓ AddIndexToOrders
+"""
+
+[[tests.rails-migrate]]
+name = "no pending migrations collapses to sentinel"
+input = """\
+-- create_table(:users)
+   -> 0.0234s
+
+-- add_index(:orders, :user_id)
+   -> 0.0123s
+"""
+expected = "ok (no pending migrations)"
+
+[[tests.rails-migrate]]
+name = "namespaced migration name is preserved"
+input = """\
+== 20240115123456 Admin::CreateUsers: migrating =================================
+-- create_table(:users)
+   -> 0.0234s
+== 20240115123456 Admin::CreateUsers: migrated (0.0235s) ========================
+"""
+expected = """\
+== 20240115123456 Admin::CreateUsers: migrating =================================
+✓ Admin::CreateUsers
+"""

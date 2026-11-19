@@ -1,0 +1,2691 @@
+/**
+ * Tests for AgentSession concurrent prompt guard.
+ */
+
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, AgentBusyError, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, AssistantMessageEvent, ToolCall } from "@oh-my-pi/pi-ai";
+import {
+	accumulateToolCallArgumentsDelta,
+	finalizeToolCallArgumentsDone,
+} from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
+import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
+import { GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import {
+	convertToLlm,
+	isUserInterruptAbort,
+	shouldRenderAbortReason,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+
+// Mock stream that mimics AssistantMessageEventStream
+
+// AgentSession schedules its TTSR retry and context-promotion continuations
+// through `scheduler.wait(delayMs, { signal })` (node:timers/promises), with
+// blind 50ms/100ms "settle" delays. Tests that drive a continuation to
+// completion would otherwise pay that wall-clock time on every run. This spy
+// collapses the blind delay to a single macrotask hop (`scheduler.wait(0)`)
+// while preserving the real abort-signal semantics, so the continuation still
+// fires only after the aborted/overflowed turn has been recorded. Each test
+// that opts in must run inside a block whose afterEach restores mocks.
+const originalSchedulerWait = scheduler.wait.bind(scheduler);
+function collapseSchedulerSettleDelays(): void {
+	vi.spyOn(scheduler, "wait").mockImplementation((_delayMs, options) => originalSchedulerWait(0, options));
+}
+let sharedDir: string;
+let sharedAuthStorage: AuthStorage;
+let sharedModelRegistry: ModelRegistry;
+
+beforeAll(async () => {
+	sharedDir = path.join(os.tmpdir(), `pi-concurrent-shared-${Snowflake.next()}`);
+	fs.mkdirSync(sharedDir, { recursive: true });
+	sharedAuthStorage = await AuthStorage.create(path.join(sharedDir, "auth.db"));
+	sharedAuthStorage.keys.setRuntime("anthropic", "test-key");
+	sharedAuthStorage.keys.setRuntime("openai-codex", "test-key");
+	sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir, "models.yml"));
+});
+
+afterAll(() => {
+	sharedAuthStorage.close();
+	removeSyncWithRetries(sharedDir);
+});
+
+describe("AgentSession concurrent prompt guard", () => {
+	let session: AgentSession;
+	let tempDir: string;
+
+	beforeEach(() => {
+		// Collapse scheduler settle delays so the post-abort auto-continue and
+		// dispose teardown are deterministic instead of racing the wall clock.
+		collapseSchedulerSettleDelays();
+		tempDir = path.join(os.tmpdir(), `pi-concurrent-test-${Snowflake.next()}`);
+		fs.mkdirSync(tempDir, { recursive: true });
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+		}
+		if (tempDir && fs.existsSync(tempDir)) {
+			removeSyncWithRetries(tempDir);
+		}
+		vi.restoreAllMocks();
+		AsyncJobManager.resetForTests();
+	});
+
+	it("continues a main session from session_stop feedback before settling", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			handler: () => ({ content: ["Done"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		const stopEvents: Array<{
+			messages: AgentMessage[];
+			stop_hook_active: boolean;
+			session_id: string;
+			turn_id: number;
+			last_assistant_message?: AgentMessage;
+		}> = [];
+		const eventOrder: string[] = [];
+		const extensionRunner = {
+			emit: vi.fn(event => {
+				eventOrder.push(event.type);
+				return Promise.resolve(undefined);
+			}),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
+			emitSessionStop: vi.fn(event => {
+				eventOrder.push("session_stop");
+				stopEvents.push(event);
+				if (stopEvents.length === 1) {
+					return Promise.resolve({ continue: true, additionalContext: "Mission incomplete; continue." });
+				}
+				return Promise.resolve(undefined);
+			}),
+		} as unknown as ExtensionRunner;
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+
+		await session.prompt("First message");
+		await session.waitForIdle();
+
+		const callMessages = mock.calls.map(call => call.context.messages);
+		expect(callMessages).toHaveLength(2);
+		expect(
+			callMessages[1]?.some(message =>
+				typeof message.content === "string"
+					? message.content.includes("Mission incomplete; continue.")
+					: message.content.some(
+							content => content.type === "text" && content.text.includes("Mission incomplete; continue."),
+						),
+			),
+		).toBe(true);
+		expect(eventOrder.filter(type => type === "session_stop" || type === "agent_end")).toEqual([
+			"session_stop",
+			"agent_end",
+			"session_stop",
+			"agent_end",
+		]);
+		expect(stopEvents.map(event => event.stop_hook_active)).toEqual([false, true]);
+		expect(stopEvents.map(event => event.turn_id)).toEqual([0, 0]);
+		expect(stopEvents[0]?.session_id).toBe(session.sessionId);
+		expect(stopEvents[0]?.last_assistant_message?.role).toBe("assistant");
+		expect(
+			stopEvents[1]?.messages.some(
+				message =>
+					message.role === "user" &&
+					Array.isArray(message.content) &&
+					message.content.some(block => block.type === "text" && block.text === "First message"),
+			),
+		).toBe(true);
+	});
+
+	it("reports streaming while a tool is still executing", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const blockingTool: AgentTool = {
+			name: "blocking_tool",
+			label: "Blocking Tool",
+			description: "Waits until the test releases it",
+			parameters: type({}),
+			execute: async () => {
+				started.resolve();
+				await release.promise;
+				return { content: [{ type: "text" as const, text: "done" }] };
+			},
+		};
+		let streamCall = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [blockingTool] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				const toolTurn = ++streamCall === 1;
+				queueMicrotask(() => {
+					const message: AssistantMessage = toolTurn
+						? {
+								role: "assistant",
+								content: [
+									{
+										type: "toolCall",
+										id: "call-blocking",
+										name: "blocking_tool",
+										arguments: {},
+									},
+								],
+								api: "anthropic-messages",
+								provider: "anthropic",
+								model: model.id,
+								usage: {
+									input: 0,
+									output: 0,
+									cacheRead: 0,
+									cacheWrite: 0,
+									totalTokens: 0,
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+								},
+								stopReason: "toolUse",
+								timestamp: Date.now(),
+							}
+						: {
+								role: "assistant",
+								content: [{ type: "text", text: "finished" }],
+								api: "anthropic-messages",
+								provider: "anthropic",
+								model: model.id,
+								usage: {
+									input: 0,
+									output: 0,
+									cacheRead: 0,
+									cacheWrite: 0,
+									totalTokens: 0,
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+								},
+								stopReason: "stop",
+								timestamp: Date.now(),
+							};
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: toolTurn ? "toolUse" : "stop", message });
+				});
+				return stream;
+			},
+			convertToLlm,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: sharedModelRegistry,
+		});
+
+		const prompt = session.prompt("Run the blocking tool");
+		await started.promise;
+
+		// `UiHelpers.renderInitialMessages` uses this exact predicate to retain
+		// dangling toolCalls in pendingTools during a focus rebuild.
+		expect(session.isStreaming).toBe(true);
+
+		release.resolve();
+		await prompt;
+		expect(session.isStreaming).toBe(false);
+	});
+
+	it("uses non-empty session_stop reason when additional context is empty", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			handler: () => ({ content: ["Done"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		let stopCount = 0;
+		const extensionRunner = {
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
+			emitSessionStop: vi.fn(() => {
+				stopCount++;
+				if (stopCount === 1) {
+					return Promise.resolve({
+						continue: true,
+						additionalContext: "",
+						reason: "Continue from fallback reason.",
+					});
+				}
+				return Promise.resolve(undefined);
+			}),
+		} as unknown as ExtensionRunner;
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+
+		await session.prompt("First message");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(
+			mock.calls[1]?.context.messages.some(message =>
+				typeof message.content === "string"
+					? message.content.includes("Continue from fallback reason.")
+					: message.content.some(
+							content => content.type === "text" && content.text.includes("Continue from fallback reason."),
+						),
+			),
+		).toBe(true);
+	});
+
+	it("does not emit session_stop when abort starts before the settle pass", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			handler: () => ({ content: ["Done"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		const settleGate = Promise.withResolvers<void>();
+		const settleReached = Promise.withResolvers<void>();
+		const emitSessionStop = vi.fn().mockResolvedValue(undefined);
+		const extensionRunner = {
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
+			emitSessionStop,
+		} as unknown as ExtensionRunner;
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+		vi.spyOn(session.goalRuntime, "onAgentEnd").mockImplementation(() => {
+			settleReached.resolve();
+			return settleGate.promise;
+		});
+
+		const promptPromise = session.prompt("First message");
+		await settleReached.promise;
+		const abortPromise = session.abort();
+		settleGate.resolve();
+
+		await abortPromise;
+		await promptPromise;
+		await session.waitForIdle();
+
+		expect(emitSessionStop).not.toHaveBeenCalled();
+	});
+
+	it("cancels an active session_stop pass without applying stale continuation feedback", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			handler: () => ({ content: ["Done"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		const stopStarted = Promise.withResolvers<void>();
+		const stopHook = Promise.withResolvers<{ continue: true; additionalContext: string }>();
+		let firstStopSignal: AbortSignal | undefined;
+		let stopCount = 0;
+		const extensionRuntime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("session_stop", event => {
+					stopCount++;
+					if (stopCount !== 1) return;
+					firstStopSignal = event.signal;
+					stopStarted.resolve();
+					return stopHook.promise;
+				});
+			},
+			tempDir,
+			new EventBus(),
+			extensionRuntime,
+			"slow-session-stop",
+		);
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			extensionRuntime,
+			tempDir,
+			sessionManager,
+			modelRegistry,
+		);
+		const extensionErrors: string[] = [];
+		extensionRunner.onError(error => extensionErrors.push(error.error));
+
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+
+		const promptPromise = session.prompt("First message");
+		await stopStarted.promise;
+		let abortSettled = false;
+		const abortPromise = session.abort().then(() => {
+			abortSettled = true;
+		});
+		await scheduler.yield();
+		const abortSettledBeforeHandler = abortSettled;
+		const signalWasCancelled = firstStopSignal?.aborted;
+		stopHook.resolve({ continue: true, additionalContext: "Should not run after abort." });
+
+		await abortPromise;
+		await promptPromise;
+		await session.waitForIdle();
+
+		expect(abortSettledBeforeHandler).toBe(true);
+		expect(signalWasCancelled).toBe(true);
+		expect(extensionErrors).toEqual([]);
+		expect(mock.calls).toHaveLength(1);
+		expect(session.queuedMessageCount).toBe(0);
+
+		await session.prompt("Second message");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(
+			mock.calls[1]?.context.messages.some(message =>
+				typeof message.content === "string"
+					? message.content.includes("Should not run after abort.")
+					: message.content.some(
+							content => content.type === "text" && content.text.includes("Should not run after abort."),
+						),
+			),
+		).toBe(false);
+	});
+
+	it("does not restart after a message_end listener aborts the completed run", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			handler: () => ({ content: ["Done"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		let stopCount = 0;
+		const extensionRunner = {
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
+			emitSessionStop: vi.fn(() => {
+				stopCount++;
+				return Promise.resolve({ continue: true, additionalContext: "Must not restart." });
+			}),
+		} as unknown as ExtensionRunner;
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: sharedModelRegistry,
+			extensionRunner,
+		});
+		let abortPromise: Promise<void> | undefined;
+		session.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "assistant") {
+				abortPromise = session.abort();
+			}
+		});
+
+		await session.prompt("First message");
+		await abortPromise;
+		await session.waitForIdle();
+
+		expect(stopCount).toBe(0);
+		expect(mock.calls).toHaveLength(1);
+		expect(session.queuedMessageCount).toBe(0);
+	});
+
+	it("caps consecutive advisory session_stop continuations at eight", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			handler: () => ({ content: ["Pass"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		const extensionRunner = {
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
+			emitSessionStop: vi.fn(() =>
+				Promise.resolve({ continue: true, additionalContext: "Run another advisory pass." }),
+			),
+		} as unknown as ExtensionRunner;
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+
+		await session.prompt("First message");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(9);
+		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(9);
+	});
+
+	it("keeps hard session_stop blocks active beyond eight attempts", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			handler: () => ({ content: ["Pass"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		let stopCount = 0;
+		const extensionRunner = {
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
+			emitSessionStop: vi.fn(() => {
+				stopCount++;
+				return Promise.resolve(
+					stopCount <= 10 ? { decision: "block" as const, reason: "Run another pass." } : undefined,
+				);
+			}),
+		} as unknown as ExtensionRunner;
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+
+		await session.prompt("First message");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(11);
+		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(11);
+	});
+
+	it("continues once when a session_stop hard block omits context", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			handler: () => ({ content: ["Pass"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		let stopCount = 0;
+		const extensionRunner = {
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
+			emitSessionStop: vi.fn(() => {
+				stopCount++;
+				return Promise.resolve(stopCount === 1 ? { decision: "block" as const } : undefined);
+			}),
+		} as unknown as ExtensionRunner;
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+
+		await session.prompt("First message");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(2);
+	});
+
+	it("emits session_stop only after empty-stop recovery reaches a final stop", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			responses: [{ content: [""] }, { content: ["Recovered"] }],
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		const extensionRunner = {
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
+			emitSessionStop: vi.fn().mockResolvedValue(undefined),
+		} as unknown as ExtensionRunner;
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+
+		await session.prompt("First message");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(1);
+	});
+
+	it("emits session_stop after empty-stop retry cap settles", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			responses: [{ content: [""] }, { content: [""] }, { content: [""] }, { content: [""] }],
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		const extensionRunner = {
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
+			emitSessionStop: vi.fn().mockResolvedValue(undefined),
+		} as unknown as ExtensionRunner;
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+
+		await session.prompt("First message");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(4);
+		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(1);
+	});
+
+	it("continues session_stop feedback in ACP sessions with deferred client turns", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			handler: () => ({ content: ["Done"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		let stopCount = 0;
+		const extensionRunner = {
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
+			emitSessionStop: vi.fn(() => {
+				stopCount++;
+				if (stopCount === 1) {
+					return Promise.resolve({ continue: true, additionalContext: "ACP stop continuation." });
+				}
+				return Promise.resolve(undefined);
+			}),
+		} as unknown as ExtensionRunner;
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+		session.setClientBridge({
+			capabilities: {},
+			deferAgentInitiatedTurns: true,
+		});
+
+		await session.prompt("First message");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(
+			mock.calls[1]?.context.messages.some(message =>
+				typeof message.content === "string"
+					? message.content.includes("ACP stop continuation.")
+					: message.content.some(
+							content => content.type === "text" && content.text.includes("ACP stop continuation."),
+						),
+			),
+		).toBe(true);
+	});
+
+	it("does not emit session_stop for subagent sessions", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			handler: () => ({ content: ["Subagent done"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		const extensionRunner = {
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
+			emitSessionStop: vi.fn().mockResolvedValue(undefined),
+		} as unknown as ExtensionRunner;
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			extensionRunner,
+			agentKind: "sub",
+		});
+
+		await session.prompt("Subagent message");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(1);
+		expect(extensionRunner.emit).toHaveBeenCalledWith({ type: "agent_end", messages: expect.any(Array) });
+		expect(extensionRunner.emitSessionStop).not.toHaveBeenCalled();
+	});
+
+	it("queues extension follow-up user messages on an idle session without starting a turn", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+			},
+			streamFn: mock.stream,
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+		});
+
+		await session.sendUserMessage("hello from session_start", { deliverAs: "followUp" });
+
+		expect(mock.calls).toHaveLength(0);
+		expect(session.queuedMessageCount).toBe(1);
+	});
+
+	// Regression: a subscriber that fires the next prompt synchronously from the
+	// agent_end listener (the shape every wire transport ends up in — rpc-mode
+	// stdout subscriber, ACP bridge, Cursor exec) must not collide with the
+	// outgoing turn's still-unwinding in-flight bookkeeping. Before the wire-level
+	// agent_end was deferred until #promptInFlightCount drops to 0, the
+	// subscriber observed agent_end while Session.isStreaming was still true (the
+	// agent's own `isStreaming` had flipped, but #promptWithMessage's finally had
+	// not yet decremented the prompt-in-flight counter), and the next prompt
+	// threw AgentBusyError. Surfaced as `RpcCommandError: prompt: Agent is
+	// already processing` from omp-rpc clients (robomp triage reminder path).
+
+	it("does not let extension notifications block public agent_end", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+		});
+		const { promise: extensionGate, resolve: releaseExtension } = Promise.withResolvers<void>();
+		const extensionRunner = {
+			emit: vi.fn((event: { type: string }) =>
+				event.type === "agent_end" ? extensionGate : Promise.resolve(undefined),
+			),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn().mockReturnValue(false),
+		} as unknown as ExtensionRunner;
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+
+		const { promise: publicAgentEnd, resolve: onPublicAgentEnd } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "agent_end") onPublicAgentEnd();
+		});
+
+		await session.prompt("First message");
+		await publicAgentEnd;
+		expect(extensionRunner.emit).toHaveBeenCalledWith({ type: "agent_end", messages: expect.any(Array) });
+
+		releaseExtension();
+		await session.waitForIdle();
+	});
+
+	it("queues idle ACP client-triggered custom messages instead of starting an ownerless turn", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+			},
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+		});
+		session.setClientBridge({
+			capabilities: {},
+			deferAgentInitiatedTurns: true,
+		});
+
+		await session.prompt("First message");
+		expect(session.isStreaming).toBe(false);
+		const callsAfterFirstPrompt = mock.calls.length;
+
+		await session.sendCustomMessage(
+			{
+				customType: "async-result",
+				content: "Background result",
+				display: true,
+				attribution: "agent",
+			},
+			{ deliverAs: "followUp", triggerTurn: true },
+		);
+
+		expect(mock.calls).toHaveLength(callsAfterFirstPrompt);
+		expect(session.isStreaming).toBe(false);
+
+		await session.prompt("Next user prompt");
+		await session.dispose();
+		session = undefined as unknown as AgentSession;
+		expect(mock.calls).toHaveLength(callsAfterFirstPrompt + 1);
+		expect(
+			mock.calls.at(-1)?.context.messages.some(message => {
+				if (typeof message.content === "string") {
+					return message.content.includes("Background result");
+				}
+
+				return message.content.some(
+					content => content.type === "text" && content.text.includes("Background result"),
+				);
+			}),
+		).toBe(true);
+	});
+});
+
+describe("AgentSession TTSR resume gate", () => {
+	let session: AgentSession;
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = path.join(os.tmpdir(), `pi-ttsr-gate-test-${Snowflake.next()}`);
+		fs.mkdirSync(tempDir, { recursive: true });
+	});
+
+	afterEach(async () => {
+		if (session) {
+			await session.dispose();
+		}
+		if (tempDir && fs.existsSync(tempDir)) {
+			removeSyncWithRetries(tempDir);
+		}
+		vi.restoreAllMocks();
+	});
+
+	const testRule: Rule = {
+		name: "no-unwrap",
+		path: "/tmp/no-unwrap.md",
+		content: "Do not use .unwrap()",
+		condition: ["\\.unwrap\\("],
+		_source: { provider: "test", providerName: "test", path: "/tmp/no-unwrap.md", level: "project" },
+	};
+
+	function makeMsg(text: string, stopReason: "stop" | "aborted" = "stop"): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "mock",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason,
+			timestamp: Date.now(),
+		};
+	}
+
+	function pushContinuationStream(stream: AssistantMessageEventStream, onComplete: () => void): void {
+		queueMicrotask(() => {
+			const partial = makeMsg("");
+			stream.push({ type: "start", partial });
+			onComplete();
+			stream.push({
+				type: "done",
+				reason: "stop",
+				message: makeMsg('Fixed: let val = result.expect("msg")'),
+			});
+		});
+	}
+
+	function pushAbortableTtsrStream(stream: AssistantMessageEventStream, signal: AbortSignal | undefined): void {
+		queueMicrotask(() => {
+			const partial = makeMsg("");
+			stream.push({ type: "start", partial });
+			stream.push({
+				type: "text_delta",
+				contentIndex: 0,
+				delta: "let val = result.unwrap(",
+				partial: makeMsg("let val = result.unwrap("),
+			});
+			if (signal) {
+				signal.addEventListener(
+					"abort",
+					() => {
+						stream.push({
+							type: "error",
+							reason: "aborted",
+							error: makeMsg("let val = result.unwrap(", "aborted"),
+						});
+					},
+					{ once: true },
+				);
+			}
+		});
+	}
+
+	it("prompt() blocks until TTSR interrupt continuation completes", async () => {
+		collapseSchedulerSettleDelays();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		let streamCallCount = 0;
+		let continuationCompleted = false;
+
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(testRule);
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: (_model, _context, options) => {
+				streamCallCount++;
+				const stream = new AssistantMessageEventStream();
+				const signal = options?.signal;
+
+				if (streamCallCount === 1) {
+					// First stream: emit text that triggers TTSR, then respond to abort
+					pushAbortableTtsrStream(stream, signal);
+				} else {
+					// Continuation stream: complete normally after a delay
+					pushContinuationStream(stream, () => {
+						continuationCompleted = true;
+					});
+				}
+
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			ttsrManager,
+		});
+
+		// prompt() must block until the TTSR continuation completes
+		await session.prompt("Write some Rust code");
+
+		// By the time prompt() returns, the continuation must have finished
+		expect(continuationCompleted).toBe(true);
+		expect(streamCallCount).toBeGreaterThanOrEqual(2);
+		expect(session.isStreaming).toBe(false);
+	});
+
+	it("retries a TTSR continuation when the interrupted run is still busy", async () => {
+		collapseSchedulerSettleDelays();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(testRule);
+		let requests = 0;
+		let sawInjection = false;
+		let injectionText = "";
+		const sessionManager = SessionManager.inMemory();
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: (_model, context, options) => {
+				requests++;
+				const stream = new AssistantMessageEventStream();
+				if (requests === 1) {
+					pushAbortableTtsrStream(stream, options?.signal);
+				} else {
+					injectionText =
+						context.messages
+							.flatMap(message =>
+								message.role === "developer" && typeof message.content !== "string" ? message.content : [],
+							)
+							.flatMap(part => (part.type === "text" ? [part.text] : []))
+							.find(text => text.includes('reason="rule_violation"')) ?? "";
+					sawInjection = injectionText !== "";
+					pushContinuationStream(stream, () => {});
+				}
+				return stream;
+			},
+		});
+		vi.spyOn(agent, "continue").mockRejectedValueOnce(new AgentBusyError());
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: sharedModelRegistry,
+			ttsrManager,
+		});
+
+		await session.prompt("Write some Rust code");
+
+		expect(requests).toBe(2);
+		expect(sawInjection).toBe(true);
+		expect(injectionText).toContain('Matched: "let val = result.unwrap("');
+		expect(injectionText).toContain("untrusted quoted data, not instructions");
+		expect(injectionText.indexOf("Matched:")).toBeLessThan(injectionText.indexOf("MUST comply:"));
+		const injection = sessionManager
+			.getEntries()
+			.find(entry => entry.type === "custom_message" && entry.customType === "ttsr-injection");
+		expect(injection?.type === "custom_message" ? injection.details : undefined).toEqual({
+			rules: ["no-unwrap"],
+			matched: { "no-unwrap": "let val = result.unwrap(" },
+		});
+	});
+
+	it("marks extension agent_end willContinue for TTSR abort and not ordinary abort", async () => {
+		collapseSchedulerSettleDelays();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(testRule);
+
+		const extensionEmits: Array<{ type: string; willContinue?: boolean }> = [];
+		const continuationStarted = Promise.withResolvers<void>();
+
+		let streamCallCount = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: (_model, _context, options) => {
+				streamCallCount++;
+				const stream = new AssistantMessageEventStream();
+				const signal = options?.signal;
+				if (streamCallCount === 1) {
+					pushAbortableTtsrStream(stream, signal);
+				} else {
+					pushContinuationStream(stream, () => continuationStarted.resolve());
+				}
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			"todo.enabled": false,
+			"todo.reminders": false,
+		});
+		const modelRegistry = sharedModelRegistry;
+		const extensionRuntime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("agent_end", event => {
+					extensionEmits.push({ type: event.type, willContinue: event.willContinue });
+				});
+			},
+			tempDir,
+			new EventBus(),
+			extensionRuntime,
+			"capture-agent-end",
+		);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			extensionRuntime,
+			tempDir,
+			sessionManager,
+			modelRegistry,
+		);
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			ttsrManager,
+			extensionRunner,
+		});
+
+		const firstGoalEndStarted = Promise.withResolvers<void>();
+		const releaseFirstGoalEnd = Promise.withResolvers<void>();
+		let goalEndCalls = 0;
+		vi.spyOn(GoalRuntime.prototype, "onAgentEnd").mockImplementation(async () => {
+			goalEndCalls++;
+			if (goalEndCalls !== 1) return;
+			firstGoalEndStarted.resolve();
+			await releaseFirstGoalEnd.promise;
+		});
+
+		const ttsrPrompt = session.prompt("Write some Rust code");
+		await firstGoalEndStarted.promise;
+		await continuationStarted.promise;
+		const pendingClearedWhileMaintenanceBlocked = !session.isTtsrAbortPending;
+		releaseFirstGoalEnd.resolve();
+		await ttsrPrompt;
+		await session.waitForIdle();
+		expect(pendingClearedWhileMaintenanceBlocked).toBe(true);
+
+		const ttsrEnds = extensionEmits.filter(event => event.type === "agent_end");
+		expect(streamCallCount).toBeGreaterThanOrEqual(2);
+		// Intermediate TTSR-abort settle continues; terminal settle after retry does not.
+		expect(ttsrEnds.length).toBeGreaterThanOrEqual(2);
+		expect(ttsrEnds[0]?.willContinue).toBe(true);
+		expect(ttsrEnds.slice(1, -1).every(event => !event.willContinue)).toBe(true);
+		expect(ttsrEnds.at(-1)?.willContinue).toBeFalsy();
+
+		extensionEmits.length = 0;
+		const ordinaryAgent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: (_model, _context, options) => {
+				const stream = new AssistantMessageEventStream();
+				const signal = options?.signal;
+				queueMicrotask(() => {
+					const partial = makeMsg("partial");
+					stream.push({ type: "start", partial });
+					stream.push({
+						type: "text_delta",
+						contentIndex: 0,
+						delta: "partial",
+						partial: makeMsg("partial"),
+					});
+					queueMicrotask(() => {
+						session?.agent.abort("user cancelled");
+					});
+					if (signal) {
+						signal.addEventListener(
+							"abort",
+							() => {
+								stream.push({
+									type: "error",
+									reason: "aborted",
+									error: makeMsg("partial", "aborted"),
+								});
+							},
+							{ once: true },
+						);
+					}
+				});
+				return stream;
+			},
+		});
+		await session.dispose();
+		session = new AgentSession({
+			agent: ordinaryAgent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			extensionRunner,
+		});
+
+		const promptPromise = session.prompt("user will cancel");
+		await session.waitForIdle();
+		await promptPromise.catch(() => undefined);
+
+		const ordinaryEnds = extensionEmits.filter(event => event.type === "agent_end");
+		expect(ordinaryEnds.length).toBeGreaterThanOrEqual(1);
+		for (const event of ordinaryEnds) {
+			expect(event.willContinue).toBeFalsy();
+		}
+	});
+
+	it("labels aborted tool placeholders with the TTSR rule reason", async () => {
+		collapseSchedulerSettleDelays();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		let streamCallCount = 0;
+
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(testRule);
+
+		const toolCallContent: ToolCall = {
+			type: "toolCall",
+			id: "call_ttsr_abort_reason",
+			name: "mock_edit",
+			arguments: { snippet: "let val = result.unwrap(" },
+		};
+
+		const makeToolCallMsg = (stopReason: "toolUse" | "aborted" = "toolUse"): AssistantMessage => ({
+			role: "assistant",
+			content: [toolCallContent],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "mock",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason,
+			timestamp: Date.now(),
+		});
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: (_model, _context, options) => {
+				streamCallCount++;
+				const stream = new AssistantMessageEventStream();
+				const signal = options?.signal;
+				if (streamCallCount === 1) {
+					queueMicrotask(() => {
+						const partial = makeToolCallMsg();
+						if (signal) {
+							signal.addEventListener(
+								"abort",
+								() => {
+									stream.push({
+										type: "error",
+										reason: "aborted",
+										error: makeToolCallMsg("aborted"),
+									});
+								},
+								{ once: true },
+							);
+						}
+						stream.push({ type: "start", partial });
+						stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+						stream.push({
+							type: "toolcall_delta",
+							contentIndex: 0,
+							delta: 'let val = result.unwrap("oops")',
+							partial,
+						});
+						// The TTSR abort placeholder is only minted for tool calls that reached
+						// `toolcall_end`: the agent loop drops incomplete tool calls from an
+						// aborted turn (partial args are unsafe to replay). Complete the call
+						// before the rule-driven abort fires so the labeled placeholder survives.
+						stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: toolCallContent, partial });
+					});
+				} else {
+					pushContinuationStream(stream, () => {});
+				}
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, ttsrManager });
+
+		await session.prompt("Write some Rust code");
+
+		const toolResult = sessionManager
+			.getEntries()
+			.find(
+				entry =>
+					entry.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.toolCallId === toolCallContent.id,
+			);
+		expect(toolResult?.type).toBe("message");
+		const text =
+			toolResult?.type === "message" && toolResult.message.role === "toolResult"
+				? (toolResult.message.content.find((part): part is { type: "text"; text: string } => part.type === "text")
+						?.text ?? "")
+				: "";
+		expect(text).toContain("Tool execution was aborted: TTSR matched rule: no-unwrap");
+		expect(text).not.toContain("Request was aborted");
+
+		// The persisted aborted assistant turn must not render as an error on
+		// resume/`/tree`/rebuild: TTSR interruption is control flow, so AgentSession
+		// stamps the SilentAbort flag and `shouldRenderAbortReason` returns false.
+		const abortedAssistant = sessionManager
+			.getEntries()
+			.find(
+				entry =>
+					entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "aborted",
+			);
+		expect(abortedAssistant?.type).toBe("message");
+		if (abortedAssistant?.type === "message" && abortedAssistant.message.role === "assistant") {
+			expect(shouldRenderAbortReason(abortedAssistant.message)).toBe(false);
+		}
+	});
+
+	it("labels only the matching aborted tool placeholder with the TTSR rule reason", async () => {
+		collapseSchedulerSettleDelays();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		let streamCallCount = 0;
+
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(testRule);
+
+		const readToolCallContent: ToolCall = {
+			type: "toolCall",
+			id: "call_innocent_read",
+			name: "read",
+			arguments: { path: "history://Eval1WithSkill" },
+		};
+		const matchedToolCallContent: ToolCall = {
+			type: "toolCall",
+			id: "call_ttsr_abort_reason",
+			name: "mock_edit",
+			arguments: { snippet: "let val = result.unwrap(" },
+		};
+
+		const makeToolCallMsg = (stopReason: "toolUse" | "aborted" = "toolUse"): AssistantMessage => ({
+			role: "assistant",
+			content: [readToolCallContent, matchedToolCallContent],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "mock",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason,
+			timestamp: Date.now(),
+		});
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: (_model, _context, options) => {
+				streamCallCount++;
+				const stream = new AssistantMessageEventStream();
+				const signal = options?.signal;
+				if (streamCallCount === 1) {
+					queueMicrotask(() => {
+						const partial = makeToolCallMsg();
+						if (signal) {
+							signal.addEventListener(
+								"abort",
+								() => {
+									stream.push({
+										type: "error",
+										reason: "aborted",
+										error: makeToolCallMsg("aborted"),
+									});
+								},
+								{ once: true },
+							);
+						}
+						stream.push({ type: "start", partial });
+						stream.push({ type: "toolcall_start", contentIndex: 1, partial });
+						stream.push({
+							type: "toolcall_delta",
+							contentIndex: 1,
+							delta: 'let val = result.unwrap("oops")',
+							partial,
+						});
+						// The abort placeholder is only minted for tool calls that reached
+						// `toolcall_end`: the agent loop drops incomplete tool calls from an
+						// aborted turn (partial args are unsafe to replay). Complete the
+						// innocent read before the rule-driven abort fires so its placeholder
+						// survives and can carry the neutral sibling label.
+						stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: readToolCallContent, partial });
+					});
+				} else {
+					pushContinuationStream(stream, () => {});
+				}
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, ttsrManager });
+
+		await session.prompt("Write some Rust code");
+
+		const toolResults = sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "message" && entry.message.role === "toolResult")
+			.map(entry => (entry.type === "message" && entry.message.role === "toolResult" ? entry.message : undefined))
+			.filter(message => message !== undefined);
+		const toolResultText = (toolCallId: string): string =>
+			toolResults
+				.find(message => message.toolCallId === toolCallId)
+				?.content.find((part): part is { type: "text"; text: string } => part.type === "text")?.text ?? "";
+
+		const readText = toolResultText(readToolCallContent.id);
+		expect(readText).toContain("Tool execution was aborted: TTSR interrupt on another tool call");
+		expect(readText).not.toContain("TTSR matched rule: no-unwrap");
+		// The matching call never reached `toolcall_end`, so the loop drops it from
+		// the aborted turn (partial args are unsafe to replay) and no placeholder is
+		// minted. The rule label for a completed matching call is covered by the
+		// single-call test above.
+		expect(toolResultText(matchedToolCallContent.id)).toBe("");
+	});
+
+	it("does not join text across an assistant message boundary while a message_start handler stalls", async () => {
+		// Two assistant responses inside ONE agent turn: a Harmony leak in the first
+		// response makes the loop abort it and stream again without a new turn_start
+		// (agent-loop abort_retry). The first response streams half of a rule's
+		// condition; the retry streams the other half while a message_start
+		// extension handler is still awaiting. The halves must not meet: the
+		// buffer reset runs before the awaited fan-out, and message_update skips it.
+		collapseSchedulerSettleDelays();
+		// A bundled Harmony-mitigation target, so the leak marker takes the
+		// abort_retry path instead of streaming through as ordinary text.
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol")!;
+		const splitRule: Rule = {
+			name: "split-phrase",
+			path: "/tmp/split-phrase.md",
+			content: "Do not say the phrase",
+			condition: ["FORBIDDEN"],
+			scope: ["text"],
+			_source: { provider: "test", providerName: "test", path: "/tmp/split-phrase.md", level: "project" },
+		};
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(splitRule);
+
+		// `entered` resolves when the retry's message_start handler is running;
+		// `released` lets it finish. The retry's delta is pushed in between, so it
+		// is processed while message_start still awaits its fan-out.
+		const retryStartEntered = Promise.withResolvers<void>();
+		const retryStartReleased = Promise.withResolvers<void>();
+		const leak = "<|channel|>analysis ";
+		let streamCallCount = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				const first = ++streamCallCount === 1;
+				queueMicrotask(() => {
+					if (first) {
+						const partial = makeMsg("");
+						stream.push({ type: "start", partial });
+						stream.push({ type: "text_delta", contentIndex: 0, delta: leak, partial: makeMsg(leak) });
+						stream.push({
+							type: "text_delta",
+							contentIndex: 0,
+							delta: "FORBID",
+							partial: makeMsg(`${leak}FORBID`),
+						});
+						stream.push({ type: "done", reason: "stop", message: makeMsg(`${leak}FORBID`) });
+					} else {
+						const partial = makeMsg("");
+						stream.push({ type: "start", partial });
+						void retryStartEntered.promise.then(() => {
+							stream.push({ type: "text_delta", contentIndex: 0, delta: "DEN", partial: makeMsg("DEN") });
+							setTimeout(() => {
+								retryStartReleased.resolve();
+								stream.push({ type: "done", reason: "stop", message: makeMsg("DEN") });
+							}, 10);
+						});
+					}
+				});
+				return stream;
+			},
+		});
+
+		let assistantStarts = 0;
+		const extensionRunner = {
+			emit: vi.fn(async (event: { type: string; message?: { role?: string } }) => {
+				if (event.type === "message_start" && event.message?.role === "assistant" && ++assistantStarts === 2) {
+					retryStartEntered.resolve();
+					await retryStartReleased.promise;
+				}
+				return undefined;
+			}),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "message_start"),
+			emitSessionStop: vi.fn().mockResolvedValue(undefined),
+		} as unknown as ExtensionRunner;
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, ttsrManager, extensionRunner });
+
+		const triggered: string[] = [];
+		let turnStarts = 0;
+		session.subscribe(event => {
+			if (event.type === "ttsr_triggered") triggered.push(...event.rules.map(rule => rule.name));
+			if (event.type === "turn_start") turnStarts++;
+		});
+
+		await session.prompt("Say the phrase across two responses");
+		await session.waitForIdle();
+
+		expect(triggered).toEqual([]);
+		expect(turnStarts).toBe(1);
+		expect(assistantStarts).toBe(2);
+		expect(streamCallCount).toBe(2);
+	});
+
+	it("still catches a phrase split across deltas of one message while a turn_start handler stalls", async () => {
+		// The mirror image: the turn-start reset must also run before the awaited
+		// fan-out, or a turn_start handler still awaiting as streaming begins lets
+		// the late reset wipe deltas already buffered for the current message.
+		collapseSchedulerSettleDelays();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const splitRule: Rule = {
+			name: "split-phrase",
+			path: "/tmp/split-phrase.md",
+			content: "Do not say the phrase",
+			condition: ["FORBIDDEN"],
+			scope: ["text"],
+			_source: { provider: "test", providerName: "test", path: "/tmp/split-phrase.md", level: "project" },
+		};
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(splitRule);
+
+		// The turn_start handler is held open until the first half has streamed;
+		// the second half is pushed only after the handler has finished, so a
+		// reset misplaced behind the fan-out would wipe the first half in between.
+		const turnStartEntered = Promise.withResolvers<void>();
+		const turnStartReleased = Promise.withResolvers<void>();
+		const turnStartFinished = Promise.withResolvers<void>();
+		let streamCallCount = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: (_model, _context, options) => {
+				const stream = new AssistantMessageEventStream();
+				if (++streamCallCount === 1) {
+					const signal = options?.signal;
+					void turnStartEntered.promise.then(() => {
+						const partial = makeMsg("");
+						stream.push({ type: "start", partial });
+						stream.push({ type: "text_delta", contentIndex: 0, delta: "FORBID", partial: makeMsg("FORBID") });
+						setTimeout(() => turnStartReleased.resolve(), 10);
+						void turnStartFinished.promise.then(() => {
+							setTimeout(() => {
+								stream.push({
+									type: "text_delta",
+									contentIndex: 0,
+									delta: "DEN",
+									partial: makeMsg("FORBIDDEN"),
+								});
+							}, 10);
+						});
+						if (signal) {
+							signal.addEventListener(
+								"abort",
+								() => stream.push({ type: "error", reason: "aborted", error: makeMsg("FORBIDDEN", "aborted") }),
+								{ once: true },
+							);
+						}
+					});
+				} else {
+					pushContinuationStream(stream, () => {});
+				}
+				return stream;
+			},
+		});
+
+		const extensionRunner = {
+			emit: vi.fn(async (event: { type: string }) => {
+				if (event.type === "turn_start") {
+					turnStartEntered.resolve();
+					await turnStartReleased.promise;
+					turnStartFinished.resolve();
+				}
+				return undefined;
+			}),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "turn_start"),
+			emitSessionStop: vi.fn().mockResolvedValue(undefined),
+		} as unknown as ExtensionRunner;
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, ttsrManager, extensionRunner });
+
+		const triggered: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "ttsr_triggered") triggered.push(...event.rules.map(rule => rule.name));
+		});
+
+		await session.prompt("Say the phrase");
+		await session.waitForIdle();
+
+		expect(triggered).toEqual(["split-phrase"]);
+		expect(streamCallCount).toBe(2);
+	});
+
+	it("relativizes the rule file path in the TTSR interrupt injection (no absolute leak)", async () => {
+		collapseSchedulerSettleDelays();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		let streamCallCount = 0;
+
+		const sessionManager = SessionManager.inMemory();
+		const cwd = sessionManager.getCwd();
+		const ruleAbsPath = path.join(cwd, ".omp", "rules", "no-unwrap.md");
+		const expectedRel = path.relative(cwd, ruleAbsPath);
+		const rule: Rule = {
+			name: "no-unwrap",
+			path: ruleAbsPath,
+			content: "Do not use .unwrap()",
+			condition: ["\\.unwrap\\("],
+			_source: { provider: "test", providerName: "test", path: ruleAbsPath, level: "project" },
+		};
+
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(rule);
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: (_model, _context, options) => {
+				streamCallCount++;
+				const stream = new AssistantMessageEventStream();
+				if (streamCallCount === 1) {
+					pushAbortableTtsrStream(stream, options?.signal);
+				} else {
+					pushContinuationStream(stream, () => {});
+				}
+				return stream;
+			},
+		});
+
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, ttsrManager });
+
+		await session.prompt("Write some Rust code");
+
+		const injection = sessionManager
+			.getEntries()
+			.find(e => e.type === "custom_message" && e.customType === "ttsr-injection");
+		expect(injection?.type).toBe("custom_message");
+		const content = injection?.type === "custom_message" ? injection.content : undefined;
+		expect(typeof content).toBe("string");
+		const text = content as string;
+		// The rendered interrupt the model receives references the rule by a
+		// project-relative path, never the absolute home path.
+		expect(text).toContain('reason="rule_violation"');
+		expect(text).toContain(`path="${expectedRel}"`);
+		expect(text).not.toContain(ruleAbsPath);
+	});
+
+	it("prompt() blocks until TTSR deferred continuation completes", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		let streamCallCount = 0;
+		let continuationCompleted = false;
+
+		// interruptMode: "never" -> TTSR match queues deferred injection instead of aborting
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "never",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(testRule);
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: (_model, _context, _options) => {
+				streamCallCount++;
+				const stream = new AssistantMessageEventStream();
+
+				if (streamCallCount === 1) {
+					// First stream: emit matching text and complete normally
+					queueMicrotask(() => {
+						const partial = makeMsg("");
+						stream.push({ type: "start", partial });
+						stream.push({
+							type: "text_delta",
+							contentIndex: 0,
+							delta: "let val = result.unwrap(",
+							partial: makeMsg("let val = result.unwrap("),
+						});
+						// Complete normally (no abort) -- deferred path
+						stream.push({
+							type: "done",
+							reason: "stop",
+							message: makeMsg("let val = result.unwrap()"),
+						});
+					});
+				} else {
+					// Continuation stream after deferred TTSR injection
+					pushContinuationStream(stream, () => {
+						continuationCompleted = true;
+					});
+				}
+
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			ttsrManager,
+		});
+
+		// prompt() must block until the deferred TTSR continuation completes
+		await session.prompt("Write some Rust code");
+
+		// By the time prompt() returns, the deferred continuation must have finished
+		expect(continuationCompleted).toBe(true);
+		expect(streamCallCount).toBeGreaterThanOrEqual(2);
+		expect(session.isStreaming).toBe(false);
+	});
+
+	it("prompt() waits for TTSR continuation with tool calls to finish", async () => {
+		collapseSchedulerSettleDelays();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		let streamCallCount = 0;
+		let toolExecutionFinished = false;
+		let allTurnsCompleted = false;
+
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(testRule);
+
+		const mockTool: AgentTool = {
+			name: "mock_edit",
+			label: "Mock Edit",
+			description: "A mock edit tool",
+			parameters: type({}),
+			execute: async () => {
+				toolExecutionFinished = true;
+				return { content: [{ type: "text" as const, text: "edit applied" }] };
+			},
+		};
+
+		const toolCallContent: ToolCall = {
+			type: "toolCall",
+			id: "call_test_001",
+			name: "mock_edit",
+			arguments: {},
+		};
+
+		function makeToolCallMsg(): AssistantMessage {
+			return {
+				role: "assistant",
+				content: [toolCallContent],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "mock",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			};
+		}
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [mockTool] },
+			streamFn: (_model, _context, options) => {
+				streamCallCount++;
+				const stream = new AssistantMessageEventStream();
+				const signal = options?.signal;
+
+				if (streamCallCount === 1) {
+					// First stream: emit text that triggers TTSR, then respond to abort
+					pushAbortableTtsrStream(stream, signal);
+				} else if (streamCallCount === 2) {
+					// Continuation: return assistant message with a tool call
+					queueMicrotask(() => {
+						const msg = makeToolCallMsg();
+						stream.push({ type: "start", partial: msg });
+						stream.push({ type: "done", reason: "toolUse", message: msg });
+					});
+				} else {
+					// After tool execution: return final response
+					queueMicrotask(() => {
+						allTurnsCompleted = true;
+						const msg = makeMsg('Fixed: let val = result.expect("msg")');
+						stream.push({ type: "start", partial: msg });
+						stream.push({ type: "done", reason: "stop", message: msg });
+					});
+				}
+
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			ttsrManager,
+		});
+
+		// prompt() must block until the TTSR continuation (including tool execution) completes.
+		// Before the fix, prompt() returned after the continuation's first assistant message_end,
+		// while the agent was still executing tool calls in the background.
+		await session.prompt("Write some Rust code");
+
+		// By the time prompt() returns, ALL turns must have completed
+		expect(toolExecutionFinished).toBe(true);
+		expect(allTurnsCompleted).toBe(true);
+		expect(streamCallCount).toBeGreaterThanOrEqual(3);
+		expect(session.isStreaming).toBe(false);
+	});
+	it("interruptMode never folds tool-match reminder into the toolResult instead of driving an extra turn", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		let streamCallCount = 0;
+		let toolExecuted = false;
+
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "never",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(testRule);
+
+		const mockTool: AgentTool = {
+			name: "mock_edit",
+			label: "Mock Edit",
+			description: "A mock edit tool",
+			parameters: type({ snippet: "string?" }),
+			execute: async () => {
+				toolExecuted = true;
+				return { content: [{ type: "text" as const, text: "edit applied" }] };
+			},
+		};
+
+		const toolCallContent: ToolCall = {
+			type: "toolCall",
+			id: "call_never_001",
+			name: "mock_edit",
+			arguments: { snippet: "let val = result.unwrap()" },
+		};
+
+		const makeToolCallMsg = (): AssistantMessage => ({
+			role: "assistant",
+			content: [toolCallContent],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "mock",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [mockTool] },
+			streamFn: () => {
+				streamCallCount++;
+				const stream = new AssistantMessageEventStream();
+				if (streamCallCount === 1) {
+					// Emit a tool call whose argument delta matches the TTSR rule.
+					queueMicrotask(() => {
+						const partial = makeToolCallMsg();
+						stream.push({ type: "start", partial });
+						stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+						stream.push({
+							type: "toolcall_delta",
+							contentIndex: 0,
+							delta: 'let val = result.unwrap("oops")',
+							partial,
+						});
+						stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: toolCallContent, partial });
+						stream.push({ type: "done", reason: "toolUse", message: partial });
+					});
+				} else {
+					// Continuation after tool result; finish cleanly.
+					queueMicrotask(() => {
+						const done = makeMsg("ok");
+						stream.push({ type: "start", partial: done });
+						stream.push({ type: "done", reason: "stop", message: done });
+					});
+				}
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			ttsrManager,
+		});
+
+		await session.prompt("Write some Rust code");
+
+		// Tool ran (no interrupt) and the loop didn't spawn an extra follow-up turn for injection.
+		expect(toolExecuted).toBe(true);
+		expect(streamCallCount).toBe(2);
+
+		// The tool output remains unmodified; the harness-authored reminder is a
+		// separate developer message after the result.
+		const toolResult = agent.state.messages.find(
+			(m): m is Extract<typeof m, { role: "toolResult" }> =>
+				m.role === "toolResult" && m.toolCallId === toolCallContent.id,
+		);
+		expect(toolResult?.content).toEqual([{ type: "text", text: "edit applied" }]);
+		const reminder = agent.state.messages.find(
+			(m): m is Extract<typeof m, { role: "developer" }> =>
+				m.role === "developer" &&
+				Array.isArray(m.content) &&
+				m.content.some(c => c.type === "text" && c.text.includes("<system-reminder")),
+		);
+		const text = Array.isArray(reminder?.content)
+			? reminder.content
+					.filter((c): c is { type: "text"; text: string } => c.type === "text")
+					.map(c => c.text)
+					.join("\n")
+			: "";
+		expect(text).toContain("<system-reminder");
+		expect(text).toContain('rule="no-unwrap"');
+		expect(text).toContain("Do not use .unwrap()");
+	});
+
+	it.each(["always", "never"] as const)(
+		"settles AST rules before write dispatch without extensions (%s)",
+		async interruptMode => {
+			const target = path.join(tempDir, "probe.ts");
+			const parameters = type({ path: "string", content: "string" });
+			const writeTool: AgentTool<typeof parameters> = {
+				name: "write",
+				label: "Write",
+				description: "Write a file",
+				parameters,
+				matcherDigest: args => {
+					if (!args || typeof args !== "object" || !("content" in args)) return undefined;
+					return typeof args.content === "string" ? args.content : undefined;
+				},
+				execute: async (_id, args) => {
+					await Bun.write(args.path, args.content);
+					return { content: [{ type: "text", text: "Written" }] };
+				},
+			};
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{
+								type: "toolCall",
+								name: "write",
+								arguments: { path: target, content: "console.log('blocked');" },
+							},
+						],
+					},
+				],
+				handler: () => ({ content: ["Done"] }),
+			});
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, tools: [writeTool] },
+				streamFn: mock.stream,
+				convertToLlm,
+			});
+			const ttsrManager = new TtsrManager({
+				enabled: true,
+				interruptMode,
+				contextMode: "keep",
+				repeatMode: "once",
+				repeatGap: 10,
+			});
+			ttsrManager.addRule({
+				name: "no-console",
+				path: "no-console.md",
+				content: "Do not add console.log calls.",
+				astCondition: ["console.log($$$)"],
+				scope: ["tool:write(*.ts)"],
+				_source: { provider: "test", providerName: "test", path: "no-console.md", level: "project" },
+			});
+			const sessionManager = SessionManager.inMemory();
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated(),
+				modelRegistry: sharedModelRegistry,
+				ttsrManager,
+			});
+
+			await session.prompt("Write the source file");
+			await session.waitForIdle();
+			expect(mock.calls).toHaveLength(2);
+			const retriedMessages = mock.calls[1]!.context.messages;
+			const toolCalls = retriedMessages.flatMap(message =>
+				message.role === "assistant"
+					? message.content.filter(block => block.type === "toolCall").map(block => block.id)
+					: [],
+			);
+			const toolResults = retriedMessages.filter(message => message.role === "toolResult");
+			expect(toolCalls).toHaveLength(1);
+			expect(toolResults).toHaveLength(1);
+			for (const id of toolCalls) expect(toolResults.filter(result => result.toolCallId === id)).toHaveLength(1);
+			if (interruptMode === "always") {
+				const aborted = agent.state.messages.find(
+					message => message.role === "assistant" && message.stopReason === "aborted",
+				);
+				if (aborted?.role !== "assistant") throw new Error("Expected aborted assistant turn");
+				expect(isUserInterruptAbort(aborted)).toBe(false);
+			}
+
+			expect(await Bun.file(target).exists()).toBe(interruptMode === "never");
+			expect(JSON.stringify(mock.calls[1]?.context.messages)).toContain("Do not add console.log calls.");
+			expect(
+				sessionManager
+					.getEntries()
+					.filter(entry => entry.type === "ttsr_injection")
+					.flatMap(entry => entry.injectedRules),
+			).toEqual(["no-console"]);
+		},
+	);
+	it("keeps direct never reminders after tool_result extensions", async () => {
+		const target = path.join(tempDir, "direct-never.ts");
+		const parameters = type({ path: "string", content: "string" });
+		const observedResults: string[] = [];
+		const extensionRuntime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("tool_result", event => {
+					observedResults.push(JSON.stringify(event.content));
+				});
+			},
+			tempDir,
+			new EventBus(),
+			extensionRuntime,
+			"direct-never-tool-result",
+		);
+		const sessionManager = SessionManager.inMemory(tempDir);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			extensionRuntime,
+			tempDir,
+			sessionManager,
+			sharedModelRegistry,
+		);
+		extensionRunner.initialize(
+			{
+				sendMessage: () => {},
+				sendUserMessage: () => {},
+				appendEntry: () => {},
+				setLabel: () => {},
+				getActiveTools: () => [],
+				getAllTools: () => [],
+				setActiveTools: async () => {},
+				getCommands: () => [],
+				setModel: async () => false,
+				getThinkingLevel: () => undefined,
+				setThinkingLevel: () => {},
+				getSessionName: () => undefined,
+				setSessionName: async () => {},
+			} as never,
+			{
+				getModel: () => undefined,
+				isIdle: () => true,
+				abort: () => {},
+				hasPendingMessages: () => false,
+				shutdown: () => {},
+				getContextUsage: () => undefined,
+				compact: async () => {},
+				getSystemPrompt: () => [],
+			} as never,
+		);
+		const content = "FORBIDDEN_TOKEN\n";
+		const writeTool: AgentTool<typeof parameters> = {
+			name: "write",
+			label: "Write",
+			description: "Write a file",
+			parameters,
+			matcherDigest: args =>
+				args && typeof args === "object" && "content" in args && typeof args.content === "string"
+					? args.content
+					: undefined,
+			execute: async (_id, args) => {
+				await Bun.write(args.path, args.content);
+				return { content: [{ type: "text", text: "Written" }] };
+			},
+		};
+		const wrappedWrite = new ExtensionToolWrapper(writeTool, extensionRunner);
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [{ type: "toolCall", name: "write", arguments: { path: target, content } }],
+				},
+			],
+			handler: () => ({ content: ["Done"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, tools: [wrappedWrite] },
+			streamFn: mock.stream,
+			convertToLlm,
+			getToolContext: () =>
+				({ settings: Settings.isolated({ "tools.approvalMode": "yolo" }), autoApprove: true }) as never,
+		});
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			interruptMode: "never",
+			contextMode: "keep",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule({
+			name: "no-forbidden-token-direct-extension",
+			path: "direct-extension.md",
+			content: "Do not write FORBIDDEN_TOKEN.",
+			condition: ["FORBIDDEN_TOKEN"],
+			scope: ["tool:write(*.ts)"],
+			interruptMode: "never",
+			_source: { provider: "test", providerName: "test", path: "direct-extension.md", level: "project" },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false, "tools.approvalMode": "yolo" }),
+			modelRegistry: sharedModelRegistry,
+			ttsrManager,
+			extensionRunner,
+			autoApprove: true,
+		});
+
+		await session.prompt("Write the source file");
+		await session.waitForIdle();
+		expect(await Bun.file(target).exists()).toBe(true);
+		expect(observedResults).toHaveLength(1);
+		expect(observedResults[0]).toContain("Written");
+		expect(observedResults[0]).not.toContain("Do not write FORBIDDEN_TOKEN.");
+		const modelResult = JSON.stringify(mock.calls[1]?.context.messages ?? []);
+		expect(modelResult.match(/Do not write FORBIDDEN_TOKEN\./g) ?? []).toHaveLength(1);
+	});
+	it("does not preflight a direct nested xd device dispatch", async () => {
+		const parameters = type({ path: "string", content: "string" });
+		const sessionManager = SessionManager.inMemory(tempDir);
+		const extensionRunner = new ExtensionRunner(
+			[],
+			new ExtensionRuntime(),
+			tempDir,
+			sessionManager,
+			sharedModelRegistry,
+		);
+		const deviceTool: AgentTool<typeof parameters> = {
+			name: "lsp",
+			label: "LSP",
+			description: "Nested device",
+			parameters,
+			matcherDigest: args => {
+				if (!args || typeof args !== "object" || !("content" in args)) return undefined;
+				return typeof args.content === "string" ? args.content : undefined;
+			},
+			execute: async () => ({ content: [{ type: "text", text: "device executed" }] }),
+		};
+		const inner = new ExtensionToolWrapper(deviceTool, extensionRunner);
+		const outerTool: AgentTool<typeof parameters> = {
+			name: "write",
+			label: "Write",
+			description: "Outer xd write",
+			parameters,
+			execute: (id, args, signal, onUpdate, context) =>
+				inner.execute(id, { path: "probe.ts", content: args.content }, signal, onUpdate, context),
+		};
+		const outer = new ExtensionToolWrapper(outerTool, extensionRunner);
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", name: "write", arguments: { path: "xd://lsp", content: "DEVICE_RULE_TOKEN" } },
+					],
+				},
+			],
+			handler: () => ({ content: ["Done"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, tools: [outer] },
+			streamFn: mock.stream,
+			convertToLlm,
+			getToolContext: () =>
+				({ settings: Settings.isolated({ "tools.approvalMode": "yolo" }), autoApprove: true }) as never,
+		});
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			interruptMode: "never",
+			contextMode: "keep",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule({
+			name: "no-device-token",
+			path: "device-rule.md",
+			content: "Do not use DEVICE_RULE_TOKEN.",
+			condition: ["DEVICE_RULE_TOKEN"],
+			scope: ["tool:lsp"],
+			interruptMode: "never",
+			_source: { provider: "test", providerName: "test", path: "device-rule.md", level: "project" },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false, "tools.approvalMode": "yolo" }),
+			modelRegistry: sharedModelRegistry,
+			ttsrManager,
+			extensionRunner,
+			autoApprove: true,
+		});
+
+		await session.prompt("Use the lsp device through write");
+		await session.waitForIdle();
+		const modelResult = JSON.stringify(mock.calls[1]?.context.messages ?? []);
+		expect(modelResult).toContain("device executed");
+		expect(modelResult).not.toContain("Do not use DEVICE_RULE_TOKEN.");
+	});
+
+	it("matches finalized write arguments regardless of streaming chunk boundaries", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected bundled Codex test model to exist");
+
+		const serializedArguments = JSON.stringify({ path: "probe.cpp", content: "// TTSR_PROBE\n" });
+		const rule: Rule = {
+			name: "stream-probe",
+			path: "/tmp/stream-probe.md",
+			content: "Report that the probe rule matched.",
+			condition: ["TTSR_PROBE"],
+			scope: ["tool:write"],
+			globs: ["**/*.cpp"],
+			interruptMode: "never",
+			_source: { provider: "test", providerName: "test", path: "/tmp/stream-probe.md", level: "project" },
+		};
+
+		class SnapshotStream extends AssistantMessageEventStream {
+			override push(event: AssistantMessageEvent): void {
+				super.push(structuredClone(event));
+			}
+		}
+
+		async function runDelivery(chunkSize: number): Promise<{ reminder: string; persistedInjections: number }> {
+			const ttsrManager = new TtsrManager({
+				enabled: true,
+				contextMode: "discard",
+				interruptMode: "never",
+				repeatMode: "once",
+				repeatGap: 10,
+			});
+			ttsrManager.addRule(rule);
+
+			const writeTool: AgentTool = {
+				name: "write",
+				label: "Write",
+				description: "Write a file",
+				parameters: type({ path: "string", content: "string" }),
+				execute: async () => ({ content: [{ type: "text" as const, text: "write applied" }] }),
+				matcherDigest: args => {
+					if (!args || typeof args !== "object" || !("content" in args)) return undefined;
+					return typeof args.content === "string" ? args.content : undefined;
+				},
+			};
+			const toolCall = {
+				type: "toolCall" as const,
+				id: `call_stream_${chunkSize}`,
+				name: "write",
+				arguments: {},
+				[kStreamingPartialJson]: "",
+			};
+			const makeToolCallMessage = (): AssistantMessage => ({
+				role: "assistant",
+				content: [toolCall],
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				model: model.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			});
+			let streamCallCount = 0;
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [writeTool] },
+				streamFn: () => {
+					streamCallCount++;
+					const stream = new SnapshotStream();
+					queueMicrotask(() => {
+						if (streamCallCount > 1) {
+							const done = makeMsg("ok");
+							stream.push({ type: "start", partial: done });
+							stream.push({ type: "done", reason: "stop", message: done });
+							return;
+						}
+
+						const partial = makeToolCallMessage();
+						stream.push({ type: "start", partial });
+						stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+						for (let offset = 0; offset < serializedArguments.length; offset += chunkSize) {
+							accumulateToolCallArgumentsDelta(
+								toolCall,
+								serializedArguments.slice(offset, offset + chunkSize),
+								stream,
+								partial,
+								0,
+							);
+						}
+						finalizeToolCallArgumentsDone(toolCall, serializedArguments);
+						stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+						stream.push({ type: "done", reason: "toolUse", message: partial });
+					});
+					return stream;
+				},
+			});
+			const sessionManager = SessionManager.inMemory();
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated(),
+				modelRegistry: sharedModelRegistry,
+				ttsrManager,
+			});
+
+			await session.prompt("Write the probe");
+			const contextMessage = agent.state.messages.find(
+				(message): message is Extract<typeof message, { role: "developer" }> =>
+					message.role === "developer" &&
+					Array.isArray(message.content) &&
+					message.content.some(c => c.type === "text" && c.text.includes("<system-reminder")),
+			);
+			const reminder = Array.isArray(contextMessage?.content)
+				? contextMessage.content
+						.filter((content): content is { type: "text"; text: string } => content.type === "text")
+						.map(content => content.text)
+						.join("\n")
+				: "";
+			const persistedInjections = sessionManager
+				.getEntries()
+				.filter(entry => entry.type === "ttsr_injection" && entry.injectedRules.includes(rule.name)).length;
+			await session.dispose();
+			return { reminder, persistedInjections };
+		}
+
+		const oneChunk = await runDelivery(serializedArguments.length);
+		const throttledChunks = await runDelivery(12);
+
+		for (const delivery of [oneChunk, throttledChunks]) {
+			expect(delivery.reminder).toContain('rule="stream-probe"');
+			expect(delivery.persistedInjections).toBe(1);
+		}
+	});
+
+	it("matches finalized arguments for end-only tool calls without matcher hooks", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const rule: Rule = {
+			name: "probe-args",
+			path: "/tmp/probe-args.md",
+			content: "Report that the probe rule matched.",
+			condition: ["TTSR_PROBE"],
+			scope: ["tool:probe_tool"],
+			interruptMode: "never",
+			_source: { provider: "test", providerName: "test", path: "/tmp/probe-args.md", level: "project" },
+		};
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "never",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(rule);
+
+		// No matcherDigest/matcherEntries: the finalized arguments are the only
+		// content TTSR can see when the provider skips intermediate deltas.
+		const probeTool: AgentTool = {
+			name: "probe_tool",
+			label: "Probe",
+			description: "A tool without matcher hooks",
+			parameters: type({ marker: "string" }),
+			execute: async () => ({ content: [{ type: "text" as const, text: "probe ran" }] }),
+		};
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "call_end_only",
+			name: "probe_tool",
+			arguments: { marker: "TTSR_PROBE" },
+		};
+		const makeToolCallMessage = (): AssistantMessage => ({
+			role: "assistant",
+			content: [toolCall],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "mock",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+		let streamCallCount = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [probeTool] },
+			streamFn: () => {
+				streamCallCount++;
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					if (streamCallCount > 1) {
+						const done = makeMsg("ok");
+						stream.push({ type: "start", partial: done });
+						stream.push({ type: "done", reason: "stop", message: done });
+						return;
+					}
+					const partial = makeToolCallMessage();
+					stream.push({ type: "start", partial });
+					// start -> end with no intermediate toolcall_delta.
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					stream.push({ type: "done", reason: "toolUse", message: partial });
+				});
+				return stream;
+			},
+		});
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: sharedModelRegistry,
+			ttsrManager,
+		});
+
+		await session.prompt("Run the probe");
+		const result = agent.state.messages.find(
+			(message): message is Extract<typeof message, { role: "toolResult" }> =>
+				message.role === "toolResult" && message.toolCallId === toolCall.id,
+		);
+		expect(result?.content).toEqual([{ type: "text", text: "probe ran" }]);
+		const contextMessage = agent.state.messages.find(
+			(message): message is Extract<typeof message, { role: "developer" }> =>
+				message.role === "developer" &&
+				Array.isArray(message.content) &&
+				message.content.some(c => c.type === "text" && c.text.includes("<system-reminder")),
+		);
+		const reminder = Array.isArray(contextMessage?.content)
+			? contextMessage.content
+					.filter((content): content is { type: "text"; text: string } => content.type === "text")
+					.map(content => content.text)
+					.join("\n")
+			: "";
+		expect(reminder).toContain('rule="probe-args"');
+	});
+
+	it("interruptMode never deduplicates the reminder across sibling tool calls in one batch", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		let streamCallCount = 0;
+		let executedCount = 0;
+
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "never",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(testRule);
+
+		const mockTool: AgentTool = {
+			name: "mock_edit",
+			label: "Mock Edit",
+			description: "A mock edit tool",
+			parameters: type({ snippet: "string?" }),
+			execute: async () => {
+				executedCount++;
+				return { content: [{ type: "text" as const, text: "edit applied" }] };
+			},
+		};
+
+		const toolCallA: ToolCall = {
+			type: "toolCall",
+			id: "call_dup_A",
+			name: "mock_edit",
+			arguments: { snippet: "a.unwrap()" },
+		};
+		const toolCallB: ToolCall = {
+			type: "toolCall",
+			id: "call_dup_B",
+			name: "mock_edit",
+			arguments: { snippet: "b.unwrap()" },
+		};
+		const toolCallC: ToolCall = {
+			type: "toolCall",
+			id: "call_dup_C",
+			name: "mock_edit",
+			arguments: { snippet: "c.unwrap()" },
+		};
+
+		const makeBatchMsg = (): AssistantMessage => ({
+			role: "assistant",
+			content: [toolCallA, toolCallB, toolCallC],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "mock",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [mockTool] },
+			streamFn: () => {
+				streamCallCount++;
+				const stream = new AssistantMessageEventStream();
+				if (streamCallCount === 1) {
+					queueMicrotask(() => {
+						const partial = makeBatchMsg();
+						stream.push({ type: "start", partial });
+						const calls: ToolCall[] = [toolCallA, toolCallB, toolCallC];
+						for (let i = 0; i < calls.length; i++) {
+							const call = calls[i]!;
+							stream.push({ type: "toolcall_start", contentIndex: i, partial });
+							stream.push({
+								type: "toolcall_delta",
+								contentIndex: i,
+								delta: `let val = result.unwrap("oops-${call.id}")`,
+								partial,
+							});
+							stream.push({ type: "toolcall_end", contentIndex: i, toolCall: call, partial });
+						}
+						stream.push({ type: "done", reason: "toolUse", message: partial });
+					});
+				} else {
+					queueMicrotask(() => {
+						const done = makeMsg("ok");
+						stream.push({ type: "start", partial: done });
+						stream.push({ type: "done", reason: "stop", message: done });
+					});
+				}
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const modelRegistry = sharedModelRegistry;
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			ttsrManager,
+		});
+
+		await session.prompt("Write some Rust code");
+
+		expect(executedCount).toBe(3);
+		const toolResults = agent.state.messages.filter(
+			(m): m is Extract<typeof m, { role: "toolResult" }> => m.role === "toolResult",
+		);
+		expect(toolResults).toHaveLength(3);
+		expect(
+			toolResults.every(result =>
+				Array.isArray(result.content)
+					? result.content.every(content => content.type !== "text" || !content.text.includes("<system-reminder"))
+					: true,
+			),
+		).toBe(true);
+		const reminders = agent.state.messages.filter(
+			(message): message is Extract<typeof message, { role: "developer" }> =>
+				message.role === "developer" &&
+				Array.isArray(message.content) &&
+				message.content.some(content => content.type === "text" && content.text.includes("<system-reminder")),
+		);
+		expect(reminders).toHaveLength(1);
+	});
+});

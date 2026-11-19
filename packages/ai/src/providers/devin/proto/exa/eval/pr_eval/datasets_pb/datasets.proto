@@ -1,0 +1,103 @@
+syntax = "proto3";
+
+package exa.eval.pr_eval.datasets_pb;
+
+import "exa/cortex_pb/cortex.proto";
+
+message MetricScoreContribution {
+  oneof score_source {
+    string metric_name = 1;
+    string existing_field_name = 3;
+  }
+  float weight = 2;
+}
+
+message ScoreCalculationConfig {
+  repeated .exa.eval.pr_eval.datasets_pb.MetricScoreContribution metric_score_contributions = 1;
+}
+
+message DetailStringFilter {
+  string detail_key = 1;
+  oneof match_type {
+    string exact_match = 2;
+    string contains = 3;
+    string regex_pattern = 4;
+  }
+  bool invert = 5;
+}
+
+message MetricsRecordFilterRequest {
+  oneof score_source {
+    string record_name = 1;
+    string existing_field_name = 4;
+  }
+  optional float max_allowed = 2;
+  optional float min_allowed = 3;
+  bool is_optional = 5;
+  repeated .exa.eval.pr_eval.datasets_pb.DetailStringFilter detail_filters = 6;
+}
+
+message FilterTrajectoryStageConfig {
+  reserved 1;
+  reserved 5;
+  reserved 6;
+  reserved 7;
+  reserved 8;
+  reserved "min_score_threshold", "generate_preference_pairs", "min_win_rating", "min_rating_delta", "max_occurrences_per_example";
+
+  message SelectionModeBestScoreConfig {
+    float min_score_threshold = 1;
+  }
+
+  message SelectionModeGeneratePairsConfig {
+    float min_win_rating = 1;
+    float min_rating_delta = 2;
+    float min_axis_delta = 4;
+    int32 max_occurrences_per_example = 3;
+  }
+
+  message SelectionModeGTvsBestConfig {
+    float min_score_threshold = 1;
+    float min_rating_delta = 2;
+  }
+
+  message SelectionModeKTOThresholdConfig {
+    float min_positive_score = 1;
+    float max_negative_score = 2;
+  }
+
+  message SelectionModeModelNameConfig {
+    string winner_model_name = 1;
+    string loser_model_name = 2;
+  }
+
+  string trajectory_field_name = 15;
+  repeated .exa.cortex_pb.CortexStepType required_step_types = 2;
+  int32 min_trajectory_length = 3;
+  bool retain_filtered_rows = 4;
+  bool truncate_trajectory_to_judge_steps = 9;
+  bool use_downloaded_score = 16 [deprecated = true];
+  oneof selection_mode {
+    .exa.eval.pr_eval.datasets_pb.FilterTrajectoryStageConfig.SelectionModeBestScoreConfig selection_mode_best_score = 10;
+    .exa.eval.pr_eval.datasets_pb.FilterTrajectoryStageConfig.SelectionModeGeneratePairsConfig selection_mode_generate_pairs = 11;
+    .exa.eval.pr_eval.datasets_pb.FilterTrajectoryStageConfig.SelectionModeGTvsBestConfig selection_mode_gt_vs_best = 12;
+    .exa.eval.pr_eval.datasets_pb.FilterTrajectoryStageConfig.SelectionModeKTOThresholdConfig selection_mode_kto_threshold = 17;
+    .exa.eval.pr_eval.datasets_pb.FilterTrajectoryStageConfig.SelectionModeModelNameConfig selection_mode_model_name = 18;
+  }
+  .exa.eval.pr_eval.datasets_pb.ScoreCalculationConfig score_calculation_config = 13;
+  repeated .exa.eval.pr_eval.datasets_pb.MetricsRecordFilterRequest metrics_record_filters = 14;
+}
+
+message MergeFormattedPreferencePairsConfig {
+  enum MismatchedPromptResolution {
+    MISMATCHED_PROMPT_RESOLUTION_UNSPECIFIED = 0;
+    MISMATCHED_PROMPT_RESOLUTION_STRICT_MATCH = 1;
+    MISMATCHED_PROMPT_RESOLUTION_KEEP_WINNER = 2;
+    MISMATCHED_PROMPT_RESOLUTION_KEEP_LOSER = 3;
+  }
+
+  .exa.eval.pr_eval.datasets_pb.MergeFormattedPreferencePairsConfig.MismatchedPromptResolution mismatched_prompt_resolution = 1;
+  int32 max_allowed_trailing_mismatched_steps = 2;
+  string expected_last_prompt_content = 3;
+  int32 world_size = 4;
+}

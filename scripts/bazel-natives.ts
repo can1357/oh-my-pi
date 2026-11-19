@@ -1,0 +1,620 @@
+#!/usr/bin/env bun
+/**
+ * Canonical Bazel driver for the shipping pi_natives addons.
+ *
+ * Usage: bun scripts/bazel-natives.ts <target>... [--dest <dir>] [--source <dir>] [-- <extra bazel args>]
+ *
+ * Targets are the //:natives-* names from BUILD.bazel (e.g. linux-x64-baseline,
+ * darwin-arm64) plus three pseudo-targets:
+ *   - host        the single addon matching this machine (x64 hosts pick
+ *                 modern vs baseline via AVX2 detection; a musl Bun gets the
+ *                 musl addon)
+ *   - all         every shipped addon (linux hosts cross-build all of them)
+ *   - darwin-all  both darwin addons
+ *
+ * One `bazel build` covers all requested targets; outputs are located via
+ * `bazel cquery --output=files` (falling back to the bazel-bin path convention)
+ * and copied dereferenced into --dest (default packages/natives/native).
+ *
+ * Extra args after `--` are passed to bazel verbatim (cache configs, endpoints,
+ * headers — see .bazelrc for the cache-rw/cache-ro policy configs).
+ *
+ * The `host` pseudo-target builds through the local Cargo/N-API path
+ * (packages/natives/scripts/build-bindings.ts) by default — no bazel needed
+ * for plain host iteration. Bazel is opt-in for host via
+ * `OMP_NATIVE_BUILD_BACKEND=bazel` or by passing extra bazel args after `--`;
+ * explicit //:natives-* targets and aggregates always build through bazel.
+ * Release CI builds every addon through that path on Linux.
+ *
+ * Windows hosts: the msvc cc toolchain in bazel/toolchains/msvc only supports
+ * linux/mac exec hosts (its clang-cl+xwin wrappers replace the MSVC a Windows
+ * box already has), so a win32 host cannot run any bazel addon build. `host`
+ * always uses the local napi build there (against installed VS Build Tools);
+ * every other target on a win32 host fails fast with guidance.
+ *
+ * Note: musl addons intentionally reuse the plain linux-<arch> filenames, so an
+ * `all` copy overwrites the gnu addon with the musl one (and vice versa);
+ * CI jobs that ship files always request an explicit disjoint target set.
+ *
+ * Every install stamps packages/natives/package.json#version into the addon's
+ * post-link version slot (scripts/stamp-native-version.ts), so release bumps
+ * never touch a Rust input. After install, the addon for the host's own target
+ * is dlopen-probed in a child process and an unloadable image (or a load that
+ * hangs) fails the build.
+ */
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { detectHostAvx2Support, detectHostMusl, resolveLocalHostAddon } from "./host-detect";
+import { hasVersionStampSlot, nativesPackageVersion, stampNativeVersion } from "./stamp-native-version";
+
+const repoRoot = path.join(import.meta.dir, "..");
+
+/** //:natives-<name> → canonical addon filename (mirrors _ADDONS in BUILD.bazel). */
+export const ADDON_OUTPUTS: Record<string, string> = {
+	"linux-x64-baseline": "pi_natives.linux-x64-baseline.node",
+	"linux-x64-modern": "pi_natives.linux-x64-modern.node",
+	"linux-arm64": "pi_natives.linux-arm64.node",
+	"linux-musl-x64-baseline": "pi_natives.linux-x64-baseline.node",
+	"linux-musl-arm64": "pi_natives.linux-arm64.node",
+	"darwin-x64-baseline": "pi_natives.darwin-x64-baseline.node",
+	"darwin-arm64": "pi_natives.darwin-arm64.node",
+	"win32-x64-baseline": "pi_natives.win32-x64-baseline.node",
+	"win32-arm64": "pi_natives.win32-arm64.node",
+};
+
+/** Aggregate filegroups → their member addon targets (mirrors BUILD.bazel). */
+export const AGGREGATE_TARGETS: Record<string, string[]> = {
+	all: [
+		"darwin-arm64",
+		"darwin-x64-baseline",
+		"linux-arm64",
+		"linux-musl-arm64",
+		"linux-musl-x64-baseline",
+		"linux-x64-baseline",
+		"linux-x64-modern",
+		"win32-arm64",
+		"win32-x64-baseline",
+	],
+	"darwin-all": ["darwin-arm64", "darwin-x64-baseline"],
+};
+
+export interface HostInfo {
+	platform: string;
+	arch: string;
+	avx2: boolean;
+	/** The running Bun links musl, so only musl addons load in it. */
+	musl: boolean;
+}
+
+/**
+ * The single addon target this host can load: modern iff x64 + AVX2, musl iff
+ * the running Bun is musl. There is no modern musl addon; the runtime loader
+ * falls back from modern to baseline.
+ */
+export function hostTargetName(host: HostInfo): string {
+	if (host.platform === "darwin") {
+		if (host.arch === "arm64") return "darwin-arm64";
+		if (host.arch === "x64") return "darwin-x64-baseline";
+	}
+	if (host.platform === "linux") {
+		if (host.arch === "arm64") return host.musl ? "linux-musl-arm64" : "linux-arm64";
+		if (host.arch === "x64") {
+			if (host.musl) return "linux-musl-x64-baseline";
+			return host.avx2 ? "linux-x64-modern" : "linux-x64-baseline";
+		}
+	}
+	if (host.platform === "win32") {
+		if (host.arch === "x64") return "win32-x64-baseline";
+		if (host.arch === "arm64") return "win32-arm64";
+	}
+	throw new Error(`No pi_natives addon target for host ${host.platform}-${host.arch}`);
+}
+
+/** Expand pseudo-targets and map names to //:natives-* labels (deduplicated). */
+export function resolveTargetLabels(names: string[], host: HostInfo): string[] {
+	const labels: string[] = [];
+	for (const name of names) {
+		const resolved = name === "host" ? hostTargetName(host) : name;
+		if (!(resolved in AGGREGATE_TARGETS) && !(resolved in ADDON_OUTPUTS)) {
+			const known = [...Object.keys(ADDON_OUTPUTS), ...Object.keys(AGGREGATE_TARGETS), "host"].join(", ");
+			throw new Error(`Unknown native target "${name}". Known targets: ${known}`);
+		}
+		const label = `//:natives-${resolved}`;
+		if (!labels.includes(label)) labels.push(label);
+	}
+	return labels;
+}
+
+/** Addon targets a request expands to: pseudo-target `host` and aggregates resolved, deduplicated. */
+export function resolveTargetMembers(names: string[], host: HostInfo): string[] {
+	const members: string[] = [];
+	for (const name of names) {
+		const resolved = name === "host" ? hostTargetName(host) : name;
+		for (const member of AGGREGATE_TARGETS[resolved] ?? [resolved]) {
+			if (!(member in ADDON_OUTPUTS)) throw new Error(`Unknown native target "${name}"`);
+			if (!members.includes(member)) members.push(member);
+		}
+	}
+	return members;
+}
+
+/**
+ * Workspace-relative output paths by bazel-bin convention:
+ * bazel-bin/natives-<t>/<canonical>.node. Fallback when cquery is unavailable.
+ */
+export function conventionOutputPaths(names: string[], host: HostInfo): string[] {
+	return resolveTargetMembers(names, host).map(member => `bazel-bin/natives-${member}/${ADDON_OUTPUTS[member]}`);
+}
+
+/**
+ * Canonical filename this host may probe, or null when the invocation builds
+ * no addon for the host's own target.
+ *
+ * The filename alone cannot decide this: musl targets deliberately reuse the
+ * gnu canonical names, so `pi_natives.linux-arm64.node` may be a musl image
+ * that a glibc builder must not dlopen — the release matrix installs exactly
+ * that artifact on a glibc runner. Only the host's own target, which matches
+ * the running Bun's libc, is probed, and one invocation can never hold both
+ * spellings of a basename because the install loop refuses duplicates.
+ */
+export function hostProbeFilename(names: string[], host: HostInfo): string | null {
+	let hostTarget: string;
+	try {
+		hostTarget = hostTargetName(host);
+	} catch {
+		return null; // no addon target for this host: nothing built here is native to it
+	}
+	if (!resolveTargetMembers(names, host).includes(hostTarget)) return null;
+	return ADDON_OUTPUTS[hostTarget] ?? null;
+}
+
+/** Parse `bazel cquery --output=files` stdout into deduplicated .node paths. */
+export function parseBazelFilesOutput(output: string): string[] {
+	const files: string[] = [];
+	for (const line of output.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed.endsWith(".node")) continue;
+		if (!files.includes(trimmed)) files.push(trimmed);
+	}
+	return files;
+}
+
+/** Parsed options for the native addon build and artifact install modes. */
+export interface CliOptions {
+	targets: string[];
+	dest: string | null;
+	source: string | null;
+	bazelArgs: string[];
+}
+
+/** Parse target names and the mutually exclusive build or artifact source options. */
+export function parseCliArgs(argv: string[]): CliOptions {
+	const targets: string[] = [];
+	let dest: string | null = null;
+	let source: string | null = null;
+	const bazelArgs: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === "--") {
+			bazelArgs.push(...argv.slice(i + 1));
+			break;
+		}
+		if (arg === "--dest" || arg === "--source") {
+			const value = argv[++i];
+			if (!value) throw new Error(`${arg} requires a directory argument`);
+			if (arg === "--dest") {
+				dest = value;
+			} else {
+				source = value;
+			}
+			continue;
+		}
+		if (arg.startsWith("-")) {
+			throw new Error(`Unknown flag ${arg} (extra bazel args go after \`--\`)`);
+		}
+		targets.push(arg);
+	}
+	if (targets.length === 0) {
+		throw new Error(
+			"Usage: bun scripts/bazel-natives.ts <target>... [--dest <dir>] [--source <dir>] [-- <extra bazel args>]",
+		);
+	}
+	if (source && bazelArgs.length > 0) {
+		throw new Error("--source cannot be combined with extra bazel arguments");
+	}
+	return { targets, dest, source, bazelArgs };
+}
+
+function resolveBazelBinary(): string | null {
+	return Bun.which("bazelisk") ?? Bun.which("bazel");
+}
+
+const STDERR_TAIL_LINES = 40;
+
+/** Run a bazel command streaming stderr live while keeping a tail for the failure report. */
+async function runBazel(
+	bin: string,
+	args: string[],
+	stdout: "inherit" | "pipe",
+): Promise<{ exitCode: number; stdout: string; stderrTail: string }> {
+	const proc = Bun.spawn([bin, ...args], { cwd: repoRoot, stdout, stderr: "pipe" });
+	const decoder = new TextDecoder();
+	let tail = "";
+	const pumpStderr = (async () => {
+		for await (const chunk of proc.stderr) {
+			const text = decoder.decode(chunk, { stream: true });
+			process.stderr.write(text);
+			tail = (tail + text)
+				.split("\n")
+				.slice(-STDERR_TAIL_LINES - 1)
+				.join("\n");
+		}
+	})();
+	const stdoutText = stdout === "pipe" ? await new Response(proc.stdout as ReadableStream).text() : "";
+	const exitCode = await proc.exited;
+	await pumpStderr;
+	return { exitCode, stdout: stdoutText, stderrTail: tail };
+}
+
+/**
+ * Copy an addon into place, stamping `version` into the copy before the atomic
+ * rename. Returns whether the copy was stamped.
+ *
+ * `allowUnstamped` accepts a prebuilt addon that predates the stamp slot
+ * (`--source` installs of main-built or npm-release addons on PR runs): it is
+ * installed as-is, and only workspace loads — which skip version validation —
+ * can use it. Release packaging still rejects it (embed-native requires the
+ * stamp), so this never ships an unstamped addon.
+ */
+async function installAddon(
+	sourcePath: string,
+	destPath: string,
+	version: string,
+	allowUnstamped: boolean,
+): Promise<boolean> {
+	const realSource = await fs.realpath(sourcePath); // bazel-bin outputs are symlink-reachable; copy the real bytes
+	const tempPath = `${destPath}.tmp.${process.pid}`;
+	try {
+		await fs.copyFile(realSource, tempPath);
+		await fs.chmod(tempPath, 0o644);
+		const stamp = !allowUnstamped || hasVersionStampSlot(await fs.readFile(tempPath));
+		if (stamp) await stampNativeVersion(tempPath, version);
+		await fs.rename(tempPath, destPath); // atomic even if dest is a loaded addon
+		return stamp;
+	} catch (err) {
+		await fs.unlink(tempPath).catch(() => {});
+		throw err;
+	}
+}
+
+/** Trailing sentence of a probe failure; the loader's own output precedes it. */
+export const ADDON_LOAD_FAILURE_EXPLANATION =
+	"The addon was produced and installed successfully, so this is a defect in the build that made it, " +
+	"not in the loader that rejected it.";
+
+/** Upper bound on one load probe; loading runs the addon's init code, which must not hang the build. */
+export const ADDON_LOAD_PROBE_TIMEOUT_MS = 60_000;
+
+/**
+ * Confirm a freshly installed host addon can actually be loaded.
+ *
+ * A cross-compiled addon cannot be probed here, but a host-platform one can,
+ * and an addon the host loader rejects is worse than a failed build: it
+ * installs cleanly, so the failure surfaces much later as a bare
+ * `process.dlopen` error in whatever first imports the runtime, with nothing
+ * pointing back at the build that produced it. Loading happens in a child so a
+ * successful probe does not keep the file mapped in this process.
+ */
+export async function verifyHostAddonLoads(
+	destPath: string,
+	timeoutMs: number = ADDON_LOAD_PROBE_TIMEOUT_MS,
+	expectedVersion?: string,
+): Promise<void> {
+	// With `expectedVersion`, the loaded addon must also report it through
+	// `__piNativesBuildVersion()`: proof the Rust stamp slot and the stamp tool
+	// agree on magic and layout, observed on the compiled bytes.
+	const versionCheck =
+		expectedVersion === undefined
+			? ""
+			: `const reported = typeof m.exports.__piNativesBuildVersion === "function" ? m.exports.__piNativesBuildVersion() : undefined; ` +
+				`if (reported !== ${JSON.stringify(expectedVersion)}) { console.error("addon reports build version " + JSON.stringify(reported) + ", expected " + ${JSON.stringify(JSON.stringify(expectedVersion))}); process.exit(1); }`;
+	const probe =
+		`const m = { exports: {} }; try { process.dlopen(m, ${JSON.stringify(destPath)}); } ` +
+		"catch (error) { console.error(error && error.message ? error.message : String(error)); process.exit(1); } " +
+		versionCheck;
+	const proc = Bun.spawn([process.execPath, "-e", probe], { stdout: "ignore", stderr: "pipe" });
+	let timedOut = false;
+	const timer = setTimeout(() => {
+		timedOut = true;
+		proc.kill("SIGKILL");
+	}, timeoutMs);
+	let exitCode: number;
+	let stderr: string;
+	try {
+		[exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+	} finally {
+		clearTimeout(timer);
+	}
+	const header = `built addon ${path.basename(destPath)} cannot be loaded on this host (${process.platform}-${process.arch})`;
+	if (timedOut) {
+		throw new Error(
+			`${header}: loading did not finish within ${timeoutMs / 1000}s.\n${ADDON_LOAD_FAILURE_EXPLANATION}`,
+		);
+	}
+	if (exitCode === 0) return;
+	throw new Error(`${header}:\n${stderr.trim()}\n${ADDON_LOAD_FAILURE_EXPLANATION}`);
+}
+
+/**
+ * Every library a glibc addon may need: those the glibc 2.17 floor keeps out of
+ * `libc.so.6`, minus the libm and libutil functions
+ * crates/natives/src/bundled_libc.rs links in.
+ */
+export const GLIBC_ADDON_NEEDED: ReadonlySet<string> = new Set([
+	"libc.so.6",
+	"libpthread.so.0",
+	"libdl.so.2",
+	"ld-linux-x86-64.so.2",
+	"ld-linux-aarch64.so.1",
+]);
+
+/** The one symbol a Linux addon exports (`:exports_map` in crates/natives/BUILD.bazel). */
+const LINUX_ADDON_EXPORT = "napi_register_module_v1";
+
+const SHT_DYNAMIC = 6;
+const SHT_DYNSYM = 11;
+const DT_NULL = 0n;
+const DT_NEEDED = 1n;
+const STB_LOCAL = 0;
+const STV_DEFAULT = 0;
+const STV_PROTECTED = 3;
+
+/** What an ELF image takes from and offers to the dynamic loader. */
+export interface ElfDynamic {
+	/** `DT_NEEDED` libraries. */
+	needed: string[];
+	/** Defined symbols other images can bind to. */
+	exports: string[];
+}
+
+/** Read {@link ElfDynamic} from an ELF64 little-endian image; null for any other file. */
+export async function elfDynamic(file: string): Promise<ElfDynamic | null> {
+	const handle = await fs.open(file, "r");
+	try {
+		const read = async (offset: number, length: number): Promise<Buffer> => {
+			const bytes = Buffer.alloc(length);
+			await handle.read(bytes, 0, length, offset);
+			return bytes;
+		};
+		const header = await read(0, 64);
+		if (header.toString("latin1", 0, 4) !== "\x7fELF" || header[4] !== 2 || header[5] !== 1) return null;
+		const shentsize = header.readUInt16LE(58);
+		const shnum = header.readUInt16LE(60);
+		const sections = await read(Number(header.readBigUInt64LE(40)), shentsize * shnum);
+		const section = (index: number) => {
+			const at = index * shentsize;
+			return {
+				type: sections.readUInt32LE(at + 4),
+				offset: Number(sections.readBigUInt64LE(at + 24)),
+				size: Number(sections.readBigUInt64LE(at + 32)),
+				link: sections.readUInt32LE(at + 40),
+			};
+		};
+		const image: ElfDynamic = { needed: [], exports: [] };
+		for (let index = 0; index < shnum; index++) {
+			const table = section(index);
+			if (table.type !== SHT_DYNAMIC && table.type !== SHT_DYNSYM) continue;
+			const strings = section(table.link);
+			const [entries, names] = await Promise.all([
+				read(table.offset, table.size),
+				read(strings.offset, strings.size),
+			]);
+			const name = (start: number) => names.toString("latin1", start, names.indexOf(0, start));
+			if (table.type === SHT_DYNAMIC) {
+				for (let at = 0; at + 16 <= entries.length; at += 16) {
+					const tag = entries.readBigUInt64LE(at);
+					if (tag === DT_NULL) break;
+					if (tag === DT_NEEDED) image.needed.push(name(Number(entries.readBigUInt64LE(at + 8))));
+				}
+				continue;
+			}
+			// Elf64_Sym entries after the null one: st_name, st_info, st_other, st_shndx, …
+			for (let at = 24; at + 24 <= entries.length; at += 24) {
+				const visibility = entries.readUInt8(at + 5) & 3;
+				if (
+					entries.readUInt16LE(at + 6) !== 0 &&
+					entries.readUInt8(at + 4) >> 4 !== STB_LOCAL &&
+					(visibility === STV_DEFAULT || visibility === STV_PROTECTED)
+				) {
+					image.exports.push(name(entries.readUInt32LE(at)));
+				}
+			}
+		}
+		return image;
+	} finally {
+		await handle.close();
+	}
+}
+
+/**
+ * Reject a Linux addon that exports anything beside its N-API entry point, or
+ * a glibc one that needs a library outside {@link GLIBC_ADDON_NEEDED}. Darwin
+ * and Windows images pass untouched.
+ */
+export async function verifyLinuxAddon(file: string): Promise<void> {
+	const image = await elfDynamic(file);
+	if (!image) return;
+	const problems: string[] = [];
+	const exports = image.exports.filter(symbol => symbol !== LINUX_ADDON_EXPORT);
+	if (exports.length > 0) {
+		problems.push(
+			`exports ${exports.length} symbols beside ${LINUX_ADDON_EXPORT} (${exports.slice(0, 3).join(", ")}, …): ` +
+				"the link did not apply :exports_map from crates/natives/BUILD.bazel",
+		);
+	}
+	const needed = image.needed.filter(library => !GLIBC_ADDON_NEEDED.has(library));
+	if (image.needed.includes("libc.so.6") && needed.length > 0) {
+		problems.push(
+			`needs ${needed.join(", ")}: define the functions it imports from there in ` +
+				"crates/natives/src/bundled_libc.rs (`llvm-readelf --dyn-syms` lists them)",
+		);
+	}
+	if (problems.length > 0) throw new Error(`built addon ${path.basename(file)} ${problems.join("; ")}`);
+}
+
+/** Build and install the host addon through the local Cargo/N-API path. */
+async function buildLocalHostAddon(host: HostInfo, destDir: string): Promise<void> {
+	const script = path.join(repoRoot, "packages/natives/scripts/build-bindings.ts");
+	console.log(`local host build: using ${path.relative(repoRoot, script)}`);
+	const proc = Bun.spawn([process.execPath, script], {
+		cwd: repoRoot,
+		stdout: "inherit",
+		stderr: "inherit",
+	});
+	const exitCode = await proc.exited;
+	if (exitCode !== 0) process.exit(exitCode || 1);
+
+	const filename = resolveLocalHostAddon(host).filename;
+	const builtPath = path.join(repoRoot, "packages/natives/native", filename);
+	if (path.dirname(builtPath) !== destDir) {
+		await fs.mkdir(destDir, { recursive: true });
+		await installAddon(builtPath, path.join(destDir, filename), await nativesPackageVersion(), false);
+	}
+	console.log(`installed ${filename} → ${path.join(destDir, filename)}`);
+	await verifyHostAddonLoads(path.join(destDir, filename), undefined, await nativesPackageVersion());
+}
+
+async function main(): Promise<void> {
+	const options = parseCliArgs(process.argv.slice(2));
+	const host: HostInfo = {
+		platform: process.platform,
+		arch: process.arch,
+		avx2: detectHostAvx2Support(),
+		musl: detectHostMusl(),
+	};
+	const destDir = options.dest ? path.resolve(options.dest) : path.join(repoRoot, "packages/natives/native");
+
+	const backend = Bun.env.OMP_NATIVE_BUILD_BACKEND?.trim();
+	if (backend && backend !== "cargo" && backend !== "bazel") {
+		throw new Error(`Unknown OMP_NATIVE_BUILD_BACKEND "${backend}" (expected "cargo" or "bazel")`);
+	}
+	const hostOnly = options.targets.length === 1 && options.targets[0] === "host";
+	// Backend selection: the host build defaults to the local Cargo/N-API
+	// path; bazel is opt-in for host via OMP_NATIVE_BUILD_BACKEND=bazel or
+	// extra bazel args after `--`. Explicit //:natives-* targets always go
+	// through bazel. win32 hosts can only build `host`, locally (see the msvc
+	// toolchain note in the header).
+	const cargoBackend =
+		backend === "cargo" ||
+		host.platform === "win32" ||
+		(backend !== "bazel" && hostOnly && options.bazelArgs.length === 0);
+	if (cargoBackend && !options.source) {
+		if (!hostOnly) {
+			if (host.platform === "win32") {
+				throw new Error(
+					`Cannot bazel-build [${options.targets.join(", ")}] on a Windows host: the msvc cross ` +
+						"toolchain (bazel/toolchains/msvc) only runs on linux/mac exec hosts. Use `host` here " +
+						"(local napi build via VS Build Tools), or run this script from WSL/linux for cross targets.",
+				);
+			}
+			throw new Error("OMP_NATIVE_BUILD_BACKEND=cargo supports only the host target");
+		}
+		await buildLocalHostAddon(host, destDir);
+		return;
+	}
+	let outputs: string[];
+
+	if (options.source) {
+		const sourceDir = path.resolve(options.source);
+		outputs = conventionOutputPaths(options.targets, host).map(output =>
+			path.join(sourceDir, path.relative("bazel-bin", output)),
+		);
+	} else {
+		const labels = resolveTargetLabels(options.targets, host);
+		const bazel = resolveBazelBinary();
+		if (!bazel) {
+			if (options.targets.length !== 1 || options.targets[0] !== "host") {
+				throw new Error(
+					`Neither \`bazelisk\` nor \`bazel\` found on PATH; Cargo fallback supports only the host target, not [${options.targets.join(", ")}]. ` +
+						"Install bazelisk or request `host` for a local Cargo/N-API build.",
+				);
+			}
+			console.log("bazelisk/bazel not found; falling back to the local Cargo/N-API host build");
+			await buildLocalHostAddon(host, destDir);
+			return;
+		}
+		// CI hands cache wiring (remote or disk) through a bazelrc fragment so
+		// endpoint composition stays in .github/actions/bazel-cache.
+		const rcPath = Bun.env.OMP_BAZEL_RC?.trim();
+		const startupArgs = rcPath ? [`--bazelrc=${rcPath}`] : [];
+
+		const buildArgs = [...startupArgs, "build", ...options.bazelArgs, "--", ...labels];
+		console.log(`$ ${path.basename(bazel)} ${buildArgs.join(" ")}`);
+		const build = await runBazel(bazel, buildArgs, "inherit");
+		if (build.exitCode !== 0) {
+			console.error(`\nbazel build failed (exit ${build.exitCode}). stderr tail:\n${build.stderrTail}`);
+			process.exit(build.exitCode || 1);
+		}
+
+		// Same flags as the build so cquery resolves the identical configuration.
+		// cquery takes exactly one query expression, so multiple targets join
+		// into a single union rather than positional args.
+		const cquery = await runBazel(
+			bazel,
+			[...startupArgs, "cquery", ...options.bazelArgs, "--output=files", labels.join(" + ")],
+			"pipe",
+		);
+		if (cquery.exitCode === 0) {
+			outputs = parseBazelFilesOutput(cquery.stdout);
+		} else {
+			console.warn(`bazel cquery failed (exit ${cquery.exitCode}); falling back to bazel-bin path convention`);
+			outputs = conventionOutputPaths(options.targets, host);
+		}
+		if (outputs.length === 0) {
+			console.error("bazel build succeeded but no .node outputs were located");
+			process.exit(1);
+		}
+	}
+
+	const seen = new Map<string, string>();
+	for (const output of outputs) {
+		const base = path.basename(output);
+		const prior = seen.get(base);
+		if (prior) {
+			// gnu and musl x64/arm64 addons share canonical basenames by design;
+			// installing both into one dest would silently clobber.
+			console.error(
+				`refusing to install ${output}: ${base} already provided by ${prior}. ` +
+					"Build gnu and musl targets in separate invocations with separate --dest dirs.",
+			);
+			process.exit(1);
+		}
+		seen.set(base, output);
+	}
+	await fs.mkdir(destDir, { recursive: true });
+	const probeFilename = hostProbeFilename(options.targets, host);
+	const version = await nativesPackageVersion();
+	for (const output of outputs) {
+		const absolute = path.isAbsolute(output) ? output : path.join(repoRoot, output);
+		const destPath = path.join(destDir, path.basename(output));
+		const stamped = await installAddon(absolute, destPath, version, options.source !== undefined);
+		console.log(
+			stamped
+				? `installed ${path.basename(output)} (stamped ${version}) → ${destPath}`
+				: `installed ${path.basename(output)} (prebuilt without a version stamp slot; left unstamped) → ${destPath}`,
+		);
+		if (!options.source) await verifyLinuxAddon(destPath);
+		if (probeFilename && path.basename(output) === probeFilename) {
+			await verifyHostAddonLoads(destPath, undefined, stamped ? version : undefined);
+		}
+	}
+}
+
+if (import.meta.main) {
+	try {
+		await main();
+	} catch (err) {
+		console.error(err instanceof Error ? err.message : String(err));
+		process.exit(1);
+	}
+}

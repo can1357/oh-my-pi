@@ -1,0 +1,75 @@
+# Compact rails routes output.
+
+[filters.rails-routes]
+description = "Compact rails routes output"
+match_command = "^(rails|rake)$"
+match_subcommand = "^routes$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^\\s*Prefix\\s+Verb",
+]
+truncate_lines_at = 160
+max_lines = 40
+
+[[tests.rails-routes]]
+name = "strips header and truncates long lines"
+input = """\
+                                  Prefix Verb   URI Pattern                                                                                       Controller#Action
+                                    root GET    /                                                                                                 home#index
+                                   users GET    /users(.:format)                                                                                  users#index
+                                         POST   /users(.:format)                                                                                  users#create
+                                new_user GET    /users/new(.:format)                                                                              users#new
+                               edit_user GET    /users/:id/edit(.:format)                                                                         users#edit
+                                    user GET    /users/:id(.:format)                                                                              users#show
+                                         PATCH  /users/:id(.:format)                                                                              users#update
+                                         PUT    /users/:id(.:format)                                                                              users#update
+                                         DELETE /users/:id(.:format)                                                                              users#destroy
+                                  orders GET    /orders(.:format)                                                                                 orders#index
+                                         POST   /orders(.:format)                                                                                 orders#create
+                                new_order GET    /orders/new(.:format)                                                                             orders#new
+                               edit_order GET    /orders/:id/edit(.:format)                                                                        orders#edit
+                                    order GET    /orders/:id(.:format)                                                                             orders#show
+                                         PATCH  /orders/:id(.:format)                                                                             orders#update
+                                         PUT    /orders/:id(.:format)                                                                             orders#update
+                                         DELETE /orders/:id(.:format)                                                                             orders#destroy
+                                products GET    /products(.:format)                                                                               products#index
+                                         POST   /products(.:format)                                                                               products#create
+                             new_product GET    /products/new(.:format)                                                                           products#new
+                            edit_product GET    /products/:id/edit(.:format)                                                                      products#edit
+                                 product GET    /products/:id(.:format)                                                                           products#show
+                                         PATCH  /products/:id(.:format)                                                                           products#update
+                                         PUT    /products/:id(.:format)                                                                           products#update
+                                         DELETE /products/:id(.:format)                                                                           products#destroy
+                              categories GET    /categories(.:format)                                                                             categories#index
+                                         POST   /categories(.:format)                                                                             categories#create
+"""
+expected = """
+                                    root GET    /                                                                                                 home#index
+                                   users GET    /users(.:format)                                                                                  users#index
+                                         POST   /users(.:format)                                                                                  users#create
+                                new_user GET    /users/new(.:format)                                                                              users#new
+                               edit_user GET    /users/:id/edit(.:format)                                                                         users#edit
+                                    user GET    /users/:id(.:format)                                                                              users#show
+                                         PATCH  /users/:id(.:format)                                                                              users#update
+                                         PUT    /users/:id(.:format)                                                                              users#update
+                                         DELETE /users/:id(.:format)                                                                              users#destroy
+                                  orders GET    /orders(.:format)                                                                                 orders#index
+                                         POST   /orders(.:format)                                                                                 orders#create
+                                new_order GET    /orders/new(.:format)                                                                             orders#new
+                               edit_order GET    /orders/:id/edit(.:format)                                                                        orders#edit
+                                    order GET    /orders/:id(.:format)                                                                             orders#show
+                                         PATCH  /orders/:id(.:format)                                                                             orders#update
+                                         PUT    /orders/:id(.:format)                                                                             orders#update
+                                         DELETE /orders/:id(.:format)                                                                             orders#destroy
+                                products GET    /products(.:format)                                                                               products#index
+                                         POST   /products(.:format)                                                                               products#creat…[+1]
+                             new_product GET    /products/new(.:format)                                                                           products#new
+                            edit_product GET    /products/:id/edit(.:format)                                                                      products#edit
+                                 product GET    /products/:id(.:format)                                                                           products#show
+                                         PATCH  /products/:id(.:format)                                                                           products#updat…[+1]
+                                         PUT    /products/:id(.:format)                                                                           products#updat…[+1]
+                                         DELETE /products/:id(.:format)                                                                           products#destr…[+2]
+                              categories GET    /categories(.:format)                                                                             categories#ind…[+2]
+                                         POST   /categories(.:format)                                                                             categories#cre…[+3]
+"""

@@ -1,0 +1,74 @@
+Isolate zig's cache for compile-only invocations (ziglang/zig#18763).
+
+Concurrent `zig cc` processes sharing one cache dir corrupt it under load
+(cache manifests referencing evicted objects: "failed to open .../scanner.o:
+FileNotFound"). This repo drives ~60 cc-compiling cargo build scripts in
+parallel through the wrapper, which reproduces the corruption reliably on CI.
+
+Compile/preprocess steps gain nothing from the cache (~25ms cold vs warm,
+measured) — give each process a private throwaway cache under the system tmp
+dir. Link steps keep the shared cache: they are the ones that benefit
+(compiler-rt/crt, ~6s cold vs 25ms warm), zig's per-artifact locking is the
+battle-tested path for concurrent artifact builds, and after first warm they
+are pure readers.
+
+Also opt @zig_config into Bazel's repo contents cache (repo_metadata,
+bazel >= 8.3): the fetch is deterministic given the pinned zig archive and
+wrapper source, and re-running it cost ~20 s of wrapper compilation on every
+fresh output base — every job on ephemeral CI pods.
+
+Note: bazel's own patch parser (unlike GNU patch) requires the `diff --git`
+separator line before each file section of a multi-file patch.
+
+diff --git a/toolchain/zig-wrapper.zig b/toolchain/zig-wrapper.zig
+--- a/toolchain/zig-wrapper.zig
++++ b/toolchain/zig-wrapper.zig
+@@ -267,6 +267,32 @@
+     if (run_mode == RunMode.cc)
+         try resolveColonLibraries(arena, cwd, &args);
+ 
++    // Compile-only steps (-c/-E/-S) get a private throwaway cache: concurrent
++    // zig processes sharing one cache corrupt it (ziglang/zig#18763), and the
++    // cache is worthless for plain compiles. Links keep the shared cache for
++    // compiler-rt/crt reuse; zig's per-artifact locking covers those.
++    if (run_mode == RunMode.cc) {
++        var compile_only = false;
++        for (args.items) |a| {
++            if (mem.eql(u8, a, "-c") or mem.eql(u8, a, "-E") or mem.eql(u8, a, "-S")) {
++                compile_only = true;
++                break;
++            }
++        }
++        if (compile_only and builtin.os.tag != .windows) {
++            const tmp_root = env.get("TMPDIR") orelse "/tmp";
++            var rnd: [8]u8 = undefined;
++            std.crypto.random.bytes(&rnd);
++            const iso = try std.fmt.allocPrint(
++                arena,
++                "{s}{s}zig-pp-{}",
++                .{ tmp_root, sep, std.fmt.fmtSliceHexLower(&rnd) },
++            );
++            try env.put("ZIG_LOCAL_CACHE_DIR", iso);
++            try env.put("ZIG_GLOBAL_CACHE_DIR", iso);
++        }
++    }
++
+     // Add -target as the last parameter. The wrapper should overwrite
+     // the target specified by other tools calling the wrapper.
+     // Some tools might pass LLVM target triple, which are rejected by zig.
+diff --git a/toolchain/defs.bzl b/toolchain/defs.bzl
+--- a/toolchain/defs.bzl
++++ b/toolchain/defs.bzl
+@@ -278,6 +278,12 @@
+         )
+         repository_ctx.symlink("tools/zig-wrapper{}".format(exe), tool_path)
+ 
++    # omp: opt into the repo contents cache — the fetch is deterministic
++    # given the pinned zig archive and the wrapper source above.
++    if hasattr(repository_ctx, "repo_metadata"):
++        return repository_ctx.repo_metadata(reproducible = True)
++    return None
++
+ zig_repository = repository_rule(
+     attrs = {
+         "version": attr.string(),

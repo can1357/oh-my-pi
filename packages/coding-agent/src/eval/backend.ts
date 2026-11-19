@@ -1,0 +1,95 @@
+import { buildEvalUrlRoots, LocalProtocolHandler } from "../internal-urls";
+import { contextLocalProtocolOptions } from "../internal-urls/context";
+import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import type { ToolSession } from "../tools";
+import type { BackendProbeOptions } from "./probe";
+import type { EvalLanguage, EvalStatusEvent } from "@oh-my-pi/pi-tui/tools/eval";
+import type { EvalDisplayOutput } from "./types";
+
+/** Per-cell execute() options. */
+export interface ExecutorBackendExecOptions {
+	cwd: string;
+	sessionId: string;
+	sessionFile: string | undefined;
+	kernelOwnerId: string | undefined;
+	signal?: AbortSignal;
+	session: ToolSession;
+	/**
+	 * Runtime-work budget in milliseconds (the cell's `timeout`). Cancellation is
+	 * driven entirely by `signal`, which the eval tool arms as a watchdog that
+	 * pauses on bridge timeout-control status events and fires a `TimeoutError`
+	 * reason only while the Python/JS runtime owns control. Backends use this
+	 * value only for timeout-annotation text and as cold-start headroom; undefined
+	 * disables the cell timeout. Backends MUST NOT derive a competing wall-clock timer from it.
+	 */
+	idleTimeoutMs?: number;
+	reset: boolean;
+	/** Absolute filename for file-backed cells; preserves import and traceback locations. */
+	filename?: string;
+	/** Explicit distribution requirements installed before executing the cell. */
+	packages?: string[];
+	/** Managed scratch environment by default; project mutations require explicit selection. */
+	environment?: "managed" | "project";
+	onChunk: (chunk: string) => void;
+	/**
+	 * Live status events (read/write/agent/…) delivered as they are emitted,
+	 * before the cell finishes. The same events are also returned in
+	 * `displayOutputs`; this channel exists so callers can stream long-running
+	 * progress (e.g. `agent()` subagents) into the UI mid-execution.
+	 */
+	onStatus?: (event: EvalStatusEvent) => void;
+	/**
+	 * Shows the user what the cell's bridged tool calls send to `out://` (a `write` there, or bash
+	 * `> out://`). Throws to refuse a reply; absent, such calls fail instead of replying unseen.
+	 */
+	onReply?: (text: string) => void;
+}
+
+/** Result returned by a backend's execute(). */
+export interface ExecutorBackendResult {
+	output: string;
+	exitCode: number | undefined;
+	cancelled: boolean;
+	truncated: boolean;
+	artifactId: string | undefined;
+	/** Bytes the artifact cap dropped from the saved file's middle (the artifact is a head/tail sample). */
+	artifactElidedBytes?: number;
+	artifactError?: OutputArtifactError;
+	totalLines: number;
+	totalBytes: number;
+	outputLines: number;
+	outputBytes: number;
+	displayOutputs: EvalDisplayOutput[];
+}
+
+/** Outcome of {@link ExecutorBackend.checkAvailability}. */
+export interface BackendAvailability {
+	ok: boolean;
+	/** Why the backend cannot run (e.g. which interpreters failed to start); surfaced in the eval error. */
+	reason?: string;
+}
+
+/** Pluggable language backend for the eval tool. */
+export interface ExecutorBackend {
+	readonly id: EvalLanguage;
+	readonly label: string;
+	/** Source language identifier passed to the syntax highlighter (e.g. "python", "javascript"). */
+	readonly highlightLang: string;
+	/** Cheap availability check. Used by backend resolution and bounded by the caller's probe options. */
+	checkAvailability(session: ToolSession, opts?: BackendProbeOptions): Promise<BackendAvailability>;
+	/** Execute one cell. Caller invokes once per cell and aggregates results. */
+	execute(code: string, opts: ExecutorBackendExecOptions): Promise<ExecutorBackendResult>;
+}
+
+/**
+ * Resolve the on-disk roots that the eval helpers substitute for internal-URL
+ * schemes from {@link contextLocalProtocolOptions}, resolved the way the
+ * protocol handlers do, so an eval `write("local://x")` and a later
+ * `read local://x` agree on the location. `local://` maps to its root, which
+ * also holds the session's spills (`local://<N>.log`).
+ * A scheme is absent when its root does not resolve (read would fail the same way).
+ */
+export function resolveEvalUrlRoots(session: ToolSession): Record<string, string> {
+	const options = LocalProtocolHandler.resolveOptions({ localProtocolOptions: contextLocalProtocolOptions(session) });
+	return options ? buildEvalUrlRoots(options) : {};
+}

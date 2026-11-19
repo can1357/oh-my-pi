@@ -1,0 +1,1170 @@
+import { describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import {
+	type AuthCredentialStore,
+	AuthStorage,
+	SqliteAuthCredentialStore,
+	type StoredAuthCredential,
+} from "../src/auth-storage";
+import { isUsageLimitReached } from "../src/auth/usage-report";
+import * as oauthUtils from "../src/registry/oauth";
+import type { UsageFetchContext, UsageFetchParams, UsageProvider, UsageReport } from "../src/usage";
+import {
+	cursorRankingStrategy,
+	cursorUsageProvider,
+	parseCursorIndividualUsage,
+	parseCursorUsage,
+} from "../src/usage/cursor";
+import { defaultRankingStrategy } from "../src/usage/registry";
+
+function createCursorAccessToken(sub: string): string {
+	const payload = btoa(JSON.stringify({ sub })).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+	return `header.${payload}.signature`;
+}
+
+describe("cursor usage provider", () => {
+	describe("parseCursorUsage", () => {
+		it("returns null for non-record payloads", () => {
+			expect(parseCursorUsage(null)).toBeNull();
+			expect(parseCursorUsage(undefined)).toBeNull();
+			expect(parseCursorUsage("invalid")).toBeNull();
+			expect(parseCursorUsage([])).toBeNull();
+		});
+
+		it("returns null when no recognized quotas are present", () => {
+			const payload = {
+				someOtherField: "hello",
+				startOfMonth: "2026-07-01T00:00:00.000Z",
+			};
+			expect(parseCursorUsage(payload)).toBeNull();
+		});
+
+		it("emits an uncapped used-only bucket when the request limit is null", () => {
+			// Exact sanitized payload reported in #6381: the plan has no legacy cap.
+			const payload = {
+				"gpt-4": {
+					numRequests: 0,
+					numRequestsTotal: 0,
+					numTokens: 0,
+					maxTokenUsage: null,
+					maxRequestUsage: null,
+				},
+				startOfMonth: "2026-07-23T01:19:45.000Z",
+			};
+
+			const report = parseCursorUsage(payload);
+			expect(report).not.toBeNull();
+			expect(report?.limits).toHaveLength(1);
+
+			const limit = report?.limits[0];
+			expect(limit?.id).toBe("cursor:requests:gpt-4");
+			expect(limit?.label).toBe("gpt-4 requests");
+			expect(limit?.amount).toEqual({ used: 0, unit: "requests" });
+			expect(limit?.status).toBeUndefined();
+			expect(limit?.window?.resetsAt).toBe(Date.parse("2026-08-23T01:19:45.000Z"));
+		});
+
+		it("keeps capped and uncapped buckets side by side", () => {
+			const payload = {
+				"gpt-4": {
+					numRequests: 12,
+					maxRequestUsage: null,
+				},
+				"claude-3-5-sonnet": {
+					used: 80,
+					limit: 100,
+				},
+			};
+
+			const report = parseCursorUsage(payload);
+			expect(report?.limits.map(limit => limit.id)).toEqual([
+				"cursor:requests:gpt-4",
+				"cursor:requests:claude-3-5-sonnet",
+			]);
+			expect(report?.limits[0]?.amount).toEqual({ used: 12, unit: "requests" });
+			expect(report?.limits[1]?.amount.limit).toBe(100);
+			expect(report?.limits[1]?.status).toBe("ok");
+		});
+
+		it("parses request-count buckets with stable IDs and labels", () => {
+			const payload = {
+				"gpt-4": {
+					numRequests: 150,
+					maxRequestUsage: 500,
+				},
+				"claude-3-5-sonnet": {
+					used: 80,
+					limit: 100,
+				},
+				startOfMonth: "2026-07-01T00:00:00.000Z",
+			};
+
+			const report = parseCursorUsage(payload);
+			expect(report).not.toBeNull();
+			if (!report) return;
+
+			expect(report.provider).toBe("cursor");
+			expect(report.limits).toHaveLength(2);
+
+			const gpt4Limit = report.limits.find(l => l.id === "cursor:requests:gpt-4");
+			expect(gpt4Limit).toBeDefined();
+			if (gpt4Limit) {
+				expect(gpt4Limit.label).toBe("gpt-4 requests");
+				expect(gpt4Limit.amount.used).toBe(150);
+				expect(gpt4Limit.amount.limit).toBe(500);
+				expect(gpt4Limit.amount.remaining).toBe(350);
+				expect(gpt4Limit.amount.usedFraction).toBe(0.3);
+				expect(gpt4Limit.amount.unit).toBe("requests");
+				expect(gpt4Limit.status).toBe("ok");
+				expect(gpt4Limit.window).toBeDefined();
+				expect(gpt4Limit.window?.id).toBe("monthly");
+				expect(gpt4Limit.window?.label).toBe("Monthly");
+				// 2026-07-01 + 1 month = 2026-08-01
+				expect(gpt4Limit.window?.resetsAt).toBe(Date.parse("2026-08-01T00:00:00.000Z"));
+			}
+
+			const sonnetLimit = report.limits.find(l => l.id === "cursor:requests:claude-3-5-sonnet");
+			expect(sonnetLimit).toBeDefined();
+			if (sonnetLimit) {
+				expect(sonnetLimit.label).toBe("claude-3-5-sonnet requests");
+				expect(sonnetLimit.amount.used).toBe(80);
+				expect(sonnetLimit.amount.limit).toBe(100);
+				expect(sonnetLimit.amount.usedFraction).toBe(0.8);
+				expect(sonnetLimit.status).toBe("ok");
+			}
+		});
+
+		it("parses USD/billing plan buckets with stable IDs and labels", () => {
+			const payload = {
+				planUsage: {
+					used: 15.5,
+					limit: 20.0,
+				},
+				"usd-custom": {
+					amountUsed: 45,
+					amountLimit: 50,
+				},
+			};
+
+			const report = parseCursorUsage(payload);
+			expect(report).not.toBeNull();
+			if (!report) return;
+
+			expect(report.limits).toHaveLength(2);
+
+			const planLimit = report.limits.find(l => l.id === "cursor:usd:planusage");
+			expect(planLimit).toBeDefined();
+			if (planLimit) {
+				expect(planLimit.label).toBe("planUsage spend");
+				expect(planLimit.amount.used).toBe(15.5);
+				expect(planLimit.amount.limit).toBe(20.0);
+				expect(planLimit.amount.unit).toBe("usd");
+				expect(planLimit.status).toBe("ok");
+			}
+
+			const customLimit = report.limits.find(l => l.id === "cursor:usd:usd-custom");
+			expect(customLimit).toBeDefined();
+			if (customLimit) {
+				expect(customLimit.label).toBe("usd-custom spend");
+				expect(customLimit.amount.used).toBe(45);
+				expect(customLimit.amount.limit).toBe(50);
+				expect(customLimit.amount.unit).toBe("usd");
+				// 45 / 50 = 0.9 -> warning status
+				expect(customLimit.status).toBe("warning");
+			}
+		});
+
+		it("derives resetsAt directly from billingCycleEnd", () => {
+			const payload = {
+				"gpt-4": {
+					numRequests: 10,
+					maxRequestUsage: 10,
+				},
+				billingCycleEnd: "2026-07-20T00:00:00.000Z",
+			};
+			const report = parseCursorUsage(payload);
+			expect(report).not.toBeNull();
+			const limit = report?.limits[0];
+			expect(limit?.window?.resetsAt).toBe(Date.parse("2026-07-20T00:00:00.000Z"));
+		});
+	});
+
+	describe("parseCursorIndividualUsage", () => {
+		it("parses personal usage cents into a capped monthly dollar limit", () => {
+			const payload = {
+				individualUsage: {
+					overall: {
+						enabled: true,
+						used: "9000",
+						limit: "10000",
+						remaining: "1000",
+					},
+				},
+				teamUsage: {
+					onDemand: {
+						enabled: true,
+						used: 900000,
+						limit: 1000000,
+						remaining: 100000,
+					},
+				},
+				billingCycleEnd: "2026-08-20T00:00:00.000Z",
+			};
+
+			const report = parseCursorIndividualUsage(payload, 123);
+			expect(report).toEqual({
+				provider: "cursor",
+				fetchedAt: 123,
+				limits: [
+					{
+						id: "cursor:usd:individual-overall",
+						label: "Personal Usage",
+						scope: {
+							provider: "cursor",
+							windowId: "monthly",
+						},
+						window: {
+							id: "monthly",
+							label: "Monthly",
+							resetsAt: Date.parse("2026-08-20T00:00:00.000Z"),
+						},
+						amount: {
+							used: 90,
+							limit: 100,
+							remaining: 10,
+							usedFraction: 0.9,
+							remainingFraction: 0.1,
+							unit: "usd",
+						},
+						status: "warning",
+					},
+				],
+				raw: payload,
+			});
+		});
+
+		it("maps plan.auto/api percent rails to Cursor Models / Other Models", () => {
+			const payload = {
+				individualUsage: {
+					plan: {
+						enabled: true,
+						used: 1504,
+						limit: 7000,
+						remaining: 5496,
+						autoPercentUsed: 1.85,
+						apiPercentUsed: 0,
+						totalPercentUsed: 1.63,
+					},
+					onDemand: {
+						enabled: true,
+						used: 0,
+						limit: 2000,
+						remaining: 2000,
+					},
+				},
+				billingCycleEnd: "2026-09-08T08:00:31.000Z",
+			};
+
+			const report = parseCursorIndividualUsage(payload, 123);
+			expect(report?.limits.map(limit => ({ id: limit.id, label: limit.label }))).toEqual([
+				{ id: "cursor:usd:individual-auto", label: "Cursor Models" },
+				{ id: "cursor:usd:individual-api", label: "Other Models" },
+				{ id: "cursor:usd:individual-ondemand", label: "On-Demand Usage" },
+			]);
+			const auto = report?.limits[0]?.amount;
+			const onDemand = report?.limits[2]?.amount;
+			expect(auto?.unit).toBe("percent");
+			expect(auto?.used).toBeCloseTo(1.85);
+			expect(auto?.usedFraction).toBeCloseTo(0.0185);
+			// Critically: do NOT trust plan.used/limit cents as the dashboard %.
+			expect(auto?.usedFraction).not.toBeCloseTo(1504 / 7000);
+			expect(onDemand).toEqual({
+				used: 0,
+				limit: 20,
+				remaining: 20,
+				usedFraction: 0,
+				remainingFraction: 1,
+				unit: "usd",
+			});
+		});
+
+		it("reports Other Models as a percent, never as a share of plan.limit", () => {
+			// Live Ultra payload: Cursor's per-request records charged $48.44 of
+			// third-party usage this cycle, so 48.44% means a $100 pool, not $400.
+			const report = parseCursorIndividualUsage({
+				membershipType: "ultra",
+				individualUsage: {
+					plan: {
+						enabled: true,
+						used: 20336,
+						limit: 40000,
+						remaining: 19664,
+						autoPercentUsed: 5.164,
+						apiPercentUsed: 48.44,
+						totalPercentUsed: 6.56,
+					},
+					onDemand: { enabled: false, used: 0, limit: null, remaining: null },
+				},
+			});
+			const api = report?.limits.find(limit => limit.id === "cursor:usd:individual-api")?.amount;
+			expect(api?.unit).toBe("percent");
+			expect(api?.used).toBeCloseTo(48.44);
+			expect(api?.usedFraction).toBeCloseTo(0.4844);
+			expect(api?.limit).toBeUndefined();
+		});
+
+		it("prefers individualUsage.overall when both overall and plan exist", () => {
+			const report = parseCursorIndividualUsage({
+				individualUsage: {
+					overall: { enabled: true, used: 100, limit: 1000, remaining: 900 },
+					plan: { enabled: true, used: 924, limit: 7000, remaining: 6076 },
+				},
+			});
+			expect(report?.limits.map(limit => limit.id)).toEqual(["cursor:usd:individual-overall"]);
+		});
+
+		it("falls back to plan when overall is present but disabled", () => {
+			const report = parseCursorIndividualUsage({
+				individualUsage: {
+					overall: { enabled: false, used: 100, limit: 1000, remaining: 900 },
+					plan: {
+						enabled: true,
+						used: 1504,
+						limit: 7000,
+						remaining: 5496,
+						autoPercentUsed: 1.85,
+						apiPercentUsed: 0,
+					},
+				},
+			});
+			expect(report?.limits.map(limit => limit.id)).toEqual([
+				"cursor:usd:individual-auto",
+				"cursor:usd:individual-api",
+			]);
+		});
+
+		it("rejects disabled plan buckets even when stale percent fields remain", () => {
+			expect(
+				parseCursorIndividualUsage({
+					individualUsage: {
+						plan: {
+							enabled: false,
+							used: 1504,
+							limit: 7000,
+							autoPercentUsed: 1.85,
+							apiPercentUsed: 0,
+						},
+					},
+				}),
+			).toBeNull();
+		});
+
+		it("keeps on-demand when the included plan bucket is unusable", () => {
+			const report = parseCursorIndividualUsage({
+				individualUsage: {
+					plan: { enabled: false, used: 1504, limit: 7000, autoPercentUsed: 1.85 },
+					onDemand: { enabled: true, used: 0, limit: 2000, remaining: 2000 },
+				},
+			});
+			expect(report?.limits.map(limit => limit.id)).toEqual(["cursor:usd:individual-ondemand"]);
+		});
+
+		it("rejects disabled, malformed, and non-positive personal usage buckets", () => {
+			expect(
+				parseCursorIndividualUsage({
+					individualUsage: { overall: { enabled: false, used: 100, limit: 1000, remaining: 900 } },
+				}),
+			).toBeNull();
+			expect(
+				parseCursorIndividualUsage({ individualUsage: { overall: { limit: null, used: "invalid" } } }),
+			).toBeNull();
+			expect(
+				parseCursorIndividualUsage({ individualUsage: { overall: { used: 0, limit: 0, remaining: 0 } } }),
+			).toBeNull();
+			expect(
+				parseCursorIndividualUsage({ individualUsage: { overall: { used: 0, limit: -100, remaining: 0 } } }),
+			).toBeNull();
+		});
+
+		it("emits uncapped used-only dollar usage when the limit is null", () => {
+			const report = parseCursorIndividualUsage({
+				individualUsage: { overall: { enabled: true, used: "2500", limit: null } },
+			});
+			expect(report?.limits).toEqual([
+				{
+					id: "cursor:usd:individual-overall",
+					label: "Personal Usage",
+					scope: {
+						provider: "cursor",
+						windowId: "monthly",
+					},
+					window: {
+						id: "monthly",
+						label: "Monthly",
+					},
+					amount: {
+						used: 25,
+						unit: "usd",
+					},
+				},
+			]);
+		});
+
+		it("infers positive spend from limit and remaining when reported used is zero", () => {
+			const report = parseCursorIndividualUsage({
+				individualUsage: {
+					overall: {
+						used: 0,
+						limit: 5000,
+						remaining: 1500,
+					},
+				},
+			});
+			expect(report?.limits[0]?.amount).toEqual({
+				used: 35,
+				limit: 50,
+				remaining: 15,
+				usedFraction: 0.7,
+				remainingFraction: 0.3,
+				unit: "usd",
+			});
+			expect(report?.limits[0]?.status).toBe("ok");
+		});
+
+		it("derives remaining from selected used when reported values conflict", () => {
+			const report = parseCursorIndividualUsage({
+				individualUsage: {
+					overall: {
+						used: 100,
+						limit: 1000,
+						remaining: 0,
+					},
+				},
+			});
+			expect(report?.limits[0]).toMatchObject({
+				amount: {
+					used: 1,
+					limit: 10,
+					remaining: 9,
+					usedFraction: 0.1,
+					remainingFraction: 0.9,
+					unit: "usd",
+				},
+				status: "ok",
+			});
+		});
+	});
+
+	describe("credential ranking", () => {
+		it("does not let an exhausted Other Models pool block Grok or Composer", () => {
+			const report = parseCursorIndividualUsage({
+				individualUsage: {
+					plan: {
+						enabled: true,
+						limit: 2000,
+						autoPercentUsed: 11,
+						apiPercentUsed: 100,
+					},
+				},
+			});
+			if (!report) throw new Error("expected Cursor usage report");
+			const scopeLimits = defaultRankingStrategy("cursor")?.scopeLimits;
+			if (!scopeLimits) throw new Error("expected Cursor ranking strategy");
+
+			const grokLimits = scopeLimits(report, { modelId: "grok-4.7-xhigh" });
+			const composerLimits = scopeLimits(report, { modelId: "composer-2.5" });
+			const otherLimits = scopeLimits(report, { modelId: "claude-opus-5-high" });
+
+			expect(grokLimits.map(limit => limit.id)).toEqual(["cursor:usd:individual-auto"]);
+			expect(composerLimits.map(limit => limit.id)).toEqual(["cursor:usd:individual-auto"]);
+			expect(otherLimits.map(limit => limit.id)).toEqual(["cursor:usd:individual-api"]);
+			expect(isUsageLimitReached(grokLimits)).toBe(false);
+			expect(isUsageLimitReached(composerLimits)).toBe(false);
+			expect(isUsageLimitReached(otherLimits)).toBe(true);
+		});
+
+		it("uses the combined pool when Cursor does not report split rails", () => {
+			const report = parseCursorIndividualUsage({
+				individualUsage: {
+					plan: {
+						enabled: true,
+						limit: 2000,
+						totalPercentUsed: 100,
+					},
+				},
+			});
+			if (!report) throw new Error("expected Cursor usage report");
+			const scopeLimits = defaultRankingStrategy("cursor")?.scopeLimits;
+			if (!scopeLimits) throw new Error("expected Cursor ranking strategy");
+
+			const limits = scopeLimits(report, { modelId: "grok-4.7-xhigh" });
+			expect(limits.map(limit => limit.id)).toEqual(["cursor:usd:individual-plan"]);
+			expect(isUsageLimitReached(limits)).toBe(true);
+		});
+
+		it("keeps an Other Models block from sidelining the account for Grok", async () => {
+			const splitReport = (autoPercentUsed: number, apiPercentUsed: number): UsageReport => {
+				const report = parseCursorIndividualUsage({
+					billingCycleEnd: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+					individualUsage: { plan: { enabled: true, limit: 2000, autoPercentUsed, apiPercentUsed } },
+				});
+				if (!report) throw new Error("expected Cursor usage report");
+				return report;
+			};
+			const reports: Record<string, UsageReport> = {
+				"acct-a": splitReport(5, 100),
+				"acct-b": splitReport(95, 50),
+			};
+			const usageProvider: UsageProvider = {
+				id: "cursor",
+				async fetchUsage(params) {
+					return reports[params.credential.accountId ?? ""] ?? null;
+				},
+			};
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-cursor-pool-block-"));
+			const store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+			const storage = new AuthStorage(store, {
+				usageProviderResolver: provider => (provider === "cursor" ? usageProvider : undefined),
+			});
+			vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+				const credential = credentials.cursor;
+				return credential ? { apiKey: `api-${credential.accountId}`, newCredentials: credential } : null;
+			});
+			try {
+				const expires = Date.now() + 60 * 60 * 1000;
+				await storage.credentials.set("cursor", [
+					{ type: "oauth", access: "access-a", refresh: "refresh-a", expires, accountId: "acct-a" },
+					{ type: "oauth", access: "access-b", refresh: "refresh-b", expires, accountId: "acct-b" },
+				]);
+
+				// Account A's Other Models pool is spent: third-party models must use B.
+				expect(await storage.keys.get("cursor", "session-other", { modelId: "claude-opus-5-high" })).toBe(
+					"api-acct-b",
+				);
+				// Account A's Cursor Models pool is nearly unused, so Grok still prefers it.
+				expect(await storage.keys.get("cursor", "session-grok", { modelId: "grok-4.7-xhigh" })).toBe("api-acct-a");
+			} finally {
+				vi.restoreAllMocks();
+				storage.close();
+				store.close();
+				await fs.rm(tempDir, { recursive: true, force: true });
+			}
+		});
+
+		const xSubscriptionReport = (
+			poolPercentUsed: number,
+			onDemand: Record<string, unknown>,
+			weeklyResetsAt?: number,
+		): UsageReport => {
+			const report = parseCursorIndividualUsage(
+				{
+					billingCycleEnd: new Date(Date.now() + 20 * 24 * 60 * 60 * 1000).toISOString(),
+					membershipType: "unified_ultra",
+					individualUsage: {
+						plan: {
+							enabled: true,
+							used: Math.round(55_395 * (poolPercentUsed / 100)),
+							limit: 55_395,
+							autoPercentUsed: 0,
+							apiPercentUsed: 0,
+							totalPercentUsed: poolPercentUsed,
+						},
+						onDemand,
+					},
+				},
+				Date.now(),
+				weeklyResetsAt,
+			);
+			if (!report) throw new Error("expected Cursor usage report");
+			return report;
+		};
+
+		it("on the X Subscription meters Grok, Composer and Auto by the weekly pool and third-party models by prepaid credit", () => {
+			const weeklyResetsAt = Date.now() + 3 * 24 * 60 * 60 * 1000;
+			const report = xSubscriptionReport(40, { enabled: false, used: 0, limit: 0, remaining: 0 }, weeklyResetsAt);
+			const scopeLimits = defaultRankingStrategy("cursor")?.scopeLimits;
+			if (!scopeLimits) throw new Error("expected Cursor ranking strategy");
+
+			for (const modelId of ["grok-4.7", "composer-2.5", "default"]) {
+				const limits = scopeLimits(report, { modelId });
+				expect(limits.map(limit => limit.id)).toEqual(["cursor:usd:individual-auto"]);
+				expect(limits[0]?.amount).toMatchObject({ limit: 553.95, usedFraction: 0.4 });
+				expect(limits[0]?.window?.resetsAt).toBe(weeklyResetsAt);
+				expect(isUsageLimitReached(limits)).toBe(false);
+			}
+			// `apiPercentUsed: 0` is not spare third-party capacity: without prepaid credit Cursor refuses them.
+			const claudeLimits = scopeLimits(report, { modelId: "claude-opus-5-5" });
+			expect(claudeLimits.map(limit => limit.id)).toEqual(["cursor:usd:individual-api"]);
+			expect(claudeLimits[0]?.window).toEqual({ id: "prepaid", label: "Prepaid credit" });
+			expect(isUsageLimitReached(claudeLimits)).toBe(true);
+
+			// Uncapped on-demand (`enabled: true, limit: null`) with no spend yet is not exhausted.
+			const uncappedReport = xSubscriptionReport(40, { enabled: true, limit: null }, weeklyResetsAt);
+			expect(isUsageLimitReached(scopeLimits(uncappedReport, { modelId: "claude-opus-5-5" }))).toBe(false);
+		});
+
+		it("on the X Subscription sends third-party models to the account with prepaid credit", async () => {
+			const reports: Record<string, UsageReport> = {
+				"acct-no-credit": xSubscriptionReport(10, { enabled: false, used: 0, limit: 0, remaining: 0 }),
+				"acct-credit": xSubscriptionReport(90, { enabled: true, used: 500, limit: 5000, remaining: 4500 }),
+			};
+			const usageProvider: UsageProvider = {
+				id: "cursor",
+				async fetchUsage(params) {
+					return reports[params.credential.accountId ?? ""] ?? null;
+				},
+			};
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-cursor-x-subscription-"));
+			const store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+			const storage = new AuthStorage(store, {
+				usageProviderResolver: provider => (provider === "cursor" ? usageProvider : undefined),
+			});
+			vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+				const credential = credentials.cursor;
+				return credential ? { apiKey: `api-${credential.accountId}`, newCredentials: credential } : null;
+			});
+			try {
+				const expires = Date.now() + 60 * 60 * 1000;
+				await storage.credentials.set("cursor", [
+					{ type: "oauth", access: "access-a", refresh: "refresh-a", expires, accountId: "acct-no-credit" },
+					{ type: "oauth", access: "access-b", refresh: "refresh-b", expires, accountId: "acct-credit" },
+				]);
+
+				expect(await storage.keys.get("cursor", "session-claude", { modelId: "claude-opus-5-5" })).toBe(
+					"api-acct-credit",
+				);
+				// Grok follows the emptier weekly pool, not the credit balance.
+				expect(await storage.keys.get("cursor", "session-grok", { modelId: "grok-4.7" })).toBe(
+					"api-acct-no-credit",
+				);
+				// Prepaid credit has no calendar reset: the `pool:api` block on `acct-no-credit`
+				// is the short default backoff (~60 s), not pinned until `billingCycleEnd` (20 days).
+				const blocks = store.listCredentialBlocks([1, 2]);
+				expect(blocks).toHaveLength(1);
+				expect(blocks[0]?.blockScope).toBe("pool:api");
+				expect(blocks[0]?.blockedUntilMs).toBeLessThanOrEqual(Date.now() + 65_000);
+			} finally {
+				vi.restoreAllMocks();
+				storage.close();
+				store.close();
+				await fs.rm(tempDir, { recursive: true, force: true });
+			}
+		});
+
+		/** Pool blocks left on one Cursor account after a live usage fetch returns `report`. */
+		const blocksAfterLiveReport = async (report: UsageReport, blockScopes: string[]): Promise<string[]> => {
+			const row: StoredAuthCredential = {
+				id: 1,
+				provider: "cursor",
+				credential: {
+					type: "oauth",
+					access: "cursor-access",
+					refresh: "cursor-refresh",
+					expires: Date.now() + 60 * 60_000,
+					accountId: "acct-1",
+				},
+				disabledCause: null,
+			};
+			const blocks = new Map(blockScopes.map(scope => [scope, Date.now() + 60 * 60_000]));
+			const store: AuthCredentialStore = {
+				close() {},
+				listAuthCredentials: provider => (provider === undefined || provider === "cursor" ? [row] : []),
+				updateAuthCredential() {},
+				async deleteAuthCredential() {
+					return false;
+				},
+				tryDisableAuthCredentialIfMatches: () => false,
+				replaceAuthCredentials: async () => [row],
+				upsertAuthCredential: async () => [row],
+				async deleteAuthCredentials() {},
+				getCredentialBlock: (_id, _providerKey, blockScope) => blocks.get(blockScope),
+				upsertCredentialBlock: block => {
+					blocks.set(block.blockScope, block.blockedUntilMs);
+				},
+				deleteCredentialBlock: (_id, _providerKey, blockScope) => {
+					blocks.delete(blockScope);
+				},
+				getCache: () => null,
+				setCache() {},
+				cleanExpiredCache() {},
+			};
+			const liveReport: UsageReport = { ...report, metadata: { accountId: "acct-1" } };
+			const usageProvider: UsageProvider = { id: "cursor", fetchUsage: async () => liveReport };
+			const storage = new AuthStorage(store, {
+				usageProviderResolver: provider => (provider === "cursor" ? usageProvider : undefined),
+				rankingStrategyResolver: provider => (provider === "cursor" ? cursorRankingStrategy : undefined),
+				configValueResolver: async value => value,
+			});
+			try {
+				await storage.credentials.reload();
+				await storage.usage.reports();
+				return [...blocks.keys()].sort();
+			} finally {
+				storage.close();
+			}
+		};
+
+		it("on the X Subscription lifts pool blocks only while the pool has room", async () => {
+			const withCredit = xSubscriptionReport(40, { enabled: true, used: 500, limit: 5000, remaining: 4500 });
+			expect(await blocksAfterLiveReport(withCredit, ["pool:api", "pool:auto"])).toEqual([]);
+
+			// Prepaid credit off or spent: third-party models stay refused, so `pool:api` stays blocked.
+			const noCredit = xSubscriptionReport(40, { enabled: false, used: 0, limit: 0, remaining: 0 });
+			expect(await blocksAfterLiveReport(noCredit, ["pool:api"])).toEqual(["pool:api"]);
+
+			const poolSpent = xSubscriptionReport(100, { enabled: true, used: 500, limit: 5000, remaining: 4500 });
+			expect(await blocksAfterLiveReport(poolSpent, ["pool:auto"])).toEqual(["pool:auto"]);
+		});
+
+		it("does not lift pool blocks from a legacy plan's monthly dashboard percentages", async () => {
+			const legacy = parseCursorIndividualUsage({
+				billingCycleEnd: new Date(Date.now() + 20 * 24 * 60 * 60 * 1000).toISOString(),
+				membershipType: "pro_plus",
+				individualUsage: { plan: { enabled: true, limit: 7000, autoPercentUsed: 5, apiPercentUsed: 5 } },
+			});
+			if (!legacy) throw new Error("expected Cursor usage report");
+			expect(legacy.limits.map(limit => limit.window?.id)).toEqual(["monthly", "monthly"]);
+			expect(cursorRankingStrategy.healableBlockScopes?.(legacy)).toEqual([]);
+			expect(await blocksAfterLiveReport(legacy, ["pool:api", "pool:auto"])).toEqual(["pool:api", "pool:auto"]);
+		});
+	});
+
+	describe("default registration", () => {
+		it("registers Cursor in AuthStorage's default usage resolver", async () => {
+			const store: AuthCredentialStore = {
+				close() {},
+				listAuthCredentials() {
+					return [];
+				},
+				updateAuthCredential() {},
+				async deleteAuthCredential() {
+					return false;
+				},
+				tryDisableAuthCredentialIfMatches() {
+					return false;
+				},
+				async replaceAuthCredentials() {
+					return [];
+				},
+				async upsertAuthCredential() {
+					return [];
+				},
+				async deleteAuthCredentials() {},
+				getCache() {
+					return null;
+				},
+				setCache() {},
+				cleanExpiredCache() {},
+			};
+			const storage = new AuthStorage(store);
+			await storage.credentials.reload();
+			try {
+				expect(storage.usage.providerFor("cursor")).toBe(cursorUsageProvider);
+			} finally {
+				storage.close();
+			}
+		});
+	});
+
+	describe("cursorUsageProvider", () => {
+		it("supports oauth credentials", () => {
+			const params: UsageFetchParams = {
+				provider: "cursor",
+				credential: {
+					type: "oauth",
+					accessToken: "valid-token",
+				},
+			};
+			expect(cursorUsageProvider.supports?.(params)).toBe(true);
+		});
+
+		it("supports api_key credentials", () => {
+			const params: UsageFetchParams = {
+				provider: "cursor",
+				credential: {
+					type: "api_key",
+					apiKey: "valid-api-key",
+				},
+			};
+			expect(cursorUsageProvider.supports?.(params)).toBe(true);
+		});
+
+		it("does not support missing token/key", () => {
+			const params1: UsageFetchParams = {
+				provider: "cursor",
+				credential: {
+					type: "oauth",
+				},
+			};
+			const params2: UsageFetchParams = {
+				provider: "cursor",
+				credential: {
+					type: "api_key",
+				},
+			};
+			expect(cursorUsageProvider.supports?.(params1)).toBe(false);
+			expect(cursorUsageProvider.supports?.(params2)).toBe(false);
+		});
+
+		it("does not support other providers", () => {
+			const params: UsageFetchParams = {
+				provider: "openai-codex",
+				credential: {
+					type: "oauth",
+					accessToken: "token",
+				},
+			};
+			expect(cursorUsageProvider.supports?.(params)).toBe(false);
+		});
+
+		it("fetches and parses usage successfully", async () => {
+			const payload = {
+				"gpt-4": {
+					numRequests: 10,
+					maxRequestUsage: 100,
+				},
+				startOfMonth: "2026-07-01T00:00:00.000Z",
+			};
+
+			const mockFetch = (async (input: string | URL, init?: RequestInit): Promise<Response> => {
+				const urlStr = typeof input === "string" ? input : input.toString();
+				expect(urlStr).toBe("https://api2.cursor.sh/auth/usage");
+				expect(init?.headers).toBeDefined();
+				const headers = init?.headers as Record<string, string>;
+				expect(headers.Accept).toBe("application/json");
+				expect(headers.Authorization).toBe("Bearer test-token");
+
+				return new Response(JSON.stringify(payload), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as unknown as typeof fetch;
+
+			const ctx: UsageFetchContext = {
+				fetch: mockFetch,
+			};
+
+			const report = await cursorUsageProvider.fetchUsage(
+				{
+					provider: "cursor",
+					credential: {
+						type: "oauth",
+						accessToken: "test-token",
+						email: "user@example.com",
+						accountId: "acc_123",
+					},
+				},
+				ctx,
+			);
+
+			expect(report).not.toBeNull();
+			if (!report) return;
+
+			expect(report.provider).toBe("cursor");
+			expect(report.limits).toHaveLength(1);
+			expect(report.limits[0].id).toBe("cursor:requests:gpt-4");
+			expect(report.metadata).toEqual({
+				email: "user@example.com",
+				accountId: "acc_123",
+			});
+		});
+
+		it("fetches personal usage with a WorkOS cookie and the profile email with a bearer token", async () => {
+			const accessToken = createCursorAccessToken("auth0|user_123");
+			const authUsagePayload = {
+				"gpt-4": {
+					numRequests: 0,
+					maxRequestUsage: null,
+				},
+				"claude-3-5-sonnet": {
+					numRequests: 80,
+					maxRequestUsage: 500,
+				},
+				"gpt-4-32k": {
+					numRequests: 12,
+					maxRequestUsage: null,
+				},
+			};
+			const usageSummaryPayload = {
+				individualUsage: {
+					overall: {
+						enabled: true,
+						used: 2000,
+						limit: 10000,
+						remaining: 8000,
+					},
+				},
+				teamUsage: {
+					onDemand: {
+						enabled: true,
+						used: 900000,
+						limit: 1000000,
+						remaining: 100000,
+					},
+				},
+			};
+			const seenUrls: string[] = [];
+			const mockFetch = (async (input: string | URL, init?: RequestInit): Promise<Response> => {
+				const url = typeof input === "string" ? input : input.toString();
+				seenUrls.push(url);
+				const headers = new Headers(init?.headers);
+				if (url === "https://api2.cursor.sh/auth/usage") {
+					expect(headers.get("Accept")).toBe("application/json");
+					expect(headers.get("Authorization")).toBe(`Bearer ${accessToken}`);
+					return Response.json(authUsagePayload);
+				}
+				if (url === "https://api2.cursor.sh/aiserver.v1.DashboardService/GetMe") {
+					expect(init?.method).toBe("POST");
+					expect(headers.get("Authorization")).toBe(`Bearer ${accessToken}`);
+					expect(headers.has("Cookie")).toBe(false);
+					return Response.json({ email: "person@example.com", authId: "auth0|user_123" });
+				}
+				expect(url).toBe("https://cursor.com/api/usage-summary");
+				expect(headers.get("Accept")).toBe("application/json");
+				expect(headers.get("Cookie")).toBe(
+					`WorkosCursorSessionToken=${encodeURIComponent(`user_123::${accessToken}`)}`,
+				);
+				expect(headers.has("Authorization")).toBe(false);
+				return Response.json(usageSummaryPayload);
+			}) as unknown as typeof fetch;
+
+			const report = await cursorUsageProvider.fetchUsage(
+				{
+					provider: "cursor",
+					credential: {
+						type: "oauth",
+						accessToken,
+						email: "stored@example.com",
+						accountId: "account_123",
+						projectId: "project_123",
+					},
+				},
+				{ fetch: mockFetch },
+			);
+
+			expect(seenUrls).toEqual([
+				"https://api2.cursor.sh/auth/usage",
+				"https://cursor.com/api/usage-summary",
+				"https://api2.cursor.sh/aiserver.v1.DashboardService/GetMe",
+			]);
+			expect(report?.metadata).toEqual({
+				email: "person@example.com",
+				accountId: "account_123",
+				projectId: "project_123",
+			});
+			// The legacy `gpt-4` bucket is uncapped and always zero on usage-based
+			// plans; next to the personal dollar rails it is dropped, not rendered
+			// as a meaningless "0 requests used" row. A capped legacy bucket still
+			// carries a quota, and an uncapped one with recorded requests still
+			// carries a count, so both stay.
+			expect(report?.limits.map(limit => limit.id)).toEqual([
+				"cursor:requests:claude-3-5-sonnet",
+				"cursor:requests:gpt-4-32k",
+				"cursor:usd:individual-overall",
+			]);
+			expect(report?.limits[0]?.amount).toMatchObject({ used: 80, limit: 500, unit: "requests" });
+			expect(report?.limits[1]?.amount).toMatchObject({ used: 12, unit: "requests" });
+			expect(report?.limits[2]).toMatchObject({
+				id: "cursor:usd:individual-overall",
+				amount: {
+					used: 20,
+					limit: 100,
+					remaining: 80,
+					unit: "usd",
+				},
+			});
+			expect(report?.raw).toEqual({
+				authUsage: authUsagePayload,
+				usageSummary: usageSummaryPayload,
+			});
+		});
+
+		it("dates an X Subscription's Cursor-models pool by its weekly reset", async () => {
+			const accessToken = createCursorAccessToken("github|1245379");
+			const weeklyResetsAt = Date.now() + 2 * 24 * 60 * 60 * 1000;
+			const mockFetch = (async (input: string | URL, init?: RequestInit): Promise<Response> => {
+				const url = typeof input === "string" ? input : input.toString();
+				if (url === "https://api2.cursor.sh/auth/usage") return Response.json({});
+				if (url === "https://cursor.com/api/usage-summary") {
+					return Response.json({
+						billingCycleEnd: new Date(Date.now() + 20 * 24 * 60 * 60 * 1000).toISOString(),
+						membershipType: "unified_ultra",
+						individualUsage: {
+							plan: { enabled: true, used: 0, limit: 55_395, totalPercentUsed: 0 },
+							onDemand: { enabled: false, used: 0, limit: 0, remaining: 0 },
+						},
+					});
+				}
+				if (url === "https://api2.cursor.sh/aiserver.v1.DashboardService/GetPlanInfo") {
+					expect(new Headers(init?.headers).get("Authorization")).toBe(`Bearer ${accessToken}`);
+					return Response.json({ planInfo: { planName: "Ultra", includedUsageResetsAt: String(weeklyResetsAt) } });
+				}
+				return Response.json({ authId: "github|1245379", email: "person@example.com" });
+			}) as unknown as typeof fetch;
+
+			const report = await cursorUsageProvider.fetchUsage(
+				{ provider: "cursor", credential: { type: "oauth", accessToken } },
+				{ fetch: mockFetch },
+			);
+
+			const pool = report?.limits.find(limit => limit.id === "cursor:usd:individual-auto");
+			expect(pool?.window).toMatchObject({ id: "weekly", resetsAt: weeklyResetsAt });
+			expect(report?.metadata).toEqual({ email: "person@example.com" });
+		});
+
+		it("ignores a profile email returned for a different subject", async () => {
+			const accessToken = createCursorAccessToken("auth0|user_123");
+			const mockFetch = (async (input: string | URL): Promise<Response> => {
+				const url = typeof input === "string" ? input : input.toString();
+				if (url === "https://api2.cursor.sh/auth/usage") {
+					return Response.json({});
+				}
+				if (url === "https://cursor.com/api/usage-summary") {
+					return Response.json({
+						individualUsage: {
+							overall: {
+								used: 2000,
+								limit: 10000,
+								remaining: 8000,
+							},
+						},
+					});
+				}
+				return Response.json({ email: "other@example.com", authId: "auth0|different_user" });
+			}) as unknown as typeof fetch;
+
+			const report = await cursorUsageProvider.fetchUsage(
+				{
+					provider: "cursor",
+					credential: {
+						type: "oauth",
+						accessToken,
+						email: "stored@example.com",
+					},
+				},
+				{ fetch: mockFetch },
+			);
+
+			expect(report?.metadata).toEqual({ email: "stored@example.com" });
+		});
+
+		it("returns legacy usage when the personal summary request fails", async () => {
+			const accessToken = createCursorAccessToken("auth0|user_789");
+			const authUsagePayload = {
+				"gpt-4": {
+					numRequests: 10,
+					maxRequestUsage: 100,
+				},
+			};
+			const seenUrls: string[] = [];
+			const mockFetch = (async (input: string | URL): Promise<Response> => {
+				const url = typeof input === "string" ? input : input.toString();
+				seenUrls.push(url);
+				if (url === "https://cursor.com/api/usage-summary") {
+					return new Response("Unavailable", { status: 503 });
+				}
+				return Response.json(authUsagePayload);
+			}) as unknown as typeof fetch;
+
+			const report = await cursorUsageProvider.fetchUsage(
+				{
+					provider: "cursor",
+					credential: {
+						type: "oauth",
+						accessToken,
+						email: "fallback@example.com",
+					},
+				},
+				{ fetch: mockFetch },
+			);
+
+			expect(seenUrls).toEqual([
+				"https://api2.cursor.sh/auth/usage",
+				"https://cursor.com/api/usage-summary",
+				"https://api2.cursor.sh/aiserver.v1.DashboardService/GetMe",
+			]);
+			expect(report?.limits.map(limit => limit.id)).toEqual(["cursor:requests:gpt-4"]);
+			expect(report?.raw).toEqual(authUsagePayload);
+			expect(report?.metadata).toEqual({ email: "fallback@example.com" });
+		});
+
+		it("does not send the session cookie outside the default Cursor origin", async () => {
+			const accessToken = createCursorAccessToken("auth0|user_123");
+			const requests: Array<{ url: string; headers: Headers }> = [];
+			const mockFetch = (async (input: string | URL, init?: RequestInit): Promise<Response> => {
+				requests.push({
+					url: typeof input === "string" ? input : input.toString(),
+					headers: new Headers(init?.headers),
+				});
+				return Response.json({
+					"gpt-4": {
+						numRequests: 10,
+						maxRequestUsage: 100,
+					},
+				});
+			}) as unknown as typeof fetch;
+
+			const report = await cursorUsageProvider.fetchUsage(
+				{
+					provider: "cursor",
+					baseUrl: "https://cursor-proxy.example.com",
+					credential: {
+						type: "oauth",
+						accessToken,
+					},
+				},
+				{ fetch: mockFetch },
+			);
+
+			expect(requests).toHaveLength(1);
+			expect(requests[0]?.url).toBe("https://cursor-proxy.example.com/auth/usage");
+			expect(requests[0]?.headers.get("Authorization")).toBe(`Bearer ${accessToken}`);
+			expect(requests[0]?.headers.has("Cookie")).toBe(false);
+			expect(report?.limits.map(limit => limit.id)).toEqual(["cursor:requests:gpt-4"]);
+		});
+
+		it("returns null on non-2xx response", async () => {
+			const mockFetch = (async () => new Response("Error", { status: 403 })) as unknown as typeof fetch;
+			const ctx: UsageFetchContext = {
+				fetch: mockFetch,
+			};
+
+			const report = await cursorUsageProvider.fetchUsage(
+				{
+					provider: "cursor",
+					credential: {
+						type: "oauth",
+						accessToken: "test-token",
+					},
+				},
+				ctx,
+			);
+
+			expect(report).toBeNull();
+		});
+
+		it("returns null on fetch error", async () => {
+			const mockFetch = (async () => {
+				throw new Error("Network error");
+			}) as unknown as typeof fetch;
+			const ctx: UsageFetchContext = {
+				fetch: mockFetch,
+			};
+
+			const report = await cursorUsageProvider.fetchUsage(
+				{
+					provider: "cursor",
+					credential: {
+						type: "oauth",
+						accessToken: "test-token",
+					},
+				},
+				ctx,
+			);
+
+			expect(report).toBeNull();
+		});
+	});
+});

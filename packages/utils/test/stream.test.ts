@@ -1,0 +1,643 @@
+import { describe, expect, it } from "bun:test";
+import {
+	ConcatSink,
+	parseJsonlLenient,
+	readJsonl,
+	readLines,
+	readSseEvents,
+	readSseJson,
+	readSseJsonOrText,
+	type ServerSentEvent,
+} from "@oh-my-pi/pi-utils/stream";
+
+const encoder = new TextEncoder();
+
+async function collectAsync<T>(iter: AsyncIterable<T>): Promise<T[]> {
+	const output: T[] = [];
+	for await (const item of iter) output.push(item);
+	return output;
+}
+
+describe("readLines", () => {
+	it("splits lines across chunks without newlines", async () => {
+		const readable = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode("alpha\nbe"));
+				controller.enqueue(encoder.encode("ta\ngam"));
+				controller.enqueue(encoder.encode("ma"));
+				controller.close();
+			},
+		});
+
+		const output: string[] = [];
+		const dec = new TextDecoder();
+		for await (const line of readLines(readable)) {
+			output.push(dec.decode(line));
+		}
+
+		expect(output).toEqual(["alpha", "beta", "gamma"]);
+	});
+
+	it("keeps retained split lines stable after the stream drains", async () => {
+		const readable = new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const chunk of ["hel", "lo\nwor", "ld\n"]) {
+					controller.enqueue(encoder.encode(chunk));
+				}
+				controller.close();
+			},
+		});
+
+		const lines = await collectAsync(readLines(readable));
+		const dec = new TextDecoder();
+		expect(lines.map(line => dec.decode(line))).toEqual(["hello", "world"]);
+	});
+
+	it("keeps a retained split line stable beside an unterminated tail", async () => {
+		const readable = new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const chunk of ["hel", "lo\nwor", "ld"]) {
+					controller.enqueue(encoder.encode(chunk));
+				}
+				controller.close();
+			},
+		});
+
+		const lines = await collectAsync(readLines(readable));
+		const dec = new TextDecoder();
+		expect(lines.map(line => dec.decode(line))).toEqual(["hello", "world"]);
+	});
+});
+
+describe("abortableSource (via readLines)", () => {
+	it("cancels the source and stops yielding when aborted mid-stream", async () => {
+		let cancelReason: unknown;
+		let cancelled = false;
+		const controller = new AbortController();
+		const readable = new ReadableStream<Uint8Array>({
+			start(streamController) {
+				// One complete line, then leave the stream open so the next read blocks.
+				streamController.enqueue(encoder.encode("alpha\n"));
+			},
+			cancel(reason) {
+				cancelled = true;
+				cancelReason = reason;
+			},
+		});
+
+		const dec = new TextDecoder();
+		const iter = readLines(readable, controller.signal)[Symbol.asyncIterator]();
+
+		const first = await iter.next();
+		expect(first.done).toBe(false);
+		expect(dec.decode(first.value as Uint8Array)).toBe("alpha");
+
+		controller.abort("timeout");
+		const next = await iter.next();
+
+		expect(next.done).toBe(true);
+		expect(cancelled).toBe(true);
+		expect(cancelReason).toBe("timeout");
+	});
+
+	it("cancels the source when the consumer breaks early", async () => {
+		let cancelled = false;
+		const readable = new ReadableStream<Uint8Array>({
+			start(streamController) {
+				streamController.enqueue(encoder.encode("alpha\n"));
+				streamController.enqueue(encoder.encode("beta\n"));
+				// Stays open: only a `break` (not EOF) should trigger cancel.
+			},
+			cancel() {
+				cancelled = true;
+			},
+		});
+
+		const dec = new TextDecoder();
+		const lines: string[] = [];
+		for await (const line of readLines(readable)) {
+			lines.push(dec.decode(line));
+			break;
+		}
+
+		expect(lines).toEqual(["alpha"]);
+		expect(cancelled).toBe(true);
+	});
+});
+
+describe("readJsonl", () => {
+	it("parses JSONL across chunk boundaries", async () => {
+		const readable = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode('{"a":1}\n{"b":'));
+				controller.enqueue(encoder.encode('2}\n{"c":3}\n'));
+				controller.close();
+			},
+		});
+
+		const output = await collectAsync(readJsonl(readable));
+		expect(output).toEqual([{ a: 1 }, { b: 2 }, { c: 3 }]);
+	});
+
+	it("parses trailing line without newline", async () => {
+		const readable = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode('{"z":9}'));
+				controller.close();
+			},
+		});
+
+		const output = await collectAsync(readJsonl(readable));
+		expect(output).toEqual([{ z: 9 }]);
+	});
+});
+
+describe("ConcatSink", () => {
+	const text = (sink: ConcatSink) => new TextDecoder().decode(sink.flush());
+
+	it("accumulates appended chunks in order", () => {
+		const sink = new ConcatSink();
+		sink.append(encoder.encode("abc"));
+		sink.append(encoder.encode("de"));
+		expect(sink.isEmpty).toBe(false);
+		expect(text(sink)).toBe("abcde");
+	});
+
+	it("keeps the remainder after consuming a prefix", () => {
+		const sink = new ConcatSink();
+		sink.append(encoder.encode("abcde"));
+		sink.consume(2);
+		expect(text(sink)).toBe("cde");
+		sink.append(encoder.encode("fg"));
+		expect(text(sink)).toBe("cdefg");
+	});
+
+	it("empties when consuming at or past the buffered length", () => {
+		const sink = new ConcatSink();
+		sink.append(encoder.encode("abc"));
+		sink.consume(3);
+		expect(sink.isEmpty).toBe(true);
+		expect(sink.flush()).toBeUndefined();
+
+		sink.append(encoder.encode("xy"));
+		sink.consume(99);
+		expect(sink.isEmpty).toBe(true);
+	});
+
+	it("ignores non-positive consume counts", () => {
+		const sink = new ConcatSink();
+		sink.append(encoder.encode("abc"));
+		sink.consume(0);
+		sink.consume(-5);
+		expect(text(sink)).toBe("abc");
+	});
+
+	it("preserves multibyte sequences split across appends", () => {
+		const bytes = encoder.encode("é🚀");
+		const sink = new ConcatSink();
+		for (const byte of bytes) sink.append(new Uint8Array([byte]));
+		expect(text(sink)).toBe("é🚀");
+	});
+});
+
+describe("parseJsonlLenient", () => {
+	it("skips malformed lines and continues", () => {
+		const result = parseJsonlLenient<{ a: number }>('{"a":1}\n{bad json}\n{"a":3}\n');
+		expect(result).toEqual([{ a: 1 }, { a: 3 }]);
+	});
+
+	it("returns empty array for empty input", () => {
+		expect(parseJsonlLenient("")).toEqual([]);
+	});
+
+	it("handles input without trailing newline", () => {
+		const result = parseJsonlLenient<{ x: number }>('{"x":42}');
+		expect(result).toEqual([{ x: 42 }]);
+	});
+
+	it("notifies onMalformedRecord once per malformed line and ignores ASCII or Unicode whitespace-only lines", () => {
+		let malformed = 0;
+		const result = parseJsonlLenient<{ a: number }>('{"a":1}\n\n\u00a0\n  {bad 1}\n{"a":2}\n{bad 2}\n\u00a0', {
+			onMalformedRecord: () => {
+				malformed++;
+			},
+		});
+		expect(result).toEqual([{ a: 1 }, { a: 2 }]);
+		expect(malformed).toBe(2);
+
+		let unicodeOnlyMalformed = 0;
+		expect(
+			parseJsonlLenient("\u00a0", {
+				onMalformedRecord: () => {
+					unicodeOnlyMalformed++;
+				},
+			}),
+		).toEqual([]);
+		expect(unicodeOnlyMalformed).toBe(0);
+	});
+});
+
+describe("readSseJson", () => {
+	it("parses data lines and stops at [DONE]", async () => {
+		const chunks = [
+			encoder.encode('data: {"a":1}\n\n'),
+			encoder.encode("event: ping\ndata: \n\n"),
+			encoder.encode('data: {"b":2}\r\n\r\n'),
+			encoder.encode("data: [DONE]\n\n"),
+			encoder.encode('data: {"c":3}\n\n'),
+		];
+		const stream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const chunk of chunks) controller.enqueue(chunk);
+				controller.close();
+			},
+		});
+
+		const output = await collectAsync(readSseJson(stream));
+		expect(output).toEqual([{ a: 1 }, { b: 2 }]);
+	});
+
+	it("reports raw events to diagnostic observers without changing parsed output", async () => {
+		const stream = bytesStreamFromChunks([
+			encoder.encode('event: message\ndata: {"a":1}\n\n'),
+			encoder.encode("event: done\ndata: [DONE]\n\n"),
+		]);
+		const observed: ServerSentEvent[] = [];
+
+		const output = await collectAsync(readSseJson(stream, undefined, event => observed.push(event)));
+
+		expect(output).toEqual([{ a: 1 }]);
+		expect(observed.map(event => event.event)).toEqual(["message", "done"]);
+		expect(observed[0].raw).toEqual(["event: message", 'data: {"a":1}']);
+	});
+
+	it("flushes a trailing event without the closing blank line", async () => {
+		const chunks = [encoder.encode('data: {"c":3}')];
+		const stream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const chunk of chunks) controller.enqueue(chunk);
+				controller.close();
+			},
+		});
+
+		const output = await collectAsync(readSseJson(stream));
+		expect(output).toEqual([{ c: 3 }]);
+	});
+
+	it("completes cleanly when the final data chunk is truncated JSON", async () => {
+		const testCases = [
+			'data: {"b":2',
+			'data: {"id":"x", "na',
+			'data: {"id":"x", "name"',
+			'data: {"id":"x", "name":',
+			'data: {"id":"x", "name": "y',
+			'data: {"id":"x",',
+			"data: [1,2,",
+			'data: {"s":"n',
+			'data: {"n',
+			'data: {"s":"abc\\',
+			'data: {"s":"\\u12',
+		];
+		for (const dataChunk of testCases) {
+			const chunks = [encoder.encode('data: {"a":1}\n\n'), encoder.encode(dataChunk)];
+			const stream = new ReadableStream<Uint8Array>({
+				start(controller) {
+					for (const chunk of chunks) controller.enqueue(chunk);
+					controller.close();
+				},
+			});
+
+			const output = await collectAsync(readSseJson(stream));
+			expect(output).toEqual([{ a: 1 }]);
+		}
+	});
+
+	it("completes cleanly when the final data chunk is cut inside a JSON literal at EOF", async () => {
+		const testCases = ['data: {"finish_reason":nul', 'data: {"ok":tru', "data: [fal"];
+		for (const dataChunk of testCases) {
+			const chunks = [encoder.encode('data: {"a":1}\n\n'), encoder.encode(dataChunk)];
+			const stream = new ReadableStream<Uint8Array>({
+				start(controller) {
+					for (const chunk of chunks) controller.enqueue(chunk);
+					controller.close();
+				},
+			});
+
+			const output = await collectAsync(readSseJson(stream));
+			expect(output).toEqual([{ a: 1 }]);
+		}
+	});
+
+	it("throws SyntaxError when a middle data chunk is malformed JSON", async () => {
+		const chunks = [encoder.encode('data: {"a":1\n\n'), encoder.encode('data: {"b":2}\n\n')];
+		const stream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const chunk of chunks) controller.enqueue(chunk);
+				controller.close();
+			},
+		});
+
+		await expect(collectAsync(readSseJson(stream))).rejects.toThrow(SyntaxError);
+	});
+
+	it("throws SyntaxError when a final event is not JSON-container-shaped", async () => {
+		// Non-object/array final events are not recoverable as a truncated stream tail
+		// and still surface as errors (e.g. provider error text, bare scalars).
+		const testCases = ["data: Internal Server Error", 'data: "an unterminated string', "data: 42 then junk"];
+		for (const dataChunk of testCases) {
+			const chunks = [encoder.encode('data: {"a":1}\n\n'), encoder.encode(dataChunk)];
+			const stream = new ReadableStream<Uint8Array>({
+				start(controller) {
+					for (const chunk of chunks) controller.enqueue(chunk);
+					controller.close();
+				},
+			});
+
+			await expect(collectAsync(readSseJson(stream))).rejects.toThrow(SyntaxError);
+		}
+	});
+
+	it("stops cleanly on a container-shaped final event that fails strict parse", async () => {
+		// Lenient recovery: any object/array-shaped final event JSON.parse rejects is
+		// treated as a cut-off or lightly malformed stream tail and ends iteration after
+		// the last valid event, rather than throwing.
+		const testCases = [
+			'data: {"b":2,}', // trailing comma
+			"data: [{]", // mismatched closer
+			'data: {"b" 2}', // missing colon
+			"data: {unterminated}", // bareword body
+			'data: {"b": true garbage', // trailing garbage after a value
+			'data: {"b":1 "c":2', // missing comma
+			'data: {"b": ]', // mismatched closer
+			'data: {"b": @', // invalid character
+		];
+		for (const dataChunk of testCases) {
+			const chunks = [encoder.encode('data: {"a":1}\n\n'), encoder.encode(dataChunk)];
+			const stream = new ReadableStream<Uint8Array>({
+				start(controller) {
+					for (const chunk of chunks) controller.enqueue(chunk);
+					controller.close();
+				},
+			});
+
+			const output = await collectAsync(readSseJson(stream));
+			expect(output).toEqual([{ a: 1 }]);
+		}
+	});
+});
+
+describe("readSseJsonOrText", () => {
+	it("yields parsed events and stops at the [DONE] sentinel", async () => {
+		const stream = bytesStreamFromChunks([
+			encoder.encode('data: {"a":1}\n\n'),
+			encoder.encode("data: \n\n"),
+			encoder.encode("data: [DONE]\n\n"),
+			encoder.encode('data: {"c":3}\n\n'),
+		]);
+
+		expect(await collectAsync(readSseJsonOrText(stream))).toEqual([{ a: 1 }]);
+	});
+
+	it("yields a non-JSON frame as its raw text instead of throwing", async () => {
+		// The whole point of the reader: a proxy that already committed to the
+		// stream answers with a plain-text throttle line, and the consumer has to
+		// see the text rather than lose the turn to a SyntaxError.
+		const stream = bytesStreamFromChunks([
+			encoder.encode("data: 429 Too Many Requests\n\n"),
+			encoder.encode('data: {"a":1}\n\n'),
+		]);
+
+		expect(await collectAsync(readSseJsonOrText(stream))).toEqual(["429 Too Many Requests", { a: 1 }]);
+	});
+
+	it("joins a multi-line HTML frame into one text yield", async () => {
+		// SSE joins consecutive `data:` fields with \n, which is exactly how an
+		// nginx throttle page arrives: several lines, none of them JSON.
+		const stream = bytesStreamFromChunks([
+			encoder.encode(
+				"data: <html>\ndata: <head><title>Service Temporarily Unavailable</title></head>\ndata: </html>\n\n",
+			),
+		]);
+
+		expect(await collectAsync(readSseJsonOrText(stream))).toEqual([
+			"<html>\n<head><title>Service Temporarily Unavailable</title></head>\n</html>",
+		]);
+	});
+
+	it("yields a double-encoded JSON string frame as the decoded string", async () => {
+		// A gateway that JSON-wraps its text error page *parses*, so it arrives as
+		// the string value rather than as rejected text. Both lanes are
+		// indistinguishable by type, which is the safe direction: a consumer
+		// branching on `typeof === "string"` classifies it instead of trusting it.
+		const stream = bytesStreamFromChunks([encoder.encode('data: "429 Too Many Requests"\n\n')]);
+
+		expect(await collectAsync(readSseJsonOrText(stream))).toEqual(["429 Too Many Requests"]);
+	});
+
+	it("ends iteration on a cut-off container-shaped tail, exactly like readSseJson", async () => {
+		const stream = bytesStreamFromChunks([encoder.encode('data: {"a":1}\n\n'), encoder.encode('data: {"b":2,}')]);
+
+		expect(await collectAsync(readSseJsonOrText(stream))).toEqual([{ a: 1 }]);
+	});
+
+	it("rethrows nothing for a middle malformed frame that readSseJson rejects", async () => {
+		// The strict reader's contract is unchanged; this reader's contract is that
+		// the same input is surfaced as text. Both share one frame loop, so pin them
+		// against each other.
+		const chunks = [encoder.encode('data: {"a":1\n\n'), encoder.encode('data: {"b":2}\n\n')];
+
+		expect(await collectAsync(readSseJsonOrText(bytesStreamFromChunks(chunks)))).toEqual(['{"a":1', { b: 2 }]);
+		await expect(collectAsync(readSseJson(bytesStreamFromChunks(chunks)))).rejects.toThrow(SyntaxError);
+	});
+});
+
+function bytesStreamFromChunks(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
+	return new ReadableStream<Uint8Array>({
+		start(controller) {
+			for (const chunk of chunks) controller.enqueue(chunk);
+			controller.close();
+		},
+	});
+}
+
+describe("readSseEvents", () => {
+	it("dispatches events on blank-line boundaries", async () => {
+		const stream = bytesStreamFromChunks([
+			encoder.encode('event: message_start\ndata: {"id":1}\n\n'),
+			encoder.encode("event: message_stop\ndata: {}\n\n"),
+		]);
+		const events = await collectAsync(readSseEvents(stream));
+		expect(events.map(e => e.event)).toEqual(["message_start", "message_stop"]);
+		expect(events.map(e => e.data)).toEqual(['{"id":1}', "{}"]);
+	});
+
+	it("joins multiple data: lines with newlines", async () => {
+		const stream = bytesStreamFromChunks([encoder.encode("event: chunk\ndata: line1\ndata: line2\ndata: line3\n\n")]);
+		const [evt] = await collectAsync(readSseEvents(stream));
+		expect(evt.event).toBe("chunk");
+		expect(evt.data).toBe("line1\nline2\nline3");
+	});
+
+	it("skips comment lines but preserves them in raw", async () => {
+		const stream = bytesStreamFromChunks([encoder.encode(": keep-alive\nevent: ping\ndata: ok\n\n")]);
+		const [evt] = await collectAsync(readSseEvents(stream, undefined, { captureRaw: true }));
+		expect(evt.event).toBe("ping");
+		expect(evt.data).toBe("ok");
+		expect(evt.raw).toEqual([": keep-alive", "event: ping", "data: ok"]);
+	});
+
+	it("does not carry pure comment keepalives into the next event raw lines", async () => {
+		const stream = bytesStreamFromChunks([encoder.encode(": keepalive\n\nevent: ping\ndata: ok\n\n")]);
+		const [evt] = await collectAsync(readSseEvents(stream, undefined, { captureRaw: true }));
+		expect(evt.raw).toEqual(["event: ping", "data: ok"]);
+	});
+
+	it("yields control-only id/retry events for reconnecting transports", async () => {
+		const stream = bytesStreamFromChunks([encoder.encode("id: stream-1\nretry: 25\n\n")]);
+		const events = await collectAsync(readSseEvents(stream, undefined, { captureRaw: true }));
+
+		expect(events).toEqual([
+			{
+				event: null,
+				data: "",
+				raw: ["id: stream-1", "retry: 25"],
+				id: "stream-1",
+				retry: 25,
+			},
+		] satisfies ServerSentEvent[]);
+	});
+
+	it("strips a single optional space after the field colon (and only one)", async () => {
+		const stream = bytesStreamFromChunks([encoder.encode("event:  spaced\ndata:  body\n\n")]);
+		const [evt] = await collectAsync(readSseEvents(stream));
+		expect(evt.event).toBe(" spaced");
+		expect(evt.data).toBe(" body");
+	});
+
+	it("dispatches multiple CR-only events before EOF", async () => {
+		let sourceClosed = false;
+		let closeSource = () => {};
+		const stream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode("event: first\rdata: 1\r\revent: second\rdata: 2\r\r"));
+				closeSource = () => {
+					if (sourceClosed) return;
+					sourceClosed = true;
+					controller.close();
+				};
+			},
+		});
+		const iterator = readSseEvents(stream)[Symbol.asyncIterator]();
+
+		const first = await iterator.next();
+		const second = await iterator.next();
+		expect(sourceClosed).toBe(false);
+		closeSource();
+		const end = await iterator.next();
+		expect(first.done).toBe(false);
+		expect(first.value?.event).toBe("first");
+		expect(first.value?.data).toBe("1");
+		expect(second.done).toBe(false);
+		expect(second.value?.event).toBe("second");
+		expect(second.value?.data).toBe("2");
+		expect(end.done).toBe(true);
+	});
+
+	it("handles chunk-split CRLF and UTF-8 sequences together", async () => {
+		const stream = bytesStreamFromChunks([
+			encoder.encode("event: utf\r"),
+			encoder.encode("\ndata: caf"),
+			Uint8Array.of(0xc3),
+			Uint8Array.of(0xa9, 0x0d),
+			encoder.encode("\n\r"),
+			encoder.encode("\nevent: next\r\ndata: ok\r\n\r\n"),
+		]);
+		const events = await collectAsync(readSseEvents(stream, undefined, { captureRaw: true }));
+
+		expect(events).toEqual([
+			{ event: "utf", data: "café", raw: ["event: utf", "data: café"] },
+			{ event: "next", data: "ok", raw: ["event: next", "data: ok"] },
+		] satisfies ServerSentEvent[]);
+	});
+
+	it("recovers when a chunk boundary splits inside a field name", async () => {
+		const stream = bytesStreamFromChunks([
+			encoder.encode("eve"),
+			encoder.encode("nt: split\nda"),
+			encoder.encode("ta: payload\n\n"),
+		]);
+		const events = await collectAsync(readSseEvents(stream));
+		expect(events).toHaveLength(1);
+		expect(events[0].event).toBe("split");
+		expect(events[0].data).toBe("payload");
+	});
+
+	it("flushes a pending event even without the trailing blank line", async () => {
+		const stream = bytesStreamFromChunks([encoder.encode("event: trailing\ndata: tail\n")]);
+		const events = await collectAsync(readSseEvents(stream, undefined, { captureRaw: true }));
+		expect(events).toEqual([
+			{ event: "trailing", data: "tail", raw: ["event: trailing", "data: tail"] },
+		] satisfies ServerSentEvent[]);
+	});
+
+	it("leaves raw empty by default so the token path pays no per-line slices", async () => {
+		const stream = bytesStreamFromChunks([encoder.encode("event: ping\ndata: ok\n\n")]);
+		const [evt] = await collectAsync(readSseEvents(stream));
+		expect(evt.event).toBe("ping");
+		expect(evt.data).toBe("ok");
+		expect(evt.raw).toEqual([]);
+	});
+
+	it("treats a tail without any newline as a complete final line", async () => {
+		const stream = bytesStreamFromChunks([encoder.encode("event: x\ndata: y")]);
+		const events = await collectAsync(readSseEvents(stream));
+		expect(events).toHaveLength(1);
+		expect(events[0].event).toBe("x");
+		expect(events[0].data).toBe("y");
+	});
+
+	it("survives a one-byte-per-chunk drip feed without quadratic blowup", async () => {
+		// The legacy decoder rebuilt the entire string buffer per line and was
+		// O(n²) in this case. Should now complete in well under a second.
+		const lines: string[] = [];
+		for (let i = 0; i < 2000; i++) {
+			lines.push(`event: e${i}`, `data: ${i}`, "");
+		}
+		const payload = encoder.encode(`${lines.join("\n")}\n`);
+		const oneByteChunks = Array.from(payload, byte => Uint8Array.of(byte));
+		const stream = bytesStreamFromChunks(oneByteChunks);
+		const start = performance.now();
+		const events = await collectAsync(readSseEvents(stream));
+		const elapsed = performance.now() - start;
+		expect(events).toHaveLength(2000);
+		expect(events[1999].event).toBe("e1999");
+		expect(events[1999].data).toBe("1999");
+		// Generous bound: the previous quadratic implementation needed >5s here.
+		expect(elapsed).toBeLessThan(2000);
+	});
+});
+
+describe("ConcatSink capacity", () => {
+	const LARGE = 4 * 1024 * 1024;
+
+	it("releases an oversized buffer once its bytes are consumed", () => {
+		const sink = new ConcatSink();
+		sink.append(new Uint8Array(LARGE).fill(0x61));
+		sink.consume(LARGE - 8);
+		const rest = sink.flush();
+		expect(rest?.length).toBe(8);
+		expect(rest!.buffer.byteLength).toBeLessThan(LARGE);
+	});
+
+	it("drops an oversized buffer on clear and reuses a right-sized one on reset", () => {
+		const sink = new ConcatSink();
+		sink.append(new Uint8Array(LARGE));
+		sink.clear();
+		sink.append(new Uint8Array(16));
+		expect(sink.flush()!.buffer.byteLength).toBeLessThan(LARGE);
+
+		sink.append(new Uint8Array(LARGE));
+		sink.reset(new Uint8Array(16));
+		expect(sink.flush()!.buffer.byteLength).toBeLessThan(LARGE);
+	});
+});

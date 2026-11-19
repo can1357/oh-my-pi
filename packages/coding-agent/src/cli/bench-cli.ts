@@ -1,0 +1,1444 @@
+import type { ResolvedThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type {
+	Api,
+	ApiKeyResolver,
+	AssistantMessage,
+	AssistantMessageEvent,
+	Context,
+	Effort,
+	Model,
+	ProviderSessionState,
+	ServiceTier,
+	ServiceTierByFamily,
+} from "@oh-my-pi/pi-ai";
+import { resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
+import {
+	renderTableRow,
+	replaceTabs,
+	type TableCell,
+	type TableColumn,
+	truncateToWidth,
+	visibleWidth,
+} from "@oh-my-pi/pi-tui";
+import { formatDuration, formatNumber, prompt } from "@oh-my-pi/pi-utils";
+import chalk from "@oh-my-pi/pi-utils/chalk";
+import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { formatModelStringWithRouting } from "../config/model-resolver";
+import { buildServiceTierByFamily, serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
+import { Settings } from "../config/settings";
+import { resolveWebsocketPreference } from "../session/settings-stream-fn";
+import cachePrefixTemplate from "../prompts/bench/cache-prefix.md" with { type: "text" };
+import cachePrefixChunk from "../prompts/bench/cache-prefix-chunk.md" with { type: "text" };
+import cacheSuffixTemplate from "../prompts/bench/cache-suffix.md" with { type: "text" };
+import chatTemplate from "../prompts/bench/chat.md" with { type: "text" };
+import generationTemplate from "../prompts/bench/generation.md" with { type: "text" };
+import prefillInstruction from "../prompts/bench/prefill-instruction.md" with { type: "text" };
+import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import {
+	type BenchRuntime,
+	type BenchTarget,
+	createDefaultBenchRuntime,
+	resolveBenchTargets,
+	type StreamSimpleFn,
+} from "./bench-runtime";
+import { createLiveBoard, type LiveBoardOutput } from "@oh-my-pi/pi-tui/chrome/live-board";
+import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
+
+import { cfgTierAnthropic, cfgTierGoogle, cfgTierOpenai } from "../session/settings";
+
+const DEFAULT_PAR = 4;
+const DEFAULT_CACHE_MAX_TOKENS = 64;
+const DEFAULT_CACHE_PREFIX_BYTES = 8_192;
+const DEFAULT_CACHE_PAIRS = 1;
+const DEFAULT_CACHE_CONCURRENCY = 1;
+const DEFAULT_PREFILL_BYTES = 32_768;
+/**
+ * Default prefill input cap per context-window token. Dense tokenizers pack
+ * the filler at ~2.3 bytes/token (Apple's on-device model), so 1.5 bytes per
+ * window token stays under ~2/3 of the window — room for the instruction and
+ * output on small local models.
+ */
+const PREFILL_BYTES_PER_CONTEXT_TOKEN = 1.5;
+/** `--detailed` requests per phase (the parallel phase rounds up to whole `--par` waves). */
+const DETAILED_DEFAULT_RUNS = 4;
+const ERROR_WIDTH = 110;
+const UTF8_ENCODER = new TextEncoder();
+const UTF8_DECODER = new TextDecoder();
+const CACHE_PREFIX_CHUNK = cachePrefixChunk;
+const CACHE_PREFIX_PLACEHOLDER = "__OMP_CACHE_BENCH_RAW_PREFIX__";
+const CACHE_PREFIX_CHUNK_BYTES = UTF8_ENCODER.encode(CACHE_PREFIX_CHUNK).byteLength;
+const RESPONSE_CACHE_STATUS_HEADERS = ["cf-aig-cache-status"] as const;
+
+/**
+ * One built-in workload a bench run exercises:
+ * - `chat`: balanced prompt/output — the everyday latency + throughput picture.
+ * - `prefill`: large cache-busted input, tiny output — isolates input-token
+ *   processing (TTFT and prefill tok/s).
+ * - `generation`: tiny prompt, long forced output — isolates sustained decode
+ *   throughput.
+ */
+export type BenchChallengeKind = "chat" | "prefill" | "generation";
+
+/** One challenge kind (`chat` by default), or `mix` to rotate through every kind. */
+export type BenchProfile = "mix" | BenchChallengeKind;
+
+/** `mix` rotation order; the lead kind (chat) supplies a mixed table's latency and ranking. */
+const CHALLENGE_KINDS = ["chat", "prefill", "generation"] as const;
+
+/** Default max output tokens per challenge kind (`--max-tokens` overrides all). */
+const CHALLENGE_MAX_TOKENS: Record<BenchChallengeKind, number> = { chat: 512, prefill: 64, generation: 2048 };
+
+/**
+ * One `--detailed` phase, run in order against each model:
+ * - `single`: chat challenges one at a time — uncontended single-user latency.
+ * - `parallel`: chat challenges `--par` at a time — latency under load and the
+ *   aggregate throughput the endpoint sustains across concurrent users.
+ * - `prefill`: prefill challenges one at a time — uncontended input processing.
+ */
+export type BenchPhase = "single" | "parallel" | "prefill";
+
+/** Default requests per model; mix needs a multiple of the kind count. */
+const PROFILE_DEFAULT_RUNS: Record<BenchProfile, number> = { mix: 9, chat: 10, prefill: 5, generation: 5 };
+
+/** Chat-challenge topics; one is drawn at random per run so runs never repeat a request. */
+const CHAT_TOPICS = [
+	"how a web browser turns an HTML payload into pixels on screen",
+	"how a garbage collector reclaims memory in a managed runtime",
+	"how TCP congestion control adapts to packet loss",
+	"how a B-tree index accelerates database lookups",
+	"how DNS resolves a hostname to an IP address",
+	"how an operating system scheduler shares a CPU between processes",
+	"how public-key cryptography secures a TLS handshake",
+	"how a compiler lowers source code to optimized machine code",
+	"how a CPU cache hierarchy hides memory latency",
+	"how a distributed consensus protocol keeps replicas consistent",
+] as const;
+
+/** Generation-challenge topics; long, low-ambiguity narrations that sustain decoding. */
+const GENERATION_TOPICS = [
+	"the history of computing",
+	"the history of aviation",
+	"the history of astronomy",
+	"the history of railways",
+	"the history of medicine",
+	"the history of telecommunications",
+	"the history of cartography",
+	"the history of shipbuilding",
+] as const;
+
+export interface BenchCommandArgs {
+	models: string[];
+	flags: {
+		runs?: number;
+		maxTokens?: number;
+		prompt?: string;
+		/** Service-tier setting value (`none` omits); overrides the configured `serviceTier` setting. */
+		serviceTier?: string;
+		/** One-based OAuth account position for each selected provider. */
+		account?: number;
+		json?: boolean;
+		par?: number;
+		/** Benchmark workload: a challenge kind (default `chat`), or `mix` to rotate through every kind. */
+		profile?: string;
+		/** Synthetic input size for prefill challenges (default: 32768 bytes, capped by the model's context window). */
+		prefillBytes?: number;
+		/** Run the single-user, parallel, and prefill phases instead of one `--profile` workload. */
+		detailed?: boolean;
+		cache?: boolean;
+		cachePrefixFile?: string;
+		cachePrefixBytes?: number;
+		cachePairs?: number;
+		cacheConcurrency?: number;
+	};
+}
+
+export interface BenchRunSuccess {
+	ok: true;
+	/** Observed response transport; absent when the provider exposes no metadata. */
+	transport?: "http" | "websocket";
+	/** Challenge kind this run exercised; absent in `--cache` mode. */
+	challenge?: BenchChallengeKind;
+	/** `--detailed` phase this run belongs to. */
+	phase?: BenchPhase;
+	/** Request start → first streamed token: queue + prefill window. */
+	ttftMs: number;
+	/** First streamed token → done: decode window (0 when the response arrived buffered). */
+	generationMs: number;
+	durationMs: number;
+	/** Total prompt tokens: `usage.input` plus cache reads/writes (providers report cached prompt tokens outside `input`). */
+	inputTokens: number;
+	outputTokens: number;
+	/** Output tokens/sec over the total request duration. */
+	tokensPerSecond: number;
+	/**
+	 * Output tokens/sec over the decode window. Inflated on providers that hide
+	 * reasoning until completion (tiny decode window); 0 for fully buffered
+	 * responses. Compare `tokensPerSecond` for a buffering-proof number.
+	 */
+	generationTps: number;
+	/** Prompt tokens/sec over the TTFT window (queue-inclusive prefill rate). */
+	prefillTps: number;
+	/** Priced cost of the request; 0 when pricing is unavailable. */
+	cost: number;
+}
+
+export interface BenchRunFailure {
+	ok: false;
+	/** Challenge kind this run exercised; absent in `--cache` mode. */
+	challenge?: BenchChallengeKind;
+	/** `--detailed` phase this run belongs to. */
+	phase?: BenchPhase;
+	error: string;
+}
+
+export type BenchRunResult = BenchRunSuccess | BenchRunFailure;
+
+export type CacheObservation =
+	| "prompt_cache_read_observed"
+	| "prompt_cache_write_observed"
+	| "response_cache_hit_observed"
+	| "no_provider_proof";
+
+export interface BenchCacheUsage {
+	inputTokens: number;
+	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+	totalTokens: number;
+	cost: number;
+}
+
+export interface BenchCacheRunReport {
+	phase: "cold" | "warm";
+	result: BenchRunResult;
+	usage?: BenchCacheUsage;
+	requestIdObserved: boolean;
+	observations: CacheObservation[];
+}
+
+export interface BenchCachePairReport {
+	cold: BenchCacheRunReport;
+	warm: BenchCacheRunReport;
+	/** The nominal cold request showed cache reuse, so it is not a true cold baseline. */
+	coldAlreadyWarm: boolean;
+	/** Structural-only comparisons: prompt text and cache keys are never emitted. */
+	stablePrefix: true;
+	suffixChanged: true;
+	promptCacheKeyStable: true;
+	statefulResponsesDisabled: true;
+	freshProviderSessionState: true;
+	/** "unavailable" when a transport does not expose the provider payload locally. */
+	payloadStructureStable: boolean | "unavailable";
+}
+
+/** Distribution summary over successful runs. */
+export interface MetricStats {
+	mean: number;
+	min: number;
+	/** Median (nearest-rank). */
+	p50: number;
+	/** 95th percentile (nearest-rank). */
+	p95: number;
+	max: number;
+}
+
+/** Aggregates over successful runs. */
+export interface BenchStats {
+	ttftMs: MetricStats;
+	durationMs: MetricStats;
+	tokensPerSecond: MetricStats;
+	generationTps: MetricStats;
+	prefillTps: MetricStats;
+	/** Mean input tokens per successful run. */
+	inputTokens: number;
+	/** Mean output tokens per successful run. */
+	outputTokens: number;
+	/** Mean priced cost per successful run; 0 when pricing is unavailable. */
+	cost: number;
+}
+
+/** One `--detailed` phase's outcome for a model. */
+export interface BenchPhaseReport {
+	/** Requests kept in flight at once. */
+	concurrency: number;
+	/** Requests finished (successful or not). */
+	runs: number;
+	/** Phase start → last finished request. */
+	wallMs: number;
+	/**
+	 * Output tokens of successful runs per wall-clock second: the throughput the
+	 * endpoint sustained across all in-flight requests. Compare `parallel` to
+	 * `single` to see whether concurrent users scale or queue.
+	 */
+	aggregateTps: number;
+	/** Per-request aggregates over successful runs; null when every run failed. */
+	stats: BenchStats | null;
+}
+
+export interface BenchModelReport {
+	/** Selector as the user typed it (e.g. "opus" or "gemini-3.5:low"). */
+	selector: string;
+	/** Resolved `provider/id`. */
+	model: string;
+	/** Explicit thinking level from a `:level` selector suffix; undefined = provider default. */
+	thinking?: ResolvedThinkingLevel;
+	results: BenchRunResult[];
+	/** Aggregates over successful runs; null when every run failed. */
+	stats: BenchStats | null;
+	/** Aggregates per challenge kind; empty in `--cache` mode. */
+	byChallenge: Partial<Record<BenchChallengeKind, BenchStats>>;
+	/** Per-phase outcomes; empty unless `--detailed`. */
+	phases: Partial<Record<BenchPhase, BenchPhaseReport>>;
+	cachePairs?: BenchCachePairReport[];
+}
+
+export interface BenchSummary {
+	/** Requests per model (`--detailed`: summed over phases). */
+	runs: number;
+	/** Explicit `--max-tokens` override (cache mode: resolved value); absent when per-challenge defaults apply. */
+	maxTokens?: number;
+	/** Benchmark workload; absent in `--cache` and `--detailed` modes. */
+	profile?: BenchProfile;
+	/** Set when `--detailed` ran the phases; each model's `phases` holds the results. */
+	detailed?: { runsPerPhase: number; par: number };
+	models: BenchModelReport[];
+	failures: number;
+	/** Requested per-family service tiers, resolved per model before reaching the wire. */
+	serviceTierByFamily?: ServiceTierByFamily;
+	cache?: {
+		pairs: number;
+		concurrency: number;
+	};
+}
+
+export interface BenchDependencies {
+	createRuntime?: () => Promise<BenchRuntime>;
+	randomSessionId?: () => string;
+	writeStdout?: (text: string) => void;
+	writeStderr?: (text: string) => void;
+	setExitCode?: (code: number) => void;
+	streamSimple?: StreamSimpleFn;
+	now?: () => number;
+	/** Uniform [0,1) source for challenge randomization; default `Math.random`. */
+	random?: () => number;
+	readTextFile?: (path: string, maxBytes: number) => Promise<string>;
+	stdoutIsTTY?: boolean;
+}
+
+function getErrorMessage(error: unknown): string {
+	if (error instanceof Error && error.message) return error.message;
+	return String(error);
+}
+
+function normalizePositiveInteger(name: string, value: number | undefined, fallback: number): number {
+	if (value === undefined) return fallback;
+	if (!Number.isInteger(value) || value <= 0) {
+		throw new Error(`Expected --${name} to be a positive integer, got ${value}`);
+	}
+	return value;
+}
+
+function closeProviderSessionStates(providerSessionState: Map<string, ProviderSessionState>): void {
+	for (const state of providerSessionState.values()) {
+		state.close();
+	}
+	providerSessionState.clear();
+}
+
+function isFirstTokenEvent(event: AssistantMessageEvent): boolean {
+	switch (event.type) {
+		case "text_delta":
+		case "thinking_delta":
+		case "toolcall_delta":
+			return event.delta.length > 0;
+		case "text_end":
+		case "thinking_end":
+			return event.content.length > 0;
+		case "image_end":
+			return true;
+		default:
+			return false;
+	}
+}
+
+/** Final message carries visible output — non-empty text/thinking, an image, or a tool call. */
+function hasVisibleFinalContent(message: AssistantMessage): boolean {
+	return message.content.some(block => {
+		switch (block.type) {
+			case "text":
+				return block.text.length > 0;
+			case "thinking":
+				return block.thinking.length > 0;
+			case "image":
+			case "redactedThinking":
+			case "toolCall":
+				return true;
+			default:
+				return false;
+		}
+	});
+}
+
+interface CacheRequestCapture {
+	payloadStructure?: string;
+	requestIdObserved: boolean;
+	responseCacheHit: boolean;
+	usage?: BenchCacheUsage;
+}
+
+function payloadStructure(payload: unknown): string {
+	if (payload === null) return "null";
+	if (Array.isArray(payload)) return `[${payload.map(payloadStructure).join(",")}]`;
+	if (typeof payload === "object") {
+		const record = payload as Record<string, unknown>;
+		return `{${Object.keys(record)
+			.sort()
+			.map(key => `${key}:${payloadStructure(record[key])}`)
+			.join(",")}}`;
+	}
+	return typeof payload;
+}
+
+function asNonNegativeNumber(value: unknown): number {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+/** Nearest-rank distribution summary; `values` MUST be non-empty. */
+function metricStats(values: number[]): MetricStats {
+	const sorted = [...values].sort((a, b) => a - b);
+	const at = (q: number): number =>
+		sorted[Math.max(0, Math.min(sorted.length - 1, Math.ceil(q * sorted.length) - 1))]!;
+	return {
+		mean: sorted.reduce((sum, value) => sum + value, 0) / sorted.length,
+		min: sorted[0]!,
+		p50: at(0.5),
+		p95: at(0.95),
+		max: sorted[sorted.length - 1]!,
+	};
+}
+
+function mean(values: number[]): number {
+	return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function captureUsage(message: AssistantMessage): BenchCacheUsage {
+	const usage = message.usage;
+	return {
+		inputTokens: asNonNegativeNumber(usage.input),
+		outputTokens: asNonNegativeNumber(usage.output),
+		cacheReadTokens: asNonNegativeNumber(usage.cacheRead),
+		cacheWriteTokens: asNonNegativeNumber(usage.cacheWrite),
+		totalTokens: asNonNegativeNumber(usage.totalTokens),
+		cost: asNonNegativeNumber(usage.cost?.total),
+	};
+}
+
+function cacheObservations(capture: CacheRequestCapture): CacheObservation[] {
+	const observations: CacheObservation[] = [];
+	if ((capture.usage?.cacheReadTokens ?? 0) > 0) observations.push("prompt_cache_read_observed");
+	if ((capture.usage?.cacheWriteTokens ?? 0) > 0) observations.push("prompt_cache_write_observed");
+	if (capture.responseCacheHit) observations.push("response_cache_hit_observed");
+	return observations.length > 0 ? observations : ["no_provider_proof"];
+}
+
+function cacheRunReport(
+	phase: BenchCacheRunReport["phase"],
+	result: BenchRunResult,
+	capture: CacheRequestCapture,
+): BenchCacheRunReport {
+	return {
+		phase,
+		result,
+		usage: capture.usage,
+		requestIdObserved: capture.requestIdObserved,
+		observations: cacheObservations(capture),
+	};
+}
+
+function truncateUtf8ByteLength(bytes: Uint8Array, maxBytes: number): number {
+	const end = Math.min(bytes.byteLength, maxBytes);
+	if (end === 0) return 0;
+
+	let sequenceStart = end - 1;
+	while (sequenceStart > 0 && (bytes[sequenceStart]! & 0b1100_0000) === 0b1000_0000) sequenceStart--;
+
+	const leadingByte = bytes[sequenceStart]!;
+	const sequenceLength =
+		leadingByte <= 0b0111_1111
+			? 1
+			: leadingByte >= 0b1100_0010 && leadingByte <= 0b1101_1111
+				? 2
+				: leadingByte >= 0b1110_0000 && leadingByte <= 0b1110_1111
+					? 3
+					: leadingByte >= 0b1111_0000 && leadingByte <= 0b1111_0100
+						? 4
+						: 1;
+	return sequenceLength > end - sequenceStart ? sequenceStart : end;
+}
+
+async function readBoundedUtf8File(path: string, maxBytes: number): Promise<string> {
+	const file = Bun.file(path);
+	const bytes = new Uint8Array(await file.slice(0, maxBytes).arrayBuffer());
+	const end = truncateUtf8ByteLength(bytes, maxBytes);
+	return UTF8_DECODER.decode(bytes.subarray(0, end));
+}
+
+function truncateUtf8(text: string, maxBytes: number): string {
+	const bytes = UTF8_ENCODER.encode(text);
+	const end = truncateUtf8ByteLength(bytes, maxBytes);
+	return end === bytes.byteLength ? text : UTF8_DECODER.decode(bytes.subarray(0, end));
+}
+
+function generatedCachePrefix(bytes: number): string {
+	return truncateUtf8(CACHE_PREFIX_CHUNK.repeat(Math.ceil(bytes / CACHE_PREFIX_CHUNK_BYTES)), bytes);
+}
+
+function renderCacheBenchmarkPrefix(prefix: string, namespace: string): string {
+	const rendered = prompt.render(cachePrefixTemplate, {
+		prefix: CACHE_PREFIX_PLACEHOLDER,
+		namespace,
+	});
+	if (!rendered.includes(CACHE_PREFIX_PLACEHOLDER)) {
+		throw new Error("Cache benchmark prefix template is missing its raw prefix placeholder");
+	}
+	// Render the static wrapper first, then inject caller bytes so prompt
+	// normalization cannot trim spaces or collapse blank lines in prefix files.
+	// Function replacer: a prefix containing `$&`/`$'`/`` $` `` must not be
+	// expanded as a string-replacement pattern.
+	return rendered.replace(CACHE_PREFIX_PLACEHOLDER, () => prefix);
+}
+
+async function resolveCachePrefix(
+	flags: BenchCommandArgs["flags"],
+	readTextFile: (path: string, maxBytes: number) => Promise<string>,
+): Promise<string> {
+	const bytes = normalizePositiveInteger("cache-prefix-bytes", flags.cachePrefixBytes, DEFAULT_CACHE_PREFIX_BYTES);
+	const prefix = flags.cachePrefixFile
+		? await readTextFile(flags.cachePrefixFile, bytes)
+		: generatedCachePrefix(bytes);
+	return truncateUtf8(prefix, bytes);
+}
+
+function cacheBenchmarkMessages(stablePrefix: string, suffix: string): Context["messages"] {
+	const timestamp = Date.now();
+	return [
+		{ role: "user", content: stablePrefix, timestamp, attribution: "user" },
+		{ role: "user", content: suffix, timestamp, attribution: "user" },
+	];
+}
+/** One concrete bench request: kind, output budget, and randomized messages. */
+interface BenchChallenge {
+	kind: BenchChallengeKind;
+	maxTokens: number;
+	messages: Context["messages"];
+}
+
+interface BenchChallengeOptions {
+	/** Replaces the built-in prompt (chat/generation only). */
+	promptOverride?: string;
+	/** Synthetic input size for prefill challenges. */
+	prefillBytes: number;
+	/** Per-run unique token; leads the prefill body so provider prefix caches can never reuse an earlier run's prefill. */
+	nonce: string;
+	/** Uniform [0,1) source for topic selection. */
+	random: () => number;
+	/** Explicit `--max-tokens`; overrides the kind default. */
+	maxTokensOverride?: number;
+}
+
+/** Build a randomized challenge so repeated runs never send a byte-identical request. */
+function buildBenchChallenge(kind: BenchChallengeKind, opts: BenchChallengeOptions): BenchChallenge {
+	const maxTokens = opts.maxTokensOverride ?? CHALLENGE_MAX_TOKENS[kind];
+	const pick = (topics: readonly string[]): string => topics[Math.floor(opts.random() * topics.length)] ?? topics[0]!;
+	const user = (content: string): Context["messages"] => [
+		{ role: "user", content, timestamp: Date.now(), attribution: "user" },
+	];
+	switch (kind) {
+		case "chat":
+			return {
+				kind,
+				maxTokens,
+				messages: user(opts.promptOverride ?? prompt.render(chatTemplate, { topic: pick(CHAT_TOPICS) }).trim()),
+			};
+		case "generation":
+			return {
+				kind,
+				maxTokens,
+				messages: user(
+					opts.promptOverride ?? prompt.render(generationTemplate, { topic: pick(GENERATION_TOPICS) }).trim(),
+				),
+			};
+		case "prefill":
+			return {
+				kind,
+				maxTokens,
+				messages: user(
+					`Benchmark run ${opts.nonce}.\n\n${generatedCachePrefix(opts.prefillBytes)}\n\n${prefillInstruction.trim()}`,
+				),
+			};
+	}
+}
+
+/**
+ * Prefill input size for `model`: an explicit `--prefill-bytes` wins; the
+ * default is capped by the context window so small local models (e.g. Apple's
+ * ~4K-token on-device model) are measured instead of rejected.
+ */
+function prefillBytesFor(model: Model<Api>, explicit: number | undefined): number {
+	if (explicit !== undefined) return explicit;
+	const window = model.contextWindow;
+	return window !== null && Number.isFinite(window) && window > 0
+		? Math.min(DEFAULT_PREFILL_BYTES, Math.floor(window * PREFILL_BYTES_PER_CONTEXT_TOKEN))
+		: DEFAULT_PREFILL_BYTES;
+}
+
+/** One workload each model runs: a challenge rotation at a fixed concurrency. */
+interface BenchStep {
+	/** `--detailed` phase; absent for a plain `--profile` run. */
+	phase?: BenchPhase;
+	kinds: readonly BenchChallengeKind[];
+	runs: number;
+	concurrency: number;
+}
+
+/** `--detailed` plan: single-user chat, `par`-way parallel chat (whole waves), single-user prefill. */
+function detailedSteps(runs: number, par: number): BenchStep[] {
+	return [
+		{ phase: "single", kinds: ["chat"], runs, concurrency: 1 },
+		{ phase: "parallel", kinds: ["chat"], runs: par * Math.ceil(runs / par), concurrency: par },
+		{ phase: "prefill", kinds: ["prefill"], runs, concurrency: 1 },
+	];
+}
+
+function buildPhaseReport(concurrency: number, results: readonly BenchRunResult[], wallMs: number): BenchPhaseReport {
+	const successes = results.filter((result): result is BenchRunSuccess => result.ok);
+	const outputTokens = successes.reduce((sum, result) => sum + result.outputTokens, 0);
+	return {
+		concurrency,
+		runs: results.length,
+		wallMs,
+		aggregateTps: wallMs > 0 ? (outputTokens * 1000) / wallMs : 0,
+		stats: successes.length === 0 ? null : computeBenchStats(successes),
+	};
+}
+
+async function runWithConcurrency<T>(
+	count: number,
+	concurrency: number,
+	run: (index: number) => Promise<T>,
+): Promise<T[]> {
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
+	const results = new Array<T>(count);
+	let next = 0;
+	const worker = async (): Promise<void> => {
+		while (next < count) {
+			const index = next++;
+			results[index] = await run(index);
+		}
+	};
+	await Promise.all(Array.from({ length: Math.min(count, concurrency) }, worker));
+	return results;
+}
+
+function formatCachePairLine(pair: BenchCachePairReport, index: number, total: number): string {
+	const formatPhase = (run: BenchCacheRunReport, alreadyWarm = false) => {
+		if (!run.result.ok) {
+			return `${run.phase} failed: ${truncateToWidth(replaceTabs(run.result.error), ERROR_WIDTH)}`;
+		}
+		const usage = run.usage;
+		return `${run.phase}${alreadyWarm ? " (already warm)" : ""} ${run.observations.join(", ")} ${chalk.dim("input")} ${usage?.inputTokens ?? 0} ${chalk.dim("cache-read")} ${usage?.cacheReadTokens ?? 0} ${chalk.dim("cache-write")} ${usage?.cacheWriteTokens ?? 0} ${chalk.dim("output")} ${usage?.outputTokens ?? run.result.outputTokens} ${chalk.dim("total")} ${usage?.totalTokens ?? 0} ${chalk.dim("cost")} ${formatCost(usage?.cost ?? 0)} ${chalk.dim("TTFT")} ${formatMs(run.result.ttftMs)} ${chalk.dim("duration")} ${formatMs(run.result.durationMs)} ${chalk.dim("throughput")} ${run.result.tokensPerSecond.toFixed(1)}/s`;
+	};
+	return `  ${chalk.dim(`pair ${index + 1}/${total}`)} ${formatPhase(pair.cold, pair.coldAlreadyWarm)}; ${formatPhase(pair.warm)}`;
+}
+
+interface BenchRequestOptions {
+	apiKey: ApiKeyResolver;
+	sessionId: string;
+	/** Native OMP messages; cache mode splits the stable prefix from the suffix. */
+	messages: Context["messages"];
+	maxTokens: number;
+	/** Explicit effort from a `:level` selector suffix; absent = provider default. */
+	reasoning?: Effort;
+	/** Only set for an explicit `:off` suffix — some endpoints reject disablement. */
+	disableReasoning?: boolean;
+	/** Requested service tier passed to `streamSimple`; absent omits the option. The provider layer applies scope/support gating before it reaches the wire. */
+	serviceTier?: ServiceTier;
+	promptCacheKey?: string;
+	statefulResponses?: false;
+	cacheCapture?: CacheRequestCapture;
+}
+
+async function runBenchRequest(
+	model: Model<Api>,
+	options: BenchRequestOptions,
+	streamFn: StreamSimpleFn,
+	now: () => number,
+): Promise<BenchRunResult> {
+	const startedAt = now();
+	let firstTokenAt: number | undefined;
+	let transport: "http" | "websocket" | undefined;
+	const providerSessionState = new Map<string, ProviderSessionState>();
+	try {
+		const context: Context = {
+			// Codex's Responses endpoint 400s with "Instructions are required" when no
+			// system prompt is present — same guard as eval's completion bridge.
+			systemPrompt: ["You are a helpful assistant."],
+			messages: options.messages,
+		};
+		const stream = streamFn(model, context, {
+			apiKey: options.apiKey,
+			sessionId: options.sessionId,
+			maxTokens:
+				model.maxTokens !== null && Number.isFinite(model.maxTokens) && model.maxTokens > 0
+					? Math.min(options.maxTokens, model.maxTokens)
+					: options.maxTokens,
+			reasoning: options.reasoning,
+			promptCacheKey: options.promptCacheKey,
+			statefulResponses: options.statefulResponses,
+			onPayload: options.cacheCapture
+				? payload => {
+						options.cacheCapture!.payloadStructure = payloadStructure(payload);
+						return undefined;
+					}
+				: undefined,
+			onResponse: response => {
+				transport = response.metadata?.transport === "websocket" ? "websocket" : "http";
+				// A handshake can describe the connection, never this generation's
+				// request ID or response-cache hit. Usage remains measurable on WS.
+				if (transport === "websocket" || !options.cacheCapture) return;
+				options.cacheCapture.requestIdObserved = Boolean(response.requestId);
+				options.cacheCapture.responseCacheHit = RESPONSE_CACHE_STATUS_HEADERS.some(
+					header => response.headers[header]?.trim().toLowerCase() === "hit",
+				);
+			},
+			disableReasoning: options.disableReasoning,
+			serviceTier: options.serviceTier,
+			providerSessionState,
+			// Keep Codex bench runs on WS as before; the settings wrapper still
+			// gates standard Responses on `providers.openaiResponsesWebsockets`.
+			preferWebsockets: true,
+			// pi-ai opts every OpenRouter request into response caching (1h TTL).
+			// Bench sends a byte-identical request each run, so within the TTL
+			// OpenRouter replays the cached generation with zeroed usage — the run
+			// shows "tokens 0, TPS 0.0" at line speed. Opt back out so every run
+			// measures a fresh generation.
+			headers: model.provider === "openrouter" ? { "X-OpenRouter-Cache": "false" } : undefined,
+		});
+		let message: AssistantMessage | undefined;
+		for await (const event of stream) {
+			if (firstTokenAt === undefined && isFirstTokenEvent(event)) {
+				firstTokenAt = now();
+			}
+			if (event.type === "error") {
+				return { ok: false, error: event.error.errorMessage ?? "request failed" };
+			}
+			if (event.type === "done") {
+				message = event.message;
+			}
+		}
+		message ??= await stream.result();
+		if (message.stopReason === "error" || message.errorMessage) {
+			return { ok: false, error: message.errorMessage ?? "request failed" };
+		}
+		if (options.serviceTier === "priority" && message.disabledFeatures?.includes("priority")) {
+			return { ok: false, error: "Provider rejected priority service; request fell back to standard speed" };
+		}
+		const rawDuration = message.duration ?? now() - startedAt;
+		const durationMs = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 0;
+		const rawTtft = message.ttft ?? (firstTokenAt === undefined ? durationMs : firstTokenAt - startedAt);
+		const ttftMs = Number.isFinite(rawTtft) && rawTtft > 0 ? rawTtft : 0;
+		const outputTokens = Number.isFinite(message.usage.output) && message.usage.output > 0 ? message.usage.output : 0;
+		// A run that streamed no content (no delta/end event set firstTokenAt),
+		// carries no visible final content, and measured no output tokens
+		// benchmarked nothing — a genuinely empty stream (e.g. a gateway that 200s
+		// with an empty body). Surface it as a failure instead of a misleading
+		// 0-token "✓". Streaming and buffered providers that produce content keep
+		// passing even when usage is omitted.
+		if (firstTokenAt === undefined && outputTokens === 0 && !hasVisibleFinalContent(message)) {
+			return {
+				ok: false,
+				error: `provider returned no output (0 tokens, empty stream; stop reason: ${message.stopReason ?? "unknown"})`,
+			};
+		}
+		if (options.cacheCapture) options.cacheCapture.usage = captureUsage(message);
+		// Providers report cache-written/read prompt tokens outside `usage.input`
+		// (e.g. Anthropic auto-caching moves nearly the whole prompt into
+		// cacheWrite), so total prompt size must sum all three.
+		const inputTokens =
+			asNonNegativeNumber(message.usage.input) +
+			asNonNegativeNumber(message.usage.cacheRead) +
+			asNonNegativeNumber(message.usage.cacheWrite);
+		const generationMs = Math.max(0, durationMs - ttftMs);
+		return {
+			ok: true,
+			transport,
+			ttftMs,
+			generationMs,
+			durationMs,
+			inputTokens,
+			outputTokens,
+			// TPS over the TOTAL request duration, deliberately not the post-TTFT
+			// decode window: reasoning models can spend seconds generating hidden
+			// thinking tokens (counted in usage.output) before the first visible
+			// byte, so "duration - TTFT" inflates TPS several-fold on providers
+			// that buffer or hide reasoning (e.g. google vs google-vertex).
+			tokensPerSecond: durationMs > 0 ? (outputTokens * 1000) / durationMs : 0,
+			generationTps: generationMs > 0 ? (outputTokens * 1000) / generationMs : 0,
+			prefillTps: ttftMs > 0 ? (inputTokens * 1000) / ttftMs : 0,
+			cost: asNonNegativeNumber(message.usage.cost?.total),
+		};
+	} catch (error) {
+		return { ok: false, error: getErrorMessage(error) };
+	} finally {
+		closeProviderSessionStates(providerSessionState);
+	}
+}
+
+function buildModelReport(
+	selector: string,
+	model: Model<Api>,
+	thinking: ResolvedThinkingLevel | undefined,
+	results: BenchRunResult[],
+	phases: BenchModelReport["phases"] = {},
+): BenchModelReport {
+	const successes = results.filter((result): result is BenchRunSuccess => result.ok);
+	const byChallenge: BenchModelReport["byChallenge"] = {};
+	for (const kind of CHALLENGE_KINDS) {
+		const kindRuns = successes.filter(r => r.challenge === kind);
+		if (kindRuns.length > 0) byChallenge[kind] = computeBenchStats(kindRuns);
+	}
+	return {
+		selector,
+		model: formatModelStringWithRouting(model),
+		thinking,
+		results,
+		stats: successes.length === 0 ? null : computeBenchStats(successes),
+		byChallenge,
+		phases,
+	};
+}
+function computeBenchStats(successes: BenchRunSuccess[]): BenchStats {
+	return {
+		ttftMs: metricStats(successes.map(r => r.ttftMs)),
+		durationMs: metricStats(successes.map(r => r.durationMs)),
+		tokensPerSecond: metricStats(successes.map(r => r.tokensPerSecond)),
+		generationTps: metricStats(successes.map(r => r.generationTps)),
+		prefillTps: metricStats(successes.map(r => r.prefillTps)),
+		inputTokens: mean(successes.map(r => r.inputTokens)),
+		outputTokens: mean(successes.map(r => r.outputTokens)),
+		cost: mean(successes.map(r => r.cost)),
+	};
+}
+
+function formatBenchModelLabel(report: BenchModelReport): string {
+	return formatModelSelectorValue(report.model, report.thinking);
+}
+
+function formatMs(ms: number): string {
+	return formatDuration(Math.max(0, Math.round(ms)));
+}
+
+/** One run's result line; `tagKind` labels the challenge (only informative when kinds are mixed). */
+function formatRunLine(result: BenchRunResult, index: number, total: number, opts: { tagKind: boolean }): string {
+	const prefix = chalk.dim(`run ${index + 1}/${total}`);
+	const kind = opts.tagKind && result.challenge ? `${chalk.cyan(result.challenge.padEnd(10))} ` : "";
+	if (result.ok) {
+		// A prefill run emits a handful of tokens: its output rates are noise, the input rate is the result.
+		const gen = result.generationTps > 0 ? `${result.generationTps.toFixed(1)}/s` : "-";
+		const rates =
+			result.challenge === "prefill"
+				? `${chalk.dim("prefill")} ${result.prefillTps.toFixed(0)}/s`
+				: `${chalk.dim("tok/s")} ${result.tokensPerSecond.toFixed(1)} ${chalk.dim("gen")} ${gen}`;
+		return `  ${chalk.green("✓")} ${prefix} ${kind}${chalk.dim("TTFT")} ${formatMs(result.ttftMs)} ${rates} ${chalk.dim("in")} ${formatNumber(result.inputTokens)} ${chalk.dim("out")} ${formatNumber(result.outputTokens)} ${chalk.dim("total")} ${formatMs(result.durationMs)}`;
+	}
+	return `  ${chalk.red("✗")} ${prefix} ${kind}${chalk.red(truncateToWidth(replaceTabs(result.error).replace(/\r?\n/g, " "), ERROR_WIDTH))}`;
+}
+
+const PHASE_LABELS: Record<BenchPhase, string> = { single: "single-user", parallel: "parallel", prefill: "prefill" };
+
+/** Placeholder cell for a value the live footer has not measured yet. */
+const PENDING_CELL = "…";
+
+/** Run (cache mode: pair) counters for one model. */
+interface BenchProgress {
+	total: number;
+	completed: number;
+	failed: number;
+	inFlight: number;
+}
+
+/** One model's comparison-table row; the live footer repaints it as runs finish. */
+interface BenchTableRow {
+	/** Aggregates over the runs finished so far. */
+	report: BenchModelReport;
+	state: "queued" | "running" | "done";
+	progress: BenchProgress;
+}
+
+function formatProgress(progress: BenchProgress, unit: "runs" | "pairs"): string {
+	const parts = [`${progress.completed}/${progress.total} ${unit}`];
+	if (progress.inFlight > 0) parts.push(`${progress.inFlight} in flight`);
+	if (progress.failed > 0) parts.push(chalk.red(`${progress.failed} failed`));
+	return parts.join(chalk.dim(" · "));
+}
+
+function formatRowStatus(row: BenchTableRow, spinner: string): string {
+	switch (row.state) {
+		case "queued":
+			return chalk.dim("queued");
+		case "running":
+			return `${chalk.yellow(spinner)} ${formatProgress(row.progress, "runs")}`;
+		case "done": {
+			const failed = row.report.results.filter(result => !result.ok).length;
+			return failed > 0 ? chalk.red(`(${failed} failed)`) : "";
+		}
+	}
+}
+
+interface BenchTableColumn {
+	header: string;
+	/** Undefined when the model has no data for this column (yet). */
+	value(report: BenchModelReport): string | undefined;
+}
+
+/** Headline column per challenge kind: output tok/s, or input tok/s for prefill (p50 of `metric`). */
+const KIND_HEADLINES: Record<
+	BenchChallengeKind,
+	{ header: string; metric: "tokensPerSecond" | "prefillTps"; digits: number }
+> = {
+	chat: { header: "tok/s", metric: "tokensPerSecond", digits: 1 },
+	prefill: { header: "prefill", metric: "prefillTps", digits: 0 },
+	generation: { header: "decode", metric: "tokensPerSecond", digits: 1 },
+};
+
+/** Comparison-table layout: columns plus the rate rows are ranked by (undefined = unmeasured). */
+interface BenchTableSpec {
+	columns: BenchTableColumn[];
+	rank(report: BenchModelReport): number | undefined;
+}
+
+const MODEL_COLUMN: BenchTableColumn = { header: "model", value: formatBenchModelLabel };
+
+const COST_COLUMN: BenchTableColumn = {
+	header: "cost/run",
+	value: r => {
+		if (!r.stats) return undefined;
+		// Zero cost means the model is unpriced, not free.
+		return r.stats.cost > 0 ? formatCost(r.stats.cost) : "-";
+	},
+};
+
+/** `--profile` table: lead-kind latency plus each kind's headline rate, ranked by the lead kind's rate. */
+function profileTableSpec(kinds: readonly BenchChallengeKind[]): BenchTableSpec {
+	// The lead kind (chat when mixed) carries the representative latency.
+	const lead = kinds[0]!;
+	const columns: BenchTableColumn[] = [
+		MODEL_COLUMN,
+		{
+			header: "TTFT p50",
+			value: r => {
+				const ttft = r.byChallenge[lead]?.ttftMs;
+				return ttft ? formatMs(ttft.p50) : undefined;
+			},
+		},
+		{
+			header: "p95",
+			value: r => {
+				const ttft = r.byChallenge[lead]?.ttftMs;
+				return ttft ? formatMs(ttft.p95) : undefined;
+			},
+		},
+	];
+	for (const kind of kinds) {
+		const { header, metric, digits } = KIND_HEADLINES[kind];
+		columns.push({ header, value: r => r.byChallenge[kind]?.[metric].p50.toFixed(digits) });
+	}
+	columns.push(COST_COLUMN);
+	const { metric } = KIND_HEADLINES[lead];
+	return { columns, rank: r => r.byChallenge[lead]?.[metric].p50 };
+}
+
+/**
+ * `--detailed` table: single-user latency/rate, the same under `par`
+ * concurrent users plus their aggregate rate and scaling, then prefill rate;
+ * ranked by single-user tok/s.
+ */
+function detailedTableSpec(par: number): BenchTableSpec {
+	// Phase columns stay pending until the phase has a successful run.
+	const single = (r: BenchModelReport) => r.phases.single?.stats ?? undefined;
+	const parallel = (r: BenchModelReport) => r.phases.parallel?.stats ?? undefined;
+	const ttft = (stats: BenchStats | undefined) => stats && formatMs(stats.ttftMs.p50);
+	return {
+		columns: [
+			MODEL_COLUMN,
+			{ header: "TTFT", value: r => ttft(single(r)) },
+			{ header: "tok/s", value: r => single(r)?.tokensPerSecond.p50.toFixed(1) },
+			{ header: `TTFT@${par}`, value: r => ttft(parallel(r)) },
+			{ header: `tok/s@${par}`, value: r => parallel(r)?.tokensPerSecond.p50.toFixed(1) },
+			{
+				header: `agg@${par}`,
+				value: r => (r.phases.parallel?.stats ? r.phases.parallel.aggregateTps.toFixed(1) : undefined),
+			},
+			{
+				// Parallel aggregate rate over single-user aggregate rate: ~1× means
+				// concurrent requests queue behind each other, ~N× means they scale.
+				header: "scale",
+				value: r => {
+					const base = r.phases.single?.aggregateTps;
+					const loaded = r.phases.parallel?.aggregateTps;
+					return base && loaded ? `${(loaded / base).toFixed(1)}×` : undefined;
+				},
+			},
+			{ header: "prefill", value: r => r.phases.prefill?.stats?.prefillTps.p50.toFixed(0) },
+			COST_COLUMN,
+		],
+		rank: r => single(r)?.tokensPerSecond.p50,
+	};
+}
+
+/**
+ * Comparison table ranked by `spec.rank` (medians, not means, so one queue
+ * hiccup cannot reorder rows). It is also the live footer: unfinished rows
+ * show {@link PENDING_CELL} for unmeasured cells and a trailing status
+ * animated by `spinner`.
+ */
+function formatBenchTable(rows: readonly BenchTableRow[], spec: BenchTableSpec, spinner = ""): string[] {
+	const ranked = rows
+		.map(row => ({ row, rate: spec.rank(row.report) ?? Number.NEGATIVE_INFINITY }))
+		.sort((a, b) => b.rate - a.rate);
+	const { columns } = spec;
+	const texts = ranked.map(({ row }) =>
+		columns.map(column => column.value(row.report) ?? (row.state === "done" ? "-" : PENDING_CELL)),
+	);
+	const layout = columns.map((column, index): TableColumn => ({
+		width: Math.max(visibleWidth(column.header), ...texts.map(cells => visibleWidth(cells[index]!))),
+		align: "left",
+		overflow: "allow",
+	}));
+	// Unpadded trailing status: progress, queue position, or failures.
+	layout.push({ width: 0, align: "left", overflow: "allow" });
+	const table: TableCell[][] = [columns.map(column => ({ text: column.header, style: chalk.dim }))];
+	for (const [index, { row, rate }] of ranked.entries()) {
+		const cells = texts[index]!.map((text): TableCell => ({
+			text,
+			style: text === PENDING_CELL ? chalk.dim : undefined,
+		}));
+		// Green marks the leader: the top row once it has a headline rate.
+		if (index === 0 && rate > Number.NEGATIVE_INFINITY) cells[0] = { text: cells[0]!.text, style: chalk.green };
+		const status = formatRowStatus(row, spinner);
+		if (status) cells.push({ text: status });
+		table.push(cells);
+	}
+	return table.map(cells => renderTableRow(cells, layout, undefined, { gap: "  " }).trimEnd());
+}
+
+function assertCacheModeSupported(targets: BenchTarget[]): void {
+	if (targets.some(({ model }) => model.api === "openai-codex-responses")) {
+		throw new Error(
+			"--cache is not supported for openai-codex-responses because Codex WebSocket chaining cannot produce independent prompt-cache pairs",
+		);
+	}
+}
+
+export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDependencies = {}): Promise<BenchSummary> {
+	const cacheMode = command.flags.cache === true;
+	const cacheFlagsUsed =
+		command.flags.cachePrefixFile !== undefined ||
+		command.flags.cachePrefixBytes !== undefined ||
+		command.flags.cachePairs !== undefined ||
+		command.flags.cacheConcurrency !== undefined;
+	if (!cacheMode && cacheFlagsUsed) throw new Error("Cache flags require --cache");
+	if (cacheMode && command.flags.runs !== undefined)
+		throw new Error("Use --cache-pairs instead of --runs with --cache");
+	if (cacheMode && command.flags.prompt !== undefined) throw new Error("--cache builds its own stable-prefix prompts");
+	if (cacheMode && command.flags.profile !== undefined) throw new Error("--profile cannot be combined with --cache");
+	if (cacheMode && (command.flags.par ?? 1) > 1) {
+		throw new Error("--par cannot parallelize cold/warm pairs; use --cache-concurrency instead");
+	}
+	const detailed = command.flags.detailed === true;
+	if (detailed && cacheMode) throw new Error("--detailed cannot be combined with --cache");
+	if (detailed && command.flags.profile !== undefined) {
+		throw new Error(
+			"--profile cannot be combined with --detailed, which runs single-user, parallel, and prefill phases",
+		);
+	}
+	const profileFlag = command.flags.profile;
+	if (
+		profileFlag !== undefined &&
+		profileFlag !== "mix" &&
+		profileFlag !== "chat" &&
+		profileFlag !== "prefill" &&
+		profileFlag !== "generation"
+	) {
+		throw new Error(`Unknown --profile "${profileFlag}" (expected chat, prefill, generation, or mix)`);
+	}
+	const profile: BenchProfile = profileFlag ?? "chat";
+	if (!cacheMode && command.flags.prompt !== undefined && profile !== "chat" && profile !== "generation") {
+		throw new Error("--prompt requires --profile chat or generation");
+	}
+	if (
+		command.flags.prefillBytes !== undefined &&
+		(cacheMode || (!detailed && profile !== "mix" && profile !== "prefill"))
+	) {
+		throw new Error("--prefill-bytes requires prefill challenges (--detailed, or --profile mix or prefill)");
+	}
+
+	const cachePairs = cacheMode
+		? normalizePositiveInteger("cache-pairs", command.flags.cachePairs, DEFAULT_CACHE_PAIRS)
+		: undefined;
+	const cacheConcurrency = cacheMode
+		? normalizePositiveInteger("cache-concurrency", command.flags.cacheConcurrency, DEFAULT_CACHE_CONCURRENCY)
+		: undefined;
+	const runsPerStep = normalizePositiveInteger(
+		"runs",
+		command.flags.runs,
+		detailed ? DETAILED_DEFAULT_RUNS : PROFILE_DEFAULT_RUNS[profile],
+	);
+	const maxTokensOverride =
+		command.flags.maxTokens !== undefined
+			? normalizePositiveInteger("max-tokens", command.flags.maxTokens, 1)
+			: undefined;
+	const cacheMaxTokens = cacheMode ? (maxTokensOverride ?? DEFAULT_CACHE_MAX_TOKENS) : undefined;
+	const par =
+		command.flags.par !== undefined ? normalizePositiveInteger("par", command.flags.par, DEFAULT_PAR) : DEFAULT_PAR;
+	if (detailed && par < 2) throw new Error("--detailed needs --par of at least 2 for its parallel phase");
+	const promptOverride = command.flags.prompt?.trim() || undefined;
+	const explicitPrefillBytes =
+		command.flags.prefillBytes !== undefined
+			? normalizePositiveInteger("prefill-bytes", command.flags.prefillBytes, DEFAULT_PREFILL_BYTES)
+			: undefined;
+	const kinds: readonly BenchChallengeKind[] = profile === "mix" ? CHALLENGE_KINDS : [profile];
+	const steps: BenchStep[] = detailed
+		? detailedSteps(runsPerStep, par)
+		: [{ kinds, runs: runsPerStep, concurrency: par }];
+	const runs = cacheMode ? cachePairs! * 2 : steps.reduce((sum, step) => sum + step.runs, 0);
+	const tableSpec = detailed ? detailedTableSpec(par) : profileTableSpec(kinds);
+	// Detailed phases each run a single kind under a phase header; only a mixed profile needs per-run kind tags.
+	const tagKind = kinds.length > 1;
+	const random = deps.random ?? Math.random;
+	const json = command.flags.json === true;
+	const randomSessionId = deps.randomSessionId ?? (() => Bun.randomUUIDv7());
+	const readTextFile = deps.readTextFile ?? readBoundedUtf8File;
+	const cachePrefix = cacheMode ? await resolveCachePrefix(command.flags, readTextFile) : undefined;
+	const writeStdout = deps.writeStdout ?? ((text: string) => process.stdout.write(text));
+	const writeStderr = deps.writeStderr ?? ((text: string) => process.stderr.write(text));
+	const setExitCode =
+		deps.setExitCode ??
+		((code: number) => {
+			process.exitCode = code;
+		});
+	const baseStreamFn = deps.streamSimple ?? streamSimple;
+	const now = deps.now ?? (() => performance.now());
+	const interactive = deps.stdoutIsTTY ?? process.stdout.isTTY === true;
+	if (command.models.length === 0) {
+		throw new Error("Pass at least one model selector, e.g. `omp bench opus gpt-5.2`");
+	}
+	// One row per model, filled as runs finish. Outside cache mode the comparison
+	// table doubles as the live footer; cache mode shows a one-line status.
+	let rows: BenchTableRow[] = [];
+	const renderLive = (spinner: string): string[] => {
+		if (!cacheMode) {
+			return rows.some(row => row.state !== "done") ? ["", ...formatBenchTable(rows, tableSpec, spinner)] : [];
+		}
+		const running = rows.find(row => row.state === "running");
+		if (!running) return [];
+		const label = chalk.bold(formatBenchModelLabel(running.report));
+		return [`  ${chalk.yellow(spinner)} ${label}${chalk.dim(" · ")}${formatProgress(running.progress, "pairs")}`];
+	};
+	const board = json
+		? undefined
+		: createLiveBoard(renderLive, {
+				isTTY: interactive,
+				get columns() {
+					return process.stdout.columns;
+				},
+				get rows() {
+					return process.stdout.rows;
+				},
+				write(text: string): boolean {
+					writeStdout(text);
+					return true;
+				},
+			} satisfies LiveBoardOutput);
+	const print = (text: string): void => {
+		if (board) board.log(text);
+		else writeStdout(`${text}\n`);
+	};
+
+	if (command.flags.account !== undefined) normalizePositiveInteger("account", command.flags.account, 1);
+	const runtime = await (deps.createRuntime ?? createDefaultBenchRuntime)();
+	const settings = runtime.settings ?? Settings.isolated({});
+	const streamFn: StreamSimpleFn = (model, context, options) =>
+		baseStreamFn(model, context, {
+			...options,
+			preferWebsockets: resolveWebsocketPreference(settings, model, options?.preferWebsockets),
+		});
+	try {
+		const targets = await resolveBenchTargets(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
+		if (cacheMode) assertCacheModeSupported(targets);
+		// Explicit `--service-tier` (a single value broadcast across families) wins;
+		// otherwise fall back to the configured per-family `tier.*` settings. Each
+		// model resolves its own family's tier below before reaching the wire.
+		const flagTier = command.flags.serviceTier ? serviceTierSettingToTier(command.flags.serviceTier) : undefined;
+		const serviceTierByFamily = command.flags.serviceTier
+			? serviceTierForAllFamilies(flagTier)
+			: buildServiceTierByFamily(
+					(runtime.settings ? cfgTierOpenai.get(runtime.settings) : undefined) ?? "none",
+					(runtime.settings ? cfgTierAnthropic.get(runtime.settings) : undefined) ?? "none",
+					(runtime.settings ? cfgTierGoogle.get(runtime.settings) : undefined) ?? "none",
+				);
+		if (!json && flagTier) print(chalk.dim(`service tier: ${flagTier}`));
+		const total = cacheMode ? cachePairs! : runs;
+		rows = targets.map(({ selector, model, thinking }): BenchTableRow => ({
+			report: buildModelReport(selector, model, thinking, []),
+			state: "queued",
+			progress: { total, completed: 0, failed: 0, inFlight: 0 },
+		}));
+		for (const [targetIndex, { selector, model, thinking }] of targets.entries()) {
+			const row = rows[targetIndex]!;
+			const { progress } = row;
+			if (!json) {
+				const label = formatBenchModelLabel(row.report);
+				print(`${chalk.bold(label)}${selector === label ? "" : chalk.dim(` (${selector})`)}`);
+			}
+			row.state = "running";
+			board?.repaint();
+			const results: BenchRunResult[] = [];
+
+			// Preflight check: let's verify credentials before starting any runs.
+			// This matches the old sequential break behavior exactly and avoids launching/printing
+			// multiple failures.
+			const testSessionId = randomSessionId();
+			let selectedResolver: ApiKeyResolver | undefined;
+			if (command.flags.account !== undefined) {
+				const oauth = runtime.oauth;
+				if (!oauth) throw new Error("OAuth account selection is unavailable");
+				const accounts = oauth.accounts(model.provider);
+				const account = accounts[command.flags.account - 1];
+				if (!account) {
+					throw new Error(
+						`Invalid --account ${command.flags.account}: provider "${model.provider}" has ${accounts.length} OAuth account(s)`,
+					);
+				}
+				selectedResolver = async ({ error, lastChance }) => {
+					if (lastChance) return undefined;
+					const result = await oauth.accessById(model.provider, account.credentialId, {
+						forceRefresh: error !== undefined,
+					});
+					if (!result?.ok)
+						throw new Error(
+							`Could not get token for account ${command.flags.account} of "${model.provider}": ${result?.error ?? "no OAuth credential available"}`,
+						);
+					return result.apiKey;
+				};
+			}
+			const preflightKey = selectedResolver
+				? await selectedResolver({ error: undefined, lastChance: false })
+				: await runtime.modelRegistry.getApiKey(model, testSessionId);
+			if (!preflightKey) {
+				const failure: BenchRunFailure = {
+					ok: false,
+					error: `No credentials for provider "${model.provider}". Run \`omp\` and use /login, or set the provider API key.`,
+				};
+				results.push(failure);
+				if (!json) print(formatRunLine(failure, 0, runs, { tagKind }));
+				row.report = buildModelReport(selector, model, thinking, results);
+				if (cacheMode) row.report.cachePairs = [];
+				row.state = "done";
+				continue;
+			}
+
+			const serviceTier = resolveModelServiceTier(serviceTierByFamily, model);
+			if (cacheMode) {
+				const pairs = await runWithConcurrency(
+					cachePairs!,
+					cacheConcurrency!,
+					async (pairIndex): Promise<BenchCachePairReport> => {
+						const cacheNamespace = randomSessionId();
+						progress.inFlight++;
+						board?.repaint();
+						const promptCacheKey = `bench-cache:${cacheNamespace}`;
+						const stablePrefix = renderCacheBenchmarkPrefix(cachePrefix!, cacheNamespace);
+						const coldSuffix = prompt.render(cacheSuffixTemplate, { variant: "A" }).trim();
+						const warmSuffix = prompt.render(cacheSuffixTemplate, { variant: "B" }).trim();
+						const coldCapture: CacheRequestCapture = {
+							requestIdObserved: false,
+							responseCacheHit: false,
+						};
+						// Keep the gateway's credential selection stable for both phases.
+						// Provider-session state is still recreated by runBenchRequest and
+						// stateful Responses chaining is disabled below.
+						const credentialAffinitySessionId = pairIndex === 0 ? testSessionId : randomSessionId();
+						const credentialResolver =
+							selectedResolver ?? runtime.modelRegistry.resolver(model, credentialAffinitySessionId);
+						const coldResult = await runBenchRequest(
+							model,
+							{
+								apiKey: credentialResolver,
+								sessionId: credentialAffinitySessionId,
+								messages: cacheBenchmarkMessages(stablePrefix, coldSuffix),
+								maxTokens: cacheMaxTokens!,
+								reasoning: toReasoningEffort(thinking),
+								disableReasoning: shouldDisableReasoning(thinking) ? true : undefined,
+								serviceTier,
+								promptCacheKey,
+								statefulResponses: false,
+								cacheCapture: coldCapture,
+							},
+							streamFn,
+							now,
+						);
+						const warmCapture: CacheRequestCapture = {
+							requestIdObserved: false,
+							responseCacheHit: false,
+						};
+						const warmResult = await runBenchRequest(
+							model,
+							{
+								apiKey: credentialResolver,
+								sessionId: credentialAffinitySessionId,
+								messages: cacheBenchmarkMessages(stablePrefix, warmSuffix),
+								maxTokens: cacheMaxTokens!,
+								reasoning: toReasoningEffort(thinking),
+								disableReasoning: shouldDisableReasoning(thinking) ? true : undefined,
+								serviceTier,
+								promptCacheKey,
+								statefulResponses: false,
+								cacheCapture: warmCapture,
+							},
+							streamFn,
+							now,
+						);
+						progress.inFlight--;
+						progress.completed++;
+						if (!coldResult.ok) progress.failed++;
+						if (!warmResult.ok) progress.failed++;
+						board?.repaint();
+						return {
+							cold: cacheRunReport("cold", coldResult, coldCapture),
+							warm: cacheRunReport("warm", warmResult, warmCapture),
+							coldAlreadyWarm: (coldCapture.usage?.cacheReadTokens ?? 0) > 0 || coldCapture.responseCacheHit,
+							stablePrefix: true,
+							suffixChanged: true,
+							promptCacheKeyStable: true,
+							statefulResponsesDisabled: true,
+							freshProviderSessionState: true,
+							payloadStructureStable:
+								coldCapture.payloadStructure === undefined || warmCapture.payloadStructure === undefined
+									? "unavailable"
+									: coldCapture.payloadStructure === warmCapture.payloadStructure,
+						};
+					},
+				);
+				for (const pair of pairs) results.push(pair.cold.result, pair.warm.result);
+				row.report = buildModelReport(selector, model, thinking, results);
+				row.report.cachePairs = pairs;
+				row.state = "done";
+				if (!json) {
+					for (const [index, pair] of pairs.entries()) {
+						print(formatCachePairLine(pair, index, pairs.length));
+					}
+				}
+				continue;
+			}
+
+			const prefillBytes = prefillBytesFor(model, explicitPrefillBytes);
+			const phases: BenchModelReport["phases"] = {};
+			let offset = 0;
+			// Steps run back to back so one phase's load never skews the next.
+			for (const step of steps) {
+				const { phase } = step;
+				if (!json && phase) {
+					print(
+						`  ${chalk.bold(PHASE_LABELS[phase])} ${chalk.dim(`· ${step.concurrency} concurrent · ${step.runs} runs`)}`,
+					);
+				}
+				const finished: BenchRunResult[] = [];
+				const startedAt = now();
+				// Runs finish out of order under concurrency; lines print in index order.
+				let nextToPrint = 0;
+				await runWithConcurrency(step.runs, step.concurrency, async index => {
+					const runIndex = offset + index;
+					const sessionId = runIndex === 0 ? testSessionId : randomSessionId();
+					const challenge = buildBenchChallenge(step.kinds[index % step.kinds.length]!, {
+						promptOverride,
+						prefillBytes,
+						nonce: randomSessionId(),
+						random,
+						maxTokensOverride,
+					});
+					progress.inFlight++;
+					board?.repaint();
+					const result: BenchRunResult = {
+						...(await runBenchRequest(
+							model,
+							{
+								apiKey: selectedResolver ?? runtime.modelRegistry.resolver(model, sessionId),
+								sessionId,
+								messages: challenge.messages,
+								maxTokens: challenge.maxTokens,
+								reasoning: toReasoningEffort(thinking),
+								disableReasoning: shouldDisableReasoning(thinking) ? true : undefined,
+								serviceTier,
+							},
+							streamFn,
+							now,
+						)),
+						challenge: challenge.kind,
+						phase,
+					};
+					results[runIndex] = result;
+					finished.push(result);
+					progress.inFlight--;
+					progress.completed++;
+					if (!result.ok) progress.failed++;
+					if (phase) phases[phase] = buildPhaseReport(step.concurrency, finished, now() - startedAt);
+					row.report = buildModelReport(selector, model, thinking, results, phases);
+					board?.repaint();
+					if (!json) {
+						while (nextToPrint < step.runs && results[offset + nextToPrint] !== undefined) {
+							print(formatRunLine(results[offset + nextToPrint]!, nextToPrint, step.runs, { tagKind }));
+							nextToPrint++;
+						}
+					}
+				});
+				// Chat phases close with the combined output rate across every in-flight request.
+				const phaseReport = phase && phase !== "prefill" ? phases[phase] : undefined;
+				if (!json && phaseReport) {
+					print(
+						`    ${chalk.dim("aggregate")} ${phaseReport.aggregateTps.toFixed(1)} tok/s ${chalk.dim(`over ${formatMs(phaseReport.wallMs)} wall`)}`,
+					);
+				}
+				offset += step.runs;
+			}
+			row.state = "done";
+		}
+		const reports = rows.map(row => row.report);
+		const failures = reports.reduce((sum, report) => sum + report.results.filter(result => !result.ok).length, 0);
+		const summary: BenchSummary = {
+			runs,
+			...(cacheMode
+				? { maxTokens: cacheMaxTokens }
+				: maxTokensOverride !== undefined
+					? { maxTokens: maxTokensOverride }
+					: {}),
+			models: reports,
+			failures,
+			serviceTierByFamily,
+			...(cacheMode
+				? { cache: { pairs: cachePairs!, concurrency: cacheConcurrency! } }
+				: detailed
+					? { detailed: { runsPerPhase: runsPerStep, par } }
+					: { profile }),
+		};
+		if (json) {
+			writeStdout(`${JSON.stringify(summary, null, 2)}\n`);
+		} else if (!cacheMode && (reports.length > 1 || runs > 1)) {
+			print(["", ...formatBenchTable(rows, tableSpec)].join("\n"));
+		}
+		if (failures > 0) setExitCode(1);
+		return summary;
+	} finally {
+		board?.close();
+		runtime.close?.();
+	}
+}

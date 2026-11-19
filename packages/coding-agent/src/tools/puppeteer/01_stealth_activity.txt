@@ -1,0 +1,80 @@
+{
+  const visibilityDescriptors = Object_getOwnPropertyDescriptors({
+    get hidden() {
+      return false;
+    },
+    get visibilityState() {
+      return "visible";
+    },
+    get webkitHidden() {
+      return false;
+    },
+    get webkitVisibilityState() {
+      return "visible";
+    },
+  });
+  for (const key of Object_keys(visibilityDescriptors)) {
+    const descriptor = visibilityDescriptors[key];
+    if (descriptor && typeof descriptor.get === "function") {
+      patchToString(descriptor.get, "get " + key);
+    }
+  }
+  const focusDescriptor = Object_getOwnPropertyDescriptor(
+    {
+      hasFocus() {
+        return document.visibilityState === "visible";
+      },
+    },
+    "hasFocus",
+  );
+  if (focusDescriptor && typeof focusDescriptor.value === "function") {
+    patchToString(focusDescriptor.value, "hasFocus");
+  }
+
+  const clearOwnSlot = (name) => {
+    const ownDescriptor = Object_getOwnPropertyDescriptor(document, name);
+    if (!ownDescriptor) return true;
+    if (ownDescriptor.configurable !== true) return false;
+    return Reflect_deleteProperty(document, name);
+  };
+
+  const inheritedSlot = (name, expectedKind) => {
+    let proto = Object_getPrototypeOf(document);
+    while (proto) {
+      const descriptor = Object_getOwnPropertyDescriptor(proto, name);
+      if (descriptor && typeof descriptor[expectedKind] === "function") {
+        return [proto, descriptor];
+      }
+      proto = Object_getPrototypeOf(proto);
+    }
+  };
+
+  const defineAccessor = (name) => {
+    if (!clearOwnSlot(name)) return;
+    const slot = inheritedSlot(name, "get");
+    if (!slot || slot[1].configurable !== true) return;
+
+    Object_defineProperty(slot[0], name, {
+      get: visibilityDescriptors[name].get,
+      enumerable: slot[1].enumerable,
+      configurable: true,
+    });
+  };
+
+  defineAccessor("hidden");
+  defineAccessor("visibilityState");
+  defineAccessor("webkitHidden");
+  defineAccessor("webkitVisibilityState");
+
+  if (clearOwnSlot("hasFocus")) {
+    const slot = inheritedSlot("hasFocus", "value");
+    if (slot && slot[1].configurable === true) {
+      Object_defineProperty(slot[0], "hasFocus", {
+        value: focusDescriptor.value,
+        writable: slot[1].writable === true,
+        enumerable: slot[1].enumerable,
+        configurable: true,
+      });
+    }
+  }
+}

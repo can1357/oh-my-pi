@@ -1,0 +1,308 @@
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+
+const BASE_SETTINGS = {
+	"async.enabled": false,
+	"bash.autoBackground.enabled": false,
+	"bashInterceptor.enabled": false,
+	"bash.patterns": [{ match: "rm -rf *", approval: "deny" }],
+} as const;
+
+function emptyWorkspaceTree(cwd: string) {
+	return { rootPath: cwd, rendered: ".\n", truncated: false, totalLines: 1, agentsMdFiles: [] };
+}
+
+function textOf(result: { content?: ReadonlyArray<{ type: string; text?: string }> }): string {
+	const blocks = result.content ?? [];
+	for (const block of blocks) {
+		if (block.type === "text" && typeof block.text === "string") return block.text;
+	}
+	return "";
+}
+
+describe("tools.approvalMode setting", () => {
+	// The per-tool approval gate (ExtensionToolWrapper) reads approvalMode / tools.approval /
+	// autoApprove exclusively from the execute-time AgentToolContext, never from the session's
+	// own settings. So a single shared session exercises every mode — we only vary the context
+	// settings per assertion. This avoids paying createAgentSession's cost (model registry,
+	// auth-storage discovery, settings init) nine times over.
+	let tempDir: string;
+	let session: AgentSession;
+	let authStorage: AuthStorage;
+
+	beforeAll(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-approval-mode-${Snowflake.next()}-`));
+		const cwd = path.join(tempDir, "cwd");
+		fs.mkdirSync(cwd, { recursive: true });
+		const sessionManager = SessionManager.create(cwd, path.join(tempDir, "sessions"));
+		authStorage = await AuthStorage.create(":memory:");
+		const created = await createAgentSession({
+			cwd,
+			agentDir: tempDir,
+			authStorage,
+			sessionManager,
+			settings: Settings.isolated(BASE_SETTINGS),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			workspaceTree: emptyWorkspaceTree(cwd),
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			toolNames: ["bash"],
+		});
+		session = created.session;
+	});
+
+	afterAll(async () => {
+		await session.dispose();
+		authStorage.close();
+		// The session opened `<agentDir>/agent.db` and `models.db`; Windows cannot delete open databases.
+		AgentStorage.close();
+		closeModelCache();
+		removeSyncWithRetries(tempDir);
+	});
+
+	function approvalSettings(extraSettings: Record<string, unknown> = {}): Settings {
+		return Settings.isolated({ ...BASE_SETTINGS, ...extraSettings });
+	}
+
+	function bashTool() {
+		const bash = session.getToolByName("bash");
+		if (!bash) throw new Error("Expected bash tool");
+		return bash;
+	}
+
+	it("yolo mode (default) bypasses approval for non-overriding tool calls", async () => {
+		const settings = approvalSettings();
+		const result = await bashTool().execute("yolo", { command: "echo ok" }, undefined, undefined, {
+			settings,
+		} as AgentToolContext);
+		expect(textOf(result)).toContain("ok");
+	});
+
+	it("omitted execute-time context inherits the session runner settings", async () => {
+		const result = await bashTool().execute("inherit-session", { command: "echo inherited" });
+		expect(textOf(result)).toContain("inherited");
+	});
+
+	it("missing execute-time context fails closed for an exec-tier tool", async () => {
+		// Explicit empty context: no settings and no --auto-approve. Omitting the
+		// argument inherits the session runner's settings (schema default yolo),
+		// which is the live-session path used by direct execute() callers.
+		await expect(
+			bashTool().execute("no-context", { command: "echo leaked" }, undefined, undefined, {} as AgentToolContext),
+		).rejects.toThrow(/requires approval but no interactive UI available/);
+	});
+
+	it("always-ask mode rejects exec tools when no UI is available", async () => {
+		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
+		await expect(
+			bashTool().execute("always-ask", { command: "echo blocked" }, undefined, undefined, {
+				settings,
+			} as AgentToolContext),
+		).rejects.toThrow(/requires approval but no interactive UI available/);
+	});
+
+	it("per-tool allow overrides are honored in every mode", async () => {
+		const settings = approvalSettings({
+			"tools.approvalMode": "always-ask",
+			"tools.approval": { bash: "allow" },
+		});
+		const result = await bashTool().execute("always-ask-allow", { command: "echo allowed" }, undefined, undefined, {
+			settings,
+		} as AgentToolContext);
+		expect(textOf(result)).toContain("allowed");
+	});
+
+	it("per-tool prompt overrides can tighten yolo mode", async () => {
+		const settings = approvalSettings({
+			"tools.approvalMode": "yolo",
+			"tools.approval": { bash: "prompt" },
+		});
+		await expect(
+			bashTool().execute("yolo-prompt", { command: "echo blocked" }, undefined, undefined, {
+				settings,
+			} as AgentToolContext),
+		).rejects.toThrow(/requires approval but no interactive UI available/);
+	});
+
+	it("write mode still prompts exec-tier tools", async () => {
+		const settings = approvalSettings({
+			"tools.approvalMode": "write",
+			"tools.approval": {},
+		});
+		await expect(
+			bashTool().execute("write-mode", { command: "echo unconfigured" }, undefined, undefined, {
+				settings,
+			} as AgentToolContext),
+		).rejects.toThrow(/requires approval but no interactive UI available/);
+	});
+
+	it("critical bash patterns do not prompt in yolo mode with bash allowed", async () => {
+		const settings = approvalSettings({
+			"tools.approvalMode": "yolo",
+			"tools.approval": { bash: "allow" },
+		});
+		const result = await bashTool().execute(
+			"critical",
+			{ command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
+			undefined,
+			undefined,
+			{
+				settings,
+			} as AgentToolContext,
+		);
+		expect(textOf(result)).toContain("(no output, exit code 0)");
+	});
+
+	it("attributes bash pattern denies to tool policy", async () => {
+		const settings = approvalSettings({
+			"tools.approvalMode": "yolo",
+			"tools.approval": { bash: "allow" },
+		});
+		await expect(
+			bashTool().execute("pattern-deny", { command: "rm -rf /tmp/never-run" }, undefined, undefined, {
+				settings,
+			} as AgentToolContext),
+		).rejects.toThrow('Tool "bash" is blocked by tool policy.\nReason: Blocked by bash pattern: rm -rf *');
+	});
+
+	it("CLI --auto-approve forces yolo mode for non-overriding tool calls", async () => {
+		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
+		const result = await bashTool().execute("cli-override", { command: "echo override" }, undefined, undefined, {
+			settings,
+			autoApprove: true,
+		} as AgentToolContext);
+		expect(textOf(result)).toContain("override");
+	});
+
+	it("CLI --auto-approve also bypasses safety-override patterns", async () => {
+		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
+		const result = await bashTool().execute(
+			"cli-critical",
+			{ command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
+			undefined,
+			undefined,
+			{
+				settings,
+				autoApprove: true,
+			} as AgentToolContext,
+		);
+		expect(textOf(result)).toContain("(no output, exit code 0)");
+	});
+
+	it("xd:// dispatch approval (xdevPolicyKey) suppresses the tier-only re-prompt", async () => {
+		// The write tool's outer gate already prompted at the device tool's tier;
+		// without the flag this exact call rejects (see the always-ask test above).
+		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
+		const result = await bashTool().execute("xdev-tier", { command: "echo dispatched" }, undefined, undefined, {
+			settings,
+			xdevPolicyKey: "bash",
+		} as AgentToolContext);
+		expect(textOf(result)).toContain("dispatched");
+	});
+
+	it("xd:// dispatch approval does not cover explicit prompts under another key, or deny policies", async () => {
+		// The outer gate resolved `tools.approval.<device>`; a policy keyed
+		// elsewhere was never asked about, so it must still prompt.
+		const promptSettings = approvalSettings({
+			"tools.approvalMode": "always-ask",
+			"tools.approval": { bash: "prompt" },
+		});
+		await expect(
+			bashTool().execute("xdev-explicit-prompt", { command: "echo blocked" }, undefined, undefined, {
+				settings: promptSettings,
+				xdevPolicyKey: "other_device",
+			} as AgentToolContext),
+		).rejects.toThrow(/requires approval but no interactive UI available/);
+
+		const denySettings = approvalSettings({
+			"tools.approvalMode": "always-ask",
+			"tools.approval": { bash: "deny" },
+		});
+		await expect(
+			bashTool().execute("xdev-denied", { command: "echo blocked" }, undefined, undefined, {
+				settings: denySettings,
+				xdevPolicyKey: "bash",
+			} as AgentToolContext),
+		).rejects.toThrow(/blocked by user policy/);
+	});
+
+	it("ACP-approved arguments satisfy explicit user and tool-override prompts", async () => {
+		const promptSettings = approvalSettings({
+			"tools.approvalMode": "always-ask",
+			"tools.approval": { bash: "prompt" },
+		});
+		const explicitResult = await bashTool().execute(
+			"acp-explicit-prompt",
+			{ command: "echo acp-explicit" },
+			undefined,
+			undefined,
+			{
+				settings: promptSettings,
+				acpApprovedArgs: { command: "echo acp-explicit" },
+			} as AgentToolContext,
+		);
+		expect(textOf(explicitResult)).toContain("acp-explicit");
+
+		const overrideSettings = approvalSettings({ "tools.approvalMode": "always-ask" });
+		const overrideResult = await bashTool().execute(
+			"acp-tool-override",
+			{ command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
+			undefined,
+			undefined,
+			{
+				settings: overrideSettings,
+				acpApprovedArgs: { command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
+			} as AgentToolContext,
+		);
+		expect(textOf(overrideResult)).toContain("(no output, exit code 0)");
+	});
+
+	it("ACP-approved arguments do not bypass deny policies", async () => {
+		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
+		await expect(
+			bashTool().execute("acp-denied", { command: "rm -rf /tmp/never-run" }, undefined, undefined, {
+				settings,
+				acpApprovedArgs: { command: "rm -rf /tmp/never-run" },
+			} as AgentToolContext),
+		).rejects.toThrow(/blocked by tool policy/);
+	});
+
+	it("ACP-approved arguments do not bypass provider safety checks", async () => {
+		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
+		await expect(
+			bashTool().execute("acp-safety", { command: "echo blocked" }, undefined, undefined, {
+				settings,
+				acpApprovedArgs: { command: "echo blocked" },
+				toolCall: {
+					batchId: "safety-batch",
+					index: 0,
+					total: 1,
+					toolCalls: [],
+					providerMetadata: {
+						type: "computer",
+						providerItemId: "computer-call",
+						actions: [],
+						pendingSafetyChecks: [{ id: "safety-check" }],
+					},
+				},
+			} as never),
+		).rejects.toThrow(/pending provider safety checks but no interactive UI/);
+	});
+});

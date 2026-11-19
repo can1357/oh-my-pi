@@ -1,0 +1,1866 @@
+/**
+ * Client-side {@link AuthCredentialStore} that mirrors a remote broker's
+ * snapshot. Refresh tokens never leave the broker; mutating methods (`replace*`,
+ * `upsert*`, `delete*ForProvider`) throw because login flows are server-side.
+ *
+ * Cache (`getCache`/`setCache`/`cleanExpiredCache`) is in-memory and ephemeral.
+ * The bounded hot set preserves recently used session pins without keeping
+ * every gateway client's 30-day sticky row resident.
+ */
+import * as os from "node:os";
+import { getAppName, getInstallId, logger, postmortem } from "@oh-my-pi/pi-utils";
+import type { AuthCredentialStore } from "../auth/store";
+import {
+	type AuthCredential,
+	type AuthCredentialSnapshotEntry,
+	type DisabledCredentialSummary,
+	type OAuthCredential,
+	type OAuthRefreshReason,
+	REMOTE_REFRESH_SENTINEL,
+	type RemoteOAuthCredential,
+	type StoredAuthCredential,
+	type StoredCredentialBlock,
+} from "../auth/types";
+import * as AIError from "../error";
+import type { OAuthCredentials } from "../registry/oauth/types";
+import type { Provider } from "../types";
+import type { ClientUsageIdentity, ObservedUsageEntry, UsageReport } from "../usage";
+import { raceSignal } from "../auth/abort";
+import { type AuthBrokerClient, AuthBrokerError, AuthBrokerStreamUnsupportedError } from "./client";
+import { compareCredentialBlockSnapshots } from "./protocol";
+import type {
+	CredentialBlockSnapshot,
+	RefresherSchedule,
+	SnapshotEntry,
+	SnapshotResponse,
+	SnapshotStreamEvent,
+} from "./types";
+
+// Bound both the number of distinct session pins and the size of caller-supplied
+// keys/values; an evicted session falls back to normal credential selection.
+const REMOTE_CACHE_MAX_ENTRIES = 4096;
+const REMOTE_CACHE_MAX_CHARACTERS = 4 * 1024 * 1024;
+
+/** Visibility rule for one provider's broker credentials. */
+export interface AuthBrokerProviderPool {
+	/** OAuth `identityKey`s visible to this client; omitted = every OAuth account. */
+	readonly accounts?: ReadonlySet<string>;
+	/** Whether API-key credentials are visible. Default `true`. */
+	readonly apiKeys?: boolean;
+}
+
+/** Pool key whose rule applies to every provider without its own entry. */
+const AUTH_BROKER_ACCOUNT_POOL_DEFAULT_KEY = "*";
+
+/**
+ * Per-provider credential visibility for this trusted broker client. A set
+ * value lists the provider's visible OAuth identities and keeps its API keys
+ * (an empty set excludes every OAuth credential); a rule object can also hide
+ * API keys. Providers without an entry follow the `"*"` rule, which defaults
+ * to unrestricted.
+ */
+export type AuthBrokerAccountPool = ReadonlyMap<string, ReadonlySet<string> | AuthBrokerProviderPool>;
+
+interface ResolvedProviderPool {
+	accounts: ReadonlySet<string> | undefined;
+	apiKeys: boolean;
+}
+
+/** Copies `pool` so later caller mutation cannot widen it, normalizing both value forms. */
+function resolveAccountPool(pool: AuthBrokerAccountPool): ReadonlyMap<string, ResolvedProviderPool> {
+	const resolved = new Map<string, ResolvedProviderPool>();
+	for (const [provider, value] of pool) {
+		resolved.set(
+			provider,
+			"has" in value
+				? { accounts: new Set(value), apiKeys: true }
+				: { accounts: value.accounts && new Set(value.accounts), apiKeys: value.apiKeys ?? true },
+		);
+	}
+	return resolved;
+}
+
+function providerPoolRule(
+	accountPool: ReadonlyMap<string, ResolvedProviderPool> | undefined,
+	provider: string,
+): ResolvedProviderPool | undefined {
+	return accountPool?.get(provider) ?? accountPool?.get(AUTH_BROKER_ACCOUNT_POOL_DEFAULT_KEY);
+}
+
+function isCredentialInAccountPool(
+	entry: Pick<SnapshotEntry, "provider" | "credential" | "identityKey">,
+	accountPool: ReadonlyMap<string, ResolvedProviderPool> | undefined,
+): boolean {
+	const rule = providerPoolRule(accountPool, entry.provider);
+	if (!rule) return true;
+	if (entry.credential.type !== "oauth") return rule.apiKeys;
+	if (!rule.accounts) return true;
+	return entry.identityKey !== null && rule.accounts.has(entry.identityKey);
+}
+
+/**
+ * Client-side TTL for the aggregate `/v1/usage` response. The broker dedups
+ * upstream `/usage` hits via AuthStorage's 5-minute per-credential cache plus
+ * single-flight, so this short client TTL mainly folds the parallel fan-out
+ * from `#rankOAuthSelections` into a single round-trip — a ranking pass issues
+ * one broker call instead of N.
+ */
+const USAGE_CACHE_TTL_MS = 15_000;
+const CREDENTIAL_BLOCK_RECONCILE_DELAY_MS = 5 * 60_000;
+const WAIT_THRESHOLD_MS = 1_000;
+const MAX_WAIT_MS = 5_000;
+const BACKGROUND_WAIT_MS = 30_000;
+const BACKGROUND_BACKOFF_INITIAL_MS = 500;
+const BACKGROUND_BACKOFF_MAX_MS = 30_000;
+/** Idle window after the last foreground store use before background sync parks. */
+const BACKGROUND_IDLE_MS = 20_000;
+/** Longest a process exit waits for the final observed-usage report to reach the broker. */
+const OBSERVED_USAGE_EXIT_FLUSH_MS = 2_000;
+
+function toCredentialBlockSnapshot(block: StoredCredentialBlock): CredentialBlockSnapshot {
+	return {
+		providerKey: block.providerKey,
+		blockScope: block.blockScope,
+		blockedUntilMs: block.blockedUntilMs,
+		...(block.updatedAtMs !== undefined ? { updatedAtMs: block.updatedAtMs } : {}),
+	};
+}
+
+function credentialBlockSnapshotsEqual(
+	left: readonly CredentialBlockSnapshot[] | undefined,
+	right: readonly CredentialBlockSnapshot[] | undefined,
+): boolean {
+	const leftBlocks = left ?? [];
+	const rightBlocks = right ?? [];
+	if (leftBlocks.length !== rightBlocks.length) return false;
+	for (let index = 0; index < leftBlocks.length; index += 1) {
+		const leftBlock = leftBlocks[index]!;
+		const rightBlock = rightBlocks[index]!;
+		if (
+			leftBlock.providerKey !== rightBlock.providerKey ||
+			leftBlock.blockScope !== rightBlock.blockScope ||
+			leftBlock.blockedUntilMs !== rightBlock.blockedUntilMs ||
+			leftBlock.updatedAtMs !== rightBlock.updatedAtMs
+		) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function snapshotBlocksChanged(previous: readonly SnapshotEntry[], next: readonly SnapshotEntry[]): boolean {
+	const previousBlocksById = new Map<number, readonly CredentialBlockSnapshot[] | undefined>();
+	for (const entry of previous) previousBlocksById.set(entry.id, entry.blocks);
+	for (const entry of next) {
+		const previousBlocks = previousBlocksById.get(entry.id);
+		if (!credentialBlockSnapshotsEqual(previousBlocks, entry.blocks)) return true;
+		previousBlocksById.delete(entry.id);
+	}
+	for (const previousBlocks of previousBlocksById.values()) {
+		if (previousBlocks && previousBlocks.length > 0) return true;
+	}
+	return false;
+}
+
+function credentialEntryWithBlocks(
+	entry: AuthCredentialSnapshotEntry,
+	blocks: readonly CredentialBlockSnapshot[] | undefined,
+): SnapshotEntry {
+	const incoming: SnapshotEntry = { ...entry, rotatesInMs: null };
+	if (blocks && blocks.length > 0) incoming.blocks = [...blocks].sort(compareCredentialBlockSnapshots);
+	return incoming;
+}
+
+/**
+ * Change-detection hash of one row's routable credential material (provider +
+ * credential; the id is the map key). Used only for equality, never persisted.
+ */
+function credentialContentHash(entry: SnapshotEntry): number | bigint {
+	return Bun.hash(`${entry.provider}\u0000${JSON.stringify(entry.credential)}`);
+}
+
+function emptySnapshot(): SnapshotResponse {
+	return {
+		generation: 0,
+		generatedAt: 0,
+		serverNowMs: 0,
+		refresher: {
+			enabled: false,
+			intervalMs: 0,
+			skewMs: 0,
+			nextSweepInMs: Number.MAX_SAFE_INTEGER,
+		},
+		credentials: [],
+	};
+}
+
+interface CacheEntry {
+	value: string;
+	expiresAtSec: number;
+}
+
+interface UsageCacheEntry {
+	/**
+	 * `null` means the last aggregate `/v1/usage` fetch failed. Callers treat
+	 * this the same as a successful empty-report response ("no usage signal
+	 * for this cycle"), and the same 15s TTL applies so transient broker
+	 * outages don't turn every ranking pass into a broker retry storm.
+	 */
+	reports: UsageReport[] | null;
+	fetchedAt: number;
+}
+
+/** Identity of one credential block row: credential, provider key, and scope. */
+function blockKey(credentialId: number, block: { providerKey: string; blockScope: string }): string {
+	return `${credentialId}\0${block.providerKey}\0${block.blockScope}`;
+}
+
+function usageOverlayKey(
+	provider: Provider,
+	ids: { accountId?: string; email?: string; projectId?: string; orgId?: string },
+): string | undefined {
+	// Org first: one account email can hold several organizations (Anthropic
+	// Team seat + personal Max), each with its own limit pools. Keying the
+	// overlay by account/email would merge the two pools' header ingests.
+	// But the org alone is not enough either: two Team members share the org
+	// id while drawing on per-user pools, so the key stays qualified by the
+	// member's own base identity whenever one is known.
+	let base: string | undefined;
+	const accountId = ids.accountId?.trim().toLowerCase();
+	const email = ids.email?.trim().toLowerCase();
+	const projectId = ids.projectId?.trim().toLowerCase();
+	if (email) base = `email:${email}`;
+	else if (accountId) base = `account:${accountId}`;
+	else if (projectId) base = `project:${projectId}`;
+	const orgId = ids.orgId?.trim().toLowerCase();
+	if (orgId) return base ? `${provider}\0org:${orgId}|${base}` : `${provider}\0org:${orgId}`;
+	if (base) return `${provider}\0${base}`;
+	return undefined;
+}
+
+function mergeUsageReports(base: UsageReport, overlay: UsageReport): UsageReport {
+	const overlayLimitsById = new Map(overlay.limits.map(limit => [limit.id, limit]));
+	const limits = [];
+	for (const limit of base.limits) {
+		const replacement = overlayLimitsById.get(limit.id);
+		if (replacement) {
+			limits.push(replacement);
+			overlayLimitsById.delete(limit.id);
+		} else {
+			limits.push(limit);
+		}
+	}
+	for (const limit of overlayLimitsById.values()) limits.push(limit);
+	const overlayMetadata = (overlay.metadata ?? {}) as Record<string, unknown>;
+	return {
+		...base,
+		fetchedAt: Math.max(base.fetchedAt, overlay.fetchedAt),
+		limits,
+		metadata: {
+			...overlayMetadata,
+			...base.metadata,
+			...(overlayMetadata.headersUpdatedAt !== undefined
+				? { headersUpdatedAt: overlayMetadata.headersUpdatedAt }
+				: {}),
+		},
+	};
+}
+
+export interface RemoteAuthCredentialStoreOptions {
+	client: AuthBrokerClient;
+	/**
+	 * Initial snapshot. When omitted, callers must call
+	 * {@link RemoteAuthCredentialStore.refreshSnapshot} before the first read.
+	 */
+	initialSnapshot?: SnapshotResponse;
+	/**
+	 * Subscribe to the broker's SSE snapshot stream when available. Falls back
+	 * to long-poll permanently when the broker returns 404. Default `true`.
+	 */
+	streamSnapshots?: boolean;
+	/**
+	 * Called with each broker-sourced raw full snapshot after the filtered
+	 * public view is applied. The constructor's initial snapshot intentionally
+	 * does not trigger this hook.
+	 */
+	onSnapshot?: (snapshot: SnapshotResponse, generation: number) => void;
+	/**
+	 * Broker credentials visible through this store (OAuth identities and API
+	 * keys per provider). This is a trusted-client routing policy, not broker
+	 * authorization.
+	 */
+	accountPool?: AuthBrokerAccountPool;
+	/** Flush cadence for batched observed-usage reports. Default 10s. */
+	observedUsageFlushMs?: number;
+	/**
+	 * Idle window after the last foreground store use before background
+	 * snapshot sync (SSE stream / long-poll) disconnects and parks. A parked
+	 * store holds no timers or sockets, so an unclosed store never keeps the
+	 * process alive longer than one idle window. Sync resumes transparently on
+	 * the next use. Default 20s.
+	 */
+	backgroundIdleMs?: number;
+}
+
+export class RemoteAuthCredentialStore implements AuthCredentialStore {
+	readonly #client: AuthBrokerClient;
+	readonly #streamSnapshots: boolean;
+	readonly #onSnapshot?: (snapshot: SnapshotResponse, generation: number) => void;
+	readonly #accountPool?: ReadonlyMap<string, ResolvedProviderPool>;
+	#snapshot: SnapshotResponse = emptySnapshot();
+	#snapshotReceivedAt = Date.now();
+	#generation = 0;
+	/**
+	 * Content hash of each row's routable credential material, keyed by id —
+	 * exactly what {@link listAuthCredentials} exposes (id, provider,
+	 * credential); blocks and usage overlays are excluded. Drives
+	 * {@link #credentialRevision} independently of the broker's numeric
+	 * generation, which is an in-memory counter that resets when the broker
+	 * process restarts and so cannot be trusted for change detection. Full
+	 * snapshots rehash every row; deltas and local writes rehash only the ids
+	 * they touched (see {@link #dirtyCredentialIds}).
+	 */
+	#credentialHashes = new Map<number, number | bigint>();
+	/** Ids whose row changed since {@link #credentialHashes} was last reconciled. */
+	#dirtyCredentialIds = new Set<number>();
+	/** Monotonic local counter bumped whenever {@link #credentialHashes} changes. */
+	#credentialRevision = 0;
+	/** Revision last reported as "seen" by {@link pollExternalChanges}; seeded from the initial snapshot. */
+	#acknowledgedRevision = 0;
+	#usageOverlays: Map<string, UsageReport> = new Map();
+	#backgroundAbort = new AbortController();
+	readonly #backgroundIdleMs: number;
+	/** Last foreground store use; background sync parks `#backgroundIdleMs` after this. */
+	#lastActivityMs = Date.now();
+	/** Present while the background loop is parked; resolved by `#noteActivity` or `close()`. */
+	#activityWakeup: PromiseWithResolvers<void> | null = null;
+	#cache: Map<string, CacheEntry> = new Map();
+	#cacheCharacters = 0;
+	/** `undefined` is the aggregate scope; provider scopes never stand in for it. */
+	#usageCache = new Map<Provider | undefined, UsageCacheEntry>();
+	#usageInflight = new Map<Provider | undefined, Promise<UsageReport[] | null>>();
+	#credentialBlockReconcileAfter: Map<string, number> = new Map();
+	/** Exact deleted rows suppressed until their old deadline, including snapshots racing the DELETE acknowledgement. */
+	#deletedCredentialBlocks: Map<string, CredentialBlockSnapshot> = new Map();
+	/** Local block writes not yet reflected by the broker; see {@link #pendingBlocksFor}. */
+	#pendingCredentialBlocks: Map<string, CredentialBlockSnapshot> = new Map();
+	#usageCacheEpoch = 0;
+	/** Raw broker credentials retained to size aggregate usage requests before account-pool filtering. */
+	#brokerUsageProviderByCredentialId = new Map<number, Provider>();
+	#brokerUsageAccountCounts = new Map<Provider, number>();
+	/** Per-snapshot lookup of oauth credentials by provider; rebuilt when `#snapshot` is replaced. */
+	#usageFilterLookup?: { snapshot: SnapshotResponse; byProvider: Map<Provider, OAuthCredential[]> };
+	/** Memoized `#filterUsageReports` output, keyed on (input identity, lookup identity). */
+	#usageFilterResult?: { input: UsageReport[]; byProvider: Map<Provider, OAuthCredential[]>; output: UsageReport[] };
+	#closed = false;
+	/**
+	 * `true` once the SSE consumer received its first frame and hasn't dropped
+	 * since. Writes consult this to suppress the otherwise-mandatory
+	 * `refreshSnapshot()` follow-up — the stream will deliver the new
+	 * generation without an extra GET.
+	 */
+	#streamingActive = false;
+	/** Latched once the broker has answered 404 — never try the stream again. */
+	#streamingUnsupported = false;
+	/** Pending observed usage keyed by `installId\u0000app\u0000provider\u0000model`, merged until flush. */
+	#observedUsage = new Map<string, { client: ClientUsageIdentity; entry: ObservedUsageEntry }>();
+	#observedUsageTimer: Timer | undefined;
+	readonly #observedUsageFlushMs: number;
+	/** Latched once the broker answered 404 — old broker, never report again. */
+	#observedUsageUnsupported = false;
+	/** Tail of the serialized observed-usage sends; each flush waits for the one before it. */
+	#observedUsageFlush: Promise<void> = Promise.resolve();
+	/** Cancels the exit flush registered with the first buffered usage. */
+	#cancelObservedUsageExitFlush: (() => void) | undefined;
+
+	constructor(opts: RemoteAuthCredentialStoreOptions) {
+		this.#client = opts.client;
+		this.#streamSnapshots = opts.streamSnapshots ?? true;
+		this.#observedUsageFlushMs = opts.observedUsageFlushMs ?? 10_000;
+		this.#backgroundIdleMs = opts.backgroundIdleMs ?? BACKGROUND_IDLE_MS;
+		this.#accountPool = opts.accountPool ? resolveAccountPool(opts.accountPool) : undefined;
+		this.#applySnapshot(opts.initialSnapshot ?? emptySnapshot(), opts.initialSnapshot?.generation ?? 0);
+		this.#acknowledgedRevision = this.#credentialRevision;
+		this.#onSnapshot = opts.onSnapshot;
+		void this.#runBackground();
+	}
+
+	get client(): AuthBrokerClient {
+		return this.#client;
+	}
+
+	get snapshot(): SnapshotResponse {
+		this.#noteActivity();
+		return this.#snapshot;
+	}
+
+	#applySnapshot(snapshot: SnapshotResponse, generation: number, protectNewBlocks = true): void {
+		const nowMs = Date.now();
+		// Reads check block expiry inline; expired rows and bookkeeping are pruned
+		// here so the block diff below compares only live rows.
+		this.cleanExpiredCredentialBlocks(nowMs);
+		this.#replaceBrokerUsageAccounts(snapshot.credentials);
+		const previousCredentials = this.#snapshot.credentials;
+		const credentials = snapshot.credentials
+			.filter(entry => isCredentialInAccountPool(entry, this.#accountPool))
+			.map(entry => this.#normalizeSnapshotEntryBlocks(entry, nowMs));
+		if (snapshotBlocksChanged(previousCredentials, credentials)) this.#invalidateUsageCache();
+		if (protectNewBlocks) this.#protectNewSnapshotBlocks(previousCredentials, credentials, nowMs);
+		this.#snapshot = { ...snapshot, credentials };
+		this.#generation = generation;
+		this.#snapshotReceivedAt = nowMs;
+		this.#rebuildCredentialHashes();
+		const onSnapshot = this.#onSnapshot;
+		if (!onSnapshot) return;
+		try {
+			onSnapshot(snapshot, generation);
+		} catch (error) {
+			logger.debug("auth-broker snapshot callback failed", { error: String(error) });
+		}
+	}
+
+	/**
+	 * Rehash every row after a full snapshot apply and bump
+	 * {@link #credentialRevision} when the routable credential set changed, so
+	 * {@link pollExternalChanges} detects add/remove/replace even when the
+	 * broker's numeric generation repeats (e.g. after a broker restart resets
+	 * its in-memory counter).
+	 */
+	#rebuildCredentialHashes(): void {
+		const previous = this.#credentialHashes;
+		const next = new Map<number, number | bigint>();
+		let changed = false;
+		for (const entry of this.#snapshot.credentials) {
+			const hash = credentialContentHash(entry);
+			next.set(entry.id, hash);
+			if (previous.get(entry.id) !== hash) changed = true;
+		}
+		this.#credentialHashes = next;
+		this.#dirtyCredentialIds.clear();
+		if (changed || next.size !== previous.size) this.#credentialRevision += 1;
+	}
+
+	/**
+	 * Rehash only the rows marked in {@link #dirtyCredentialIds} (stream deltas
+	 * and local writes) and bump {@link #credentialRevision} when any of them
+	 * was added, removed, or changed since the last reconcile.
+	 */
+	#refreshCredentialRevision(): void {
+		const dirty = this.#dirtyCredentialIds;
+		if (dirty.size === 0) return;
+		let changed = false;
+		for (const entry of this.#snapshot.credentials) {
+			if (!dirty.delete(entry.id)) continue;
+			const hash = credentialContentHash(entry);
+			if (this.#credentialHashes.get(entry.id) !== hash) {
+				this.#credentialHashes.set(entry.id, hash);
+				changed = true;
+			}
+			if (dirty.size === 0) break;
+		}
+		// Dirty ids no longer in the snapshot were removed.
+		for (const id of dirty) {
+			if (this.#credentialHashes.delete(id)) changed = true;
+		}
+		dirty.clear();
+		if (changed) this.#credentialRevision += 1;
+	}
+
+	#protectNewSnapshotBlocks(previous: readonly SnapshotEntry[], next: readonly SnapshotEntry[], nowMs: number): void {
+		const previousBlocksByKey = new Map<string, string>();
+		for (const entry of previous) {
+			for (const block of entry.blocks ?? []) {
+				previousBlocksByKey.set(blockKey(entry.id, block), `${block.blockedUntilMs}\0${block.updatedAtMs ?? ""}`);
+			}
+		}
+		const activeKeys = new Set<string>();
+		for (const entry of next) {
+			for (const block of entry.blocks ?? []) {
+				const key = blockKey(entry.id, block);
+				activeKeys.add(key);
+				const signature = `${block.blockedUntilMs}\0${block.updatedAtMs ?? ""}`;
+				if (previousBlocksByKey.get(key) === signature) continue;
+				const updatedAtMs = block.updatedAtMs ?? nowMs;
+				this.#credentialBlockReconcileAfter.set(
+					key,
+					Math.min(block.blockedUntilMs, updatedAtMs + CREDENTIAL_BLOCK_RECONCILE_DELAY_MS),
+				);
+			}
+		}
+		for (const key of this.#credentialBlockReconcileAfter.keys()) {
+			if (!activeKeys.has(key)) this.#credentialBlockReconcileAfter.delete(key);
+		}
+	}
+
+	/**
+	 * Background snapshot sync. Invariant: this loop never keeps the process
+	 * alive on its own. While the store is in active foreground use it holds a
+	 * live broker request (SSE stream or long-poll); once the store has been
+	 * idle for `#backgroundIdleMs` an unref'd watchdog aborts that request and
+	 * the loop parks on a bare promise — zero timers or sockets — until the
+	 * next foreground call. Backoff sleeps use unref'd timers for the same
+	 * reason. A leaked (never-closed) store therefore stops pinning the event
+	 * loop at most one idle window after its last use.
+	 */
+	async #runBackground(): Promise<void> {
+		let backoffMs = BACKGROUND_BACKOFF_INITIAL_MS;
+		while (!this.#closed && !this.#backgroundAbort.signal.aborted) {
+			if (this.#idleRemainingMs() <= 0) {
+				this.#activityWakeup ??= Promise.withResolvers<void>();
+				await this.#activityWakeup.promise;
+				continue;
+			}
+			const watchdog = this.#startIdleWatchdog();
+			try {
+				if (this.#streamSnapshots && !this.#streamingUnsupported) {
+					try {
+						await this.#consumeSnapshotStream(watchdog.signal);
+						backoffMs = BACKGROUND_BACKOFF_INITIAL_MS;
+					} catch (error) {
+						if (this.#closed || this.#backgroundAbort.signal.aborted) break;
+						if (watchdog.idled()) continue;
+						if (error instanceof AuthBrokerStreamUnsupportedError) {
+							this.#streamingUnsupported = true;
+							logger.debug("auth-broker snapshot stream unsupported; falling back to long-poll");
+							continue;
+						}
+						logger.debug("auth-broker snapshot stream failed; backing off", { error: String(error) });
+						await this.#backoffWait(backoffMs);
+						backoffMs = Math.min(BACKGROUND_BACKOFF_MAX_MS, backoffMs * 2);
+					}
+					continue;
+				}
+				try {
+					const result = await this.#client.fetchSnapshot({
+						ifGenerationGt: this.#generation,
+						waitMs: BACKGROUND_WAIT_MS,
+						signal: watchdog.signal,
+					});
+					if (result.status === 200) this.#applySnapshot(result.snapshot, result.generation);
+					backoffMs = BACKGROUND_BACKOFF_INITIAL_MS;
+				} catch (error) {
+					if (this.#closed || this.#backgroundAbort.signal.aborted) break;
+					if (watchdog.idled()) continue;
+					logger.debug("auth-broker background snapshot sync failed", { error: String(error) });
+					await this.#backoffWait(backoffMs);
+					backoffMs = Math.min(BACKGROUND_BACKOFF_MAX_MS, backoffMs * 2);
+				}
+			} finally {
+				watchdog.stop();
+			}
+		}
+	}
+
+	/** Record a foreground store use; wakes the parked background sync. */
+	#noteActivity(): void {
+		this.#lastActivityMs = Date.now();
+		if (this.#activityWakeup) {
+			this.#activityWakeup.resolve();
+			this.#activityWakeup = null;
+		}
+	}
+
+	#idleRemainingMs(): number {
+		return this.#lastActivityMs + this.#backgroundIdleMs - Date.now();
+	}
+
+	/**
+	 * Abort signal for one background iteration that trips once the store has
+	 * been idle for `#backgroundIdleMs`. The timer is unref'd: it can only fire
+	 * while something else keeps the event loop alive — typically our own
+	 * in-flight broker request, which is exactly what it exists to end.
+	 */
+	#startIdleWatchdog(): { signal: AbortSignal; idled: () => boolean; stop: () => void } {
+		const controller = new AbortController();
+		let idled = false;
+		let timer: Timer | undefined;
+		const arm = (): void => {
+			const remainingMs = this.#idleRemainingMs();
+			if (remainingMs > 0) {
+				timer = setTimeout(arm, remainingMs);
+				timer.unref?.();
+				return;
+			}
+			idled = true;
+			controller.abort(new AIError.AbortError("auth-broker background sync idle"));
+		};
+		arm();
+		return {
+			signal: AbortSignal.any([this.#backgroundAbort.signal, controller.signal]),
+			idled: () => idled,
+			stop: () => clearTimeout(timer),
+		};
+	}
+
+	/**
+	 * Backoff sleep on an unref'd timer so retry waits never pin the process;
+	 * in an otherwise-exiting process the timer simply never fires and the
+	 * suspended loop holds no handles. Wakes early on `close()`.
+	 */
+	async #backoffWait(ms: number): Promise<void> {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const timer = setTimeout(resolve, ms);
+		timer.unref?.();
+		const onAbort = (): void => {
+			clearTimeout(timer);
+			resolve();
+		};
+		this.#backgroundAbort.signal.addEventListener("abort", onAbort, { once: true });
+		try {
+			await promise;
+		} finally {
+			this.#backgroundAbort.signal.removeEventListener("abort", onAbort);
+		}
+	}
+
+	async #consumeSnapshotStream(signal: AbortSignal): Promise<void> {
+		const iterator = this.#client.openSnapshotStream({ signal });
+		try {
+			for await (const event of iterator) {
+				if (this.#closed || signal.aborted) break;
+				this.#streamingActive = true;
+				this.#applyStreamEvent(event);
+			}
+		} finally {
+			this.#streamingActive = false;
+		}
+	}
+
+	#applyStreamEvent(event: SnapshotStreamEvent): void {
+		switch (event.kind) {
+			case "snapshot": {
+				// The first frame of every SSE connection is a full authoritative
+				// snapshot. Always adopt it as the new generation baseline: the
+				// broker's in-memory generation counter resets on restart and may
+				// therefore be lower than the previous stream's last value.
+				// Subsequent entry/removal frames remain guarded against reordering
+				// relative to this new baseline below.
+				const { kind: _kind, ...snapshot } = event;
+				this.#applySnapshot(snapshot, snapshot.generation);
+				return;
+			}
+			case "entry": {
+				if (event.generation < this.#generation) return;
+				this.#applyStreamEntry(event.entry, event.refresher, event.generation, event.serverNowMs);
+				return;
+			}
+			case "removed": {
+				if (event.generation < this.#generation) return;
+				this.#removeStreamCredential(event.id, event.refresher, event.generation, event.serverNowMs);
+				return;
+			}
+		}
+	}
+
+	#applyStreamEntry(
+		entry: SnapshotEntry,
+		refresher: RefresherSchedule,
+		generation: number,
+		serverNowMs: number,
+	): void {
+		this.#upsertBrokerUsageAccount(entry);
+		if (!isCredentialInAccountPool(entry, this.#accountPool)) {
+			this.#removeStreamCredential(entry.id, refresher, generation, serverNowMs, { retainBrokerUsageAccount: true });
+			return;
+		}
+		const nowMs = Date.now();
+		const incoming = this.#normalizeSnapshotEntryBlocks(entry, nowMs);
+		const index = this.#snapshot.credentials.findIndex(candidate => candidate.id === incoming.id);
+		// Expired rows linger until the next prune; compare only live ones.
+		const previousBlocks =
+			index === -1
+				? undefined
+				: this.#snapshot.credentials[index]?.blocks?.filter(block => block.blockedUntilMs > nowMs);
+		const blocksChanged = !credentialBlockSnapshotsEqual(previousBlocks, incoming.blocks);
+		if (blocksChanged) this.#invalidateUsageCache();
+		const credentials =
+			index === -1
+				? [...this.#snapshot.credentials, incoming]
+				: this.#snapshot.credentials.map((candidate, i) => (i === index ? incoming : candidate));
+		if (blocksChanged) this.#protectNewSnapshotBlocks(this.#snapshot.credentials, credentials, nowMs);
+		this.#snapshot = { ...this.#snapshot, generation, serverNowMs, refresher, credentials };
+		this.#generation = generation;
+		this.#snapshotReceivedAt = nowMs;
+		this.#dirtyCredentialIds.add(incoming.id);
+		this.#refreshCredentialRevision();
+	}
+
+	#removeStreamCredential(
+		id: number,
+		refresher: RefresherSchedule,
+		generation: number,
+		serverNowMs: number,
+		options?: { retainBrokerUsageAccount?: boolean },
+	): void {
+		if (!options?.retainBrokerUsageAccount) this.#removeBrokerUsageAccount(id);
+		const nowMs = Date.now();
+		const removed = this.#snapshot.credentials.find(entry => entry.id === id);
+		if (removed?.blocks?.some(block => block.blockedUntilMs > nowMs)) this.#invalidateUsageCache();
+		const credentials = this.#snapshot.credentials.filter(entry => entry.id !== id);
+		this.#snapshot = { ...this.#snapshot, generation, serverNowMs, refresher, credentials };
+		this.#generation = generation;
+		this.#snapshotReceivedAt = nowMs;
+		this.#dirtyCredentialIds.add(id);
+		this.#refreshCredentialRevision();
+	}
+
+	/** Re-hydrate the in-memory snapshot from the broker. */
+	async refreshSnapshot(): Promise<SnapshotResponse> {
+		this.#noteActivity();
+		const result = await this.#client.fetchSnapshot();
+		if (result.status === 200) this.#applySnapshot(result.snapshot, result.generation);
+		return this.#snapshot;
+	}
+
+	/**
+	 * Stateful probe for broker-side credential changes, mirroring
+	 * {@link SqliteAuthCredentialStore.pollExternalChanges} so long-lived broker
+	 * clients (notably `auth-gateway serve`) pick up logins/logouts made by
+	 * another process without a restart.
+	 *
+	 * Compares a local content revision, not the broker's numeric generation:
+	 * generation is an in-memory counter that resets when the broker process
+	 * restarts, so a reconnecting stream can deliver a different credential set
+	 * under a repeated (or lower) generation. {@link #refreshCredentialRevision}
+	 * bumps the revision whenever the applied credential material actually
+	 * changes, catching those cases too. Records foreground activity first: a
+	 * low-traffic client's background sync parks after `#backgroundIdleMs`, and
+	 * without this wakeup it would never fetch the new snapshot to report in the
+	 * first place.
+	 */
+	pollExternalChanges(): boolean {
+		this.#noteActivity();
+		if (this.#credentialRevision === this.#acknowledgedRevision) return false;
+		this.#acknowledgedRevision = this.#credentialRevision;
+		return true;
+	}
+
+	listAuthCredentials(provider?: string): StoredAuthCredential[] {
+		this.#noteActivity();
+		const out: StoredAuthCredential[] = [];
+		for (const entry of this.#snapshot.credentials) {
+			if (provider !== undefined && entry.provider !== provider) continue;
+			out.push({
+				id: entry.id,
+				provider: entry.provider,
+				credential: entry.credential as AuthCredential,
+				disabledCause: null,
+			});
+		}
+		return out;
+	}
+
+	/** Broker-backed disabled tombstones; empty against brokers predating the endpoint. */
+	listDisabledCredentials(provider?: string, signal?: AbortSignal): Promise<DisabledCredentialSummary[]> {
+		this.#noteActivity();
+		return this.#client.listDisabledCredentials(provider, signal);
+	}
+
+	getCredentialBlock(credentialId: number, providerKey: string, blockScope: string): number | undefined {
+		this.#noteActivity();
+		// Expired rows are pruned on snapshot apply, not per read; filter inline.
+		const entry = this.#snapshot.credentials.find(candidate => candidate.id === credentialId);
+		if (!entry?.blocks) return undefined;
+		const block = entry.blocks.find(
+			candidate => candidate.providerKey === providerKey && candidate.blockScope === blockScope,
+		);
+		if (!block || block.blockedUntilMs <= Date.now()) return undefined;
+		return block.blockedUntilMs;
+	}
+
+	getCredentialBlockScopes(credentialId: number, providerKey: string): Map<string, number> {
+		this.#noteActivity();
+		const nowMs = Date.now();
+		const scopes = new Map<string, number>();
+		const entry = this.#snapshot.credentials.find(candidate => candidate.id === credentialId);
+		for (const block of entry?.blocks ?? []) {
+			if (block.providerKey !== providerKey || block.blockedUntilMs <= nowMs) continue;
+			scopes.set(block.blockScope, block.blockedUntilMs);
+		}
+		return scopes;
+	}
+
+	getCredentialBlockReconcileAfter(credentialId: number, providerKey: string, blockScope: string): number | undefined {
+		if (this.getCredentialBlock(credentialId, providerKey, blockScope) === undefined) return undefined;
+		const key = blockKey(credentialId, { providerKey, blockScope });
+		const reconcileAfterMs = this.#credentialBlockReconcileAfter.get(key);
+		return reconcileAfterMs !== undefined && reconcileAfterMs > Date.now() ? reconcileAfterMs : undefined;
+	}
+
+	listCredentialBlocks(credentialIds: readonly number[]): StoredCredentialBlock[] {
+		this.#noteActivity();
+		const nowMs = Date.now();
+		const ids = new Set(credentialIds);
+		const blocks: StoredCredentialBlock[] = [];
+		for (const entry of this.#snapshot.credentials) {
+			if (!ids.has(entry.id) || !entry.blocks) continue;
+			for (const block of entry.blocks) {
+				if (block.blockedUntilMs <= nowMs) continue;
+				blocks.push({
+					credentialId: entry.id,
+					providerKey: block.providerKey,
+					blockScope: block.blockScope,
+					blockedUntilMs: block.blockedUntilMs,
+					updatedAtMs: block.updatedAtMs,
+				});
+			}
+		}
+		blocks.sort((a, b) => a.credentialId - b.credentialId || compareCredentialBlockSnapshots(a, b));
+		return blocks;
+	}
+
+	upsertCredentialBlock(block: StoredCredentialBlock): void {
+		this.#noteActivity();
+		this.#upsertSnapshotBlock(block);
+		this.#invalidateUsageCache();
+		const key = blockKey(block.credentialId, block);
+		this.#credentialBlockReconcileAfter.set(
+			key,
+			Math.min(block.blockedUntilMs, Date.now() + CREDENTIAL_BLOCK_RECONCILE_DELAY_MS),
+		);
+		const body = toCredentialBlockSnapshot(block);
+		const pending = this.#pendingCredentialBlocks.get(key);
+		if (!pending || pending.blockedUntilMs < body.blockedUntilMs) this.#pendingCredentialBlocks.set(key, body);
+		void this.#client
+			.upsertCredentialBlock(block.credentialId, body)
+			.then(() => {
+				this.#maybeRefreshSnapshot("credential block");
+			})
+			.catch(error => {
+				logger.warn("auth-broker credential block propagation failed", {
+					id: block.credentialId,
+					providerKey: block.providerKey,
+					blockScope: block.blockScope,
+					error: String(error),
+				});
+			});
+	}
+
+	deleteCredentialBlock(credentialId: number, providerKey: string, blockScope: string): void {
+		this.#noteActivity();
+		const key = blockKey(credentialId, { providerKey, blockScope });
+		this.#pendingCredentialBlocks.delete(key);
+		const deleted = this.#snapshot.credentials
+			.find(entry => entry.id === credentialId)
+			?.blocks?.find(block => block.providerKey === providerKey && block.blockScope === blockScope);
+		if (deleted) this.#deletedCredentialBlocks.set(key, deleted);
+		this.#deleteSnapshotBlocks(credentialId, { providerKey, blockScope });
+		this.#credentialBlockReconcileAfter.delete(key);
+		this.#invalidateUsageCache();
+		void this.#client
+			.deleteCredentialBlock(credentialId, { providerKey, blockScope })
+			.then(() => {
+				this.#maybeRefreshSnapshot("credential block delete");
+			})
+			.catch(error => {
+				if (this.#deletedCredentialBlocks.get(key) === deleted) this.#deletedCredentialBlocks.delete(key);
+				this.#maybeRefreshSnapshot("credential block delete failed");
+				logger.warn("auth-broker credential block delete propagation failed", {
+					id: credentialId,
+					providerKey,
+					blockScope,
+					error: String(error),
+				});
+			});
+	}
+
+	deleteCredentialBlocks(credentialId: number): void {
+		this.#noteActivity();
+		for (const key of this.#pendingCredentialBlocks.keys()) {
+			if (key.startsWith(`${credentialId}\0`)) this.#pendingCredentialBlocks.delete(key);
+		}
+		this.#deleteSnapshotBlocks(credentialId);
+		for (const key of this.#credentialBlockReconcileAfter.keys()) {
+			if (key.startsWith(`${credentialId}\0`)) this.#credentialBlockReconcileAfter.delete(key);
+		}
+		this.#invalidateUsageCache();
+		void this.#client
+			.deleteCredentialBlocks(credentialId)
+			.then(() => {
+				this.#maybeRefreshSnapshot("credential blocks delete");
+			})
+			.catch(error => {
+				logger.warn("auth-broker credential blocks delete propagation failed", {
+					id: credentialId,
+					error: String(error),
+				});
+			});
+	}
+
+	cleanExpiredCredentialBlocks(nowMs: number): void {
+		this.#pruneExpiredCredentialBlocks(nowMs);
+		for (const [key, block] of this.#deletedCredentialBlocks) {
+			if (block.blockedUntilMs <= nowMs) this.#deletedCredentialBlocks.delete(key);
+		}
+		for (const [key, block] of this.#pendingCredentialBlocks) {
+			if (block.blockedUntilMs <= nowMs) this.#pendingCredentialBlocks.delete(key);
+		}
+		for (const [key, reconcileAfterMs] of this.#credentialBlockReconcileAfter) {
+			if (reconcileAfterMs <= nowMs) this.#credentialBlockReconcileAfter.delete(key);
+		}
+	}
+
+	/**
+	 * In-memory update from a successful refresh through the broker. AuthStorage
+	 * calls this after `#replaceCredentialAt`; the broker already persisted the
+	 * authoritative row, so we just mirror it.
+	 */
+	updateAuthCredential(id: number, credential: AuthCredential): void {
+		this.#noteActivity();
+		for (const entry of this.#snapshot.credentials) {
+			if (entry.id !== id) continue;
+			entry.credential = credential as typeof entry.credential;
+			this.#dirtyCredentialIds.add(id);
+			return;
+		}
+	}
+
+	async deleteAuthCredential(id: number, disabledCause: string): Promise<boolean> {
+		this.#noteActivity();
+		const found = this.#snapshot.credentials.some(entry => entry.id === id);
+		if (!found) return false;
+		await this.#client.disableCredential(id, disabledCause);
+		this.#removeCredentialById(id);
+		this.#maybeRefreshSnapshot("delete credential");
+		return true;
+	}
+
+	tryDisableAuthCredentialIfMatches(id: number, _expectedData: string, disabledCause: string): boolean {
+		this.#noteActivity();
+		const found = this.#snapshot.credentials.find(entry => entry.id === id);
+		if (!found) return false;
+		this.#removeCredentialById(id);
+		void this.#client.disableCredential(id, disabledCause).catch(error => {
+			logger.warn("auth-broker disable propagation failed", { id, error: String(error) });
+		});
+		return true;
+	}
+
+	async waitForFreshSnapshot(maxWaitMs: number, opts: { signal?: AbortSignal } = {}): Promise<boolean> {
+		this.#noteActivity();
+		const previousGeneration = this.#generation;
+		const result = await this.#client.fetchSnapshot({
+			ifGenerationGt: this.#generation,
+			waitMs: maxWaitMs,
+			signal: opts.signal,
+		});
+		if (result.status === 200) this.#applySnapshot(result.snapshot, result.generation);
+		return this.#generation !== previousGeneration;
+	}
+
+	async prepareForRequest(credentialId: number, opts: { signal?: AbortSignal } = {}): Promise<boolean> {
+		this.#noteActivity();
+		const entry = this.#snapshot.credentials.find(candidate => candidate.id === credentialId);
+		if (entry?.credential.type !== "oauth" || entry.rotatesInMs === null) return false;
+		const remainingMs = this.#snapshotReceivedAt + entry.rotatesInMs - Date.now();
+		if (remainingMs > WAIT_THRESHOLD_MS) return false;
+		return this.waitForFreshSnapshot(MAX_WAIT_MS, opts);
+	}
+
+	async markCredentialSuspect(credentialId: number, opts: { signal?: AbortSignal } = {}): Promise<void> {
+		this.#noteActivity();
+		await this.#refreshThroughBroker(credentialId, opts.signal, "auth-recovery");
+		this.#maybeRefreshSnapshot("suspect credential refresh");
+	}
+
+	/**
+	 * Upsert a single credential through the broker. The broker server is the
+	 * canonical writer — see `POST /v1/credential`. The redacted snapshot
+	 * entries returned by the server replace the provider's rows in our local
+	 * snapshot, and the global snapshot is then refreshed in the background so
+	 * any concurrent peer (refresh, generation bump) stays in sync.
+	 */
+	async upsertAuthCredential(provider: string, credential: AuthCredential): Promise<StoredAuthCredential[]> {
+		this.#noteActivity();
+		const { entries } = await this.#client.uploadCredential(provider, credential);
+		this.#applyProviderEntries(provider, entries);
+		this.#maybeRefreshSnapshot("upload");
+		return this.listAuthCredentials(provider);
+	}
+
+	/**
+	 * Replace-all semantics: disable every active credential for the provider,
+	 * then upload each of the new credentials. Used by API-key login so a new
+	 * key clobbers any previously stored key for the same provider.
+	 */
+	async replaceAuthCredentials(provider: string, credentials: AuthCredential[]): Promise<StoredAuthCredential[]> {
+		const existing = this.listAuthCredentials(provider);
+		for (const entry of existing) {
+			try {
+				await this.#client.disableCredential(entry.id, "replaced by newer credential");
+			} catch (error) {
+				logger.warn("auth-broker disable during replace failed", {
+					provider,
+					id: entry.id,
+					error: String(error),
+				});
+			}
+		}
+		// Snapshot reflects the disables before we add the new rows so a concurrent
+		// reader cannot momentarily see old + new together for the same provider.
+		this.#removeProviderEntries(provider);
+		for (const credential of credentials) {
+			const { entries } = await this.#client.uploadCredential(provider, credential);
+			this.#applyProviderEntries(provider, entries);
+		}
+		this.#maybeRefreshSnapshot("replace");
+		return this.listAuthCredentials(provider);
+	}
+
+	/**
+	 * Logout: disable every active credential for the provider on the broker,
+	 * then drop them from the local snapshot. Refresh fetches the authoritative
+	 * post-state in the background.
+	 */
+	async deleteAuthCredentials(provider: string, disabledCause: string): Promise<void> {
+		const existing = this.listAuthCredentials(provider);
+		for (const entry of existing) {
+			try {
+				await this.#client.disableCredential(entry.id, disabledCause);
+			} catch (error) {
+				logger.warn("auth-broker disable during delete failed", {
+					provider,
+					id: entry.id,
+					error: String(error),
+				});
+			}
+		}
+		this.#removeProviderEntries(provider);
+		this.#maybeRefreshSnapshot("delete");
+	}
+
+	#applyProviderEntries(provider: string, entries: AuthCredentialSnapshotEntry[]): void {
+		// `entries` is the broker's authoritative post-upsert list of rows for
+		// `provider`. Drop our existing rows for the same provider and splice in
+		// the fresh set — preserving every other provider's rows in place.
+		const existingBlocks = new Map<number, readonly CredentialBlockSnapshot[] | undefined>();
+		const others: SnapshotEntry[] = [];
+		for (const entry of this.#snapshot.credentials) {
+			if (entry.provider !== provider) {
+				others.push(entry);
+				continue;
+			}
+			this.#dirtyCredentialIds.add(entry.id);
+			if (entry.blocks !== undefined) existingBlocks.set(entry.id, entry.blocks);
+		}
+		const incoming = entries
+			.filter(entry => isCredentialInAccountPool(entry, this.#accountPool))
+			.map(entry => credentialEntryWithBlocks(entry, existingBlocks.get(entry.id)));
+		for (const entry of incoming) this.#dirtyCredentialIds.add(entry.id);
+		this.#snapshot = { ...this.#snapshot, credentials: [...others, ...incoming] };
+	}
+	#applyCredentialEntry(entry: AuthCredentialSnapshotEntry): boolean {
+		if (!isCredentialInAccountPool(entry, this.#accountPool)) {
+			this.#removeCredentialById(entry.id);
+			return false;
+		}
+		const index = this.#snapshot.credentials.findIndex(candidate => candidate.id === entry.id);
+		const existingBlocks = index === -1 ? undefined : this.#snapshot.credentials[index]?.blocks;
+		const incoming = credentialEntryWithBlocks(entry, existingBlocks);
+		this.#dirtyCredentialIds.add(entry.id);
+		if (index === -1) {
+			this.#snapshot = { ...this.#snapshot, credentials: [...this.#snapshot.credentials, incoming] };
+			return true;
+		}
+		const credentials = [...this.#snapshot.credentials];
+		credentials[index] = incoming;
+		this.#snapshot = { ...this.#snapshot, credentials };
+		return true;
+	}
+
+	#removeProviderEntries(provider: string): void {
+		const next: SnapshotEntry[] = [];
+		for (const entry of this.#snapshot.credentials) {
+			if (entry.provider === provider) this.#dirtyCredentialIds.add(entry.id);
+			else next.push(entry);
+		}
+		this.#snapshot = { ...this.#snapshot, credentials: next };
+	}
+
+	#removeCredentialById(id: number): void {
+		const next = this.#snapshot.credentials.filter(entry => entry.id !== id);
+		this.#snapshot = { ...this.#snapshot, credentials: next };
+		this.#dirtyCredentialIds.add(id);
+	}
+
+	#normalizeSnapshotEntryBlocks(entry: SnapshotEntry, nowMs: number): SnapshotEntry {
+		const pending = this.#pendingBlocksFor(entry, nowMs);
+		if ((!entry.blocks || entry.blocks.length === 0) && pending.length === 0) return entry;
+		// A pending row replaces a shorter reported row for the same scope.
+		const merged = [
+			...(entry.blocks ?? []).filter(
+				block =>
+					!pending.some(
+						candidate => candidate.providerKey === block.providerKey && candidate.blockScope === block.blockScope,
+					),
+			),
+			...pending,
+		];
+		const blocks = merged
+			.filter(block => {
+				if (block.blockedUntilMs <= nowMs) return false;
+				const deleted = this.#deletedCredentialBlocks.get(blockKey(entry.id, block));
+				// Suppress only the exact row we deleted. A fresh block in this
+				// scope, including one with the same deadline but a newer update,
+				// remains authoritative while the DELETE propagates.
+				return (
+					!deleted || deleted.blockedUntilMs !== block.blockedUntilMs || deleted.updatedAtMs !== block.updatedAtMs
+				);
+			})
+			.map(block => ({
+				providerKey: block.providerKey,
+				blockScope: block.blockScope,
+				blockedUntilMs: block.blockedUntilMs,
+				...(block.updatedAtMs !== undefined ? { updatedAtMs: block.updatedAtMs } : {}),
+			}))
+			.sort(compareCredentialBlockSnapshots);
+		if (blocks.length > 0) return { ...entry, blocks };
+		const next: SnapshotEntry = { ...entry };
+		delete next.blocks;
+		return next;
+	}
+
+	/**
+	 * Locally written blocks the incoming entry does not yet carry. The broker
+	 * write is asynchronous: a snapshot racing it, or a failed write, must not
+	 * erase a block this process still depends on. A pending row retires once the
+	 * broker reports it (or a longer deadline) or when it expires.
+	 */
+	#pendingBlocksFor(entry: SnapshotEntry, nowMs: number): CredentialBlockSnapshot[] {
+		if (this.#pendingCredentialBlocks.size === 0) return [];
+		const pending: CredentialBlockSnapshot[] = [];
+		const prefix = `${entry.id}\0`;
+		for (const [key, block] of this.#pendingCredentialBlocks) {
+			if (!key.startsWith(prefix)) continue;
+			const reported = entry.blocks?.find(
+				candidate => candidate.providerKey === block.providerKey && candidate.blockScope === block.blockScope,
+			);
+			if (block.blockedUntilMs <= nowMs || (reported && reported.blockedUntilMs >= block.blockedUntilMs)) {
+				this.#pendingCredentialBlocks.delete(key);
+				continue;
+			}
+			pending.push(block);
+		}
+		return pending;
+	}
+
+	#upsertSnapshotBlock(block: StoredCredentialBlock): void {
+		this.#deletedCredentialBlocks.delete(blockKey(block.credentialId, block));
+		const index = this.#snapshot.credentials.findIndex(entry => entry.id === block.credentialId);
+		if (index === -1) return;
+		const entry = this.#snapshot.credentials[index]!;
+		const incoming = toCredentialBlockSnapshot(block);
+		// Expired rows linger until the next prune; drop this entry's now so an
+		// expired row in the same scope cannot lend the new block its stale fields.
+		const nowMs = Date.now();
+		const blocks = (entry.blocks ?? []).filter(candidate => candidate.blockedUntilMs > nowMs);
+		const blockIndex = blocks.findIndex(
+			candidate => candidate.providerKey === incoming.providerKey && candidate.blockScope === incoming.blockScope,
+		);
+		if (blockIndex === -1) {
+			blocks.push(incoming);
+		} else {
+			const existing = blocks[blockIndex]!;
+			blocks[blockIndex] = {
+				...existing,
+				blockedUntilMs: Math.max(existing.blockedUntilMs, incoming.blockedUntilMs),
+			};
+		}
+		blocks.sort(compareCredentialBlockSnapshots);
+		const credentials = [...this.#snapshot.credentials];
+		credentials[index] = { ...entry, blocks };
+		this.#snapshot = { ...this.#snapshot, credentials };
+	}
+
+	#deleteSnapshotBlocks(credentialId: number, target?: { providerKey: string; blockScope: string }): void {
+		const index = this.#snapshot.credentials.findIndex(entry => entry.id === credentialId);
+		if (index === -1) return;
+		const entry = this.#snapshot.credentials[index]!;
+		if (!entry.blocks || entry.blocks.length === 0) return;
+		const blocks = target
+			? entry.blocks.filter(
+					block => block.providerKey !== target.providerKey || block.blockScope !== target.blockScope,
+				)
+			: [];
+		if (blocks.length === entry.blocks.length) return;
+		const next: SnapshotEntry = { ...entry };
+		if (blocks.length > 0) next.blocks = blocks;
+		else delete next.blocks;
+		const credentials = [...this.#snapshot.credentials];
+		credentials[index] = next;
+		this.#snapshot = { ...this.#snapshot, credentials };
+	}
+
+	#pruneExpiredCredentialBlocks(nowMs: number): void {
+		let changed = false;
+		const credentials = this.#snapshot.credentials.map(entry => {
+			if (!entry.blocks || entry.blocks.length === 0) return entry;
+			const blocks = entry.blocks.filter(block => block.blockedUntilMs > nowMs);
+			if (blocks.length === entry.blocks.length) return entry;
+			changed = true;
+			if (blocks.length > 0) return { ...entry, blocks };
+			const next: SnapshotEntry = { ...entry };
+			delete next.blocks;
+			return next;
+		});
+		if (changed) this.#snapshot = { ...this.#snapshot, credentials };
+	}
+
+	/**
+	 * Fire-and-forget `refreshSnapshot()` after a write. When the SSE stream is
+	 * active the broker will deliver the new generation push, so the extra GET
+	 * is wasted bandwidth and we skip it.
+	 */
+	#maybeRefreshSnapshot(reason: string): void {
+		if (this.#streamingActive) return;
+		void this.refreshSnapshot().catch(error => {
+			logger.debug("auth-broker snapshot refresh after write failed", { reason, error: String(error) });
+		});
+	}
+
+	getCache(key: string): string | null {
+		this.#noteActivity();
+		const entry = this.#cache.get(key);
+		if (!entry) return null;
+		if (entry.expiresAtSec * 1000 <= Date.now()) {
+			this.#deleteCache(key);
+			return null;
+		}
+		this.#cache.delete(key);
+		this.#cache.set(key, entry);
+		return entry.value;
+	}
+
+	setCache(key: string, value: string, expiresAtSec: number): void {
+		this.#noteActivity();
+		this.#deleteCache(key);
+		const size = key.length + value.length;
+		if (size > REMOTE_CACHE_MAX_CHARACTERS) return;
+		this.#cache.set(key, { value, expiresAtSec });
+		this.#cacheCharacters += size;
+		while (this.#cache.size > REMOTE_CACHE_MAX_ENTRIES || this.#cacheCharacters > REMOTE_CACHE_MAX_CHARACTERS) {
+			const oldest = this.#cache.keys().next().value;
+			if (oldest === undefined) break;
+			this.#deleteCache(oldest);
+		}
+	}
+
+	#deleteCache(key: string): void {
+		const entry = this.#cache.get(key);
+		if (!entry) return;
+		this.#cacheCharacters -= key.length + entry.value.length;
+		this.#cache.delete(key);
+	}
+
+	/** Drop all cache rows whose keys start with the supplied prefix. */
+	deleteCachePrefix(prefix: string): void {
+		for (const key of this.#cache.keys()) {
+			if (key.startsWith(prefix)) this.#deleteCache(key);
+		}
+	}
+
+	cleanExpiredCache(): void {
+		const nowSec = Math.floor(Date.now() / 1000);
+		for (const [key, entry] of this.#cache) {
+			if (entry.expiresAtSec <= nowSec) this.#deleteCache(key);
+		}
+	}
+
+	async invalidateUsageCache(provider?: string, signal?: AbortSignal): Promise<void> {
+		this.#noteActivity();
+		this.#invalidateUsageCache();
+		try {
+			await this.#client.notifyUsageStale(provider, signal);
+		} catch (err) {
+			logger.warn("auth-broker notification of stale usage failed", { error: String(err) });
+		} finally {
+			// A concurrent read may have reached the broker before it processed the
+			// notification. That response cannot seed the post-notification cache.
+			this.#invalidateUsageCache();
+		}
+	}
+
+	#invalidateUsageCache(): void {
+		// Snapshot/block updates invalidate quota evidence, not a failed broker
+		// connection's cooldown. Keep the flight too: its completion will queue
+		// one current-generation successor instead of overlapping broker calls.
+		for (const [provider, cached] of this.#usageCache) {
+			if (cached.reports !== null) this.#usageCache.delete(provider);
+		}
+		this.#usageCacheEpoch += 1;
+	}
+
+	/**
+	 * Store-level hook consumed by `AuthStorage` — routes refresh through the
+	 * broker so the actual refresh token never leaves the broker host. Returns
+	 * the broker-redacted credential with {@link REMOTE_REFRESH_SENTINEL} in
+	 * the `refresh` slot.
+	 */
+	async refreshOAuthCredential(
+		_provider: Provider,
+		credentialId: number,
+		_credential: OAuthCredential,
+		signal?: AbortSignal,
+		reason?: OAuthRefreshReason,
+	): Promise<OAuthCredentials> {
+		this.#noteActivity();
+		const refreshed = await this.#refreshThroughBroker(credentialId, signal, reason);
+		if (!this.#streamingActive) {
+			await this.refreshSnapshot().catch(error => {
+				logger.debug("auth-broker snapshot refresh after credential refresh failed", { error: String(error) });
+			});
+		}
+		return {
+			access: refreshed.access,
+			refresh: REMOTE_REFRESH_SENTINEL,
+			expires: refreshed.expires,
+			accountId: refreshed.accountId,
+			email: refreshed.email,
+			projectId: refreshed.projectId,
+			enterpriseUrl: refreshed.enterpriseUrl,
+		};
+	}
+
+	/**
+	 * Refresh one credential through the broker and apply the reply. If this
+	 * client's copy changed to something else while the request was in flight,
+	 * the reply may be stale, so the broker's current row wins: a logout stays
+	 * logged out and a newer login is kept.
+	 */
+	async #refreshThroughBroker(
+		credentialId: number,
+		signal?: AbortSignal,
+		reason?: OAuthRefreshReason,
+	): Promise<RemoteOAuthCredential> {
+		const local = () => this.#snapshot.credentials.find(candidate => candidate.id === credentialId);
+		const before = JSON.stringify(local()?.credential);
+		let { entry } = await this.#client.refreshCredential(credentialId, signal, reason);
+		const current = JSON.stringify(local()?.credential);
+		if (current !== before && current !== JSON.stringify(entry.credential)) {
+			await this.refreshSnapshot();
+			const latest = local();
+			if (!latest) throw new AIError.AuthBrokerError(`Credential id=${credentialId} was removed during refresh`);
+			entry = latest;
+		}
+		if (entry.credential.type !== "oauth") {
+			throw new AIError.AuthBrokerError(`Broker returned non-OAuth credential for id=${credentialId}`);
+		}
+		if (!this.#applyCredentialEntry(entry)) {
+			throw new AIError.AuthBrokerError(
+				`Broker refreshed credential id=${credentialId} outside the configured account pool`,
+			);
+		}
+		return entry.credential;
+	}
+
+	/**
+	 * Store-level hook consumed by `AuthStorage.usage.reports()` — proxies
+	 * to the broker's `/v1/usage` endpoint. Shared per-credential caches and
+	 * cooldowns keep separate clients from multiplying provider probes.
+	 */
+	async fetchUsageReports(signal?: AbortSignal, provider?: Provider): Promise<UsageReport[] | null> {
+		this.#noteActivity();
+		const reports = await raceSignal(this.#loadUsageReports(provider), signal, "auth-broker request aborted");
+		if (!reports) return null;
+		const visible = this.#filterUsageReports(this.#applyUsageOverlays(reports));
+		return provider === undefined ? visible : visible.filter(report => report.provider === provider);
+	}
+
+	/**
+	 * Per-credential usage hook consumed by `UsageService.report`. Pulls
+	 * provider-scoped broker `/v1/usage` once and serves that provider's callers
+	 * from the same response (coalesced + cached), then overlays any client-observed
+	 * header hints for the matching credential.
+	 *
+	 * The broker caches each credential independently; the short client TTL
+	 * also folds sequential consumers into one broker round-trip.
+	 */
+	async getUsageReport(
+		provider: Provider,
+		credential: OAuthCredential,
+		signal?: AbortSignal,
+	): Promise<UsageReport | null> {
+		this.#noteActivity();
+		const reports = await raceSignal(this.#loadUsageReports(provider), signal, "auth-broker request aborted");
+		const visibleReports = reports ? this.#filterUsageReports(reports) : null;
+		const matched = visibleReports ? matchUsageReport(visibleReports, provider, credential) : null;
+		const overlay = this.#getActiveUsageOverlay(provider, credential);
+		if (matched && overlay) return mergeUsageReports(matched, overlay);
+		return overlay ?? matched;
+	}
+
+	/**
+	 * Hot path — called per `getUsageReport()`/`fetchUsageReports()` (status-line
+	 * refresh cadence). The oauth-credential lookup is memoized on `#snapshot`
+	 * identity (every update site replaces the reference), and the filtered
+	 * output on (reports identity, lookup identity) — `#loadUsageReports`
+	 * serves the same array for 15s, so steady-state calls are O(1).
+	 */
+	#filterUsageReports(reports: UsageReport[]): UsageReport[] {
+		const accountPool = this.#accountPool;
+		if (!accountPool) return reports;
+		let lookup = this.#usageFilterLookup;
+		if (!lookup || lookup.snapshot !== this.#snapshot) {
+			const byProvider = new Map<Provider, OAuthCredential[]>();
+			for (const entry of this.#snapshot.credentials) {
+				if (entry.credential.type !== "oauth") continue;
+				const list = byProvider.get(entry.provider);
+				if (list) list.push(entry.credential);
+				else byProvider.set(entry.provider, [entry.credential]);
+			}
+			lookup = { snapshot: this.#snapshot, byProvider };
+			this.#usageFilterLookup = lookup;
+		}
+		const memo = this.#usageFilterResult;
+		if (memo && memo.input === reports && memo.byProvider === lookup.byProvider) return memo.output;
+		const byProvider = lookup.byProvider;
+		const output = reports.filter(report => {
+			// Unrestricted for this provider: every report stays. Otherwise a
+			// report must belong to a visible OAuth credential, so reports from
+			// hidden accounts or API keys fail closed.
+			const rule = providerPoolRule(accountPool, report.provider);
+			if (!rule || (rule.accounts === undefined && rule.apiKeys)) return true;
+			const credentials = byProvider.get(report.provider);
+			if (!credentials) return false;
+			return credentials.some(credential => usageReportMatchesCredential(report, credential));
+		});
+		this.#usageFilterResult = { input: reports, byProvider, output };
+		return output;
+	}
+
+	ingestUsageReport(provider: Provider, credential: OAuthCredential, report: UsageReport): boolean {
+		this.#noteActivity();
+		const key = usageOverlayKey(provider, credential);
+		if (!key) return false;
+		const activeOverlay = this.#getActiveUsageOverlay(provider, credential);
+		this.#usageOverlays.set(key, activeOverlay ? mergeUsageReports(activeOverlay, report) : report);
+		return true;
+	}
+
+	#getActiveUsageOverlay(provider: Provider, credential: OAuthCredential): UsageReport | undefined {
+		const key = usageOverlayKey(provider, credential);
+		if (!key) return undefined;
+		const overlay = this.#usageOverlays.get(key);
+		if (!overlay) return undefined;
+		if (Date.now() - overlay.fetchedAt >= USAGE_CACHE_TTL_MS) {
+			this.#usageOverlays.delete(key);
+			return undefined;
+		}
+		return overlay;
+	}
+
+	#applyUsageOverlays(reports: UsageReport[]): UsageReport[] {
+		const overlays = [...this.#usageOverlays.values()].filter(
+			overlay => Date.now() - overlay.fetchedAt < USAGE_CACHE_TTL_MS,
+		);
+		if (overlays.length === 0) return reports;
+		const merged = [...reports];
+		for (const overlay of overlays) {
+			const matchIndex = findMatchingReportIndex(merged, overlay);
+			if (matchIndex === -1) {
+				merged.push(overlay);
+			} else {
+				merged[matchIndex] = mergeUsageReports(merged[matchIndex]!, overlay);
+			}
+		}
+		return merged;
+	}
+
+	#replaceBrokerUsageAccounts(entries: readonly SnapshotEntry[]): void {
+		this.#brokerUsageProviderByCredentialId.clear();
+		this.#brokerUsageAccountCounts.clear();
+		for (const entry of entries) this.#upsertBrokerUsageAccount(entry);
+	}
+
+	#upsertBrokerUsageAccount(entry: Pick<SnapshotEntry, "id" | "provider">): void {
+		const previous = this.#brokerUsageProviderByCredentialId.get(entry.id);
+		if (previous === entry.provider) return;
+		if (previous !== undefined) {
+			const count = this.#brokerUsageAccountCounts.get(previous) ?? 0;
+			if (count <= 1) this.#brokerUsageAccountCounts.delete(previous);
+			else this.#brokerUsageAccountCounts.set(previous, count - 1);
+		}
+		this.#brokerUsageProviderByCredentialId.set(entry.id, entry.provider);
+		this.#brokerUsageAccountCounts.set(entry.provider, (this.#brokerUsageAccountCounts.get(entry.provider) ?? 0) + 1);
+	}
+
+	#removeBrokerUsageAccount(id: number): void {
+		const provider = this.#brokerUsageProviderByCredentialId.get(id);
+		if (provider === undefined) return;
+		this.#brokerUsageProviderByCredentialId.delete(id);
+		const count = this.#brokerUsageAccountCounts.get(provider) ?? 0;
+		if (count <= 1) this.#brokerUsageAccountCounts.delete(provider);
+		else this.#brokerUsageAccountCounts.set(provider, count - 1);
+	}
+
+	#maxBrokerUsageAccounts(provider?: Provider): number {
+		if (provider !== undefined) return this.#brokerUsageAccountCounts.get(provider) ?? 1;
+		let maximum = 1;
+		for (const count of this.#brokerUsageAccountCounts.values()) maximum = Math.max(maximum, count);
+		return maximum;
+	}
+
+	#loadUsageReports(provider?: Provider): Promise<UsageReport[] | null> {
+		// An existing aggregate result covers a provider lookup too. The reverse
+		// is not true: a partial cache must never hide other providers from /usage.
+		const now = Date.now();
+		let cached = this.#usageCache.get(provider);
+		if (cached && now - cached.fetchedAt >= USAGE_CACHE_TTL_MS) cached = undefined;
+		const aggregate = provider === undefined ? undefined : this.#usageCache.get(undefined);
+		// Prefer the newest successful coverage over a failed fetch in another scope.
+		if (
+			aggregate &&
+			now - aggregate.fetchedAt < USAGE_CACHE_TTL_MS &&
+			(!cached ||
+				(aggregate.reports !== null && (cached.reports === null || aggregate.fetchedAt >= cached.fetchedAt)))
+		) {
+			cached = aggregate;
+		}
+		if (cached) return Promise.resolve(cached.reports);
+		const existing = this.#usageInflight.get(provider) ?? this.#usageInflight.get(undefined);
+		if (existing) return existing;
+		const epoch = this.#usageCacheEpoch;
+		const inflight = this.#client
+			.fetchUsage({ provider, maxAccountsPerProvider: this.#maxBrokerUsageAccounts(provider) })
+			.then(body => {
+				if (epoch !== this.#usageCacheEpoch) {
+					if (this.#usageInflight.get(provider) === inflight) this.#usageInflight.delete(provider);
+					return this.#loadUsageReports(provider);
+				}
+				// Older brokers ignore the query and still return an aggregate.
+				// Keep it scoped locally; a scoped response is never an aggregate cache.
+				const reports =
+					provider === undefined ? body.reports : body.reports.filter(report => report.provider === provider);
+				this.#usageCache.set(provider, { reports, fetchedAt: Date.now() });
+				return reports;
+			})
+			.catch(error => {
+				logger.warn("auth-broker usage fetch failed", { error: String(error) });
+				// Documented 15s TTL fallback, isolated to the requested scope.
+				// Invalidation preserves this cooldown, as it does for aggregate polls.
+				this.#usageCache.set(provider, { reports: null, fetchedAt: Date.now() });
+				return null;
+			})
+			.finally(() => {
+				if (this.#usageInflight.get(provider) === inflight) this.#usageInflight.delete(provider);
+			});
+		this.#usageInflight.set(provider, inflight);
+		return inflight;
+	}
+
+	/**
+	 * Fold locally observed request usage into the pending report and schedule
+	 * a flush. One `POST /v1/usage/observed` at most per flush interval, plus a
+	 * final one when the process exits; on failure the batch is retained and
+	 * retried with the next flush. A 404 (pre-endpoint broker) disables
+	 * reporting for the life of this store.
+	 *
+	 * `client` overrides the reporting identity — the auth-gateway attributes
+	 * each request to the originating install/app instead of the gateway host.
+	 */
+	recordObservedUsage(entries: ObservedUsageEntry[], client?: ClientUsageIdentity): void {
+		if (this.#closed || this.#observedUsageUnsupported) return;
+		const identity = client ?? { installId: getInstallId(), hostname: os.hostname(), app: getAppName() };
+		for (const entry of entries) {
+			const key = `${identity.installId}\u0000${identity.app ?? ""}\u0000${entry.provider}\u0000${entry.model}`;
+			const pending = this.#observedUsage.get(key);
+			if (pending) {
+				pending.entry.at = Math.max(pending.entry.at, entry.at);
+				pending.entry.requests += entry.requests;
+				pending.entry.inputTokens += entry.inputTokens;
+				pending.entry.outputTokens += entry.outputTokens;
+				pending.entry.cacheReadTokens += entry.cacheReadTokens;
+				pending.entry.cacheWriteTokens += entry.cacheWriteTokens;
+				pending.entry.costUsd += entry.costUsd;
+			} else {
+				this.#observedUsage.set(key, { client: identity, entry: { ...entry } });
+			}
+		}
+		if (this.#observedUsage.size > 0 && this.#observedUsageTimer === undefined) {
+			this.#observedUsageTimer = setTimeout(() => {
+				this.#observedUsageTimer = undefined;
+				void this.#flushObservedUsage();
+			}, this.#observedUsageFlushMs);
+			this.#observedUsageTimer.unref?.();
+		}
+		// The timer never holds the process open, so a process that exits first (a
+		// one-shot run, a signal) sends what is still buffered on the way out. The
+		// wait is bounded: an unreachable broker must not stall the exit.
+		this.#cancelObservedUsageExitFlush ??= postmortem.register("auth-broker-observed-usage", () =>
+			raceSignal(
+				this.#flushObservedUsage(),
+				AbortSignal.timeout(OBSERVED_USAGE_EXIT_FLUSH_MS),
+				"observed usage exit flush timed out",
+			).catch(error => {
+				logger.debug("auth-broker observed usage dropped at exit", { error: String(error) });
+			}),
+		);
+	}
+
+	#flushObservedUsage(): Promise<void> {
+		// The tail never rejects, so one failed send cannot stall every later flush.
+		this.#observedUsageFlush = this.#observedUsageFlush
+			.then(() => this.#sendObservedUsage())
+			.catch(error => {
+				logger.debug("auth-broker observed usage flush failed", { error: String(error) });
+			});
+		return this.#observedUsageFlush;
+	}
+
+	async #sendObservedUsage(): Promise<void> {
+		if (this.#observedUsage.size === 0 || this.#observedUsageUnsupported) return;
+		const batch = [...this.#observedUsage.values()];
+		this.#observedUsage.clear();
+		// One report per distinct client identity — usually one (this install),
+		// plus one per attributed gateway caller when running inside the gateway.
+		const groups = new Map<string, { client: ClientUsageIdentity; entries: ObservedUsageEntry[] }>();
+		for (const { client, entry } of batch) {
+			const key = `${client.installId}\u0000${client.app ?? ""}`;
+			const group = groups.get(key);
+			if (group) group.entries.push(entry);
+			else groups.set(key, { client, entries: [entry] });
+		}
+		for (const { client, entries } of groups.values()) {
+			try {
+				await this.#client.reportClientUsage({
+					installId: client.installId,
+					hostname: client.hostname,
+					app: client.app,
+					entries,
+				});
+			} catch (error) {
+				const status = error instanceof AuthBrokerError ? error.status : undefined;
+				if (status === 400 || status === 404 || status === 501) {
+					// Broker predates the endpoint or its request schema (or the store
+					// can't persist) — stop trying for the life of this process.
+					this.#observedUsageUnsupported = true;
+					logger.debug("auth-broker does not accept observed usage; reporting disabled", { status });
+					return;
+				}
+				logger.debug("auth-broker observed usage flush failed; retrying next flush", { error: String(error) });
+				// Merge the failed group back under the (possibly refilled) buffer so
+				// nothing is lost; bounded because entries are keyed per
+				// (identity, provider, model).
+				if (!this.#closed) this.recordObservedUsage(entries, client);
+			}
+		}
+	}
+
+	close(): void {
+		if (this.#closed) return;
+		this.#closed = true;
+		this.#backgroundAbort.abort();
+		this.#activityWakeup?.resolve();
+		this.#activityWakeup = null;
+		if (this.#observedUsageTimer !== undefined) {
+			clearTimeout(this.#observedUsageTimer);
+			this.#observedUsageTimer = undefined;
+		}
+		// Final flush. The exit registration outlives close() until it settles, so a
+		// process exiting right after close() still sends it; failures are dropped.
+		void this.#flushObservedUsage().finally(() => this.#cancelObservedUsageExitFlush?.());
+		this.#cache.clear();
+		this.#cacheCharacters = 0;
+		this.#usageOverlays.clear();
+	}
+}
+
+/**
+ * Match a broker-supplied usage report to a specific OAuth credential. The
+ * broker returns aggregate reports across all credentials it manages, so we
+ * pick the one whose identity (accountId / email / projectId) lines up with
+ * the credential the caller is asking about.
+ *
+ * Falls back to the provider's lone report when it shares no identity field
+ * with the credential; falls through to `null` when nothing matches, which
+ * `AuthStorage` treats as "no usage data" (ranking proceeds without a usage
+ * signal for this credential).
+ */
+function matchUsageReport(reports: UsageReport[], provider: Provider, credential: OAuthCredential): UsageReport | null {
+	const all = reports.filter(report => report.provider === provider);
+	if (all.length === 0) return null;
+	// Org precedence, decisive on EITHER side: an org-scoped credential may
+	// only take its own org's report, and an org-less (legacy) credential may
+	// only take org-less reports — the shared email/account would otherwise
+	// hand one subscription the OTHER subscription's pool (e.g. mark healthy
+	// Max exhausted via Team's report, or rank a legacy row on a sibling's
+	// numbers).
+	const orgId = credential.orgId?.trim().toLowerCase();
+	const accountId = credential.accountId?.trim().toLowerCase();
+	const email = credential.email?.trim().toLowerCase();
+	const projectId = credential.projectId?.trim().toLowerCase();
+	if (orgId) {
+		const sameOrg: UsageReport[] = [];
+		let sawReportOrg = false;
+		for (const report of all) {
+			const metaOrg = readMetadataString((report.metadata ?? {}) as Record<string, unknown>, "orgId");
+			if (metaOrg) {
+				sawReportOrg = true;
+				if (metaOrg.toLowerCase() === orgId) sameOrg.push(report);
+			}
+		}
+		// Org-attributed reports exist: the shared org is a GATE, not a match.
+		// Two Team members share the org id while drawing on per-user pools,
+		// so the credential's own base identity must still line up inside the
+		// same-org subset — a lone sibling report is NOT ours. An org-only
+		// credential (no base identifiers) takes the lone same-org report and
+		// treats several as ambiguous. None in our org → "no usage data"
+		// rather than mis-attributing another org's pool.
+		if (sawReportOrg) {
+			if (accountId || email || projectId) {
+				for (const report of sameOrg) {
+					if (reportMatchesIdentity(report, accountId, email, projectId)) return report;
+				}
+				return null;
+			}
+			return sameOrg.length === 1 ? sameOrg[0]! : null;
+		}
+		// No surviving report carries an org at all: presence mismatch is a
+		// non-match too — the sole org-less report may be a legacy sibling
+		// row's pool, and handing it to a scoped credential would rank/block
+		// on the wrong quota. "No usage data" degrades gracefully instead.
+		return null;
+	}
+	const candidates = all.filter(
+		report => !readMetadataString((report.metadata ?? {}) as Record<string, unknown>, "orgId"),
+	);
+	if (candidates.length === 0) return null;
+	// The sole report stands in for a credential it shares no identity field
+	// with; otherwise identity decides, because a report naming another email,
+	// account or project is a sibling's pool whose fetch succeeded where this
+	// credential's failed.
+	if (
+		all.length === 1 &&
+		candidates.length === 1 &&
+		!reportHasComparableIdentity(candidates[0], accountId, email, projectId)
+	) {
+		return candidates[0];
+	}
+	for (const report of candidates) {
+		if (reportMatchesIdentity(report, accountId, email, projectId)) return report;
+	}
+	return null;
+}
+
+function usageReportMatchesCredential(report: UsageReport, credential: OAuthCredential): boolean {
+	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
+	const credentialOrg = credential.orgId?.trim().toLowerCase();
+	const reportOrg = readMetadataString(metadata, "orgId")?.toLowerCase();
+	if (credentialOrg !== reportOrg) return false;
+
+	const accountId = credential.accountId?.trim().toLowerCase();
+	const email = credential.email?.trim().toLowerCase();
+	const projectId = credential.projectId?.trim().toLowerCase();
+	if (accountId || email || projectId) {
+		return reportMatchesIdentity(report, accountId, email, projectId);
+	}
+	return credentialOrg !== undefined;
+}
+
+function findMatchingReportIndex(reports: UsageReport[], overlay: UsageReport): number {
+	const all = reports
+		.map((report, index) => ({ report, index }))
+		.filter(candidate => candidate.report.provider === overlay.provider);
+	if (all.length === 0) return -1;
+	const metadata = (overlay.metadata ?? {}) as Record<string, unknown>;
+	// Org precedence — mirror matchUsageReport: an org-attributed overlay may
+	// only merge into a report of the SAME org, and an org-less overlay may
+	// only merge into an org-less report. Within the same org the overlay's
+	// base identity must still match — two Team members' reports share the
+	// org id but must not swallow each other's header ingests.
+	const overlayOrg = readMetadataString(metadata, "orgId")?.toLowerCase();
+	const accountId = readMetadataString(metadata, "accountId")?.toLowerCase();
+	const email = readMetadataString(metadata, "email")?.toLowerCase();
+	const projectId = readMetadataString(metadata, "projectId")?.toLowerCase();
+	if (overlayOrg) {
+		const sameOrg: { report: UsageReport; index: number }[] = [];
+		let sawReportOrg = false;
+		for (const candidate of all) {
+			const candidateOrg = readMetadataString((candidate.report.metadata ?? {}) as Record<string, unknown>, "orgId");
+			if (candidateOrg) {
+				sawReportOrg = true;
+				if (candidateOrg.toLowerCase() === overlayOrg) sameOrg.push(candidate);
+			}
+		}
+		if (sawReportOrg) {
+			if (accountId || email || projectId) {
+				for (const candidate of sameOrg) {
+					if (reportMatchesIdentity(candidate.report, accountId, email, projectId)) return candidate.index;
+				}
+				return -1;
+			}
+			return sameOrg.length === 1 ? sameOrg[0]!.index : -1;
+		}
+		// Presence mismatch — mirror matchUsageReport: an org-scoped overlay
+		// never merges into an org-less report; it becomes its own report row.
+		return -1;
+	}
+	const candidates = all.filter(
+		candidate => !readMetadataString((candidate.report.metadata ?? {}) as Record<string, unknown>, "orgId"),
+	);
+	if (candidates.length === 0) return -1;
+	if (
+		all.length === 1 &&
+		candidates.length === 1 &&
+		!reportHasComparableIdentity(candidates[0]!.report, accountId, email, projectId)
+	) {
+		return candidates[0]!.index;
+	}
+	for (const candidate of candidates) {
+		if (reportMatchesIdentity(candidate.report, accountId, email, projectId)) return candidate.index;
+	}
+	return -1;
+}
+
+function reportMatchesIdentity(
+	report: UsageReport,
+	accountId: string | undefined,
+	email: string | undefined,
+	projectId: string | undefined,
+): boolean {
+	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
+	const metaEmail = readMetadataString(metadata, "email")?.toLowerCase();
+	// Email identifies the member within shared Team workspace account/org ids.
+	// When both sides provide it, a mismatch is decisive.
+	if (email && metaEmail) return metaEmail === email;
+	if (accountId) {
+		const metaAccount = readMetadataString(metadata, "accountId") ?? readMetadataString(metadata, "account_id");
+		if (metaAccount && metaAccount.toLowerCase() === accountId) return true;
+		for (const limit of report.limits) {
+			if (limit.scope.accountId?.trim().toLowerCase() === accountId) return true;
+		}
+	}
+	if (projectId) {
+		const metaProject = readMetadataString(metadata, "projectId") ?? readMetadataString(metadata, "project_id");
+		if (metaProject && metaProject.toLowerCase() === projectId) return true;
+		for (const limit of report.limits) {
+			if (limit.scope.projectId?.trim().toLowerCase() === projectId) return true;
+		}
+	}
+	return false;
+}
+
+/** Whether the report names an email, account or project the caller can compare against. */
+function reportHasComparableIdentity(
+	report: UsageReport,
+	accountId: string | undefined,
+	email: string | undefined,
+	projectId: string | undefined,
+): boolean {
+	const metadata = report.metadata ?? {};
+	if (email && readMetadataString(metadata, "email")) return true;
+	if (accountId) {
+		if (readMetadataString(metadata, "accountId") ?? readMetadataString(metadata, "account_id")) return true;
+		if (report.limits.some(limit => limit.scope.accountId?.trim())) return true;
+	}
+	if (projectId) {
+		if (readMetadataString(metadata, "projectId") ?? readMetadataString(metadata, "project_id")) return true;
+		if (report.limits.some(limit => limit.scope.projectId?.trim())) return true;
+	}
+	return false;
+}
+
+function readMetadataString(metadata: Record<string, unknown>, key: string): string | undefined {
+	const value = metadata[key];
+	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}

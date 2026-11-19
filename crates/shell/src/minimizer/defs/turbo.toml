@@ -1,0 +1,34 @@
+# Turborepo task runner output.
+# Drop preamble bullets and cache-replay banners, keep real task lines.
+
+[filters.turbo]
+description = "Compact Turborepo task output"
+match_command = "^turbo$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^•\\s+Packages in scope",
+	"^•\\s+Running ",
+	"^•\\s+Remote caching",
+	"cache hit, replaying logs",
+	"cache (miss, executing|bypass, force executing)",
+	"^\\s*\\d+ packages in scope",
+]
+truncate_lines_at = 250
+max_lines = 80
+on_empty = "turbo: ok"
+
+[[tests.turbo]]
+name = "strips preamble keeps results"
+input = "• Packages in scope: web\n• Running build in 1 packages\napp:build: cache hit, replaying logs abc123\napp:build: > next build\n Tasks:    1 successful, 1 total\n"
+expected = "app:build: > next build\n Tasks:    1 successful, 1 total\n"
+
+[[tests.turbo]]
+name = "preamble only collapses"
+input = "• Running build in 1 packages\n"
+expected = "turbo: ok"
+
+[[tests.turbo]]
+name = "strips cache noise keeps task output and summary"
+input = "app:build: cache hit, replaying logs abc123\ncache miss, executing abc456\n\n3 packages in scope\n\n> myapp:build\n\nCompiled successfully.\n\nTasks:    2 successful, 2 total (1 cached)\nDuration: 3.2s\n"
+expected = "> myapp:build\nCompiled successfully.\nTasks:    2 successful, 2 total (1 cached)\nDuration: 3.2s\n"

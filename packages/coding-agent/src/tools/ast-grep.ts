@@ -1,0 +1,405 @@
+import type { AstGrepToolDetails } from "@oh-my-pi/pi-tui/tools/ast-grep";
+import { type } from "@oh-my-pi/omptype";
+import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { ToolExample } from "@oh-my-pi/pi-ai";
+import { type AstFindMatch, astGrep, type ShellFilesystem } from "@oh-my-pi/pi-natives";
+
+import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { getEditStore } from "../edit/store";
+
+import { sessionResolveContext } from "../internal-urls/context";
+import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
+import astGrepDescription from "../prompts/tools/ast-grep.md" with { type: "text" };
+import { sessionDelegationBias } from "../task/prompt-policy";
+import { isScoutSpawnable } from "../task/spawn-policy";
+
+import { resolveFileDisplayMode } from "../utils/file-display-mode";
+import { ensureGrammar, missingGrammarsNote, rerunWithGrammars } from "../utils/grammars";
+import type { ToolSession } from ".";
+import { resolveToolTier } from "./approval";
+import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
+import { createFileRecorder, formatResultPath, resultSnapshotPath, targetResultBase } from "./file-recorder";
+import { type FileMatchSection, formatFileMatches } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
+import { formatMatchLine } from "@oh-my-pi/pi-tui/tools/match-line-format";
+
+import {
+	parseSearchPath,
+	relativeSearchResultPath,
+	resolveSearchResultPath,
+	resolveToolSearchScope,
+	searchPathTier,
+} from "./path-utils";
+import { searchApprovalCacheTargets } from "./search-approval-targets";
+import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
+import { isRawSelector } from "./read-selector";
+import { capParseErrors, formatCodeFrameLine, formatParseErrors } from "@oh-my-pi/pi-tui/render/render-utils";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { singleLine } from "@oh-my-pi/pi-tui/utils";
+import { toolResult } from "./tool-result";
+
+import { cfgTaskDisabledAgents } from "../task/settings";
+
+const astGrepSchema = type({
+	pat: type("string").describe("ast pattern"),
+	"path?": type("string").describe(
+		'file, directory, glob, or internal URL to search; pass several as a semicolon-delimited list ("src; tests"). Omitted -> searches the workspace root (".")',
+	),
+	"lang?": type("string").describe("language override, e.g. cpp for ambiguous .h files"),
+	"skip?": type("number").describe("matches to skip"),
+});
+
+function compareAstFindMatch(left: AstFindMatch, right: AstFindMatch): number {
+	const pathCmp = left.path.localeCompare(right.path);
+	if (pathCmp !== 0) return pathCmp;
+	if (left.startLine !== right.startLine) return left.startLine - right.startLine;
+	if (left.startColumn !== right.startColumn) return left.startColumn - right.startColumn;
+	if (left.endLine !== right.endLine) return left.endLine - right.endLine;
+	if (left.endColumn !== right.endColumn) return left.endColumn - right.endColumn;
+	if (left.byteStart !== right.byteStart) return left.byteStart - right.byteStart;
+	return left.byteEnd - right.byteEnd;
+}
+
+function retainAstFindMatch(matches: AstFindMatch[], capacity: number, candidate: AstFindMatch): void {
+	if (matches.length < capacity) {
+		matches.push(candidate);
+		return;
+	}
+	let worstIndex = 0;
+	for (let index = 1; index < matches.length; index++) {
+		if (compareAstFindMatch(matches[index]!, matches[worstIndex]!) > 0) {
+			worstIndex = index;
+		}
+	}
+	if (compareAstFindMatch(candidate, matches[worstIndex]!) < 0) {
+		matches[worstIndex] = candidate;
+	}
+}
+
+async function runMultiTargetAstGrep(
+	targets: Array<{ basePath: string; glob?: string }>,
+	options: {
+		patterns: string[];
+		commonBasePath: string;
+		lang?: string;
+		skip: number;
+		limit: number;
+		signal?: AbortSignal;
+		filesystem: ShellFilesystem;
+	},
+): Promise<{
+	matches: AstFindMatch[];
+	totalMatches: number;
+	filesWithMatches: number;
+	filesSearched: number;
+	limitReached: boolean;
+	parseErrors?: string[];
+	missingGrammars?: string[];
+}> {
+	const retainedMatches: AstFindMatch[] = [];
+	const retainedCapacity = options.skip + options.limit + 1;
+	const parseErrors: string[] = [];
+	const missingGrammars = new Set<string>();
+	let totalMatches = 0;
+	let filesWithMatches = 0;
+	let filesSearched = 0;
+	let limitReached = false;
+	for (const target of targets) {
+		const targetResult = await astGrep({
+			patterns: options.patterns,
+			lang: options.lang,
+			path: target.basePath,
+			glob: target.glob,
+			offset: 0,
+			limit: options.skip + options.limit + 1,
+			includeMeta: true,
+			signal: options.signal,
+			filesystem: options.filesystem,
+		});
+		totalMatches += targetResult.totalMatches;
+		filesWithMatches += targetResult.filesWithMatches;
+		filesSearched += targetResult.filesSearched;
+		limitReached = limitReached || targetResult.limitReached;
+		if (targetResult.parseErrors) parseErrors.push(...targetResult.parseErrors);
+		for (const language of targetResult.missingGrammars ?? []) missingGrammars.add(language);
+		const resultBase = await targetResultBase(target.basePath);
+		for (const match of targetResult.matches) {
+			const absolute = resolveSearchResultPath(resultBase, match.path);
+			const rebased = relativeSearchResultPath(options.commonBasePath, absolute);
+			retainAstFindMatch(retainedMatches, retainedCapacity, { ...match, path: rebased });
+		}
+	}
+	retainedMatches.sort(compareAstFindMatch);
+	const visible = retainedMatches.slice(options.skip);
+	const paged = visible.slice(0, options.limit);
+	return {
+		matches: paged,
+		totalMatches,
+		filesWithMatches,
+		filesSearched,
+		limitReached: limitReached || visible.length > options.limit,
+		parseErrors: parseErrors.length > 0 ? parseErrors : undefined,
+		missingGrammars: missingGrammars.size > 0 ? [...missingGrammars] : undefined,
+	};
+}
+
+export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolDetails> {
+	readonly name = "ast_grep";
+	readonly approval = searchPathTier;
+	/** `always-ask-cached` keys: the tree (or file) of every root it searches, as `grep` reports them. */
+	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined =>
+		searchApprovalCacheTargets(
+			toPathList((args as { path?: string } | null | undefined)?.path),
+			this.session.cwd,
+			entry => parseSearchPath(entry).basePath,
+		);
+	readonly label = "AST Grep";
+	readonly summary = "Search code with AST patterns (SHOULD be preferred for structural search)";
+	get description(): string {
+		const eagerDelegation = sessionDelegationBias(this.session) === "eager";
+		const scoutAvailable = isScoutSpawnable(
+			cfgTaskDisabledAgents.get(this.session.settings),
+			this.session.getSessionSpawns?.() ?? "*",
+		);
+		// Both render inputs are booleans; pack them so repeat reads skip the template render.
+		const key = (eagerDelegation ? 1 : 0) | (scoutAvailable ? 2 : 0);
+		if (key !== this.#descriptionKey) {
+			this.#description = prompt.render(astGrepDescription, { eagerDelegation, scoutAvailable });
+			this.#descriptionKey = key;
+		}
+		return this.#description;
+	}
+	readonly parameters = astGrepSchema;
+	readonly strict = true;
+
+	readonly examples: readonly ToolExample<typeof astGrepSchema.inferIn>[] = [
+		{
+			caption: "Search TypeScript files under src",
+			call: { pat: "console.log($$$)", path: "src/**/*.ts" },
+		},
+		{
+			caption: "Named imports from a specific package",
+			call: { pat: 'import { $$$IMPORTS } from "react"', path: "src/**/*.ts" },
+		},
+		{
+			caption: "Arrow functions assigned to a const",
+			call: { pat: "const $NAME = ($$$ARGS) => $BODY", path: "src/utils/**/*.ts" },
+		},
+		{
+			caption: "Method call on any object, ignoring method name with `$_`",
+			call: { pat: "logger.$_($$$ARGS)", path: "src/**/*.ts" },
+		},
+		{
+			caption: "Loosest existence check for a symbol in one file",
+			call: { pat: "processItems", path: "src/worker.ts" },
+		},
+	];
+	readonly loadMode = "discoverable";
+	#descriptionKey = -1;
+	#description = "";
+
+	constructor(private readonly session: ToolSession) {}
+
+	async execute(
+		_toolCallId: string,
+		params: typeof astGrepSchema.infer,
+		signal?: AbortSignal,
+		_onUpdate?: AgentToolUpdateCallback<AstGrepToolDetails>,
+		_context?: AgentToolContext,
+	): Promise<AgentToolResult<AstGrepToolDetails>> {
+		return untilAborted(signal, async () => {
+			const pattern = params.pat.trim();
+			if (pattern.length === 0) {
+				throw new ToolError("`pat` must be a non-empty pattern");
+			}
+			const patterns = [pattern];
+			const skip = params.skip === undefined ? 0 : Math.floor(params.skip);
+			if (!Number.isFinite(skip) || skip < 0) {
+				throw new ToolError("skip must be a non-negative number");
+			}
+			const scopedPaths = toPathList(params.path);
+			const rawPaths = scopedPaths.length > 0 ? scopedPaths : ["."];
+			const resolveContext = sessionResolveContext(this.session, { signal });
+			// Internal URLs resolve inside the native search, bounded by the tier this call was approved at.
+			const urlFilesystem = new InternalUrlFilesystem({
+				context: resolveContext,
+				tier: resolveToolTier(this, params),
+			});
+			const filesystem = urlFilesystem.shellFilesystem();
+			const scope = await resolveToolSearchScope({
+				rawPaths,
+				cwd: this.session.cwd,
+				internalUrlAction: "search",
+				filesystem: urlFilesystem,
+				resolveExternalUrl: async rawPath => {
+					const target = parseReadUrlTarget(rawPath);
+					if (!target) return undefined;
+					const materialized = await materializeReadUrlToFile(
+						this.session,
+						{ path: target.path, raw: isRawSelector(target.sel) },
+						signal,
+					);
+					return { sourcePath: materialized.path, immutable: true };
+				},
+			});
+			const { searchPath: resolvedSearchPath, scopePath, isDirectory, multiTargets, globFilter } = scope;
+
+			const DEFAULT_AST_LIMIT = 50;
+			if (params.lang) await ensureGrammar({ lang: params.lang });
+			const result = await rerunWithGrammars(() =>
+				multiTargets
+					? runMultiTargetAstGrep(multiTargets, {
+							patterns,
+							lang: params.lang,
+							commonBasePath: resolvedSearchPath,
+							skip,
+							limit: DEFAULT_AST_LIMIT,
+							signal,
+							filesystem,
+						})
+					: astGrep({
+							patterns,
+							lang: params.lang,
+							path: resolvedSearchPath,
+							glob: globFilter,
+							offset: skip,
+							includeMeta: true,
+							signal,
+							filesystem,
+						}),
+			);
+			const grammarNote = result.missingGrammars?.length ? missingGrammarsNote(result.missingGrammars) : undefined;
+
+			const normalizedParseErrors = (result.parseErrors ?? []).map(error => {
+				const parseError = error.match(/^.+: (.+: parse error \(syntax tree contains error nodes\))$/);
+				return parseError?.[1] ?? error;
+			});
+			const { errors: cappedParseErrors, total: parseErrorsTotal } = capParseErrors(normalizedParseErrors);
+			const formatPath = (filePath: string): string =>
+				formatResultPath(filePath, isDirectory, resolvedSearchPath, this.session.cwd);
+
+			const { record: recordFile, list: fileList } = createFileRecorder();
+			const fileMatchCounts = new Map<string, number>();
+			const matchesByFile = new Map<string, AstFindMatch[]>();
+			for (const match of result.matches) {
+				const relativePath = formatPath(match.path);
+				recordFile(relativePath);
+				if (!matchesByFile.has(relativePath)) {
+					matchesByFile.set(relativePath, []);
+				}
+				matchesByFile.get(relativePath)!.push(match);
+			}
+
+			const baseDetails: AstGrepToolDetails = {
+				matchCount: result.totalMatches,
+				fileCount: result.filesWithMatches,
+				filesSearched: result.filesSearched,
+				limitReached: result.limitReached,
+				...(cappedParseErrors.length > 0 ? { parseErrors: cappedParseErrors, parseErrorsTotal } : {}),
+				scopePath,
+				searchPath: resolvedSearchPath,
+				cwd: this.session.cwd,
+				files: fileList,
+				fileMatches: [],
+			};
+
+			if (result.matches.length === 0) {
+				const noMatchMessage = cappedParseErrors.length
+					? "No matches found. Parse issues mean the query may be mis-scoped; narrow `path` before concluding absence."
+					: "No matches found";
+				const parseMessage = cappedParseErrors.length
+					? `\n${formatParseErrors(cappedParseErrors, parseErrorsTotal).join("\n")}`
+					: "";
+				const grammarMessage = grammarNote ? `\n${grammarNote}` : "";
+				// Zero matches is useless even with parse issues: the follow-up
+				// call has already corrected course by the time compaction runs.
+				return toolResult(baseDetails).text(`${noMatchMessage}${parseMessage}${grammarMessage}`).useless().done();
+			}
+
+			const useHashLines = resolveFileDisplayMode(this.session).hashLines;
+			const hashContexts = new Map<string, { tag: string; path: string }>();
+			if (useHashLines) {
+				// Immutable schemes get no host file; mutable URLs (`local://`) bind to their backing file.
+				const snapshotPaths = await Promise.all(
+					fileList.map(relativePath => resultSnapshotPath(relativePath, this.session.cwd, resolveContext)),
+				);
+				const store = getEditStore(this.session);
+				for (let index = 0; index < fileList.length; index++) {
+					const snapshotPath = snapshotPaths[index];
+					if (snapshotPath === undefined) continue;
+					// Whole-file content tag: any anchor validates while the file is
+					// unchanged; over-cap / unreadable files get no tag (plain output).
+					const tag = store.recordSnapshotFile(snapshotPath);
+					if (tag) hashContexts.set(fileList[index], { tag, path: snapshotPath });
+				}
+			}
+			const outputLines: string[] = [];
+			const displayLines: string[] = [];
+			const renderMatchesForFile = (relativePath: string): FileMatchSection => {
+				const modelOut: string[] = [];
+				const displayOut: string[] = [];
+				const fileMatches = matchesByFile.get(relativePath) ?? [];
+				const hashContext = hashContexts.get(relativePath);
+				const lineNumberWidth = fileMatches.reduce((width, match) => {
+					const lineCount = match.text.split("\n").length;
+					const endLine = match.startLine + lineCount - 1;
+					return Math.max(width, String(match.startLine).length, String(endLine).length);
+				}, 0);
+				for (const match of fileMatches) {
+					const matchLines = match.text.split("\n");
+					for (let index = 0; index < matchLines.length; index++) {
+						const lineNumber = match.startLine + index;
+						const isMatch = index === 0;
+						const line = matchLines[index] ?? "";
+						modelOut.push(
+							formatMatchLine(lineNumber, line, isMatch, { useHashLines: hashContext !== undefined }),
+						);
+						displayOut.push(formatCodeFrameLine(isMatch ? "*" : " ", lineNumber, line, lineNumberWidth));
+					}
+					if (match.metaVariables && Object.keys(match.metaVariables).length > 0) {
+						const serializedMeta = Object.entries(match.metaVariables)
+							.sort(([left], [right]) => left.localeCompare(right))
+							.map(([key, value]) => `${key}=${value}`)
+							.join(", ");
+						modelOut.push(`  meta: ${serializedMeta}`);
+						// A capture can span lines; its display row stays one row, so the
+						// renderer can tell it from the match's code frames and file headers.
+						displayOut.push(`  meta: ${singleLine(serializedMeta)}`);
+					}
+					fileMatchCounts.set(relativePath, (fileMatchCounts.get(relativePath) ?? 0) + 1);
+				}
+				if (hashContext?.tag) {
+					getEditStore(this.session).recordSeenLinesFromBody(
+						hashContext.path,
+						hashContext.tag,
+						modelOut.join("\n"),
+					);
+				}
+				return { model: modelOut, display: displayOut, tag: hashContext?.tag };
+			};
+
+			const matchOutput = formatFileMatches(fileList, isDirectory, renderMatchesForFile);
+			outputLines.push(...matchOutput.model);
+			displayLines.push(...matchOutput.display);
+
+			const details: AstGrepToolDetails = {
+				...baseDetails,
+				fileMatches: fileList.map(filePath => ({
+					path: filePath,
+					count: fileMatchCounts.get(filePath) ?? 0,
+				})),
+				displayContent: displayLines.join("\n"),
+			};
+			if (result.limitReached) {
+				outputLines.push("", "Result limit reached; narrow path or use skip to page through results.");
+			}
+			if (cappedParseErrors.length) {
+				outputLines.push("", ...formatParseErrors(cappedParseErrors, parseErrorsTotal));
+			}
+			if (grammarNote) {
+				outputLines.push("", grammarNote);
+			}
+
+			return toolResult(details).text(outputLines.join("\n")).done();
+		});
+	}
+}

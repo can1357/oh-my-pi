@@ -1,0 +1,10 @@
+: 1793737938:0;HISTFILE=/tmp/fxh; SAVEHIST=100; setopt extendedhistory
+: 1793737938:0;echo "multi\
+line"
+: 1793737938:0;print Äƒ£ Ã© âƒ¨ƒ± \\ 
+: 1793737938:0;for i in 1 2\
+do echo $i; done
+: 1793737938:0;: trailing \\\\ 
+: 1793737938:0;echo \\  
+: 1793737938:0;:colon
+: 1793737938:0;fc -W /tmp/fxh

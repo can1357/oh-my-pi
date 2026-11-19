@@ -1,0 +1,254 @@
+[
+ {
+  "text": "a ",
+  "count": 8
+ },
+ {
+  "text": "a\t",
+  "count": 8
+ },
+ {
+  "text": "a \n",
+  "count": 8
+ },
+ {
+  "text": "a\n ",
+  "count": 9
+ },
+ {
+  "text": "a \t \n ",
+  "count": 12
+ },
+ {
+  "text": " a ",
+  "count": 9
+ },
+ {
+  "text": "  'REXX  ",
+  "count": 12
+ },
+ {
+  "text": "日本語 text  ",
+  "count": 12
+ },
+ {
+  "text": " hello    ",
+  "count": 10
+ },
+ {
+  "text": "'REXX\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+  "count": 11
+ },
+ {
+  "text": "a\n",
+  "count": 7
+ },
+ {
+  "text": "a\n\n",
+  "count": 7
+ },
+ {
+  "text": "a\n\n\n\n\n",
+  "count": 7
+ },
+ {
+  "text": "a\n\n\n\n\n\n\n\n\n\n\n\n",
+  "count": 7
+ },
+ {
+  "text": "a\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+  "count": 8
+ },
+ {
+  "text": "a\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+  "count": 8
+ },
+ {
+  "text": "a\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+  "count": 8
+ },
+ {
+  "text": "a\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+  "count": 7
+ },
+ {
+  "text": "a\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+  "count": 8
+ },
+ {
+  "text": "para\n\npara\n",
+  "count": 9
+ },
+ {
+  "text": "\tindent\n\tindent\n",
+  "count": 13
+ },
+ {
+  "text": "trailing \r\n",
+  "count": 10
+ },
+ {
+  "text": "mix   ",
+  "count": 9
+ },
+ {
+  "text": "<.;)кл ж漢仮三本仮中平文一名三二`#+/आअक्ंआेईिइघी—‘’。”",
+  "count": 52
+ },
+ {
+  "text": " if err != nil {\n\treturn err\n}\n\n",
+  "count": 19
+ },
+ {
+  "text": "  SELECT * FROM users WHERE id = 42;\n\n",
+  "count": 25
+ },
+ {
+  "text": "다다라마나한̧‍‍่️̧‍््́️่",
+  "count": 28
+ },
+ {
+  "text": "XOIOTV่̧́‍््่่่́dpldvnzgdazจา์กคงัีुआकूअंेआििの語👍🏽✨🚀✨🏽⚖",
+  "count": 69
+ },
+ {
+  "text": "ΒΖкааабжблгв9,614€…！…！jkrm마가라다어나마한UEòáßñá",
+  "count": 45
+ },
+ {
+  "text": "اختثثóçúßáвбкг гаебле\n\n \t \t  \n\t",
+  "count": 31
+ },
+ {
+  "text": " SELECT * FROM users WHERE id = 42;\n\n",
+  "count": 25
+ },
+ {
+  "text": ">/,(,^%.+@%",
+  "count": 17
+ },
+ {
+  "text": "jumps naïve the CamelCase jumps fox brown naïve NASA HTTP2 CamelCase naïve",
+  "count": 45
+ },
+ {
+  "text": "NASA we'll HTTP2 don't CamelCase brown",
+  "count": 27
+ },
+ {
+  "text": "ANUअ्इीअिाçìééßúàèóßù́́️̧̧‍่́éàóòàééáç0315,",
+  "count": 49
+ },
+ {
+  "text": "they've CamelCase quick the the brown NASA jumps brown naïve don't the it's naïve quick they've",
+  "count": 42
+ },
+ {
+  "text": "://]&تب تحجحبحاлзкйдг",
+  "count": 24
+ },
+ {
+  "text": "́‍‍्่̧́-가어어국다다라어국🏽😀🎉⚖✨\t\n\n \n\t\n çìòá ",
+  "count": 51
+ },
+ {
+  "text": "CamelCase CamelCase naïve fox HTTP2 don't jumps fox fox NASA we'll İstanbul quick they've don't İstanbul brown",
+  "count": 60
+ },
+ {
+  "text": "ंुुईीค่éóíóجج خاخبت́‍̧‍्̧‍‍️̧̧́",
+  "count": 45
+ },
+ {
+  "text": "SELECT * FROM users WHERE id = 42;",
+  "count": 24
+ },
+ {
+  "text": " SELECT * FROM users WHERE id = 42;",
+  "count": 25
+ },
+ {
+  "text": " function f(a, b) { return a === b || a <= b; }\n",
+  "count": 26
+ },
+ {
+  "text": " SELECT * FROM users WHERE id = 42;\n",
+  "count": 25
+ },
+ {
+  "text": "const x = { a: 1, b: [2, 3] };\n\n",
+  "count": 24
+ },
+ {
+  "text": "  SELECT * FROM users WHERE id = 42;\n\n",
+  "count": 25
+ },
+ {
+  "text": "İstanbul NASA jumps brown jumps jumps HTTP2 CamelCase NASA we'll brown brown quick jumps İstanbul NASA NASA",
+  "count": 62
+ },
+ {
+  "text": "खकईआूुिईثاخخ اجبااث \n\t\n   \t\n",
+  "count": 30
+ },
+ {
+  "text": "длкддкагзLQZIFZEWY 名日平本の平漢εΔ나국 라라나 나국나라",
+  "count": 45
+ },
+ {
+  "text": " const x = { a: 1, b: [2, 3] };\n\n\n\n",
+  "count": 25
+ },
+ {
+  "text": "don't they've brown NASA fox fox HTTP2 the don't",
+  "count": 28
+ },
+ {
+  "text": "if err != nil {\n\treturn err\n}\n",
+  "count": 18
+ },
+ {
+  "text": "가어한나ाुअकीघคิา๊๋ัข็ค่๊ีحجا حتث خبختิีิ์ זהבג  דדבהא平語中本二字語ß",
+  "count": 69
+ },
+ {
+  "text": " \t\t  \t\n\t ́️‍्่‍̧‍",
+  "count": 26
+ },
+ {
+  "text": " SELECT * FROM users WHERE id = 42;\n",
+  "count": 25
+ },
+ {
+  "text": "  if err != nil {\n\treturn err\n}",
+  "count": 19
+ },
+ {
+  "text": "naïve NASA fox jumps quick quick we'll we'll HTTP2 quick quick it's HTTP2 we'll brown it's they've don't",
+  "count": 56
+ },
+ {
+  "text": " function f(a, b) { return a === b || a <= b; }\n",
+  "count": 26
+ },
+ {
+  "text": "  \t \n  \n\n\t\t🚀🏽🎉✨😀️️✨️🚀่️‍्́́‍่️्््ζΓ्่́‍‍️่́́‍्",
+  "count": 66
+ },
+ {
+  "text": "  const x = { a: 1, b: [2, 3] };\n\n\n\n",
+  "count": 25
+ },
+ {
+  "text": " if err != nil {\n\treturn err\n}\n\n",
+  "count": 19
+ },
+ {
+  "text": "  for i in range(10):\n    print(i ** 2)\n\n\n\n",
+  "count": 24
+ },
+ {
+  "text": "it's we'll it's brown we'll the quick we'll CamelCase CamelCase jumps HTTP2 NASA",
+  "count": 46
+ }
+]

@@ -1,0 +1,121 @@
+import { CURRENT_SETUP_VERSION } from "./setup-version";
+import type { SetupHost } from "./scenes/types";
+import { composerSetupScene } from "./scenes/composer";
+import { glyphSetupScene } from "./scenes/glyph";
+import { modelSetupScene } from "./scenes/model";
+import { providersSetupScene } from "./scenes/sign-in";
+import { themeSetupScene } from "./scenes/theme";
+import { updatesSetupScene } from "./scenes/updates";
+import type { SetupScene } from "./scenes/types";
+import { SetupWizardComponent, setupSceneApplies } from "./wizard-overlay";
+
+export type { SetupScene, SetupSceneController, SetupSceneHost, SetupSceneResult } from "./scenes/types";
+
+export { runStartupSplash } from "./startup-splash";
+export { CURRENT_SETUP_VERSION };
+
+/** Ordered onboarding scenes with independent version gates. */
+export const ALL_SCENES = [
+	providersSetupScene,
+	modelSetupScene,
+	glyphSetupScene,
+	composerSetupScene,
+	themeSetupScene,
+	updatesSetupScene,
+] as const satisfies readonly SetupScene[];
+
+/** Environment and invocation gates for onboarding scene selection. */
+export interface SetupSceneSelectionOptions {
+	resuming?: boolean;
+	isTTY?: boolean;
+	skipEnv?: string;
+	setupWizardEnabled?: boolean;
+	force?: boolean;
+}
+
+function setupSkipEnvEnabled(value: string | undefined): boolean {
+	if (value === undefined) return false;
+	const normalized = value.trim().toLowerCase();
+	return normalized !== "" && normalized !== "0" && normalized !== "false" && normalized !== "no";
+}
+
+/**
+ * Whether this launch may show onboarding at all: a TTY and, unless forced,
+ * not resuming, not skipped by `OMP_SKIP_SETUP` or `startup.setupWizard`.
+ */
+export function setupWizardAllowed(options: SetupSceneSelectionOptions = {}): boolean {
+	const isTTY = options.isTTY ?? (process.stdin.isTTY && process.stdout.isTTY);
+	if (!isTTY) return false;
+	if (options.force) return true;
+	return (
+		!options.resuming &&
+		!setupSkipEnvEnabled(options.skipEnv ?? Bun.env.OMP_SKIP_SETUP) &&
+		options.setupWizardEnabled !== false
+	);
+}
+
+/** Select scenes newer than the stored version, honoring hard environment gates ({@link setupWizardAllowed}). */
+export async function selectSetupScenes(
+	storedVersion: number,
+	scenes: readonly SetupScene[],
+	ctx?: SetupHost,
+	options: SetupSceneSelectionOptions = {},
+): Promise<SetupScene[]> {
+	if (!setupWizardAllowed(options)) return [];
+
+	const selected: SetupScene[] = [];
+	for (const scene of scenes) {
+		if (!options.force && scene.minVersion <= storedVersion) continue;
+		if (scene.shouldRun) {
+			if (!ctx) continue;
+			if (!(await scene.shouldRun(ctx))) continue;
+		}
+		selected.push(scene);
+	}
+	return selected;
+}
+
+/** Control completion persistence and the post-setup welcome animation. */
+export interface RunSetupWizardOptions {
+	markComplete?: boolean;
+	playWelcomeIntro?: boolean;
+}
+
+/**
+ * Own the fullscreen setup overlay until its scenes and outro finish. When
+ * none of `scenes` applies to the current renderer (a TSP surface skips
+ * `ansiOnly` ones) nothing is shown, but completion is still persisted.
+ */
+export async function runSetupWizard(
+	ctx: SetupHost,
+	scenes: readonly SetupScene[] = ALL_SCENES,
+	options: RunSetupWizardOptions = {},
+): Promise<void> {
+	if (scenes.length === 0) return;
+	if (!scenes.some(setupSceneApplies)) {
+		if (options.markComplete !== false) await ctx.markComplete(CURRENT_SETUP_VERSION);
+		if (options.playWelcomeIntro !== false) ctx.playWelcomeIntro();
+		return;
+	}
+	const component = new SetupWizardComponent(ctx, scenes);
+	const overlay = ctx.ui.showOverlay(component, {
+		width: "100%",
+		maxHeight: "100%",
+		anchor: "top-left",
+		margin: 0,
+		fullscreen: true,
+	});
+	try {
+		await component.run();
+		if (options.markComplete !== false) {
+			await ctx.markComplete(CURRENT_SETUP_VERSION);
+		}
+	} finally {
+		component.dispose();
+		ctx.ui.setFocus(component);
+		overlay.hide();
+	}
+	if (options.playWelcomeIntro !== false) {
+		ctx.playWelcomeIntro();
+	}
+}

@@ -1,0 +1,21 @@
+// Model-lineage compat for "amazon"; regenerated from the frozen census using class taxonomy selectors.
+
+class "amazon" {
+	// Explicit Nova cache points on Bedrock Converse (AWS model cards).
+	on "amazon-bedrock" {
+		family "nova" {
+			// Only the AWS-documented v1:0 deployments; unknown revisions stay
+			// conservative (no inferred cache support).
+			models "*nova-2-lite-v1:0" "*nova-lite-v1:0" "*nova-micro-v1:0" "*nova-premier-v1:0" "*nova-pro-v1:0" {
+				prompt-cache-mode "explicit"
+				prompt-cache-minimum-tokens 1024
+				prompt-cache-maximum-checkpoints 4
+			}
+		}
+	}
+	on "kilo" "nanogpt" "vercel-ai-gateway" {
+		family "nova" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+}

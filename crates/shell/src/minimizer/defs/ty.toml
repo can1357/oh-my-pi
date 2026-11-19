@@ -1,0 +1,35 @@
+# ty (astral type checker) output. Short-circuit on clean success,
+# otherwise strip ANSI and keep diagnostics.
+
+[filters.ty]
+description = "Compact ty (astral) type checker output"
+match_command = "^ty$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^Checking \\d+ file",
+	"^ty \\d+\\.\\d+",
+]
+truncate_lines_at = 250
+max_lines = 80
+on_empty = "ty: ok"
+
+[[filters.ty.match_output]]
+pattern = "All checks passed"
+message = "ty: ok"
+unless = "(?i)error|fail"
+
+[[tests.ty]]
+name = "clean run short-circuits"
+input = "All checks passed!\n"
+expected = "ty: ok"
+
+[[tests.ty]]
+name = "keeps diagnostics"
+input = "\nerror[invalid-type]: bad type\n  --> src/foo.py:10:5\n"
+expected = "error[invalid-type]: bad type\n  --> src/foo.py:10:5\n"
+
+[[tests.ty]]
+name = "strips noise, keeps diagnostics"
+input = "ty 0.1.0\nChecking 15 files\n\nerror[unresolved-reference]: Name `foo` used when not defined\n  --> app/main.py:10:5\n\nFound 1 error, 0 warnings\n"
+expected = "error[unresolved-reference]: Name `foo` used when not defined\n  --> app/main.py:10:5\nFound 1 error, 0 warnings\n"

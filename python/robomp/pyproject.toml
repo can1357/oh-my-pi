@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robomp"
+version = "0.1.0"
+description = "Self-hosted GitHub triage/fix bot driving omp --mode rpc"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Stencil Labs, Inc." }]
+dependencies = [
+  "fastapi>=0.112",
+  "uvicorn[standard]>=0.30",
+  "httpx>=0.27",
+  "pydantic>=2.6",
+  "pydantic-settings>=2.2",
+  "python-dotenv>=1.0",
+  "click>=8.1",
+  "omp-rpc>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "respx>=0.21",
+  "ruff>=0.13",
+]
+
+[project.scripts]
+robomp = "robomp.cli:main"
+
+[tool.setuptools]
+package-dir = { "robomp" = "src" }
+packages = ["robomp", "robomp.proxy"]
+
+[tool.setuptools.package-data]
+robomp = ["prompts/*", "py.typed", "static/*", "static/assets/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+  "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+extend-exclude = [".pi-context", "data"]
+
+[tool.ruff.lint]
+select = [
+  "E", "W",  # pycodestyle
+  "F",       # pyflakes
+  "I",       # isort
+  "UP",      # pyupgrade
+  "B",       # flake8-bugbear
+  "C4",      # comprehensions
+  "PIE",     # misc lints
+]
+ignore = [
+  "E501",  # long lines (embedded HTML/SQL/prompts); formatter handles real cases
+  "B008",  # FastAPI/Click rely on call-in-defaults (Depends, Option)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]  # assert False is fine in tests
+
+[tool.ruff.lint.isort]
+known-first-party = ["robomp"]
+
+[tool.ruff.format]
+quote-style = "double"

@@ -1,0 +1,27 @@
+# sops encrypt / decrypt output.
+# Strips age/gpg chatter and legacy-config notices but preserves decrypted
+# payload bytes.
+
+[filters.sops]
+description = "Compact sops encrypt/decrypt output"
+match_command = "^sops$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^\\[AGE\\] ",
+	"^sops detected a legacy",
+	"^Please rotate your data key",
+]
+truncate_lines_at = 300
+max_lines = 120
+on_empty = "sops: ok"
+
+[[tests.sops]]
+name = "passes decrypted content"
+input = "SECRET=hunter2\nAPI_KEY=abc\n"
+expected = "SECRET=hunter2\nAPI_KEY=abc\n"
+
+[[tests.sops]]
+name = "empty after stripping chatter"
+input = "\n[AGE] loaded recipients\n"
+expected = "sops: ok"

@@ -1,0 +1,503 @@
+syntax = "proto3";
+
+package exa.opensearch_clients_pb;
+
+import "buf/validate/validate.proto";
+import "exa/chat_pb/chat.proto";
+import "exa/codeium_common_pb/codeium_common.proto";
+import "exa/index_pb/index.proto";
+import "google/protobuf/timestamp.proto";
+
+enum SearchMode {
+  SEARCH_MODE_UNSPECIFIED = 0;
+  SEARCH_MODE_HYBRID = 1;
+  SEARCH_MODE_KEYWORD = 2;
+  SEARCH_MODE_APPROXIMATE_KNN = 3;
+  SEARCH_MODE_BRUTE_FORCE_KNN = 4;
+}
+
+enum ForwardStatus {
+  FORWARD_STATUS_UNSPECIFIED = 0;
+  FORWARD_STATUS_FAILURE = 1;
+  FORWARD_STATUS_SAVED = 2;
+  FORWARD_STATUS_SUCCESS = 3;
+}
+
+enum ConnectorType {
+  CONNECTOR_TYPE_UNSPECIFIED = 0;
+  CONNECTOR_TYPE_GITHUB = 1;
+  CONNECTOR_TYPE_SLACK = 2;
+  CONNECTOR_TYPE_GOOGLE_DRIVE = 3;
+  CONNECTOR_TYPE_JIRA = 4;
+  CONNECTOR_TYPE_CODEIUM = 5;
+  CONNECTOR_TYPE_EMAIL = 6;
+  CONNECTOR_TYPE_GITHUB_OAUTH = 7;
+}
+
+enum JobStatus {
+  JOB_STATUS_UNSPECIFIED = 0;
+  JOB_STATUS_QUEUED = 1;
+  JOB_STATUS_RUNNING = 2;
+  JOB_STATUS_COMPLETED = 3;
+  JOB_STATUS_CANCELLED = 4;
+  JOB_STATUS_CANCELLING = 5;
+  JOB_STATUS_ERRORED = 6;
+  JOB_STATUS_RETRYABLE = 7;
+}
+
+message TimeRange {
+  .google.protobuf.Timestamp start = 1;
+  .google.protobuf.Timestamp end = 2;
+}
+
+message GithubUser {
+  string auth_uid = 1;
+  string username = 2;
+}
+
+message AddGithubUsersRequest {
+  repeated .exa.opensearch_clients_pb.GithubUser users = 1;
+}
+
+message AddGithubUsersResponse {
+}
+
+message UserInfo {
+  string auth_uid = 1;
+  string email = 2;
+  string name = 3;
+  string photo_url = 4;
+}
+
+message AddUsersRequest {
+  repeated .exa.opensearch_clients_pb.UserInfo users = 1;
+}
+
+message AddUsersResponse {
+}
+
+message KnowledgeBaseSearchRequest {
+  int64 max_results = 2;
+  repeated string queries = 3;
+  .exa.codeium_common_pb.Metadata metadata = 4;
+  repeated string urls = 12;
+  repeated string document_ids = 13;
+  repeated string aggregate_ids = 5;
+  repeated .exa.chat_pb.ChatMessagePrompt chat_message_prompts = 6;
+  .exa.opensearch_clients_pb.TimeRange time_range = 7;
+  repeated .exa.codeium_common_pb.DocumentType document_types = 14;
+  .exa.opensearch_clients_pb.SearchMode search_mode = 9;
+  bool disable_reranking = 10;
+  bool disable_contextual_lookup = 11;
+  repeated .exa.codeium_common_pb.IndexChoice index_choices = 8;
+  string query = 1 [deprecated = true];
+}
+
+message KnowledgeBaseSearchResponse {
+  repeated .exa.codeium_common_pb.KnowledgeBaseGroup knowledge_base_groups = 1;
+}
+
+message GetKnowledgeBaseScopeItemsRequest {
+  string query = 1;
+  .exa.codeium_common_pb.Metadata metadata = 3;
+  repeated .exa.codeium_common_pb.DocumentType document_types = 5;
+  repeated .exa.codeium_common_pb.IndexChoice index_choices = 4 [deprecated = true];
+  repeated string index_names = 2 [deprecated = true];
+}
+
+message GetKnowledgeBaseScopeItemsResponse {
+  repeated .exa.codeium_common_pb.KnowledgeBaseScopeItem scope_items = 1;
+}
+
+message GetKnowledgeBaseItemsFromScopeItemsRequest {
+  reserved 1;
+
+  .exa.codeium_common_pb.Metadata metadata = 2;
+  repeated .exa.codeium_common_pb.KnowledgeBaseScopeItem scope_items = 3;
+}
+
+message GetKnowledgeBaseItemsFromScopeItemsResponse {
+  repeated .exa.codeium_common_pb.KnowledgeBaseItemWithMetadata knowledge_base_items_with_metadata = 1;
+}
+
+message IngestSlackDataRequest {
+  .exa.index_pb.ManagementMetadata metadata = 1;
+  repeated string channel_ids = 2;
+}
+
+message IngestSlackDataResponse {
+}
+
+message IngestGithubDataRequest {
+  .exa.index_pb.ManagementMetadata metadata = 3;
+  string organization = 1;
+  string repository = 2;
+}
+
+message IngestGithubDataResponse {
+}
+
+message IngestGoogleDriveDataRequest {
+  reserved 1;
+
+  .exa.index_pb.ManagementMetadata metadata = 2;
+  repeated string folder_ids = 3;
+}
+
+message IngestGoogleDriveDataResponse {
+}
+
+message IngestJiraDataRequest {
+  reserved 1;
+  reserved 2;
+  reserved 3;
+
+  .exa.index_pb.ManagementMetadata metadata = 4;
+}
+
+message IngestJiraDataResponse {
+}
+
+message IngestJiraPayloadRequest {
+  string body = 3;
+}
+
+message IngestJiraPayloadResponse {
+}
+
+message ForwardResult {
+  .exa.opensearch_clients_pb.ForwardStatus status = 1;
+  optional string error = 2;
+}
+
+message ForwardSlackPayloadRequest {
+  repeated string bodies = 1;
+}
+
+message ForwardSlackPayloadResponse {
+  repeated .exa.opensearch_clients_pb.ForwardResult results = 1;
+}
+
+message IngestSlackPayloadRequest {
+  repeated .exa.opensearch_clients_pb.SlackPayload payload = 1;
+}
+
+message IngestSlackPayloadResponse {
+}
+
+message CommonDocument {
+  string document_id = 1;
+  string text = 2;
+}
+
+message CommonDocumentWithScore {
+  .exa.opensearch_clients_pb.CommonDocument document = 1;
+  float score = 2;
+}
+
+message SearchResult {
+  string text = 1;
+  string url = 2;
+}
+
+message QuerySearchResponse {
+  repeated .exa.opensearch_clients_pb.CommonDocumentWithScore document_with_scores = 1;
+}
+
+message OpenSearchAddRepositoryRequest {
+  .exa.index_pb.ManagementMetadata metadata = 1;
+  .exa.index_pb.RepositoryConfig config = 2;
+  .exa.index_pb.RequestIndexVersion initial_index = 3;
+}
+
+message OpenSearchAddRepositoryResponse {
+  string repo_name = 1;
+  string index_id = 2;
+}
+
+message OpenSearchGetIndexRequest {
+  string index_id = 1;
+}
+
+message OpenSearchGetIndexResponse {
+  .exa.index_pb.IndexingStatus status = 1;
+}
+
+message HybridSearchRequest {
+  string query = 1;
+  .exa.codeium_common_pb.Embedding embedding = 2;
+  int64 max_results = 3;
+}
+
+message HybridSearchResponse {
+  repeated .exa.opensearch_clients_pb.CommonDocumentWithScore document_with_scores = 1;
+}
+
+message GraphSearchRequest {
+  string query = 1;
+  .exa.codeium_common_pb.Embedding embedding = 2;
+  int64 max_results = 3;
+}
+
+message GraphSearchResponse {
+  repeated .exa.opensearch_clients_pb.CommonDocumentWithScore document_with_scores = 1;
+}
+
+message ConnectorConfig {
+  oneof config {
+    .exa.opensearch_clients_pb.ConnectorConfigSlack slack = 1;
+    .exa.opensearch_clients_pb.ConnectorConfigGithub github = 2;
+    .exa.opensearch_clients_pb.ConnectorConfigGoogleDrive google_drive = 3;
+    .exa.opensearch_clients_pb.ConnectorConfigJira jira = 4;
+  }
+}
+
+message ConnectorConfigSlack {
+  reserved 1;
+  reserved 2;
+
+  repeated string include_channel_ids = 3;
+  repeated string exclude_channel_ids = 4;
+}
+
+message ConnectorConfigGithub {
+  reserved 1;
+}
+
+message ConnectorConfigGoogleDrive {
+  reserved 1;
+
+  repeated string include_drive_ids = 2;
+  repeated string exclude_drive_ids = 3;
+}
+
+message ConnectorConfigJira {
+}
+
+message ConnectorInternalConfig {
+  oneof config {
+    .exa.opensearch_clients_pb.ConnectorInternalConfigSlack slack = 1;
+    .exa.opensearch_clients_pb.ConnectorInternalConfigGithub github = 2;
+    .exa.opensearch_clients_pb.ConnectorInternalConfigGoogleDrive google_drive = 3;
+    .exa.opensearch_clients_pb.ConnectorInternalConfigJira jira = 4;
+  }
+}
+
+message ConnectorInternalConfigSlack {
+  reserved 4;
+
+  string client_id = 2;
+  string client_secret = 3;
+  string signing_secret = 1;
+}
+
+message GithubRepoConfig {
+  string organization = 1;
+  string repository = 2;
+}
+
+message ConnectorInternalConfigGithub {
+  int64 installation_id = 1;
+  repeated .exa.opensearch_clients_pb.GithubRepoConfig repo_configs = 2;
+}
+
+message ConnectorInternalConfigGoogleDrive {
+  reserved 1;
+}
+
+message ConnectorInternalConfigJira {
+  int64 webhook_id = 1;
+}
+
+message ConnectKnowledgeBaseAccountRequest {
+  reserved 1;
+
+  .exa.index_pb.ManagementMetadata metadata = 7;
+  .exa.opensearch_clients_pb.ConnectorType connector = 2;
+  string access_token = 3;
+  .google.protobuf.Timestamp access_token_expires_at = 4;
+  string refresh_token = 5;
+  .google.protobuf.Timestamp refresh_token_expires_at = 6;
+  .exa.opensearch_clients_pb.ConnectorAdditionalParams additional_params = 8;
+}
+
+message DeleteKnowledgeBaseConnectionRequest {
+  .exa.index_pb.ManagementMetadata metadata = 1;
+  .exa.opensearch_clients_pb.ConnectorType connector = 2;
+}
+
+message DeleteKnowledgeBaseConnectionResponse {
+}
+
+message UpdateConnectorConfigRequest {
+  .exa.index_pb.ManagementMetadata metadata = 1;
+  .exa.opensearch_clients_pb.ConnectorType connector = 2;
+  .exa.opensearch_clients_pb.ConnectorConfig config = 3;
+}
+
+message UpdateConnectorConfigResponse {
+}
+
+message ConnectorAdditionalParams {
+  oneof config {
+    .exa.opensearch_clients_pb.ConnectorAdditionalParamsSlack slack = 2;
+    .exa.opensearch_clients_pb.ConnectorAdditionalParamsGithub github = 1;
+  }
+}
+
+message ConnectorAdditionalParamsSlack {
+  string client_id = 1;
+  string client_secret = 2;
+  string signing_secret = 3;
+}
+
+message ConnectorAdditionalParamsGithub {
+  int64 installation_id = 1;
+}
+
+message ConnectKnowledgeBaseAccountResponse {
+}
+
+message CancelKnowledgeBaseJobsRequest {
+  .exa.index_pb.ManagementMetadata metadata = 1;
+  repeated int64 job_ids = 2;
+}
+
+message CancelKnowledgeBaseJobsResponse {
+}
+
+message DocumentTypeCount {
+  .exa.codeium_common_pb.DocumentType document_type = 1;
+  int64 count = 2;
+}
+
+message ConnectorState {
+  .exa.opensearch_clients_pb.ConnectorType connector = 1;
+  bool initialized = 2;
+  .exa.opensearch_clients_pb.ConnectorConfig config = 3;
+  repeated .exa.opensearch_clients_pb.DocumentTypeCount document_type_counts = 4;
+  .google.protobuf.Timestamp last_indexed_at = 5;
+  .google.protobuf.Timestamp unhealthy_since = 6;
+  .google.protobuf.Timestamp last_configured_at = 7;
+}
+
+message GetKnowledgeBaseConnectorStateRequest {
+  reserved 2;
+
+  .exa.index_pb.ManagementMetadata metadata = 1;
+}
+
+message GetKnowledgeBaseConnectorStateResponse {
+  repeated .exa.opensearch_clients_pb.ConnectorState connector_states = 1;
+}
+
+message JobState {
+  .exa.opensearch_clients_pb.ConnectorType connector = 1;
+  int64 id = 2;
+  .exa.opensearch_clients_pb.JobStatus status = 3;
+}
+
+message GetKnowledgeBaseJobStatesRequest {
+  .exa.index_pb.ManagementMetadata metadata = 1;
+  repeated .exa.opensearch_clients_pb.ConnectorType connector_types = 2;
+}
+
+message GetKnowledgeBaseJobStatesResponse {
+  repeated .exa.opensearch_clients_pb.JobState job_states = 1;
+}
+
+message SlackMessagePayload {
+  string dataset_id = 1;
+  string previous_message_dataset_id = 2;
+  string type = 3;
+  string channel_id = 4;
+  string user = 5;
+  string text = 6;
+  string timestamp = 7;
+  string thread_timestamp = 8;
+  string channel_name = 9;
+  string team_name = 10;
+  string team_id = 11;
+  bool is_private_channel = 12;
+  string team_domain = 13;
+  string original_timestamp = 14;
+}
+
+message SlackChannelPayload {
+  reserved 3;
+  reserved 5;
+  reserved 6;
+
+  string type = 1;
+  string channel_id = 2;
+  string channel_name = 4;
+  string description = 7;
+  string team_id = 8;
+  bool is_private_channel = 9;
+}
+
+message SlackPayload {
+  reserved 1;
+  reserved 2;
+  reserved 3;
+  reserved 4;
+  reserved 5;
+  reserved 6;
+  reserved 7;
+  reserved 8;
+  reserved 9;
+  reserved 10;
+  reserved 11;
+  reserved 12;
+
+  oneof payload {
+    .exa.opensearch_clients_pb.SlackMessagePayload message = 13;
+    .exa.opensearch_clients_pb.SlackChannelPayload channel = 14;
+  }
+}
+
+message GetKnowledgeBaseWebhookUrlRequest {
+  .exa.index_pb.ManagementMetadata metadata = 1;
+}
+
+message GetKnowledgeBaseWebhookUrlResponse {
+  string webhook_url = 1;
+}
+
+message GetConnectorInternalConfigRequest {
+  .exa.opensearch_clients_pb.ConnectorType connector = 1;
+}
+
+message GetConnectorInternalConfigResponse {
+  .exa.opensearch_clients_pb.ConnectorInternalConfig internal_config = 1;
+}
+
+service KnowledgeBaseService {
+  rpc KnowledgeBaseSearch (.exa.opensearch_clients_pb.KnowledgeBaseSearchRequest) returns (.exa.opensearch_clients_pb.KnowledgeBaseSearchResponse);
+  rpc GetKnowledgeBaseScopeItems (.exa.opensearch_clients_pb.GetKnowledgeBaseScopeItemsRequest) returns (.exa.opensearch_clients_pb.GetKnowledgeBaseScopeItemsResponse);
+  rpc GetKnowledgeBaseItemsFromScopeItems (.exa.opensearch_clients_pb.GetKnowledgeBaseItemsFromScopeItemsRequest) returns (.exa.opensearch_clients_pb.GetKnowledgeBaseItemsFromScopeItemsResponse);
+  rpc IngestSlackData (.exa.opensearch_clients_pb.IngestSlackDataRequest) returns (.exa.opensearch_clients_pb.IngestSlackDataResponse);
+  rpc IngestGithubData (.exa.opensearch_clients_pb.IngestGithubDataRequest) returns (.exa.opensearch_clients_pb.IngestGithubDataResponse);
+  rpc IngestGoogleDriveData (.exa.opensearch_clients_pb.IngestGoogleDriveDataRequest) returns (.exa.opensearch_clients_pb.IngestGoogleDriveDataResponse);
+  rpc IngestJiraData (.exa.opensearch_clients_pb.IngestJiraDataRequest) returns (.exa.opensearch_clients_pb.IngestJiraDataResponse);
+  rpc IngestJiraPayload (.exa.opensearch_clients_pb.IngestJiraPayloadRequest) returns (.exa.opensearch_clients_pb.IngestJiraPayloadResponse);
+  rpc ForwardSlackPayload (.exa.opensearch_clients_pb.ForwardSlackPayloadRequest) returns (.exa.opensearch_clients_pb.ForwardSlackPayloadResponse);
+  rpc IngestSlackPayload (.exa.opensearch_clients_pb.IngestSlackPayloadRequest) returns (.exa.opensearch_clients_pb.IngestSlackPayloadResponse);
+  rpc ConnectKnowledgeBaseAccount (.exa.opensearch_clients_pb.ConnectKnowledgeBaseAccountRequest) returns (.exa.opensearch_clients_pb.ConnectKnowledgeBaseAccountResponse);
+  rpc DeleteKnowledgeBaseConnection (.exa.opensearch_clients_pb.DeleteKnowledgeBaseConnectionRequest) returns (.exa.opensearch_clients_pb.DeleteKnowledgeBaseConnectionResponse);
+  rpc UpdateConnectorConfig (.exa.opensearch_clients_pb.UpdateConnectorConfigRequest) returns (.exa.opensearch_clients_pb.UpdateConnectorConfigResponse);
+  rpc CancelKnowledgeBaseJobs (.exa.opensearch_clients_pb.CancelKnowledgeBaseJobsRequest) returns (.exa.opensearch_clients_pb.CancelKnowledgeBaseJobsResponse);
+  rpc GetKnowledgeBaseConnectorState (.exa.opensearch_clients_pb.GetKnowledgeBaseConnectorStateRequest) returns (.exa.opensearch_clients_pb.GetKnowledgeBaseConnectorStateResponse);
+  rpc GetKnowledgeBaseJobStates (.exa.opensearch_clients_pb.GetKnowledgeBaseJobStatesRequest) returns (.exa.opensearch_clients_pb.GetKnowledgeBaseJobStatesResponse);
+  rpc AddUsers (.exa.opensearch_clients_pb.AddUsersRequest) returns (.exa.opensearch_clients_pb.AddUsersResponse);
+  rpc AddGithubUsers (.exa.opensearch_clients_pb.AddGithubUsersRequest) returns (.exa.opensearch_clients_pb.AddGithubUsersResponse);
+  rpc GetKnowledgeBaseWebhookUrl (.exa.opensearch_clients_pb.GetKnowledgeBaseWebhookUrlRequest) returns (.exa.opensearch_clients_pb.GetKnowledgeBaseWebhookUrlResponse);
+  rpc GetConnectorInternalConfig (.exa.opensearch_clients_pb.GetConnectorInternalConfigRequest) returns (.exa.opensearch_clients_pb.GetConnectorInternalConfigResponse);
+}
+
+service CodeIndexService {
+  rpc OpenSearchAddRepository (.exa.opensearch_clients_pb.OpenSearchAddRepositoryRequest) returns (.exa.opensearch_clients_pb.OpenSearchAddRepositoryResponse);
+  rpc OpenSearchGetIndex (.exa.opensearch_clients_pb.OpenSearchGetIndexRequest) returns (.exa.opensearch_clients_pb.OpenSearchGetIndexResponse);
+  rpc HybridSearch (.exa.opensearch_clients_pb.HybridSearchRequest) returns (.exa.opensearch_clients_pb.HybridSearchResponse);
+  rpc GraphSearch (.exa.opensearch_clients_pb.GraphSearchRequest) returns (.exa.opensearch_clients_pb.GraphSearchResponse);
+}

@@ -1,0 +1,82 @@
+import { revisionAtLeast } from "./compat/revision";
+import { classifyModel } from "./compat/taxonomy";
+import type { ModelIdentity } from "./compat/types";
+import { bareModelId } from "./identity/id";
+import type { ModelTokenizer } from "./types";
+
+// Resolution is pure and catalog ids recur across providers and aliases.
+const MAX_TOKENIZER_CACHE_ENTRIES = 2_048;
+const modelTokenizerCache = new Map<string, ModelTokenizer | null>();
+
+function claudeTokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
+	if (identity.class !== "anthropic") return undefined;
+	if (identity.family === "opus") {
+		if (revisionAtLeast(identity.revision, "5")) return "claude-v5";
+		if (revisionAtLeast(identity.revision, "4.7")) return "claude-v47";
+		return "claude-v3";
+	}
+	if (identity.family === "sonnet" || identity.family === "fable" || identity.family === "mythos") {
+		return revisionAtLeast(identity.revision, "5") ? "claude-v5-sonnet" : "claude-v3";
+	}
+	// Haiku 5.5 moved to the post-4.7 tokenizer (~30% more tokens than Haiku
+	// 4.5). No Haiku-measured vocabulary is embedded; Sonnet 5's is the nearest.
+	if (identity.family === "haiku" && revisionAtLeast(identity.revision, "5.5")) return "claude-v5-sonnet";
+	return "claude-v3";
+}
+
+function qwenTokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
+	return identity.class === "qwen" && revisionAtLeast(identity.revision, "3.5") ? "qwen3" : undefined;
+}
+
+function deepSeekTokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
+	return identity.class === "deepseek" ? "deepseek-v3" : undefined;
+}
+
+function kimiTokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
+	return identity.class === "kimi" ? "kimi-k2" : undefined;
+}
+
+function glmTokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
+	return identity.class === "glm" && revisionAtLeast(identity.revision, "5") ? "glm5" : undefined;
+}
+
+// GPT-5 and later bill text in o200k_base, GPT-3.5 and GPT-4 (Turbo) in cl100k_base. GPT-4.1, GPT-4.5, gpt-4o and the
+// o-series are o200k too, which is the default for a model without a tokenizer.
+function openAITokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
+	if (identity.class !== "openai") return undefined;
+	if (revisionAtLeast(identity.revision, "5")) return "o200k";
+	if (
+		identity.family === "gpt" &&
+		revisionAtLeast(identity.revision, "3.5") &&
+		!revisionAtLeast(identity.revision, "4.1")
+	) {
+		return "cl100k";
+	}
+	return undefined;
+}
+
+/**
+ * Resolve the exact locally embedded tokenizer for a canonical model id.
+ *
+ * This is catalog policy, not a runtime caller heuristic: [`buildModel`](./build.ts)
+ * materializes the result as `Model.tokenizer`; consumers read that property.
+ */
+export function resolveModelTokenizer(modelId: string, provider = ""): ModelTokenizer | undefined {
+	const cacheKey = `${provider}\0${modelId}`;
+	const cached = modelTokenizerCache.get(cacheKey);
+	if (cached !== undefined) return cached ?? undefined;
+	// Provider-scoped identity overrides (e.g. Yolo-Auto's `yolo` alias for
+	// Qwen3.8 Flash) only apply when the provider is known; bare ids stay
+	// provider-agnostic so unrelated namespaces never inherit them.
+	const identity = classifyModel(provider, bareModelId(modelId), { lenient: true });
+	const tokenizer =
+		claudeTokenizer(identity) ??
+		qwenTokenizer(identity) ??
+		deepSeekTokenizer(identity) ??
+		kimiTokenizer(identity) ??
+		glmTokenizer(identity) ??
+		openAITokenizer(identity);
+	if (modelTokenizerCache.size === MAX_TOKENIZER_CACHE_ENTRIES) modelTokenizerCache.clear();
+	modelTokenizerCache.set(cacheKey, tokenizer ?? null);
+	return tokenizer;
+}

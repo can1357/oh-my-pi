@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package exa.auto_cascade_common_pb;
+
+import "buf/validate/validate.proto";
+import "exa/cortex_pb/cortex.proto";
+import "google/protobuf/timestamp.proto";
+
+enum BranchStatus {
+  BRANCH_STATUS_UNSPECIFIED = 0;
+  BRANCH_STATUS_NO_PR = 1;
+  BRANCH_STATUS_PR_OPEN = 2;
+  BRANCH_STATUS_PR_CLOSED = 3;
+  BRANCH_STATUS_PR_MERGED = 4;
+  BRANCH_STATUS_HAS_SUGGESTION = 5;
+}
+
+enum CommentType {
+  COMMENT_TYPE_UNSPECIFIED = 0;
+  COMMENT_TYPE_MANUAL_REVIEW_TRIGGER = 1;
+  COMMENT_TYPE_LGTM = 2;
+  COMMENT_TYPE_REVIEW_BODY = 3;
+  COMMENT_TYPE_REVIEW_COMMENT = 4;
+}
+
+enum GithubCICheckStatus {
+  GITHUB_CI_CHECK_STATUS_UNSPECIFIED = 0;
+  GITHUB_CI_CHECK_STATUS_SUCCESS = 1;
+  GITHUB_CI_CHECK_STATUS_FAILED = 2;
+  GITHUB_CI_CHECK_STATUS_PENDING = 3;
+}
+
+enum GithubPullRequestBranchStatus {
+  GITHUB_PULL_REQUEST_BRANCH_STATUS_UNSPECIFIED = 0;
+  GITHUB_PULL_REQUEST_BRANCH_STATUS_OPEN = 1;
+  GITHUB_PULL_REQUEST_BRANCH_STATUS_CLOSED = 2;
+  GITHUB_PULL_REQUEST_BRANCH_STATUS_DRAFT = 3;
+  GITHUB_PULL_REQUEST_BRANCH_STATUS_MERGED = 4;
+}
+
+message GitRepoInfo {
+  string repo_name = 1;
+  string branch = 2;
+  string commit = 3;
+  string pr_url = 4;
+}
+
+message SessionInfo {
+  string session_id = 1;
+  string explanation = 2;
+  string ssh_url = 3;
+  .exa.cortex_pb.CascadeRunStatus status = 4;
+  string summary = 5;
+  .exa.cortex_pb.CortexTrajectory trajectory = 6;
+  string session_key = 7;
+  .google.protobuf.Timestamp created_at = 8;
+  repeated .exa.auto_cascade_common_pb.GitRepoInfo git_repos = 9;
+  .google.protobuf.Timestamp updated_at = 10;
+}
+
+message SessionInfos {
+  map<string, .exa.auto_cascade_common_pb.SessionInfo> sessions = 1;
+}
+
+message GithubPullRequestInfo {
+  string url = 1;
+  string owner = 2;
+  string repo = 3;
+  string title = 4;
+  string number = 5;
+  .exa.auto_cascade_common_pb.GithubCICheckStatus ci_status = 6;
+  .exa.auto_cascade_common_pb.GithubPullRequestBranchStatus branch_status = 7;
+  .google.protobuf.Timestamp updated_at = 8;
+}
+
+message GithubInstallationInfo {
+  string installation_id = 1;
+  string organization_name = 2;
+}

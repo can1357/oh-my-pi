@@ -1,0 +1,585 @@
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { AuthStorage, type CredentialDisabledEvent, getOAuthProviders } from "@oh-my-pi/pi-ai";
+import * as oauthUtils from "@oh-my-pi/pi-ai/oauth";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { Extension, ExtensionError, ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "@oh-my-pi/pi-coding-agent/session/credential-disabled-notice";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+
+interface SessionDirs {
+	cwd: string;
+	agentDir: string;
+}
+
+function emptyWorkspaceTree(cwd: string) {
+	return { rootPath: cwd, rendered: ".\n", truncated: false, totalLines: 1, agentsMdFiles: [] };
+}
+
+const expiredOAuth = () =>
+	({
+		type: "oauth" as const,
+		access: "expired-access",
+		refresh: "stale-refresh",
+		expires: Date.now() - 60_000,
+	}) as const;
+
+const failOAuthRefresh = (): void => {
+	// AuthStorage refreshes through `refreshOAuthToken` before calling
+	// `getOAuthApiKey`. Mock the refresh path so the simulated invalid_grant
+	// failure actually reaches the disable classifier.
+	vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async () => {
+		throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+	});
+};
+
+/**
+ * Drives `ExtensionRunner.initialize` with no-op stubs so credential_disabled events flush
+ * out of the runner's pre-init buffer. Mode controllers (interactive/RPC/ACP/print/subagent)
+ * normally do this with mode-specific actions; tests just need any initialize call to flip
+ * the runner's `#initialized` flag and drain the buffer.
+ */
+const initializeRunnerForTest = (runner: ExtensionRunner | undefined): void => {
+	if (!runner) return;
+	runner.initialize(
+		{
+			sendMessage: () => {},
+			sendUserMessage: async () => {},
+			appendEntry: () => {},
+			setLabel: () => {},
+			getActiveTools: () => [],
+			getAllTools: () => [],
+			setActiveTools: async () => {},
+			getCommands: () => [],
+			setModel: async () => false,
+			getThinkingLevel: () => undefined,
+			setThinkingLevel: () => {},
+			getSessionName: () => undefined,
+			setSessionName: async () => {},
+		},
+		{
+			getModel: () => undefined,
+			isIdle: () => true,
+			abort: () => {},
+			hasPendingMessages: () => false,
+			shutdown: () => {},
+			getContextUsage: () => undefined,
+			compact: async () => {},
+			getSystemPrompt: () => [],
+		},
+	);
+};
+
+describe("createAgentSession credential_disabled subscription", () => {
+	const tempDirs: string[] = [];
+	// Every test opens a file-backed auth DB under its temp dir; Windows cannot delete it while open.
+	const authStorages: AuthStorage[] = [];
+	const createAuthStorage = async (...args: Parameters<typeof AuthStorage.create>): Promise<AuthStorage> => {
+		const storage = await AuthStorage.create(...args);
+		authStorages.push(storage);
+		return storage;
+	};
+
+	const makeDirs = (label: string): SessionDirs => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-credential-disabled-${label}-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		const agentDir = path.join(tempDir, "agent");
+		fs.mkdirSync(cwd, { recursive: true });
+		fs.mkdirSync(agentDir, { recursive: true });
+		return { cwd, agentDir };
+	};
+
+	const baseOptions = (dirs: SessionDirs, authStorage: AuthStorage, extensions: ExtensionFactory[] = []) => ({
+		cwd: dirs.cwd,
+		agentDir: dirs.agentDir,
+		authStorage,
+		// Pin the model registry at a temp models.json. Without an explicit path, ModelRegistry
+		// loads the developer's real ~/.omp models config on every construction (~100ms each,
+		// and non-isolated). Pointing it at the (absent) temp file keeps construction at ~2ms and
+		// avoids leaking host config into the test. Providing the registry also skips the
+		// fire-and-forget background model discovery, which is irrelevant to credential_disabled.
+		modelRegistry: new ModelRegistry(authStorage, path.join(dirs.agentDir, "models.json")),
+		settings: Settings.isolated(),
+		disableExtensionDiscovery: true,
+		extensions,
+		skills: [],
+		rules: [],
+		contextFiles: [],
+		promptTemplates: [],
+		workspaceTree: emptyWorkspaceTree(dirs.cwd),
+		// This suite exercises the SDK's credential event bridge, not ambient tools.
+		// Avoid rebuilding the full built-in/custom-tool surface for every session.
+		toolNames: ["read"],
+		preloadedCustomToolPaths: [],
+		skipPythonPreflight: true,
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+	});
+
+	/**
+	 * Make an inline extension factory whose `credential_disabled` handler resolves a fresh
+	 * promise on every event. The returned `next()` produces a promise that resolves to the
+	 * next event the extension observes. Drives test-side awaiting without relying on
+	 * arbitrary `Bun.sleep` settling.
+	 */
+	const makeRecordingExtension = () => {
+		const events: CredentialDisabledEvent[] = [];
+		const waiters: Array<{ resolve: (event: CredentialDisabledEvent) => void }> = [];
+		const factory: ExtensionFactory = pi => {
+			pi.on("credential_disabled", event => {
+				const observed = { provider: event.provider, disabledCause: event.disabledCause };
+				events.push(observed);
+				const waiter = waiters.shift();
+				if (waiter) waiter.resolve(observed);
+			});
+		};
+		const next = (): Promise<CredentialDisabledEvent> => {
+			if (events.length > waiters.length) {
+				return Promise.resolve(events[waiters.length] as CredentialDisabledEvent);
+			}
+			const { promise, resolve } = Promise.withResolvers<CredentialDisabledEvent>();
+			waiters.push({ resolve });
+			return promise;
+		};
+		return { factory, events, next };
+	};
+
+	const drainCredentialDisabledDispatch = async (): Promise<void> => {
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+	};
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		for (const storage of authStorages.splice(0)) storage.close();
+		for (const dir of tempDirs.splice(0)) {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	it("concurrent sessions each subscribe their own listener; each dispose only removes its own", async () => {
+		const sharedDirs = makeDirs("concurrent");
+		const embedderEvents: CredentialDisabledEvent[] = [];
+		const authStorage = await createAuthStorage(path.join(sharedDirs.agentDir, "agent.db"), {
+			onCredentialDisabled: event => {
+				embedderEvents.push(event);
+			},
+		});
+
+		const ext1 = makeRecordingExtension();
+		const ext2 = makeRecordingExtension();
+		const ext3 = makeRecordingExtension();
+		const dirs1 = makeDirs("concurrent-1");
+		const dirs2 = makeDirs("concurrent-2");
+		const dirs3 = makeDirs("concurrent-3");
+		const session1 = await createAgentSession(baseOptions(dirs1, authStorage, [ext1.factory]));
+		const session2 = await createAgentSession(baseOptions(dirs2, authStorage, [ext2.factory]));
+		const session3 = await createAgentSession(baseOptions(dirs3, authStorage, [ext3.factory]));
+		initializeRunnerForTest(session1.session.extensionRunner);
+		initializeRunnerForTest(session2.session.extensionRunner);
+		initializeRunnerForTest(session3.session.extensionRunner);
+
+		failOAuthRefresh();
+
+		// All three sessions + embedder receive the first event.
+		await authStorage.credentials.set("anthropic", [expiredOAuth()]);
+		const wait1All = Promise.all([ext1.next(), ext2.next(), ext3.next()]);
+		await authStorage.keys.get("anthropic", "concurrent-1");
+		await wait1All;
+		expect(embedderEvents.map(e => e.provider)).toEqual(["anthropic"]);
+		expect(ext1.events.map(e => e.provider)).toEqual(["anthropic"]);
+		expect(ext2.events.map(e => e.provider)).toEqual(["anthropic"]);
+		expect(ext3.events.map(e => e.provider)).toEqual(["anthropic"]);
+
+		// Dispose session1; sessions 2 and 3 + embedder still receive.
+		await session1.session.dispose();
+
+		await authStorage.credentials.set("openai", [expiredOAuth()]);
+		const wait2 = Promise.all([ext2.next(), ext3.next()]);
+		await authStorage.keys.get("openai", "concurrent-2");
+		await wait2;
+		await drainCredentialDisabledDispatch();
+		expect(embedderEvents.map(e => e.provider)).toEqual(["anthropic", "openai"]);
+		expect(ext1.events.map(e => e.provider)).toEqual(["anthropic"]);
+		expect(ext2.events.map(e => e.provider)).toEqual(["anthropic", "openai"]);
+		expect(ext3.events.map(e => e.provider)).toEqual(["anthropic", "openai"]);
+
+		// Dispose session2; only session3 + embedder receive.
+		await session2.session.dispose();
+
+		await authStorage.credentials.set("google", [expiredOAuth()]);
+		const wait3 = ext3.next();
+		await authStorage.keys.get("google", "concurrent-3");
+		await wait3;
+		await drainCredentialDisabledDispatch();
+		expect(embedderEvents.map(e => e.provider)).toEqual(["anthropic", "openai", "google"]);
+		expect(ext1.events.map(e => e.provider)).toEqual(["anthropic"]);
+		expect(ext2.events.map(e => e.provider)).toEqual(["anthropic", "openai"]);
+		expect(ext3.events.map(e => e.provider)).toEqual(["anthropic", "openai", "google"]);
+
+		// Dispose the last session; only the embedder receives.
+		await session3.session.dispose();
+
+		await authStorage.credentials.set("anthropic", [expiredOAuth()]);
+		await authStorage.keys.get("anthropic", "concurrent-final");
+		await drainCredentialDisabledDispatch();
+		expect(embedderEvents.map(e => e.provider)).toEqual(["anthropic", "openai", "google", "anthropic"]);
+		expect(ext1.events).toHaveLength(1);
+		expect(ext2.events).toHaveLength(2);
+		expect(ext3.events).toHaveLength(3);
+	});
+
+	it("buffers credential_disabled events fired before runner.initialize and replays them once initialize runs", async () => {
+		// Without deferral the runner would fan out with `hasUI=false`, an unset model, and
+		// no-op runtime actions — extension handlers would observe the constructor defaults
+		// rather than the real context wired in by mode controllers.
+		const dirs = makeDirs("pre-init");
+		// No constructor handler — verifies the default case still defers properly.
+		const authStorage = await createAuthStorage(path.join(dirs.agentDir, "agent.db"));
+		const ext = makeRecordingExtension();
+
+		const { session } = await createAgentSession(baseOptions(dirs, authStorage, [ext.factory]));
+
+		try {
+			// Fire the event BEFORE initializing. Extension must NOT see it yet — the runner
+			// would otherwise emit with `hasUI=false`, an unset model, and no-op runtime
+			// actions, defeating the headline re-login flow.
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
+			failOAuthRefresh();
+			await authStorage.keys.get("anthropic", "pre-init");
+			await drainCredentialDisabledDispatch();
+			expect(ext.events).toHaveLength(0);
+
+			// Initializing flushes the buffer through `emit()` with the now-populated
+			// context. The recording extension records the event.
+			const observed = ext.next();
+			initializeRunnerForTest(session.extensionRunner);
+			const extEvent = await observed;
+
+			expect(extEvent.provider).toBe("anthropic");
+			expect(extEvent.disabledCause).toContain("invalid_grant");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("captures startup events even when the embedder constructor handler is attached", async () => {
+		// With a constructor `onCredentialDisabled`, the AuthStorage listener set is non-empty
+		// from construction, so the no-listener buffer can't catch startup events for any
+		// later subscriber. The SDK listener subscribes immediately at the top of
+		// `createAgentSession` so every disable event reaches both the embedder (synchronously)
+		// and the extension runner (deferred until initialize).
+		const dirs = makeDirs("embedder-and-extension");
+		const embedderEvents: CredentialDisabledEvent[] = [];
+		const authStorage = await createAuthStorage(path.join(dirs.agentDir, "agent.db"), {
+			onCredentialDisabled: event => {
+				embedderEvents.push(event);
+			},
+		});
+		const ext = makeRecordingExtension();
+
+		const { session } = await createAgentSession(baseOptions(dirs, authStorage, [ext.factory]));
+
+		try {
+			// Fire BEFORE initialize — simulates an OAuth invalid_grant during startup model
+			// probes when the embedder constructor handler is set.
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
+			failOAuthRefresh();
+			await authStorage.keys.get("anthropic", "startup-with-embedder");
+			await drainCredentialDisabledDispatch();
+
+			// Embedder fires immediately (sync push from AuthStorage's fan-out loop). The
+			// extension still hasn't received it because the runner is uninitialized.
+			expect(embedderEvents).toHaveLength(1);
+			expect(embedderEvents[0]?.provider).toBe("anthropic");
+			expect(ext.events).toHaveLength(0);
+
+			// Initialize the runner. The buffered event flushes through emit().
+			const observed = ext.next();
+			initializeRunnerForTest(session.extensionRunner);
+			const extEvent = await observed;
+
+			expect(extEvent.provider).toBe("anthropic");
+			expect(extEvent.disabledCause).toContain("invalid_grant");
+			// Embedder didn't double-receive.
+			expect(embedderEvents).toHaveLength(1);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("releases the session subscription if createAgentSession throws mid-startup", async () => {
+		const dirs = makeDirs("startup-failure");
+		const embedderEvents: CredentialDisabledEvent[] = [];
+		const authStorage = await createAuthStorage(path.join(dirs.agentDir, "agent.db"), {
+			onCredentialDisabled: event => {
+				embedderEvents.push(event);
+			},
+		});
+
+		const throwingFactory: ExtensionFactory = () => {
+			throw new Error("simulated mid-startup failure");
+		};
+
+		await expect(createAgentSession(baseOptions(dirs, authStorage, [throwingFactory]))).rejects.toThrow(
+			/simulated mid-startup failure/,
+		);
+
+		// A retry must also fail without accumulating stale subscribers (this is what the
+		// outer-catch cleanup in createAgentSession exists to guarantee).
+		await expect(createAgentSession(baseOptions(dirs, authStorage, [throwingFactory]))).rejects.toThrow(
+			/simulated mid-startup failure/,
+		);
+
+		// Now fire a real disable. Only the embedder must observe it — no leftover listener
+		// from either failed startup attempt.
+		failOAuthRefresh();
+		await authStorage.credentials.set("anthropic", [expiredOAuth()]);
+		await authStorage.keys.get("anthropic", "post-failure");
+		await drainCredentialDisabledDispatch();
+
+		expect(embedderEvents).toEqual([
+			{
+				provider: "anthropic",
+				disabledCause: expect.stringContaining("invalid_grant"),
+				credentialId: expect.any(Number),
+			},
+		]);
+	});
+	it("subscribes through the registry's auth storage when only options.modelRegistry is provided", async () => {
+		const dirs = makeDirs("registry-only");
+		const embedderEvents: CredentialDisabledEvent[] = [];
+		const authStorage = await createAuthStorage(path.join(dirs.agentDir, "agent.db"), {
+			onCredentialDisabled: event => {
+				embedderEvents.push(event);
+			},
+		});
+		const modelRegistry = new ModelRegistry(authStorage, path.join(dirs.agentDir, "models.json"));
+		const ext = makeRecordingExtension();
+
+		const { session } = await createAgentSession({
+			cwd: dirs.cwd,
+			agentDir: dirs.agentDir,
+			modelRegistry, // registry-only — no separate options.authStorage
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			extensions: [ext.factory],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			workspaceTree: emptyWorkspaceTree(dirs.cwd),
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+		initializeRunnerForTest(session.extensionRunner);
+
+		try {
+			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
+			failOAuthRefresh();
+
+			const observed = ext.next();
+			await modelRegistry.getApiKeyForProvider("anthropic", "registry-only");
+			const extEvent = await observed;
+
+			expect(embedderEvents).toEqual([
+				{
+					provider: "anthropic",
+					disabledCause: expect.stringContaining("invalid_grant"),
+					credentialId: expect.any(Number),
+				},
+			]);
+			expect(extEvent.provider).toBe("anthropic");
+			expect(extEvent.disabledCause).toContain("invalid_grant");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("rejects when options.authStorage and options.modelRegistry.authStorage are different instances", async () => {
+		const dirs = makeDirs("mismatch");
+		const registryStorage = await createAuthStorage(path.join(dirs.agentDir, "agent-registry.db"));
+		const otherStorage = await createAuthStorage(path.join(dirs.agentDir, "agent-other.db"));
+		const modelRegistry = new ModelRegistry(registryStorage, path.join(dirs.agentDir, "models-registry.json"));
+
+		await expect(
+			createAgentSession({
+				cwd: dirs.cwd,
+				agentDir: dirs.agentDir,
+				authStorage: otherStorage,
+				modelRegistry,
+				settings: Settings.isolated(),
+				disableExtensionDiscovery: true,
+				extensions: [],
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				workspaceTree: emptyWorkspaceTree(dirs.cwd),
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			}),
+		).rejects.toThrow(/options\.authStorage.*modelRegistry\.authStorage/);
+	});
+
+	it("routes handler errors through onError when listener is registered synchronously after initialize()", async () => {
+		// Regression: the flush of #pendingCredentialDisabled used to run synchronously
+		// inside initialize(), before mode controllers had a chance to call onError().
+		// Handler exceptions were therefore silently dropped. The flush is now deferred
+		// by one microtask so a sync onError() registration lands in time.
+		const dirs = makeDirs("error-routing");
+		const authStorage = await AuthStorage.create(path.join(dirs.agentDir, "agent.db"));
+		const modelRegistry = new ModelRegistry(authStorage, path.join(dirs.agentDir, "models.json"));
+		try {
+			const throwingExtension: Extension = {
+				path: "test://throwing-credential-disabled",
+				resolvedPath: "test://throwing-credential-disabled",
+				handlers: new Map([
+					[
+						"credential_disabled",
+						[
+							async () => {
+								throw new Error("boom");
+							},
+						],
+					],
+				]),
+				tools: new Map(),
+				assistantThinkingRenderers: [],
+				assistantTextRenderers: [],
+				transcriptPresenters: [],
+				linkSchemes: [],
+				fileWriteFallbackHandlers: [],
+				fileDeleteFallbackHandlers: [],
+				messageRenderers: new Map(),
+				composerShapes: new Map(),
+				commands: new Map(),
+				flags: new Map(),
+				shortcuts: new Map(),
+			};
+			const runtime = new ExtensionRuntime();
+			const sessionManager = SessionManager.inMemory();
+			const runner = new ExtensionRunner([throwingExtension], runtime, dirs.cwd, sessionManager, modelRegistry);
+
+			// 1. Buffer the event BEFORE initialize so it lands in #pendingCredentialDisabled.
+			await runner.emitCredentialDisabled({ provider: "anthropic", disabledCause: "test" });
+
+			// 2. initialize(); the flush is queued as a microtask.
+			runner.initialize(
+				{
+					sendMessage: () => {},
+					sendUserMessage: async () => {},
+					appendEntry: () => {},
+					setLabel: () => {},
+					getActiveTools: () => [],
+					getAllTools: () => [],
+					setActiveTools: async () => {},
+					getCommands: () => [],
+					setModel: async () => false,
+					getThinkingLevel: () => undefined,
+					setThinkingLevel: () => {},
+					getSessionName: () => undefined,
+					setSessionName: async () => {},
+				},
+				{
+					getModel: () => undefined,
+					isIdle: () => true,
+					abort: () => {},
+					hasPendingMessages: () => false,
+					shutdown: () => {},
+					getContextUsage: () => undefined,
+					compact: async () => {},
+					getSystemPrompt: () => [],
+				},
+				undefined,
+				undefined,
+			);
+
+			// 3. Synchronous onError registration — must land before the deferred flush
+			// invokes the throwing handler. This is the contract this test defends.
+			const receivedError = Promise.withResolvers<ExtensionError>();
+			runner.onError(error => {
+				receivedError.resolve(error);
+			});
+
+			// 4. Await the observable callback instead of assuming a fixed number of
+			// microtask turns inside the lifecycle runner.
+			const error = await receivedError.promise;
+
+			expect(error).toMatchObject({
+				extensionPath: "test://throwing-credential-disabled",
+				event: "credential_disabled",
+				error: "boom",
+			});
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	const recordNotices = (session: AgentSession): Array<Extract<AgentSessionEvent, { type: "notice" }>> => {
+		const notices: Array<Extract<AgentSessionEvent, { type: "notice" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(event);
+		});
+		return notices;
+	};
+
+	it("warns the live session, without the provider's text, when a signed-in account is disabled", async () => {
+		const dirs = makeDirs("notice");
+		const authStorage = await createAuthStorage(path.join(dirs.agentDir, "agent.db"));
+		const { session } = await createAgentSession(baseOptions(dirs, authStorage));
+		const notices = recordNotices(session);
+		try {
+			await authStorage.credentials.set("anthropic", [{ ...expiredOAuth(), email: "alice@example.com" }]);
+			failOAuthRefresh();
+
+			await authStorage.keys.get("anthropic", "session-notice");
+
+			const name = getOAuthProviders().find(provider => provider.id === "anthropic")?.name;
+			expect(name).toBeDefined();
+			expect(notices).toEqual([
+				{
+					type: "notice",
+					level: "warning",
+					source: CREDENTIAL_DISABLED_NOTICE_SOURCE,
+					message: `${name} account alice@example.com was signed out automatically. Run /login to sign in again.`,
+				},
+			]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("does not prescribe /login for a disabled credential that has no login entry", async () => {
+		const dirs = makeDirs("notice-no-login");
+		const embedderEvents: CredentialDisabledEvent[] = [];
+		const authStorage = await createAuthStorage(path.join(dirs.agentDir, "agent.db"), {
+			onCredentialDisabled: event => {
+				embedderEvents.push(event);
+			},
+		});
+		const { session } = await createAgentSession(baseOptions(dirs, authStorage));
+		const notices = recordNotices(session);
+		try {
+			const provider = "mcp_oauth:https://mcp.example.test/sse";
+			await authStorage.credentials.set(provider, [expiredOAuth()]);
+			const [row] = authStorage.credentials.list(provider);
+
+			expect(await authStorage.credentials.disable(row!.id, "oauth refresh failed: invalid_grant")).toBe(true);
+
+			expect(embedderEvents.map(event => event.provider)).toEqual([provider]);
+			expect(notices).toEqual([]);
+		} finally {
+			await session.dispose();
+		}
+	});
+});

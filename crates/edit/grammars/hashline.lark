@@ -1,0 +1,27 @@
+start: begin_patch file_patch+ end_patch
+begin_patch: "*** Begin Patch" LF
+end_patch:   "*** End Patch" LF?
+
+file_patch: file_header hunk+
+file_header: "[" filename "#" file_hash "]" LF
+file_hash: /[0-9A-F]{4}/
+filename: /[^#\r\n]+/
+
+hunk: put_hunk | cut_hunk | rem_hunk | mv_hunk
+put_hunk: "PUT " put_locator ":" LF body+
+        | "PUT " put_locator register LF
+        | "PUT " gap_locator LF
+cut_hunk: "CUT " cut_locator register? LF
+rem_hunk: "REM" LF
+mv_hunk: "MV " filename LF
+
+put_locator: range | LID "*" | gap_locator
+cut_locator: range | LID "*"
+gap_locator: "<" LID | ">" LID | ">" LID "*" | ">$"
+register: " @" /[A-Za-z0-9_-]+/
+
+range: LID ".=" LID
+LID: /[1-9]\d*/
+body: "+" /(.*)/ LF
+
+%import common.LF

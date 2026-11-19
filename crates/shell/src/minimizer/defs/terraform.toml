@@ -1,0 +1,44 @@
+[filters.terraform_plan]
+description = "Terraform / OpenTofu plan or apply"
+match_command = "^(terraform|tofu)$"
+match_subcommand = "^(plan|apply|destroy)$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^Terraform has created a lock file",
+	"^Note: You didn't use the -out option",
+	"^Releasing state lock",
+	"^Acquiring state lock",
+	"^Refreshing Terraform state",
+	"^\\s*#.*will be (read during apply|refreshed)",
+]
+truncate_lines_at = 250
+head_lines = 40
+tail_lines = 40
+on_empty = "terraform: no changes"
+
+[[tests.terraform_plan]]
+name = "apply complete passes through"
+input = "Apply complete! Resources: 2 added, 0 changed, 0 destroyed.\n"
+expected = "Apply complete! Resources: 2 added, 0 changed, 0 destroyed.\n"
+
+[filters.terraform_init]
+description = "Terraform init / validate / fmt"
+match_command = "^(terraform|tofu)$"
+match_subcommand = "^(init|validate|fmt)$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^- Installing ",
+	"^- Using previously-installed ",
+	"^- Reusing previous version",
+	"^Initializing modules",
+	"^Initializing the backend",
+	"^Initializing provider plugins",
+]
+on_empty = "terraform: ok"
+
+[[tests.terraform_init]]
+name = "clean init"
+input = "- Installing hashicorp/aws v5.0.0...\n- Using previously-installed hashicorp/aws v5.0.0\n"
+expected = "terraform: ok"

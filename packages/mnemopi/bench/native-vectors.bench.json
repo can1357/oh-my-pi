@@ -1,0 +1,100 @@
+{
+  "sha": "8047bedaa46276710c9544d08f12bb13996da858",
+  "date": "2026-07-22T12:17:28.977Z",
+  "scenario": "dim=384, stride=48B, warmup=20, iterations=200 (adaptive for O(n²) rows, see per-row fields), crossing-inclusive",
+  "runtime": "bun 1.3.14",
+  "host": "Apple M1, darwin-arm64",
+  "rows": [
+    {
+      "kernel": "searchExactVectorIndex (topK wrapper)",
+      "count": 10,
+      "ts_us": 17.34,
+      "native_us": 9.49,
+      "speedup": 1.83,
+      "ts_iterations": 200,
+      "native_iterations": 200
+    },
+    {
+      "kernel": "searchExactVectorIndex (topK wrapper)",
+      "count": 100,
+      "ts_us": 56,
+      "native_us": 34.65,
+      "speedup": 1.62,
+      "ts_iterations": 200,
+      "native_iterations": 200
+    },
+    {
+      "kernel": "searchExactVectorIndex (topK wrapper)",
+      "count": 1000,
+      "ts_us": 508.91,
+      "native_us": 300.93,
+      "speedup": 1.69,
+      "ts_iterations": 200,
+      "native_iterations": 200
+    },
+    {
+      "kernel": "searchExactVectorIndex (topK wrapper)",
+      "count": 10000,
+      "ts_us": 5562.41,
+      "native_us": 3437.82,
+      "speedup": 1.62,
+      "ts_iterations": 200,
+      "native_iterations": 200
+    },
+    {
+      "kernel": "cosineSimilarityPairs (incl. flatten+adjacency)",
+      "count": 10,
+      "ts_us": 26.42,
+      "native_us": 30.67,
+      "speedup": 0.86,
+      "ts_iterations": 200,
+      "native_iterations": 200
+    },
+    {
+      "kernel": "cosineSimilarityPairs (incl. flatten+adjacency)",
+      "count": 100,
+      "ts_us": 4418.75,
+      "native_us": 1866.25,
+      "speedup": 2.37,
+      "ts_iterations": 200,
+      "native_iterations": 200
+    },
+    {
+      "kernel": "cosineSimilarityPairs (incl. flatten+adjacency)",
+      "count": 1000,
+      "ts_us": 445625.44,
+      "native_us": 179685.28,
+      "speedup": 2.48,
+      "ts_iterations": 10,
+      "native_iterations": 10
+    },
+    {
+      "kernel": "mmrRerankIndices (via mmrRerank)",
+      "count": 10,
+      "ts_us": 395.5,
+      "native_us": 17.62,
+      "speedup": 22.44,
+      "ts_iterations": 200,
+      "native_iterations": 200
+    },
+    {
+      "kernel": "mmrRerankIndices (via mmrRerank)",
+      "count": 100,
+      "ts_us": 10439.19,
+      "native_us": 287.99,
+      "speedup": 36.25,
+      "ts_iterations": 200,
+      "native_iterations": 200
+    },
+    {
+      "kernel": "mmrRerankIndices (via mmrRerank)",
+      "count": 1000,
+      "ts_us": 103521.56,
+      "native_us": 3430.07,
+      "speedup": 30.18,
+      "ts_iterations": 200,
+      "native_iterations": 200
+    }
+  ],
+  "sink": 15782.734317403312
+}

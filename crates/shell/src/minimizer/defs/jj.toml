@@ -1,0 +1,28 @@
+# jj (jujutsu) VCS output. Strip ANSI and blank lines, keep a compact summary.
+
+[filters.jj]
+description = "Compact jj (jujutsu) output"
+match_command = "^jj$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^Hint:",
+]
+truncate_lines_at = 200
+max_lines = 80
+on_empty = "jj: ok"
+
+[[tests.jj]]
+name = "strips blank lines"
+input = "Working copy  (@) : abc def\n\nParent commit      : xyz 123 main | msg\n"
+expected = "Working copy  (@) : abc def\nParent commit      : xyz 123 main | msg\n"
+
+[[tests.jj]]
+name = "empty becomes sentinel"
+input = "\n\n"
+expected = "jj: ok"
+
+[[tests.jj]]
+name = "strips hint keeps working copy update"
+input = "Working copy now at: qpvuntsm abc123 feat: add new feature\nHint: use `jj log` to see the full history\n"
+expected = "Working copy now at: qpvuntsm abc123 feat: add new feature\n"

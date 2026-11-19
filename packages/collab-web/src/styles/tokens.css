@@ -1,0 +1,158 @@
+/* Design tokens — pure-black chassis, one inset panel, alpha hairlines, and
+ * one omp accent gradient (cyan → pink). Dark is the default;
+ * `[data-theme="light"]` and the prefers-color-scheme fallback flip to light.
+ * The ONLY file allowed to contain raw color values. */
+:root {
+	color-scheme: dark;
+
+	/* surface ramp: page → inset panel → card → raised */
+	--bg: #000;
+	--panel: #09090a;
+	--bg-raised: #0e0e10;
+	--bg-inset: #060607;
+	--bg-overlay: #17171a;
+	--glass: rgba(14, 14, 16, 0.78);
+	--hover: rgba(255, 255, 255, 0.035);
+	--selected: rgba(255, 255, 255, 0.075);
+
+	/* text */
+	--fg: #ededef;
+	--fg-muted: #a0a0a8;
+	--fg-faint: #6c6c74;
+	--fg-inverse: #0a0a0b;
+
+	/* accent: omp cyan → pink; solid pink for text and strokes */
+	--accent-a: #5ad8e6;
+	--accent-b: #ed4abf;
+	--accent: #f068c8;
+	--accent-fg: #fff;
+	--accent-muted: rgba(237, 74, 191, 0.14);
+	--accent-gradient: linear-gradient(100deg, var(--accent-a), var(--accent-b));
+	--ambient-a: rgba(90, 216, 230, 0.07);
+	--ambient-b: rgba(237, 74, 191, 0.06);
+
+	/* omp mark gradient stops (magenta → iris → cyan) */
+	--mark-a: oklch(0.7 0.24 340);
+	--mark-b: oklch(0.62 0.21 295);
+	--mark-c: oklch(0.81 0.14 200);
+
+	/* status; green `--live` is reserved for real-time presence */
+	--ok: #3ecf8e;
+	--live: #3ecf8e;
+	--warn: #f5a524;
+	--err: #ff6166;
+
+	/* hairlines: alpha so one value reads on every surface step */
+	--border: rgba(255, 255, 255, 0.07);
+	--border-strong: rgba(255, 255, 255, 0.13);
+	--edge-top: rgba(255, 255, 255, 0.14);
+	--edge-bottom: rgba(255, 255, 255, 0.05);
+	--ring: #5ad8e6;
+	--ring-soft: rgba(90, 216, 230, 0.18);
+
+	/* type — system stacks only */
+	--font-ui: "Inter var", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+	--font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+
+	/* radii by role: chip · control · card · panel */
+	--radius-sm: 6px;
+	--radius: 8px;
+	--radius-lg: 12px;
+	--radius-xl: 16px;
+
+	--topbar-h: 52px;
+	--ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+	--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.5);
+	--shadow-overlay: 0 24px 64px rgba(0, 0, 0, 0.7), 0 1px 0 rgba(255, 255, 255, 0.06) inset;
+	--rail-mobile-shadow: -12px 0 32px rgba(0, 0, 0, 0.6);
+	--backdrop: rgba(0, 0, 0, 0.55);
+}
+
+/* Light theme — explicit override (toggle writes data-theme="light"). */
+[data-theme="light"] {
+	color-scheme: light;
+
+	--bg: #f2f2f3;
+	--panel: #fff;
+	--bg-raised: #fff;
+	--bg-inset: #f6f6f7;
+	--bg-overlay: #fff;
+	--glass: rgba(255, 255, 255, 0.82);
+	--hover: rgba(0, 0, 0, 0.03);
+	--selected: rgba(0, 0, 0, 0.06);
+
+	--fg: #151518;
+	--fg-muted: #5a5a63;
+	--fg-faint: #8b8b94;
+	--fg-inverse: #fff;
+
+	--accent-a: #1fa9bb;
+	--accent-b: #d42ea3;
+	--accent: #c42596;
+	--accent-muted: rgba(212, 46, 163, 0.1);
+	--ambient-a: rgba(31, 169, 187, 0.06);
+	--ambient-b: rgba(212, 46, 163, 0.05);
+
+	--ok: #12a36b;
+	--live: #12a36b;
+	--warn: #c77c02;
+	--err: #dc3a40;
+
+	--border: rgba(0, 0, 0, 0.08);
+	--border-strong: rgba(0, 0, 0, 0.14);
+	--edge-top: rgba(0, 0, 0, 0.1);
+	--edge-bottom: rgba(0, 0, 0, 0.06);
+	--ring: #1fa9bb;
+	--ring-soft: rgba(31, 169, 187, 0.16);
+
+	--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04);
+	--shadow-overlay: 0 24px 64px rgba(0, 0, 0, 0.16);
+	--rail-mobile-shadow: -12px 0 32px rgba(0, 0, 0, 0.12);
+	--backdrop: rgba(0, 0, 0, 0.25);
+}
+
+/* Light theme — system fallback when no explicit preference is stored. */
+@media (prefers-color-scheme: light) {
+	:root:not([data-theme]) {
+		color-scheme: light;
+
+		--bg: #f2f2f3;
+		--panel: #fff;
+		--bg-raised: #fff;
+		--bg-inset: #f6f6f7;
+		--bg-overlay: #fff;
+		--glass: rgba(255, 255, 255, 0.82);
+		--hover: rgba(0, 0, 0, 0.03);
+		--selected: rgba(0, 0, 0, 0.06);
+
+		--fg: #151518;
+		--fg-muted: #5a5a63;
+		--fg-faint: #8b8b94;
+		--fg-inverse: #fff;
+
+		--accent-a: #1fa9bb;
+		--accent-b: #d42ea3;
+		--accent: #c42596;
+		--accent-muted: rgba(212, 46, 163, 0.1);
+		--ambient-a: rgba(31, 169, 187, 0.06);
+		--ambient-b: rgba(212, 46, 163, 0.05);
+
+		--ok: #12a36b;
+		--live: #12a36b;
+		--warn: #c77c02;
+		--err: #dc3a40;
+
+		--border: rgba(0, 0, 0, 0.08);
+		--border-strong: rgba(0, 0, 0, 0.14);
+		--edge-top: rgba(0, 0, 0, 0.1);
+		--edge-bottom: rgba(0, 0, 0, 0.06);
+		--ring: #1fa9bb;
+		--ring-soft: rgba(31, 169, 187, 0.16);
+
+		--shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04);
+		--shadow-overlay: 0 24px 64px rgba(0, 0, 0, 0.16);
+		--rail-mobile-shadow: -12px 0 32px rgba(0, 0, 0, 0.12);
+		--backdrop: rgba(0, 0, 0, 0.25);
+	}
+}

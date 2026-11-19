@@ -1,0 +1,341 @@
+/**
+ * Shell environment snapshot for preserving user aliases, functions, and options.
+ *
+ * Creates a snapshot file that captures the user's shell environment from their
+ * .bashrc/.zshrc, which can be sourced before each command to provide a familiar
+ * shell experience.
+ */
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { getSafeProjectCwd, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { quotePosixArgument } from "./shell-quote";
+import fnEnvHelper from "./shell-snapshot-fn-env.sh" with { type: "text" };
+
+interface SnapshotFailure {
+	/** rc file `mtime:size` when the attempt failed; a change re-arms creation. */
+	rcStamp: string;
+	/** Hash of the environment the rc ran with; a different environment re-arms creation. */
+	envStamp: number | bigint;
+	retryAt: number;
+}
+
+/** Snapshot path per shell; re-checked for existence on every hit. */
+const cachedSnapshots = new Map<string, string>();
+const inflightSnapshots = new Map<string, Promise<string | null>>();
+const failedSnapshots = new Map<string, SnapshotFailure>();
+const SNAPSHOT_TIMEOUT_MS = 2_000;
+/** A failed (slow or broken rc) snapshot is retried after this long unless the rc file or environment changes first. */
+const SNAPSHOT_FAILURE_RETRY_MS = 60_000;
+
+function sanitizeSnapshotEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
+	const sanitized = { ...env };
+	delete sanitized.BASH_ENV;
+	delete sanitized.ENV;
+	return sanitized;
+}
+
+/**
+ * Get the user's shell config file path.
+ *
+ * Honours `env.HOME` when present so a caller can target a sandboxed/test
+ * home, falling back to `os.homedir()` (which Bun resolves once at startup
+ * and caches — `process.env.HOME` overrides don't affect it).
+ */
+function getShellConfigFile(shell: string, env: Record<string, string | undefined>): string {
+	const home = env.HOME || os.homedir();
+	if (shell.includes("zsh")) return path.join(home, ".zshrc");
+	if (shell.includes("bash")) return path.join(home, ".bashrc");
+	return path.join(home, ".profile");
+}
+
+/**
+ * Generate the snapshot creation script.
+ * This script sources the user's rc file and extracts functions, aliases, and options.
+ * Matches Claude Code's snapshot generation logic.
+ */
+function generateSnapshotScript(shell: string, snapshotPath: string, rcFile: string): string {
+	const hasRcFile = fs.existsSync(rcFile);
+	const isZsh = shell.includes("zsh");
+	// Core tools whose user functions/aliases are dropped so the agent always runs
+	// the real binaries. Bare alternation: each filter supplies its own anchors.
+	const commonTools =
+		"ls|dir|vdir|cat|head|tail|less|more|grep|egrep|fgrep|rg|find|fd|locate|sed|awk|perl|cp|mv|rm|mkdir|rmdir|touch|chmod|chown|ln|pwd|readlink|stat|cut|sort|uniq|xargs|tee|tr|basename|dirname";
+	const commonFunctionRegex = `^(${commonTools})$`;
+	// bash's `alias` prints `alias NAME=...`; zsh's prints `NAME=...`.
+	const commonAliasRegex = `^(alias )?(${commonTools})=`;
+
+	const quotedPath = quotePosixArgument(snapshotPath);
+
+	// Function extraction differs between bash and zsh. Each form prints function bodies on stdout so
+	// we can both persist them AND scan their bodies for referenced env vars (issue #3470).
+	// Seeds are the user's own (non-`_`) functions; the worklist then pulls in every defined function a
+	// kept body names, so `cd() { __zsh_like_cd cd "$@"; }` (mise/zoxide) keeps its helper. Core tools
+	// stay excluded even when referenced, and utilities are `command`-qualified against rc overrides.
+	const listFunctionNames = isZsh ? "typeset +f" : "declare -F | cut -d' ' -f3";
+	const printFunction = isZsh ? "typeset -f" : "declare -f";
+	const functionExtractor = `# Force autoload all functions first
+${printFunction} > /dev/null 2>&1
+__omp_all=$(${listFunctionNames} 2>/dev/null | command sort -u)
+__omp_next=$(printf '%s\\n' "$__omp_all" | grep -vE '^(_|__)' | grep -vE '${commonFunctionRegex}')
+__omp_kept=$(mktemp)
+while [ -n "$__omp_next" ]; do
+   printf '%s\\n' "$__omp_next" >> "$__omp_kept"
+   __omp_next=$(printf '%s\\n' "$__omp_next" | while IFS= read -r __omp_f; do ${printFunction} "$__omp_f" 2>/dev/null; done \\
+      | grep -oE '[A-Za-z_][A-Za-z0-9_.-]*' | command sort -u | grep -xF -f <(printf '%s\\n' "$__omp_all") \\
+      | grep -vE '${commonFunctionRegex}' | grep -vxF -f "$__omp_kept")
+done
+while IFS= read -r __omp_f; do ${printFunction} "$__omp_f" 2>/dev/null; done < "$__omp_kept"
+rm -f "$__omp_kept"`;
+
+	// Shell options extraction
+	const optionsScript = isZsh
+		? `
+echo "# Shell Options" >> "$SNAPSHOT_FILE"
+setopt 2>/dev/null | sed 's/^/setopt /' | head -n 1000 >> "$SNAPSHOT_FILE"
+`
+		: `
+echo "# Shell Options" >> "$SNAPSHOT_FILE"
+shopt -p 2>/dev/null | head -n 1000 >> "$SNAPSHOT_FILE"
+set -o 2>/dev/null | awk '$2 == "on" && $1 !~ /^(onecmd|monitor|restricted)$/ {print "set -o " $1}' | head -n 1000 >> "$SNAPSHOT_FILE"
+echo "shopt -s expand_aliases" >> "$SNAPSHOT_FILE"
+`;
+
+	return `
+SNAPSHOT_FILE=${quotedPath}
+
+# Snapshot may inline env-var values referenced by captured functions (#3470).
+# Defence in depth: (a) JS caller pre-creates the file at 0600 so the shell's
+# \`>|\`/\`>>\` redirections truncate/append without changing the inode mode,
+# (b) we \`umask 077\` before AND after sourcing the rc so any other file the
+# script creates is private even when the rc resets umask to 022, (c) JS
+# caller chmods file + dir after the script exits.
+umask 077
+
+# Source user's rc file if it exists
+${hasRcFile ? `source "${rcFile}" < /dev/null 2>/dev/null` : "# No user config file to source"}
+
+# Re-tighten umask in case the rc reset it (common \`.bashrc\`/\`.zshrc\` set
+# \`umask 022\` for the interactive shell).
+umask 077
+
+# Create/clear the snapshot file
+echo "# Shell snapshot - generated by omp agent" >| "$SNAPSHOT_FILE"
+
+# Unalias everything first to avoid conflicts when sourced
+echo "unalias -a 2>/dev/null || true" >> "$SNAPSHOT_FILE"
+
+# Capture function definitions into a variable so we can both persist them
+# and scan their bodies for env-var references (issue #3470).
+__omp_funcs=$(
+${functionExtractor}
+)
+echo "# Functions" >> "$SNAPSHOT_FILE"
+printf '%s\\n' "$__omp_funcs" >> "$SNAPSHOT_FILE"
+
+# Re-export uppercase identifiers referenced by snapshotted functions whose
+# value is set in the rc-sourced shell. Without this, activation idioms like
+# mise's \`mise()\` -> \`command "$__MISE_EXE" "$@"\` blow up because the helper
+# var is lost (issue #3470). Helper definitions are POSIX-shell so the same
+# block works for both bash and zsh.
+echo "# Captured function environment" >> "$SNAPSHOT_FILE"
+${fnEnvHelper}
+printf '%s\\n' "$__omp_funcs" | __omp_emit_referenced_exports >> "$SNAPSHOT_FILE"
+unset -f __omp_sq_quote __omp_emit_export_for __omp_emit_referenced_exports 2>/dev/null
+unset __omp_funcs __omp_qbuf __omp_qout __omp_sq __omp_xv __omp_name 2>/dev/null
+
+${optionsScript}
+
+# Export aliases (limit to 1000)
+echo "# Aliases" >> "$SNAPSHOT_FILE"
+# Filter out winpty aliases on Windows to avoid "stdin is not a tty" errors
+if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
+   alias 2>/dev/null | grep -v "='winpty " | grep -vE '${commonAliasRegex}' | sed 's/^alias //g' | sed 's/^/alias -- /' | head -n 1000 >> "$SNAPSHOT_FILE"
+else
+   alias 2>/dev/null | grep -vE '${commonAliasRegex}' | sed 's/^alias //g' | sed 's/^/alias -- /' | head -n 1000 >> "$SNAPSHOT_FILE"
+fi
+
+# Export PATH
+echo "export PATH='$PATH'" >> "$SNAPSHOT_FILE"
+
+# Verify snapshot was created
+if [ ! -f "$SNAPSHOT_FILE" ]; then
+   echo "Error: Snapshot file was not created" >&2
+   exit 1
+fi
+`.trim();
+}
+
+function rcFileStamp(rcFile: string): string {
+	try {
+		const stat = fs.statSync(rcFile);
+		return `${stat.mtimeMs}:${stat.size}`;
+	} catch {
+		return "missing";
+	}
+}
+
+/**
+ * Create a shell snapshot, caching the result.
+ * Returns the path to the snapshot file, or null if creation failed.
+ *
+ * Concurrent callers share one in-flight creation. A failure is remembered
+ * for {@link SNAPSHOT_FAILURE_RETRY_MS} (or until the rc file or the
+ * environment changes), so a slow or broken rc costs one spawn instead of one
+ * per bash call.
+ *
+ * `timeoutMs` is configurable so callers exercising failure handling do not
+ * have to wait out the production startup budget.
+ */
+export async function getOrCreateSnapshot(
+	shell: string,
+	env: Record<string, string | undefined>,
+	timeoutMs = SNAPSHOT_TIMEOUT_MS,
+): Promise<string | null> {
+	// Skip on Windows (no .bashrc in standard location)
+	if (process.platform === "win32") {
+		return null;
+	}
+
+	const cacheKey = shell;
+	const cached = cachedSnapshots.get(cacheKey);
+	if (cached) {
+		// A cleaned-up snapshot must be recreated, never handed to the shell.
+		if (fs.existsSync(cached)) return cached;
+		cachedSnapshots.delete(cacheKey);
+	}
+
+	const inflight = inflightSnapshots.get(cacheKey);
+	if (inflight) return inflight;
+
+	const rcFile = getShellConfigFile(shell, env);
+	const failure = failedSnapshots.get(cacheKey);
+	if (failure) {
+		if (
+			performance.now() < failure.retryAt &&
+			rcFileStamp(rcFile) === failure.rcStamp &&
+			Bun.hash(JSON.stringify(env)) === failure.envStamp
+		) {
+			return null;
+		}
+		failedSnapshots.delete(cacheKey);
+	}
+
+	// Snapshot creation is best-effort: an unexpected throw counts as a failure.
+	const attempt = createSnapshot(shell, env, rcFile, timeoutMs).catch(() => null);
+	const creation = attempt.then(snapshotPath => {
+		inflightSnapshots.delete(cacheKey);
+		if (snapshotPath) {
+			cachedSnapshots.set(cacheKey, snapshotPath);
+		} else {
+			failedSnapshots.set(cacheKey, {
+				rcStamp: rcFileStamp(rcFile),
+				envStamp: Bun.hash(JSON.stringify(env)),
+				retryAt: performance.now() + SNAPSHOT_FAILURE_RETRY_MS,
+			});
+		}
+		return snapshotPath;
+	});
+	inflightSnapshots.set(cacheKey, creation);
+	return creation;
+}
+
+async function createSnapshot(
+	shell: string,
+	env: Record<string, string | undefined>,
+	rcFile: string,
+	timeoutMs: number,
+): Promise<string | null> {
+	// Snapshot dir is per-uid. `os.tmpdir()` is shared between accounts on Linux and
+	// this dir is 0700 because the script may inline env-var values referenced by
+	// captured functions (#3470), so a single shared name hands the first account an
+	// exclusive dir and every other account's pre-create write below fails with
+	// EACCES — which used to escape into `executeBash` and break every bash call.
+	const uid = process.getuid?.();
+	const snapshotDir = path.join(os.tmpdir(), uid === undefined ? "omp-shell-snapshots" : `omp-shell-snapshots-${uid}`);
+
+	// Generate unique snapshot path
+	const shellName = shell.includes("zsh") ? "zsh" : shell.includes("bash") ? "bash" : "sh";
+	const snapshotPath = path.join(snapshotDir, `snapshot-${shellName}-${crypto.randomUUID()}.sh`);
+
+	try {
+		fs.mkdirSync(snapshotDir, { recursive: true, mode: 0o700 });
+		// `mode` only applies to a fresh mkdir; an existing dir keeps its mode, so
+		// chmod it defensively. Ignore EPERM (dir owned by another account).
+		try {
+			fs.chmodSync(snapshotDir, 0o700);
+		} catch {
+			// best-effort
+		}
+		// Pre-create the snapshot file at 0600 so the shell's `>|` (truncate) and
+		// `>>` (append) redirections inside `generateSnapshotScript` operate on an
+		// existing inode and preserve the private mode, regardless of the umask
+		// state inside the spawned shell. Without this, a `.bashrc` that sets
+		// `umask 022` (the typical interactive default) before the script's first
+		// redirection would create the file world-readable; the JS-side post-spawn
+		// chmod would tighten it, but only after the shell finished writing every
+		// captured env value to disk.
+		fs.writeFileSync(snapshotPath, "", { mode: 0o600 });
+	} catch (err) {
+		// Unusable snapshot dir (foreign owner, read-only or full /tmp): run without
+		// a snapshot instead of failing the caller's command.
+		logger.debug("shell-snapshot: snapshot dir unusable", { dir: snapshotDir, err: String(err) });
+		return null;
+	}
+
+	// Generate and execute snapshot script
+	const script = generateSnapshotScript(shell, snapshotPath, rcFile);
+
+	let succeeded = false;
+	try {
+		const snapshotEnv = sanitizeSnapshotEnv(env);
+		const spawnEnv: Record<string, string> = {};
+		for (const [key, value] of Object.entries(snapshotEnv)) {
+			if (value !== undefined) {
+				spawnEnv[key] = value;
+			}
+		}
+		const child = Bun.spawn([shell, "-c", script], {
+			cwd: getSafeProjectCwd(),
+			env: spawnEnv,
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "ignore",
+			timeout: timeoutMs,
+			killSignal: "SIGKILL",
+		});
+
+		await child.exited;
+		if (child.exitCode === 0 && fs.existsSync(snapshotPath)) {
+			// Defence-in-depth: the script's `umask 077` already locks the file at
+			// first write, but chmod again in case the umask didn't take (exotic
+			// shells) or a postmortem-restored file ended up looser.
+			try {
+				fs.chmodSync(snapshotPath, 0o600);
+			} catch {
+				// best-effort
+			}
+			succeeded = true;
+			return snapshotPath;
+		}
+	} catch {
+		// Snapshot creation failed, proceed without it
+	} finally {
+		if (!succeeded) {
+			try {
+				fs.rmSync(snapshotPath, { force: true });
+			} catch {
+				// best-effort cleanup; force: true ignores ENOENT
+			}
+		}
+	}
+
+	return null;
+}
+
+postmortem.register("shell-snapshot", () => {
+	for (const snapshotPath of cachedSnapshots.values()) {
+		fs.unlinkSync(snapshotPath);
+	}
+	cachedSnapshots.clear();
+});

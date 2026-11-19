@@ -1,0 +1,177 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
+
+export type MnemopiLlmCompletionTask = {
+	kind: "memory-extraction";
+	input: string;
+};
+
+export interface MnemopiLlmCompleteOptions {
+	maxTokens?: number;
+	temperature?: number;
+	timeout?: number;
+	provider?: string | null;
+	model?: string | null;
+	task?: MnemopiLlmCompletionTask;
+}
+
+export type MnemopiLlmCompletion = (
+	prompt: string,
+	opts?: MnemopiLlmCompleteOptions,
+) => string | null | Promise<string | null>;
+
+/**
+ * What an embedding provider's `embed` returns: the embedding matrix streamed as async batches,
+ * matching fastembed's `embed()` (`AsyncGenerator<number[][]>`). Each yielded batch is a list of
+ * rows; each row is one number per dimension. Yield the whole matrix as a single batch when not
+ * streaming: `async *embed(texts) { yield texts.map(embedOne); }`.
+ */
+export type EmbeddingOutput = AsyncIterable<number[][]>;
+
+export interface MnemopiEmbeddingProvider {
+	embed(texts: readonly string[]): EmbeddingOutput | Promise<EmbeddingOutput>;
+	available?(): boolean | Promise<boolean>;
+}
+
+/** A remote embedding request that produced no vectors; the embedding call returns null. */
+export interface EmbeddingRequestFailure {
+	baseUrl: string;
+	model: string;
+	/** HTTP status; undefined for network errors, timeouts, and malformed responses. */
+	status?: number;
+	/** Provider response text or error message. */
+	message: string;
+}
+
+export interface MnemopiEmbeddingRuntimeOptions {
+	disabled?: boolean;
+	model?: string;
+	/** Whether the resolved remote embedding endpoint may be called. */
+	allowRemote?: (baseUrl: string) => boolean;
+	/** Whether local inference and loading an uncached local model are allowed. */
+	allowLocal?: () => boolean;
+	allowLocalLoad?: () => boolean;
+	apiUrl?: string;
+	apiKey?: ApiKey;
+	provider?: MnemopiEmbeddingProvider | ((texts: readonly string[]) => EmbeddingOutput | Promise<EmbeddingOutput>);
+	/** Override `MNEMOPI_EMBEDDING_MAX_INPUT_CHARS`. `0` disables the cap. See `config.embeddingMaxInputChars`. */
+	maxInputChars?: number;
+	/** Override `MNEMOPI_EMBEDDING_BATCH_SIZE`: max texts per embedding API request. */
+	batchSize?: number;
+	/**
+	 * Override `MNEMOPI_EMBEDDING_QUERY_PREFIX`: text prepended to recall queries before
+	 * embedding, for instruction-tuned embedders (Qwen3-Embedding `Instruct: …\nQuery: `,
+	 * E5 `query: `). Stored memories are embedded unchanged.
+	 */
+	queryPrefix?: string;
+	/**
+	 * Override `MNEMOPI_EMBEDDING_INPUT_TYPE`: send `input_type` with API requests, `query` for
+	 * recall queries and `passage` for stored memories. NVIDIA NIM asymmetric embedders reject
+	 * requests without it.
+	 */
+	inputType?: boolean;
+	/** Called for every failed embedding API request, so a host can surface it; exceptions are ignored. */
+	onRequestFailed?: (failure: EmbeddingRequestFailure) => void;
+}
+
+export interface MnemopiLlmRuntimeOptions {
+	enabled?: boolean;
+	/** Whether a configured remote endpoint may be called at request time. */
+	allowRemote?: () => boolean;
+	baseUrl?: string;
+	apiKey?: ApiKey;
+	model?: string | Model<Api>;
+	maxTokens?: number;
+	complete?: MnemopiLlmCompletion;
+	/** Override the fact-extraction prompt template ({text}/{lang}). Used to feed small local models a friendlier format. */
+	extractionPrompt?: string;
+	/** Override the consolidation/sleep prompt template ({memories}/{source}/{memory_count}). */
+	consolidationPrompt?: string;
+}
+
+export interface MnemopiRuntimeOptions {
+	embeddings?: false | MnemopiEmbeddingRuntimeOptions;
+	llm?: false | MnemopiLlmRuntimeOptions | Model<Api> | MnemopiLlmCompletion;
+	/** Verbose diagnostics: escalates best-effort failure logs from debug to warn. */
+	debug?: boolean;
+}
+
+export interface ResolvedMnemopiEmbeddingRuntimeOptions {
+	disabled?: boolean;
+	model?: string;
+	allowRemote?: (baseUrl: string) => boolean;
+	allowLocal?: () => boolean;
+	allowLocalLoad?: () => boolean;
+	apiUrl?: string;
+	apiKey?: ApiKey;
+	provider?: MnemopiEmbeddingProvider;
+	maxInputChars?: number;
+	batchSize?: number;
+	queryPrefix?: string;
+	inputType?: boolean;
+	onRequestFailed?: (failure: EmbeddingRequestFailure) => void;
+}
+
+export interface ResolvedMnemopiLlmRuntimeOptions {
+	enabled?: boolean;
+	allowRemote?: () => boolean;
+	baseUrl?: string;
+	apiKey?: ApiKey;
+	model?: string | Model<Api>;
+	maxTokens?: number;
+	complete?: MnemopiLlmCompletion;
+	extractionPrompt?: string;
+	consolidationPrompt?: string;
+}
+
+export interface ResolvedMnemopiRuntimeOptions {
+	embeddings?: ResolvedMnemopiEmbeddingRuntimeOptions;
+	llm?: ResolvedMnemopiLlmRuntimeOptions;
+	debug?: boolean;
+}
+
+const runtimeOptionsStorage = new AsyncLocalStorage<ResolvedMnemopiRuntimeOptions>();
+
+export function withMnemopiRuntimeOptions<T>(options: ResolvedMnemopiRuntimeOptions | undefined, fn: () => T): T {
+	if (options === undefined) {
+		return fn();
+	}
+	return runtimeOptionsStorage.run(options, fn);
+}
+
+export function getMnemopiRuntimeOptions(): ResolvedMnemopiRuntimeOptions | undefined {
+	return runtimeOptionsStorage.getStore();
+}
+
+/** Whether the active runtime scope requested verbose diagnostics (`mnemopi.debug`). */
+export function mnemopiDebugEnabled(): boolean {
+	return runtimeOptionsStorage.getStore()?.debug === true;
+}
+
+export function resolveEmbeddingProvider(
+	provider:
+		| MnemopiEmbeddingProvider
+		| ((texts: readonly string[]) => EmbeddingOutput | Promise<EmbeddingOutput>)
+		| undefined,
+): MnemopiEmbeddingProvider | undefined {
+	if (provider === undefined) {
+		return undefined;
+	}
+	if (typeof provider === "function") {
+		return { embed: provider };
+	}
+	return provider;
+}
+
+export function isPiAiModel(value: unknown): value is Model<Api> {
+	if (value === null || typeof value !== "object") {
+		return false;
+	}
+	const maybe = value as Partial<Model<Api>>;
+	return (
+		typeof maybe.id === "string" &&
+		typeof maybe.provider === "string" &&
+		typeof maybe.baseUrl === "string" &&
+		typeof maybe.api === "string"
+	);
+}

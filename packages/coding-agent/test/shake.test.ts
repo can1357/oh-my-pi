@@ -1,0 +1,1587 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentMessage, RESCUE_SHAKE_CONFIG, Tokenizer } from "@oh-my-pi/pi-agent-core";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
+import type {
+	AssistantMessage,
+	ImageContent,
+	Model,
+	ProviderSessionState,
+	ToolResultMessage,
+	UserMessage,
+} from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionStatsTracker } from "@oh-my-pi/pi-coding-agent/session/session-stats";
+import { formatShakeSummary } from "@oh-my-pi/pi-coding-agent/session/shake-types";
+import { TempDir } from "@oh-my-pi/pi-utils";
+
+import {
+	cfgCompactionDropUseless,
+	cfgCompactionKeepRecentTokens,
+	cfgCompactionMethodOrder,
+	cfgCompactionThresholdPercent,
+	cfgCompactionThresholdTokens,
+	cfgContextPromotionEnabled,
+} from "@oh-my-pi/pi-coding-agent/session/context-settings";
+
+const usage = {
+	input: 16,
+	output: 8,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 24,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+describe("AgentSession shake", () => {
+	let tempDir: TempDir;
+	let session: AgentSession;
+	let sessionManager: SessionManager;
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let events: AgentSessionEvent[];
+	let apiInfo: { api: AssistantMessage["api"]; provider: AssistantMessage["provider"]; model: string };
+
+	beforeEach(async () => {
+		tempDir = TempDir.createSync("@pi-shake-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		modelRegistry = new ModelRegistry(authStorage);
+		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		events = [];
+
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected built-in anthropic model to exist");
+		apiInfo = { api: model.api, provider: model.provider, model: model.id };
+
+		const agent = new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } });
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": true, "compaction.autoContinue": false }),
+			modelRegistry,
+		});
+		session.subscribe(event => events.push(event));
+	});
+
+	afterEach(async () => {
+		if (session) await session.dispose();
+		authStorage.close();
+		try {
+			await tempDir.remove();
+		} catch {}
+		vi.restoreAllMocks();
+	});
+
+	/** Seed a user → assistant(toolCall) → toolResult turn carrying a heavy bash result. */
+	function seedHeavyToolResult(text: string, toolName = "bash"): void {
+		const toolCallId = `call_${toolName}_${Math.random().toString(36).slice(2)}`;
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "do it" }],
+			timestamp: Date.now() - 3,
+		});
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [
+				{ type: "text", text: "working" },
+				{ type: "toolCall", id: toolCallId, name: toolName, arguments: { command: "ls" } },
+			],
+			...apiInfo,
+			stopReason: "toolUse",
+			usage,
+			timestamp: Date.now() - 2,
+		});
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId,
+			toolName,
+			content: [{ type: "text", text }],
+			isError: false,
+			timestamp: Date.now() - 1,
+		});
+	}
+
+	/** Build enough recent content to place a seeded result outside manual shake's protected tail. */
+	function recentProtectedTail(label: string): string {
+		return `${label}\n${"tail ".repeat(4_000)}`;
+	}
+
+	function appendRecentProtectedTail(): void {
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: recentProtectedTail("newer context") }],
+			timestamp: Date.now() + 2,
+		});
+	}
+
+	function branchToolResults(): ToolResultMessage[] {
+		return sessionManager
+			.getBranch()
+			.filter(e => e.type === "message" && (e.message as { role?: string }).role === "toolResult")
+			.map(e => (e as { message: ToolResultMessage }).message);
+	}
+
+	describe("elide", () => {
+		it("drops the tool result, offloads to an artifact, and embeds the recovery link", async () => {
+			seedHeavyToolResult("X".repeat(4000));
+			appendRecentProtectedTail();
+			const replaceSpy = vi.spyOn(session.agent, "replaceMessages");
+
+			const result = await session.shake("elide");
+
+			expect(result.mode).toBe("elide");
+			expect(result.toolResultsDropped).toBe(1);
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			expect(result.artifactId).toBeDefined();
+			expect(replaceSpy).toHaveBeenCalled();
+
+			const [tr] = branchToolResults();
+			expect(tr.prunedAt).toBeGreaterThan(0);
+			const text = tr.content.map(b => (b.type === "text" ? b.text : "")).join("");
+			expect(text).toContain(`local://${result.artifactId}.log`);
+			expect(text).toContain("shaken");
+		});
+
+		it("continues artifact-less when ordinary shake cannot allocate an artifact", async () => {
+			seedHeavyToolResult("X".repeat(4000));
+			appendRecentProtectedTail();
+			const allocateArtifactPath = vi
+				.spyOn(sessionManager, "allocateArtifactPath")
+				.mockRejectedValue(new Error("artifact directory unavailable"));
+			const saveArtifact = vi.spyOn(sessionManager, "saveArtifact").mockResolvedValue(undefined);
+
+			const result = await session.shake("elide");
+
+			expect(result.toolResultsDropped).toBe(1);
+			expect(result.artifactId).toBeUndefined();
+			const [toolResult] = branchToolResults();
+			expect(toolResult.content).toEqual([{ type: "text", text: expect.stringContaining("[shaken ~") }]);
+			expect(toolResult.content).not.toEqual([{ type: "text", text: expect.stringContaining("local://") }]);
+			saveArtifact.mockRestore();
+			allocateArtifactPath.mockRestore();
+		});
+
+		it("preserves mixed tool-result images while eliding only recoverable text", async () => {
+			const largeText = "mixed tool output ".repeat(2_000);
+			const image: ImageContent = {
+				type: "image",
+				data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB",
+				mimeType: "image/png",
+				detail: "original",
+				providerFile: { provider: "openai", id: "file_shake_image" },
+				url: "https://images.example.invalid/shake.png",
+			};
+			const imageSnapshot = structuredClone(image);
+			seedHeavyToolResult(largeText);
+			const [mixedResult] = branchToolResults();
+			mixedResult.content = [{ type: "text", text: largeText }, image];
+			const tailBefore = recentProtectedTail("newer context");
+			appendRecentProtectedTail();
+
+			const result = await session.shake("elide");
+
+			expect(result.toolResultsDropped).toBe(1);
+			expect(result.imagesDropped).toBeUndefined();
+			expect(result.artifactId).toBeDefined();
+			const placeholder = mixedResult.content[0];
+			expect(placeholder?.type).toBe("text");
+			if (placeholder?.type !== "text") throw new Error("Expected shake placeholder text");
+			expect(placeholder.text).toContain("shaken");
+			expect(placeholder.text).toContain(`local://${result.artifactId}.log`);
+			expect(mixedResult.content[1]).toBe(image);
+			expect(mixedResult.content[1]).toEqual(imageSnapshot);
+
+			const tokenizer = new Tokenizer();
+			const expectedFreed = tokenizer.countTokens(largeText) - tokenizer.countTokens(placeholder.text);
+			expect(result.tokensFreed).toBe(expectedFreed);
+			expect(result.tokensFreed).toBeGreaterThan(0);
+
+			if (!result.artifactId) throw new Error("Expected shake artifact");
+			const artifactPath = await sessionManager.getArtifactPath(result.artifactId);
+			if (!artifactPath) throw new Error("Expected persisted shake artifact");
+			expect(await Bun.file(artifactPath).text()).toContain(largeText);
+
+			const latestUser = sessionManager
+				.getBranch()
+				.findLast(entry => entry.type === "message" && entry.message.role === "user");
+			expect(
+				latestUser?.type === "message" && latestUser.message.role === "user"
+					? latestUser.message.content
+					: undefined,
+			).toEqual([{ type: "text", text: tailBefore }]);
+
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected persisted shake session");
+			const persisted = await SessionManager.open(sessionFile, tempDir.path());
+			try {
+				const persistedResult = persisted
+					.getBranch()
+					.find(
+						entry =>
+							entry.type === "message" &&
+							entry.message.role === "toolResult" &&
+							entry.message.toolCallId === mixedResult.toolCallId,
+					);
+				const persistedImage =
+					persistedResult?.type === "message" && persistedResult.message.role === "toolResult"
+						? persistedResult.message.content.find(block => block.type === "image")
+						: undefined;
+				expect(persistedImage).toEqual(imageSnapshot);
+			} finally {
+				await persisted.close();
+			}
+
+			const imageResult = await session.shake("images");
+			expect(imageResult.imagesDropped).toBe(1);
+			expect(mixedResult.content.some(block => block.type === "image")).toBe(false);
+		});
+
+		it("saves the tokens it elides from an assistant turn with the turn", async () => {
+			const fence = `\`\`\`ts\n${"const value = compute(a, b, c, d, e);\n".repeat(200)}\`\`\``;
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "write it" }],
+				timestamp: Date.now() - 2,
+			});
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: `Here it is:\n${fence}\nDone.` }],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now() - 1,
+			});
+			appendRecentProtectedTail();
+
+			const result = await session.shake("elide");
+
+			expect(result.blocksDropped).toBe(1);
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected persisted shake session");
+			const persisted = await SessionManager.open(sessionFile, tempDir.path());
+			try {
+				const turn = persisted
+					.getBranch()
+					.find(entry => entry.type === "message" && entry.message.role === "assistant");
+				expect(
+					turn?.type === "message" && turn.message.role === "assistant"
+						? turn.message.elidedOutputTokens
+						: undefined,
+				).toBe(result.tokensFreed);
+			} finally {
+				await persisted.close();
+			}
+		});
+
+		it("updates provider-anchored context usage immediately after rewriting prompt history", async () => {
+			seedHeavyToolResult("X".repeat(20_000));
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: recentProtectedTail("done") }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(
+				sessionManager
+					.getBranch()
+					.filter(entry => entry.type === "message")
+					.map(entry => entry.message as AgentMessage),
+			);
+			const before = session.getContextUsage()?.tokens;
+			expect(before).toBe(20_000);
+
+			const result = await session.shake("elide");
+
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 - result.tokensFreed);
+			const anchor = sessionManager
+				.getBranch()
+				.findLast(
+					entry =>
+						entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "stop",
+				);
+			expect(
+				anchor?.type === "message" && anchor.message.role === "assistant"
+					? anchor.message.contextSnapshot?.historyRewriteTokensRemoved
+					: undefined,
+			).toBe(result.tokensFreed);
+		});
+
+		it("skips response-only usage when selecting the correction anchor", async () => {
+			seedHeavyToolResult("X".repeat(20_000));
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: recentProtectedTail("anchored") }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "response-only" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 0, output: 8, totalTokens: 8 },
+				timestamp: Date.now() + 1,
+			});
+			session.agent.replaceMessages(
+				sessionManager
+					.getBranch()
+					.filter(entry => entry.type === "message")
+					.map(entry => entry.message as AgentMessage),
+			);
+			const before = session.getContextUsage()?.tokens;
+			expect(before).toBeDefined();
+
+			const result = await session.shake("elide");
+
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			expect(session.getContextUsage()?.tokens).toBe(before! - result.tokensFreed);
+			const assistants = sessionManager
+				.getBranch()
+				.filter(entry => entry.type === "message" && entry.message.role === "assistant");
+			const usableAnchor = assistants.at(-2);
+			const responseOnly = assistants.at(-1);
+			expect(
+				usableAnchor?.type === "message" && usableAnchor.message.role === "assistant"
+					? usableAnchor.message.contextSnapshot?.historyRewriteTokensRemoved
+					: undefined,
+			).toBe(result.tokensFreed);
+			expect(
+				responseOnly?.type === "message" && responseOnly.message.role === "assistant"
+					? responseOnly.message.contextSnapshot?.historyRewriteTokensRemoved
+					: undefined,
+			).toBeUndefined();
+		});
+
+		it("does not subtract remote-compacted entries omitted from the provider prompt", async () => {
+			seedHeavyToolResult("X".repeat(20_000));
+			const firstKeptEntryId = sessionManager.getBranch()[0]?.id;
+			if (!firstKeptEntryId) throw new Error("Expected seeded branch");
+			sessionManager.appendCompaction("remote summary", undefined, firstKeptEntryId, 10_000, {
+				details: {},
+				preserveData: {
+					openaiRemoteCompaction: {
+						provider: "openai",
+						replacementHistory: [],
+					},
+				},
+			});
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: recentProtectedTail("post-compaction") }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+
+			const result = await session.shake("elide");
+
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			const anchor = sessionManager
+				.getBranch()
+				.findLast(entry => entry.type === "message" && entry.message.role === "assistant");
+			expect(
+				anchor?.type === "message" && anchor.message.role === "assistant"
+					? anchor.message.contextSnapshot?.historyRewriteTokensRemoved
+					: undefined,
+			).toBeUndefined();
+		});
+
+		it("returns zero counts for an empty branch", async () => {
+			const result = await session.shake("elide");
+			expect(result.toolResultsDropped).toBe(0);
+			expect(result.blocksDropped).toBe(0);
+			expect(result.tokensFreed).toBe(0);
+		});
+	});
+
+	describe("images", () => {
+		it("mirrors dropImages and reports the removed image count", async () => {
+			const png: ImageContent = { type: "image", data: "iVBORw0KGgo", mimeType: "image/png" };
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "look" }, png],
+				timestamp: Date.now(),
+			});
+
+			const result = await session.shake("images");
+
+			expect(result.mode).toBe("images");
+			expect(result.imagesDropped).toBe(1);
+			const branch = sessionManager.getBranch();
+			const userMsg = branch.find(e => e.type === "message" && (e.message as { role?: string }).role === "user");
+			const content = (userMsg as { message: { content: unknown } }).message.content as Array<{ type: string }>;
+			expect(content.some(b => b.type === "image")).toBe(false);
+		});
+
+		it("credits the removed image tokens against the provider-anchored context meter", async () => {
+			const png: ImageContent = { type: "image", data: "iVBORw0KGgo", mimeType: "image/png" };
+			const withImage: UserMessage = {
+				role: "user",
+				content: [{ type: "text", text: "look" }, png],
+				timestamp: Date.now() - 1,
+			};
+			sessionManager.appendMessage(withImage);
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "latest answer" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+
+			// What the image block alone costs: the same message with and without it.
+			const tokenizer = session.agent.tokenizer;
+			const imageTokens =
+				tokenizer.countMessage(withImage) -
+				tokenizer.countMessage({ ...withImage, content: [{ type: "text", text: "look" }] });
+			expect(imageTokens).toBeGreaterThan(0);
+
+			const result = await session.shake("images");
+
+			expect(result.imagesDropped).toBe(1);
+			expect(result.tokensFreed).toBe(imageTokens);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 - imageTokens);
+		});
+
+		it("does not subtract post-anchor image tokens from the provider-anchored meter", async () => {
+			const png: ImageContent = { type: "image", data: "iVBORw0KGgo", mimeType: "image/png" };
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "latest answer" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now() - 1,
+			});
+			const withImage: UserMessage = {
+				role: "user",
+				content: [{ type: "text", text: "look" }, png],
+				timestamp: Date.now(),
+			};
+			sessionManager.appendMessage(withImage);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+			const tokenizer = session.agent.tokenizer;
+			const imageTokens =
+				tokenizer.countMessage(withImage) -
+				tokenizer.countMessage({ ...withImage, content: [{ type: "text", text: "look" }] });
+			expect(imageTokens).toBeGreaterThan(0);
+			const before = session.getContextUsage()?.tokens ?? 0;
+			expect(before).toBeGreaterThan(20_000);
+
+			const result = await session.shake("images");
+
+			expect(result.imagesDropped).toBe(1);
+			expect(result.tokensFreed).toBe(imageTokens);
+			expect(session.getContextUsage()?.tokens).toBe(before - imageTokens);
+			const anchor = sessionManager
+				.getBranch()
+				.findLast(entry => entry.type === "message" && entry.message.role === "assistant");
+			expect(
+				anchor?.type === "message" && anchor.message.role === "assistant"
+					? anchor.message.contextSnapshot?.historyRewriteTokensRemoved
+					: undefined,
+			).toBeUndefined();
+		});
+
+		it("drops images from custom messages through the projected message", async () => {
+			const png: ImageContent = { type: "image", data: "iVBORw0KGgo", mimeType: "image/png" };
+			sessionManager.appendCustomMessageEntry("test-note", [{ type: "text", text: "note" }, png], true);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+			const result = await session.shake("images");
+
+			expect(result.imagesDropped).toBe(1);
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			const branch = sessionManager.getBranch();
+			const custom = branch.find(e => e.type === "custom_message");
+			const parts = (custom as { content: Array<{ type: string }> }).content;
+			expect(parts.some(part => part.type === "image")).toBe(false);
+		});
+	});
+
+	describe("thinking", () => {
+		it("drops both thinking variants, keeps empty turns empty, and refreshes persisted and runtime state", async () => {
+			const mixed: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "reasoning ".repeat(1_000) },
+					{ type: "redactedThinking", data: "opaque-reasoning" },
+					{ type: "text", text: "visible answer" },
+				],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now(),
+			};
+			const thinkingOnly: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "thinking", thinking: "private reasoning" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now() + 1,
+			};
+			sessionManager.appendMessage(mixed);
+			sessionManager.appendMessage(thinkingOnly);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+			const tokenizer = new Tokenizer();
+			const tokensBefore = tokenizer.countMessage(mixed, { excludeEncryptedReasoning: true });
+			const thinkingOnlyBefore = tokenizer.countMessage(thinkingOnly, { excludeEncryptedReasoning: true });
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(3);
+			expect(mixed.content).toEqual([{ type: "text", text: "visible answer" }]);
+			expect(thinkingOnly.content).toEqual([]);
+			expect(tokenizer.countMessage(mixed, { excludeEncryptedReasoning: true })).toBeLessThan(tokensBefore);
+			const measuredSaving =
+				tokensBefore +
+				thinkingOnlyBefore -
+				tokenizer.countMessage(mixed, { excludeEncryptedReasoning: true }) -
+				tokenizer.countMessage(thinkingOnly, { excludeEncryptedReasoning: true });
+			expect(measuredSaving).toBeGreaterThan(0);
+			expect(result.tokensFreed).toBe(measuredSaving);
+			expect(formatShakeSummary(result)).toContain(`~${result.tokensFreed} tokens freed`);
+
+			const runtimeAssistants = session.agent.state.messages.filter(
+				(message): message is AssistantMessage => message.role === "assistant",
+			);
+			expect(runtimeAssistants.flatMap(message => message.content.map(block => block.type))).toEqual(["text"]);
+			expect(runtimeAssistants.some(message => message.content.length === 0)).toBe(true);
+
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected persisted shake session");
+			const persisted = await SessionManager.open(sessionFile, tempDir.path());
+			try {
+				const persistedAssistants = persisted
+					.getBranch()
+					.flatMap(entry =>
+						entry.type === "message" && entry.message.role === "assistant" ? [entry.message] : [],
+					);
+				expect(persistedAssistants.flatMap(message => message.content.map(block => block.type))).toEqual(["text"]);
+				expect(persistedAssistants.some(message => message.content.length === 0)).toBe(true);
+			} finally {
+				await persisted.close();
+			}
+		});
+
+		it("does not inflate reported savings with opaque signature bytes", async () => {
+			const signed: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "short", thinkingSignature: "S".repeat(20_000) },
+					{ type: "text", text: "answer" },
+				],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now(),
+			};
+			sessionManager.appendMessage(signed);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+			const tokenizer = new Tokenizer();
+			const before = tokenizer.countMessage(signed, { excludeEncryptedReasoning: true });
+			const rawBefore = tokenizer.countMessage(signed);
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(1);
+			expect(result.tokensFreed).toBe(before - tokenizer.countMessage(signed, { excludeEncryptedReasoning: true }));
+			expect(result.tokensFreed).toBeLessThan(rawBefore - tokenizer.countMessage(signed));
+		});
+
+		it("updates the provider-anchored context meter for earlier thinking", async () => {
+			const prior: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "old reasoning ".repeat(1_000) },
+					{ type: "text", text: "old answer" },
+				],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now() - 1,
+			};
+			sessionManager.appendMessage(prior);
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "latest answer" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+
+			const result = await session.shake("thinking");
+
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 - result.tokensFreed);
+		});
+
+		it("does not credit thinking that the Responses request replays from native history", async () => {
+			const model = getBundledModel("openrouter", "z-ai/glm-5.3-flash");
+			if (!model) throw new Error("Expected bundled OpenRouter model");
+			session.agent.setModel(model);
+			const prior: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "reasoning ".repeat(1_000) },
+					{ type: "text", text: "answer" },
+				],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				providerPayload: {
+					type: "openaiResponsesHistory",
+					provider: model.provider,
+					dt: true,
+					items: [
+						{ type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "reasoning" }] },
+						{
+							type: "message",
+							id: "msg_1",
+							role: "assistant",
+							content: [{ type: "output_text", text: "answer" }],
+						},
+					],
+				},
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now() - 1,
+			};
+			sessionManager.appendMessage(prior);
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "latest answer" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+
+			const result = await session.shake("thinking");
+
+			expect(result.tokensFreed).toBe(0);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			expect(prior.content[0]?.type).toBe("thinking");
+			const wire = buildResponsesInput({
+				model,
+				context: { messages: [prior] },
+				strictResponsesPairing: false,
+				supportsImageDetailOriginal: false,
+				nativeHistory: { replay: true, filterReasoning: false },
+			});
+			expect(wire.some(item => item.type === "reasoning" && item.summary?.[0]?.text === "reasoning")).toBe(true);
+		});
+
+		/** An assistant turn as a real Responses request stores it: reasoning items plus the answer item. */
+		function nativeTurn(
+			model: Model,
+			options: {
+				answer: string;
+				items: Array<Record<string, unknown>>;
+				modelId?: string;
+				thinking: string;
+				timestamp?: number;
+			},
+		): AssistantMessage {
+			return {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: options.thinking },
+					{ type: "text", text: options.answer },
+				],
+				api: model.api,
+				provider: model.provider,
+				model: options.modelId ?? model.id,
+				providerPayload: {
+					type: "openaiResponsesHistory",
+					provider: model.provider,
+					dt: true,
+					items: options.items,
+				},
+				stopReason: "stop",
+				usage,
+				timestamp: options.timestamp ?? Date.now(),
+			};
+		}
+
+		/** The native output item a real turn carries ahead of its reasoning. */
+		function answerItem(text: string): Array<Record<string, unknown>> {
+			return [
+				{
+					type: "message",
+					id: "msg_answer",
+					role: "assistant",
+					status: "completed",
+					content: [{ type: "output_text", text, annotations: [] }],
+				},
+			];
+		}
+
+		function bundled(provider: string, id: string): Model {
+			const model = getBundledModel(provider, id);
+			if (!model) throw new Error(`Expected bundled ${provider} test model to exist`);
+			return model;
+		}
+
+		it("reports replayed thinking as kept and rewrites nothing", async () => {
+			const model = bundled("openrouter", "z-ai/glm-4.7");
+			session.agent.setModel(model);
+			const replayed = nativeTurn(model, {
+				thinking: "reasoning the payload replays ".repeat(1_000),
+				answer: "old answer",
+				items: [
+					{ type: "reasoning", id: "rs_replayed", summary: [], encrypted_content: "e".repeat(2_000) },
+					...answerItem("old answer"),
+				],
+				timestamp: Date.now() - 1,
+			});
+			sessionManager.appendMessage(replayed);
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "latest answer" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			const contentBefore = structuredClone(replayed.content);
+			const rewriteEntries = vi.spyOn(sessionManager, "rewriteEntries");
+			const replaceMessages = vi.spyOn(session.agent, "replaceMessages");
+			const anchoredRewrite = vi.spyOn(SessionStatsTracker.prototype, "recordAnchoredHistoryRewrite");
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(0);
+			expect(result.thinkingBlocksKept).toBe(1);
+			expect(result.tokensFreed).toBe(0);
+			expect(replayed.content).toEqual(contentBefore);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			// No rewrite at all: the transcript is what the wire already sends.
+			expect(rewriteEntries).not.toHaveBeenCalled();
+			expect(replaceMessages).not.toHaveBeenCalled();
+			expect(anchoredRewrite).not.toHaveBeenCalled();
+			// The wording is not part of this contract: it must say blocks were kept
+			// and must not claim a drop.
+			const summary = formatShakeSummary(result);
+			expect(summary).toContain("1 thinking block");
+			expect(summary).toContain("kept");
+			expect(summary).not.toContain("Dropped");
+		});
+
+		it("leaves an answer-only native turn's thinking in place", async () => {
+			// The request replays this turn from its payload, which carries the answer
+			// item and no reasoning item: the content thinking never reaches the wire.
+			const model = bundled("openrouter", "z-ai/glm-4.7");
+			session.agent.setModel(model);
+			const replayed = nativeTurn(model, {
+				thinking: "reasoning with no native item ".repeat(1_000),
+				answer: "answer",
+				items: [
+					{
+						type: "message",
+						id: "msg_x",
+						role: "assistant",
+						status: "completed",
+						content: [{ type: "output_text", text: "answer", annotations: [] }],
+					},
+				],
+				timestamp: Date.now() - 1,
+			});
+			sessionManager.appendMessage(replayed);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			const contentBefore = structuredClone(replayed.content);
+			const rewriteEntries = vi.spyOn(sessionManager, "rewriteEntries");
+			const replaceMessages = vi.spyOn(session.agent, "replaceMessages");
+			const anchoredRewrite = vi.spyOn(SessionStatsTracker.prototype, "recordAnchoredHistoryRewrite");
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(0);
+			expect(result.thinkingBlocksKept).toBe(1);
+			expect(result.tokensFreed).toBe(0);
+			expect(replayed.content).toEqual(contentBefore);
+			expect(rewriteEntries).not.toHaveBeenCalled();
+			expect(replaceMessages).not.toHaveBeenCalled();
+			expect(anchoredRewrite).not.toHaveBeenCalled();
+		});
+
+		it("drops an answer-only turn a cold session rebuilds from content", async () => {
+			// Cold: the builder replays native items only when nothing in them is
+			// bound to one connection, and an answer item carrying an id is bound, so
+			// the turn is rebuilt from `content` and its thinking does leave the
+			// transcript's wire form.
+			const model = bundled("github-copilot", "gpt-5.4");
+			session.agent.setModel(model);
+			const rebuilt = nativeTurn(model, {
+				thinking: "reasoning rebuilt from content ".repeat(1_000),
+				answer: "answer",
+				items: [
+					{
+						type: "message",
+						id: "msg_x",
+						role: "assistant",
+						status: "completed",
+						content: [{ type: "output_text", text: "answer", annotations: [] }],
+					},
+				],
+			});
+			sessionManager.appendMessage(rebuilt);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			const tokenizer = session.agent.tokenizer;
+			const before = tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true });
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(1);
+			expect(result.thinkingBlocksKept).toBe(0);
+			expect(rebuilt.content).toEqual([{ type: "text", text: "answer" }]);
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			expect(result.tokensFreed).toBe(before - tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true }));
+		});
+
+		it("still drops thinking a cold Responses session rebuilds from content", async () => {
+			// GitHub Copilot binds native items to one connection, so the session
+			// starts cold and the turn is rebuilt from `content`.
+			const model = bundled("github-copilot", "gpt-5.4");
+			session.agent.setModel(model);
+			const rebuilt = nativeTurn(model, {
+				thinking: "reasoning rebuilt from content ".repeat(1_000),
+				answer: "answer",
+				items: [
+					{ type: "reasoning", id: "rs_cold", summary: [], encrypted_content: "e".repeat(2_000) },
+					...answerItem("answer"),
+				],
+			});
+			sessionManager.appendMessage(rebuilt);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			const tokenizer = session.agent.tokenizer;
+			const before = tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true });
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(1);
+			expect(result.thinkingBlocksKept).toBe(0);
+			expect(rebuilt.content).toEqual([{ type: "text", text: "answer" }]);
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			expect(result.tokensFreed).toBe(before - tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true }));
+		});
+
+		it("leaves plaintext reasoning a cold session replays in place", async () => {
+			const model = bundled("openai", "gpt-5");
+			// A warmed-then-closed session: cold, and nothing in the items is bound
+			// to a connection, so the plaintext reasoning still replays.
+			const cold: ProviderSessionState & { nativeHistoryReplayWarmed: boolean } = {
+				close: () => {},
+				nativeHistoryReplayWarmed: false,
+			};
+			session.agent.providerSessionState = new Map<string, ProviderSessionState>([
+				["openai-responses:openai", cold],
+			]);
+			session.agent.setModel(model);
+			const replayed = nativeTurn(model, {
+				thinking: "plaintext reasoning ".repeat(1_000),
+				answer: "answer",
+				items: [
+					{ type: "reasoning", summary: [], content: [{ type: "reasoning_text", text: "plaintext reasoning" }] },
+					{
+						type: "message",
+						role: "assistant",
+						content: [{ type: "output_text", text: "answer", annotations: [] }],
+					},
+				],
+			});
+			sessionManager.appendMessage(replayed);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(0);
+			expect(result.thinkingBlocksKept).toBe(1);
+			expect(result.tokensFreed).toBe(0);
+			expect(replayed.content.map(block => block.type)).toEqual(["thinking", "text"]);
+		});
+
+		it("keeps a replayed turn while dropping a rebuilt one, and persists the payload", async () => {
+			const model = bundled("openrouter", "z-ai/glm-4.7");
+			session.agent.setModel(model);
+			const items = [
+				{ type: "reasoning", id: "rs_turn", summary: [], encrypted_content: "e".repeat(2_000) },
+				...answerItem("first answer"),
+			];
+			const replayed = nativeTurn(model, {
+				thinking: "first reasoning ".repeat(1_000),
+				answer: "first answer",
+				items,
+				timestamp: Date.now() - 2,
+			});
+			// Same provider and payload shape, but the turn belongs to another model.
+			const rebuilt = nativeTurn(model, {
+				thinking: "second reasoning ".repeat(1_000),
+				answer: "second answer",
+				items,
+				modelId: "z-ai/glm-4.6",
+				timestamp: Date.now() - 1,
+			});
+			sessionManager.appendMessage(replayed);
+			sessionManager.appendMessage(rebuilt);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			const tokenizer = session.agent.tokenizer;
+			const before = tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true });
+			const rewriteEntries = vi.spyOn(sessionManager, "rewriteEntries");
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(1);
+			expect(result.thinkingBlocksKept).toBe(1);
+			expect(replayed.content.map(block => block.type)).toEqual(["thinking", "text"]);
+			expect(rebuilt.content).toEqual([{ type: "text", text: "second answer" }]);
+			expect(result.tokensFreed).toBe(before - tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true }));
+			expect(rewriteEntries).toHaveBeenCalledTimes(1);
+			const summary = formatShakeSummary(result);
+			expect(summary).toContain("Dropped 1 thinking block");
+			expect(summary).toContain("1 thinking block");
+			expect(summary).toContain("kept");
+
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected persisted shake session");
+			const persisted = await SessionManager.open(sessionFile, tempDir.path());
+			try {
+				const assistants = persisted
+					.getBranch()
+					.flatMap(entry =>
+						entry.type === "message" && entry.message.role === "assistant" ? [entry.message] : [],
+					);
+				const keptTurn = assistants.find(message => message.content.some(block => block.type === "thinking"));
+				if (!keptTurn) throw new Error("Expected the kept thinking turn to persist");
+				expect(keptTurn.model).toBe(model.id);
+				const payload = keptTurn.providerPayload;
+				if (payload?.type !== "openaiResponsesHistory") throw new Error("Expected the native payload to persist");
+				// The reasoning item and its answer item are still exactly what the
+				// request replays, so the kept turn stays a complete native turn.
+				expect(payload.items).toEqual(items);
+				const droppedTurn = assistants.find(message => message.model === "z-ai/glm-4.6");
+				expect(droppedTurn?.content.map(block => block.type)).toEqual(["text"]);
+			} finally {
+				await persisted.close();
+			}
+		});
+	});
+
+	describe("protected tools", () => {
+		it("never shakes skill results", async () => {
+			seedHeavyToolResult("S".repeat(4000), "skill");
+			const result = await session.shake("elide");
+			expect(result.toolResultsDropped).toBe(0);
+		});
+
+		/** Seed a user → assistant(read toolCall) → toolResult turn recovering an artifact. */
+		function seedArtifactRecoveryResult(text: string, args: Record<string, unknown>, details?: unknown): void {
+			const toolCallId = `call_read_${Math.random().toString(36).slice(2)}`;
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "recover it" }],
+				timestamp: Date.now() - 3,
+			});
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [
+					{ type: "text", text: "recovering" },
+					{ type: "toolCall", id: toolCallId, name: "read", arguments: args },
+				],
+				...apiInfo,
+				stopReason: "toolUse",
+				usage,
+				timestamp: Date.now() - 2,
+			});
+			sessionManager.appendMessage({
+				role: "toolResult",
+				toolCallId,
+				toolName: "read",
+				content: [{ type: "text", text }],
+				...(details === undefined ? {} : { details }),
+				isError: false,
+				timestamp: Date.now() - 1,
+			});
+		}
+
+		it("rescue config never re-elides artifact recovery reads, by path or by source meta", async () => {
+			seedArtifactRecoveryResult("R".repeat(4000), { path: "local://0.log" });
+			seedArtifactRecoveryResult(
+				"F".repeat(4000),
+				{ path: "/tmp/artifacts/3.shake.log" },
+				{
+					meta: { source: { type: "internal", value: "local://3.log" } },
+				},
+			);
+			const result = await session.shake("elide", { config: RESCUE_SHAKE_CONFIG });
+			expect(result.toolResultsDropped).toBe(0);
+			const texts = branchToolResults().map(m => (m.content[0] as { text: string }).text);
+			expect(texts.some(t => t.startsWith("R"))).toBe(true);
+			expect(texts.some(t => t.startsWith("F"))).toBe(true);
+		});
+
+		it("rescue config still elides ordinary oversized results", async () => {
+			seedHeavyToolResult("B".repeat(4000));
+			seedArtifactRecoveryResult("R".repeat(4000), { path: "local://0.log" });
+			const result = await session.shake("elide", { config: RESCUE_SHAKE_CONFIG });
+			expect(result.toolResultsDropped).toBe(1);
+			const texts = branchToolResults().map(m => (m.content[0] as { text: string }).text);
+			expect(texts.some(t => t.startsWith("B"))).toBe(false);
+			expect(texts.some(t => t.startsWith("R"))).toBe(true);
+		});
+	});
+
+	describe("auto-shake strategy", () => {
+		it("dispatches the elide path and emits a shake action for threshold maintenance", async () => {
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdPercent.set(session.settings, 1);
+			cfgContextPromotionEnabled.set(session.settings, false);
+
+			// Reclaim enough that the corrected (provider − tokensFreed) figure lands
+			// inside the 80% recovery band — otherwise the #2275 post-shake check would
+			// (correctly) declare pressure unresolved and fall back to context-full.
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 10_000 });
+
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "trigger" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: {
+					input: 10_000,
+					output: 1_000,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 11_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			};
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			await session.waitForIdle();
+
+			expect(shakeSpy).toHaveBeenCalledWith("elide", expect.anything());
+			const start = events.filter(e => e.type === "auto_compaction_start");
+			expect(start).toHaveLength(1);
+			expect(start[0]).toMatchObject({ type: "auto_compaction_start", reason: "threshold", action: "shake" });
+			const end = events.filter(e => e.type === "auto_compaction_end");
+			expect(end).toHaveLength(1);
+			expect(end[0]).toMatchObject({ type: "auto_compaction_end", action: "shake" });
+		});
+
+		it("keeps a successful overflow shake recovery committed before retrying", async () => {
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgContextPromotionEnabled.set(session.settings, false);
+			seedHeavyToolResult("X ".repeat(20000));
+			branchToolResults()[0].useless = true;
+			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			vi.spyOn(session.agent, "continue").mockResolvedValue();
+			vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 1000, contextWindow: 200000, percent: 0.5 });
+
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "" }],
+				...apiInfo,
+				stopReason: "error",
+				errorMessage: "prompt is too long: 250000 tokens > 200000 maximum",
+				usage: {
+					input: 250_000,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 250_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			};
+			const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+			session.subscribe(event => {
+				if (event.type === "auto_compaction_end" && event.action === "shake") onCompactionDone();
+			});
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+
+			await compactionDone;
+			await session.waitForIdle();
+
+			const shakeEnd = events.find(event => event.type === "auto_compaction_end" && event.action === "shake");
+			expect(shakeEnd).toMatchObject({ type: "auto_compaction_end", action: "shake", willRetry: true });
+			expect(sessionManager.getBranch()).not.toContainEqual(
+				expect.objectContaining({
+					type: "message",
+					message: expect.objectContaining({
+						role: "assistant",
+						stopReason: "error",
+						errorMessage: assistantMessage.errorMessage,
+					}),
+				}),
+			);
+			expect(session.agent.state.messages).not.toContainEqual(
+				expect.objectContaining({
+					role: "assistant",
+					stopReason: "error",
+					errorMessage: assistantMessage.errorMessage,
+				}),
+			);
+		});
+
+		it("keeps an incomplete shake retry committed before rollback can restore the length tail", async () => {
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			// Over threshold: the window, not the output cap, ran out, so recovery compacts.
+			cfgCompactionThresholdTokens.set(session.settings, 10_000);
+			cfgContextPromotionEnabled.set(session.settings, false);
+			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			vi.spyOn(session.agent, "continue").mockResolvedValue();
+			vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 1000, contextWindow: 200000, percent: 0.5 });
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				// Reclaims back under the recovery band, so shake retries instead of falling back.
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 20_000 });
+
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "partial response" }],
+				...apiInfo,
+				stopReason: "length",
+				usage: {
+					input: 20_000,
+					output: 5_000,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 25_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			};
+			const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+			session.subscribe(event => {
+				if (event.type === "auto_compaction_end" && event.action === "shake") onCompactionDone();
+			});
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+
+			await compactionDone;
+			await session.waitForIdle();
+
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			const shakeEnd = events.find(event => event.type === "auto_compaction_end" && event.action === "shake");
+			expect(shakeEnd).toMatchObject({ type: "auto_compaction_end", action: "shake", willRetry: true });
+			expect(sessionManager.getBranch()).not.toContainEqual(
+				expect.objectContaining({
+					type: "message",
+					message: expect.objectContaining({
+						role: "assistant",
+						stopReason: "length",
+						timestamp: assistantMessage.timestamp,
+					}),
+				}),
+			);
+			expect(session.agent.state.messages).not.toContainEqual(
+				expect.objectContaining({
+					role: "assistant",
+					stopReason: "length",
+					timestamp: assistantMessage.timestamp,
+				}),
+			);
+		});
+
+		it("has isCompacting true when the shake auto_compaction_start event fires", async () => {
+			// Defect 1 parity for the shake strategy: the controller backing isCompacting
+			// must be installed before auto_compaction_start is emitted, so a message
+			// typed as the loader appears is queued safely rather than mis-routed.
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdPercent.set(session.settings, 1);
+			cfgContextPromotionEnabled.set(session.settings, false);
+
+			let capturedIsCompacting: boolean | undefined;
+			const { promise: shakeStarted, resolve: onShakeStarted } = Promise.withResolvers<void>();
+			session.subscribe(event => {
+				if (event.type === "auto_compaction_start" && event.action === "shake") {
+					capturedIsCompacting = session.isCompacting;
+					onShakeStarted();
+				}
+			});
+
+			vi.spyOn(session, "shake").mockResolvedValue({
+				mode: "elide",
+				toolResultsDropped: 1,
+				blocksDropped: 0,
+				tokensFreed: 10_000,
+			});
+
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "trigger" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: {
+					input: 10_000,
+					output: 1_000,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 11_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			};
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			await shakeStarted;
+
+			expect(capturedIsCompacting).toBe(true);
+		});
+
+		it("advances to soft compaction when shake cannot drop context below the threshold (regression #2119)", async () => {
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdPercent.set(session.settings, 1);
+			cfgContextPromotionEnabled.set(session.settings, false);
+
+			// Seed agent state so the post-shake estimate is well above the 1% threshold
+			// (~2K tokens for a 200K window). The mocked shake returns reclaimed=true but
+			// does not modify state, mimicking the dead-loop scenario where shake removes
+			// nothing material yet the threshold check stays positive.
+			session.agent.replaceMessages([
+				{
+					role: "user",
+					content: [{ type: "text", text: "x".repeat(40000) }],
+					timestamp: Date.now(),
+				} as never,
+			]);
+
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 10 });
+
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "trigger" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: {
+					input: 10_000,
+					output: 1_000,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 11_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			};
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			await session.waitForIdle();
+
+			// Shake fires once. The pre-fix bug auto-continued, which would re-trigger shake
+			// on the next agent_end. The fix replaces that loop with a one-shot fallback.
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+
+			const shakeEnd = events.find(
+				e => e.type === "auto_compaction_end" && (e as { action?: string }).action === "shake",
+			) as { errorMessage?: string; skipped?: boolean } | undefined;
+			expect(shakeEnd).toBeDefined();
+			expect(shakeEnd?.errorMessage).toMatch(/trying the next preferred compaction method/i);
+
+			// Fallback enters the context-full path so the situation actually resolves.
+			const fullStart = events.find(
+				e => e.type === "auto_compaction_start" && (e as { action?: string }).action === "context-full",
+			);
+			expect(fullStart).toBeDefined();
+		});
+
+		it("falls back when provider-reported usage stays above the threshold even though the local estimate is below it (regression #2275)", async () => {
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdTokens.set(session.settings, 5_000);
+			cfgContextPromotionEnabled.set(session.settings, false);
+
+			// Agent state holds almost no content, so #estimatePendingPromptTokens reads
+			// well below the 5K threshold. The pre-fix post-shake check trusted that
+			// estimate and treated the pressure as resolved, even though the assistant
+			// message's provider-reported usage (11K) was well above the threshold.
+			// This is the metric-divergence dead loop from #2275: thinking-heavy
+			// sessions hit it for real (thinkingSignature payloads aren't counted by
+			// the estimator), and an empty-state probe mimics it deterministically.
+			session.agent.replaceMessages([]);
+
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 10 });
+
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "trigger" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: {
+					input: 10_000,
+					output: 1_000,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 11_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			};
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			await session.waitForIdle();
+
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+
+			const shakeEnd = events.find(
+				e => e.type === "auto_compaction_end" && (e as { action?: string }).action === "shake",
+			) as { errorMessage?: string; skipped?: boolean } | undefined;
+			expect(shakeEnd).toBeDefined();
+			expect(shakeEnd?.errorMessage).toMatch(/trying the next preferred compaction method/i);
+
+			const fullStart = events.find(
+				e => e.type === "auto_compaction_start" && (e as { action?: string }).action === "context-full",
+			);
+			expect(fullStart).toBeDefined();
+		});
+
+		it("counts pre-shake prune savings when deciding whether to fall back to context-full", async () => {
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdTokens.set(session.settings, 76384);
+			cfgCompactionThresholdPercent.set(session.settings, -1);
+			cfgCompactionDropUseless.set(session.settings, true);
+			cfgContextPromotionEnabled.set(session.settings, false);
+
+			const now = Date.now();
+			sessionManager.appendMessage({
+				role: "user",
+				content: "Investigate every module of the project.",
+				timestamp: now - 200,
+			});
+			const bigCallId = "call-big-useless-for-shake";
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "toolCall", id: bigCallId, name: "grep", arguments: { pattern: "TODO" } }],
+				...apiInfo,
+				stopReason: "toolUse",
+				usage,
+				timestamp: now - 180,
+			});
+			sessionManager.appendMessage({
+				role: "toolResult",
+				toolCallId: bigCallId,
+				toolName: "grep",
+				content: [{ type: "text", text: "match line\n".repeat(20000) }],
+				isError: false,
+				useless: true,
+				timestamp: now - 170,
+			});
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 100 });
+
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "trigger" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: {
+					input: 5000,
+					output: 1000,
+					cacheRead: 85000,
+					cacheWrite: 0,
+					totalTokens: 91000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: now,
+			};
+
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			await session.waitForIdle();
+
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			const fullStart = events.find(
+				event => event.type === "auto_compaction_start" && (event as { action?: string }).action === "context-full",
+			);
+			expect(fullStart).toBeUndefined();
+		});
+
+		it("falls back after pre-prompt shake when the floored stored conversation remains over threshold", async () => {
+			cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+			cfgCompactionThresholdTokens.set(session.settings, 8_000);
+			cfgCompactionKeepRecentTokens.set(session.settings, 1);
+			cfgContextPromotionEnabled.set(session.settings, false);
+
+			const seedUser: AgentMessage = {
+				role: "user",
+				content: [{ type: "text", text: "seed" }],
+				timestamp: Date.now() - 2,
+			};
+			const bulkText = "alpha beta gamma delta epsilon ".repeat(3_000);
+			const seedAssistant: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: bulkText }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: {
+					input: 1_000,
+					output: 10,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 1_010,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now() - 1,
+			};
+			sessionManager.appendMessage(seedUser);
+			sessionManager.appendMessage(seedAssistant);
+			session.agent.replaceMessages([seedUser, seedAssistant]);
+
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 10 });
+			const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+				summary: "pre-prompt shake fallback compacted",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			}));
+			vi.spyOn(session.agent, "prompt").mockImplementation(async () => {});
+
+			expect(session.getContextUsage({ contextWindow: 200_000 })?.tokens).toBe(1_000);
+
+			await session.prompt("small pending prompt", { skipCompactionCheck: true });
+
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			expect(compactSpy).toHaveBeenCalled();
+			const fullStart = events.find(
+				event => event.type === "auto_compaction_start" && (event as { action?: string }).action === "context-full",
+			);
+			expect(fullStart).toBeDefined();
+		});
+	});
+
+	it("keeps the in-flight tool call and lowers context usage when shaking mid-turn", async () => {
+		seedHeavyToolResult("X".repeat(20_000));
+		appendRecentProtectedTail();
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+		const toolEntered = Promise.withResolvers<void>();
+		const releaseTool = Promise.withResolvers<void>();
+		session.agent.setTools([
+			{
+				name: "block",
+				label: "Block",
+				description: "Blocks until released",
+				parameters: type({}),
+				async execute() {
+					toolEntered.resolve();
+					await releaseTool.promise;
+					return { content: [{ type: "text", text: "released" }] };
+				},
+			},
+		]);
+		session.agent.streamFn = createMockModel({
+			responses: [
+				{
+					content: [{ type: "toolCall", id: "call_block", name: "block", arguments: {} }],
+					stopReason: "toolUse",
+					usage: { cacheRead: 50_000 },
+				},
+				{ content: ["done"], stopReason: "stop", usage: { cacheRead: 1_000 } },
+			],
+		}).stream;
+
+		const run = session.prompt("continue");
+		await toolEntered.promise;
+		expect(session.getContextUsage()?.tokens).toBe(50_000);
+		const result = await session.shake("elide");
+		expect(result.tokensFreed).toBeGreaterThan(0);
+		expect(session.getContextUsage()?.tokens).toBe(50_000 - result.tokensFreed);
+		releaseTool.resolve();
+		await run;
+
+		const messages = session.agent.state.messages;
+		const blockCall = messages.findIndex(
+			m => m.role === "assistant" && m.content.some(b => b.type === "toolCall" && b.id === "call_block"),
+		);
+		expect(blockCall).toBeGreaterThan(-1);
+		expect(messages[blockCall + 1]).toMatchObject({ role: "toolResult", toolCallId: "call_block" });
+	});
+
+	it("drops an earlier turn's unpaired tool call from a rebuild while the next turn streams", async () => {
+		const staleUser: UserMessage = {
+			role: "user",
+			content: [{ type: "text", text: "start" }],
+			timestamp: Date.now() - 2,
+		};
+		const staleAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call_stale", name: "bash", arguments: { command: "ls" } }],
+			...apiInfo,
+			stopReason: "toolUse",
+			usage,
+			timestamp: Date.now() - 1,
+		};
+		sessionManager.appendMessage(staleUser);
+		sessionManager.appendMessage(staleAssistant);
+		session.agent.replaceMessages([staleUser, staleAssistant]);
+		const promptRecorded = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "user") promptRecorded.resolve();
+		});
+		session.agent.streamFn = createMockModel({
+			responses: [{ content: ["done"], stopReason: "stop", delayMs: 5_000 }],
+		}).stream;
+
+		const run = session.prompt("continue");
+		await promptRecorded.promise;
+		expect(session.agent.state.isStreaming).toBe(true);
+		const rebuilt = session.buildDisplaySessionContext().messages;
+		await session.abort();
+		await run.catch(() => undefined);
+
+		expect(
+			rebuilt.some(
+				m => m.role === "assistant" && m.content.some(b => b.type === "toolCall" && b.id === "call_stale"),
+			),
+		).toBe(false);
+	});
+});

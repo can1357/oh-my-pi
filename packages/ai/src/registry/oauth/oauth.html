@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<meta name="color-scheme" content="dark light" />
+		<title>omp · authentication</title>
+		<style>
+			:root {
+				--bg: #000;
+				--card: #0b0b0d;
+				--ink-1: #f4f4f5;
+				--ink-2: #b4b4bb;
+				--ink-3: #7a7a83;
+				--line-1: rgb(255 255 255 / 0.07);
+				--line-2: rgb(255 255 255 / 0.12);
+				--top-lit: rgb(255 255 255 / 0.22);
+				--accent-a: #22d3ee;
+				--accent-b: #f472b6;
+				--accent-gradient: linear-gradient(135deg, var(--accent-a), var(--accent-b));
+				--ok: #4ade80;
+				--ok-soft: rgb(74 222 128 / 0.12);
+				--bad: #f87171;
+				--bad-soft: rgb(248 113 113 / 0.12);
+				--pending: #a1a1aa;
+				--pending-soft: rgb(161 161 170 / 0.12);
+				--glow-a: rgb(34 211 238 / 0.1);
+				--glow-b: rgb(244 114 182 / 0.08);
+				--shadow: 0 30px 60px -20px rgb(0 0 0 / 0.8);
+				--btn-bg: #f4f4f5;
+				--btn-fg: #000;
+				--r-control: 8px;
+				--r-panel: 16px;
+				--sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+				--mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+				color-scheme: dark;
+			}
+
+			@media (prefers-color-scheme: light) {
+				:root {
+					--bg: #fafafa;
+					--card: #fff;
+					--ink-1: #111113;
+					--ink-2: #4b4b52;
+					--ink-3: #83838b;
+					--line-1: rgb(0 0 0 / 0.08);
+					--line-2: rgb(0 0 0 / 0.12);
+					--top-lit: rgb(0 0 0 / 0.04);
+					--accent-a: #0891b2;
+					--accent-b: #db2777;
+					--ok: #16a34a;
+					--ok-soft: rgb(22 163 74 / 0.1);
+					--bad: #dc2626;
+					--bad-soft: rgb(220 38 38 / 0.1);
+					--pending: #71717a;
+					--pending-soft: rgb(113 113 122 / 0.1);
+					--glow-a: rgb(8 145 178 / 0.08);
+					--glow-b: rgb(219 39 119 / 0.06);
+					--shadow: 0 20px 50px -24px rgb(0 0 0 / 0.18);
+					--btn-bg: #111113;
+					--btn-fg: #fff;
+					color-scheme: light;
+				}
+			}
+
+			* {
+				box-sizing: border-box;
+			}
+
+			body {
+				margin: 0;
+				min-height: 100vh;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				padding: 1.5rem;
+				font-family: var(--sans);
+				background: var(--bg);
+				color: var(--ink-1);
+				-webkit-font-smoothing: antialiased;
+				overflow-x: clip;
+			}
+
+			/* ambient glow */
+			.glow {
+				position: fixed;
+				inset: 0;
+				pointer-events: none;
+				background:
+					radial-gradient(ellipse 50vw 40vh at 38% 30%, var(--glow-a), transparent 70%),
+					radial-gradient(ellipse 50vw 40vh at 64% 64%, var(--glow-b), transparent 70%);
+			}
+
+			.container {
+				position: relative;
+				width: 100%;
+				max-width: 400px;
+				padding: 2rem 2rem 1.75rem;
+				background: var(--card);
+				border: 1px solid var(--line-1);
+				border-radius: var(--r-panel);
+				box-shadow: var(--shadow);
+				overflow: hidden;
+				animation: rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+			}
+			/* top-lit hairline */
+			.container::before {
+				content: "";
+				position: absolute;
+				top: 0;
+				left: 12%;
+				right: 12%;
+				height: 1px;
+				background: linear-gradient(90deg, transparent, var(--top-lit), transparent);
+			}
+			@keyframes rise {
+				from {
+					opacity: 0;
+					transform: translateY(8px);
+				}
+			}
+
+			.brand {
+				display: flex;
+				align-items: center;
+				gap: 0.6rem;
+				margin-bottom: 1.75rem;
+			}
+			.omp-mark {
+				flex: none;
+				display: block;
+			}
+			.wordmark {
+				font-size: 13px;
+				font-weight: 600;
+				letter-spacing: -0.01em;
+			}
+			.wordmark-sub {
+				margin-left: auto;
+				font-family: var(--mono);
+				font-size: 12px;
+				color: var(--ink-3);
+			}
+
+			.status {
+				display: inline-flex;
+				align-items: center;
+				gap: 0.45rem;
+				padding: 0.22rem 0.6rem 0.22rem 0.5rem;
+				margin-bottom: 1rem;
+				border-radius: 999px;
+				font-size: 12px;
+				font-weight: 500;
+				color: var(--pending);
+				background: var(--pending-soft);
+			}
+			.status-dot {
+				width: 7px;
+				height: 7px;
+				border-radius: 50%;
+				background: currentColor;
+			}
+			.status-word {
+				display: none;
+			}
+			.container:not(.success):not(.error) .status-pending,
+			.success .status-success,
+			.error .status-error {
+				display: inline;
+			}
+			.container:not(.success):not(.error) .status-dot {
+				animation: pulse 1.4s ease-in-out infinite;
+			}
+			@keyframes pulse {
+				50% {
+					opacity: 0.35;
+				}
+			}
+			.success .status {
+				color: var(--ok);
+				background: var(--ok-soft);
+			}
+			.error .status {
+				color: var(--bad);
+				background: var(--bad-soft);
+			}
+
+			h1 {
+				margin: 0 0 0.5rem;
+				font-size: 1.35rem;
+				font-weight: 600;
+				letter-spacing: -0.02em;
+				line-height: 1.25;
+				text-wrap: balance;
+			}
+			p {
+				margin: 0 0 1.5rem;
+				font-size: 0.9rem;
+				line-height: 1.6;
+				color: var(--ink-2);
+			}
+			p:last-of-type:not(:has(+ .btn)) {
+				margin-bottom: 0.25rem;
+			}
+			.error p {
+				font-family: var(--mono);
+				font-size: 0.8rem;
+				padding: 0.6rem 0.75rem;
+				border: 1px solid var(--line-1);
+				border-radius: var(--r-control);
+				overflow-wrap: anywhere;
+			}
+
+			.btn {
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				width: 100%;
+				padding: 0.6rem 1rem;
+				font: inherit;
+				font-size: 0.875rem;
+				font-weight: 500;
+				color: var(--btn-fg);
+				background: var(--btn-bg);
+				border: none;
+				border-radius: var(--r-control);
+				cursor: pointer;
+				transition: opacity 0.15s;
+			}
+			.btn:hover {
+				opacity: 0.86;
+			}
+			.btn:focus-visible {
+				outline: 2px solid var(--accent-a);
+				outline-offset: 2px;
+			}
+			.error .btn {
+				color: var(--ink-1);
+				background: transparent;
+				border: 1px solid var(--line-2);
+			}
+
+			/* auto-close progress */
+			.timer {
+				position: absolute;
+				left: 0;
+				bottom: 0;
+				height: 2px;
+				width: 100%;
+				background: var(--accent-gradient);
+				transform-origin: left;
+				transform: scaleX(0);
+			}
+			.countdown .timer {
+				animation: countdown 3s linear forwards;
+			}
+			@keyframes countdown {
+				from {
+					transform: scaleX(1);
+				}
+				to {
+					transform: scaleX(0);
+				}
+			}
+
+			@media (prefers-reduced-motion: reduce) {
+				.container,
+				.countdown .timer,
+				.status-dot {
+					animation: none !important;
+				}
+			}
+		</style>
+	</head>
+	<body>
+		<span aria-hidden="true" class="glow"></span>
+		<div id="app" class="container">
+			<div class="brand">
+				<svg class="omp-mark" viewBox="0 0 64 64" width="24" height="24" aria-hidden="true">
+					<defs>
+						<linearGradient id="omp-mark-grad" x1="0" y1="0" x2="1" y2="1">
+							<stop offset="0" stop-color="oklch(0.7 0.24 340)" />
+							<stop offset=".5" stop-color="oklch(0.62 0.21 295)" />
+							<stop offset="1" stop-color="oklch(0.81 0.14 200)" />
+						</linearGradient>
+					</defs>
+					<path fill="url(#omp-mark-grad)" d="M10 14h44v9H43v33h-9V23h-9v22h-9V23H10z" />
+				</svg>
+				<span class="wordmark">omp</span>
+				<span class="wordmark-sub">oauth</span>
+			</div>
+
+			<div class="status" role="status">
+				<span aria-hidden="true" class="status-dot"></span>
+				<span class="status-word status-pending">Waiting</span>
+				<span class="status-word status-success">Connected</span>
+				<span class="status-word status-error">Failed</span>
+			</div>
+
+			<h1 id="title">Authentication</h1>
+			<p id="message"></p>
+			<button onclick="window.close()" class="btn">Close window</button>
+			<span aria-hidden="true" class="timer"></span>
+		</div>
+
+		<script id="server-state" type="application/json">
+			__OAUTH_STATE__
+		</script>
+
+		<script>
+			let serverState;
+			try {
+				serverState = JSON.parse(document.getElementById("server-state").textContent);
+			} catch {
+				const params = new URLSearchParams(window.location.search);
+				serverState = {
+					ok: params.get("ok") === "1",
+					error: params.get("error") || "Authentication failed",
+				};
+			}
+
+			const app = document.getElementById("app");
+			const title = document.getElementById("title");
+			const message = document.getElementById("message");
+
+			if (serverState.ok) {
+				const closeButton = document.querySelector(".btn");
+				app.classList.add("success", "countdown");
+				title.textContent = "Authentication successful";
+				message.textContent = "You have successfully logged in.";
+				window.close();
+				setTimeout(() => {
+					app.classList.remove("countdown");
+					closeButton.remove();
+					message.innerHTML = "You have successfully logged in.<br>Please close this tab manually.";
+				}, 300);
+			} else {
+				app.classList.add("error");
+				title.textContent = "Authentication failed";
+				message.textContent = serverState.error || "An error occurred";
+			}
+		</script>
+	</body>
+</html>

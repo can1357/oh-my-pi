@@ -1,0 +1,103 @@
+syntax = "proto3";
+
+package cel.expr;
+
+import "cel/expr/syntax.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/struct.proto";
+
+message CheckedExpr {
+  map<int64, .cel.expr.Reference> reference_map = 2;
+  map<int64, .cel.expr.Type> type_map = 3;
+  .cel.expr.SourceInfo source_info = 5;
+  string expr_version = 6;
+  .cel.expr.Expr expr = 4;
+}
+
+message Type {
+  message ListType {
+    .cel.expr.Type elem_type = 1;
+  }
+
+  message MapType {
+    .cel.expr.Type key_type = 1;
+    .cel.expr.Type value_type = 2;
+  }
+
+  message FunctionType {
+    .cel.expr.Type result_type = 1;
+    repeated .cel.expr.Type arg_types = 2;
+  }
+
+  message AbstractType {
+    string name = 1;
+    repeated .cel.expr.Type parameter_types = 2;
+  }
+
+  enum PrimitiveType {
+    PRIMITIVE_TYPE_UNSPECIFIED = 0;
+    BOOL = 1;
+    INT64 = 2;
+    UINT64 = 3;
+    DOUBLE = 4;
+    STRING = 5;
+    BYTES = 6;
+  }
+
+  enum WellKnownType {
+    WELL_KNOWN_TYPE_UNSPECIFIED = 0;
+    ANY = 1;
+    TIMESTAMP = 2;
+    DURATION = 3;
+  }
+
+  oneof type_kind {
+    .google.protobuf.Empty dyn = 1;
+    .google.protobuf.NullValue null = 2;
+    .cel.expr.Type.PrimitiveType primitive = 3;
+    .cel.expr.Type.PrimitiveType wrapper = 4;
+    .cel.expr.Type.WellKnownType well_known = 5;
+    .cel.expr.Type.ListType list_type = 6;
+    .cel.expr.Type.MapType map_type = 7;
+    .cel.expr.Type.FunctionType function = 8;
+    string message_type = 9;
+    string type_param = 10;
+    .cel.expr.Type type = 11;
+    .google.protobuf.Empty error = 12;
+    .cel.expr.Type.AbstractType abstract_type = 14;
+  }
+}
+
+message Decl {
+  message IdentDecl {
+    .cel.expr.Type type = 1;
+    .cel.expr.Constant value = 2;
+    string doc = 3;
+  }
+
+  message FunctionDecl {
+    message Overload {
+      string overload_id = 1;
+      repeated .cel.expr.Type params = 2;
+      repeated string type_params = 3;
+      .cel.expr.Type result_type = 4;
+      bool is_instance_function = 5;
+      string doc = 6;
+    }
+
+    repeated .cel.expr.Decl.FunctionDecl.Overload overloads = 1;
+    string doc = 2;
+  }
+
+  string name = 1;
+  oneof decl_kind {
+    .cel.expr.Decl.IdentDecl ident = 2;
+    .cel.expr.Decl.FunctionDecl function = 3;
+  }
+}
+
+message Reference {
+  string name = 1;
+  repeated string overload_id = 3;
+  .cel.expr.Constant value = 4;
+}

@@ -1,0 +1,6 @@
+branch feature/new-filters
+staged 2, unstaged 1, untracked 1
+A internal/filter/kubectl.go
+M internal/filter/registry.go
+M README.md
+?? internal/filter/npm.go

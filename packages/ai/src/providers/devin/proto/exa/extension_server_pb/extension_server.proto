@@ -1,0 +1,556 @@
+syntax = "proto3";
+
+package exa.extension_server_pb;
+
+import "buf/validate/validate.proto";
+import "exa/codeium_common_pb/codeium_common.proto";
+import "exa/cortex_pb/cortex.proto";
+import "exa/language_server_pb/language_server.proto";
+
+enum ActiveEditorType {
+  ACTIVE_EDITOR_TYPE_UNSPECIFIED = 0;
+  ACTIVE_EDITOR_TYPE_TEXT_EDITOR = 1;
+  ACTIVE_EDITOR_TYPE_TERMINAL = 2;
+}
+
+enum SoundType {
+  SOUND_TYPE_UNSPECIFIED = 0;
+  SOUND_TYPE_CASCADE_DONE = 1;
+}
+
+enum SettingLocation {
+  SETTING_LOCATION_UNSPECIFIED = 0;
+  SETTING_LOCATION_USER = 1;
+  SETTING_LOCATION_WORKSPACE = 2;
+}
+
+message CancelVibeAndReplaceRequest {
+}
+
+message CancelVibeAndReplaceResponse {
+}
+
+message StartAudioRecordingRequest {
+}
+
+message EndAudioRecordingRequest {
+}
+
+message EndAudioRecordingResponse {
+  string transcription = 1;
+}
+
+message StartAudioRecordingResponse {
+}
+
+message GetCurrentAudioRecordingRequest {
+}
+
+message GetCurrentAudioRecordingResponse {
+  float average_volume = 2;
+}
+
+message LanguageServerStartedRequest {
+  int32 language_server_port = 1;
+  int32 lsp_port = 2;
+  int32 chat_client_port = 3;
+  string csrf_token = 4;
+}
+
+message LanguageServerStartedResponse {
+}
+
+message OpenSettingRequest {
+  string setting_id = 1;
+}
+
+message OpenSettingResponse {
+}
+
+message OpenFilePointerRequest {
+  string file_uri = 1;
+  int32 start_line = 2;
+  int32 start_col = 3;
+  int32 end_line = 4;
+  int32 end_col = 5;
+  bool is_cascade_diff = 6;
+  bool is_directory = 7;
+  bool pinned = 8;
+}
+
+message OpenFilePointerResponse {
+}
+
+message InsertCodeAtCursorRequest {
+  string text = 1;
+  .exa.extension_server_pb.ActiveEditorType editor_type = 2;
+}
+
+message InsertCodeAtCursorResponse {
+}
+
+message EventMetadataRecord {
+  string key = 1;
+  string value = 2;
+}
+
+message LogEventRequest {
+  .exa.codeium_common_pb.ProductEventType event = 1 [deprecated = true];
+  string event_string = 3;
+  repeated .exa.extension_server_pb.EventMetadataRecord metadata = 2;
+}
+
+message LogEventResponse {
+}
+
+message CheckTerminalShellSupportRequest {
+}
+
+message CheckTerminalShellSupportResponse {
+  bool has_shell_integration = 1;
+  string shell_name = 2;
+  string shell_path = 3;
+  string failure_reason = 4;
+  repeated string shell_args = 5;
+}
+
+message ExecuteCommandRequest {
+  reserved 1;
+  reserved 2;
+  reserved "command", "args";
+
+  string command_line = 5;
+  string cwd = 3;
+  string terminal_id = 4;
+}
+
+message ShowTerminalRequest {
+  string terminal_id = 1;
+}
+
+message ShowTerminalResponse {
+}
+
+message OpenVirtualFileRequest {
+  string text = 1;
+  bool show_markdown_preview = 2;
+}
+
+message OpenVirtualFileResponse {
+}
+
+message SaveDocumentRequest {
+  string uri = 1;
+}
+
+message SaveDocumentResponse {
+}
+
+message ReadTerminalRequest {
+  string terminal_id = 1;
+}
+
+message ReadTerminalResponse {
+  string contents = 1;
+}
+
+message OpenTerminalRequest {
+  string terminal_id = 1;
+}
+
+message OpenTerminalResponse {
+}
+
+message GetLintErrorsRequest {
+  message AwaitNewLintsConfig {
+    string acknowledger_id = 1;
+    int32 timeout_ms = 2;
+    int32 grace_period_ms = 3;
+    bool include_saved = 4;
+  }
+
+  optional .exa.extension_server_pb.GetLintErrorsRequest.AwaitNewLintsConfig await_new_lints_config = 1;
+}
+
+message GetLintErrorsResponse {
+  repeated .exa.codeium_common_pb.CodeDiagnostic lint_errors = 1;
+  repeated .exa.codeium_common_pb.CodeDiagnostic persistent_lint_errors = 2;
+}
+
+message WatchForLintsRequest {
+  string acknowledger_id = 1;
+  int32 duration_ms = 2;
+}
+
+message WatchForLintsResponse {
+}
+
+message GetLintsForAcknowledgerRequest {
+  string acknowledger_id = 1;
+}
+
+message GetLintsForAcknowledgerResponse {
+  repeated .exa.codeium_common_pb.CodeDiagnostic lint_errors = 1;
+  repeated .exa.codeium_common_pb.CodeDiagnostic persistent_lint_errors = 2;
+}
+
+message OpenDiffZonesRequest {
+  string cascade_id = 1;
+  repeated .exa.language_server_pb.ValidationState validation_states = 2;
+  bool write_new_state = 3;
+  optional string git_worktree_path = 4;
+}
+
+message OpenDiffZonesResponse {
+}
+
+message OpenMultiDiffRequest {
+  string cascade_id = 1;
+  string title = 2;
+}
+
+message OpenMultiDiffResponse {
+}
+
+message OpenExternalUrlRequest {
+  string url = 1;
+  bool use_ide_browser = 2;
+}
+
+message OpenExternalUrlResponse {
+}
+
+message HandleAsyncPostMessageRequest {
+  string message_type = 1;
+  string message_content = 2;
+}
+
+message HandleAsyncPostMessageResponse {
+  string response_content = 1;
+}
+
+message OpenWindsurfRulesFileRequest {
+  bool is_workspace_rules = 1;
+}
+
+message OpenWindsurfRulesFileResponse {
+}
+
+message DeleteWindsurfRulesFileRequest {
+  bool is_workspace_rules = 1;
+  string file_path = 2;
+}
+
+message DeleteWindsurfRulesFileResponse {
+}
+
+message RefreshURIsRequest {
+  repeated string uris = 1;
+}
+
+message RefreshURIsResponse {
+}
+
+message OpenConfigurePluginsPageRequest {
+  optional string server_name = 1;
+}
+
+message OpenConfigurePluginsPageResponse {
+}
+
+message NotebookCellEdit {
+  int32 cell_index = 1;
+  bool is_insert = 2;
+  string cell_type = 3;
+}
+
+message WriteCascadeEditRequest {
+  string uri = 1;
+  string target_content = 2;
+  optional string cascade_id = 3;
+  optional string git_worktree_path = 4;
+  optional .exa.extension_server_pb.NotebookCellEdit notebook_cell = 5;
+}
+
+message WriteCascadeEditResponse {
+}
+
+message OpenConversationWorkspaceQuickPickRequest {
+  string cascade_id = 1;
+  repeated string workspace_uris = 2;
+}
+
+message OpenConversationWorkspaceQuickPickResponse {
+  bool open_in_current_window = 1;
+}
+
+message FindAllReferencesRequest {
+  string file_uri = 1;
+  string symbol = 2;
+  uint32 line = 3;
+  uint32 occurrence_index = 4;
+}
+
+message FindAllReferencesResponse {
+  repeated .exa.codeium_common_pb.LspReference references = 1;
+}
+
+message GetLSPCompletionItemsRequest {
+  string document_uri = 1;
+  .exa.codeium_common_pb.DocumentPosition position = 2;
+}
+
+message GetLSPCompletionItemsResponse {
+  string completion_items_json = 1;
+}
+
+message UpdateCascadeTrajectorySummariesRequest {
+  .exa.cortex_pb.CascadeTrajectorySummaries summaries = 1;
+  bool initial_load_complete = 2;
+}
+
+message UpdateCascadeTrajectorySummariesResponse {
+}
+
+message LoadCodeMapRequest {
+  string codemap_json = 1;
+}
+
+message LoadCodeMapResponse {
+}
+
+message AddAnnotationRequest {
+  .exa.codeium_common_pb.CodeAnnotation annotation = 1;
+}
+
+message AddAnnotationResponse {
+}
+
+message RemoveAnnotationRequest {
+  string annotation_id = 1;
+}
+
+message RemoveAnnotationResponse {
+}
+
+message ShowAnnotationRequest {
+  string annotation_id = 1;
+}
+
+message ShowAnnotationResponse {
+}
+
+message GetSecretValueRequest {
+  string key = 1;
+}
+
+message GetSecretValueResponse {
+  string value = 1;
+}
+
+message StoreSecretValueRequest {
+  string key = 1;
+  string value = 2;
+}
+
+message StoreSecretValueResponse {
+}
+
+message GetRedirectUriRequest {
+}
+
+message GetRedirectUriResponse {
+  string uri = 1;
+}
+
+message CheckExperimentRequest {
+  string experiment_key = 1;
+  map<string, string> context_overrides = 2;
+}
+
+message CheckExperimentResponse {
+  bool enabled = 1;
+  optional .exa.extension_server_pb.ExperimentVariant variant = 2;
+  optional string error_message = 3;
+}
+
+message ExperimentVariant {
+  string name = 1;
+  .exa.extension_server_pb.ExperimentPayload payload = 2;
+}
+
+message ExperimentPayload {
+  string type = 1;
+  string value = 2;
+}
+
+message SearchQueryRequest {
+  string query = 1;
+  optional int32 max_results = 2;
+  optional string cache_key = 3;
+  optional bool include_ignored_files = 4 [deprecated = true];
+}
+
+message SearchQueryResponse {
+  repeated string result_uris = 1;
+}
+
+message UnmountChangesRequest {
+}
+
+message UnmountChangesResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message LogoutWindsurfRequest {
+  string api_key = 1;
+}
+
+message LogoutWindsurfResponse {
+}
+
+message DeleteWindsurfWorkflowRequest {
+  .exa.cortex_pb.CortexMemoryScope scope = 1;
+  string file_path = 2;
+}
+
+message DeleteWindsurfWorkflowResponse {
+}
+
+message NotifyMcpStateChangedRequest {
+  reserved 2;
+  reserved 3;
+
+  repeated .exa.cortex_pb.McpServerState states = 1;
+}
+
+message NotifyMcpStateChangedResponse {
+}
+
+message NativeStorageTarget {
+  oneof target {
+    .exa.extension_server_pb.SettingTarget setting = 1;
+    .exa.extension_server_pb.StateTarget state = 2;
+  }
+}
+
+message SettingTarget {
+  .exa.extension_server_pb.SettingLocation location = 1;
+}
+
+message StateTarget {
+}
+
+message NativeValue {
+  oneof value {
+    string string_value = 1;
+    int32 int_value = 2;
+    bool bool_value = 3;
+    double double_value = 4;
+    .exa.extension_server_pb.NativeValueList list_value = 5;
+    .exa.extension_server_pb.NativeValueMap map_value = 6;
+  }
+}
+
+message NativeValueList {
+  repeated .exa.extension_server_pb.NativeValue values = 1;
+}
+
+message NativeValueMap {
+  map<string, .exa.extension_server_pb.NativeValue> values = 1;
+}
+
+message NativeValueEntry {
+  .exa.extension_server_pb.NativeValue value = 1;
+  bool is_default = 2;
+}
+
+message GetNativeValuesRequest {
+  .exa.extension_server_pb.NativeStorageTarget target = 1;
+  repeated string keys = 2;
+}
+
+message GetNativeValuesResponse {
+  map<string, .exa.extension_server_pb.NativeValueEntry> values = 1;
+}
+
+message SetNativeValueRequest {
+  .exa.extension_server_pb.NativeStorageTarget target = 1;
+  string key = 2;
+  .exa.extension_server_pb.NativeValue value = 3;
+  .exa.extension_server_pb.NativeValue expected_previous_value = 4;
+}
+
+message SetNativeValueResponse {
+  bool concurrency_conflict = 1;
+  .exa.extension_server_pb.NativeValueEntry current_value = 2;
+}
+
+message ClearNativeValueRequest {
+  .exa.extension_server_pb.NativeStorageTarget target = 1;
+  string key = 2;
+}
+
+message ClearNativeValueResponse {
+}
+
+message SubscribeNativeValuesRequest {
+  .exa.extension_server_pb.NativeStorageTarget target = 1;
+}
+
+message SubscribeNativeValuesResponse {
+  map<string, .exa.extension_server_pb.NativeValueEntry> values = 1;
+}
+
+service ExtensionServerService {
+  rpc LanguageServerStarted (.exa.extension_server_pb.LanguageServerStartedRequest) returns (.exa.extension_server_pb.LanguageServerStartedResponse);
+  rpc OpenSetting (.exa.extension_server_pb.OpenSettingRequest) returns (.exa.extension_server_pb.OpenSettingResponse);
+  rpc OpenFilePointer (.exa.extension_server_pb.OpenFilePointerRequest) returns (.exa.extension_server_pb.OpenFilePointerResponse);
+  rpc InsertCodeAtCursor (.exa.extension_server_pb.InsertCodeAtCursorRequest) returns (.exa.extension_server_pb.InsertCodeAtCursorResponse);
+  rpc LogEvent (.exa.extension_server_pb.LogEventRequest) returns (.exa.extension_server_pb.LogEventResponse);
+  rpc CheckTerminalShellSupport (.exa.extension_server_pb.CheckTerminalShellSupportRequest) returns (.exa.extension_server_pb.CheckTerminalShellSupportResponse);
+  rpc ExecuteCommand (.exa.extension_server_pb.ExecuteCommandRequest) returns (stream .exa.codeium_common_pb.TerminalShellCommandStreamChunk);
+  rpc ShowTerminal (.exa.extension_server_pb.ShowTerminalRequest) returns (.exa.extension_server_pb.ShowTerminalResponse);
+  rpc OpenVirtualFile (.exa.extension_server_pb.OpenVirtualFileRequest) returns (.exa.extension_server_pb.OpenVirtualFileResponse);
+  rpc SaveDocument (.exa.extension_server_pb.SaveDocumentRequest) returns (.exa.extension_server_pb.SaveDocumentResponse);
+  rpc ReadTerminal (.exa.extension_server_pb.ReadTerminalRequest) returns (.exa.extension_server_pb.ReadTerminalResponse);
+  rpc OpenTerminal (.exa.extension_server_pb.OpenTerminalRequest) returns (.exa.extension_server_pb.OpenTerminalResponse);
+  rpc GetLintErrors (.exa.extension_server_pb.GetLintErrorsRequest) returns (.exa.extension_server_pb.GetLintErrorsResponse);
+  rpc WatchForLints (.exa.extension_server_pb.WatchForLintsRequest) returns (.exa.extension_server_pb.WatchForLintsResponse);
+  rpc GetLintsForAcknowledger (.exa.extension_server_pb.GetLintsForAcknowledgerRequest) returns (.exa.extension_server_pb.GetLintsForAcknowledgerResponse);
+  rpc OpenDiffZones (.exa.extension_server_pb.OpenDiffZonesRequest) returns (.exa.extension_server_pb.OpenDiffZonesResponse);
+  rpc OpenExternalUrl (.exa.extension_server_pb.OpenExternalUrlRequest) returns (.exa.extension_server_pb.OpenExternalUrlResponse);
+  rpc OpenMultiDiff (.exa.extension_server_pb.OpenMultiDiffRequest) returns (.exa.extension_server_pb.OpenMultiDiffResponse);
+  rpc HandleAsyncPostMessage (.exa.extension_server_pb.HandleAsyncPostMessageRequest) returns (.exa.extension_server_pb.HandleAsyncPostMessageResponse);
+  rpc OpenWindsurfRulesFile (.exa.extension_server_pb.OpenWindsurfRulesFileRequest) returns (.exa.extension_server_pb.OpenWindsurfRulesFileResponse);
+  rpc DeleteWindsurfRulesFile (.exa.extension_server_pb.DeleteWindsurfRulesFileRequest) returns (.exa.extension_server_pb.DeleteWindsurfRulesFileResponse);
+  rpc DeleteWindsurfWorkflow (.exa.extension_server_pb.DeleteWindsurfWorkflowRequest) returns (.exa.extension_server_pb.DeleteWindsurfWorkflowResponse);
+  rpc NotifyMcpStateChanged (.exa.extension_server_pb.NotifyMcpStateChangedRequest) returns (.exa.extension_server_pb.NotifyMcpStateChangedResponse);
+  rpc OpenConfigurePluginsPage (.exa.extension_server_pb.OpenConfigurePluginsPageRequest) returns (.exa.extension_server_pb.OpenConfigurePluginsPageResponse);
+  rpc OpenConversationWorkspaceQuickPick (.exa.extension_server_pb.OpenConversationWorkspaceQuickPickRequest) returns (.exa.extension_server_pb.OpenConversationWorkspaceQuickPickResponse);
+  rpc FindAllReferences (.exa.extension_server_pb.FindAllReferencesRequest) returns (.exa.extension_server_pb.FindAllReferencesResponse);
+  rpc GetLSPCompletionItems (.exa.extension_server_pb.GetLSPCompletionItemsRequest) returns (.exa.extension_server_pb.GetLSPCompletionItemsResponse);
+  rpc RefreshURIs (.exa.extension_server_pb.RefreshURIsRequest) returns (.exa.extension_server_pb.RefreshURIsResponse);
+  rpc CheckExperiment (.exa.extension_server_pb.CheckExperimentRequest) returns (.exa.extension_server_pb.CheckExperimentResponse);
+  rpc WriteCascadeEdit (.exa.extension_server_pb.WriteCascadeEditRequest) returns (.exa.extension_server_pb.WriteCascadeEditResponse);
+  rpc StartAudioRecording (.exa.extension_server_pb.StartAudioRecordingRequest) returns (.exa.extension_server_pb.StartAudioRecordingResponse);
+  rpc EndAudioRecording (.exa.extension_server_pb.EndAudioRecordingRequest) returns (.exa.extension_server_pb.EndAudioRecordingResponse);
+  rpc GetCurrentAudioRecording (.exa.extension_server_pb.GetCurrentAudioRecordingRequest) returns (.exa.extension_server_pb.GetCurrentAudioRecordingResponse);
+  rpc UpdateCascadeTrajectorySummaries (.exa.extension_server_pb.UpdateCascadeTrajectorySummariesRequest) returns (.exa.extension_server_pb.UpdateCascadeTrajectorySummariesResponse);
+  rpc LoadCodeMap (.exa.extension_server_pb.LoadCodeMapRequest) returns (.exa.extension_server_pb.LoadCodeMapResponse);
+  rpc AddAnnotation (.exa.extension_server_pb.AddAnnotationRequest) returns (.exa.extension_server_pb.AddAnnotationResponse);
+  rpc RemoveAnnotation (.exa.extension_server_pb.RemoveAnnotationRequest) returns (.exa.extension_server_pb.RemoveAnnotationResponse);
+  rpc ShowAnnotation (.exa.extension_server_pb.ShowAnnotationRequest) returns (.exa.extension_server_pb.ShowAnnotationResponse);
+  rpc GetSecretValue (.exa.extension_server_pb.GetSecretValueRequest) returns (.exa.extension_server_pb.GetSecretValueResponse);
+  rpc StoreSecretValue (.exa.extension_server_pb.StoreSecretValueRequest) returns (.exa.extension_server_pb.StoreSecretValueResponse);
+  rpc GetRedirectUri (.exa.extension_server_pb.GetRedirectUriRequest) returns (.exa.extension_server_pb.GetRedirectUriResponse);
+  rpc CancelVibeAndReplace (.exa.extension_server_pb.CancelVibeAndReplaceRequest) returns (.exa.extension_server_pb.CancelVibeAndReplaceResponse);
+  rpc SearchQuery (.exa.extension_server_pb.SearchQueryRequest) returns (.exa.extension_server_pb.SearchQueryResponse);
+  rpc UnmountChanges (.exa.extension_server_pb.UnmountChangesRequest) returns (.exa.extension_server_pb.UnmountChangesResponse);
+  rpc LogoutWindsurf (.exa.extension_server_pb.LogoutWindsurfRequest) returns (.exa.extension_server_pb.LogoutWindsurfResponse);
+  rpc GetNativeValues (.exa.extension_server_pb.GetNativeValuesRequest) returns (.exa.extension_server_pb.GetNativeValuesResponse);
+  rpc SetNativeValue (.exa.extension_server_pb.SetNativeValueRequest) returns (.exa.extension_server_pb.SetNativeValueResponse);
+  rpc ClearNativeValue (.exa.extension_server_pb.ClearNativeValueRequest) returns (.exa.extension_server_pb.ClearNativeValueResponse);
+  rpc SubscribeNativeValues (.exa.extension_server_pb.SubscribeNativeValuesRequest) returns (stream .exa.extension_server_pb.SubscribeNativeValuesResponse);
+}

@@ -1,0 +1,52 @@
+# cargo-deny 0.20.2 policy. Empty targets evaluates every target-specific
+# dependency represented by Cargo.lock; all-features includes optional edges.
+[graph]
+targets = []
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+include-dev = true
+include-build = true
+unused-allowed-license = "deny"
+unused-license-exception = "deny"
+confidence-threshold = 0.8
+# cargo-deny evaluates SPDX expressions existentially across OR and
+# conjunctively across AND: a permissive OR branch may be selected, but every
+# obligation in the selected branch must be allowed.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "bzip2-1.0.6",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Zlib",
+]
+# Copyleft exceptions stay package-scoped: distributions disclose source
+# availability in the native addon's notices
+# (packages/natives/THIRD-PARTY-NOTICES.txt) rather than globally admitting
+# copyleft dependencies.
+exceptions = [
+    # uluru (via omp-vcs → jj-lib → gix → gix-pack) is MPL-2.0: file-level
+    # copyleft, satisfied by upstream source availability; no obligations
+    # attach to our unmodified use.
+    { allow = ["MPL-2.0"], crate = "uluru@3.1.0" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -1,0 +1,37 @@
+# Helm repo/search/list/history output.
+# Strips the "Hang tight..." / "Happy Helming!" banners that clutter agent
+# context without affecting the actual chart/release listing.
+
+[filters.helm]
+description = "Compact helm repo/search/list/history output"
+match_command = "^helm$"
+match_subcommand = "^(repo|search|list|history)$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^W\\d{4}",
+	"^Hang tight while we grab the latest",
+	"^\\.\\.\\.Successfully got an update from",
+	"^\\.\\.\\.Unable to get an update from",
+	"^Update Complete\\.",
+	"^Happy Helming",
+	"^WARNING: Kubernetes configuration file is",
+]
+truncate_lines_at = 250
+max_lines = 80
+on_empty = "helm: ok"
+
+[[tests.helm]]
+name = "strip update banner keep repo list"
+input = "Hang tight while we grab the latest from your chart repositories...\n...Successfully got an update from the \"bitnami\" chart repository\nUpdate Complete.\nNAME\tURL\nbitnami\thttps://charts.bitnami.com/bitnami"
+expected = "NAME\tURL\nbitnami\thttps://charts.bitnami.com/bitnami\n"
+
+[[tests.helm]]
+name = "empty after stripping"
+input = "Hang tight while we grab the latest from your chart repositories...\n"
+expected = "helm: ok"
+
+[[tests.helm]]
+name = "strips glog W-prefix warning and blank line keeps table rows"
+input = "W0419 10:30:00.123456   1234 warnings.go:70] cannot validate\nNAME\tNAMESPACE\tREVISION\nmy-release\tdefault\t3\n\nother-release\tdefault\t1\n"
+expected = "NAME\tNAMESPACE\tREVISION\nmy-release\tdefault\t3\nother-release\tdefault\t1\n"

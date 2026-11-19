@@ -1,0 +1,70 @@
+# xcodebuild compile output — strip build-graph chatter, keep errors and result.
+
+[filters.xcodebuild]
+description = "Compact xcodebuild output"
+match_command = "^xcodebuild$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^CompileC ",
+	"^CompileSwift ",
+	"^CompileSwiftSources ",
+	"^CompileStoryboard ",
+	"^CompileAssetCatalog ",
+	"^Ld ",
+	"^CopyPNGFile ",
+	"^CopySwiftLibs ",
+	"^CopyPlistFile ",
+	"^ProcessInfoPlistFile ",
+	"^ProcessPCH ",
+	"^CreateBuildDirectory ",
+	"^WriteAuxiliaryFile ",
+	"^Touch ",
+	"^PhaseScriptExecution ",
+	"^MkDir ",
+	"^RegisterExecutionPolicyException ",
+	"^SymLink ",
+	"^Building target:",
+	"^\\s+cd ",
+	"^\\s+export ",
+	"^\\s+builtin-",
+	"^CodeSign\\s",
+	"^Signing Identity:",
+	"^RegisterWithLaunchServices",
+	"^Validate\\s",
+	"^ProcessProductPackaging",
+	"^GenerateDSYMFile",
+	"^LinkStoryboards",
+	"^PBXCp\\s",
+	"^SetMode\\s",
+	"^SetOwnerAndGroup\\s",
+	"^Ditto\\s",
+	"^CpResource\\s",
+	"^CpHeader\\s",
+	"^note: Using new build system",
+	"^\\s+/Applications/Xcode",
+	"^\\s+/usr/bin/",
+]
+truncate_lines_at = 300
+max_lines = 80
+on_empty = "xcodebuild: ok"
+
+[[tests.xcodebuild]]
+name = "keeps compile error and build failed"
+input = "CompileC /tmp/x.o main.m\nLd /tmp/bin normal\n/src/Foo.swift:1:1: error: cannot find type 'Bar'\n** BUILD FAILED **"
+expected = "/src/Foo.swift:1:1: error: cannot find type 'Bar'\n** BUILD FAILED **\n"
+
+[[tests.xcodebuild]]
+name = "clean success"
+input = "CompileC /tmp/x.o main.m\n** BUILD SUCCEEDED **"
+expected = "** BUILD SUCCEEDED **\n"
+
+[[tests.xcodebuild]]
+name = "test output keeps test results"
+input = "note: Using new build system\nCompileSwift normal arm64 /Users/dev/AppTests/Tests.swift\n    cd /Users/dev/App\nTest Suite 'All tests' started at 2026-03-10 12:00:00\nTest Suite 'AppTests' started at 2026-03-10 12:00:00\nTest Case '-[AppTests testExample]' passed (0.001 seconds).\nTest Case '-[AppTests testFailing]' failed (0.002 seconds).\nTest Suite 'AppTests' passed at 2026-03-10 12:00:01\nExecuted 2 tests, with 1 failure in 0.003 seconds"
+expected = "Test Suite 'All tests' started at 2026-03-10 12:00:00\nTest Suite 'AppTests' started at 2026-03-10 12:00:00\nTest Case '-[AppTests testExample]' passed (0.001 seconds).\nTest Case '-[AppTests testFailing]' failed (0.002 seconds).\nTest Suite 'AppTests' passed at 2026-03-10 12:00:01\nExecuted 2 tests, with 1 failure in 0.003 seconds\n"
+
+[[tests.xcodebuild]]
+name = "empty input returns on_empty message"
+input = ""
+expected = "xcodebuild: ok"

@@ -1,0 +1,300 @@
+# TUI core renderer — explicit history and viewport contract
+
+This document describes the core renderer contract. The relevant implementation
+lives in:
+
+- [`packages/tui/src/tui.ts`](../packages/tui/src/tui.ts) — frame planning,
+  history emission, viewport diffing, overlays, and cursor placement.
+- [`packages/tui/src/terminal.ts`](../packages/tui/src/terminal.ts) — terminal I/O,
+  capability probes, and private-CSI reassembly.
+- [`packages/tui/src/utils.ts`](../packages/tui/src/utils.ts) — ANSI-aware width,
+  slicing, truncation, and wrapping.
+- [`packages/tui/src/kitty-graphics.ts`](../packages/tui/src/kitty-graphics.ts) and
+  [`packages/tui/src/components/image.ts`](../packages/tui/src/components/image.ts)
+  — inline images and their memory budget.
+
+Application code owns transcript lifecycle. The renderer does not inspect the
+component tree to guess which rows are final.
+
+## 1. Frame ownership
+
+A product installs a `TerminalFrameProvider` with `TUI.setFrameProvider()`. On
+each render the provider receives the current `ViewportSize` and returns a
+`TerminalFramePlan`:
+
+```ts
+interface HistoryBatch {
+	readonly id: number;
+	readonly rows: readonly string[];
+	readonly kind?: "append" | "replay";
+}
+
+interface TerminalFramePlan {
+	readonly history?: HistoryBatch;
+	readonly viewport: readonly string[];
+}
+```
+
+`viewport` is the complete mutable screen image for this frame. An `append`
+history batch contains finalized rows or a stable append-only head row. A
+`replay` batch contains the complete logical ledger, including any naturally
+emitted prefix of the active append-only head. Finality
+is therefore an application decision, never an inference from a row crossing
+the top of the terminal.
+
+A history batch has a monotonic id. The TUI writes each accepted batch exactly
+once, then acknowledges that id to the provider. The provider retains a pending
+batch until acknowledgement and does not reuse or reorder ids. This handshake
+makes retries and coalesced renders safe without requiring the renderer to
+compare a new transcript with terminal scrollback.
+
+`packages/tui/src/chrome/transcript-container.ts` owns the active, settled, and
+committed block lifecycle for the coding agent. Blocks are mutable by default. Assistant/thinking producers
+explicitly opt into append-only presentation and publish only a monotonically
+extending prefix of complete stable semantic rows. Each row re-renders at the
+current width; open Markdown and the current partial suffix remain mutable. Under pressure,
+only the current logical head can emit enough stable rows to relieve overflow without finalizing. Final
+retirement writes only its un-emitted suffix.
+
+## 2. Rendering a frame
+
+For every frame the TUI:
+
+1. Requests a plan from the product's frame provider.
+2. Appends an unacknowledged history batch, if any, exactly once and
+   acknowledges its id.
+3. Anchors the mutable viewport immediately below retained terminal history.
+4. Normalizes and width-fits viewport rows, composites overlays, and emits only
+   the changed viewport rows.
+5. Parks the hardware cursor at the real content position inside the
+   synchronized-output frame.
+
+History and viewport have deliberately different update rules. History is an
+ordered append stream; viewport rows are replaceable and diffed against the
+previous viewport. A replay is one atomic exception: the renderer moves the
+ledger suffix that fits into leading blank viewport rows, retains the prefix as
+history remainder, prepares `remainder || finalViewport`, and performs one
+synchronous `terminal.write`. No block-at-a-time replay frames are observable.
+Ordinary renders never audit or rewrite terminal history.
+
+Without synchronized output (Terminal.app ignores DEC 2026) the terminal may
+present any prefix of a frame's write, so those frames never repaint through
+rows that only moved. Rows about to leave the screen first show their history
+line, line feeds on the bottom row push them into scrollback, surviving rows
+shift into place with DL/IL (never deleting on the top row, which Terminal.app
+archives into scrollback), and only rows that still differ are rewritten. Every
+intermediate screen is the previous frame scrolled or shifted, never a row
+beside its stale copy or an erased band awaiting repaint. Frames with images or
+OSC 66 text keep the plain row-rewrite path.
+
+Visible overlays are screen-coordinate content. They composite over the
+viewport and never become history. Showing, updating, or closing an overlay
+only repaints the viewport.
+
+## 3. Reset and resize behavior
+
+Destructive display resets are gesture-driven. `resetDisplay()` and explicit
+session replacement may clear terminal history and repaint the current product
+state because the user action establishes a new display boundary. Ordinary
+renders never clear history.
+
+A resize invalidates viewport geometry and repaints the viewport at the new
+width and height. After a settled resize, `ResizeScrollbackMode` selects
+how retained history is handled (including cleanup of live rows a height
+shrink may have pushed before the resize callback ran):
+
+- `rebuild` clears native history and replays one current-width transcript;
+- `append` retains native history and appends a current-width transcript copy
+  on width changes (height-only resizes do not append a duplicate);
+- `preserve` repaints only the viewport and leaves old-width history unchanged.
+
+The raw TUI defaults to `preserve` and accepts
+`PI_TUI_RESIZE_SCROLLBACK`; the coding agent defaults to `rebuild`. Append and
+rebuild resize policies each prepare one complete bottom-first replay
+transaction; preserve prepares none. Replay consumes one fresh monotonic history
+id without rewinding logical retirement state, and acknowledgement happens only
+after the synchronous write returns.
+
+In-place resize (Warp by default outside multiplexers/ConPTY, or forced with
+`PI_TUI_RESIZE_IN_PLACE=1`) skips resize replay entirely and repaints once the
+drag settles. `PI_TUI_RESIZE_IN_PLACE=0` forces the borrowed-buffer path.
+See [runtime resize details](./tui-runtime-internals.md#resize).
+
+The renderer never probes the user's scroll position. This keeps updates safe
+while the user is reading older terminal history and avoids terminal- or
+platform-specific finality policy.
+
+## 4. ANSI and width invariants
+
+`visibleWidth`, `truncateToWidth`, `sliceByColumn`, and `wrapTextWithAnsi` share
+one ANSI-aware UAX#11 width model. Measuring, slicing, truncation, and wrapping
+must route through these helpers so escape sequences remain zero-width and
+column boundaries agree.
+
+- Printable ASCII uses the fast one-cell-per-code-unit path.
+- Non-ASCII text uses the shared narrow-ambiguous width model, with a shared
+  terminal/platform-aware Hangul Compatibility Jamo correction.
+- Tabs use `DEFAULT_TAB_WIDTH`.
+- OSC 66 sized spans contribute their declared cell width.
+- Over-wide rows are truncated to the viewport width; the render hot path must
+  not throw for a cosmetic width mismatch.
+
+ANSI state is normalized at row boundaries so independently updated rows remain
+valid. Cursor writes stay inside synchronized output, before ESU, to avoid a
+second visible frame.
+
+## 5. Terminal capabilities and input probes
+
+Terminal detection selects optimizations such as synchronized output, DECCARA,
+and image protocols; it does not change history semantics.
+
+Inside tmux, the pane environment identifies tmux rather than the attached
+emulator. At startup, terminal detection asks the local tmux server for
+`#{client_termtype}` and `#{client_termname}` and maps recognized names through
+the normal capability table: the terminal-type reply first, then a client `TERM`
+that names its emulator (`xterm-kitty`, `xterm-ghostty`, `wezterm`). The pane's
+own `TERM` (`tmux-*`) never selects an image protocol; an unrecognized client
+leaves images to the runtime SIXEL probe. Modified keys still require tmux
+`extended-keys`, while OSC notifications and Kitty graphics require
+`allow-passthrough`.
+
+`ProcessTerminal` pairs capability queries with typed DA1 sentinel owners.
+Private CSI replies may be split across stdin flushes, so reassembly must retain
+partial replies until their terminator and must not leak probe bytes as user
+input. New probes need a typed sentinel owner and byte-by-byte split-reply
+coverage.
+
+SIXEL discovery accepts either a positive XTSMGRAPHICS geometry reply or DA1
+attribute 4. `ProcessTerminal.onSixelSupport` publishes and caches the DA1
+advertisement while consuming the reply bytes and preserving sentinel ownership.
+A missing DA1 attribute does not reject support reported by XTSMGRAPHICS.
+Selecting SIXEL from DA1 does not end a pending XTSMGRAPHICS query: its input
+consumer remains until the graphics reply arrives or the probe times out.
+Explicit `PI_FORCE_IMAGE_PROTOCOL` choices, including `none`/`off`, take priority;
+native TSP surfaces keep their own image transport.
+
+### Native rendering (Tern Surface Protocol)
+
+`ProcessTerminal` also sends the TSP `hello` query (APC `tsp`) behind a `tsp`
+DA1 sentinel owner. `PI_TUI_NATIVE=0` disables it; multiplexers, devenv's
+reloading shell (`DEVENV_RELOAD_FILE`: its terminal layer forwards DA1 but drops
+APC) and Bun tests skip it by default, while `PI_TUI_NATIVE=1` forces the probe
+(tmux still needs `@tern-tsp`). With `TERM_PROGRAM=tern` only a multiplexer's
+session marker counts, not a `screen*`/`tmux*` `TERM` alone, and the debug log
+records once why the pane stayed on rows. A supported-version
+reply switches `TUI` to `native/backend.ts`: components
+are described (`describe()`, or `rows` fallback from `render()`), reconciled
+into document ops (`native/reconcile.ts`) and sent as frames, paced by the
+terminal's acknowledgements instead of the render cadence. None of this
+document's history, viewport, resize-replay or CPR machinery runs on that path;
+SIGWINCH only refreshes the width used by `rows` fallback nodes. While a surface
+is live the nerd symbol preset is forced process-locally, and icon glyphs are
+sent as `icon` spans. The first row paint waits
+up to 300 ms for the probe. Direct Tern sessions optimistically open a surface
+immediately and fall back to rows if the terminal does not confirm it. Such a
+session needs raw input from the start, so a `deferInput` start does not leave
+the tty cooked. The kernel echo that shows typing on other terminals while the
+module graph loads comes from Tern instead: the composer's `editor` node
+carries `typeahead: true` (`Editor.nativeTypeahead`, set by `Composer.start`),
+and Tern keeps the text typed into it, draws it at the caret, and writes it to
+the pty as typed once the prop clears, or ahead of the first key it does not
+keep. Typing that reaches omp during startup (from such a flush, or a Tern
+without typeahead) splits in the TUI: plain typing (printable text, Backspace)
+edits the component focused at start live; the first other key (a shortcut,
+Enter, an arrow, a paste) and every key after it are held, in typing order. A
+dialog that takes focus meanwhile (a startup hook's select or confirm) gets its
+input live, and the hold survives the TUI stop/start of an external editor
+opened from such a dialog. A swapped-in custom editor inherits the hold and
+the typeahead through `Composer.setEditor()` (`TUI.replaceHeldFocus()`), so
+its keys queue behind the held ones, and it keeps the startup submit gate. The
+cell-size reply is still consumed on arrival, and the sixel probe is skipped
+on a TSP terminal, so no probe listener sees held keys. `InteractiveMode.init()`
+calls `Composer.releaseHeldInput()` after startup hooks, mode reconcile, draft
+restore and every session subscription, just before lifting the submit gate:
+`typeahead` clears so Tern sends what it kept, a restored draft goes before
+the text typed during startup, a startup shortcut acts on the final, observed
+session, and a held Enter is still ignored. Ctrl+C/Ctrl+D release the TUI's
+queue early. The
+debug socket's `doc` op returns the reference document
+(every sent frame applied by `native/apply.ts`), and `tsp` returns recent frames.
+
+#### Explicit composer submission
+
+omp's `q: "hello"` advertises `features: ["edit", "undo", "send"]`.
+The `editor`/`input` prop `sendable` is separate from text editability:
+`sendable: true` means the owner is ready to accept an atomic prompt submission.
+An absent or false value is not ready, even if the field is writable or focused.
+Base `Editor` and `Input` fields publish false because they do not handle `send`.
+The prompt `CustomEditor` publishes true only when its `onSubmit` handler exists
+and `disableSubmit` is false.
+
+During interactive bootstrap the composer stays writable with `sendable: false`.
+Once all handlers and subscriptions are ready, init lifts the submit gate and
+requests a render to publish `sendable: true`, without requiring user input.
+A terminal must retain a pending prompt until that readiness update arrives; it
+must not dispatch early, sleep, poll, or defer a simulated Enter.
+
+A terminal that sees `"send"` and a ready composer may submit a supplied prompt
+with an `e` message:
+
+```json
+{ "ev": "send", "sf": "s:1", "id": "k.line/input", "text": "First line\nSecond line" }
+```
+
+`sf` must name a live surface and `id` its editable composer node (the
+`editor` descendant of the `omp.editor` role, normally `<component>.line/input`),
+not the composer wrapper or its Send button. All three payload fields are
+required strings; surface and node ids must be nonempty. Malformed payloads,
+unknown or closed surfaces, and stale/noneditable node targets are ignored.
+The terminal must also require `sendable === true` on the addressed node before
+dispatching the advertised `send` event. The backend resolves the node's owner and delivers
+`{ type: "send", key: "line/input", text }`, independent of keyboard focus.
+
+`CustomEditor` submits this text once through its ordinary `submit()` /
+`onSubmit` path. Multiline text remains one prompt; the usual loaded-text
+normalization, outer-whitespace trimming, command processing, main-versus-viewed
+agent routing and submitted history rules still apply. This is not a paste:
+large prompts do not open the large-paste selection menu, and the terminal
+must not follow the event with a simulated Enter. Empty or whitespace-only
+text is a no-op, never a submission of the existing draft or a stream interrupt.
+Disabled or not-yet-wired composers also leave the draft untouched.
+
+Before a nonblank send replaces a draft, the old text, paste expansions and
+attachments are retained in local recall history (not persisted as a submitted
+prompt). The explicit payload is submitted by itself, without those old
+attachments or paste expansions. Sends wait in the input FIFO until any
+in-flight clipboard/attachment work settles, including failures, so the
+displaced draft is saved only after its pending attachments finish arriving.
+Native Send-button actions keep their existing behavior: they submit the
+current draft rather than an explicit payload.
+
+## 6. Inline images and memory
+
+Kitty images are transmit-once, place-many. `ImageBudget` retains only the most
+recent images; demotion deletes image pixels by id and repaints the affected
+viewport rows with the height-preserving text fallback. It does not replay
+history. An image already retained in terminal history may lose its pixels when
+demoted because historical rows are immutable.
+
+Never retransmit full base64 image data on every frame. Kitty Unicode
+placeholders remain capability-gated and can be overridden with the existing
+image environment settings.
+
+## 7. Core invariants
+
+1. Products decide finality and submit finalized or declared append-only stable
+   rows only through ordered `HistoryBatch` values.
+2. The TUI writes a history batch exactly once and acknowledges its monotonic
+   id; it never derives history from viewport row position.
+3. Ordinary frames diff and repaint the viewport only. They never rewrite,
+   audit, clear, or replay retained history.
+4. Settled resizes follow the configured replay mode without deriving
+   history from cross-width physical row arithmetic.
+5. Only explicit display resets and `rebuild` resize mode destructively clear
+   native history.
+6. Overlays and image-budget changes remain viewport-local.
+7. Width handling uses the shared ANSI-aware helpers and clamps rather than
+   throwing in the render hot path.
+8. The renderer never probes terminal scroll position. Terminal/multiplexer
+   geometry controls resize mechanics (including the in-place no-replay path),
+   not block finality.

@@ -1,0 +1,139 @@
+/**
+ * Custom command types.
+ *
+ * Custom commands are TypeScript modules that define executable slash commands.
+ * Unlike markdown commands which expand to prompts, custom commands can execute
+ * arbitrary logic with full access to the hook context.
+ */
+import type { type as ArkType } from "@oh-my-pi/omptype";
+import type * as TypeBox from "@oh-my-pi/omptype/typebox";
+import type * as zod from "@oh-my-pi/omptype/zod";
+import type { ExtensionUIContext } from "../extensions/types";
+import type { ExecOptions, ExecResult, HookCommandContext } from "../../extensibility/hooks/types";
+import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
+import type * as PiCodingAgent from "../../index";
+
+// Re-export for custom commands to use
+export type { ExecOptions, ExecResult, HookCommandContext };
+
+/** Interactive capabilities available to user-invoked commands, not hooks. */
+export interface CustomCommandContext extends HookCommandContext {
+	ui: ExtensionUIContext;
+}
+
+/**
+ * API passed to custom command factory.
+ * Similar to HookAPI but focused on command needs.
+ */
+export interface CustomCommandAPI {
+	/** Current working directory */
+	cwd: string;
+	/** Execute a shell command */
+	exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
+	/** Injected TypeBox shim (legacy/compat). */
+	typebox: typeof TypeBox;
+	/** Injected omptype schema builder for custom commands. */
+	arktype: typeof ArkType & { type: typeof ArkType };
+	/** Injected Zod-compatible omptype builder for custom commands. */
+	zod: typeof zod;
+	/** Injected pi-coding-agent exports */
+	pi: typeof PiCodingAgent;
+}
+
+/**
+ * Custom command definition.
+ *
+ * Commands can either:
+ * - Return a string to be sent to the LLM as a prompt
+ * - Return void/undefined to do nothing (fire-and-forget)
+ *
+ * @example
+ * ```typescript
+ * const factory: CustomCommandFactory = (pi) => ({
+ *	  name: "deploy",
+ *	  description: "Deploy current branch to staging",
+ *	  async execute(args, ctx) {
+ *		 const env = args[0] || "staging";
+ *		 const confirmed = await ctx.ui.confirm("Deploy", `Deploy to ${env}?`);
+ *		 if (!confirmed) return;
+ *
+ *		 const result = await pi.exec("./deploy.sh", [env]);
+ *		 if (result.exitCode !== 0) {
+ *			ctx.ui.notify(`Deploy failed: ${result.stderr}`, "error");
+ *			return;
+ *		 }
+ *
+ *		 ctx.ui.notify("Deploy successful!", "info");
+ *		 // No return = no prompt sent to LLM
+ *	  }
+ * });
+ * ```
+ *
+ * @example
+ * ```typescript
+ * // Return a prompt to send to the LLM
+ * const factory: CustomCommandFactory = (pi) => ({
+ *	  name: "git:status",
+ *	  description: "Show git status and suggest actions",
+ *	  async execute(args, ctx) {
+ *		 const result = await pi.exec("git", ["status", "--porcelain"]);
+ *		 return `Here's the git status:\n\`\`\`\n${result.stdout}\`\`\`\nSuggest what to do next.`;
+ *	  }
+ * });
+ * ```
+ */
+export interface CustomCommand {
+	/** Command name (can include namespace like "git:commit") */
+	name: string;
+	/** Description shown in command autocomplete */
+	description: string;
+	/**
+	 * Optional argument completions shown in the slash-command autocomplete UI.
+	 * @param cwd - Live session working directory (follows /move and /wt)
+	 */
+	getArgumentCompletions?(
+		argumentPrefix: string,
+		cwd: string,
+	): Promise<AutocompleteItem[] | null> | AutocompleteItem[] | null;
+	/**
+	 * Execute the command.
+	 * @param args - Parsed command arguments
+	 * @param ctx - Command context with UI and session control
+	 * @param rawArgs - Exact unparsed argument remainder after the command name, including whitespace, quotes, and newlines
+	 * @returns String to send as prompt, or void for fire-and-forget
+	 */
+	execute(
+		args: string[],
+		ctx: CustomCommandContext,
+		rawArgs?: string,
+	): Promise<string | undefined> | string | undefined;
+}
+
+/**
+ * Factory function that creates custom command(s).
+ * Can return a single command or an array of commands.
+ */
+export type CustomCommandFactory = (
+	api: CustomCommandAPI,
+) => CustomCommand | CustomCommand[] | Promise<CustomCommand | CustomCommand[]>;
+
+/** Source of a loaded custom command */
+export type CustomCommandSource = "bundled" | "user" | "project";
+
+/** Loaded custom command with metadata */
+export interface LoadedCustomCommand {
+	/** Original path to the command module */
+	path: string;
+	/** Resolved absolute path */
+	resolvedPath: string;
+	/** The command definition */
+	command: CustomCommand;
+	/** Where the command was loaded from */
+	source: CustomCommandSource;
+}
+
+/** Result from loading custom commands */
+export interface CustomCommandsLoadResult {
+	commands: LoadedCustomCommand[];
+	errors: Array<{ path: string; error: string }>;
+}

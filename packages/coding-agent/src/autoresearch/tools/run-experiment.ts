@@ -1,0 +1,395 @@
+import { runExperimentToolRenderer } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+
+import { formatBytes, procmgr } from "@oh-my-pi/pi-utils";
+import { Settings } from "../../config/settings";
+import { executeBash } from "../../exec/bash-executor";
+import type { ToolDefinition } from "../../extensibility/extensions";
+
+import {
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	TailBuffer,
+	type TruncationResult,
+	truncateTail,
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
+
+import { parseWorkDirDirtyPaths } from "../git";
+import {
+	EXPERIMENT_MAX_BYTES,
+	EXPERIMENT_MAX_LINES,
+	ExperimentOutputScanner,
+	tryGitPrefix,
+	tryGitStatus,
+} from "../helpers";
+import { formatNum } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import { formatElapsed } from "@oh-my-pi/pi-tui/apps/autoresearch-data";
+import { buildExperimentState } from "../state";
+import { quotePosixArgument } from "../../utils/shell-quote";
+import { openAutoresearchStorageIfExists } from "../storage";
+import type { AutoresearchToolFactoryOptions } from "../types";
+import type { ASIData, RunDetails, RunExperimentProgressDetails } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import { DEFAULT_HARNESS_COMMAND, HARNESS_FILENAME } from "@oh-my-pi/pi-tui/tools/autoresearch";
+
+const runExperimentSchema = type({
+	"timeout_seconds?": type("number").describe("timeout in seconds (default 600)"),
+});
+
+interface ProcessExecutionResult {
+	exitCode: number | null;
+	killed: boolean;
+	logPath: string;
+	/** Tail truncation for the LLM preview ({@link EXPERIMENT_MAX_BYTES}/{@link EXPERIMENT_MAX_LINES}). */
+	llmTruncation: TruncationResult;
+	/** Tail truncation for the rendered output (default budgets). */
+	displayTruncation: TruncationResult;
+	metrics: Map<string, number>;
+	asi: ASIData | null;
+}
+
+interface ProgressSnapshot {
+	elapsed: string;
+	runDirectory: string;
+	fullOutputPath: string;
+	tailOutput: string;
+	truncation?: RunExperimentProgressDetails["truncation"];
+}
+
+export function createRunExperimentTool(
+	options: AutoresearchToolFactoryOptions,
+): ToolDefinition<typeof runExperimentSchema, RunDetails | RunExperimentProgressDetails> {
+	return {
+		...runExperimentToolRenderer,
+		name: "run_experiment",
+		label: "Run Experiment",
+		description:
+			"Run any benchmark command. Output is captured automatically; `METRIC name=value` and `ASI key=value` lines printed by the command are parsed.",
+		parameters: runExperimentSchema,
+		defaultInactive: true,
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			const storage = await openAutoresearchStorageIfExists(ctx.cwd);
+			const currentBranch = (await vcs.git(ctx.cwd)?.currentBranch()) ?? null;
+			const session = storage?.getActiveSessionForBranch(currentBranch) ?? null;
+			if (!storage || !session) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Error: no active autoresearch session for the current branch. Call init_experiment first.",
+						},
+					],
+				};
+			}
+
+			const runtime = options.getRuntime(ctx);
+
+			const abandonedPriorRun = (() => {
+				const pending = storage.getPendingRun(session.id);
+				if (!pending) return null;
+				storage.abandonPendingRuns(session.id);
+				return pending.id;
+			})();
+
+			const resolvedCommand = DEFAULT_HARNESS_COMMAND;
+			const preRunStatus = await tryGitStatus(ctx.cwd);
+			const workDirPrefix = await tryGitPrefix(ctx.cwd);
+			const preRunDirtyPaths = parseWorkDirDirtyPaths(preRunStatus, workDirPrefix);
+
+			const startedAt = Date.now();
+			const insertedRun = storage.insertRun({
+				sessionId: session.id,
+				segment: session.currentSegment,
+				command: resolvedCommand,
+				logPath: "", // patched after we know the run id
+				preRunDirtyPaths,
+				startedAt,
+			});
+
+			const runDirectory = path.join(storage.projectDir, "runs", String(insertedRun.id).padStart(4, "0"));
+			const benchmarkLogPath = path.join(runDirectory, "benchmark.log");
+			fs.mkdirSync(runDirectory, { recursive: true });
+			storage.updateRunLogPath(insertedRun.id, benchmarkLogPath);
+
+			runtime.lastRunDuration = null;
+			runtime.lastRunAsi = null;
+			runtime.lastRunArtifactDir = runDirectory;
+			runtime.lastRunNumber = insertedRun.id;
+			runtime.lastRunSummary = null;
+			runtime.runningExperiment = {
+				startedAt,
+				command: resolvedCommand,
+				runDirectory,
+				runNumber: insertedRun.id,
+			};
+			options.dashboard.updateWidget(ctx, runtime);
+			options.dashboard.requestRender();
+
+			const timeoutMs = Math.max(0, Math.floor((params.timeout_seconds ?? 600) * 1000));
+			let execution: ProcessExecutionResult;
+			try {
+				execution = await executeProcess({
+					command: await resolveHarnessExecLine(),
+					cwd: ctx.cwd,
+					logPath: benchmarkLogPath,
+					timeoutMs,
+					signal,
+					onProgress: details => {
+						onUpdate?.({
+							content: [{ type: "text", text: details.tailOutput }],
+							details: {
+								phase: "running",
+								elapsed: details.elapsed,
+								truncation: details.truncation,
+								fullOutputPath: details.fullOutputPath,
+								runDirectory: details.runDirectory,
+							},
+						});
+					},
+				});
+			} finally {
+				runtime.runningExperiment = null;
+				options.dashboard.updateWidget(ctx, runtime);
+				options.dashboard.requestRender();
+			}
+
+			const completedAt = Date.now();
+			const durationMs = completedAt - startedAt;
+			const durationSeconds = durationMs / 1000;
+			runtime.lastRunDuration = durationSeconds;
+
+			const { llmTruncation, displayTruncation } = execution;
+			const parsedMetricsMap = execution.metrics;
+			const parsedMetrics = parsedMetricsMap.size > 0 ? Object.fromEntries(parsedMetricsMap.entries()) : null;
+			const parsedPrimary = parsedMetricsMap.get(session.primaryMetric) ?? null;
+			const parsedAsi = execution.asi;
+			runtime.lastRunAsi = parsedAsi;
+
+			storage.markRunCompleted({
+				runId: insertedRun.id,
+				completedAt,
+				durationMs,
+				exitCode: execution.exitCode,
+				timedOut: execution.killed,
+				parsedPrimary,
+				parsedMetrics,
+				parsedAsi,
+			});
+
+			const passed = execution.exitCode === 0 && !execution.killed;
+			const resultDetails: RunDetails = {
+				runNumber: insertedRun.id,
+				runDirectory,
+				benchmarkLogPath,
+				command: resolvedCommand,
+				exitCode: execution.exitCode,
+				durationSeconds,
+				passed,
+				crashed: execution.exitCode !== 0 || execution.killed,
+				timedOut: execution.killed,
+				tailOutput: displayTruncation.content,
+				parsedMetrics,
+				parsedPrimary,
+				parsedAsi,
+				metricName: session.primaryMetric,
+				metricUnit: session.metricUnit,
+				preRunDirtyPaths,
+				abandonedPriorRun,
+				truncation: llmTruncation.truncated ? llmTruncation : undefined,
+				fullOutputPath: execution.logPath,
+			};
+
+			runtime.lastRunSummary = {
+				command: resolvedCommand,
+				durationSeconds,
+				parsedAsi,
+				parsedMetrics,
+				parsedPrimary,
+				passed,
+				preRunDirtyPaths,
+				runDirectory,
+				runNumber: insertedRun.id,
+				exitCode: execution.exitCode,
+				timedOut: execution.killed,
+			};
+			runtime.autoResumeArmed = true;
+			runtime.lastAutoResumePendingRunNumber = null;
+
+			// Refresh state to reflect any prior abandonment changes (logged set unchanged).
+			const refreshedSession = storage.getSessionById(session.id);
+			if (refreshedSession) {
+				runtime.state = buildExperimentState(refreshedSession, storage.listLoggedRuns(session.id));
+			}
+			options.dashboard.updateWidget(ctx, runtime);
+			options.dashboard.requestRender();
+
+			const headerLines: string[] = [];
+			if (abandonedPriorRun !== null) {
+				headerLines.push(`Note: abandoned prior pending run #${abandonedPriorRun} before starting this run.`);
+			}
+			const warningPrefix = headerLines.length > 0 ? `${headerLines.join("\n")}\n\n` : "";
+
+			return {
+				content: [
+					{
+						type: "text",
+						text: warningPrefix + buildRunText(resultDetails, llmTruncation.content, runtime.state.bestMetric),
+					},
+				],
+				details: resultDetails,
+			};
+		},
+	};
+}
+
+/**
+ * Shell line that actually runs the harness; the recorded command stays
+ * {@link DEFAULT_HARNESS_COMMAND}. On Windows a bare `bash` resolves through
+ * PATH to the WSL launcher (`WindowsApps\bash.exe` / `System32\bash.exe`),
+ * which runs the harness inside a Linux VM with a different toolchain and env,
+ * or fails outright when WSL is unavailable. Use the resolved host shell (Git
+ * Bash, or the configured `shellPath`) when it is POSIX.
+ */
+async function resolveHarnessExecLine(): Promise<string> {
+	if (process.platform !== "win32") return DEFAULT_HARNESS_COMMAND;
+	const { shell } = (await Settings.init()).getShellConfig();
+	if (!procmgr.isPosixShell(shell)) return DEFAULT_HARNESS_COMMAND;
+	return `${quotePosixArgument(shell)} ${HARNESS_FILENAME}`;
+}
+
+async function executeProcess(opts: {
+	command: string;
+	cwd: string;
+	logPath: string;
+	timeoutMs: number;
+	signal?: AbortSignal;
+	onProgress?(details: ProgressSnapshot): void;
+}): Promise<ProcessExecutionResult> {
+	// Holds 2× the largest truncation budget, so tail truncations of it equal those of the full log.
+	const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES * 2);
+	const scanner = new ExperimentOutputScanner();
+	let totalBytes = 0;
+	let newlineCount = 0;
+
+	const startedAt = Date.now();
+	const snapshot = (): ProgressSnapshot => {
+		const tail = truncateTail(tailBuffer.text(), {
+			maxBytes: DEFAULT_MAX_BYTES,
+			maxLines: DEFAULT_MAX_LINES,
+		});
+		return {
+			elapsed: formatElapsed(Date.now() - startedAt),
+			runDirectory: path.dirname(opts.logPath),
+			fullOutputPath: opts.logPath,
+			tailOutput: tail.content,
+			truncation: tail.truncated ? tail : undefined,
+		};
+	};
+
+	const progressTimer = opts.onProgress
+		? setInterval(() => {
+				opts.onProgress?.(snapshot());
+			}, 1000)
+		: undefined;
+
+	const logSink = Bun.file(opts.logPath).writer();
+	let logSinkClosed = false;
+	const closeLogSink = async (): Promise<void> => {
+		if (logSinkClosed) return;
+		logSinkClosed = true;
+		await logSink.end();
+	};
+	try {
+		const result = await executeBash(opts.command, {
+			cwd: opts.cwd,
+			sessionKey: `autoresearch:${opts.cwd}`,
+			timeout: opts.timeoutMs > 0 ? opts.timeoutMs : 2_147_000_000,
+			signal: opts.signal,
+			chunkThrottleMs: 0,
+			onChunk: chunk => {
+				tailBuffer.append(chunk);
+				logSink.write(chunk);
+				scanner.append(chunk);
+				totalBytes += Buffer.byteLength(chunk, "utf-8");
+				for (let index = chunk.indexOf("\n"); index !== -1; index = chunk.indexOf("\n", index + 1)) {
+					newlineCount += 1;
+				}
+			},
+		});
+		await closeLogSink();
+		if (opts.signal?.aborted) {
+			throw new Error("aborted");
+		}
+
+		const tail = tailBuffer.text();
+		const totals = { totalLines: newlineCount + 1, totalBytes };
+		const { metrics, asi } = scanner.finish();
+		return {
+			exitCode: result.exitCode ?? null,
+			killed: result.cancelled,
+			logPath: opts.logPath,
+			llmTruncation: {
+				...truncateTail(tail, { maxBytes: EXPERIMENT_MAX_BYTES, maxLines: EXPERIMENT_MAX_LINES }),
+				...totals,
+			},
+			displayTruncation: {
+				...truncateTail(tail, { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES }),
+				...totals,
+			},
+			metrics,
+			asi,
+		};
+	} finally {
+		if (progressTimer) clearInterval(progressTimer);
+		if (!logSinkClosed) {
+			try {
+				await closeLogSink();
+			} catch {
+				// Preserve the command failure when cleanup is best-effort.
+			}
+		}
+	}
+}
+
+function buildRunText(details: RunDetails, outputPreview: string, bestMetric: number | null): string {
+	const lines: string[] = [];
+	lines.push(`Run #${details.runNumber} directory: ${details.runDirectory}`);
+	if (details.timedOut) {
+		lines.push(`TIMEOUT after ${details.durationSeconds.toFixed(1)}s`);
+	} else if (details.exitCode !== 0) {
+		lines.push(`FAILED with exit code ${details.exitCode} in ${details.durationSeconds.toFixed(1)}s`);
+	} else {
+		lines.push(`PASSED in ${details.durationSeconds.toFixed(1)}s`);
+	}
+	if (bestMetric !== null) {
+		lines.push(`Current baseline ${details.metricName}: ${formatNum(bestMetric, details.metricUnit)}`);
+	}
+	if (details.parsedPrimary !== null) {
+		lines.push(`Parsed ${details.metricName}: ${details.parsedPrimary}`);
+		lines.push(`Next log_experiment metric: ${details.parsedPrimary}`);
+	}
+	if (details.parsedMetrics) {
+		const secondaryEntries = Object.entries(details.parsedMetrics)
+			.filter(([name]) => name !== details.metricName)
+			.map(([name, value]) => [name, value] as const);
+		const secondary = secondaryEntries.map(([name, value]) => `${name}=${value}`);
+		if (secondary.length > 0) {
+			lines.push(`Parsed metrics: ${secondary.join(", ")}`);
+			lines.push(`Next log_experiment metrics: ${JSON.stringify(Object.fromEntries(secondaryEntries))}`);
+		}
+	}
+	if (details.parsedAsi) {
+		lines.push(`Parsed ASI keys: ${Object.keys(details.parsedAsi).join(", ")}`);
+	}
+	lines.push("");
+	lines.push(outputPreview);
+	if (details.truncation && details.fullOutputPath) {
+		lines.push("");
+		lines.push(
+			`Output truncated (${formatBytes(EXPERIMENT_MAX_BYTES)} limit). Full output: ${details.fullOutputPath}`,
+		);
+	}
+	return lines.join("\n").trimEnd();
+}

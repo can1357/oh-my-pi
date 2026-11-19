@@ -1,0 +1,243 @@
+f() { echo a; echo b | cat; a && b || c; ! d }f () {
+	echo a
+	echo b | cat
+	a && b || c
+	! d
+}f() { if a; then b; elif c; then d; else e; fi }f () {
+	if a
+	then
+		b
+	elif c
+	then
+		d
+	else
+		e
+	fi
+}f() { for i in 1 2; do echo $i; done; for i (a b) echo; for ((i=0;i<3;i++)) echo $i; for a b in 1 2 3 4; do :; done }f () {
+	for i in 1 2
+	do
+		echo $i
+	done
+	for i in a b
+	do
+		echo
+	done
+	for ((i=0; i<3; i++)) do
+		echo $i
+	done
+	for a b in 1 2 3 4
+	do
+		:
+	done
+}f() { while a; do b; done; until a; do b; done; repeat 3 echo x; repeat $n; do x; done }f () {
+	while a
+	do
+		b
+	done
+	until a
+	do
+		b
+	done
+	repeat 3
+	do
+		echo x
+	done
+	repeat $n
+	do
+		x
+	done
+}f() { case $a in (a|b) x;; c) y;& d|e) z;| *) ;; esac; case x in esac }f () {
+	case $a in
+		(a|b) x ;;
+		(c) y ;&
+		(d | e) z ;|
+		(*)  ;;
+	esac
+	case x in
+	esac
+}f() { { a; b } always { c }; (a; b); { x } }f () {
+	{
+		a
+		b
+	} always {
+		c
+	}
+	(
+		a
+		b
+	)
+	{
+		x
+	}
+}f() { [[ -n $a && ( $b == c* || ! -f d ) ]]; (( i++ )); [[ a ]]; [[ a < b ]] }f () {
+	[[ -n $a && ( $b == c* || ! -f d ) ]]
+	(( i++ ))
+	[[ -n a ]]
+	[[ a < b ]]
+}f() { cat <<EOF
+hello $x
+EOF
+cat <<-'E' >f
+	tab
+	E
+echo after; }f () {
+	cat <<EOF
+hello $x
+EOF
+	cat <<'E' > f
+tab
+E
+	echo after
+}f() { a=1 b=(x y) cmd >o 2>&1 <i >>a 2>>b >|c &>d &>|e >&2 3<&- <<<str {fd}>x; local x=1 y; typeset -A h=([a]=1 [b]=2) }f () {
+	a=1 b=(x y) cmd > o 2>&1 < i >> a 2>> b >| c &> d &>| e >&2 3<&- <<< str {fd}> x
+	local x=1 y 
+	typeset -A h=([a]=1 [b]=2) 
+}f() { () { echo $1 } a b; function { echo anon }; g() { inner }; function h { x } }f () {
+	() {
+		echo $1
+	} a b
+	() {
+		echo anon
+	}
+	g () {
+		inner
+	}
+	h () {
+		x
+	}
+}f() { time a | b; coproc c; a &; b &|; nocorrect ls; select x in a b; do :; done }f () {
+	time a | b
+	coproc c
+	a &
+	b &|
+	ls
+	select x in a b
+	do
+	:
+	done
+}f() { echo ${(f)"$(cat x)"} *(.N) =(ls) <1-5> (#i)a ${a[1]} $x[2] "$(cmd)" `bq` $((1+2)) $'a\tb' }f () {
+	echo ${(f)"$(cat x)"} *(.N) =(ls) <1-5> (#i)a ${a[1]} $x[2] "$(cmd)" `bq` $((1+2)) $'a\tb'
+}f() { a=1 >f; x=1; for x in; do :; done; {}; case a in (x) b; c;; (y) d & ;; esac }f () {
+	a=1  > f
+	x=1 
+	for x in 
+	do
+		:
+	done
+	{
+		
+	}
+	case a in
+		(x) b
+			c ;;
+		(y) d & ;;
+	esac
+}f() { time { a; b }; cat 3<<EOF; a >f |& b
+x
+EOF
+echo ${a:-b} "q $x" 'sq' \$x }f () {
+	time {
+			a
+			b
+		}
+	cat 3<<EOF
+x
+EOF
+	a > f 2>&1 | b
+	echo ${a:-b} "q $x" 'sq' \$x
+}f() { if a; then b & fi; while a; b; do c; done; until { a }; do b; done }f () {
+	if a
+	then
+		b &
+	fi
+	while a
+		b
+	do
+		c
+	done
+	until {
+			a
+		}
+	do
+		b
+	done
+}f() { x=$(echo a; echo b) y=`x`; echo $(
+ cmd
+) }f () {
+	x=$(echo a; echo b) y=`x` 
+	echo $(
+ cmd
+)
+}f() { [[ $a = b && $c != d ]]; [[ a -ef b ]]; [[ -o opt ]]; [[ x == (#i)y* ]] }f () {
+	[[ $a = b && $c != d ]]
+	[[ a -ef b ]]
+	[[ -o opt ]]
+	[[ x == (#i)y* ]]
+}f() { a | b && c; ! a | b }f () {
+	a | b && c
+	! a | b
+}f() { [[ -f ]]; [[ a -nt b ]]; [[ -x a b ]]; [[ a =~ b ]]; [[ ! ! a ]]; [[ (a || b) || c ]]; [[ a && b || c ]]; [[ a || b && c ]] }f () {
+	[[ -f  ]]
+	[[ a -nt b ]]
+	[[ -x a b ]]
+	[[ a =~ b ]]
+	[[ ! ( ! -n a ) ]]
+	[[ -n a || -n b || -n c ]]
+	[[ ( -n a && -n b ) || -n c ]]
+	[[ -n a || ( -n b && -n c ) ]]
+}f() { echo a } >/dev/nullf () {
+	echo a
+} > /dev/nullf() {}f () {
+	
+}f() (a)f () {
+	(
+		a
+	)
+}f() echo hif () {
+	echo hi
+}f() { a=(1 [k]=v); x[2]=3; y+=4 }f () {
+	a=(1 [k]=v) 
+	x[2]=3 
+	y+=4 
+}f() { echo $(( 1 + 2 )) $[ 3 ] }f () {
+	echo $(( 1 + 2 )) $[ 3 ]
+}f() { ( a ) && { b } || c; !; time; coproc; }f () {
+	(
+		a
+	) && {
+		b
+	} || c
+	!
+	time
+	coproc
+}f() { x() { y() { z } } }f () {
+	x () {
+		y () {
+			z
+		}
+	}
+}f() { for i; do echo; done; while true; do break; done }f () {
+	for i
+	do
+		echo
+	done
+	while true
+	do
+		break
+	done
+}f() { if a; then; else b; fi; print -r -- "${(j: :)@}" }f () {
+	if a
+	then
+		
+	else
+		b
+	fi
+	print -r -- "${(j: :)@}"
+}f() { echo a\
+b 'c
+d' "e
+f" }f () {
+	echo ab 'c
+d' "e
+f"
+}

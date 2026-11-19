@@ -1,0 +1,157 @@
+syntax = "proto3";
+
+package exa.trust_pb;
+
+import "google/protobuf/timestamp.proto";
+
+enum TrustEventSource {
+  TRUST_EVENT_SOURCE_UNSPECIFIED = 0;
+  TRUST_EVENT_SOURCE_API_SERVER = 1;
+  TRUST_EVENT_SOURCE_DEVIN_WEBSERVER = 2;
+  TRUST_EVENT_SOURCE_INTERNAL_DETECTOR = 3;
+}
+
+enum TrustIdentifierType {
+  TRUST_IDENTIFIER_TYPE_UNSPECIFIED = 0;
+  TRUST_IDENTIFIER_TYPE_EMAIL = 1;
+  TRUST_IDENTIFIER_TYPE_DEVIN_USER_ID = 2;
+  TRUST_IDENTIFIER_TYPE_DEVIN_ACCOUNT_ID = 3;
+}
+
+enum TrustQueryKeyType {
+  TRUST_QUERY_KEY_TYPE_UNSPECIFIED = 0;
+  TRUST_QUERY_KEY_TYPE_AUTH_UID = 1;
+  TRUST_QUERY_KEY_TYPE_DEVIN_USER_ID = 2;
+  TRUST_QUERY_KEY_TYPE_DEVIN_ACCOUNT_ID = 3;
+}
+
+enum ManualTrustVerdict {
+  MANUAL_TRUST_VERDICT_UNSPECIFIED = 0;
+  MANUAL_TRUST_VERDICT_TRUST = 1;
+  MANUAL_TRUST_VERDICT_DISTRUST = 2;
+}
+
+message TrustIdentifier {
+  .exa.trust_pb.TrustIdentifierType identifier_type = 1;
+  string identifier = 2;
+}
+
+message TrustQueryKey {
+  .exa.trust_pb.TrustQueryKeyType key_type = 1;
+  string key = 2;
+}
+
+message TrustEvent {
+  reserved 2;
+
+  .google.protobuf.Timestamp observed_at = 1;
+  .exa.trust_pb.TrustEventSource source = 3;
+  string idempotency_key = 4;
+  oneof signal {
+    .exa.trust_pb.UnknownSignal unknown = 5;
+    .exa.trust_pb.ProvidersExhaustedSignal providers_exhausted = 6;
+    .exa.trust_pb.CrossModelRateLimitSignal cross_model_rate_limit = 7;
+    .exa.trust_pb.AccountFanoutSignal account_fanout = 8;
+    .exa.trust_pb.MultiIpTrajectorySignal multi_ip_trajectory = 9;
+    .exa.trust_pb.CyberAbuseEvent cyber_abuse = 10;
+    .exa.trust_pb.OpenAIBlockedUserEvent openai_blocked_user = 11;
+    .exa.trust_pb.SuspiciousUserAgentSignal suspicious_user_agent = 12;
+    .exa.trust_pb.ManualTrustSignal manual_trust = 14;
+    .exa.trust_pb.HunterEmailVerificationSignal hunter_email_verification = 17;
+  }
+  repeated .exa.trust_pb.TrustIdentifier identifiers = 13;
+  .exa.trust_pb.TrustQueryKey query_key = 15;
+}
+
+message UnknownSignal {
+}
+
+message ProvidersExhaustedSignal {
+  string model_uid = 1;
+  string tier = 2;
+  int32 total_attempts = 3;
+  string last_error_code = 4;
+  string last_error_message = 5;
+  int32 providers_tried = 6;
+  string auth_uid = 7;
+}
+
+message CrossModelRateLimitSignal {
+  string model_uid = 1;
+  string tier = 2;
+  int64 count = 3;
+  int64 limit = 4;
+  int32 period_seconds = 5;
+  bool email_mismatch = 6;
+  string auth_uid = 7;
+}
+
+message AccountFanoutSignal {
+  string auth_uid = 1;
+  string identity = 2;
+  string account_id = 3;
+  bool is_trial = 4;
+}
+
+message MultiIpTrajectorySignal {
+  string auth_uid = 1;
+  int64 ip_count = 2;
+  int64 threshold = 3;
+  int32 window_seconds = 4;
+  string tier = 5;
+  string email = 6;
+  bool enforced = 7;
+}
+
+message CyberAbuseEvent {
+  string auth_uid = 1;
+  string provider = 2;
+  string event_type = 3;
+  string model_uid = 4;
+  string tier = 5;
+}
+
+message OpenAIBlockedUserEvent {
+  string auth_uid = 1;
+  string provider = 2;
+  string model_uid = 3;
+  string tier = 4;
+}
+
+message SuspiciousUserAgentSignal {
+  string auth_uid = 1;
+  string user_agent = 2;
+  string matched_prefix = 3;
+}
+
+message ManualTrustSignal {
+  string auth_uid = 1;
+  .exa.trust_pb.ManualTrustVerdict verdict = 2;
+  int32 percent = 3;
+  string reason = 4;
+  string flagged_by = 5;
+}
+
+message HunterEmailVerificationSignal {
+  string email = 1;
+  string result = 2;
+  string status = 3;
+  int32 score = 4;
+  bool regexp = 5;
+  bool gibberish = 6;
+  bool disposable = 7;
+  bool webmail = 8;
+  bool mx_records = 9;
+  bool smtp_server = 10;
+  bool smtp_check = 11;
+  bool accept_all = 12;
+  bool block = 13;
+  int32 sources_count = 14;
+}
+
+message RecordTrustEventsRequest {
+  repeated .exa.trust_pb.TrustEvent events = 1;
+}
+
+message RecordTrustEventsResponse {
+}

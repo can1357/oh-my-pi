@@ -1,0 +1,5 @@
+auth "alibaba-coding-plan" {
+	name "Alibaba Coding Plan"
+	login "custom" hook="alibaba-coding-plan"
+	api-key-format "structured"
+}

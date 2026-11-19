@@ -1,0 +1,28 @@
+auth "devin" {
+	name "Devin"
+	login "oauth-code" {
+		authorize-url "https://app.devin.ai/auth/cli/continue"
+		pkce #true
+		state "uuid"
+		authorize-params {
+			prompt "select_account"
+		}
+		instructions "Sign in to Devin in your browser."
+		callback port=59653 path="/callback" hostname="127.0.0.1"
+		token url="https://api.devin.ai/auth/cli/token" body="json" standard=#false {
+			params {
+				code "{code}"
+				code_verifier "{code_verifier}"
+			}
+			headers { Accept "application/json" }
+		}
+		credential {
+			access "token"
+			refresh "token"
+			expires "jwt" fallback-ms=31536000000
+			api-endpoint literal="https://api.devin.ai"
+			enterprise-url literal="https://app.devin.ai"
+		}
+	}
+	refresh "none"
+}

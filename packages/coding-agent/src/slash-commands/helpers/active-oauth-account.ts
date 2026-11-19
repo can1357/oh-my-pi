@@ -1,0 +1,162 @@
+import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+import type { OAuthAccountIdentity } from "../../session/auth-storage";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
+
+/** Codex's orgName is the login-time plan, not a workspace name. */
+export function codexUsagePlan(report: UsageReport): string | undefined {
+	if (report.provider !== "openai-codex") return undefined;
+	const plan = report.metadata?.planType;
+	if (typeof plan !== "string" || !plan.trim()) return undefined;
+	return sanitizeText(plan.trim().replace(/[\r\n\t]+/g, " "));
+}
+
+/** OAuth identity a usage report is attributed to, from its metadata or its limits' scopes. */
+export function usageReportIdentity(report: UsageReport): OAuthAccountIdentity {
+	const metadata = report.metadata ?? {};
+	const read = (key: keyof OAuthAccountIdentity): string | undefined => {
+		const value = metadata[key];
+		return typeof value === "string" && value.length > 0 ? value : undefined;
+	};
+	const firstScoped = (key: "accountId" | "projectId" | "orgId"): string | undefined => {
+		for (const limit of report.limits) {
+			const value = limit.scope[key];
+			if (value) return value;
+		}
+		return undefined;
+	};
+	return {
+		email: read("email"),
+		accountId: read("accountId") ?? firstScoped("accountId"),
+		projectId: read("projectId") ?? firstScoped("projectId"),
+		orgId: read("orgId") ?? firstScoped("orgId"),
+		orgName: read("orgName"),
+	};
+}
+
+/** Qualify Codex identities only when two reports have the same email. */
+export function formatCodexUsageReportLabel(
+	report: UsageReport,
+	peers: readonly UsageReport[],
+	base: string,
+	redaction?: Map<string, string>,
+	includePlan = true,
+	orgStyle: "inline" | "parenthesized" = "parenthesized",
+): string {
+	const email = report.metadata?.email;
+	const collision =
+		typeof email === "string" && !!email && peers.some(peer => peer !== report && peer.metadata?.email === email);
+	const rawOrg = collision
+		? (report.metadata?.orgId ?? report.metadata?.accountId ?? `account ${peers.indexOf(report) + 1}`)
+		: undefined;
+	const clean = (value: string): string => sanitizeText((redaction?.get(value) ?? value).replace(/[\r\n\t]+/g, " "));
+	const org =
+		typeof rawOrg === "string" && rawOrg && rawOrg !== base
+			? orgStyle === "inline"
+				? ` · ${clean(rawOrg)}`
+				: ` (${clean(rawOrg)})`
+			: "";
+	const identity = clean(base);
+	const plan = includePlan ? codexUsagePlan(report) : undefined;
+	return `${identity}${org}${plan ? ` · plan: ${plan}` : ""}`;
+}
+
+/**
+ * Identity a usage limit is attributed to: an OAuth account identity, or —
+ * when the account has no OAuth identifiers at all (API-key credentials) — a
+ * durable credential row id. See {@link limitMatchesActiveAccount}.
+ */
+export type ActiveAccountIdentity = OAuthAccountIdentity & { credentialId?: number };
+
+function normalizeIdentityValue(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;
+}
+
+/**
+ * Session marker label for an active OAuth identity: the base identifier
+ * (email → accountId → projectId) suffixed with the organization when present
+ * and distinct. Same-email Anthropic multi-org accounts share the base, so the
+ * org suffix is the only field that tells the session's quota pool apart.
+ * Codex usage labels instead use live report metadata via formatCodexUsageReportLabel.
+ * Returns `undefined` when no identifier is recoverable.
+ */
+export function formatActiveAccountLabel(identity: OAuthAccountIdentity | undefined): string | undefined {
+	if (!identity) return undefined;
+	const base = identity.email || identity.accountId || identity.projectId;
+	if (!base) return undefined;
+	const org = identity.orgName || identity.orgId;
+	return org && org !== base ? `${base} (${org})` : base;
+}
+
+/**
+ * True when a single usage-limit column belongs to the given OAuth identity.
+ *
+ * Single definition of the matching rules for both `/usage` renderers:
+ * - `orgId`     ↔ report metadata `orgId` — a GATE that QUALIFIES the base
+ *   identity, never a replacement for it. Mismatched org presence or
+ *   different orgs never match: two subscriptions (orgs) can share one
+ *   email, so an org-scoped identity matches only its own org's reports and
+ *   an org-less legacy identity never claims an org-attributed report via
+ *   the shared email. A SHARED org still requires the base-identity match
+ *   below — Anthropic Team seats have per-user pools yet share the org id
+ *   in report metadata. Only an org-only identity (no base identifiers
+ *   recovered at all) matches on the org alone. When neither side carries
+ *   an org, the base fallback applies unchanged (providers without orgs
+ *   keep their former behavior).
+ * - `email`     ↔ report metadata `email` — decisive when both sides carry
+ *   one: Codex Team seats share an account id and Antigravity accounts share
+ *   one Google project, so only the email tells their reports apart
+ * - `accountId` ↔ report metadata `accountId`/`account_id` or `limit.scope.accountId`
+ * - `projectId` ↔ report metadata `projectId` or `limit.scope.projectId`
+ *   (Google-style providers key usage on the GCP project, not an account id)
+ *
+ * A credential-scoped identity (`credentialId` set, no OAuth identifiers — an
+ * API-key account) matches only the report probed from that stored row
+ * (`metadata.credentialId`). Decisive: reports without a row tag (env keys,
+ * broker aggregates) can never be attributed to a pinned stored row, and
+ * letting them match would merge sibling API-key accounts into one pool —
+ * the exact wrong-account display this rule prevents.
+ */
+export function limitMatchesActiveAccount(
+	report: UsageReport,
+	limit: UsageLimit,
+	identity: ActiveAccountIdentity | undefined,
+): boolean {
+	if (!identity) return false;
+	const metadata = report.metadata ?? {};
+	if (identity.credentialId !== undefined) {
+		// Merged same-account reports carry every contributing row id.
+		const mergedIds = metadata.credentialIds;
+		if (Array.isArray(mergedIds)) return mergedIds.includes(identity.credentialId);
+		return metadata.credentialId === identity.credentialId;
+	}
+	const activeAccountId = normalizeIdentityValue(identity.accountId);
+	const activeEmail = normalizeIdentityValue(identity.email);
+	const activeProjectId = normalizeIdentityValue(identity.projectId);
+	const activeOrgId = normalizeIdentityValue(identity.orgId);
+	const reportOrgId = normalizeIdentityValue(metadata.orgId);
+	// Org gate (see doc comment above): different/mismatched-presence orgs
+	// never match; a shared org falls through to the base checks unless the
+	// identity is org-only.
+	if (activeOrgId || reportOrgId) {
+		if (activeOrgId !== reportOrgId) return false;
+		if (!activeAccountId && !activeEmail && !activeProjectId) return true;
+	}
+	const reportEmail = normalizeIdentityValue(metadata.email);
+	if (activeEmail && reportEmail) return activeEmail === reportEmail;
+	if (activeAccountId) {
+		const reportAccountId = normalizeIdentityValue(metadata.accountId) ?? normalizeIdentityValue(metadata.account_id);
+		if (reportAccountId === activeAccountId) return true;
+		if (normalizeIdentityValue(limit.scope.accountId) === activeAccountId) return true;
+	}
+	if (activeProjectId) {
+		if (normalizeIdentityValue(metadata.projectId) === activeProjectId) return true;
+		if (normalizeIdentityValue(limit.scope.projectId) === activeProjectId) return true;
+	}
+	return false;
+}
+
+/** True when any limit column in `report` belongs to the given OAuth identity. */
+export function reportMatchesActiveAccount(report: UsageReport, identity: ActiveAccountIdentity | undefined): boolean {
+	if (!identity) return false;
+	return report.limits.some(limit => limitMatchesActiveAccount(report, limit, identity));
+}

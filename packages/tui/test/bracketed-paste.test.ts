@@ -1,0 +1,151 @@
+/**
+ * Tests for BracketedPasteHandler
+ *
+ * Covers the byte-cap defense-in-depth (issue #4073 case B).
+ * The normal ProcessTerminal path re-wraps StdinBuffer's bounded paste with
+ * both markers so BracketedPasteHandler always receives them together; the
+ * byte cap only fires on alternate callers that bypass StdinBuffer.
+ */
+import { describe, expect, it } from "bun:test";
+import { BracketedPasteHandler, decodeReencodedPasteControls } from "@oh-my-pi/pi-tui/bracketed-paste";
+
+const PASTE_START = "\x1b[200~";
+const PASTE_END = "\x1b[201~";
+
+describe("BracketedPasteHandler", () => {
+	describe("Byte cap (issue #4073 case B)", () => {
+		it("aborts paste mode and delivers accumulated bytes when the cap is exceeded", () => {
+			// A caller that bypasses StdinBuffer (feeds PASTE_START without an
+			// end marker) must not accumulate memory forever. The cap fires
+			// on the very chunk that would push the buffer past the limit,
+			// delivering the buffered bytes so they are neither lost nor held.
+			const handler = new BracketedPasteHandler({ byteLimit: 16 });
+			handler.process(PASTE_START);
+			const first = handler.process("0123456789");
+			expect(first).toEqual({ handled: true, remaining: "" });
+
+			const overflow = handler.process("abcdefgh");
+			expect(overflow.handled).toBe(true);
+			// @ts-expect-error - narrowed at runtime by the assertion above
+			expect(overflow.pasteContent).toBe("0123456789abcdefgh");
+			// @ts-expect-error - narrowed at runtime by the assertion above
+			expect(overflow.remaining).toBe("");
+		});
+
+		it("resets state after a cap-abort so subsequent input is not eaten as paste", () => {
+			const handler = new BracketedPasteHandler({ byteLimit: 8 });
+			handler.process(PASTE_START);
+			// One over the cap → cap-flush.
+			const abort = handler.process("0123456789");
+			expect(abort.handled).toBe(true);
+			// A follow-up plain byte after recovery must go through as
+			// unhandled so callers process it normally.
+			const next = handler.process("x");
+			expect(next).toEqual({ handled: false });
+		});
+
+		it("does not truncate a legitimate multi-chunk paste under the cap", () => {
+			const handler = new BracketedPasteHandler({ byteLimit: 1024 });
+			handler.process(PASTE_START);
+			handler.process("hello ");
+			handler.process("world");
+			const result = handler.process(PASTE_END);
+			expect(result.handled).toBe(true);
+			// @ts-expect-error - handled=true carries pasteContent
+			expect(result.pasteContent).toBe("hello world");
+		});
+
+		it("defaults to a generous cap that fits a small multi-chunk paste", () => {
+			// Default byte limit is 64 MiB — a normal-sized paste completes
+			// via the end marker, not via the cap.
+			const handler = new BracketedPasteHandler();
+			handler.process(PASTE_START);
+			handler.process("x".repeat(100_000));
+			const finish = handler.process(PASTE_END);
+			expect(finish.handled).toBe(true);
+			// @ts-expect-error - handled=true carries pasteContent
+			expect(finish.pasteContent.length).toBe(100_000);
+		});
+
+		it("caps a multibyte payload by UTF-8 bytes, not UTF-16 code units", () => {
+			// Regression: the cap compared `buffer.length`, so a payload over
+			// the byte limit but under it in code units kept buffering. A
+			// caller now receives the accumulated bytes on the chunk that
+			// crosses the byte cap.
+			const handler = new BracketedPasteHandler({ byteLimit: 16 });
+			handler.process(PASTE_START);
+			const overflow = handler.process("é".repeat(9)); // 9 units, 18 bytes
+			expect(overflow.handled).toBe(true);
+			// @ts-expect-error - handled=true carries pasteContent
+			expect(overflow.pasteContent).toBe("é".repeat(9));
+		});
+
+		it("resets the byte counter when a new paste starts", () => {
+			const handler = new BracketedPasteHandler({ byteLimit: 16 });
+			handler.process(PASTE_START);
+			// 18 bytes → cap-abort, leaving the counter at 18 unless the next
+			// paste resets it.
+			handler.process("é".repeat(9));
+
+			handler.process(PASTE_START);
+			const first = handler.process("hello");
+			// A carried-over counter would abort this chunk instead of buffering.
+			expect(first).toEqual({ handled: true, remaining: "" });
+			const finish = handler.process(PASTE_END);
+			// @ts-expect-error - handled=true carries pasteContent
+			expect(finish.pasteContent).toBe("hello");
+		});
+	});
+
+	describe("Baseline flow", () => {
+		it("returns handled=false when no paste marker has been seen", () => {
+			const handler = new BracketedPasteHandler();
+			expect(handler.process("plain text")).toEqual({ handled: false });
+		});
+
+		it("leaves an unbracketed Enter on the caller's key path", () => {
+			// Editor/Input consult the handler before key dispatch: claiming a bare
+			// CR as paste content would stop Enter from ever submitting.
+			const handler = new BracketedPasteHandler();
+			expect(handler.process("\r")).toEqual({ handled: false });
+		});
+
+		it("assembles a paste delivered as a single chunk with both markers", () => {
+			const handler = new BracketedPasteHandler();
+			const result = handler.process(`${PASTE_START}payload${PASTE_END}tail`);
+			expect(result.handled).toBe(true);
+			// @ts-expect-error - handled=true carries pasteContent + remaining
+			expect(result.pasteContent).toBe("payload");
+			// @ts-expect-error - remaining carries post-marker input
+			expect(result.remaining).toBe("tail");
+		});
+
+		it("consumes doubled start delimiters without leaking framing into pasted text", () => {
+			const handler = new BracketedPasteHandler();
+			expect(handler.process(`${PASTE_START}${PASTE_START}https://example.com${PASTE_END}`)).toEqual({
+				handled: true,
+				pasteContent: "https://example.com",
+				remaining: "",
+			});
+		});
+
+		it("keeps the payload when a second start arrives in a later chunk", () => {
+			const handler = new BracketedPasteHandler();
+			handler.process(`${PASTE_START}first`);
+			handler.process(PASTE_START);
+			expect(handler.process(`second${PASTE_END}`)).toEqual({
+				handled: true,
+				pasteContent: "firstsecond",
+				remaining: "",
+			});
+		});
+	});
+
+	describe("Re-encoded paste controls", () => {
+		it("decodes an uppercase-letter CSI-u Ctrl chord to its C0 control", () => {
+			// Ctrl+Shift+J re-encoded inside a paste reports uppercase J (74); it
+			// must land as the same LF as lowercase j, not a stray codepoint.
+			expect(decodeReencodedPasteControls("line1\x1b[74;5uline2")).toBe("line1\nline2");
+		});
+	});
+});

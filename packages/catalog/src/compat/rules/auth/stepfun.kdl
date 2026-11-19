@@ -1,0 +1,13 @@
+auth "stepfun" {
+	name "StepFun"
+	login "api-key" {
+		auth-url "https://platform.stepfun.ai/interface-key"
+		instructions "Copy your API key from the StepFun Open Platform"
+		// StepFun keys are unprefixed opaque strings (no `sk-` prefix), so the
+		// placeholder must not teach a credential shape the console never issues.
+		prompt "Paste your StepFun API key" placeholder="..."
+		// A real auth rejection (401/403) is fatal; any other validation-endpoint
+		// failure is non-fatal — skip validation and trust the supplied key.
+		validate "chat-completions" label="StepFun" base-url="https://api.stepfun.ai/v1" model="step-5-preview" optional=#true
+	}
+}

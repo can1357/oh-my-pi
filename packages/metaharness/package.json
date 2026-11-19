@@ -1,0 +1,49 @@
+{
+	"type": "module",
+	"private": true,
+	"name": "@oh-my-pi/pi-metaharness",
+	"version": "0.0.1",
+	"description": "Unified benchmark runners plus Harbor run storage, REST/SSE APIs, and a live web dashboard",
+	"homepage": "https://omp.sh",
+	"author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/can1357/oh-my-pi.git",
+		"directory": "packages/metaharness"
+	},
+	"bin": {
+		"metaharness": "src/server.ts"
+	},
+	"scripts": {
+		"check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
+		"check:types": "bun check --no-script -p tsconfig.json && bun check --no-script -p src/tb/tsconfig.json && bun check --no-script -p adapters/edit/tsconfig.json && bun check --no-script -p scripts/tsconfig.json",
+		"lint": "oxlint .",
+		"serve": "bun run src/server.ts",
+		"bench:edit": "bun adapters/edit/cli.ts",
+		"bench:tb": "bun src/tb/cli.ts",
+		"bench:tb-floor": "bun scripts/tb-floor.ts",
+		"dev": "bun --hot src/server.ts",
+		"test": "bun test"
+	},
+	"dependencies": {
+		"@oh-my-pi/pi-agent-core": "catalog:",
+		"@oh-my-pi/pi-ai": "catalog:",
+		"@oh-my-pi/pi-catalog": "catalog:",
+		"@oh-my-pi/pi-coding-agent": "catalog:",
+		"@oh-my-pi/pi-utils": "catalog:",
+		"@oh-my-pi/typescript-edit-benchmark": "workspace:*",
+		"@stencil-hq/vibemon": "^0.3.2",
+		"@oh-my-pi/pi-natives": "catalog:",
+		"react": "^19.1.0",
+		"react-dom": "^19.1.0"
+	},
+	"devDependencies": {
+		"@types/bun": "catalog:",
+		"@types/react": "^19.1.0",
+		"@types/react-dom": "^19.1.0"
+	},
+	"engines": {
+		"bun": ">=1.4.4"
+	}
+}

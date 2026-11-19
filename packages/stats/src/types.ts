@@ -1,0 +1,287 @@
+import type { AssistantMessage, ServiceTier, ServiceTierByFamily, StopReason, Usage } from "@oh-my-pi/pi-ai";
+import type { AgentType } from "./shared-types";
+
+export * from "./shared-types";
+
+/**
+ * Extracted stats from an assistant message.
+ */
+export interface MessageStats {
+	/** Database ID */
+	id?: number;
+	/** Session file path */
+	sessionFile: string;
+	/** Entry ID within the session */
+	entryId: string;
+	/** Folder/project path (extracted from session filename) */
+	folder: string;
+	/** Model ID */
+	model: string;
+	/** Provider name */
+	provider: string;
+	/** API type */
+	api: string;
+	/** Unix timestamp in milliseconds */
+	timestamp: number;
+	/** Request duration in milliseconds */
+	duration: number | null;
+	/** Time to first token in milliseconds */
+	ttft: number | null;
+	/** Stop reason */
+	stopReason: StopReason;
+	/** Error message if stopReason is error */
+	errorMessage: string | null;
+	/** Token usage */
+	usage: Usage;
+	/** Which agent produced this message (main agent, task subagent, advisor) */
+	agentType: AgentType;
+	/**
+	 * Raw `purpose` of the `model_usage` entry this row was journaled from (a
+	 * model call that is not a conversation turn: title generation, judge
+	 * queries, …), `:detail` suffix included; `null` for an assistant message.
+	 * Non-null is what marks a row as off-transcript, so the parser always gives
+	 * such a row a value. Always written by `rowToMessageStats`; optional because
+	 * the parser omits it for assistant messages and session fixtures that stand
+	 * in for ingest input are typed as `MessageStats` too.
+	 */
+	purpose?: string | null;
+	/**
+	 * Service tier the provider reported serving this turn, or `null` when the
+	 * provider reported none. Lets consumers separate a fast serving path's
+	 * throughput and premium traffic from standard-tier traffic. Always written by
+	 * `rowToMessageStats`; optional only because session fixtures that stand in
+	 * for ingest input are typed as `MessageStats` too.
+	 */
+	serviceTier?: ServiceTier | null;
+	/**
+	 * Ingest refused to price this request: a scheduled (time-based) card with no
+	 * recoverable request timestamp, so `usage.cost.total` of 0 is unknown spend
+	 * rather than a free request. Always written by `rowToMessageStats`; optional
+	 * only because session fixtures that stand in for ingest input are typed as
+	 * `MessageStats` too.
+	 */
+	costUnpriced?: boolean;
+}
+
+/**
+ * Session-recorded token usage before pricing: counters are coerced to numbers
+ * because their columns are NOT NULL, but `cost` is only present when the
+ * session entry actually recorded one. Absence is meaningful — `resolveStoredCost`
+ * estimates a request with no recorded price, whereas a recorded zero is a real
+ * charge that scheduled cards freeze. `costUnpriced` is omitted because it is a
+ * decision of the ingest path, not something the parser or a caller supplies.
+ */
+export interface MessageStatsInput extends Omit<MessageStats, "usage" | "costUnpriced"> {
+	usage: Omit<Usage, "cost"> & { cost?: Partial<Usage["cost"]> };
+}
+
+/**
+ * Full details of a request, including content.
+ */
+export interface RequestDetails extends MessageStats {
+	/** The full conversation history or just the last turn. */
+	messages: unknown[];
+	/**
+	 * The model's response. For a `model_usage` entry, the payload it journaled:
+	 * the reply text of a completion, else a judgment's answers by question id,
+	 * else `null`.
+	 */
+	output: unknown;
+}
+
+/**
+ * Session log entry types.
+ */
+export interface SessionHeader {
+	type: "session";
+	version: number;
+	id: string;
+	timestamp: string;
+	cwd: string;
+	title?: string;
+}
+
+export interface SessionMessageEntry {
+	type: "message";
+	id: string;
+	parentId: string | null;
+	timestamp: string;
+	message: AssistantMessage | { role: "user" | "toolResult" };
+}
+
+export interface SessionServiceTierChangeEntry {
+	type: "service_tier_change";
+	id: string;
+	parentId?: string | null;
+	timestamp: string;
+	serviceTier: ServiceTierByFamily | ServiceTier | null;
+}
+
+export interface SessionModelUsageEntry {
+	type: "model_usage";
+	id: string;
+	parentId: string | null;
+	timestamp: string;
+	purpose: string;
+	role?: string;
+	api: string;
+	provider: string;
+	model: string;
+	usage: Usage;
+	stopReason?: StopReason;
+	errorMessage?: string;
+	/** Wall time of the request in milliseconds; absent on older entries. */
+	duration?: number;
+	/** Milliseconds until the first token; absent on older entries. */
+	ttft?: number;
+	/** What a native judge query answered, by question id; absent on older entries. */
+	judgment?: { state: string; answers: Record<string, number | [string | number, number]>; cached?: number };
+	/** What a text side channel (title generation) was sent and replied; absent on older entries. */
+	completion?: { prompt?: string; reply?: string };
+}
+
+/**
+ * Custom journal entry (`tool_execution_start`, `session_exit`, …). Mirrors
+ * the coding-agent shape structurally — stats never imports coding-agent.
+ */
+export interface SessionCustomEntry {
+	type: "custom";
+	id?: string;
+	parentId?: string | null;
+	timestamp?: string;
+	customType: string;
+	data?: Record<string, unknown>;
+}
+
+/** Structural variants the trace builder matches on beyond messages. */
+export interface SessionTypedEntry {
+	type: "session_init" | "compaction" | "model_change" | "mode_change" | "reset_boundary";
+	id?: string;
+	parentId?: string | null;
+	timestamp?: string;
+	[key: string]: unknown;
+}
+
+export type SessionEntry =
+	| SessionHeader
+	| SessionMessageEntry
+	| SessionServiceTierChangeEntry
+	| SessionModelUsageEntry
+	| SessionCustomEntry
+	| SessionTypedEntry
+	| { type: string };
+
+/**
+ * Behavioral stats extracted from a single user message.
+ */
+export interface UserMessageStats {
+	/** Database ID */
+	id?: number;
+	/** Session file path */
+	sessionFile: string;
+	/** Entry ID within the session */
+	entryId: string;
+	/** Folder/project path */
+	folder: string;
+	/** Unix timestamp in ms */
+	timestamp: number;
+	/** Model that responded to this user message, if linked */
+	model: string | null;
+	/** Provider that responded to this user message, if linked */
+	provider: string | null;
+	/** Total characters of message text */
+	chars: number;
+	/** Whitespace-delimited word count */
+	words: number;
+	/** Yelling sentences (> 50% uppercase letters) */
+	yelling: number;
+	/** Profanity hits */
+	profanity: number;
+	/** Catch-all upset signal: drama runs + `noooo`/`ughh`/... + `dude` + `:(` */
+	anguish: number;
+	/** Corrective negation ("no", "nope", "thats not what i meant") */
+	negation: number;
+	/** User repeating themselves ("i meant", "still doesnt work", "like i said") */
+	repetition: number;
+	/** Second-person reproach ("you didnt", "why did you", "stop X-ing") */
+	blame: number;
+	/** Judge-facing prose (see `judgeProse`); empty when the message was all markup. */
+	prose: string;
+	/** Hex `Bun.hash` of `prose`, keying the shared verdict cache; empty when `prose` is. */
+	proseHash: string;
+}
+
+/**
+ * Pair emitted by the parser for each assistant message that answers a user
+ * message: the first assistant message descending from it through non-message
+ * entries, whether the user message was parsed in this pass or an earlier one.
+ * The aggregator applies the link to the persisted `user_messages` row so it
+ * stops showing up in the "unknown" model bucket.
+ */
+export interface UserMessageLink {
+	sessionFile: string;
+	entryId: string;
+	model: string;
+	provider: string;
+}
+
+/**
+ * One tool call extracted from an assistant message's `toolCall` content
+ * blocks. `callsInTurn` records how many calls that assistant turn contained
+ * so aggregation can split the turn's real provider usage evenly per call.
+ */
+export interface ToolCallStats {
+	/** Session file path */
+	sessionFile: string;
+	/** Assistant-message entry ID that emitted the call */
+	entryId: string;
+	/** Provider-assigned tool call ID (unique within a session) */
+	toolCallId: string;
+	/** Folder/project path (extracted from session filename) */
+	folder: string;
+	/** Tool name */
+	toolName: string;
+	/** Model that emitted the call */
+	model: string;
+	/** Provider name */
+	provider: string;
+	/** Assistant-message timestamp (Unix ms) */
+	timestamp: number;
+	/** Which agent produced the call */
+	agentType: AgentType;
+	/** Total tool calls in the same assistant turn (>= 1) */
+	callsInTurn: number;
+	/** Serialized argument characters */
+	argsChars: number;
+	/** Result text characters, when the same parse also read the call's `toolResult` */
+	resultChars?: number;
+	/** Result error flag, set together with `resultChars` */
+	isError?: boolean;
+}
+
+/**
+ * Result linkage emitted when the parser sees a `toolResult` message entry.
+ * Applied as an UPDATE on the persisted tool-call row — results can land in a
+ * later incremental sync pass than the call that produced them (calls parsed
+ * in the same pass already carry the result, so their UPDATE is a no-op).
+ */
+export interface ToolResultLink {
+	sessionFile: string;
+	toolCallId: string;
+	/** Text characters fed back into context */
+	resultChars: number;
+	isError: boolean;
+}
+
+/** One snapcompact compaction entry: the context size the session's estimate measured before and after it. */
+export interface SnapcompactCompactionStats {
+	sessionFile: string;
+	/** Compaction entry ID */
+	entryId: string;
+	/** Folder/project path (extracted from session filename) */
+	folder: string;
+	/** Compaction timestamp (Unix ms) */
+	timestamp: number;
+	tokensBefore: number;
+	tokensAfter: number;
+}

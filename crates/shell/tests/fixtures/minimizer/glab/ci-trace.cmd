@@ -1,0 +1,1 @@
+glab ci trace

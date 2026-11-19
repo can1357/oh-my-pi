@@ -1,0 +1,988 @@
+[
+  {
+    "name": "blocks",
+    "source": "# H1 ###\n\n## H2\n\nSetext H1\n===\n\nSetext H2\n---\n\n***\n",
+    "tokens": [
+      {
+        "type": "heading",
+        "raw": "# H1 ###",
+        "depth": 1,
+        "text": "H1",
+        "tokens": [
+          {
+            "type": "text",
+            "raw": "H1",
+            "text": "H1",
+            "escaped": false
+          }
+        ]
+      },
+      {
+        "type": "space",
+        "raw": "\n\n"
+      },
+      {
+        "type": "heading",
+        "raw": "## H2",
+        "depth": 2,
+        "text": "H2",
+        "tokens": [
+          {
+            "type": "text",
+            "raw": "H2",
+            "text": "H2",
+            "escaped": false
+          }
+        ]
+      },
+      {
+        "type": "space",
+        "raw": "\n\n"
+      },
+      {
+        "type": "heading",
+        "raw": "Setext H1\n===",
+        "depth": 1,
+        "text": "Setext H1",
+        "tokens": [
+          {
+            "type": "text",
+            "raw": "Setext H1",
+            "text": "Setext H1",
+            "escaped": false
+          }
+        ]
+      },
+      {
+        "type": "space",
+        "raw": "\n\n"
+      },
+      {
+        "type": "heading",
+        "raw": "Setext H2\n---",
+        "depth": 2,
+        "text": "Setext H2",
+        "tokens": [
+          {
+            "type": "text",
+            "raw": "Setext H2",
+            "text": "Setext H2",
+            "escaped": false
+          }
+        ]
+      },
+      {
+        "type": "space",
+        "raw": "\n\n"
+      },
+      {
+        "type": "hr",
+        "raw": "***\n"
+      }
+    ],
+    "html": "<h1>H1</h1>\n<h2>H2</h2>\n<h1>Setext H1</h1>\n<h2>Setext H2</h2>\n<hr>\n"
+  },
+  {
+    "name": "lists",
+    "source": "- a\n- b\n  - nested\n\n- c\n\n3. three\n4. four\n\n   continuation\n\n- [x] done\n- [ ] todo\n",
+    "tokens": [
+      {
+        "type": "list",
+        "raw": "- a\n- b\n  - nested\n\n- c",
+        "ordered": false,
+        "start": "",
+        "loose": true,
+        "items": [
+          {
+            "type": "list_item",
+            "raw": "- a\n",
+            "task": false,
+            "loose": true,
+            "text": "a",
+            "tokens": [
+              {
+                "type": "paragraph",
+                "raw": "a",
+                "text": "a",
+                "tokens": [
+                  {
+                    "type": "text",
+                    "raw": "a",
+                    "text": "a",
+                    "escaped": false
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "list_item",
+            "raw": "- b\n  - nested\n\n",
+            "task": false,
+            "loose": true,
+            "text": "b\n- nested\n",
+            "tokens": [
+              {
+                "type": "paragraph",
+                "raw": "b\n",
+                "text": "b",
+                "tokens": [
+                  {
+                    "type": "text",
+                    "raw": "b",
+                    "text": "b",
+                    "escaped": false
+                  }
+                ]
+              },
+              {
+                "type": "list",
+                "raw": "- nested\n",
+                "ordered": false,
+                "start": "",
+                "loose": false,
+                "items": [
+                  {
+                    "type": "list_item",
+                    "raw": "- nested",
+                    "task": false,
+                    "loose": false,
+                    "text": "nested",
+                    "tokens": [
+                      {
+                        "type": "text",
+                        "raw": "nested",
+                        "text": "nested",
+                        "tokens": [
+                          {
+                            "type": "text",
+                            "raw": "nested",
+                            "text": "nested",
+                            "escaped": false
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "list_item",
+            "raw": "- c",
+            "task": false,
+            "loose": true,
+            "text": "c",
+            "tokens": [
+              {
+                "type": "paragraph",
+                "raw": "c",
+                "text": "c",
+                "tokens": [
+                  {
+                    "type": "text",
+                    "raw": "c",
+                    "text": "c",
+                    "escaped": false
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "space",
+        "raw": "\n\n"
+      },
+      {
+        "type": "list",
+        "raw": "3. three\n4. four\n\n   continuation",
+        "ordered": true,
+        "start": 3,
+        "loose": true,
+        "items": [
+          {
+            "type": "list_item",
+            "raw": "3. three\n",
+            "task": false,
+            "loose": true,
+            "text": "three",
+            "tokens": [
+              {
+                "type": "paragraph",
+                "raw": "three",
+                "text": "three",
+                "tokens": [
+                  {
+                    "type": "text",
+                    "raw": "three",
+                    "text": "three",
+                    "escaped": false
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "list_item",
+            "raw": "4. four\n\n   continuation",
+            "task": false,
+            "loose": true,
+            "text": "four\n\ncontinuation",
+            "tokens": [
+              {
+                "type": "paragraph",
+                "raw": "four",
+                "text": "four",
+                "tokens": [
+                  {
+                    "type": "text",
+                    "raw": "four",
+                    "text": "four",
+                    "escaped": false
+                  }
+                ]
+              },
+              {
+                "type": "space",
+                "raw": "\n\n"
+              },
+              {
+                "type": "paragraph",
+                "raw": "continuation",
+                "text": "continuation",
+                "tokens": [
+                  {
+                    "type": "text",
+                    "raw": "continuation",
+                    "text": "continuation",
+                    "escaped": false
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "space",
+        "raw": "\n\n"
+      },
+      {
+        "type": "list",
+        "raw": "- [x] done\n- [ ] todo\n",
+        "ordered": false,
+        "start": "",
+        "loose": false,
+        "items": [
+          {
+            "type": "list_item",
+            "raw": "- [x] done\n",
+            "task": true,
+            "loose": false,
+            "text": "done",
+            "tokens": [
+              {
+                "type": "checkbox",
+                "raw": "[x] ",
+                "checked": true
+              },
+              {
+                "type": "text",
+                "raw": "done",
+                "text": "done",
+                "tokens": [
+                  {
+                    "type": "text",
+                    "raw": "done",
+                    "text": "done",
+                    "escaped": false
+                  }
+                ]
+              }
+            ],
+            "checked": true
+          },
+          {
+            "type": "list_item",
+            "raw": "- [ ] todo",
+            "task": true,
+            "loose": false,
+            "text": "todo",
+            "tokens": [
+              {
+                "type": "checkbox",
+                "raw": "[ ] ",
+                "checked": false
+              },
+              {
+                "type": "text",
+                "raw": "todo",
+                "text": "todo",
+                "tokens": [
+                  {
+                    "type": "text",
+                    "raw": "todo",
+                    "text": "todo",
+                    "escaped": false
+                  }
+                ]
+              }
+            ],
+            "checked": false
+          }
+        ]
+      }
+    ],
+    "html": "<ul>\n<li><p>a</p>\n</li>\n<li><p>b</p>\n<ul>\n<li>nested</li>\n</ul>\n</li>\n<li><p>c</p>\n</li>\n</ul>\n<ol start=\"3\">\n<li><p>three</p>\n</li>\n<li><p>four</p>\n<p>continuation</p>\n</li>\n</ol>\n<ul>\n<li><input checked=\"\" disabled=\"\" type=\"checkbox\"> done</li>\n<li><input disabled=\"\" type=\"checkbox\"> todo</li>\n</ul>\n"
+  },
+  {
+    "name": "codeQuote",
+    "source": "```ts meta\nconst x = 1;\n```\n\n~~~\na\n~~~\n\n    alpha\n    beta\n\n> quote\n>\n> - item\n>   continued\n",
+    "tokens": [
+      {
+        "type": "code",
+        "raw": "```ts meta\nconst x = 1;\n```",
+        "lang": "ts meta",
+        "text": "const x = 1;"
+      },
+      {
+        "type": "space",
+        "raw": "\n\n"
+      },
+      {
+        "type": "code",
+        "raw": "~~~\na\n~~~",
+        "lang": "",
+        "text": "a"
+      },
+      {
+        "type": "space",
+        "raw": "\n\n"
+      },
+      {
+        "type": "code",
+        "raw": "    alpha\n    beta",
+        "codeBlockStyle": "indented",
+        "text": "alpha\nbeta"
+      },
+      {
+        "type": "space",
+        "raw": "\n\n"
+      },
+      {
+        "type": "blockquote",
+        "raw": "> quote\n>\n> - item\n>   continued\n",
+        "tokens": [
+          {
+            "type": "paragraph",
+            "raw": "quote",
+            "text": "quote",
+            "tokens": [
+              {
+                "type": "text",
+                "raw": "quote",
+                "text": "quote",
+                "escaped": false
+              }
+            ]
+          },
+          {
+            "type": "space",
+            "raw": "\n\n"
+          },
+          {
+            "type": "list",
+            "raw": "- item\n  continued",
+            "ordered": false,
+            "start": "",
+            "loose": false,
+            "items": [
+              {
+                "type": "list_item",
+                "raw": "- item\n  continued",
+                "task": false,
+                "loose": false,
+                "text": "item\ncontinued",
+                "tokens": [
+                  {
+                    "type": "text",
+                    "raw": "item\ncontinued",
+                    "text": "item\ncontinued",
+                    "tokens": [
+                      {
+                        "type": "text",
+                        "raw": "item\ncontinued",
+                        "text": "item\ncontinued",
+                        "escaped": false
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "text": "quote\n\n- item\n  continued"
+      }
+    ],
+    "html": "<pre><code class=\"language-ts\">const x = 1;\n</code></pre>\n<pre><code>a\n</code></pre>\n<pre><code>alpha\nbeta\n</code></pre>\n<blockquote>\n<p>quote</p>\n<ul>\n<li>item\ncontinued</li>\n</ul>\n</blockquote>\n"
+  },
+  {
+    "name": "table",
+    "source": "| A | B |\n| :- | -: |\n| x | y |\n",
+    "tokens": [
+      {
+        "type": "table",
+        "raw": "| A | B |\n| :- | -: |\n| x | y |\n",
+        "header": [
+          {
+            "text": "A",
+            "tokens": [
+              {
+                "type": "text",
+                "raw": "A",
+                "text": "A",
+                "escaped": false
+              }
+            ],
+            "header": true,
+            "align": "left"
+          },
+          {
+            "text": "B",
+            "tokens": [
+              {
+                "type": "text",
+                "raw": "B",
+                "text": "B",
+                "escaped": false
+              }
+            ],
+            "header": true,
+            "align": "right"
+          }
+        ],
+        "align": [
+          "left",
+          "right"
+        ],
+        "rows": [
+          [
+            {
+              "text": "x",
+              "tokens": [
+                {
+                  "type": "text",
+                  "raw": "x",
+                  "text": "x",
+                  "escaped": false
+                }
+              ],
+              "header": false,
+              "align": "left"
+            },
+            {
+              "text": "y",
+              "tokens": [
+                {
+                  "type": "text",
+                  "raw": "y",
+                  "text": "y",
+                  "escaped": false
+                }
+              ],
+              "header": false,
+              "align": "right"
+            }
+          ]
+        ]
+      }
+    ],
+    "html": "<table>\n<thead>\n<tr>\n<th align=\"left\">A</th>\n<th align=\"right\">B</th>\n</tr>\n</thead>\n<tbody><tr>\n<td align=\"left\">x</td>\n<td align=\"right\">y</td>\n</tr>\n</tbody></table>\n"
+  },
+  {
+    "name": "inline",
+    "source": "a **strong** *em* __strong__ _em_ ~~del~~.\n\n\\*literal* ` code ` ``a ` b``  \nnext\\\nline\n",
+    "tokens": [
+      {
+        "type": "paragraph",
+        "raw": "a **strong** *em* __strong__ _em_ ~~del~~.",
+        "text": "a **strong** *em* __strong__ _em_ ~~del~~.",
+        "tokens": [
+          {
+            "type": "text",
+            "raw": "a ",
+            "text": "a ",
+            "escaped": false
+          },
+          {
+            "type": "strong",
+            "raw": "**strong**",
+            "text": "strong",
+            "tokens": [
+              {
+                "type": "text",
+                "raw": "strong",
+                "text": "strong",
+                "escaped": false
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "raw": " ",
+            "text": " ",
+            "escaped": false
+          },
+          {
+            "type": "em",
+            "raw": "*em*",
+            "text": "em",
+            "tokens": [
+              {
+                "type": "text",
+                "raw": "em",
+                "text": "em",
+                "escaped": false
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "raw": " ",
+            "text": " ",
+            "escaped": false
+          },
+          {
+            "type": "strong",
+            "raw": "__strong__",
+            "text": "strong",
+            "tokens": [
+              {
+                "type": "text",
+                "raw": "strong",
+                "text": "strong",
+                "escaped": false
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "raw": " ",
+            "text": " ",
+            "escaped": false
+          },
+          {
+            "type": "em",
+            "raw": "_em_",
+            "text": "em",
+            "tokens": [
+              {
+                "type": "text",
+                "raw": "em",
+                "text": "em",
+                "escaped": false
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "raw": " ",
+            "text": " ",
+            "escaped": false
+          },
+          {
+            "type": "del",
+            "raw": "~~del~~",
+            "text": "del",
+            "tokens": [
+              {
+                "type": "text",
+                "raw": "del",
+                "text": "del",
+                "escaped": false
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "raw": ".",
+            "text": ".",
+            "escaped": false
+          }
+        ]
+      },
+      {
+        "type": "space",
+        "raw": "\n\n"
+      },
+      {
+        "type": "paragraph",
+        "raw": "\\*literal* ` code ` ``a ` b``  \nnext\\\nline\n",
+        "text": "\\*literal* ` code ` ``a ` b``  \nnext\\\nline",
+        "tokens": [
+          {
+            "type": "escape",
+            "raw": "\\*",
+            "text": "*"
+          },
+          {
+            "type": "text",
+            "raw": "literal* ",
+            "text": "literal* ",
+            "escaped": false
+          },
+          {
+            "type": "codespan",
+            "raw": "` code `",
+            "text": "code"
+          },
+          {
+            "type": "text",
+            "raw": " ",
+            "text": " ",
+            "escaped": false
+          },
+          {
+            "type": "codespan",
+            "raw": "``a ` b``",
+            "text": "a ` b"
+          },
+          {
+            "type": "br",
+            "raw": "  \n"
+          },
+          {
+            "type": "text",
+            "raw": "next",
+            "text": "next",
+            "escaped": false
+          },
+          {
+            "type": "br",
+            "raw": "\\\n"
+          },
+          {
+            "type": "text",
+            "raw": "line",
+            "text": "line",
+            "escaped": false
+          }
+        ]
+      }
+    ],
+    "html": "<p>a <strong>strong</strong> <em>em</em> <strong>strong</strong> <em>em</em> <del>del</del>.</p>\n<p>*literal* <code>code</code> <code>a ` b</code><br>next<br>line</p>\n"
+  },
+  {
+    "name": "links",
+    "source": "[label](https://x.test \"t\") ![alt](img.png) [ref][id] [short][] [id]\n\n[id]: /url \"title\"\n[short]: /s\n",
+    "tokens": [
+      {
+        "type": "paragraph",
+        "raw": "[label](https://x.test \"t\") ![alt](img.png) [ref][id] [short][] [id]",
+        "text": "[label](https://x.test \"t\") ![alt](img.png) [ref][id] [short][] [id]",
+        "tokens": [
+          {
+            "type": "link",
+            "raw": "[label](https://x.test \"t\")",
+            "href": "https://x.test",
+            "title": "t",
+            "text": "label",
+            "tokens": [
+              {
+                "type": "text",
+                "raw": "label",
+                "text": "label",
+                "escaped": false
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "raw": " ",
+            "text": " ",
+            "escaped": false
+          },
+          {
+            "type": "image",
+            "raw": "![alt](img.png)",
+            "href": "img.png",
+            "title": null,
+            "text": "alt",
+            "tokens": [
+              {
+                "type": "text",
+                "raw": "alt",
+                "text": "alt",
+                "escaped": false
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "raw": " ",
+            "text": " ",
+            "escaped": false
+          },
+          {
+            "type": "link",
+            "raw": "[ref][id]",
+            "href": "/url",
+            "title": "title",
+            "text": "ref",
+            "tokens": [
+              {
+                "type": "text",
+                "raw": "ref",
+                "text": "ref",
+                "escaped": false
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "raw": " ",
+            "text": " ",
+            "escaped": false
+          },
+          {
+            "type": "link",
+            "raw": "[short][]",
+            "href": "/s",
+            "title": null,
+            "text": "short",
+            "tokens": [
+              {
+                "type": "text",
+                "raw": "short",
+                "text": "short",
+                "escaped": false
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "raw": " ",
+            "text": " ",
+            "escaped": false
+          },
+          {
+            "type": "link",
+            "raw": "[id]",
+            "href": "/url",
+            "title": "title",
+            "text": "id",
+            "tokens": [
+              {
+                "type": "text",
+                "raw": "id",
+                "text": "id",
+                "escaped": false
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "space",
+        "raw": "\n\n"
+      },
+      {
+        "type": "def",
+        "tag": "id",
+        "raw": "[id]: /url \"title\"\n",
+        "href": "/url",
+        "title": "title"
+      },
+      {
+        "type": "def",
+        "tag": "short",
+        "raw": "[short]: /s\n",
+        "href": "/s"
+      }
+    ],
+    "html": "<p><a href=\"https://x.test\" title=\"t\">label</a> <img src=\"img.png\" alt=\"alt\"> <a href=\"/url\" title=\"title\">ref</a> <a href=\"/s\">short</a> <a href=\"/url\" title=\"title\">id</a></p>\n"
+  },
+  {
+    "name": "autolinks",
+    "source": "<https://x.test/a> <me@example.com> www.example.com https://example.com/a_(b).\n",
+    "tokens": [
+      {
+        "type": "paragraph",
+        "raw": "<https://x.test/a> <me@example.com> www.example.com https://example.com/a_(b).\n",
+        "text": "<https://x.test/a> <me@example.com> www.example.com https://example.com/a_(b).",
+        "tokens": [
+          {
+            "type": "link",
+            "raw": "<https://x.test/a>",
+            "text": "https://x.test/a",
+            "href": "https://x.test/a",
+            "tokens": [
+              {
+                "type": "text",
+                "raw": "https://x.test/a",
+                "text": "https://x.test/a"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "raw": " ",
+            "text": " ",
+            "escaped": false
+          },
+          {
+            "type": "link",
+            "raw": "<me@example.com>",
+            "text": "me@example.com",
+            "href": "mailto:me@example.com",
+            "tokens": [
+              {
+                "type": "text",
+                "raw": "me@example.com",
+                "text": "me@example.com"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "raw": " ",
+            "text": " ",
+            "escaped": false
+          },
+          {
+            "type": "link",
+            "raw": "www.example.com",
+            "text": "www.example.com",
+            "href": "http://www.example.com",
+            "tokens": [
+              {
+                "type": "text",
+                "raw": "www.example.com",
+                "text": "www.example.com"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "raw": " ",
+            "text": " ",
+            "escaped": false
+          },
+          {
+            "type": "link",
+            "raw": "https://example.com/a_(b)",
+            "text": "https://example.com/a_(b)",
+            "href": "https://example.com/a_(b)",
+            "tokens": [
+              {
+                "type": "text",
+                "raw": "https://example.com/a_(b)",
+                "text": "https://example.com/a_(b)"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "raw": ".",
+            "text": ".",
+            "escaped": false
+          }
+        ]
+      }
+    ],
+    "html": "<p><a href=\"https://x.test/a\">https://x.test/a</a> <a href=\"mailto:me@example.com\">me@example.com</a> <a href=\"http://www.example.com\">www.example.com</a> <a href=\"https://example.com/a_(b)\">https://example.com/a_(b)</a>.</p>\n"
+  },
+  {
+    "name": "html",
+    "source": "<div>\nraw *html*\n</div>\n\ninline <span>x</span> end\n",
+    "tokens": [
+      {
+        "type": "html",
+        "block": true,
+        "raw": "<div>\nraw *html*\n</div>",
+        "pre": false,
+        "text": "<div>\nraw *html*\n</div>"
+      },
+      {
+        "type": "space",
+        "raw": "\n\n"
+      },
+      {
+        "type": "paragraph",
+        "raw": "inline <span>x</span> end\n",
+        "text": "inline <span>x</span> end",
+        "tokens": [
+          {
+            "type": "text",
+            "raw": "inline ",
+            "text": "inline ",
+            "escaped": false
+          },
+          {
+            "type": "html",
+            "raw": "<span>",
+            "inLink": false,
+            "inRawBlock": false,
+            "block": false,
+            "text": "<span>"
+          },
+          {
+            "type": "text",
+            "raw": "x",
+            "text": "x",
+            "escaped": false
+          },
+          {
+            "type": "html",
+            "raw": "</span>",
+            "inLink": false,
+            "inRawBlock": false,
+            "block": false,
+            "text": "</span>"
+          },
+          {
+            "type": "text",
+            "raw": " end",
+            "text": " end",
+            "escaped": false
+          }
+        ]
+      }
+    ],
+    "html": "<div>\nraw *html*\n</div><p>inline <span>x</span> end</p>\n"
+  },
+  {
+    "name": "lazyContinuation",
+    "source": "tree root\n└── last branch\n    └── child under last branch\n\n    real indented code\n",
+    "tokens": [
+      {
+        "type": "paragraph",
+        "raw": "tree root\n└── last branch\n    └── child under last branch",
+        "text": "tree root\n└── last branch\n    └── child under last branch",
+        "tokens": [
+          {
+            "type": "text",
+            "raw": "tree root\n└── last branch\n    └── child under last branch",
+            "text": "tree root\n└── last branch\n    └── child under last branch",
+            "escaped": false
+          }
+        ]
+      },
+      {
+        "type": "space",
+        "raw": "\n\n"
+      },
+      {
+        "type": "code",
+        "raw": "    real indented code\n",
+        "codeBlockStyle": "indented",
+        "text": "real indented code\n"
+      }
+    ],
+    "html": "<p>tree root\n└── last branch\n    └── child under last branch</p>\n<pre><code>real indented code\n</code></pre>\n"
+  }
+]

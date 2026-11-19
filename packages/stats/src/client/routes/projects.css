@@ -1,0 +1,6 @@
+/* Long temp-dir names must not stretch the table. */
+.projects-folder {
+	gap: 8px;
+	max-width: 280px;
+	min-width: 0;
+}

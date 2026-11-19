@@ -1,0 +1,218 @@
+import { describe, expect, test } from "bun:test";
+import { billingVariantPlain, classifyModel, collapseVariantId, routingVariantPlain } from "../src/compat/taxonomy";
+import { Effort } from "../src/effort";
+
+describe("classifyModel", () => {
+	test("anthropic dashed revision extracts as dotted triple", () => {
+		expect(classifyModel("anthropic", "claude-opus-4-6")).toEqual({
+			class: "anthropic",
+			family: "opus",
+			revision: "4.6.0",
+		});
+	});
+
+	test("namespaced aggregator ids classify by bare name", () => {
+		expect(classifyModel("openrouter", "anthropic/claude-opus-4-6")).toEqual({
+			class: "anthropic",
+			family: "opus",
+			revision: "4.6.0",
+		});
+	});
+
+	test("class namespace does not compete with the product family", () => {
+		expect(classifyModel("litellm", "mistral.mixtral-8x7b-instruct-v0:1")).toEqual({
+			class: "mistral",
+			family: "mixtral",
+		});
+		expect(classifyModel("litellm", "mistral.mistral-large-2402-v1:0")).toEqual({
+			class: "mistral",
+			family: "mistral",
+		});
+	});
+
+	test("bare o-series names carry no revision", () => {
+		expect(classifyModel("openai", "o3")).toEqual({ class: "openai", family: "o-series" });
+		expect(classifyModel("openai", "o3-mini")).toEqual({
+			class: "openai",
+			family: "o-series",
+			revision: "3.0.0",
+		});
+	});
+
+	test("DeepSeek V4 revisions ignore suffixes and reviewed Flash aliases resolve to V4.1", () => {
+		expect(classifyModel("opencode-zen", "deepseek-v4-flash-free")).toMatchObject({
+			class: "deepseek",
+			family: "flash",
+			revision: "4.0.0",
+		});
+		expect(classifyModel("openrouter", "deepseek/deepseek-v4-flash-0731")).toMatchObject({
+			class: "deepseek",
+			family: "flash",
+			revision: "4.0.0",
+		});
+		expect(classifyModel("cline-pass", "deepseek-v4.1-flash")).toMatchObject({
+			class: "deepseek",
+			family: "flash",
+			revision: "4.1.0",
+		});
+		for (const provider of ["deepseek", "opencode-go"]) {
+			expect(classifyModel(provider, "deepseek-flash")).toEqual({
+				class: "deepseek",
+				family: "flash",
+				revision: "4.1.0",
+			});
+		}
+		expect(classifyModel("custom", "deepseek-flash")).toEqual({ class: "deepseek", family: "flash" });
+		expect(classifyModel("deepseek", "deepseek-r1")).toEqual({ class: "deepseek", family: "r1" });
+	});
+
+	test("bounded matchers do not fire on substrings", () => {
+		expect(classifyModel("test", "anthropicology").class).toBe("unknown");
+		expect(classifyModel("test", "deepseeker").class).toBe("unknown");
+	});
+
+	test("gpt-oss outranks the gpt- prefix", () => {
+		expect(classifyModel("openai", "gpt-oss-120b").class).toBe("gpt-oss");
+	});
+	test("zai- vendor-prefixed bare ids classify as glm", () => {
+		// Bounded matchers are prefix-anchored, so `bounded "glm"` never sees
+		// `zai-glm-*`; losing the class drops the glm tokenizer and <think>
+		// replay dialect on hosts like mistral (regression: pre-KDL parity sweep).
+		expect(classifyModel("mistral", "zai-glm-5-2")).toEqual({ class: "glm", revision: "5.2.0" });
+		expect(classifyModel("cerebras", "zai-glm-4.7")).toEqual({ class: "glm", revision: "4.7.0" });
+	});
+
+	test("bare K3 SKUs and provider-qualified selectors retain Kimi K3 identity", () => {
+		for (const [provider, model] of [
+			["", "k3"],
+			["", "kimi-code/k3"],
+			["", "kimi-coding/k3"],
+			["kimi-code", "k3"],
+			["kimi-coding", "K3"],
+			["", "k3-256k"],
+			["", "K3-256K"],
+			["", "kimi-code/k3-256k"],
+			["", "kimi-coding/K3-256K"],
+			["kimi-code", "k3-256k"],
+			["kimi-coding", "K3-256K"],
+		] as const) {
+			expect(classifyModel(provider, model)).toEqual({ class: "kimi", family: "k3" });
+		}
+	});
+
+	test("K3.1 Pro retains Kimi K3 identity with its own revision", () => {
+		for (const [provider, model] of [
+			["", "k3.1-pro"],
+			["kimi-code", "k3.1-pro"],
+			["kimi-code", "k3.1-pro-highspeed"],
+		] as const) {
+			expect(classifyModel(provider, model)).toEqual({ class: "kimi", family: "k3", revision: "3.1.0" });
+		}
+	});
+
+	test("K3 identity does not absorb adjacent bare names", () => {
+		for (const model of [
+			"k30",
+			"k3-custom",
+			"k3anthropic",
+			"k3-256",
+			"k3-256kb",
+			"k3-256k-custom",
+			"kimi-code/k3-256kb",
+		]) {
+			expect(classifyModel("", model)).toEqual({ class: "unknown" });
+		}
+		expect(classifyModel("moonshot", "kimi-k3")).toEqual({ class: "kimi", family: "k3" });
+	});
+
+	test("-thinking suffix collapses to the logical id", () => {
+		expect(classifyModel("vercel-ai-gateway", "glm-4.6-thinking")).toMatchObject({
+			class: "glm",
+			thinkingVariant: true,
+			logicalId: "glm-4.6",
+		});
+	});
+
+	test("effort suffix collapses with except-bare-prefix gate", () => {
+		// qwen3.6-max is a product SKU, not an effort variant: the collapse
+		// vocabulary carries except-bare-prefix="qwen" on the -max suffix.
+		const qwen = classifyModel("alibaba-token-plan", "qwen3.6-max");
+		expect(qwen.class).toBe("qwen");
+		expect(qwen.effort).toBeUndefined();
+	});
+
+	test("daybreak overrides pin class/revision", () => {
+		expect(classifyModel("openai", "daybreak-blue-latest")).toMatchObject({
+			class: "unknown",
+			revision: "5.6.0",
+		});
+		expect(classifyModel("openai", "gpt-daybreak-blue-latest")).toMatchObject({
+			class: "openai",
+			revision: "5.6.0",
+		});
+	});
+
+	test("provider-specific override beats provider-agnostic classification", () => {
+		expect(classifyModel("kilo", "qwq-32b")).toMatchObject({
+			class: "qwen",
+			logicalId: "qwen/qwq-32b",
+		});
+	});
+
+	test("reviewed Bonsai basenames and quantized namespaces retain their wire id and Qwen generation", () => {
+		for (const [model, revision] of [
+			["Bonsai-27B", "3.6.0"],
+			["PrismML/Ternary-Bonsai-27B-q2_0", "3.6.0"],
+			["local/prefix-Ternary-BONSAI-2-27B-Q5_K_S.gguf", "3.8.0"],
+		] as const) {
+			expect(classifyModel("custom-local", model)).toEqual({ class: "qwen", revision });
+		}
+	});
+
+	test("Bonsai override globs do not absorb adjacent model sizes", () => {
+		for (const model of ["bonsai-270b", "bonsai-2-270b", "ternary-bonsai-270b-q4_k_m.gguf", "namespace/bonsai-7b"]) {
+			expect(classifyModel("llama.cpp", model)).toEqual({ class: "unknown" });
+		}
+	});
+
+	test("Bedrock dotted Grok ids classify as xai with a revision", () => {
+		// AWS Converse ids bury the vendor in dots (`us.xai.grok-4.6`). An
+		// unbounded `namespace "xai"` never splits on `.`, so these used to
+		// land in class unknown and inherit the Bedrock budget default.
+		for (const id of ["us.xai.grok-4.6", "global.xai.grok-4.6", "xai.grok-4.6"]) {
+			expect(classifyModel("amazon-bedrock", id)).toEqual({
+				class: "xai",
+				family: "grok",
+				revision: "4.6.0",
+			});
+		}
+	});
+
+	test("bare Meta-Llama wire ids classify as meta without a namespace segment", () => {
+		// SambaNova serves `Meta-Llama-*` with no `meta-llama/` prefix, which
+		// `bounded "llama"` never sees (prefix-anchored) and
+		// `namespace "meta-llama"` cannot match, so it used to land in class
+		// unknown and skip Meta cascade rules.
+		expect(classifyModel("sambanova", "Meta-Llama-3.3-70B-Instruct")).toEqual({
+			class: "meta",
+			family: "llama",
+		});
+	});
+});
+
+describe("collapse and variant vocabulary", () => {
+	test("routing-variant suffix resolves on declared providers only", () => {
+		expect(routingVariantPlain("openai-codex", "gpt-5.6-luna-wm")).toBe("gpt-5.6-luna");
+		expect(routingVariantPlain("openai", "gpt-5.6-luna-wm")).toBeUndefined();
+	});
+
+	test("billing-variant suffix strips to the transport base", () => {
+		expect(billingVariantPlain("gpt-5.5-pro-free")).toBe("gpt-5.5-pro");
+		expect(billingVariantPlain("-free")).toBeUndefined();
+	});
+
+	test("collapse assigns effort tier from the declared suffix", () => {
+		const collapsed = collapseVariantId("openai", "gpt-5.2-codex-xhigh");
+		expect(collapsed).toEqual({ logicalId: "gpt-5.2-codex", effort: Effort.XHigh, thinkingVariant: false });
+	});
+});

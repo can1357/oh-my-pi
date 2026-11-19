@@ -1,0 +1,431 @@
+/**
+ * `omp models` — list, search, and refresh available models.
+ *
+ * Subcommands:
+ * - `ls` (default): list available chat models grouped by provider.
+ * - `find <substring>`: list models of the selected kind whose provider, id, or name contains the substring.
+ * - `refresh`: force an online catalog re-fetch (ignoring the model cache TTL),
+ *   then list. This is the supported replacement for `rm -rf ~/.omp/models.db`
+ *   when a provider ships a new model that the 24h cache has not picked up yet.
+ *
+ * `ls`/`find` use the cache when fresh (`online-if-uncached`); only `refresh`
+ * forces the network (`online`).
+ */
+import type { Api, Effort, Model } from "@oh-my-pi/pi-ai";
+import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
+import { getEffectiveTokenCost, getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { type ModelKind, type ModelPricingStatus, modelKind } from "@oh-my-pi/pi-catalog/types";
+import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
+import chalk from "@oh-my-pi/pi-utils/chalk";
+import type { ConfigError } from "../config/config-file";
+import { ModelRegistry } from "../config/model-registry";
+import { Settings } from "../config/settings";
+import { discoverAndLoadExtensions, ExtensionRunner, emitSessionShutdownEvent } from "../extensibility/extensions";
+import { discoverAuthStorage } from "../sdk";
+import { SessionManager } from "../session/session-manager";
+import { EventBus } from "../utils/event-bus";
+
+import { cfgDisabledExtensions, cfgExtensions } from "../extensibility/settings";
+
+export type ModelsAction = "ls" | "find" | "refresh";
+
+export interface ModelsCommandArgs {
+	action: ModelsAction;
+	/** Search substring for `find`, or optional filter for `ls`. */
+	pattern?: string;
+	flags: {
+		json?: boolean;
+		/** Catalog kind to list; defaults to chat models. */
+		kind?: ModelKind | "all";
+		/** CLI `-e <path>` extension paths to load before listing (issue #905). */
+		extensions?: string[];
+		/** Skip extension discovery; only load explicit `extensions`. */
+		noExtensions?: boolean;
+		/** Extra `config.yml` overlays to apply for this invocation. */
+		config?: string[];
+	};
+}
+
+/**
+ * Known action keywords. Any other first token (e.g. `openai-codex`) is treated
+ * as a provider/substring filter for the default `ls` view, so every provider
+ * name doubles as an `omp models <provider>` shortcut.
+ */
+const KNOWN_ACTIONS: Record<string, ModelsAction> = {
+	ls: "ls",
+	list: "ls",
+	find: "find",
+	refresh: "refresh",
+};
+
+/** Resolve the two positional args into an action + filter (provider names fall through to `ls`). */
+export function resolveModelsArgs(
+	first: string | undefined,
+	second: string | undefined,
+): { action: ModelsAction; pattern: string | undefined } {
+	const known = first === undefined ? undefined : KNOWN_ACTIONS[first];
+	if (known) {
+		return { action: known, pattern: second };
+	}
+	return { action: "ls", pattern: first };
+}
+
+interface ModelJson {
+	provider: string;
+	kind: ModelKind;
+	id: string;
+	selector: string;
+	name: string;
+	contextWindow: number | null;
+	maxTokens: number | null;
+	reasoning: boolean;
+	/** Supported thinking efforts when the model thinks, otherwise null. */
+	thinking: readonly Effort[] | null;
+	input: ("text" | "image")[];
+	cost: Model<Api>["cost"];
+	pricingStatus: ModelPricingStatus;
+}
+
+interface ModelsJson {
+	models: ModelJson[];
+}
+
+function writeLine(line = ""): void {
+	process.stdout.write(`${line}\n`);
+}
+
+function writeModelsConfigError(error: Error): void {
+	writeLine(chalk.yellow("Warning: models.yml validation failed — custom providers disabled"));
+	for (const line of error.message.split("\n")) {
+		writeLine(`  ${line}`);
+	}
+	writeLine();
+}
+
+function formatLimit(n: number | null): string {
+	return n === null ? "-" : formatNumber(n);
+}
+
+function byProviderThenId(left: Model<Api>, right: Model<Api>): number {
+	const providerCmp = left.provider.localeCompare(right.provider);
+	if (providerCmp !== 0) return providerCmp;
+	return left.id.localeCompare(right.id);
+}
+
+function toModelJson(model: Model<Api>): ModelJson {
+	// Scalar legs report the card in force now, not the one current when the row was built.
+	const { input, output, cacheRead, cacheWrite } = getEffectiveTokenCost(model.cost);
+	return {
+		provider: model.provider,
+		kind: modelKind(model),
+		id: model.id,
+		selector: `${model.provider}/${model.id}`,
+		name: model.name,
+		contextWindow: model.contextWindow,
+		maxTokens: model.maxTokens,
+		reasoning: model.reasoning,
+		thinking: model.thinking ? getSupportedEfforts(model) : null,
+		input: model.input,
+		cost: { ...model.cost, input, output, cacheRead, cacheWrite },
+		pricingStatus: getModelPricingStatus(model),
+	};
+}
+
+type ColumnAlign = "left" | "right";
+
+interface BoxColumn {
+	header: string;
+	align?: ColumnAlign;
+}
+
+/** Right- or left-pad a plain (ANSI-free) cell to `width` display columns. */
+function padCell(text: string, width: number, align: ColumnAlign = "left"): string {
+	const space = width - Bun.stringWidth(text);
+	if (space <= 0) return text;
+	const fill = " ".repeat(space);
+	return align === "right" ? fill + text : text + fill;
+}
+
+/**
+ * Render `rows` as a box-drawing table. Cells must be plain text (no ANSI); the
+ * header row is bolded and the borders dimmed (both no-ops on non-TTY output).
+ */
+function boxTable(columns: BoxColumn[], rows: string[][]): string[] {
+	const widths = columns.map((column, index) =>
+		Math.max(Bun.stringWidth(column.header), ...rows.map(row => Bun.stringWidth(row[index] ?? ""))),
+	);
+	const bar = chalk.dim("│");
+	const segments = widths.map(width => "─".repeat(width + 2));
+	const renderRow = (cells: string[], bold: boolean): string => {
+		const padded = columns.map((column, index) => {
+			const cell = padCell(cells[index] ?? "", widths[index]!, column.align);
+			return bold ? chalk.bold(cell) : cell;
+		});
+		return `${bar} ${padded.join(` ${bar} `)} ${bar}`;
+	};
+	const lines = [chalk.dim(`┌${segments.join("┬")}┐`)];
+	lines.push(
+		renderRow(
+			columns.map(column => column.header),
+			true,
+		),
+	);
+	lines.push(chalk.dim(`├${segments.join("┼")}┤`));
+	for (const row of rows) {
+		lines.push(renderRow(row, false));
+	}
+	lines.push(chalk.dim(`└${segments.join("┴")}┘`));
+	return lines;
+}
+
+/**
+ * The two registry reads the listing performs. Structural so the renderer can be
+ * exercised without booting a full {@link ModelRegistry}.
+ */
+export interface ModelsListingSource {
+	/** Return models available for the selected catalog kind, or every kind for `all`. */
+	getAvailable(kind?: ModelKind | "all"): Model<Api>[];
+	getError(): ConfigError | undefined;
+}
+
+/**
+ * Render `omp models ls`/`find` as one box table per provider, selecting chat
+ * models by default or the caller-requested catalog kind.
+ */
+export function renderProviderModels(
+	source: ModelsListingSource,
+	action: ModelsAction,
+	pattern: string | undefined,
+	json: boolean,
+	kind: ModelKind | "all" = "chat",
+): void {
+	const available = source.getAvailable(kind);
+	const needle = pattern?.toLowerCase();
+	let filtered = available;
+
+	if (needle) {
+		let exactFound = false;
+		if (action !== "find") {
+			const exact = available.filter(m => m.provider.toLowerCase() === needle);
+			if (exact.length > 0) {
+				filtered = exact;
+				exactFound = true;
+			}
+		}
+		if (!exactFound) {
+			filtered = available.filter(
+				model =>
+					model.id.toLowerCase().includes(needle) ||
+					model.provider.toLowerCase().includes(needle) ||
+					`${model.provider}/${model.id}`.toLowerCase().includes(needle) ||
+					model.name.toLowerCase().includes(needle),
+			);
+		}
+	}
+
+	const configError = source.getError();
+
+	if (json) {
+		if (configError) {
+			process.stderr.write(
+				`Warning: models.yml validation failed — custom providers disabled\n${configError.message}\n`,
+			);
+		}
+		const output: ModelsJson = { models: filtered.slice().sort(byProviderThenId).map(toModelJson) };
+		writeLine(JSON.stringify(output));
+		return;
+	}
+
+	if (configError) {
+		writeModelsConfigError(configError);
+	}
+
+	if (available.length === 0) {
+		writeLine("No models available. Set API keys in environment variables.");
+		return;
+	}
+	if (filtered.length === 0) {
+		writeLine(`No models matching "${pattern}"`);
+		return;
+	}
+
+	// One section per provider: bold heading + a box table of that provider's models.
+	const byProvider = new Map<string, Model<Api>[]>();
+	for (const model of filtered.slice().sort(byProviderThenId)) {
+		let group = byProvider.get(model.provider);
+		if (!group) {
+			group = [];
+			byProvider.set(model.provider, group);
+		}
+		group.push(model);
+	}
+
+	let firstProvider = true;
+	for (const [provider, models] of byProvider) {
+		if (!firstProvider) writeLine();
+		firstProvider = false;
+		writeLine(`${chalk.bold.cyan(provider)} ${chalk.dim(`(${models.length})`)}`);
+		const rows = models.map(model => [
+			model.id,
+			formatLimit(model.contextWindow),
+			formatLimit(model.maxTokens),
+			model.thinking ? getSupportedEfforts(model).join(",") : model.reasoning ? "yes" : "-",
+			// Wire truth, not the declared `input`: the transport drops image parts for
+			// models the catalog marks text-only (`compat.stripImageInput`, #9697).
+			sendsImageInputOnWire(model) ? "yes" : "no",
+		]);
+		for (const line of boxTable(
+			[
+				{ header: "model" },
+				{ header: "context", align: "right" },
+				{ header: "max-out", align: "right" },
+				{ header: "thinking" },
+				{ header: "images" },
+			],
+			rows,
+		)) {
+			writeLine(line);
+		}
+	}
+}
+
+/**
+ * Options for {@link runModelsListing}: render the catalog from a caller-supplied
+ * registry. Loads extensions (CLI `-e` paths and configured `settings.extensions`)
+ * and discovers their providers before rendering so extension-contributed models
+ * appear (issue #905). The caller is responsible for refreshing built-in providers.
+ */
+export interface RunModelsListingOptions {
+	modelRegistry: ModelRegistry;
+	cwd: string;
+	action?: ModelsAction;
+	pattern?: string;
+	json?: boolean;
+	/** Catalog kind to list; defaults to chat models. */
+	kind?: ModelKind | "all";
+	/** CLI-supplied extension paths (e.g. from `-e <path>`). */
+	additionalExtensionPaths?: string[];
+	/** Extension paths configured under `extensions:` in user settings. */
+	settingsExtensions?: string[];
+	/** Disabled extension ids from settings (`disabledExtensions`). */
+	disabledExtensionIds?: string[];
+	/** When true, exclude ambient factories and resolve only `additionalExtensionPaths`. */
+	disableExtensionDiscovery?: boolean;
+}
+
+export async function runModelsListing(options: RunModelsListingOptions): Promise<void> {
+	const {
+		modelRegistry,
+		cwd,
+		action = "ls",
+		pattern,
+		json = false,
+		kind = "chat",
+		additionalExtensionPaths = [],
+		settingsExtensions = [],
+		disabledExtensionIds = [],
+		disableExtensionDiscovery = false,
+	} = options;
+
+	const eventBus = new EventBus();
+	const configuredPaths = disableExtensionDiscovery
+		? additionalExtensionPaths
+		: [...additionalExtensionPaths, ...settingsExtensions];
+	const extensionsResult = await discoverAndLoadExtensions(
+		configuredPaths,
+		cwd,
+		eventBus,
+		disableExtensionDiscovery ? undefined : disabledExtensionIds,
+		{ ambient: !disableExtensionDiscovery, includeAmbientHooks: false },
+	);
+	const extensionRunner =
+		extensionsResult.extensions.length > 0
+			? new ExtensionRunner(
+					extensionsResult.extensions,
+					extensionsResult.runtime,
+					cwd,
+					SessionManager.inMemory(cwd),
+					modelRegistry,
+				)
+			: undefined;
+
+	try {
+		for (const { path: extPath, error } of extensionsResult.errors) {
+			process.stderr.write(`Failed to load extension: ${extPath}: ${error}\n`);
+		}
+
+		// Mirror sdk.ts: drain pending provider registrations into the registry.
+		const activeSources = extensionsResult.extensions.map(extension => extension.path);
+		modelRegistry.syncExtensionSources(activeSources);
+		modelRegistry.clearSourceRegistrations(new Set(activeSources));
+		for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
+			modelRegistry.registerProvider(name, config, sourceId);
+		}
+		extensionsResult.runtime.pendingProviderRegistrations = [];
+		// Discover runtime (extension) provider catalogs now that they are registered.
+		await modelRegistry.refreshRuntimeProviders(action === "refresh" ? "online" : "online-if-uncached");
+
+		for (const warning of modelRegistry.drainConfigWarnings()) {
+			process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
+		}
+		// A failed fetch otherwise looks identical to a provider with no models.
+		for (const { provider, status, error } of modelRegistry.getRuntimeDiscoveryFailures()) {
+			const detail = error?.replace(/\s+/g, " ").trim();
+			process.stderr.write(
+				`${chalk.yellow(`Warning: ${provider} model discovery failed (${status}): ${detail}`)}\n`,
+			);
+		}
+		renderProviderModels(modelRegistry, action, pattern, json, kind);
+	} finally {
+		await emitSessionShutdownEvent(extensionRunner);
+	}
+}
+
+/**
+ * Entry point for the standalone `omp models` command: bootstraps auth storage,
+ * settings, and the model registry, force/cache-refreshes built-in providers per
+ * the chosen action, then delegates to {@link runModelsListing}.
+ */
+export async function runModelsCommand(command: ModelsCommandArgs): Promise<void> {
+	const { action, pattern } = command;
+	const json = command.flags.json ?? false;
+	const kind = command.flags.kind ?? "chat";
+
+	if (action === "find" && (!pattern || pattern.trim().length === 0)) {
+		process.stderr.write("`omp models find` requires a search substring, e.g. `omp models find minimax`\n");
+		process.exitCode = 1;
+		return;
+	}
+
+	const cwd = getProjectDir();
+	const settings = await Settings.init({ cwd, configFiles: command.flags.config });
+	const authStorage = await discoverAuthStorage(undefined, { settings });
+	try {
+		const modelRegistry = new ModelRegistry(authStorage);
+
+		if (action === "refresh" && !json && process.stderr.isTTY) {
+			process.stderr.write("Refreshing models from all providers…\n");
+		}
+		await modelRegistry.refresh(
+			action === "refresh" ? "online" : "online-if-uncached",
+			action === "refresh" ? { refreshCommandCredentials: true } : undefined,
+		);
+
+		const cliExtensionPaths = command.flags.extensions ?? [];
+		await runModelsListing({
+			modelRegistry,
+			cwd,
+			action,
+			pattern,
+			json,
+			kind,
+			additionalExtensionPaths: cliExtensionPaths,
+			settingsExtensions: cfgExtensions.get(settings),
+			disabledExtensionIds: cfgDisabledExtensions.get(settings),
+			disableExtensionDiscovery: Boolean(command.flags.noExtensions),
+		});
+	} finally {
+		authStorage.close();
+	}
+}

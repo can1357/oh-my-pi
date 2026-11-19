@@ -1,0 +1,5 @@
+8cb198e (HEAD -> main, tag: v0.22.0)
+  chore(master): release 0.22.0 (#201)
+  Release-As: 0.22.0
+393fa5b feat: add `rtk wc` command (#175)
+  Adds a compact word-count subcommand.

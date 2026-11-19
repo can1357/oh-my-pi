@@ -1,0 +1,137 @@
+import { describe, expect, it } from "bun:test";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
+
+const split = (input: string) => InternalUrlRouter.instance().split(input);
+const peelWriteSelector = (input: string) => InternalUrlRouter.instance().peelWriteSelector(input, "write");
+
+describe("InternalUrlRouter.split", () => {
+	it("returns the input unchanged when there is no selector tail", () => {
+		expect(split("local://3.log")).toEqual({ path: "local://3.log" });
+		expect(split("agent://reviewer_0")).toEqual({ path: "agent://reviewer_0" });
+		expect(split("memory://root")).toEqual({ path: "memory://root" });
+	});
+
+	it("peels a single line-range selector", () => {
+		expect(split("local://3.log:1-100")).toEqual({ path: "local://3.log", sel: "1-100" });
+		expect(split("local://3.log:50+150")).toEqual({ path: "local://3.log", sel: "50+150" });
+		expect(split("local://3.log:50-")).toEqual({ path: "local://3.log", sel: "50-" });
+	});
+
+	it("peels a `raw` selector", () => {
+		expect(split("local://3.log:raw")).toEqual({ path: "local://3.log", sel: "raw" });
+	});
+
+	it("peels compound `raw:range` selectors in either order", () => {
+		expect(split("local://3.log:raw:1-100")).toEqual({
+			path: "local://3.log",
+			sel: "raw:1-100",
+		});
+		expect(split("local://3.log:1-100:raw")).toEqual({
+			path: "local://3.log",
+			sel: "1-100:raw",
+		});
+	});
+
+	it("peels the malformed `:-N` selector that the strict splitter misses (the original bug)", () => {
+		expect(split("local://3.log:raw:-100")).toEqual({
+			path: "local://3.log",
+			sel: "raw:-100",
+		});
+		expect(split("local://3.log:-100")).toEqual({ path: "local://3.log", sel: "-100" });
+	});
+
+	it("peels selectors from skill URLs with namespaced hosts", () => {
+		expect(split("skill://superpowers:brainstorming:1-5")).toEqual({
+			path: "skill://superpowers:brainstorming",
+			sel: "1-5",
+		});
+	});
+
+	it("does not peel chunks that are not selector-shaped", () => {
+		// `name` is part of the host, not a selector.
+		expect(split("skill://plugin:name")).toEqual({ path: "skill://plugin:name" });
+	});
+
+	it("stops at the scheme separator `://`", () => {
+		expect(split("agent://1-50")).toEqual({ path: "agent://1-50" });
+	});
+
+	it("treats mcp:// URIs as opaque by default — selector-shaped suffixes are NOT peeled", () => {
+		// MCP resource URIs are server-defined and may legitimately end with `:raw`,
+		// `:1-50`, etc. Without an explicit escape the URI must be forwarded verbatim
+		// to the protocol handler so server-defined resources remain reachable.
+		expect(split("mcp://server/resource:1-50")).toEqual({
+			path: "mcp://server/resource:1-50",
+		});
+		expect(split("mcp://server/resource:raw")).toEqual({
+			path: "mcp://server/resource:raw",
+		});
+		expect(split("mcp://server/resource:L10")).toEqual({
+			path: "mcp://server/resource:L10",
+		});
+		expect(split("mcp://server/resource:conflicts")).toEqual({
+			path: "mcp://server/resource:conflicts",
+		});
+	});
+
+	it("returns the input unchanged for non-URL strings", () => {
+		expect(split("/abs/path:1-50")).toEqual({ path: "/abs/path:1-50" });
+		expect(split("plain-text")).toEqual({ path: "plain-text" });
+	});
+
+	it("does not peel for unknown schemes", () => {
+		expect(split("http://example.com:1-50")).toEqual({
+			path: "http://example.com:1-50",
+		});
+	});
+
+	it("keeps a `portAuthority` port (`ssh://host:port`) out of selector peeling", () => {
+		expect(split("ssh://host:2222")).toEqual({ path: "ssh://host:2222" });
+	});
+
+	it("peels a read selector after an `ssh://host:port/path`", () => {
+		expect(split("ssh://host:2222/etc/hosts:1-5")).toEqual({
+			path: "ssh://host:2222/etc/hosts",
+			sel: "1-5",
+		});
+	});
+
+	it("normalizes the single-slash alias before peeling", () => {
+		expect(split("local:/notes.md:2-2")).toEqual({ path: "local://notes.md", sel: "2-2" });
+	});
+});
+
+describe("InternalUrlRouter.peelWriteSelector (mutating-tool/read selector parity)", () => {
+	it("peels whole-file display selectors so write targets the same file read does", () => {
+		expect(peelWriteSelector("ssh://h/f:raw")).toBe("ssh://h/f");
+		expect(peelWriteSelector("ssh://h/f:conflicts")).toBe("ssh://h/f");
+	});
+
+	it("matches read's case-insensitive selector grammar", () => {
+		expect(peelWriteSelector("ssh://h/f:RAW")).toBe("ssh://h/f");
+		expect(peelWriteSelector("ssh://h/f:Conflicts")).toBe("ssh://h/f");
+	});
+
+	it("passes through paths with no peelable selector", () => {
+		expect(peelWriteSelector("ssh://h/f")).toBe("ssh://h/f");
+		expect(peelWriteSelector("vault://note")).toBe("vault://note");
+		// A real filesystem path with a colon is not a scheme:// URL, so it is never peeled.
+		expect(peelWriteSelector("/tmp/local:1-20")).toBe("/tmp/local:1-20");
+	});
+
+	it("applies the same peel to every write-capable internal scheme (intentional, matches read's target)", () => {
+		// vault:// and local:// writes peel display selectors too — write targets
+		// the base resource read resolves, not a note/file literally named `note:raw`.
+		expect(peelWriteSelector("vault://note:raw")).toBe("vault://note");
+		expect(peelWriteSelector("local:/foo.txt:conflicts")).toBe("local://foo.txt");
+		expect(() => peelWriteSelector("vault://note:1-20")).toThrow(/whole file/);
+		expect(() => peelWriteSelector("local:/foo.txt:5")).toThrow(/whole file/);
+	});
+
+	it("rejects line-range and malformed selectors instead of silently stripping them", () => {
+		expect(() => peelWriteSelector("ssh://h/f:1-20")).toThrow(/whole file/);
+		expect(() => peelWriteSelector("ssh://h/f:-10")).toThrow(/whole file/);
+		expect(() => peelWriteSelector("ssh://h/f:raw:1-20")).toThrow(/whole file/);
+		expect(() => peelWriteSelector("ssh://h/f:conflicts:1-20")).toThrow(/whole file/);
+	});
+});

@@ -1,0 +1,834 @@
+#!/usr/bin/env bun
+
+// Copilot model premium request multipliers by model identifier.
+const COPILOT_PREMIUM_MULTIPLIERS: Record<string, number> = {
+	"github-copilot/claude-haiku-4.5": 0.33,
+	"github-copilot/claude-opus-4.6": 3,
+	"github-copilot/gpt-4o": 0,
+	"github-copilot/gpt-5.4-mini": 0.33,
+	"github-copilot/grok-code-fast-1": 0.25,
+};
+
+import * as path from "node:path";
+import { parseArgs } from "node:util";
+import { discoverAuthStorage } from "@oh-my-pi/pi-ai/auth-broker/discover";
+import type { OAuthAccess } from "@oh-my-pi/pi-ai/auth-storage";
+import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
+import { getGitLabDuoModels } from "@oh-my-pi/pi-ai/providers/gitlab-duo";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
+import { $env } from "@oh-my-pi/pi-utils";
+import { buildModel } from "../src/build";
+import { isRetiredProvider } from "../src/compat/behavior";
+import { collapseVariants } from "../src/compat/collapse";
+import { providerEntries, providerEntry, seedModels } from "../src/compat/providers";
+import type { CompiledProvider } from "../src/compat/types";
+import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
+import { encodeModelCatalog } from "../src/model-catalog-format";
+import { createModelManager } from "../src/model-manager";
+import { resolveModelTokenizer } from "../src/model-tokenizer";
+import { getBundledModels, getBundledProviders } from "../src/models";
+import { toModelSpec } from "../src/provider-models/bundled-references";
+import {
+	allowsUnauthenticatedCatalogDiscovery,
+	type CatalogDiscoveryConfig,
+	type CatalogProviderDescriptor,
+	isCatalogDescriptor,
+} from "../src/provider-models/descriptor-types";
+import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
+import { filterModelsDevCatalogRows } from "../src/provider-models/models-dev-policies";
+import {
+	buildFireworksFastSeed,
+	buildXaiOAuthStaticSeed,
+	fetchWellKnownModels,
+	kimiCodeMaxTokens,
+	MODELS_DEV_PROVIDER_DESCRIPTORS,
+	mapModelsDevToModels,
+	NANO_GPT_THINKING_SUFFIX_RE,
+	openCodeGoBaseUrlForApi,
+	projectOpenAIProReasoningAliases,
+	stripFireworksDeepSeekThinkingToggle,
+} from "../src/provider-models/openai-compat";
+import { type OpenAICodexAccount, openaiCodexModelManagerOptions } from "../src/provider-models/special";
+import type { Api, Model, ModelSpec } from "../src/types";
+import { cleanModelName } from "../src/utils";
+import { mergeCopilotApiHeaders } from "../src/wire/github-copilot";
+import {
+	applyCanonicalLimitFallback,
+	applyGeneratedModelPolicies,
+	applyOllamaCloudOutputCap,
+	applyPricingPeerFallback,
+	hasBillableCost,
+	linkOpenAIPromotionTargets,
+} from "./generated-policies";
+
+const packageRoot = path.join(import.meta.dir, "..");
+
+// Generator policies may mutate nested specs, so each snapshot row owns its values.
+const prevModelsJson: Record<string, Record<string, Model<Api>>> = Object.fromEntries(
+	getBundledProviders().map(provider => [
+		provider,
+		Object.fromEntries(getBundledModels(provider).map(model => [model.id, structuredClone(model)])),
+	]),
+);
+
+/**
+ * Local/self-hosted providers (Ollama, vLLM, LM Studio, LiteLLM, Bifrost). Their model
+ * catalogs are whatever happens to be running on the machine that invokes the
+ * generator — bundling them would leak machine-specific endpoints (e.g.
+ * `http://localhost:4000/v1`) into the committed snapshot. They are discovered
+ * dynamically at runtime instead, so they are never fetched during generation
+ * and never written to models.json.
+ */
+const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litellm", "bifrost"]);
+/**
+ * Credential-scoped catalogs (Devin's Cascade roster is gated per account/team
+ * via `allowed_model_uids`). Fetching them during generation would bake one
+ * private account's entitlements into the shared bundle, and those rows then
+ * survive forever as previous-snapshot zombies: a later regen without that
+ * credential can never mark the provider authoritative to prune them. These
+ * providers are never fetched at generation time and their previous-snapshot
+ * rows are dropped — the curated static seed is the only bundled surface, and
+ * runtime discovery is authoritative per credential (mirrors the GitLab Duo
+ * fallback-only policy below).
+ */
+const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin", "sambanova", "otari", "modal"]);
+/**
+ * Providers whose authored seed is the complete documented fallback
+ * catalog: their previous-snapshot rows are never resurrected, so an id
+ * the host retired (e.g. CoralBricks' GLM 5.3 Flash, 2026-10-07) cannot
+ * return as a previous-snapshot zombie. `local` lists exactly the on-device
+ * workers this build ships, so a replaced one (Kokoro → Phonon) drops out.
+ */
+const STATIC_SEED_COMPLETE_PROVIDERS = new Set(["yolo-auto", "coralbricks", "local"]);
+
+/**
+ * The rows one provider's authored seed (`rules/providers/<id>.kdl`) contributes
+ * to this regeneration, per its `bundle` policy:
+ * - `always`: every regen (same-id upstream/discovery rows still win dedup).
+ * - `fallback`: only when the provider's authoritative discovery did not succeed.
+ * - `empty`: only when no other source produced a row for the provider.
+ * - `never`: runtime-only rows the provider's model manager serves itself.
+ *
+ * xai-oauth projects curated chat rows into Responses specs while preserving
+ * runner seed transports. The bundle carries both so configured roles resolve
+ * synchronously before live discovery completes.
+ */
+function bundledSeedRows(
+	entry: CompiledProvider,
+	models: readonly ModelSpec[],
+	authoritativeProviders: ReadonlySet<string>,
+): readonly ModelSpec[] {
+	switch (entry.seed?.bundle) {
+		case undefined:
+		case "never":
+			return [];
+		case "fallback":
+			if (authoritativeProviders.has(entry.id)) return [];
+			break;
+		case "empty":
+			if (models.some(model => model.provider === entry.id)) return [];
+			break;
+		case "always":
+			break;
+	}
+	return entry.id === "xai-oauth" ? buildXaiOAuthStaticSeed() : seedModels(entry.id);
+}
+
+/** Catalog providers whose seed rows carry the given precedence. */
+function seededProviders(precedence: "upstream" | "seed"): CompiledProvider[] {
+	const entries = providerEntries();
+	const out: CompiledProvider[] = [];
+	for (const id in entries) {
+		const entry = entries[id];
+		if (entry.seed?.precedence === precedence) out.push(entry);
+	}
+	return out;
+}
+
+/**
+ * Restores unfetched rows from a previous generated catalog while pruning
+ * providers whose snapshots are no longer valid.
+ */
+export function mergePreviousSnapshotModels(
+	models: readonly ModelSpec[],
+	previousModels: Readonly<Record<string, Readonly<Record<string, Model<Api>>>>>,
+	excludedProviders: ReadonlySet<string>,
+): ModelSpec[] {
+	const merged = [...models];
+	const fetchedKeys = new Set(models.map(model => `${model.provider}/${model.id}`));
+	for (const provider in previousModels) {
+		const providerModels = previousModels[provider];
+		for (const id in providerModels) {
+			const model = toModelSpec(providerModels[id]);
+			if (
+				!fetchedKeys.has(`${model.provider}/${model.id}`) &&
+				!DISCOVERY_ONLY_PROVIDERS.has(model.provider) &&
+				!CREDENTIAL_SCOPED_PROVIDERS.has(model.provider) &&
+				!STATIC_SEED_COMPLETE_PROVIDERS.has(model.provider) &&
+				!isRetiredProvider(model.provider) &&
+				!excludedProviders.has(model.provider)
+			) {
+				merged.push(model);
+			}
+		}
+	}
+	return merged;
+}
+
+async function resolveProviderApiKey(providerId: string, catalog: CatalogDiscoveryConfig): Promise<string | undefined> {
+	for (const envVar of catalog.envVars ?? []) {
+		const value = $env[envVar as keyof typeof $env];
+		if (typeof value === "string" && value.length > 0) {
+			return value;
+		}
+	}
+
+	try {
+		const authStorage = await discoverAuthStorage();
+		try {
+			const storedApiKey = await authStorage.keys.get(providerId);
+			if (storedApiKey) {
+				return storedApiKey;
+			}
+			if (catalog.oauthProvider) {
+				// AuthStorage.keys.get refreshes through the broker-aware
+				// single-flighted machinery, so a build-time invocation no
+				// longer silently falls back to bundled models when an
+				// expired-but-refreshable OAuth credential is on disk.
+				const oauthKey = await authStorage.keys.get(catalog.oauthProvider);
+				if (oauthKey) {
+					return oauthKey;
+				}
+			}
+		} finally {
+			authStorage.close();
+		}
+	} catch (err) {
+		console.warn(
+			`Warning: Failed to retrieve credentials for ${providerId}:`,
+			err instanceof Error ? err.message : String(err),
+		);
+	}
+
+	return undefined;
+}
+type CatalogProviderFetchResult = { models: ModelSpec[]; succeeded: boolean };
+
+async function fetchProviderModelsFromCatalog(
+	descriptor: CatalogProviderDescriptor,
+): Promise<CatalogProviderFetchResult> {
+	const apiKey = await resolveProviderApiKey(descriptor.providerId, descriptor.catalogDiscovery);
+
+	if (!apiKey && !allowsUnauthenticatedCatalogDiscovery(descriptor)) {
+		console.log(`No ${descriptor.catalogDiscovery.label} credentials found (env or agent.db), using fallback models`);
+		return { models: [], succeeded: false };
+	}
+
+	try {
+		console.log(`Fetching models from ${descriptor.catalogDiscovery.label} model manager...`);
+		const discoveryConfig = { apiKey };
+		const preparedConfig =
+			getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ?? discoveryConfig;
+		const managerOptions = descriptor.createModelManagerOptions(preparedConfig);
+		const manager = createModelManager(managerOptions);
+		const result = await manager.refresh("online");
+		// `stale: true` means the dynamic fetch failed and the manager fell back
+		// to merging the local agent.db model cache over the static catalog —
+		// fine for a live session ("stale state remains visible"), poison for a
+		// committed bundle: cache rows written by older code leak outdated
+		// limits into models.json (e.g. the xai-oauth maxTokens regression).
+		// Treat it like missing credentials so the prev-snapshot/curated-seed
+		// fallback applies instead.
+		if (result.stale) {
+			console.warn(
+				`${descriptor.catalogDiscovery.label} dynamic fetch failed (stale cache merge), using fallback models`,
+			);
+			return { models: [], succeeded: false };
+		}
+		const models = result.models.filter(model => model.provider === descriptor.providerId);
+		if (models.length === 0) {
+			console.warn(`${descriptor.catalogDiscovery.label} discovery returned no models`);
+			return { models: [], succeeded: true };
+		}
+		console.log(`Fetched ${models.length} models from ${descriptor.catalogDiscovery.label} model manager`);
+		// Keep discovery rows as specs until policies finish; the final bundle is fully materialized below.
+		return { models: models.map(model => toModelSpec(model)), succeeded: true };
+	} catch (error) {
+		console.error(`Failed to fetch ${descriptor.catalogDiscovery.label} models:`, error);
+		return { models: [], succeeded: false };
+	}
+}
+
+async function loadModelsDevData(): Promise<ModelSpec[]> {
+	try {
+		console.log("Fetching stencil.so catalog from catalog.stencil.so...");
+		const data = await fetchWellKnownModels();
+		const models = mapModelsDevToModels(data as Record<string, unknown>, MODELS_DEV_PROVIDER_DESCRIPTORS);
+		models.sort((a, b) => a.id.localeCompare(b.id));
+		console.log(`Loaded ${models.length} models from stencil.so`);
+		return models;
+	} catch (error) {
+		console.error("Failed to load stencil.so data:", error);
+		return [];
+	}
+}
+
+function createGlobalModelsDevReferenceMap(modelsDevModels: readonly ModelSpec[]): Map<string, ModelSpec> {
+	// NanoGPT publishes a model's thinking route as a separate `<id>:thinking`
+	// row, so its base row carries `reasoning: false`. The base is still
+	// reasoning-capable when that sibling exists; without this the sibling's
+	// larger limits make the non-thinking row the cross-provider reference and
+	// its `reasoning: false` overwrites every same-id row (#18673).
+	const thinkingBaseKeys = new Set<string>();
+	for (const model of modelsDevModels) {
+		const match = NANO_GPT_THINKING_SUFFIX_RE.exec(model.id);
+		if (match && model.reasoning) {
+			thinkingBaseKeys.add(`${model.provider}/${model.id.slice(0, match.index)}`);
+		}
+	}
+	const references = new Map<string, ModelSpec>();
+	for (const row of modelsDevModels) {
+		const model =
+			!row.reasoning && thinkingBaseKeys.has(`${row.provider}/${row.id}`) ? { ...row, reasoning: true } : row;
+		const existing = references.get(model.id);
+		if (!existing) {
+			references.set(model.id, model);
+			continue;
+		}
+		if ((model.contextWindow ?? 0) > (existing.contextWindow ?? 0)) {
+			references.set(model.id, model);
+			continue;
+		}
+		if (
+			(model.contextWindow ?? 0) === (existing.contextWindow ?? 0) &&
+			(model.maxTokens ?? 0) > (existing.maxTokens ?? 0)
+		) {
+			references.set(model.id, model);
+		}
+	}
+	return references;
+}
+
+export function applyGlobalModelsDevFallback(
+	models: readonly ModelSpec[],
+	modelsDevModels: readonly ModelSpec[],
+): ModelSpec[] {
+	const providerScopedKeys = new Set(modelsDevModels.map(model => `${model.provider}/${model.id}`));
+	const globalReferences = createGlobalModelsDevReferenceMap(modelsDevModels);
+	return models.map(model => {
+		if (
+			providerScopedKeys.has(`${model.provider}/${model.id}`) ||
+			model.provider === "devin" ||
+			model.provider === "baseten" ||
+			// Meta's first-party rows come from the reviewed seed; a same-id
+			// gateway row would overwrite their display names.
+			model.provider === "meta" ||
+			// Providers whose discovery is the deployment truth and whose
+			// corrections live in KDL opt out of same-id reference fills.
+			providerEntry(model.provider)?.skipCrossProviderReferenceFills === true
+		) {
+			return model;
+		}
+		// ClinePass free-tier entries arrive manager-complete: enriched from the
+		// bundled upstream reference and carrying a tier-marked name. The same-id
+		// overlay would overwrite their names with the reference's display name
+		// (dropping the "(free)" marker) and flip reasoning from unrelated
+		// same-id data, diverging the bundle from the runtime roster. Their raw
+		// wire tag marks them as manager-complete. (`.api` equality narrows the
+		// generic, making the compat field access sound.)
+		if (
+			model.provider === "cline-pass" &&
+			model.api === "openai-completions" &&
+			(model as ModelSpec<"openai-completions">).compat?.wireModelIdMode === "raw"
+		) {
+			return model;
+		}
+		const reference = globalReferences.get(model.id);
+		if (!reference) {
+			return model;
+		}
+		return {
+			...model,
+			name: reference.name,
+			reasoning: reference.reasoning,
+			input: reference.input,
+			// Fill unknown endpoint limits from same-id stencil.so references, but keep
+			// provider-specific values when discovery returned them explicitly.
+			contextWindow: model.contextWindow ?? reference.contextWindow,
+			maxTokens: model.maxTokens ?? reference.maxTokens,
+			int: model.int ?? reference.int,
+			tps: model.tps ?? reference.tps,
+		};
+	});
+}
+
+function applyPremiumMultiplierOverrides(models: readonly ModelSpec[]): ModelSpec[] {
+	return models.map(model => {
+		const premiumMultiplier = COPILOT_PREMIUM_MULTIPLIERS[`${model.provider}/${model.id}`];
+		if (premiumMultiplier === undefined) {
+			return model;
+		}
+		if (model.premiumMultiplier === premiumMultiplier) {
+			return model;
+		}
+		return {
+			...model,
+			premiumMultiplier,
+		};
+	});
+}
+
+function applyUmansPricingFallback(models: readonly ModelSpec[], modelsDevModels: readonly ModelSpec[]): ModelSpec[] {
+	const paygCosts = new Map<string, ModelSpec["cost"]>();
+	for (const model of modelsDevModels) {
+		if (model.provider === "umans" && hasBillableCost(model.cost)) {
+			paygCosts.set(model.id, model.cost);
+		}
+	}
+
+	// The public endpoint exposes this technical alias for Umans Flash, but
+	// stencil.so publishes pricing only for the recommended `umans-flash` id.
+	const flashCost = paygCosts.get("umans-flash");
+	if (flashCost) {
+		paygCosts.set("umans-qwen3.6-35b-a3b", flashCost);
+	}
+
+	return models.map(model => {
+		if (model.provider !== "umans" || hasBillableCost(model.cost)) {
+			return model;
+		}
+		const cost = paygCosts.get(model.id);
+		return cost ? { ...model, cost: { ...cost } } : model;
+	});
+}
+
+function applyCodexPricingFallback(models: readonly ModelSpec[]): ModelSpec[] {
+	const openAIModels = new Map(
+		models
+			.filter(model => model.provider === "openai" && hasBillableCost(model.cost))
+			.map(model => [model.id, model.cost]),
+	);
+
+	return models.map(model => {
+		if (model.provider !== "openai-codex" || model.api !== "openai-codex-responses") {
+			return model;
+		}
+		if (hasBillableCost(model.cost)) {
+			return model;
+		}
+
+		// Daybreak standard pricing is rule-owned (`providers/openai-codex.kdl`
+		// cost-patch); only same-id openai mirrors remain generator-applied.
+		const openAICost = openAIModels.get(model.id);
+		if (!openAICost) {
+			return model;
+		}
+
+		return {
+			...model,
+			cost: { ...openAICost },
+		};
+	});
+}
+
+/**
+ * Kimi Code discovery snapshots carried maxTokens=32000 uniformly (#6711); pin
+ * the documented per-family output ceilings and leave legacy K2 rows as-is.
+ * Other hosts' Kimi output caps are rule-owned (`max-tokens-ceiling`).
+ */
+function applyKimiCodeMaxTokens(models: readonly ModelSpec[]): ModelSpec[] {
+	return models.map(model => {
+		if (model.provider !== "kimi-code") return model;
+		const capped = kimiCodeMaxTokens(model.id, model.maxTokens);
+		return capped === model.maxTokens ? model : { ...model, maxTokens: capped };
+	});
+}
+
+/**
+ * Fireworks' DeepSeek V4 endpoint accepts the user's effort through
+ * `reasoning_effort` and rejects the DeepSeek-native binary `thinking` toggle
+ * when both are present. Strip stale reference metadata from generated fallbacks.
+ */
+function applyFireworksDeepSeekReasoningShape(models: readonly ModelSpec[]): ModelSpec[] {
+	return models.map(model => {
+		if (model.provider !== "fireworks" || model.api !== "openai-completions") return model;
+		// `.api` equality doesn't narrow the generic; the guard makes this cast sound.
+		return stripFireworksDeepSeekThinkingToggle(model as ModelSpec<"openai-completions">, model.id);
+	});
+}
+
+function normalizeAntigravityEndpoint(models: readonly ModelSpec[]): ModelSpec[] {
+	return models.map(model => {
+		if (model.provider === "google-antigravity" && model.baseUrl) {
+			return { ...model, baseUrl: ANTIGRAVITY_PRIMARY_ENDPOINT };
+		}
+		return model;
+	});
+}
+
+const ANTIGRAVITY_ENDPOINT = ANTIGRAVITY_PRIMARY_ENDPOINT;
+
+async function getOAuthAccessFromStorage(provider: OAuthProvider): Promise<OAuthAccess | null> {
+	try {
+		const authStorage = await discoverAuthStorage();
+		try {
+			// `getOAuthAccess` runs the full AuthStorage refresh pipeline so an
+			// expired-but-refreshable credential gets rotated before discovery,
+			// and identity metadata (accountId/projectId/email) flows through
+			// for Codex/Antigravity downstream calls.
+			let access = await authStorage.oauth.access(provider);
+			if (!access && provider === "google-antigravity") {
+				access = await authStorage.oauth.access("google-gemini-cli");
+			}
+			return access ?? null;
+		} finally {
+			authStorage.close();
+		}
+	} catch (err) {
+		console.warn(
+			`Warning: Failed to retrieve credentials for ${provider}:`,
+			err instanceof Error ? err.message : String(err),
+		);
+		return null;
+	}
+}
+
+/**
+ * Fetch available Antigravity models from the API using the discovery module.
+ * Returns empty array if no auth is available (previous models used as fallback).
+ */
+async function fetchAntigravityModels(): Promise<ModelSpec<"google-gemini-cli">[]> {
+	const access = await getOAuthAccessFromStorage("google-antigravity");
+	if (!access) {
+		console.log("No Antigravity or Gemini CLI credentials found, will use previous models.");
+		console.log("Tip: If you are logged in under a specific profile, run with OMP_PROFILE=<name>.");
+		return [];
+	}
+	try {
+		console.log("Fetching models from Antigravity API...");
+		const discovered = await fetchAntigravityDiscoveryModels({
+			token: access.accessToken,
+			projectId: access.projectId,
+			endpoint: ANTIGRAVITY_ENDPOINT,
+		});
+		if (discovered === null || discovered.rejectedStatus !== undefined) {
+			console.warn("Antigravity API fetch failed, will use previous models");
+			return [];
+		}
+		if (discovered.models.length > 0) {
+			console.log(`Fetched ${discovered.models.length} models from Antigravity API`);
+			return discovered.models;
+		}
+		console.warn("Antigravity API returned no models, will use previous models");
+		return [];
+	} catch (error) {
+		console.error("Failed to fetch Antigravity models:", error);
+		return [];
+	}
+}
+
+/**
+ * Resolve every stored Codex OAuth account and union their account-scoped
+ * `/models` catalogs through the same manager path the runtime uses (#6265).
+ * Fails closed: any account that cannot resolve or fetch aborts discovery and
+ * returns [] (non-authoritative), so a partial per-account snapshot never
+ * replaces the previous bundle's model set.
+ */
+async function fetchCodexDiscoveryModels(): Promise<ModelSpec<"openai-codex-responses">[]> {
+	const accounts: OpenAICodexAccount[] = [];
+	try {
+		const authStorage = await discoverAuthStorage();
+		try {
+			const accesses = await authStorage.oauth.accessAll("openai-codex");
+			for (const access of accesses) {
+				if (!access.ok) {
+					console.warn(`Codex account failed to resolve (${access.error}), keeping previous models.`);
+					return [];
+				}
+				accounts.push({ accessToken: access.accessToken, accountId: access.accountId });
+			}
+		} finally {
+			authStorage.close();
+		}
+	} catch (error) {
+		console.warn(
+			"Warning: Failed to retrieve Codex credentials:",
+			error instanceof Error ? error.message : String(error),
+		);
+		return [];
+	}
+	if (accounts.length === 0) {
+		console.log("No Codex credentials found, will use previous models.");
+		console.log("Tip: If you are logged in under a specific profile, run with OMP_PROFILE=<name>.");
+		return [];
+	}
+	console.log(`Fetching models from Codex API for ${accounts.length} account(s)...`);
+	const options = openaiCodexModelManagerOptions({ resolveAccounts: async () => accounts });
+	const models = await options.fetchDynamicModels?.();
+	if (!models) {
+		console.warn("Codex API fetch failed, keeping previous models.");
+		return [];
+	}
+	console.log(`Fetched ${models.length} models from Codex API`);
+	return [...models];
+}
+
+async function generateModels(selectedProvider?: string) {
+	// Fetch models from dynamic sources.
+	const modelsDevModels = await loadModelsDevData();
+	const catalogProviderDescriptors = PROVIDER_DESCRIPTORS.filter(
+		(descriptor): descriptor is CatalogProviderDescriptor =>
+			isCatalogDescriptor(descriptor) &&
+			!DISCOVERY_ONLY_PROVIDERS.has(descriptor.providerId) &&
+			!CREDENTIAL_SCOPED_PROVIDERS.has(descriptor.providerId) &&
+			(selectedProvider === undefined || descriptor.providerId === selectedProvider),
+	);
+	const catalogProviderModelBatches = await Promise.all(
+		catalogProviderDescriptors.map(async descriptor => ({
+			descriptor,
+			...(await fetchProviderModelsFromCatalog(descriptor)),
+		})),
+	);
+	// A provider is authoritative once its endpoint snapshot can replace the
+	// stencil.so / previous-snapshot rows. Requiring fetched models keeps a
+	// flaky empty-but-200 discovery from silently wiping another provider's
+	// bundled catalog; only alibaba-token-plan treats an empty success as
+	// authoritative, because its `/models` allowlist reflects the subscribed
+	// edition and must not be widened by the curated seed below.
+	const authoritativeCatalogProviders = new Set(
+		catalogProviderModelBatches
+			.filter(
+				batch =>
+					batch.descriptor.dynamicModelsAuthoritative === true &&
+					(batch.models.length > 0 || (batch.succeeded && batch.descriptor.providerId === "alibaba-token-plan")),
+			)
+			.map(batch => batch.descriptor.providerId),
+	);
+	const catalogProviderModels = catalogProviderModelBatches.flatMap(batch => batch.models);
+	const bundledModelsDevModels = modelsDevModels.filter(model => !authoritativeCatalogProviders.has(model.provider));
+	// getGitLabDuoModels returns built models; project back to spec stage for the bundle.
+	const gitLabDuoModels = getGitLabDuoModels().map(model => toModelSpec(model));
+	// Combine models. stencil.so has priority unless a provider's successful endpoint
+	// discovery is authoritative; those endpoint snapshots replace stencil.so rows.
+	let allModels = applyGlobalModelsDevFallback(
+		[...bundledModelsDevModels, ...catalogProviderModels, ...gitLabDuoModels],
+		modelsDevModels,
+	);
+
+	// Authored seed rows (`rules/providers/<id>.kdl`) whose upstream rows win
+	// dedup. Pushed before the previous-snapshot merge so the current seed, not
+	// a stale snapshot copy, is the fallback row.
+	for (const entry of seededProviders("upstream")) {
+		allModels.push(...bundledSeedRows(entry, allModels, authoritativeCatalogProviders));
+	}
+	// Seed Fireworks "Fast" serving-path variants (`<id>-fast`). Fast routers are
+	// not enumerated by the serverless control-plane list, so discovery never
+	// surfaces them; the seed projects each base entry into a fast variant.
+	// Deduped behind any identical previous-snapshot entry.
+	allModels.push(...buildFireworksFastSeed());
+
+	const specialDiscoverySources = [
+		{ label: "Antigravity", providerId: "google-antigravity", authoritative: false, fetch: fetchAntigravityModels },
+		{ label: "Codex", providerId: "openai-codex", authoritative: true, fetch: fetchCodexDiscoveryModels },
+	] as const;
+	const specialDiscoveries = await Promise.all(
+		specialDiscoverySources
+			.filter(source => selectedProvider === undefined || source.providerId === selectedProvider)
+			.map(async source => ({
+				label: source.label,
+				providerId: source.providerId,
+				authoritative: source.authoritative,
+				models: await source.fetch(),
+			})),
+	);
+	const authoritativeSpecialDiscoveryProviders = new Set<string>();
+	for (const discovery of specialDiscoveries) {
+		if (discovery.models.length > 0) {
+			console.log(`Added ${discovery.models.length} models from ${discovery.label} discovery`);
+			allModels.push(...discovery.models);
+			if (discovery.authoritative) {
+				authoritativeSpecialDiscoveryProviders.add(discovery.providerId);
+			}
+		}
+	}
+
+	const modelsDevSnapshotExcludedProviders = new Set<string>();
+	for (const model of modelsDevModels) {
+		if (model.provider === "google-vertex") {
+			modelsDevSnapshotExcludedProviders.add(model.provider);
+		}
+	}
+	// Merge previous models.json entries as fallback for provider/model pairs not
+	// fetched dynamically. Providers covered by authoritative endpoint discovery
+	// or authoritative stencil.so sources keep that upstream list exactly, so
+	// retired entries from the previous snapshot do not reappear during regeneration.
+	// Discovery-only providers (local inference servers) — never bundle static models.
+	const previousSnapshotExcludedProviders = new Set([
+		...authoritativeCatalogProviders,
+		...authoritativeSpecialDiscoveryProviders,
+		...modelsDevSnapshotExcludedProviders,
+		"firepass",
+	]);
+
+	// Previous-snapshot entries may carry an older ThinkingConfig vocabulary;
+	// applyGeneratedModelPolicies re-bakes `thinking` for every model, so the
+	// inbound shape is irrelevant beyond identity/pricing/compat fields.
+	allModels = mergePreviousSnapshotModels(allModels, prevModelsJson, previousSnapshotExcludedProviders);
+	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
+	// Previous-snapshot fallbacks can retain a retired client fingerprint. Force
+	// every bundled Copilot model onto the same identity used by live discovery.
+	allModels = allModels.map(model =>
+		model.provider === "github-copilot" ? { ...model, headers: mergeCopilotApiHeaders(model.headers) } : model,
+	);
+	// Seed rows that outrank upstream: prepended after the snapshot merge and
+	// reference fills, so dedup keeps the authored row and same-id rows from
+	// other providers never overwrite its name/capabilities.
+	for (const entry of seededProviders("seed")) {
+		allModels.unshift(...bundledSeedRows(entry, allModels, authoritativeCatalogProviders));
+	}
+	allModels = applyUmansPricingFallback(allModels, modelsDevModels);
+	allModels = applyPremiumMultiplierOverrides(allModels);
+	allModels = applyCodexPricingFallback(allModels);
+	allModels = applyPricingPeerFallback(allModels);
+	allModels = applyKimiCodeMaxTokens(allModels);
+	allModels = applyFireworksDeepSeekReasoningShape(allModels);
+	allModels = filterModelsDevCatalogRows(allModels);
+	allModels = normalizeAntigravityEndpoint(allModels);
+	// Previous-snapshot fallbacks keep their old baseUrl; re-base every OpenCode
+	// Go row so retained rows follow gateway endpoint moves (#15722).
+	allModels = allModels.map(model =>
+		model.provider === "opencode-go" ? { ...model, baseUrl: openCodeGoBaseUrlForApi(model.api) } : model,
+	);
+	// Normalize display names: gateway author prefixes ("OpenAI: …"), alias
+	// markers ("(latest)"), provider attribution ("(Antigravity)"), and
+	// price/promo tags are model-extrinsic — strip them from the bundle.
+	allModels = allModels.map(model => {
+		const name = cleanModelName(model.name);
+		return name === model.name ? model : { ...model, name };
+	});
+	// Re-derive the first-party gpt-5.6 pro-reasoning aliases from the current
+	// base rows (stale previous-snapshot aliases are dropped inside), before the
+	// policy re-bake so the aliases get the same baked thinking metadata.
+	allModels = projectOpenAIProReasoningAliases(allModels);
+	applyGeneratedModelPolicies(allModels);
+	linkOpenAIPromotionTargets(allModels);
+	// Collapse effort-tier variants AFTER the policy re-bake: live-discovery
+	// entries are already collapsed (rebake skips them); this pass folds
+	// previous-snapshot raw members into their logical families.
+	allModels = collapseVariants(allModels);
+	// Fill remaining null endpoint limits from each model's canonical-family
+	// reference. Runs last so canonical ids and explicit policy limits are final.
+	applyCanonicalLimitFallback(allModels);
+	// Pin every Ollama Cloud model's max-output to the enforced ceiling; runs
+	// after canonical fallback so finalized context windows drive the cap.
+	applyOllamaCloudOutputCap(allModels);
+
+	for (const model of allModels) {
+		canonicalizeModelCompat(model);
+	}
+
+	// Group by provider and sort each provider's models
+	const providers: Record<string, Record<string, ModelSpec>> = {};
+	for (const model of allModels) {
+		if (DISCOVERY_ONLY_PROVIDERS.has(model.provider) || isRetiredProvider(model.provider)) continue;
+		if (!providers[model.provider]) {
+			providers[model.provider] = {};
+		}
+		// Use model ID as key to deduplicate the ordered sources assembled above.
+		// Earlier sources win.
+		if (!providers[model.provider][model.id]) {
+			providers[model.provider][model.id] = model;
+		}
+	}
+
+	// Sort providers alphabetically and models within each provider by ID
+	const sortObj = <V>(o: Record<string, V>): Record<string, V> => {
+		return Object.fromEntries(
+			Object.entries(o)
+				.sort(([a], [b]) => a.localeCompare(b))
+				.map(([id, model]) => [id, model]),
+		);
+	};
+
+	const modelSpecs: Record<string, Record<string, ModelSpec>> = sortObj(providers);
+	// Validated against the generated rows, not a descriptor list, so every
+	// source kind (descriptor, special discovery, models.dev, seed) is selectable
+	// and a typo fails before models.json is rewritten.
+	if (selectedProvider !== undefined && modelSpecs[selectedProvider] === undefined) {
+		throw new Error(`No catalog rows generated for provider: ${selectedProvider}`);
+	}
+	// A provider-only update must not re-bake unrelated snapshot metadata.
+	// Keep cross-provider inputs above for reference fills, but replace only
+	// the requested provider in the generated output.
+	const MODELS: Record<string, Record<string, Model<Api>>> = selectedProvider === undefined
+		? {}
+		: { ...prevModelsJson };
+	if (selectedProvider !== undefined) delete MODELS[selectedProvider];
+	for (const [provider, models] of Object.entries(modelSpecs)) {
+		if (selectedProvider !== undefined && provider !== selectedProvider) continue;
+		MODELS[provider] = Object.fromEntries(
+			Object.entries(sortObj(models)).map(([id, model]) => [id, buildGeneratedModel(model)]),
+		);
+	}
+
+	// Generate JSON file
+	await Bun.write(path.join(packageRoot, "src/models.json"), encodeModelCatalog(sortObj(MODELS)));
+	console.log("Generated src/models.json");
+
+	// Print statistics for the rows this run regenerated.
+	const writtenModels = selectedProvider === undefined ? allModels : Object.values(MODELS[selectedProvider] ?? {});
+	const totalModels = writtenModels.length;
+	const reasoningModels = writtenModels.filter(m => m.reasoning).length;
+
+	console.log(`
+Model Statistics:`);
+	console.log(`  Total models: ${totalModels}`);
+	console.log(`  Reasoning-capable models: ${reasoningModels}`);
+
+	for (const [provider, models] of Object.entries(MODELS)) {
+		if (selectedProvider !== undefined && provider !== selectedProvider) continue;
+		console.log(`  ${provider}: ${Object.keys(models).length} models`);
+	}
+}
+
+function canonicalizeModelCompat(model: ModelSpec<Api>): void {
+	if (!model.compat) return;
+
+	if ("disableStrictTools" in model.compat && model.compat.disableStrictTools === false) {
+		delete model.compat.disableStrictTools;
+	}
+
+	let hasKeys = false;
+	for (const _ in model.compat) {
+		hasKeys = true;
+		break;
+	}
+	if (!hasKeys) {
+		delete model.compat;
+	}
+}
+
+/**
+ * Materialize one bundled row. Prompt-cache lifetimes are rule-owned output,
+ * not snapshot input: stale lifetimes and configuration provenance from a
+ * previous snapshot (or a copied reference row) are dropped so `buildModel`
+ * reapplies only the current KDL policy. A tokenizer the row's own id resolves
+ * is policy output too; a copied one survives only for ids policy cannot
+ * classify (e.g. GitLab Duo aliases of Claude models).
+ */
+export function buildGeneratedModel(model: ModelSpec<Api>): Model<Api> {
+	const spec = { ...model };
+	if (resolveModelTokenizer(spec.requestModelId ?? spec.id, spec.provider) !== undefined) delete spec.tokenizer;
+	delete spec.promptCache;
+	delete spec.promptCacheConfig;
+	delete spec.kindConfig;
+	return buildModel(spec);
+}
+
+if (import.meta.main) {
+	const { values } = parseArgs({ args: Bun.argv.slice(2), options: { provider: { type: "string" } } });
+	generateModels(values.provider).catch(error => {
+		console.error(error);
+		process.exitCode = 1;
+	});
+}

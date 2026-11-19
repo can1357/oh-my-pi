@@ -1,0 +1,24 @@
+auth "gitlab-duo" {
+	name "GitLab Duo Non-Agentic"
+	env "GITLAB_TOKEN"
+	login "oauth-code" {
+		// GitLab rejects the bundled client when its registered redirect URI drifts.
+		// Users may override both values with their own OAuth application (#2424).
+		client-id "da4edff2e6ebd2bc3208611e2768bc1c1dd7be791dc5ff26ca34ca9ee44f7d4b" env="GITLAB_CLIENT_ID"
+		authorize-url "https://gitlab.com/oauth/authorize"
+		scopes "api"
+		pkce #true
+		instructions "Complete GitLab login in browser. If GitLab responds with \"The redirect URI included is not valid\", register your own GitLab OAuth application and set GITLAB_CLIENT_ID + GITLAB_REDIRECT_URI, or use a Personal Access Token via GITLAB_TOKEN."
+		callback port=8080 path="/callback" hostname="localhost" redirect-uri-env="GITLAB_REDIRECT_URI"
+		token url="https://gitlab.com/oauth/token" body="form"
+		credential {
+			access "access_token"
+			refresh "refresh_token"
+			expires "seconds" path="expires_in" from="created_at" skew-ms=300000
+		}
+		after-exchange hook="gitlab-duo-clear-cache"
+	}
+	refresh {
+		after-refresh hook="gitlab-duo-clear-cache"
+	}
+}

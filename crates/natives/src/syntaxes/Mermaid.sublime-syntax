@@ -1,0 +1,94 @@
+# Vendored from https://raw.githubusercontent.com/SublimeText/Mermaid/master/mermaid.sublime-syntax
+# Source: SublimeText/Mermaid, MIT license, copyright (c) 2017 Peng Wang.
+%YAML 1.2
+---
+# See https://www.sublimetext.com/docs/syntax.html
+name: Mermaid
+file_extensions:
+  - mermaid
+  - mmd
+scope: source.mermaid
+version: 2
+contexts:
+  prototype:
+    - include: line-comment
+
+  main:
+    # don't include the prototype so we can have preprocesor comments take precedence over normal ones
+    - meta_include_prototype: false
+    - include: preprocessor-comments
+    - include: line-comment
+
+    - match: <
+      push:
+        - meta_scope: punctuation.definition.comment.mermaid.html
+        - match: $
+          pop: true
+
+    - match: (?-i)^\s*(sequenceDiagram)\s+
+      captures:
+        1: keyword.declaration.trait.diagram.mermaid
+      push:
+        - meta_scope: meta.declaration.diagram.mermaid
+        - match: $
+          set: scope:source.mermaid.sequence
+    - match: ^\s*(graph|flowchart)\s+
+      captures:
+        1: keyword.declaration.graph.mermaid
+      scope: keyword.declaration.graph.mermaid
+    - include: quoted-string
+    - match: (?:<-->|<--|-->|---|-.->|-\.-|==>|===|->>|-->>|<<-|<<--|-)
+      scope: keyword.operator.mermaid
+    - include: graph-direction
+
+  graph-direction:
+    - match: \b(?:T[BD]|BT|LR|RL)\b
+      scope: constant.language.graph-direction.mermaid
+
+  preprocessor-comments:
+    - match: '^\s*(%%)(?={)'
+      captures:
+        1: punctuation.definition.comment.mermaid
+      push: inside-preprocessor-comment
+
+  inside-preprocessor-comment:
+    - meta_scope: comment.line.percentage.mermaid
+    - match: ''
+      embed: scope:source.js
+      escape: (%%)?$
+      escape_captures:
+        1: punctuation.definition.comment.end.mermaid
+      pop: 1
+    #- match: '' # basis, bumpX, bumpY, cardinal, catmullRom, linear, monotoneX, monotoneY, natural, step, stepAfter, and stepBefore.
+
+  line-comment:
+    - match: '^\s*(%%)'
+      captures:
+        1: punctuation.definition.comment.mermaid
+      push: inside-line-comment
+
+  inside-line-comment:
+    - meta_scope: comment.line.percentage.mermaid
+    - match: $\n?
+      pop: true
+
+  quoted-string:
+    - match: '"'
+      scope: punctuation.definition.string.begin.mermaid
+      push: inside-quoted-string
+
+  inside-quoted-string:
+    - meta_scope: string.quoted.double.mermaid
+    - match: '"'
+      scope: punctuation.definition.string.end.mermaid
+      pop: true
+    - match: (#)[0-9]{1,7}(;)
+      scope: constant.character.entity.decimal.mermaid
+      captures:
+        1: punctuation.definition.entity.mermaid
+        2: punctuation.terminator.entity.mermaid
+    - match: (#)[a-zA-Z0-9]+(;)
+      scope: constant.character.entity.named.mermaid
+      captures:
+        1: punctuation.definition.entity.mermaid
+        2: punctuation.terminator.entity.mermaid

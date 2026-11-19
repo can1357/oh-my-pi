@@ -1,0 +1,21 @@
+{
+	"extends": "./tsconfig.client.json",
+	"compilerOptions": {
+		"noEmit": false,
+		"emitDeclarationOnly": true,
+		"declaration": true,
+		"declarationMap": false,
+		"sourceMap": false,
+		"inlineSources": false,
+		"rootDir": "src",
+		"outDir": "dist/types",
+		"noCheck": true
+	},
+	"include": [
+		"src/client"
+	],
+	"exclude": [
+		"dist",
+		"node_modules"
+	]
+}

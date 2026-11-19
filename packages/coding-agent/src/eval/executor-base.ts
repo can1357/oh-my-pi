@@ -1,0 +1,673 @@
+import { logger, toError } from "@oh-my-pi/pi-utils";
+import { Settings } from "../config/settings";
+import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
+import type { ToolSession } from "../tools";
+import { ToolAbortError } from "../tools/tool-errors";
+import {
+	resolveOutputMaxColumns,
+	resolveOutputSinkArtifactMaxBytes,
+	resolveOutputSinkHeadBytes,
+} from "../tools/output-meta";
+import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP, isEvalTimeoutControlEvent } from "./bridge-timeout";
+import type { JsStatusEvent } from "./js/shared/types";
+import { registerPyToolBridge } from "./py/tool-bridge";
+import { getActiveEvalShadowCell } from "./speculation/runtime-context";
+import type { EvalDisplayOutput } from "./types";
+
+/**
+ * Constructor for a language executor's cancellation error. Each backend
+ * subclasses {@link Error} and carries a `timedOut` flag distinguishing a
+ * deadline expiry from a plain abort.
+ */
+export type CancelledErrorClass = new (timedOut: boolean) => Error & { timedOut: boolean };
+
+/** Raised when callers reference kernel-owned state before its retained kernel exists. */
+export class EvalKernelNotRunningError extends Error {
+	constructor(language: string) {
+		super(
+			`${language} kernel is not running; tools defined with @tool / tool() live in the kernel and must be (re)defined in an eval cell first`,
+		);
+		this.name = "EvalKernelNotRunningError";
+	}
+}
+
+/** The error an aborted kernel call reports: the signal's own reason (`Interrupted by user`, …) or `fallback`. */
+export function abortReasonError(reason: unknown, fallback: string): Error {
+	if (reason instanceof Error) return reason;
+	if (typeof reason === "string") return new ToolAbortError(reason);
+	return new ToolAbortError(fallback);
+}
+
+/**
+ * A cell's display outputs in emission order. Progress snapshots (see
+ * `statusEventKey`) replace their earlier snapshot in place, so a long `wait()`
+ * over agents keeps one event per handle instead of one per poll tick. Shared
+ * by the kernel (Python) and VM (JS) executors.
+ */
+export class DisplayOutputCollector {
+	readonly outputs: EvalDisplayOutput[] = [];
+	readonly #snapshotIndex = new Map<string, number>();
+
+	push(output: EvalDisplayOutput): void {
+		const key = output.type === "status" ? statusEventKey(output.event) : undefined;
+		if (key !== undefined) {
+			const index = this.#snapshotIndex.get(key);
+			if (index !== undefined) {
+				this.outputs[index] = output;
+				return;
+			}
+			this.#snapshotIndex.set(key, this.outputs.length);
+		}
+		this.outputs.push(output);
+	}
+}
+
+/** Managed-env values a kernel patch may carry (`null` clears, `undefined` skips). */
+export type KernelEnvPatch = Record<string, string | null | undefined>;
+
+/**
+ * Options every kernel-backed language executor shares. Per-language option
+ * interfaces structurally extend this; the base executor only reads these.
+ */
+export interface KernelExecutorBaseOptions {
+	cwd?: string;
+	filename?: string;
+	timeoutMs?: number;
+	deadlineMs?: number;
+	idleTimeoutMs?: number;
+	onChunk?: (chunk: string) => Promise<void> | void;
+	signal?: AbortSignal;
+	onStatus?: (event: JsStatusEvent) => void;
+	emitStatus?: (event: JsStatusEvent) => void;
+	/** Shows the user `out://` replies of the cell's bridged tool calls; absent, those calls are refused. */
+	onReply?: (text: string) => void;
+	toolSession?: ToolSession;
+	bridgeSessionId?: string;
+	artifactId?: string;
+	artifactPath?: string;
+	/** Set by the kernel session registry; true when this cell is the first on a replacement for a dead kernel. */
+	claimKernelRestartNotice?: () => boolean;
+}
+
+/** Normalised execution result produced by {@link executeWithKernelBase}. */
+export interface KernelExecutionResult {
+	output: string;
+	exitCode: number | undefined;
+	cancelled: boolean;
+	truncated: boolean;
+	artifactId: string | undefined;
+	/** Bytes the artifact cap dropped from the saved file's middle (the artifact is a head/tail sample). */
+	artifactElidedBytes?: number;
+	artifactError?: OutputArtifactError;
+	totalLines: number;
+	totalBytes: number;
+	outputLines: number;
+	outputBytes: number;
+	displayOutputs: EvalDisplayOutput[];
+	stdinRequested: boolean;
+}
+
+/** Mirrors the `eval-state-context` reminder wording so agents recognise it. */
+export function formatKernelRestartNotice(runtimeLabel: string): string {
+	return `Kernel restarted: the previous ${runtimeLabel} is dead; state is unavailable. Re-run needed setup: variables, imports and definitions from earlier cells are gone.`;
+}
+
+/** Minimal kernel surface the base executor drives, satisfied by every backend kernel. */
+export interface GenericKernel<TEnv> {
+	execute(
+		code: string,
+		options: {
+			cwd?: string;
+			filename?: string;
+			env?: TEnv;
+			id: string;
+			signal?: AbortSignal;
+			onChunk: (text: string) => Promise<void> | void;
+			onDisplay: (output: EvalDisplayOutput) => Promise<void> | void;
+		},
+	): Promise<{
+		status: "ok" | "error";
+		cancelled: boolean;
+		timedOut: boolean;
+		kernelKilled?: boolean;
+		stdinRequested?: boolean;
+	}>;
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation helpers
+// ---------------------------------------------------------------------------
+
+export function getExecutionDeadlineMs(options?: { deadlineMs?: number; timeoutMs?: number }): number | undefined {
+	if (options?.deadlineMs !== undefined) return options.deadlineMs;
+	if (options?.timeoutMs === undefined) return undefined;
+	return Date.now() + options.timeoutMs;
+}
+
+export function getRemainingTimeoutMs(deadlineMs?: number): number | undefined {
+	if (deadlineMs === undefined) return undefined;
+	return deadlineMs - Date.now();
+}
+
+/** What can ask for a cell to stop: the caller's (or the cell's own) abort signal, and the caller's deadline. */
+export interface CancellationRequest {
+	signal?: AbortSignal;
+	deadlineMs?: number;
+}
+
+/**
+ * Whether `error` ended the cell because a cancellation was requested: it is
+ * the executor's own cancelled error (thrown only on an abort or a passed
+ * deadline), or the request's signal aborted, or its deadline has passed. The
+ * error's name proves nothing: a kernel's own startup budget, a transport's
+ * request timeout and the user's code all throw errors named "AbortError" or
+ * "TimeoutError" that nobody asked for, and those are failures to report
+ * with their text, not cancellations.
+ */
+export function isCancellationError(
+	error: unknown,
+	cancelledErrorClass: CancelledErrorClass,
+	request: CancellationRequest,
+): boolean {
+	if (error instanceof cancelledErrorClass) return true;
+	if (request.signal?.aborted) return true;
+	const remainingMs = getRemainingTimeoutMs(request.deadlineMs);
+	return remainingMs !== undefined && remainingMs <= 0;
+}
+
+/** For a cancellation (see {@link isCancellationError}): whether it was a timeout rather than an abort. */
+export function isTimedOutCancellation(
+	error: unknown,
+	cancelledErrorClass: CancelledErrorClass,
+	signal?: AbortSignal,
+	deadlineMs?: number,
+): boolean {
+	if (error instanceof cancelledErrorClass) return error.timedOut;
+	if (typeof DOMException !== "undefined" && error instanceof DOMException) return error.name === "TimeoutError";
+	if (error instanceof Error && error.name === "TimeoutError") return true;
+	const reason = signal?.reason;
+	if (typeof DOMException !== "undefined" && reason instanceof DOMException) return reason.name === "TimeoutError";
+	if (reason instanceof Error) return reason.name === "TimeoutError";
+	const remainingMs = getRemainingTimeoutMs(deadlineMs);
+	return remainingMs !== undefined && remainingMs <= 0;
+}
+
+export async function waitForPromiseWithCancellation<T>(
+	promise: Promise<T>,
+	options: { signal?: AbortSignal; deadlineMs?: number },
+	cancelledErrorClass: CancelledErrorClass,
+	timedOutResolver?: (error: unknown, signal?: AbortSignal) => boolean,
+): Promise<T> {
+	if (options.signal?.aborted) {
+		throw new cancelledErrorClass(
+			timedOutResolver?.(options.signal.reason, options.signal) ??
+				isTimedOutCancellation(options.signal.reason, cancelledErrorClass, options.signal),
+		);
+	}
+	const remainingMs = getRemainingTimeoutMs(options.deadlineMs);
+	if (remainingMs !== undefined && remainingMs <= 0) {
+		throw new cancelledErrorClass(true);
+	}
+	if (!options.signal && remainingMs === undefined) {
+		return await promise;
+	}
+
+	const { promise: resultPromise, resolve, reject } = Promise.withResolvers<T>();
+	const cleanups: Array<() => void> = [];
+	const finish = (cb: () => void): void => {
+		while (cleanups.length > 0) cleanups.pop()?.();
+		cb();
+	};
+	if (options.signal) {
+		const onAbort = (): void =>
+			finish(() =>
+				reject(
+					new cancelledErrorClass(
+						timedOutResolver?.(options.signal?.reason, options.signal) ??
+							isTimedOutCancellation(options.signal?.reason, cancelledErrorClass, options.signal),
+					),
+				),
+			);
+		options.signal.addEventListener("abort", onAbort, { once: true });
+		cleanups.push(() => options.signal?.removeEventListener("abort", onAbort));
+	}
+	if (remainingMs !== undefined) {
+		const timer = setTimeout(() => finish(() => reject(new cancelledErrorClass(true))), remainingMs);
+		timer.unref();
+		cleanups.push(() => clearTimeout(timer));
+	}
+	promise.then(
+		value => finish(() => resolve(value)),
+		err => finish(() => reject(err)),
+	);
+	return await resultPromise;
+}
+
+/**
+ * Derived abort signal for the kernel, holding back an external abort while a
+ * bridge call marked `deferExternalAbort` is in flight.
+ *
+ * Scope is deliberately narrow: only `kernel.execute` consumes
+ * {@link BridgeAbortShield.signal}. Work dispatched through the tool bridge
+ * keeps the caller's real signal so a turn cancel reaches spawned subagents
+ * immediately — deferral protects the runtime, never the delegated work.
+ */
+interface BridgeAbortShield {
+	signal: AbortSignal | undefined;
+	abortRequested: boolean;
+	timedOut: boolean;
+	handleStatus?: (event: JsStatusEvent) => void;
+	dispose?: () => void;
+}
+
+function createBridgeAbortShield(source: AbortSignal | undefined): BridgeAbortShield {
+	const shield: BridgeAbortShield = {
+		signal: undefined,
+		abortRequested: false,
+		timedOut: false,
+	};
+	if (!source) return shield;
+
+	const controller = new AbortController();
+	let pauseDepth = 0;
+	let abortReason: unknown;
+	let removeAbortListener: (() => void) | undefined;
+
+	const requestAbort = (reason: unknown): void => {
+		shield.abortRequested = true;
+		shield.timedOut =
+			shield.timedOut ||
+			(typeof DOMException !== "undefined" && reason instanceof DOMException
+				? reason.name === "TimeoutError"
+				: reason instanceof Error && reason.name === "TimeoutError");
+		abortReason = reason;
+		if (pauseDepth > 0 || controller.signal.aborted) return;
+		controller.abort(reason);
+	};
+
+	const onAbort = (): void => {
+		const reason = source.reason;
+		requestAbort(reason);
+	};
+
+	shield.signal = controller.signal;
+	shield.handleStatus = (event: JsStatusEvent): void => {
+		if (event.deferExternalAbort !== true) return;
+		if (event.op === EVAL_TIMEOUT_PAUSE_OP) {
+			pauseDepth++;
+			return;
+		}
+		if (event.op !== EVAL_TIMEOUT_RESUME_OP || pauseDepth === 0) return;
+		pauseDepth--;
+		if (shield.abortRequested && !controller.signal.aborted) controller.abort(abortReason);
+	};
+	shield.dispose = (): void => {
+		removeAbortListener?.();
+		removeAbortListener = undefined;
+	};
+
+	if (source.aborted) {
+		requestAbort(source.reason);
+	} else {
+		source.addEventListener("abort", onAbort, { once: true });
+		removeAbortListener = () => {
+			source.removeEventListener("abort", onAbort);
+		};
+		if (source.aborted) {
+			source.removeEventListener("abort", onAbort);
+			removeAbortListener = undefined;
+			requestAbort(source.reason);
+		}
+	}
+
+	return shield;
+}
+
+export function createCancelledKernelResult(output: string): KernelExecutionResult {
+	const outputBytes = Buffer.byteLength(output, "utf-8");
+	const outputLines = output.length > 0 ? 1 : 0;
+	return {
+		output,
+		exitCode: undefined,
+		cancelled: true,
+		truncated: false,
+		artifactId: undefined,
+		totalLines: outputLines,
+		totalBytes: outputBytes,
+		outputLines,
+		outputBytes,
+		displayOutputs: [],
+		stdinRequested: false,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Managed environment helpers
+// ---------------------------------------------------------------------------
+
+export const MANAGED_KERNEL_ENV_KEYS = [
+	"PI_SESSION_FILE",
+	"PI_ARTIFACTS_DIR",
+	"PI_TOOL_BRIDGE_URL",
+	"PI_TOOL_BRIDGE_TOKEN",
+	"PI_TOOL_BRIDGE_SESSION",
+	"PI_EVAL_LOCAL_ROOTS",
+] as const;
+
+interface ManagedKernelEnvOptions {
+	sessionFile?: string;
+	artifactsDir?: string;
+	bridgeSessionId?: string;
+	bridge?: { url: string; token: string };
+	localRoots?: Record<string, string>;
+}
+interface ManagedKernelEnvPolicy {
+	sparse?: boolean;
+}
+
+export function buildManagedKernelEnvPatch(options: ManagedKernelEnvOptions): Record<string, string | null>;
+export function buildManagedKernelEnvPatch(
+	options: ManagedKernelEnvOptions,
+	policy: { sparse: true },
+): Record<string, string | undefined>;
+export function buildManagedKernelEnvPatch(
+	options: ManagedKernelEnvOptions,
+	policy?: ManagedKernelEnvPolicy,
+): KernelEnvPatch {
+	const localRoots = options.localRoots;
+	if (policy?.sparse) {
+		const patch: Record<string, string | undefined> = {};
+		if (options.sessionFile) patch.PI_SESSION_FILE = options.sessionFile;
+		if (options.artifactsDir) patch.PI_ARTIFACTS_DIR = options.artifactsDir;
+		if (options.bridge) {
+			patch.PI_TOOL_BRIDGE_URL = options.bridge.url;
+			patch.PI_TOOL_BRIDGE_TOKEN = options.bridge.token;
+			patch.PI_TOOL_BRIDGE_SESSION = options.bridgeSessionId ?? "";
+		}
+		if (localRoots) patch.PI_EVAL_LOCAL_ROOTS = JSON.stringify(localRoots);
+		return patch;
+	}
+	return {
+		PI_SESSION_FILE: options.sessionFile ?? null,
+		PI_ARTIFACTS_DIR: options.artifactsDir ?? null,
+		PI_TOOL_BRIDGE_URL: options.bridge?.url ?? null,
+		PI_TOOL_BRIDGE_TOKEN: options.bridge?.token ?? null,
+		PI_TOOL_BRIDGE_SESSION: options.bridge && options.bridgeSessionId ? options.bridgeSessionId : null,
+		PI_EVAL_LOCAL_ROOTS: localRoots && Object.keys(localRoots).length > 0 ? JSON.stringify(localRoots) : null,
+	};
+}
+
+export function buildManagedKernelEnv(
+	options: ManagedKernelEnvOptions,
+	policy?: ManagedKernelEnvPolicy,
+): Record<string, string> | undefined {
+	const patch = policy?.sparse
+		? buildManagedKernelEnvPatch(options, { sparse: true })
+		: buildManagedKernelEnvPatch(options);
+	const env: Record<string, string> = {};
+	let hasKeys = false;
+	for (const key of MANAGED_KERNEL_ENV_KEYS) {
+		const value = patch[key];
+		if (typeof value === "string") {
+			env[key] = value;
+			hasKeys = true;
+		}
+	}
+	return hasKeys ? env : undefined;
+}
+
+export function attachSessionOwner(
+	session: { ownerIds: Set<string>; hasFallbackOwner: boolean },
+	sessionId: string,
+	ownerId: string | undefined,
+): void {
+	if (ownerId !== undefined) {
+		if (session.hasFallbackOwner) {
+			session.ownerIds.delete(sessionId);
+			session.hasFallbackOwner = false;
+		}
+		session.ownerIds.add(ownerId);
+		return;
+	}
+	if (session.hasFallbackOwner || session.ownerIds.size === 0) {
+		session.ownerIds.add(sessionId);
+		session.hasFallbackOwner = true;
+	}
+}
+
+/** Owner registry shared by every language's live/starting session records. */
+export interface SessionOwners {
+	ownerIds: Set<string>;
+	hasFallbackOwner: boolean;
+}
+
+/** Narrows owner-scoped retained-kernel disposal. */
+export interface DisposeByOwnerOptions {
+	/** Sessions with this (language-namespaced) session id keep their kernel and owner registration. */
+	keepSessionId?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Base executor implementation
+// ---------------------------------------------------------------------------
+
+export interface ExecuteWithKernelBaseParams<
+	TOptions extends KernelExecutorBaseOptions,
+	TEnv extends KernelEnvPatch = Record<string, string | null>,
+> {
+	kernel: GenericKernel<TEnv>;
+	code: string;
+	options: TOptions | undefined;
+	/** Prefix for the per-execution run id (e.g. `"py"`). */
+	runIdPrefix: string;
+	/** Human-readable language label used in the failure log line. */
+	errorLogLabel: string;
+	cancelledErrorClass: CancelledErrorClass;
+	buildKernelEnvPatch: (options: TOptions) => TEnv;
+	formatKernelTimeoutAnnotation: (executionTimeoutMs: number | undefined, kernelKilled: boolean) => string;
+	formatTimeoutAnnotation: (executionTimeoutMs: number | undefined) => string | undefined;
+}
+
+export async function executeWithKernelBase<
+	TOptions extends KernelExecutorBaseOptions,
+	TEnv extends KernelEnvPatch = Record<string, string | null>,
+>(params: ExecuteWithKernelBaseParams<TOptions, TEnv>): Promise<KernelExecutionResult> {
+	const {
+		kernel,
+		code,
+		options,
+		runIdPrefix,
+		errorLogLabel,
+		cancelledErrorClass,
+		buildKernelEnvPatch,
+		formatKernelTimeoutAnnotation,
+		formatTimeoutAnnotation,
+	} = params;
+
+	const settings = await Settings.init();
+	const sink = new OutputSink({
+		onChunk: options?.onChunk,
+		artifactPath: options?.artifactPath,
+		artifactId: options?.artifactId,
+		headBytes: resolveOutputSinkHeadBytes(settings),
+		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
+		maxColumns: resolveOutputMaxColumns(settings),
+	});
+
+	const display = new DisplayOutputCollector();
+	const displayOutputs = display.outputs;
+	const deadlineMs = getExecutionDeadlineMs(options);
+	const remainingMs = getRemainingTimeoutMs(deadlineMs);
+	const executionTimeoutMs = remainingMs !== undefined && remainingMs > 0 ? remainingMs : undefined;
+	// The wall-clock timeout must abort through the same shield the bridge
+	// watches. A kernel-internal timer SIGINTs the runner but leaves in-flight
+	// bridge calls (wait() over agent()/completion() handles or tool.*) blocked
+	// in urllib worker threads; the runner then wedges waiting for them, never
+	// emits `done`, and the SIGINT escalation kills
+	// the kernel — losing every variable. Expiring via the shield rejects those
+	// bridge calls, so the workers unwind and the cell settles as a clean
+	// KeyboardInterrupt. It also inherits critical-phase deferral: a timeout
+	// landing mid-merge waits for the resume instead of settling the cell on
+	// top of a half-applied git operation.
+	const timeoutSignal = executionTimeoutMs !== undefined ? AbortSignal.timeout(executionTimeoutMs) : undefined;
+	const abortSource =
+		options?.signal && timeoutSignal
+			? AbortSignal.any([options.signal, timeoutSignal])
+			: (timeoutSignal ?? options?.signal);
+	const abortShield = createBridgeAbortShield(abortSource);
+
+	const collectDisplay = (output: EvalDisplayOutput): void => {
+		if (output.type === "status") {
+			abortShield.handleStatus?.(output.event);
+			options?.onStatus?.(output.event);
+			if (isEvalTimeoutControlEvent(output.event)) return;
+		}
+		display.push(output);
+	};
+
+	const emitStatus: (event: JsStatusEvent) => void =
+		options?.emitStatus ?? (event => collectDisplay({ type: "status", event }));
+	const runId = `${runIdPrefix}-${crypto.randomUUID()}`;
+	// Two aborts cross the bridge, and conflating them is what let a cancelled
+	// turn keep working. Delegated work (above all the subagents `agent()`
+	// spawns) gets the caller's real signal so it dies with the turn — shielding
+	// it here made Python fan-outs outlive a cancel indefinitely,
+	// while JS cells, which never route through this shield, stopped fine. The
+	// shielded signal only governs how long the host waits on a call, holding
+	// the cell open across a critical phase (isolation worktree setup,
+	// merge/cherry-pick) so a cancel can't settle it on top of a half-applied
+	// git operation.
+	const unregisterBridge =
+		options?.toolSession && options?.bridgeSessionId
+			? registerPyToolBridge(options.bridgeSessionId, runId, {
+					toolSession: options.toolSession,
+					signal: options.signal,
+					cellTimeoutMs: executionTimeoutMs ?? options.idleTimeoutMs ?? 0,
+					shieldedSignal: abortShield.signal,
+					emitStatus,
+					onReply: options.onReply,
+					shadowCell: getActiveEvalShadowCell(),
+					abortRequested: () => {
+						return abortShield.abortRequested;
+					},
+				})
+			: null;
+
+	const restartNotice = options?.claimKernelRestartNotice?.()
+		? formatKernelRestartNotice(`${errorLogLabel} kernel`)
+		: undefined;
+	try {
+		if (restartNotice) sink.push(`${restartNotice}\n`);
+		if (remainingMs !== undefined && remainingMs <= 0) {
+			throw new cancelledErrorClass(true);
+		}
+
+		const result = await kernel.execute(code, {
+			cwd: options?.cwd,
+			filename: options?.filename,
+			env: buildKernelEnvPatch(options ?? ({} as TOptions)),
+			id: runId,
+			signal: abortShield.signal,
+			onChunk: text => sink.push(text),
+			onDisplay: output => collectDisplay(output),
+		});
+
+		if (result.cancelled || abortShield.abortRequested) {
+			const timedOut = result.timedOut || abortShield.timedOut;
+			const annotation = timedOut
+				? formatKernelTimeoutAnnotation(executionTimeoutMs ?? options?.idleTimeoutMs, result.kernelKilled ?? false)
+				: result.kernelKilled && !abortShield.abortRequested
+					? "Kernel died during execution; completion is uncertain. The cell was not replayed; check for partial side effects before retrying."
+					: undefined;
+			const dumped = await sink.dump(annotation);
+			return {
+				exitCode: undefined,
+				cancelled: true,
+				truncated: dumped.truncated,
+				output: dumped.output,
+				artifactId: dumped.artifactId ?? undefined,
+				artifactElidedBytes: dumped.artifactElidedBytes,
+				artifactError: dumped.artifactError,
+				totalLines: dumped.totalLines,
+				totalBytes: dumped.totalBytes,
+				outputLines: dumped.outputLines,
+				outputBytes: dumped.outputBytes,
+				displayOutputs,
+				stdinRequested: !!result.stdinRequested,
+			};
+		}
+
+		if (result.stdinRequested) {
+			const dumped = await sink.dump("Kernel requested stdin; interactive input is not supported.");
+			return {
+				exitCode: 1,
+				cancelled: false,
+				truncated: dumped.truncated,
+				output: dumped.output,
+				artifactId: dumped.artifactId ?? undefined,
+				artifactElidedBytes: dumped.artifactElidedBytes,
+				artifactError: dumped.artifactError,
+				totalLines: dumped.totalLines,
+				totalBytes: dumped.totalBytes,
+				outputLines: dumped.outputLines,
+				outputBytes: dumped.outputBytes,
+				displayOutputs,
+				stdinRequested: true,
+			};
+		}
+
+		const exitCode = result.status === "ok" ? 0 : 1;
+		const dumped = await sink.dump();
+		return {
+			exitCode,
+			cancelled: false,
+			truncated: dumped.truncated,
+			output: dumped.output,
+			artifactId: dumped.artifactId ?? undefined,
+			artifactElidedBytes: dumped.artifactElidedBytes,
+			artifactError: dumped.artifactError,
+			totalLines: dumped.totalLines,
+			totalBytes: dumped.totalBytes,
+			outputLines: dumped.outputLines,
+			outputBytes: dumped.outputBytes,
+			displayOutputs,
+			stdinRequested: false,
+		};
+	} catch (err) {
+		if (
+			isCancellationError(err, cancelledErrorClass, { signal: abortShield.signal, deadlineMs }) ||
+			abortShield.abortRequested
+		) {
+			const timedOut =
+				abortShield.timedOut || isTimedOutCancellation(err, cancelledErrorClass, abortShield.signal, deadlineMs);
+			const dumped = await sink.dump(
+				timedOut ? formatTimeoutAnnotation(executionTimeoutMs ?? options?.idleTimeoutMs) : undefined,
+			);
+			return {
+				exitCode: undefined,
+				cancelled: true,
+				truncated: dumped.truncated,
+				output: dumped.output,
+				artifactId: dumped.artifactId ?? undefined,
+				artifactElidedBytes: dumped.artifactElidedBytes,
+				artifactError: dumped.artifactError,
+				totalLines: dumped.totalLines,
+				totalBytes: dumped.totalBytes,
+				outputLines: dumped.outputLines,
+				outputBytes: dumped.outputBytes,
+				displayOutputs,
+				stdinRequested: false,
+			};
+		}
+		const error = toError(err);
+		logger.error(`${errorLogLabel} execution failed`, { error: error.message });
+		// The notice was claimed for this cell; a thrown error drops streamed output, so carry it here.
+		if (restartNotice) error.message = `${restartNotice}\n${error.message}`;
+		throw error;
+	} finally {
+		await sink.dispose();
+		unregisterBridge?.();
+		abortShield.dispose?.();
+	}
+}

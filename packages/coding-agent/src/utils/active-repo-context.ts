@@ -1,0 +1,162 @@
+import * as fs from "node:fs";
+import * as fsPromises from "node:fs/promises";
+import * as path from "node:path";
+
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+
+import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
+
+function compareEntryNames(left: fs.Dirent, right: fs.Dirent): number {
+	if (left.name < right.name) return -1;
+	if (left.name > right.name) return 1;
+	return 0;
+}
+
+function buildContext(cwd: string, repoRoot: string): ActiveRepoContext {
+	const resolvedCwd = path.resolve(cwd);
+	const resolvedRepoRoot = path.resolve(repoRoot);
+	return {
+		cwd: resolvedCwd,
+		repoRoot: resolvedRepoRoot,
+		relativeRepoRoot: path.relative(resolvedCwd, resolvedRepoRoot),
+		source: "single-direct-child-repo",
+	};
+}
+
+/** Whether `cwd` already sits inside a VCS repository. */
+function insideRepository(cwd: string): boolean {
+	try {
+		return vcs.repo(cwd) !== null;
+	} catch {
+		return false;
+	}
+}
+
+async function readDirectChildren(cwd: string): Promise<fs.Dirent[]> {
+	try {
+		const entries = await fsPromises.readdir(cwd, { withFileTypes: true });
+		entries.sort(compareEntryNames);
+		return entries;
+	} catch {
+		return [];
+	}
+}
+
+function readDirectChildrenSync(cwd: string): fs.Dirent[] {
+	try {
+		const entries = fs.readdirSync(cwd, { withFileTypes: true });
+		entries.sort(compareEntryNames);
+		return entries;
+	} catch {
+		return [];
+	}
+}
+
+async function resolveDirectChildDirectory(cwd: string, entry: fs.Dirent): Promise<string | null> {
+	const childPath = path.join(cwd, entry.name);
+	if (entry.isDirectory()) return childPath;
+	if (!entry.isSymbolicLink()) return null;
+	try {
+		const stat = await fsPromises.stat(childPath);
+		return stat.isDirectory() ? childPath : null;
+	} catch {
+		return null;
+	}
+}
+
+function resolveDirectChildDirectorySync(cwd: string, entry: fs.Dirent): string | null {
+	const childPath = path.join(cwd, entry.name);
+	if (entry.isDirectory()) return childPath;
+	if (!entry.isSymbolicLink()) return null;
+	try {
+		const stat = fs.statSync(childPath);
+		return stat.isDirectory() ? childPath : null;
+	} catch {
+		return null;
+	}
+}
+
+async function hasGitRepository(childPath: string): Promise<boolean> {
+	try {
+		// Skip markerless siblings before native discovery can walk their ancestors.
+		const stat = await fsPromises.stat(path.join(childPath, ".git"));
+		if (!stat.isDirectory() && !stat.isFile()) return false;
+		const info = vcs.gitInfo(childPath);
+		// Resolve gitfiles through the shared parser, but never adopt an ancestor.
+		if (!info || path.resolve(info.repoRoot) !== childPath) return false;
+		return (await fsPromises.stat(info.headPath)).isFile();
+	} catch {
+		return false;
+	}
+}
+
+function hasGitRepositorySync(childPath: string): boolean {
+	try {
+		const stat = fs.statSync(path.join(childPath, ".git"));
+		if (!stat.isDirectory() && !stat.isFile()) return false;
+		const info = vcs.gitInfo(childPath);
+		if (!info || path.resolve(info.repoRoot) !== childPath) return false;
+		return fs.statSync(info.headPath).isFile();
+	} catch {
+		return false;
+	}
+}
+
+async function findSingleDirectChildRepo(cwd: string): Promise<ActiveRepoContext | null> {
+	let context: ActiveRepoContext | null = null;
+	for (const entry of await readDirectChildren(cwd)) {
+		const childPath = await resolveDirectChildDirectory(cwd, entry);
+		if (!childPath) continue;
+		if (!(await hasGitRepository(childPath))) continue;
+		if (context) return null;
+		context = buildContext(cwd, childPath);
+	}
+	return context;
+}
+
+function findSingleDirectChildRepoSync(cwd: string): ActiveRepoContext | null {
+	let context: ActiveRepoContext | null = null;
+	for (const entry of readDirectChildrenSync(cwd)) {
+		const childPath = resolveDirectChildDirectorySync(cwd, entry);
+		if (!childPath) continue;
+		if (!hasGitRepositorySync(childPath)) continue;
+		if (context) return null;
+		context = buildContext(cwd, childPath);
+	}
+	return context;
+}
+
+async function hasJjWorkspace(childPath: string): Promise<boolean> {
+	try {
+		if (!(await fsPromises.stat(path.join(childPath, ".jj"))).isDirectory()) return false;
+		const root = vcs.jj(childPath)?.root();
+		return root !== undefined && path.resolve(root) === childPath;
+	} catch {
+		return false;
+	}
+}
+
+/** Every direct child of a cwd outside any repository that is a git or jj checkout root (symlinks followed), by name. */
+export async function listDirectChildRepos(cwd: string): Promise<string[]> {
+	const resolvedCwd = path.resolve(cwd);
+	if (insideRepository(resolvedCwd)) return [];
+	const repos: string[] = [];
+	for (const entry of await readDirectChildren(resolvedCwd)) {
+		const childPath = await resolveDirectChildDirectory(resolvedCwd, entry);
+		if (childPath && ((await hasGitRepository(childPath)) || (await hasJjWorkspace(childPath))))
+			repos.push(childPath);
+	}
+	return repos;
+}
+
+export async function resolveActiveRepoContext(cwd: string): Promise<ActiveRepoContext | null> {
+	const resolvedCwd = path.resolve(cwd);
+	if (insideRepository(resolvedCwd)) return null;
+	return findSingleDirectChildRepo(resolvedCwd);
+}
+
+export function resolveActiveRepoContextSync(cwd: string): ActiveRepoContext | null {
+	const resolvedCwd = path.resolve(cwd);
+	if (insideRepository(resolvedCwd)) return null;
+	return findSingleDirectChildRepoSync(resolvedCwd);
+}

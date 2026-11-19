@@ -1,0 +1,5 @@
+branch feature/new-filters
+staged 3, unstaged 0, untracked 0
+A internal/filter/kubectl.go
+A internal/filter/kubectl_test.go
+M internal/filter/registry.go

@@ -1,0 +1,800 @@
+# @oh-my-pi/pi-tui
+
+Minimal terminal UI framework with differential rendering and synchronized output for flicker-free interactive CLI applications.
+
+## Features
+
+- **Differential Rendering**: Three-strategy rendering system that only updates what changed
+- **Synchronized Output**: Uses CSI 2026 for atomic screen updates (no flicker)
+- **Bracketed Paste Mode**: Handles large pastes correctly with markers for >10 line pastes
+- **Component-based**: Simple Component interface with render() method
+- **Theme Support**: Components accept theme interfaces for customizable styling
+- **Built-in Components**: Text, TruncatedText, Input, Editor, Markdown, Loader, SelectList, SettingsList, Spacer, Image, Box, Container
+- **Inline Images**: Renders images in terminals that support Kitty or iTerm2 graphics protocols
+- **Autocomplete Support**: File paths and slash commands
+
+## Quick Start
+
+```typescript
+import { TUI, Text, Editor, ProcessTerminal } from "@oh-my-pi/pi-tui";
+
+// Create terminal
+const terminal = new ProcessTerminal();
+
+// Create TUI
+const tui = new TUI(terminal);
+
+// Add components
+tui.addChild(new Text("Welcome to my app!"));
+
+const editor = new Editor(editorTheme);
+editor.onSubmit = text => {
+	console.log("Submitted:", text);
+	tui.addChild(new Text(`You said: ${text}`));
+};
+tui.addChild(editor);
+
+// Start
+tui.start();
+```
+
+## SIXEL transparency and terminal backgrounds
+
+SIXEL has binary transparency, not fractional alpha. omp blends partially
+transparent image pixels against the terminal's reported OSC 11 background
+before quantization, preserving antialiased text and translucent details.
+Images with alpha are resized in premultiplied form before background compositing
+to prevent dark fringes and hidden-color bleed along scaled transparent edges.
+Fully transparent pixels stay transparent. Kitty and iTerm2 retain their
+existing image paths.
+
+When a new OSC 11 report changes the background RGB, SIXEL images are
+re-encoded even if the terminal stays dark or stays light. Terminals supporting
+Mode 2031 trigger this automatically. Otherwise, press Ctrl+L to refresh the
+background after changing it. This introduces no periodic polling.
+Direct terminals replay transcript history using the existing theme-change
+repaint policy; multiplexers repaint the viewport without clearing their native
+scrollback.
+
+Cached RGB is cleared when terminal ownership starts or ends, so a restarted
+session without an OSC 11 response cannot inherit the previous terminal's RGB.
+If the terminal cannot report its RGB, or an active multiplexer marks background
+queries as unreliable on the current platform, omp approximates the background
+with black for detected dark appearance or white for light. Untrusted reports
+do not override the existing appearance fallback. Exact edge-color matching is
+not guaranteed with that fallback, transparent terminal windows, or graphics
+overlapping a differently colored background.
+
+On known-broken background-query paths, such as macOS inside Zellij, native
+appearance changes also repaint SIXEL images when using a fixed theme or
+identical light/dark theme mappings. `COLORFGBG` still takes precedence over the
+native fallback; reports that leave the effective background unchanged do not
+trigger a repaint.
+
+If native TSP negotiation fails, the row renderer resumes these SIXEL refreshes.
+Expecting native support alone does not disable repainting after the failure.
+
+## Core API
+
+### TUI
+
+Main container that manages components and rendering.
+
+```typescript
+const tui = new TUI(terminal);
+tui.addChild(component);
+tui.removeChild(component);
+tui.start();
+tui.stop();
+tui.requestRender(); // Request a re-render
+tui.requestComponentRender(component); // Re-render only the root subtree containing `component` when safe (falls back to a full render on resize, overlays, images, or concurrent full requests)
+
+// Global debug key handler (Shift+Ctrl+D)
+tui.onDebug = () => console.log("Debug triggered");
+```
+
+### Component Interface
+
+All components implement:
+
+```typescript
+interface Component {
+	render(width: number): readonly string[];
+	handleInput?(data: string): void;
+	invalidate?(): void;
+	releaseRenderCaches?(): void;
+}
+```
+
+| Method                   | Description                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `render(width)`          | Returns an array of strings, one per line. Each line **must not exceed `width`** or the TUI will error. Use `truncateToWidth()` or manual wrapping to ensure this. The result is component-owned and immutable to callers; return the same array reference when unchanged (enables renderer memoization) and a new array when content changed. |
+| `handleInput?(data)`     | Called when the component has focus and receives keyboard input. The `data` string contains raw terminal input (may include ANSI escape sequences).                                                                                                                                                                                            |
+| `invalidate?()`          | Called to clear any cached render state. Components should re-render from scratch on the next `render()` call.                                                                                                                                                                                                                                 |
+| `releaseRenderCaches?()` | Drops only derived render caches. The next `render()` must return the same rows without eager rebuilds, renderer callbacks, image conversions, or child replacement.                                                                                                                                                                           |
+
+## Built-in Components
+
+### Composition
+
+Build screens from persistent components and update their data, selection, expansion, or size through setters. Layouts own child bounds and mouse-coordinate translation; controllers retain domain workflows and asynchronous operations. Propagate `invalidate()` after theme changes and `dispose()` when removing an owned component tree.
+
+| Family       | Components                                                                      | Import       |
+| ------------ | ------------------------------------------------------------------------------- | ------------ |
+| Layout       | `Stack`, `Row`, `SplitPane`                                                     | package root |
+| Panels       | `OverlayPanel`, `PanelRows`, `PanelDivider`                                     | `/chrome`    |
+| Menus        | `SelectList`, `MenuSelection`                                                   | package root |
+| Forms        | `Form`, `FormField`, `TextFormField`, `SelectFormField`, `SettingsFormField`    | package root |
+| Wizard steps | `WizardStep`                                                                    | package root |
+| Viewports    | `ScrollView`, including child rendering, follow-tail, and keyed range anchoring | package root |
+| Trees        | `TreeView`                                                                      | package root |
+| Disclosure   | `Disclosure`, with lazy summary/detail children                                 | package root |
+| Messages     | `FramedMessageComponent`, `MessageNoticeComponent`, `MessageDividerComponent`   | `/chrome`    |
+| Tool output  | `ToolCard`, `framedToolCard`, `plainToolCard`, `OutputPane`                     | `/render`    |
+| Transcripts  | `TranscriptBrowser`                                                             | package root |
+| Data         | `MetricRow`, `ProgressBar`, `Table`, `KeyValueList`, `Section`                  | package root |
+
+```typescript
+import { Disclosure, SplitPane, Text } from "@oh-my-pi/pi-tui";
+
+const diagnostics = new Disclosure({
+	summary: new Text("2 build diagnostics", 0, 0),
+	body: () => new Text("src/index.ts:12 — unused import\nsrc/config.ts:8 — missing property", 0, 0),
+});
+
+const view = new SplitPane({
+	left: new Text("Build diagnostics", 0, 0),
+	right: diagnostics,
+	leftSize: { fixed: 24 },
+	rightMinWidth: 30,
+	splitAt: 60,
+	narrowPane: "right",
+	height: 12,
+});
+
+diagnostics.setExpanded(true);
+view.setHeight(16);
+```
+
+`ScrollView.revealRange()` preserves manual scrolling while a selection is unchanged; `mode: "once"` supports asynchronously arriving initial selections. `OutputPane.append()` accepts incremental terminal output, including carriage-return updates; call `finish()` when the stream ends.
+
+### Container
+
+Groups child components.
+
+```typescript
+const container = new Container();
+container.addChild(component);
+container.removeChild(component);
+```
+
+### Box
+
+Container that applies padding and background color to all children.
+
+```typescript
+const box = new Box(
+	1, // paddingX (default: 1)
+	1, // paddingY (default: 1)
+	text => chalk.bgGray(text), // optional background function
+);
+box.addChild(new Text("Content"));
+box.setBgFn(text => chalk.bgBlue(text)); // Change background dynamically
+```
+
+### Text
+
+Displays multi-line text with word wrapping and padding.
+
+```typescript
+const text = new Text(
+	"Hello World", // text content
+	1, // paddingX (default: 1)
+	1, // paddingY (default: 1)
+	text => chalk.bgGray(text), // optional background function
+);
+text.setText("Updated text");
+text.setCustomBgFn(text => chalk.bgBlue(text));
+```
+
+### TruncatedText
+
+Single-line text that truncates to fit viewport width. Useful for status lines and headers.
+
+```typescript
+const truncated = new TruncatedText(
+	"This is a very long line that will be truncated...",
+	0, // paddingX (default: 0)
+	0, // paddingY (default: 0)
+);
+```
+
+### Input
+
+Single-line text input with horizontal scrolling.
+
+```typescript
+const input = new Input();
+input.onSubmit = value => console.log(value);
+input.setValue("initial");
+input.getValue();
+```
+
+**Key Bindings:**
+
+- `Enter` - Submit
+- `Ctrl+A` / `Ctrl+E` - Line start/end
+- `Ctrl+W` or `Alt+Backspace` - Delete word backwards
+- `Ctrl+U` - Delete to start of line
+- `Ctrl+K` - Delete to end of line
+- `Ctrl+Left` / `Ctrl+Right` - Word navigation
+- `Alt+Left` / `Alt+Right` - Word navigation
+- Arrow keys, Backspace, Delete work as expected
+
+### Editor
+
+Multi-line text editor with autocomplete, file completion, and paste handling.
+
+```typescript
+interface SymbolTheme {
+	cursor: string;
+	ellipsis: string;
+	boxRound: {
+		topLeft: string;
+		topRight: string;
+		bottomLeft: string;
+		bottomRight: string;
+		horizontal: string;
+		vertical: string;
+	};
+	boxSharp: {
+		topLeft: string;
+		topRight: string;
+		bottomLeft: string;
+		bottomRight: string;
+		horizontal: string;
+		vertical: string;
+		teeDown: string;
+		teeUp: string;
+		teeLeft: string;
+		teeRight: string;
+		cross: string;
+	};
+	table: {
+		topLeft: string;
+		topRight: string;
+		bottomLeft: string;
+		bottomRight: string;
+		horizontal: string;
+		vertical: string;
+		teeDown: string;
+		teeUp: string;
+		teeLeft: string;
+		teeRight: string;
+		cross: string;
+	};
+	quoteBorder: string;
+	hrChar: string;
+	spinnerFrames: string[];
+}
+
+interface EditorTheme {
+	borderColor: (str: string) => string;
+	selectList: SelectListTheme;
+	symbols: SymbolTheme;
+}
+
+const editor = new Editor(theme);
+editor.onSubmit = text => console.log(text);
+editor.onChange = text => console.log("Changed:", text);
+editor.disableSubmit = true; // Disable submit temporarily
+editor.setAutocompleteProvider(provider);
+editor.borderColor = s => chalk.blue(s); // Change border dynamically
+```
+
+**Features:**
+
+- Multi-line editing with word wrap
+- Slash command autocomplete (type `/`)
+- File path autocomplete (press `Tab`)
+- Large paste handling (>10 lines creates `[paste #1 +50 lines]` marker)
+- Horizontal lines above/below editor
+- Fake cursor rendering (hidden real cursor)
+
+**Key Bindings:**
+
+- `Enter` - Submit
+- `Shift+Enter`, `Ctrl+Enter`, or `Alt+Enter` - New line (terminal-dependent, Alt+Enter most reliable)
+- `Tab` - Autocomplete
+- `Ctrl+K` - Delete line
+- `Alt+D` / `Alt+Delete` - Delete word forward
+- `Ctrl+A` / `Ctrl+E` - Line start/end
+- `Ctrl+-` - Undo last edit
+- Arrow keys, Backspace, Delete work as expected
+
+### Markdown
+
+Renders markdown with syntax highlighting and theming support.
+
+```typescript
+interface MarkdownTheme {
+	heading: (text: string, depth: number) => string; // depth 1–6
+	link: (text: string) => string;
+	extensionLink?: (text: string) => string; // links a registered extension scheme handles; defaults to link
+	linkUrl: (text: string) => string;
+	code: (text: string) => string;
+	codeBlock: (text: string) => string;
+	codeBlockBorder: (text: string) => string;
+	quote: (text: string) => string;
+	quoteBorder: (text: string) => string;
+	hr: (text: string) => string;
+	listBullet: (text: string) => string;
+	bold: (text: string) => string;
+	italic: (text: string) => string;
+	strikethrough: (text: string) => string;
+	underline: (text: string) => string;
+	strong?: (text: string) => string; // **strong**; defaults to bold
+	emphasis?: (text: string) => string; // *emphasis*; defaults to italic
+	tableHeader?: (text: string) => string; // defaults to bold
+	highlightCode?: (code: string, lang?: string) => string[];
+	symbols: SymbolTheme;
+}
+
+interface DefaultTextStyle {
+	color?: (text: string) => string;
+	bgColor?: (text: string) => string;
+	bold?: boolean;
+	italic?: boolean;
+	strikethrough?: boolean;
+	underline?: boolean;
+}
+
+const md = new Markdown(
+	"# Hello\n\nSome **bold** text",
+	1, // paddingX
+	1, // paddingY
+	theme, // MarkdownTheme
+	defaultStyle, // optional DefaultTextStyle
+	2, // optional code block indent (spaces)
+);
+md.setText("Updated markdown");
+```
+
+**Features:**
+
+- Headings, bold, italic, code blocks, lists, links, blockquotes
+- HTML tags rendered as plain text
+- Optional syntax highlighting via `highlightCode`
+- Padding support
+- Render caching for performance
+
+### Loader
+
+Animated loading spinner.
+
+```typescript
+const loader = new Loader(
+	tui, // TUI instance for render updates
+	s => chalk.cyan(s), // spinner color function
+	s => chalk.gray(s), // message color function
+	"Loading...", // message (default: "Loading...")
+);
+loader.start();
+loader.setMessage("Still loading...");
+loader.stop();
+```
+
+### CancellableLoader
+
+Extends Loader with Escape key handling and an AbortSignal for cancelling async operations.
+
+```typescript
+const loader = new CancellableLoader(
+	tui, // TUI instance for render updates
+	s => chalk.cyan(s), // spinner color function
+	s => chalk.gray(s), // message color function
+	"Working...", // message
+);
+loader.onAbort = () => done(null); // Called when user presses Escape
+doAsyncWork(loader.signal).then(done);
+```
+
+**Properties:**
+
+- `signal: AbortSignal` - Aborted when user presses Escape
+- `aborted: boolean` - Whether the loader was aborted
+- `onAbort?: () => void` - Callback when user presses Escape
+
+### SelectList
+
+Interactive selection list with keyboard navigation.
+
+```typescript
+interface SelectItem {
+	value: string;
+	label: string;
+	description?: string;
+}
+
+interface SelectListTheme {
+	selectedPrefix: (text: string) => string;
+	selectedText: (text: string) => string;
+	description: (text: string) => string;
+	scrollInfo: (text: string) => string;
+	noMatch: (text: string) => string;
+	symbols: SymbolTheme;
+}
+
+const list = new SelectList(
+	[
+		{ value: "opt1", label: "Option 1", description: "First option" },
+		{ value: "opt2", label: "Option 2", description: "Second option" },
+	],
+	5, // maxVisible
+	theme, // SelectListTheme
+);
+
+list.onSelect = item => console.log("Selected:", item);
+list.onCancel = () => console.log("Cancelled");
+list.onSelectionChange = item => console.log("Highlighted:", item);
+list.setFilter("opt"); // Filter items
+```
+
+**Controls:**
+
+- Arrow keys: Navigate
+- Enter: Select
+- Escape: Cancel
+
+### SettingsList
+
+Settings panel with value cycling and submenus.
+
+```typescript
+interface SettingItem {
+	id: string;
+	label: string;
+	description?: string;
+	currentValue: string;
+	values?: string[]; // If provided, Enter/Space cycles through these
+	submenu?: (currentValue: string, done: (selectedValue?: string) => void) => Component;
+}
+
+interface SettingsListTheme {
+	label: (text: string, selected: boolean) => string;
+	value: (text: string, selected: boolean) => string;
+	description: (text: string) => string;
+	cursor: string;
+	hint: (text: string) => string;
+}
+
+const settings = new SettingsList(
+	[
+		{ id: "theme", label: "Theme", currentValue: "dark", values: ["dark", "light"] },
+		{ id: "model", label: "Model", currentValue: "gpt-4", submenu: (val, done) => modelSelector },
+	],
+	10, // maxVisible
+	theme, // SettingsListTheme
+	(id, newValue) => console.log(`${id} changed to ${newValue}`),
+	() => console.log("Cancelled"),
+);
+settings.updateValue("theme", "light");
+```
+
+**Controls:**
+
+- Arrow keys: Navigate
+- Enter/Space: Activate (cycle value or open submenu)
+- Escape: Cancel
+
+### Spacer
+
+Empty lines for vertical spacing.
+
+```typescript
+const spacer = new Spacer(2); // 2 empty lines (default: 1)
+```
+
+### Image
+
+Renders images inline for terminals that support the Kitty graphics protocol (including Kitty, Ghostty, WezTerm, Rex, and Warp on macOS/Linux), iTerm2 inline images or SIXEL. Falls back to a text placeholder on unsupported terminals.
+
+```typescript
+interface ImageTheme {
+	fallbackColor: (str: string) => string;
+}
+
+interface ImageOptions {
+	maxWidthCells?: number;
+	maxHeightCells?: number;
+	filename?: string;
+	budget?: ImageBudget; // usually tui.imageBudget
+	requestRender?: () => void; // repaint once a SIXEL encode lands; defaults to the budget's
+}
+
+const image = new Image(
+	base64Data, // base64-encoded image data
+	"image/png", // MIME type
+	theme, // ImageTheme
+	{ ...options, budget: tui.imageBudget }, // optional ImageOptions
+);
+tui.addChild(image);
+```
+
+SIXEL images encode off the JavaScript thread: the first render reserves the image's rows and the image appears on the repaint `budget` or `requestRender` triggers once the encode lands. Without either, it waits for an unrelated repaint.
+
+Supported formats: PNG, JPEG, GIF, WebP. Dimensions are parsed from the image headers automatically.
+
+### Figures
+
+`FigureMarkdown`, `SvgFigure`, and `TableChartFigure` size their images to a share of the terminal viewport. A surface shorter than the screen (an overlay, a pane) passes `maxRows: () => rows`, read on every render: the rows each figure may fill, a table chart's separator included. Zero hides a figure and keeps it from holding up transcript completion. Callers reserve room for prose and chrome themselves.
+
+Lowering the ceiling refits the drawn image at once and redraws it at the new size; a SIXEL reserves its rows while each re-encode runs off the JavaScript thread, as for a width change. Changing the ceiling of rows already committed to native scrollback forces a resync, so leave committed figures alone.
+
+## Autocomplete
+
+### CombinedAutocompleteProvider
+
+Supports both slash commands and file paths.
+
+```typescript
+import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui";
+import { getProjectDir } from "@oh-my-pi/pi-utils";
+
+const provider = new CombinedAutocompleteProvider(
+	[
+		{ name: "help", description: "Show help" },
+		{ name: "clear", description: "Clear screen" },
+		{ name: "delete", description: "Delete last message" },
+	],
+	getProjectDir(), // base path for file completion
+);
+
+editor.setAutocompleteProvider(provider);
+```
+
+**Features:**
+
+- Type `/` to see slash commands
+- Press `Tab` for file path completion
+- Works with `~/`, `./`, `../`, and `@` prefix
+- Filters to attachable files for `@` prefix
+
+## Key Detection
+
+Helper functions for detecting keyboard input (supports Kitty keyboard protocol):
+
+```typescript
+import {
+	isEnter,
+	isEscape,
+	isTab,
+	isShiftTab,
+	isArrowUp,
+	isArrowDown,
+	isArrowLeft,
+	isArrowRight,
+	isCtrlA,
+	isCtrlC,
+	isCtrlE,
+	isCtrlK,
+	isCtrlO,
+	isCtrlP,
+	isCtrlLeft,
+	isCtrlRight,
+	isAltLeft,
+	isAltRight,
+	isShiftEnter,
+	isAltEnter,
+	isShiftCtrlO,
+	isShiftCtrlD,
+	isShiftCtrlP,
+	isBackspace,
+	isDelete,
+	isHome,
+	isEnd,
+	// ... and more
+} from "@oh-my-pi/pi-tui";
+
+if (isCtrlC(data)) {
+	process.exit(0);
+}
+```
+
+## Differential Rendering
+
+The TUI uses three rendering strategies:
+
+1. **First Render**: Output all lines without clearing scrollback
+2. **Width Changed or Change Above Viewport**: Clear screen and full re-render
+3. **Normal Update**: Move cursor to first changed line, clear to end, render changed lines
+
+All updates are wrapped in **synchronized output** (`\x1b[?2026h` ... `\x1b[?2026l`) for atomic, flicker-free rendering unless `PI_NO_SYNC_OUTPUT=1` is set. The opt-out removes only the DEC 2026 wrapper; paint writes still guard terminal autowrap to avoid pending-wrap cursor artifacts.
+
+## Terminal Interface
+
+The TUI works with any object implementing the `Terminal` interface:
+
+```typescript
+interface Terminal {
+	start(onInput: (data: string) => void, onResize: () => void, onDisconnect?: () => void): void;
+	stop(): void;
+	write(data: string): void;
+	get columns(): number;
+	get rows(): number;
+	moveBy(lines: number): void;
+	hideCursor(force?: boolean): void;
+	showCursor(force?: boolean): void;
+	clearLine(): void;
+	clearFromCursor(): void;
+	clearScreen(): void;
+}
+```
+
+**Built-in implementations:**
+
+- `ProcessTerminal` - Uses `process.stdin/stdout`
+- `VirtualTerminal` - For testing (uses kitty-vt-wasm)
+
+## Utilities
+
+```typescript
+import { Ellipsis, visibleWidth, truncateToWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
+
+// Get visible width of string (ignoring ANSI codes, uses Bun.stringWidth)
+const width = visibleWidth("\x1b[31mHello\x1b[0m"); // 5
+
+// Truncate string to width (preserving ANSI codes, adds ellipsis)
+const truncated = truncateToWidth("Hello World", 8); // "Hello…" (default: Ellipsis.Unicode)
+
+// Truncate without ellipsis
+const truncatedNoEllipsis = truncateToWidth("Hello World", 8, Ellipsis.Omit); // "Hello Wo"
+
+// Wrap text to width (Bun.wrapAnsi word wrap, trims line ends, preserves ANSI)
+const lines = wrapTextWithAnsi("This is a long line that needs wrapping", 20);
+// ["This is a long line", "that needs wrapping"]
+```
+
+## Creating Custom Components
+
+When creating custom components, **each line returned by `render()` must not exceed the `width` parameter**. The TUI will error if any line is wider than the terminal.
+
+### Handling Input
+
+Use the key detection utilities to handle keyboard input:
+
+```typescript
+import { isEnter, isEscape, isArrowUp, isArrowDown, isCtrlC, isTab, isBackspace } from "@oh-my-pi/pi-tui";
+import type { Component } from "@oh-my-pi/pi-tui";
+
+class MyInteractiveComponent implements Component {
+	private selectedIndex = 0;
+	private items = ["Option 1", "Option 2", "Option 3"];
+
+	onSelect?: (index: number) => void;
+	onCancel?: () => void;
+
+	handleInput(data: string): void {
+		if (isArrowUp(data)) {
+			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+		} else if (isArrowDown(data)) {
+			this.selectedIndex = Math.min(this.items.length - 1, this.selectedIndex + 1);
+		} else if (isEnter(data)) {
+			this.onSelect?.(this.selectedIndex);
+		} else if (isEscape(data) || isCtrlC(data)) {
+			this.onCancel?.();
+		}
+	}
+
+	render(width: number): readonly string[] {
+		return this.items.map((item, i) => {
+			const prefix = i === this.selectedIndex ? "> " : "  ";
+			return truncateToWidth(prefix + item, width);
+		});
+	}
+}
+```
+
+### Handling Line Width
+
+Use the provided utilities to ensure lines fit:
+
+```typescript
+import { visibleWidth, truncateToWidth } from "@oh-my-pi/pi-tui";
+import type { Component } from "@oh-my-pi/pi-tui";
+
+class MyComponent implements Component {
+	private text: string;
+
+	constructor(text: string) {
+		this.text = text;
+	}
+
+	render(width: number): readonly string[] {
+		// Option 1: Truncate long lines
+		return [truncateToWidth(this.text, width)];
+
+		// Option 2: Check and pad to exact width
+		const line = this.text;
+		const visible = visibleWidth(line);
+		if (visible > width) {
+			return [truncateToWidth(line, width)];
+		}
+		// Pad to exact width (optional, for backgrounds)
+		return [line + " ".repeat(width - visible)];
+	}
+}
+```
+
+### ANSI Code Considerations
+
+`visibleWidth()`, `truncateToWidth()`, and `wrapTextWithAnsi()` correctly handle ANSI escape codes:
+
+- `visibleWidth()` ignores ANSI codes when calculating width (via `Bun.stringWidth`)
+- `truncateToWidth()` preserves ANSI codes and properly closes them when truncating
+- `wrapTextWithAnsi()` preserves ANSI codes while word-wrapping and trimming line ends
+
+```typescript
+import chalk from "@oh-my-pi/pi-utils/chalk";
+
+const styled = chalk.red("Hello") + " " + chalk.blue("World");
+const width = visibleWidth(styled); // 11 (not counting ANSI codes)
+const truncated = truncateToWidth(styled, 8); // Red "Hello" + " W..." with proper reset
+```
+
+### Caching
+
+For performance, components should cache their rendered output and only re-render when necessary:
+
+```typescript
+class CachedComponent implements Component {
+	private text: string;
+	private cachedWidth?: number;
+	private cachedLines?: string[];
+
+	render(width: number): readonly string[] {
+		if (this.cachedLines && this.cachedWidth === width) {
+			return this.cachedLines;
+		}
+
+		const lines = [truncateToWidth(this.text, width)];
+
+		this.cachedWidth = width;
+		this.cachedLines = lines;
+		return lines;
+	}
+
+	invalidate(): void {
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
+	}
+}
+```
+
+## Example
+
+See `test/chat-simple.ts` for a complete chat interface example with:
+
+- Markdown messages with custom background colors
+- Loading spinner during responses
+- Editor with autocomplete and slash commands
+- Spacers between messages
+
+Run it:
+
+```bash
+npx tsx test/chat-simple.ts
+```
+
+## Development
+
+```bash
+# Install dependencies (from monorepo root)
+npm install
+
+# Run type checking
+npm run check
+
+# Run the demo
+npx tsx test/chat-simple.ts
+```

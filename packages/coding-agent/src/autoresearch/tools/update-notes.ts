@@ -1,0 +1,103 @@
+import { type UpdateNotesDetails } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import { updateNotesToolRenderer } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import { type } from "@oh-my-pi/omptype";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+
+import type { ToolDefinition } from "../../extensibility/extensions";
+
+import { buildExperimentState } from "../state";
+import { openAutoresearchStorageIfExists } from "../storage";
+import type { AutoresearchToolFactoryOptions } from "../types";
+
+const updateNotesSchema = type({
+	"body?": type("string").describe("replacement notes body"),
+	"append_idea?": type("string").describe("append as bullet under Ideas instead of replacing body"),
+});
+
+export function createUpdateNotesTool(
+	options: AutoresearchToolFactoryOptions,
+): ToolDefinition<typeof updateNotesSchema, UpdateNotesDetails> {
+	return {
+		...updateNotesToolRenderer,
+		name: "update_notes",
+		label: "Update Notes",
+		description:
+			"Persist the durable autoresearch playbook (goal, scope notes, hypotheses, ideas backlog) on the active session. Pass `body` to replace the entire notes blob, or `append_idea` to append a single bullet under an `## Ideas` section.",
+		parameters: updateNotesSchema,
+		defaultInactive: true,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const storage = await openAutoresearchStorageIfExists(ctx.cwd);
+			const currentBranch = (await vcs.git(ctx.cwd)?.currentBranch()) ?? null;
+			const session = storage?.getActiveSessionForBranch(currentBranch) ?? null;
+			if (!storage || !session) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Error: no active autoresearch session for the current branch. Call init_experiment first.",
+						},
+					],
+				};
+			}
+
+			const trimmedIdea = params.append_idea?.trim() ?? "";
+			const nextNotes = trimmedIdea.length > 0 ? appendIdea(session.notes, trimmedIdea) : params.body;
+			if (nextNotes === undefined) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Error: pass `body` to replace notes or `append_idea` to add an idea.",
+						},
+					],
+				};
+			}
+
+			storage.updateSession(session.id, { notes: nextNotes });
+			const refreshed = storage.getSessionById(session.id);
+			const loggedRuns = storage.listLoggedRuns(session.id);
+			const runtime = options.getRuntime(ctx);
+			if (refreshed) {
+				runtime.state = buildExperimentState(refreshed, loggedRuns);
+			}
+			options.dashboard.updateWidget(ctx, runtime);
+
+			return {
+				content: [
+					{
+						type: "text",
+						text:
+							trimmedIdea.length > 0
+								? `Appended idea (${nextNotes.length} chars total).`
+								: `Notes updated (${nextNotes.length} chars).`,
+					},
+				],
+				details: { notes: nextNotes },
+			};
+		},
+	};
+}
+
+const IDEAS_HEADING = "## Ideas";
+
+function appendIdea(currentNotes: string, idea: string): string {
+	const trimmed = currentNotes.trimEnd();
+	if (trimmed.length === 0) {
+		return `${IDEAS_HEADING}\n- ${idea}\n`;
+	}
+	const lines = trimmed.split("\n");
+	const ideasIndex = lines.findIndex(line => line.trim() === IDEAS_HEADING);
+	if (ideasIndex >= 0) {
+		// find end of ideas section (next heading or end of file)
+		let insertAt = lines.length;
+		for (let i = ideasIndex + 1; i < lines.length; i += 1) {
+			if (/^#{1,6}\s/.test(lines[i] ?? "")) {
+				insertAt = i;
+				break;
+			}
+		}
+		lines.splice(insertAt, 0, `- ${idea}`);
+		return `${lines.join("\n")}\n`;
+	}
+	return `${trimmed}\n\n${IDEAS_HEADING}\n- ${idea}\n`;
+}

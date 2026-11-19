@@ -1,0 +1,26 @@
+.venv/
+.pi-context/
+.cache/
+data/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+build/
+dist/
+*.egg-info/
+.DS_Store
+.idea/
+.vscode/
+node_modules/
+*.tsbuildinfo
+.vite/
+
+# Frontend bundle. The Vite build (`bun run web:build` / Docker `web-builder`
+# stage) writes hashed JS/CSS chunks into `src/static/`. Nothing
+# committed; the test suite synthesises a minimal placeholder via conftest.
+src/static/
+web/dist/

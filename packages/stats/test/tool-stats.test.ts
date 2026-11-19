@@ -1,0 +1,564 @@
+import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { getToolDashboardStats, syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
+import { closeDb, getFrustrationByModel, getRecentRequests, initDb, setFileOffset } from "@oh-my-pi/omp-stats/db";
+import { getToolStats, getToolStatsByModel } from "@oh-my-pi/omp-stats/rollup";
+import { parseSessionFile } from "@oh-my-pi/omp-stats/parser";
+import type { ToolUsageStats } from "@oh-my-pi/omp-stats/types";
+import { getSessionsDir } from "@oh-my-pi/pi-utils";
+import { installStatsTestIsolation } from "./helpers/temp-agent";
+
+installStatsTestIsolation("@pi-stats-tool-stats-");
+
+const FOLDER_SLUG = "--tmp--tool-stats";
+const MODEL = "gpt-5.4";
+const PROVIDER = "openai";
+
+const TS1 = "2026-06-24T10:00:00.000Z";
+const TS2 = "2026-06-24T10:05:00.000Z";
+
+// Turn 1: two toolCall blocks (grep + read) sharing one provider request.
+const TURN1_TOTAL_TOKENS = 100;
+const TURN1_OUTPUT_TOKENS = 20;
+const TURN1_COST = 0.01;
+// Turn 2: a single grep toolCall owning the whole request.
+const TURN2_TOTAL_TOKENS = 40;
+const TURN2_OUTPUT_TOKENS = 8;
+const TURN2_COST = 0.004;
+
+const GREP_ARGS_1 = { pattern: "x" };
+const READ_ARGS = { path: "/tmp/f" };
+const GREP_ARGS_2 = { pattern: "yz" };
+
+const GREP_RESULT_1 = "grep hit: src/index.ts:42";
+const READ_ERROR_RESULT = "read failed: ENOENT";
+const GREP_RESULT_2 = "ok";
+
+interface ToolCallBlock {
+	id: string;
+	name: string;
+	arguments: Record<string, unknown>;
+}
+
+interface AssistantTurnOptions {
+	entryId: string;
+	parentId?: string | null;
+	timestamp: string;
+	toolCalls: ToolCallBlock[];
+	totalTokens: number;
+	outputTokens: number;
+	costTotal: number;
+}
+
+function buildAssistantEntry(opts: AssistantTurnOptions) {
+	return {
+		type: "message",
+		id: opts.entryId,
+		parentId: opts.parentId ?? null,
+		timestamp: opts.timestamp,
+		message: {
+			role: "assistant",
+			content: [
+				{ type: "text", text: "ok" },
+				...opts.toolCalls.map(call => ({
+					type: "toolCall",
+					id: call.id,
+					name: call.name,
+					arguments: call.arguments,
+				})),
+			],
+			api: "openai-responses",
+			provider: PROVIDER,
+			model: MODEL,
+			usage: {
+				input: 10,
+				output: opts.outputTokens,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: opts.totalTokens,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: opts.costTotal },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.parse(opts.timestamp),
+			duration: 10,
+			ttft: 5,
+		},
+	};
+}
+
+interface ToolResultOptions {
+	entryId: string;
+	parentId: string;
+	timestamp: string;
+	toolCallId: string;
+	toolName: string;
+	text: string;
+	isError?: boolean;
+	details?: unknown;
+}
+
+function buildToolResultEntry(opts: ToolResultOptions) {
+	return {
+		type: "message",
+		id: opts.entryId,
+		parentId: opts.parentId,
+		timestamp: opts.timestamp,
+		message: {
+			role: "toolResult",
+			toolCallId: opts.toolCallId,
+			toolName: opts.toolName,
+			content: [{ type: "text", text: opts.text }],
+			isError: opts.isError ?? false,
+			details: opts.details,
+			timestamp: Date.parse(opts.timestamp),
+		},
+	};
+}
+
+async function writeSessionFile(
+	fileName: string,
+	header: { id: string; parentSession?: string },
+	entries: unknown[],
+): Promise<string> {
+	const sessionDir = path.join(getSessionsDir(), FOLDER_SLUG);
+	await fs.mkdir(sessionDir, { recursive: true });
+	const sessionFile = path.join(sessionDir, fileName);
+	const headerEntry = {
+		type: "session",
+		version: 3,
+		id: header.id,
+		timestamp: new Date().toISOString(),
+		cwd: "/tmp/project",
+		...(header.parentSession ? { parentSession: header.parentSession } : {}),
+	};
+	const lines = [headerEntry, ...entries].map(entry => JSON.stringify(entry)).join("\n");
+	await Bun.write(sessionFile, `${lines}\n`);
+	return sessionFile;
+}
+
+/**
+ * Standard fixture: turn 1 calls grep+read (grep succeeds, read errors),
+ * turn 2 calls grep again and succeeds.
+ */
+function buildStandardEntries(): unknown[] {
+	return [
+		buildAssistantEntry({
+			entryId: "asst-1",
+			timestamp: TS1,
+			toolCalls: [
+				{ id: "call-1", name: "grep", arguments: GREP_ARGS_1 },
+				{ id: "call-2", name: "read", arguments: READ_ARGS },
+			],
+			totalTokens: TURN1_TOTAL_TOKENS,
+			outputTokens: TURN1_OUTPUT_TOKENS,
+			costTotal: TURN1_COST,
+		}),
+		buildToolResultEntry({
+			entryId: "tr-1",
+			parentId: "asst-1",
+			timestamp: TS1,
+			toolCallId: "call-1",
+			toolName: "grep",
+			text: GREP_RESULT_1,
+		}),
+		buildToolResultEntry({
+			entryId: "tr-2",
+			parentId: "asst-1",
+			timestamp: TS1,
+			toolCallId: "call-2",
+			toolName: "read",
+			text: READ_ERROR_RESULT,
+			isError: true,
+		}),
+		buildAssistantEntry({
+			entryId: "asst-2",
+			parentId: "tr-2",
+			timestamp: TS2,
+			toolCalls: [{ id: "call-3", name: "grep", arguments: GREP_ARGS_2 }],
+			totalTokens: TURN2_TOTAL_TOKENS,
+			outputTokens: TURN2_OUTPUT_TOKENS,
+			costTotal: TURN2_COST,
+		}),
+		buildToolResultEntry({
+			entryId: "tr-3",
+			parentId: "asst-2",
+			timestamp: TS2,
+			toolCallId: "call-3",
+			toolName: "grep",
+			text: GREP_RESULT_2,
+		}),
+	];
+}
+
+function toolRow(rows: ToolUsageStats[], tool: string): ToolUsageStats {
+	const row = rows.find(r => r.tool === tool);
+	if (!row) throw new Error(`missing aggregate row for tool "${tool}"`);
+	return row;
+}
+
+describe("tool usage stats pipeline", () => {
+	it("ingests tool calls and results end-to-end and splits turn usage across calls", async () => {
+		await writeSessionFile("session.jsonl", { id: "sess0001" }, buildStandardEntries());
+		await syncAllSessions({ workers: 1 });
+
+		const stats = getToolStats();
+		expect(stats).toHaveLength(2);
+
+		const grep = toolRow(stats, "grep");
+		expect(grep.calls).toBe(2);
+		expect(grep.errors).toBe(0);
+		expect(grep.resultChars).toBe(GREP_RESULT_1.length + GREP_RESULT_2.length);
+		expect(grep.argsChars).toBe(JSON.stringify(GREP_ARGS_1).length + JSON.stringify(GREP_ARGS_2).length);
+		// Turn 1's request is split across its two toolCall blocks; turn 2 is
+		// grep's alone: 100/2 + 40 = 90, 20/2 + 8 = 18, 0.01/2 + 0.004 = 0.009.
+		expect(grep.totalTokensShare).toBeCloseTo(90, 6);
+		expect(grep.outputTokensShare).toBeCloseTo(18, 6);
+		expect(grep.costShare).toBeCloseTo(0.009, 8);
+		expect(grep.lastUsed).toBe(Date.parse(TS2));
+
+		const read = toolRow(stats, "read");
+		expect(read.calls).toBe(1);
+		expect(read.errors).toBe(1);
+		expect(read.resultChars).toBe(READ_ERROR_RESULT.length);
+		expect(read.argsChars).toBe(JSON.stringify(READ_ARGS).length);
+		expect(read.totalTokensShare).toBeCloseTo(50, 6);
+		expect(read.outputTokensShare).toBeCloseTo(10, 6);
+		expect(read.costShare).toBeCloseTo(0.005, 8);
+		expect(read.lastUsed).toBe(Date.parse(TS1));
+
+		// Per-model breakdown carries the fixture model/provider with the same split.
+		const byModel = getToolStatsByModel();
+		expect(byModel).toHaveLength(2);
+		for (const row of byModel) {
+			expect(row.model).toBe(MODEL);
+			expect(row.provider).toBe(PROVIDER);
+		}
+		expect(toolRow(byModel, "grep").calls).toBe(2);
+		expect(toolRow(byModel, "grep").totalTokensShare).toBeCloseTo(90, 6);
+		expect(toolRow(byModel, "read").calls).toBe(1);
+		expect(toolRow(byModel, "read").totalTokensShare).toBeCloseTo(50, 6);
+
+		// Dashboard payload reuses the same aggregates and buckets the calls.
+		const dashboard = await getToolDashboardStats("all");
+		expect(dashboard.byTool).toEqual(stats);
+		expect(dashboard.series.length).toBeGreaterThan(0);
+		const seriesCalls = new Map<string, number>();
+		const seriesErrors = new Map<string, number>();
+		for (const point of dashboard.series) {
+			seriesCalls.set(point.tool, (seriesCalls.get(point.tool) ?? 0) + point.calls);
+			seriesErrors.set(point.tool, (seriesErrors.get(point.tool) ?? 0) + point.errors);
+		}
+		expect(seriesCalls.get("grep")).toBe(2);
+		expect(seriesCalls.get("read")).toBe(1);
+		expect(seriesErrors.get("grep")).toBe(0);
+		expect(seriesErrors.get("read")).toBe(1);
+	});
+
+	it.each([
+		{ name: "a skipped call that never executed", details: { __synthetic: true, executed: false }, expected: false },
+		{ name: "a synthetic result marked executed", details: { __synthetic: true, executed: true }, expected: true },
+		{ name: "executed: false without the synthetic marker", details: { executed: false }, expected: true },
+		{
+			name: "an interrupted call that had started",
+			details: { __interrupted: true, source: "interrupt_skipped", execution: "started" },
+			expected: true,
+		},
+	])("counts $name as error=$expected", async ({ details, expected }) => {
+		const sessionFile = await writeSessionFile("session.jsonl", { id: "synthetic" }, [
+			buildAssistantEntry({
+				entryId: "asst-1",
+				timestamp: TS1,
+				toolCalls: [{ id: "call-1", name: "wait", arguments: {} }],
+				totalTokens: TURN2_TOTAL_TOKENS,
+				outputTokens: TURN2_OUTPUT_TOKENS,
+				costTotal: TURN2_COST,
+			}),
+			buildToolResultEntry({
+				entryId: "tr-1",
+				parentId: "asst-1",
+				timestamp: TS1,
+				toolCallId: "call-1",
+				toolName: "wait",
+				text: "Skipped due to queued user message.",
+				isError: true,
+				details,
+			}),
+		]);
+
+		const parsed = await parseSessionFile(sessionFile);
+		expect(parsed.toolCalls.map(call => call.isError)).toEqual([expected]);
+	});
+
+	it("excludes skipped non-executions from error totals without dropping calls or real errors", async () => {
+		const entries = buildStandardEntries();
+		entries.push(
+			buildAssistantEntry({
+				entryId: "asst-skipped",
+				timestamp: TS2,
+				toolCalls: [{ id: "call-skipped", name: "wait", arguments: {} }],
+				totalTokens: TURN2_TOTAL_TOKENS,
+				outputTokens: TURN2_OUTPUT_TOKENS,
+				costTotal: TURN2_COST,
+			}),
+			buildToolResultEntry({
+				entryId: "tr-skipped",
+				parentId: "asst-skipped",
+				timestamp: TS2,
+				toolCallId: "call-skipped",
+				toolName: "wait",
+				text: "Skipped due to queued user message.",
+				isError: true,
+				details: { __synthetic: true, source: "interrupt_skipped", executed: false },
+			}),
+		);
+		await writeSessionFile("session.jsonl", { id: "skipped" }, entries);
+		await syncAllSessions({ workers: 1 });
+
+		const stats = getToolStats();
+		expect(toolRow(stats, "wait").calls).toBe(1);
+		expect(toolRow(stats, "wait").errors).toBe(0);
+		expect(toolRow(stats, "read").errors).toBe(1);
+
+		// Model a database last synced before non-executions were classified separately.
+		const database = await initDb();
+		database.run("UPDATE tool_calls SET is_error = 1 WHERE tool_call_id = 'call-skipped'");
+		database.run("INSERT OR REPLACE INTO meta VALUES ('tool_calls_v2', 'complete')");
+		database.run("DELETE FROM meta WHERE key = 'tool_calls_v3'");
+		closeDb();
+
+		await syncAllSessions({ workers: 1 });
+		const repaired = getToolStats();
+		expect(toolRow(repaired, "wait").calls).toBe(1);
+		expect(toolRow(repaired, "wait").errors).toBe(0);
+		expect(toolRow(repaired, "read").errors).toBe(1);
+	});
+
+	it("links a result that lands in a later sync pass without duplicating the call", async () => {
+		const lateResultText = "late failure output";
+		const sessionFile = await writeSessionFile("session.jsonl", { id: "sess0002" }, [
+			buildAssistantEntry({
+				entryId: "asst-1",
+				timestamp: TS1,
+				toolCalls: [{ id: "call-1", name: "grep", arguments: GREP_ARGS_1 }],
+				totalTokens: TURN2_TOTAL_TOKENS,
+				outputTokens: TURN2_OUTPUT_TOKENS,
+				costTotal: TURN2_COST,
+			}),
+		]);
+		await syncAllSessions({ workers: 1 });
+
+		// First pass: the call is recorded but no result has arrived yet.
+		const pending = getToolStats();
+		expect(pending).toHaveLength(1);
+		expect(pending[0].tool).toBe("grep");
+		expect(pending[0].calls).toBe(1);
+		expect(pending[0].resultChars).toBe(0);
+		expect(pending[0].errors).toBe(0);
+
+		// The toolResult is appended after the first pass consumed the file.
+		const lateResult = buildToolResultEntry({
+			entryId: "tr-1",
+			parentId: "asst-1",
+			timestamp: TS2,
+			toolCallId: "call-1",
+			toolName: "grep",
+			text: lateResultText,
+			isError: true,
+		});
+		await fs.appendFile(sessionFile, `${JSON.stringify(lateResult)}\n`);
+		// Guarantee the stored mtime is strictly older than the file's, so the
+		// incremental sync re-reads it regardless of filesystem granularity.
+		const bumped = new Date(Date.now() + 1_000);
+		await fs.utimes(sessionFile, bumped, bumped);
+
+		await syncAllSessions({ workers: 1 });
+
+		const linked = getToolStats();
+		expect(linked).toHaveLength(1);
+		expect(linked[0].tool).toBe("grep");
+		expect(linked[0].calls).toBe(1);
+		expect(linked[0].resultChars).toBe(lateResultText.length);
+		expect(linked[0].errors).toBe(1);
+	});
+
+	it("does not double-count tool calls copied into a forked session file", async () => {
+		const entries = buildStandardEntries();
+		const parentFile = await writeSessionFile("01_parent.jsonl", { id: "parent00" }, entries);
+		// `createBranchedSession` deep-copies the parent's entries (same entry
+		// ids, timestamps, and tool call ids) into the child file.
+		await writeSessionFile("02_fork.jsonl", { id: "fork0000", parentSession: parentFile }, entries);
+
+		await syncAllSessions({ workers: 1 });
+
+		const stats = getToolStats();
+		expect(stats).toHaveLength(2);
+
+		const grep = toolRow(stats, "grep");
+		expect(grep.calls).toBe(2);
+		expect(grep.errors).toBe(0);
+		expect(grep.resultChars).toBe(GREP_RESULT_1.length + GREP_RESULT_2.length);
+		expect(grep.totalTokensShare).toBeCloseTo(90, 6);
+
+		const read = toolRow(stats, "read");
+		expect(read.calls).toBe(1);
+		expect(read.errors).toBe(1);
+		expect(read.resultChars).toBe(READ_ERROR_RESULT.length);
+		expect(read.totalTokensShare).toBeCloseTo(50, 6);
+	});
+
+	it("keeps tool aggregates stable across repeated syncs of unchanged data", async () => {
+		const sessionFile = await writeSessionFile("session.jsonl", { id: "sess0003" }, buildStandardEntries());
+		await syncAllSessions({ workers: 1 });
+
+		const first = getToolStats();
+		expect(toolRow(first, "grep").calls).toBe(2);
+		expect(toolRow(first, "read").calls).toBe(1);
+
+		// Plain re-sync: the offset table short-circuits the unchanged file.
+		await syncAllSessions({ workers: 1 });
+		expect(getToolStats()).toEqual(first);
+
+		// Bumped mtime with identical content: the file is re-examined from its
+		// stored offset and must not re-ingest anything.
+		const bumped = new Date(Date.now() + 1_000);
+		await fs.utimes(sessionFile, bumped, bumped);
+		await syncAllSessions({ workers: 1 });
+		expect(getToolStats()).toEqual(first);
+	});
+
+	it("repairs missing and stale rows during full replay without invalidating retained request IDs", async () => {
+		const file = await writeSessionFile("session.jsonl", { id: "replay" }, [
+			{
+				type: "message",
+				id: "user-1",
+				timestamp: TS1,
+				message: { role: "user", content: "Please inspect the file." },
+			},
+			...buildStandardEntries(),
+			buildAssistantEntry({
+				entryId: "reply",
+				parentId: "user-1",
+				timestamp: TS2,
+				toolCalls: [],
+				totalTokens: 10,
+				outputTokens: 2,
+				costTotal: 0.001,
+			}),
+		]);
+		await syncAllSessions({ workers: 1 });
+		const before = getToolStats();
+		const retained = getRecentRequests()
+			.filter(row => row.entryId !== "asst-1")
+			.map(row => ({ entryId: row.entryId, id: row.id }));
+		// Model an interrupted older replay that advanced its cursor but left removed records behind.
+		const content = await Bun.file(file).text();
+		await fs.appendFile(
+			file,
+			[
+				{
+					type: "message",
+					id: "stale-user",
+					timestamp: TS2,
+					message: { role: "user", content: "Obsolete request." },
+				},
+				buildAssistantEntry({
+					entryId: "stale-reply",
+					parentId: "stale-user",
+					timestamp: TS2,
+					toolCalls: [{ id: "stale-call", name: "read", arguments: READ_ARGS }],
+					totalTokens: 10,
+					outputTokens: 2,
+					costTotal: 0.001,
+				}),
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n") + "\n",
+		);
+		await syncAllSessions({ workers: 1 });
+		await fs.writeFile(file, content);
+		const parsed = await parseSessionFile(file);
+		if (!parsed.parserState) throw new Error("fixture transcript disappeared");
+		setFileOffset(file, parsed.newOffset, parsed.parserState.mtimeMs, parsed.parserState);
+
+		const database = await initDb();
+		database.run("DELETE FROM messages WHERE entry_id = 'asst-1'");
+		database.run("DELETE FROM tool_calls WHERE tool_call_id = 'call-1'");
+		database.run("UPDATE tool_calls SET result_chars = NULL, is_error = NULL WHERE tool_call_id = 'call-2'");
+		database.run("UPDATE user_messages SET model = NULL, provider = NULL");
+		database.run("INSERT OR REPLACE INTO meta VALUES ('session_reconciliation', 'pending')");
+
+		await syncAllSessions({ workers: 1 });
+
+		expect(
+			getRecentRequests()
+				.filter(row => row.entryId !== "asst-1")
+				.map(row => ({ entryId: row.entryId, id: row.id })),
+		).toEqual(retained);
+		expect(getToolStats()).toEqual(before);
+		expect(
+			getFrustrationByModel().map(row => ({
+				model: row.model,
+				provider: row.provider,
+				messages: row.messages,
+			})),
+		).toEqual([{ model: MODEL, provider: PROVIDER, messages: 1 }]);
+	});
+
+	it("collapses provider-polluted tool names and skips nameless calls", async () => {
+		// Real-world shapes observed when a gateway hands the model's whole
+		// invocation text back as the function name (see sanitizeToolName):
+		// inlined `key=value` args, parenthesized args, a shell command in
+		// the name slot with a stray in-band closer, and whitespace-only
+		// noise that carries no tool identity at all.
+		await writeSessionFile("session.jsonl", { id: "sess0004" }, [
+			buildAssistantEntry({
+				entryId: "asst-1",
+				timestamp: TS1,
+				toolCalls: [
+					{ id: "call-1", name: 'bash command="ls -la /repo" i="List repo"', arguments: {} },
+					{
+						id: "call-2",
+						name: 'bash(i="Probe repo", timeout=30)</arg-value>',
+						arguments: {},
+					},
+					{
+						id: "call-3",
+						name: "curl --resolve oracle.example:443:127.0.0.1 -k https://oracle.example --max-time 5</arg-value>",
+						arguments: { i: "Comparing cert routes" },
+					},
+					{ id: "call-4", name: 'grep -rn "token" --include=*.go . | head -10', arguments: {} },
+					{ id: "call-5", name: "  \u0000\t  ", arguments: {} },
+				],
+				totalTokens: TURN1_TOTAL_TOKENS,
+				outputTokens: TURN1_OUTPUT_TOKENS,
+				costTotal: TURN1_COST,
+			}),
+			buildToolResultEntry({
+				entryId: "tr-1",
+				parentId: "asst-1",
+				timestamp: TS1,
+				toolCallId: "call-3",
+				toolName: "curl --resolve oracle.example:443:127.0.0.1 -k https://oracle.example --max-time 5</arg-value>",
+				text: "000",
+				isError: true,
+			}),
+		]);
+		await syncAllSessions({ workers: 1 });
+
+		const stats = getToolStats();
+		// Surviving rows collapse onto their leading identifier token; the
+		// nameless call is dropped entirely.
+		expect(stats.map(row => row.tool).sort()).toEqual(["bash", "curl", "grep"]);
+		expect(toolRow(stats, "bash").calls).toBe(2);
+		expect(toolRow(stats, "curl").calls).toBe(1);
+		expect(toolRow(stats, "curl").errors).toBe(1);
+
+		// The dashboard's per-model rows - the source of the tool filter
+		// dropdown - see the same collapsed names.
+		const byModel = getToolStatsByModel()
+			.map(row => row.tool)
+			.sort();
+		expect(byModel).toEqual(["bash", "curl", "grep"]);
+	});
+});

@@ -1,0 +1,34 @@
+# gcloud CLI output.
+# Google Cloud SDK prints a nagging "Updates are available" block on most
+# invocations; strip it along with a few other SDK-level notices.
+
+[filters.gcloud]
+description = "Compact gcloud CLI output with update notices stripped"
+match_command = "^gcloud$"
+strip_ansi = true
+strip_lines_matching = [
+	"^Updates are available for some Google Cloud CLI components",
+	"^To install them, please run:",
+	"^\\s*\\$ gcloud components update",
+	"^Your current Cloud SDK version is:",
+	"^The latest available version is:",
+	"^\\s*$",
+]
+truncate_lines_at = 300
+max_lines = 120
+on_empty = "gcloud: ok"
+
+[[tests.gcloud]]
+name = "strip update notice keep listing"
+input = "Updates are available for some Google Cloud CLI components.\nNAME: my-project\nPROJECT_ID: my-project-123"
+expected = "NAME: my-project\nPROJECT_ID: my-project-123\n"
+
+[[tests.gcloud]]
+name = "empty after stripping update notice"
+input = "Updates are available for some Google Cloud CLI components.\n"
+expected = "gcloud: ok"
+
+[[tests.gcloud]]
+name = "blank separator line removed between content"
+input = "NAME: my-project\n\nPROJECT_ID: my-project-123\n"
+expected = "NAME: my-project\nPROJECT_ID: my-project-123\n"

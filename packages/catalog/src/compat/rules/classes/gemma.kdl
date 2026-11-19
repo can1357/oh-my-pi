@@ -1,0 +1,25 @@
+// Model-lineage compat for "gemma"; regenerated from the frozen census using class taxonomy selectors.
+
+class "gemma" {
+	on "aiand" "aimlapi" "cerebras" "coreweave" "huggingface" "kilo" "nanogpt" \
+		"novita" "nvidia" "together" "vercel-ai-gateway" "zenmux" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	on "google" "ollama-cloud" "openrouter" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	on "google" "vercel-ai-gateway" {
+		thinking-mode "budget"
+	}
+	// Gemma 4 on the Gemini API toggles thinking only through `thinkingLevel`
+	// (`HIGH` on, `MINIMAL` off) and rejects any `thinkingBudget` with a 400
+	// (https://ai.google.dev/gemma/docs/core/gemma_on_gemini_api#thinking).
+	// Off must be sent explicitly as `MINIMAL` rather than omitting the config.
+	on "google" {
+		revision ">=4" {
+			thinking-mode "google-level"
+			thinking-efforts "high"
+			thinking-suppress-when-off #true
+		}
+	}
+}

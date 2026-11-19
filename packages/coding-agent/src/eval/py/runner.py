@@ -1,0 +1,3293 @@
+"""OMP Python runner — subprocess wrapper used by the coding-agent host.
+
+NDJSON protocol over stdin/stdout. Host writes one JSON object per line;
+wrapper writes typed frames back.
+
+Host -> wrapper:
+  {"id": str, "code": str, "silent": bool?, "storeHistory": bool?}
+  {"id": str, "code": str, "silent": bool?, "storeHistory": bool?, "cwd": str?, "filename": str?, "env": dict?}
+  {"type": "tool", "id": str, "op": "describe", "names": [str]}
+  {"type": "tool", "id": str, "op": "call", "name": str, "args": dict}
+  {"type": "tool_cancel", "id": str}              # caller gave up: cancel an async tool call
+  {"type": "interrupt", "id": str}                # interrupt this cell; a SIGINT follows
+  {"type": "exit"}                                # graceful shutdown
+
+Wrapper -> host:
+  {"type": "started",     "id": ...}
+  {"type": "stdout",      "id": ..., "data": str}
+  {"type": "stderr",      "id": ..., "data": str}
+  {"type": "view",        "id": ..., "text": str, "view": {"kind": "table"|"json"|"markdown", ...}}
+  {"type": "image",       "id": ..., "image": {"mimeType": str, "data": base64,
+                              "detail"?: str, "url"?: str, "providerFile"?: dict}}
+  {"type": "status",      "id": ..., "event": {"op": str, ...}}
+  {"type": "reply",       "id": ..., "value": <tool envelope>}
+  {"type": "error",       "id": ..., "ename": str, "evalue": str, "traceback": [str]}
+  {"type": "done",        "id": ..., "status": "ok"|"error",
+                              "executionCount": int, "cancelled": bool}
+
+The runner is intentionally self-contained: no third-party imports, no IPython.
+Magics are translated by a small line-scanner before AST parsing. `print` and
+the trailing-expression echo write plain text to stdout; for images, data
+frames, Markdown objects and large structures they also emit `image`/`view`
+frames (a `view` pretty-prints text the cell already printed).
+"""
+
+from __future__ import annotations
+
+import ast
+import asyncio
+import base64
+import builtins
+import codecs
+import contextvars
+import functools
+import inspect
+import io
+import itertools
+import json
+import hashlib
+import linecache
+import locale
+import math
+import os
+import re
+import runpy
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+import traceback
+import tokenize
+from pathlib import Path
+from typing import Any, Callable
+
+# ---------------------------------------------------------------------------
+# Frame writer
+# ---------------------------------------------------------------------------
+
+# Frames travel on a private dup of the original stdout. fd 1 itself is then
+# repointed at a capture pipe: child processes spawned by user code without
+# stdout=PIPE inherit fd 1, and their output is forwarded to the host as
+# regular stdout frames by a drain thread instead of being written raw into
+# the NDJSON channel (where it would be dropped as invalid JSON — or worse,
+# spoof a frame). The wire protocol is unchanged: the host still reads NDJSON
+# frames from the subprocess stdout.
+_RAW_STDERR = sys.__stderr__
+try:
+    _FRAME_FD = os.dup(sys.__stdout__.fileno())
+    _RAW_STDOUT = os.fdopen(_FRAME_FD, "w", encoding="utf-8", errors="backslashreplace")
+    _CAPTURE_READ_FD, _capture_write_fd = os.pipe()
+    os.dup2(_capture_write_fd, sys.__stdout__.fileno())
+    os.close(_capture_write_fd)
+except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+    _RAW_STDOUT = sys.__stdout__
+    _CAPTURE_READ_FD = None
+_OUT_LOCK = threading.Lock()
+
+# Requests likewise arrive on a private dup of the original stdin, and fd 0
+# itself is repointed at os.devnull: user code, and every process it spawns
+# without an explicit stdin, then reads immediate EOF instead of blocking on
+# (or stealing frames from) a control channel that stays open for the
+# kernel's whole life. The host still writes NDJSON requests to the
+# subprocess stdin.
+try:
+    _CONTROL_FD = os.dup(sys.__stdin__.fileno())
+    _CONTROL_IN = os.fdopen(_CONTROL_FD, "r", encoding="utf-8")
+    _devnull_fd = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(_devnull_fd, sys.__stdin__.fileno())
+    os.close(_devnull_fd)
+except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+    _CONTROL_IN = sys.__stdin__
+
+
+def _json_default(o: Any) -> Any:
+    try:
+        return repr(o)
+    except Exception:
+        return f"<unrepr {type(o).__name__}>"
+
+
+def _emit(frame: dict) -> None:
+    """Serialize a frame and write it to the host as a single NDJSON line."""
+    line = json.dumps(frame, ensure_ascii=False, default=_json_default)
+    with _OUT_LOCK:
+        _RAW_STDOUT.write(line)
+        _RAW_STDOUT.write("\n")
+        _RAW_STDOUT.flush()
+
+
+# ---------------------------------------------------------------------------
+# User stdout/stderr proxies
+# ---------------------------------------------------------------------------
+
+
+class _StreamProxy(io.TextIOBase):
+    """Emit ``write()`` data as typed frames tied to the current request.
+
+    Writes are coalesced per request: a frame is emitted once the buffer holds
+    a complete line (everything up to the last newline goes out together) or
+    grows past ``_MAX_BUFFER`` bytes, so the common ``print()`` pair of
+    ``write(text)`` + ``write("\\n")`` costs one frame instead of two. Partial
+    lines are bounded by ``flush()`` and the end-of-request flush.
+    """
+
+    _MAX_BUFFER = 8192
+
+    def __init__(self, kind: str) -> None:
+        super().__init__()
+        self._kind = kind
+        self._lock = threading.Lock()
+        self._buffers: dict[str, str] = {}
+
+    def writable(self) -> bool:  # noqa: D401 - protocol method
+        return True
+
+    def isatty(self) -> bool:  # noqa: D401 - protocol method
+        return False
+
+    def write(self, data: Any) -> int:  # type: ignore[override]
+        if not isinstance(data, str):
+            data = str(data)
+        if not data:
+            return 0
+        rid = _CURRENT_RID.get()
+        if rid is None:
+            _RAW_STDERR.write(data)
+            _RAW_STDERR.flush()
+            return len(data)
+        emit_text = None
+        with self._lock:
+            buf = self._buffers.pop(rid, "") + data
+            if len(buf) >= self._MAX_BUFFER:
+                emit_text = buf
+            else:
+                nl = buf.rfind("\n")
+                if nl >= 0:
+                    emit_text = buf[: nl + 1]
+                    rest = buf[nl + 1 :]
+                    if rest:
+                        self._buffers[rid] = rest
+                else:
+                    self._buffers[rid] = buf
+        if emit_text:
+            _emit({"type": self._kind, "id": rid, "data": emit_text})
+        return len(data)
+
+    def flush(self) -> None:  # noqa: D401 - protocol method
+        rid = _CURRENT_RID.get()
+        if rid is not None:
+            self.flush_rid(rid)
+        return None
+
+    def flush_rid(self, rid: str) -> None:
+        """Flush any buffered partial line for ``rid`` as its own frame."""
+        with self._lock:
+            buf = self._buffers.pop(rid, None)
+        if buf:
+            _emit({"type": self._kind, "id": rid, "data": buf})
+
+
+def _flush_stream_proxies(rid: str) -> None:
+    """Drain buffered proxy output for ``rid`` (called before its done frame)."""
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, _StreamProxy):
+            stream.flush_rid(rid)
+
+
+# ---------------------------------------------------------------------------
+# Runner state
+# ---------------------------------------------------------------------------
+
+
+class _RunnerState:
+    def __init__(self) -> None:
+        self.execution_count: int = 0
+        self.namespace_revision: int = 0
+        self.cancel_requested: bool = False
+        # User globals — kept across requests when running in session mode.
+        self.user_ns: dict[str, Any] = {
+            "__name__": "__main__",
+            "__doc__": None,
+            "__builtins__": builtins,
+        }
+        self.last_install_marker: int = 0
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.active_executions: int = 0
+        # In-flight cells by request id (``None`` while queued on the control
+        # channel, then the running ``asyncio.Task``), the ids the host asked
+        # to interrupt, and the tasks cancelled while parked on an ``await``.
+        self.executing_tasks: dict[str, asyncio.Task | None] = {}
+        self.interrupt_ids: set[str] = set()
+        self.interrupted_tasks: set[asyncio.Task] = set()
+        # POSIX reads interrupt requests while cells run, so a SIGINT acts only
+        # on the cells they name. Windows runs one cell at a time.
+        self.targeted_interrupts: bool = False
+        # Best-effort attribution target for captured fd-1 bytes (child
+        # processes inheriting stdout). With overlapping requests the most
+        # recently started one wins — strictly better than dropping the bytes.
+        self.capture_rid: str | None = None
+
+
+_CURRENT_RID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "omp_current_rid", default=None
+)
+_CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS: contextvars.ContextVar[set[int] | None] = (
+    contextvars.ContextVar(
+        "omp_displayed_matplotlib_figure_ids",
+        default=None,
+    )
+)
+
+
+_STATE = _RunnerState()
+
+_SHADOW_SNAPSHOT_MAX_DEPTH = 16
+_SHADOW_SNAPSHOT_MAX_NODES = 2000
+_SHADOW_SNAPSHOT_MAX_STRING_BYTES = 8 * 1024 * 1024
+_SHADOW_UNSUPPORTED = object()
+
+# Class attribute on the prelude `_ToolProxy` identifying the genuine tool
+# bridge. A retained non-JSON-safe user `tool` binding is omitted from the
+# shadow snapshot exactly like the genuine bridge, so snapshot absence alone
+# cannot tell them apart (see `_shadow_tool_available`).
+_TOOL_BRIDGE_MARKER = "__omp_tool_bridge__"
+
+# Runner-owned reference to the genuine prelude tool bridge, captured on first
+# sighting: kernel init executes the prelude before user cells, so the first
+# `tool` binding observed by the planner is the installed bridge. Identity
+# (`is`) plus the marker above defeats both retained shadows and spoofed
+# markers; the residual is a hostile `%run` script that both runs before any
+# plan and reproduces the marker.
+_TRUSTED_TOOL_BRIDGE: dict[str, Any] = {}
+
+
+def _tool_binding_state(user_ns: dict[str, Any]) -> str:
+    """Reserved `tool` binding identity: absent, intact, or shadowed.
+
+    Absent with nothing ever captured is the bare-harness norm (no bridge
+    installed at all). Absent after a capture means user deletion. Present
+    means intact only for the captured genuine bridge carrying the marker.
+    """
+    if "tool" not in user_ns:
+        return "absent" if _TRUSTED_TOOL_BRIDGE.get("bridge") is None else "shadowed"
+    current = user_ns["tool"]
+    trusted = _TRUSTED_TOOL_BRIDGE.get("bridge")
+    if trusted is None:
+        if getattr(current, _TOOL_BRIDGE_MARKER, False) is True:
+            _TRUSTED_TOOL_BRIDGE["bridge"] = current
+            return "intact"
+        return "shadowed"
+    return "intact" if current is trusted else "shadowed"
+
+
+def _shadow_identity_state() -> dict[str, str]:
+    """Reserved-binding identity relevant to speculation, for the snapshot digest.
+
+    Out-of-band namespace changes (async tasks, background threads) that replace
+    `tool` or `str` may leave no JSON-safe trace and bump no revision; without
+    this the digest would still match and stale plans would verify. Predicates
+    mirror the planner gates exactly (`str` membership matches the seed in
+    `_emit_shadow_plan`; `tool` matches `_shadow_tool_available`).
+    """
+    user_ns = _STATE.user_ns
+    return {
+        "str": "shadowed" if "str" in user_ns else "absent",
+        "tool": _tool_binding_state(user_ns),
+    }
+
+def _copy_shadow_value(value: Any, depth: int, state: dict[str, Any]) -> Any:
+    """Copy exact JSON-safe values without invoking user protocols."""
+    if depth > _SHADOW_SNAPSHOT_MAX_DEPTH:
+        return _SHADOW_UNSUPPORTED
+    state["nodes"] += 1
+    if state["nodes"] > _SHADOW_SNAPSHOT_MAX_NODES:
+        return _SHADOW_UNSUPPORTED
+    value_type = type(value)
+    if value is None or value_type is bool or value_type is int:
+        return value
+    if value_type is float:
+        return value if value == value and value not in (float("inf"), float("-inf")) else _SHADOW_UNSUPPORTED
+    if value_type is str:
+        state["bytes"] += len(value.encode("utf-8"))
+        return value if state["bytes"] <= _SHADOW_SNAPSHOT_MAX_STRING_BYTES else _SHADOW_UNSUPPORTED
+    if value_type not in (list, tuple, dict) or id(value) in state["seen"]:
+        return _SHADOW_UNSUPPORTED
+    state["seen"].add(id(value))
+    try:
+        if value_type in (list, tuple):
+            copied = [_copy_shadow_value(item, depth + 1, state) for item in value]
+            return copied if all(item is not _SHADOW_UNSUPPORTED for item in copied) else _SHADOW_UNSUPPORTED
+        copied_dict: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                return _SHADOW_UNSUPPORTED
+            copied = _copy_shadow_value(item, depth + 1, state)
+            if copied is _SHADOW_UNSUPPORTED:
+                return _SHADOW_UNSUPPORTED
+            copied_dict[key] = copied
+        return copied_dict
+    finally:
+        state["seen"].discard(id(value))
+
+
+def _snapshot_user_namespace() -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    snapshot_state: dict[str, Any] = {"nodes": 0, "bytes": 0, "seen": set()}
+    for key, value in _STATE.user_ns.items():
+        if key.startswith("_"):
+            continue
+        copied = _copy_shadow_value(value, 0, snapshot_state)
+        if copied is not _SHADOW_UNSUPPORTED:
+            values[key] = copied
+    return values
+
+
+def _shadow_tool_available(snapshot: dict[str, Any], user_ns: dict[str, Any]) -> bool:
+    """Whether a speculative `tool.read` may reach the genuine bridge.
+
+    A JSON-safe user value is visible in the snapshot; anything else goes
+    through the binding identity, which also covers bare harnesses ("absent"
+    with nothing ever captured stays available as before).
+    """
+    if "tool" in snapshot:
+        return False
+    # A JSON-safe user value is visible above; anything else goes through the
+    # binding identity, which also covers bare harnesses ("absent" with nothing
+    # ever captured stays available as before).
+    return _tool_binding_state(user_ns) in ("intact", "absent")
+
+def _shadow_snapshot_digest(values: dict[str, Any]) -> str:
+    payload = json.dumps(
+        {"identity": _shadow_identity_state(), "values": values},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _emit_shadow_snapshot(req: dict) -> None:
+    rid = str(req.get("id"))
+    if _STATE.active_executions != 0:
+        _emit({"type": "shadow_snapshot", "id": rid, "eligible": False, "reason": "kernel is busy"})
+        return
+    values = _snapshot_user_namespace()
+    _emit(
+        {
+            "type": "shadow_snapshot",
+            "id": rid,
+            "eligible": True,
+            "revision": _STATE.namespace_revision,
+            "digest": _shadow_snapshot_digest(values),
+            "values": values,
+        }
+    )
+
+
+def _shadow_span(node: ast.AST, line_offsets: list[int]) -> dict[str, int]:
+    start_line = max(1, int(getattr(node, "lineno", 1)))
+    end_line = max(start_line, int(getattr(node, "end_lineno", start_line)))
+    start = line_offsets[start_line - 1] + int(getattr(node, "col_offset", 0))
+    end = line_offsets[end_line - 1] + int(getattr(node, "end_col_offset", 0))
+    return {"start": start, "end": end}
+
+
+def _shadow_dependencies(expression: dict[str, Any], output: set[str] | None = None) -> set[str]:
+    output = output if output is not None else set()
+    kind = expression.get("kind")
+    if kind == "operation_result":
+        output.add(str(expression["operationId"]))
+    elif kind == "property":
+        _shadow_dependencies(expression["target"], output)
+    elif kind in ("array", "concat"):
+        for item in expression["items"]:
+            _shadow_dependencies(item, output)
+    elif kind == "object":
+        for entry in expression["entries"]:
+            _shadow_dependencies(entry["value"], output)
+    elif kind == "transform":
+        _shadow_dependencies(expression["input"], output)
+        if expression.get("argument") is not None:
+            _shadow_dependencies(expression["argument"], output)
+    return output
+
+
+
+
+def _shadow_expression_is_string(expression: dict[str, Any]) -> bool:
+    kind = expression.get("kind")
+    if kind == "literal":
+        return type(expression.get("value")) is str
+    if kind == "concat":
+        return True
+    return kind == "transform" and expression.get("name") in (
+        "Python.str",
+        "JSON.stringify",
+        "Array.join",
+    )
+
+
+def _shadow_expression(
+    node: ast.AST,
+    environment: dict[str, dict[str, Any]],
+    snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if isinstance(node, ast.Constant) and (
+        node.value is None or type(node.value) in (bool, int, float, str)
+    ):
+        if type(node.value) is float and (
+            node.value != node.value or node.value in (float("inf"), float("-inf"))
+        ):
+            return None
+        return {"kind": "literal", "value": node.value}
+    if isinstance(node, ast.Name):
+        return environment.get(node.id, {"kind": "snapshot", "name": node.id})
+    if isinstance(node, (ast.List, ast.Tuple)):
+        items = [_shadow_expression(item, environment, snapshot) for item in node.elts]
+        return (
+            {"kind": "array", "items": items}
+            if all(item is not None for item in items)
+            else None
+        )
+    if isinstance(node, ast.Dict):
+        entries: list[dict[str, Any]] = []
+        for key, value in zip(node.keys, node.values):
+            if not isinstance(key, ast.Constant) or type(key.value) is not str:
+                return None
+            projected = _shadow_expression(value, environment, snapshot)
+            if projected is None:
+                return None
+            entries.append({"key": key.value, "value": projected})
+        return {"kind": "object", "entries": entries}
+    if isinstance(node, ast.Subscript):
+        target = _shadow_expression(node.value, environment, snapshot)
+        key = _shadow_expression(node.slice, environment, snapshot)
+        if target is None or key is None or key.get("kind") != "literal":
+            return None
+        if type(key.get("value")) not in (str, int):
+            return None
+        return {"kind": "property", "target": target, "property": key["value"]}
+    if isinstance(node, ast.JoinedStr):
+        items: list[dict[str, Any]] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and type(value.value) is str:
+                items.append({"kind": "literal", "value": value.value})
+            elif isinstance(value, ast.FormattedValue):
+                if value.conversion != -1 or value.format_spec is not None:
+                    return None
+                projected = _shadow_expression(value.value, environment, snapshot)
+                if projected is None:
+                    return None
+                items.append({"kind": "transform", "name": "Python.str", "input": projected})
+            else:
+                return None
+        return {"kind": "concat", "items": items}
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _shadow_expression(node.left, environment, snapshot)
+        right = _shadow_expression(node.right, environment, snapshot)
+        return (
+            {"kind": "concat", "items": [left, right]}
+            if left is not None
+            and right is not None
+            and _shadow_expression_is_string(left)
+            and _shadow_expression_is_string(right)
+            else None
+        )
+    if isinstance(node, ast.Call) and not node.keywords:
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "str"
+            and node.func.id not in environment
+            and (snapshot is None or "str" not in snapshot)
+            and len(node.args) == 1
+        ):
+            projected = _shadow_expression(node.args[0], environment, snapshot)
+            return (
+                {"kind": "transform", "name": "Python.str", "input": projected}
+                if projected is not None
+                else None
+            )
+    return None
+
+
+def _shadow_static_value(
+    expression: dict[str, Any], snapshot: dict[str, Any]
+) -> tuple[bool, Any]:
+    kind = expression.get("kind")
+    if kind == "literal":
+        return True, expression.get("value")
+    if kind == "snapshot":
+        name = str(expression.get("name"))
+        return (True, snapshot[name]) if name in snapshot else (False, None)
+    if kind == "array":
+        values = [_shadow_static_value(item, snapshot) for item in expression["items"]]
+        return (
+            (True, [value for _, value in values])
+            if all(ok for ok, _ in values)
+            else (False, None)
+        )
+    if kind == "object":
+        values = [
+            (entry["key"], _shadow_static_value(entry["value"], snapshot))
+            for entry in expression["entries"]
+        ]
+        return (
+            (True, {key: value for key, (_, value) in values})
+            if all(ok for _, (ok, _) in values)
+            else (False, None)
+        )
+    if kind == "property":
+        ok, target = _shadow_static_value(expression["target"], snapshot)
+        if not ok:
+            return False, None
+        property_name = expression["property"]
+        if type(target) is dict and type(property_name) is str and property_name in target:
+            return True, target[property_name]
+        if type(target) is list and type(property_name) is int and 0 <= property_name < len(target):
+            return True, target[property_name]
+        return False, None
+    if kind == "concat":
+        values = [_shadow_static_value(item, snapshot) for item in expression["items"]]
+        return (
+            (True, "".join(str(value) for _, value in values))
+            if all(ok for ok, _ in values)
+            else (False, None)
+        )
+    return False, None
+
+
+def _shadow_call_kind(node: ast.AST, tool_available: bool = True) -> str | None:
+    if isinstance(node, ast.Await):
+        node = node.value
+    if not isinstance(node, ast.Call):
+        return None
+    if (
+        isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "tool"
+        and node.func.attr == "read"
+        and tool_available
+    ):
+        return "read"
+    return None
+
+
+def _emit_shadow_plan(req: dict) -> None:
+    rid = str(req.get("id"))
+    if _STATE.active_executions != 0:
+        _emit({"type": "shadow_plan", "id": rid, "eligible": False, "reason": "kernel is busy"})
+        return
+    code = req.get("code")
+    if type(code) is not str:
+        _emit({"type": "shadow_plan", "id": rid, "eligible": False, "reason": "code is not a string"})
+        return
+    try:
+        module = ast.parse(code, mode="exec")
+    except SyntaxError:
+        _emit({"type": "shadow_plan", "id": rid, "eligible": False, "reason": "incomplete or invalid Python"})
+        return
+    snapshot = _snapshot_user_namespace()
+    try:
+        # Whole-cell validity gate: `ast.parse` accepts cells that `compile()`
+        # rejects (e.g. use-before-global), while authoritative
+        # `_compile_source()` raises SyntaxError before any bridge call.
+        # Mirror its filename/mode/flags (top-level await stays legal) and
+        # fail closed with zero operations plus an invalidating barrier.
+        compile(module, "<cell>", "exec", flags=_TLA_FLAG)
+    except SyntaxError:
+        _emit(
+            {
+                "type": "shadow_plan",
+                "id": rid,
+                "eligible": True,
+                "revision": _STATE.namespace_revision,
+                "digest": _shadow_snapshot_digest(snapshot),
+                "values": snapshot,
+                "operations": [],
+                "controls": [],
+                "barrier": {
+                    "kind": "barrier",
+                    "reason": "cell does not compile",
+                    "span": {"start": 0, "end": len(code)},
+                },
+            }
+        )
+        return
+    # Mirror the `_compile_source` whole-cell instrumentation skip: when the
+    # cell binds `__omp_with_call_site__` anywhere, authoritative execution
+    # runs zero instrumented calls, so the planner must admit zero operations
+    # (per-call scoping is undecidable across call order; fail closed).
+    if _cell_binds_call_site_helper(module):
+        _emit(
+            {
+                "type": "shadow_plan",
+                "id": rid,
+                "eligible": True,
+                "revision": _STATE.namespace_revision,
+                "digest": _shadow_snapshot_digest(snapshot),
+                "values": snapshot,
+                "operations": [],
+                "controls": [],
+                "barrier": {
+                    "kind": "barrier",
+                    "reason": "Python call-site helper binding changed",
+                    "span": {"start": 0, "end": len(code)},
+                },
+            }
+        )
+        return
+    tool_available = _shadow_tool_available(snapshot, _STATE.user_ns)
+    line_offsets = [0]
+    for line in code.splitlines(keepends=True):
+        line_offsets.append(line_offsets[-1] + len(line))
+    operations: list[dict[str, Any]] = []
+    controls: list[dict[str, Any]] = []
+    environment: dict[str, dict[str, Any]] = {}
+    # A retained `str` binding shadows the builtin even when the JSON-safe snapshot
+    # omits it (function values are never JSON-safe), so snapshot absence alone
+    # cannot prove the builtin is intact. Seed the same snapshot-ref shape Name
+    # resolution falls back to: the `str(...)` call gate below then fails closed,
+    # and any other use resolves unresolvable. (`del str` needs no seed: removing
+    # the binding restores builtin resolution authoritatively too.)
+    if "str" in _STATE.user_ns:
+        environment["str"] = {"kind": "snapshot", "name": "str"}
+    occurrences: dict[str, int] = {}
+    source_order = 0
+    barrier: dict[str, Any] | None = None
+
+    def add_operation(
+        expression_node: ast.AST,
+        dynamic_path: list[str],
+        control_dependencies: list[str],
+    ) -> dict[str, Any] | None:
+        nonlocal source_order
+        # Unawaited `tool.read(...)` never reaches the bridge: the kernel tool
+        # attribute is async, so a bare call only builds a coroutine. Admit an
+        # operation only for the awaited form; anything else fails closed via
+        # the caller's barrier path below.
+        if not isinstance(expression_node, ast.Await):
+            return None
+        call_node = expression_node.value
+        kind = _shadow_call_kind(call_node, tool_available)
+        if not isinstance(call_node, ast.Call) or kind != "read":
+            return None
+        if call_node.keywords or len(call_node.args) != 1:
+            return None
+        argument_ir = _shadow_expression(call_node.args[0], environment, snapshot)
+        if argument_ir is None:
+            return None
+        call_span = _shadow_span(call_node, line_offsets)
+        static_site = f"py:{call_span['start']}"
+        path_key = f"{static_site}:{'/'.join(dynamic_path)}"
+        occurrence = occurrences.get(path_key, 0)
+        occurrences[path_key] = occurrence + 1
+        operation_id = f"{path_key}:{occurrence}"
+        operation = {
+            "kind": "tool",
+            "call": {
+                "id": operation_id,
+                "siteId": static_site,
+                "dynamicPath": list(dynamic_path),
+                "occurrence": occurrence,
+                "name": kind,
+                "args": argument_ir,
+                "dependencies": sorted(_shadow_dependencies(argument_ir)),
+                "controlDependencies": list(control_dependencies),
+                "sourceOrder": source_order,
+                "span": call_span,
+            },
+        }
+        source_order += 1
+        operations.append(operation)
+        return operation
+
+    def project_statements(
+        statements: list[ast.stmt],
+        dynamic_path: list[str],
+        control_dependencies: list[str],
+    ) -> bool:
+        nonlocal barrier
+        for statement in statements:
+            if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                target = (
+                    statement.targets[0]
+                    if isinstance(statement, ast.Assign) and len(statement.targets) == 1
+                    else getattr(statement, "target", None)
+                )
+                value_node = statement.value
+                if not isinstance(target, ast.Name) or value_node is None:
+                    barrier = {
+                        "kind": "barrier",
+                        "reason": "unsupported Python assignment",
+                        "span": _shadow_span(statement, line_offsets),
+                    }
+                    return False
+                if target.id == "tool":
+                    barrier = {
+                        "kind": "barrier",
+                        "reason": "Python tool binding changed",
+                        "span": _shadow_span(statement, line_offsets),
+                    }
+                    return False
+                operation = add_operation(value_node, dynamic_path, control_dependencies)
+                if operation is not None:
+                    environment[target.id] = {"kind": "operation_result", "operationId": operation["call"]["id"]}
+                    continue
+                projected = _shadow_expression(value_node, environment, snapshot)
+                if projected is None:
+                    barrier = {
+                        "kind": "barrier",
+                        "reason": "unsupported Python assignment value",
+                        "span": _shadow_span(value_node, line_offsets),
+                    }
+                    return False
+                if not _shadow_static_value(projected, snapshot)[0]:
+                    barrier = {
+                        "kind": "barrier",
+                        "reason": "unsupported Python assignment value",
+                        "span": _shadow_span(value_node, line_offsets),
+                    }
+                    return False
+                environment[target.id] = projected
+                continue
+            if isinstance(statement, ast.Expr):
+                if add_operation(statement.value, dynamic_path, control_dependencies) is not None:
+                    continue
+                projected = _shadow_expression(statement.value, environment, snapshot)
+                if projected is not None and _shadow_static_value(projected, snapshot)[0]:
+                    continue
+                barrier = {
+                    "kind": "barrier",
+                    "reason": "unsupported Python statement",
+                    "span": _shadow_span(statement, line_offsets),
+                }
+                return False
+            if isinstance(statement, ast.If):
+                test = _shadow_expression(statement.test, environment, snapshot)
+                if test is None:
+                    barrier = {
+                        "kind": "barrier",
+                        "reason": "unsupported Python condition",
+                        "span": _shadow_span(statement.test, line_offsets),
+                    }
+                    return False
+                ok, selected = _shadow_static_value(test, snapshot)
+                conditional_id = f"py:{_shadow_span(statement, line_offsets)['start']}:if"
+                if ok:
+                    branch = statement.body if selected else statement.orelse
+                    if not project_statements(
+                        branch,
+                        [*dynamic_path, "if:true" if selected else "if:false"],
+                        control_dependencies,
+                    ):
+                        return False
+                    continue
+                controls.append(
+                    {
+                        "kind": "conditional",
+                        "id": conditional_id,
+                        "test": test,
+                        "consequentPath": "if:true",
+                        "alternatePath": "if:false",
+                        "span": _shadow_span(statement, line_offsets),
+                    }
+                )
+                if not project_statements(
+                    statement.body,
+                    [*dynamic_path, "if:true"],
+                    [*control_dependencies, conditional_id],
+                ):
+                    return False
+                if not project_statements(
+                    statement.orelse,
+                    [*dynamic_path, "if:false"],
+                    [*control_dependencies, conditional_id],
+                ):
+                    return False
+                continue
+            if isinstance(statement, ast.For) and isinstance(statement.target, ast.Name):
+                if statement.target.id == "tool":
+                    barrier = {
+                        "kind": "barrier",
+                        "reason": "Python tool binding changed",
+                        "span": _shadow_span(statement.target, line_offsets),
+                    }
+                    return False
+                iterable = _shadow_expression(statement.iter, environment, snapshot)
+                ok, values = _shadow_static_value(iterable, snapshot) if iterable is not None else (False, None)
+                if not ok or type(values) is not list or len(values) > 32:
+                    barrier = {
+                        "kind": "barrier",
+                        "reason": "unbounded or dynamic Python loop",
+                        "span": _shadow_span(statement, line_offsets),
+                    }
+                    return False
+                controls.append(
+                    {
+                        "kind": "loop",
+                        "id": f"py:{_shadow_span(statement, line_offsets)['start']}:loop",
+                        "iterable": iterable,
+                        "iterations": len(values),
+                        "span": _shadow_span(statement, line_offsets),
+                    }
+                )
+                previous = environment.get(statement.target.id)
+                for index, value in enumerate(values):
+                    environment[statement.target.id] = {"kind": "literal", "value": value}
+                    if not project_statements(
+                        statement.body,
+                        [*dynamic_path, f"loop:{index}"],
+                        control_dependencies,
+                    ):
+                        return False
+                if values:
+                    environment[statement.target.id] = {"kind": "literal", "value": values[-1]}
+                elif previous is None:
+                    environment.pop(statement.target.id, None)
+                else:
+                    environment[statement.target.id] = previous
+                if statement.orelse and not project_statements(
+                    statement.orelse,
+                    [*dynamic_path, "loop:else"],
+                    control_dependencies,
+                ):
+                    return False
+                continue
+            barrier = {
+                "kind": "barrier",
+                "reason": "unsupported Python statement",
+                "span": _shadow_span(statement, line_offsets),
+            }
+            return False
+        return True
+
+    project_statements(module.body, [], [])
+    _emit(
+        {
+            "type": "shadow_plan",
+            "id": rid,
+            "eligible": True,
+            "revision": _STATE.namespace_revision,
+            "digest": _shadow_snapshot_digest(snapshot),
+            "values": snapshot,
+            "operations": operations,
+            "controls": controls,
+            "barrier": barrier,
+        }
+    )
+
+def _drain_captured_stdout() -> None:
+    """Forward bytes written to the captured fd 1 as stdout frames.
+
+    Runs on a daemon thread for the life of the process. Child processes that
+    inherit fd 1 (any ``subprocess`` call without ``stdout=PIPE``) land here.
+    """
+    if _CAPTURE_READ_FD is None:
+        return
+    import codecs
+
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    while True:
+        try:
+            chunk = os.read(_CAPTURE_READ_FD, 65536)
+        except OSError:
+            return
+        if not chunk:
+            return
+        text = decoder.decode(chunk)
+        if not text:
+            continue
+        rid = _STATE.capture_rid
+        if rid is None:
+            _RAW_STDERR.write(text)
+            _RAW_STDERR.flush()
+        else:
+            _emit({"type": "stdout", "id": rid, "data": text})
+
+
+def _start_capture_drain() -> None:
+    if _CAPTURE_READ_FD is None:
+        return
+    thread = threading.Thread(
+        target=_drain_captured_stdout, name="omp-fd1-capture", daemon=True
+    )
+    thread.start()
+
+
+# ---------------------------------------------------------------------------
+# Magic source transformer
+# ---------------------------------------------------------------------------
+
+
+_MAGIC_LINE_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<name>[A-Za-z_][A-Za-z_0-9]*)(?:[ \t]+(?P<args>.*))?$"
+)
+_ASSIGN_LINE_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<lhs>[A-Za-z_][A-Za-z_0-9.\[\], ]*?)\s*=\s*(?P<rhs>.+)$"
+)
+
+
+def _fold_continuations(lines: list[str], start: int) -> tuple[str, int]:
+    """Fold trailing backslash continuations starting at ``start``. Returns
+    ``(folded_text, lines_consumed)``."""
+    parts: list[str] = []
+    i = start
+    while i < len(lines):
+        line = lines[i]
+        if line.endswith("\\"):
+            parts.append(line[:-1])
+            i += 1
+            continue
+        parts.append(line)
+        i += 1
+        break
+    return ("".join(parts), i - start)
+
+
+def _quote_arg(text: str) -> str:
+    """Return a Python string literal that round-trips ``text`` exactly."""
+    return json.dumps(text, ensure_ascii=False)
+
+
+_STRING_START_TOKENS = {
+    getattr(tokenize, name, -1) for name in ("FSTRING_START", "TSTRING_START")
+}
+_STRING_END_TOKENS = {
+    getattr(tokenize, name, -1) for name in ("FSTRING_END", "TSTRING_END")
+}
+
+
+def _magic_line_indices(lines: list[str]) -> set[int]:
+    """Find command lines outside Python strings without lexing shell payloads."""
+    indices: set[int] = set()
+    offset = 0
+    while offset < len(lines):
+        # A synthetic enclosing expression suppresses indentation checks when
+        # restarting in the middle of a suite; this pass only identifies tokens.
+        stream = itertools.chain(
+            ("(\n",),
+            (line + "\n" for line in itertools.islice(lines, offset, None)),
+            (")\n",),
+        )
+        last_row = -1
+        string_depth = 0
+        try:
+            for item in tokenize.generate_tokens(lambda: next(stream, "")):
+                if item.type in _STRING_START_TOKENS:
+                    string_depth += 1
+                elif item.type in _STRING_END_TOKENS:
+                    string_depth -= 1
+                    continue
+                if string_depth or item.type in (
+                    tokenize.NL, tokenize.NEWLINE, tokenize.INDENT,
+                    tokenize.DEDENT, tokenize.ENDMARKER, tokenize.COMMENT,
+                ) or (item.type == tokenize.ERRORTOKEN and item.string.isspace()):
+                    # Python < 3.12 emits indentation before `!` as one
+                    # whitespace ERRORTOKEN per column.
+                    continue
+                row = offset + item.start[0] - 2
+                if row < offset or row >= len(lines) or row == last_row:
+                    continue
+                last_row = row
+                stripped = lines[row].lstrip()
+                if item.start[1] != len(lines[row]) - len(stripped):
+                    continue
+                assignment = _ASSIGN_LINE_RE.match(lines[row])
+                rhs = assignment.group("rhs").strip() if assignment else ""
+                if not stripped.startswith(("%", "!")) and not rhs.startswith(("%", "!")):
+                    continue
+                indices.add(row)
+                if stripped.startswith("%%"):
+                    return indices
+                # Shell quotes and cell/line magic arguments are not Python.
+                # Restart after the command instead of tokenizing its payload.
+                consumed = _fold_continuations(lines, row)[1] if stripped.startswith(("%", "!")) else 1
+                offset = row + consumed
+                break
+            else:
+                return indices
+        except (tokenize.TokenError, IndentationError):
+            # Leave incomplete Python source to the ordinary syntax-error path.
+            return indices
+    return indices
+
+
+def transform_cell(source: str) -> str:
+    """Translate IPython-style magics + shell escapes into plain Python.
+
+    Rules
+    -----
+    * ``%name args``              -> ``__omp_magic("name", "args")``
+    * ``%load path``              -> ``await __omp_magic_async("load", "path")``
+    * ``var = %name args``        -> ``var = __omp_magic("name", "args")``
+    * ``!cmd``                    -> ``__omp_shell("cmd")``
+    * ``var = !cmd``              -> ``var = __omp_shell("cmd")``
+    * ``%%name args\\n<body>``    -> ``__omp_magic_cell("name", "args", "<body>")``
+      (cell magic must be the first non-whitespace token of a top-level line and
+      consumes the remainder of the cell)
+
+    Python tokenization identifies command lines outside strings and comments.
+    Real command payloads are skipped before resuming lexical scanning so shell
+    quoting cannot change how subsequent Python source is interpreted.
+    """
+
+    if "%" not in source and "!" not in source:
+        return source
+
+    lines = source.splitlines()
+    magic_lines = _magic_line_indices(lines)
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if i not in magic_lines:
+            out.append(line)
+            i += 1
+            continue
+        stripped = line.lstrip()
+        indent = line[: len(line) - len(stripped)]
+
+        # Cell magic — consumes from here to EOF.
+        if stripped.startswith("%%"):
+            head, _ = _split_magic_head(stripped[2:])
+            name, args = head
+            body_lines = lines[i + 1 :]
+            body = "\n".join(body_lines)
+            out.append(
+                f"{indent}__omp_magic_cell({_quote_arg(name)}, {_quote_arg(args)}, {_quote_arg(body)})"
+            )
+            return "\n".join(out)
+
+        # Line magic / shell at start of line.
+        if stripped.startswith("%") and not stripped.startswith("%%"):
+            folded, consumed = _fold_continuations(lines, i)
+            stripped_folded = folded.lstrip()
+            indent = folded[: len(folded) - len(stripped_folded)]
+            head, _ = _split_magic_head(stripped_folded[1:])
+            name, args = head
+            call = "__omp_magic_async" if name == "load" else "__omp_magic"
+            prefix = "await " if name == "load" else ""
+            out.append(f"{indent}{prefix}{call}({_quote_arg(name)}, {_quote_arg(args)})")
+            i += consumed
+            continue
+
+        if stripped.startswith("!"):
+            folded, consumed = _fold_continuations(lines, i)
+            stripped_folded = folded.lstrip()
+            indent = folded[: len(folded) - len(stripped_folded)]
+            cmd = stripped_folded[1:].strip()
+            out.append(f"{indent}__omp_shell({_quote_arg(cmd)})")
+            i += consumed
+            continue
+
+        # Assignment forms: var = %magic / var = !cmd
+        m = _ASSIGN_LINE_RE.match(line)
+        if m:
+            rhs = m.group("rhs").strip()
+            if rhs.startswith("!"):
+                cmd = rhs[1:].strip()
+                out.append(
+                    f"{m.group('indent')}{m.group('lhs').rstrip()} = __omp_shell({_quote_arg(cmd)})"
+                )
+                i += 1
+                continue
+            if rhs.startswith("%") and not rhs.startswith("%%"):
+                head, _ = _split_magic_head(rhs[1:])
+                name, args = head
+                call = "__omp_magic_async" if name == "load" else "__omp_magic"
+                prefix = "await " if name == "load" else ""
+                out.append(
+                    f"{m.group('indent')}{m.group('lhs').rstrip()} = {prefix}{call}({_quote_arg(name)}, {_quote_arg(args)})"
+                )
+                i += 1
+                continue
+
+        out.append(line)
+        i += 1
+
+    return "\n".join(out)
+
+
+def _split_magic_head(text: str) -> tuple[tuple[str, str], str]:
+    """Split ``"name rest"`` into ``("name", "rest")``."""
+    text = text.lstrip()
+    if not text:
+        return ("", ""), ""
+    m = re.match(r"([A-Za-z_][A-Za-z_0-9]*)(?:\s+(.*))?$", text)
+    if not m:
+        return ("", text), ""
+    return (m.group(1), (m.group(2) or "").rstrip()), ""
+
+
+# ---------------------------------------------------------------------------
+# Magic registry
+# ---------------------------------------------------------------------------
+
+
+_LINE_MAGICS: dict[str, Callable[[str], Any]] = {}
+_CELL_MAGICS: dict[str, Callable[[str, str], Any]] = {}
+
+
+def line_magic(name: str) -> Callable[[Callable[[str], Any]], Callable[[str], Any]]:
+    def decorator(fn: Callable[[str], Any]) -> Callable[[str], Any]:
+        _LINE_MAGICS[name] = fn
+        return fn
+
+    return decorator
+
+
+def cell_magic(
+    name: str,
+) -> Callable[[Callable[[str, str], Any]], Callable[[str, str], Any]]:
+    def decorator(fn: Callable[[str, str], Any]) -> Callable[[str, str], Any]:
+        _CELL_MAGICS[name] = fn
+        return fn
+
+    return decorator
+
+
+def _emit_status(op: str, **data: Any) -> None:
+    """Emit a structured status event for TUI rendering."""
+    rid = _CURRENT_RID.get()
+    if rid is None:
+        return
+    _emit({"type": "status", "id": rid, "event": {"op": op, **data}})
+
+
+_SHELL_READ_CHUNK_BYTES = 8192
+_SHELL_OUTPUT_MAX_BYTES = 1024 * 1024
+_SHELL_OUTPUT_MAX_LINES = 3000
+_SHELL_RESULT_CAPTURE_BYTES = _SHELL_OUTPUT_MAX_BYTES
+_PIP_LINE_SCAN_CHARS = 64 * 1024
+_SHELL_TRUNCATION_NOTICE = (
+    f"[output truncated: shell helper exceeded {_SHELL_OUTPUT_MAX_BYTES} bytes "
+    f"or {_SHELL_OUTPUT_MAX_LINES} lines; remaining output discarded]\n"
+)
+
+
+def _process_output_encoding() -> str:
+    return locale.getpreferredencoding(False) or "utf-8"
+
+
+def _process_output_decoder(encoding: str) -> codecs.IncrementalDecoder:
+    return codecs.getincrementaldecoder(encoding)(errors="strict")
+
+
+def _take_prefix_by_lines(text: str, max_lines: int) -> str:
+    if max_lines <= 0:
+        return ""
+    cursor = 0
+    for _ in range(max_lines):
+        newline = text.find("\n", cursor)
+        if newline < 0:
+            return text
+        cursor = newline + 1
+    return text[:cursor]
+
+
+def _take_prefix_by_encoded_bytes(text: str, max_bytes: int, encoding: str) -> str:
+    if max_bytes <= 0:
+        return ""
+    if len(text.encode(encoding, errors="strict")) <= max_bytes:
+        return text
+    lo = 0
+    hi = len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if len(text[:mid].encode(encoding, errors="strict")) <= max_bytes:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo]
+
+
+class _ShellOutputLimiter:
+    def __init__(self, *, max_bytes: int, max_lines: int, encoding: str) -> None:
+        self._remaining_bytes = max_bytes
+        self._remaining_lines = max_lines
+        self._encoding = encoding
+        self._truncated = False
+        self._at_line_start = True
+
+    def write(self, text: str) -> None:
+        if not text or self._truncated:
+            return
+        limited = _take_prefix_by_lines(text, self._remaining_lines)
+        truncated = limited != text
+        byte_limited = _take_prefix_by_encoded_bytes(
+            limited, self._remaining_bytes, self._encoding
+        )
+        truncated = truncated or byte_limited != limited
+        if byte_limited:
+            sys.stdout.write(byte_limited)
+            sys.stdout.flush()
+            self._remaining_bytes -= len(
+                byte_limited.encode(self._encoding, errors="strict")
+            )
+            self._remaining_lines -= byte_limited.count("\n")
+            self._at_line_start = byte_limited.endswith("\n")
+        if truncated:
+            self._emit_truncation_notice()
+
+    def _emit_truncation_notice(self) -> None:
+        if self._truncated:
+            return
+        prefix = "" if self._at_line_start else "\n"
+        sys.stdout.write(prefix + _SHELL_TRUNCATION_NOTICE)
+        sys.stdout.flush()
+        self._truncated = True
+
+
+def _stream_process_output(
+    proc: subprocess.Popen, on_text: Callable[[str], None] | None = None
+) -> None:
+    assert proc.stdout is not None
+    encoding = _process_output_encoding()
+    decoder = _process_output_decoder(encoding)
+    limiter = _ShellOutputLimiter(
+        max_bytes=_SHELL_OUTPUT_MAX_BYTES,
+        max_lines=_SHELL_OUTPUT_MAX_LINES,
+        encoding=encoding,
+    )
+    while True:
+        chunk = os.read(proc.stdout.fileno(), _SHELL_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        text = decoder.decode(chunk)
+        if text:
+            limiter.write(text)
+            if on_text is not None:
+                on_text(text)
+    tail = decoder.decode(b"", final=True)
+    if tail:
+        limiter.write(tail)
+        if on_text is not None:
+            on_text(tail)
+
+
+class _BoundedTextCapture:
+    def __init__(self, max_bytes: int, max_lines: int, encoding: str) -> None:
+        self._remaining_bytes = max_bytes
+        self._remaining_lines = max_lines
+        self._encoding = encoding
+        self._parts: list[str] = []
+
+    def add(self, text: str) -> None:
+        if self._remaining_bytes <= 0 or self._remaining_lines <= 0:
+            return
+        line_limited = _take_prefix_by_lines(text, self._remaining_lines)
+        part = _take_prefix_by_encoded_bytes(
+            line_limited, self._remaining_bytes, self._encoding
+        )
+        if not part:
+            return
+        self._parts.append(part)
+        self._remaining_bytes -= len(part.encode(self._encoding, errors="strict"))
+        self._remaining_lines -= part.count("\n")
+
+    def text(self) -> str:
+        return "".join(self._parts)
+
+
+class _BoundedLineScanner:
+    def __init__(self, max_chars: int, on_line: Callable[[str], None]) -> None:
+        self._max_chars = max_chars
+        self._on_line = on_line
+        self._partial = ""
+
+    def add(self, text: str) -> None:
+        data = self._partial + text
+        lines = data.splitlines(keepends=True)
+        if not lines:
+            return
+        if lines[-1].endswith(("\n", "\r")):
+            self._partial = ""
+        else:
+            self._partial = lines.pop()
+        for line in lines:
+            self._on_line(line)
+        if len(self._partial) > self._max_chars:
+            self._partial = self._partial[-self._max_chars :]
+
+    def finish(self) -> None:
+        if self._partial:
+            self._on_line(self._partial)
+            self._partial = ""
+
+
+@line_magic("pip")
+def _magic_pip(args: str) -> None:
+    argv = shlex.split(args) if args else ["--help"]
+    # Installs are host work, not cell compute: suspend the eval watchdog (same
+    # protocol as bridge waits in bridge-timeout.ts). Caller aborts still apply.
+    _emit_status("timeout-pause")
+    try:
+        _run_pip(argv, args)
+    finally:
+        _emit_status("timeout-resume")
+
+
+def _has_pip() -> bool:
+    import importlib.util
+
+    importlib.invalidate_caches()
+    try:
+        return importlib.util.find_spec("pip") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _procfs_usable() -> bool:
+    # /proc can be missing, unreadable or an empty unmounted directory (some
+    # containers and chroots); a mounted procfs lists this process. One
+    # inherited from a parent PID namespace lists outer pids, which can collide
+    # with ours (init is 1 in both) but never match its parents to our children:
+    # its /proc/self is this process under another pid.
+    try:
+        if str(os.getpid()) not in os.listdir("/proc"):
+            return False
+        with open("/proc/self/stat", "rb") as stat:
+            return int(stat.read().split(b" ", 1)[0]) == os.getpid()
+    except (OSError, ValueError):
+        return False
+
+
+def _child_pids() -> dict[int, list[int]]:
+    """Map each live pid to the pids of its children."""
+    children: dict[int, list[int]] = {}
+    if sys.platform.startswith("linux"):
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return children
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/stat", "rb") as stat:
+                    ppid = int(stat.read().rsplit(b")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            children.setdefault(ppid, []).append(int(entry))
+        return children
+    try:
+        listing = subprocess.run(
+            # /bin/ps first: the kernel's PATH is the user's and may not hold it.
+            ["/bin/ps" if os.path.exists("/bin/ps") else "ps", "-A", "-o", "pid=,ppid="],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return children
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) == 2:
+            children.setdefault(int(fields[1]), []).append(int(fields[0]))
+    return children
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    # Installers spawn their own children (ensurepip runs pip in one, source
+    # builds run backends and compilers), so killing `proc` alone is not enough.
+    # The tree stays in the kernel's process group so kernel shutdown still
+    # reaches it.
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        proc.kill()
+        proc.wait()
+        return
+    # Stop each process before listing its children, so nothing can spawn
+    # behind the walk; then kill every stopped process.
+    stopped: list[int] = []
+    level = [proc.pid]
+    while level:
+        for pid in level:
+            try:
+                os.kill(pid, signal.SIGSTOP)
+            except ProcessLookupError:
+                continue
+            stopped.append(pid)
+        children = _child_pids()
+        level = [child for pid in level for child in children.get(pid, ())]
+    for pid in stopped:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    proc.wait()
+
+
+def _run_installer(
+    cmd: list[str],
+    on_text: Callable[[str], None] | None = None,
+    env: dict[str, str] | None = None,
+) -> int:
+    if sys.platform.startswith("linux") and not _procfs_usable():
+        return _run_guarded_installer(cmd, on_text, env)
+    # stdin=DEVNULL: see _run_shell_body.
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+    )
+    try:
+        _stream_process_output(proc, on_text)
+        return proc.wait()
+    except BaseException:
+        # Cancelling the cell interrupts only the kernel: stop the installer too.
+        _kill_process_tree(proc)
+        raise
+
+
+# Parent of the installer in a session of its own. Its stdin is a pipe only the
+# kernel writes to, which reads EOF once the kernel closes it or exits by any
+# means (SIGKILL included); the whole group dies with it then.
+_INSTALLER_GUARD = """\
+import os, signal, subprocess, sys, threading
+def guard():
+    while os.read(0, 1):
+        pass
+    os.killpg(0, signal.SIGKILL)
+threading.Thread(target=guard, daemon=True).start()
+code = subprocess.call(sys.argv[1:], stdin=subprocess.DEVNULL)
+sys.exit(code if code >= 0 else 128 - code)
+"""
+
+
+def _run_guarded_installer(
+    cmd: list[str],
+    on_text: Callable[[str], None] | None,
+    env: dict[str, str] | None,
+) -> int:
+    # Without procfs nothing on Linux can list processes (ps reads /proc too),
+    # so the installer cannot stay in the kernel's group to be walked: it runs
+    # in a group of its own, under a guard that kills the group when the kernel
+    # goes, since kernel shutdown sweeps only the kernel's group.
+    read_end, write_end = os.pipe()
+    proc: subprocess.Popen | None = None
+    try:
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-I", "-c", _INSTALLER_GUARD, *cmd],
+                stdin=read_end,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                start_new_session=True,
+            )
+        finally:
+            os.close(read_end)
+        _stream_process_output(proc, on_text)
+        return proc.wait()
+    finally:
+        # Ends the guard, so a cancel landing inside Popen still stops the tree.
+        os.close(write_end)
+        if proc is not None:
+            # A cancel, or what the installer left running once it exited.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+
+
+def _bootstrap_pip() -> int:
+    # Environments made by `uv venv` ship without pip. Install it from the
+    # stdlib wheel; where ensurepip is missing or disabled (Debian's system
+    # Python), have uv install it into the kernel's interpreter instead.
+    code = _run_installer([sys.executable, "-m", "ensurepip"])
+    uv = shutil.which("uv")
+    if code == 0 or uv is None:
+        return code
+    return _run_installer(
+        [uv, "pip", "install", "pip"],
+        env={**os.environ, "UV_PYTHON": sys.executable},
+    )
+
+
+def _run_pip(argv: list[str], args: str) -> None:
+    if not _has_pip():
+        code = _bootstrap_pip()
+        if code != 0:
+            sys.stderr.write(
+                f"%pip: {sys.executable} has no pip and it could not be bootstrapped"
+                " (ensurepip failed and `uv` is not on PATH). Install `uv`, or your distribution's"
+                " python3-pip/python3-venv package, then retry.\n"
+            )
+            _emit_status("pip", args=args, installed=[], exit_code=code)
+            return
+    installed_packages: list[str] = []
+
+    def scan_pip_line(raw_line: str) -> None:
+        m = re.search(r"Successfully installed\s+(.+)$", raw_line)
+        if m:
+            for token in m.group(1).split():
+                # Token is name-version; drop the version suffix.
+                pkg = token.rsplit("-", 1)[0]
+                installed_packages.append(pkg.replace("_", "-"))
+
+    scanner = _BoundedLineScanner(_PIP_LINE_SCAN_CHARS, scan_pip_line)
+    returncode = _run_installer([sys.executable, "-m", "pip", *argv], scanner.add)
+    scanner.finish()
+    if installed_packages:
+        import importlib
+
+        importlib.invalidate_caches()
+        prefixes = {pkg.lower().replace("-", "_") for pkg in installed_packages}
+        for mod_name in list(sys.modules):
+            head = mod_name.split(".", 1)[0].lower()
+            if head in prefixes:
+                sys.modules.pop(mod_name, None)
+    _emit_status(
+        "pip", args=args, installed=installed_packages, exit_code=returncode
+    )
+
+
+@line_magic("cd")
+def _magic_cd(args: str) -> str:
+    path = os.path.expanduser(args.strip()) or os.path.expanduser("~")
+    os.chdir(path)
+    cwd = os.getcwd()
+    _emit_status("cd", path=cwd)
+    return cwd
+
+
+@line_magic("pwd")
+def _magic_pwd(_args: str) -> str:
+    cwd = os.getcwd()
+    _emit_status("pwd", path=cwd)
+    return cwd
+
+
+@line_magic("ls")
+def _magic_ls(args: str) -> list[str]:
+    target = os.path.expanduser(args.strip()) or "."
+    entries = sorted(os.listdir(target))
+    _emit_status("ls", path=os.path.abspath(target), count=len(entries))
+    return entries
+
+
+@line_magic("env")
+def _magic_env(args: str) -> Any:
+    args = args.strip()
+    if not args:
+        return dict(sorted(os.environ.items()))
+    if "=" in args:
+        key, value = args.split("=", 1)
+        os.environ[key.strip()] = value.strip()
+        return value.strip()
+    return os.environ.get(args)
+
+
+@line_magic("set_env")
+def _magic_set_env(args: str) -> str:
+    parts = args.split(None, 1)
+    if len(parts) != 2:
+        raise ValueError("Usage: %set_env KEY VALUE")
+    key, value = parts
+    os.environ[key] = value
+    return value
+
+
+@line_magic("time")
+def _magic_time(args: str) -> Any:
+    start = time.perf_counter()
+    result = eval(args, _STATE.user_ns)
+    elapsed = time.perf_counter() - start
+    sys.stdout.write(f"Wall time: {elapsed * 1000:.2f} ms\n")
+    _emit_status("time", elapsed_ms=round(elapsed * 1000, 3))
+    return result
+
+
+@line_magic("timeit")
+def _magic_timeit(args: str) -> None:
+    import timeit as _timeit
+
+    timer = _timeit.Timer(stmt=args, globals=_STATE.user_ns)
+    iters, total = timer.autorange()
+    per = total / iters
+    sys.stdout.write(f"{iters} loops, best of 1: {per * 1e6:.2f} us per loop\n")
+    _emit_status("timeit", loops=iters, total_ms=round(total * 1000, 3))
+
+
+@line_magic("who")
+def _magic_who(_args: str) -> list[str]:
+    names = sorted(
+        name
+        for name, value in _STATE.user_ns.items()
+        if not name.startswith("_")
+        and not callable(value)
+        or hasattr(value, "__class__")
+    )
+    return [n for n in names if not n.startswith("__")]
+
+
+@line_magic("whos")
+def _magic_whos(_args: str) -> list[tuple[str, str]]:
+    rows = []
+    for name in sorted(_STATE.user_ns):
+        if name.startswith("__"):
+            continue
+        value = _STATE.user_ns[name]
+        rows.append((name, type(value).__name__))
+    return rows
+
+
+@line_magic("reset")
+def _magic_reset(_args: str) -> None:
+    _STATE.user_ns.clear()
+    _STATE.user_ns.update(
+        {"__name__": "__main__", "__doc__": None, "__builtins__": builtins}
+    )
+    _install_builtins(_STATE.user_ns)
+    _emit_status("reset")
+
+
+@line_magic("load")
+async def _magic_load(args: str) -> None:
+    try:
+        parts = shlex.split(args)
+    except ValueError as exc:
+        raise ValueError(f"Usage: %load <path> ({exc})") from exc
+    if len(parts) != 1:
+        raise ValueError("Usage: %load <path> (quote paths containing spaces)")
+    path = Path(os.path.expanduser(parts[0])).resolve()
+    source = path.read_text(encoding="utf-8")
+    await _exec_source_async(
+        transform_cell(source), _STATE.user_ns,
+        filename=str(path), linecache_source=source,
+    )
+
+
+@line_magic("run")
+def _magic_run(args: str) -> None:
+    parts = shlex.split(args) if args else []
+    if not parts:
+        raise ValueError("Usage: %run <path>")
+    target = os.path.expanduser(parts[0])
+    saved_argv = sys.argv
+    try:
+        sys.argv = [target, *parts[1:]]
+        result_ns = runpy.run_path(target, run_name="__main__")
+    finally:
+        sys.argv = saved_argv
+    for name, value in result_ns.items():
+        if name.startswith("__"):
+            continue
+        _STATE.user_ns[name] = value
+
+
+def _resolve_bash() -> str:
+    if os.name != "nt":
+        return "/bin/bash"
+    # Prefer Git Bash over WSL's System32 bash.exe, which runs inside a
+    # separate Linux environment and does not share the Windows filesystem
+    # layout or PATH.
+    for env_var, suffix in (
+        ("ProgramFiles", r"Git\bin\bash.exe"),
+        ("ProgramFiles(x86)", r"Git\bin\bash.exe"),
+        ("LOCALAPPDATA", r"Programs\Git\bin\bash.exe"),
+    ):
+        root = os.environ.get(env_var)
+        if root:
+            candidate = os.path.join(root, suffix)
+            if os.path.isfile(candidate):
+                return candidate
+    found = shutil.which("bash")
+    if found and "system32" not in found.lower():
+        return found
+    # WSL's System32 bash.exe runs in a separate Linux environment, so
+    # silently falling back to it would execute the cell somewhere the user
+    # did not intend; fail loudly instead.
+    raise RuntimeError(
+        "%%bash requires a POSIX bash, but none was found. "
+        "Install Git for Windows or add a non-WSL bash to PATH."
+    )
+
+
+@cell_magic("bash")
+def _magic_cell_bash(args: str, body: str) -> None:
+    # Like IPython's %%bash the cell has no value: a returned status would be
+    # displayed as the cell's result, a stray `0` after every run. A failure
+    # is still reported, since a command can fail without printing anything.
+    code = _run_shell_body(body, shell_arg=_resolve_bash())
+    if code != 0:
+        sys.stderr.write(f"%%bash: exit status {code}\n")
+
+
+@cell_magic("capture")
+def _magic_cell_capture(args: str, body: str) -> str:
+    """Capture stdout/stderr of body; bind to ``args`` (a name) if provided."""
+    captured = io.StringIO()
+    saved_stdout, saved_stderr = sys.stdout, sys.stderr
+    sys.stdout = sys.stderr = captured
+    try:
+        _exec_source(body, _STATE.user_ns)
+    finally:
+        sys.stdout, sys.stderr = saved_stdout, saved_stderr
+    text = captured.getvalue()
+    name = args.strip()
+    if name:
+        _STATE.user_ns[name] = text
+    return text
+
+
+@cell_magic("timeit")
+def _magic_cell_timeit(args: str, body: str) -> None:
+    import timeit as _timeit
+
+    timer = _timeit.Timer(stmt=body, globals=_STATE.user_ns)
+    iters, total = timer.autorange()
+    per = total / iters
+    sys.stdout.write(f"{iters} loops, best of 1: {per * 1e6:.2f} us per loop\n")
+    _emit_status("timeit", loops=iters, total_ms=round(total * 1000, 3))
+
+
+@cell_magic("writefile")
+def _magic_cell_writefile(args: str, body: str) -> str:
+    path = Path(os.path.expanduser(args.strip()))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    _emit_status("writefile", path=str(path), bytes=len(body))
+    return str(path)
+
+
+def _run_shell_body(body: str, *, shell_arg: str) -> int:
+    # stdin=DEVNULL: children must never read the host's NDJSON control
+    # channel (a reading child would steal frames, and inheriting the pipe
+    # deadlocks nested interpreters on Windows). fd 0 already points at
+    # os.devnull; this stays explicit for when that redirect failed.
+    proc = subprocess.Popen(
+        [shell_arg, "-c", body],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    _stream_process_output(proc)
+    proc.wait()
+    return proc.returncode
+
+
+def __omp_magic(name: str, args: str) -> Any:
+    fn = _LINE_MAGICS.get(name)
+    if fn is None:
+        raise NameError(f"UsageError: Line magic function '%{name}' not found.")
+    return fn(args)
+
+
+async def __omp_magic_async(name: str, args: str) -> Any:
+    result = __omp_magic(name, args)
+    return await result if inspect.isawaitable(result) else result
+
+
+def __omp_magic_cell(name: str, args: str, body: str) -> Any:
+    fn = _CELL_MAGICS.get(name)
+    if fn is None:
+        raise NameError(f"UsageError: Cell magic function '%%{name}' not found.")
+    return fn(args, body)
+
+
+class _ShellResult(list):
+    """Result of ``!cmd`` — list of stripped output lines."""
+
+    def __init__(self, lines: list[str], returncode: int) -> None:
+        super().__init__(lines)
+        self.returncode = returncode
+
+    @property
+    def n(self) -> str:  # IPython compat
+        return "\n".join(self)
+
+    @property
+    def s(self) -> str:  # IPython compat
+        return " ".join(self)
+
+
+def __omp_shell(cmd: str) -> _ShellResult:
+    # stdin=DEVNULL: see _run_shell_body.
+    proc = subprocess.Popen(
+        cmd,
+        shell=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    capture = _BoundedTextCapture(
+        _SHELL_RESULT_CAPTURE_BYTES, _SHELL_OUTPUT_MAX_LINES, _process_output_encoding()
+    )
+    _stream_process_output(proc, capture.add)
+    proc.wait()
+    lines = [line for line in capture.text().splitlines()]
+    return _ShellResult(lines, proc.returncode)
+
+
+# ---------------------------------------------------------------------------
+# Rich print: images and views for printed values
+# ---------------------------------------------------------------------------
+#
+# `print` and the trailing-expression echo write plain text to stdout, which is
+# all the model sees. Images additionally go out as `image` frames (model and
+# user); data frames, Markdown objects, large structures and strings holding a
+# JSON object or array go out as `view` frames carrying the exact text they
+# printed, which the host shows in place of that text.
+
+
+_REAL_PRINT = builtins.print
+_PLAIN_TEXT_TYPES = frozenset({str, int, float, complex, bool, bytes, type(None)})
+# Structured values and JSON text get a JSON view only when their text is long or multi-line.
+_JSON_VIEW_MIN_CHARS = 80
+# The host drops views whose JSON exceeds 32 KiB; don't build hopeless ones.
+_JSON_VIEW_MAX_CHARS = 32 * 1024
+_MAX_SAFE_JSON_INTEGER = (1 << 53) - 1
+_JSON_TEXT_START_RE = re.compile(r"\s*[\[{]")
+_ELLIPSIS = "\u2026"
+# Polars' table defaults when its POLARS_FMT_* variables are unset.
+_POLARS_DEFAULT_MAX_ROWS = 10
+_POLARS_DEFAULT_MAX_COLS = 8
+_POLARS_DEFAULT_STR_LEN = 30
+_PANDAS_DIMENSIONS_RE = re.compile(r"\n\n\[\d+ rows x \d+ columns\]\Z")
+
+
+def _flush_stdout_proxy(rid: str) -> None:
+    stream = sys.stdout
+    if isinstance(stream, _StreamProxy):
+        stream.flush_rid(rid)
+
+
+def _emit_view(text: str, view: dict) -> None:
+    """Emit a view of ``text``, which the cell already printed to stdout."""
+    rid = _CURRENT_RID.get()
+    if rid is None:
+        return
+    _flush_stdout_proxy(rid)
+    _emit({"type": "view", "id": rid, "text": text, "view": view})
+
+
+def _emit_image(image: dict) -> None:
+    """Emit an image payload ``{mimeType, data(base64), detail?, url?, providerFile?}``."""
+    rid = _CURRENT_RID.get()
+    if rid is None:
+        return
+    _flush_stdout_proxy(rid)
+    _emit({"type": "image", "id": rid, "image": image})
+
+
+def _image_base64(data: Any) -> str | None:
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        return base64.b64encode(bytes(data)).decode("ascii") if data else None
+    if isinstance(data, str):
+        return data or None
+    return None
+
+
+def _image_payload(value: Any) -> dict | None:
+    """Image payload of a ``{mimeType, data, detail?, url?, providerFile?}`` dict."""
+    if not isinstance(value, dict) or not isinstance(value.get("mimeType"), str):
+        return None
+    data = _image_base64(value.get("data"))
+    if data is None:
+        return None
+    image = {"mimeType": value["mimeType"], "data": data}
+    for key in ("detail", "url", "providerFile"):
+        if key in value:
+            image[key] = value[key]
+    return image
+
+
+def _emit_image_dict(value: Any) -> bool:
+    """Emit an image dict (prelude helper); returns whether it was a valid image."""
+    image = _image_payload(value)
+    if image is None:
+        return False
+    _emit_image(image)
+    return True
+
+
+def _omp_image(value: Any) -> dict | None:
+    """Payload of an omp image dict ``{type: "image", mimeType, data, ...}``."""
+    if isinstance(value, dict) and value.get("type") == "image":
+        return _image_payload(value)
+    return None
+
+
+def _is_matplotlib_figure(value: Any) -> bool:
+    figure_module = sys.modules.get("matplotlib.figure")
+    figure_cls = getattr(figure_module, "Figure", None)
+    if isinstance(figure_cls, type) and isinstance(value, figure_cls):
+        return True
+
+    value_type = type(value)
+    return (
+        value_type.__module__ == "matplotlib.figure" and value_type.__name__ == "Figure"
+    )
+
+
+def _png_payload(save: Callable[[io.BytesIO], Any]) -> dict:
+    buf = io.BytesIO()
+    save(buf)
+    return {"mimeType": "image/png", "data": base64.b64encode(buf.getvalue()).decode("ascii")}
+
+
+def _value_image(value: Any) -> dict | None:
+    """Image for a matplotlib figure, PIL image or ``_repr_png_``/``_repr_jpeg_`` object."""
+    if _is_matplotlib_figure(value):
+        image = _png_payload(lambda buf: value.savefig(buf, format="png", bbox_inches="tight"))
+        shown = _CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS.get()
+        if shown is not None:
+            shown.add(id(value))
+        return image
+    pil_image = getattr(sys.modules.get("PIL.Image"), "Image", None)
+    if isinstance(pil_image, type) and isinstance(value, pil_image):
+        try:
+            return _png_payload(lambda buf: value.save(buf, format="PNG"))
+        except Exception:
+            pass  # e.g. a mode PNG can't store; PIL's own _repr_png_ may still convert
+    for attr, mime in (("_repr_png_", "image/png"), ("_repr_jpeg_", "image/jpeg")):
+        repr_fn = getattr(value, attr, None)
+        if not callable(repr_fn):
+            continue
+        data = repr_fn()
+        if isinstance(data, tuple):
+            data = data[0] if data else None
+        encoded = _image_base64(data)
+        if encoded is not None:
+            return {"mimeType": mime, "data": encoded}
+    return None
+
+
+def _markdown_source(value: Any) -> str | None:
+    repr_fn = getattr(value, "_repr_markdown_", None)
+    if not callable(repr_fn):
+        return None
+    data = repr_fn()
+    if isinstance(data, tuple):
+        data = data[0] if data else None
+    return data if isinstance(data, str) else None
+
+
+def _json_safe(value: Any, active: set[int] | None = None) -> Any:
+    """JSON-safe copy: unsafe integers and non-finite floats become strings,
+    other non-JSON leaves become ``str()``, and cycles are cut."""
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, int):
+        return str(value) if abs(value) > _MAX_SAFE_JSON_INTEGER else int(value)
+    if isinstance(value, float):
+        return float(value) if math.isfinite(value) else str(value)
+    if isinstance(value, (dict, list, tuple)):
+        if active is None:
+            active = set()
+        marker = id(value)
+        if marker in active:
+            return "{...}" if isinstance(value, dict) else "[...]"
+        active.add(marker)
+        try:
+            if isinstance(value, dict):
+                return {str(key): _json_safe(item, active) for key, item in value.items()}
+            return [_json_safe(item, active) for item in value]
+        finally:
+            active.discard(marker)
+    try:
+        return str(value)
+    except Exception:
+        return f"<unprintable {type(value).__name__}>"
+
+
+def _json_view(value: Any, text: str) -> dict | None:
+    base = next((cls for cls in (dict, list, tuple) if isinstance(value, cls)), None)
+    if base is None:
+        return None
+    # A subclass that customises its text (namedtuple, OrderedDict, ...) gets no
+    # view: the view must show what the text shows.
+    value_type = type(value)
+    if value_type.__repr__ is not base.__repr__ or value_type.__str__ is not base.__str__:
+        return None
+    if not _json_view_sized(text):
+        return None
+    return {"kind": "json", "value": _json_safe(value)}
+
+
+def _json_text_view(value: str, text: str) -> dict | None:
+    """JSON view of a string holding a JSON object or array; ``text`` is what it printed as."""
+    if not _json_view_sized(text) or not _JSON_TEXT_START_RE.match(value):
+        return None
+    return {"kind": "json", "value": _json_safe(json.loads(value))}
+
+
+def _json_view_sized(text: str) -> bool:
+    return (len(text) > _JSON_VIEW_MIN_CHARS or "\n" in text) and len(text) <= _JSON_VIEW_MAX_CHARS
+
+
+def _module_instance(value: Any, module: Any, name: str) -> bool:
+    cls = getattr(module, name, None)
+    return isinstance(cls, type) and isinstance(value, cls)
+
+
+def _table_view(
+    heads: list[str],
+    numeric: list[bool],
+    columns: list[list[str]],
+    row_split: int | None,
+    col_split: int | None,
+) -> dict | None:
+    """Assemble a table view from column-major cells, eliding at the splits."""
+    if not columns:
+        return None
+    if col_split is not None:
+        heads.insert(col_split, _ELLIPSIS)
+        numeric.insert(col_split, False)
+        columns.insert(col_split, [_ELLIPSIS] * len(columns[0]))
+    rows = [list(row) for row in zip(*columns)]
+    if row_split is not None:
+        rows.insert(row_split, [_ELLIPSIS] * len(columns))
+    return {
+        "kind": "table",
+        "columns": [
+            {"head": head, "numeric": True} if is_numeric else {"head": head}
+            for head, is_numeric in zip(heads, numeric)
+        ],
+        "rows": rows,
+    }
+
+
+def _split_positions(count: int, split: tuple[int, int] | None) -> list[int]:
+    if split is None:
+        return list(range(count))
+    head, tail = split
+    return list(range(min(head, count))) + list(range(max(count - tail, head), count))
+
+
+def _label_text(label: Any) -> str:
+    if isinstance(label, tuple):
+        return " / ".join(str(part) for part in label)
+    return str(label)
+
+
+def _pandas_numeric(pd: Any, dtype: Any) -> bool:
+    types = pd.api.types
+    return bool(types.is_numeric_dtype(dtype) and not types.is_bool_dtype(dtype))
+
+
+def _pandas_cells(series: Any) -> list[str]:
+    """Display strings for a pandas Series' values, as its own repr formats them."""
+    count = len(series)
+    lines = series.to_string(index=False).split("\n") if count else []
+    if len(lines) != count:
+        lines = [str(item) for item in series.tolist()]
+    return [line.strip() for line in lines]
+
+
+def _pandas_frame_rows(count: int, max_rows: Any, min_rows: Any) -> tuple[int, int] | None:
+    """(head, tail) rows DataFrame.to_string shows, or None when all show."""
+    fitted = max_rows
+    if fitted and count > fitted and min_rows:
+        fitted = min(min_rows, fitted)
+    if not (fitted and count > fitted):
+        return None
+    half = fitted // 2
+    return (half, half) if half >= 1 else (max_rows, 0)
+
+
+def _pandas_frame_columns(
+    pd: Any, frame: Any, text: str, render_rows: tuple[Any, Any]
+) -> tuple[int, int] | None | bool:
+    """(left, right) columns the repr shows, None when all show, False when unknown."""
+    count = len(frame.columns)
+    max_cols = pd.get_option("display.max_columns")
+    if max_cols is None:
+        return None
+    if max_cols > 0:
+        if count <= max_cols:
+            return None
+        half = max_cols // 2
+        return (half, half) if half >= 1 else (max_cols, 0)
+    # display.max_columns == 0: pandas fits the frame to the terminal width.
+    width = shutil.get_terminal_size().columns
+    if not pd.get_option("display.expand_frame_repr"):
+        return (width // 2, width // 2) if count > width else None
+    # Fitting drops middle columns by their rendered widths, then shows the
+    # first and last `h`. Find `h` by rendering: widths grow with `h`, and the
+    # final comparison confirms the match.
+    max_rows, min_rows = render_rows
+    table = _PANDAS_DIMENSIONS_RE.sub("", text)
+
+    def render(max_cols_shown: int | None) -> str:
+        return frame.to_string(
+            max_rows=max_rows,
+            min_rows=min_rows,
+            max_cols=max_cols_shown,
+            max_colwidth=pd.get_option("display.max_colwidth"),
+            show_dimensions=False,
+            line_width=None,
+        )
+
+    def line_width(rendered: str) -> int:
+        return max(len(line) for line in rendered.split("\n"))
+
+    if render(None) == table:
+        return None
+    target = line_width(table)
+    low, high = 1, (count - 1) // 2
+    if high < low:
+        return False
+    while low < high:
+        mid = (low + high + 1) // 2
+        if line_width(render(2 * mid)) <= target:
+            low = mid
+        else:
+            high = mid - 1
+    return (low, low) if render(2 * low) == table else False
+
+
+def _pandas_index_columns(pd: Any, index: Any) -> tuple[list[str], list[bool], list[list[str]]]:
+    heads: list[str] = []
+    numeric: list[bool] = []
+    columns: list[list[str]] = []
+    for level, name in enumerate(index.names):
+        values = index.get_level_values(level)
+        heads.append("" if name is None else str(name))
+        numeric.append(_pandas_numeric(pd, values.dtype))
+        columns.append(_pandas_cells(values.to_series()))
+    return heads, numeric, columns
+
+
+def _pandas_frame_view(pd: Any, frame: Any, text: str) -> dict | None:
+    if frame.empty or text.startswith("<class "):  # empty or `display.large_repr = "info"`
+        return None
+    max_rows = pd.get_option("display.max_rows")
+    min_rows = pd.get_option("display.min_rows")
+    if max_rows == 0:
+        # Terminal-height mode: rows left after header, dots, prompt and dimensions.
+        height = shutil.get_terminal_size().lines
+        max_rows = height - (6 if pd.get_option("display.show_dimensions") else 3)
+        min_rows = None
+    row_split = _pandas_frame_rows(len(frame), max_rows, min_rows)
+    col_split = _pandas_frame_columns(pd, frame, text, (max_rows, min_rows))
+    if col_split is False:
+        return None
+    shown = frame.iloc[
+        _split_positions(len(frame), row_split),
+        _split_positions(len(frame.columns), col_split),
+    ]
+    heads, numeric, columns = _pandas_index_columns(pd, shown.index)
+    index_count = len(heads)
+    for position, label in enumerate(shown.columns):
+        series = shown.iloc[:, position]
+        heads.append(_label_text(label))
+        numeric.append(_pandas_numeric(pd, series.dtype))
+        columns.append(_pandas_cells(series))
+    return _table_view(
+        heads,
+        numeric,
+        columns,
+        None if row_split is None else min(row_split[0], len(frame)),
+        None if col_split is None else index_count + min(col_split[0], len(frame.columns)),
+    )
+
+
+def _pandas_series_view(pd: Any, series: Any) -> dict | None:
+    count = len(series)
+    if count == 0:
+        return None
+    max_rows = pd.get_option("display.max_rows")
+    min_rows = pd.get_option("display.min_rows")
+    if max_rows == 0:
+        max_rows = min_rows = shutil.get_terminal_size().lines
+    row_split = None
+    if max_rows and count > max_rows:
+        fitted = min(min_rows, max_rows) if min_rows else max_rows
+        row_split = (1, 0) if fitted == 1 else (fitted // 2, fitted // 2)
+    shown = series.iloc[_split_positions(count, row_split)]
+    heads, numeric, columns = _pandas_index_columns(pd, shown.index)
+    heads.append("" if series.name is None else _label_text(series.name))
+    numeric.append(_pandas_numeric(pd, series.dtype))
+    columns.append(_pandas_cells(shown))
+    return _table_view(heads, numeric, columns, None if row_split is None else row_split[0], None)
+
+
+def _polars_limit(name: str, default: int) -> int:
+    try:
+        return int(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+def _polars_split(count: int, limit: int) -> tuple[int, int] | None:
+    if limit < 0 or count <= limit:
+        return None
+    return (limit + 1) // 2, limit // 2
+
+
+def _polars_cell(value: Any, str_len: int) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return value if len(value) <= str_len else value[:str_len] + _ELLIPSIS
+    return str(value)
+
+
+def _polars_view(pl: Any, value: Any) -> dict | None:
+    if _module_instance(value, pl, "DataFrame"):
+        names = list(value.columns)
+        col_split = _polars_split(len(names), _polars_limit("POLARS_FMT_MAX_COLS", _POLARS_DEFAULT_MAX_COLS))
+        series_list = [value.get_column(names[i]) for i in _split_positions(len(names), col_split)]
+        count = value.height
+    elif _module_instance(value, pl, "Series"):
+        col_split = None
+        series_list = [value]
+        count = len(value)
+    else:
+        return None
+    row_split = _polars_split(count, _polars_limit("POLARS_FMT_MAX_ROWS", _POLARS_DEFAULT_MAX_ROWS))
+    str_len = _polars_limit("POLARS_FMT_STR_LEN", _POLARS_DEFAULT_STR_LEN)
+    heads: list[str] = []
+    numeric: list[bool] = []
+    columns: list[list[str]] = []
+    for series in series_list:
+        if row_split is None:
+            items = series.to_list()
+        else:
+            items = series.head(row_split[0]).to_list() + series.tail(row_split[1]).to_list()
+        heads.append(str(series.name))
+        numeric.append(bool(series.dtype.is_numeric()))
+        columns.append([_polars_cell(item, str_len) for item in items])
+    return _table_view(
+        heads,
+        numeric,
+        columns,
+        None if row_split is None else row_split[0],
+        None if col_split is None else col_split[0],
+    )
+
+
+def _data_view(value: Any, text: str) -> dict | None:
+    """Table view for a pandas/polars frame or series, else a JSON view for large structures."""
+    pd = sys.modules.get("pandas")
+    if pd is not None:
+        if _module_instance(value, pd, "DataFrame"):
+            return _pandas_frame_view(pd, value, text)
+        if _module_instance(value, pd, "Series"):
+            return _pandas_series_view(pd, value)
+    pl = sys.modules.get("polars")
+    if pl is not None:
+        view = _polars_view(pl, value)
+        if view is not None:
+            return view
+    return _json_view(value, text)
+
+
+def _guarded(fn: Callable[..., Any], *args: Any) -> Any:
+    """Classification never breaks a print: a failing probe means "not rich"."""
+    try:
+        return fn(*args)
+    except Exception:
+        return None
+
+
+def _rich_value(value: Any, to_text: Callable[[Any], str]) -> tuple[str, list[tuple[str, dict]]]:
+    """The text ``value`` contributes to the output, plus its images and views."""
+    if type(value) is str:
+        text = to_text(value)
+        view = _guarded(_json_text_view, value, text)
+        return text, [] if view is None else [("view", view)]
+    if type(value) in _PLAIN_TEXT_TYPES:
+        return to_text(value), []
+    image = _omp_image(value)
+    if image is not None:
+        return f"<image {image['mimeType']}>", [("image", image)]
+    if not isinstance(value, type):
+        image = _guarded(_value_image, value)
+        if image is not None:
+            return to_text(value), [("image", image)]
+        markdown = _guarded(_markdown_source, value)
+        if markdown is not None:
+            return markdown, [("view", {"kind": "markdown", "text": markdown})]
+    text = to_text(value)
+    view = _guarded(_data_view, value, text)
+    return text, [] if view is None else [("view", view)]
+
+
+def _emit_rich(text: str, parts: list[tuple[str, dict]]) -> None:
+    for kind, payload in parts:
+        if kind == "image":
+            _emit_image(payload)
+        else:
+            _emit_view(text, payload)
+
+
+def _is_cell_stdout(stream: Any) -> bool:
+    return (
+        isinstance(stream, _StreamProxy)
+        and stream._kind == "stdout"
+        and _CURRENT_RID.get() is not None
+    )
+
+
+@functools.wraps(_REAL_PRINT)
+def _rich_print(
+    *args: Any,
+    sep: str | None = " ",
+    end: str | None = "\n",
+    file: Any = None,
+    flush: bool = False,
+) -> None:
+    if not _is_cell_stdout(sys.stdout if file is None else file):
+        _REAL_PRINT(*args, sep=sep, end=end, file=file, flush=flush)
+        return
+    rendered = [_rich_value(arg, str) for arg in args]
+    _REAL_PRINT(*(text for text, _ in rendered), sep=sep, end=end, file=file, flush=flush)
+    for text, parts in rendered:
+        _emit_rich(text, parts)
+
+
+builtins.print = _rich_print
+
+
+def _echo_value(value: Any) -> None:
+    """Echo a cell's trailing value like printing its repr."""
+    text, parts = _rich_value(value, repr)
+    stream = sys.stdout
+    stream.write(f"{text}\n")
+    if _is_cell_stdout(stream):
+        _emit_rich(text, parts)
+
+
+# ---------------------------------------------------------------------------
+# Matplotlib post-cell flush
+# ---------------------------------------------------------------------------
+
+
+def _flush_matplotlib_figures() -> None:
+    plt = sys.modules.get("matplotlib.pyplot")
+    if plt is None:
+        return
+    try:
+        fignums = list(plt.get_fignums())
+    except Exception:
+        return
+    for num in fignums:
+        try:
+            fig = plt.figure(num)
+            if id(fig) in (_CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS.get() or set()):
+                plt.close(fig)
+                continue
+            _emit_image(
+                _png_payload(lambda buf: fig.savefig(buf, format="png", bbox_inches="tight"))
+            )
+            plt.close(fig)
+        except Exception:
+            continue
+
+
+# Force a non-interactive backend before user code imports matplotlib. Set as
+# environ default so the user can still override it explicitly.
+os.environ.setdefault("MPLBACKEND", "Agg")
+
+
+# ---------------------------------------------------------------------------
+# Builtin injection
+# ---------------------------------------------------------------------------
+
+
+def _install_builtins(ns: dict) -> None:
+    ns["__omp_emit_status"] = _emit_status
+    ns["__omp_emit_image"] = _emit_image_dict
+    ns["__omp_magic"] = __omp_magic
+    ns["__omp_magic_async"] = __omp_magic_async
+    ns["__omp_magic_cell"] = __omp_magic_cell
+    ns["__omp_shell"] = __omp_shell
+    # Plain threads (ThreadPoolExecutor) do not inherit the ContextVar: fall back
+    # to the request currently executing, the same target fd-1 capture uses.
+    ns["__omp_current_run_id__"] = lambda: _CURRENT_RID.get() or _STATE.capture_rid
+
+
+_install_builtins(_STATE.user_ns)
+
+
+# ---------------------------------------------------------------------------
+# Source execution (split last expression for the echo)
+# ---------------------------------------------------------------------------
+
+
+_TLA_FLAG = getattr(ast, "PyCF_ALLOW_TOP_LEVEL_AWAIT", 0x2000)
+
+
+def _await_sync(coro) -> Any:
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+    if running_loop is not None and running_loop.is_running():
+        raise RuntimeError(
+            "top-level await is not supported from synchronous magic execution"
+        )
+    return asyncio.run(coro)
+
+
+def _run_compiled_sync(code, ns: dict, *, want_value: bool) -> Any:
+    """Synchronous execution path used by nested magic helpers."""
+    if code.co_flags & inspect.CO_COROUTINE:
+        result = _await_sync(eval(code, ns))
+        return result if want_value else None
+    if want_value:
+        return eval(code, ns)
+    exec(code, ns)
+    return None
+
+
+async def _run_compiled_async(code, ns: dict, *, want_value: bool) -> Any:
+    """Execute a code object in the persistent event loop.
+
+    Coroutine code is awaited in this task so top-level ``await`` interleaves
+    with sibling requests. Plain statement/expression code runs on the main
+    runner thread so SIGINT can interrupt it reliably.
+    """
+    if code.co_flags & inspect.CO_COROUTINE:
+        result = await eval(code, ns)
+        return result if want_value else None
+    if want_value:
+        return eval(code, ns)
+    exec(code, ns)
+    return None
+
+
+
+_CALL_SITE_HELPER_NAME = "__omp_with_call_site__"
+
+# Runner-owned reference to the genuine instrumentation helper. The helper is
+# defined by the eval prelude inside the user namespace, so the first callable
+# observed there is trusted: kernel init always executes the prelude before
+# user cells. Any later replacement is pollution from a retained cell.
+_TRUSTED_CALL_SITE_HELPERS: dict[str, Any] = {}
+
+
+def _restore_call_site_helper(ns: dict) -> None:
+    """Reinstall the genuine helper after retained-cell pollution.
+
+    A previous cell can assign or delete `__omp_with_call_site__`; without
+    this, the next rewritten `tool.read(...)` would resolve to
+    user-controlled state and change ordinary eval behavior even with
+    speculation disabled.
+    """
+    current = ns.get(_CALL_SITE_HELPER_NAME)
+    trusted = _TRUSTED_CALL_SITE_HELPERS.get(_CALL_SITE_HELPER_NAME)
+    if trusted is None:
+        if callable(current):
+            _TRUSTED_CALL_SITE_HELPERS[_CALL_SITE_HELPER_NAME] = current
+        return
+    if current is not trusted:
+        ns[_CALL_SITE_HELPER_NAME] = trusted
+
+
+def _cell_binds_call_site_helper(module: ast.Module) -> bool:
+    """Whether the cell binds the reserved helper name in any scope."""
+    for node in ast.walk(module):
+        if isinstance(node, ast.Name):
+            if node.id == _CALL_SITE_HELPER_NAME and isinstance(node.ctx, (ast.Store, ast.Del)):
+                return True
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == _CALL_SITE_HELPER_NAME:
+                return True
+        elif isinstance(node, ast.arg):
+            if node.arg == _CALL_SITE_HELPER_NAME:
+                return True
+        elif isinstance(node, ast.alias):
+            if node.asname == _CALL_SITE_HELPER_NAME:
+                return True
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name == _CALL_SITE_HELPER_NAME:
+                return True
+    return False
+
+class _ShadowCallSiteTransformer(ast.NodeTransformer):
+    def __init__(self, line_offsets: list[int]) -> None:
+        self._line_offsets = line_offsets
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        transformed = self.generic_visit(node)
+        if (
+            not isinstance(transformed, ast.Call)
+            or _shadow_call_kind(transformed) != "read"
+            or transformed.keywords
+            or len(transformed.args) != 1
+        ):
+            return transformed
+        if any(
+            isinstance(child, (ast.Await, ast.Yield, ast.YieldFrom, ast.NamedExpr))
+            for child in ast.walk(transformed)
+        ):
+            return transformed
+        # Passing the callable and evaluated argument keeps `locals()` in the
+        # user cell's frame; a thunk would introduce a lambda frame.
+        site_id = f"py:{_shadow_span(node, self._line_offsets)['start']}"
+        wrapped = ast.Call(
+            func=ast.Name(id=_CALL_SITE_HELPER_NAME, ctx=ast.Load()),
+            args=[
+                ast.Constant(value=site_id),
+                transformed.func,
+                transformed.args[0],
+            ],
+            keywords=[],
+        )
+        return ast.copy_location(wrapped, node)
+
+
+def _compile_source(
+    source: str, filename: str = "<cell>"
+) -> tuple[Any, Any | None, bool]:
+    module = ast.parse(source, filename, "exec")
+    line_offsets = [0]
+    for line in source.splitlines(keepends=True):
+        line_offsets.append(line_offsets[-1] + len(line))
+    if _CALL_SITE_HELPER_NAME not in source or not _cell_binds_call_site_helper(module):
+        module = _ShadowCallSiteTransformer(line_offsets).visit(module)
+    ast.fix_missing_locations(module)
+    if not module.body:
+        return None, None, False
+
+    last = module.body[-1]
+    if isinstance(last, ast.Expr):
+        body_module = ast.Module(body=module.body[:-1], type_ignores=[])
+        expr_module = ast.Expression(body=last.value)
+        ast.copy_location(expr_module, last)
+        body_code = compile(body_module, filename, "exec", flags=_TLA_FLAG)
+        expr_code = compile(expr_module, filename, "eval", flags=_TLA_FLAG)
+        return body_code, expr_code, True
+
+    return compile(module, filename, "exec", flags=_TLA_FLAG), None, False
+
+
+def _prepare_file_source(
+    source: str, ns: dict, filename: str, linecache_source: str | None
+) -> None:
+    display_source = source if linecache_source is None else linecache_source
+    lines = display_source.splitlines(keepends=True)
+    if display_source and (not lines or not lines[-1].endswith(("\n", "\r"))):
+        lines[-1] += "\n"
+    linecache.cache[filename] = (len(display_source), None, lines, filename)
+    if not (filename.startswith("<") and filename.endswith(">")):
+        ns["__file__"] = filename
+        script_dir = os.path.dirname(filename)
+        if script_dir:
+            try:
+                sys.path.remove(script_dir)
+            except ValueError:
+                pass
+            sys.path.insert(0, script_dir)
+
+
+def _exec_source(source: str, ns: dict) -> None:
+    """Synchronous source execution for legacy magic helpers."""
+    _restore_call_site_helper(ns)
+    body_code, expr_code, has_expr = _compile_source(source)
+    if body_code is None:
+        return
+    _run_compiled_sync(body_code, ns, want_value=False)
+    if has_expr and expr_code is not None:
+        value = _run_compiled_sync(expr_code, ns, want_value=True)
+        if value is not None:
+            _echo_value(value)
+
+
+async def _exec_source_async(
+    source: str,
+    ns: dict,
+    *,
+    filename: str = "<cell>",
+    linecache_source: str | None = None,
+) -> None:
+    """Compile + execute ``source``; if the last node is an expression, echo
+    its value like ``print(repr(value))`` (with the same images and views).
+    Top-level ``await`` / ``async for`` / ``async with`` is permitted; awaited
+    regions yield to other requests in the runner's persistent event loop."""
+    _restore_call_site_helper(ns)
+    body_code, expr_code, has_expr = _compile_source(source, filename)
+    _prepare_file_source(source, ns, filename, linecache_source)
+    if body_code is None:
+        return
+    await _run_compiled_async(body_code, ns, want_value=False)
+    if has_expr and expr_code is not None:
+        value = await _run_compiled_async(expr_code, ns, want_value=True)
+        if value is not None:
+            _echo_value(value)
+
+
+# ---------------------------------------------------------------------------
+# Signal handling
+# ---------------------------------------------------------------------------
+
+
+def _install_idle_sigint() -> None:
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except (OSError, ValueError):
+        # Some platforms (Windows in non-console mode) reject this; fine.
+        pass
+
+
+def _exec_sigint_handler(signum: int, frame: Any) -> None:
+    """Raise into the sync cell the host named (on Windows, the running cell);
+    cancel named cells parked on an ``await`` instead, since raising in the idle
+    event loop would unwind it and end the kernel."""
+    loop = _STATE.loop
+    if loop is None:
+        raise KeyboardInterrupt
+    current = asyncio.current_task(loop)
+    running = (
+        next((rid for rid, task in _STATE.executing_tasks.items() if task is current), None)
+        if current is not None
+        else None
+    )
+    if running is not None and (not _STATE.targeted_interrupts or running in _STATE.interrupt_ids):
+        _STATE.interrupt_ids.discard(running)
+        raise KeyboardInterrupt
+    _cancel_parked_cells()
+
+
+def _cancel_parked_cells() -> None:
+    for rid, task in list(_STATE.executing_tasks.items()):
+        if task is None:
+            continue
+        if _STATE.targeted_interrupts and rid not in _STATE.interrupt_ids:
+            continue
+        _STATE.interrupt_ids.discard(rid)
+        _STATE.interrupted_tasks.add(task)
+        task.cancel()
+
+
+def _request_interrupt(loop: asyncio.AbstractEventLoop, rid: str) -> None:
+    """Interrupt cell ``rid`` from the stdin reader thread. The signal reaches it
+    in sync code; the queued cancel reaches it if a sibling's sync code holds
+    the main thread; a pending interrupt is held until the named cell registers.
+    Each interrupt is delivered once."""
+    if rid not in _STATE.executing_tasks:
+        return
+    _STATE.interrupt_ids.add(rid)
+    if rid not in _STATE.executing_tasks:
+        _STATE.interrupt_ids.discard(rid)
+        return
+    task = _STATE.executing_tasks.get(rid)
+    if task is None:
+        return
+    loop.call_soon_threadsafe(_cancel_parked_cells)
+    signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+
+
+def _install_exec_sigint() -> None:
+    try:
+        signal.signal(signal.SIGINT, _exec_sigint_handler)
+    except (OSError, ValueError):
+        pass
+
+
+def _begin_exec_sigint() -> None:
+    _STATE.active_executions += 1
+    _install_exec_sigint()
+
+
+def _end_exec_sigint() -> None:
+    if _STATE.active_executions > 0:
+        _STATE.active_executions -= 1
+    if _STATE.active_executions == 0:
+        _install_idle_sigint()
+
+
+_MANAGED_ENV_KEYS = (
+    "PI_SESSION_FILE",
+    "PI_ARTIFACTS_DIR",
+    "PI_TOOL_BRIDGE_URL",
+    "PI_TOOL_BRIDGE_TOKEN",
+    "PI_TOOL_BRIDGE_SESSION",
+    "PI_EVAL_LOCAL_ROOTS",
+)
+
+
+def _apply_request_runtime(req: dict, rid: str) -> None:
+    cwd = req.get("cwd")
+    if isinstance(cwd, str) and cwd:
+        try:
+            os.chdir(cwd)
+        except OSError as exc:
+            # The session cwd was moved or removed (e.g. a deleted worktree): keep running
+            # in the last valid directory instead of failing every cell.
+            try:
+                fallback = os.getcwd()
+            except OSError:
+                # The process cwd is gone too (usually the same deleted directory).
+                fallback = os.path.expanduser("~")
+                os.chdir(fallback)
+            _emit(
+                {
+                    "type": "stderr",
+                    "id": rid,
+                    "data": f"Warning: session cwd {cwd} is unavailable ({exc.strerror or exc}); this cell runs in {fallback}\n",
+                }
+            )
+            cwd = None
+    if isinstance(cwd, str) and cwd:
+        try:
+            sys.path.remove(cwd)
+        except ValueError:
+            pass
+        sys.path.insert(0, cwd)
+
+    env = req.get("env")
+    if isinstance(env, dict):
+        for key in _MANAGED_ENV_KEYS:
+            value = env.get(key)
+            if isinstance(value, str):
+                os.environ[key] = value
+            elif value is None:
+                os.environ.pop(key, None)
+
+
+def _start_parent_watchdog() -> None:
+    """Self-terminate when the host process dies.
+
+    The main loop only exits when stdin EOFs, which only happens once user
+    code finishes and the next ``readline`` call returns. If the host gets
+    SIGKILL mid-execution (or any way that skips graceful shutdown) the
+    runner would otherwise outlive its parent and keep holding kernel
+    state. Poll ``os.getppid()`` instead and ``os._exit`` the moment we get
+    reparented \u2014 covers POSIX hosts. Windows has no reliable ppid
+    equivalent; there we still bail out on the next stdin read.
+    """
+    if os.name != "posix":
+        return
+    original_ppid = os.getppid()
+    if original_ppid <= 1:
+        return
+
+    def watch() -> None:
+        while True:
+            try:
+                if os.getppid() != original_ppid:
+                    os._exit(0)
+            except Exception:
+                return
+            time.sleep(10)
+
+    thread = threading.Thread(target=watch, name="omp-parent-watchdog", daemon=True)
+    thread.start()
+
+
+# ---------------------------------------------------------------------------
+# Request dispatch
+# ---------------------------------------------------------------------------
+
+
+_TOOL_LOOP: asyncio.AbstractEventLoop | None = None
+_TOOL_LOOP_LOCK = threading.Lock()
+
+
+def _tool_loop() -> asyncio.AbstractEventLoop:
+    """The event loop every async kernel-defined tool runs on, started on first use.
+
+    Concurrent calls share kernel-global asyncio primitives (a cell's
+    ``asyncio.Lock()`` serializing a tool across subagents, say), so they must
+    share one loop: with a private loop per call, a release from another
+    call's thread never wakes the waiter's selector and the waiting call hangs
+    forever. It is not the cell loop, which a cell blocked in ``wait()`` on
+    this tool's caller would deadlock.
+    """
+    global _TOOL_LOOP
+    with _TOOL_LOOP_LOCK:
+        if _TOOL_LOOP is None:
+            loop = asyncio.new_event_loop()
+            threading.Thread(target=loop.run_forever, name="omp-tool-loop", daemon=True).start()
+            _TOOL_LOOP = loop
+        return _TOOL_LOOP
+
+
+async def _await_tool_result(awaitable: Any) -> Any:
+    return await awaitable
+
+
+# In-flight tool requests by id: ``None`` until an async call is on the tool
+# loop, then its future. A cancel drops the entry, so a call that has not
+# reached the loop yet sees itself cancelled when it gets there.
+_TOOL_CALLS: dict[str, Any] = {}
+_TOOL_CALLS_LOCK = threading.Lock()
+
+
+def _start_tool_request(req: dict) -> None:
+    """Register a tool request, then serve it on its own thread.
+
+    Registration happens on the reader thread, before any later
+    ``tool_cancel`` line for the same id is read.
+    """
+    rid = str(req.get("id"))
+    with _TOOL_CALLS_LOCK:
+        _TOOL_CALLS[rid] = None
+    threading.Thread(
+        target=_handle_tool_request,
+        args=(req,),
+        name=f"omp-tool-{rid}",
+        daemon=True,
+    ).start()
+
+
+def _cancel_tool_request(rid: str) -> None:
+    """Cancel an async tool call whose caller gave up; a finished or sync call is left alone."""
+    with _TOOL_CALLS_LOCK:
+        future = _TOOL_CALLS.pop(rid, None)
+    if future is not None:
+        future.cancel()
+
+
+def _run_async_tool(rid: str, awaitable: Any) -> Any:
+    """Await ``awaitable`` on the shared tool loop, honouring a cancel of request ``rid``."""
+    with _TOOL_CALLS_LOCK:
+        if rid not in _TOOL_CALLS:
+            if inspect.iscoroutine(awaitable):
+                awaitable.close()
+            raise asyncio.CancelledError()
+        future = asyncio.run_coroutine_threadsafe(_await_tool_result(awaitable), _tool_loop())
+        _TOOL_CALLS[rid] = future
+    return future.result()
+
+
+def _jsonable(value: Any) -> Any:
+    """Convert a tool result into a JSON-safe value without failing the request."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(item) for item in value]
+    return repr(value)
+
+
+def _handle_tool_request(req: dict) -> None:
+    """Describe or invoke a kernel-defined tool on a dedicated runner thread."""
+    rid = str(req.get("id"))
+    token = _CURRENT_RID.set(rid)
+    status = "ok"
+    _emit({"type": "started", "id": rid})
+    try:
+        tools = _STATE.user_ns.get("__omp_tools__") or {}
+        op = req.get("op")
+        if op == "describe":
+            requested = req.get("names") or list(tools)
+            envelope = {
+                "ok": True,
+                "tools": [tools[name].describe() for name in requested if name in tools],
+                "missing": [name for name in requested if name not in tools],
+            }
+        elif op == "call":
+            name = str(req.get("name") or "")
+            spec = tools.get(name)
+            if spec is None:
+                raise KeyError(f"tool {name!r} is not defined")
+            result = spec.fn(**(req.get("args") or {}))
+            if inspect.isawaitable(result):
+                result = _run_async_tool(rid, result)
+            envelope = {"ok": True, "value": _jsonable(result)}
+        else:
+            raise ValueError(f"unknown tool operation {op!r}")
+        _emit({"type": "reply", "id": rid, "value": _json_safe(envelope)})
+    except BaseException as exc:  # noqa: BLE001 - protocol errors must settle the request
+        status = "error"
+        _emit_error(rid, exc)
+    finally:
+        with _TOOL_CALLS_LOCK:
+            _TOOL_CALLS.pop(rid, None)
+        _flush_stream_proxies(rid)
+        _emit(
+            {
+                "type": "done",
+                "id": rid,
+                "status": status,
+                "executionCount": _STATE.execution_count,
+                "cancelled": False,
+            }
+        )
+        _CURRENT_RID.reset(token)
+
+
+async def _handle_request_async(req: dict) -> None:
+    rid = str(req.get("id"))
+    execution_reserved = bool(req.pop("_execution_reserved", False))
+    execution_started = False
+    token = _CURRENT_RID.set(rid)
+    displayed_matplotlib_token = _CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS.set(set())
+    _STATE.capture_rid = rid
+    reset_call_occurrences = _STATE.user_ns.get("__omp_reset_call_occurrences__")
+    if callable(reset_call_occurrences):
+        reset_call_occurrences()
+    _STATE.namespace_revision += 1
+    _STATE.user_ns["__omp_run_id__"] = rid
+    _STATE.cancel_requested = False
+    _STATE.execution_count += 1
+    execution_count = _STATE.execution_count
+    _emit({"type": "started", "id": rid})
+
+    status: str = "ok"
+    cancelled = False
+
+    try:
+        try:
+            _apply_request_runtime(req, rid)
+            source = req.get("code", "")
+            requested_filename = req.get("filename")
+            filename = (
+                requested_filename
+                if isinstance(requested_filename, str) and requested_filename
+                else f"<cell-{execution_count}>"
+            )
+            transformed = transform_cell(source)
+        except SyntaxError as exc:
+            _emit_error(rid, exc, source_filename=filename)
+            _emit(
+                {
+                    "type": "done",
+                    "id": rid,
+                    "status": "error",
+                    "executionCount": execution_count,
+                    "cancelled": False,
+                }
+            )
+            return
+        except BaseException as exc:  # noqa: BLE001 - runtime setup errors must settle the request
+            _emit_error(rid, exc)
+            _emit(
+                {
+                    "type": "done",
+                    "id": rid,
+                    "status": "error",
+                    "executionCount": execution_count,
+                    "cancelled": False,
+                }
+            )
+            return
+
+        if execution_reserved:
+            _install_exec_sigint()
+        else:
+            _begin_exec_sigint()
+        execution_started = True
+        task = asyncio.current_task()
+        _STATE.executing_tasks[rid] = task
+        try:
+            if rid in _STATE.interrupt_ids:
+                _STATE.interrupt_ids.discard(rid)
+                raise KeyboardInterrupt
+            await _exec_source_async(
+                transformed,
+                _STATE.user_ns,
+                filename=filename,
+                linecache_source=source,
+            )
+        except KeyboardInterrupt:
+            cancelled = True
+            status = "error"
+            _emit_error(rid, KeyboardInterrupt("Execution interrupted"))
+        except asyncio.CancelledError as exc:
+            status = "error"
+            cancelled = task in _STATE.interrupted_tasks
+            _emit_error(rid, KeyboardInterrupt("Execution interrupted") if cancelled else exc)
+        except SystemExit as exc:
+            status = "error"
+            _emit_error(rid, exc)
+        except BaseException as exc:  # noqa: BLE001 - we want to surface every user error
+            status = "error"
+            _emit_error(rid, exc, source_filename=filename)
+        finally:
+            _STATE.executing_tasks.pop(rid, None)
+            _STATE.interrupt_ids.discard(rid)
+            if task in _STATE.interrupted_tasks:
+                _STATE.interrupted_tasks.discard(task)
+                # On Windows cells run on the long-lived serve task; clear the
+                # cancel requests it absorbed (Python 3.11+).
+                uncancel = getattr(task, "uncancel", None)
+                if uncancel is not None:
+                    while uncancel():
+                        pass
+            _end_exec_sigint()
+            try:
+                _flush_matplotlib_figures()
+            except Exception:
+                pass
+
+        _flush_stream_proxies(rid)
+        _emit(
+            {
+                "type": "done",
+                "id": rid,
+                "status": status,
+                "executionCount": execution_count,
+                "cancelled": cancelled,
+            }
+        )
+    finally:
+        _STATE.executing_tasks.pop(rid, None)
+        _STATE.interrupt_ids.discard(rid)
+        if _STATE.capture_rid == rid:
+            _STATE.capture_rid = None
+        _flush_stream_proxies(rid)
+        _CURRENT_RID.reset(token)
+        _CURRENT_DISPLAYED_MATPLOTLIB_FIGURE_IDS.reset(displayed_matplotlib_token)
+        if execution_reserved and not execution_started:
+            _end_exec_sigint()
+
+
+def _emit_error(rid: str, exc: BaseException, source_filename: str | None = None) -> None:
+    if isinstance(exc, SyntaxError) and source_filename is not None and exc.filename == source_filename:
+        # Syntax error in the executed source itself: every stack frame is
+        # runner machinery, so emit only the caret display, like a REPL.
+        tb_lines = traceback.format_exception_only(type(exc), exc)
+    else:
+        # Magics execute between the cell and loaded script. Omit runner
+        # frames throughout that chain, not just before the first user frame.
+        # Internal-only failures retain their full traceback for diagnosis.
+        formatted = traceback.TracebackException.from_exception(exc)
+        user_frames = [frame for frame in formatted.stack if frame.filename != __file__]
+        if user_frames:
+            formatted.stack = traceback.StackSummary.from_list(user_frames)
+        tb_lines = list(formatted.format())
+    if isinstance(exc, ModuleNotFoundError) and exc.name:
+        tb_lines.append(
+            f"Install the distribution that provides module {exc.name!r} with "
+            "`%pip install <distribution-name>` in eval. "
+            "Distribution names can differ from import names."
+        )
+    _emit(
+        {
+            "type": "error",
+            "id": rid,
+            "ename": type(exc).__name__,
+            "evalue": str(exc),
+            "traceback": [line.rstrip("\n") for line in tb_lines],
+        }
+    )
+
+
+def _admit_shadow_run(req: dict) -> bool:
+    expected_revision = req.get("expectedShadowRevision")
+    expected_digest = req.get("expectedShadowDigest")
+    if expected_revision is not None or expected_digest is not None:
+        values = _snapshot_user_namespace()
+        eligible = (
+            _STATE.active_executions == 0
+            and expected_revision == _STATE.namespace_revision
+            and expected_digest == _shadow_snapshot_digest(values)
+        )
+        if not eligible:
+            rid = str(req.get("id"))
+            _STATE.executing_tasks.pop(rid, None)
+            _STATE.interrupt_ids.discard(rid)
+            _emit(
+                {
+                    "type": "done",
+                    "id": rid,
+                    "status": "ok",
+                    "executionCount": _STATE.execution_count,
+                    "cancelled": False,
+                    "admissionRejected": True,
+                }
+            )
+            return False
+    _STATE.active_executions += 1
+    req["_execution_reserved"] = True
+    return True
+
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
+
+
+def _parse_request(line: str) -> dict | None:
+    """Parse one NDJSON control line, or ``None`` when it should be skipped.
+
+    Emits a ``ProtocolError`` frame for malformed JSON so the host sees the
+    same diagnostic the reader has always produced.
+    """
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError as exc:
+        _emit(
+            {
+                "type": "error",
+                "id": "",
+                "ename": "ProtocolError",
+                "evalue": f"Invalid JSON request: {exc}",
+                "traceback": [],
+            }
+        )
+        return None
+
+
+def _read_stdin(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, stdin) -> None:
+    """Feed control-channel requests to the event loop from a reader thread.
+
+    POSIX only -- see ``_serve_windows`` for why Windows cannot run a
+    perpetually blocked stdin reader.
+    """
+    for raw_line in stdin:
+        line = raw_line.strip()
+        if not line:
+            continue
+        req = _parse_request(line)
+        if req is None:
+            continue
+        if req.get("type") == "tool":
+            _start_tool_request(req)
+            continue
+        if req.get("type") == "tool_cancel":
+            _cancel_tool_request(str(req.get("id")))
+            continue
+        if req.get("type") == "interrupt":
+            _request_interrupt(loop, str(req.get("id")))
+            continue
+        if req.get("type") not in ("exit", "shadow_snapshot", "shadow_plan"):
+            _STATE.executing_tasks[str(req.get("id"))] = None
+        loop.call_soon_threadsafe(queue.put_nowait, req)
+    loop.call_soon_threadsafe(queue.put_nowait, {"type": "exit"})
+
+
+async def _serve_posix(loop: asyncio.AbstractEventLoop, stdin) -> None:
+    """Dispatch requests concurrently, one asyncio task per request.
+
+    A background thread reads stdin and enqueues requests so a cell parked on
+    a top-level ``await`` (an ``await agent(...)`` bridge call, say) does not
+    block sibling requests: auto-backgrounded cells, user Python shortcuts, and
+    kernel-defined tool calls from subagents can all be in flight on one kernel
+    at once. The reader thread stays blocked in a
+    control-channel read for its whole life, which is safe on POSIX but wedges
+    native-extension imports on Windows (see ``_serve_windows``).
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+    _STATE.targeted_interrupts = True
+    reader = threading.Thread(
+        target=_read_stdin,
+        args=(loop, queue, stdin),
+        name="omp-stdin-reader",
+        daemon=True,
+    )
+    reader.start()
+
+    tasks: set[asyncio.Task] = set()
+
+    def _task_done(task: asyncio.Task) -> None:
+        tasks.discard(task)
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            _emit_error("", exc)
+
+    try:
+        while True:
+            req = await queue.get()
+            if req.get("type") == "exit":
+                break
+            if req.get("type") == "shadow_snapshot":
+                _emit_shadow_snapshot(req)
+                continue
+            if req.get("type") == "shadow_plan":
+                _emit_shadow_plan(req)
+                continue
+            if not _admit_shadow_run(req):
+                continue
+            task = asyncio.create_task(_handle_request_async(req))
+            tasks.add(task)
+            task.add_done_callback(_task_done)
+    finally:
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        _STATE.executing_tasks.clear()
+        _STATE.interrupt_ids.clear()
+
+
+async def _serve_windows(loop: asyncio.AbstractEventLoop, stdin) -> None:
+    """Dispatch requests serially, serving tool requests between cells.
+
+    A thread perpetually parked in a blocking control-channel read deadlocks
+    native-extension imports (NumPy in particular) under a pipe-backed
+    subprocess on Windows: the native DLL load and the concurrent stdin read
+    wedge each other (numpy#24290, issue #7985). Reading each line via
+    ``run_in_executor`` confines the stdin read to the gap *between* requests
+    -- once a line arrives the reader returns, so no thread is reading stdin
+    while a cell (and its imports) run. The trade-off is that requests are
+    handled one at a time instead of interleaved; on Windows that is strictly
+    better than the alternative, since any concurrent reader deadlocks the
+    import outright.
+    """
+    while True:
+        raw_line = await loop.run_in_executor(None, stdin.readline)
+        if not raw_line:
+            break  # EOF: the host closed the control channel.
+        line = raw_line.strip()
+        if not line:
+            continue
+        req = _parse_request(line)
+        if req is None:
+            continue
+        if req.get("type") == "exit":
+            break
+        if req.get("type") == "shadow_snapshot":
+            _emit_shadow_snapshot(req)
+            continue
+        if req.get("type") == "shadow_plan":
+            _emit_shadow_plan(req)
+            continue
+        if req.get("type") == "tool":
+            _start_tool_request(req)
+            continue
+        if req.get("type") == "tool_cancel":
+            _cancel_tool_request(str(req.get("id")))
+            continue
+        if req.get("type") == "interrupt":
+            continue  # read only between cells, after the cell it named settled
+        if not _admit_shadow_run(req):
+            continue
+        try:
+            await _handle_request_async(req)
+        except asyncio.CancelledError:
+            raise  # task cancellation must propagate; never swallow it and spin
+        except BaseException as exc:  # noqa: BLE001 - one bad request must not wedge the loop
+            _emit_error(str(req.get("id", "")), exc)
+
+
+async def _main_async() -> None:
+    sys.stdout = _StreamProxy("stdout")
+    sys.stderr = _StreamProxy("stderr")
+    _install_idle_sigint()
+    _start_parent_watchdog()
+    _start_capture_drain()
+
+    stdin = _CONTROL_IN
+    if stdin is None:
+        return
+
+    loop = asyncio.get_running_loop()
+    _STATE.loop = loop
+
+    if os.name == "nt":
+        await _serve_windows(loop, stdin)
+    else:
+        await _serve_posix(loop, stdin)
+
+
+def main() -> None:
+    asyncio.run(_main_async())
+
+
+if __name__ == "__main__":
+    main()
