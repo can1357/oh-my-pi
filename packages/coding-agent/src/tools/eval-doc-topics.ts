@@ -29,7 +29,7 @@ export interface EvalToolDescriptionOptions {
 	/** Enabled preludes; each becomes an `xd://eval/<name>` doc topic, inlined when it asks to be. */
 	preludes?: readonly Pick<
 		EvalPreludeDefinition,
-		"name" | "documentation" | "inlineDocumentation" | "firstCallDocumentation"
+		"name" | "documentation" | "summary" | "inlineDocumentation" | "firstCallDocumentation"
 	>[];
 	/** The session can send first-call guides; without it such a prelude is listed as read-first. */
 	firstCallGuides?: boolean;
