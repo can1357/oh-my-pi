@@ -572,6 +572,7 @@ const DIRECT_REPLAY_APIS: Record<KnownApi, boolean> = {
 	"gitlab-duo-agent": false,
 	"devin-agent": false,
 	"antigravity-acp": false,
+	"kiro-api": true,
 };
 
 /**

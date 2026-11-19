@@ -37,30 +37,6 @@ describe("runInteractiveBashPty", () => {
 		tempDir = TempDir.createSync("@omp-bash-pty-env-");
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
-		// The spawn env is filtered `Bun.env` plus procmgr's fixed keys. Those keys
-		// and anything set at runtime never reach the native environ the PTY
-		// inherits, so the PTY must be handed them.
-		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
-			shell: "/bin/bash",
-			args: ["-l", "-c"],
-			env: {
-				PATH: Bun.env.PATH ?? "",
-				HOME: tempDir.path(),
-				TERM: "dumb",
-				// The spawn env carries CI (unless PI_BASH_NO_CI is set) and may carry
-				// the launcher's NO_COLOR; either turns tools monochrome and
-				// non-interactive on a real terminal.
-				CI: "shell-ci",
-				NO_COLOR: "shell-no-color",
-				// Editor and pinentry guards for commands nobody can answer; a pty
-				// call has a user at the keyboard.
-				GIT_EDITOR: "shell-git-editor",
-				GPG_TTY: "shell-gpg-tty",
-				OMP_PTY_RUNTIME_PROBE: "from-shell-env",
-				OMP_PTY_LAYER: "shell",
-			},
-			prefix: undefined,
-		});
 	});
 
 	afterEach(() => {
@@ -69,44 +45,55 @@ describe("runInteractiveBashPty", () => {
 		tempDir.removeSync();
 	});
 
-	/** Run the env probe on a real PTY with `direnvEnv` as the command's overrides. */
-	async function probe(direnvEnv: Record<string, string>): Promise<string> {
+	/** Run the env probe on a real PTY as a program started from the session exports `env`. */
+	async function probe(env: Record<string, string>): Promise<string> {
+		const command = `printf 'probe=%s term=%s ci=%s no_color=%s git_editor=%s gpg_tty=%s tty=%s\\n' "\${OMP_PTY_PROBE-unset}" "$TERM" "\${CI-unset}" "\${NO_COLOR-unset}" "\${GIT_EDITOR-unset}" "\${GPG_TTY-unset}" "$([ -t 0 ] && echo yes)"`;
 		const result = await runInteractiveBashPty(headlessUi(), {
-			command: `printf 'probe=%s layer=%s term=%s ci=%s no_color=%s git_editor=%s gpg_tty=%s\\n' "\${OMP_PTY_RUNTIME_PROBE-unset}" "\${OMP_PTY_LAYER-unset}" "$TERM" "\${CI-unset}" "\${NO_COLOR-unset}" "\${GIT_EDITOR-unset}" "\${GPG_TTY-unset}"`,
+			command,
+			application: "/bin/bash",
+			args: ["-c", command],
 			cwd: tempDir.path(),
 			timeoutMs: 15_000,
-			env: direnvEnv,
+			env: { PATH: Bun.env.PATH ?? "", HOME: tempDir.path(), ...env },
 		});
 		expect(result.exitCode).toBe(0);
 		return result.output;
 	}
 
 	it.skipIf(ptyUnavailable)(
-		"runs the command with the shell spawn env minus its non-interactive guards, direnv overrides on top, and a real TERM",
+		"starts the program on a terminal from the session's exports, without the guards of unattended commands",
 		async () => {
-			const output = await probe({ OMP_PTY_LAYER: "direnv" });
+			// What the launch environment itself gives the program for the guarded names.
+			const launch = await probe({ OMP_PTY_PROBE: "from-session" });
 
-			expect(output).toContain("probe=from-shell-env layer=direnv term=xterm-256color");
-			// The native environ underneath may hold its own values for these
-			// (CI runners set CI); what must not arrive is the spawn env's value.
-			expect(output).not.toContain("shell-ci");
-			expect(output).not.toContain("shell-no-color");
-			expect(output).not.toContain("shell-git-editor");
-			expect(output).not.toContain("shell-gpg-tty");
+			// What the session shell exports while it runs a command nobody can answer.
+			const output = await probe({
+				OMP_PTY_PROBE: "from-session",
+				TERM: "dumb",
+				CI: "true",
+				NO_COLOR: "1",
+				GIT_EDITOR: "true",
+				GPG_TTY: "not a tty",
+			});
+
+			expect(output).toContain("probe=from-session term=xterm-256color");
+			expect(output).toContain("tty=yes");
+			// The guards never reach the program: it sees the launch values, whatever they are.
+			expect(output).toBe(launch);
 		},
 	);
 
-	it.skipIf(ptyUnavailable)("lets direnv values win over the terminal defaults and the dropped guards", async () => {
+	it.skipIf(ptyUnavailable)("keeps a value the session set itself where a guard would be", async () => {
 		const output = await probe({
-			TERM: "direnv-term",
-			CI: "direnv-ci",
-			NO_COLOR: "direnv-no-color",
-			GIT_EDITOR: "direnv-git-editor",
-			GPG_TTY: "direnv-gpg-tty",
+			TERM: "session-term",
+			CI: "session-ci",
+			NO_COLOR: "session-no-color",
+			GIT_EDITOR: "session-git-editor",
+			GPG_TTY: "session-gpg-tty",
 		});
 
 		expect(output).toContain(
-			"term=direnv-term ci=direnv-ci no_color=direnv-no-color git_editor=direnv-git-editor gpg_tty=direnv-gpg-tty",
+			"term=session-term ci=session-ci no_color=session-no-color git_editor=session-git-editor gpg_tty=session-gpg-tty",
 		);
 	});
 });

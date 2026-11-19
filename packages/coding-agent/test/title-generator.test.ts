@@ -98,6 +98,45 @@ describe("title generator", () => {
 		expect(completeSimpleMock).not.toHaveBeenCalled();
 	});
 
+	it("reports a produced local title as an unmetered request, and a null result as nothing", async () => {
+		const localModel = getBundledModel("local", "lfm2.5-230m");
+		if (!localModel) throw new Error("Expected bundled local tiny model");
+		const settings = createSettings(localModel);
+		const registry = createRegistry(localModel);
+		// A null result may be an abort or a failed model that never reached the worker.
+		vi.spyOn(tinyTitleClient, "generate").mockResolvedValueOnce("Local Title").mockResolvedValueOnce(null);
+		const reports: Array<{ message: ai.AssistantMessage; prompt: string }> = [];
+		const run = () =>
+			generateSessionTitle(
+				"Investigate the resolver",
+				registry,
+				settings,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				(message, prompt) => {
+					reports.push({ message, prompt });
+				},
+			);
+
+		expect(await run()).toBe("Local Title");
+		expect(await run()).toBeNull();
+
+		expect(reports).toHaveLength(1);
+		expect(reports[0]?.prompt).toContain("Investigate the resolver");
+		expect(reports[0]?.message).toMatchObject({
+			api: "local-inference",
+			provider: localModel.provider,
+			model: localModel.id,
+			stopReason: "stop",
+			content: [{ type: "text", text: "Local Title" }],
+		});
+		expect(reports[0]?.message.usage.totalTokens).toBe(0);
+	});
+
 	it("never falls back to a paid title model when local inference fails", async () => {
 		const localModel = getBundledModel("local", "lfm2.5-230m");
 		if (!localModel) throw new Error("Expected bundled local tiny model");

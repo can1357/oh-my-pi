@@ -154,18 +154,10 @@ describe("Parallel web search", () => {
 		]);
 	});
 
-	it("joins the auto chain only with a credential but stays explicitly selectable without one", () => {
+	it("joins the auto chain without a credential so the public MCP runs", () => {
 		delete process.env.PARALLEL_API_KEY;
-		const provider = new ParallelProvider();
-		const authStorage = createInMemoryAuthStorage();
-		try {
-			expect(provider.isAvailable(authStorage)).toBe(false);
-			expect(provider.isExplicitlyAvailable(authStorage)).toBe(true);
-			authStorage.keys.setRuntime("parallel", "stored-parallel-key");
-			expect(provider.isAvailable(authStorage)).toBe(true);
-		} finally {
-			authStorage.close();
-		}
+
+		expect(new ParallelProvider().isAvailable(anonymousAuthStorage)).toBe(true);
 	});
 
 	it("uses anonymous MCP and maps structured results when Parallel has no credential", async () => {

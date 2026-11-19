@@ -669,15 +669,12 @@ describe("searchExa", () => {
 		expect(receivedKey).toBe("stored-key-xyz");
 	});
 
-	it("joins the auto chain only with a credential but stays explicitly selectable without one", async () => {
+	it("joins the auto chain without credentials so the public MCP runs", async () => {
 		delete process.env.EXA_API_KEY;
-		await withInMemoryAuthStorage(async authStorage => {
-			const provider = new ExaProvider();
-			expect(provider.isAvailable(authStorage)).toBe(false);
-			expect(provider.isExplicitlyAvailable(authStorage)).toBe(true);
-			authStorage.keys.setRuntime("exa", "stored-key-xyz");
-			expect(provider.isAvailable(authStorage)).toBe(true);
-		});
+		const available = await withInMemoryAuthStorage(authStorage =>
+			Promise.resolve(new ExaProvider().isAvailable(authStorage)),
+		);
+		expect(available).toBe(true);
 	});
 
 	it("errors instead of falling back to the public MCP when a configured credential does not resolve", async () => {

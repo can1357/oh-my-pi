@@ -25,6 +25,8 @@ export interface CustomMessage<T = unknown> {
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
+	/** Rendered and saved, never sent to the model (like `!!` bash rows). */
+	excludeFromContext?: boolean;
 	timestamp: number;
 }
 
@@ -180,6 +182,7 @@ export function createCustomMessage(
 	details: unknown | undefined,
 	timestamp: string,
 	attribution?: MessageAttribution,
+	excludeFromContext?: boolean,
 ): CustomMessage {
 	return {
 		role: "custom",
@@ -188,6 +191,7 @@ export function createCustomMessage(
 		display,
 		details,
 		attribution,
+		...(excludeFromContext ? { excludeFromContext: true } : {}),
 		timestamp: new Date(timestamp).getTime(),
 	};
 }
@@ -216,6 +220,7 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
 		switch (message.role) {
 			case "custom":
 			case "hookMessage": {
+				if (message.role === "custom" && message.excludeFromContext) return undefined;
 				const content =
 					typeof message.content === "string"
 						? [{ type: "text" as const, text: message.content }]
@@ -295,13 +300,14 @@ export function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 
 /**
  * The context message a session entry contributes, or `undefined` for entries
- * that don't reach the LLM (compaction markers, labels, model changes, ...).
+ * that don't reach the LLM (compaction markers, labels, model changes, rows
+ * kept out of context, ...).
  */
 export function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 	if (entry.type === "message") {
 		return entry.message;
 	}
-	if (entry.type === "custom_message") {
+	if (entry.type === "custom_message" && !entry.excludeFromContext) {
 		return createCustomMessage(
 			entry.customType,
 			entry.content,

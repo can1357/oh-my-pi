@@ -270,7 +270,7 @@ describe("Firecrawl web search provider", () => {
 		}
 	});
 
-	it("joins the auto chain only with a credential or self-hosted endpoint", () => {
+	it("joins the auto chain in hosted keyless mode, keyless only without a credential or self-hosted endpoint", () => {
 		const originalApiKey = process.env.FIRECRAWL_API_KEY;
 		const originalBaseUrl = process.env.FIRECRAWL_BASE_URL;
 		const originalApiUrl = process.env.FIRECRAWL_API_URL;
@@ -279,11 +279,11 @@ describe("Firecrawl web search provider", () => {
 		delete process.env.FIRECRAWL_API_URL;
 		try {
 			const provider = new FirecrawlProvider();
-			expect(provider.isAvailable(keylessAuthStorage)).toBe(false);
-			expect(provider.isExplicitlyAvailable(keylessAuthStorage)).toBe(true);
-			expect(provider.isAvailable(providerAuthStorage)).toBe(true);
-			process.env.FIRECRAWL_BASE_URL = "http://localhost:3002";
 			expect(provider.isAvailable(keylessAuthStorage)).toBe(true);
+			expect(provider.isKeyless(keylessAuthStorage)).toBe(true);
+			expect(provider.isKeyless(providerAuthStorage)).toBe(false);
+			process.env.FIRECRAWL_BASE_URL = "http://localhost:3002";
+			expect(provider.isKeyless(keylessAuthStorage)).toBe(false);
 		} finally {
 			if (originalApiKey === undefined) delete process.env.FIRECRAWL_API_KEY;
 			else process.env.FIRECRAWL_API_KEY = originalApiKey;

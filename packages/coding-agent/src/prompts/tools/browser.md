@@ -45,7 +45,8 @@ selectors: CSS, or Puppeteer aria/… text/… xpath/… pierce/… label/… pl
   - the relay's Chrome pages (`shown`: the active tab).
   - Pass an entry's `target`; never guess.
 - `viewportOnly`: on-screen elements only (ignored on cmux). `includeAll`: non-interactive nodes too. `text()` and `html()` without a selector read `<body>`.
-- `click`: `button` presses another mouse button (`"right"` opens a context menu); `count` clicks more than once. `<select>` elements: `select`, not `fill`.
+- `click`: `button` presses another mouse button (`"right"` opens a context menu); `count` clicks more than once.
+- `<select>` elements: `select(selector, …choices)` or `handle.select(…choices)`, not `fill`. Choices mix strings (exact value, then label), `{label: "full text"}`, `{value: "exact value"}`, or `{index: 0}`; labels match exactly or full option text with whitespace collapsed and trimmed.
 - `clickAt`, `mouseMove`, `drag` `{x, y}` points: the position as read off the tab's latest screenshot.
   - That is viewport CSS pixels, unless the screenshot's line says it is scaled.
   - After a scaled screenshot, pass values measured on the page (`box`, `evaluate`) with `css: true` instead of scaling them: `clickAt(x, y, {css: true})`, `{x, y, css: true}`.
@@ -161,7 +162,7 @@ Tern and WebKit tab limits:
 
 Lifetime:
 
-- Closing releases the managed tab and closes tabs omp opened in the relay, never borrowed relay tabs, CDP-attached pages, or adopted Tern blocks.
+- Closing releases the managed tab and closes pages omp opened, never borrowed pages or adopted Tern blocks.
 - `browser.close({ all: true })` releases the tabs you opened, not other agents'.
 - `kill: true` terminates only applications spawned by this process, never reused browser processes.
 - Idle tabs auto-freeze at turn settle, unfreeze on next use, and close past the idle-close timeout.

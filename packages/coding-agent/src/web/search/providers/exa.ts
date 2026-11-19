@@ -451,13 +451,11 @@ export class ExaProvider extends SearchProvider {
 	readonly id = "exa";
 	readonly label = "Exa";
 
-	/** The auto chain admits Exa only when enabled and a credential is configured. */
-	isAvailable(authStorage: AuthStorage): boolean {
-		return this.isExplicitlyAvailable(authStorage) && authStorage.keys.source("exa") !== undefined;
-	}
-
-	/** An explicit `web/exa` selection works without a key via Exa's public MCP, unless disabled in settings. */
-	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
+	/**
+	 * Available unless disabled in settings: without a credential, search runs
+	 * through Exa's unauthenticated public MCP.
+	 */
+	isAvailable(_authStorage: AuthStorage): boolean {
 		try {
 			if (cfgExaEnabled.get(settings) === false) {
 				return false;
@@ -466,6 +464,10 @@ export class ExaProvider extends SearchProvider {
 			// Settings may be unavailable before CLI initialization; assume not disabled.
 		}
 		return true;
+	}
+
+	override isKeyless(authStorage: AuthStorage): boolean {
+		return authStorage.keys.source("exa") === undefined;
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

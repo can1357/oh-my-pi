@@ -1323,11 +1323,13 @@ describe("tool-owned dynamic approval declarations", () => {
 
 		// `&&` inside `${…}` and `{ … }` groups stays within its clause too.
 		expect(
+			// oxlint-disable-next-line no-template-curly-in-string -- literal shell/JS text under test
 			formatApprovalPrompt(bash, { command: "git status && echo ${x:-a&&b} && { true && cd /tmp; }" }).split("\n"),
 		).toEqual([
 			"Allow tool: bash",
 			"Command:",
 			"  ✓ git status (allowed: git status*)",
+			// oxlint-disable-next-line no-template-curly-in-string -- literal shell/JS text under test
 			"  ? echo ${x:-a&&b} (requires approval)",
 			"  ? { true && cd /tmp; } (requires approval)",
 		]);

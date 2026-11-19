@@ -208,14 +208,14 @@ export class FirecrawlProvider extends SearchProvider {
 	readonly id = "firecrawl";
 	readonly label = "Firecrawl";
 
-	/** The auto chain admits Firecrawl only with a credential or a self-hosted endpoint. */
-	isAvailable(authStorage: AuthStorage): boolean {
-		return authStorage.keys.source("firecrawl") !== undefined || configuredFirecrawlBaseUrl() !== undefined;
+	/** Always available: without a credential or self-hosted endpoint, search runs in keyless mode. */
+	isAvailable(_authStorage: AuthStorage): boolean {
+		return true;
 	}
 
-	/** An explicit `web/firecrawl` selection works without a key via Firecrawl's keyless hosted mode. */
-	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
-		return true;
+	/** Keyless unless a credential or a self-hosted endpoint is configured. */
+	override isKeyless(authStorage: AuthStorage): boolean {
+		return authStorage.keys.source("firecrawl") === undefined && configuredFirecrawlBaseUrl() === undefined;
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {
