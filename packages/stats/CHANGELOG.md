@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added 2d and 3d range presets with hourly buckets to the stats dashboard time selector ([#19766](https://github.com/can1357/oh-my-pi/issues/19766), [#19774](https://github.com/can1357/oh-my-pi/pull/19774) by [@thekitaev](https://github.com/thekitaev)).
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes
