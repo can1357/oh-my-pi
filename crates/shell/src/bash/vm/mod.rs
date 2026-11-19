@@ -959,7 +959,7 @@ impl Kernel {
 				&& let Some(origins) = self.trace_unit_origins.get(&vp.vpid).cloned()
 			{
 				match &data {
-					EventData::Subshell { child } | EventData::Background { pid: child, .. } => {
+					EventData::Subshell { child, .. } | EventData::Background { pid: child, .. } => {
 						self.trace_unit_origins.entry(*child).or_insert(origins);
 					},
 					EventData::Pipeline { stages } => {

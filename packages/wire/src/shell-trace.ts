@@ -120,7 +120,7 @@ export interface ShellTraceUnit {
 	syntax?: unknown;
 	/** Compiler-known wrapper bytes removed from this unit's displayed source. */
 	projection?: number;
-	/** Script a callout (`timeout`, `git`, `xargs`, …) ran for its operands; its calling command stands for it. */
+	/** Script a callout (`timeout`, `git`, `xargs`, …) ran for its operands, or a script file run in place of the program a command named (`ENOEXEC`); its calling command stands for it. */
 	callout?: boolean;
 	nodes: ShellTraceNode[];
 }

@@ -877,7 +877,11 @@ pub enum EventData<'a> {
 	/// A subshell vproc started.
 	Subshell {
 		/// Child vpid.
-		child: Vpid,
+		child:       Vpid,
+		/// The child is a new shell running a file the OS would not execute
+		/// (`ENOEXEC`, any `#!` file on Windows) in place of the program the
+		/// command named, not shell code of its parent.
+		script_file: bool,
 	},
 	/// A pipeline started.
 	Pipeline {

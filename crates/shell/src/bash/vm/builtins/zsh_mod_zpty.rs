@@ -601,7 +601,7 @@ fn newptycmd(
 	state::set_zsh_option(&mut ctx.k.root, ctx.cx.store, &mut child, ZshOpt::Interactive, false)?;
 	let vpid = child.vpid;
 	ctx.k
-		.emit_op(ctx.cx, ctx.vp, 0, EventData::Subshell { child: vpid });
+		.emit_op(ctx.cx, ctx.vp, 0, EventData::Subshell { child: vpid, script_file: false });
 	ctx.k.spawned.push(Box::new(child));
 	let fd = ctx.vp.fds.lowest_free(10);
 	ctx.vp.fds.set(fd, Some(master));

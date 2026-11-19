@@ -209,7 +209,9 @@ pub struct Unit {
 	/// Compiler-known wrapper bytes removed at the presentation boundary.
 	pub projection: u32,
 	/// The script a callout (`timeout`, `git`, `xargs`, …) submitted to run
-	/// its operands: host-generated, so the calling command stands for it.
+	/// its operands, or a script file the engine ran in place of the program
+	/// the command named (`ENOEXEC`): not command text, so the calling
+	/// command stands for it.
 	pub callout:    bool,
 }
 
@@ -310,9 +312,9 @@ struct Inner {
 	run:          Option<RunId>,
 	root_vpid:    Option<Vpid>,
 	/// Exact membership learned from engine fork events, each marked when
-	/// it runs a callout's script ([`Unit::callout`]): the callout's
-	/// subshell, or a fork of it. Engine forks emit `run: None`;
-	/// API-created subshells have their own `RunId`.
+	/// it runs a callout's script or an executed script file
+	/// ([`Unit::callout`]): that shell, or a fork of it. Engine forks emit
+	/// `run: None`; API-created subshells have their own `RunId`.
 	vpids:        HashMap<Vpid, bool>,
 	vpid_order:   VecDeque<Vpid>,
 	runs:         HashSet<RunId>,
@@ -571,13 +573,15 @@ impl EventSink for RunTrace {
 
 impl Inner {
 	/// Learn only explicit engine lineage; never infer ownership from output.
-	/// A fork inherits its parent's callout mark.
+	/// A fork inherits its parent's callout mark; an executed script file's
+	/// shell starts one.
 	fn descendants(&mut self, ev: &Event<'_>) {
 		let callout = self.vpids.get(&ev.vpid) == Some(&true);
 		match ev.data {
-			EventData::Subshell { child } | EventData::Background { pid: child, .. } => {
-				self.descendant(child, callout);
+			EventData::Subshell { child, script_file } => {
+				self.descendant(child, callout || script_file);
 			},
+			EventData::Background { pid: child, .. } => self.descendant(child, callout),
 			EventData::Pipeline { stages } => {
 				for &child in stages {
 					self.descendant(child, callout);

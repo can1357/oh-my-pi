@@ -161,7 +161,7 @@ pub fn start(
 			}
 		},
 	};
-	let new = New { args: &args, env, pairs: &pairs, dollar0: &dollar0, origin };
+	let new = New { args: &args, env, pairs: &pairs, dollar0: &dollar0, origin, script_file: false };
 	launch(k, vp, cx, &new, &src, stdin)
 }
 
@@ -191,7 +191,8 @@ pub fn start_script(
 	};
 	let pairs = env_pairs(env);
 	let dollar0 = args.dollar0_in(&pairs);
-	let new = New { args: &args, env, pairs: &pairs, dollar0: &dollar0, origin: "" };
+	let new =
+		New { args: &args, env, pairs: &pairs, dollar0: &dollar0, origin: "", script_file: true };
 	launch(k, vp, cx, &new, text, false)
 }
 
@@ -204,13 +205,15 @@ fn env_pairs(env: &EnvView) -> Vec<(BString, BString)> {
 
 /// What a new shell starts from.
 struct New<'a> {
-	args:    &'a ShellArgs,
-	env:     &'a EnvView,
+	args:        &'a ShellArgs,
+	env:         &'a EnvView,
 	/// [`Self::env`] as pairs.
-	pairs:   &'a [(BString, BString)],
-	dollar0: &'a [u8],
+	pairs:       &'a [(BString, BString)],
+	dollar0:     &'a [u8],
 	/// `$-`'s `c` or `s` (`MiscKey::RunOrigin`), empty for a script.
-	origin:  &'static str,
+	origin:      &'static str,
+	/// Started by [`start_script`] (see [`EventData::Subshell`]).
+	script_file: bool,
 }
 
 /// Start the new shell `new` describes, reading `src` (standard input when
@@ -228,7 +231,7 @@ fn launch(
 	src: &[u8],
 	stdin: bool,
 ) -> Option<Flow> {
-	let New { args, env, pairs, dollar0, origin } = *new;
+	let New { args, env, pairs, dollar0, origin, script_file } = *new;
 	// The startup files (`BASH_ENV` for a non-interactive bash): the first
 	// readable candidate of each.
 	let home = env
@@ -305,7 +308,7 @@ fn launch(
 		push_script(&mut child, text, 1, ScriptKind::Source);
 	}
 	let vpid = child.vpid;
-	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
+	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid, script_file });
 	k.spawned.push(Box::new(child));
 	let s = st(vp);
 	s.wait_for = vec![vpid];

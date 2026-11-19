@@ -261,7 +261,8 @@ pub fn render(source: &impl VizSource, runtime: &Runtime<'_>, options: &Options)
 		};
 		p.root_units();
 		// Dynamic units with no proven outer origin remain explicitly
-		// unlocated; a callout's script is drawn by its calling command.
+		// unlocated; a callout's script or an executed script file is drawn by
+		// its calling command.
 		for index in 0..source.unit_count() {
 			let Some(unit) = source.unit(index) else {
 				continue;
