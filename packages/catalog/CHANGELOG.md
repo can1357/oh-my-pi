@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Google Antigravity requests now identify as Antigravity 2.32.1, the current release, instead of 2.26.0 when the update manifest cannot be reached ([#19279](https://github.com/can1357/oh-my-pi/pull/19279) by [@Xytronix](https://github.com/Xytronix))
+
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added support for prompt-cache prewarming on the first-party Anthropic endpoint via the `isPromptCachePrewarmSupported` compatibility capability.
+
+### Fixed
+
+- Fixed hosted judgment requests for TypeSafe, OpenRouter, Command Code, and OpenCode Zen when evaluating more than 32 questions.
+- Improved Devin image handling to support more conversation images within provider limits, and updated image compaction for Devin Gemini models to reflect their billed token usage.
+- Fixed Devin Gemini model pricing so models switch from promotional to list pricing when promotions end.
+- Fixed Kiro API key authentication (`KIRO_API_KEY` and `ksk_…`) so model listing, chat, and `/usage` requests work correctly.
+
+## [18.22.2] - 2026-11-18
+
 ### Added
 
 - Added Kiro to the model catalog with automatic discovery of every model available to the signed-in Kiro account ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
@@ -11,10 +30,6 @@
 ### Changed
 
 - `readModelCache()` parses a payload once per process: cache files holding identical rows return the same shared row objects
-
-### Fixed
-
-- Google Antigravity requests now identify as Antigravity 2.32.1, the current release, instead of 2.26.0 when the update manifest cannot be reached ([#19279](https://github.com/can1357/oh-my-pi/pull/19279) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.22.1] - 2026-11-17
 

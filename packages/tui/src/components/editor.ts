@@ -78,6 +78,8 @@ export interface NativeEditorLayout {
 	readonly role: string;
 	/** Tone of the root (`pending` while a turn runs). */
 	readonly tone?: TspTone;
+	/** Folds the root to its compact row while the keys are elsewhere in the document (an ask above it). */
+	readonly folded?: boolean;
 	readonly children: readonly NativeChild[];
 	/** Keypath of the `editor` node inside the root (the autocomplete's caret anchor). */
 	readonly caret: string;
@@ -804,7 +806,13 @@ export class Editor implements Component, Focusable {
 	#nativeDecor?: { text: string; generation: number; decor: readonly TspEditorDecoration[] | undefined };
 	#nativeEditor?: { props: TspEditorProps; node: NativeNode };
 	#nativeOverlay?: { list: SelectList; caret: string; node: NativeNode };
-	#nativeRoot?: { role: string; tone: TspTone | undefined; children: readonly NativeChild[]; node: NativeNode };
+	#nativeRoot?: {
+		role: string;
+		tone: TspTone | undefined;
+		folded: boolean | undefined;
+		children: readonly NativeChild[];
+		node: NativeNode;
+	};
 
 	// Store last layout width for cursor navigation
 	#lastLayoutWidth: number = 80;
@@ -935,6 +943,11 @@ export class Editor implements Component, Focusable {
 	 */
 	#pinnedUndo: UndoMark | null = null;
 
+	/**
+	 * ↑ on the first line, not browsing history: true when the host took the keys (to an ask waiting above
+	 * the composer); false lets ↑ recall history or move the cursor as usual.
+	 */
+	onUpFromTop?: () => boolean;
 	onSubmit?: (text: string) => void | Promise<void>;
 	onAltEnter?: (text: string) => void;
 	onChange?: (text: string) => void;
@@ -1993,11 +2006,21 @@ export class Editor implements Component, Focusable {
 			this.#nativeOverlay = undefined;
 		}
 		const root = this.#nativeRoot;
-		if (root && root.role === layout.role && root.tone === layout.tone && sameItems(root.children, children)) {
+		if (
+			root &&
+			root.role === layout.role &&
+			root.tone === layout.tone &&
+			root.folded === layout.folded &&
+			sameItems(root.children, children)
+		) {
 			return root.node;
 		}
-		const described = col(children, layout.tone ? { role: layout.role, tone: layout.tone } : { role: layout.role });
-		this.#nativeRoot = { role: layout.role, tone: layout.tone, children, node: described };
+		const described = col(children, {
+			role: layout.role,
+			...(layout.tone ? { tone: layout.tone } : {}),
+			...(layout.folded ? { folded: true } : {}),
+		});
+		this.#nativeRoot = { role: layout.role, tone: layout.tone, folded: layout.folded, children, node: described };
 		return described;
 	}
 
@@ -2507,8 +2530,10 @@ export class Editor implements Component, Focusable {
 		}
 		// Arrow keys
 		else if (kb.matchesCanonical(canonical, "tui.editor.cursorUp")) {
-			// Up - history navigation or cursor movement
-			if (this.#isEditorEmpty()) {
+			// Up - out to what waits above (an ask), else history navigation or cursor movement
+			if (this.#historyIndex === -1 && this.#isOnFirstVisualLine() && this.onUpFromTop?.()) {
+				// The host took the keys.
+			} else if (this.#isEditorEmpty()) {
 				this.#navigateHistory(-1); // Start browsing history
 			} else if (this.#historyIndex > -1 && this.#isOnFirstVisualLine()) {
 				this.#navigateHistory(-1); // Navigate to older history entry

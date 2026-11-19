@@ -332,8 +332,10 @@ export class TodoCommandController {
 		const current = this.#currentPhases();
 		const trimmed = rest.trim();
 		if (!trimmed) {
-			// no-arg: apply to all
-			const { phases, errors } = applyOpsToPhases(current, [{ op }]);
+			// no-arg: apply to all. The tool refuses a bare done/drop, so every task is named.
+			const all = current.flatMap(phase => phase.tasks.map(task => task.content));
+			const { phases, errors } =
+				all.length > 0 ? applyOpsToPhases(current, [{ op, task: all }]) : { phases: current, errors: [] };
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;

@@ -1,7 +1,13 @@
 import { readUInt16LE, readUInt32LE } from "./bytes";
 import { crc32 } from "./checksums";
 import { ArchiveError } from "./error";
-import { assertArchiveMemberSize, assertEntryCount, assertIndexSize, assertInMemorySize } from "./limits";
+import {
+	assertArchiveMemberSize,
+	assertArchiveMemberSizeField,
+	assertEntryCount,
+	assertIndexSize,
+	assertInMemorySize,
+} from "./limits";
 import { assertArchivePathBytes, normalizeArchiveEntryPath } from "./paths";
 import { Rar4Decoder } from "./rar/rar4-decoder";
 import { Rar5Decoder } from "./rar/rar5-decoder";
@@ -406,7 +412,7 @@ function parseRar5(bytes: Uint8Array, marker: number, options: FormatReadOptions
 				}
 			}
 			if (type === 2) {
-				assertArchiveMemberSize(unpackedSize, rawPath, options.limits);
+				assertArchiveMemberSizeField(unpackedSize, rawPath);
 				const path = normalizeArchiveEntryPath(rawPath);
 				if (path) {
 					let linkResolveTarget: boolean | undefined;
@@ -542,7 +548,7 @@ function parseRar4(bytes: Uint8Array, marker: number, options: FormatReadOptions
 					if (timeIndex === 0) mtimeMs = preciseMs;
 				}
 			}
-			assertArchiveMemberSize(unpackedSize, rawPath, options.limits);
+			assertArchiveMemberSizeField(unpackedSize, rawPath);
 			const path = normalizeArchiveEntryPath(rawPath);
 			if (path) {
 				const directory = ((flags >>> 5) & 7) === 7;

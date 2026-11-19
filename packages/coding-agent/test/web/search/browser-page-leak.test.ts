@@ -10,8 +10,7 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { withTimeout } from "@oh-my-pi/pi-utils";
-import { daemonRuntimeDir } from "@oh-my-pi/pi-coding-agent/launch/paths";
+import { getDaemonRuntimeDir, withTimeout } from "@oh-my-pi/pi-utils";
 import * as launch from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import {
 	forgetSharedTarget,
@@ -51,7 +50,7 @@ async function ownedTargets(scope: SharedTargetScope): Promise<string[]> {
 	await recordSharedTarget(scope, probe);
 	await forgetSharedTarget(scope, probe);
 	const file = Bun.file(
-		path.join(daemonRuntimeDir(scope.projectDir), `${scope.daemonName}.targets`, `${process.pid}.json`),
+		path.join(getDaemonRuntimeDir(scope.projectDir), `${scope.daemonName}.targets`, `${process.pid}.json`),
 	);
 	if (!(await file.exists())) return [];
 	return ((await file.json()) as { targets: string[] }).targets;
@@ -216,7 +215,7 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 	resetOrphanRegistryForTest();
 	for (const scope of scopes.splice(0)) {
-		await fs.rm(daemonRuntimeDir(scope.projectDir), { recursive: true, force: true }).catch(() => undefined);
+		await fs.rm(getDaemonRuntimeDir(scope.projectDir), { recursive: true, force: true }).catch(() => undefined);
 	}
 });
 

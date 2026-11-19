@@ -28,12 +28,14 @@ describe.skipIf(SKIP)("handleSemanticScholar", () => {
 		expect(result?.truncated).toBe(false);
 	});
 
-	it("handles invalid paper ID format", async () => {
-		const result = await handleSemanticScholar("https://www.semanticscholar.org/paper/invalid", 20);
-		expect(result).not.toBeNull();
-		expect(result?.method).toBe("semantic-scholar");
-		expect(result?.content).toContain("Failed to extract paper ID");
-		expect(result?.notes).toContain("Invalid URL format");
+	it("leaves URLs without a paper id, and the Graph API, to the generic reader", async () => {
+		expect(await handleSemanticScholar("https://www.semanticscholar.org/paper/invalid", 20)).toBeNull();
+		expect(
+			await handleSemanticScholar(
+				"https://api.semanticscholar.org/graph/v1/paper/204e3073870fae3d05bcbc2f6a8e263d9b72e776?fields=title",
+				20,
+			),
+		).toBeNull();
 	});
 
 	it("extracts paper ID from various URL formats", async () => {
