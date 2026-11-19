@@ -747,7 +747,7 @@ describe("computer prelude", () => {
 		);
 		await prelude.invoke({ action: "call", chain: [{ method: "press", args: ["cmd+s"] }], timeout: 9 }, context);
 		expect(calls[2]).toMatchObject({
-			code: 'return await (await desktop.window("42")).ax({"maxDepth":3});',
+			code: 'return await desktop.windowAccess("42").ax({"maxDepth":3});',
 			snapshot: { readOnly: true },
 		});
 		expect(calls[3]).toMatchObject({
