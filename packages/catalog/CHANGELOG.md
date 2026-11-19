@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `gemini-4-neon` to the bundled Antigravity CLI roster, with the `low`/`medium`/`high`/`xhigh` thought levels `agy` offers for it ([#19787](https://github.com/can1357/oh-my-pi/pull/19787) by [@ataberkus](https://github.com/ataberkus)).
+
 ## [19.0.0] - 2026-11-18
 
 ### Added
