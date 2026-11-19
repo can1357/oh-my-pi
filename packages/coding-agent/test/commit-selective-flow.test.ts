@@ -630,6 +630,33 @@ describe("selective commit flow", () => {
 		).rejects.toThrow(/HEAD moved .* changed a\.ts/);
 	});
 
+	it.skipIf(process.platform === "win32")(
+		"retries the commit when a hook moves HEAD after the expected-HEAD check",
+		async () => {
+			const { root, journal, head } = await sharedWorkspace();
+			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+			await git(root, ["config", "core.hooksPath", ".git/hooks"]);
+			// A concurrent commit carrying the seed's tree, made without touching the worktree or index.
+			const moved = (await git(root, ["commit-tree", `${head}^{tree}`, "-p", head, "-m", "concurrent"])).trim();
+			// `commit-msg` runs after the expected-HEAD check and before the swap that updates HEAD.
+			const hook = path.join(root, ".git", "hooks", "commit-msg");
+			await fs.mkdir(path.dirname(hook), { recursive: true });
+			await Bun.write(hook, `#!/bin/sh\ngit update-ref refs/heads/main ${moved}\n`);
+			await fs.chmod(hook, 0o755);
+
+			const outcome = await commitSelection(
+				draft,
+				{ subject: "fix(parser): added parse" },
+				{ journal, agent: { agent: "Main" } },
+			);
+
+			// The lost swap is retried on the new HEAD instead of failing the commit.
+			expect(outcome.parent).toBe(moved);
+			expect((await git(root, ["rev-parse", "HEAD~1"])).trim()).toBe(moved);
+			expect(await git(root, ["show", "HEAD:a.ts"])).toBe("export const a = 2;\n");
+		},
+	);
+
 	it("refuses to commit during a merge in a linked worktree without changing HEAD or the index", async () => {
 		const { root: mainRoot, journal } = await emptyRepo();
 		await Bun.write(path.join(mainRoot, "base.txt"), "base\n");

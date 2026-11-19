@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- `commitCreate()` now reports a HEAD that moves after the expected-HEAD check, such as from a `commit-msg` hook, as a `HeadMoved` error instead of a generic `Backend` failure ([#19393](https://github.com/can1357/oh-my-pi/pull/19393) by [@eggpeat](https://github.com/eggpeat))
+### Added
+
 - Fixed the native addon failing to load when HOME, PI_NATIVES_DIR or the install directory contains `?` ([#19763](https://github.com/can1357/oh-my-pi/pull/19763) by [@sjawhar](https://github.com/sjawhar))
 
 ## [19.0.1] - 2026-11-19

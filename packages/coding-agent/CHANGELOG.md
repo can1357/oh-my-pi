@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `/commit`'s selective commit now retries when HEAD moves after the expected-HEAD check, such as inside a `commit-msg` hook, instead of failing the commit ([#19393](https://github.com/can1357/oh-my-pi/pull/19393) by [@eggpeat](https://github.com/eggpeat))
+### Breaking Changes
+
+- SDK: `AgentSession` emits `agent_end` once per run (when nothing can resume it) and the new `agent_pause` event for a loop that stops mid-run; `hasPendingAsyncWork()`, `settleAsyncWork()` and `suppressAutoResumeUntilPrompt()` are replaced by `isRunActive`, `wakeSources` and `waitForRunEnd()`, and a user-interrupt `abort()` also ends a run paused on background work. The RPC and JSON print streams, the collab wire and extension `agent_end` keep their per-loop flagged shape
+
 ### Added
 
 - Added a coloured extension status variant to `omp gallery --segment status` ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
