@@ -112,7 +112,7 @@ it.each([
 			stage = "ephemeral";
 			await session.runEphemeralTurn({ promptText: "Summarize the current result." });
 			stage = "handoff";
-			await session.handoff();
+			await session.compact(undefined, { mode: "handoff" });
 			const current = requests.slice(1);
 			expect(current.map(r => r.stage)).toEqual(["primary", "ephemeral", "handoff"]);
 			expect(current.map(r => r.provider)).toEqual(Array(3).fill(switchToLuna ? "openai-codex" : "muse-code"));

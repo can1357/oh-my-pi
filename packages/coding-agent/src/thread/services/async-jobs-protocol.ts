@@ -26,6 +26,7 @@ import {
 	type AsyncJobReapResult,
 	type AsyncJobRunResult,
 	type AsyncJobType,
+	type EvictedJob,
 } from "../../async/job-manager";
 import type { JobWidgetBrief } from "../../job-widgets/types";
 import type { RpcMethod } from "../rpc";
@@ -120,6 +121,7 @@ export type AsyncJobManagerProtocol = {
 	hasWidgets: RpcMethod<[], boolean>;
 	atCapacity: RpcMethod<[], boolean>;
 	onJobSettled: RpcMethod<[listener: WireCallback<[]>], WireUnsubscribe>;
+	onJobsChanged: RpcMethod<[listener: WireCallback<[]>], WireUnsubscribe>;
 	register: RpcMethod<
 		[type: AsyncJobType, label: string, run: WireJobRun, options: WireRegisterOptions | undefined],
 		string
@@ -149,6 +151,8 @@ export type AsyncJobManagerProtocol = {
 	isJobResultConsumed: RpcMethod<[jobId: string], boolean>;
 	cancelAll: RpcMethod<[filter: AsyncJobFilter | undefined, reason: unknown], void>;
 	evictCompletedJobs: RpcMethod<[filter: AsyncJobFilter | undefined], number>;
+	getEvictedJob: RpcMethod<[id: string, filter: AsyncJobFilter | undefined], EvictedJob | undefined>;
+	getEvictedJobs: RpcMethod<[filter: AsyncJobFilter | undefined], EvictedJob[]>;
 	waitForAll: RpcMethod<[], void>;
 	registerDeliverySink: RpcMethod<[ownerId: string, sink: WireDeliverySink], WireUnsubscribe>;
 	waitForOwnerJobs: RpcMethod<

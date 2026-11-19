@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added support for excluding custom messages from model context and compaction or branch summaries, while allowing queued steering and follow-up messages to continue correctly after excluded messages.
+
 ## [18.22.1] - 2026-11-17
 
 ### Added
