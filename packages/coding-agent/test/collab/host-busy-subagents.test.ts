@@ -49,12 +49,12 @@ function note(id: string): SessionEntry {
 
 interface Progress {
 	index: number;
-	parentToolCallId: string;
-	progress: { toolCount: number };
+	progress: { id: string; toolCount: number };
 }
 
+/** The i-th frame of a flood: eval `agent()`-style spawns, all index 0 with no parent call, told apart by id. */
 function progress(i: number): Progress {
-	return { index: i % SUBAGENTS, parentToolCallId: "call-1", progress: { toolCount: i } };
+	return { index: 0, progress: { id: `agent-${i % SUBAGENTS}`, toolCount: i } };
 }
 
 async function busyHost() {
@@ -132,12 +132,14 @@ it("keeps a slow guest joined through a flood of subagent progress, with each su
 		"newest progress never arrived",
 	);
 	const newest = new Map(
-		busFrames(received, TASK_SUBAGENT_PROGRESS_CHANNEL).map(data => [data.index, data.progress.toolCount]),
+		busFrames(received, TASK_SUBAGENT_PROGRESS_CHANNEL).map(data => [data.progress.id, data.progress.toolCount]),
 	);
 	expect(newest.size).toBe(SUBAGENTS);
-	// The last frame each subagent sent: the largest i below FLOOD with i % SUBAGENTS === index.
-	for (const [index, toolCount] of newest)
-		expect(toolCount).toBe(index + SUBAGENTS * Math.floor((FLOOD - 1 - index) / SUBAGENTS));
+	// The last frame each subagent sent: the largest i below FLOOD with i % SUBAGENTS === its number.
+	for (const [id, toolCount] of newest) {
+		const agent = Number(id.slice("agent-".length));
+		expect(toolCount).toBe(agent + SUBAGENTS * Math.floor((FLOOD - 1 - agent) / SUBAGENTS));
+	}
 	expect(busFrames(received, TASK_SUBAGENT_PROGRESS_CHANNEL).length).toBeLessThan(256);
 	expect(ended(seen)).toEqual([]);
 }, 20_000);
