@@ -65,6 +65,11 @@ const NEXT_FALLBACK = bundled("google", "gemini-2.5-flash");
 const CODEX = bundled("openai-codex", "gpt-5.6-sol");
 const CODEX_FALLBACK = bundled("openai", "gpt-5.5");
 const VERTEX_PRIMARY = bundled("google-vertex", "claude-opus-4-8@default");
+const OPENCODE_FLASH = bundled("opencode-go", "deepseek-v4-flash");
+const OPENCODE_PRO = bundled("opencode-go", "deepseek-v4-pro");
+const GATEWAY_GPT_5_6 = bundled("cloudflare-ai-gateway", "openai/gpt-5.6");
+const OPENROUTER_OPUS_FAST = bundled("openrouter", "anthropic/claude-opus-4.8-fast");
+const OPENROUTER_OPUS_BATCH = bundled("openrouter", "anthropic/claude-opus-4.8:batch");
 
 function chainOf(...models: Model[]): Record<string, string[]> {
 	return { default: models.map(formatModelString) };
@@ -244,6 +249,9 @@ describe("AgentSession fallback walk with usage-aware fallback", () => {
 		unregisterCustomApis(MOCK_API_SOURCE);
 		authStorage.keys.removeRuntime(CODEX.provider);
 		authStorage.keys.removeRuntime(VERTEX_PRIMARY.provider);
+		authStorage.keys.removeRuntime(OPENCODE_FLASH.provider);
+		authStorage.keys.removeRuntime(GATEWAY_GPT_5_6.provider);
+		authStorage.keys.removeRuntime(OPENROUTER_OPUS_FAST.provider);
 		await authStorage.credentials.remove(CODEX.provider);
 	});
 
@@ -690,15 +698,15 @@ describe("AgentSession fallback walk with usage-aware fallback", () => {
 			expect(last.errorMessage).toBe(`Retry budget exhausted after 2 retries: ${SERVER_ERROR}`);
 		});
 
-		it("retries the fallback in use with no switch, and pins it, when its cooldown ends while the walk reads the spent fallback's usage", async () => {
+		it("makes no switch, and pins the fallback in use, when its cooldown ends while the walk reads the spent fallback's usage", async () => {
 			// The primary's denial switches to the fallback, unpinned. The fallback
 			// then fails, which puts it in cooldown, and the walk reaches the spent
 			// fallback after it, whose own chain names the fallback in use. Its usage
 			// read outlasts every cooldown the failures set, so the step past it
-			// finds the fallback in use at the level it runs at: it makes no switch,
-			// pins that fallback's record and retries it at once, past the spent
-			// retry budget. `cooldown-expiry` restores only an unpinned fallback's
-			// primary, and the primary fails each time.
+			// finds the fallback in use at the level it runs at. That pick is no
+			// switch: the walk only pins that fallback's record, and the spent retry
+			// budget ends the turn. `cooldown-expiry` restores only an unpinned
+			// fallback's primary, so the next turn stays on the fallback.
 			let now = Date.now();
 			vi.spyOn(Date, "now").mockImplementation(() => now);
 			let spentReads = 0;
@@ -743,11 +751,15 @@ describe("AgentSession fallback walk with usage-aware fallback", () => {
 			await runTurn(run.session, "Fail on the primary");
 			failFallback = true;
 			await runTurn(run.session, "Fail on the fallback");
+
+			const failed = lastAssistant(run.session);
+			expect(failed.stopReason).toBe("error");
+			expect(failed.errorMessage).toBe(`Retry budget exhausted after 0 retries: ${SERVER_ERROR}`);
+
 			await runTurn(run.session, "Stay on the fallback after the cooldowns");
 
 			expect(requestedModels).toEqual([
 				formatModelString(PRIMARY),
-				formatModelString(FALLBACK),
 				formatModelString(FALLBACK),
 				formatModelString(FALLBACK),
 				formatModelString(FALLBACK),
@@ -920,9 +932,11 @@ describe("AgentSession fallback walk with usage-aware fallback", () => {
 
 		it("passes over the same model on another provider as a model that refused in the turn, to the model after it", async () => {
 			// The primary is Anthropic's Claude Opus 4.8, and Vertex's
-			// `claude-opus-4-8@default` is that model on another provider: the
-			// catalog gives both one vendor class, family and revision. The primary
-			// refuses, and the refusal walk moves to the fallback, which refuses too.
+			// `claude-opus-4-8@default` is that model on another provider: the two
+			// share the catalog's product key, which is the class, family and
+			// revision and the words of the served id that name the product. The
+			// primary refuses, and the refusal walk moves to the fallback, which
+			// refuses too.
 			// The fallback's own chain names the Vertex model, and then the next
 			// fallback: the walk passes over the Vertex model and answers from the
 			// next fallback.
@@ -2008,5 +2022,484 @@ describe("AgentSession fallback walk with usage-aware fallback", () => {
 			expect(modelOf(run.session)).toBe(formatModelString(NEXT_FALLBACK));
 			expect(lastAssistant(run.session).stopReason).toBe("stop");
 		});
+	});
+
+	describe("the step past a spent fallback that finds the model in use", () => {
+		/**
+		 * Runs one turn on the primary, whose first 12 requests fail with a server
+		 * error and whose later requests answer, so a walk that keeps retrying it
+		 * still ends. The default chain names only the fallback, and its own chain
+		 * names the primary. Each usage read of the fallback reads it as spent and
+		 * moves the clock one hour, past every cooldown a failure sets, so the
+		 * step past the spent fallback finds the primary, the model in use.
+		 */
+		async function runPrimaryNamedBySpentFallback(
+			maxRetries: number,
+			thinkingLevel?: Effort,
+		): Promise<{ run: WalkRun; requestedModels: string[] }> {
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			stubUsageReads({
+				[formatModelString(FALLBACK)]: async () => {
+					now += 60 * 60 * 1000;
+					return depletedRead("usage");
+				},
+			});
+			const requestedModels: string[] = [];
+			let primaryFailures = 0;
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: PRIMARY, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(formatModelString(model));
+					if (model.provider === PRIMARY.provider && model.id === PRIMARY.id && ++primaryFailures <= 12) {
+						return providerErrorStream(model, SERVER_ERROR, 500);
+					}
+					mock.push({ content: ["answered"] });
+					return mock.stream(model, context, options);
+				},
+			});
+			const run = startSession(
+				agent,
+				walkSettings(PRIMARY, {
+					"retry.maxRetries": maxRetries,
+					"retry.fallbackChains": {
+						default: [formatModelString(FALLBACK)],
+						[formatModelString(FALLBACK)]: [formatModelString(PRIMARY)],
+					},
+				}),
+			);
+			if (thinkingLevel !== undefined) run.session.setThinkingLevel(thinkingLevel);
+
+			await runTurn(run.session, "Fail on the primary");
+			return { run, requestedModels };
+		}
+
+		it("ends the turn on the spent retry budget when the step past a spent fallback finds the primary in use", async () => {
+			// The pick is the model in use, so it is no switch, and a budget of no
+			// retries ends the turn after the first request.
+			const { run, requestedModels } = await runPrimaryNamedBySpentFallback(0);
+
+			expect(requestedModels).toEqual([formatModelString(PRIMARY)]);
+			expect(run.fallbacks).toEqual([]);
+			expect(modelOf(run.session)).toBe(formatModelString(PRIMARY));
+			const last = lastAssistant(run.session);
+			expect(last.stopReason).toBe("error");
+			expect(last.errorMessage).toBe(`Retry budget exhausted after 0 retries: ${SERVER_ERROR}`);
+		});
+
+		it("ends the turn on the spent retry budget at the session's level when the spent fallback has no thinking", async () => {
+			// The session runs the primary at high. The spent fallback, gpt-4o-mini,
+			// has no thinking, and its own chain names the primary with no level. An
+			// entry that names the model in use with no level is no switch in the
+			// walk's own search, so it is no switch in the step past the spent
+			// fallback either: a budget of no retries ends the turn after the first
+			// request, and the session keeps its level.
+			const { run, requestedModels } = await runPrimaryNamedBySpentFallback(0, Effort.High);
+
+			expect(requestedModels).toEqual([formatModelString(PRIMARY)]);
+			expect(run.fallbacks).toEqual([]);
+			expect(run.session.thinkingLevel).toBe(Effort.High);
+			const last = lastAssistant(run.session);
+			expect(last.stopReason).toBe("error");
+			expect(last.errorMessage).toBe(`Retry budget exhausted after 0 retries: ${SERVER_ERROR}`);
+		});
+
+		it("retries the primary only as often as the retry budget allows when the step past a spent fallback finds it", async () => {
+			// Each failure's walk finds the primary again, which is no switch, so
+			// the failures spend the budget: the first request, then the two
+			// retries it allows.
+			const { run, requestedModels } = await runPrimaryNamedBySpentFallback(2);
+
+			expect(requestedModels).toEqual([
+				formatModelString(PRIMARY),
+				formatModelString(PRIMARY),
+				formatModelString(PRIMARY),
+			]);
+			expect(run.fallbacks).toEqual([]);
+			expect(modelOf(run.session)).toBe(formatModelString(PRIMARY));
+			const last = lastAssistant(run.session);
+			expect(last.stopReason).toBe("error");
+			expect(last.errorMessage).toBe(`Retry budget exhausted after 2 retries: ${SERVER_ERROR}`);
+		});
+
+		it("switches to another model that the spent fallback's own chain names, with a fresh retry budget", async () => {
+			// The pick is another model, so it is a switch: the retry on it goes
+			// ahead although the primary's budget of no retries is spent.
+			stubUsageReads({ [formatModelString(FALLBACK)]: depletedRead("usage") });
+			const requestedModels: string[] = [];
+			const run = startSession(
+				createWalkAgent(PRIMARY, requestedModels, model => providerErrorStream(model, SERVER_ERROR, 500)),
+				walkSettings(PRIMARY, {
+					"retry.maxRetries": 0,
+					"retry.fallbackChains": {
+						default: [formatModelString(FALLBACK)],
+						[formatModelString(FALLBACK)]: [formatModelString(NEXT_FALLBACK)],
+					},
+				}),
+			);
+
+			await runTurn(run.session, "Fail on the primary");
+
+			expect(requestedModels).toEqual([formatModelString(PRIMARY), formatModelString(NEXT_FALLBACK)]);
+			expect(run.fallbacks).toEqual([formatModelString(NEXT_FALLBACK)]);
+			expect(modelOf(run.session)).toBe(formatModelString(NEXT_FALLBACK));
+			expect(lastAssistant(run.session).stopReason).toBe("stop");
+		});
+	});
+
+	describe("a long usage limit whose walk reaches a spent fallback", () => {
+		// OpenCode Go's weekly limit asks for a wait past `retry.maxDelayMs`, so
+		// the walk after it passes over every OpenCode Go model and wraps around
+		// its chain.
+		const WEEKLY_LIMIT_ERROR =
+			"429 Weekly usage limit reached. Resets in 55min. type=GoUsageLimitError retry-after-ms=3242000";
+		const RESERVE: ModelUsageHealth = {
+			state: "reserve",
+			accounts: [{ credentialId: 1, credentialType: "oauth", state: "reserve", remainingFraction: 0.05 }],
+		};
+		const HEALTHY: ModelUsageHealth = { state: "healthy", accounts: [] };
+
+		beforeEach(() => {
+			authStorage.keys.setRuntime(OPENCODE_FLASH.provider, `${OPENCODE_FLASH.provider}-test-key`);
+		});
+
+		/**
+		 * An agent on deepseek-v4-flash that records each requested `provider/id`.
+		 * Every OpenCode Go request fails with the weekly limit; every other model
+		 * answers.
+		 */
+		function createWeeklyLimitAgent(requestedModels: string[]): Agent {
+			const mock = createMockModel();
+			return new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: OPENCODE_FLASH, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(formatModelString(model));
+					mock.push(
+						model.provider === OPENCODE_FLASH.provider
+							? { throw: WEEKLY_LIMIT_ERROR }
+							: { content: ["answered"] },
+					);
+					return mock.stream(model, context, options);
+				},
+			});
+		}
+
+		/** Settings on `primary` under which the weekly limit's wait is past `retry.maxDelayMs`. */
+		function weeklyLimitSettings(primary: Model, values: Readonly<Record<string, unknown>>): Settings {
+			return walkSettings(primary, { "retry.maxDelayMs": 300_000, "retry.maxRetries": 3, ...values });
+		}
+
+		it("passes over the provider of a long usage limit in the step past a spent fallback, to the model after it", async () => {
+			// The default chain names only the spent fallback, whose own chain names
+			// deepseek-v4-pro and then the next fallback. The step past the spent
+			// fallback keeps the walk's exclusion of OpenCode Go.
+			stubUsageReads({ [formatModelString(FALLBACK)]: depletedRead("usage") });
+			const requestedModels: string[] = [];
+			const run = startSession(
+				createWeeklyLimitAgent(requestedModels),
+				weeklyLimitSettings(OPENCODE_FLASH, {
+					"retry.fallbackChains": {
+						default: [formatModelString(FALLBACK)],
+						[formatModelString(FALLBACK)]: [formatModelString(OPENCODE_PRO), formatModelString(NEXT_FALLBACK)],
+					},
+				}),
+			);
+
+			await runTurn(run.session, "Hit the weekly usage limit");
+
+			expect(requestedModels).toEqual([formatModelString(OPENCODE_FLASH), formatModelString(NEXT_FALLBACK)]);
+			expect(run.fallbacks).toEqual([formatModelString(NEXT_FALLBACK)]);
+			expect(modelOf(run.session)).toBe(formatModelString(NEXT_FALLBACK));
+			expect(lastAssistant(run.session).stopReason).toBe("stop");
+		});
+
+		it("ends the turn on a long usage limit when the spent fallback's own chain names only the provider of that limit", async () => {
+			// The spent fallback's own chain names only deepseek-v4-pro, which the
+			// walk's exclusion passes over, so no candidate passes and the turn ends
+			// on the limit.
+			stubUsageReads({ [formatModelString(FALLBACK)]: depletedRead("usage") });
+			const requestedModels: string[] = [];
+			const run = startSession(
+				createWeeklyLimitAgent(requestedModels),
+				weeklyLimitSettings(OPENCODE_FLASH, {
+					"retry.fallbackChains": {
+						default: [formatModelString(FALLBACK)],
+						[formatModelString(FALLBACK)]: [formatModelString(OPENCODE_PRO)],
+					},
+				}),
+			);
+
+			await runTurn(run.session, "Hit the weekly usage limit");
+
+			expect(requestedModels).toEqual([formatModelString(OPENCODE_FLASH)]);
+			expect(run.fallbacks).toEqual([]);
+			expect(modelOf(run.session)).toBe(formatModelString(OPENCODE_FLASH));
+			const last = lastAssistant(run.session);
+			expect(last.stopReason).toBe("error");
+			expect(last.errorMessage).toBe(WEEKLY_LIMIT_ERROR);
+		});
+
+		it("keeps the provider of a long usage limit out of the check before the call that the walk's switch leads to", async () => {
+			// The spent fallback's own chain names Claude Sonnet 4.5, which is at
+			// the reserve, and its own chain names deepseek-v4-pro and then the next
+			// fallback. The step past the spent fallback takes the reserve model.
+			// The check before its call moves off it under the auto reserve policy,
+			// and that check also passes over OpenCode Go.
+			stubUsageReads({
+				[formatModelString(FALLBACK)]: depletedRead("usage"),
+				[formatModelString(PRIMARY)]: RESERVE,
+			});
+			const requestedModels: string[] = [];
+			const run = startSession(
+				createWeeklyLimitAgent(requestedModels),
+				weeklyLimitSettings(OPENCODE_FLASH, {
+					"retry.usageReservePolicy": "auto",
+					"retry.fallbackChains": {
+						default: [formatModelString(FALLBACK)],
+						[formatModelString(FALLBACK)]: [formatModelString(PRIMARY)],
+						[formatModelString(PRIMARY)]: [formatModelString(OPENCODE_PRO), formatModelString(NEXT_FALLBACK)],
+					},
+				}),
+			);
+
+			await runTurn(run.session, "Hit the weekly usage limit");
+
+			expect(requestedModels).toEqual([formatModelString(OPENCODE_FLASH), formatModelString(NEXT_FALLBACK)]);
+			expect(run.fallbacks).toEqual([formatModelString(PRIMARY), formatModelString(NEXT_FALLBACK)]);
+			expect(modelOf(run.session)).toBe(formatModelString(NEXT_FALLBACK));
+			expect(lastAssistant(run.session).stopReason).toBe("stop");
+		});
+
+		it("lets the check before a later call switch to the provider of a long usage limit", async () => {
+			// The first turn runs as in the test above. In the second turn the next
+			// fallback is at the reserve, and its own chain names deepseek-v4-pro.
+			// The check before that call searches the pinned default chain first:
+			// deepseek-v4-flash is in its cooldown and the fallback is spent. Then
+			// it searches the next fallback's own chain. The exclusion bound only
+			// the check before the first call after the walk's switch, so this
+			// check switches to deepseek-v4-pro. That request hits the weekly limit
+			// too. The walk after it switches to Claude Sonnet 4.5, and the check
+			// before that call passes over deepseek-v4-pro and the next fallback.
+			let turn = 1;
+			stubUsageReads({
+				[formatModelString(FALLBACK)]: depletedRead("usage"),
+				[formatModelString(PRIMARY)]: RESERVE,
+				[formatModelString(NEXT_FALLBACK)]: async () => (turn === 1 ? HEALTHY : RESERVE),
+			});
+			const requestedModels: string[] = [];
+			const run = startSession(
+				createWeeklyLimitAgent(requestedModels),
+				weeklyLimitSettings(OPENCODE_FLASH, {
+					"retry.usageReservePolicy": "auto",
+					"retry.fallbackChains": {
+						default: [formatModelString(FALLBACK)],
+						[formatModelString(FALLBACK)]: [formatModelString(PRIMARY)],
+						[formatModelString(PRIMARY)]: [formatModelString(OPENCODE_PRO), formatModelString(NEXT_FALLBACK)],
+						[formatModelString(NEXT_FALLBACK)]: [formatModelString(OPENCODE_PRO)],
+					},
+				}),
+			);
+
+			await runTurn(run.session, "Hit the weekly usage limit");
+			turn = 2;
+			await runTurn(run.session, "Reach the next fallback's reserve");
+
+			expect(requestedModels).toEqual([
+				formatModelString(OPENCODE_FLASH),
+				formatModelString(NEXT_FALLBACK),
+				formatModelString(OPENCODE_PRO),
+				formatModelString(PRIMARY),
+			]);
+			expect(run.fallbacks).toEqual([
+				formatModelString(PRIMARY),
+				formatModelString(NEXT_FALLBACK),
+				formatModelString(OPENCODE_PRO),
+				formatModelString(PRIMARY),
+			]);
+			expect(modelOf(run.session)).toBe(formatModelString(PRIMARY));
+			expect(lastAssistant(run.session).stopReason).toBe("stop");
+		});
+
+		it("wraps around the chain in the step past a spent fallback after a long usage limit", async () => {
+			// The default role's model is the next fallback, and its chain names
+			// Claude Sonnet 4.5, deepseek-v4-flash and the spent fallback, which has
+			// no own chain. The session runs on deepseek-v4-flash. The walk wraps
+			// around the chain after the long limit, and so does the step past the
+			// spent fallback, so the role's model answers.
+			stubUsageReads({ [formatModelString(FALLBACK)]: depletedRead("usage") });
+			const requestedModels: string[] = [];
+			const run = startSession(
+				createWeeklyLimitAgent(requestedModels),
+				weeklyLimitSettings(NEXT_FALLBACK, { "retry.fallbackChains": chainOf(PRIMARY, OPENCODE_FLASH, FALLBACK) }),
+			);
+
+			await runTurn(run.session, "Hit the weekly usage limit");
+
+			expect(requestedModels).toEqual([formatModelString(OPENCODE_FLASH), formatModelString(NEXT_FALLBACK)]);
+			expect(run.fallbacks).toEqual([formatModelString(NEXT_FALLBACK)]);
+			expect(modelOf(run.session)).toBe(formatModelString(NEXT_FALLBACK));
+			expect(lastAssistant(run.session).stopReason).toBe("stop");
+		});
+	});
+
+	describe("a refusal and the models that share its catalog class, family and revision", () => {
+		const GPT_5_6 = bundled("openai", "gpt-5.6");
+		const OPUS = bundled("anthropic", "claude-opus-4-8");
+
+		for (const product of [bundled("openai", "gpt-5.6-sol"), bundled("openai", "gpt-5.6-luna")]) {
+			it(`steps a refusal of gpt-5.6 to ${product.id}, another product of the same class, family and revision`, async () => {
+				// The catalog gives both models one class, family and revision, but
+				// they are different products, so a refusal of one does not pass
+				// over the other.
+				const { class: vendor, family, revision } = GPT_5_6.identity;
+				expect(product.identity).toMatchObject({ class: vendor, family, revision });
+				stubUsageReads({});
+				const requestedModels: string[] = [];
+				const run = startSession(
+					createRefusalAgent(GPT_5_6, requestedModels, [GPT_5_6]),
+					walkSettings(GPT_5_6, { "retry.maxRetries": 1, "retry.fallbackChains": chainOf(product) }),
+				);
+
+				await runTurn(run.session, "Recover from the refusal");
+
+				expect(requestedModels).toEqual([formatModelString(GPT_5_6), formatModelString(product)]);
+				expect(run.fallbacks).toEqual([formatModelString(product)]);
+				expect(modelOf(run.session)).toBe(formatModelString(product));
+				expect(lastAssistant(run.session).stopReason).toBe("stop");
+			});
+		}
+
+		it("passes over the same model on a gateway as a model that refused in the turn, to the model after it", async () => {
+			// The gateway serves gpt-5.6 itself. It has a key, so only the refusal
+			// can pass it over.
+			authStorage.keys.setRuntime(GATEWAY_GPT_5_6.provider, `${GATEWAY_GPT_5_6.provider}-test-key`);
+			expect(modelRegistry.hasConfiguredAuth(GATEWAY_GPT_5_6)).toBe(true);
+			stubUsageReads({});
+			const requestedModels: string[] = [];
+			const run = startSession(
+				createRefusalAgent(GPT_5_6, requestedModels, [GPT_5_6]),
+				walkSettings(GPT_5_6, {
+					"retry.maxRetries": 1,
+					"retry.fallbackChains": chainOf(GATEWAY_GPT_5_6, NEXT_FALLBACK),
+				}),
+			);
+
+			await runTurn(run.session, "Recover from the refusal");
+
+			expect(requestedModels).toEqual([formatModelString(GPT_5_6), formatModelString(NEXT_FALLBACK)]);
+			expect(run.fallbacks).toEqual([formatModelString(NEXT_FALLBACK)]);
+			expect(modelOf(run.session)).toBe(formatModelString(NEXT_FALLBACK));
+			expect(lastAssistant(run.session).stopReason).toBe("stop");
+		});
+
+		it("passes over the routes of a model that refused in the turn, to the model after it", async () => {
+			// OpenRouter's fast and batch routes of Claude Opus 4.8 serve the model
+			// that refused. Both have a key, so only the refusal can pass them over.
+			authStorage.keys.setRuntime(OPENROUTER_OPUS_FAST.provider, `${OPENROUTER_OPUS_FAST.provider}-test-key`);
+			expect(modelRegistry.hasConfiguredAuth(OPENROUTER_OPUS_FAST)).toBe(true);
+			expect(modelRegistry.hasConfiguredAuth(OPENROUTER_OPUS_BATCH)).toBe(true);
+			stubUsageReads({});
+			const requestedModels: string[] = [];
+			const run = startSession(
+				createRefusalAgent(OPUS, requestedModels, [OPUS]),
+				walkSettings(OPUS, {
+					"retry.maxRetries": 1,
+					"retry.fallbackChains": chainOf(OPENROUTER_OPUS_FAST, OPENROUTER_OPUS_BATCH, NEXT_FALLBACK),
+				}),
+			);
+
+			await runTurn(run.session, "Recover from the refusal");
+
+			expect(requestedModels).toEqual([formatModelString(OPUS), formatModelString(NEXT_FALLBACK)]);
+			expect(run.fallbacks).toEqual([formatModelString(NEXT_FALLBACK)]);
+			expect(modelOf(run.session)).toBe(formatModelString(NEXT_FALLBACK));
+			expect(lastAssistant(run.session).stopReason).toBe("stop");
+		});
+
+		// OpenAI sends gpt-5.6-luna-pro upstream as gpt-5.6-luna, so its served id
+		// names the base model, while OpenRouter sends the same model under the
+		// row's own id.
+		const LUNA = bundled("openai", "gpt-5.6-luna");
+		const LUNA_PRO = bundled("openai", "gpt-5.6-luna-pro");
+		const OPENROUTER_LUNA_PRO = bundled("openrouter", "openai/gpt-5.6-luna-pro");
+
+		for (const [refusing, other] of [
+			[LUNA_PRO, OPENROUTER_LUNA_PRO],
+			[OPENROUTER_LUNA_PRO, LUNA_PRO],
+		] as const) {
+			it(`passes over ${formatModelString(other)} after ${formatModelString(refusing)} refuses, to the model after it`, async () => {
+				// The two rows are one model. The chain entry has a key, so only the
+				// refusal can pass it over.
+				expect(LUNA_PRO.requestModelId).toBe(LUNA.id);
+				expect(OPENROUTER_LUNA_PRO.requestModelId).toBeUndefined();
+				authStorage.keys.setRuntime(OPENROUTER_LUNA_PRO.provider, `${OPENROUTER_LUNA_PRO.provider}-test-key`);
+				expect(modelRegistry.hasConfiguredAuth(other)).toBe(true);
+				stubUsageReads({});
+				const requestedModels: string[] = [];
+				const run = startSession(
+					createRefusalAgent(refusing, requestedModels, [refusing]),
+					walkSettings(refusing, {
+						"retry.maxRetries": 1,
+						"retry.fallbackChains": chainOf(other, NEXT_FALLBACK),
+					}),
+				);
+
+				await runTurn(run.session, "Recover from the refusal");
+
+				expect(requestedModels).toEqual([formatModelString(refusing), formatModelString(NEXT_FALLBACK)]);
+				expect(run.fallbacks).toEqual([formatModelString(NEXT_FALLBACK)]);
+				expect(modelOf(run.session)).toBe(formatModelString(NEXT_FALLBACK));
+				expect(lastAssistant(run.session).stopReason).toBe("stop");
+			});
+		}
+
+		it("passes over the model that served a refused row's request, to the model after it", async () => {
+			// OpenAI served the refused request of gpt-5.6-luna-pro with gpt-5.6-luna.
+			expect(LUNA_PRO.requestModelId).toBe(LUNA.id);
+			expect(modelRegistry.hasConfiguredAuth(LUNA)).toBe(true);
+			stubUsageReads({});
+			const requestedModels: string[] = [];
+			const run = startSession(
+				createRefusalAgent(LUNA_PRO, requestedModels, [LUNA_PRO]),
+				walkSettings(LUNA_PRO, { "retry.maxRetries": 1, "retry.fallbackChains": chainOf(LUNA, NEXT_FALLBACK) }),
+			);
+
+			await runTurn(run.session, "Recover from the refusal");
+
+			expect(requestedModels).toEqual([formatModelString(LUNA_PRO), formatModelString(NEXT_FALLBACK)]);
+			expect(run.fallbacks).toEqual([formatModelString(NEXT_FALLBACK)]);
+			expect(modelOf(run.session)).toBe(formatModelString(NEXT_FALLBACK));
+			expect(lastAssistant(run.session).stopReason).toBe("stop");
+		});
+
+		const CODEX_5_1 = bundled("openai", "gpt-5.1-codex");
+		const CODEX_5_1_MAX = bundled("openai", "gpt-5.1-codex-max");
+
+		for (const [refusing, product] of [
+			[CODEX_5_1_MAX, CODEX_5_1],
+			[CODEX_5_1, CODEX_5_1_MAX],
+		] as const) {
+			it(`steps a refusal of ${refusing.id} to ${product.id}, another product`, async () => {
+				// The catalog's logical id of GPT-5.1 Codex Max is gpt-5.1-codex, but
+				// the two are different products, so a refusal of one does not pass
+				// over the other.
+				stubUsageReads({});
+				const requestedModels: string[] = [];
+				const run = startSession(
+					createRefusalAgent(refusing, requestedModels, [refusing]),
+					walkSettings(refusing, { "retry.maxRetries": 1, "retry.fallbackChains": chainOf(product) }),
+				);
+
+				await runTurn(run.session, "Recover from the refusal");
+
+				expect(requestedModels).toEqual([formatModelString(refusing), formatModelString(product)]);
+				expect(run.fallbacks).toEqual([formatModelString(product)]);
+				expect(modelOf(run.session)).toBe(formatModelString(product));
+				expect(lastAssistant(run.session).stopReason).toBe("stop");
+			});
+		}
 	});
 });

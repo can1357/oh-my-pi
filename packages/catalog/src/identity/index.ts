@@ -5,4 +5,5 @@ export * from "./bundled";
 export * from "./dialect";
 export * from "./id";
 export * from "./priority";
+export * from "./product";
 export * from "./reference";
