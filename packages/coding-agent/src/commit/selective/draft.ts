@@ -101,10 +101,17 @@ interface FileChange {
 	headMode: string | null;
 	/** Git mode in the worktree; `null` when the file is deleted. */
 	mode: string | null;
-	/** Set exactly when `attribution` is absent: the file selects whole. */
+	/** Set exactly when the change has no line attribution: the file selects whole. */
 	whole?: WholeReason;
-	/** Line attribution of the content change. */
+	/**
+	 * Line attribution of the content change, kept only when recorded edits shaped it. A file no
+	 * usable record explains is one unrecorded step from `head` to `work`, which
+	 * {@link lineAttribution} rebuilds on use: kept for every untracked file of a worktree, its
+	 * per-line objects cost tens of times the files' size.
+	 */
 	attribution?: Attribution;
+	/** Line counts of every change op; zero for a whole-file change. */
+	counts: Counts;
 	classification?: Classification;
 	selected: Set<number>;
 	wholeSelected: boolean;
@@ -430,6 +437,7 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 	}
 	files.sort((a, b) => a.path.localeCompare(b.path));
 	for (const file of files) {
+		// A file without kept attribution has only unrecorded lines, all `other`: nothing to select.
 		if (file.attribution) {
 			file.classification = classify(file.attribution, scope);
 			for (const op of file.attribution.ops) {
@@ -493,6 +501,7 @@ async function loadFile(
 			selected: new Set<number>(),
 			wholeSelected: false,
 			editors: [],
+			counts: { added: 0, removed: 0 },
 		};
 	}
 	let workBytes: Uint8Array | null = null;
@@ -521,6 +530,7 @@ async function loadFile(
 		selected: new Set<number>(),
 		wholeSelected: false,
 		editors: [...new Set(records.map(record => record.agent))],
+		counts: { added: 0, removed: 0 },
 	};
 	const whole = (reason: WholeReason): FileChange => ({
 		...base,
@@ -559,13 +569,16 @@ async function loadFile(
 				gapHint: snapshot.gapHint,
 			}));
 			const steps = historySteps(headLines, edits ?? [], workLines, lastCall?.agent);
-			return {
+			const attribution = attribute(headLines, steps, workLines);
+			const change: FileChange = {
 				...base,
 				head: headText,
 				work: workText,
-				attribution: attribute(headLines, steps, workLines),
 				hint: edits === undefined ? lastCall : undefined,
 			};
+			change.counts = countOps(change, attribution);
+			if (edits !== undefined) change.attribution = attribution;
+			return change;
 		},
 	};
 }
@@ -590,11 +603,11 @@ interface Counts {
 }
 
 /**
- * Line counts of `file`'s ops (all of them, or `ops`). A created or deleted file's final newline
- * is an op of its own (an empty last line, see `toLines`) and is not counted as a line.
+ * Line counts of `attribution`'s ops in `file` (all of them, or `ops`). A created or deleted file's
+ * final newline is an op of its own (an empty last line, see `toLines`) and is not counted as a line.
  */
-function countOps(file: FileChange, ops: Iterable<ChangeOp> = file.attribution?.ops ?? []): Counts {
-	const last = file.attribution?.ops.at(-1);
+function countOps(file: FileChange, attribution: Attribution, ops: Iterable<ChangeOp> = attribution.ops): Counts {
+	const last = attribution.ops.at(-1);
 	const newline = (file.head === null || file.work === null) && last?.text === "" ? last : undefined;
 	const counts = { added: 0, removed: 0 };
 	for (const op of ops) {
@@ -603,6 +616,14 @@ function countOps(file: FileChange, ops: Iterable<ChangeOp> = file.attribution?.
 		else counts.removed++;
 	}
 	return counts;
+}
+
+/** Line attribution of a file that is not whole, rebuilt when not kept (see {@link FileChange.attribution}). */
+function lineAttribution(file: FileChange): Attribution {
+	if (file.attribution) return file.attribution;
+	const head = toLines(file.head);
+	const work = toLines(file.work);
+	return attribute(head, historySteps(head, [], work, file.hint?.agent), work);
 }
 
 /** ` mode 100644 → 100755` when a file that exists on both sides changes mode; empty otherwise. */
@@ -671,7 +692,7 @@ export class Draft {
 	selection(): SelectedChange[] {
 		const changes: SelectedChange[] = [];
 		for (const file of this.#files) {
-			if (!file.attribution) {
+			if (file.whole) {
 				if (!file.wholeSelected) continue;
 				if (file.whole === "gitlink") {
 					changes.push({
@@ -686,7 +707,7 @@ export class Draft {
 				continue;
 			}
 			if (file.selected.size === 0) continue;
-			const content = fromLines(buildContent(file.attribution, file.selected));
+			const content = fromLines(buildContent(lineAttribution(file), file.selected));
 			// A partly reverted deletion keeps the file, with its HEAD mode.
 			const mode = file.mode ?? file.headMode;
 			const before = file.head === null || file.headMode === null ? null : { text: file.head, mode: file.headMode };
@@ -769,13 +790,13 @@ export class Draft {
 		units: readonly string[] | undefined,
 		pattern: RegExp | undefined,
 	): ChangeOp[] | "whole" {
-		if (!file.attribution) {
+		if (file.whole) {
 			if (units?.length && !units.every(unit => unit === "1" || unit === "1a")) {
 				throw new Error(`${file.path} is a whole-file change; it has only unit 1.`);
 			}
 			return "whole";
 		}
-		const { hunks } = file.attribution;
+		const { hunks } = lineAttribution(file);
 		const ops: ChangeOp[] = [];
 		const wanted = units?.length ? units : undefined;
 		const known = new Set<string>();
@@ -867,13 +888,16 @@ export class Draft {
 
 	#describeFile(file: FileChange): { selected?: string; review: string[]; outOfScopeAgents: Set<string> } {
 		const outOfScopeAgents = new Set(file.editors.filter(agent => !this.scope.has(agent)));
-		if (!file.attribution) {
+		if (file.whole) {
 			const label = wholeLabel(file);
 			if (file.wholeSelected) return { selected: `  ✓ ${file.path}  whole ${label}`, review: [], outOfScopeAgents };
 			const reason = this.#wholeReviewReason(file);
 			return { review: reason ? [`  ? ${file.path}  whole ${label}; ${reason}`] : [], outOfScopeAgents };
 		}
-		const { ops, hunks } = file.attribution;
+		// Unkept attribution has no review or out-of-scope lines (see createDraft): rebuild it only for a selection.
+		const attribution = file.attribution ?? (file.selected.size > 0 ? lineAttribution(file) : undefined);
+		const ops = attribution?.ops ?? [];
+		const hunks = attribution?.hunks ?? [];
 		const status = file.classification?.status ?? [];
 		const chosen = ops.filter(op => file.selected.has(op.id));
 		const review: string[] = [];
@@ -890,20 +914,20 @@ export class Draft {
 		});
 		if (chosen.length === 0 && file.hint && review.length === 0) {
 			review.push(
-				`  ? ${file.path}  ${formatCounts(countOps(file))}${modeChange(file)}; no edit record; ${describeHint(file, file.hint)}`,
+				`  ? ${file.path}  ${formatCounts(file.counts)}${modeChange(file)}; no edit record; ${describeHint(file, file.hint)}`,
 			);
 		}
 		for (const op of ops) {
 			if (status[op.id] === "other" && !op.by.startsWith("~") && !this.scope.has(op.by)) outOfScopeAgents.add(op.by);
 		}
-		if (chosen.length === 0) return { review, outOfScopeAgents };
+		if (!attribution || chosen.length === 0) return { review, outOfScopeAgents };
 		const leftOut = ops.filter(op => !file.selected.has(op.id));
 		const owners = [...new Set(chosen.map(op => (op.by.startsWith("~") && op.hint ? op.hint : op.by)))];
 		const mark = leftOut.length === 0 ? "✓" : "◐";
-		let line = `  ${mark} ${file.path}  ${formatCounts(countOps(file, chosen))}${modeChange(file)}`;
+		let line = `  ${mark} ${file.path}  ${formatCounts(countOps(file, attribution, chosen))}${modeChange(file)}`;
 		if (leftOut.length > 0) {
 			const others = [...new Set(leftOut.map(op => actorName(op.by)))];
-			line += ` of ${formatCounts(countOps(file))}; left out: ${others.join(", ")}`;
+			line += ` of ${formatCounts(file.counts)}; left out: ${others.join(", ")}`;
 		}
 		return { selected: `${line}  [${owners.map(actorName).join(", ")}]`, review, outOfScopeAgents };
 	}
@@ -921,7 +945,7 @@ export class Draft {
 	/** Partially selected, or listed under Review in {@link summary}. */
 	#needsAttention(file: FileChange): boolean {
 		const selected = file.selected.size;
-		if (file.attribution && selected > 0 && selected < file.attribution.ops.length) return true;
+		if (selected > 0 && !file.whole && selected < lineAttribution(file).ops.length) return true;
 		return this.#describeFile(file).review.length > 0;
 	}
 
@@ -934,16 +958,17 @@ export class Draft {
 	}
 
 	#renderFile(file: FileChange): string {
-		if (!file.attribution) {
+		if (file.whole) {
 			const reason = file.wholeSelected ? undefined : this.#wholeReviewReason(file);
 			const mark = file.wholeSelected ? "✓" : reason ? "?" : "·";
 			return `${file.path}  whole-file change (${wholeLabel(file)})${reason ? `; ${reason}` : ""}\n  1 ${mark} whole file`;
 		}
-		const { ops, hunks } = file.attribution;
+		const attribution = lineAttribution(file);
+		const { ops, hunks } = attribution;
 		const status = file.classification?.status ?? [];
 		const chosen = ops.filter(op => file.selected.has(op.id));
 		const lines = [
-			`${file.path}  ${formatCounts(countOps(file, chosen))} of ${formatCounts(countOps(file))} selected${modeChange(file)}`,
+			`${file.path}  ${formatCounts(countOps(file, attribution, chosen))} of ${formatCounts(file.counts)} selected${modeChange(file)}`,
 		];
 		hunks.forEach((hunk, hunkIndex) => {
 			const headRange = `${hunk.headStart + (hunk.headCount > 0 ? 1 : 0)},${hunk.headCount}`;

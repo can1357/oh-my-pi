@@ -141,8 +141,10 @@ export class JobsSheet implements Component {
 	 */
 	#held: { job: JobsPanelJob; detail: JobsPanelDetail | undefined; agents: readonly JobTreeAgent[] } | undefined;
 
-	constructor(source: JobsSheetSource) {
+	/** `selected`: the job to open on, when it is listed; else the first, as always. */
+	constructor(source: JobsSheetSource, options: { selected?: string } = {}) {
 		this.#source = source;
+		this.#selectedId = options.selected;
 	}
 
 	describe(_cx: DescribeContext): NativeNode {

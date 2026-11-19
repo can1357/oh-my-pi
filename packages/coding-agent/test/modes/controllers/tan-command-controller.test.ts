@@ -20,6 +20,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as nameGenerator from "@oh-my-pi/pi-coding-agent/task/name-generator";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 interface CapturedJobRunContext {
@@ -119,6 +120,8 @@ function createContext(overrides?: {
 	preparedExtensions?: unknown;
 	effectiveExtensionRoots?: unknown;
 	extensionPaths?: unknown;
+	messages?: AgentMessage[];
+	generateTitle?: (context: string) => Promise<string | null>;
 }) {
 	const tempDir = TempDir.createSync("@omp-tan-controller-");
 	harnessTempDirs.push(tempDir);
@@ -136,6 +139,7 @@ function createContext(overrides?: {
 			return overrides?.register ? overrides.register(run, options) : "job-123";
 		},
 	);
+	const generateTitle = vi.fn(overrides?.generateTitle ?? (async (_context: string) => null));
 	const session = {
 		agent: { promptCacheKey: overrides?.parentPromptCacheKey },
 		model: overrides?.model ?? model,
@@ -151,6 +155,8 @@ function createContext(overrides?: {
 		effectiveExtensionRoots: overrides?.effectiveExtensionRoots,
 		extensionPaths: overrides?.extensionPaths,
 		getAgentId: vi.fn(() => overrides?.agentId),
+		messages: overrides?.messages ?? [],
+		generateTitle,
 		sendCustomMessage: vi.fn(async () => {
 			sequence.push("sendCustomMessage");
 		}),
@@ -191,6 +197,7 @@ function createContext(overrides?: {
 		getArtifactsDir,
 		getSessionId,
 		register,
+		generateTitle,
 		sequence,
 		get capturedRun() {
 			return capturedRun;
@@ -244,6 +251,7 @@ describe("TanCommandController", () => {
 			modelRegistry: new ModelRegistry(auth, path.join(harness.tempDir.path(), "models.yml")),
 			asyncJobManager,
 		});
+		vi.spyOn(session, "generateTitle").mockResolvedValue(null);
 		const toolStarted = Promise.withResolvers<void>();
 		const releaseTool = Promise.withResolvers<void>();
 		const schema = type({});
@@ -293,6 +301,8 @@ describe("TanCommandController", () => {
 
 		expect(await controller.start("write the release note")).toBe(true);
 
+		const agentId = harness.capturedOptions?.agentId;
+		const sessionFile = path.join(harness.parentArtifactsDir, `${agentId}.jsonl`);
 		expect(forkSpy).toHaveBeenCalledWith(
 			harness.parentFile,
 			harness.tempDir.path(),
@@ -301,14 +311,14 @@ describe("TanCommandController", () => {
 			{
 				copyArtifacts: false,
 				suppressBreadcrumb: true,
-				sessionFile: expect.stringMatching(/Tan-.+\.jsonl$/),
+				sessionFile,
 				resetInheritedCost: true,
 				repairInterruptedTail: true,
 			},
 		);
 		expect(harness.register).toHaveBeenCalledWith("task", "/tan write the release note", expect.any(Function), {
 			ownerId: MAIN_AGENT_ID,
-			agentId: expect.stringMatching(/^Tan-/) as unknown as string,
+			agentId: expect.any(String) as unknown as string,
 			request: "write the release note",
 		});
 		expect(harness.capturedOptions?.ownerId).toBe(MAIN_AGENT_ID);
@@ -319,12 +329,66 @@ describe("TanCommandController", () => {
 				details: {
 					jobId: "job-123",
 					work: "write the release note",
-					sessionFile: expect.stringMatching(/Tan-.+\.jsonl$/),
+					sessionFile,
 				},
 			}),
 			{ triggerTurn: false, deliverAs: "steer" },
 		);
 		expect(harness.ctx.showStatus).toHaveBeenCalledWith("Dispatched background tan job-123");
+	});
+
+	it("names the clone from the small model's title of its request and the parent's latest turns", async () => {
+		const harness = createContext({
+			messages: [
+				{ role: "user", content: "add jittered backoff to RetryPolicy", attribution: "user", timestamp: 1 },
+				assistantText("RetryPolicy now backs off with full jitter."),
+			],
+			generateTitle: async () => "Uploader retry-backoff",
+		});
+		const forkSpy = vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+
+		expect(await new TanCommandController(harness.ctx).start("do the same for the uploader")).toBe(true);
+
+		// Parent turns lead, oldest first; the tan's request is the final user turn.
+		const [context] = harness.generateTitle.mock.calls[0] ?? [];
+		expect(context).toMatch(
+			/jittered backoff to RetryPolicy[\s\S]*backs off with full jitter[\s\S]*<user>\ndo the same for the uploader\n<\/user>\n<\/chat>$/,
+		);
+		expect(harness.capturedOptions?.agentId).toBe("UploaderRetryBackoff");
+		expect(forkSpy.mock.calls[0]?.[4]?.sessionFile).toBe(
+			path.join(harness.parentArtifactsDir, "UploaderRetryBackoff.jsonl"),
+		);
+	});
+
+	it("leaves out parent turns that do not fit the name budget beside the request", async () => {
+		const harness = createContext({
+			messages: [
+				{ role: "user", content: "add jittered backoff to RetryPolicy", attribution: "user", timestamp: 1 },
+			],
+		});
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const work = `audit the uploader ${"carefully ".repeat(195)}`.trim();
+
+		expect(await new TanCommandController(harness.ctx).start(work)).toBe(true);
+
+		const [context] = harness.generateTitle.mock.calls[0] ?? [];
+		expect(context).toContain("audit the uploader");
+		expect(context).not.toContain("RetryPolicy");
+	});
+
+	it("falls back to a random name when naming fails, never reusing a transcript already on disk", async () => {
+		const harness = createContext({
+			generateTitle: async () => {
+				throw new Error("smol model unavailable");
+			},
+		});
+		await Bun.write(path.join(harness.parentArtifactsDir, "SwiftFalcon.jsonl"), "");
+		vi.spyOn(nameGenerator, "generateTaskName").mockReturnValue("SwiftFalcon");
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+
+		expect(await new TanCommandController(harness.ctx).start("write the release note")).toBe(true);
+
+		expect(harness.capturedOptions?.agentId).toBe("SwiftFalcon-2");
 	});
 
 	it("keeps the dispatching session's local:// root after the interactive session switches", async () => {
@@ -535,7 +599,7 @@ describe("TanCommandController", () => {
 		expect(createAgentSessionSpy.mock.calls[0]?.[0]).toEqual(
 			expect.objectContaining({
 				providerPromptCacheKey: "parent-session",
-				parentTaskPrefix: expect.stringMatching(/^Tan-/) as unknown as string,
+				parentTaskPrefix: harness.capturedOptions?.agentId,
 				agentDisplayName: "tan",
 			}),
 		);
@@ -555,11 +619,11 @@ describe("TanCommandController", () => {
 		await capturedRun({ jobId: "job-1", signal: new AbortController().signal, reportProgress: async () => {} });
 
 		const opts = createAgentSessionSpy.mock.calls[0]?.[0];
-		// The clone's registry parent is the spawning (focused) agent. Its own
-		// `Tan-<id>` artifact prefix must never double as the parent link, or the
-		// hub would render the tan parented to itself.
+		// The clone's registry parent is the spawning (focused) agent. Its own id,
+		// its artifact prefix, must never double as the parent link, or the hub
+		// would render the tan parented to itself.
 		expect(opts?.parentAgentId).toBe("FocusedParent");
-		expect(opts?.parentTaskPrefix).toMatch(/^Tan-/);
+		expect(opts?.parentTaskPrefix).toBe(harness.capturedOptions?.agentId);
 		expect(opts?.parentTaskPrefix).not.toBe("FocusedParent");
 	});
 
@@ -616,8 +680,9 @@ describe("TanCommandController", () => {
 		});
 		// Parked (not unregistered) before dispose, then the disposed session is nulled
 		// out — the hub keeps the ref and reads its transcript from the session file.
-		expect(setStatus).toHaveBeenCalledWith(expect.stringMatching(/^Tan-/), "parked");
-		expect(detachSession).toHaveBeenCalledWith(expect.stringMatching(/^Tan-/));
+		const agentId = harness.capturedOptions?.agentId;
+		expect(setStatus).toHaveBeenCalledWith(agentId, "parked");
+		expect(detachSession).toHaveBeenCalledWith(agentId);
 		expect(clone.dispose).toHaveBeenCalled();
 		expect(unregister).not.toHaveBeenCalled();
 	});

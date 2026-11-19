@@ -500,7 +500,7 @@ export class InternalUrlRouter {
 	}
 
 	/** Resolve an internal URL through its registered protocol handler. */
-	async resolve(input: string, context?: ResolveContext): Promise<InternalResource> {
+	async resolve(input: string, context?: ResolveContext): Promise<InternalResource<string | Buffer>> {
 		const { parsed, handler } = this.#route(input, true);
 		const resource = await handler.resolve(parsed, context);
 		return { ...resource, immutable: resource.immutable ?? handler.spec.immutable };
