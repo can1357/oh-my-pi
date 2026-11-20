@@ -2,9 +2,6 @@
 
 ## [Unreleased]
 
-### Changed
-
-- `TaskItem.model` and `TaskParams.model` widen to `string | string[]` and document configured `@role` selectors and ordered candidate lists for per-call selection ([#16793](https://github.com/can1357/oh-my-pi/pull/16793) by [@Xytronix](https://github.com/Xytronix))
 ### Breaking Changes
 
 - Moved `convertImageToPng`, `convertImageToPngShared`, `cachedPngConversion` and `imagePayloadKey` from `@oh-my-pi/pi-tui/chat/image-loading` to `@oh-my-pi/pi-tui/png-conversion`; import them from the new path ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
@@ -21,6 +18,7 @@
 - Windows console VT input and AltGr recovery go through `@oh-my-pi/pi-natives` instead of `bun:ffi`
 - The background jobs sheet reads a job's output from where its command sends it: a command that pipes (`| tail`) or redirects (`> log`) gets a tab per stream beside Output and opens on the one being written, instead of "No output yet" until it ends
 - The background jobs sheet draws a job's command as its live shell visualization with the running step in view, and fits what the job is for, its caption and its facts in fewer lines
+- `TaskItem.model` and `TaskParams.model` widen to `string | string[]` and document configured `@role` selectors and ordered candidate lists for per-call selection ([#19921](https://github.com/can1357/oh-my-pi/pull/19921) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 

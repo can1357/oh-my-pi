@@ -1621,6 +1621,42 @@ describe("per-call model preflight", () => {
 		).rejects.toThrow(/No available approved model matches/);
 	});
 
+	it("resolves a fuzzy role value against a registry built for a session without one", async () => {
+		mockDiscovery();
+		const authStorage = createInMemoryAuthStorage();
+		vi.spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
+		vi.spyOn(ModelRegistry.prototype, "awaitBackgroundRefresh").mockResolvedValue(undefined);
+		vi.spyOn(ModelRegistry.prototype, "isBackgroundRefreshPending").mockReturnValue(false);
+		vi.spyOn(ModelRegistry.prototype, "getAll").mockReturnValue([target, other, painter]);
+		vi.spyOn(ModelRegistry.prototype, "getAvailable").mockImplementation(kind =>
+			kind === "chat" ? [target, other] : [target, other, painter],
+		);
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+		const noRegistry = Object.assign(
+			perCallSession({ "task.perCallModel": "on", modelRoles: { review: "target" } }),
+			{
+				modelRegistry: undefined,
+				authStorage,
+			},
+		);
+		try {
+			const settled = await runStructuredSubagent(
+				request({ session: noRegistry, perCallModel: "@review", retainArtifacts: true }),
+			);
+			// The executor matches per-call patterns exactly, so the bare value must arrive resolved.
+			expect(dispatched[0]?.modelOverride).toEqual(["mock/target"]);
+			expect(dispatched[0]?.modelRegistry).toBeInstanceOf(ModelRegistry);
+			expect(dispatched[0]?.modelRegistry?.authStorage).toBe(authStorage);
+			await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+		} finally {
+			authStorage.close();
+		}
+	});
+
 	it.each([
 		["a configured role", "@review", "mock/target:high", ["mock/target:high"]],
 		["a role with an overriding level", "@review:low", "mock/target:high", ["mock/target:low"]],

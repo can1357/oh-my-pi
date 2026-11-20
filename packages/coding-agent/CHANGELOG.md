@@ -2,9 +2,6 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added per-call `model` selectors for configured chat roles (`@review[:level]`) and ordered candidate lists, choosing the first available approved model with credentials at spawn without runtime fallback; `task.perCallModelAllow` also accepts configured roles and scoped globs that only narrow grants ([#16793](https://github.com/can1357/oh-my-pi/pull/16793) by [@Xytronix](https://github.com/Xytronix))
 ### Breaking Changes
 
 - Removed the `mcp/transports/*` and `mcp/tool-cache` SDK exports, `DeferredMCPTool`, and the cache and reconnect-policy parameters of `MCPManager`; MCP servers are now reached through the MCP host (`mcp/host/*`)
@@ -31,6 +28,7 @@
 - Sessions now record approval prompts in their session file, even before the first reply: a `tool_approval_requested` entry when a tool call starts waiting on you (naming the dispatching eval call in `parentToolCallId` for calls made from an eval) and a `tool_approval_resolved` entry when it is approved, denied, aborted, or refused, so tools that read session files (sidebars, dashboards) can show a session waiting on approval ([#18837](https://github.com/can1357/oh-my-pi/pull/18837) by [@baekjosh](https://github.com/baekjosh))
 - Added redirected files to a background bash job's streams: `proc://<id>/streams`, the jobs sheet and job widgets (source `file:<n>`) read what a command writes with `> log` while it runs, as they do for `|` stages
 - Added Binary Ninja as a disassembler backend for read analysis views and the dsm namespace. Select it with disassembler.backend = binja; it uses a local install found through binja.installDir, $BN_INSTALL_DIR, or the default install locations ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- Added per-call `model` selectors for configured chat roles (`@review[:level]`) and ordered candidate lists, choosing the first available approved model with credentials at spawn without runtime fallback; `task.perCallModelAllow` also accepts configured roles and scoped globs that only narrow grants ([#19921](https://github.com/can1357/oh-my-pi/pull/19921) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 

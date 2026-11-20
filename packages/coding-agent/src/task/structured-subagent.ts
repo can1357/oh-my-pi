@@ -19,6 +19,7 @@ import {
 	resolveModelOverride,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
+import { ModelRegistry } from "../config/model-registry";
 import { isKindRole } from "../config/model-roles";
 import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
 import {
@@ -39,6 +40,7 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { discoverAuthStorage } from "../sdk";
 import { journalCompletion } from "../session/model-usage-journal";
 import { AUTO_THINKING, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
@@ -225,6 +227,8 @@ export interface EffectiveSubagentPolicy {
 	/** Present for a per-call `model`: every model the child sends to must stay approved by these grants. */
 	perCallModelGrants?: PerCallModelGrants;
 	schema: StructuredSubagentSchemaResolution;
+	/** Registry a per-call role was resolved against when the session had none; the child reuses it. */
+	modelRegistry?: ModelRegistry;
 	planMode: boolean;
 	isIsolated: boolean;
 	mergeMode: "patch" | "branch";
@@ -427,6 +431,8 @@ interface PerCallModelSelection {
 	patterns: string[];
 	/** The role of a request that is one `@role` selector, reported as the spawn's role; revival still pins the resolved model. */
 	role?: string;
+	/** Registry built for role resolution when the session had none; the child must run against the same catalog. */
+	modelRegistry?: ModelRegistry;
 }
 
 /** Gate, validate and approve a per-call `model`. */
@@ -438,7 +444,8 @@ async function preflightPerCallModel(
 	userTaggedEffort: boolean,
 	parentModelPattern: string | undefined,
 ): Promise<PerCallModelSelection> {
-	const { settings, modelRegistry } = request.session;
+	const { settings } = request.session;
+	let { modelRegistry } = request.session;
 	const operatorSettings = settings.grantAuthority();
 	const fail = (message: string): never => {
 		throw new StructuredSubagentError("preflight", message);
@@ -504,12 +511,20 @@ async function preflightPerCallModel(
 			`No available approved model matches \`model\` ${JSON.stringify(selector)}. Glob role values never grant per-call models.`,
 		);
 	}
+	// A role value is only a pattern until a catalog resolves it, and the executor matches per-call
+	// patterns exactly. Build the registry the executor would create now and hand it to the child.
+	let ownRegistry: ModelRegistry | undefined;
+	if (!modelRegistry && roles.some(Boolean)) {
+		ownRegistry = new ModelRegistry(request.session.authStorage ?? (await discoverAuthStorage()));
+		ownRegistry.refreshInBackground();
+		modelRegistry = ownRegistry;
+	}
 	if (!modelRegistry) return { grants, patterns: candidateSources.flat(), role };
 	// A role or list must see the complete catalog before expanding or skipping candidates.
 	// A single exact selector retains the existing cold/in-flight discovery deferral.
 	if (roles.some(Boolean) || Array.isArray(selector)) await modelRegistry.awaitBackgroundRefresh();
 	const available = modelRegistry.getAvailable("all");
-	if (available.length === 0) return { grants, patterns: candidateSources.flat(), role };
+	if (available.length === 0) return { grants, patterns: candidateSources.flat(), role, modelRegistry: ownRegistry };
 	const chat = modelRegistry.getAvailable("chat");
 	const chatRegistry = { getAvailable: () => chat };
 	const catalog = modelRegistry.getAll();
@@ -543,7 +558,7 @@ async function preflightPerCallModel(
 					);
 				}
 				if (!Array.isArray(selector) && modelRegistry.isBackgroundRefreshPending()) {
-					return { grants, patterns: [candidate], role };
+					return { grants, patterns: [candidate], role, modelRegistry: ownRegistry };
 				}
 				continue;
 			}
@@ -574,7 +589,7 @@ async function preflightPerCallModel(
 		);
 	}
 	// Unavailable candidates are skipped: the caller's later entries are its own fallback order.
-	return { grants, patterns: [...new Set(patterns)], role };
+	return { grants, patterns: [...new Set(patterns)], role, modelRegistry: ownRegistry };
 }
 
 /**
@@ -739,6 +754,7 @@ export async function resolveEffectiveSubagentPolicy(
 		oauthAccountPools,
 		parentActiveModelPattern,
 		perCallModelGrants,
+		modelRegistry: perCall?.modelRegistry,
 		structured,
 		schema,
 		planMode,
@@ -922,7 +938,7 @@ function buildExecutorOptions(
 		onProgress: request.onProgress,
 		onToolResult: request.onToolResult,
 		authStorage: session.authStorage,
-		modelRegistry: session.modelRegistry,
+		modelRegistry: policy.modelRegistry ?? session.modelRegistry,
 		settings: session.settings,
 		asyncJobManager: session.asyncJobManager,
 		inheritedSessionAgents: session.getSessionAgents?.(),
