@@ -1356,6 +1356,8 @@ export type TspEvent =
 	| { ev: "resize"; sf?: string; cols: number; cell?: { w: number; h: number }; visible?: boolean }
 	| { ev: "theme"; dark: boolean }
 	| { ev: "motion"; reduce: boolean }
+	/** The terminal's features changed (a setting: Tern's Agents tray drops `tray`); the list replaces `hello.features`. */
+	| { ev: "features"; features: readonly string[] }
 	| { ev: "visible"; sf?: string; visible: boolean }
 	| { ev: "toggle"; sf: string; id: string; key?: string; collapsed: boolean }
 	| { ev: "select"; sf: string; id: string; item: string }

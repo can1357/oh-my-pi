@@ -604,7 +604,7 @@ describe("fetchCursorUsableModels", () => {
 				"composer-2.5",
 				"claude-opus-4-8-high",
 				"claude-opus-4-8-high-fast",
-				"gpt-5.1",
+				"kimi-k2.5",
 				"gemini-4-argon",
 				"gemini-4-argon-fast",
 			].map(modelId => create(ModelDetailsSchema, { modelId })),
@@ -628,8 +628,8 @@ describe("fetchCursorUsableModels", () => {
 					variants: [fastVariant("claude-opus-4-8-high", false), fastVariant("claude-opus-4-8-high-fast", true)],
 				}),
 				create(AvailableModelsResponse_ModelDetailsSchema, {
-					name: "gpt-5.1",
-					clientDisplayName: "GPT-5.1",
+					name: "kimi-k2.5",
+					clientDisplayName: "Kimi K2.5",
 					supportsAgent: true,
 				}),
 				create(AvailableModelsResponse_ModelDetailsSchema, {
@@ -674,7 +674,7 @@ describe("fetchCursorUsableModels", () => {
 		expect(built("claude-opus-4-8-fast").cost).toEqual({ input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 });
 		// Not on the card: left unpriced rather than borrowing another
 		// provider's card, so it reads as pricing unknown instead of a guess.
-		const uncovered = built("gpt-5.1");
+		const uncovered = built("kimi-k2.5");
 		expect(uncovered.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 		expect(getModelPricingStatus(uncovered)).toBe("unknown");
 		// A lane priced from a sibling slug's card (no rule names its own id)

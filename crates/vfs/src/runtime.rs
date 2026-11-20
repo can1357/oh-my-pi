@@ -14,7 +14,7 @@ use parking_lot::{Mutex, MutexGuard};
 use tokio::{runtime::Handle, sync::Notify};
 use tokio_util::sync::CancellationToken;
 
-use crate::error::cancelled;
+use crate::{changes::Changes, error::cancelled};
 
 /// Runs a provider future to completion on the calling (synchronous) thread.
 ///
@@ -87,6 +87,8 @@ pub(crate) struct Scope {
 	/// Mode bits cleared from host creations; see
 	/// [`crate::Fs::with_creation_mask`].
 	pub(crate) creation_mask: Option<u32>,
+	/// See [`crate::Fs::with_change_sink`].
+	pub(crate) changes:       Changes,
 }
 
 impl Scope {

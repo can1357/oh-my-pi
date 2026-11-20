@@ -640,11 +640,18 @@ pub trait ExtProc: Send {
 	fn cont(&mut self) -> io::Result<()>;
 }
 
-/// Opens a [`PipeMirror`] per pipeline pipe ([`Host::pipe_tap`]).
+/// Opens a [`PipeMirror`] per pipeline pipe ([`Host::pipe_tap`]), and learns
+/// of the files output is redirected into.
 pub trait PipeTap: Send + Sync {
 	/// A new pipe from stage `producer` to stage `consumer` (their source
 	/// text as written); `None` leaves this pipe untapped.
 	fn open(&self, producer: &BStr, consumer: &BStr) -> Option<Arc<dyn PipeMirror>>;
+	/// An output redirection of `command` (its source text as written)
+	/// opened the regular file at the absolute `path` (`>`, `>>`, `>|`,
+	/// `&>`, `&>>`). What is written there crosses no pipe to mirror: a tap
+	/// that wants it reads the file. Not told of a `{var}` fd's file, nor of
+	/// one a spawned process opens itself ([`SpawnSpec::redirs`]).
+	fn file(&self, _command: &BStr, _path: &BStr) {}
 }
 
 /// Receives the bytes crossing one tapped pipe.

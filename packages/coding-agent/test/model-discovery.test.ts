@@ -23,6 +23,7 @@ import {
 import type { ModelKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { CODEX_CLIENT_VERSION } from "@oh-my-pi/pi-catalog/wire/codex";
 import {
+	DISCOVERY_DEFAULT_CONTEXT_WINDOW,
 	type DiscoveryProviderConfig,
 	discoverLlamaCppModels,
 	discoverLiteLLMModels,
@@ -2984,6 +2985,50 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(models.map(model => model.id)).toEqual(["mistral/mistral-large-latest"]);
 	});
 
+	test("proxy discovery derives the context window from nested token limits before clamping the output cap", async () => {
+		// A proxy that publishes only `limits.max_input_tokens` +
+		// `limits.max_output_tokens` states a 400K window without
+		// `context_length`. Ignoring the nested limits left the context at the
+		// 128K default, and the new `Math.min` clamp then also truncated a valid
+		// 200K output cap to 128K — diverging from the generic list discovery,
+		// which already derives the window from the same row shape.
+		const fetchMock: FetchImpl = async input => {
+			if (String(input) !== "http://127.0.0.1:9992/v1/models") throw new Error(`Unexpected URL: ${String(input)}`);
+			return Response.json({
+				data: [
+					{
+						id: "openai-test/nested-limits",
+						supported_endpoint_types: ["openai"],
+						limits: { max_input_tokens: 200_000, max_output_tokens: 200_000 },
+					},
+					{
+						id: "openai-test/incomplete-nested-limits",
+						supported_endpoint_types: ["openai"],
+						limits: { max_input_tokens: 200_000 },
+					},
+				],
+			});
+		};
+		const models = await discoverProxyModels(
+			{
+				provider: "proxy-test",
+				api: "openai-completions",
+				baseUrl: "http://127.0.0.1:9992/v1",
+				discovery: { type: "proxy" },
+			},
+			{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
+		);
+
+		const nested = models.find(model => model.id === "openai-test/nested-limits");
+		expect(nested?.contextWindow).toBe(400_000);
+		expect(nested?.maxTokens).toBe(200_000);
+
+		// Half a budget is not a window: the guarded fallback must stay silent.
+		const incomplete = models.find(model => model.id === "openai-test/incomplete-nested-limits");
+		expect(incomplete?.contextWindow).toBe(DISCOVERY_DEFAULT_CONTEXT_WINDOW);
+		expect(incomplete?.maxTokens).toBe(32_768);
+	});
+
 	test("litellm discovery skips a model group whose name names two vendors instead of dropping the provider (#18770)", async () => {
 		const fetchMock: FetchImpl = async input => {
 			if (String(input) !== "http://127.0.0.1:4001/model_group/info") {
@@ -3875,6 +3920,66 @@ describe("ModelRegistry runtime discovery", () => {
 		// never pinning the model at a broken `0` window.
 		const zeroCtx = registry.getAll().find(m => m.provider === "proxy-test" && m.id === "zero-context-model");
 		expect(zeroCtx?.contextWindow).toBe(128000);
+	});
+
+	test("proxy discovery honors API-reported input modalities and output cap", async () => {
+		writeRawModelsJson({
+			"proxy-test": {
+				baseUrl: "http://127.0.0.1:9998",
+				auth: "none",
+				discovery: { type: "proxy" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9998/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "vision-row-model",
+								supported_endpoint_types: ["openai"],
+								context_length: 200000,
+								input_modalities: ["text", "image"],
+								max_output_tokens: 64000,
+							},
+							{
+								id: "architecture-row-model",
+								supported_endpoint_types: ["anthropic"],
+								context_length: 200000,
+								architecture: { input_modalities: ["text", "image", "pdf"] },
+								limits: { max_output_tokens: 32000 },
+							},
+							{
+								id: "clamped-row-model",
+								supported_endpoint_types: ["openai"],
+								context_length: 32000,
+								max_output_tokens: 999999,
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		const visionRow = registry.find("proxy-test", "vision-row-model");
+		expect(visionRow?.input).toEqual(["text", "image"]);
+		expect(visionRow?.maxTokens).toBe(64000);
+
+		// OpenRouter-shaped rows carry the modalities under `architecture`.
+		const architectureRow = registry.find("proxy-test", "architecture-row-model");
+		expect(architectureRow?.input).toEqual(["text", "image"]);
+		expect(architectureRow?.maxTokens).toBe(32000);
+
+		// A row that advertises no modalities stays text-only, and an output cap
+		// larger than the advertised context window is clamped to it.
+		const clampedRow = registry.find("proxy-test", "clamped-row-model");
+		expect(clampedRow?.input).toEqual(["text"]);
+		expect(clampedRow?.maxTokens).toBe(32000);
 	});
 
 	test("proxy discovery uses proxy-reported name over bundled placeholder", async () => {

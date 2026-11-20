@@ -2,8 +2,19 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as url from "node:url";
 import { $which, isWsl, logger } from "@oh-my-pi/pi-utils";
+import { redactUrlForLog } from "./redact-url";
 
 const URL_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
+/** Like {@link URL_SCHEME_PATTERN}, but a one-letter "scheme" is a Windows drive (`C:\…`), not a URL. */
+const LOGGED_URL_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]+:/;
+
+/**
+ * Redact any scheme URL (`https:`, `mailto:`, …). A local filename may contain a
+ * literal `#`, so paths stay verbatim.
+ */
+function logTarget(target: string): string {
+	return LOGGED_URL_PATTERN.test(target) ? redactUrlForLog(target, "omit") : target;
+}
 
 function getExistingWslLocalPath(urlOrPath: string): string | undefined {
 	if (!isWsl() || !$which("wslview")) {
@@ -99,8 +110,9 @@ export function openPath(urlOrPath: string): void {
 		// still letting the caller advertise a copy-URL fallback.
 		logger.warn("Failed to open external URL/path", {
 			command: cmd[0],
-			target: urlOrPath,
-			error: error instanceof Error ? error.message : String(error),
+			target: logTarget(urlOrPath),
+			// Spawn errors can echo argv, including an encoded URL on Windows.
+			code: error instanceof Error && "code" in error ? error.code : undefined,
 		});
 		return;
 	}
@@ -113,7 +125,7 @@ export function openPath(urlOrPath: string): void {
 			if (typeof exitCode === "number" && exitCode !== 0) {
 				logger.warn("External opener exited with non-zero status", {
 					command: cmd[0],
-					target: urlOrPath,
+					target: logTarget(urlOrPath),
 					exitCode,
 				});
 			}
