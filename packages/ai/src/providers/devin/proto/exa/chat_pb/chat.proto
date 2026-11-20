@@ -357,6 +357,9 @@ message ChatMessagePrompt {
   bytes gemini_thought_signature = 17 [deprecated = true];
   string signature_type = 18;
   string phase = 19;
+  // Model uid that produced `signature`; the Devin CLI sends it beside
+  // `signature` and `signature_type` on replayed Gemini turns.
+  string signature_model_uid = 22;
 }
 
 message PromptCacheOptions {

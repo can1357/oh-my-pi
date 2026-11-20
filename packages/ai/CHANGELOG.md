@@ -9,6 +9,7 @@
 - The auth broker now logs a warning when a transient OAuth refresh failure leaves a login's access token expiring before the next retry; these failures logged only at debug, so a login could stop refreshing and lapse unnoticed ([#19590](https://github.com/can1357/oh-my-pi/pull/19590) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed chat completions dropping reasoning sent only as `reasoning_details` (Bifrost Gemini) ([#19595](https://github.com/can1357/oh-my-pi/pull/19595) by [@Xytronix](https://github.com/Xytronix))
 - Fixed Antigravity CLI quota exhaustion (`RESOURCE_EXHAUSTED`) streaming into replies as "API error" text; the request now fails with a 429 rate-limit error, so omp's retry, credential rotation and model fallback policy applies instead of a thinking-loop retry ([#19382](https://github.com/can1357/oh-my-pi/pull/19382) by [@gimso2x](https://github.com/gimso2x))
+- Fixed Devin Gemini models (e.g. `devin/gemini-4-neon`) dropping their thought signatures and replaying tool loops unsigned, a pattern tied to frequent empty stops; the signature, its type and the signing model now go back as the Devin CLI sends them ([#19840](https://github.com/can1357/oh-my-pi/issues/19840))
 
 ## [19.0.1] - 2026-11-19
 

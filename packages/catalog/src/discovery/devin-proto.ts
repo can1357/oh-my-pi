@@ -1215,6 +1215,7 @@ export interface ChatMessagePrompt extends ProtoMessage {
 	geminiThoughtSignature: Uint8Array;
 	signatureType: string;
 	phase: string;
+	signatureModelUid: string;
 }
 
 export const ChatMessagePromptSchema: MessageCodec<ChatMessagePrompt> = pb<ChatMessagePrompt>("exa.chat_pb.ChatMessagePrompt", [
@@ -1237,6 +1238,7 @@ export const ChatMessagePromptSchema: MessageCodec<ChatMessagePrompt> = pb<ChatM
 	{ no: 17, name: "geminiThoughtSignature", kind: "bytes" },
 	{ no: 18, name: "signatureType", kind: "string" },
 	{ no: 19, name: "phase", kind: "string" },
+	{ no: 22, name: "signatureModelUid", kind: "string" },
 ]);
 
 /** Devin message exa.codeium_common_pb.ChatToolCall. */
