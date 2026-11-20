@@ -33,6 +33,7 @@
 
 - Listing sessions across every project (`/resume` across projects, `archive.sessions(project="*")`, `archive.projects()`) is faster with thousands of project directories
 - In the interactive session, `wait` on background jobs now blocks for up to 4 minutes on its first call instead of returning after 5 seconds, saving a wasted turn per wait
+- In the interactive session, `wait` on background jobs now blocks for up to 4 minutes on its first call instead of returning after 5 seconds, saving a wasted turn per wait ([#19873](https://github.com/can1357/oh-my-pi/pull/19873) by [@H4vC](https://github.com/H4vC))
 - Updated MCP OAuth client name to "Codex"
 - Auto-retries are quieter: once a retry is scheduled, the failed attempt's error leaves the pinned banner and stays out of the transcript; the retry status line shows the reason, and a recovered retry leaves only a dim "retried" note
 - Selective commits (`/commit`, eval `commit`) no longer guess which changes a `bash` or `eval` call made. Edit-tool writes are attributed, and so is what the shell writes itself: builtins such as `sed -i`, `cp`, `mv`, `rm` and redirections such as `cat > file`. Files changed by programs you run (formatters, codegen) are listed under Unrecorded and a formatter's rewrite of your lines under Review, for you to `take`
