@@ -147,10 +147,12 @@ export function resolveExecutablePath(): string {
 /**
  * Resolve the command that re-enters this CLI's entrypoint: the compiled
  * binary itself, or the runtime plus the declared worker-host entry. Used by
- * the TUI `/restart` relaunch; workers go through {@link resolveWorkerSpawnCmd},
- * whose no-host fallback deliberately differs (cwd-relative entry pinned to the
- * package root for `bun test` IPC). Outside a CLI host this falls back to the
- * absolute path of `src/cli.ts` so the relaunch keeps the caller's cwd.
+ * the bash tool's `git worktree add` rewrite and, through
+ * {@link resolveRestartCmd}, by the TUI `/restart` relaunch; workers go through
+ * {@link resolveWorkerSpawnCmd}, whose no-host fallback deliberately differs
+ * (cwd-relative entry pinned to the package root for `bun test` IPC). Outside a
+ * CLI host this falls back to the absolute path of `src/cli.ts` so the relaunch
+ * keeps the caller's cwd.
  */
 export function resolveCliEntryCmd(): string[] {
 	const executable = resolveExecutablePath();
@@ -159,6 +161,9 @@ export function resolveCliEntryCmd(): string[] {
 	if (hostEntry) return [executable, hostEntry];
 	return [executable, path.resolve(import.meta.dir, "..", "cli.ts")];
 }
+
+/** Set by the dev launcher (`scripts/omp`) so relaunches re-enter it instead of bare `bun src/cli.ts`. */
+export const DEV_LAUNCHER_ENV = "OMP_DEV_LAUNCHER";
 
 /**
  * Resolve the command for `/restart` to re-exec the build the launcher on PATH
@@ -174,10 +179,17 @@ export function resolveCliEntryCmd(): string[] {
  * still passes the bare name, while PowerShell passes the full path. Keep the
  * unchanged entry command otherwise, and leave workers on
  * {@link resolveExecutablePath} so they stay pinned to the parent build
- * (issues #16262, #19259).
+ * (issues #16262, #19259). A source launch that came through the dev launcher
+ * re-enters it, because the launcher starts Bun from a bunfig-free directory
+ * and restores the cwd via its preload; a launcher that no longer exists is
+ * ignored rather than exec'd.
  */
 export function resolveRestartCmd(): string[] {
-	if (!isCompiledBinary()) return resolveCliEntryCmd();
+	if (!isCompiledBinary()) {
+		const launcher = process.env[DEV_LAUNCHER_ENV]?.trim();
+		if (launcher && fs.existsSync(launcher)) return [launcher];
+		return resolveCliEntryCmd();
+	}
 	const executable = resolveExecutablePath();
 	const running = stripWindowsExtendedLengthPathPrefix(process.execPath);
 	const argv0 = stripWindowsExtendedLengthPathPrefix(process.argv0);
