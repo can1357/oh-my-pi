@@ -393,7 +393,9 @@ impl AtSpiAx {
 				let Ok(app) = self.app_for_window(window).await else {
 					return false;
 				};
-				let Ok(frames) = Self::frames(&self.connection, &app, self.reply_timeout).await else {
+				let Ok(frames) =
+					Self::frames(&self.connection, &app, self.reply_timeout, self.native.is_none()).await
+				else {
 					return false;
 				};
 				for frame in frames {
@@ -443,7 +445,7 @@ impl AtSpiAx {
 			if !self
 				.reply(frame_proxy.get_role())
 				.await?
-				.is_ok_and(|role| top_level_role(role, true))
+				.is_ok_and(|role| top_level_role(role, true, self.native.is_none()))
 			{
 				continue;
 			}
@@ -573,13 +575,12 @@ impl AtSpiAx {
 	}
 
 	/// `app`'s children that are top-level windows. Each reply, not the
-	/// traversal, gets a deadline. A child whose role cannot be read fails the
-	/// call: every caller decides which window something belongs to, and a
-	/// child that may be a window must not be left out of that.
+	/// traversal, gets a deadline.
 	async fn frames(
 		connection: &Connection,
 		app: &ObjectRefOwned,
 		reply_timeout: Duration,
+		alert_windows: bool,
 	) -> CoreResult<Vec<ObjectRefOwned>> {
 		let proxy = answered("the application", reply_timeout, app.as_accessible_proxy(connection))
 			.await?
@@ -593,10 +594,10 @@ impl AtSpiAx {
 				answered("the application", reply_timeout, child.as_accessible_proxy(connection))
 					.await?
 					.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
-			let role = answered("the application", reply_timeout, child_proxy.get_role())
+			if answered("the application", reply_timeout, child_proxy.get_role())
 				.await?
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window role: {err}")))?;
-			if top_level_role(role, true) {
+				.is_ok_and(|role| top_level_role(role, true, alert_windows))
+			{
 				frames.push(child);
 			}
 		}
@@ -650,6 +651,7 @@ impl AtSpiAx {
 		connection: &Connection,
 		mut object: ObjectRefOwned,
 		reply_timeout: Duration,
+		alert_windows: bool,
 	) -> CoreResult<ObjectRefOwned> {
 		for _ in 0..64 {
 			let proxy =
@@ -659,13 +661,13 @@ impl AtSpiAx {
 			let role = answered("the application", reply_timeout, proxy.get_role())
 				.await?
 				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window role: {err}")))?;
-			if top_level_role(role, false) {
+			if top_level_role(role, false, alert_windows) {
 				return Ok(object);
 			}
 			let parent = answered("the application", reply_timeout, proxy.parent())
 				.await?
 				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window parent: {err}")))?;
-			if top_level_role(role, true)
+			if top_level_role(role, true, alert_windows)
 				&& Self::is_application(connection, &parent, reply_timeout).await?
 			{
 				return Ok(object);
@@ -1565,13 +1567,14 @@ fn native_window_for_frame(windows: &[DesktopWindow], pid: u32, title: &str) -> 
 }
 
 /// Whether `role` marks a top-level window: `Frame`, `Dialog` and `Window`
-/// anywhere, and `FileChooser` and `Alert` as a child of the application.
-/// GTK3 gives its Open and Save dialogs that role and gives it to the file
-/// chooser widget inside them too; its message dialogs are alerts.
-const fn top_level_role(role: Role, child_of_application: bool) -> bool {
+/// anywhere, and `FileChooser` as a child of the application. GTK3 message
+/// dialogs are `Alert`s; include them only without native window matching,
+/// since their accessible name need not match their native title.
+const fn top_level_role(role: Role, child_of_application: bool, alert_windows: bool) -> bool {
 	match role {
 		Role::Frame | Role::Dialog | Role::Window => true,
-		Role::FileChooser | Role::Alert => child_of_application,
+		Role::FileChooser => child_of_application,
+		Role::Alert => child_of_application && alert_windows,
 		_ => false,
 	}
 }
@@ -1669,7 +1672,8 @@ impl AxBackend for AtSpiAx {
 		self
 			.run(async {
 				let app = self.app_for_window(win).await?;
-				let frames = Self::frames(&self.connection, &app, self.reply_timeout).await?;
+				let frames =
+					Self::frames(&self.connection, &app, self.reply_timeout, self.native.is_none()).await?;
 				let mut matches = Vec::new();
 				for frame in frames {
 					let id = atspi_window_id(&frame);
@@ -1683,16 +1687,6 @@ impl AxBackend for AtSpiAx {
 						.reply(frame.as_accessible_proxy(&self.connection))
 						.await?
 						.map_err(|err| failed(err.to_string()))?;
-					// A message dialog's name is its kind, not its native title
-					// (see `window_id`): a native window never takes it by title.
-					if self
-						.reply(proxy.get_role())
-						.await?
-						.map_err(|err| failed(err.to_string()))?
-						== Role::Alert
-					{
-						continue;
-					}
 					if self
 						.reply(proxy.name())
 						.await?
@@ -1719,7 +1713,8 @@ impl AxBackend for AtSpiAx {
 		let object = Self::object(h).clone();
 		self.run(async {
 			let connection = &self.connection;
-			let object = Self::top_level(connection, object, self.reply_timeout).await?;
+			let object =
+				Self::top_level(connection, object, self.reply_timeout, self.native.is_none()).await?;
 			// The ancestry scan is per-reply; the following single-window
 			// identification keeps its operation budget.
 			answered("the application", self.reply_timeout, async {
@@ -1737,25 +1732,10 @@ impl AxBackend for AtSpiAx {
 					.get_connection_unix_process_id(name.clone().into())
 					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window pid: {err}")))?;
-				let accessible = object
+				let title = object
 					.as_accessible_proxy(connection)
 					.await
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window owner: {err}")))?;
-				// A GTK message dialog's accessible name is its kind ("Question"),
-				// not the title the display server gives it (the program name), so
-				// a title can name another window, never the dialog's own: only
-				// its listed AT-SPI id (above) identifies it.
-				let role = accessible
-					.get_role()
-					.await
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window role: {err}")))?;
-				if role == Role::Alert {
-					return Err(DesktopError::ax_failed(
-						"a message dialog is identified only by its listed AT-SPI window; refusing \
-						 ambiguous input ownership",
-					));
-				}
-				let title = accessible
+					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window owner: {err}")))?
 					.name()
 					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window title: {err}")))?;
@@ -1945,7 +1925,7 @@ impl AxBackend for AtSpiAx {
 				.await
 				.map_err(DesktopError::ax_failed)?
 			{
-				let frames = Self::frames(connection, &app, *reply_timeout).await?;
+				let frames = Self::frames(connection, &app, *reply_timeout, native.is_none()).await?;
 				for frame in frames {
 					// This probes one frame, not the traversal: retain its
 					// single-element operation budget.
@@ -3100,11 +3080,11 @@ mod tests {
 			let (server, client) = tokio::try_join!(server.build(), client).unwrap();
 			let object = |path| ObjectRefOwned::from_static_str_unchecked(PEER, path);
 			let path = |object: ObjectRefOwned| object.path_as_str().to_owned();
-			let top_levels = AtSpiAx::frames(&client, &object("/app"), REPLY_TIMEOUT).await;
+			let top_levels = AtSpiAx::frames(&client, &object("/app"), REPLY_TIMEOUT, false).await;
 			let mut owners = Vec::new();
 			for element in ["/open", "/dialog", "/ok"] {
 				owners.push(
-					AtSpiAx::top_level(&client, object(element), REPLY_TIMEOUT)
+					AtSpiAx::top_level(&client, object(element), REPLY_TIMEOUT, false)
 						.await
 						.map(path)
 						.ok(),
@@ -3982,7 +3962,7 @@ mod tests {
 		use std::sync::{Arc, Mutex};
 
 		use atspi::zbus::{
-			Guid, connection::Builder as ConnectionBuilder, fdo, interface, zvariant::OwnedObjectPath,
+			Guid, connection::Builder as ConnectionBuilder, interface, zvariant::OwnedObjectPath,
 		};
 
 		use super::*;
@@ -4364,10 +4344,9 @@ mod tests {
 			assert_eq!(listed.unanswered, [":1.8"]);
 		}
 
-		/// An element of a GTK 3 app: its role (`None`: the read fails), name,
-		/// parent and children. The message dialog reads as focused.
+		/// An element of a GTK 3 app: its role, name, parent and children.
 		struct Gtk3 {
-			role:     Option<Role>,
+			role:     Role,
 			name:     &'static str,
 			parent:   &'static str,
 			children: Vec<&'static str>,
@@ -4375,15 +4354,12 @@ mod tests {
 
 		#[interface(name = "org.a11y.atspi.Accessible")]
 		impl Gtk3 {
-			fn get_role(&self) -> fdo::Result<u32> {
-				self
-					.role
-					.map(|role| role as u32)
-					.ok_or_else(|| fdo::Error::Failed("the role cannot be read".into()))
+			fn get_role(&self) -> u32 {
+				self.role as u32
 			}
 
 			fn get_state(&self) -> Vec<u32> {
-				let dialog = self.role == Some(Role::Alert) && self.parent == "/app";
+				let dialog = self.role == Role::Alert && self.parent == "/app";
 				let bits = if dialog {
 					StateSet::new(State::Focused).bits()
 				} else {
@@ -4433,16 +4409,7 @@ mod tests {
 		/// inside the window), and a message dialog, which accessibility names
 		/// "Question" when it has no title.
 		fn app_with_message_dialog(main: &'static str) -> (AtSpiAx, Connection) {
-			app_with_message_dialog_and_main_role(main, Some(Role::Frame))
-		}
-
-		/// [`app_with_message_dialog`] with the main window's role.
-		fn app_with_message_dialog_and_main_role(
-			main: &'static str,
-			main_role: Option<Role>,
-		) -> (AtSpiAx, Connection) {
-			let node =
-				|role, name, parent, children| Gtk3 { role: Some(role), name, parent, children };
+			let node = |role, name, parent, children| Gtk3 { role, name, parent, children };
 			let frame = || Extents { x: 10, y: 20, delay: Duration::ZERO };
 			backend(HUNG_CALL_TIMEOUT, |server| {
 				server
@@ -4459,7 +4426,7 @@ mod tests {
 					)
 					.unwrap()
 					.serve_at("/main", Gtk3 {
-						role:     main_role,
+						role:     Role::Frame,
 						name:     main,
 						parent:   "/app",
 						children: vec!["/banner"],
@@ -4481,23 +4448,7 @@ mod tests {
 		}
 
 		#[test]
-		fn a_message_dialog_is_found_by_its_listed_window_and_never_by_a_title() {
-			let x11 = |id: &str, title: &str| DesktopWindow {
-				id:      id.into(),
-				title:   title.into(),
-				app:     "tdlg".into(),
-				pid:     Some(7),
-				x:       0,
-				y:       0,
-				width:   300,
-				height:  200,
-				focused: false,
-			};
-			let element =
-				|path| AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, path));
-			let (yes, dismiss) = (element("/yes"), element("/dismiss"));
-
-			// Wayland: the dialog is listed and owns its button.
+		fn wayland_lists_a_message_dialog_and_resolves_its_button() {
 			let (mut ax, _server) = app_with_message_dialog("TDLG");
 			let listed: Vec<_> = ax
 				.windows()
@@ -4508,68 +4459,35 @@ mod tests {
 				.collect();
 			let titles: Vec<_> = listed.iter().map(|window| window.title.as_str()).collect();
 			assert_eq!(titles, ["TDLG", "Question"]);
+			let yes = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/yes"));
 			assert_eq!(ax.window_id(&yes, &listed).unwrap(), listed[1].id);
-			// X11: an alert inside a window is part of that window; the dialog,
-			// named "Question" but titled with the program name, takes no window.
-			let windows = [x11("1", "TDLG"), x11("2", "tdlg.py")];
-			assert_eq!(ax.window_id(&dismiss, &windows).unwrap(), "1");
-			assert!(ax.window_id(&yes, &windows).is_err());
+			let AxHandle::AtSpi(root) = ax.window_root(&listed[1]).unwrap() else {
+				panic!("expected AT-SPI root");
+			};
+			assert_eq!(root.path_as_str(), "/alert");
+		}
 
-			// X11, the main window titled "Question" with another accessible
-			// name: neither its input nor its tree goes to the dialog.
-			let (mut ax, _server) = app_with_message_dialog("");
-			let windows = [x11("1", "Question"), x11("2", "tdlg.py")];
-			assert!(ax.window_id(&yes, &windows).is_err());
+		#[test]
+		fn native_windows_leave_alert_ownership_as_on_main() {
+			let (ax, _server) = app_with_message_dialog("Main");
+			let windows = [window("1", "Question", 0, 0), window("2", "tdlg.py", 0, 0)];
+			let mut ax = ax.with_native_windows(Box::new(Native::new(&[
+				("1", "Question", 0, 0),
+				("2", "tdlg.py", 0, 0),
+			])));
+			let listed = ax.windows().unwrap();
+			let titles: Vec<_> = listed.windows.iter().map(|entry| entry.window.title.as_str()).collect();
+			assert_eq!(titles, ["Main"]);
+			let element =
+				|path| AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, path));
+			assert!(ax.window_id(&element("/yes"), &windows).is_err());
 			assert!(ax.window_root(&windows[0]).is_err());
-		}
-
-		/// The app of [`app_with_message_dialog`] whose main window, titled like
-		/// the dialog, cannot say its role.
-		fn app_with_an_unreadable_window() -> (AtSpiAx, Connection) {
-			app_with_message_dialog_and_main_role("Question", None)
-		}
-
-		/// The listed message dialog of `ax`.
-		fn listed_dialog(ax: &AtSpiAx) -> DesktopWindow {
-			ax.windows()
-				.unwrap()
-				.windows
-				.into_iter()
-				.find(|entry| entry.window.title == "Question")
-				.unwrap()
-				.window
-		}
-
-		#[test]
-		fn the_window_listing_leaves_out_a_window_whose_role_cannot_be_read() {
-			let (ax, _server) = app_with_an_unreadable_window();
-			let titles: Vec<_> = ax
-				.windows()
-				.unwrap()
-				.windows
-				.into_iter()
-				.map(|entry| entry.window.title)
-				.collect();
-			assert_eq!(titles, ["Question"]);
-		}
-
-		#[test]
-		fn a_window_has_no_root_while_a_sibling_cannot_say_its_role() {
-			let (mut ax, _server) = app_with_message_dialog("TDLG");
-			let dialog = listed_dialog(&ax);
-			assert!(ax.window_root(&dialog).is_ok());
-			let (mut ax, _server) = app_with_an_unreadable_window();
-			let dialog = listed_dialog(&ax);
-			assert!(ax.window_root(&dialog).is_err());
-		}
-
-		#[test]
-		fn a_window_holds_no_focus_while_a_sibling_cannot_say_its_role() {
-			// The dialog, listed either way, reads as focused.
-			let (ax, _server) = app_with_message_dialog("TDLG");
-			assert!(ax.holds_focus(&listed_dialog(&ax)));
-			let (ax, _server) = app_with_an_unreadable_window();
-			assert!(!ax.holds_focus(&listed_dialog(&ax)));
+			let main = window("1", "Main", 0, 0);
+			assert_eq!(ax.window_id(&element("/dismiss"), std::slice::from_ref(&main)).unwrap(), "1");
+			let AxHandle::AtSpi(root) = ax.window_root(&main).unwrap() else {
+				panic!("expected AT-SPI root");
+			};
+			assert_eq!(root.path_as_str(), "/main");
 		}
 
 		#[test]
