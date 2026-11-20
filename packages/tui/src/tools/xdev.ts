@@ -53,16 +53,19 @@ export function setXdevRendererLookup(lookup: (name: string) => ToolRenderer | u
 	rendererLookup = lookup;
 }
 
-/** Decode the (possibly partially streamed) inner args JSON string into display args. */
-function decodeInnerArgs(raw: unknown): Record<string, unknown> {
+/**
+ * Decode the (possibly partially streamed) inner args JSON string into display
+ * args — the payload a dispatch hands to the renderer it delegates to.
+ */
+export function decodeInnerArgs(raw: unknown): Record<string, unknown> {
 	if (typeof raw !== "string" || raw.length === 0) return {};
 	const parsed = parseStreamingJson<Record<string, unknown>>(raw);
 	const args: Record<string, unknown> = parsed && typeof parsed === "object" ? { ...parsed } : {};
 	args.__partialJson = raw;
 	return args;
 }
-
-/** Renderer for a mounted device: the live mounted tool's own render callbacks
+/**
+ * Renderer for a mounted device: the live mounted tool's own render callbacks
  *  (custom/MCP/image tools carry them) first, then the static built-in renderer
  *  map keyed by name. */
 function resolveDeviceRenderer(
@@ -73,6 +76,18 @@ function resolveDeviceRenderer(
 		return mounted;
 	}
 	return rendererLookup?.(name);
+}
+
+/**
+ * The renderer an `xd://` dispatch delegates to: the same resolution
+ * {@link renderXdevCall} performs, exposed so a delegating renderer can tell
+ * which renderer owns the preview its dispatch paints.
+ */
+export function resolveXdevDelegatedRenderer(
+	name: string,
+	mounted: XdevMountedRenderer | undefined,
+): XdevMountedRenderer | undefined {
+	return resolveDeviceRenderer(name, mounted);
 }
 
 /** Human label for a device write: mounted tool label, else `server/tool` for MCP names. */
