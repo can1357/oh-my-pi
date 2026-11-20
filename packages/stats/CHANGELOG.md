@@ -4,7 +4,8 @@
 
 ### Fixed
 
-- Fixed the Spotlight page charging a fetch-back turn the cache-write premium on context the next request would have written anyway ([#19377](https://github.com/can1357/oh-my-pi/pull/19377) by [@Xytronix](https://github.com/Xytronix))
+- Fixed the Spotlight page charging a fetch-back turn the cache-write premium on context the next request reads back and would have written anyway ([#19898](https://github.com/can1357/oh-my-pi/pull/19898) by [@Xytronix](https://github.com/Xytronix))
+
 ## [19.0.1] - 2026-11-19
 
 ### Added
