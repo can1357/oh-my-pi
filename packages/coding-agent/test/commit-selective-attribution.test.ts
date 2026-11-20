@@ -277,6 +277,30 @@ describe("selective commit attribution", () => {
 		});
 	}
 
+	it("keeps an unrelated insertion preselected when only a reviewed reorder also adds its text", () => {
+		const lines = (text: string) => text.split(" ").join("\n");
+		const snapshots = [
+			"B x x A q q q q",
+			"Main: B A x x C q q q q",
+			"Other: A x x C D B q q q q",
+			"Main: A x C D B x q q q q",
+			// Unrelated to the reorder, though the reviewed hunks add a `C` as well.
+			"Main: A x C D B x q q C q q",
+		];
+		const edits: Edit[] = [];
+		let before = lines(snapshots[0]);
+		for (const step of snapshots.slice(1)) {
+			const [actor, after] = step.split(": ");
+			edits.push({ actor, before, after: lines(after) });
+			before = lines(after);
+		}
+
+		const { verdicts } = commitFor(lines("x B x D A q q q q"), edits, before, ["Main"]);
+
+		expect(verdicts.at(-1)).toBe("own +C");
+		expect(verdicts.slice(0, -1).every(verdict => verdict.startsWith("review"))).toBe(true);
+	});
+
 	describe("subagents", () => {
 		const mainAfter = CODE.replace("return 1", "return 10");
 		const subAfter = mainAfter.replace("return 2", "return 20");
