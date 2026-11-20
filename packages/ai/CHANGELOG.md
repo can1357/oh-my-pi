@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ADC authentication and project/location URL resolution for Vertex AI partner Responses API endpoints (`/publishers/meta/v1` and `/publishers/openai/v1`) under `google-vertex` ([#19861](https://github.com/can1357/oh-my-pi/pull/19861) by [@konsailabs](https://github.com/konsailabs))
+
 ### Fixed
 
 - GPT-6.2 system prompts are now sent as leading `developer` input messages on third-party Responses proxies too, so they hit the prompt cache instead of billing at the full input rate every turn ([openai/codex#62312](https://github.com/openai/codex/issues/62312))

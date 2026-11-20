@@ -5,6 +5,7 @@
 ### Added
 
 - Added `uncached-instructions` compatibility flag, enabled for GPT-6.2 models on every host, which moves the system prompt out of the uncached Responses `instructions` field
+- Added `isVertexPublisherResponsesUrl` predicate to detect Vertex AI partner Responses API endpoints (`/publishers/{meta,openai}/v1`) ([#19861](https://github.com/can1357/oh-my-pi/pull/19861) by [@konsailabs](https://github.com/konsailabs))
 
 ### Fixed
 
