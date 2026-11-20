@@ -51,6 +51,7 @@
 
 ### Fixed
 
+- On Windows, an abort or `timeout` now ends an in-process utility such as `cat` that is blocked reading an open, empty stdin pipe, instead of waiting until a writer closes it ([#19338](https://github.com/can1357/oh-my-pi/pull/19338) by [@jchanghong023](https://github.com/jchanghong023))
 - In Tern, answers keep their turn footer and its Copy button after a resume, a compaction or any other transcript rebuild; previously every answer drawn before the rebuild lost them
 - `--continue` (and `autoResume`) no longer resumes a session another running omp is writing, which duplicated its conversation into a new file on the first message; it starts a new session as plain `omp` does
 - `/handoff` now shows its progress like `/compact` while it writes the summary: a working row with a spinner and timer while the agent is idle, and a row above it while a turn runs. Previously only a one-off status line said it had started

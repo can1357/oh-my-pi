@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- On Windows, an abort or `timeout` now ends an in-process utility such as `cat` that is blocked reading an open, empty stdin pipe, instead of waiting until a writer closes it ([#19338](https://github.com/can1357/oh-my-pi/pull/19338) by [@jchanghong023](https://github.com/jchanghong023))
 - The `sed` shell builtin accepts grouped scripts such as `1{h;d};2{G}` without a semicolon before the closing brace.
 - Fixed the native addon failing to load when HOME, PI_NATIVES_DIR or the install directory contains `?` ([#19763](https://github.com/can1357/oh-my-pi/pull/19763) by [@sjawhar](https://github.com/sjawhar))
 - `commitCreate()` now reports a HEAD that moves after the expected-HEAD check, such as from a `commit-msg` hook, as a `HeadMoved` error instead of a generic `Backend` failure ([#19393](https://github.com/can1357/oh-my-pi/pull/19393) by [@eggpeat](https://github.com/eggpeat))
@@ -99,6 +100,7 @@
 ### Removed
 
 - Removed the obsolete `wayland-pipewire` Cargo feature and `OMP_NATIVE_FEATURES` configuration variable.
+- Removed the `wayland-pipewire` Cargo feature and `OMP_NATIVE_FEATURES`, which only existed to pass it ([#18353](https://github.com/can1357/oh-my-pi/pull/18353) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.0] - 2026-11-16
 
