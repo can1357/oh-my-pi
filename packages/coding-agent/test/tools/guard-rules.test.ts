@@ -458,6 +458,12 @@ describe.skipIf(process.platform === "win32")("kills_harness", () => {
 			`pkill -c -P ${process.ppid}`,
 			`pkill -q 5 -P ${process.ppid}`,
 			`pkill --queue 5 -P ${process.ppid}`,
+			// getopt takes an unambiguous abbreviation of a long option.
+			`pkill --cou -P ${process.ppid}`,
+			`pkill --co -P ${process.ppid}`,
+			`pkill --ec -P ${process.ppid}`,
+			`pkill --qu 5 -P ${process.ppid}`,
+			`pkill --q=5 -P ${process.ppid}`,
 		]) {
 			expect({ command, rule: ruleOf(bashApproval(process.cwd(), command)) }).toEqual({
 				command,

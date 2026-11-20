@@ -2377,12 +2377,23 @@ function signalOption(word: string): string | undefined {
 
 /** procps `pkill` short options that take a value: the rest of their bundle, or the next word. */
 const PKILL_VALUE_LETTERS = "gGPstuUFrOq";
+/**
+ * procps `pkill` long options `pgrep` lacks or answers differently, each with the shortest
+ * abbreviation getopt takes for it (`--co`, as `--c` could also be `--cgroup`).
+ */
+const PKILL_DROPPED_OPTIONS = [
+	{ long: "--count", shortest: "--co" },
+	{ long: "--echo", shortest: "--ec" },
+] as const;
+/** procps `pkill`'s `--queue`, which takes a value and which `pgrep` lacks. */
+const PKILL_QUEUE_OPTION = { long: "--queue", shortest: "--q" };
 
 /**
  * The selection a `pkill` gives `pgrep`: its options without the ones `pgrep` lacks or answers
  * differently. `-c` and `--count` (a count, not PIDs), `-e` and `--echo`, and `-H` go; `-q` and
- * `--queue` go with the value they take. Every other option selects what `pkill` does, and one that
- * takes a value keeps it whole, stuck on (`-ucoolify`, `--parent=1`) or the next word.
+ * `--queue` go with the value they take, a long one also when abbreviated (`--cou`, `--qu 5`).
+ * Every other option selects what `pkill` does, and one that takes a value keeps it whole, stuck
+ * on (`-ucoolify`, `--parent=1`) or the next word.
  */
 function pgrepSelection(kept: readonly string[]): string[] {
 	const out: string[] = [];
@@ -2392,9 +2403,16 @@ function pgrepSelection(kept: readonly string[]): string[] {
 			out.push(...kept.slice(i));
 			break;
 		}
-		if (arg === "--queue") i++;
-		else if (arg.startsWith("--")) {
-			if (arg !== "--count" && arg !== "--echo" && !arg.startsWith("--queue=")) out.push(arg);
+		if (arg.startsWith("--")) {
+			const eq = arg.indexOf("=");
+			const flag = eq < 0 ? arg : arg.slice(0, eq);
+			const names = (option: { long: string; shortest: string }) =>
+				flag.length >= option.shortest.length && option.long.startsWith(flag);
+			if (names(PKILL_QUEUE_OPTION)) {
+				if (eq < 0) i++;
+			} else if (!PKILL_DROPPED_OPTIONS.some(names)) {
+				out.push(arg);
+			}
 		} else if (arg.startsWith("-") && arg.length > 1) {
 			let letters = "";
 			for (let k = 1; k < arg.length; k++) {
