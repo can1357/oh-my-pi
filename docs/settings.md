@@ -426,6 +426,17 @@ separate, run `omp config set session.worktreeScope directory` (or choose
 The all-projects tab still shows sessions across every directory, including
 sessions in deleted worktrees; this setting only narrows the current-folder list.
 
+## Disabling session deletion
+
+Session deletion is irreversible: omp cannot restore a deleted session file.
+If you have hit a delete by accident before, run `omp config set session.delete.enabled false`
+(or untick **Allow Session Deletion** in `/settings`). `/delete` and `/session delete` then refuse
+with a message naming the setting instead of unlinking, and both resume pickers — `/resume` and
+`omp --resume`'s startup picker — drop the Backspace/Delete binding and its hint line entirely,
+so the key edits your search query at worst. Commands you expect to delete stay useful otherwise —
+`/new`, `/clear`, `/fork`, and worktree cleanup are untouched, and sessions the tools prune as
+empty shells still go. Set it back to `true` to restore deletion.
+
 ## Settings catalog
 
 The catalog below highlights common settings; it is not the complete schema. `omp config list` is the authoritative reference for every key, current value, type, and description. Defaults and enum values shown here come from the schema. Settings that accept an env or flag override are noted; those overrides are process-local and not persisted.

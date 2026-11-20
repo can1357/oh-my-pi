@@ -21,6 +21,7 @@ import { handleMcpAcp } from "./helpers/mcp";
 import { markdownFenceFor } from "../utils/markdown-fence";
 import { openLocalFileInEditor } from "../modes/local-file-editor";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
+import { cfgSessionDeleteEnabled } from "../session/settings";
 import {
 	describeRedeemOutcome,
 	formatResetUsageAccountLine,
@@ -272,6 +273,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return commandConsumed();
 			}
 			if (verb === "delete" && !rest) {
+				if (!cfgSessionDeleteEnabled.get(runtime.settings))
+					return usage("Session deletion is disabled (session.delete.enabled=false).", runtime);
 				if (runtime.session.isStreaming) return usage("Cannot delete the session while streaming.", runtime);
 				const sessionFile = runtime.sessionManager.getSessionFile();
 				if (!sessionFile) return usage("No session file to delete (in-memory session).", runtime);

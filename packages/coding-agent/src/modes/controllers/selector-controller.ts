@@ -129,7 +129,12 @@ import type { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-
 import { cfgAdvisorSyncBacklog } from "../../advisor/settings";
 import { cfgBranchSummaryEnabled } from "../../session/context-settings";
 import { cfgCycleOrder, cfgDisabledProviders, cfgModelRoleStorage } from "../../config/model-settings";
-import { cfgDefaultThinkingLevel, cfgRetryFallbackChains, cfgSessionWorktreeScope } from "../../session/settings";
+import {
+	cfgDefaultThinkingLevel,
+	cfgRetryFallbackChains,
+	cfgSessionDeleteEnabled,
+	cfgSessionWorktreeScope,
+} from "../../session/settings";
 import {
 	cfgStatusLineCompactThinkingLevel,
 	cfgStatusLineContextLine,
@@ -1907,21 +1912,25 @@ export class SelectorController {
 				: undefined;
 			onSelectSession = session => this.handleResumeSession(session.path, { followContinuation: true });
 			selectorOptions = {
-				onDelete: async (session: SessionInfo) => {
-					if (!(await this.#detachActiveSessionBeforeDeletion(session.path))) {
-						return false;
-					}
-					const storage = new FileSessionStorage();
-					try {
-						await storage.deleteSessionWithArtifacts(session.path);
-						return true;
-					} catch (error) {
-						throw new Error(
-							`Failed to delete session: ${error instanceof Error ? error.message : String(error)}`,
-							{ cause: error },
-						);
-					}
-				},
+				// session.delete.enabled=false omits onDelete: the selector then binds
+				// no delete key and shows no delete hint at all.
+				onDelete: cfgSessionDeleteEnabled.get(this.ctx.settings)
+					? async (session: SessionInfo) => {
+							if (!(await this.#detachActiveSessionBeforeDeletion(session.path))) {
+								return false;
+							}
+							const storage = new FileSessionStorage();
+							try {
+								await storage.deleteSessionWithArtifacts(session.path);
+								return true;
+							} catch (error) {
+								throw new Error(
+									`Failed to delete session: ${error instanceof Error ? error.message : String(error)}`,
+									{ cause: error },
+								);
+							}
+						}
+					: undefined,
 				onRename: async (session: SessionInfo, title: string): Promise<string | null> => {
 					if (this.ctx.sessionManager.getSessionFile() === session.path) {
 						// A session that has only been read does not hold
@@ -2149,6 +2158,10 @@ export class SelectorController {
 	}
 
 	async handleSessionDeleteCommand(): Promise<void> {
+		if (!cfgSessionDeleteEnabled.get(this.ctx.settings)) {
+			this.ctx.showError("Session deletion is disabled (session.delete.enabled=false)");
+			return;
+		}
 		const sessionFile = this.ctx.sessionManager.getSessionFile();
 		if (!sessionFile) {
 			this.ctx.showError("No session file to delete (in-memory session)");

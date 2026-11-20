@@ -475,6 +475,7 @@ import {
 } from "./settings";
 import { cfgTasksTodoClearDelay } from "../tools/settings";
 import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../task/settings";
+import { cfgSessionDeleteEnabled } from "../session/settings";
 import { cfgExpandThinkingBlocks, cfgProseOnlyThinking } from "../session/settings";
 import { cfgDefaultThinkingLevel, cfgHideThinkingBlock } from "../session/settings";
 import { cfgCycleOrder, cfgModelRoles } from "../config/model-settings";
@@ -9555,6 +9556,13 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async handleDeleteCommand(): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
+		// Refuse before prepareSessionSwitch: its teardown (canceling /btw, hiding
+		// a pending plan review) is destructive, and a disabled delete must leave
+		// live state untouched.
+		if (!cfgSessionDeleteEnabled.get(this.settings)) {
+			this.showError("Session deletion is disabled (session.delete.enabled=false)");
+			return;
+		}
 		await this.prepareSessionSwitch();
 		await this.#commandController.handleDeleteCommand();
 	}
