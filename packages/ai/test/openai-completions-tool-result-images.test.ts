@@ -53,6 +53,7 @@ const compat: ResolvedOpenAICompat = {
 	supportsStrictMode: true,
 	toolStrictMode: "none",
 	supportsReasoningParams: true,
+	reasoningOpaqueReplay: false,
 	supportsSamplingParams: true,
 	supportsPenaltyAndStopParams: true,
 	alwaysSendMaxTokens: false,

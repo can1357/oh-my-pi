@@ -461,7 +461,9 @@ function sanitizeMalformedToolCalls(messages: Message[], model: Model): Message[
 				filtered.push(block);
 			}
 			if (filtered.length === 0) continue;
-			result.push(filtered.length === msg.content.length ? msg : { ...msg, content: filtered });
+			result.push(
+				filtered.length === msg.content.length ? msg : { ...msg, content: dropReasoningDetailsEnvelopes(filtered) },
+			);
 			continue;
 		}
 		if (msg.role === "toolResult") {

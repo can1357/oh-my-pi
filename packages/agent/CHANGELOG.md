@@ -64,7 +64,7 @@
 
 ### Fixed
 
-- Context estimates now count replayed GitHub Copilot reasoning summaries without charging for the encrypted state.
+- Context estimates now count replayed GitHub Copilot reasoning summaries without charging for the encrypted state. ([#19989](https://github.com/can1357/oh-my-pi/pull/19989) by [@ashtacore](https://github.com/ashtacore))
 
 ## [19.0.0] - 2026-11-18
 

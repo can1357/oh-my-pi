@@ -552,6 +552,11 @@ describe("chat-completions history estimate", () => {
 		const expected = tokenizer.countMessage({ ...turn, content: [toolCall] }) + tokenizer.countTokens(first + second);
 		expect(tokenizer.countMessage(turn)).toBe(expected);
 		expect(tokenizer.countMessage(turn, floor)).toBe(expected);
+
+		const disabled = { ...copilotGemini, compat: { ...copilotGemini.compat, reasoningOpaqueReplay: false } };
+		expect(tokenizer.countsAlike(disabled)).toBe(false);
+		const withoutReplay = new Tokenizer(disabled);
+		expect(withoutReplay.countMessage(turn)).toBe(withoutReplay.countMessage({ ...turn, content: [toolCall] }));
 	});
 
 	test.each([

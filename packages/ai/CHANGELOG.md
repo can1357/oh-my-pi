@@ -177,7 +177,7 @@
 - Antigravity quota exhaustion is now reported as a 429 rate-limit error, allowing configured retries, credential rotation, and model fallback behavior to apply correctly instead of treating the response as assistant text. ([#19382](https://github.com/can1357/oh-my-pi/pull/19382) by [@gimso2x](https://github.com/gimso2x))
 - Anthropic requests now preserve prompt caching when tools are activated later in a conversation, avoiding unnecessary system-prompt and transcript cache rewrites. ([#19826](https://github.com/can1357/oh-my-pi/issues/19826))
 - Models flagged `foldUserAfterToolResult` now receive a user message that arrives right after a tool result inside that tool result, instead of as a separate turn
-- GitHub Copilot's Gemini models now retain their reasoning state across tool calls.
+- GitHub Copilot's Gemini models now retain their reasoning state across tool calls. ([#19989](https://github.com/can1357/oh-my-pi/pull/19989) by [@ashtacore](https://github.com/ashtacore))
 - LiteLLM requests now switch to another configured key when a 422 budget-exceeded response stops the current key ([#19860](https://github.com/can1357/oh-my-pi/issues/19860)).
 - GPT-6.2 system prompts are now sent as leading `developer` input messages on third-party Responses proxies too, so they hit the prompt cache instead of billing at the full input rate every turn ([openai/codex#62312](https://github.com/openai/codex/issues/62312))
 - Fixed thinking detection so a failed check of one request style no longer ignores another style that already worked, and the next request no longer repeats a style the server already refused. ([#19758](https://github.com/can1357/oh-my-pi/pull/19758) by [@eggpeat](https://github.com/eggpeat))
