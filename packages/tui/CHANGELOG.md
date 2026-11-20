@@ -12,6 +12,7 @@
 
 - Added handling of `features` terminal events to update UI without waiting for a new hello
 - Added Vim `W`, `B`, and `E` motions for navigating whitespace-delimited WORDs ([#13099](https://github.com/can1357/oh-my-pi/pull/13099) by [@Scott-Simmons](https://github.com/Scott-Simmons)).
+- Added Vim `s`/`S` (substitute characters / lines, Visual `S` changes whole lines) and the linewise line motions `-`, `+`, and `_`
 
 ### Changed
 
@@ -22,6 +23,7 @@
 
 ### Fixed
 
+- Fixed Vim `cc`, `cj`, and other linewise changes keeping the start of the line when the cursor was mid-line, and storing the old text so `p` spliced it into a line instead of putting it back as whole lines
 - Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
 - Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed WebP and JPEG images drawing as a blank gap on Kitty-graphics terminals (Ghostty, Kitty, herdr) when shown through a bare `Image`, such as an extension's pasted-image preview ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))

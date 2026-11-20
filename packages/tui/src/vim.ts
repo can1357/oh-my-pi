@@ -977,6 +977,19 @@ export class VimState {
 				// Sticky end-of-line, so `$j` lands on the end of each line rather than a fixed column.
 				this.#desiredCol = Number.POSITIVE_INFINITY;
 				return { to: at(line.length), inclusive: false, linewise: false };
+			case "-":
+			case "+":
+			case "_": {
+				// Vim's `nv_up`/`nv_down`/`nv_lineop`: linewise, landing on the first non-blank.
+				// `_` moves `count - 1` lines down, so `d_` is `dd` and `c_` is `cc`.
+				const delta = key === "-" ? -count : key === "+" ? count : count - 1;
+				const target = Math.max(0, Math.min(buf.cursorLine + delta, buf.lines.length - 1));
+				return {
+					to: { line: target, col: firstNonBlank(buf.lines[target] ?? "") },
+					inclusive: false,
+					linewise: true,
+				};
+			}
 			case "W":
 			case "B":
 			case "E": {
@@ -1171,8 +1184,17 @@ export class VimState {
 		}
 		// `c` always lands in Insert mode. The leading move matters when the range is empty
 		// (`ci"` between bare quotes): the delete is a no-op, so nothing else would park the cursor.
-		// `cc`/`cj` clear the lines but keep them, so a linewise change stays linewise-shaped.
 		this.mode = "insert";
+		if (linewise) {
+			// `cc`/`cj`/`S`: like Vim's `op_delete` for a linewise change, the lines go to the register
+			// whole but one empty line stays behind to type into, whatever column the cursor was on.
+			const start = { line: from.line, col: 0 };
+			return [
+				{ kind: "move", to: start },
+				{ kind: "delete", from: start, to, linewise: true, insert: true },
+				{ kind: "mode", mode: "insert" },
+			];
+		}
 		return [
 			{ kind: "move", to: from },
 			{ kind: "delete", from, to, linewise: false, insert: true },
@@ -1326,6 +1348,19 @@ export class VimState {
 					false,
 				);
 			}
+			case "S":
+			case "s": {
+				// Vim's `nv_optrans` feeds `cc`/`cl` back as typed keys, count included, so `S` is `cc`
+				// in every respect. Pending operators are cancelled (`dS` does nothing), as in Vim.
+				if (this.#operator !== null) {
+					this.#clearPending();
+					return [];
+				}
+				this.#operator = "c";
+				if (key === "S") return this.#handleNormalKey("c", buf);
+				const motion = this.#resolveMotion("l", buf);
+				return motion === null ? [] : this.#applyMotion(buf, motion);
+			}
 			case "d":
 			case "y":
 			case "c":
@@ -1414,31 +1449,34 @@ export class VimState {
 			case "x":
 			case "c":
 			case "s":
+			case "S":
 			case ">":
 			case "<":
 			case "J": {
-				const { from, to } = visualRange(buf, anchor, linewise);
+				// `vS` changes whole lines even from a charwise selection: Vim's `nv_subst` forces `V`.
+				const whole = linewise || key === "S";
+				const { from, to } = visualRange(buf, anchor, whole);
 				this.#clearPending();
 				this.anchor = null;
 				if (key !== "y") {
 					const change: VimChange = {
 						kind: "visual",
 						key,
-						linewise,
+						linewise: whole,
 						lines: to.line - from.line + 1,
 						graphemes:
 							from.line === to.line ? countGraphemes((buf.lines[from.line] ?? "").slice(from.col, to.col)) : 0,
 						endCol: to.col,
 						insert: null,
 					};
-					if (key === "c" || key === "s") {
+					if (key === "c" || key === "s" || key === "S") {
 						this.#lastChange = change;
 						this.#stagedChange = null;
 					} else {
 						this.#stagedChange = change;
 					}
 				}
-				return this.#visualEdit(key, from, to, linewise);
+				return this.#visualEdit(key, from, to, whole);
 			}
 			default:
 				this.#clearPending();
@@ -1456,7 +1494,7 @@ export class VimState {
 					: { kind: "indent", fromLine: from.line, toLine: to.line, out: key === "<" };
 			return [edit, { kind: "mode", mode: "normal" }];
 		}
-		const operator: VimOperator = key === "y" ? "y" : key === "c" || key === "s" ? "c" : "d";
+		const operator: VimOperator = key === "y" ? "y" : key === "c" || key === "s" || key === "S" ? "c" : "d";
 		// `#operate` switches to Insert itself for `c`; everything else drops back to Normal.
 		if (operator !== "c") this.mode = "normal";
 		const commands = this.#operate(operator, from, to, linewise);
