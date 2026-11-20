@@ -37,6 +37,7 @@ function overlayUi(): {
 				entry.hidden = hidden;
 			},
 			isHidden: () => entry.hidden,
+			isFocused: () => false,
 		};
 	};
 	return { shown, setFocus, overlayStack, ui: { overlayStack, setFocus, showOverlay } };
@@ -89,7 +90,7 @@ describe("single-instance menus", () => {
 			ui: {
 				showOverlay: (component: Component, _options?: OverlayOptions): OverlayHandle => {
 					overlays.push(component);
-					return { hide: () => {}, setHidden: () => {}, isHidden: () => false };
+					return { hide: () => {}, setHidden: () => {}, isHidden: () => false, isFocused: () => false };
 				},
 				setFocus,
 			},

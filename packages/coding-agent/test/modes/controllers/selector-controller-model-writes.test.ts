@@ -63,7 +63,14 @@ describe("SelectorController model selector writes", () => {
 			createInteractiveModeContext({
 				session: live,
 				settings,
-				ui: { showOverlay: () => ({ hide: () => {}, setHidden: () => {}, isHidden: () => false }) },
+				ui: {
+					showOverlay: () => ({
+						hide: () => {},
+						setHidden: () => {},
+						isHidden: () => false,
+						isFocused: () => false,
+					}),
+				},
 				keybindings: { getKeys: () => [], getDisplayString: () => "" },
 				showError,
 			}),

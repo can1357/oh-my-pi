@@ -364,4 +364,52 @@ describe("TUI overlay focus", () => {
 			tui.stop();
 		}
 	});
+
+	it("reports through its handle whether the overlay holds focus", () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+		const editor = new FocusRecorder("editor");
+		const questionnaire = new FocusRecorder("questionnaire");
+
+		tui.addChild(editor);
+		tui.setFocus(editor);
+
+		try {
+			tui.start();
+			const handle = tui.showOverlay(questionnaire);
+			expect(handle.isFocused()).toBe(true);
+
+			handle.setHidden(true);
+			expect(tui.getFocused()).toBe(editor);
+			expect(handle.isFocused()).toBe(false);
+
+			handle.setHidden(false);
+			expect(handle.isFocused()).toBe(true);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("reports focus when a prompt the overlay owns holds focus", () => {
+		const terminal = new MinimalTerminal();
+		const tui = new TUI(terminal);
+		const editor = new FocusRecorder("editor");
+		const wizardOverlay = new OwningOverlay("wizard");
+		const authorizationCodeInput = new FocusRecorder("code");
+
+		tui.addChild(editor);
+		tui.setFocus(editor);
+
+		try {
+			tui.start();
+			const handle = tui.showOverlay(wizardOverlay, { fullscreen: true });
+
+			wizardOverlay.focusTarget = authorizationCodeInput;
+			tui.setFocus(authorizationCodeInput);
+			expect(tui.getFocused()).toBe(authorizationCodeInput);
+			expect(handle.isFocused()).toBe(true);
+		} finally {
+			tui.stop();
+		}
+	});
 });

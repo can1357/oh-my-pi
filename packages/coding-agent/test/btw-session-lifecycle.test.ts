@@ -94,6 +94,7 @@ describe("BTW session boundaries", () => {
 			hide: vi.fn(),
 			setHidden: vi.fn(),
 			isHidden: () => false,
+			isFocused: () => false,
 		}));
 		vi.spyOn(mode, "renderInitialMessages").mockResolvedValue(undefined);
 		vi.spyOn(mode, "reloadTodos").mockResolvedValue(undefined);
