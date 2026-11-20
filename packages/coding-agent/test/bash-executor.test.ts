@@ -732,6 +732,11 @@ exit 64
 		if (!zshPath) {
 			return;
 		}
+		// An interactive zsh whose ZDOTDIR holds none of .zshenv, .zprofile, .zshrc and .zlogin
+		// runs zsh-newuser-install where the zsh install ships it (Debian and Ubuntu do), and its
+		// menu waits for a key before the command runs, so the prompt this test answers never
+		// appears. An empty .zshrc is a startup file, so zsh runs the command straight away.
+		fs.writeFileSync(path.join(tempDir, ".zshrc"), "");
 		cfgShellPath.set(Settings.instance, zshPath);
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: zshPath,
@@ -1694,7 +1699,7 @@ describe("executeBash :async: background retention", () => {
 			if (!sleepBin) throw new Error("sleep executable not found");
 			let pid: number | undefined;
 			try {
-				// pi's `nohup` tool (crates/pi-shell/src/tools/nohup.rs) runs the operand
+				// pi's `nohup` tool (crates/shell/src/tools/nohup.rs) runs the operand
 				// in a detached tree that session cancel and teardown leave running,
 				// independently of the retain map. `$!` names the background job, not
 				// the external that survives — the operand writes its own pid before

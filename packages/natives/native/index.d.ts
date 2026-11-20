@@ -269,6 +269,41 @@ export declare class EditStore {
   clear(): void
 }
 
+/** Async reader/writer over a raw fd (pipe end). */
+export declare class FdStream {
+  /** Take ownership of `fd` (Windows: a pipe handle value). */
+  constructor(fd: number)
+  /**
+   * Begin reading: every chunk goes to `onChunk`, then `onClose` fires once
+   * with `null` on EOF/`close()` or an error message.
+   */
+  start(onChunk: (chunk: Uint8Array) => void, onClose: (reason: string | null) => void): void
+  /**
+   * Stop reading without closing the fd. Resolves once every chunk read
+   * before the pause has been delivered to `onChunk`; unread bytes stay in
+   * the kernel buffer. Writes are unaffected. No-op (resolved) when not
+   * reading (not started, already paused, or closed).
+   *
+   * Windows: the blocking pipe read cannot be interrupted without losing its
+   * bytes, so this resolves immediately and reading continues.
+   */
+  pause(): Promise<void>
+  /**
+   * Restart the read loop after `pause()` with the callbacks given to
+   * `start`. No-op when not paused.
+   */
+  resume(): void
+  /**
+   * Queue `data`; false once more than 1 MiB is unwritten (or the stream is
+   * closed).
+   */
+  write(data: string | Uint8Array): boolean
+  /** Resolve once every queued byte was written or the stream closed. */
+  drained(): Promise<void>
+  /** Stop reading and writing, drop queued bytes, and close the fd. */
+  close(): void
+}
+
 /**
  * Process-owned cross-platform advisory lock.
  *
@@ -282,9 +317,10 @@ export declare class FileLock {
   /**
    * Whether any handle, in any process including this one, holds `path`.
    *
-   * Observes without locking or opening the lock: a `connect(2)` probe on
-   * Linux, an `F_GETLK` query on other Unix platforms, a `\BaseNamedObjects`
-   * directory listing on Windows. A concurrent `tryAcquire()` never meets it.
+   * Observes without taking the lock: an `F_OFD_GETLK` query plus a
+   * `connect(2)` probe of the older abstract-socket name on Linux, an
+   * `F_GETLK` query on other Unix platforms, a `\BaseNamedObjects` directory
+   * listing on Windows. A concurrent `tryAcquire()` never meets it.
    */
   static isHeld(path: string): boolean
   /** Whether this handle owns the requested lock. */
@@ -320,6 +356,12 @@ export declare class IpcConnection {
    */
   static connect(endpoint: string, options: IpcConnectOptions): Promise<IpcConnection>
   /**
+   * Dial TCP `host:port` (`TCP_NODELAY` set; no peer-credential check:
+   * authenticate in-band). Rejects with code ECONNREFUSED, ETIMEDOUT
+   * (`timeoutMs` expired), EADDRNOTAVAIL, or the OS errno name.
+   */
+  static connectTcp(host: string, port: number, options: IpcConnectOptions): Promise<IpcConnection>
+  /**
    * Begin delivery on a `lines` connection (throws `TypeError` on a `raw`
    * one). Call `start`/`startRaw` exactly once. Frames received before
    * start are buffered, never dropped. `onLine` gets each non-empty line
@@ -335,8 +377,21 @@ export declare class IpcConnection {
    */
   startRaw(onChunk: (chunk: Uint8Array) => void, onClose: (reason: string | null) => void): void
   /**
+   * On a started `lines` connection: stop line framing. Bytes received
+   * past the last line already passed to `onLine` — including the rest of
+   * the batch when called from inside `onLine` — and every later byte go to
+   * `onChunk`, in order, nothing lost or reframed. `send()` then takes raw
+   * strings (UTF-8) / `Uint8Array` written as-is, without an LF. The
+   * `onClose` given to `start` still fires exactly once, last.
+   * `maxFrameBytes` stops applying once the switch reaches the reader. Throws
+   * `TypeError` on a `raw` connection, `ERR_INVALID_STATE` before `start` or
+   * when already upgraded.
+   */
+  upgradeRaw(onChunk: (chunk: Uint8Array) => void): void
+  /**
    * Send one frame. lines: a string without LF (`TypeError` otherwise);
-   * LF is appended. raw: string (UTF-8) or `Uint8Array` written as-is.
+   * LF is appended. raw (or after `upgradeRaw`): string (UTF-8) or
+   * `Uint8Array` written as-is.
    * Frames sent during one JS task are written together when it ends (a
    * microtask), in order; `end()` writes them first. Returns false once
    * unwritten bytes exceed 1 MiB (await `drained()` before sending more).
@@ -377,8 +432,25 @@ export declare class IpcServer {
    * started).
    */
   static listen(endpoint: string, options: IpcListenOptions, onConnection: (connection: IpcConnection) => void): Promise<IpcServer>
-  /** The endpoint this server listens on. */
+  /**
+   * Bind and listen on TCP `host:port`; `port` 0 picks an ephemeral port
+   * (read it back from `port`). Loopback and non-loopback hosts are both
+   * allowed. No peer-credential check: authenticate in-band. Accepted
+   * sockets have `TCP_NODELAY` set. `onConnection` receives each accepted
+   * connection (not yet started). Rejects with code EADDRINUSE,
+   * EADDRNOTAVAIL, EACCES, or the OS errno name.
+   */
+  static listenTcp(host: string, port: number, options: IpcListenOptions, onConnection: (connection: IpcConnection) => void): Promise<IpcServer>
+  /**
+   * The endpoint this server listens on: the socket path / pipe name, or
+   * `"<ip>:<port>"` for TCP.
+   */
   get endpoint(): string
+  /**
+   * The bound TCP port (the real one when listening on port 0); `null` for
+   * Unix-socket / named-pipe servers.
+   */
+  get port(): number | null
   /**
    * Stop accepting. Unix: unlink the socket file if it is still the inode
    * this server bound. Accepted connections are untouched. Idempotent.
@@ -517,13 +589,16 @@ export declare class PhononTts {
 }
 
 /**
- * The bytes crossing one shell run's pipeline pipes, during and after the run.
+ * The output of one shell run that never reaches its own stdout, during and
+ * after the run: the bytes crossing its pipeline pipes, and the files its
+ * commands redirect their output into.
  *
  * For `cargo build 2>&1 | tail -5`, stream 1 holds what `cargo` has written
- * so far while `tail` still holds it back. Create one per run and pass it as
+ * so far while `tail` still holds it back; for `cargo build > build.log`,
+ * stream 1 reads `build.log`. Create one per run and pass it as
  * [`ShellRunOptions::streams`]. Streams are numbered from 1 in the order the
- * run opened its pipes; each keeps its most recent 1 MiB, and a run keeps its
- * 4 newest finished streams.
+ * run opened them; each keeps (a file: reads) its most recent 1 MiB, and a
+ * run keeps its 4 newest finished pipes and its 8 newest files.
  */
 export declare class PipeStreams {
   constructor()
@@ -597,11 +672,37 @@ export declare class Process {
   children(): Array<Process>
   /** Current status of this process reference. */
   status(): ProcessStatus
+  /**
+   * Process start time in milliseconds since the Unix epoch, when the
+   * platform reports it; a pid-reuse guard for re-adopting processes.
+   */
+  startTime(): number | null
 }
 
 /** Stateful PTY session for interactive stdin/stdout passthrough. */
 export declare class PtySession {
   constructor()
+  /**
+   * Wrap an inherited pty master fd and its child pid (e.g. kept across
+   * `execReplace`); call `resume` to drive it like a started session.
+   */
+  static adopt(masterFd: number, pid: number): PtySession
+  /** Unix pty master fd of the running session, for `execReplace` keepFds. */
+  masterFd(): number | null
+  /** Process id of the running session's child. */
+  pid(): number | null
+  /**
+   * Whether the program in the terminal waits on the user's keys.
+   *
+   * `true` while echo is off (a password prompt such as `sudo`'s, or a
+   * full-screen program like `less`) or, on Linux, while a foreground
+   * process is blocked reading the terminal (a `[y/N]` prompt). `false` when
+   * no session runs or, on Linux, no foreground process reads the terminal.
+   * `null` when an echoing line prompt cannot be told from a busy program:
+   * always on macOS and Windows, and on Linux when a foreground process
+   * cannot be inspected (one running setuid).
+   */
+  awaitsInput(): boolean | null
   /**
    * Start a shell command, stream output chunks, and report the spawned child
    * PID.
@@ -612,12 +713,33 @@ export declare class PtySession {
    * report the spawned child PID.
    */
   startArgv(options: PtyArgvStartOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null, onStart?: ((error: Error | null, pid: number) => void) | undefined | null): Promise<PtyRunResult>
+  /**
+   * Drive an adopted session: stream output chunks and resolve when the
+   * child exits (exit code via `waitpid`).
+   */
+  resume(onChunk: (error: Error | null, chunk: string) => void): Promise<PtyRunResult>
   /** Write raw input bytes to PTY stdin. */
   write(data: string): void
   /** Resize the active PTY. */
   resize(cols: number, rows: number): void
   /** Force-kill the active PTY command. */
   kill(): void
+  /**
+   * Stop reading output without closing the master. Resolves once every
+   * chunk read before the pause has been delivered to `onChunk`, including
+   * partial UTF-8 held by the decoder (flushed lossily); unread bytes stay in
+   * the kernel buffer. Input, resize, kill and child-exit handling keep
+   * working. No-op (resolved) when no session runs or output is already
+   * paused. A run whose child exits while paused stops waiting for output
+   * as for a slave held open elsewhere, leaving the unread bytes unread.
+   *
+   * Windows: `ConPTY` output is a blocking pipe read that cannot be
+   * interrupted without losing its bytes, so this resolves immediately and
+   * reading continues.
+   */
+  pauseOutput(): Promise<void>
+  /** Restart reading output after `pauseOutput()`. No-op when not paused. */
+  resumeOutput(): void
 }
 
 /**
@@ -659,7 +781,7 @@ export declare class RunTrace {
   present(options: ShellVizOptions): string
 }
 
-/** Persistent embedded bash engine (pi-shell) shell session. */
+/** Persistent embedded bash engine shell session. */
 export declare class Shell {
   /**
    * Create a new shell session from optional configuration.
@@ -776,9 +898,11 @@ export declare class TextPredictor {
 }
 
 /**
- * Dedicated, cancellable terminal writer. The destination must be a TTY that
- * can be independently reopened (unix) or a console (Windows); pipes and
- * files are deliberately rejected.
+ * Dedicated, cancellable terminal writer.
+ *
+ * The destination must be a TTY (reopened independently when possible, else
+ * duplicated) on unix or a console on Windows; pipes and files are
+ * deliberately rejected.
  */
 export declare class TtyWriter {
   /**
@@ -800,7 +924,8 @@ export declare class TtyWriter {
   flushSync(timeoutMs: number): boolean
   /**
    * Drain until the deadline, then cancel and join. Nothing is written after
-   * return, except one chunk a Windows console refused to abort. Already
+   * return, except one chunk whose write could not be aborted (a Windows
+   * console refusing to, a blocking duplicate on unix). Already
    * queued JS callbacks may still run; callers must ignore callbacks from a
    * stopped writer.
    */
@@ -1432,6 +1557,12 @@ export interface AxSnapshot {
   text: string
   nodeCount: number
   truncated: boolean
+  /**
+   * The window appeared fully covered around the read, and its app can stop
+   * updating its tree while covered (Chromium on Windows), so the tree may
+   * be stale.
+   */
+  covered: boolean
 }
 
 export interface AxSnapshotOptions {
@@ -1657,6 +1788,12 @@ export interface DesktopCapture {
    * frame. Windows also detects disconnected sessions and secure desktops.
    */
   screenLocked: boolean
+  /**
+   * The target window appeared fully covered around this frame, and its app
+   * can stop drawing while covered (Chromium on Windows), so the frame may
+   * be stale.
+   */
+  covered: boolean
 }
 
 export interface DesktopControlState {
@@ -1929,6 +2066,16 @@ export interface DiffChange {
  * not another copy of the text.
  */
 export declare function diffLineRuns(oldText: string, newText: string): Array<DiffRun>
+
+/**
+ * [`diff_line_runs`] bounded to `max_edits` added or removed lines.
+ *
+ * Returns `null` once the edit script needs more. An exact diff of a
+ * wholesale rewrite takes time quadratic in its size; this one stops after
+ * `O((N + M) · max_edits)`, for callers that can treat such a rewrite as one
+ * replaced block.
+ */
+export declare function diffLineRunsWithin(oldText: string, newText: string, maxEdits: number): Array<DiffRun> | null
 
 /**
  * Line diff with jsdiff `diffLines(oldText, newText)` semantics (default
@@ -2216,6 +2363,15 @@ export declare enum Ellipsis {
 }
 
 /**
+ * Add `ENABLE_VIRTUAL_TERMINAL_INPUT` to the stdin console's mode.
+ *
+ * Call after entering raw mode, which clears it. Returns the mode found, for
+ * `restoreConsoleInputMode`; `null` when stdin is not a console or the
+ * console refuses VT input, and always off Windows.
+ */
+export declare function enableConsoleVtInput(): number | null
+
+/**
  * Matching-bracket context for an arbitrary tree-sitter language.
  *
  * For each multi-line named node whose span crosses the visible window, return
@@ -2293,23 +2449,18 @@ export declare enum Encoding {
 }
 
 /**
- * Replace the current process image via `execvp(3)`.
+ * execve in place: clears CLOEXEC on keepFds, replaces the image, same PID.
+ * Throws ENOSYS on Windows.
  *
- * On success this never returns: the kernel tears down every other thread and
- * the new program takes over this PID, controlling terminal, and inherited
- * (non-`CLOEXEC`) file descriptors. Callers must flush logs and restore the
- * terminal first — no JS or native cleanup runs after a successful call.
- *
- * # Errors
- * Returns an error, leaving the process untouched, when `argv` is empty, an
- * argument contains an interior NUL byte, or the exec itself fails (e.g.
- * executable not found). Windows has no exec-replace semantics, so this
- * always errors there; callers fall back to spawn-and-wait.
+ * On success this never returns: no JS or native cleanup runs afterwards, so
+ * callers flush logs and restore the terminal first. On failure the
+ * `CLOEXEC` flags are restored and a JS error whose `code` is the errno name
+ * is thrown.
  */
-export declare function execReplace(argv: Array<string>): void
+export declare function execReplace(path: string, argv: Array<string>, env: Record<string, string>, keepFds: Array<number>): never
 
 /**
- * Execute a command in the embedded bash engine (pi-shell).
+ * Execute a command in the embedded bash engine.
  *
  * Creates a fresh session for each call. The `on_chunk` callback receives
  * streamed stdout/stderr output. Returns the exit code when the command
@@ -2797,7 +2948,7 @@ export interface InlineSloppyRegion {
  */
 export declare function installSqliteLockShim(): boolean
 
-/** Options for `IpcConnection.connect`. */
+/** Options for `IpcConnection.connect` / `IpcConnection.connectTcp`. */
 export interface IpcConnectOptions {
   /**
    * `lines`: UTF-8 text frames delimited by LF; `raw`: byte chunks as
@@ -2821,7 +2972,7 @@ export interface IpcConnectOptions {
  */
 export declare function ipcEndpoint(dir: string, name: string): string
 
-/** Options for `IpcServer.listen`. */
+/** Options for `IpcServer.listen` / `IpcServer.listenTcp`. */
 export interface IpcListenOptions {
   /**
    * `lines`: UTF-8 text frames delimited by LF; `raw`: byte chunks as
@@ -2863,7 +3014,7 @@ export declare enum IsoChangeKind {
 /**
  * Capture the changes between `lower` and `merged`.
  *
- * Uses [`pi_iso::IsolationBackend::diff`]'s default implementation —
+ * Uses [`omp_iso::IsolationBackend::diff`]'s default implementation —
  * `git diff` when `merged/.git` exists, otherwise a mtime-skipped tree
  * walk. The backend selection only affects the lifecycle methods; diff
  * behaviour is uniform.
@@ -2923,7 +3074,7 @@ export interface IsoProbeResult {
 /**
  * Pick the best backend available right now.
  *
- * `preferred` is treated as a hint — see [`pi_iso::resolve`] for the exact
+ * `preferred` is treated as a hint — see [`omp_iso::resolve`] for the exact
  * priority rules. Backend probes may spawn CLIs, so they run on the native
  * blocking pool.
  */
@@ -3213,9 +3364,9 @@ export interface MinimizerOptions {
  * Telemetry for a single minimization.
  *
  * Surfaced when the minimizer actually rewrote the command's output. The
- * session layer is expected to persist `original_text` via its
- * `ArtifactManager`, splice the resulting `artifact://<id>` reference
- * into `text`, and replace any previously streamed raw output with the
+ * session layer is expected to persist `original_text` as a session
+ * spill, splice the spill's URL (formatted only on the JS side) into
+ * `text`, and replace any previously streamed raw output with the
  * minimized text.
  */
 export interface MinimizerResult {
@@ -3429,18 +3580,29 @@ export interface PipeStreamChunk {
   open: boolean
 }
 
-/** A tapped pipe of a run. */
+/** A tapped pipe or redirected file of a run. */
 export interface PipeStreamInfo {
   /** Stream number, from 1. */
   id: number
-  /** Source text of the stage writing into the pipe. */
+  /**
+   * Source text of the stage writing into the pipe, or of the command whose
+   * redirection opened the file.
+   */
   producer: string
-  /** Source text of the stage reading from it. */
+  /**
+   * Source text of the stage reading from the pipe, or the file's absolute
+   * path.
+   */
   consumer: string
-  /** Bytes written so far, including those no longer retained. */
+  /**
+   * Bytes written so far, including those no longer retained; a file's
+   * size now.
+   */
   total: number
-  /** Whether bytes may still arrive. */
+  /** Whether bytes may still arrive; for a file, whether the run goes on. */
   open: boolean
+  /** The stream is a file a command redirected its output into. */
+  file: boolean
 }
 
 export interface PointerOptions {
@@ -3620,6 +3782,27 @@ export interface PtyStartOptions {
 export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxHeightPx: number, scale?: number | undefined | null, cell?: SvgCell | undefined | null): Promise<Uint8Array>
 
 /**
+ * A child spawned by `spawnRaw`: its pid and the parent-side pipe ends.
+ *
+ * The fds are `CLOEXEC`, nonblocking raw fds (Windows: handle values) owned
+ * by the caller.
+ */
+export interface RawChild {
+  pid: number
+  stdin: number
+  stdout: number
+  stderr: number
+}
+
+/** Exit status of a reaped child. */
+export interface RawExit {
+  /** Exit code when the child exited normally. */
+  exitCode: number | null
+  /** Terminating signal when the child was killed by one (Unix). */
+  signal: number | null
+}
+
+/**
  * Read an image from the system clipboard.
  *
  * Returns `Ok(None)` when no image data is available.
@@ -3639,6 +3822,9 @@ export declare function readImageFromClipboard(): Promise<ClipboardImage | undef
  * Returns an error if clipboard access fails.
  */
 export declare function readTextFromClipboard(): Promise<string | undefined | null>
+
+/** waitpid for a direct child (also one inherited across execReplace). */
+export declare function reapChild(pid: number): Promise<RawExit>
 
 /**
  * Render Mermaid diagram text (flowchart, state, sequence, class, ER, or
@@ -3674,7 +3860,13 @@ export declare function renderMermaidAscii(text: string, options?: MermaidRender
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
 
 /**
- * Run the pi-shell engine as a process shell in this process (`omp zsh`,
+ * Put back a stdin console mode `enableConsoleVtInput` returned. False when
+ * stdin is no longer a console or refuses the mode; always false off Windows.
+ */
+export declare function restoreConsoleInputMode(mode: number): boolean
+
+/**
+ * Run the shell engine as a process shell in this process (`omp zsh`,
  * `omp bash`, `omp sh`).
  *
  * `argv` is the shell's whole command line,
@@ -3749,8 +3941,8 @@ export declare function setHangulCompatJamoWidthOverride(value: number): void
 export declare function shellBuiltins(sessionEnv?: Record<string, string>): Array<string>
 
 /**
- * Options for executing a shell command via the embedded bash engine
- * (pi-shell).
+ *  Options for executing a shell command via the embedded bash engine
+ * .
  */
 export interface ShellExecuteOptions {
   /** Command string to execute in the shell. */
@@ -3773,6 +3965,19 @@ export interface ShellExecuteOptions {
   filesystem?: ShellFilesystem
 }
 
+/** One host text file a command changed, as `onFileChange` receives it. */
+export interface ShellFileChange {
+  /** Absolute host path. */
+  path: string
+  /**
+   * Content before the command touched the file; absent when there was
+   * no file.
+   */
+  before?: Buffer
+  /** Content once the command was done; absent when it removed the file. */
+  after?: Buffer
+}
+
 /** Host filesystem injected into shell sessions. */
 export interface ShellFilesystem {
   /**
@@ -3789,6 +3994,14 @@ export interface ShellFilesystem {
    * injected filesystem and receives every path, host paths included.
    */
   nativeLocalPaths?: boolean
+  /**
+   * Called for each host text file a command changed itself: a builtin's
+   * write, rename or removal (`sed -i`, `cp`, `mv`, `rm`, `tee`) and the
+   * target of a redirection, once the command is done with it. Only files
+   * git would track are reported (in a work tree, not ignored), at most
+   * 4 MiB each; what a spawned program writes on its own is not.
+   */
+  onFileChange?: (error: Error | null, change: ShellFileChange) => void
 }
 
 /** Permissions probed by an `access` request. */
@@ -4148,8 +4361,8 @@ export interface ShellRunResult {
   /**
    * When the minimizer rewrote the captured output, this carries the
    * original buffer + telemetry so the session layer can persist it as
-   * an artifact and splice an `artifact://<id>` reference into the
-   * minimized text shown to the agent. `None` when nothing was rewritten.
+   * a spill and splice the spill's URL into the minimized text shown to
+   * the agent. `None` when nothing was rewritten.
    */
   minimized?: MinimizerResult
   /** Shell working directory after command completion. */
@@ -4322,6 +4535,24 @@ export interface SnapcompactRenderOptions {
  */
 export declare function snapcompactSupportedChars(font: string, chars: string): string
 
+/**
+ * Spawn in its own process group with three pipes; parent-side fds are
+ * CLOEXEC raw fds owned by the caller.
+ */
+export declare function spawnRaw(options: SpawnRawOptions): RawChild
+
+/** Options for `spawnRaw`. */
+export interface SpawnRawOptions {
+  /** Executable name or path (resolved against `env.PATH`). */
+  application: string
+  /** Arguments passed to the executable. */
+  args: Array<string>
+  /** Complete child environment; nothing is inherited from this process. */
+  env: Record<string, string>
+  /** Working directory of the child. */
+  cwd: string
+}
+
 /** A misspelled span measured in JavaScript/UTF-16 code units. */
 export interface SpellingRange {
   /** Inclusive UTF-16 start offset. */
@@ -4426,6 +4657,16 @@ export interface TextPredictorOptions {
   /** Show threshold override; omit for the engine's tuned default. */
   showThreshold?: number
 }
+
+/**
+ * Translate a kitty CSI-u Alt/Ctrl+Alt chord into the text `AltGr` produced
+ * on the active keyboard layout; `null` when the sequence is not an `AltGr`
+ * keystroke there, and always off Windows.
+ *
+ * Only meaningful on native Windows `ConPTY` hosts with the kitty protocol
+ * active: other hosts report the produced text themselves.
+ */
+export declare function translateWindowsAltGrSequence(data: string): string | null
 
 /**
  * Truncate text to a visible width, preserving ANSI codes.

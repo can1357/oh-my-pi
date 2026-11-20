@@ -19,7 +19,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { PipeStreams, shellBuiltins } from "@oh-my-pi/pi-natives";
-import { $which, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import { $which, isEnoent, logger, prompt, spillUrl } from "@oh-my-pi/pi-utils";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import {
@@ -29,6 +29,8 @@ import {
 	raceJobSettlement,
 	resolveAutoBackgroundWaitMs,
 } from "../async";
+import { shellChangeSnapshots } from "../commit/selective/journal";
+import { type BoardEntry, registerOnBoard } from "../daemon/client";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import { shellMounts, shellProcessCommand } from "../exec/shell-process";
 import { InternalUrlRouter } from "../internal-urls";
@@ -67,6 +69,7 @@ import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { outputMeta, resolveInlineByteCapBudget } from "./output-meta";
 import { resolveShellDirectory, resolveToCwd } from "./path-utils";
 import {
+	BASH_APPROVAL_SHELL_CONTROL_CHARS,
 	extractAndChainSegments,
 	extractLeadingCdTarget,
 	extractLiteralAndChainSegments,
@@ -111,19 +114,6 @@ import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight
 import { SPOTLIGHT_FULL_OUTPUT_MAX_BYTES } from "../spotlight/types";
 import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
 
-const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
-	"\n": true,
-	"\r": true,
-	";": true,
-	"&": true,
-	"|": true,
-	"<": true,
-	">": true,
-	"`": true,
-	$: true,
-	"(": true,
-	")": true,
-};
 const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^-]*[ce]|--(?:command|eval))(?:[= \t]|$)/u;
 
 function hasBashApprovalShellControl(command: string): boolean {
@@ -353,9 +343,18 @@ function bashApprovalRuleMatches(
 ): boolean {
 	if (rule.approval === "allow") {
 		if (hasBashApprovalShellControl(command)) return false;
-		if (commandMatchesBashApprovalPattern(command, rule.match)) return true;
+		const trimmedCommand = command.trimStart();
+		const hasLeadingEnv =
+			withoutLeadingEnvironmentAssignments(trimmedCommand) !== null || isShellEnvironmentAssignment(trimmedCommand);
+		if (
+			(!hasLeadingEnv || isShellEnvironmentAssignment(rule.match)) &&
+			commandMatchesBashApprovalPattern(command, rule.match)
+		) {
+			return true;
+		}
+		if (!hasLeadingEnv) return false;
 		const effectiveEnv = rule.env ? [...rule.env, ...allowedEnvVars] : allowedEnvVars;
-		const stripped = stripAllowedLeadingEnvAssignments(command, effectiveEnv);
+		const stripped = stripAllowedLeadingEnvAssignments(trimmedCommand, effectiveEnv);
 		return stripped !== undefined && commandMatchesBashApprovalPattern(stripped, rule.match);
 	}
 	return commandSegmentMatchesBashApprovalPattern(command, rule.match);
@@ -447,7 +446,7 @@ function resolveBashPatternDecision(
 
 async function saveBashOriginalArtifact(session: ToolSession, originalText: string): Promise<string | undefined> {
 	try {
-		const alloc = await session.allocateOutputArtifact?.("bash-original");
+		const alloc = await session.allocateOutputArtifact?.();
 		if (!alloc?.path || !alloc.id) return undefined;
 		await Bun.write(alloc.path, originalText);
 		return alloc.id;
@@ -508,7 +507,7 @@ const bashSchemaWithAsyncAndService = type({
 });
 
 // Without an interactive UI a finite command's `pty` can only fall back, so those sessions are not
-// offered it; services keep it, since the broker gives them a terminal of their own.
+// offered it; services keep it, since the daemon gives them a terminal of their own.
 const bashSchemaBaseNoPty = bashSchemaBase.omit("pty");
 const bashSchemaWithAsyncNoPty = bashSchemaWithAsync.omit("pty");
 
@@ -533,6 +532,14 @@ export interface BashToolInput {
 	 */
 	notify?: string;
 	pty?: boolean;
+}
+
+const PTY_BOARD_COMMAND_MAX = 60;
+
+/** A pty command as one board-label line of at most {@link PTY_BOARD_COMMAND_MAX} chars. */
+function ptyBoardCommand(command: string): string {
+	const line = command.replace(/\s+/gu, " ").trim();
+	return line.length > PTY_BOARD_COMMAND_MAX ? `${line.slice(0, PTY_BOARD_COMMAND_MAX - 1)}…` : line;
 }
 
 /**
@@ -929,7 +936,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		signal: AbortSignal | undefined,
 		options: Omit<InternalUrlFilesystemOptions, "context">,
 	): InternalUrlFilesystem {
-		return new InternalUrlFilesystem({ ...options, context: sessionResolveContext(this.session, { signal }) });
+		return new InternalUrlFilesystem({
+			...options,
+			context: sessionResolveContext(this.session, { signal }),
+			// What the command's builtins and redirections write is journaled like an edit tool's write.
+			onFileChange:
+				this.session.recordFileChange &&
+				(change => this.session.recordFileChange?.({ tool: "bash", ...shellChangeSnapshots(change) })),
+		});
 	}
 
 	/**
@@ -1018,13 +1032,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			signal: AbortSignal | undefined;
 			/** `urlmap` commands for the session's URL paths ({@link shellMounts}). */
 			mounts: string;
-			artifactPath: string | undefined;
-			artifactId: string | undefined;
 		},
 	): Promise<BashInteractiveResult> {
 		const seed = await this.#sessionSeed(run.sessionId, run.hostCwd, run.signal);
 		const script = run.mounts + seed.script;
 		const source = script ? path.join(os.tmpdir(), `omp-shell-seed-${crypto.randomUUID()}.sh`) : undefined;
+		// Set from the pty's start callback; a holder keeps the type from narrowing to `undefined`.
+		const board: { entry?: BoardEntry } = {};
 		try {
 			if (source !== undefined) await fs.promises.writeFile(source, script, { mode: 0o600 });
 			return await runInteractiveBashPty(ui, {
@@ -1034,10 +1048,20 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				env: { ...seed.env, ...run.sessionEnv },
 				timeoutMs: run.timeoutMs,
 				signal: run.signal,
-				artifactPath: run.artifactPath,
-				artifactId: run.artifactId,
+				allocateArtifact: this.session.allocateOutputArtifact,
+				onStart: pid => {
+					board.entry = registerOnBoard({
+						kind: "external",
+						scope: { kind: "session", id: run.sessionId || `process-${process.pid}` },
+						key: `pty:${pid}`,
+						label: `pty: ${ptyBoardCommand(run.command)}`,
+						pid,
+					});
+				},
 			});
 		} finally {
+			// Resolves only after the pty program exited.
+			board.entry?.dispose();
 			if (source !== undefined) await fs.promises.rm(source, { force: true });
 		}
 	}
@@ -1166,7 +1190,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// bypass the sink (client-bridge terminals, minimizer misses). When the
 		// sink spilled, its artifact already holds the full raw stream — reuse
 		// that id instead of saving a second (already-truncated) copy, so the
-		// `[raw output: artifact://N]` footer and the truncation notice agree.
+		// `[raw output: local://N.log]` footer and the truncation notice agree.
 		const inlineCap = {
 			maxBytes: resolveInlineByteCapBudget(this.session.settings),
 			saveArtifact: result.artifactError
@@ -1247,7 +1271,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			text,
 			plain: built + formatOutputNotice(outputMeta().truncationFromSummary(result, { direction: "tail" }).get()),
 			plainWidthCut: whole && widthCut,
-			artifact: whole ? `artifact://${result.artifactId}` : undefined,
+			artifact: whole && result.artifactId ? spillUrl(result.artifactId) : undefined,
 			command,
 			exitCode: result.exitCode,
 			source: command,
@@ -1401,7 +1425,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						: undefined;
 				// A cancelled job reports nothing more, even while its command is still shutting down.
 				if (notifier) runSignal.addEventListener("abort", () => notifier.stop(), { once: true });
-				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
 				const wallTimeStart = performance.now();
 				try {
 					const result = await executeBash(options.command, {
@@ -1429,8 +1452,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							toolCallId: options.toolCallId,
 						}).shellFilesystem(),
 						speech: sessionShellSpeech(this.session),
-						artifactPath,
-						artifactId,
+						allocateArtifact: this.session.allocateOutputArtifact,
 						onChunk: chunk => {
 							outputTap.append(chunk);
 							notifier?.poll();
@@ -1506,7 +1528,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			{
 				ownerId: this.session.getAgentId?.() ?? undefined,
 				foreground: options.foreground,
-				process: { command: options.command, cwd: options.commandCwd, pids: () => pids(), streams },
+				process: {
+					command: options.command,
+					cwd: options.commandCwd,
+					pids: () => pids(),
+					streams,
+					trace: () => liveTrace ?? latestProgressDetails?.trace,
+				},
 				intent: options.intent,
 				widgetInputs: {
 					sources: () => [outputTap, ...pipeSources.list()],
@@ -1755,27 +1783,23 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				ready === undefined ? undefined : ctx?.toolCall?.steeringSignal,
 			);
 			const daemon = service.daemon;
-			// A broker from an older omp starts the service and ignores the regex.
-			const notifyLine = service.notifyArmed
-				? notifyNotice
-				: notifySource === undefined
-					? undefined
-					: `Ignored notify: this project's service broker is from an older omp, so ${name}'s output is not reported; read proc://${name} for it.`;
+			const pid = daemon.pids[0];
+			const notifyLine = service.notifyArmed ? notifyNotice : undefined;
 			if (service.readyInterrupted) {
 				// A queued message arrived mid-wait: return so it injects promptly.
-				// The broker keeps starting the service, inspectable via proc://.
+				// The daemon keeps starting the service, inspectable via proc://.
 				return {
 					content: [
 						{
 							type: "text",
-							text: `${name}: starting${daemon.pid === undefined ? "" : ` pid=${daemon.pid}`}\nReadiness wait interrupted early to handle an incoming message; the service is still starting and keeps running. Read proc://${name} for status.${notifyLine ? `\n${notifyLine}` : ""}`,
+							text: `${name}: starting${pid === undefined ? "" : ` pid=${pid}`}\nReadiness wait interrupted early to handle an incoming message; the service is still starting and keeps running. Read proc://${name} for status.${notifyLine ? `\n${notifyLine}` : ""}`,
 						},
 					],
-					details: { service: { name, state: daemon.state, ready: false, timedOut: false, pid: daemon.pid } },
+					details: { service: { name, state: daemon.state, ready: false, timedOut: false, pid } },
 				};
 			}
 			const lines = [
-				`${daemon.name}: ${daemon.state}${daemon.pid === undefined ? "" : ` pid=${daemon.pid}`}${daemon.readyAt === undefined ? "" : " ready"}`,
+				`${daemon.key}: ${daemon.state}${pid === undefined ? "" : ` pid=${pid}`}${daemon.readyAt === undefined ? "" : " ready"}`,
 			];
 			if (service.readyTimedOut)
 				lines.push(
@@ -1794,7 +1818,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						state: daemon.state,
 						ready: daemon.readyAt !== undefined || daemon.state === "running",
 						timedOut: service.readyTimedOut,
-						pid: daemon.pid,
+						pid,
 					},
 				},
 			};
@@ -2236,9 +2260,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			}
 		}
 
-		// Allocate artifact for truncated output storage
-		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
-
 		const interactiveUi = canUseInteractiveBashPty(pty === true, ctx) ? ctx?.ui : undefined;
 		if (pty && !interactiveUi) {
 			pendingNotices.push("pty requested but unavailable in this environment; ran without a terminal");
@@ -2268,8 +2289,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					timeoutMs,
 					signal,
 					mounts: await shellMounts(sessionResolveContext(this.session, { signal }), approvalTier),
-					artifactPath,
-					artifactId,
 				})
 			: // executeBash runs its OWN direnv preflight internally — pass the RAW
 				// command here so the unset prefix is not applied twice.
@@ -2293,8 +2312,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						toolCallId,
 					}).shellFilesystem(),
 					speech: sessionShellSpeech(this.session),
-					artifactPath,
-					artifactId,
+					allocateArtifact: this.session.allocateOutputArtifact,
 					// Stream the sink's own inline view rather than re-buffering chunks.
 					onPreview: emitFrame
 						? text => {

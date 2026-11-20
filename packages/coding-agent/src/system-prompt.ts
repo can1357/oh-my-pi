@@ -43,6 +43,7 @@ import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
 import { XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
+import { quotePosixArgument } from "./utils/shell-quote";
 import { expandTilde } from "./tools/path-utils";
 import { matchModelPattern, type ModelPatternEntry } from "./utils/model-patterns";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
@@ -67,7 +68,7 @@ import {
 	cfgPersonality,
 	cfgSystemPromptTemplates,
 } from "./session/settings";
-import { cfgOvnfsPath, cfgTaskBatch, cfgTaskEager } from "./task/settings";
+import { cfgOvnfsPath, cfgTaskBatch, cfgTaskCrossInstance, cfgTaskEager } from "./task/settings";
 import { cfgBrowserCdpUrl, cfgBrowserRelayUrl } from "./tools/browser/settings";
 import {
 	cfgAsyncEnabled,
@@ -96,6 +97,7 @@ export const cfgSystemPromptInputs = combine({
 	xdevInlineDevices: cfgToolsXdevInlineDevices,
 	vaultEnabled: cfgVaultEnabled,
 	outEnabled: cfgOutEnabled,
+	crossInstanceAgents: cfgTaskCrossInstance,
 	renderMermaid: cfgTuiRenderMermaid,
 	renderSvg: cfgTuiRenderSvg,
 	renderEmbeds: cfgTuiRenderEmbeds,
@@ -603,6 +605,8 @@ export interface BuildSystemPromptOptions {
 	settingsApproval?: boolean;
 	/** Whether `out://` writes reach the user as transcript replies; gates advertising `out://`. */
 	outReplies?: boolean;
+	/** Advertise cross-instance agent addressing. */
+	crossInstanceAgents?: boolean;
 	/**
 	 * Eval preludes advertised by this prompt. Each prelude's `guidance` is
 	 * appended as its own block after the rendered template, so custom templates
@@ -756,6 +760,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		securityEnabled = false,
 		settingsApproval = false,
 		outReplies = false,
+		crossInstanceAgents = false,
 		evalPreludes = [],
 		model,
 		includeModelInPrompt = true,
@@ -1065,6 +1070,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		securityEnabled,
 		settingsApproval,
 		outReplies,
+		crossInstanceAgents,
 		subagent,
 	};
 	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(
@@ -1154,7 +1160,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		hasDynamicXdevTools: xdevTools.some(mounted => mounted.dynamic === true),
 		xdevDocs,
 		autoQaEnabled,
-		ovnfs,
+		// The guidance pastes it into shell commands: always single-quoted, so no path character splits or expands it.
+		ovnfs: ovnfs && quotePosixArgument(ovnfs),
 		writeTransportOnly,
 		subagent,
 	};

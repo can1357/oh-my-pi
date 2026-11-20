@@ -7,10 +7,10 @@ import type { Message, UserMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as daemonClient from "@oh-my-pi/pi-coding-agent/daemon/client";
+import type { DaemonClient } from "@oh-my-pi/pi-coding-agent/daemon/protocol";
 import { applyToolProxy } from "@oh-my-pi/pi-coding-agent/extensibility/tool-proxy";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
-import * as daemonClient from "@oh-my-pi/pi-coding-agent/launch/client";
-import type { DaemonBrokerClient } from "@oh-my-pi/pi-coding-agent/launch/client";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -144,8 +144,9 @@ describe("agent-loop wait wake delivery", () => {
 				},
 				onCompletion: () => () => {},
 				onNotify: () => () => {},
-			} as unknown as DaemonBrokerClient;
-			vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(broker);
+				onReconnect: () => () => {},
+			} as unknown as DaemonClient;
+			vi.spyOn(daemonClient, "daemonClient").mockResolvedValue(broker);
 		}
 		const schema = type({});
 		const barrier: AgentTool<typeof schema> = {

@@ -54,8 +54,8 @@ import { isOfficialCodexApiUrl } from "@oh-my-pi/pi-catalog/wire/codex";
 import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
-import { redactUrlForLog } from "../mcp/json-rpc";
 import type { AuthStorage } from "../session/auth-storage";
+import { redactUrlForLog } from "../utils/redact-url";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
 import type { ConfigError, ConfigFile, LoadResult } from "./config-file";
 import {
@@ -3172,17 +3172,21 @@ export class ModelRegistry {
 			},
 		];
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
-		const standardProviderDescriptors = PROVIDER_DESCRIPTORS.filter(descriptor => {
-			if (disabledProviders.has(descriptor.providerId)) return false;
-			if (configuredDiscoveryProviders.has(descriptor.providerId)) return false;
-			if (this.#runtimeModelManagers.has(descriptor.providerId)) return false;
-			return providerFilter ? providerFilter.has(descriptor.providerId) : true;
-		});
-		const enabledSpecialProviderDescriptors = specialProviderDescriptors.filter(descriptor => {
-			if (disabledProviders.has(descriptor.providerId)) return false;
-			if (configuredDiscoveryProviders.has(descriptor.providerId)) return false;
-			return providerFilter ? providerFilter.has(descriptor.providerId) : true;
-		});
+		// A pi-native override routes the provider through a gateway, which is not
+		// the provider's listing API. Descriptors that ignore the override's base
+		// URL would also send the gateway key to the provider itself.
+		const discoverable = (providerId: string): boolean =>
+			!disabledProviders.has(providerId) &&
+			(this.#runtimeProviderOverrides.get(providerId)?.transport ??
+				this.#providerOverrides.get(providerId)?.transport) !== "pi-native" &&
+			!configuredDiscoveryProviders.has(providerId) &&
+			(providerFilter?.has(providerId) ?? true);
+		const standardProviderDescriptors = PROVIDER_DESCRIPTORS.filter(
+			descriptor => discoverable(descriptor.providerId) && !this.#runtimeModelManagers.has(descriptor.providerId),
+		);
+		const enabledSpecialProviderDescriptors = specialProviderDescriptors.filter(descriptor =>
+			discoverable(descriptor.providerId),
+		);
 		const standardProviderKeys = await Promise.all(
 			standardProviderDescriptors.map(descriptor => {
 				const cacheProviderId = isCredentialScopedModelCacheProvider(descriptor.providerId)
@@ -4823,6 +4827,8 @@ export interface ProviderConfigInput {
 		thinking?: ThinkingConfig;
 		input: ("text" | "image")[];
 		supportsTools?: boolean;
+		/** Snapcompact frame shape, replacing the model line's default (see `Model.snapcompactShape`). */
+		snapcompactShape?: Model<Api>["snapcompactShape"];
 		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		contextWindow: number;
 		maxTokens: number;

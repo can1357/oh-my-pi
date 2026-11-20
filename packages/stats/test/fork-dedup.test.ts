@@ -79,6 +79,31 @@ async function writeSessionFile(
 	return sessionFile;
 }
 
+/**
+ * Writes a fork's session file born after its parent's, as a real fork always is. A full stats
+ * sync ingests transcripts in creation order (birth time, `orderForIngest`), so the fork follows
+ * its parent and the parent keeps the entries the fork copied. A filesystem that stamps files
+ * from the kernel's coarse clock (ext4) gives two files written back to back one birth time, and
+ * their order then falls to the order the directory lists them in, which ext4 takes from a hash
+ * of their names. So the fork is written again until it is born after its parent.
+ */
+async function writeForkSessionFile(parentFile: string, ...args: Parameters<typeof writeSessionFile>): Promise<string> {
+	const born = async (file: string) => {
+		const stat = await fs.stat(file);
+		return stat.birthtimeMs || stat.ctimeMs;
+	};
+	const parentBorn = await born(parentFile);
+	const deadline = Date.now() + 5_000;
+	for (;;) {
+		const forkFile = await writeSessionFile(...args);
+		if ((await born(forkFile)) > parentBorn) return forkFile;
+		if (Date.now() > deadline) throw new Error("the fork's session file is never born after its parent's");
+		await fs.rm(forkFile);
+		// The file clock moves by a kernel tick (1 to 10 ms); no fake timer moves it.
+		await Bun.sleep(1);
+	}
+}
+
 function makeStat(sessionFile: string, entryId: string, timestamp: number, premium = 0): MessageStats {
 	return {
 		sessionFile,
@@ -123,7 +148,8 @@ describe("stats sync deduplicates forked-session entries", () => {
 		// header. Earlier stats sync keyed uniqueness on (session_file,
 		// entry_id), so both files contributed the same provider request to
 		// every aggregate.
-		const forkFile = await writeSessionFile(
+		const forkFile = await writeForkSessionFile(
+			parentFile,
 			"--tmp--fork-dedup",
 			"02_fork.jsonl",
 			{ id: "fork0000", cwd: "/tmp/project", parentSession: parentFile },

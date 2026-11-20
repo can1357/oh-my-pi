@@ -101,7 +101,7 @@ export const SINGLE_FILE_MATCHES = 50;
  * (DEFAULT_FILE_LIMIT files × MULTI_FILE_PER_FILE_MATCHES matches) plus
  * pagination headroom so the caller can see total file count. */
 const INTERNAL_TOTAL_CAP = 2000;
-/** Mirrors `MAX_FILE_BYTES` in `crates/pi-natives/src/grep.rs`. Native grep
+/** Mirrors `MAX_FILE_BYTES` in `crates/natives/src/grep.rs`. Native grep
  * searches only the first `MAX_FILE_BYTES` of a larger file (a leading mmap
  * window) and drops the rest; matches beyond the window are not returned. We
  * surface a partial-coverage note when the caller explicitly targeted such a

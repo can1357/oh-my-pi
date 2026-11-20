@@ -13,7 +13,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { DeferredMCPTool, MCPTool } from "../../src/mcp/tool-bridge";
+import { MCPTool } from "../../src/mcp/tool-bridge";
 import type { MCPServerConnection, MCPToolDefinition } from "../../src/mcp/types";
 import { Settings } from "../../src/config/settings";
 import { EditTool } from "../../src/edit";
@@ -295,7 +295,6 @@ describe("MCP fallback and prompt formatting", () => {
 		const definition: MCPToolDefinition = { name: "apply", inputSchema: { type: "object" } };
 		const connection = { name: "kubernetes" } as MCPServerConnection;
 		const eager = new MCPTool(connection, definition);
-		const deferred = new DeferredMCPTool("kubernetes", definition, async () => connection);
 		const writeTool = new WriteTool({ cwd: "." } as ToolSession);
 		const expected = [
 			"Arguments:",
@@ -312,7 +311,6 @@ describe("MCP fallback and prompt formatting", () => {
 		].join("\n");
 		const cases: { subject: ApprovalTool; args: unknown }[] = [
 			{ subject: eager, args },
-			{ subject: deferred, args },
 			{ subject: tool(eager.name), args },
 			{ subject: writeTool, args: { path: `xd://${eager.name}`, content: JSON.stringify(args) } },
 		];
@@ -776,6 +774,16 @@ describe("tool-owned dynamic approval declarations", () => {
 		]) {
 			expect(bashApproval(command, settingsOverrides)).toBe("exec");
 		}
+		expect(
+			bashApproval("LD_PRELOAD=/tmp/evil.so make", {
+				"bash.patterns": [{ match: "*", approval: "allow" }],
+			}),
+		).toBe("exec");
+		expect(
+			bashApproval("FOO=1 make build", {
+				"bash.patterns": [{ match: "FOO=1 make*", approval: "allow" }],
+			}),
+		).toEqual({ tier: "write", policy: "allow" });
 
 		// Leading env assignments cannot bypass deny or prompt rules.
 		for (const command of ["FOO=1 BAR=2 rm -rf build", "true && FOO=1 rm -rf build"]) {
@@ -792,6 +800,47 @@ describe("tool-owned dynamic approval declarations", () => {
 			policy: "prompt",
 			reason: "Prompt required by bash pattern: curl *",
 		});
+	});
+
+	it("allows leading environment assignments on compound && segments when permitted by bash.allowedEnvVars or rule.env", () => {
+		const settingsOverrides = {
+			"bash.allowCompoundCommands": true,
+			"bash.allowedEnvVars": ["GOWORK", "GOOS", "GOARCH", "CGO_ENABLED", "CARGO_TARGET_DIR"],
+			"bash.patterns": [
+				{ match: "git status*", approval: "allow" },
+				{ match: "go tool golangci-lint*", approval: "allow" },
+				{ match: "go test*", approval: "allow" },
+				{ match: "go vet*", approval: "allow" },
+				{ match: "make lint*", approval: "allow" },
+				{ match: "bun run build:native*", approval: "allow", env: ["CMAKE_GENERATOR"] },
+			],
+		};
+
+		for (const command of [
+			"git status --short && GOWORK=off go vet ./tests/endpoints/... ./cmd/... ./api/... ./internal/... ./pkg/...",
+			"go tool golangci-lint fmt ./cmd/... ./tests/... && go test -race ./cmd/addr-api/controllers/... && GOWORK=off go vet ./tests/endpoints/... && make lint",
+			'CARGO_TARGET_DIR="/tmp/target dir" CMAKE_GENERATOR=Ninja bun run build:native && git status --short',
+		]) {
+			expect(bashApproval(command, settingsOverrides)).toEqual({ tier: "write", policy: "allow" });
+		}
+
+		// Unlisted env vars, bare assignments, subscripted/quoted assignment names, and assignments before
+		// stateful builtins or interpreters must not auto-allow in a compound chain.
+		for (const command of [
+			"git status --short && LD_PRELOAD=/tmp/evil.so go vet ./...",
+			"git status --short && GOWORK=off LD_PRELOAD=/tmp/evil.so go vet ./...",
+			"git status --short && CMAKE_GENERATOR=Ninja go vet ./...",
+			"GOWORK=off && go vet ./...",
+			"GOWORK=off : && go vet ./...",
+			"GOWORK=off cd /tmp && go vet ./...",
+			"GOWORK=off env go vet ./... && git status --short",
+			"'GOWORK'=off go vet ./... && git status --short",
+			"'BASH_CMDS[go]'=/tmp/evil go vet ./... && git status --short",
+			"git status --short && go vet GOWORK=off ./...",
+			"git -c alias.x='!touch /tmp/pwn; printf ok' x && git status --short",
+		]) {
+			expect(bashApproval(command, settingsOverrides)).toBe("exec");
+		}
 	});
 
 	it("matches bash.allowedEnvVars entries as exact names, never as wildcards", () => {
@@ -1291,6 +1340,32 @@ describe("tool-owned dynamic approval declarations", () => {
 			"  ✓ git status (allowed: git status*)",
 		]);
 
+		// Leading env assignments permitted by bash.allowedEnvVars or rule.env mark the segment covered,
+		// while unlisted leading env assignments prompt without tainting subsequent segments.
+		const envBash = createBashTool({
+			"bash.allowCompoundCommands": true,
+			"bash.allowedEnvVars": ["GOWORK"],
+			"bash.patterns": [
+				{ match: "git status*", approval: "allow" },
+				{ match: "go vet*", approval: "allow" },
+				{ match: "bun run build:native*", approval: "allow", env: ["CMAKE_GENERATOR"] },
+			],
+		});
+		expect(
+			formatApprovalPrompt(envBash, {
+				command:
+					"git status --short && GOWORK=off go vet ./tests/endpoints/... && CMAKE_GENERATOR=Ninja bun run build:native && UNLISTED=1 go vet ./cmd/... && git status",
+			}).split("\n"),
+		).toEqual([
+			"Allow tool: bash",
+			"Command:",
+			"  ✓ git status --short (allowed: git status*)",
+			"  ✓ GOWORK=off go vet ./tests/endpoints/... (allowed: go vet*)",
+			"  ✓ CMAKE_GENERATOR=Ninja bun run build:native (allowed: bun run build:native*)",
+			"  ? UNLISTED=1 go vet ./cmd/... (requires approval)",
+			"  ✓ git status (allowed: git status*)",
+		]);
+
 		// Stateful segment taints subsequent segments because shell state can change before they run,
 		// including when a leading redirection precedes the stateful builtin.
 		for (const command of [
@@ -1323,11 +1398,13 @@ describe("tool-owned dynamic approval declarations", () => {
 
 		// `&&` inside `${…}` and `{ … }` groups stays within its clause too.
 		expect(
+			// oxlint-disable-next-line no-template-curly-in-string -- literal shell/JS text under test
 			formatApprovalPrompt(bash, { command: "git status && echo ${x:-a&&b} && { true && cd /tmp; }" }).split("\n"),
 		).toEqual([
 			"Allow tool: bash",
 			"Command:",
 			"  ✓ git status (allowed: git status*)",
+			// oxlint-disable-next-line no-template-curly-in-string -- literal shell/JS text under test
 			"  ? echo ${x:-a&&b} (requires approval)",
 			"  ? { true && cd /tmp; } (requires approval)",
 		]);

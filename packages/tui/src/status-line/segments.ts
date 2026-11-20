@@ -19,7 +19,7 @@ import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-colo
 import { summarizeLoopCondition } from "./loop";
 import { formatMetric } from "../components/metric";
 import { formatBillingSummary } from "./metrics";
-import { sanitizeStatusText } from "../chrome/shared";
+import { sanitizeInlineStatusText, sanitizeStatusText } from "../chrome/shared";
 import {
 	formatContextUsage,
 	getContextUsageLevel,
@@ -222,9 +222,11 @@ const piSegment: StatusLineSegment = {
 		// whole-unit turn timer (port of rust omp's status-band active brand).
 		// No trailing pad: the group renderer owns inter-segment spacing, so a
 		// trailing space here would double the gap at the first separator (#11103).
+		// Waiting on the user's answer to an ask, a question mark stands in for the spinner.
+		const glyph = ctx.awaitingAnswer ? theme.symbol("cmd.question") || "?" : brandSpinnerFrame(ctx.now?.getTime());
 		const content =
 			ctx.turnElapsedMs != null
-				? `${brandMark(brandSpinnerFrame(ctx.now?.getTime()), profile)} ${brandTimer(ctx.turnElapsedMs)}`
+				? `${brandMark(glyph, profile)} ${brandTimer(ctx.turnElapsedMs)}`
 				: brandMark(theme.icon.omp, profile);
 		return { content: `${fgAnsi}${content}\x1b[39m`, visible: true };
 	},
@@ -262,14 +264,19 @@ function brandTimer(elapsedMs: number): string {
 const statusSegment: StatusLineSegment = {
 	id: "status",
 	render(ctx) {
+		// Plain statuses take the accent colour, a styled one keeps its own. The dot between
+		// statuses is dim like the segment separators; it sets its own colour, so what
+		// follows it (and a status that closed its styling) is re-opened in the accent.
+		const accent = sessionAccentAnsi(ctx) ?? theme.getFgAnsi("accent");
+		const separator = `${theme.getFgAnsi("dim")}${theme.sep.dot}${accent}`;
 		let text = "";
 		for (const status of ctx.hookStatuses ?? []) {
-			const sanitized = sanitizeStatusText(status);
+			const sanitized = sanitizeInlineStatusText(status, { fg: accent, faint: Boolean(ctx.focusedAgentId) });
 			if (!sanitized) continue;
-			text += text ? `${theme.sep.dot}${sanitized}` : sanitized;
+			text += text ? separator + sanitized : sanitized;
 		}
 		return {
-			content: text ? accentFg(ctx, "accent", text) : "",
+			content: text ? `${accent}${text}\x1b[39m` : "",
 			visible: text.length > 0,
 		};
 	},

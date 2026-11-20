@@ -132,11 +132,11 @@ describe("bash internal URLs through the shell filesystem", () => {
 
 		// An identifier or message text that only looks like a path is the program's own.
 		const { text, isError } = await run(
-			`'${process.execPath}' '${script}' skill://nope/tool.js 'artifact://12; local://data.txt is the evidence'`,
+			`'${process.execPath}' '${script}' skill://nope/tool.js 'local://12.log; local://data.txt is the evidence'`,
 		);
 
 		expect(isError).toBeUndefined();
-		expect(text).toContain("skill://nope/tool.js\nartifact://12; local://data.txt is the evidence\n");
+		expect(text).toContain("skill://nope/tool.js\nlocal://12.log; local://data.txt is the evidence\n");
 	});
 
 	it.skipIf(process.platform === "win32")("hands omp every URL as written, selectors included", async () => {

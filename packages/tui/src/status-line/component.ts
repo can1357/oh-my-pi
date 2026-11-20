@@ -74,16 +74,18 @@ export type StatusLineNativeAction =
 	| "status.context"
 	| "status.git"
 	| "status.cost"
+	| "status.usage"
 	| "status.path"
 	| "status.cache";
 
-/** Click action per native segment: quick model picker, `/context`, `/git`, `/usage`, the project directory, `/session`. */
+/** Click action per native segment: quick model picker, `/context`, `/git`, `/usage` (cost and the subscription limits), the project directory, `/session`. */
 const NATIVE_SEGMENT_ACTIONS: Partial<Record<string, StatusLineNativeAction>> = {
 	model: "status.model",
 	context_pct: "status.context",
 	context_total: "status.context",
 	git: "status.git",
 	cost: "status.cost",
+	usage: "status.usage",
 	path: "status.path",
 	cache: "status.cache",
 };
@@ -807,6 +809,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#collabStatus: CollabStatus | null = null;
 	#streamStatus: { viewers: number } | null = null;
 	#recording = false;
+	#awaitingAnswer = false;
 	#focusedAgentId: string | undefined;
 	#activeRepoCache: ActiveRepoCache | undefined;
 
@@ -1270,6 +1273,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	setStreamStatus(status: { viewers: number } | null): void {
 		if (this.#streamStatus?.viewers === status?.viewers) return;
 		this.#streamStatus = status;
+		this.#invalidateStatusLineRenderCache();
+	}
+
+	/** Whether the turn waits on an ask the user hasn't answered: the brand's spinner turns into a question mark. */
+	setAwaitingAnswer(awaiting: boolean): void {
+		if (this.#awaitingAnswer === awaiting) return;
+		this.#awaitingAnswer = awaiting;
 		this.#invalidateStatusLineRenderCache();
 	}
 
@@ -2754,6 +2764,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			subagentTreeCost: this.#focusedAgentId ? 0 : this.#subagentTreeCost,
 			activeMs: this.getActiveMs(),
 			turnElapsedMs,
+			awaitingAnswer: this.#awaitingAnswer,
 			now: new Date(nowMs),
 			brandFgAnsi: this.#brandFgAnsi(turnElapsedMs !== null, sessionAccentEnabled, brandVisible),
 			git: {

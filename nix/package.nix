@@ -133,7 +133,7 @@ stdenv.mkDerivation {
   buildPhase = ''
     runHook preBuild
 
-    echo "Preparing pi-natives"
+    echo "Preparing omp-natives"
     install -Dm755 "${nativeBuild}/lib/${platform.nativeLibrary}" \
       "packages/natives/native/${platform.addon}"
     # The loader and embed-native.ts require the release version, which is
@@ -146,7 +146,7 @@ stdenv.mkDerivation {
       # The loader extracts this archived addon at runtime, so fix its
       # interpreter-independent Nix RPATH before Bun embeds it.
       autoPatchelf -- "packages/natives/native/${platform.addon}"
-      # pi-voice dlopens libpulse-simple.so.0 / libpulse.so.0 / libasound.so.2,
+      # omp-voice dlopens libpulse-simple.so.0 / libpulse.so.0 / libasound.so.2,
       # and Wayland capture libpipewire-0.3.so.0, by bare name; glibc resolves
       # those through the calling object's RUNPATH, so append the client
       # libraries here. Nothing links them, so autoPatchelf cannot discover

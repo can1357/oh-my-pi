@@ -1,7 +1,7 @@
 /**
  * Bash command execution with streaming support and cancellation.
  *
- * Uses the embedded bash engine (pi-shell) through native bindings for shell
+ * Uses the embedded bash engine through native bindings for shell
  * execution.
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -17,11 +17,12 @@ import {
 } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
 import { logger } from "@oh-my-pi/pi-utils";
+import { formatRawOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
 import type { MinimizedMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { type ArtifactAllocator, OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { attachShellTrace } from "@oh-my-pi/pi-tui/tools/shell-viz";
 import {
 	resolveOutputMaxColumns,
@@ -30,6 +31,7 @@ import {
 } from "../tools/output-meta";
 import { quotePosixArgv } from "../utils/shell-quote";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
+import { StreamNewlineNormalizer } from "../utils/stream-newlines";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { loadDirenvEnv } from "./direnv";
 import { buildNonInteractiveEnv } from "./non-interactive-env";
@@ -88,7 +90,7 @@ export interface BashExecutorOptions {
 	 */
 	streams?: PipeStreams;
 	/**
-	 * Receives the embedded shell's live trace of the command (pi-shell's
+	 * Receives the embedded shell's live trace of the command (omp-shell's
 	 * `RunTrace` snapshot) every {@link TRACE_POLL_MS} while it changed, and
 	 * once more after the run settles. The PTY path never calls it.
 	 */
@@ -110,14 +112,13 @@ export interface BashExecutorOptions {
 	 * experiment shapes the output instead. Default: the setting decides.
 	 */
 	minimize?: boolean;
-	/** Artifact path/id for full output storage */
-	artifactPath?: string;
-	artifactId?: string;
+	/** Claims the spill file for output that overflows the inline view. */
+	allocateArtifact?: ArtifactAllocator;
 	/**
 	 * Invoked when the native minimizer rewrote the command's output, giving
 	 * the caller a chance to persist the lossless original capture (typically
-	 * via the session's `ArtifactManager`). The returned id is spliced into
-	 * the sink output as `artifact://<id>` so the agent can retrieve the raw
+	 * via the session's `ArtifactManager`). The returned spill id is spliced
+	 * into the sink output as its spill URL so the agent can retrieve the raw
 	 * bytes. Return `undefined` to skip the footer.
 	 */
 	onMinimizedSave?: (
@@ -667,6 +668,7 @@ async function executeUserShellPty(run: {
 	dump: (notice?: string) => Promise<OutputSummary & { images?: ImageContent[] }>;
 }): Promise<BashResult> {
 	const session = new PtySession();
+	const newlines = new StreamNewlineNormalizer();
 	const result = await session.startArgv(
 		{
 			application: run.shell,
@@ -684,7 +686,7 @@ async function executeUserShellPty(run: {
 			// Preserve raw bytes for the terminal display, but extract graphics
 			// before the transcript sink sanitizes or truncates the clean text.
 			const clean = run.graphics.push(chunk);
-			if (clean) run.sink.push(clean.replace(/\r\n?/gu, "\n"));
+			if (clean) run.sink.push(newlines.push(clean));
 		},
 		err => {
 			if (err) return;
@@ -788,8 +790,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 						onPreview?.(sink.preview());
 					}
 				: undefined,
-		artifactPath: options?.artifactPath,
-		artifactId: options?.artifactId,
+		allocateArtifact: options?.allocateArtifact,
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
@@ -936,7 +937,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				timeoutTimer = setTimeout(onDeadline, remainingMs);
 				return;
 			}
-			// Explicit timeouts are enforced inside pi-natives via `timeoutMs`.
+			// Explicit timeouts are enforced inside omp-natives via `timeoutMs`.
 			// Give native cancellation time to flush pipeline output and drain the
 			// N-API bridge before this result-only watchdog gives up on the run.
 			if (!nativeOwnsTimeout) {
@@ -1053,7 +1054,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 		// When the native minimizer rewrote the output, persist the original and
 		// swap the sink's accumulated raw stream for the minimized text with an
-		// `artifact://<id>` footer so the agent can retrieve the raw bytes
+		// `[raw output: <spill url>]` footer so the agent can retrieve the raw bytes
 		// losslessly. The minimized text is a lossy summary, so substitute it
 		// only once the original is addressable — a caller that returns no id
 		// (or an unavailable allocator) must keep the raw stream rather than
@@ -1080,7 +1081,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				const sep = minimizedText.endsWith("\n") ? "" : "\n";
 				// The label keeps its own line so the `[raw output: …]` line stays parseable.
 				sink.push(
-					`${sep}[output summarized by the ${minimized.filter} filter; pipe through \`| cat\` for verbatim output]\n[raw output: artifact://${artifactId}]\n`,
+					`${sep}[output summarized by the ${minimized.filter} filter; pipe through \`| cat\` for verbatim output]\n${formatRawOutputNotice(artifactId)}\n`,
 				);
 			}
 		}

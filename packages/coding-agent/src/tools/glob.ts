@@ -524,7 +524,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					throwIfAborted(signal);
 					let stat: UrlFileStat;
 					if (internalRouter.canHandle(target.searchPath)) {
-						// A URL failure carries its handler's diagnosis (`Artifact 9 not found. Available: 4`).
+						// A URL failure carries its handler's diagnosis (a missing `local://` file, a `skill://` URL without a name).
 						stat = await urlFilesystem.stat(target.searchPath).catch((err: unknown) => {
 							throw new ToolError(
 								`Cannot glob ${target.searchPath}: ${err instanceof Error ? err.message : String(err)}`,

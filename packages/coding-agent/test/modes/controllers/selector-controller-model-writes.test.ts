@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { type RawSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
@@ -13,6 +14,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as modelHubModule from "@oh-my-pi/pi-tui/overlays/model-hub";
 import * as modelPickerModule from "@oh-my-pi/pi-tui/overlays/model-picker";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
@@ -35,6 +37,7 @@ describe("SelectorController model selector writes", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		restoreSettingsTestState(state);
 		state = undefined;
 		await session?.dispose();
@@ -116,6 +119,41 @@ describe("SelectorController model selector writes", () => {
 		const second = openModelPicker(controller);
 		await second.callbacks.onPick(sonnet, "anthropic/claude-sonnet-4-5", { overContext: false });
 		expect(session!.configuredThinkingLevel()).toBe(Effort.Medium);
+		expect(showError).not.toHaveBeenCalled();
+	});
+
+	it("shows auto's resolved level once a turn settles it, and an untouched pick keeps auto", async () => {
+		const sonnet = model("claude-sonnet-4-5");
+		const { controller, showError } = start(Settings.isolated(), sonnet);
+		vi.spyOn(session!.agent, "prompt").mockResolvedValue(undefined);
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.High);
+		session!.setThinkingLevel(AUTO_THINKING);
+
+		// Unresolved auto shows as auto.
+		const pending = openModelPicker(controller);
+		expect(pending.options.thinkingLevelFor?.(sonnet)).toBe(AUTO_THINKING);
+		pending.callbacks.onCancel();
+
+		await session!.prompt("Implement a focused parser fix");
+		const { callbacks, options } = openModelPicker(controller);
+		expect(options.thinkingLevelFor?.(sonnet)).toBe(Effort.High);
+
+		await callbacks.onPick(sonnet, "anthropic/claude-sonnet-4-5", { overContext: false });
+		expect(session!.configuredThinkingLevel()).toBe(AUTO_THINKING);
+		expect(showError).not.toHaveBeenCalled();
+	});
+
+	it("carries the session's level to a picked model, clamped to its ladder, over a role's level for it", async () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "anthropic/claude-opus-4-5:low" } });
+		const { controller, showError } = start(settings, model("claude-opus-4-7"));
+		session!.setThinkingLevel(Effort.Max);
+
+		const { callbacks } = openModelPicker(controller);
+		await callbacks.onPick(model("claude-opus-4-5"), "anthropic/claude-opus-4-5", { overContext: false });
+
+		// Opus 4.5 tops out at xhigh: the nearest level to max, not the smol role's low.
+		expect(session!.model?.id).toBe("claude-opus-4-5");
+		expect(session!.configuredThinkingLevel()).toBe(Effort.XHigh);
 		expect(showError).not.toHaveBeenCalled();
 	});
 

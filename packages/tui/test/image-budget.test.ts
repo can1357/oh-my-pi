@@ -1361,18 +1361,18 @@ describe("TUI inline-image budget", () => {
 				scheduler.settle();
 				scheduler.settle();
 
-				// The settled rebuild deletes every placement (`d=A`), erases screen
-				// and history, then re-sends the data and re-places it. The erase
-				// reclaims any image that has no placement, so the transmit must
-				// follow it — otherwise the replay places an image the terminal just
-				// freed and the picture vanishes after the resize.
+				// The settled rebuild erases screen and history, deletes every
+				// placement (`d=A`), then re-sends the data and re-places it. The
+				// erase reclaims any image that has no placement, so the transmit
+				// must follow it — otherwise the replay places an image the terminal
+				// just freed and the picture vanishes after the resize.
 				const output = writes.join("");
-				const deleteAll = output.indexOf("\x1b_Ga=d,d=A");
 				const erase = output.indexOf("\x1b[2J\x1b[3J");
+				const deleteAll = output.indexOf("\x1b_Ga=d,d=A", erase);
 				const transmit = output.indexOf(BASE64_ONE_PIXEL_PNG, deleteAll);
-				expect(deleteAll).toBeGreaterThanOrEqual(0);
-				expect(erase).toBeGreaterThan(deleteAll);
-				expect(transmit).toBeGreaterThan(erase);
+				expect(erase).toBeGreaterThanOrEqual(0);
+				expect(deleteAll).toBeGreaterThan(erase);
+				expect(transmit).toBeGreaterThan(deleteAll);
 				expect(placed.has(shownId)).toBe(true);
 			} finally {
 				tui.stop();
@@ -1917,9 +1917,13 @@ describe("TUI inline-image budget", () => {
 
 			// ED2/ED3 erase text but leave graphics untouched. d=A also removes
 			// untracked placements; current images must be re-sent and re-placed.
+			// It follows the erases: d=A spares placements in scrollback, and a
+			// terminal may move those on screen when ED3 erases their rows.
 			const repaint = writes.join("");
 			const deleteIndex = repaint.indexOf("\x1b_Ga=d,d=A,q=2\x1b\\");
-			expect(deleteIndex).toBeGreaterThanOrEqual(0);
+			const eraseIndex = repaint.indexOf("\x1b[2J\x1b[3J");
+			expect(eraseIndex).toBeGreaterThanOrEqual(0);
+			expect(deleteIndex).toBeGreaterThan(eraseIndex);
 			const transmitIndex = repaint.indexOf("\x1b_Ga=t", deleteIndex);
 			const placeIndex = repaint.indexOf("\x1b_Ga=p", transmitIndex);
 			expect(transmitIndex).toBeGreaterThan(deleteIndex);

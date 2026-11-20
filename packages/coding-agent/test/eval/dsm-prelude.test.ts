@@ -2,13 +2,21 @@ import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type IpcConnection, IpcServer, ipcEndpoint } from "@oh-my-pi/pi-natives";
+import { IpcConnection, IpcServer, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { Settings } from "../../src/config/settings";
+import * as daemon from "../../src/daemon/client";
+import type { DaemonClient, DaemonTunnel, UnitRef } from "../../src/daemon/protocol";
 import { cfgDisasmBackend } from "../../src/disasm/active";
 import type { DisasmBackendId } from "../../src/disasm/backend";
 import * as client from "../../src/disasm/client";
 import { createDsmPrelude, releaseDsmReferences } from "../../src/disasm/prelude-definition";
-import { formatDatabaseHandle, type HostRequest, type HostStatus, parseHostRequest } from "../../src/disasm/protocol";
+import {
+	DISASM_UNIT_KIND,
+	formatDatabaseHandle,
+	type HostRequest,
+	type HostStatus,
+	parseHostRequest,
+} from "../../src/disasm/protocol";
 import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
 import { invokeEvalPrelude } from "../../src/eval/preludes";
@@ -31,14 +39,62 @@ function field(value: unknown, name: string): unknown {
 	return value !== null && typeof value === "object" ? Reflect.get(value, name) : undefined;
 }
 
-/** Real connections and eval kernels; only backend computation and broker discovery are stand-ins. */
+/** Daemon stand-in whose `attach` dials the fixture's host endpoint; the fixture never uses anything else. */
+function hostDaemon(endpoint: string): DaemonClient {
+	const unused = async (): Promise<never> => {
+		throw new Error("unused by the dsm fixture");
+	};
+	const noSubscription = () => () => {};
+	return {
+		welcome: { v: 1, daemon: { pid: process.pid, build: "test", startedAt: 0 }, caps: { [DISASM_UNIT_KIND]: 1 } },
+		request: unused,
+		open: unused,
+		release: unused,
+		call: unused,
+		async attach(unit: UnitRef): Promise<DaemonTunnel> {
+			if (typeof unit === "string") throw new Error("dsm attaches by (kind, scope, key)");
+			const connection = await IpcConnection.connect(endpoint, { framing: "raw" });
+			return {
+				unit: {
+					id: `unit-${unit.key}`,
+					kind: unit.kind,
+					scope: unit.scope,
+					key: unit.key,
+					label: unit.key,
+					generation: "1",
+					state: "running",
+					pids: [],
+					createdAt: 0,
+					startedAt: 0,
+					restartCount: 0,
+					outputBytes: 0,
+					leases: 0,
+					policy: { hold: "leases", idleMs: 0, onIdle: "flush-stop", restart: "no", survive: "none" },
+					supervised: true,
+				},
+				send: data => connection.send(data),
+				drained: () => connection.drained(),
+				start: (onData, onClose) => connection.startRaw(onData, onClose),
+				close: () => connection.destroy(),
+				ref: () => connection.ref(),
+				unref: () => connection.unref(),
+			};
+		},
+		onCompletion: noSubscription,
+		onNotify: noSubscription,
+		onUnit: noSubscription,
+		onReconnect: noSubscription,
+		close() {},
+	};
+}
+
+/** Real connections and eval kernels; only backend computation and the daemon's unit routing are stand-ins. */
 async function fixture(maxTimeout = 0) {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-dsm-prelude-"));
 	const binary = path.join(dir, "sample");
 	await Bun.write(binary, new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]));
 	const endpoint = ipcEndpoint(dir, "dsm");
-	const freshHandle = () =>
-		formatDatabaseHandle({ backend: "ida", id: "sample-id", instance: crypto.randomUUID(), project: dir });
+	const freshHandle = () => formatDatabaseHandle({ backend: "ida", id: "sample-id", instance: crypto.randomUUID() });
 	const status: HostStatus = {
 		id: "sample-id",
 		ref: binary,
@@ -142,8 +198,9 @@ async function fixture(maxTimeout = 0) {
 		await server.close();
 		await fs.rm(dir, { recursive: true, force: true });
 	});
+	vi.spyOn(daemon, "daemonClient").mockResolvedValue(hostDaemon(endpoint));
 	const connect = async () => {
-		const connected = await client.DisasmDatabase.attach("omp.ida.sample-id", endpoint, "status");
+		const connected = await client.DisasmDatabase.attach("ida:sample-id", "status");
 		if (!connected) throw new Error("Fixture database did not attach");
 		databases.push(connected);
 		return connected;
@@ -153,7 +210,7 @@ async function fixture(maxTimeout = 0) {
 	vi.spyOn(cfgDisasmBackend, "get").mockImplementation(() => backend);
 	const find = vi
 		.spyOn(client, "findOpenDatabase")
-		.mockImplementation(async (_session, selected, ref) =>
+		.mockImplementation(async (selected, ref) =>
 			open && selected === backend && (ref === status.id || ref === db.name) ? db : undefined,
 		);
 	const list = vi.spyOn(client, "listDatabases").mockImplementation(async () => (open ? [db] : []));
@@ -172,10 +229,10 @@ async function fixture(maxTimeout = 0) {
 		await db.refresh();
 		return db;
 	});
-	const makeOwner = (cwd = dir) => {
+	const makeOwner = () => {
 		const callbacks = new Set<() => void>();
 		const session: ToolSession = {
-			cwd,
+			cwd: dir,
 			hasUI: false,
 			getSessionFile: () => null,
 			getSessionSpawns: () => null,
@@ -276,6 +333,30 @@ describe("dsm host capability", () => {
 		});
 	});
 
+	it("rejects another backend's database file by naming its owner", async () => {
+		const f = await fixture();
+		const binjaDatabase = path.join(f.dir, "existing.bndb");
+		await Bun.write(binjaDatabase, "database");
+		await Bun.write(path.join(f.dir, "existing.i64"), "database");
+		await expect(f.invoke({ action: "open", path: "existing.bndb" })).rejects.toThrow(
+			"Binary Ninja database existing.bndb cannot be opened with the active IDA backend; set disassembler.backend to binja.",
+		);
+		f.setBackend("ghidra");
+		await expect(f.invoke({ action: "open", path: "existing.i64" })).rejects.toThrow(
+			"IDA database existing.i64 cannot be opened with the active Ghidra backend; set disassembler.backend to ida.",
+		);
+		f.setBackend("binja");
+		await expect(f.invoke({ action: "open", path: "existing.i64" })).rejects.toThrow(
+			"IDA database existing.i64 cannot be opened with the active Binary Ninja backend; set disassembler.backend to ida.",
+		);
+		expect(f.acquire).not.toHaveBeenCalled();
+		await f.invoke({ action: "open", path: "existing.bndb" });
+		expect(f.acquire).toHaveBeenLastCalledWith(f.session, "binja", binjaDatabase, {
+			arch: undefined,
+			signal: undefined,
+		});
+	});
+
 	it("keeps closed references invalid across a reopen or host replacement", async () => {
 		const f = await fixture();
 		const handle = await f.getHandle();
@@ -289,14 +370,12 @@ describe("dsm host capability", () => {
 		expect(f.requests.filter(request => request.op === "call")).toHaveLength(0);
 	});
 
-	it("shares a printable handle with a different-cwd child without letting that child close its parent's reference", async () => {
+	it("shares a printable handle with a child without letting that child close its parent's reference", async () => {
 		const f = await fixture();
 		const parent = await f.invoke({ action: "open", path: "sample" });
-		const child = f.child(path.join(f.dir, "child"));
+		const child = f.child();
 		const imported = await child.invoke({ action: "open", path: field(parent, "handle") });
-		expect(f.byHandle).toHaveBeenCalledWith(
-			expect.objectContaining({ project: f.dir, backend: "ida", id: f.status.id }),
-		);
+		expect(f.byHandle).toHaveBeenCalledWith(expect.objectContaining({ backend: "ida", id: f.status.id }));
 		await child.invoke({ action: "close", lease: field(imported, "lease"), backend: "ida" });
 		expect(f.status.references).toBe(1);
 		expect(

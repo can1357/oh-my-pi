@@ -1884,6 +1884,7 @@ function mapOptionsForApi<TApi extends Api>(
 		anthropicCompaction: options?.anthropicCompaction,
 		anthropicSlowMode: options?.anthropicSlowMode,
 		userProfileId: options?.userProfileId,
+		prewarm: options?.prewarm,
 		...simpleProviderOptions,
 	};
 
@@ -2365,7 +2366,7 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"kiro-api">({
 				...base,
 				reasoning: options?.reasoning,
-				disableReasoning: options?.disableReasoning,
+				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
 				hideThinkingSummary: options?.hideThinkingSummary,
 			});
 

@@ -15,7 +15,7 @@
  *
  * `ovnfs start --json` makes sure the daemon runs and reports its admin
  * socket; checkouts are then opened (`new`) and removed (`rm`) over that socket
- * (protocol: {@link callSocket}).
+ * ({@link callOvnfs}).
  *
  * Each workspace keeps a record of its checkout ({@link OVNFS_CHECKOUT_FILE}) in the
  * run's task-isolation dir, beside the owner marker, so `omp worktree clear`
@@ -31,31 +31,14 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
-import { callSocket, OvnfsError, socketFeatures } from "../ovnfs/client";
-import { forgetDaemon, startDaemon } from "../ovnfs/daemon";
+import { callOvnfs, checkoutStem, type NewReply, removeCheckout } from "../ovnfs/checkouts";
+import { OvnfsError, socketFeatures } from "../ovnfs/client";
+import { startDaemon } from "../ovnfs/daemon";
+import { type CheckoutRecord, OVNFS_CHECKOUT_FILE, releaseOvnfsCheckout } from "../ovnfs/task-record";
 import type { IsolationWorkspace, OpenWorkspace, RetainedWorkspace, WorkspaceStart } from "./isolation-runner";
 import { vacateIsolationSlot } from "./isolation-runner";
 import { writeIsolationOwner } from "./isolation-ownership";
 import { captureIsolationBaseline, taskIsolationBaseDir, type WorktreeBaseline } from "./worktree";
-
-/** Record of the checkout an isolation dir stands for. */
-export const OVNFS_CHECKOUT_FILE = ".omp-ovnfs-checkout.json";
-
-/** Contents of {@link OVNFS_CHECKOUT_FILE}. */
-interface CheckoutRecord {
-	/** ovnfs executable that opened the checkout (it can start the daemon again). */
-	command: string;
-	checkout: string;
-	/** The checkout on the same capture a branch commit reads its baseline from, while it exists. */
-	start?: string;
-}
-
-/** The parts of ovnfs's `new` reply used here. */
-interface NewReply {
-	checkout: { name: string; path: string; base: string };
-	/** How the folder was captured; absent for a checkout from a snapshot. */
-	capture?: { root: string; repos: string[] | null };
-}
 
 /** The part of ovnfs's `diff` reply used here. */
 interface DiffReply {
@@ -67,39 +50,13 @@ interface DiffReply {
 /** Daemon features a checkout needs to keep its own starting state (`api.Features`). */
 const START_FEATURES = ["new.base", "diff.binary"];
 
-/** One operation on the daemon `command` manages, starting it again once if it went away. */
-async function call<T>(command: string, op: string, args: object): Promise<T> {
-	const { socket } = await startDaemon(command);
-	try {
-		return await callSocket<T>(socket, op, args);
-	} catch (err) {
-		const code = (err as NodeJS.ErrnoException).code;
-		if (code !== "ECONNREFUSED" && code !== "ENOENT") throw err;
-		forgetDaemon(command);
-		return callSocket<T>((await startDaemon(command)).socket, op, args);
-	}
-}
-
 /** A checkout name ovnfs accepts (`[a-z0-9][a-z0-9._-]{0,63}`), recognisable as this agent's, unique per run. */
 function checkoutName(agentId: string): string {
-	const stem = agentId
-		.toLowerCase()
-		.replace(/[^a-z0-9._-]+/g, "-")
-		.replace(/^[^a-z0-9]+/, "")
-		.slice(0, 40);
+	const stem = checkoutStem(agentId, 40);
 	const suffix = Math.floor(Math.random() * 2 ** 24)
 		.toString(16)
 		.padStart(6, "0");
 	return `omp-${stem || "task"}-${suffix}`;
-}
-
-/** Remove a checkout; one already gone counts as removed. */
-async function removeCheckout(command: string, checkout: string): Promise<void> {
-	try {
-		await call(command, "rm", { checkout });
-	} catch (err) {
-		if (!(err instanceof OvnfsError && err.code === "not_found")) throw err;
-	}
 }
 
 /**
@@ -119,23 +76,6 @@ async function releaseCheckoutRecord(dir: string, command: string, checkout: str
 		return;
 	}
 	await fs.rm(dir, { recursive: true, force: true });
-}
-
-/**
- * Remove the ovnfs checkouts a task-isolation dir records and report whether it
- * recorded one. Throws when a checkout cannot be removed (the record then stays
- * for a later retry); `omp worktree clear` calls this before deleting the dir.
- */
-export async function releaseOvnfsCheckout(dir: string): Promise<boolean> {
-	let record: CheckoutRecord;
-	try {
-		record = (await Bun.file(path.join(dir, OVNFS_CHECKOUT_FILE)).json()) as CheckoutRecord;
-	} catch {
-		return false;
-	}
-	if (record.start) await removeCheckout(record.command, record.start);
-	await removeCheckout(record.command, record.checkout);
-	return true;
 }
 
 /** Whether paths `a` and `b` name the same folder (case-insensitively on Windows). */
@@ -171,7 +111,7 @@ class OvnfsWorkspace implements IsolationWorkspace {
 	async #rootPatch(): Promise<string | undefined> {
 		let reply: DiffReply;
 		try {
-			reply = await call<DiffReply>(this.command, "diff", { checkout: this.checkout, binary: true });
+			reply = await callOvnfs<DiffReply>(this.command, "diff", { checkout: this.checkout, binary: true });
 		} catch (err) {
 			if (err instanceof OvnfsError && err.code === "unsupported") return undefined;
 			throw err;
@@ -192,7 +132,7 @@ class OvnfsWorkspace implements IsolationWorkspace {
 		// A start checkout an earlier, interrupted call left behind.
 		await removeCheckout(this.command, start);
 		try {
-			const reply = await call<NewReply>(this.command, "new", { base, name: start });
+			const reply = await callOvnfs<NewReply>(this.command, "new", { base, name: start });
 			return await captureIsolationBaseline(reply.checkout.path, repoRoot);
 		} finally {
 			try {
@@ -303,7 +243,7 @@ export function ovnfsWorkspace(command: string): OpenWorkspace {
 			const record: CheckoutRecord = { command, checkout };
 			await Bun.write(path.join(baseDir, OVNFS_CHECKOUT_FILE), JSON.stringify(record));
 			recorded = true;
-			const reply = await call<NewReply>(command, "new", { dir: repoRoot, name: checkout });
+			const reply = await callOvnfs<NewReply>(command, "new", { dir: repoRoot, name: checkout });
 			const capture = await startingCapture(command, repoRoot, reply);
 			return new OvnfsWorkspace(reply.checkout.path, baseDir, command, checkout, capture);
 		} catch (err) {

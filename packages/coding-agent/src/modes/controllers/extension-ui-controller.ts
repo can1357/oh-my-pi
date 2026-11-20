@@ -32,7 +32,6 @@ import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import {
-	type AskDialogInputGuard,
 	type AskDialogPrompt,
 	type AskDialogPromptDraft,
 	type AskDialogPromptValue,
@@ -61,7 +60,6 @@ import { boundPromptTitle, HookEditorComponent, type HookEditorOptions } from "@
 import { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
 import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
 import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
-import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { ComposerOwner, InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -87,12 +85,6 @@ const ASK_CHAT_OPTION = "Chat about this";
 const ASK_NEXT_OPTION = "Next →";
 /** What an inline ask warns while sending the composer's draft would skip it. */
 const ASK_SKIP_NOTICE = "Sending your message skips these questions";
-
-/** A draft guard and whether it still owns input; see `#draftInputGuard`. */
-interface DraftGuard {
-	guard: AskDialogInputGuard;
-	owns(): boolean;
-}
 
 /** Where a local ask shows; see `#mountAsk`. */
 interface AskSlot {
@@ -156,8 +148,8 @@ export class ExtensionUiController {
 	// the rest queue. See `#presentDialog`.
 	#dialogActive = false;
 	#dialogQueue: Array<() => void> = [];
-	/** Natively, the ask shown inline at the transcript's end (`#mountAsk`). */
-	#inlineAsk: Component | undefined;
+	/** The local ask shown above the composer (`#mountAsk`). */
+	#ask: Component | undefined;
 	/**
 	 * The steering messages that last denied an approval. Steering waits for the tool batch to
 	 * end, so while any of them is still pending, later approvals of that batch (an exclusive call
@@ -892,102 +884,83 @@ export class ExtensionUiController {
 	}
 
 	/**
-	 * A draft in progress when a dialog lands keeps the keyboard, so in-flight
-	 * typing never answers by accident; up/down hand input to the dialog and the
-	 * draft stays parked beneath it until the dialog closes.
-	 */
-	#draftInputGuard(): DraftGuard | undefined {
-		const draftEditor = this.ctx.editor;
-		if (draftEditor.getText().length === 0) return undefined;
-		let reportedBlocked = false;
-		const guard: AskDialogInputGuard = {
-			isBlocked: () => draftEditor.getText().length > 0,
-			handleInput: (keyData: string) => draftEditor.handleDraftEdit(keyData),
-			hint: "typing edits your prompt",
-			// Show the draft's insertion cursor while it owns input; drop it
-			// once the dialog controls take over.
-			syncPresentation: (blocked: boolean) => {
-				reportedBlocked = blocked;
-				draftEditor.focused = blocked;
-			},
-		};
-		return { guard, owns: () => reportedBlocked && guard.isBlocked() };
-	}
-
-	/**
-	 * Natively (Tern), what the composer shows about the ask waiting inline above it: `pending` while
-	 * one waits, `skip` while sending its draft would skip it; undefined with no ask or with the composer
-	 * talking to a `/btw` note.
+	 * What the composer shows about the ask waiting above it: `pending` while one waits, `skip` while
+	 * sending its draft would skip it; undefined with no ask or with the composer talking to a `/btw` note.
 	 */
 	composerAsk(): "pending" | "skip" | undefined {
-		if (!this.#inlineAsk || this.ctx.isBtwFocused) return undefined;
+		if (!this.#ask || this.ctx.isBtwFocused) return undefined;
 		return this.#draftSkipsAsk() ? "skip" : "pending";
 	}
 
-	/** Natively, gives the keys to the ask waiting in the transcript; false when none waits. */
-	focusInlineAsk(): boolean {
-		const ask = this.#inlineAsk;
+	/** Whether an ask waits above the composer while the keys are away from the composer (it draws faint). */
+	askHoldsKeys(): boolean {
+		return this.#ask !== undefined && !this.ctx.editor.focused;
+	}
+
+	/** In rows, the keys of the ask holding them, which the faint composer under it shows. */
+	askKeyHints(): string | undefined {
+		if (!this.askHoldsKeys()) return undefined;
+		const ask = this.#ask;
+		return ask instanceof HtmlFormDialog || ask instanceof AskDialogComponent ? ask.keyHints() : undefined;
+	}
+
+	/** Gives the keys to the ask waiting above the composer; false when none waits. */
+	focusAsk(): boolean {
+		const ask = this.#ask;
 		if (!ask) return false;
 		this.ctx.ui.setFocus(ask);
 		this.ctx.ui.requestRender();
 		return true;
 	}
 
+	/** Gives the keys to the composer (Tab past an ask's last stop, the ask closing). */
 	#focusComposer(): void {
 		this.ctx.ui.setFocus(this.ctx.editor);
 		this.ctx.ui.requestRender();
 	}
 
 	/**
-	 * Whether sending the composer's draft now skips the inline ask: a plain message, which reaches the
+	 * Whether sending the composer's draft now skips the ask shown: a plain message, which reaches the
 	 * agent as the user's and closes the ask, not a command, a shell run or a `/btw` follow-up.
 	 */
 	#draftSkipsAsk(): boolean {
-		if (!this.#inlineAsk || this.ctx.isBtwFocused || this.ctx.isBashMode || this.ctx.isPythonMode) return false;
+		if (!this.#ask || this.ctx.isBtwFocused || this.ctx.isBashMode || this.ctx.isPythonMode || this.ctx.isBtwMode)
+			return false;
 		const draft = this.ctx.editor.getText().trim();
 		return draft.length > 0 && !draft.startsWith("/");
 	}
 
+	/** The ask's warning while sending the composer's draft would skip it, with the key back to it. */
+	#skipNotice(): string | undefined {
+		if (!this.#draftSkipsAsk()) return undefined;
+		const back = this.ctx.keybindings.getKeys("app.thinking.cycle")[0];
+		return this.ctx.editor.focused && back
+			? `${ASK_SKIP_NOTICE} · ${formatKeyHint(back)} answers them`
+			: ASK_SKIP_NOTICE;
+	}
+
 	/**
-	 * Shows a local ask. Natively (Tern) it goes inline at the transcript's end and the composer stays
-	 * under it: the ask takes the keys unless the composer holds a draft, whose sending skips it. In rows
-	 * it takes the composer's place, a guarded `draft` kept visible beneath it.
+	 * Shows a local ask above the composer, which stays: natively (Tern) at the transcript's end, in rows
+	 * just over it. The ask takes the keys unless the composer holds a draft, whose sending skips it;
+	 * Shift+Tab, Tab past the ask's last stop and clicks move the keys between them.
 	 */
-	#mountAsk(dialog: Component, draft: DraftGuard | undefined): AskSlot {
+	#mountAsk(dialog: Component): AskSlot {
 		this.ctx.closeLinkBrowser();
-		if (isNativeRendering()) {
-			this.#inlineAsk = dialog;
-			this.ctx.askContainer.addChild(dialog);
-			if (!this.ctx.editor.getText().trim()) this.ctx.ui.setFocus(dialog);
-			this.ctx.ui.requestRender();
-			return {
-				restore: () => {
-					this.ctx.editorContainer.clear();
-					this.ctx.editorContainer.addChild(this.ctx.editor);
-					this.focusInlineAsk();
-				},
-				unmount: () => {
-					if (this.#inlineAsk === dialog) this.#inlineAsk = undefined;
-					this.ctx.askContainer.removeChild(dialog);
-					this.ctx.editorContainer.clear();
-					this.ctx.editorContainer.addChild(this.ctx.editor);
-					this.#focusComposer();
-				},
-			};
-		}
-		const show = (): void => {
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(dialog);
-			if (draft) this.ctx.editorContainer.addChild(this.ctx.editor);
-			this.ctx.ui.setFocus(dialog);
-			this.ctx.ui.requestRender();
-		};
-		const releaseComposerOwner = draft && this.#claimComposerOwner(dialog, draft.owns);
-		show();
+		this.#ask = dialog;
+		this.ctx.askContainer.addChild(dialog);
+		this.ctx.statusLine.setAwaitingAnswer(true);
+		if (this.ctx.editor.getText().trim()) this.ctx.ui.requestRender();
+		else this.focusAsk();
 		return {
-			restore: show,
+			restore: () => {
+				this.ctx.editorContainer.clear();
+				this.ctx.editorContainer.addChild(this.ctx.editor);
+				this.focusAsk();
+			},
 			unmount: () => {
-				releaseComposerOwner?.();
+				if (this.#ask === dialog) this.#ask = undefined;
+				this.ctx.askContainer.removeChild(dialog);
+				this.ctx.statusLine.setAwaitingAnswer(this.#ask !== undefined);
 				this.ctx.editorContainer.clear();
 				this.ctx.editorContainer.addChild(this.ctx.editor);
 				this.#focusComposer();
@@ -1011,8 +984,6 @@ export class ExtensionUiController {
 		const first = form.fields.find(field => field.name);
 		const prompt = { kind: "question", msg: first && fieldQuestions(form).get(first) } as const;
 		return this.#presentDialog<ExtensionFormDialogResult>(prompt, dialogOptions?.signal, settle => {
-			// Natively the composer stays in place under the inline ask: no guard proxies a draft into it.
-			const draft = isNativeRendering() ? undefined : this.#draftInputGuard();
 			const dialog = new HtmlFormDialog(form, {
 				tui: this.ctx.ui,
 				cwd: this.ctx.sessionManager.getCwd(),
@@ -1023,15 +994,14 @@ export class ExtensionUiController {
 				},
 				onSubmit: (data, notes) => settle({ data, ...(notes.length ? { notes } : {}) }),
 				onCancel: () => settle(undefined),
-				inputGuard: draft?.guard,
 				acceptImages: dialogOptions?.acceptImages === true,
 				onPasteImage: () => this.ctx.handleImagePaste(),
 				onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
-				skipNotice: () => (this.#draftSkipsAsk() ? ASK_SKIP_NOTICE : undefined),
-				claimKeys: () => this.focusInlineAsk(),
+				skipNotice: () => this.#skipNotice(),
+				claimKeys: () => this.focusAsk(),
 				releaseKeys: () => this.#focusComposer(),
 			});
-			const slot = this.#mountAsk(dialog, draft);
+			const slot = this.#mountAsk(dialog);
 			return () => {
 				// Closed by its signal (a message sent instead, the turn aborted): what was answered goes along.
 				if (dialogOptions?.signal?.aborted) {
@@ -1193,14 +1163,7 @@ export class ExtensionUiController {
 			let promptEditor: HookEditorComponent | undefined;
 			let promptResolve: ((value: AskDialogPromptValue | AskDialogPromptDraft | undefined) => void) | undefined;
 			let closed = false;
-			// Natively the composer stays in place under the inline ask: no guard proxies a draft into it.
-			const draft = isNativeRendering() ? undefined : this.#draftInputGuard();
-			const inputGuard = draft?.guard;
-
-			// Keeps the draft editor mounted beneath the restored ask (rows), matching the initial
-			// presentation: the guard re-blocks whenever the draft is non-empty (e.g. a failed submit
-			// restored its text while a nested prompt was open), and routed input must land on a
-			// visible surface.
+			// After a nested prompt took the composer's place: the composer back, the keys to the ask.
 			const restoreAskDialog = (): void => {
 				if (!closed) slot.restore();
 			};
@@ -1281,13 +1244,12 @@ export class ExtensionUiController {
 					timeout: dialogOptions?.timeout,
 					onTimeout: dialogOptions?.onTimeout,
 					tui: this.ctx.ui,
-					inputGuard,
-					skipNotice: () => (this.#draftSkipsAsk() ? ASK_SKIP_NOTICE : undefined),
-					claimKeys: () => this.focusInlineAsk(),
+					skipNotice: () => this.#skipNotice(),
+					claimKeys: () => this.focusAsk(),
 					releaseKeys: () => this.#focusComposer(),
 				},
 			);
-			const slot = this.#mountAsk(askDialog, draft);
+			const slot = this.#mountAsk(askDialog);
 
 			return () => {
 				closed = true;

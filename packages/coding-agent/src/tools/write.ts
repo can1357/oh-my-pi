@@ -1013,8 +1013,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					if (!verbatim && target.spec.backing !== "device" && endsWithReadTruncationNotice(content)) {
 						let currentContent: string | undefined;
 						try {
-							currentContent = (await router.resolve(path, sessionResolveContext(this.session, { signal })))
+							const current = (await router.resolve(path, sessionResolveContext(this.session, { signal })))
 								.content;
+							// Bytes were never read as text, so no read projection of them can be truncated.
+							if (typeof current === "string") currentContent = current;
 						} catch (error) {
 							// A missing target has no source to discard, as for a new disk file (readCurrentWriteSource).
 							if (!isEnoent(error)) throw error;
@@ -1176,7 +1178,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					tool: "write",
 					before: before.text,
 					after,
-					beforeMtimeMs: before.mtimeMs,
 				});
 			};
 

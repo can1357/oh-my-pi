@@ -313,7 +313,7 @@ async function runPrintModeCore(
 	let costCapRefusalBeforeTurn = session.costCapRefusal;
 	// The print-mode-dispatched commands. Only commands whose runtime hooks
 	// are real in the headless runtime belong here: each runs a session API
-	// (`/mcp reauth` engine, `session.compact`, `session.handoff`,
+	// (`/mcp reauth` engine, `session.compact`,
 	// `session.retry`). Commands whose hooks would be stubs
 	// (`/reload-plugins` and friends) stay undispatched, and so does
 	// `/stats`: its dashboard server is in-process (`Bun.serve` inside this

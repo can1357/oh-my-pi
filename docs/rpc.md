@@ -255,7 +255,7 @@ correlate it via `id`. Ordering across concurrent commands is not guaranteed
 
 `handoff` fails while a response is streaming. On success, its payload is `{ savedPath? }` or `null` when no handoff was produced. Session transitions (`new_session`, `switch_session`, `branch`, `fork`, `open_session`) report cancellation when an extension prevents the transition.
 
-`fork` moves the process onto a new session file and returns `{ cancelled }`; read the new `sessionFile`/`sessionId` with `get_state`. With `entryId` (any `message` entry from `get_entries`, such as a user or assistant message), the new file holds the root-to-entry path including that entry plus the session's artifacts, so kept `artifact://` references still resolve, and its header's `parentSession` is the old session file. When `entryId` sits inside an assistant tool-call batch (the assistant message itself, or one of its tool results), the cut extends through the batch's recorded tool results so the fork never ends on tool calls whose results were dropped. This runs `session_before_branch`/`session_branch` hooks with reason `"fork"`, and the hook's `entryId` is the last kept entry. Without `entryId` it copies the whole session and its artifacts (`/fork`), records the old session id as `parentSession`, runs `session_before_switch`/`session_switch` with reason `"fork"`, and reports `cancelled: true` when the session is not persisted. A non-message `entryId` fails. Both variants fail with `code: "session_busy"` while a response is streaming or bash, eval, compaction, handoff, or retry work is running, including work that starts while the fork's hooks or flushes are awaited; a refused fork keeps the current session, its transcript, and its queued next-turn messages and background jobs. The Python client exposes `fork(entry_id=None) -> CancellationResult`.
+`fork` moves the process onto a new session file and returns `{ cancelled }`; read the new `sessionFile`/`sessionId` with `get_state`. With `entryId` (any `message` entry from `get_entries`, such as a user or assistant message), the new file holds the root-to-entry path including that entry plus the session's artifacts (spills included), so kept `local://N.log` references still resolve, and its header's `parentSession` is the old session file. When `entryId` sits inside an assistant tool-call batch (the assistant message itself, or one of its tool results), the cut extends through the batch's recorded tool results so the fork never ends on tool calls whose results were dropped. This runs `session_before_branch`/`session_branch` hooks with reason `"fork"`, and the hook's `entryId` is the last kept entry. Without `entryId` it copies the whole session and its artifacts (`/fork`), records the old session id as `parentSession`, runs `session_before_switch`/`session_switch` with reason `"fork"`, and reports `cancelled: true` when the session is not persisted. A non-message `entryId` fails. Both variants fail with `code: "session_busy"` while a response is streaming or bash, eval, compaction, handoff, or retry work is running, including work that starts while the fork's hooks or flushes are awaited; a refused fork keeps the current session, its transcript, and its queued next-turn messages and background jobs. The Python client exposes `fork(entry_id=None) -> CancellationResult`.
 
 `navigate_tree` moves the session's leaf to `entryId` in the same session file, as the interactive `/tree` selector does: a user message rewinds past itself (the leaf moves to its parent and `editorText` carries its text), any other entry becomes the leaf. With `summarize`, the abandoned branch is summarized by the session's model (with `customInstructions`, if given) and the summary entry lands at the target. A refusal never moves the leaf or writes to the transcript. An unknown `entryId` (`code: "entry_not_found"`) and a session already busy when the command runs (`code: "session_busy"`, as for `fork`) are refused before any side effect, so a running `btw` question and a waiting goal continuation are left alone. Two refusals come after the navigation has started, so they still cancel a running `btw` question (a waiting goal continuation is held and then resumes): `code: "session_busy"` when work started while the summary was generated, and `code: "ask_reanswer_unsupported"` for an `ask` tool result whose questions the interactive picker could reopen, since re-answering needs that picker (an `ask` result whose original questions cannot be recovered is a plain leaf move). A goal continuation waiting to start is held until the navigation ends and then runs on the new leaf. Read the new transcript with `get_messages`. `abort_branch_summary` stops a running summary: that `navigate_tree` answers `{ cancelled: true, aborted: true }` and nothing moves; it skips the command queue, which would otherwise hold it behind the `navigate_tree` it stops.
 
@@ -736,12 +736,7 @@ The corresponding `get_state` result reports the same computed state:
 
 ### `set_ask_dialog` payload
 
-`set_ask_dialog` opts the host in to the `ask` extension UI request (see
-[Extension UI Sub-Protocol](#extension-ui-sub-protocol)). It is off by default
-for every process; until a host enables it, the `ask` tool keeps prompting with
-one `select` (plus `editor` for free text) per choice. Builds without the
-command answer with a failed `response`, so hosts should keep the `select`
-fallback when enabling fails.
+`set_ask_dialog` opts the host in to the `ask` extension UI request for extension `ui.askDialog` calls (see [Extension UI Sub-Protocol](#extension-ui-sub-protocol)). It is off by default; until enabled, those calls use `select` and `editor`. This setting does not affect the `ask` tool, which always sends a whole `form`. Builds without the command answer with a failed `response`, so hosts should keep handling extension dialogs through `select` and `editor` when enabling fails.
 
 ```json
 { "id": "req_ask", "type": "set_ask_dialog", "enabled": true }
@@ -871,7 +866,7 @@ Scheme names are trimmed and lowercased and must match `[a-z][a-z0-9+.-]*`.
 replaces the entire previous set — schemes missing from the new list are
 unregistered; an empty list clears all host schemes.
 
-Every built-in scheme (`local://`, `skill://`, `artifact://`, `security://`,
+Every built-in scheme (`local://`, `skill://`, `security://`,
 `mcp://`, …) is reserved: RPC hosts cannot register or shadow one, and the
 request fails with `Host URI scheme is reserved by OMP: <scheme>://`.
 
@@ -993,7 +988,8 @@ A `compact` call refused before it starts (another compaction is running, or
 
 Each refresh handed to the provider stream emits one start and one matching end
 (a session disposed mid-refresh emits no end).
-Warm-or-stop decisions that do not send a request emit neither. These are
+Decisions that send no refresh (stop, or bridging the wait with compaction) emit
+neither. These are
 session events, so **both types must be listed in `set_event_filter` when a filter
 is active** to observe complete refresh lifecycles:
 
@@ -1001,12 +997,14 @@ is active** to observe complete refresh lifecycles:
 {
   type: "cache_warming_start";
   phase: "streaming" | "idle";
+  method: "prewarm" | "replay"; // max_tokens 0 pre-warm, or a one-token replay
   provider: string;
   model: string; // model id
 }
 {
   type: "cache_warming_end";
   phase: "streaming" | "idle"; // same phase as the matching start
+  method: "prewarm" | "replay"; // same method as the matching start
   provider: string;
   model: string;
   outcome: "hit" | "miss" | "error" | "aborted";
@@ -1017,7 +1015,9 @@ is active** to observe complete refresh lifecycles:
 
 - `hit`: the refresh read cached tokens without writing a new cache entry.
 - `miss`: it read no cached tokens or wrote cache tokens; warming stops.
-- `error`: no response was available or the response reported an error; warming stops.
+- `error`: no response was available or the response reported an error; warming stops, except that
+  a `prewarm` the endpoint rejects (HTTP 400) is followed by a `replay` start/end pair in the same
+  slot, and the model is replayed for the rest of the session.
 - `aborted`: the run was cancelled or replaced while the refresh was in flight.
 
 `usage` is present only when the refresh was recorded as a `model_usage` entry
@@ -1304,7 +1304,7 @@ Extensions in RPC mode use request/response UI frames. `--no-ui` disables the ex
 
 `--mode rpc-ui` independently enables the tool UI context, including with `--no-ui`:
 
-- `ask` still sends `select` requests. Free-text answers use `editor` with `promptStyle: true`; `ask` does not send `input` requests. Dialog cancellation can send `cancel`. Each `ask` prompt's `title` can span several lines: the form's context text for that field (paragraphs, lists, `<pre>` blocks, tables) separated by blank lines, then the field's question on the last line.
+- The `ask` tool sends one `form` request carrying the complete HTML form, without an enable command. Hosts must render the form and reply with submitted `data` or cancellation; the tool no longer walks fields through `select`, `input` or `editor` over RPC. Extension `ui.formDialog` calls send the same `form` request in both RPC modes.
 - Other callers using the tool UI context retain its supported dialog methods (`select`, `confirm`, `input`, `editor`, and cancellation) and presentation methods (`notify`, `setStatus`, string-array `setWidget`, `set_editor_text`, and opt-in `setTitle`). `--no-ui` is not a transport-level filter on these methods.
 - Tool approval prompts use the extension runner, not the tool UI context. Under `--no-ui`, tools requiring approval fail closed with a no-interactive-UI error rather than sending an approval dialog, just as with `--mode rpc --no-ui`.
 - MCP authentication challenges do not gain an RPC UI handler in either mode; the interactive-mode MCP auth handler is not installed.
@@ -1316,7 +1316,7 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
 
 `RpcExtensionUIRequest` (`type: "extension_ui_request"`) methods:
 
-- `select`, `confirm`, `input`, `editor`, `ask`, `cancel`
+- `select`, `confirm`, `input`, `editor`, `ask`, `form`, `cancel`
    - `select` keeps labels in `options: string[]` and, when any option has a
      description, emits a positionally aligned
      `optionDetails: Array<{ description?: string }>` array. Hosts that do not
@@ -1325,23 +1325,18 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
      (option to focus first), `selectionMarker?: "radio" | "checkbox"`,
      `checkedIndices?: number[]` (options currently checked in a checkbox
      list) and `markableCount?: number` (leading options that get a marker;
-     trailing ones are actions, such as the `ask` tool's "Done selecting";
-     absent means every option when `selectionMarker` is set). The `ask`
-     tool's "Other" row is marked and appears in `checkedIndices` once a custom
-     answer is entered.
-     The `ask` tool's checkbox fallback re-sends `select` after
-     every toggle, so `checkedIndices` is the authoritative checked state; a
-     host that ignores it cannot show which options are already checked.
+     trailing ones are actions; absent means every option when
+     `selectionMarker` is set). `checkedIndices` is the authoritative checked state.
    - `input` carries `title: string` and optional `placeholder?: string`,
      `timeout?: number`, and `secret?: boolean`. `secret` is an unnegotiated
      host hint from `ExtensionUIDialogOptions.secret`; hosts that support
      masked input should hide typed characters when `secret: true`.
    - `ask` is emitted only after `set_ask_dialog` enables it. It carries every
-     question of one extension `ui.askDialog` call (the `ask` tool instead walks
-     its HTML form field by field through `select`, `input` and `editor`):
+     question of one extension `ui.askDialog` call (the `ask` tool instead sends a `form` request):
      `questions: Array<{ id: string, question: string, header?: string, options: Array<{ label: string, description?: string, preview?: string }>, multi?: boolean, recommended?: number }>`
      plus `timeout?: number`. `options` never include an "Other" entry; hosts
      always offer free text.
+   - `form` requires no opt-in. It carries the HTML `<form>` of one `ui.formDialog` call as `html: string`, plus `timeout?: number`. Hosts render the form whole; radio and checkbox groups of two or more options offer a free-text "Other" answer, unless the group already has an option labelled `Other`. Hosts must answer every `form` request with submitted `data` or `{ cancelled: true }`; a host without a form renderer must cancel. An unanswered `form` can block the `ask` call indefinitely, because plan mode disables the ask timeout.
 - `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`
 - `open_url` (emitted by RPC login flows): includes `url`, optional `launchUrl`, and optional `instructions`. When present, `launchUrl` is a short loopback redirect and is the recommended copy target so terminal truncation cannot corrupt OAuth query parameters.
 
@@ -1373,6 +1368,7 @@ Example:
 - `{ type: "extension_ui_response", id: string, confirmed: boolean }`
 - `{ type: "extension_ui_response", id: string, cancelled: true, timedOut?: boolean }`
 - `{ type: "extension_ui_response", id: string, answers: Array<{ id: string, selectedOptions: string[], customInput?: string }> }` (answers an `ask` request)
+- `{ type: "extension_ui_response", id: string, data: Record<string, string | number | string[]> }` (answers a `form` request)
 
 `select` and `input` resolve to `undefined`, and `confirm` to `false`, on
 cancellation, timeout, or signal abort. Signal abort emits a `cancel` request
@@ -1388,6 +1384,25 @@ option, else its first.
 `selectedOptions` holds exact option labels without duplicates; a multi-select may be empty. A single-select
 (`multi` absent or false) takes at most one option and not both an option and `customInput`. `customInput`
 is trimmed and ignored when empty. Any other shape fails the `ask` tool call instead of guessing.
+
+`data` holds the submitted values by control `name`, as an HTML form submits them. A radio group, a single
+`<select>` or a lone checkbox gives one option `value` (omitted when nothing is chosen); a checkbox group or a
+multi-select of two or more options gives an array of option values without duplicates (empty when omitted), while one with a single
+option gives that one value like a lone checkbox; a text field gives its text, or a number for a
+`number`/`range` input (an absent text field counts as empty). A radio or checkbox group of two or more options,
+unless it already has an option labelled `Other`, takes one extra string that is not an option value as its "Other"
+answer. Hidden inputs keep the form's own values.
+Unknown names, disabled options, wrong types, and answers that break `required`, `min`/`max`,
+`minlength`/`maxlength`, `email`/`url` or `pattern` fail the `ask` tool call instead of guessing. A `form` timeout
+(omp's timer or a host `cancelled: true, timedOut: true` reply) submits the form's defaults. A form whose frame
+exceeds the transport limit (1 MiB under protocol v1, 64 MiB after `negotiate_protocol` to v2) fails the `ask` tool
+call without being sent, instead of reaching the host truncated.
+
+A valid choice answer, including a permitted "Other" answer, takes precedence over a same-name hidden value. An otherwise invalid choice value that exactly matches that hidden value counts as no selection; it does not satisfy a required field. Inside a checkbox group's or multi-select's array, one entry equal to the hidden value is dropped as the hidden input's echo (as browser form data sends it) when no option carries that value, or when keeping it would make the array invalid.
+
+Fields sharing a `name` share its one entry. Each field whose shape fits the entry takes it; a same-name field that cannot carry it (a radio group beside a checkbox group, a group without "Other" beside a text input) counts as unanswered and must still pass its own constraints. An entry no field of its name can carry fails the call.
+
+An invalid `data` reply fails the whole `ask` call, with no round for correcting a field, so hosts must enforce the form's constraints before sending: `required` (a whitespace-only text answer counts as empty), `min`/`max`, `minlength`/`maxlength`, `email`, `url`, and `pattern` (anchored to the whole value; an invalid pattern is ignored).
 
 ```json
 {

@@ -70,7 +70,7 @@ describe("read tool raw range exactness", () => {
 		])("returns only selected source lines for %s", async (selector, expected) => {
 			const body = "A\nB\nC\nD\n";
 			await Bun.write(filePath, body);
-			await Bun.write(path.join(testDir, "session", "0.read.log"), body);
+			await Bun.write(path.join(testDir, "session", "local", "0.log"), body);
 			const handler: ProtocolHandler = {
 				scheme: "verbatim",
 				spec: { backing: "virtual", selectors: "lines", immutable: true },
@@ -80,7 +80,7 @@ describe("read tool raw range exactness", () => {
 			InternalUrlRouter.instance().register(handler);
 			const wrapped = wrapToolWithMetaNotice(new ReadTool(makeSession(testDir)));
 
-			const target = source === "disk" ? filePath : source === "located" ? "artifact://0" : "verbatim://fixture";
+			const target = source === "disk" ? filePath : source === "located" ? "local://0.log" : "verbatim://fixture";
 			const result = await wrapped.execute("raw-selected-lines", { path: `${target}:${selector}` });
 			expect(getTextOutput(result)).toBe(expected);
 			expect(result.details?.meta?.truncation).toBeUndefined();

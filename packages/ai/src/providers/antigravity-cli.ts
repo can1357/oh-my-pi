@@ -7,6 +7,7 @@
 import * as path from "node:path";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { logger } from "@oh-my-pi/pi-utils";
+import * as AIError from "../error";
 import type { Context, Model, StreamFunction, StreamOptions } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { agyGeminiDir } from "./antigravity-cli/binary";
@@ -37,10 +38,14 @@ export const streamAntigravityCli: StreamFunction<"antigravity-acp"> = (
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
 	const writer = new StepWriter(model, stream);
-	void runStep(model, context, options, writer).catch(error => {
+	void runStep(model, context, options, writer).catch(async error => {
 		writer.fail(
-			options.signal?.aborted ? "aborted" : "error",
-			error instanceof Error ? error.message : String(error),
+			await AIError.finalize(error, {
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				signal: options.signal,
+			}),
 		);
 	});
 	return stream;

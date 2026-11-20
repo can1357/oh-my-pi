@@ -4,7 +4,15 @@
 
 ### Added
 
-- Added the layout-transition props every node takes: `transition: "layout"`, `transitionMs` and `motionKey`.
+- Added the `features` terminal event: the terminal's feature list changed (a setting), replacing the `hello` reply's
+
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added tray state and interaction properties, including focus, peek, quiet, main status, item references, card status and actions, and event state.
+- Added layout transition properties to nodes for coordinating layout animations.
+- Added support for folding a dock composer into its compact row.
 
 ## [18.22.0] - 2026-11-16
 
