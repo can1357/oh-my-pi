@@ -59,17 +59,9 @@ const OWN_WORKTREE: &str = "In a worktree of your own (git worktree add <path> [
 fn own_checkout_hint(ovnfs: Option<&str>) -> Cow<'static, str> {
 	match ovnfs.map(str::trim).filter(|command| !command.is_empty()) {
 		Some(command) => {
-			// The hint is pasted into shell commands: a path outside plain word
-			// characters is single-quoted, so spaces, `$` and backticks stay
-			// literal.
-			let plain = command
-				.chars()
-				.all(|c| c.is_ascii_alphanumeric() || "_./:@%+,-".contains(c));
-			let command = if plain {
-				Cow::Borrowed(command)
-			} else {
-				Cow::Owned(format!("'{}'", command.replace('\'', r"'\''")))
-			};
+			// The hint is pasted into shell commands: the command is always
+			// single-quoted, so no character of a path can split or expand it.
+			let command = format!("'{}'", command.replace('\'', r"'\''"));
 			Cow::Owned(format!(
 				"In an ovnfs checkout of your own ({command} new --name <name>) it runs, and \
 				 uncommitted changes it would discard are saved first. Add --rev <rev> to start at a \
@@ -1082,9 +1074,8 @@ mod tests {
 			hint.contains(r"('C:/Program Files/$HOME/it'\''s/ovnfs.exe' new --name <name>)"),
 			"{hint}"
 		);
-		let hint = own_checkout_hint(Some("/opt/ovnfs"));
-		assert!(hint.contains("(/opt/ovnfs new --name <name>)"), "{hint}");
-		// A leading `NAME=value` word is an environment assignment, not the command.
+		// A leading `NAME=value` word is an environment assignment, not the
+		// command.
 		let hint = own_checkout_hint(Some("ovnfs=dev"));
 		assert!(hint.contains("('ovnfs=dev' new --name <name>)"), "{hint}");
 	}
@@ -1477,7 +1468,7 @@ mod tests {
 			(
 				&repo,
 				"PI_GIT_GUARD_OVNFS=/opt/ovnfs git checkout tracked.txt",
-				"/opt/ovnfs new --name <name>",
+				"'/opt/ovnfs' new --name <name>",
 			),
 			(&clone, "git checkout tracked.txt", "git worktree add"),
 		] {
@@ -1487,7 +1478,7 @@ mod tests {
 			if hint.contains("ovnfs") {
 				assert!(output.contains("--rev <rev>"), "{command}: {output}");
 				assert!(
-					output.contains("/opt/ovnfs run --rev HEAD -- <command>"),
+					output.contains("'/opt/ovnfs' run --rev HEAD -- <command>"),
 					"{command}: {output}"
 				);
 				assert!(output.contains("--take SRC:PATH"), "{command}: {output}");
@@ -1648,9 +1639,9 @@ mod tests {
 		let (code, output) =
 			guarded(&worktree, "PI_GIT_GUARD_OVNFS=ovnfs git checkout tracked.txt").await;
 		assert_eq!(code, Some(i32::from(REFUSED_EXIT)), "{output}");
-		assert!(output.contains("ovnfs new --name <name>"), "{output}");
+		assert!(output.contains("'ovnfs' new --name <name>"), "{output}");
 		assert!(output.contains("--rev <rev>"), "{output}");
-		assert!(output.contains("ovnfs run --rev HEAD -- <command>"), "{output}");
+		assert!(output.contains("'ovnfs' run --rev HEAD -- <command>"), "{output}");
 		assert!(output.contains("--take SRC:PATH"), "{output}");
 		assert!(
 			output.contains("folder (.), the index (empty SRC), or another revision"),

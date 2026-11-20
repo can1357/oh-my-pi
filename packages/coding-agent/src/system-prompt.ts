@@ -1160,8 +1160,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		hasDynamicXdevTools: xdevTools.some(mounted => mounted.dynamic === true),
 		xdevDocs,
 		autoQaEnabled,
-		// The guidance pastes it into shell commands: any path outside plain word characters is single-quoted.
-		ovnfs: ovnfs && !/^[\w./:@%+,-]+$/.test(ovnfs) ? quotePosixArgument(ovnfs) : ovnfs,
+		// The guidance pastes it into shell commands: always single-quoted, so no path character splits or expands it.
+		ovnfs: ovnfs && quotePosixArgument(ovnfs),
 		writeTransportOnly,
 		subagent,
 	};
