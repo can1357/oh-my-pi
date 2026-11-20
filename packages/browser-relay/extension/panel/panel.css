@@ -379,6 +379,48 @@ body {
 	font-size: 12.5px;
 }
 
+/* A menu headed by a filter field: the field stays put while the rows scroll under it. */
+.pn-menu--search {
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	padding: 0;
+}
+
+.pn-menu-search {
+	display: flex;
+	flex: none;
+	align-items: center;
+	gap: 8px;
+	height: 38px;
+	padding: 0 12px;
+	border-bottom: 1px solid var(--border);
+	color: var(--fg-faint);
+}
+
+.pn-menu-search input {
+	flex: 1;
+	min-width: 0;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	color: var(--fg);
+	font: inherit;
+	font-size: 13px;
+	outline: none;
+}
+
+.pn-menu-search input::placeholder {
+	color: var(--fg-faint);
+}
+
+.pn-menu-scroll {
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	padding: 4px;
+}
+
 /* ---- session switcher ---- */
 
 .pn-switcher {

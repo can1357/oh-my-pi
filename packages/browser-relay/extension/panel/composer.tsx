@@ -43,8 +43,9 @@ import type { Shortcut, TabContext } from "../messages";
 import { Editor, type EditorHandle } from "./editor";
 import { NotAnImageError, prepareImage, prepareWireImage } from "./images";
 import { Lightbox, type LightboxImage } from "./media";
+import { ModelPicker, useModelList } from "./model-picker";
 import { scheduleCaption } from "./schedule";
-import type { PanelModel, PanelSession, PanelSnapshot, PanelWorker } from "./session";
+import type { PanelSession, PanelSnapshot, PanelWorker } from "./session";
 import { sortShortcuts } from "./storage";
 import { hostOf } from "./tab-context";
 import { imageSrc } from "./timeline";
@@ -244,7 +245,7 @@ export function Composer(props: ComposerProps): ReactNode {
 	const [extraTabs, setExtraTabs] = useState<TabContext[]>([]);
 	const [menu, setMenu] = useState<"actions" | "tab" | "model" | null>(null);
 	const [windowTabs, setWindowTabs] = useState<chrome.tabs.Tab[]>([]);
-	const [models, setModels] = useState<PanelModel[]>([]);
+	const models = useModelList(session, menu === "model");
 
 	const working = snapshot?.working ?? false;
 	const readOnly = snapshot?.readOnly ?? false;
@@ -253,6 +254,8 @@ export function Composer(props: ComposerProps): ReactNode {
 	const uiRequest = canPrompt ? (snapshot?.uiRequest ?? null) : null;
 	const queued = snapshot?.state?.queuedMessageCount ?? 0;
 	const currentModel = snapshot?.state?.model ?? null;
+	// The picker hangs off the model chip, so switching needs a current model to show.
+	const canSwitchModel = session?.listModels !== undefined && session.setModel !== undefined && currentModel !== null;
 	const primaryTab = tabMode.kind === "follow" ? activeTab : tabMode.kind === "pinned" ? tabMode.tab : null;
 	const captureTab = primaryTab ?? activeTab;
 	const uploading = attachments.some(attachment => attachment.status === "uploading");
@@ -265,22 +268,6 @@ export function Composer(props: ComposerProps): ReactNode {
 		if (activeTab.url !== tabMode.tab.url || activeTab.title !== tabMode.tab.title)
 			setTabMode({ kind: "pinned", tab: activeTab });
 	}, [activeTab, tabMode]);
-
-	useEffect(() => {
-		let alive = true;
-		setModels([]);
-		void session?.listModels?.().then(
-			list => {
-				if (alive) setModels(list);
-			},
-			() => {
-				// The chip still shows the current model; the list just stays empty.
-			},
-		);
-		return () => {
-			alive = false;
-		};
-	}, [session]);
 
 	useEffect(() => {
 		if (menu !== "tab") return;
@@ -525,24 +512,18 @@ export function Composer(props: ComposerProps): ReactNode {
 				icon: <Shrink size={16} />,
 				onSelect: run({ kind: "compact" }),
 			});
-		if (session?.setModel !== undefined && models.length > 0 && matches("model"))
+		if (canSwitchModel && matches("model", "switch"))
 			commands.push({
 				kind: "item",
 				id: "cmd-model",
 				label: "Switch model",
 				meta: "/model",
 				icon: <Sparkles size={16} />,
-				submenu: models.map(model => ({
-					kind: "item" as const,
-					id: `model-${model.provider}/${model.id}`,
-					label: model.name,
-					description: model.provider,
-					checked: currentModel?.provider === model.provider && currentModel.id === model.id,
-					onSelect: () => {
-						editorRef.current?.resolveSlash(null);
-						void session.setModel?.(model);
-					},
-				})),
+				onSelect: () => {
+					editorRef.current?.resolveSlash(null);
+					// Opens after the slash menu's own close has run.
+					window.setTimeout(() => setMenu("model"), 0);
+				},
 			});
 		if (matches("export", "markdown", "gif"))
 			commands.push({
@@ -632,7 +613,7 @@ export function Composer(props: ComposerProps): ReactNode {
 		return groups.flatMap((group, index) =>
 			index === 0 ? group : [{ kind: "separator" as const, id: `sep-${index}` }, ...group],
 		);
-	}, [slashQuery, props.shortcuts, props.onCommand, session, models, currentModel, capture]);
+	}, [slashQuery, props.shortcuts, props.onCommand, session, canSwitchModel, capture]);
 
 	const slashOpen = slashQuery !== null && !slashDismissed && slashEntries.length > 0;
 	const onEditorKey = (event: KeyboardEvent<HTMLDivElement>): boolean =>
@@ -678,19 +659,6 @@ export function Composer(props: ComposerProps): ReactNode {
 			onSelect: () => window.setTimeout(() => setMenu("tab"), 0),
 		},
 	];
-
-	const modelEntries: MenuEntry[] = models.map(model => ({
-		kind: "item",
-		id: `${model.provider}/${model.id}`,
-		label: model.name,
-		description: model.provider,
-		checked: currentModel?.provider === model.provider && currentModel.id === model.id,
-		onSelect: () => {
-			session?.setModel?.(model).catch(error => {
-				props.onNotify("error", `Couldn’t switch model: ${error instanceof Error ? error.message : String(error)}`);
-			});
-		},
-	}));
 
 	const strip = props.strip;
 	const placeholder = readOnly ? "Read-only session — watching only" : !live ? "Waiting for the session…" : undefined;
@@ -841,7 +809,7 @@ export function Composer(props: ComposerProps): ReactNode {
 					</span>
 					{queued > 0 && <span className="sh-queued pn-queued">queued ×{queued}</span>}
 					<span className="pn-footer-spacer" />
-					{session?.listModels !== undefined && currentModel !== null && (
+					{canSwitchModel && (
 						<span className="pn-pop-anchor">
 							<button
 								type="button"
@@ -854,12 +822,17 @@ export function Composer(props: ComposerProps): ReactNode {
 								<ChevronDown size={11} />
 							</button>
 							{menu === "model" && (
-								<Menu
-									entries={modelEntries}
-									className="pn-pop pn-pop--above-right pn-model-menu"
-									width={264}
-									autoFocus
-									empty="No other models available"
+								<ModelPicker
+									list={models}
+									current={currentModel}
+									onPick={model => {
+										session?.setModel?.(model).catch(error => {
+											props.onNotify(
+												"error",
+												`Couldn’t switch model: ${error instanceof Error ? error.message : String(error)}`,
+											);
+										});
+									}}
 									onClose={() => setMenu(null)}
 								/>
 							)}

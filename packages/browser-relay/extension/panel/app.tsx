@@ -21,7 +21,8 @@ import type {
 import { Composer, type ComposerCommand, type ComposerHandle, type Outgoing, type Strip } from "./composer";
 import { type Attached, Header, hostTitle } from "./header";
 import { imageSize } from "./images";
-import type { PanelModel, PanelSession, PanelSnapshot } from "./session";
+import { useModelList } from "./model-picker";
+import type { PanelSession, PanelSnapshot } from "./session";
 import { openCollabSession, openRpcSession } from "./sessions/index";
 import { SettingsSheet } from "./sheets/settings";
 import { type ShortcutDraft, ShortcutSheet } from "./sheets/shortcut";
@@ -714,21 +715,8 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 	);
 
 	// The shortcut editor offers the models the current session can run.
-	const [models, setModels] = useState<PanelModel[]>([]);
-	const editingShortcut = sheet?.kind === "shortcut";
-	useEffect(() => {
-		if (!editingShortcut || session?.listModels === undefined) return;
-		let alive = true;
-		void session.listModels().then(
-			list => {
-				if (alive) setModels(list);
-			},
-			() => undefined,
-		);
-		return () => {
-			alive = false;
-		};
-	}, [editingShortcut, session]);
+	const modelList = useModelList(session, sheet?.kind === "shortcut");
+	const models = modelList.status === "ready" ? modelList.models : [];
 
 	// ---- keyboard ----
 	useEscapeFallback(working && !readOnly ? stop : null);

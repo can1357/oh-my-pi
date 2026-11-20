@@ -1,5 +1,5 @@
 /** Small building blocks every panel surface shares: Esc routing, menus with keyboard handling, sheets, toggles. */
-import { Check, ChevronRight } from "lucide-react";
+import { Check, ChevronRight, Search } from "lucide-react";
 import { createPortal } from "react-dom";
 import {
 	type KeyboardEvent as ReactKeyboardEvent,
@@ -288,7 +288,8 @@ function Submenu(props: {
 /**
  * A popover menu. ↑/↓ move without wrapping and skip separators, → opens a submenu, ← closes it, Enter or Tab
  * picks, Esc closes. With `autoFocus` it takes focus and handles its own keys; without, the owner forwards keys
- * through {@link MenuHandle}.
+ * through {@link MenuHandle}. With `search` a filter field heads the rows and holds focus; editing it moves the
+ * highlight to the first row.
  */
 export function Menu(props: {
 	entries: readonly MenuEntry[];
@@ -301,9 +302,12 @@ export function Menu(props: {
 	width?: number | string;
 	/** Shown instead of rows when there are none. */
 	empty?: string;
+	/** Filter field above the rows; the owner narrows `entries` as `value` changes. */
+	search?: { value: string; placeholder: string; onChange(value: string): void };
 }): ReactNode {
-	const { entries, onClose } = props;
+	const { entries, onClose, search } = props;
 	const rootRef = useRef<HTMLDivElement | null>(null);
+	const searchRef = useRef<HTMLInputElement | null>(null);
 	const items = selectable(entries);
 	const [activeId, setActiveId] = useState<string | null>(items[0]?.id ?? null);
 	const [submenu, setSubmenu] = useState<{ parent: string; activeId: string | null } | null>(null);
@@ -321,7 +325,7 @@ export function Menu(props: {
 	});
 	useOutsidePress(rootRef, true, onClose);
 	useEffect(() => {
-		if (props.autoFocus) rootRef.current?.focus();
+		if (props.autoFocus) (searchRef.current ?? rootRef.current)?.focus();
 	}, [props.autoFocus]);
 
 	const pick = (item: MenuItem): void => {
@@ -378,33 +382,56 @@ export function Menu(props: {
 	};
 	useImperativeHandle(props.handle, () => ({ handleKey }));
 
+	const rows =
+		items.length === 0 && props.empty !== undefined ? (
+			<div className="pn-menu-empty">{props.empty}</div>
+		) : (
+			<MenuList
+				entries={entries}
+				activeId={submenu === null ? (active?.id ?? null) : submenu.parent}
+				openSubmenuId={submenu?.parent ?? null}
+				submenuActiveId={submenu?.activeId ?? null}
+				dense={props.dense === true}
+				onHover={id => {
+					setActiveId(id);
+					if (submenu !== null && submenu.parent !== id) setSubmenu(null);
+				}}
+				onPick={pick}
+				onSubHover={id => setSubmenu(current => (current === null ? null : { ...current, activeId: id }))}
+			/>
+		);
 	return (
 		<div
 			ref={rootRef}
-			className={`pn-menu${props.className ? ` ${props.className}` : ""}`}
+			className={`pn-menu${search === undefined ? "" : " pn-menu--search"}${props.className ? ` ${props.className}` : ""}`}
 			role="menu"
 			tabIndex={-1}
 			style={props.width === undefined ? undefined : { width: props.width }}
 			onKeyDown={event => {
-				if (props.autoFocus && handleKey(event)) event.preventDefault();
+				if (props.autoFocus && !event.nativeEvent.isComposing && handleKey(event)) event.preventDefault();
 			}}
 		>
-			{items.length === 0 && props.empty !== undefined ? (
-				<div className="pn-menu-empty">{props.empty}</div>
+			{search === undefined ? (
+				rows
 			) : (
-				<MenuList
-					entries={entries}
-					activeId={submenu === null ? (active?.id ?? null) : submenu.parent}
-					openSubmenuId={submenu?.parent ?? null}
-					submenuActiveId={submenu?.activeId ?? null}
-					dense={props.dense === true}
-					onHover={id => {
-						setActiveId(id);
-						if (submenu !== null && submenu.parent !== id) setSubmenu(null);
-					}}
-					onPick={pick}
-					onSubHover={id => setSubmenu(current => (current === null ? null : { ...current, activeId: id }))}
-				/>
+				<>
+					<label className="pn-menu-search">
+						<Search size={14} />
+						<input
+							ref={searchRef}
+							value={search.value}
+							placeholder={search.placeholder}
+							aria-label={search.placeholder}
+							spellCheck={false}
+							autoComplete="off"
+							onChange={event => {
+								setActiveId(null);
+								search.onChange(event.target.value);
+							}}
+						/>
+					</label>
+					<div className="pn-menu-scroll">{rows}</div>
+				</>
 			)}
 		</div>
 	);

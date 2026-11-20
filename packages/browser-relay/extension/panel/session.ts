@@ -56,8 +56,11 @@ export interface PanelSession {
 	abort(): Promise<void>;
 	/** Answer the pending `uiRequest`; `undefined` cancels it. */
 	answer(reqId: number, value: CollabUiResponseValue): void;
-	/** Models the session can switch to; absent when the host doesn't allow switching (collab guests). */
-	listModels?(): Promise<PanelModel[]>;
+	/**
+	 * Models the session can switch to, fetched once and shared by every caller; a failed fetch is retried on the next
+	 * call. Absent when the host doesn't allow switching (collab guests).
+	 */
+	listModels?(): Promise<readonly PanelModel[]>;
 	setModel?(model: PanelModel): Promise<void>;
 	/** Compact the context now; absent when the host doesn't allow it (collab guests). */
 	compact?(): Promise<void>;

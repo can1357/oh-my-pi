@@ -221,6 +221,8 @@ export class RpcPanelSession implements PanelSession {
 	#notices: readonly Notice[] = [];
 	#snapshot: PanelSnapshot;
 	#frameTimer: Timer | null = null;
+	/** In-flight or settled `get_available_models`; cleared when it fails. */
+	#models: Promise<readonly PanelModel[]> | null = null;
 
 	constructor(worker: PanelWorker, info: RpcSessionInfo) {
 		this.#worker = worker;
@@ -304,7 +306,16 @@ export class RpcPanelSession implements PanelSession {
 		});
 	}
 
-	async listModels(): Promise<PanelModel[]> {
+	listModels(): Promise<readonly PanelModel[]> {
+		// The catalog can run to thousands of models (megabytes over the native host): fetch it once per session.
+		this.#models ??= this.#fetchModels().catch(error => {
+			this.#models = null;
+			throw error;
+		});
+		return this.#models;
+	}
+
+	async #fetchModels(): Promise<readonly PanelModel[]> {
 		const response = await this.#call({ type: "get_available_models" });
 		if (response.command !== "get_available_models") throw new Error("unexpected response to get_available_models");
 		return response.data.models.map(model => ({ provider: model.provider, id: model.id, name: model.name }));
