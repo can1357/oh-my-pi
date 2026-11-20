@@ -66,8 +66,8 @@ export class LazyDfa {
 	readonly #startCore: Int32Array;
 	readonly #universalCore: Int32Array;
 	/** Start and universal states per position-flags value, valid for `#entryEpoch`. */
-	readonly #initialIds = new Int32Array(8).fill(-1);
-	readonly #universalIds = new Int32Array(8).fill(-1);
+	readonly #initialIds: Int32Array;
+	readonly #universalIds: Int32Array;
 	#entryEpoch = 0;
 	#cores: Int32Array[] = [];
 	#flags: number[] = [];
@@ -95,6 +95,8 @@ export class LazyDfa {
 	constructor(nfa: Nfa, anchored: boolean, limits: DfaLimits) {
 		this.#nfa = nfa;
 		this.#anchored = anchored;
+		this.#initialIds = new Int32Array(nfa.classes.positionFlags).fill(-1);
+		this.#universalIds = new Int32Array(nfa.classes.positionFlags).fill(-1);
 		this.#width = nfa.classes.alphabet.size;
 		this.#maxStates = Math.max(1, Math.floor(limits.dfaEntries / this.#width));
 		this.#jitAfter = limits.jitAfter;

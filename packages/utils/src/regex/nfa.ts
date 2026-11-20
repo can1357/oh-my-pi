@@ -8,7 +8,21 @@
  * compile to ε and a backreference to an optional copy of its group: a
  * superset, flagged by {@link Nfa.exact}.
  */
-import { Alphabet, anyUnitSet, lineTerminatorSet, literalSet, oracleSet, type UnitSet, wordUnitSet } from "./alphabet";
+import {
+	Alphabet,
+	anyUnitSet,
+	LEAD_SURROGATE,
+	lineTerminatorSet,
+	literalSet,
+	OracleMismatchError,
+	oracleSet,
+	supplementaryRanges,
+	SURROGATE_END,
+	TRAIL_SURROGATE,
+	type UnitSet,
+	unitRange,
+	wordUnitSet,
+} from "./alphabet";
 import type { AssertKind, ParsedPattern, RegexNode } from "./parse";
 
 /** Node kinds. */
@@ -24,11 +38,18 @@ export const ASSERT_LINE_START = 2;
 export const ASSERT_LINE_END = 3;
 export const ASSERT_WORD = 4;
 export const ASSERT_NONWORD = 5;
+const ASSERT_BOUNDARY = 6;
+const ASSERT_REVERSE_BOUNDARY = 7;
+const ASSERT_UNICODE_WORD = 8;
+const ASSERT_UNICODE_NONWORD = 9;
 
 /** Class flag: `\b` counts the class as word characters. */
 export const WORD_CLASS = 1;
 /** Class flag: the class holds JavaScript line terminators (`m`-mode `^`/`$`). */
 export const LINE_CLASS = 2;
+const LEAD_CLASS = 4;
+const TRAIL_CLASS = 8;
+const UNICODE_WORD_CLASS = 16;
 
 /** Position flag: nothing precedes the position. */
 export const AT_START = 1;
@@ -65,13 +86,21 @@ export function holds(assertion: number, before: number, atEnd: boolean, after: 
 			return atEnd || (after & LINE_CLASS) !== 0;
 		case ASSERT_WORD:
 			return ((before & AFTER_WORD) !== 0) !== ((after & WORD_CLASS) !== 0);
-		default:
+		case ASSERT_NONWORD:
 			return ((before & AFTER_WORD) !== 0) === ((after & WORD_CLASS) !== 0);
+		case ASSERT_BOUNDARY:
+			return (before & (LEAD_CLASS << 1)) === 0 || (after & TRAIL_CLASS) === 0;
+		case ASSERT_REVERSE_BOUNDARY:
+			return (before & (TRAIL_CLASS << 1)) === 0 || (after & LEAD_CLASS) === 0;
+		case ASSERT_UNICODE_WORD:
+			return ((before & (UNICODE_WORD_CLASS << 1)) !== 0) !== ((after & UNICODE_WORD_CLASS) !== 0);
+		default:
+			return ((before & (UNICODE_WORD_CLASS << 1)) !== 0) === ((after & UNICODE_WORD_CLASS) !== 0);
 	}
 }
 
 /** The assertion an `assert` node compiles to; mirrored when the text is read backwards. */
-export function assertionOf(kind: AssertKind, multiline: boolean, mirrored: boolean): number {
+export function assertionOf(kind: AssertKind, multiline: boolean, mirrored: boolean, unicodeWord?: boolean): number {
 	switch (kind) {
 		case "start":
 		case "end": {
@@ -80,9 +109,11 @@ export function assertionOf(kind: AssertKind, multiline: boolean, mirrored: bool
 			return atStart ? ASSERT_START : ASSERT_END;
 		}
 		case "word":
-			return ASSERT_WORD;
+			return unicodeWord ? ASSERT_UNICODE_WORD : ASSERT_WORD;
 		case "nonword":
-			return ASSERT_NONWORD;
+			return unicodeWord ? ASSERT_UNICODE_NONWORD : ASSERT_NONWORD;
+		case "boundary":
+			return mirrored ? ASSERT_REVERSE_BOUNDARY : ASSERT_BOUNDARY;
 	}
 }
 
@@ -95,6 +126,8 @@ export class CharClasses {
 	readonly alphabet: Alphabet;
 	/** {@link WORD_CLASS} and {@link LINE_CLASS} bits by class id. */
 	readonly classFlags: Uint8Array;
+	/** Capacity of a cache keyed by position flags. */
+	readonly positionFlags: number;
 	/** Class membership per character set, by class id. */
 	readonly sets: Uint8Array[] = [];
 	readonly #unitSets = new Map<RegexNode, UnitSet>();
@@ -107,12 +140,18 @@ export class CharClasses {
 	constructor(pattern: ParsedPattern, flags: PatternFlags) {
 		const literals = new Map<number, UnitSet>();
 		let usesWord = false;
+		let usesUnicodeWord = false;
+		let usesBoundary = false;
 		let usesLines = false;
 		const visit = (node: RegexNode): void => {
 			switch (node.type) {
 				case "unit": {
+					if (this.#unitSets.has(node)) return;
 					const { code } = node;
-					if (code !== undefined && !flags.ignoreCase) {
+					const ignoreCase = node.ignoreCase ?? flags.ignoreCase;
+					if (node.set) {
+						this.#unitSets.set(node, node.set);
+					} else if (code !== undefined && (!ignoreCase || pattern.unicode)) {
 						let set = literals.get(code);
 						if (!set) {
 							set = literalSet(code);
@@ -121,7 +160,7 @@ export class CharClasses {
 						this.#unitSets.set(node, set);
 					} else {
 						// `s` only changes `.`; leaving it off elsewhere shares oracle results between patterns.
-						const oracleFlags = `${flags.ignoreCase ? "i" : ""}${flags.dotAll && node.source === "." ? "s" : ""}`;
+						const oracleFlags = `${ignoreCase ? "i" : ""}${(node.dotAll ?? flags.dotAll) && node.source === "." ? "s" : ""}`;
 						this.#unitSets.set(node, oracleSet(node.source, oracleFlags));
 					}
 					return;
@@ -138,24 +177,38 @@ export class CharClasses {
 					visit(node.body);
 					return;
 				case "assert":
-					if (node.kind === "word" || node.kind === "nonword") usesWord = true;
-					else if (flags.multiline) usesLines = true;
+					if (node.kind === "word" || node.kind === "nonword") {
+						if (node.unicodeWord) usesUnicodeWord = true;
+						else usesWord = true;
+					} else if (node.kind === "boundary") usesBoundary = true;
+					else if (node.multiline ?? flags.multiline) usesLines = true;
 			}
 		};
 		visit(pattern.root);
-		const word = usesWord ? wordUnitSet(flags.ignoreCase) : undefined;
-		const lines = usesLines ? lineTerminatorSet() : undefined;
+		const flagSets: [number, UnitSet][] = [];
+		if (usesWord) flagSets.push([WORD_CLASS, wordUnitSet(false)]);
+		if (usesLines) flagSets.push([LINE_CLASS, lineTerminatorSet()]);
+		if (usesBoundary) {
+			flagSets.push(
+				[LEAD_CLASS, unitRange(LEAD_SURROGATE, TRAIL_SURROGATE - 1)],
+				[TRAIL_CLASS, unitRange(TRAIL_SURROGATE, SURROGATE_END - 1)],
+			);
+		}
+		if (usesUnicodeWord) {
+			// The JSC Unicode fold table currently adds only BMP letters to ASCII words.
+			if (supplementaryRanges("\\w", "iu").length) throw new OracleMismatchError("supplementary Unicode word");
+			flagSets.push([UNICODE_WORD_CLASS, wordUnitSet(true)]);
+		}
+		this.positionFlags = usesUnicodeWord ? UNICODE_WORD_CLASS << 2 : usesBoundary ? TRAIL_CLASS << 2 : 8;
 		const sets = [...this.#unitSets.values()];
-		if (word) sets.push(word);
-		if (lines) sets.push(lines);
+		for (const [, set] of flagSets) sets.push(set);
 		this.alphabet = new Alphabet(sets, MAX_CLASSES);
 		this.classFlags = new Uint8Array(this.alphabet.size);
-		if (word)
-			for (const [id, member] of this.alphabet.membership(word).entries())
-				if (member) this.classFlags[id]! |= WORD_CLASS;
-		if (lines)
-			for (const [id, member] of this.alphabet.membership(lines).entries())
-				if (member) this.classFlags[id]! |= LINE_CLASS;
+		for (const [bit, set] of flagSets) {
+			for (const [id, member] of this.alphabet.membership(set).entries()) {
+				if (member) this.classFlags[id]! |= bit;
+			}
+		}
 	}
 
 	/** Index into {@link CharClasses.sets} of the classes one `unit` node accepts. */
@@ -272,12 +325,21 @@ class NfaBuilder {
 			case "group":
 				return this.#compile(node.body, next);
 			case "assert":
-				return this.#add(ASSERT, next, assertionOf(node.kind, this.#multiline, this.#reverse));
+				if (this.#expanding.size > 0) return next;
+				return this.#add(
+					ASSERT,
+					next,
+					assertionOf(node.kind, node.multiline ?? this.#multiline, this.#reverse, node.unicodeWord),
+				);
 			case "look":
 				this.#exact = false;
 				return next;
 			case "backref":
-				return this.#backreference(node.target, next);
+				return this.#backreference(
+					node.target,
+					next,
+					node.ignoreCase === true && (this.#pattern.scopedCase === true || this.#pattern.unicode === true),
+				);
 			case "repeat":
 				return this.#repeat(node.body, node.min, node.max, next);
 		}
@@ -300,14 +362,14 @@ class NfaBuilder {
 		return entry;
 	}
 
-	/** A backreference matches what its group matched: any string of the group's language, or nothing. */
-	#backreference(target: number | string, next: number): number {
+	/** An optional copy of the capture, dropping assertions that need not hold again at the reference. */
+	#backreference(target: number | string, next: number, mayFold: boolean): number {
 		this.#exact = false;
 		const indices = typeof target === "number" ? [target] : this.#pattern.names.get(target);
 		const index = indices?.length === 1 ? indices[0]! : undefined;
 		const body = index === undefined ? undefined : this.#pattern.groups[index];
 		// A reference inside its own group expands once more, then widens to any text.
-		if (index === undefined || !body || this.#expanding.has(index)) {
+		if (mayFold || index === undefined || !body || this.#expanding.has(index)) {
 			const loop = this.#add(SPLIT, -1, next);
 			this.#out1[loop] = this.#add(CHAR, loop, this.#classes.anySet());
 			return loop;

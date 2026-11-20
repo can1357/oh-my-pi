@@ -47,7 +47,7 @@ type Run = (p: number, stop: number, state: number, bias: number, lo: number) =>
 
 /** Kernels needing more range tests than this stay unbuilt; the interpreter keeps them. */
 const MAX_TESTS = 1 << 15;
-/** Self-loops skip with SIMD when their stay set or exit set spans at most this many runs. */
+/** Above this many runs, use an ASCII table or leave UTF-16 to the scalar loop. */
 const MAX_SIMD_RUNS = 4;
 /** Action of code units whose transition the kernel leaves to the interpreter. */
 const EXIT = -1;
@@ -377,6 +377,7 @@ function emit(mode: ScanMode, plan: readonly Map<number, number[]>[], layout: La
 		}
 		const order = [...groups.keys()].sort((a, b) => Number(b >>> 1 === state) - Number(a >>> 1 === state));
 		const shared = narrow && mode === FIND ? sharedRun(rows, state) : undefined;
+		// The pair scan runs on dispatch, not on every scalar self-loop iteration.
 		if (shared) emitSharedRun(c, shared, exitDepth);
 		/** Takes `action` from inside `nested` blocks of this state's loop. */
 		const act = (action: number, nested: number): void => {
@@ -407,11 +408,14 @@ function emit(mode: ScanMode, plan: readonly Map<number, number[]>[], layout: La
 					.br(exitDepth + nested);
 				return;
 			}
-			if (!shared) emitSkip(c, groups.get(action)!, { narrow, back, marked, markAddress });
 			c.br(nested);
 		};
 
 		c.loop();
+		const unmarkedStay = groups.get(state << 1);
+		if (unmarkedStay) emitSkip(c, unmarkedStay, { narrow, back, marked: false, markAddress });
+		const markedStay = groups.get((state << 1) | 1);
+		if (markedStay) emitSkip(c, markedStay, { narrow, back, marked: true, markAddress });
 		c.get(P)
 			.get(STOP)
 			.op(back ? OP.leU : OP.geU)
@@ -472,11 +476,9 @@ function emit(mode: ScanMode, plan: readonly Map<number, number[]>[], layout: La
 }
 
 /**
- * After a step that stayed (`P` already advanced), skips 16 bytes of code units
- * at a time while every one stays; unmarked, it then lands on the first that
- * leaves, marked, it stores their marks and leaves the partial vector to the
- * scalar loop. Emits nothing when neither the stay set nor its complement fits
- * in {@link MAX_SIMD_RUNS} runs.
+ * At entry to a state loop, skips whole vectors of one self-loop action.
+ * Unmarked, it then lands on the first unit with another action. Marked, it
+ * stores the marks and leaves the partial vector to the scalar loop.
  */
 function emitSkip(
 	c: Code,
@@ -491,7 +493,8 @@ function emitSkip(
 	}
 	const testStay = stay.length <= leave.length;
 	const tested = testStay ? stay : leave;
-	if (tested.length / 2 > MAX_SIMD_RUNS) return;
+	const nibble = tested.length / 2 > MAX_SIMD_RUNS;
+	if (nibble && !narrow) return;
 	const lane = narrow ? 0 : 1;
 	const lanes = narrow ? 16 : 8;
 	const unit = narrow ? 1 : 2;
@@ -507,8 +510,11 @@ function emitSkip(
 		c.get(P);
 		if (back) c.i32(16 - unit).op(OP.sub);
 		c.simd(0x00).op(0, 0).set(V);
-		emitVectorRanges(c, tested, lane, last);
-		if (testStay) c.simd(0x4d); // v128.not: lanes that leave
+		if (nibble) emitAsciiMembership(c, leave);
+		else {
+			emitVectorRanges(c, tested, lane, last);
+			if (testStay) c.simd(0x4d); // v128.not: lanes that leave
+		}
 		c.set(V).get(V).simd(0x53).op(OP.eqz); // !v128.any_true
 	}
 	c.if();
@@ -529,7 +535,9 @@ function emitSkip(
 		.end();
 	if (!marked) {
 		// Land on the first unit that leaves: the lowest set bit forwards, the highest backwards.
-		c.get(P).get(V).simd(LANE.bitmask[lane]!);
+		c.get(P).get(V);
+		if (nibble) c.i32(0).simd(0x0f).simd(0x24); // i8x16.ne: set the sign bit of every leaving lane
+		c.simd(LANE.bitmask[lane]!);
 		if (back) c.i32(32 - lanes).op(OP.shl, OP.clz);
 		else c.op(OP.ctz);
 		if (!narrow) c.i32(1).op(OP.shl);
@@ -594,24 +602,8 @@ function emitSharedRun(c: Code, { leave, toOther, other }: SharedRun, exitDepth:
 	c.get(P).i32(16).op(OP.add).get(STOP).op(OP.gtU).brIf(1);
 	if (leave.length) {
 		c.get(P).simd(0).op(0, 0).set(V);
-		if (leave.length <= 4) {
-			emitVectorRanges(c, leave, 0, LAST_ASCII);
-		} else {
-			// For ASCII x, table[x & 15] has bit (x >>> 4) set iff x leaves.
-			const table = Array<number>(16).fill(0);
-			for (let i = 0; i < leave.length; i += 2) {
-				for (let unit = leave[i]!; unit <= leave[i + 1]!; unit++) table[unit & 15]! |= 1 << (unit >>> 4);
-			}
-			c.simd(0x0c)
-				.op(...table)
-				.get(V)
-				.i32(15)
-				.simd(0x0f)
-				.simd(0x4e)
-				.simd(0x0e);
-			c.simd(0x0c).op(1, 2, 4, 8, 16, 32, 64, 128, 0, 0, 0, 0, 0, 0, 0, 0);
-			c.get(V).i32(4).simd(0x6d).simd(0x0e).simd(0x4e);
-		}
+		if (leave.length <= 4) emitVectorRanges(c, leave, 0, LAST_ASCII);
+		else emitAsciiMembership(c, leave);
 		c.simd(0x53).brIf(1); // v128.any_true
 	}
 	c.get(P).i32(16).op(OP.add).set(P).br(0).end().end();
@@ -627,6 +619,24 @@ function emitSharedRun(c: Code, { leave, toOther, other }: SharedRun, exitDepth:
 		.br(exitDepth + 1)
 		.end()
 		.end();
+}
+
+/** Pushes a vector with a nonzero byte for each ASCII lane of `V` in the given ranges. */
+function emitAsciiMembership(c: Code, ranges: readonly number[]): void {
+	// For ASCII x, table[x & 15] has bit (x >>> 4) set iff x belongs.
+	const table = Array<number>(16).fill(0);
+	for (let i = 0; i < ranges.length; i += 2) {
+		for (let unit = ranges[i]!; unit <= ranges[i + 1]!; unit++) table[unit & 15]! |= 1 << (unit >>> 4);
+	}
+	c.simd(0x0c)
+		.op(...table)
+		.get(V)
+		.i32(15)
+		.simd(0x0f)
+		.simd(0x4e)
+		.simd(0x0e);
+	c.simd(0x0c).op(1, 2, 4, 8, 16, 32, 64, 128, 0, 0, 0, 0, 0, 0, 0, 0);
+	c.get(V).i32(4).simd(0x6d).simd(0x0e).simd(0x4e);
 }
 
 /** Pushes a vector with all bits set in each lane of `V` that belongs to the given ranges. */

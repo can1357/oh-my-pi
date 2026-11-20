@@ -1,16 +1,28 @@
 /**
- * Parser for JavaScript `RegExp` sources without the `u`/`v` flags (Annex B syntax).
+ * Parser for JavaScript `RegExp` sources in legacy and Unicode (`u`) modes.
  *
- * Feeds {@link LinearRegExp}: every matcher of one code unit (literal, escape,
- * class, `.`) keeps a standalone source the engine hands to JSC to learn which
- * code units it accepts, so character semantics are never re-implemented here.
+ * Feeds {@link LinearRegExp}: each atom keeps a standalone source for JSC to
+ * classify. Unicode atoms are lowered into sequences of UTF-16 matchers, with
+ * guards when a surrogate must stand alone.
  *
  * The source must already compile as a `RegExp`; the parser does not diagnose
  * syntax errors.
  */
 
+import {
+	addUnitRange,
+	hasSurrogate,
+	LEAD_SURROGATE,
+	oracleSet,
+	supplementaryRanges,
+	SURROGATE_END,
+	TRAIL_SURROGATE,
+	type UnitSet,
+	unitRange,
+} from "./alphabet";
+
 /** A zero-width assertion an automaton can check from the neighbouring code units. */
-export type AssertKind = "start" | "end" | "word" | "nonword";
+export type AssertKind = "start" | "end" | "word" | "nonword" | "boundary";
 
 /** One node of a parsed pattern. */
 export type RegexNode =
@@ -18,7 +30,7 @@ export type RegexNode =
 	 * Matches one code unit. `source` is a standalone pattern for it; `code` is
 	 * the exact code unit of a literal, which needs no oracle without `i`.
 	 */
-	| { type: "unit"; source: string; code?: number }
+	| { type: "unit"; source: string; code?: number; ignoreCase?: boolean; dotAll?: boolean; set?: UnitSet }
 	| { type: "seq"; items: RegexNode[] }
 	| { type: "alt"; options: RegexNode[] }
 	/** `max` is `Infinity` for unbounded quantifiers. */
@@ -26,14 +38,18 @@ export type RegexNode =
 	/** `capture` is the 1-based group index of a capturing group. */
 	| { type: "group"; body: RegexNode; capture?: number }
 	/** `^`, `$`, `\b`, `\B`; the `m` flag decides line semantics at compile time. */
-	| { type: "assert"; kind: AssertKind }
+	| { type: "assert"; kind: AssertKind; multiline?: boolean; unicodeWord?: boolean }
 	| { type: "look"; body: RegexNode; behind: boolean; negate: boolean }
 	/** A capture index, or a name to resolve through {@link ParsedPattern.names}. */
-	| { type: "backref"; target: number | string };
+	| { type: "backref"; target: number | string; ignoreCase?: boolean };
 
 /** A parsed pattern with its capturing groups. */
 export interface ParsedPattern {
 	root: RegexNode;
+	/** The original source uses Unicode code point semantics. */
+	unicode?: boolean;
+	/** Effective case modes can differ between a capture and its reference. */
+	scopedCase?: boolean;
 	/** Capturing group bodies by 1-based index. */
 	groups: RegexNode[];
 	/** Capture indices by group name; ES2025 allows one name in several alternatives. */
@@ -89,19 +105,23 @@ export function capturesWithin(node: RegexNode): [number, number] | undefined {
 	return first <= last ? [first, last] : undefined;
 }
 
-/** Thrown for syntax the parser does not model (e.g. `(?i:…)` modifiers). */
+/** Thrown for syntax the parser does not model. */
 export class UnsupportedPatternError extends Error {}
 
 /**
- * Parses a `RegExp` source compiled without `u`/`v`.
+ * Parses a compiled `RegExp` source (except `v` mode).
  *
- * @throws {UnsupportedPatternError} on pattern modifiers or malformed groups.
+ * @throws {UnsupportedPatternError} on unsupported constructs or malformed groups.
  */
-export function parsePattern(source: string): ParsedPattern {
-	const parser = new Parser(source);
-	const root = parser.disjunction();
+export function parsePattern(source: string, flags = ""): ParsedPattern {
+	const parser = new Parser(source, flags);
+	let root = parser.disjunction();
+	// Nonempty matches already start at a boundary: every consuming atom ensures it.
+	if (parser.unicode && nullable(root)) {
+		root = { type: "seq", items: [BOUNDARY, ...(root.type === "seq" ? root.items : [root])] };
+	}
 	if (parser.pos !== source.length) throw new UnsupportedPatternError(`unbalanced ")" at ${parser.pos}`);
-	return { root, groups: parser.groups, names: parser.names };
+	return { root, groups: parser.groups, names: parser.names, unicode: parser.unicode, scopedCase: parser.scopedCase };
 }
 
 /** Capturing groups in `source`, counted like JS: `(` and `(?<name>`, outside classes and escapes. */
@@ -142,7 +162,16 @@ function hasNamedGroups(source: string): boolean {
 }
 
 const HEX = /^[0-9a-fA-F]+$/;
+const MODIFIER_GROUP = /\(\?([ims]*)(?:-([ims]+))?:/y;
+const NAME_ESCAPE = /\\u(?:\{([0-9a-fA-F]+)\}|([0-9a-fA-F]{4}))/g;
 const QUANTIFIER_BRACE = /\{(\d+)(?:(,)(\d*))?\}/y;
+
+function decodeName(name: string): string {
+	return name.replace(NAME_ESCAPE, (_, braced: string | undefined, fixed: string) =>
+		String.fromCodePoint(Number.parseInt(braced ?? fixed, 16)),
+	);
+}
+
 /** Escapes whose code unit is fixed by the spec: `\n` → 0x0a, and so on. */
 const CONTROL_ESCAPES: Record<string, number> = { f: 0x0c, n: 0x0a, r: 0x0d, t: 0x09, v: 0x0b };
 /** Escapes that match a class of code units; JSC decides the members. */
@@ -161,8 +190,74 @@ function isOctal(char: string | undefined): boolean {
 }
 
 /** Standalone source for one known code unit; `\uXXXX` keeps oracle cache keys canonical. */
-function literal(code: number): RegexNode {
-	return { type: "unit", source: `\\u${code.toString(16).padStart(4, "0")}`, code };
+function literalSource(code: number): string {
+	return code <= 0xffff ? `\\u${code.toString(16).padStart(4, "0")}` : `\\u{${code.toString(16)}}`;
+}
+
+const BOUNDARY: RegexNode = { type: "assert", kind: "boundary" };
+
+/** Splits code-point ranges into an equivalent union of leading/trailing surrogate sets. */
+function lowerUnit(source: string, flags: string, code: number | undefined): RegexNode {
+	if (code !== undefined && !flags.includes("i")) {
+		if (code > 0xffff) {
+			const value = code - 0x10000;
+			const lead = LEAD_SURROGATE + (value >>> 10);
+			const trail = TRAIL_SURROGATE + (value & 1023);
+			return {
+				type: "seq",
+				items: [
+					{ type: "unit", source: literalSource(lead), code: lead },
+					{ type: "unit", source: literalSource(trail), code: trail },
+				],
+			};
+		}
+		const unit: RegexNode = { type: "unit", source, code };
+		return code >= LEAD_SURROGATE && code < SURROGATE_END ? { type: "seq", items: [BOUNDARY, unit, BOUNDARY] } : unit;
+	}
+	const bmp = oracleSet(source, flags);
+	const unit: RegexNode = { type: "unit", source, set: bmp };
+	// A standalone surrogate is an atom only when not part of a pair.
+	const bmpNode: RegexNode = hasSurrogate(bmp) ? { type: "seq", items: [BOUNDARY, unit, BOUNDARY] } : unit;
+	const astral = supplementaryRanges(source, flags);
+	if (!astral.length) return bmpNode;
+	const options: RegexNode[] = bmp.some(word => word !== 0) ? [bmpNode] : [];
+	const byTrail = new Map<number, UnitSet>();
+	const add = (firstLead: number, lastLead: number, firstTrail: number, lastTrail: number): void => {
+		const key = (firstTrail << 10) | lastTrail;
+		const first = LEAD_SURROGATE + firstLead;
+		const last = LEAD_SURROGATE + lastLead;
+		const set = byTrail.get(key);
+		if (set) addUnitRange(set, first, last);
+		else byTrail.set(key, unitRange(first, last));
+	};
+	for (let range = 0; range < astral.length; range += 2) {
+		const first = astral[range]! - 0x10000;
+		const last = astral[range + 1]! - 0x10000;
+		const firstLead = first >>> 10;
+		const lastLead = last >>> 10;
+		const firstTrail = first & 1023;
+		const lastTrail = last & 1023;
+		if (firstLead === lastLead) {
+			add(firstLead, lastLead, firstTrail, lastTrail);
+		} else {
+			const middleStart = firstLead + (firstTrail === 0 ? 0 : 1);
+			const middleEnd = lastLead - (lastTrail === 1023 ? 0 : 1);
+			if (firstTrail !== 0) add(firstLead, firstLead, firstTrail, 1023);
+			if (middleStart <= middleEnd) add(middleStart, middleEnd, 0, 1023);
+			if (lastTrail !== 1023) add(lastLead, lastLead, 0, lastTrail);
+		}
+	}
+	for (const [trail, leadSet] of byTrail) {
+		const trailSet = unitRange(TRAIL_SURROGATE + (trail >>> 10), TRAIL_SURROGATE + (trail & 1023));
+		options.push({
+			type: "seq",
+			items: [
+				{ type: "unit", source, set: leadSet },
+				{ type: "unit", source, set: trailSet },
+			],
+		});
+	}
+	return options.length === 1 ? options[0]! : { type: "alt", options };
 }
 
 function readHex(source: string, start: number, digits: number): number | undefined {
@@ -177,9 +272,16 @@ class Parser {
 	readonly #source: string;
 	readonly #groupCount: number;
 	readonly #namedGroups: boolean;
+	readonly unicode: boolean;
+	scopedCase = false;
+	readonly #outerFlags: string;
+	readonly #lowered = new Map<string, RegexNode>();
+	#modifiers: { ignoreCase?: boolean; multiline?: boolean; dotAll?: boolean } = {};
 	#nextGroup = 1;
 
-	constructor(source: string) {
+	constructor(source: string, flags: string) {
+		this.unicode = flags.includes("u");
+		this.#outerFlags = flags;
 		this.#source = source;
 		this.#groupCount = countCapturingGroups(source);
 		this.#namedGroups = hasNamedGroups(source);
@@ -206,28 +308,33 @@ class Parser {
 		const char = source[this.pos]!;
 		if (char === "^" || char === "$") {
 			this.pos++;
-			return { type: "assert", kind: char === "^" ? "start" : "end" };
+			return { type: "assert", kind: char === "^" ? "start" : "end", multiline: this.#modifiers.multiline };
 		}
 		if (char === "\\" && (source[this.pos + 1] === "b" || source[this.pos + 1] === "B")) {
 			this.pos += 2;
-			return { type: "assert", kind: source[this.pos - 1] === "b" ? "word" : "nonword" };
+			return {
+				type: "assert",
+				kind: source[this.pos - 1] === "b" ? "word" : "nonword",
+				unicodeWord: this.unicode && (this.#modifiers.ignoreCase ?? this.#outerFlags.includes("i")),
+			};
 		}
 		let atom: RegexNode;
 		if (char === "(") {
 			atom = this.#group();
 		} else if (char === "[") {
 			const end = classEnd(source, this.pos);
-			atom = { type: "unit", source: source.slice(this.pos, end) };
+			atom = this.#unit(source.slice(this.pos, end));
 			this.pos = end;
 		} else if (char === "\\") {
 			atom = this.#escape();
 		} else if (char === ".") {
 			this.pos++;
-			atom = { type: "unit", source: "." };
+			atom = this.#unit(".");
 		} else {
 			// Annex B: `]`, `{` and `}` outside a quantifier are literal characters too.
-			this.pos++;
-			atom = literal(char.charCodeAt(0));
+			const code = this.unicode ? source.codePointAt(this.pos)! : char.charCodeAt(0);
+			this.pos += code > 0xffff ? 2 : 1;
+			atom = this.#unit(literalSource(code), code);
 		}
 		return this.#quantified(atom);
 	}
@@ -248,7 +355,7 @@ class Parser {
 		} else if (isGroupName(source, start)) {
 			const close = source.indexOf(">", start + 3);
 			if (close === -1) throw new UnsupportedPatternError("unterminated group name");
-			const name = source.slice(start + 3, close);
+			const name = decodeName(source.slice(start + 3, close));
 			const index = this.#nextGroup++;
 			const indices = this.names.get(name);
 			if (indices) indices.push(index);
@@ -256,7 +363,23 @@ class Parser {
 			this.pos = close + 1;
 			node = this.#capture(index);
 		} else if (source[start + 1] === "?") {
-			throw new UnsupportedPatternError(`unsupported group "${source.slice(start, start + 4)}"`);
+			MODIFIER_GROUP.lastIndex = start;
+			const match = MODIFIER_GROUP.exec(source);
+			if (!match) throw new UnsupportedPatternError(`unsupported group "${source.slice(start, start + 4)}"`);
+			this.pos = MODIFIER_GROUP.lastIndex;
+			const previous = this.#modifiers;
+			const add = match[1]!;
+			const remove = match[2] ?? "";
+			this.scopedCase ||= add.includes("i") || remove.includes("i");
+			const effective = (flag: string, inherited: boolean | undefined): boolean | undefined =>
+				add.includes(flag) ? true : remove.includes(flag) ? false : inherited;
+			this.#modifiers = {
+				ignoreCase: effective("i", previous.ignoreCase),
+				multiline: effective("m", previous.multiline),
+				dotAll: effective("s", previous.dotAll),
+			};
+			node = { type: "group", body: this.disjunction() };
+			this.#modifiers = previous;
 		} else {
 			this.pos++;
 			node = this.#capture(this.#nextGroup++);
@@ -272,13 +395,33 @@ class Parser {
 		return { type: "group", body, capture: index };
 	}
 
+	#unit(source: string, code?: number): RegexNode {
+		const { ignoreCase, dotAll } = this.#modifiers;
+		if (!this.unicode) return { type: "unit", source, code, ignoreCase, dotAll };
+		const folded = ignoreCase ?? this.#outerFlags.includes("i");
+		const matchesAll = source === "." && (dotAll ?? this.#outerFlags.includes("s"));
+		const flags = `${folded ? "i" : ""}${matchesAll ? "s" : ""}u`;
+		const key = `${flags}/${source}`;
+		let node = this.#lowered.get(key);
+		if (!node) {
+			node = lowerUnit(source, flags, code);
+			this.#lowered.set(key, node);
+		}
+		return node;
+	}
+
+	#backreference(target: string | number): RegexNode {
+		const ignoreCase = this.#modifiers.ignoreCase ?? this.#outerFlags.includes("i");
+		return { type: "backref", target, ignoreCase };
+	}
+
 	#escape(): RegexNode {
 		const source = this.#source;
 		const start = this.pos;
 		const char = source[start + 1]!;
 		const unit = (length: number, code?: number): RegexNode => {
 			this.pos = start + length;
-			return code === undefined ? { type: "unit", source: source.slice(start, start + length) } : literal(code);
+			return this.#unit(code === undefined ? source.slice(start, start + length) : literalSource(code), code);
 		};
 		if (CLASS_ESCAPES.has(char)) return unit(2);
 		const control = CONTROL_ESCAPES[char];
@@ -293,9 +436,29 @@ class Parser {
 				return code === undefined ? unit(2, 0x78) : unit(4, code);
 			}
 			case "u": {
+				if (this.unicode && source[start + 2] === "{") {
+					const end = source.indexOf("}", start + 3);
+					return unit(end + 1 - start, Number.parseInt(source.slice(start + 3, end), 16));
+				}
 				const code = readHex(source, start + 2, 4);
+				if (
+					this.unicode &&
+					code !== undefined &&
+					code >= LEAD_SURROGATE &&
+					code < TRAIL_SURROGATE &&
+					source.startsWith("\\u", start + 6)
+				) {
+					const trail = readHex(source, start + 8, 4);
+					if (trail !== undefined && trail >= TRAIL_SURROGATE && trail < SURROGATE_END) {
+						return unit(12, 0x10000 + ((code - LEAD_SURROGATE) << 10) + trail - TRAIL_SURROGATE);
+					}
+				}
 				return code === undefined ? unit(2, 0x75) : unit(6, code);
 			}
+			case "p":
+			case "P":
+				if (this.unicode) return unit(source.indexOf("}", start + 3) + 1 - start);
+				break;
 			case "k":
 				if (!this.#namedGroups) return unit(2, 0x6b);
 				return this.#namedBackreference(start);
@@ -306,7 +469,7 @@ class Parser {
 			const index = Number(source.slice(start + 1, end));
 			if (char !== "0" && index <= this.#groupCount) {
 				this.pos = end;
-				return { type: "backref", target: index };
+				return this.#backreference(index);
 			}
 			// Annex B: `\8`/`\9` are identity escapes; other digits start a legacy octal escape of
 			// up to three digits, the three-digit form only from `0`–`3` (so at most 0o377).
@@ -324,7 +487,7 @@ class Parser {
 		const close = this.#source.indexOf(">", start + 3);
 		if (this.#source[start + 2] !== "<" || close === -1) throw new UnsupportedPatternError("malformed \\k");
 		this.pos = close + 1;
-		return { type: "backref", target: this.#source.slice(start + 3, close) };
+		return this.#backreference(decodeName(this.#source.slice(start + 3, close)));
 	}
 
 	#quantified(atom: RegexNode): RegexNode {

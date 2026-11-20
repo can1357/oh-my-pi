@@ -15,21 +15,28 @@
  *   a match can start, and a memoized backtracker ({@link Backtracker}) with
  *   ECMAScript semantics finds the match JavaScript would return, captures
  *   included, trying only those starts and never re-exploring a failed
- *   configuration. A search reads the text only as far as its match.
+ *   configuration. A search reads the text only as far as its match;
+ * - before either, a pattern with no loop over a group runs as generated
+ *   JavaScript ({@link compileScanner}) that tries start positions directly, on
+ *   a step budget. What it cannot afford it hands to the two above.
  *
- * Patterns the engine does not model (`u`/`v` flags, `(?i:…)` modifiers, size
- * limits) keep the native engine.
+ * A small set of patterns proven to have linear search cost use native `exec`
+ * and keep the automaton for streaming. Unicode (`u`) atoms are lowered to
+ * UTF-16, with guards at code-point boundaries. Unsupported constructs
+ * (including `v` and patterns exceeding the engine's size limits) keep the native engine.
  *
  * @example
  * const condition = new LinearRegExp("^def[^\\n]*\\n(?:[ \\t]+[^\\n]*\\n|[ \\t]*\\n)*?[ \\t]+import ", "m");
  * condition.test(source); // the native answer, in O(source.length)
  */
 import * as logger from "../logger";
-import { OracleMismatchError } from "./alphabet";
+import { insideSurrogatePair, OracleMismatchError } from "./alphabet";
 import { type BacktrackMatch, Backtracker, type MemoLimits } from "./backtrack";
 import { type DfaLimits, LazyDfa, RegexStream } from "./dfa";
+import { canUseNativeExec } from "./native-exec";
 import { CharClasses, compileNfa } from "./nfa";
 import { type ParsedPattern, parsePattern, type RegexNode, UnsupportedPatternError } from "./parse";
+import { scanPrefix } from "./scanner-prefix";
 
 /**
  * A positive lookaround the whole pattern starts with, as an automaton marking
@@ -60,6 +67,7 @@ const DEFAULT_LIMITS: EngineLimits = {
 	memoAfter: 256,
 	memoPages: 1 << 15,
 	memoContexts: 1 << 16,
+	scanSteps: 256,
 };
 /** Windows up to this many positions reuse the engine's scratch buffers. */
 const SCRATCH = 4096;
@@ -82,6 +90,8 @@ function leadingLookarounds(root: RegexNode): Extract<RegexNode, { type: "look" 
 class Engine {
 	/** Whether the automaton decides alone (no lookarounds or backreferences). */
 	readonly regular: boolean;
+	/** Private matcher for patterns proven to run in linear time natively. */
+	readonly native: RegExp | undefined;
 	readonly #pattern: ParsedPattern;
 	readonly #classes: CharClasses;
 	readonly #anchored: boolean;
@@ -93,12 +103,24 @@ class Engine {
 	readonly #marks = new Uint8Array(SCRATCH);
 	readonly #filterMarks = new Uint8Array(SCRATCH);
 
-	constructor(regex: RegExp, limits: EngineLimits) {
-		const flags = { ignoreCase: regex.ignoreCase, multiline: regex.multiline, dotAll: regex.dotAll };
+	constructor(source: string, flagSet: string, limits: EngineLimits) {
+		const flags = {
+			ignoreCase: flagSet.includes("i"),
+			multiline: flagSet.includes("m"),
+			dotAll: flagSet.includes("s"),
+		};
 		this.#limits = limits;
-		this.#pattern = parsePattern(regex.source);
+		this.#pattern = parsePattern(source, flagSet);
 		this.#classes = new CharClasses(this.#pattern, flags);
-		this.#anchored = regex.sticky;
+		this.#anchored = flagSet.includes("y");
+		const looks = this.#anchored ? [] : leadingLookarounds(this.#pattern.root);
+		if (canUseNativeExec(this.#pattern, this.#classes)) {
+			// A leading lookbehind can be much cheaper to find forwards than to test at each start.
+			const prefix = looks.some(look => look.behind)
+				? scanPrefix(this.#pattern.root, this.#classes, flags)
+				: undefined;
+			if (!prefix || prefix.kind === "run" || prefix.low >= 0) this.native = new RegExp(source, flagSet);
+		}
 		/** Unanchored automaton for `root`: marks where it can start (`reverse`) or end. */
 		const marker = (root: RegexNode, reverse: boolean): LazyDfa =>
 			new LazyDfa(compileNfa({ ...this.#pattern, root }, this.#classes, flags.multiline, reverse), false, limits);
@@ -107,12 +129,7 @@ class Engine {
 		this.#forward = new LazyDfa(forward, this.#anchored, limits);
 		this.#reverse = this.#anchored ? undefined : marker(this.#pattern.root, true);
 		// Without them the automata drop lookarounds, so `(?<=password=)\S+` could start almost anywhere.
-		this.#filters = this.#anchored
-			? []
-			: leadingLookarounds(this.#pattern.root).map(look => ({
-					dfa: marker(look.body, !look.behind),
-					behind: look.behind,
-				}));
+		this.#filters = looks.map(look => ({ dfa: marker(look.body, !look.behind), behind: look.behind }));
 		this.#backtracker = new Backtracker(this.#pattern, this.#classes, flags, limits);
 	}
 
@@ -124,10 +141,10 @@ class Engine {
 
 	/** The match JavaScript finds when searching from `from`. */
 	match(text: string, from: number): BacktrackMatch | undefined {
-		const candidate = this.#anchored ? undefined : this.#backtracker.probe(text, from);
-		if (candidate) return candidate;
-		const match =
-			candidate === null ? undefined : this.#anchored ? this.#matchAt(text, from) : this.#search(text, from);
+		const probed = this.#anchored ? from : this.#backtracker.probe(text, from);
+		let match: BacktrackMatch | undefined;
+		if (typeof probed === "number") match = this.#anchored ? this.#matchAt(text, from) : this.#search(text, probed);
+		else if (probed) return probed;
 		// Finding nothing ends a scan of `text`: let go of it and of its memo.
 		if (!match) this.#backtracker.release();
 		return match;
@@ -200,12 +217,15 @@ class Engine {
 	 */
 	#search(text: string, from: number): BacktrackMatch | undefined {
 		const reverse = this.#reverse!;
+		let widen = false;
 		for (let lo = from; lo <= text.length;) {
 			const end = this.#firstMatchEnd(text, lo);
 			if (end < 0) return undefined;
 			// A regular pattern's leftmost match starts no later than its earliest-ending match ends.
-			// Otherwise the automaton's matches only hint: cover enough starts to amortize each step.
-			const hi = this.regular ? end : Math.min(text.length, Math.max(end, lo + this.#limits.window - 1));
+			// Otherwise the automaton's match only hints. The hint is usually right, so the first
+			// window stops there; once it was wrong, windows cover enough starts to amortize each step.
+			const hi = widen ? Math.min(text.length, Math.max(end, lo + this.#limits.window - 1)) : end;
+			widen = !this.regular;
 			const size = hi - lo + 1;
 			const marks = size <= SCRATCH ? this.#marks : new Uint8Array(size);
 			reverse.markStarts(text, lo, hi, marks);
@@ -272,7 +292,17 @@ export class LinearRegExp extends RegExp {
 		if (!engine) return super.exec(string);
 		const text = String(string);
 		const advancing = this.global || this.sticky;
-		const from = advancing ? toLength(this.lastIndex) : 0;
+		let from = advancing ? toLength(this.lastIndex) : 0;
+		const native = engine.native;
+		if (native) {
+			// Coerce before accessing the shared matcher: lastIndex.valueOf can reenter exec.
+			if (advancing) native.lastIndex = from;
+			const result = native.exec(text);
+			if (advancing) this.lastIndex = native.lastIndex;
+			return result;
+		}
+		// Unicode matching at the second unit of a pair starts at the beginning of that code point.
+		if (this.unicode && insideSurrogatePair(text, from)) from--;
 		// `toLength` leaves the index double-tagged; at most `text.length` it fits int32, which the JIT code
 		// below speculates on (a double index makes every scan bail out of optimized code).
 		const match = from > text.length ? undefined : engine.match(text, from | 0);
@@ -288,7 +318,8 @@ export class LinearRegExp extends RegExp {
 		const engine = this.#compiled();
 		if (!engine) return super.test(string);
 		if (this.global || this.sticky) return this.exec(string) !== null;
-		return engine.test(String(string), 0);
+		const text = String(string);
+		return engine.native ? engine.native.test(text) : engine.test(text, 0);
 	}
 
 	/**
@@ -312,9 +343,10 @@ export class LinearRegExp extends RegExp {
 }
 
 function compile(regex: RegExp, limits: EngineLimits): Engine | null {
-	if (regex.unicode || regex.unicodeSets) return null;
+	const flags = regex.flags;
+	if (flags.includes("v")) return null;
 	try {
-		return new Engine(regex, limits);
+		return new Engine(regex.source, flags, limits);
 	} catch (error) {
 		if (
 			error instanceof UnsupportedPatternError ||

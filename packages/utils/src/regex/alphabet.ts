@@ -2,9 +2,9 @@
  * Code-unit sets decided by JSC, and the alphabet a pattern's automaton reads.
  *
  * {@link LinearRegExp} never re-implements JavaScript character semantics: each
- * one-unit matcher (a class, `.`, `\s`, a literal under `i`) is run by JSC over
- * all 65,536 UTF-16 code units, so case folding, Unicode table versions and
- * Annex B quirks are whatever the engine that runs the original `RegExp` does.
+ * atom (a class, `.`, `\s`, a literal under `i`) is run by JSC over the
+ * UTF-16 code units and, for Unicode atoms, supplementary code points. Case
+ * folding, tables and Annex B quirks match the engine running the original.
  * The sets then partition the code units into the classes no matcher tells
  * apart; the automaton steps on one class per code unit.
  */
@@ -19,9 +19,25 @@ const ORACLE_CACHE_LIMIT = 4096;
 
 const oracleCache = new Map<string, UnitSet>();
 let allUnits: string | undefined;
+let unicodeUnits: string | undefined;
+let supplementaryPoints: string | undefined;
+const supplementaryCache = new Map<string, readonly number[]>();
+const unicodeFoldCache = new Map<number, RegExp>();
 let anyUnit: UnitSet | undefined;
 let lineTerminators: UnitSet | undefined;
-const wordUnits = new Map<boolean, UnitSet>();
+/** First UTF-16 high surrogate. */
+export const LEAD_SURROGATE = 0xd800;
+/** First UTF-16 low surrogate. */
+export const TRAIL_SURROGATE = 0xdc00;
+/** First UTF-16 code unit after the surrogate ranges. */
+export const SURROGATE_END = 0xe000;
+
+/** UTF-16 position inside (rather than before or after) a code point. */
+export function insideSurrogatePair(text: string, index: number): boolean {
+	const before = text.charCodeAt(index - 1);
+	const after = text.charCodeAt(index);
+	return before >= LEAD_SURROGATE && before < TRAIL_SURROGATE && after >= TRAIL_SURROGATE && after < SURROGATE_END;
+}
 
 /** Thrown when an atom source does not behave as a matcher of exactly one code unit. */
 export class OracleMismatchError extends Error {}
@@ -58,6 +74,81 @@ export function anyUnitSet(): UnitSet {
 	return anyUnit;
 }
 
+/** Adds the closed code-unit interval `[first, last]` to a set. */
+export function addUnitRange(set: UnitSet, first: number, last: number): void {
+	const start = first >>> 5;
+	const end = last >>> 5;
+	const leading = 0xffffffff << (first & 31);
+	const trailing = 0xffffffff >>> (31 - (last & 31));
+	if (start === end) set[start]! |= leading & trailing;
+	else {
+		set[start]! |= leading;
+		set.fill(0xffffffff, start + 1, end);
+		set[end]! |= trailing;
+	}
+}
+
+/** A set of the code units in the closed interval `[first, last]`. */
+export function unitRange(first: number, last: number): UnitSet {
+	const set = new Uint32Array(SET_WORDS);
+	addUnitRange(set, first, last);
+	return set;
+}
+
+/** Whether a BMP set includes any lone surrogate. */
+export function hasSurrogate(set: UnitSet): boolean {
+	for (let word = LEAD_SURROGATE >>> 5; word < SURROGATE_END >>> 5; word++) {
+		if (set[word]) return true;
+	}
+	return false;
+}
+
+/** Every supplementary code point, in order and exactly two code units wide. */
+function supplementaryString(): string {
+	if (supplementaryPoints === undefined) {
+		const chunks: string[] = [];
+		for (let first = 0x10000; first < 0x110000; first += 4096) {
+			chunks.push(String.fromCodePoint(...Array.from({ length: 4096 }, (_, offset) => first + offset)));
+		}
+		supplementaryPoints = chunks.join("");
+	}
+	return supplementaryPoints;
+}
+
+const ALL_SUPPLEMENTARY = [0x10000, 0x10ffff];
+const NO_SUPPLEMENTARY: readonly number[] = [];
+
+/** Closed supplementary code-point ranges accepted by one Unicode atom. */
+export function supplementaryRanges(source: string, flags: string): readonly number[] {
+	switch (source) {
+		case ".":
+		case "\\D":
+		case "\\S":
+			return ALL_SUPPLEMENTARY;
+		case "\\d":
+		case "\\s":
+			return NO_SUPPLEMENTARY;
+		case "\\w":
+			if (!flags.includes("i")) return NO_SUPPLEMENTARY;
+			break;
+		case "\\W":
+			if (!flags.includes("i")) return ALL_SUPPLEMENTARY;
+			break;
+	}
+	const key = `${flags}/${source}`;
+	const cached = supplementaryCache.get(key);
+	if (cached) return cached;
+	const ranges: number[] = [];
+	const matcher = new RegExp(`(?:${source})+`, `${flags}g`);
+	const text = supplementaryString();
+	for (let match = matcher.exec(text); match; match = matcher.exec(text)) {
+		ranges.push(0x10000 + match.index / 2, 0x10000 + matcher.lastIndex / 2 - 1);
+	}
+	if (supplementaryCache.size >= ORACLE_CACHE_LIMIT) supplementaryCache.clear();
+	supplementaryCache.set(key, ranges);
+	return ranges;
+}
+
 /** The single code unit `code`, without asking JSC: no flag changes a literal outside `i`. */
 export function literalSet(code: number): UnitSet {
 	const set = new Uint32Array(SET_WORDS);
@@ -66,7 +157,7 @@ export function literalSet(code: number): UnitSet {
 }
 
 /**
- * Code units the one-unit matcher `source` accepts under `flags` (a subset of `is`), as JSC decides.
+ * BMP code points (including lone surrogates) accepted by an atom, as JSC decides.
  *
  * @throws {OracleMismatchError} when `source` is not a matcher of exactly one code unit.
  */
@@ -75,7 +166,16 @@ export function oracleSet(source: string, flags: string): UnitSet {
 	const cached = oracleCache.get(key);
 	if (cached) return cached;
 	// Removing whole runs keeps the replace to a few matches even for sets like `.` or `[^\n]`.
-	const set = complementOf(unitString().replace(new RegExp(`(?:${source})+`, `${flags}g`), ""));
+	const units = unitString();
+	// Keep every surrogate isolated; in ascending order the middle two form a pair.
+	const text = flags.includes("u")
+		? (unicodeUnits ??=
+				units.slice(0, LEAD_SURROGATE) +
+				units.slice(TRAIL_SURROGATE, SURROGATE_END) +
+				units.slice(LEAD_SURROGATE, TRAIL_SURROGATE) +
+				units.slice(SURROGATE_END))
+		: units;
+	const set = complementOf(text.replace(new RegExp(`(?:${source})+`, `${flags}g`), ""));
 	let member = 0;
 	while (member < UNIT_COUNT && !has(set, member)) member++;
 	if (member < UNIT_COUNT && !new RegExp(`^(?:${source})$`, flags).test(String.fromCharCode(member))) {
@@ -91,19 +191,25 @@ export function caseFoldEquals(a: number, b: number): boolean {
 	return a === b || has(oracleSet(`\\u${a.toString(16).padStart(4, "0")}`, "i"), b);
 }
 
-/** Code units `\b` treats as word characters under the pattern's `i` flag. */
-export function wordUnitSet(ignoreCase: boolean): UnitSet {
-	let set = wordUnits.get(ignoreCase);
-	if (!set) {
-		set = new Uint32Array(SET_WORDS);
-		const boundary = new RegExp("\\b", ignoreCase ? "i" : "");
-		for (let unit = 0; unit < UNIT_COUNT; unit++) {
-			// In a one-unit string `\b` holds exactly when that unit is a word character.
-			if (boundary.test(String.fromCharCode(unit))) set[unit >>> 5]! |= 1 << (unit & 31);
-		}
-		wordUnits.set(ignoreCase, set);
+/** JSC's Unicode case equivalence for two code points in a folded backreference. */
+export function unicodeCaseFoldEquals(a: number, b: number): boolean {
+	if (a === b) return true;
+	if ((a | b) < 128) {
+		const lower = a | 32;
+		return lower >= 97 && lower <= 122 && lower === (b | 32);
 	}
-	return set;
+	let matcher = unicodeFoldCache.get(a);
+	if (!matcher) {
+		if (unicodeFoldCache.size >= ORACLE_CACHE_LIMIT) unicodeFoldCache.clear();
+		matcher = new RegExp(`\\u{${a.toString(16)}}`, "iu");
+		unicodeFoldCache.set(a, matcher);
+	}
+	return matcher.test(String.fromCodePoint(b));
+}
+
+/** Code units `\b` treats as word characters, with extra folds only when both `i` and `u` apply. */
+export function wordUnitSet(unicodeIgnoreCase: boolean): UnitSet {
+	return oracleSet("\\w", unicodeIgnoreCase ? "iu" : "");
 }
 
 /** Code units after which `^` holds under `m`: JavaScript's line terminators. */
@@ -124,10 +230,8 @@ export class Alphabet {
 	readonly blockIndex: Uint16Array;
 	/** Class tables, 256 entries each. */
 	readonly blocks: Uint16Array;
-	/** One code unit of each class. */
-	readonly #representatives: number[] = [];
-	readonly #singletons: boolean[] = [];
-	#runs: number[][] | undefined;
+	/** Each class's code units as flattened `[first, last]` runs, by class id. */
+	readonly runs: readonly (readonly number[])[];
 
 	/**
 	 * @throws {RangeError} when the sets split the code units into more than `maxClasses` classes.
@@ -140,6 +244,7 @@ export class Alphabet {
 		const bounds = [...cuts].sort((a, b) => a - b);
 		const classes = new Uint16Array(UNIT_COUNT);
 		const ids = new Map<string, number>();
+		const runs: number[][] = [];
 		for (let segment = 0; segment + 1 < bounds.length; segment++) {
 			const first = bounds[segment]!;
 			const end = bounds[segment + 1]!;
@@ -149,14 +254,13 @@ export class Alphabet {
 				if (ids.size >= maxClasses) throw new RangeError(`more than ${maxClasses} character classes`);
 				id = ids.size;
 				ids.set(signature, id);
-				this.#representatives.push(first);
-				this.#singletons.push(end === first + 1);
-			} else {
-				this.#singletons[id] = false;
+				runs.push([]);
 			}
+			runs[id]!.push(first, end - 1);
 			classes.fill(id, first, end);
 		}
-		this.size = ids.size;
+		this.runs = runs;
+		this.size = runs.length;
 		const tables: Uint16Array[] = [];
 		const uniform = new Map<number, number>();
 		this.blockIndex = new Uint16Array(256);
@@ -183,35 +287,17 @@ export class Alphabet {
 		return this.blocks[(this.blockIndex[unit >>> 8]! << 8) | (unit & 255)]!;
 	}
 
-	/** Each class's code units as flattened `[first, last]` runs, by class id; for generated scan code. */
-	get runs(): readonly (readonly number[])[] {
-		if (!this.#runs) {
-			const runs: number[][] = Array.from({ length: this.size }, () => []);
-			let first = 0;
-			let current = this.classOf(0);
-			for (let unit = 1; unit <= UNIT_COUNT; unit++) {
-				const id = unit < UNIT_COUNT ? this.classOf(unit) : -1;
-				if (id === current) continue;
-				runs[current]!.push(first, unit - 1);
-				first = unit;
-				current = id;
-			}
-			this.#runs = runs;
-		}
-		return this.#runs;
-	}
-
 	/** The sole code unit accepted by `members`, or undefined for empty or wider sets. */
 	singleUnit(members: Uint8Array): number | undefined {
 		const id = members.indexOf(1);
-		return id >= 0 && this.#singletons[id] && members.indexOf(1, id + 1) === -1
-			? this.#representatives[id]
-			: undefined;
+		if (id < 0 || members.indexOf(1, id + 1) !== -1) return undefined;
+		const run = this.runs[id]!;
+		return run.length === 2 && run[0] === run[1] ? run[0] : undefined;
 	}
 
 	/** Which classes lie inside `set`: 1 per member class, by class id. */
 	membership(set: UnitSet): Uint8Array {
-		return Uint8Array.from(this.#representatives, unit => (has(set, unit) ? 1 : 0));
+		return Uint8Array.from(this.runs, run => Number(has(set, run[0]!)));
 	}
 }
 

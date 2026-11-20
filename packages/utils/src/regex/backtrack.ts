@@ -18,10 +18,11 @@
  * depend on captures are only tracked once an attempt has visited many of
  * them: a well-behaved backreference pattern pays nothing, a blow-up is cut short.
  */
-import { caseFoldEquals } from "./alphabet";
+import { caseFoldEquals, insideSurrogatePair, unicodeCaseFoldEquals } from "./alphabet";
 import { GreedyRuns, REPLAY_LIMIT } from "./greedy";
 import { assertionOf, type CharClasses, holds, MAX_NODES } from "./nfa";
 import { capturesWithin, nullable, type ParsedPattern, type RegexNode } from "./parse";
+import { BAIL, compileScanner, NONE, type Scanner } from "./scanner";
 
 const CHAR = 0;
 const SPLIT = 1;
@@ -34,6 +35,10 @@ const ASSERT = 7;
 const BACKREF = 8;
 const LOOK = 9;
 const SUCCEED = 10;
+/** A greedy repetition of one character set, taken in one scan. */
+const RUN = 11;
+/** Resumes the {@link RUN} at the next instruction with a shorter length; reached only from a choice point. */
+const RETRY = 12;
 
 /** Nesting limit for nullable loops: one mask bit per level. */
 const MAX_NULLABLE_DEPTH = 30;
@@ -50,6 +55,8 @@ const PAGE_POOL = 64;
  * rebuild than that.
  */
 const KEEP_MEMO_RATIO = 512;
+/** Starts one search offers the scanner after it ran out of steps, before going to the interpreter alone. */
+const SCAN_BAILS = 4;
 /** Group zero is stored as the match's start and end, never in the register file. */
 const NO_CAPTURES = new Int32Array(2).fill(-1);
 /** Bounds on the failure memo of a {@link Backtracker}. */
@@ -60,6 +67,8 @@ export interface MemoLimits {
 	memoPages: number;
 	/** Capture and iteration contexts kept per text; past it the memo starts over. */
 	memoContexts: number;
+	/** Steps a compiled {@link Scanner} starts with before it leaves a start to the memoized search. */
+	scanSteps: number;
 }
 
 /**
@@ -68,13 +77,20 @@ export interface MemoLimits {
  * - `SPLIT`: `next` preferred, `x` the alternative;
  * - `OPEN`/`CLOSE`: `x` group (`CLOSE.y` 1 backwards); `CLEAR`: groups `x`..`y`;
  * - `MARK`/`CHECK`: `x` mask bit; `ASSERT`: `x` assertion;
- * - `BACKREF`: `x` index into `refs`, `y` 1 backwards; `LOOK`: `x` body entry, `y` 1 when negative.
+ * - `BACKREF`: `x` index into `refs`, `y` 1 backwards; `LOOK`: `x` body entry, `y` 1 when negative;
+ * - `RUN`: `x` set index, `y` least and `z` most repetitions (-1 unbounded); its `RETRY` is the instruction before it.
  */
 interface Program {
 	op: Uint8Array;
 	next: Int32Array;
 	x: Int32Array;
 	y: Int32Array;
+	z: Int32Array;
+	/**
+	 * Per `RUN`/`RETRY`: the set the code unit after the run must be in for what
+	 * follows to match, when that is a plain character; lengths failing it are skipped.
+	 */
+	follow: (Uint8Array | undefined)[];
 	entry: number;
 	groupCount: number;
 	/** Candidate groups per backreference; duplicate group names give several. */
@@ -99,25 +115,29 @@ class ProgramBuilder {
 	readonly next: number[] = [];
 	readonly x: number[] = [];
 	readonly y: number[] = [];
+	readonly z: number[] = [];
 	readonly refs: number[][] = [];
 	readonly #pattern: ParsedPattern;
 	readonly #classes: CharClasses;
 	readonly #multiline: boolean;
+	readonly #ignoreCase: boolean;
 	/** Nullable loops enclosing the node being compiled, within the current (sub)program. */
 	#depth = 0;
 
-	constructor(pattern: ParsedPattern, classes: CharClasses, multiline: boolean) {
+	constructor(pattern: ParsedPattern, classes: CharClasses, flags: { ignoreCase: boolean; multiline: boolean }) {
 		this.#pattern = pattern;
 		this.#classes = classes;
-		this.#multiline = multiline;
+		this.#multiline = flags.multiline;
+		this.#ignoreCase = flags.ignoreCase;
 	}
 
-	add(op: number, next: number, x = 0, y = 0): number {
+	add(op: number, next: number, x = 0, y = 0, z = 0): number {
 		if (this.op.length >= MAX_NODES) throw new RangeError(`more than ${MAX_NODES} instructions`);
 		this.op.push(op);
 		this.next.push(next);
 		this.x.push(x);
 		this.y.push(y);
+		this.z.push(z);
 		return this.op.length - 1;
 	}
 
@@ -149,7 +169,11 @@ class ProgramBuilder {
 			}
 			case "assert":
 				// Assertions read both neighbours of the position, whichever way the match runs.
-				return this.add(ASSERT, next, assertionOf(node.kind, this.#multiline, false));
+				return this.add(
+					ASSERT,
+					next,
+					assertionOf(node.kind, node.multiline ?? this.#multiline, false, node.unicodeWord),
+				);
 			case "look": {
 				const depth = this.#depth;
 				this.#depth = 0;
@@ -163,7 +187,8 @@ class ProgramBuilder {
 			case "backref": {
 				const { target } = node;
 				const groups = typeof target === "number" ? [target] : (this.#pattern.names.get(target) ?? []);
-				return this.add(BACKREF, next, this.refs.push(groups) - 1, direction);
+				const ignoreCase = node.ignoreCase ?? this.#ignoreCase;
+				return this.add(BACKREF, next, this.refs.push(groups) - 1, direction, ignoreCase ? 1 : 0);
 			}
 			case "repeat":
 				return this.#repeat(node.body, node.min, node.max, node.greedy, next, backward);
@@ -173,6 +198,11 @@ class ProgramBuilder {
 	#repeat(body: RegexNode, min: number, max: number, greedy: boolean, next: number, backward: boolean): number {
 		if (min > MAX_NODES || (max !== Infinity && max > MAX_NODES)) {
 			throw new RangeError(`quantifier bound past ${MAX_NODES}`);
+		}
+		if (greedy && !backward && body.type === "unit") {
+			// One instruction instead of a split per code unit; its retry sits right before it.
+			this.add(RETRY, next);
+			return this.add(RUN, next, this.#classes.setOf(body), min, max === Infinity ? -1 : max);
 		}
 		const captures = capturesWithin(body);
 		const emptyFails = nullable(body);
@@ -215,8 +245,12 @@ class ProgramBuilder {
  *
  * @throws {RangeError} past {@link MAX_NODES} instructions or nested nullable loops.
  */
-function compileProgram(pattern: ParsedPattern, classes: CharClasses, multiline: boolean): Program {
-	const builder = new ProgramBuilder(pattern, classes, multiline);
+function compileProgram(
+	pattern: ParsedPattern,
+	classes: CharClasses,
+	flags: { ignoreCase: boolean; multiline: boolean },
+): Program {
+	const builder = new ProgramBuilder(pattern, classes, flags);
 	const entry = builder.compile(pattern.root, builder.add(SUCCEED, -1), false);
 	const op = Uint8Array.from(builder.op);
 	const next = Int32Array.from(builder.next);
@@ -236,7 +270,16 @@ function compileProgram(pattern: ParsedPattern, classes: CharClasses, multiline:
 	const inDegree = new Uint32Array(size);
 	inDegree[entry]!++;
 	for (let pc = 0; pc < size; pc++) for (const successor of successors(pc)) inDegree[successor]!++;
-	const memo = Uint8Array.from(inDegree, degree => (degree >= 2 ? 1 : 0));
+	// A run is memoized too: one that failed at the next position rules out this one's longer lengths.
+	const memo = Uint8Array.from(inDegree, (degree, pc) => (degree >= 2 || op[pc] === RUN ? 1 : 0));
+	const y = Int32Array.from(builder.y);
+	const follow = Array.from(op, (kind, pc): Uint8Array | undefined => {
+		if (kind !== RUN && kind !== RETRY) return undefined;
+		// Captures open and close without failing; the first thing that can fail decides.
+		let after = next[pc]!;
+		while (op[after] === OPEN || op[after] === CLOSE || op[after] === CLEAR) after = next[after]!;
+		return op[after] === CHAR && y[after] === 0 ? classes.sets[x[after]!] : undefined;
+	});
 	// Groups a reachable backreference reads, by fixpoint over the instruction graph.
 	const reads = Array.from({ length: size }, (): Set<number> | undefined => undefined);
 	if (builder.refs.length > 0) {
@@ -275,7 +318,9 @@ function compileProgram(pattern: ParsedPattern, classes: CharClasses, multiline:
 		op,
 		next,
 		x,
-		y: Int32Array.from(builder.y),
+		y,
+		z: Int32Array.from(builder.z),
+		follow,
 		entry,
 		groupCount: pattern.groups.length === 0 ? 0 : pattern.groups.length - 1,
 		refs: builder.refs,
@@ -289,6 +334,12 @@ function compileProgram(pattern: ParsedPattern, classes: CharClasses, multiline:
 export class Backtracker {
 	readonly #program: Program;
 	readonly #greedy: GreedyRuns | undefined;
+	readonly #pattern: ParsedPattern;
+	readonly #multiline: boolean;
+	/** Compiled on first use; null when the pattern has no scanner. */
+	#scanner: Scanner | null | undefined;
+	/** Where the scanner's match starts, or the start it left undecided. */
+	readonly #scanOut = new Int32Array(1);
 	readonly #classes: CharClasses;
 	readonly #ignoreCase: boolean;
 	readonly #limits: MemoLimits;
@@ -329,8 +380,10 @@ export class Backtracker {
 		flags: { ignoreCase: boolean; multiline: boolean },
 		limits: MemoLimits,
 	) {
-		this.#program = compileProgram(pattern, classes, flags.multiline);
+		this.#program = compileProgram(pattern, classes, flags);
 		this.#greedy = GreedyRuns.compile(pattern.root, classes);
+		this.#pattern = pattern;
+		this.#multiline = flags.multiline;
 		this.#classes = classes;
 		this.#ignoreCase = flags.ignoreCase;
 		this.#limits = limits;
@@ -344,27 +397,47 @@ export class Backtracker {
 	}
 
 	/**
-	 * Resolves an unanchored match from a required literal, without scanning the
-	 * automata. Returns null for a missing literal and undefined when undecided.
+	 * Resolves an unanchored match without scanning the automata: from a required
+	 * literal, then with the pattern's {@link Scanner}. Returns the match, null
+	 * when there is none, or the position from which the search is still
+	 * undecided (every start before it is ruled out).
 	 */
-	probe(text: string, from: number): BacktrackMatch | null | undefined {
+	probe(text: string, from: number): BacktrackMatch | null | number {
 		const greedy = this.#greedy;
-		if (!greedy) return undefined;
 		// Try a few false leads without building a marks array. An undecided
 		// attempt must still take priority over every later start.
-		for (let attempts = 0; attempts < 3; attempts++) {
+		for (let attempts = 0; greedy && attempts < 3; attempts++) {
 			const start = greedy.firstStart(text, from);
-			if (start === undefined) return undefined;
+			if (start === undefined) break;
 			if (start < 0) return null;
 			const end = greedy.match(text, start, this.#registers);
-			if (end === REPLAY_LIMIT) return undefined;
+			if (end === REPLAY_LIMIT) {
+				from = start;
+				break;
+			}
 			if (end >= 0) {
 				if (this.#text !== undefined && text !== this.#text) this.release();
 				return this.#matched(text, start, end);
 			}
 			from = start + 1;
 		}
-		return undefined;
+		const scan = this.#scan();
+		if (!scan) return from;
+		const end = scan(text, from, text.length, this.#registers, this.#scanOut);
+		if (end === NONE) return null;
+		if (end === BAIL) return this.#scanOut[0]!;
+		if (this.#text !== undefined && text !== this.#text) this.release();
+		return this.#matched(text, this.#scanOut[0]!, end);
+	}
+
+	#scan(): Scanner | null {
+		if (this.#scanner === undefined) {
+			const flags = { ignoreCase: this.#ignoreCase, multiline: this.#multiline };
+			this.#scanner = this.#pattern.unicode
+				? null
+				: (compileScanner(this.#pattern, this.#classes, flags, this.#limits.scanSteps) ?? null);
+		}
+		return this.#scanner;
 	}
 
 	/**
@@ -380,6 +453,8 @@ export class Backtracker {
 			this.#text = text;
 			this.#pageCount = (text.length >>> PAGE_SHIFT) + 1;
 		}
+		// A scanner that keeps running out of steps here is only delaying the memoized search.
+		let scans = SCAN_BAILS;
 		for (let offset = 0; offset < count; offset++) {
 			if (marks) {
 				offset = marks.indexOf(1, offset);
@@ -387,7 +462,11 @@ export class Backtracker {
 			}
 			const start = lo + offset;
 			let end = this.#greedy?.match(text, start, this.#registers) ?? REPLAY_LIMIT;
-			if (end === REPLAY_LIMIT) {
+			if (end === REPLAY_LIMIT && scans > 0) {
+				end = this.#scan()?.(text, start, start, this.#registers, this.#scanOut) ?? BAIL;
+				if (end === BAIL) scans--;
+			}
+			if (end === BAIL) {
 				this.#registers.fill(-1);
 				this.#version++;
 				this.#undo.length = 0;
@@ -418,7 +497,7 @@ export class Backtracker {
 	 * when visited and are recorded as failed once the search backtracks past them.
 	 */
 	#run(entry: number, start: number): number {
-		const { op, next, x, y, memo, refs, reads } = this.#program;
+		const { op, next, x, y, z, follow, memo, refs, reads } = this.#program;
 		const { sets } = this.#classes;
 		const { blockIndex, blocks } = this.#classes.alphabet;
 		const size = op.length;
@@ -462,6 +541,73 @@ export class Backtracker {
 						choices.push(x[pc]!, position, mask, undo.length, path.length);
 						pc = next[pc]!;
 						continue;
+					case RUN: {
+						const members = sets[x[pc]!]!;
+						const most = z[pc]!;
+						const limit = most < 0 || length - position < most ? length : position + most;
+						let end = position;
+						while (end < limit) {
+							const unit = text.charCodeAt(end);
+							if (!members[blocks[(blockIndex[unit >>> 8]! << 8) | (unit & 255)]!]) break;
+							end++;
+						}
+						let lowest = position + y[pc]!;
+						if (end < lowest) break fail;
+						// An unbounded run that failed one position on tried every longer length of this one.
+						if (most < 0 && end > lowest) {
+							const context = reads[pc] === 0 ? 0 : this.#contextOf(reads[pc]!, 0);
+							const page =
+								context < 0
+									? undefined
+									: failed.get((context * this.#pageCount + ((position + 1) >>> PAGE_SHIFT)) * size + pc);
+							const bit = (position + 1) & PAGE_MASK;
+							if (page !== undefined && page[bit >> 3]! & (1 << (bit & 7))) end = lowest;
+						}
+						if (lowest === position) {
+							// Taking nothing keeps the iteration mask, so it is its own, last choice.
+							if (end === position) {
+								pc = next[pc]!;
+								continue;
+							}
+							choices.push(next[pc]!, position, mask, undo.length, path.length);
+							lowest++;
+						}
+						const after = follow[pc];
+						if (after) {
+							while (end >= lowest) {
+								if (end < length) {
+									const unit = text.charCodeAt(end);
+									if (after[blocks[(blockIndex[unit >>> 8]! << 8) | (unit & 255)]!]) break;
+								}
+								end--;
+							}
+							if (end < lowest) break fail;
+						}
+						// The choice's mask slot carries the shortest length left to try.
+						if (end > lowest) choices.push(pc - 1, end - 1, lowest, undo.length, path.length);
+						position = end;
+						mask = 0;
+						pc = next[pc]!;
+						continue;
+					}
+					case RETRY: {
+						const lowest = mask;
+						const after = follow[pc];
+						if (after) {
+							while (position >= lowest) {
+								if (position < length) {
+									const unit = text.charCodeAt(position);
+									if (after[blocks[(blockIndex[unit >>> 8]! << 8) | (unit & 255)]!]) break;
+								}
+								position--;
+							}
+							if (position < lowest) break fail;
+						}
+						if (position > lowest) choices.push(pc, position - 1, lowest, undo.length, path.length);
+						mask = 0;
+						pc = next[pc]!;
+						continue;
+					}
 					case OPEN:
 						this.#set(pending + x[pc]!, position);
 						pc = next[pc]!;
@@ -498,7 +644,7 @@ export class Backtracker {
 						continue;
 					}
 					case BACKREF: {
-						const consumed = this.#backreference(refs[x[pc]!]!, position, y[pc] === 1);
+						const consumed = this.#backreference(refs[x[pc]!]!, position, y[pc] === 1, z[pc] === 1);
 						if (consumed < 0) break fail;
 						position += y[pc] ? -consumed : consumed;
 						if (consumed > 0) mask = 0;
@@ -616,24 +762,52 @@ export class Backtracker {
 	}
 
 	/** Units a backreference consumes at `position`, or -1 when it does not match. */
-	#backreference(groups: number[], position: number, backward: boolean): number {
+	#backreference(groups: number[], position: number, backward: boolean, ignoreCase: boolean): number {
 		const registers = this.#registers;
 		const text = this.#text!;
 		for (const group of groups) {
 			const start = registers[2 * group]!;
 			if (start < 0) continue;
-			const length = registers[2 * group + 1]! - start;
+			const end = registers[2 * group + 1]!;
+			if (start === end) return 0;
+			if (ignoreCase && this.#pattern.unicode) return this.#foldedReference(text, start, end, position, backward);
+			const length = end - start;
 			const at = backward ? position - length : position;
 			if (at < 0 || at + length > text.length) return -1;
+			if (this.#pattern.unicode && insideSurrogatePair(text, backward ? at : at + length)) return -1;
 			for (let offset = 0; offset < length; offset++) {
 				const expected = text.charCodeAt(start + offset);
 				const actual = text.charCodeAt(at + offset);
-				if (expected !== actual && !(this.#ignoreCase && caseFoldEquals(expected, actual))) return -1;
+				if (expected !== actual && !(ignoreCase && caseFoldEquals(expected, actual))) return -1;
 			}
 			return length;
 		}
 		// A reference to a group that did not participate matches the empty string.
 		return 0;
+	}
+
+	/** Unicode captures compare code points, including in right-to-left lookbehind. */
+	#foldedReference(text: string, start: number, end: number, position: number, backward: boolean): number {
+		if (insideSurrogatePair(text, position)) return -1;
+		let at = position;
+		if (backward) {
+			while (end > start) {
+				if (at === 0) return -1;
+				end -= insideSurrogatePair(text, end - 1) ? 2 : 1;
+				at -= insideSurrogatePair(text, at - 1) ? 2 : 1;
+				if (!unicodeCaseFoldEquals(text.codePointAt(end)!, text.codePointAt(at)!)) return -1;
+			}
+			return position - at;
+		}
+		while (start < end) {
+			if (at === text.length) return -1;
+			const expected = text.codePointAt(start)!;
+			const actual = text.codePointAt(at)!;
+			if (!unicodeCaseFoldEquals(expected, actual)) return -1;
+			start += expected > 0xffff ? 2 : 1;
+			at += actual > 0xffff ? 2 : 1;
+		}
+		return at - position;
 	}
 
 	#set(register: number, value: number): void {
