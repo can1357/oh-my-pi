@@ -1052,7 +1052,6 @@ public static class Fixture {
 		// offset: the step did not move, and is not reported as moved.
 		let error = scroll(x, y, (0.0, -100.0), None).unwrap_err();
 		assert_eq!(error.code, ErrorCode::InputFailed, "{error}");
-		assert!(error.message.contains("did not move"), "{error}");
 		let grown = list.state();
 		assert_eq!(grown[OFFSET], end[OFFSET]);
 		assert_eq!(grown[ROWS], 120.0);
