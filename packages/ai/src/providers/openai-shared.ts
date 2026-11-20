@@ -721,6 +721,22 @@ export function resolveOpenAIOutputTokenParam(
 	return { field: input.field, value };
 }
 
+const OPENROUTER_AFFORDABLE_MAX_TOKENS_PATTERN = /\bcan only afford (\d+)\b/i;
+
+/**
+ * Output cap to retry with after OpenRouter's credit pre-check refused the
+ * request. With no cap sent (the routing omission above) OpenRouter reserves
+ * the model's default output and rejects a low-balance account with
+ * `402 ... You requested up to N tokens, but can only afford M`; a request
+ * capped at M fits the balance.
+ */
+export function resolveOpenRouterAffordableMaxTokens(error: unknown, isOpenRouterHost: boolean): number | undefined {
+	if (!isOpenRouterHost || !(error instanceof AIError.ProviderHttpError) || error.status !== 402) return undefined;
+	const match = OPENROUTER_AFFORDABLE_MAX_TOKENS_PATTERN.exec(error.message);
+	const affordable = match ? Number(match[1]) : 0;
+	return affordable > 0 ? affordable : undefined;
+}
+
 export interface OpenAIGatewayRoutingParams {
 	provider?: OpenRouterRouting;
 	providerOptions?: { gateway?: Pick<VercelGatewayRouting, "only" | "order" | "caching"> };
