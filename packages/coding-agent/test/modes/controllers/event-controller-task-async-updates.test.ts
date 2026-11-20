@@ -54,6 +54,14 @@ function bashResult(
 	return { content: [{ type: "text" as const, text }], details };
 }
 
+function waitResult(status: "running" | "completed", durationMs: number) {
+	const details: CoordinationDetails = {
+		op: "wait",
+		jobs: [{ id: "Job1", type: "task", status, label: "Long task", durationMs }],
+	};
+	return { content: [{ type: "text" as const, text: `${status} wait` }], details };
+}
+
 describe("EventController async update finalization", () => {
 	const sealed: ToolExecutionComponent[] = [];
 
@@ -395,6 +403,53 @@ describe("EventController async update finalization", () => {
 
 		expect(component.isTranscriptBlockFinalized()).toBe(true);
 		expect(chatContainer.peekFinalizedBatch(80, 0)?.rows).toBeDefined();
+	});
+
+	it("keeps an executing wait card repainting across a turn boundary", async () => {
+		const { controller, pendingTools } = createFixture();
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "tc-wait",
+			toolName: "wait",
+			args: {},
+		});
+		const component = pendingTools.get("tc-wait")!;
+		sealed.push(component);
+		component.setExpanded(true);
+		const painted = () => Bun.stripANSI(component.render(100).join("\n"));
+
+		await controller.handleEvent({
+			type: "tool_execution_update",
+			toolCallId: "tc-wait",
+			toolName: "wait",
+			args: {},
+			partialResult: waitResult("running", 757_000),
+		});
+		expect(painted()).toContain("12m37s");
+
+		// A new turn starts while the wait is still executing.
+		await controller.handleEvent({ type: "agent_start" });
+		expect(pendingTools.get("tc-wait")).toBe(component);
+
+		await controller.handleEvent({
+			type: "tool_execution_update",
+			toolCallId: "tc-wait",
+			toolName: "wait",
+			args: {},
+			partialResult: waitResult("running", 915_000),
+		});
+		expect(painted()).toContain("15m15s");
+
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "tc-wait",
+			toolName: "wait",
+			result: waitResult("completed", 916_000),
+			isError: false,
+		});
+		expect(painted()).toContain("15m16s");
+		expect(pendingTools.has("tc-wait")).toBe(false);
+		expect(component.isTranscriptBlockFinalized()).toBe(true);
 	});
 
 	it("keeps a parked task card available across the next agent turn", async () => {

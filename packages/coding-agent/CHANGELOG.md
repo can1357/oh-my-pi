@@ -43,6 +43,7 @@
 
 ### Fixed
 
+- Fixed a `wait` card freezing at its last frame when a new turn started while the wait was still running; it keeps repainting until its result lands ([#11136](https://github.com/can1357/oh-my-pi/issues/11136))
 - The shell's `rg` builtin prints paths under an explicit `.` as `./path` like ripgrep, so names starting with `-` (session directories such as `--work-pi--`) can be passed back to `rg` and other commands
 - The shell's `fd` builtin prints paths like fd: `./path` under an explicit `.`, with `-0`, or when a name starts with `-`; directories end in the path separator; `--strip-cwd-prefix` takes effect, `--format`'s `{//}` is the printed path's parent instead of an absolute one, and `--absolute-path` no longer prints `/./`
 - Sloppy edits reject incomplete Find/action pairs without writing, preserve numeric `||` expressions, and no longer mistake a nested or partial closing line for the end of a block range

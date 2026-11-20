@@ -552,29 +552,48 @@ export class EventController {
 		}
 	}
 
-	/** Freeze foreground tool cards once no live agent turn can complete them. */
-	#sealAbandonedForegroundTools(): void {
-		const background = new Set<ToolExecutionHandle>();
+	/**
+	 * Freeze foreground tool cards once no live agent turn can complete them.
+	 * With `keepInFlight`, a call whose execution started and has not ended keeps
+	 * its card, started flag and reply blocks: the turn boundary does not finish it.
+	 */
+	#sealAbandonedForegroundTools({ keepInFlight = false }: { keepInFlight?: boolean } = {}): void {
+		const retained = new Set<ToolExecutionHandle>();
 		for (const toolCallId of this.#backgroundCallIds) {
 			const component = this.ctx.pendingTools.get(toolCallId);
-			if (component) background.add(component);
+			if (component) retained.add(component);
+		}
+		if (keepInFlight) {
+			for (const toolCallId of this.#executionStartedCallIds) {
+				const component = this.ctx.pendingTools.get(toolCallId);
+				if (component) retained.add(component);
+			}
 		}
 		for (const component of this.#toolTimelineComponents.values()) {
 			if (
 				(component instanceof ToolExecutionComponent || component instanceof ReadToolGroupComponent) &&
-				!background.has(component)
+				!retained.has(component)
 			) {
 				component.seal();
 			}
 		}
 		for (const [toolCallId, component] of this.ctx.pendingTools) {
 			if (this.#backgroundCallIds.has(toolCallId)) continue;
+			if (keepInFlight && this.#executionStartedCallIds.has(toolCallId)) continue;
 			component.seal();
 			this.ctx.pendingTools.delete(toolCallId);
 		}
 		this.#backgroundCallIds = new Set(
 			Array.from(this.#backgroundCallIds).filter(toolCallId => this.ctx.pendingTools.has(toolCallId)),
 		);
+		if (keepInFlight) {
+			this.#executionStartedCallIds = new Set(
+				Array.from(this.#executionStartedCallIds).filter(toolCallId => this.ctx.pendingTools.has(toolCallId)),
+			);
+			for (const toolCallId of this.#toolReplyBlocks.keys()) {
+				if (!this.#executionStartedCallIds.has(toolCallId)) this.#toolReplyBlocks.delete(toolCallId);
+			}
+		}
 		this.#finalizeAbandonedPostToolSegments();
 	}
 	/**
@@ -1242,20 +1261,19 @@ export class EventController {
 			this.#turnStartedAt = undefined;
 		}
 		this.#clearApprovalPreviewGates();
-		// A new turn cannot inherit a foreground tool execution. A dropped
+		// A new turn cannot inherit an abandoned foreground tool card. A dropped
 		// agent_end (for example after a renderer exception) otherwise leaves a
 		// live-only tool card without a persisted result; ordered transcript
-		// retirement then remains pinned behind that invisible stale card.
-		this.#sealAbandonedForegroundTools();
+		// retirement then remains pinned behind that invisible stale card. A call
+		// still executing is not abandoned: its tool_execution_end has not come.
+		this.#sealAbandonedForegroundTools({ keepInFlight: true });
 		this.#toolTimelineComponents.clear();
 		this.#streamedToolCallIdByIndex.clear();
 		this.#pendingStreamPreviews.clear();
 		this.#retractedToolCallIds.clear();
-		this.#executionStartedCallIds.clear();
 		this.#syntheticFailureCards.clear();
 		this.#orphanedToolCompletions.clear();
 		this.#postToolAssistantComponents.clear();
-		this.#toolReplyBlocks.clear();
 		this.#lastIntent = undefined;
 		// Something outside woke the run: the row stops naming the wait and
 		// follows this loop's intents again.
