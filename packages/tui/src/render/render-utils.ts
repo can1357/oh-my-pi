@@ -388,11 +388,6 @@ export function capPreviewLines(
 	return [`${options.prefix ?? ""}${theme.fg("dim", marker)}`, ...visible];
 }
 
-/** Join metadata with the theme separator and muted styling. */
-export function formatMeta(meta: string[], theme: Theme): string {
-	return meta.length > 0 ? ` ${theme.fg("muted", meta.join(theme.sep.dot))}` : "";
-}
-
 function sanitizeErrorText(message: string | undefined): string {
 	const clean = (message ?? "").replace(/^Error:\s*/, "").trim();
 	return clean ? replaceTabs(truncateToWidth(clean, TRUNCATE_LENGTHS.LINE)) : "Unknown error";

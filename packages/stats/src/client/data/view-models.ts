@@ -5,13 +5,17 @@ import type {
 	FolderStats,
 	MessageStats,
 	ModelPerformancePoint,
+	SideChannelStats,
 	ToolUsageStats,
+	UsageAttributionTotals,
 } from "../types";
-import { modelKey } from "./colors";
+import { buildColorLookup, modelKey, SERIES_COLORS } from "./colors";
 import { isUnpricedMessage } from "./formatters";
 
-/** Fixed display order for the agent-token-share breakdown. */
+/** Fixed display order of the agent types in a token share. */
 const AGENT_TYPE_ORDER: AgentType[] = ["main", "subagent", "advisor"];
+/** Palette hues left to side-channel categories beside agent segments: the agent types wear the first three. */
+const BESIDE_AGENT_COLORS = SERIES_COLORS.slice(3);
 
 export interface ConversationTokenStats {
 	totalInputTokens: number;
@@ -25,50 +29,98 @@ export function sumConversationTokens(stats: ConversationTokenStats): number {
 	return stats.totalInputTokens + stats.totalOutputTokens + stats.totalCacheReadTokens + stats.totalCacheWriteTokens;
 }
 
-export interface AgentTokenSegment {
-	agentType: AgentType;
+/** What a token-share segment counts: an agent type's conversation turns, or the calls of one side-channel category. */
+export type TokenShareSource = { kind: "agent"; agentType: AgentType } | { kind: "sideChannel"; category: string };
+
+export type TokenShareSegment = TokenShareSource & {
+	/** Unique within its view. */
+	key: string;
 	/** input + output + cache read + cache write — the displayed denominator. */
 	tokens: number;
 	requests: number;
 	cost: number;
-	/** Fraction (0-1) of total tokens across all present agent types. */
+	/** Fraction (0-1) of the view's total tokens. */
 	share: number;
-}
+};
 
-export interface AgentTokenShareView {
+export interface TokenShareView {
 	totalTokens: number;
 	totalCost: number;
-	segments: AgentTokenSegment[];
+	segments: TokenShareSegment[];
+	/** Side-channel category -> color, ranked by tokens within this view so its largest categories never share a hue. */
+	categoryColors: Map<string, string>;
+}
+
+/** A group's amounts; `share` is settled by {@link shareView} once the view's total is known. */
+function segmentAmounts(stat: UsageAttributionTotals) {
+	return { tokens: sumConversationTokens(stat), requests: stat.totalRequests, cost: stat.totalCost, share: 0 };
+}
+
+/** One segment per agent type present in the data, ordered main -> subagents -> advisor. */
+function agentSegments(stats: readonly AgentTypeStats[]): TokenShareSegment[] {
+	const byType = new Map<AgentType, AgentTypeStats>();
+	for (const stat of stats) byType.set(stat.agentType, stat);
+	const segments: TokenShareSegment[] = [];
+	for (const agentType of AGENT_TYPE_ORDER) {
+		const stat = byType.get(agentType);
+		if (stat) segments.push({ kind: "agent", agentType, key: `agent:${agentType}`, ...segmentAmounts(stat) });
+	}
+	return segments;
+}
+
+/** One segment per category served by decision models (`decision`) or by language models, largest first. */
+function sideChannelSegments(stats: readonly SideChannelStats[], decision: boolean): TokenShareSegment[] {
+	const segments: Extract<TokenShareSegment, { kind: "sideChannel" }>[] = [];
+	for (const stat of stats) {
+		if (stat.decision !== decision) continue;
+		segments.push({
+			kind: "sideChannel",
+			category: stat.category,
+			key: `side:${stat.category}`,
+			...segmentAmounts(stat),
+		});
+	}
+	return segments.sort((a, b) => b.tokens - a.tokens || a.category.localeCompare(b.category));
+}
+
+/** Settle each segment's share of the view's tokens and color the view's categories from `palette`. */
+function shareView(segments: TokenShareSegment[], palette: readonly string[]): TokenShareView {
+	let totalTokens = 0;
+	let totalCost = 0;
+	const categories: { key: string; weight: number }[] = [];
+	for (const segment of segments) {
+		totalTokens += segment.tokens;
+		totalCost += segment.cost;
+		if (segment.kind === "sideChannel") categories.push({ key: segment.category, weight: segment.tokens });
+	}
+	if (totalTokens > 0) {
+		for (const segment of segments) segment.share = segment.tokens / totalTokens;
+	}
+	return { totalTokens, totalCost, segments, categoryColors: buildColorLookup(categories, palette) };
 }
 
 /**
- * Build the "token usage by agent" breakdown: one segment per agent type that
- * appears in the data, ordered main -> subagents -> advisor, each carrying its
- * token total and share of the grand total. Token counts use the same four
- * conversation-token buckets as the overview total so the two views reconcile.
+ * Build the "token usage by agent" breakdown: the conversation turns of each
+ * agent type present in the data, ordered main -> subagents -> advisor, then
+ * the side channels that ran on a language model, one segment per category,
+ * largest first. Shares are over all of them. Side channels served by decision
+ * models are left out: see {@link buildDecisionModelShare}. Token counts use
+ * the same four conversation-token buckets as the overview total.
  */
-export function buildAgentTokenShare(stats: AgentTypeStats[]): AgentTokenShareView {
-	const byType = new Map<AgentType, AgentTypeStats>();
-	for (const stat of stats) byType.set(stat.agentType, stat);
+export function buildUsageTokenShare(
+	byAgentType: readonly AgentTypeStats[],
+	bySideChannel: readonly SideChannelStats[],
+): TokenShareView {
+	return shareView([...agentSegments(byAgentType), ...sideChannelSegments(bySideChannel, false)], BESIDE_AGENT_COLORS);
+}
 
-	const present = AGENT_TYPE_ORDER.map(type => byType.get(type)).filter(
-		(stat): stat is AgentTypeStats => stat !== undefined,
-	);
-	const totalTokens = present.reduce((sum, stat) => sum + sumConversationTokens(stat), 0);
-	const totalCost = present.reduce((sum, stat) => sum + stat.totalCost, 0);
-
-	const segments = present.map(stat => {
-		const tokens = sumConversationTokens(stat);
-		return {
-			agentType: stat.agentType,
-			tokens,
-			requests: stat.totalRequests,
-			cost: stat.totalCost,
-			share: totalTokens > 0 ? tokens / totalTokens : 0,
-		};
-	});
-
-	return { totalTokens, totalCost, segments };
+/**
+ * Build the breakdown of decision-model usage: one segment per side-channel
+ * category served by a decision model, largest first, each with its share of
+ * all decision-model tokens. No segments when no decision model was called.
+ */
+export function buildDecisionModelShare(bySideChannel: readonly SideChannelStats[]): TokenShareView {
+	return shareView(sideChannelSegments(bySideChannel, true), SERIES_COLORS);
 }
 
 /** API-equivalent cost split by billing component. */

@@ -148,7 +148,7 @@ beforeEach(() => {
 	spyOn(registry, "getSttModelSpec").mockImplementation(requested =>
 		requested === key ? onlineSpec : requested === offlineKey ? offlineSpec : undefined,
 	);
-	spyOn(runtime, "loadSourceSherpaRuntime").mockReturnValue(nativeRuntime);
+	spyOn(runtime, "loadSherpaRuntime").mockResolvedValue(nativeRuntime);
 	spyOn(fs, "mkdir").mockResolvedValue(undefined);
 	spyOn(fs, "stat").mockResolvedValue(presentFile);
 	OnlineRecognizer.instances.length = 0;

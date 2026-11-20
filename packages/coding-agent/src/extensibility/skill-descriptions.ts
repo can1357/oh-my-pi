@@ -2,7 +2,8 @@ import { Database, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import {
 	getAgentDir,
 	getSkillDescriptionsDbPath,
@@ -11,6 +12,7 @@ import {
 	logger,
 	postmortem,
 	prompt,
+	toError,
 } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import {
@@ -20,6 +22,9 @@ import {
 	resolveRoleSelection,
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import { trackStep } from "../downloads/activity";
+import { CostCapError, type CostGateApi } from "../session/cost-gate";
+import { journalCompletion, type ModelUsageLedger } from "../session/model-usage-journal";
 import compressDescriptionPrompt from "../prompts/skills/compress-description.md" with { type: "text" };
 import { Semaphore } from "../task/parallel";
 import type { Skill } from "./skills";
@@ -28,7 +33,9 @@ const MAX_PREVIEW_CHARS = 100;
 // A sentence or word cut shorter than this discards too much; cut at the budget instead.
 const MIN_PREVIEW_CUT = 40;
 const MAX_COMPRESSED_CHARS = 160;
-const MAX_COMPRESSED_WORDS = 12;
+// Revision of validCompression's rules, part of every unusable-answer marker: bump it whenever the
+// rules accept more, so answers an older, stricter revision rejected are asked for again.
+const VALIDATION_REVISION = 2;
 // Leave ample room for other cleanup under postmortem's 10-second deadline.
 const STORE_CLOSE_GRACE_MS = 4_000;
 const inFlight = new Map<string, Promise<void>>();
@@ -48,14 +55,22 @@ class SkillDescriptionLengthError extends Error {}
 /**
  * Resolve the fast role for each background request the way `/models` shows it — configured `smol`,
  * the inherited `default` when `smol` is unset, then the built-in chain — before a configured `tiny`.
- * Never uses the session's foreground model. `getTelemetry` supplies the telemetry handle for each
- * request's chat span.
+ * Never uses the session's foreground model. `getCostGate` returns the session tree's gate per request,
+ * following it across new sessions and switches; each provider attempt is admitted and metered there.
+ * `usageLedger` is the session whose prompt asked for the compression; each attempt is journaled there,
+ * under `purpose` (default `skill-description`); `oneshotKind` (default `skill_description`) tags telemetry.
  */
 export function createSkillDescriptionCompressor(
 	registry: ModelRegistry,
 	settings: Settings,
-	sessionId?: string,
-	getTelemetry?: () => AgentTelemetry | undefined,
+	options: {
+		sessionId?: string;
+		getTelemetry?: () => AgentTelemetry | undefined;
+		getCostGate?: () => CostGateApi | undefined;
+		usageLedger?: Partial<ModelUsageLedger>;
+		purpose?: string;
+		oneshotKind?: string;
+	} = {},
 ): SkillDescriptionCompressor {
 	const select = (): Model<Api> | undefined => {
 		// The first exact provider/id match wins before every other matching phase.
@@ -92,23 +107,49 @@ export function createSkillDescriptionCompressor(
 		async compress(_name, _description, request) {
 			const model = select();
 			if (!model) throw new Error("No smol or tiny model available");
-			const apiKey = await registry.getApiKey(model, sessionId);
+			const apiKey = await registry.getApiKey(model, options.sessionId);
 			if (!apiKey) throw new Error(`No credential for ${model.provider}/${model.id}`);
-			const response = await instrumentedCompleteSimple(
-				model,
-				{
-					messages: [{ role: "user", content: request, timestamp: Date.now() }],
-				},
-				{
-					apiKey: registry.resolver(model, sessionId),
-					sessionId,
-					maxTokens: 1024,
-					disableReasoning: true,
-					temperature: 0,
-					signal: AbortSignal.timeout(30_000),
-				},
-				{ telemetry: getTelemetry?.(), oneshotKind: "skill_description" },
-			);
+			const gate = options.getCostGate?.();
+			gate?.admit();
+			// A refusal inside a provider's retry loop aborts the request, so no retry
+			// layer (`fetchWithRetry`, SDK clients) treats it as a transient network error.
+			const refused = new AbortController();
+			const refuseAttempt = (): void => {
+				const refusal = gate?.check();
+				if (!refusal) return;
+				const error = new CostCapError(refusal);
+				refused.abort(error);
+				throw error;
+			};
+			const journal = journalCompletion(options.usageLedger, { purpose: options.purpose ?? "skill-description" });
+			let response: AssistantMessage;
+			try {
+				response = await instrumentedCompleteSimple(
+					model,
+					{
+						messages: [{ role: "user", content: request, timestamp: Date.now() }],
+					},
+					{
+						apiKey: registry.resolver(model, options.sessionId),
+						sessionId: options.sessionId,
+						maxTokens: 1024,
+						disableReasoning: true,
+						temperature: 0,
+						signal: AbortSignal.any([AbortSignal.timeout(30_000), refused.signal]),
+						beforeDispatch: gate ? refuseAttempt : undefined,
+						fetch: gate ? transportFetch(model, undefined, refuseAttempt) : undefined,
+						onAttempt: message => {
+							gate?.record(message.usage.cost.total);
+							journal?.(message, request);
+						},
+					},
+					{ telemetry: options.getTelemetry?.(), oneshotKind: options.oneshotKind ?? "skill_description" },
+				);
+			} catch (error) {
+				if (refused.signal.aborted) throw refused.signal.reason;
+				throw error;
+			}
+			if (refused.signal.aborted) throw refused.signal.reason;
 			if (response.stopReason === "length") {
 				throw new SkillDescriptionLengthError("Model stopped: length");
 			}
@@ -146,11 +187,19 @@ export function previewSkillDescription(description: string): string {
 	return `${cut}…`;
 }
 
+/**
+ * The prompt's 12-word target stays advisory: small models routinely overshoot it by a few words
+ * while staying well inside the character budget, which is what bounds the prompt.
+ */
 function validCompression(text: string): string | null {
 	const line = text.trim();
 	if (!line || /[\r\n]/.test(line) || line.length > MAX_COMPRESSED_CHARS) return null;
-	if (line.split(/\s+/).length > MAX_COMPRESSED_WORDS) return null;
 	return line;
+}
+
+/** Store key recording that `model`'s answer for the skill at `key` failed this validation revision. */
+function unusableKey(key: string, model: string): string {
+	return `${key}:v${VALIDATION_REVISION}:${model}`;
 }
 
 function pendingForStore(store: SkillDescriptionStore): Promise<void>[] {
@@ -246,8 +295,9 @@ function adoptLegacyDatabase(legacyPath: string, dbPath: string): void {
 }
 
 /**
- * SQLite store of compressed descriptions, keyed by prompt + skill content hash. A `<key>:<provider/id>` row
- * records that model's unusable answer, so it is not asked again while new models still are.
+ * SQLite store of routing hints (compressed skill descriptions, MCP namespace hints), keyed by a hash
+ * of the prompt and the content it condenses. A `<key>:v<revision>:<provider/id>` row records that
+ * model's unusable answer, so it is not asked again while new models and validation revisions still are.
  */
 export class SkillDescriptionStore {
 	/** Database file; scopes in-flight compression jobs shared by catalogs on this store. */
@@ -345,98 +395,243 @@ export class SkillDescriptionStore {
 	}
 }
 
-/** One prompt/session snapshot; completing a background job never mutates its rendered descriptions. */
-export class SkillDescriptionCatalog {
+/** One routing hint a {@link RoutingHintCatalog} serves: the cached model answer, else `placeholder`. */
+export interface RoutingHintRequest {
+	/** Store key: a digest of the prompt and everything it renders. */
+	readonly key: string;
+	/** Subject name, passed to the compressor and logged on failure. */
+	readonly name: string;
+	/** Source text the hint condenses, passed to the compressor. */
+	readonly description: string;
+	/** Hint shown until the model answer is cached, and remembered for a model whose answer is unusable. */
+	readonly placeholder: string;
+	/** Download-HUD row that counts this hint while the model condenses it (`Optimizing skills`); none when omitted. */
+	readonly activity?: string;
+	/** The model request; rendered only when compression runs. */
+	render(): string;
+}
+
+/**
+ * Takes the machine-wide lock of one compression job (`<store path>:<hint key>`) and resolves with
+ * its release, so one omp process asks the model for a hint and the others read its answer from
+ * the store.
+ */
+export type RoutingHintLock = (job: string) => Promise<() => void>;
+
+/** Store, compressor, deferral and lock shared by every {@link RoutingHintCatalog}. */
+export interface RoutingHintCatalogOptions {
+	/** Defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep placeholders. */
+	store?: SkillDescriptionStore;
+	compress?: SkillDescriptionCompressor;
+	/**
+	 * Hold model work until {@link RoutingHintCatalog.startCompression}: until the owning session's
+	 * cost gate exists, and off a startup path (resolving the compression model composes the catalog).
+	 */
+	deferCompression?: boolean;
+	/** Without one, every omp process compresses its own misses. */
+	lock?: RoutingHintLock;
+}
+
+/**
+ * One prompt/session snapshot of model-condensed routing hints. A hint is frozen the first time the
+ * catalog renders it, so completing a background job never mutates a prompt this catalog already
+ * built; the answer reaches the next catalog through the store. Skills
+ * ({@link SkillDescriptionCatalog}) and MCP eval namespaces (`mcp/eval-namespaces.ts`) use it.
+ */
+export class RoutingHintCatalog {
 	readonly #store: SkillDescriptionStore | undefined;
 	readonly #compress?: SkillDescriptionCompressor;
+	readonly #lock: RoutingHintLock | undefined;
 	readonly #snapshot = new Map<string, string>();
+	/** Misses rendered before {@link startCompression}; `undefined` once compression runs. */
+	#deferred: Map<string, RoutingHintRequest> | undefined;
 
-	/** `store` defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep previews. */
-	constructor(options: { store?: SkillDescriptionStore; compress?: SkillDescriptionCompressor } = {}) {
+	constructor(options: RoutingHintCatalogOptions = {}) {
 		this.#store = options.store ?? sharedSkillDescriptionStore();
 		this.#compress = options.compress;
+		this.#lock = options.lock;
+		if (options.deferCompression) this.#deferred = new Map();
+	}
+
+	/** The hint this catalog froze for `key`, else `placeholder`; schedules no model work. */
+	peek(key: string, placeholder: string): string {
+		return this.#snapshot.get(key) ?? placeholder;
+	}
+
+	/**
+	 * Hints for `requests`, in order: the frozen one, else the cached answer, else the placeholder.
+	 * Misses schedule one compression batch (held while compression is deferred).
+	 */
+	hints(requests: readonly RoutingHintRequest[]): string[] {
+		const store = this.#store;
+		const misses = new Map<string, RoutingHintRequest>();
+		const rendered = requests.map(request => {
+			let hint = this.#snapshot.get(request.key);
+			if (hint !== undefined) return hint;
+			try {
+				hint = store?.get(request.key);
+			} catch (error) {
+				logger.warn("Routing hint cache read failed", { error: String(error) });
+			}
+			if (hint === undefined) {
+				hint = request.placeholder;
+				misses.set(request.key, request);
+			}
+			this.#snapshot.set(request.key, hint);
+			return hint;
+		});
+		if (!store || misses.size === 0) return rendered;
+		if (this.#deferred) {
+			for (const [key, request] of misses) this.#deferred.set(key, request);
+		} else {
+			this.#schedule(store, misses);
+		}
+		return rendered;
+	}
+
+	/** Start compression held by `deferCompression`; later renders schedule theirs immediately. */
+	startCompression(): void {
+		const deferred = this.#deferred;
+		this.#deferred = undefined;
+		if (deferred && deferred.size > 0 && this.#store) this.#schedule(this.#store, deferred);
+	}
+
+	/** Await background writes already scheduled on this catalog's store (for shutdown or tests). */
+	async waitForPending(): Promise<void> {
+		if (!this.#store) return;
+		await Promise.all(pendingForStore(this.#store));
+	}
+
+	#schedule(store: SkillDescriptionStore, misses: ReadonlyMap<string, RoutingHintRequest>): void {
+		const compressor = this.#compress;
+		if (!compressor || store.isClosing) return;
+		// One resolution serves the whole batch: each composes the available model catalog, and a
+		// miss that model already answered unusably needs nothing more. Deferred until the current
+		// synchronous prompt rendering has finished.
+		const lock = this.#lock;
+		let batchModel: Promise<string | undefined> | undefined;
+		for (const [key, request] of misses) {
+			const job = `${store.path}:${key}`;
+			if (inFlight.has(job)) continue;
+			batchModel ??= Promise.resolve().then(() => compressor.modelKey());
+			const pending = compressHint(store, compressor, batchModel, request, lock && (() => lock(job))).finally(() =>
+				inFlight.delete(job),
+			);
+			inFlight.set(job, pending);
+		}
+	}
+}
+
+/** Skill routing hints: one prompt/session snapshot over a {@link RoutingHintCatalog}. */
+export class SkillDescriptionCatalog {
+	readonly #hints: RoutingHintCatalog;
+
+	constructor(options: RoutingHintCatalogOptions = {}) {
+		this.#hints = new RoutingHintCatalog(options);
 	}
 
 	/** Read the session's frozen prompt hints without starting new model work. */
 	snapshot(skills: readonly Skill[]): Array<Skill & { description: string }> {
 		return skills.map(skill => ({
 			...skill,
-			description: this.#snapshot.get(keyFor(skill)) ?? previewSkillDescription(skill.description),
+			description: this.#hints.peek(keyFor(skill), previewSkillDescription(skill.description)),
 		}));
 	}
 
 	render(skills: readonly Skill[]): Array<Skill & { description: string }> {
 		if (skills.length === 0) return [];
-		const store = this.#store;
-		return skills.map(skill => {
-			const key = keyFor(skill);
-			let description = this.#snapshot.get(key);
-			if (description === undefined) {
-				try {
-					description = store?.get(key);
-				} catch (error) {
-					logger.warn("Skill description cache read failed", { error: String(error) });
-				}
-				if (description === undefined) {
-					description = previewSkillDescription(skill.description);
-					if (store) this.#schedule(store, key, skill);
-				}
-				this.#snapshot.set(key, description);
-			}
-			return { ...skill, description };
-		});
+		// Authored descriptions already within the preview budget need no model
+		// compression: use them verbatim so exclusions survive. Only truly
+		// short input qualifies — `previewSkillDescription` truncates longer
+		// text to fit, which must still schedule compression. `keyFor` runs
+		// only for long descriptions that may schedule compression.
+		const requests = skills.map((skill): RoutingHintRequest | undefined =>
+			skill.description.replace(/\s+/g, " ").trim().length <= MAX_PREVIEW_CHARS
+				? undefined
+				: {
+						key: keyFor(skill),
+						name: skill.name,
+						description: skill.description,
+						placeholder: previewSkillDescription(skill.description),
+						activity: "Optimizing skills",
+						render: () =>
+							prompt.render(compressDescriptionPrompt, { name: skill.name, description: skill.description }),
+					},
+		);
+		const hints = this.#hints.hints(requests.filter(request => request !== undefined));
+		let next = 0;
+		return skills.map((skill, index) => ({
+			...skill,
+			description: requests[index] ? hints[next++] : previewSkillDescription(skill.description),
+		}));
+	}
+
+	/** Start compression held by `deferCompression`; later renders schedule theirs immediately. */
+	startCompression(): void {
+		this.#hints.startCompression();
 	}
 
 	/** Await background writes already scheduled by this catalog (for shutdown or tests). */
-	async waitForPending(): Promise<void> {
-		if (!this.#store) return;
-		await Promise.all(pendingForStore(this.#store));
+	waitForPending(): Promise<void> {
+		return this.#hints.waitForPending();
 	}
+}
 
-	#schedule(store: SkillDescriptionStore, key: string, skill: Skill): void {
-		const compressor = this.#compress;
-		if (!compressor || store.isClosing) return;
-		const job = `${store.path}:${key}`;
-		if (inFlight.has(job)) return;
-		// Defer model work until the current synchronous prompt rendering has finished.
-		const pending = Promise.resolve().then(async () => {
+/**
+ * Compress one routing hint into `store`. `batchModel` filters out requests that model already
+ * answered unusably (and everything when no model is available) before taking a slot. `lock` makes
+ * the request wait its turn among omp processes; a hint one of them stored meanwhile is not requested.
+ */
+async function compressHint(
+	store: SkillDescriptionStore,
+	compressor: SkillDescriptionCompressor,
+	batchModel: Promise<string | undefined>,
+	request: RoutingHintRequest,
+	lock: (() => Promise<() => void>) | undefined,
+): Promise<void> {
+	const { key, name } = request;
+	// A request that goes on to the model is counted in its `activity` row until it settles.
+	let settle: ((failure?: string) => void) | undefined;
+	let failure: string | undefined;
+	try {
+		const candidate = await batchModel;
+		if (candidate === undefined || store.isClosing || store.get(unusableKey(key, candidate)) !== undefined) return;
+		if (request.activity !== undefined) settle = trackStep(request.activity);
+		await compressionSlots.acquire();
+		let unlock: (() => void) | undefined;
+		try {
+			if (store.isClosing) return;
+			unlock = await lock?.();
+			if (store.isClosing || store.get(key) !== undefined) return;
+			// Unusable answers are remembered per model: that model is not asked again, a newly selected one is.
+			// Re-resolved because the role can change while this job waits behind running requests.
+			const model = compressor.modelKey();
+			const unusable = model === undefined ? undefined : unusableKey(key, model);
+			if (unusable !== undefined && store.get(unusable) !== undefined) return;
+			let result: string | null = null;
 			try {
-				await compressionSlots.acquire();
-				try {
-					if (store.isClosing) return;
-					// Unusable answers are remembered per model: that model is not asked again, a newly selected one is.
-					const model = compressor.modelKey();
-					const unusableKey = model === undefined ? undefined : `${key}:${model}`;
-					if (unusableKey !== undefined && store.get(unusableKey) !== undefined) return;
-					const request = prompt.render(compressDescriptionPrompt, {
-						name: skill.name,
-						description: skill.description,
-					});
-					let result: string | null = null;
-					try {
-						result = validCompression(await compressor.compress(skill.name, skill.description, request));
-					} catch (error) {
-						if (!(error instanceof SkillDescriptionLengthError)) throw error;
-					}
-					if (store.isClosed) return;
-					if (result !== null) {
-						store.put(key, result);
-					} else if (unusableKey !== undefined) {
-						logger.warn("Skill description compression unusable; keeping the preview for this model", {
-							skill: skill.name,
-							model,
-						});
-						store.put(unusableKey, previewSkillDescription(skill.description));
-					}
-				} finally {
-					compressionSlots.release();
-				}
+				result = validCompression(await compressor.compress(name, request.description, request.render()));
 			} catch (error) {
-				logger.warn("Skill description compression failed", { skill: skill.name, error: String(error) });
-			} finally {
-				inFlight.delete(job);
+				if (!(error instanceof SkillDescriptionLengthError)) throw error;
 			}
-		});
-		inFlight.set(job, pending);
+			if (store.isClosed) return;
+			if (result !== null) {
+				store.put(key, result);
+			} else if (unusable !== undefined) {
+				logger.warn("Routing hint compression unusable; keeping the placeholder for this model", {
+					name,
+					model,
+				});
+				store.put(unusable, request.placeholder);
+			}
+		} finally {
+			unlock?.();
+			compressionSlots.release();
+		}
+	} catch (error) {
+		failure = toError(error).message;
+		logger.warn("Routing hint compression failed", { name, error: String(error) });
+	} finally {
+		settle?.(failure);
 	}
 }

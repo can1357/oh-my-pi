@@ -19,6 +19,8 @@ import {
 } from "../keybinding-matchers";
 /** Prompt history fields displayed in search results. */
 export interface HistorySearchEntry {
+	/** Stable identifier of the stored prompt. */
+	id: number;
 	prompt: string;
 	created_at: number;
 	/** Project folder the prompt was typed in. */
@@ -29,6 +31,8 @@ export interface HistorySearchEntry {
 export interface HistorySource {
 	search(query: string, limit: number): HistorySearchEntry[];
 	getRecent(limit: number): HistorySearchEntry[];
+	/** Remove a prompt from history. */
+	delete(id: number): void;
 }
 import { boundKeys, editorKeys, keyHint, rawKeyHint } from "../chrome/keybinding-hints";
 import { OverlayPanel } from "../chrome/overlay-box";
@@ -240,7 +244,12 @@ export class HistorySearchComponent extends OverlayPanel {
 
 		const dot = theme.fg("dim", theme.sep.dot);
 		const navigate = theme.fg("dim", editorKeys("tui.select.up", "tui.select.down")) + theme.fg("muted", " navigate");
-		const hint = [navigate, rawKeyHint("enter", "select"), keyHint("tui.select.cancel", "cancel")].join(dot);
+		const hint = [
+			navigate,
+			rawKeyHint("enter", "select"),
+			rawKeyHint("delete", "delete at end"),
+			keyHint("tui.select.cancel", "cancel"),
+		].join(dot);
 
 		this.addChild(new Spacer(1));
 		this.addChild(this.#searchInput);
@@ -301,6 +310,16 @@ export class HistorySearchComponent extends OverlayPanel {
 		if (matchesKey(keyData, "end")) {
 			this.#flushPendingSearch();
 			this.#menu.moveToBoundary("last");
+			return;
+		}
+
+		if (matchesKey(keyData, "delete") && this.#searchInput.getCursor() === this.#searchInput.getValue().length) {
+			this.#flushPendingSearch();
+			const selected = this.#menu.selectedItem;
+			if (selected) {
+				this.#historyStorage.delete(selected.id);
+				this.#updateResults();
+			}
 			return;
 		}
 
@@ -379,6 +398,7 @@ export class HistorySearchComponent extends OverlayPanel {
 		this.#nativeHints ??= hintsRow([
 			actionHint(["tui.select.up", "tui.select.down"], "navigate"),
 			{ keys: ENTER_KEYS, label: "select" },
+			{ keys: ["delete"], label: "delete at end" },
 			actionHint("tui.select.cancel", "cancel"),
 		]);
 		const root = overlayCard(this.nativeRole, this.title, [this.#searchInput, list, this.#nativeHints]);

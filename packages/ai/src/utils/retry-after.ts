@@ -3,12 +3,13 @@ import { extractRetryHint } from "@oh-my-pi/pi-utils";
 
 export type HeadersLike = Headers | Record<string, string | undefined> | undefined | null;
 
-/** Extracts retry timing using the provider's catalog-declared timestamp timezone. */
+/** Extracts retry timing using the provider or its upstream's declared timestamp timezone. */
 export function extractProviderRetryHint(
 	provider: string | undefined,
 	message: string | undefined,
+	baseUrl?: string,
 ): number | undefined {
-	const naiveResetTimezoneOffset = provider === undefined ? undefined : retryResetTimezoneOffsetFor(provider);
+	const naiveResetTimezoneOffset = provider === undefined ? undefined : retryResetTimezoneOffsetFor(provider, baseUrl);
 	return extractRetryHint(undefined, message, { naiveResetTimezoneOffset });
 }
 
@@ -48,6 +49,46 @@ export function getRetryAfterMsFromHeaders(headers: HeadersLike): number | undef
 	);
 	if (candidates.length === 0) return undefined;
 	return Math.max(...candidates);
+}
+
+/**
+ * The server's explicit `x-should-retry` verdict: `true`/`false` when the
+ * header says so, `undefined` when absent or unrecognised. Non-standard
+ * (Stainless-SDK convention) but emitted by OpenAI, Anthropic, and retrying
+ * gateways; when present it overrides status/text retry heuristics.
+ */
+export function getShouldRetryFromHeaders(headers: HeadersLike): boolean | undefined {
+	if (!headers) return undefined;
+	const value = getHeaderValue(headers, "x-should-retry");
+	if (value === "true") return true;
+	if (value === "false") return false;
+	return undefined;
+}
+
+const RATE_LIMIT_LIMIT_HEADER_PREFIX = "x-ratelimit-limit-";
+
+/**
+ * Name of the first `x-ratelimit-limit-*` header that reports a zero
+ * allowance (Mistral `x-ratelimit-limit-req-minute: 0`, OpenAI
+ * `x-ratelimit-limit-requests: 0`), or `undefined` when none does.
+ *
+ * A zero limit means the plan grants no quota for the model at all, so a 429
+ * carrying one never clears by waiting; `captureOpenAIHttpError` and the
+ * OpenAI-wire transport use it to fail fast instead of replaying.
+ */
+export function getZeroRateLimitHeader(headers: HeadersLike): string | undefined {
+	if (!headers) return undefined;
+	if (headers instanceof Headers) {
+		for (const [name, value] of headers) {
+			if (name.startsWith(RATE_LIMIT_LIMIT_HEADER_PREFIX) && value.trim() === "0") return name;
+		}
+		return undefined;
+	}
+	for (const key in headers) {
+		const name = key.toLowerCase();
+		if (name.startsWith(RATE_LIMIT_LIMIT_HEADER_PREFIX) && headers[key]?.trim() === "0") return name;
+	}
+	return undefined;
 }
 
 export function getHeadersFromError(error: unknown): HeadersLike {

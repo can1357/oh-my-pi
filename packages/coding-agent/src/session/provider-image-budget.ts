@@ -6,7 +6,6 @@ import type {
 	Model,
 	ProviderPayload,
 	TextContent,
-	Tool,
 	ToolResultMessage,
 	ToolResultProviderMetadata,
 	UserMessage,
@@ -15,17 +14,24 @@ import { reachesBudgetedHost } from "@oh-my-pi/pi-ai";
 import { adoptFactoryReplay, toGeminiTools } from "@oh-my-pi/pi-ai/providers/factory-droid/gemini";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
 import { resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { resolveInlineImageByteBudget, resolveRequestBodyByteLimit } from "@oh-my-pi/pi-catalog/compat/request-size";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { capFrameDataBytes, frameDataBytesBudget, providerImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
+import { declaredTools } from "../utils/tool-declarations";
 import { imageDecodeFailureReason } from "@oh-my-pi/pi-tui/chat/image-loading";
 
 const IMAGE_OMISSION: TextContent = {
 	type: "text",
 	text: "[image omitted: provider image limit]",
 };
+
+/** Says `count` images were dropped from a message that keeps other content. */
+function omittedImages(count: number): TextContent {
+	return { type: "text", text: `[${count} image${count === 1 ? "" : "s"} omitted: provider image limit]` };
+}
 
 /**
  * Body bytes added after the clamp sees the context: injected reminders, the provider's own system prompt, and
@@ -136,6 +142,7 @@ function clampContent(
 	state: ImageBudgetState,
 ): (TextContent | ImageContent)[] | undefined {
 	let clamped: (TextContent | ImageContent)[] | undefined;
+	let dropped = 0;
 	for (let index = 0; index < content.length; index++) {
 		const part = content[index];
 		if (part.type === "image" && needsImageDrop(state)) {
@@ -144,14 +151,19 @@ function clampContent(
 				clamped ??= content.slice(0, index);
 				if (state.remainingDrops > 0) state.remainingDrops--;
 				state.inlineBytes -= bytes;
+				dropped++;
 				continue;
 			}
 		}
 		clamped?.push(part);
 	}
+	if (!clamped) return undefined;
 	// An image-only message would otherwise go out empty; converters skip
 	// zero-block messages, silently losing the turn (e.g. an oversized pasted image).
-	return clamped && clamped.length === 0 ? [IMAGE_OMISSION] : clamped;
+	if (clamped.length === 0) return [IMAGE_OMISSION];
+	// Kept text must not read as the whole result: say images were there.
+	clamped.push(omittedImages(dropped));
+	return clamped;
 }
 
 function clampUserMessage(message: UserMessage, state: ImageBudgetState): UserMessage {
@@ -175,9 +187,10 @@ const COMPUTER_FALLBACK_TEXT_CHARS = 16_000;
 
 /**
  * Where the route sends a computer result's metadata screenshot, the result is that one image, never its content:
- * evicting it drops the metadata (and the unsent content images), and the result goes out as its remaining text, as
- * for an unreadable screenshot in {@link dropUnreadableContextImages}; the bytes of that newly sent text accrue to
- * `state.fallbackTextBytes`. Elsewhere the content is what is sent and clamped, and the unsent metadata stays.
+ * evicting it drops the metadata (and the unsent content images), and the result goes out as its remaining text led by
+ * the omission note, as for an unreadable screenshot in {@link dropUnreadableContextImages}; the bytes of that newly
+ * sent text accrue to `state.fallbackTextBytes`. Elsewhere the content is what is sent and clamped, and the unsent
+ * metadata stays.
  */
 function clampToolResultMessage(message: ToolResultMessage, state: ImageBudgetState): ToolResultMessage {
 	if (!needsImageDrop(state)) return message;
@@ -191,15 +204,17 @@ function clampToolResultMessage(message: ToolResultMessage, state: ImageBudgetSt
 	if (state.remainingDrops > 0) state.remainingDrops--;
 	state.inlineBytes -= bytes;
 	const text = message.content.filter(part => part.type === "text");
+	// The note leads: the route sends this text truncated from the end.
+	const content = text.length > 0 ? [omittedImages(1), ...text] : [IMAGE_OMISSION];
 	if (state.fallbackTextBytes !== undefined) {
-		const sent = text
+		const sent = content
 			.map(part => part.text)
 			.join("\n")
 			.slice(0, COMPUTER_FALLBACK_TEXT_CHARS);
 		// The note's prefix, call id and truncation marker.
 		state.fallbackTextBytes += Buffer.byteLength(JSON.stringify(sent)) + 256;
 	}
-	return { ...message, content: text.length > 0 ? text : [IMAGE_OMISSION], providerMetadata: undefined };
+	return { ...message, content, providerMetadata: undefined };
 }
 
 function clampImages(context: Context, state: ImageBudgetState): Context {
@@ -291,39 +306,15 @@ function measuredContent<T extends { type: string }>(content: readonly T[], stri
 }
 
 /**
- * Every {@link Tool} field and nothing else: `satisfies` stops compiling when `Tool` gains or drops a field, so the
- * measured declaration cannot drift from what providers serialize. Anything else on a live tool object (sessions,
- * runners, caches) is execution state that never reaches the wire (#17819).
- */
-const TOOL_DECLARATION_KEYS = Object.keys({
-	name: true,
-	description: true,
-	parameters: true,
-	strict: true,
-	deferLoading: true,
-	customFormat: true,
-	customWireName: true,
-	native: true,
-	examples: true,
-} satisfies Record<keyof Tool, true>) as (keyof Tool)[];
-
-function declaredTools(tools: readonly Tool[] | undefined): Tool[] | undefined {
-	return tools?.map(tool => {
-		const declared: Partial<Record<keyof Tool, unknown>> = {};
-		for (const key of TOOL_DECLARATION_KEYS) declared[key] = tool[key];
-		return declared as Tool;
-	});
-}
-
-/**
  * UTF-8 bytes `context` puts in the request body around its inline images. Text, tools and the system prompt ride in
  * the same body as the images; they are measured with every image's base64 emptied, so the cost follows the text
  * rather than the images. Never sent: tool-result `details` (UI-only), another provider's native payload (assistant
  * turns, compaction summaries), an assistant's Responses or Cursor history from another model, which those wires
  * replay only on the model that produced it, and inactive tool definitions anywhere but the Anthropic wire, the only
- * one that re-declares them. A same-model Responses turn goes out as its native items or as its rebuilt content, never
- * both: the larger is charged. Factory's Gemini wire is measured as it sends: tool schemas dereferenced, and replay
- * reasoning settled by {@link adoptFactoryReplay}. A computer result carries its screenshot twice and sends one copy
+ * one that re-declares them. A same-model Responses turn, or a Factory Gemini turn kept for native replay, goes out
+ * as its native content or as its rebuilt content, never both: the larger is charged. Factory's Gemini wire is
+ * measured as it sends: tool schemas dereferenced, and replay reasoning and native content settled by
+ * {@link adoptFactoryReplay}. A computer result carries its screenshot twice and sends one copy
  * (sentScreenshotBytes); where that is the metadata copy, none of its content is sent.
  */
 function otherRequestBytes(context: Context, model: Model, metadataWire: boolean): number {
@@ -331,13 +322,14 @@ function otherRequestBytes(context: Context, model: Model, metadataWire: boolean
 	const factory = model.api === "factory-droid-agent" ? (model as Model<"factory-droid-agent">) : undefined;
 	const replayApi = factory ? resolveFactoryDroidPolicy(factory)?.wire : model.api;
 	const gemini = replayApi === "google-generate" ? factory : undefined;
+	const nativeReplay = gemini !== undefined && resolveModelPolicy(gemini).request.googleNativeReplay === true;
 	const stringArguments =
 		replayApi === "openai-responses" ||
 		replayApi === "azure-openai-responses" ||
 		replayApi === "openai-codex-responses" ||
 		replayApi === "openai-completions";
 	const messages = context.messages.map(original => {
-		const message = gemini ? adoptFactoryReplay(original, gemini) : original;
+		const message = gemini ? adoptFactoryReplay(original, gemini, nativeReplay) : original;
 		if (message.role === "toolResult") {
 			const metadata = message.providerMetadata;
 			if (!metadata || sentScreenshotBytes(message, metadataWire) === undefined) {
@@ -362,16 +354,18 @@ function otherRequestBytes(context: Context, model: Model, metadataWire: boolean
 		const owner =
 			message.role === "assistant" ? message.provider : "provider" in payload ? payload.provider : undefined;
 		if (owner !== undefined && owner !== model.provider) return { ...message, content, providerPayload: undefined };
-		if (
-			message.role !== "assistant" ||
-			(payload.type !== "openaiResponsesHistory" && payload.type !== "cursorHistory")
-		) {
+		if (message.role !== "assistant") return { ...message, content };
+		if (payload.type === "openaiResponsesHistory" || payload.type === "cursorHistory") {
+			if (message.api !== replayApi || message.model !== model.id) {
+				return { ...message, content, providerPayload: undefined };
+			}
+			if (payload.type === "cursorHistory") return { ...message, content };
+		} else if (payload.type !== "geminiNativeContent") {
 			return { ...message, content };
-		}
-		if (message.api !== replayApi || message.model !== model.id) {
+		} else if (!gemini) {
+			// Only Factory's Gemini wire replays it, and adoptFactoryReplay kept it only where it does.
 			return { ...message, content, providerPayload: undefined };
 		}
-		if (payload.type !== "openaiResponsesHistory") return { ...message, content };
 		return Buffer.byteLength(JSON.stringify(payload)) > Buffer.byteLength(JSON.stringify(content))
 			? { ...message, content: [] }
 			: { ...message, content, providerPayload: undefined };

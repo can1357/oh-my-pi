@@ -95,7 +95,7 @@ RUN set -eux; \
       | git cat-file --batch-check > /out/natives-seed/trees.txt; \
     rm -rf /tmp/native-key.git
 
-# Layer 4 — compile pi-natives to a Linux N-API addon. Persistent caches keep
+# Layer 4 — compile omp-natives to a Linux N-API addon. Persistent caches keep
 # repeat builds incremental: cargo's package index + git-deps (CARGO_HOME is
 # /usr/local/cargo in the rust image, not ~/.cargo) + the workspace target dir.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -173,7 +173,7 @@ RUN curl -fsSL https://sh.rustup.rs -o /tmp/rustup-init.sh \
     && rm -rf /usr/local/rustup-bootstrap \
     && /usr/local/cargo/bin/rustup --version
 
-# pi-natives addon: pi's loader probes /opt/bun/bin as a fallback path.
+# omp-natives addon: pi's loader probes /opt/bun/bin as a fallback path.
 COPY --from=natives-builder /out/pi_natives.linux-*.node /opt/bun/bin/
 COPY --from=natives-builder /out/natives-seed/ /opt/pi-natives-seed/
 

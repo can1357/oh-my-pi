@@ -1,8 +1,9 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ResponsesWebSocketConnection } from "../src/providers/responses-websocket-connection";
 
 const openAIResponsesModel = getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">;
 const openAICompletionsModel = {
@@ -105,13 +106,22 @@ describe("StreamOptions.fetch override", () => {
 			{ preconnect: fetch.preconnect },
 		);
 
-		const result = await streamOpenAIResponses(openAIResponsesModel, baseContext(), {
-			apiKey: "test-key",
-			fetch: customFetch,
-		}).result();
+		const connect = spyOn(ResponsesWebSocketConnection.prototype, "connect").mockImplementation(() => {
+			throw new Error("A custom fetch without WS opt-in must not open a socket");
+		});
+		try {
+			const result = await streamOpenAIResponses(openAIResponsesModel, baseContext(), {
+				apiKey: "test-key",
+				fetch: customFetch,
+			}).result();
 
-		expect(result.stopReason).toBe("stop");
-		expect(calls.length).toBeGreaterThanOrEqual(1);
-		expect(calls[0]?.url).toContain("/responses");
+			expect(result.stopReason).toBe("stop");
+			expect(result.content).toContainEqual(expect.objectContaining({ type: "text", text: "hi" }));
+			expect(calls).toHaveLength(1);
+			expect(calls[0]?.url).toContain("/responses");
+			expect(connect).not.toHaveBeenCalled();
+		} finally {
+			connect.mockRestore();
+		}
 	});
 });

@@ -1,1 +1,1 @@
-screen locked: macOS is showing its lock screen, so a display capture shows the lock screen and a window capture shows that window's last frame behind it
+{{#if windows}}screen locked: Windows reports a locked or disconnected session or a secure desktop, so this capture does not confirm the app's current state{{else}}screen locked: macOS is showing its lock screen, so a display capture shows the lock screen and a window capture shows that window's last frame behind it{{/if}}

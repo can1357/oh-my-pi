@@ -264,7 +264,12 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	},
 	{ name: "set_auto_retry", doc: "Enable or disable auto-retry.", params: { enabled: "boolean" } },
 	{ name: "abort_retry", doc: "Abort a pending auto-retry." },
-	{ name: "bash", doc: "Run a shell command.", params: { command: "string" }, result: "BashResult" },
+	{
+		name: "bash",
+		doc: "Run a shell command. Before excluding output, require ready.supportsBashExcludeFromContext to be true.",
+		params: { command: "string", "excludeFromContext?": "boolean" },
+		result: "BashResult",
+	},
 	{ name: "abort_bash", doc: "Abort the running shell command." },
 
 	{ name: "get_session_stats", doc: "Session statistics.", result: "SessionStats" },

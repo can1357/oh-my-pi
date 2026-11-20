@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
-import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,34 +8,11 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { initializeWithSettings, loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "../helpers/settings-test-state";
+import { SYMLINKS_USABLE } from "../helpers/symlink-support";
 
 const HOOK_SOURCE = `export default function(pi) {
 	pi.on("tool_call", async () => ({ block: true, reason: "blocked by hook" }));
 }`;
-
-/**
- * Creating a symlink needs Developer Mode or elevation on Windows and is simply absent on
- * some images, so the link test is gated on whether this host can make one at all.
- *
- * Probed at module scope, not in `beforeEach`: `skipIf` reads its condition when the test
- * is registered, which happens before any hook runs, so a probe assigned in `beforeEach`
- * would leave the flag undefined and skip the test on every host.
- */
-const probeSymlinks = (): boolean => {
-	const dir = nodeFs.mkdtempSync(path.join(os.tmpdir(), "omp-symlink-probe-"));
-	try {
-		const target = path.join(dir, "target.ts");
-		nodeFs.writeFileSync(target, HOOK_SOURCE);
-		nodeFs.symlinkSync(target, path.join(dir, "link.ts"), "file");
-		return true;
-	} catch {
-		return false;
-	} finally {
-		nodeFs.rmSync(dir, { recursive: true, force: true });
-	}
-};
-
-const SYMLINKS_USABLE = probeSymlinks();
 
 describe("native hook discovery", () => {
 	let root: string;

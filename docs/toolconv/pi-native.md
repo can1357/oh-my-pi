@@ -210,7 +210,9 @@ successful response with no body is also an `AuthGatewayError`.
 - `packages/ai/src/stream.ts` — pi-native dispatch
 - `packages/ai/src/providers/pi-native-client.ts` — request, auth, SSE and
   timeout behavior
-- `packages/ai/src/providers/pi-native-server.ts` — request validation,
-  option allow-list, SSE and error envelopes
+- `packages/ai/src/providers/pi-native-server.ts` — request validation, SSE and
+  error envelopes
+- `packages/ai/src/auth-gateway/caller-options.ts` — the options a request may
+  carry, and the ones a scoped client token loses
 - `packages/ai/src/auth-gateway/server.ts` — `/v1/pi/stream` route and gateway
   model/credential resolution

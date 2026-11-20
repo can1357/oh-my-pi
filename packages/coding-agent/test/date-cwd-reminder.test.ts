@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
 import type { Api, AssistantMessage, Context, Message, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai";
+import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import { isPerCallContextMessage, markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -722,6 +726,130 @@ describe("date-cwd-reminder", () => {
 				]);
 			});
 
+			it("moves an earlier injector's control off a per-call message, so today's reminder stays last and is placed once", () => {
+				const { placements, journal } = createJournal();
+				const first: Message = { role: "user", content: "task", timestamp: 1 };
+				const call = createAssistantMessage("calling a tool");
+				const result: Message = {
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "read",
+					content: [{ type: "text", text: "notes" }],
+					isError: false,
+					timestamp: 3,
+				};
+				const history = [first, call, result];
+				// A context hook's status message, rebuilt for every request with a fixed timestamp.
+				const status = (): Message => ({ role: "user", content: "STATUS", timestamp: 0 });
+				// An injector from before per-call messages were excluded saw it as a sent turn and
+				// anchored the day-two control on it: the journal such a session carries.
+				const earlier = new DateCwdReminderInjector(journal);
+				earlier.transform({ systemPrompt: ["system"], messages: [...history, status()] }, "2026-08-14", "/work");
+				earlier.transform({ systemPrompt: ["system"], messages: [...history, status()] }, "2026-08-15", "/work");
+				expect(placements.at(-1)).toMatchObject({ turn: "user:0:", placement: "control" });
+
+				const resumed = new DateCwdReminderInjector(journal);
+				const reminderDates: string[][] = [];
+				const journalSizes: number[] = [];
+				for (let request = 0; request < 3; request++) {
+					const tail = status();
+					markPerCallContextMessage(tail);
+					const out = resumed.transform(
+						{ systemPrompt: ["system"], messages: [...history, tail] },
+						"2026-08-16",
+						"/work",
+					);
+					reminderDates.push(
+						out.messages.flatMap(message => {
+							const match = JSON.stringify(message.content).match(/2026-08-1\d/);
+							return match ? [match[0]] : [];
+						}),
+					);
+					journalSizes.push(placements.length);
+				}
+
+				for (const dates of reminderDates) expect(dates).toEqual(["2026-08-14", "2026-08-15", "2026-08-16"]);
+				expect(new Set(journalSizes).size).toBe(1);
+
+				// Reopen after the conversation grew: the move was journaled, so the day-two control stays
+				// right after the turn it was moved to instead of re-deriving from the new request shape.
+				const later: Message[] = [
+					...history,
+					createAssistantMessage("calling another tool"),
+					{ ...result, toolCallId: "call-2", timestamp: 5 },
+				];
+				const sizeBeforeReopen = placements.length;
+				const reopened = new DateCwdReminderInjector(journal);
+				for (let request = 0; request < 2; request++) {
+					const tail = status();
+					markPerCallContextMessage(tail);
+					const out = reopened.transform(
+						{ systemPrompt: ["system"], messages: [...later, tail] },
+						"2026-08-16",
+						"/work",
+					);
+					const dated = out.messages.flatMap((message, index) => {
+						const match = JSON.stringify(message.content).match(/2026-08-1\d/);
+						return match ? [{ date: match[0], index }] : [];
+					});
+					expect(dated.map(entry => entry.date)).toEqual(["2026-08-14", "2026-08-15", "2026-08-16"]);
+					// The day-two control follows the first tool result, before the later turns.
+					expect(out.messages[dated[1]!.index - 1]).toBe(result);
+				}
+				expect(placements.length).toBe(sizeBeforeReopen);
+			});
+
+			it("keeps a moved control ahead of a newer control already at its new turn when the session reopens", () => {
+				const { placements, journal } = createJournal();
+				const first: Message = { role: "user", content: "task", timestamp: 1 };
+				const result: Message = {
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "read",
+					content: [{ type: "text", text: "notes" }],
+					isError: false,
+					timestamp: 3,
+				};
+				const history = [first, createAssistantMessage("calling a tool"), result];
+				const status = (): Message => ({ role: "user", content: "STATUS", timestamp: 0 });
+				// An earlier injector anchored the day-two control on the hook's status message...
+				const earlier = new DateCwdReminderInjector(journal);
+				earlier.transform({ systemPrompt: ["system"], messages: [...history, status()] }, "2026-08-14", "/work");
+				earlier.transform({ systemPrompt: ["system"], messages: [...history, status()] }, "2026-08-15", "/work");
+				// ...and the day-three control already sits after the tool result.
+				journal.record({
+					conversation: "user:1:",
+					turn: "toolResult:3",
+					reminder: renderDateCwdReminder("2026-08-16", "/work"),
+					placement: "control",
+				});
+				const datesOf = (injector: DateCwdReminderInjector, withStatus = true) => {
+					const tail = status();
+					markPerCallContextMessage(tail);
+					const out = injector.transform(
+						{ systemPrompt: ["system"], messages: withStatus ? [...history, tail] : history },
+						"2026-08-16",
+						"/work",
+					);
+					return out.messages.flatMap(message => {
+						const match = JSON.stringify(message.content).match(/2026-08-1\d/);
+						return match ? [match[0]] : [];
+					});
+				};
+				// The resume moves day two after the tool result, ahead of day three, and journals the move.
+				expect(datesOf(new DateCwdReminderInjector(journal))).toEqual(["2026-08-14", "2026-08-15", "2026-08-16"]);
+				const sizeAfterMove = placements.length;
+				// A reopen replays the journal, the move last: day two keeps its place, with or without the
+				// per-call message the old control was anchored on.
+				expect(datesOf(new DateCwdReminderInjector(journal))).toEqual(["2026-08-14", "2026-08-15", "2026-08-16"]);
+				expect(datesOf(new DateCwdReminderInjector(journal), false)).toEqual([
+					"2026-08-14",
+					"2026-08-15",
+					"2026-08-16",
+				]);
+				expect(placements.length).toBe(sizeAfterMove);
+			});
+
 			it("dates the first turn today when the journal has no reminder for it", () => {
 				const { journal } = createJournal();
 				const out = new DateCwdReminderInjector(journal).transform(
@@ -1404,6 +1532,177 @@ describe("date-cwd reminder on the provider wire", () => {
 			]);
 			expect(wire[2]!.at(-1)).toBe(reminder);
 			expect(wire[3]!.filter(message => message === reminder)).toHaveLength(1);
+		} finally {
+			setSystemTime();
+			authStorage.close();
+		}
+	});
+
+	it("keeps the Anthropic cache on the history when the date rolls over under per-call messages a context hook adds", async () => {
+		using tempDir = TempDir.createSync("@pi-date-cwd-reminder-");
+		await Bun.write(tempDir.join("notes.txt"), "notes");
+		const api = "test-date-cwd-reminder-per-call";
+		const contexts: Context[] = [];
+		registerCustomApi(api, (_model, context) => {
+			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			const request = contexts.length;
+			queueMicrotask(() => {
+				if (request < 5) {
+					// The run crosses midnight between tool continuations: request 3 is the first of the new day.
+					if (request === 2) setSystemTime(new Date(2026, 7, 15, 0, 1));
+					const toolCall = {
+						type: "toolCall" as const,
+						id: `read-${request}`,
+						name: "read",
+						arguments: { path: "notes.txt" },
+					};
+					const message: AssistantMessage = {
+						...createAssistantMessage(""),
+						content: [toolCall],
+						stopReason: "toolUse",
+					};
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
+					stream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") });
+				}
+			});
+			return stream;
+		});
+		const model = buildModel({
+			id: "date-cwd-reminder-per-call",
+			name: "Date cwd reminder per-call",
+			api,
+			provider: "managed-primary",
+			// Remote endpoint: a loopback URL would turn on append-only context, which pins message identity.
+			baseUrl: "https://api.example.com/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.keys.setRuntime(model.provider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		// A hook that pins a note after the first turn and appends a status block, both built
+		// afresh on every request with a fixed timestamp, so their keys repeat request to request.
+		const perCallHook: ExtensionFactory = pi => {
+			pi.on("context", event => ({
+				messages: [
+					event.messages[0]!,
+					{ role: "user", content: [{ type: "text", text: "PINNED NOTE" }], timestamp: 0 },
+					...event.messages.slice(1),
+					{ role: "user", content: [{ type: "text", text: "STATUS BLOCK" }], timestamp: 0 },
+				],
+			}));
+		};
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model,
+			toolNames: ["read"],
+			disableExtensionDiscovery: true,
+			extensions: [perCallHook],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			taskDepth: 1,
+			agentId: "SubAgent",
+		});
+		sessions.push(session);
+
+		setSystemTime(new Date(2026, 7, 14, 23, 59));
+		try {
+			await session.sendUserMessage("first");
+			await session.waitForIdle();
+			setSystemTime();
+
+			expect(contexts).toHaveLength(5);
+			expect(contexts[0]!.messages.filter(message => isPerCallContextMessage(message))).toHaveLength(2);
+
+			// The same requests as Anthropic bodies: each must cache its history where the next request reads it.
+			const anthropicModel = buildModel({
+				id: "claude-opus-5-5",
+				name: "Claude Opus 5.5",
+				api: "anthropic-messages",
+				provider: "anthropic",
+				baseUrl: "https://api.anthropic.com",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 1_000_000,
+				maxTokens: 64_000,
+			} satisfies ModelSpec<"anthropic-messages">);
+			const bodies: MessageCreateParams[] = [];
+			for (const context of contexts) {
+				let body: MessageCreateParams | undefined;
+				const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+					body = JSON.parse(requestBodyText(init) ?? "{}") as MessageCreateParams;
+					return new Response(
+						JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
+						{ status: 400, headers: { "Content-Type": "application/json" } },
+					);
+				}) as typeof fetch;
+				await streamAnthropic(anthropicModel, context, { apiKey: "sk-ant-api-test", fetch: fetchMock })
+					.result()
+					.catch(() => undefined);
+				if (!body) throw new Error("wire body was not captured");
+				bodies.push(body);
+			}
+			const withoutBreakpoints = (message: MessageCreateParams["messages"][number]) =>
+				JSON.stringify(message, (key, value) => (key === "cache_control" ? undefined : value));
+			for (let request = 1; request < bodies.length; request++) {
+				const previous = bodies[request - 1]!.messages;
+				const next = bodies[request]!.messages;
+				let repeated = 0;
+				while (
+					repeated < Math.min(previous.length, next.length) &&
+					withoutBreakpoints(previous[repeated]!) === withoutBreakpoints(next[repeated]!)
+				) {
+					repeated++;
+				}
+				const breakpoints = previous.flatMap((message, index) =>
+					Array.isArray(message.content) &&
+					message.content.some(block => "cache_control" in block && block.cache_control != null)
+						? [index]
+						: [],
+				);
+				const reusable = breakpoints.filter(index => index < repeated).at(-1) ?? -1;
+				const newestToolResult = previous.findLastIndex(
+					message => Array.isArray(message.content) && message.content.some(block => block.type === "tool_result"),
+				);
+				// The next request reads the earlier request's cache at least through its newest tool result.
+				expect({ request, readsThroughNewestToolResult: reusable >= newestToolResult }).toEqual({
+					request,
+					readsThroughNewestToolResult: true,
+				});
+			}
+
+			// What each request sends as conversation history: everything but the hook's per-call messages.
+			const history = contexts.map(context =>
+				context.messages
+					.filter(message => !isPerCallContextMessage(message))
+					.map(message => JSON.stringify([message.role, message.content])),
+			);
+			for (let request = 1; request < history.length; request++) {
+				expect(history[request]!.slice(0, history[request - 1]!.length)).toEqual(history[request - 1]!);
+			}
+			const reminder = JSON.stringify([
+				"developer",
+				renderDateCwdReminder("2026-08-15", normalizePromptPath(tempDir.path())),
+			]);
+			expect(history[4]!.filter(message => message === reminder)).toHaveLength(1);
 		} finally {
 			setSystemTime();
 			authStorage.close();

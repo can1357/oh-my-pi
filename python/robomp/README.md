@@ -224,6 +224,11 @@ The integration test spawns a real `omp --mode rpc` against an
   `ROBOMP_SHUTDOWN_DRAIN_TIMEOUT_SECONDS` (25s) +
   `ROBOMP_SHUTDOWN_KILL_TIMEOUT_SECONDS` (5s); compose
   `stop_grace_period: 30s` covers both.
+- **PR checkout fallback.** If the pull ref is missing, same-repository PRs
+  can fetch their source branch only when its tip matches the webhook head SHA.
+  Direct and proxy transports accept Git-valid branch characters (including
+  `+`, embedded `@`, and Unicode), while rejecting unsafe refspecs and options.
+  Proxy PR-head requests require a positive `pr_number`.
 - **Logs.** Structured JSON on stdout, rotated to
   `/data/logs/robomp.log.jsonl`.
 - **Inspection** (localhost only): `GET /events?limit=N`,

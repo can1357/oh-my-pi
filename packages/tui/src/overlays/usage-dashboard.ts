@@ -126,6 +126,33 @@ function statusWithUnavailableAccounts(windows: readonly { status?: UsageLimit["
 	return aggregateStatus(windows) === "exhausted" ? "exhausted" : "warning";
 }
 
+/**
+ * Tone a bar-less amount row (prepaid balance, spend-to-date) takes from its
+ * reported status; `undefined` keeps the row informational, so providers that
+ * omit a status on such rows render unchanged.
+ */
+function pressureTone(status: UsageLimit["status"]): "error" | "warning" | undefined {
+	if (status === "exhausted") return "error";
+	if (status === "warning") return "warning";
+	return undefined;
+}
+
+/**
+ * Text a bar-less amount row shows: the formatted amount, else `exhausted`
+ * when the provider reports the quota spent without a measurable amount,
+ * else the caller's no-data label.
+ */
+function barlessAmountText(
+	amount: string | undefined,
+	status: UsageLimit["status"],
+	labels: { exhausted: string; noData: string },
+): string {
+	return amount ?? (status === "exhausted" ? labels.exhausted : labels.noData);
+}
+
+const CARD_AMOUNT_LABELS = { exhausted: "exhausted", noData: "no data" } as const;
+const NATIVE_AMOUNT_LABELS = { exhausted: "Exhausted", noData: "No data" } as const;
+
 /** Fraction below which a window counts as untouched (renders as 100% free). */
 const IDLE_FRACTION = 0.005;
 /**
@@ -835,7 +862,8 @@ export class UsageDashboardComponent implements Component {
 				}
 			}
 			if (window.fraction === undefined) {
-				const text = theme.fg("dim", window.usedText ?? "no data");
+				const amount = barlessAmountText(window.usedText, window.status, CARD_AMOUNT_LABELS);
+				const text = theme.fg(pressureTone(window.status) ?? "dim", amount);
 				for (const line of wrapTextWithAnsi(`${prefix}${text}`, contentWidth)) lines.push(`  ${line}`);
 				continue;
 			}
@@ -1056,7 +1084,7 @@ export class UsageDashboardComponent implements Component {
 		const refreshHint = this.#options.refresh ? "r refresh · " : "";
 		const hint =
 			this.#view === "detail"
-				? `${scrollHint}${refreshHint}${cancel} back`
+				? `${scrollHint}${refreshHint}${formatKeyHint("tab")} overview · ${cancel} back`
 				: `${scrollHint}${refreshHint}${formatKeyHint("enter")} details · ${cancel} close`;
 		this.#panel.title = title;
 		this.#header.setLines([checkedText ? theme.fg("dim", checkedText) : ""]);
@@ -1435,7 +1463,18 @@ export class UsageDashboardComponent implements Component {
 				];
 				if (window.fraction === undefined) {
 					cells.push(
-						text([span(window.usedText ?? "No data", "muted")], { role: "omp.usage.amount", truncate: "end" }),
+						text(
+							[
+								span(
+									barlessAmountText(window.usedText, window.status, NATIVE_AMOUNT_LABELS),
+									pressureTone(window.status) ?? "muted",
+								),
+							],
+							{
+								role: "omp.usage.amount",
+								truncate: "end",
+							},
+						),
 					);
 				} else {
 					cells.push(
@@ -1694,7 +1733,16 @@ export class UsageDashboardComponent implements Component {
 						account: [span(reportAccountLabel(report, limit, index), "muted")],
 						left:
 							fraction === undefined
-								? [span(formatAbsoluteOnlyAmount([limit]) ?? "No data", "muted")]
+								? [
+										span(
+											barlessAmountText(
+												formatAbsoluteOnlyAmount([limit]),
+												limit.status,
+												NATIVE_AMOUNT_LABELS,
+											),
+											pressureTone(limit.status) ?? "muted",
+										),
+									]
 								: leftSpans(fraction, limit.status),
 						reset:
 							resetsAt !== undefined && resetsAt > nowMs
@@ -1802,10 +1850,11 @@ export class UsageDashboardComponent implements Component {
 			void this.#refresh();
 			return;
 		}
-		if (
-			this.#view === "overview" &&
-			(matchesKey(data, "return") || matchesKey(data, "tab") || matchesKey(data, "d"))
-		) {
+		if (matchesKey(data, "tab")) {
+			this.#setView(this.#view === "overview" ? "detail" : "overview");
+			return;
+		}
+		if (this.#view === "overview" && (matchesKey(data, "return") || matchesKey(data, "d"))) {
 			this.#setView("detail");
 			return;
 		}

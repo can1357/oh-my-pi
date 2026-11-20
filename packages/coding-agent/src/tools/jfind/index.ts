@@ -12,8 +12,16 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { formatBytes, formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { sessionResolveContext } from "../../internal-urls/context";
 import { InternalUrlFilesystem } from "../../internal-urls/url-filesystem";
-import { hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../../judgment";
+import {
+	hasNativeJudge,
+	type JudgeDeps,
+	journalJudgmentUsage,
+	nativeJudgeRejection,
+	resolveJudge,
+	sharedJudgmentCache,
+} from "../../judgment";
 import findDescription from "../../prompts/tools/find.md" with { type: "text" };
+import { SPOTLIGHT_ENTRY } from "../../spotlight/types";
 import type { ToolSession } from "..";
 import { resolveToolTier } from "../approval";
 import {
@@ -23,12 +31,13 @@ import {
 	searchPathTier,
 } from "../path-utils";
 import { searchApprovalCacheTargets } from "../search-approval-targets";
+import { cfgFindVerifyModel } from "../settings";
 import { toolResult } from "../tool-result";
 import { type CascadeResult, runCascade } from "./cascade";
 import { rankedHeat } from "./passages";
 import { resolveSearchRoot } from "./tree";
 
-import { cfgFindEnabled } from "../settings";
+import { cfgFindEnabled, cfgFindHitThreshold } from "../settings";
 
 const findSchema = type({
 	query: "string",
@@ -41,19 +50,22 @@ export type FindToolInput = typeof findSchema.infer;
 /** Line ranges shown per hit in the model-facing text, strongest first. */
 const RANGES_SHOWN = 3;
 
-/** Wall-clock budget for one `find` call; a stalled judge fails instead of blocking the turn. */
-const FIND_TIMEOUT_MS = 20_000;
+/** Wall-clock budget for one `find` call; a stalled judge ends it with the hits verified so far instead of blocking the turn. */
+export const FIND_TIMEOUT_MS = 20_000;
 
 /**
  * Resolve `find.enabled` for a session: `auto` enables `find` only when the
- * judge role is backed by a native System One model ({@link hasNativeJudge})
- * rather than a prompted small model. Gates tool creation and the `find` hints
- * in sibling tool prompts.
+ * judge role is backed by a working native System One model ({@link hasNativeJudge})
+ * rather than a prompted small model or a native route that rejected the account.
+ * Gates tool creation and the `find` hints in sibling tool prompts.
  */
 export function isFindEnabled(session: ToolSession): boolean {
 	const mode = cfgFindEnabled.get(session.settings);
 	if (mode !== "auto") return mode === "on";
-	return session.modelRegistry !== undefined && hasNativeJudge(session.settings, session.modelRegistry);
+	return (
+		session.modelRegistry !== undefined &&
+		hasNativeJudge(session.settings, session.modelRegistry, session.getActiveModel?.())
+	);
 }
 
 /** Semantic search tool: describe a behavior, get files and line ranges that implement it. */
@@ -75,7 +87,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 	constructor(private readonly session: ToolSession) {}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
 		params: FindToolInput,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<FindToolDetails>,
@@ -97,19 +109,29 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 				: formatPathRelativeToCwd(root.path, cwd, { trailingSlash: root.type === "directory" });
 		const registry = this.session.modelRegistry;
 		if (!registry) throw new ToolError("find has no model registry to resolve a judge from");
-		const judge = resolveJudge({
+		const sessionModel = this.session.getActiveModel?.();
+		const rejected = nativeJudgeRejection(this.session.settings, registry, sessionModel);
+		if (rejected) throw new ToolError(`find is disabled for this session: judge ${rejected}. Use grep.`);
+		const judgeDeps: JudgeDeps = {
 			settings: this.session.settings,
 			registry,
+			sessionModel,
 			sessionId: this.session.getSessionId?.() ?? undefined,
 			purpose: "find",
 			onUsage: journalJudgmentUsage(this.session.sessionManager),
 			telemetry: this.session.getTelemetry?.(),
 			cache: sharedJudgmentCache(),
 			costGate: this.session.costGate,
-		});
+		};
+		const judge = resolveJudge(judgeDeps);
+		const verifyModel = cfgFindVerifyModel.get(this.session.settings)?.trim();
+		const verifyJudge = verifyModel ? resolveJudge({ ...judgeDeps, leadModel: verifyModel }) : undefined;
+		const experiment = this.session.spotlight;
 		const started = performance.now();
-		const timeout = AbortSignal.timeout(FIND_TIMEOUT_MS);
-		let result: CascadeResult;
+		const deadline = AbortSignal.timeout(FIND_TIMEOUT_MS);
+		// The phase the deadline interrupts, named when nothing was verified before it.
+		let phase = "lexical scan";
+		let result: CascadeResult | undefined;
 		try {
 			result = await runCascade({
 				root,
@@ -117,18 +139,43 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 				query,
 				extraKeywords: params.grep_keywords,
 				judge,
+				verifyJudge,
+				spotlight: experiment ? { client: experiment.client, thinking: experiment.thinking } : undefined,
 				includeHidden: false,
-				signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-				onProgress: message => onUpdate?.({ content: [{ type: "text", text: message }] }),
+				signal,
+				deadline,
+				threshold: cfgFindHitThreshold.get(this.session.settings),
+				onProgress: message => {
+					// Keep the phase the deadline interrupted; the cascade still reads files after it.
+					if (!deadline.aborted) phase = message;
+					onUpdate?.({ content: [{ type: "text", text: message }] });
+				},
 			});
 		} catch (error) {
-			if (timeout.aborted && !signal?.aborted) {
-				throw new ToolError(`find timed out after ${formatDuration(FIND_TIMEOUT_MS)}`);
-			}
-			throw error;
+			if (!deadline.aborted || signal?.aborted) throw error;
+		}
+		if (!result) {
+			throw new ToolError(
+				`find timed out after ${formatDuration(FIND_TIMEOUT_MS)} at "${phase}", before any file was judged. Narrow \`path\` to a smaller tree, or use grep.`,
+			);
 		}
 		const elapsedMs = performance.now() - started;
-		const { stats, threshold, keywords, coverage } = result;
+		const { stats, threshold, keywords, coverage, ranking, timeout } = result;
+		experiment?.log(SPOTLIGHT_ENTRY.find, {
+			toolCallId,
+			ranker: ranking.ranker,
+			candidates: ranking.candidates,
+			read: ranking.read,
+			hits: result.hits.length,
+			spotlightMs: ranking.spotlight?.ms,
+			spotlightTokens: ranking.spotlight?.inputTokens,
+			spotlightCostUsd: ranking.spotlight?.costUsd,
+			spotlightError: ranking.spotlight?.error,
+			judgeRequests: stats.requests,
+			judgeRequestsSaved: ranking.judgeRequestsSaved,
+			judgeCostUsd: stats.cost - (ranking.spotlight?.costUsd ?? 0),
+			elapsedMs: Math.round(elapsedMs),
+		});
 		// Cascade paths are root-relative; the model and renderer want paths
 		// `read` resolves (cwd-relative files, URLs under URL scopes, including
 		// with `:start-end` selectors) without knowing the scope.
@@ -136,29 +183,54 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			...hit,
 			rel: formatPathRelativeToCwd(resolveSearchResultPath(root.path, hit.rel), cwd),
 		}));
+		const lexicalFallback = result.lexicalFallback.map(match => ({
+			...match,
+			rel: formatPathRelativeToCwd(resolveSearchResultPath(root.path, match.rel), cwd),
+		}));
 		const details: FindToolDetails = {
 			query,
 			keywords,
 			threshold,
 			hits,
+			lexicalFallback,
 			coverage,
 			stats,
+			timeout,
 			elapsedMs,
 			cwd,
 			scopePath,
 		};
 		const where = scopePath === undefined ? "" : ` in ${scopePath}`;
 		const out: string[] = [];
-		if (coverage === "unavailable") {
+		const disabled =
+			coverage === "unavailable" ? nativeJudgeRejection(this.session.settings, registry, sessionModel) : undefined;
+		if (disabled) {
+			out.push(
+				`find is disabled for this session: judge ${disabled}. Nothing was judged for "${query}"${where}; use grep.`,
+			);
+		} else if (coverage === "unavailable") {
 			out.push(
 				`find unavailable for "${query}"${where}: all ${stats.requests} judge requests failed, nothing was judged. This is not evidence of absence; use grep.`,
+			);
+		} else if (timeout?.passages === 0) {
+			out.push(
+				`find timed out after ${formatDuration(FIND_TIMEOUT_MS)} at "${phase}", before any passage was verified. This is not evidence of absence; narrow \`path\`, or use grep.`,
+			);
+		} else if (stats.listed === 0) {
+			out.push(
+				`no eligible files${where || " in the workspace"}: find skips gitignored, hidden, binary and credential files and build/vendor dirs (dist, build, out, target, node_modules, …). grep with \`gitignore: false\` searches them.`,
 			);
 		} else if (hits.length === 0) {
 			out.push(`no hits for "${query}"${where} (τ ${threshold.toFixed(2)})`);
 		} else {
 			out.push(`${hits.length} hit(s) for "${query}"${where} (τ ${threshold.toFixed(2)}), strongest first`);
 		}
-		if (coverage === "partial") {
+		if (timeout && timeout.passages > 0) {
+			out.push(
+				`partial: timed out after ${formatDuration(FIND_TIMEOUT_MS)} with ${timeout.verified} of ${timeout.passages} passages verified; unverified files may still match. Narrow \`path\` for a complete search.`,
+			);
+		}
+		if (coverage === "partial" && stats.failed > 0) {
 			out.push(
 				`partial: ${stats.failed} of ${stats.requests} judge requests failed; unjudged files may still match`,
 			);
@@ -171,6 +243,10 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 				const span = range.start === range.end ? String(range.start) : `${range.start}-${range.end}`;
 				out.push(`  ${hit.rel}:${span}  ${range.p.toFixed(2)}  ${range.snippet}`);
 			}
+		}
+		if (lexicalFallback.length > 0) {
+			out.push("", "unranked literal keyword matches (not semantically judged):");
+			for (const match of lexicalFallback) out.push(`  ${match.rel}:${match.line}  ${match.snippet}`);
 		}
 		const unanswered = stats.unanswered > 0 ? ` · ${stats.unanswered} unanswered` : "";
 		out.push(

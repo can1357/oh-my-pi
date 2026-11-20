@@ -7,10 +7,10 @@ import type { Message, UserMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as daemonClient from "@oh-my-pi/pi-coding-agent/daemon/client";
+import type { DaemonClient } from "@oh-my-pi/pi-coding-agent/daemon/protocol";
 import { applyToolProxy } from "@oh-my-pi/pi-coding-agent/extensibility/tool-proxy";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
-import * as daemonClient from "@oh-my-pi/pi-coding-agent/launch/client";
-import type { DaemonBrokerClient } from "@oh-my-pi/pi-coding-agent/launch/client";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -68,14 +68,14 @@ describe("agent-loop wait wake delivery", () => {
 		const registry = AgentRegistry.global();
 		const inbox: IrcMessage[] = [];
 		// The host owns the inbox and boundary injection; the real WaitTool
-		// drains this same inbox before it registers a future bus waiter.
+		// hands every message it takes off the bus to this same inbox.
 		registry.register({
 			id: "Main",
 			displayName: "Main",
 			kind: "main",
 			status: "running",
 			session: {
-				drainPendingIrcInboxMessages: () => inbox.splice(0, 1),
+				hasIrcInterrupts: () => inbox.length > 0,
 				deliverIrcMessage: async (message: IrcMessage) => {
 					inbox.push(message);
 					return "queued";
@@ -123,7 +123,7 @@ describe("agent-loop wait wake delivery", () => {
 				// earlier stage instead parks the accepted push on the host queue.
 				if (stage !== "in flight") await queuedCompletion.promise;
 			} else if (source === "peer") {
-				await IrcBus.global().send({ from: "Peer", to: "Main", body: payload }, { suppressRelay: true });
+				await IrcBus.global().send({ from: "Peer", to: "Main", body: payload });
 			} else {
 				if (options.settledJob) {
 					releaseJob.resolve("settled owned output");
@@ -143,8 +143,10 @@ describe("agent-loop wait wake delivery", () => {
 					throw new Error("Daemon broker request aborted");
 				},
 				onCompletion: () => () => {},
-			} as unknown as DaemonBrokerClient;
-			vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(broker);
+				onNotify: () => () => {},
+				onReconnect: () => () => {},
+			} as unknown as DaemonClient;
+			vi.spyOn(daemonClient, "daemonClient").mockResolvedValue(broker);
 		}
 		const schema = type({});
 		const barrier: AgentTool<typeof schema> = {
@@ -311,17 +313,18 @@ describe("agent-loop wait wake delivery", () => {
 				expect(result.isError).toBe(false);
 				expect(execute).toHaveBeenCalledTimes(1);
 				expect(result.result.details).not.toHaveProperty("__synthetic");
-				expect(messages.filter(message => messageText(message).includes(payload))).toHaveLength(1);
+				const carriers = messages.filter(message => messageText(message).includes(payload));
+				expect(carriers).toHaveLength(1);
 				if (stage === "queued at admission" || stage === "queued before execute") {
 					expect(execute.mock.calls[0][2]?.reason).toBe(TOOL_INTERRUPT_ABORT_REASON);
 				}
 				if (source === "background") {
 					expect(manager.isJobResultConsumed(jobId)).toBe(true);
 					expect(consumed.mock.calls.filter(([ids]) => ids.includes(jobId))).toHaveLength(1);
-				} else if (source === "parent") {
-					expect(result.result.details).toMatchObject({ interrupted: true });
 				} else {
-					expect(result.result.details).toMatchObject({ waited: { from: "Peer", body: payload } });
+					// A message never rides in the wait's result: it arrives as a user turn after it.
+					expect(result.result.details).toMatchObject({ interrupted: true });
+					expect(carriers[0]?.role).toBe("user");
 				}
 			});
 		}

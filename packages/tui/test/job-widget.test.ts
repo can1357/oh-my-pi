@@ -124,7 +124,7 @@ describe("describeJobTile", () => {
 		const described = describeJobTile(tile({ widget: decodeBench }));
 		expect(texts(role(described, "omp.job.tile.head")!).split("\n").filter(Boolean)).toEqual([
 			"●",
-			"verb-bench · decode throughput",
+			"loadtest · decode throughput",
 			"bg_1",
 		]);
 		expect(ofKind(role(described, "omp.job.tile.head")!, "elapsed")).toHaveLength(1);
@@ -234,7 +234,7 @@ describe("renderJobTileLines", () => {
 				meta: "12s",
 			},
 		).map(line => Bun.stripANSI(line));
-		expect(lines[0]).toMatch(/^◐ verb-bench · decode throughput bg_1 +decode 186 tok\/s ▲ 15% {2}12s$/);
+		expect(lines[0]).toMatch(/^◐ loadtest · decode throughput bg_1 +decode 186 tok\/s ▲ 15% {2}12s$/);
 		expect(visibleWidth(lines[0]!)).toBe(80);
 		expect(lines[1]).toMatch(/^ {2}tok\/s · nvfp4 b1 {2}[▁▂▃▄▅▆▇█]+ {2}186 tok\/s {2}┄ target 200 tok\/s$/);
 		expect(lines.slice(2)).toEqual(["  p50 41 ms · p99 212 ms ▼ 3.2% · errors 0", "  nvfp4 b1 run 32/48"]);

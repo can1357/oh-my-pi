@@ -109,6 +109,7 @@ async function harness(spaceHoldKeys: readonly KeyId[] = ["space"]) {
 			terminal: { rows: 30 },
 		} as unknown as TUI,
 		btwContainer: new Container(),
+		editorContainer: new Container(),
 		session,
 		settings: Settings.isolated(),
 		keybindings: {

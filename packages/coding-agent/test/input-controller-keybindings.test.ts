@@ -8,9 +8,19 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { ComposerOwner, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	getKeybindings,
+	type KeyId,
+	type KeybindingsManager as TuiKeybindingsManager,
+	matchesKey,
+	setKeybindings,
+} from "@oh-my-pi/pi-tui";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
+import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -44,6 +54,7 @@ type FakeEditor = {
 	pasteText(text: string): void;
 	handleInput?(data: string): void;
 	imageLinks?: (string | undefined)[];
+	insertAtom(label: string, expansion: string): void;
 	pendingImages: ImageContent[];
 	pendingImageLinks: (string | undefined)[];
 	clearDraft(historyText?: string): void;
@@ -155,6 +166,7 @@ async function createContext() {
 		setCustomKeyHandler,
 		clearCustomKeyHandlers,
 		spaceHold: new SpaceHoldGesture(() => {}),
+		insertAtom: vi.fn(),
 		pendingImages: [],
 		pendingImageLinks: [],
 		clearDraft(historyText?: string) {
@@ -225,10 +237,12 @@ async function createContext() {
 		updatePendingMessagesDisplay,
 		isBashMode: false,
 		isPythonMode: false,
+		isBtwMode: false,
 		hideToolActivity: false,
 		toolOutputExpanded: false,
 		settings: Settings.isolated(),
 		chatContainer: { children: [], setToolActivityVisible: vi.fn() },
+		pendingShellContainer: { children: [] },
 		handleHotkeysCommand: vi.fn(),
 		handlePlanModeCommand: vi.fn(),
 		handleNewCommand: vi.fn(),
@@ -301,10 +315,19 @@ async function createContext() {
 // 1x1 PNG.
 const TINY_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD3sAAAAASUVORK5CYII=";
 
+const PNG_CLIPBOARD = {
+	readImage: async () => ({ data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }),
+	readText: async () => "",
+	readMacFileUrls: async (): Promise<string[]> => [],
+};
+
+/** One kitty OSC 5522 clipboard packet. */
+const packet = (metadata: string, payload?: string) =>
+	`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
+const base64 = (value: string) => Buffer.from(value).toString("base64");
+
 /** Replay a kitty OSC 5522 enhanced paste that offers text and PNG and delivers `png` bytes. */
 function dispatchEnhancedImagePaste(listeners: InputListener[], png: Uint8Array): void {
-	const packet = (metadata: string, payload?: string) =>
-		`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
 	const imageMime = Buffer.from("image/png").toString("base64");
 	const textMime = Buffer.from("text/plain").toString("base64");
 	for (const input of [
@@ -322,8 +345,6 @@ function dispatchEnhancedImagePaste(listeners: InputListener[], png: Uint8Array)
 
 /** Replay a kitty OSC 5522 enhanced paste that offers and delivers plain `text`. */
 function dispatchEnhancedTextPaste(listeners: InputListener[], text: string): void {
-	const packet = (metadata: string, payload?: string) =>
-		`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
 	const textMime = Buffer.from("text/plain").toString("base64");
 	for (const input of [
 		packet("type=read:status=OK:pw=secret"),
@@ -335,6 +356,20 @@ function dispatchEnhancedTextPaste(listeners: InputListener[], text: string): vo
 	]) {
 		dispatchInput(listeners, input);
 	}
+}
+
+/** Replay a kitty OSC 5522 listing that offers plain text and HTML; the controller then requests one of them. */
+function offerTextAndHtml(listeners: InputListener[]): void {
+	dispatchInput(listeners, packet("type=read:status=OK"));
+	dispatchInput(listeners, packet(`type=read:status=DATA:mime=${base64(".")}`, base64("text/plain text/html")));
+	dispatchInput(listeners, packet("type=read:status=DONE"));
+}
+
+/** Deliver `body` as the `mime` the controller requested. */
+function deliverEnhancedPaste(listeners: InputListener[], mime: string, body: string): void {
+	dispatchInput(listeners, packet("type=read:status=OK"));
+	dispatchInput(listeners, packet(`type=read:status=DATA:mime=${base64(mime)}`, base64(body)));
+	dispatchInput(listeners, packet("type=read:status=DONE"));
 }
 
 describe("InputController keybinding setup", () => {
@@ -406,12 +441,13 @@ describe("InputController keybinding setup", () => {
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.retry", ["alt+r"]);
 		expect(editor.onRetry).toBeDefined();
 
-		editor.setText("draft that should clear after retry");
+		editor.setText("draft that should survive retry");
 		editor.onRetry?.();
 		await Promise.resolve();
 
 		expect(spies.retry).toHaveBeenCalledTimes(1);
-		expect(editor.getText()).toBe("");
+		expect(spies.prompt).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("draft that should survive retry");
 	});
 
 	it("retries the focused view session instead of the main session", async () => {
@@ -461,8 +497,8 @@ describe("InputController keybinding setup", () => {
 		expect(editor.getText()).toBe("draft that should survive");
 	});
 
-	it("clears retry draft attachments only after retry starts", async () => {
-		const { InputController, ctx, editor } = await createContext();
+	it("keeps retry draft attachments after retry starts", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
 		const image: ImageContent = { type: "image", mimeType: "image/png", data: "abc" };
 		const controller = new InputController(ctx);
 
@@ -474,10 +510,11 @@ describe("InputController keybinding setup", () => {
 		editor.onRetry?.();
 		await Promise.resolve();
 
-		expect(ctx.editor.pendingImages).toEqual([]);
-		expect(ctx.editor.pendingImageLinks).toEqual([]);
-		expect(editor.imageLinks).toBeUndefined();
-		expect(editor.getText()).toBe("");
+		expect(spies.retry).toHaveBeenCalledTimes(1);
+		expect(ctx.editor.pendingImages).toEqual([image]);
+		expect(ctx.editor.pendingImageLinks).toEqual(["local://draft.png"]);
+		expect(editor.imageLinks).toEqual(["local://draft.png"]);
+		expect(editor.getText()).toBe("draft with image");
 	});
 
 	it("routes b to branch a branchable /btw panel", async () => {
@@ -528,6 +565,20 @@ describe("InputController keybinding setup", () => {
 
 		expect(result).toBeUndefined();
 		expect(spies.handleBtwBranchKey).not.toHaveBeenCalled();
+	});
+
+	it("leaves ← to an overlay open over a focused subagent's view", async () => {
+		const { InputController, ctx, setFocused, spies } = await createContext();
+		Object.assign(ctx, { focusedAgentId: "Worker", lastLeftTapTime: 0 });
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(spies.addInputListener);
+
+		// The empty composer owns the ←← back-to-main gesture.
+		expect(dispatchInput(listeners, "\x1b[D")).toEqual({ consume: true });
+		// The model picker's thinking slider steps on ←; the gesture must not swallow it.
+		setFocused({ handleInput: vi.fn() });
+		expect(dispatchInput(listeners, "\x1b[D")).toBeUndefined();
 	});
 
 	it("routes the smart-paste shortcut to a focused login input", async () => {
@@ -807,7 +858,8 @@ describe("InputController keybinding setup", () => {
 		// A steer sent after the compaction lands before the yield.
 		steering.push("steer mid-run");
 
-		// Dequeue: the steer, then the held follow-up, then the request, then what was queued before it.
+		// Dequeue: the steer, then the held follow-up (as queue shorthand, so Enter holds it again), then the
+		// request (as typed: Enter compacts now), then what was queued before it.
 		const restored: string[] = [];
 		for (let i = 0; i < 4; i++) {
 			editor.setText("");
@@ -816,7 +868,7 @@ describe("InputController keybinding setup", () => {
 		}
 		expect(restored).toEqual([
 			"steer mid-run",
-			"now continue",
+			"=> now continue",
 			"/compact keep the API notes",
 			"sent before the compaction",
 		]);
@@ -1065,6 +1117,7 @@ describe("InputController image paste into an image-accepting prompt", () => {
 				getCwd: () => tempDir.path(),
 				getArtifactsDir: () => tempDir.path(),
 				getSessionId: () => "session",
+				putBlob: async () => ({ hash: "h", path: "/tmp/h.png", displayPath: "/tmp/h.png" }),
 			},
 		});
 		return context;
@@ -1169,6 +1222,41 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		expect(submitted.text).toMatch(/^see \[Image #1, \d+x\d+\]$/);
 		expect(submitted.source).toMatch(/^local:\/\/pasted-image-[0-9a-f]+\.png$/);
 		expect(context.editor.pendingImages).toHaveLength(0);
+	});
+
+	it("pastes a TIFF-only enhanced (OSC 5522) listing through the native clipboard reader (#17696)", async () => {
+		const context = await createPromptContext();
+		const submittedOnce = Promise.withResolvers<void>();
+		const onSubmit = vi.fn<(text: string, images?: ImageContent[]) => void>(() => submittedOnce.resolve());
+		const prompt = new HookEditorComponent(context.ctx.ui, "Answer", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+		});
+		context.setFocused(prompt);
+		const readImage = vi.fn(async () => ({ data: Buffer.from(TINY_PNG, "base64"), mimeType: "image/png" }));
+		new InputController(context.ctx, {
+			readImage,
+			readText: async () => "",
+			readMacFileUrls: async () => [],
+		}).setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		context.spies.addStartListener.mock.calls[0]?.[0]();
+
+		// macOS `⌃⌘⇧4` screenshots reach the pasteboard as TIFF only.
+		const tiffMime = Buffer.from("image/tiff").toString("base64");
+		for (const input of [
+			"\x1b]5522;type=read:status=OK:pw=secret\x1b\\",
+			`\x1b]5522;type=read:status=DATA:mime=${tiffMime}\x1b\\`,
+			"\x1b]5522;type=read:status=DONE\x1b\\",
+		]) {
+			dispatchInput(listeners, input);
+		}
+		prompt.handleInput("\r");
+		await submittedOnce.promise;
+
+		expect(readImage).toHaveBeenCalledTimes(1);
+		expect(submittedImage(onSubmit).source).toMatch(/^local:\/\/pasted-image-[0-9a-f]+\.png$/);
+		expect(context.ctx.showStatus).not.toHaveBeenCalledWith("Clipboard paste has no supported text or image data");
 	});
 
 	it("prefers a Finder file URL over the co-advertised icon bitmap (#8769)", async () => {
@@ -1299,6 +1387,145 @@ describe("InputController image paste into an image-accepting prompt", () => {
 
 		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
 		expect(context.editor.pendingImages).toHaveLength(0);
+		expect(context.editor.getText()).toBe("");
+	});
+
+	/** Resolves on the next call to `mock`. */
+	function nextCall<Args extends unknown[]>(mock: Mock<(...args: Args) => void>): Promise<void> {
+		const called = Promise.withResolvers<void>();
+		mock.mockImplementation(() => called.resolve());
+		return called.promise;
+	}
+
+	/** A focused dialog with no `pasteText`, as the approval and ask dialogs are. */
+	function createPlainDialog() {
+		const handleInput = vi.fn<(data: string) => void>();
+		return { dialog: { handleInput, render: () => [] } satisfies Component, handleInput };
+	}
+
+	function startEnhancedPaste(context: {
+		ctx: InteractiveModeContext;
+		spies: {
+			addInputListener: Mock<(listener: InputListener) => void>;
+			addStartListener: Mock<(listener: () => void) => void>;
+		};
+	}): InputListener[] {
+		new InputController(context.ctx).setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		context.spies.addStartListener.mock.calls[0]?.[0]();
+		return listeners;
+	}
+
+	function mountComposerOwner(
+		context: { ctx: InteractiveModeContext; setFocused(target: unknown): void },
+		dialog: object,
+		owner: ComposerOwner | undefined,
+	): void {
+		Object.assign(context.ctx, { composerOwner: owner });
+		context.setFocused(dialog);
+	}
+
+	it("sends an enhanced image paste to the main editor only for the dialog the composer owner owns", async () => {
+		const rows: { name: string; owner?: (dialog: Component) => ComposerOwner; toEditor: boolean }[] = [
+			{ name: "owned", owner: component => ({ component, owns: () => true }), toEditor: true },
+			{ name: "no owner registered", toEditor: false },
+			{ name: "owner declines", owner: component => ({ component, owns: () => false }), toEditor: false },
+			{
+				name: "owner of another component",
+				owner: () => ({ component: createPlainDialog().dialog, owns: () => true }),
+				toEditor: false,
+			},
+		];
+		for (const row of rows) {
+			const context = await createPromptContext();
+			const { dialog } = createPlainDialog();
+			mountComposerOwner(context, dialog, row.owner?.(dialog));
+			const listeners = startEnhancedPaste(context);
+			const showStatus = context.ctx.showStatus as Mock<(message: string) => void>;
+			const settled = Promise.race([
+				nextCall(context.editor.insertAtom as Mock<(label: string, expansion: string) => void>),
+				nextCall(showStatus),
+			]);
+
+			dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+			await settled;
+
+			expect(context.editor.pendingImages, row.name).toHaveLength(row.toEditor ? 1 : 0);
+			expect(showStatus.mock.calls.length > 0, row.name).toBe(!row.toEditor);
+		}
+	});
+
+	it("reads an HTML clipboard paste only for a dialog the composer owner owns", async () => {
+		const html = `<p>see</p><img src="data:image/png;base64,${TINY_PNG}">`;
+		for (const owns of [true, false]) {
+			const context = await createPromptContext();
+			const { dialog, handleInput } = createPlainDialog();
+			mountComposerOwner(context, dialog, { component: dialog, owns: () => owns });
+			const listeners = startEnhancedPaste(context);
+			const written = context.ctx.ui.terminal.write as Mock<(data: string) => void>;
+			const mime = owns ? "text/html" : "text/plain";
+
+			offerTextAndHtml(listeners);
+			expect(
+				written.mock.calls.some(([data]) => data.includes(`type=read;${base64(mime)}`)),
+				`requests ${mime}`,
+			).toBe(true);
+
+			if (owns) {
+				const attached = nextCall(context.editor.insertAtom as Mock<(label: string, expansion: string) => void>);
+				deliverEnhancedPaste(listeners, mime, html);
+				await attached;
+				expect(context.editor.pendingImages).toHaveLength(1);
+			} else {
+				deliverEnhancedPaste(listeners, mime, "see");
+				expect(handleInput).toHaveBeenCalledWith("\x1b[200~see\x1b[201~");
+			}
+		}
+	});
+
+	it("attaches a clipboard image to the main editor when the composer owns a dialog without pasteText", async () => {
+		const context = await createPromptContext();
+		const { dialog, handleInput } = createPlainDialog();
+		mountComposerOwner(context, dialog, { component: dialog, owns: () => true });
+		const controller = new InputController(context.ctx, PNG_CLIPBOARD);
+
+		expect(await controller.handleImagePaste()).toBe(true);
+
+		expect(context.editor.pendingImages).toHaveLength(1);
+		expect(handleInput).not.toHaveBeenCalled();
+	});
+
+	it("refuses a clipboard image in a focused dialog without pasteText that the composer does not own", async () => {
+		const imagePath = await writePng("finder.png");
+		const context = await createPromptContext();
+		const { dialog, handleInput } = createPlainDialog();
+		context.setFocused(dialog);
+		// A Finder file URL must not attach either.
+		const controller = new InputController(context.ctx, {
+			...PNG_CLIPBOARD,
+			readMacFileUrls: async () => [`file://${imagePath}`],
+		});
+
+		expect(await controller.handleImagePaste()).toBe(false);
+
+		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
+		expect(handleInput).not.toHaveBeenCalled();
+		expect(context.editor.pendingImages).toHaveLength(0);
+	});
+
+	it("delivers clipboard text to a focused dialog without pasteText as a bracketed paste", async () => {
+		const context = await createPromptContext();
+		const { dialog, handleInput } = createPlainDialog();
+		context.setFocused(dialog);
+		const controller = new InputController(context.ctx, {
+			readImage: async () => null,
+			readText: async () => "sk-test-key",
+			readMacFileUrls: async () => [],
+		});
+
+		expect(await controller.handleImagePaste()).toBe(true);
+
+		expect(handleInput).toHaveBeenCalledWith("\x1b[200~sk-test-key\x1b[201~");
 		expect(context.editor.getText()).toBe("");
 	});
 });
@@ -1432,7 +1659,7 @@ describe("InputController global editor actions", () => {
 
 	it("refuses Alt+G when collabGuest is active", async () => {
 		const context = await createContext();
-		context.ctx.collabGuest = {} as unknown as InteractiveModeContext["collabGuest"];
+		Object.assign(context.ctx, { collabGuest: {} });
 		const controller = new context.InputController(context.ctx);
 		controller.setupKeyHandlers();
 		const listeners = registeredInputListeners(context.spies.addInputListener);
@@ -1609,5 +1836,129 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 
 		expect(dispatchInput(listeners, "\x0f")).toEqual({ consume: true });
 		expect(ctx.toolOutputExpanded).toBe(true);
+	});
+});
+
+describe("InputController image paste into an ask form note", () => {
+	const FORM = `<form><fieldset><legend>Database</legend>
+<label><input type="radio" name="db" value="sqlite" checked> SQLite</label><br>
+<label><input type="radio" name="db" value="pg"> Postgres</label></fieldset></form>`;
+
+	let settingsState: SettingsTestState | undefined;
+	let tempDir: TempDir;
+	let previousKeybindings: TuiKeybindingsManager;
+
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	beforeEach(async () => {
+		settingsState = beginSettingsTest();
+		await Settings.init({ inMemory: true });
+		tempDir = await TempDir.create("@omp-form-note-image-");
+		previousKeybindings = getKeybindings();
+		setKeybindings(KeybindingsManager.inMemory());
+	});
+
+	afterEach(async () => {
+		setKeybindings(previousKeybindings);
+		restoreSettingsTestState(settingsState);
+		settingsState = undefined;
+		await tempDir.remove();
+	});
+
+	const routes = [
+		{
+			name: "an enhanced (OSC 5522) paste",
+			paste: (_form: HtmlFormDialog, _png: string, listeners: InputListener[]) => {
+				dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+			},
+		},
+		{
+			name: "Ctrl+V",
+			paste: (_form: HtmlFormDialog, _png: string, listeners: InputListener[]) => {
+				dispatchInput(listeners, "\x16");
+			},
+		},
+		{
+			name: "a bracketed image-file path",
+			paste: (form: HtmlFormDialog, png: string) => {
+				form.handleInput(`\x1b[200~${png}\x1b[201~`);
+			},
+		},
+	];
+
+	/** An opted-in form focused in front of the main editor, with the controller's paste listeners installed. */
+	async function mountForm() {
+		const context = await createContext();
+		Object.assign(context.ctx, {
+			sessionManager: {
+				getCwd: () => tempDir.path(),
+				getArtifactsDir: () => tempDir.path(),
+				getSessionId: () => "session",
+			},
+		});
+		const pngPath = tempDir.join("shot.png");
+		await Bun.write(pngPath, Buffer.from(TINY_PNG, "base64"));
+		const controller = new InputController(context.ctx, {
+			readImage: async () => ({
+				data: Buffer.from(TINY_PNG, "base64"),
+				mimeType: "image/png",
+			}),
+			readText: async () => "",
+			readMacFileUrls: async () => [],
+		});
+		const form = new HtmlFormDialog(parseHtmlForm(FORM), {
+			acceptImages: true,
+			onPasteImage: () => controller.handleImagePaste(),
+			onPasteImagePath: path => controller.handleImagePathPaste(path),
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+		});
+		form.focused = true;
+		form.render(100);
+		context.setFocused(form);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		context.spies.addStartListener.mock.calls[0]?.[0]();
+		return { context, form, listeners, pngPath };
+	}
+
+	it.each(routes)("attaches $name to the open note", async ({ paste }) => {
+		const { context, form, listeners, pngPath } = await mountForm();
+
+		form.handleInput("n");
+		form.handleInput("why sqlite");
+		const delivered = Promise.withResolvers<void>();
+		context.spies.requestRender.mockImplementation(() => delivered.resolve());
+		paste(form, pngPath, listeners);
+		form.handleInput("\r");
+		await delivered.promise;
+
+		const [note] = form.optionNotes();
+		expect(note?.images).toHaveLength(1);
+		expect(note?.text).toMatch(/^why sqlite\s*\[Image #1, \d+x\d+\]$/);
+		expect(context.editor.pendingImages).toHaveLength(0);
+		expect(context.editor.getText()).toBe("");
+		form.dispose();
+	});
+
+	it("refuses an enhanced image paste while no note is open", async () => {
+		const { context, form, listeners } = await mountForm();
+		const showStatus = context.ctx.showStatus as unknown as Mock<(message: string) => void>;
+		// Settle on either outcome, so a paste that lands in the main editor fails the assertions below.
+		const settled = Promise.withResolvers<void>();
+		showStatus.mockImplementation(() => settled.resolve());
+		(context.editor.insertAtom as Mock<(label: string, expansion: string) => void>).mockImplementation(() =>
+			settled.resolve(),
+		);
+
+		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+		await settled.promise;
+
+		expect(showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
+		expect(context.editor.pendingImages).toHaveLength(0);
+		expect(form.optionNotes()).toEqual([]);
+		form.dispose();
 	});
 });

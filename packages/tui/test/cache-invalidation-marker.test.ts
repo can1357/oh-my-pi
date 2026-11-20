@@ -45,9 +45,27 @@ describe("detectCacheInvalidation", () => {
 		expect(detectCacheInvalidation(prev, current)).toBeUndefined();
 	});
 
-	it("does not flag a turn that reused any cache", () => {
+	it("does not flag a turn that read back the warm prefix", () => {
 		const prev = usage({ cacheRead: 50_900, cacheWrite: 980 });
 		const current = usage({ cacheRead: 50_900, cacheWrite: 3_459, input: 2 });
+		expect(detectCacheInvalidation(prev, current)).toBeUndefined();
+	});
+
+	it("flags a collapse that still reads the system block other sessions keep warm", () => {
+		// Observed after an idle gap: concurrent sessions on the same system prompt
+		// kept its ~15k-token block warm, so the request read that back while
+		// re-writing the expired 364k-token history behind it.
+		const prev = usage({ cacheRead: 369_518, cacheWrite: 1_983, input: 1 });
+		const current = usage({ cacheRead: 15_282, cacheWrite: 364_343, input: 3 });
+		expect(detectCacheInvalidation(prev, current)).toEqual({ reprocessedTokens: 364_346 });
+	});
+
+	it("does not flag expiry behind a predecessor that read only the shared system block", () => {
+		// The opening request reads the system block warm from other sessions and
+		// writes its own history; that history was never read back, so losing it to
+		// the TTL is expected warming, like the write-only predecessor above.
+		const prev = usage({ cacheRead: 15_282, cacheWrite: 35_000, input: 4 });
+		const current = usage({ cacheRead: 15_282, cacheWrite: 36_100, input: 2 });
 		expect(detectCacheInvalidation(prev, current)).toBeUndefined();
 	});
 

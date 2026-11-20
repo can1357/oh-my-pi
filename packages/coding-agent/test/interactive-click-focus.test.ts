@@ -57,7 +57,7 @@ describe("inline click-to-focus geometry", () => {
 		term = new VirtualTerminal(120, 32);
 		eventBus = new EventBus();
 		const composer = new Composer({ terminal: term });
-		mode = new InteractiveMode(session, "test", undefined, () => {}, undefined, undefined, eventBus, composer);
+		mode = new InteractiveMode(session, "test", () => {}, undefined, undefined, eventBus, composer);
 	});
 	afterEach(async () => {
 		vi.restoreAllMocks();
@@ -303,6 +303,7 @@ describe("inline click-to-focus geometry", () => {
 			tools: new Map(),
 			assistantThinkingRenderers: [],
 			assistantTextRenderers: [],
+			transcriptPresenters: [],
 			linkSchemes: schemes,
 			fileWriteFallbackHandlers: [],
 			fileDeleteFallbackHandlers: [],
@@ -519,6 +520,7 @@ describe("inline click-to-focus geometry", () => {
 			tools: new Map(),
 			assistantThinkingRenderers: [],
 			assistantTextRenderers: renderers,
+			transcriptPresenters: [],
 			linkSchemes: ["demo"],
 			fileWriteFallbackHandlers: [],
 			fileDeleteFallbackHandlers: [],
@@ -862,7 +864,11 @@ describe("inline click-to-focus geometry", () => {
 		await term.waitForRender(() => screen().some(row => row.includes("Extension links")));
 		// A link handler's `ctx.ui.custom(…, { overlay: true })` draws over the browser and takes the keys.
 		const keys: string[] = [];
-		const panel = { render: () => ["Handler panel"], invalidate() {}, handleInput: (data: string) => keys.push(data) };
+		const panel = {
+			render: () => ["Handler panel"],
+			invalidate() {},
+			handleInput: (data: string) => keys.push(data),
+		};
 		const handle = mode.ui.showOverlay(panel, { anchor: "center", width: 30 });
 		expect(mode.ui.getFocused()).toBe(panel);
 

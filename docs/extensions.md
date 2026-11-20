@@ -35,6 +35,14 @@ Extensions can combine all of the following in one module:
 - custom message rendering
 - session/message injection APIs (`sendMessage`, `sendUserMessage`, `appendEntry`)
 
+Import host values from the package root, `@oh-my-pi/pi-coding-agent`. Deeper paths such as `@oh-my-pi/pi-tui/native/spans` also resolve inside the omp binary, but they name internal files: when a file moves, a static import of it stops the whole extension from loading. Besides the extension types and the theme (`theme`, `getSettingsListTheme`), the root exports these helpers:
+
+- `formTheme`, `editorKey`, `editorKeys` and `formatKeyHint` for settings dialogs and key hints
+- `styledSpans` and `compactText` to turn ANSI-styled text into `TspText`, such as a transcript presenter's `{ compact: { label, rows } }`, and `rowsText` to wrap pre-rendered rows in one native text node; `styleSpans`, `plainText`, `plainLine`, `spansLine` and `styledBackground` cover the other conversions between ANSI text and spans
+- `parseXdUrl` to read the device name from an `xd://` URL, plus `parseXdTopicUrl`, `stripXdUrlPrefix`, `couldBecomeXdUrl` and `XD_URL_PREFIX`
+- `unwrapHashlineHeaderPath` to turn a `[path#TAG]` write/edit target into its plain path
+- `cfgExtensionTranscriptPresenters`, the handle of the `extensionRenderers.transcriptPresenters` setting
+
 ## Runtime model
 
 1. Extension modules are imported concurrently; their factory functions then run sequentially in path order.
@@ -116,8 +124,8 @@ export default function (pi: ExtensionAPI) {
 Core methods:
 
 - `on(event, handler)`
-- `registerTool`, `registerCommand`, `registerShortcut`, `registerFlag`
-- `registerMessageRenderer`, `registerAssistantThinkingRenderer`, `registerAssistantTextRenderer`, `registerLinkScheme`
+- `registerTool`, `registerCommand`, `registerShortcut`, `getShortcutConflict`, `registerFlag`
+- `registerMessageRenderer`, `registerAssistantThinkingRenderer`, `registerAssistantTextRenderer`, `registerTranscriptPresenter`, `registerLinkScheme`
 - `registerComposerShape`
 - `setLabel`, `getFlag`
 - `sendMessage`, `sendUserMessage`, `appendEntry`, `exec`
@@ -137,6 +145,20 @@ labeling action. `getAllTools()` returns tool schemas and source metadata, while
 `getActiveTools()` returns enabled names.
 
 `getServiceTiers()` returns a detached snapshot of the session's live per-family tier map. `setServiceTier(family, tier)` changes one family for subsequent requests; pass `undefined` to clear that session override. OpenAI accepts `auto`, `default`, `flex`, `scale`, `priority`, or `ultrafast`; Anthropic accepts `priority`; Google accepts `flex` or `priority`. Changes made while a response is streaming do not alter that in-flight request.
+
+### Keyboard shortcuts
+
+Register shortcuts in the extension factory; omp binds them before `session_start`, so a later registration applies on the next start.
+
+`getShortcutConflict(chord)` returns `undefined` for a free chord, otherwise the first holder of:
+
+- `{ kind: "reserved" }`: omp keeps the chord (see [Constraints and pitfalls](#constraints-and-pitfalls)); a shortcut on it is never bound.
+- `{ kind: "keybinding", keybindings }`: keymap actions bound to it in the editor (Ctrl+Enter counts for approve and follow-up when their bindings are emptied). `app.*` actions usually take the key first where they apply; editing keys (`tui.editor.*`, `tui.input.*`, e.g. `alt+y` yank-pop) lose it to the shortcut.
+- `{ kind: "extension", extensionPath }`: another extension's shortcut. When several extensions register one chord, in any spelling, only the last one loaded is bound.
+
+Chords compare as the TUI matches them: `alt+ctrl+x` is `ctrl+alt+x`, and `?` also covers `shift+?`. The caller's own registrations don't count. Keybindings come from the session's TUI keymap, user remaps included; sessions without a TUI (print, RPC, ACP, SDK) use omp's defaults.
+
+It throws while extensions are loading, so call it from a handler (a command, `session_start`), e.g. to validate a chord the user picks; the factory then registers it on the next start.
 
 ### Provider registration
 
@@ -342,6 +364,17 @@ re-exported by `session/messages.ts`): non-object payloads are coerced to string
 content under the default custom type, missing `customType`/`attribution` fields
 are defaulted, and invalid content collapses to an empty string.
 
+Set `excludeFromContext: true` on the payload for a row that is drawn and saved
+but never sent to the model, like a `!!` bash run: per-turn stats or status
+lines. The flag is persisted on the `custom_message` entry, so the row stays out
+of context after resume, compaction and branch summaries. Such a row never
+starts or extends a turn: `triggerTurn` and `"aside"` are ignored. Sent while a
+run is live, it is queued like a `!!` bash row and drawn and saved when the run
+ends or the next prompt starts; a `/new` or session switch that interrupts the
+run saves it to the session being left. Like `!!` and `$$` runs, it leaves a
+shown composer prediction in place and does not hold back a queued follow-up,
+since the model's view is unchanged.
+
 ## 2) Handler context (`ExtensionContext`)
 
 Handlers and tool `execute` receive `ctx` with:
@@ -359,8 +392,8 @@ Handlers and tool `execute` receive `ctx` with:
 - `compact(instructionsOrOptions?)`: accepts summary focus text or `CompactOptions`, including one-off `mode: "soft" | "remote" | "snapcompact"`, `onComplete`, `onError`, and `suppressContinuation`
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
-- `resolvePlanReview(reviewId, choice, input?)`: answer the open interactive plan review; returns `false` when the review or choice is unavailable, `refine` requires non-empty `input.feedback`, and on approvals (`execute`, `compact`, `keep`) `input.role` may name a tier from the event's `tiers` to pick the execution model (an unknown role, or a `role` on any other choice, returns `false`)
-- `getPendingPlanReview()`: the open interactive plan review still awaiting an answer, in the `plan_review_requested` shape, or `undefined`; use it to answer a review that opened before the extension loaded or reconnected
+- `resolvePlanReview(reviewId, choice, input?)`: answer the open interactive plan review; returns `false` when the review or choice is unavailable (with `input.role`, availability is judged on that tier, so `keep` can be accepted for a larger-context tier the slider is not on), `refine` requires non-empty `input.feedback`, and on approvals (`execute`, `compact`, `keep`) `input.role` may name a tier from the event's `tiers` to pick the execution model (an unknown role, or a `role` on any other choice, returns `false`)
+- `getPendingPlanReview()`: the open interactive plan review still awaiting an answer, in the `plan_review_requested` shape with `options` re-measured for the tier currently selected in the slider, or `undefined`; use it to answer a review that opened before the extension loaded or reconnected
 - `openPlanReview()`: open the interactive plan review on the newest plan file, like `/plan-review`; resolves `true` once a review awaits an answer, without waiting for a choice. An already-open review is kept rather than replaced. Unlike `/plan-review` it never aborts work: it resolves `false`, silently, while the agent is streaming or compacting, when plan mode is inactive, or when no non-empty plan file exists
 - `sessionModes` (interactive TUI sessions only; `undefined` in print, JSON, RPC, ACP, and subagents): direct control of the built-in plan, vibe, goal, and loop modes without slash commands or dialogs. `getState()` returns a detached snapshot (`plan`/`goal`: `inactive | active | paused`, `vibe`: `inactive | active`, `loop`: `inactive | active | paused`, plus the plan file and goal objective/budget), so an extension that loaded late can read the current state. `set(request)` runs one explicit transition: `{ mode: "plan" | "vibe", action: "enter" | "exit" }`, `{ mode: "goal", action: "enter", objective, tokenBudget? }`, `{ mode: "goal", action: "pause" | "resume" | "drop" }`, `{ mode: "loop", action: "enter", prompt?, limit?, condition? }`, or `{ mode: "loop", action: "exit" }`. Requesting a state that already holds returns `{ ok: true, changed: false }`. Refusals return `{ ok: false, code, message, state }` with `code` `busy` (a turn, compaction, or another mode transition is running; the session is still restoring its saved modes, as during `session_start` or a session switch; or a completed goal is still being torn down), `conflict` (another mode blocks it, as with the slash commands), `disabled` (`extensionHandlers.modeControl` off, or `plan.enabled` / `goal.enabled` off), or `invalid_request`. No transition submits a prompt — send one separately; goal continuation and loop repetition start once the next turn ends. Loop `prompt` is the text repeated after each turn (without it, the user's next typed prompt); on an active loop it replaces that text, and `enter` on a paused loop resumes it. Plan `exit` leaves plan mode fully, restoring tools and model, without approving the plan or deleting its draft. Setting `extensionHandlers.modeControl: false` refuses every `set()` while `getState()` and `mode_changed` keep working.
 
@@ -414,7 +447,7 @@ Use `history` only for detached prior side-turn messages; it is cloned with `str
 
 ### Live voice on your own peer (`ctx.startLive`)
 
-Start a `/live` session whose audio runs on a WebRTC peer the extension owns, for example a browser on a phone, instead of the host's microphone and speakers. omp keeps everything else: Codex signaling with the session's OpenAI Codex sign-in, the bundled live prompt, delegations into this session as ordinary turns, and transcripts. The TUI shows its live visualizer, and `/live` or the stop key ends the call.
+Start a `/live` session whose audio runs on a WebRTC peer the extension owns, for example a browser on a phone, instead of the host's microphone and speakers. omp keeps everything else: signaling (Codex with the session's OpenAI Codex sign-in, or the [custom live endpoint](./rpc.md#custom-live-endpoint) when `live.endpoint` is set), the bundled live prompt, delegations into this session as ordinary turns, and transcripts. The TUI shows its live visualizer, and `/live` or the stop key ends the call.
 
 ```ts
 if (!ctx.startLive) throw new Error("This host does not run live sessions");
@@ -493,10 +526,11 @@ Canonical event unions and payload types are in `types.ts`.
 
 - `session_start`
 - `session_before_switch` / `session_switch`
+- `session_clear`
 - `session_before_branch` / `session_branch`
 - `session_before_compact` / `session.compacting` / `session_compact`
 - `session_before_tree` / `session_tree`
-- `session_shutdown`
+- `session_before_shutdown` / `session_shutdown`
 
 In the interactive TUI, an extension whose factory registers no providers,
 shortcuts, composer shapes, or file fallbacks is loaded after the composer
@@ -507,6 +541,13 @@ loaded, so its tools, commands, and `input`/`before_agent_start` hooks apply fro
 the first request. Events emitted before it binds are not replayed. Resumed
 sessions, `--tools`, and launches with flags omp does not recognize load every
 extension before the session starts.
+
+`session_clear` receives `{ type: "session_clear" }` after a successful in-place
+context reset (`/clear` or `AgentSession.resetSessionContext()`), including an
+empty clear. Handlers are awaited before the reset returns and can invalidate
+caches of instructions already injected into model context. The session id,
+file, and persisted history are unchanged; this is not `session_switch` and
+cannot cancel the reset. A busy/rejected reset emits no event.
 
 `session.compacting` receives `{ sessionId, messages }` and can return
 `{ context?: string[]; prompt?: string; preserveData?: Record<string, unknown> }`
@@ -520,8 +561,31 @@ Cancelable pre-events:
 - `session_before_branch` → `{ cancel?: boolean; skipConversationRestore?: boolean }`
 - `session_before_compact` → `{ cancel?: boolean; compaction?: CompactionResult }`
 - `session_before_tree` → `{ cancel?: boolean; summary?: { summary: string; details?: unknown } }`
+- `session_before_shutdown` → `{ cancel?: boolean }`
+
+Pre-events are gates: handlers may ask the operator before deciding, so time spent awaiting a host dialog (`ctx.ui.select`, `confirm`, `input`, `askDialog`, `formDialog`, `approve`, `editor`, a presented `custom` component) does not count against the 30-second handler budget. The `signal` on `session_before_compact` and `session_before_tree` is cooperative: pass it to your own work, but the operation still waits for your handler. The `signal` on `session_before_shutdown` releases the close: on abort the host stops waiting, closes your pending dialogs, and ignores a late result.
 
 `session_before_branch` and `session_branch` carry `reason`, which decides what `session_before_branch.entryId` means. For `"branch"` (`branch(entryId)`, `/branch`) it is the user message being rewound: it and everything after it are dropped. For `"fork"` (`AgentSession.fork(entryId)`, RPC `fork` with an `entryId`) and `"btw"` (`/btw` promotion) it is the last entry kept in the new session.
+
+#### Closing the session
+
+`session_before_shutdown` asks extensions before the operator ends the session through a close that can still be refused: in the interactive TUI that is `/exit`, `/quit`, Ctrl+D on an empty editor, double Ctrl+C, and quitting from the session selector. It runs before anything is stopped, while extension UI is available, and fires again on each attempt. Forced closes never emit it: fatal workspace errors, `ctx.shutdown()`, OS signals, restart, and RPC/ACP/print/SDK/subagent disposal.
+
+The first `{ cancel: true }` keeps the session open. Errors, timeouts, and aborts let the close proceed. The event's `signal` aborts when the close stops waiting: another close request (a further `/exit` or Ctrl+D, a fatal close), an OS signal, or the UI stopping. A cancel delivered after that is ignored. The operator's dialog keys are unchanged; dismissing a prompt resolves it as `undefined`, which closes normally.
+
+A `ctx.shutdown()` request that arrives during the prompt is not cancelled with the operator's quit; it still closes the session at the next settled boundary.
+
+```ts
+pi.on("session_before_shutdown", async (event, ctx) => {
+	const outcome = await ctx.ui.input("Did this session reach its goal?");
+	if (event.signal.aborted || outcome === undefined) return;
+	pi.appendEntry("session-outcome", { outcome });
+});
+```
+
+Cancellation stops the host from waiting but cannot stop extension code or undo its side effects; check `signal` before persisting late results. `appendEntry` follows normal session persistence, so it does not force an empty session onto disk.
+
+`session_shutdown` is unchanged: a notification-only teardown event with concurrent handlers and a 2-second budget. Ask questions in `session_before_shutdown`, not there.
 
 ### Prompt and turn lifecycle
 
@@ -530,9 +594,13 @@ Cancelable pre-events:
 - `before_provider_request` — receives `{ payload }`; return the replacement payload itself (not `{ payload }`). Handlers chain. Provider transports must invoke `onPayload`; `devin-agent` does not.
 - `after_provider_response` — notification before response-body consumption: `{ status, headers, requestId?, metadata? }`. Provider request/response handlers receive the model used for that request in `ctx.model`.
 - `context` — receives conversation messages and may return `{ messages }`; replacements chain without rewriting persisted history
-- `agent_start` / `agent_end` — agent loop lifecycle notification; `agent_end` remains notification-only
+- `agent_start` / `agent_end` — agent loop lifecycle notification; `agent_end` remains notification-only.
+  For extensions, `agent_end.messages` contains the active session context at the loop's end, not just
+  the messages produced by that loop. Earlier messages can appear again in later notifications;
+  compaction or branch changes can change which messages remain in that context. Track processed
+  message IDs when an action should happen once per message, rather than treating this array as a delta.
 - `session_stop` — main-session stop hook, awaited before settle. Advisory `{ continue: true, additionalContext }` requests are capped at 8 continuations. Explicit `{ decision: "block", reason }` refusals take precedence over advisory requests, do not consume that allowance, and remain blocking until the hook allows completion or the operator interrupts. A refusal without a reason receives a diagnostic continuation rather than permission to finish. This event never fires for task/subagent sessions and defers until agent-owned background jobs are fully idle (`#hasPendingAsyncWake` in `session/agent-session.ts`).
-- `cache_warming_decision` — fired before each prompt-cache warming refresh with the warmer's economics (`warmCost`, `missCost`, `continuationProbability`, `action`). Return `{ action: "warm" | "stop" }` to override; the last handler returning an action wins, handler failures or answers slower than 2 seconds leave the warmer's decision standing, and a `"stop"` override ends warming until the next real request. Only the main agent loop warms; task/subagent sessions never fire this. The refresh itself replays the real request through the same provider path, so `before_provider_request` and `after_provider_response` fire for it too; a replacement payload must stay byte-identical to the real one for the refresh to hit the cache.
+- `cache_warming_decision` — fired before each prompt-cache warming decision with the warmer's economics: `method` (`"prewarm"` for a `max_tokens: 0` pre-warm, `"replay"` for a one-token replay; absent when the request cannot be refreshed safely), `warmCost` (a cache read of the prompt, plus the expected billed output for a replay), `missCost` (re-writing the prompt instead of reading it), `compactCost` (bridging the wait with compaction; absent when compaction is not an option), `spentCost` (refresh spend since the last real request), `continuationProbability`, and `action` (`"warm"`, `"compact"`, or `"stop"`). Return `{ action }` to override; the last handler returning an action wins, handler failures or answers slower than 2 seconds leave the warmer's decision standing, and so does an override the warmer cannot carry out (`"warm"` without a `method`, `"compact"` without `compactCost` or later than a minute before the entry expires). A `"stop"` override ends warming until the next real request. The main agent loop warms in any mode and task subagents up to `streaming`; one-shot sessions never fire this. The refresh itself goes through the same provider path as the real request, so `before_provider_request` and `after_provider_response` fire for it too; a replacement payload must stay byte-identical to the real one for the refresh to hit the cache.
 - `turn_start` / `turn_end`
 - `assistant_message` — awaited once per finalized assistant message before agent context, persistence, `message_end`, or tool dispatch. Return `{ content }` to replace text for history, persistence, `message_end` consumers, and the next provider request; handlers chain. Text already delivered through streaming updates (`message_update`, ACP/RPC chunks) is not retracted, so clients that render from the stream may keep showing the original text. Text blocks must retain their count, order, and positions; only their text may change. All non-text blocks and other block metadata must remain unchanged. Unchanged text retains its original `textSignature` (even if the handler drops or changes it); edited text loses its signature so provider replay state is never reused for different text. Invalid replacements and handler errors are reported and skipped. If aborted while a handler is pending, completed rewrites so far are retained and remaining handlers are skipped.
 - `message_start` / `message_update` / `message_end` — lifecycle notifications; `message_end` receives a detached snapshot, so in-place changes cannot rewrite agent or provider context
@@ -598,11 +666,13 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 - `tool_execution_start` / `tool_execution_update` / `tool_execution_end` (observability)
 - `tool_approval_requested` / `tool_approval_resolved` (observability; emitted by `wrapper.ts` only when a tool requires approval and an approval handler is registered)
 
+`tool_call` and `tool_result` identify the call with `toolCallId`. When a JS or Python eval cell or kernel-defined tool calls a session tool, both events also carry `parentToolCallId`: the ID of the invocation that made the nested call, not the ID of the eval that defined the tool. Direct calls omit this field.
+
 `tool_result` is middleware-style: handlers run in extension order and each sees prior modifications. Distinct non-blank `additionalContext` from every handler is preserved in registration order (repeats, compared ignoring surrounding whitespace, are dropped) and delivered before that call's `tool_call` context.
 
 ### Plan review lifecycle
 
-- `plan_review_requested` reports an interactive plan review with its `reviewId`, session, title, plan path and content, plus the choices in display order. Choice ids are stable (`execute`, `compact`, `keep`, `refine`, `save`); labels may change, and `keep` carries the current token count. An extension can answer it with `ctx.resolvePlanReview(...)` while the terminal picker stays live; the first answer wins. `save` uses the default file name without opening the path prompt.
+- `plan_review_requested` reports an interactive plan review with its `reviewId`, session, title, plan path and content, plus the choices in display order. Choice ids are stable (`execute`, `compact`, `keep`, `refine`, `save`); labels may change, and `keep` carries the current token count measured against the context window of the tier selected when the review opened (moving the slider re-measures it; read `ctx.getPendingPlanReview()` for the current state). An extension can answer it with `ctx.resolvePlanReview(...)` while the terminal picker stays live; the first answer wins. `save` writes the plan under the default file name without opening the path prompt and leaves the review open, still answerable (it fires no `plan_review_resolved`). The overlay shows Refine only while the plan has comments; `refine` with `input.feedback` is accepted either way.
 - An approval answered by an extension runs on the tier named by `input.role`, or the one currently selected in the overlay's model slider when `role` is omitted; `plan_review_requested` lists the selectable `tiers` (`role`, `provider`, `model`, and `thinkingLevel` when the role pins one; absent when fewer than two resolve). The approval executes the plan as it is at pick time: in-overlay edits if any, otherwise the plan file re-read from disk. That can differ from the reported `planContent`; an extension may write the plan file before answering to execute its own revision.
 - Tier order follows the configured role cycle, not the selected tier. The slider initially selects `default` when available; a remote `input.role` updates the displayed tier and commits the answer, preventing later terminal input from changing it.
 - `plan_review_resolved` reports how that review closed, with the selected choice id (or `undefined` when dismissed or cancelled by a session switch, a replacement review, or shutdown) and `by: "local" | "extension"`. It fires when the overlay actually closes, after every `plan_review_requested` handler has returned, so `plan_review_requested` handlers should hand off long work (a remote round-trip, a `ctx.ui` dialog) instead of awaiting it.
@@ -936,6 +1006,7 @@ Supported:
 - theme listing/loading by name (`setTheme` supports string names)
 - tools expanded toggle
 - `rerenderMessage(timestamp)`: draws the assistant reply with that `message.timestamp` again, re-running the [assistant text renderers](#assistant-text-renderer); a no-op while `extensionRenderers.assistantText` is off
+- `refreshTranscript(ids)`: asks the [transcript presenters](#transcript-presenter) again for the blocks with those ids and redraws the ones whose display changed
 - `getLinkClicksAvailable()`: whether picking a [claimed link](#extension-link-schemes), by its hint tag or a click, raises `link_activate` right now
 
 Current no-op methods in this controller:
@@ -1304,6 +1375,28 @@ pi.registerMessageRenderer("my-type", (message, { expanded }, theme) => {
 
 Used by interactive rendering when custom messages are displayed.
 
+### Compact rows
+
+A renderer's component may implement `isTranscriptBlockCompact(): boolean` (the `CompactTranscriptBlock` interface in `@oh-my-pi/pi-tui/chrome/transcript-container`). While it returns `true`, the message packs against neighboring compact blocks. The terminal draws no blank row between them, and Tern shows the run as one block without gaps. Empty or hidden blocks between two compact ones keep the run going.
+
+```ts
+import { type Component, truncateToWidth } from "@oh-my-pi/pi-tui";
+
+class StatusRow implements Component {
+	constructor(readonly label: string) {}
+	render(width: number) {
+		return [truncateToWidth(this.label, width)];
+	}
+	isTranscriptBlockCompact() {
+		return true;
+	}
+}
+
+pi.registerMessageRenderer("status", message => new StatusRow(String(message.content)));
+```
+
+The transcript asks again on every frame, so the answer can follow state such as expansion. In a plain terminal, rows in scrollback never change. If a compact message has already scrolled out and the block after it stops being compact, the blank row appears above that block in the live area. A blank row already in scrollback stays, even if the blocks around it pack later.
+
 ## Assistant thinking renderer
 
 ```ts
@@ -1337,6 +1430,47 @@ A display-only transform of each assistant text block in the main transcript, us
 - **Redraw.** Call `ctx.ui.rerenderMessage(message.timestamp)` after state the renderer reads changes (for example a click) to draw that reply again in place; it calls the renderers again even for blocks whose text is unchanged. A reply still in the live viewport just repaints; in a plain terminal, a reply with rows already in scrollback rebuilds the scrollback (as toggling thinking visibility does), which is costly, so avoid animating such replies frame by frame.
 - **Links.** Links the renderer draws behave like any model-authored link. To get their clicks, give them a scheme the extension [claims](#extension-link-schemes). Relative link targets the renderer adds are not resolved against the session's working directory the way the model's own are, so Tern's native view opens them relative to its own; use absolute paths or URLs.
 
+## Transcript presenter
+
+Opt-in: presenters are asked only while the `extensionRenderers.transcriptPresenters` setting is on (default off; **Tools → Extensions → Extension Transcript Presenters**). Off, they are never called and every block draws as without them; turning it on or off redraws the transcript.
+
+```ts
+// Tool calls of runs that have ended: answers depend only on the block and this set.
+const finished = new Set<string>();
+pi.on("agent_end", (event, ctx) => {
+	const ids: string[] = [];
+	for (const message of event.messages) {
+		if (message.role !== "assistant") continue;
+		for (const part of message.content) if (part.type === "toolCall") ids.push(part.id);
+	}
+	for (const id of ids) finished.add(id);
+	ctx.ui.refreshTranscript(ids);
+});
+pi.registerTranscriptPresenter(block => {
+	if (block.type !== "toolCall") return undefined;
+	if (block.toolName === "edit" || block.toolName === "write") return "compact";
+	return finished.has(block.id) ? "hidden" : "compact";
+});
+```
+
+Chooses how each block of the main session's transcript is drawn, in the plain terminal and in Tern's native view. It is display only: the session, `/export` and the model context are unchanged. It works in interactive mode with the setting on; elsewhere the presenter is registered but never asked.
+
+- **Blocks.** A presenter receives a read-only `TranscriptBlock`. Later versions add block types: return `undefined` for a `type` you do not know.
+  - `{ type: "toolCall", id, toolName, args, result?, isError, isPartial }` for a model tool call, `id` its `toolCallId`; the reads of a grouped read card are asked one by one.
+  - `{ type: "message", id, message }` for a session message drawn as its own block: `custom` messages with `customType` `advisor`, `skill-prompt`, `lsp-late-diagnostic`, `async-result` (background job completions), `async-notify` (output a running background job or service reports) and `launch-completion` (supervised process exits), and user `!`/`$` runs (`bashExecution`, `pythonExecution`). `id` is `String(message.timestamp)`, the same live and after a resume; messages recorded in the same millisecond share it, as they share `rerenderMessage`'s timestamp. A `!`/`$` run still going has a provisional message and id; it is asked again with the recorded message once the session records the run.
+  - `{ type: "event", id, event }` for a TTSR rule hit (`ttsr_triggered`) or an incomplete-todo reminder (`todo_reminder`), shaped like the extension event of the same type. These exist only in the session that raised them; `id` is unique within the process.
+
+  `args`, `result`, `message` and `event` are not copies: they are the live objects omp draws the block from, often the session's own message data, so never mutate them.
+- **Answers.** `undefined` defers to the next presenter. `"full"` is omp's own drawing. `"hidden"` draws nothing, as `display.hideToolActivity` does. `"compact"` is one row of omp's own summary. `{ compact: { label, rows } }` replaces that row's text with `label` and adds one row per entry of `rows` below it; both take `TspText` (a string or theme-token spans). Presenters answer synchronously and run while the transcript draws, so keep them cheap: any other value (a misspelt mode, the Promise of an `async` presenter) draws the block in full and is reported like a throw.
+- **Precedence.** Presenters are asked in extension load order and the first answer that is not `undefined` wins. A suspended extension's presenter is skipped. A presenter that throws answers `"full"` for that block: the block is drawn in full and later presenters are not asked for it. Its first failure (a throw or an unknown answer) is reported once through the extension error channel (event `transcript_presenter`). A block the user expanded, with `Ctrl+O` or its own toggle in Tern, is always drawn in full, and `display.hideToolActivity` still hides tool activity.
+- **Tern.** A compact tool call keeps its `tool` node as one inline, collapsed row; with `rows`, its body is one text node of those rows, all shown. Other blocks become an inline row with their full drawing folded below it. The row's toggle opens the full block.
+- **Spacing.** Consecutive compact blocks draw as tight rows, with no blank row between them in the terminal and no gap in Tern; blocks that draw nothing between them (hidden ones, a reply holding only tool calls) don't break the run. A block drawn in full keeps its blank row or gap on both sides. Extension message renderers can join a run too (see [Compact rows](#compact-rows)).
+- **When omp asks.** Whenever a block's data changes (arguments stream, a result lands). Call `ctx.ui.refreshTranscript(ids)` when the presenter's own state changes, as the `agent_end` handler above does. Registering a presenter, disposing it (`registerTranscriptPresenter` returns the disposer) and suspending or resuming its extension redraw every block.
+- **Same block, same answer.** omp may ask again at any time, for example when a setting change rebuilds the transcript, and keeps no earlier answer. Make the answer a function of the block and the extension's own state only, and key that state by block `id` as above: state reset per run (on `agent_start`) would redraw earlier runs' blocks with the new run's answer once a rebuild asks again.
+- **Scrollback.** In a plain terminal, settled blocks stay in the live viewport until the screen fills (or more than 256 blocks are live, hidden ones included), so a turn that fits on screen just repaints when its blocks change. If a changed block already has rows in terminal scrollback, omp erases and replays the scrollback once for the whole batch of changes (as toggling thinking visibility does). Late results that change such blocks (a presenter answering from `isPartial`, say, with background jobs finishing) share one replay per frame, but each replay still redraws the whole transcript, so its cost grows with the session. Tern never replays. Avoid changing old blocks often.
+- **Main transcript only.** A focused subagent's transcript, a collab guest's view of the host's session, and the overlays that replay a transcript (link browser, rewind and `/copy` pickers, agent transcript viewer) draw stock cards, as if no presenter were registered.
+- **Late diagnostics.** In Tern, late LSP diagnostics join the edit/write card they belong to and are drawn with it; while a presenter draws that card compact or hidden, they show as a block of their own right after it. Late diagnostics no card takes (all of them in a plain terminal) are `lsp-late-diagnostic` message blocks, asked like any other.
+
 ## Extension link schemes
 
 Opt-in with the same setting as [assistant text renderers](#assistant-text-renderer) (`extensionRenderers.assistantText`, default off). Off, claimed schemes are ignored and links draw exactly as before.
@@ -1355,6 +1489,7 @@ pi.on("link_activate", ({ url }) => {
 - **Handler.** A `link_activate` handler runs like a command, without the event-handler timeout, so it may await a dialog (`ctx.ui.confirm`, `ctx.ui.select`, …). A handler that throws is reported as an extension error.
 - **Fallback.** `ctx.ui.getLinkClicksAvailable()` is true only while claimed links can be picked: interactive mode, a plain terminal, `extensionRenderers.assistantText` on, and the hint key bound or `tui.mouse` on. A subagent's copy of the extension gets the same answer, since its links are picked on the same screen. Changing the setting, `tui.mouse` while the hint key is unbound, Tern's native view opening or closing, or suspending or resuming an extension (a live `disabledExtensions` edit) re-runs the assistant text renderers, so a renderer can check it on each call and draw content inline instead of behind a link nobody can pick.
 - **Ownership.** Scheme names are case-insensitive and at least two characters long, so no scheme captures a Windows drive path such as `C:/notes.md`. When two extensions claim one scheme, the first loaded gets its clicks; a suspended extension's schemes are released until it resumes. Web, file and mail schemes (`http`, `https`, `file`, `mailto`, …) and omp's internal URL schemes (`local`, `skill`, `agent`, …) are reserved: claiming one throws and fails the extension's load. Only links omp draws itself are picked: a raw terminal hyperlink of a claimed scheme in tool output stays an ordinary hyperlink.
+- **Registration.** Claim schemes in the extension's factory. A scheme claimed later (from `session_start` or another handler) is ignored until `extensionRenderers.assistantText` changes or an extension is suspended or resumed.
 - **Tern.** Tern's native view draws such links as its own links and does not route their clicks back to omp; handle them there with a Tern plugin.
 
 ### Link browser
@@ -1379,7 +1514,7 @@ Provide `renderCall` / `renderResult` on `registerTool` definitions for custom t
 - `tool_call` errors and timeouts block execution (fail-closed). Its budget is `extensionHandlers.toolCallTimeoutMs` (default 30,000 ms), paused during extension UI waits.
 - Most dispatched handlers have a 30-second budget; `session_shutdown` handlers run concurrently with a 2-second budget. Timing out stops waiting and cancels handler UI, but cannot undo arbitrary extension side effects.
 - Command name conflicts with built-ins are skipped with diagnostics.
-- Reserved shortcuts are ignored (`ctrl+c`, `ctrl+d`, `ctrl+z`, `ctrl+k`, `ctrl+p`, `ctrl+l`, `ctrl+o`, `ctrl+t`, `ctrl+g`, `ctrl+q`, `alt+m`, `shift+tab`, `shift+ctrl+p`, `alt+enter`, `escape`, `enter`).
+- Reserved shortcuts are ignored (`ctrl+c`, `ctrl+d`, `ctrl+z`, `ctrl+k`, `ctrl+p`, `ctrl+l`, `ctrl+o`, `ctrl+t`, `ctrl+g`, `ctrl+q`, `alt+m`, `shift+tab`, `shift+ctrl+p`, `alt+enter`, `escape`, `enter`); `getShortcutConflict` reports them as `reserved`.
 - Treat `ctx.reload()` as terminal for the current command handler frame.
 - Module globals are shared by parent/child bindings. Keep session-specific state in the factory closure or persisted session entries.
 

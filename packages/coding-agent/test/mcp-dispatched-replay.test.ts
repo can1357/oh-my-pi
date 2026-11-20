@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { connectToServer } from "@oh-my-pi/pi-coding-agent/mcp/client";
-import { DeferredMCPTool, MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
+import { MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -44,7 +44,6 @@ async function openConnection(): Promise<MCPServerConnection> {
 		type: "stdio",
 		command: process.execPath,
 		args: [path.join(import.meta.dir, "fixtures", "side-effect-mcp.ts"), effectsPath],
-		timeout: 300,
 	});
 	connections.push(connection);
 	return connection;
@@ -76,33 +75,9 @@ describe("MCP tool calls after dispatch", () => {
 
 		expect(recovered.details?.isError).toBeFalsy();
 		expect(recovered.content).toEqual([{ type: "text", text: "effect recorded" }]);
-		expect(reconnects).toBe(1);
-		expect(await effects()).toEqual(["record_effect", "record_effect"]);
-	});
-
-	it("does not replay a crashed DeferredMCPTool call", async () => {
-		const connection = await openConnection();
-		let reconnects = 0;
-		const tool = new DeferredMCPTool(
-			"side-effect",
-			TOOL_DEF,
-			async () => connection,
-			undefined,
-			async () => {
-				reconnects++;
-				return openConnection();
-			},
-		);
-
-		const result = await tool.execute("crash", { crash: true }, undefined, context);
-
-		expect(result.details?.isError).toBe(true);
-		expect(result.content[0]).toMatchObject({
-			type: "text",
-			text: expect.stringContaining("retryable: no"),
-		});
+		// The host starts a fresh server for the next request; the session has nothing to reconnect.
 		expect(reconnects).toBe(0);
-		expect(await effects()).toEqual(["record_effect"]);
+		expect(await effects()).toEqual(["record_effect", "record_effect"]);
 	});
 
 	it("reconnects and retries a definitely unsent call exactly once", async () => {

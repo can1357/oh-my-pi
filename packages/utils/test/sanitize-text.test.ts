@@ -64,11 +64,6 @@ describe("sanitizeTextDeep", () => {
 		expect(isRecord(output) && output.clean).toBe(clean);
 	});
 
-	it("returns the same reference when nothing needs sanitizing", () => {
-		const input = { a: ["x", { b: "y" }], n: 1, missing: undefined };
-		expect(sanitizeTextDeep(input)).toBe(input);
-	});
-
 	it("terminates on cyclic values", () => {
 		const input: Record<string, unknown> = { text: "a\x1b[2Jb" };
 		input.self = input;

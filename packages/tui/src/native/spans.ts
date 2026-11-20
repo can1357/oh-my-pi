@@ -293,6 +293,46 @@ export function rowsText(lines: readonly string[]): NativeNode {
 	return text(compactText(styledSpans(lines.join("\n"))), { wrap: "none" });
 }
 
+/** Semantic span tokens drawn with the theme colour that stands for them in the terminal. */
+const SEMANTIC_FG: Readonly<Record<string, ThemeColor>> = {
+	info: "accent",
+	link: "mdLink",
+	code: "mdCode",
+	mono: "mdCode",
+	path: "accent",
+	num: "accent",
+	ins: "toolDiffAdded",
+	del: "toolDiffRemoved",
+};
+
+/**
+ * Styled text as one ANSI terminal line: the reverse of {@link styledSpans}. Each span takes the
+ * last theme colour (or semantic colour token) in `s`, bold for `strong` and italic for `em`; text
+ * is sanitized like {@link plainText} and line breaks become spaces.
+ */
+export function spansLine(content: TspText): string {
+	if (typeof content === "string") return plainLine(content);
+	let out = "";
+	for (const part of content) {
+		let value = clean(part.t).replace(/[\r\n]+/g, " ");
+		if (!value) continue;
+		let color: ThemeColor | undefined;
+		let bold = false;
+		let italic = false;
+		for (const token of part.s?.split(" ") ?? []) {
+			if (token === "strong") bold = true;
+			else if (token === "em") italic = true;
+			else if (isValidThemeColor(token)) color = token;
+			else if (SEMANTIC_FG[token] !== undefined) color = SEMANTIC_FG[token];
+		}
+		if (color !== undefined) value = theme.fg(color, value);
+		if (bold) value = theme.bold(value);
+		if (italic) value = theme.italic(value);
+		out += value;
+	}
+	return out;
+}
+
 /** Theme background token of the first SGR background in ANSI-styled text. */
 export function styledBackground(styled: string): ThemeBg | undefined {
 	const reverse = activeReverse();

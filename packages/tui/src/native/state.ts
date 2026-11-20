@@ -41,6 +41,24 @@ export function setNativeButtons(on: boolean): void {
 	buttons = on;
 }
 
+/**
+ * Whether the live terminal types streaming `md` out itself (its `hello`
+ * lists `pace`): omp then sends assistant text as it arrives instead of
+ * pacing it. Set only by the native backend from the `hello` it adopts;
+ * false while no surface is live.
+ */
+let pacing = false;
+
+/** Whether a live surface's terminal paces streamed `md` (see {@link setNativePacing}). */
+export function nativePacing(): boolean {
+	return active && pacing;
+}
+
+/** Called by the native backend when it adopts a `hello` reply and when it stops. */
+export function setNativePacing(on: boolean): void {
+	pacing = on;
+}
+
 /** Call `listener` whenever native rendering starts or stops; returns the unsubscribe. */
 export function onNativeRenderingChange(listener: (on: boolean) => void): () => void {
 	listeners.add(listener);

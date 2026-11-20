@@ -31,6 +31,15 @@ describe("WelcomeComponent", () => {
 		});
 	});
 
+	it("natively follows the version with the update status", () => {
+		const welcome = new WelcomeComponent("1.0.0");
+		welcome.setVersionUpdate({ phase: "updating", version: "1.1.0", fraction: 0.426 });
+		const version = JSON.stringify(welcome.describe({} as never));
+		expect(version).toContain('"t":"v1.0.0"');
+		expect(version).toContain('"t":" → v1.1.0"');
+		expect(version).toContain('"t":" 42%"');
+	});
+
 	it("selects standard tip when preset is not unicode", () => {
 		vi.spyOn(theme, "getSymbolPreset").mockReturnValue("nerd");
 
@@ -118,5 +127,22 @@ describe("WelcomeComponent", () => {
 		expect(narrow).toContain("████████████");
 		expect(narrow).not.toContain("▄▀▀▄");
 		expect(narrow).not.toContain("v1.0.0");
+	});
+
+	it("trails the version with update progress, narrowing it before dropping it, without moving the lockup", () => {
+		const rows = (columns: number, update: boolean) => {
+			const welcome = new WelcomeComponent("1.0.0");
+			if (update) welcome.setVersionUpdate({ phase: "updating", version: "1.1.0", fraction: 0.5 });
+			return welcome.render(columns).map(row => Bun.stripANSI(row));
+		};
+		const versionRow = (columns: number) => rows(columns, true).find(row => row.includes("v1.0.0")) ?? "";
+
+		// The lockup centers as if no indicator were there.
+		expect(rows(80, true).slice(0, 4)).toEqual(rows(80, false).slice(0, 4));
+		expect(versionRow(80)).toMatch(/v1\.0\.0 → v1\.1\.0 \S+ 50%$/);
+		// Too narrow for the bar: the percent alone; narrower still: the bare version.
+		expect(versionRow(56).trimStart()).toBe("██       v1.0.0 → v1.1.0 50%");
+		expect(versionRow(38)).not.toContain("→");
+		for (const columns of [80, 56, 38]) expect(visibleWidth(versionRow(columns))).toBeLessThan(columns);
 	});
 });

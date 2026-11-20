@@ -13,34 +13,41 @@ const MAX_TITLE_CHARS = 80;
  */
 export type AppOpenRoute = "shows-window" | "launches";
 
+/** Matches a lowercased app-name substring or PID membership for a resolved application identity. */
+export function matchesWindowApp(window: DesktopWindow, app: string, pids?: ReadonlySet<number>): boolean {
+	return window.app.toLocaleLowerCase().includes(app) || (window.pid !== undefined && pids?.has(window.pid) === true);
+}
+
 /** Lists the open windows by app, apps matching `app` first, for a selector that matched nothing. */
 export function describeWindowMiss(
 	windows: readonly DesktopWindow[],
 	app: string | undefined,
 	route: AppOpenRoute,
+	pids?: ReadonlySet<number>,
 ): string {
 	// An empty `app` filters nothing in `matchesFilter`, so it matches no app here either.
 	const needle = app?.toLocaleLowerCase() || undefined;
-	const matched = (name: string): boolean => needle !== undefined && name.toLocaleLowerCase().includes(needle);
+	const matched = (window: DesktopWindow): boolean => needle !== undefined && matchesWindowApp(window, needle, pids);
 	const call = `computer.apps.open(${JSON.stringify(app)})`;
 	const hint =
 		route === "shows-window"
 			? `${call} opens it by that exact name or ID, or shows a window of it if it runs without one, and returns it with that window (window: null if none appears within 3 s).\n`
 			: `${call} launches it by that exact name or ID.\n`;
 	const note =
-		needle !== undefined && !windows.some(window => matched(window.app))
+		needle !== undefined && !windows.some(matched)
 			? `No open window belongs to an app matching ${JSON.stringify(app)}.\n${hint}`
 			: "";
 	if (windows.length === 0) return `${note}No windows are open.`;
 	const byApp = Map.groupBy(windows, window => window.app);
 	const focusedApp = windows.find(window => window.focused)?.app;
-	const rank = (name: string): number => (matched(name) ? 0 : name === focusedApp ? 1 : 2);
+	const matchedApp = (name: string): boolean => byApp.get(name)!.some(matched);
+	const rank = (name: string): number => (matchedApp(name) ? 0 : name === focusedApp ? 1 : 2);
 	const apps = [...byApp.keys()].sort((left, right) => rank(left) - rank(right) || left.localeCompare(right));
 	const lines = apps.slice(0, MAX_APPS).map(name => {
 		const group = byApp.get(name)!;
 		// Titled windows first; untitled ones still list their ids, since macOS without Screen Recording blanks other apps' titles.
 		const ordered = group.toSorted((left, right) => Number(!left.title.trim()) - Number(!right.title.trim()));
-		const limit = matched(name) ? WINDOWS_PER_MATCHED_APP : WINDOWS_PER_APP;
+		const limit = matchedApp(name) ? WINDOWS_PER_MATCHED_APP : WINDOWS_PER_APP;
 		const entries = ordered
 			.slice(0, limit)
 			.map(window => `${window.id} ${JSON.stringify(truncate(window.title, MAX_TITLE_CHARS))}`);

@@ -11,7 +11,7 @@ import { effect, register } from "../config/registry";
 import type { Settings } from "../config/settings";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { $which, isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
 import { setFeedModelBadgeEnabled } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
@@ -49,7 +49,12 @@ export const cfgIsolationBackend = register({
 		label: "Isolation Backend",
 		description: "Backend used for subagent isolation and worktree cloning",
 		options: [
-			{ value: "auto", label: "Auto", description: "Let the PAL pick the best available backend" },
+			{
+				value: "auto",
+				label: "Auto",
+				description:
+					"Isolated subagents and `/wt` use ovnfs checkouts when ovnfs is found; otherwise (and for other worktrees) the PAL picks the best available backend",
+			},
 			{ value: "apfs", label: "APFS", description: "macOS clonefile reflink (APFS)" },
 			{ value: "btrfs", label: "btrfs", description: "btrfs subvolume snapshot" },
 			{ value: "zfs", label: "ZFS", description: "ZFS snapshot + clone" },
@@ -125,7 +130,7 @@ export const cfgWorktreeOnExit = register({
 	id: "worktree.onExit",
 	protocolDefault: ["rpc", "acp"],
 	type: "enum",
-	values: ["keep", "ask", "remove"] as const,
+	values: ["keep", "ask", "remove", "force"] as const,
 	default: "keep",
 	ui: {
 		tab: "tasks",
@@ -140,6 +145,12 @@ export const cfgWorktreeOnExit = register({
 				label: "Remove",
 				description:
 					"Remove clean worktrees; ask when they have uncommitted changes or new commits. Gitignored files (e.g. `.env`) are deleted too",
+			},
+			{
+				value: "force",
+				label: "Force Remove",
+				description:
+					"Remove every worktree without asking, even with uncommitted changes. Uncommitted work, gitignored files (e.g. `.env`), and commits only on a detached HEAD are lost; new commits on the branch are kept",
 			},
 		],
 	},
@@ -158,6 +169,30 @@ export const cfgTaskIsolationApply = register({
 			"Automatically apply successful isolated task changes to the parent checkout; disable to retain patch or branch artifacts",
 	},
 });
+
+export const cfgOvnfsPath = register({
+	id: "ovnfs.path",
+	type: "string",
+	default: undefined,
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "ovnfs Binary",
+		description:
+			"ovnfs executable; unset looks for `ovnfs` on PATH. When it is found, ovnfs checkouts (copy-on-write views of a folder, ready in about a second at any size) serve every separate copy: the system prompt tells agents to open checkouts instead of git worktrees or copies, and with `isolation.backend` on auto, isolated subagents (when allowed) run in checkouts instead of native clones and `/wt` moves the session into a checkout instead of a linked worktree",
+	},
+});
+
+/**
+ * The ovnfs command agents and isolated subagents use (`ovnfs.path`, else `ovnfs`),
+ * or `undefined` when that binary is not found. Read by the system prompt (checkout
+ * guidance), the bash git guard, and, when `isolation.backend` is auto, the task
+ * runner (ovnfs-backed isolation) and `/wt` (ovnfs-backed session worktrees).
+ */
+export function ovnfsCommand(settings?: Settings): string | undefined {
+	const command = (settings && cfgOvnfsPath.get(settings)?.trim()) || "ovnfs";
+	return $which(command) ? command : undefined;
+}
 
 export const cfgTaskIsolationMerge = register({
 	id: "task.isolation.merge",
@@ -226,7 +261,7 @@ export const cfgTaskEager = register({
 		tab: "tasks",
 		group: "Subagents",
 		label: "Prefer Task Delegation",
-		description: "How strongly to push delegating work to subagents",
+		description: "How strongly to push the main agent to delegate work; subagents keep the model's own policy",
 		options: [
 			{
 				value: "default",
@@ -235,6 +270,34 @@ export const cfgTaskEager = register({
 			},
 			{ value: "preferred", label: "Preferred", description: "Adds delegation guidance to the system prompt" },
 			{ value: "always", label: "Always", description: "Prompt guidance plus a first-turn delegation reminder" },
+		],
+	},
+});
+
+export const cfgTaskAutoParallel = register({
+	id: "task.autoParallel",
+	protocolDefault: ["rpc", "acp"],
+	type: "enum",
+	values: ["off", "suggest", "on"] as const,
+	default: "off",
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Auto Parallel",
+		description:
+			"Ask the native judge resolved through the 'judge' role which parts of each new top-level prompt can run concurrently. Needs a native judge and the task tool; without them nothing is judged.",
+		options: [
+			{ value: "off", label: "Off", description: "Never split prompts" },
+			{
+				value: "suggest",
+				label: "Suggest",
+				description: "Judge each prompt and report the split without acting on it",
+			},
+			{
+				value: "on",
+				label: "On",
+				description: "When a prompt splits into independent subtasks, tell the agent to delegate them in parallel",
+			},
 		],
 	},
 });
@@ -253,16 +316,17 @@ export const cfgTaskBatch = register({
 	},
 });
 
-export const cfgTaskFile = register({
-	id: "task.file",
+export const cfgTaskSteps = register({
+	id: "task.steps",
+	protocolDefault: ["rpc", "acp"],
 	type: "boolean",
 	default: false,
 	ui: {
 		tab: "tasks",
 		group: "Subagents",
-		label: "Task Instructions from Files",
+		label: "Sequential Task Steps",
 		description:
-			"Let the task tool read subagent instructions from a file (taskFile), recording its path and SHA-256.",
+			"Spawns take ordered `steps` instead of one `task`: the subagent gets the first step, then each next one once it finishes the previous; past 4 steps, earlier messages carry two or more. The last step's result is the task's result.",
 	},
 });
 
@@ -275,7 +339,7 @@ export const cfgTaskStructured = register({
 		group: "Subagents",
 		label: "Structured Task Results",
 		description:
-			"Expose outputSchema/schemaMode on the task tool and return subagent results through the yield tool, validated against caller or agent output schemas. Off: task subagents have no yield tool and return their final message as plain text, except agents whose definition sets structured: true. Eval agent()/workpool spawns always keep structured results.",
+			"Expose outputSchema/schemaMode on the task tool and honor agent output schemas; a subagent with a schema returns its result through the yield tool, validated against it. Off: task subagents ignore schemas, except agents whose definition sets structured: true. A subagent without a schema has no yield tool and returns its final message. Eval agent()/workpool spawns always honor schemas.",
 	},
 });
 
@@ -395,6 +459,39 @@ export const cfgTaskMaxConcurrency = register({
 	},
 });
 
+function validateWorkerThreads(value: unknown): void {
+	if (value === undefined || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) return;
+	throw new Error(
+		`Invalid task.workerThreads: expected a non-negative integer (0 runs subagents on the main thread), got ${Bun.inspect(value)}.`,
+	);
+}
+
+/**
+ * Upper bound on worker threads hosting subagents; how many are used follows the number of
+ * concurrent subagents (`allowedSubagentWorkers`). 0 keeps every subagent on the main thread.
+ */
+export const cfgTaskWorkerThreads = register({
+	id: "task.workerThreads",
+	protocolDefault: ["rpc", "acp"],
+	type: "number",
+	default: 4,
+	validate: validateWorkerThreads,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Subagent Worker Threads",
+		description:
+			"Maximum worker threads for subagents. Up to 8 concurrent subagents run on the main thread; at 9 one worker joins, and one more each time the count doubles (18, 36, 72). Workers stop a minute after no subagent is live in them; 0 keeps every subagent on the main thread",
+		options: [
+			{ value: "0", label: "Main thread only" },
+			{ value: "1", label: "Up to 1 worker" },
+			{ value: "2", label: "Up to 2 workers" },
+			{ value: "4", label: "Up to 4 workers", description: "Default" },
+			{ value: "8", label: "Up to 8 workers" },
+		],
+	},
+});
+
 export const cfgTaskEnableLsp = register({
 	id: "task.enableLsp",
 	type: "boolean",
@@ -402,9 +499,22 @@ export const cfgTaskEnableLsp = register({
 	ui: {
 		tab: "tasks",
 		group: "Subagents",
-		label: "LSP in Subagents",
+		label: "LSP Edit Checks in Subagents",
 		description:
-			"Allow subagents spawned via the task tool to use the lsp tool. Off by default to keep subagents cheap; enable when LSP-aware delegation is worth the extra tokens.",
+			"Run LSP formatting and diagnostics on subagent edits. Off by default to keep subagents cheap; the lsp tool stays available to them either way.",
+	},
+});
+
+/** Allow interactive instances in the same folder to discover and message each other's agents. */
+export const cfgTaskCrossInstance = register({
+	id: "task.crossInstance",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Cross-Instance Agent Messaging",
+		description: "Let other omp instances in this folder read agent outputs and send messages that can wake agents",
 	},
 });
 
@@ -589,6 +699,13 @@ export const cfgTaskAgentAccountPools = register({
 
 export const cfgTaskAgentPrewalk = register({
 	id: "task.agentPrewalk",
+	protocolDefault: ["rpc", "acp"],
+	type: "record",
+	default: {} as Record<string, string>,
+});
+
+export const cfgTaskAgentPrewalkAuto = register({
+	id: "task.agentPrewalkAuto",
 	protocolDefault: ["rpc", "acp"],
 	type: "record",
 	default: {} as Record<string, string>,

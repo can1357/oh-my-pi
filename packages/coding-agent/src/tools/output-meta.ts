@@ -38,6 +38,9 @@ import {
 	cfgToolsOutputMaxColumns,
 } from "./settings";
 
+/** The sink's middle-elision marker line (`formatMiddleElisionMarker`): head lines above it, tail lines below. */
+const MIDDLE_ELISION_MARKER = /^\[…\d+(?:ln|B) elided…\]$/;
+
 /** Input for {@link OutputMetaBuilder.limits}. `columnUnit` defaults to `chars`. */
 export interface LimitsInput {
 	matchLimit?: number;
@@ -217,21 +220,30 @@ export class OutputMetaBuilder {
 		// A capped artifact holds only a head/tail sample; the notice must say so.
 		const artifactElidedBytes = artifactId ? summary.artifactElidedBytes : undefined;
 
-		// Middle elision: the sink retained head + tail with an elision marker.
+		// Middle elision: the sink retained head + tail with an elision marker; the marker's line splits them.
 		if (summary.elidedBytes != null && summary.elidedBytes > 0) {
 			const elidedLines = summary.elidedLines ?? Math.max(0, totalLines - summary.outputLines);
+			const shown = summary.output.split("\n");
+			const markerAt = shown.findIndex(line => MIDDLE_ELISION_MARKER.test(line));
+			// Output ending in a newline has no line after it, though the counts carry an empty one.
+			const trailing = markerAt >= 0 && shown.length > markerAt + 1 && shown.at(-1) === "" ? 1 : 0;
+			const lastLine = totalLines - trailing;
 			const keptLines = Math.max(0, summary.outputLines - 1); // -1 for marker line
-			const headLines = Math.ceil(keptLines / 2);
-			const tailLines = keptLines - headLines;
+			// Lines from the marker on are the marker and the tail; the rest of `outputLines` is the head. A notice
+			// `dump(notice)` put above the head is not in `outputLines`, so it never counts as a head line.
+			const tailLines =
+				markerAt >= 0 ? shown.length - markerAt - 1 - trailing : keptLines - Math.ceil(keptLines / 2);
+			const headLines =
+				markerAt >= 0 ? Math.max(0, summary.outputLines - (shown.length - markerAt)) : Math.ceil(keptLines / 2);
 			this.#meta.truncation = {
 				direction: "middle",
 				truncatedBy: "middle",
-				totalLines,
+				totalLines: lastLine,
 				totalBytes: summary.totalBytes,
 				outputLines: summary.outputLines,
 				outputBytes: summary.outputBytes,
 				headRange: headLines > 0 ? { start: 1, end: headLines } : undefined,
-				tailRange: tailLines > 0 ? { start: totalLines - tailLines + 1, end: totalLines } : undefined,
+				tailRange: tailLines > 0 ? { start: lastLine - tailLines + 1, end: lastLine } : undefined,
 				elidedBytes: summary.elidedBytes,
 				elidedLines,
 				artifactId,
@@ -380,7 +392,7 @@ export class OutputMetaBuilder {
 	 * `artifactElidedBytes` marks an artifact the size cap cut to a head/tail sample.
 	 * `recovery.lines` (first to last cut line) lets the notice name the
 	 * `<selectorBase>:raw:<first>-<last>` read that returns those lines whole;
-	 * the base defaults to `artifact://<artifactId>`.
+	 * the base defaults to `local://<artifactId>.log`.
 	 */
 	columnTruncated(
 		maxColumn: number,
@@ -419,7 +431,7 @@ export class OutputMetaBuilder {
 		return this;
 	}
 
-	/** Add internal URL source info (skill://, agent://, artifact://). */
+	/** Add internal URL source info (skill://, agent://, local://). */
 	sourceInternal(value: string): this {
 		this.#meta.source = { type: "internal", value };
 		return this;
@@ -516,11 +528,11 @@ export function resolveOutputSinkHeadBytes(s: Settings | undefined): number {
  * Slack on top of the configured spill threshold before the final-defense
  * inline byte cap fires. The OutputSink already bounds inline bodies to the
  * threshold; only notice slop (wall time, exit code, elision marker,
- * `[raw output: artifact://N]` footer) rides above it. The slack keeps the
+ * `[raw output: local://N.log]` footer) rides above it. The slack keeps the
  * cap a genuine last resort for paths that bypass the sink (e.g. ACP
  * client-bridge terminals) instead of re-truncating — and re-saving — every
- * sink-elided result (the double-artifact `Artifact: N+1` vs `artifact://N`
- * mismatch).
+ * sink-elided result (a second spill `N+1` while the footer still names
+ * `local://N.log`).
  */
 const INLINE_CAP_SLACK_BYTES = 2 * 1024;
 
@@ -612,13 +624,13 @@ async function spillLargeResultToArtifact(
 	// RPC-host); a save failure must never convert a successful call into an
 	// error, nor re-expose the full (possibly context-blowing) output. Mirror
 	// `enforceInlineByteCap`: always truncate past the threshold, and only
-	// attach the `artifact://` recovery link when the save actually succeeded.
+	// attach the `local://N.log` recovery link when the save actually succeeded.
 	let artifactId: string | undefined;
 	// A failed stream capture only left a preview here. Saving that preview
 	// would invent a misleading full-output recovery link, not recover the log.
 	if (!existingMeta?.artifactError) {
 		try {
-			artifactId = await sessionManager.saveArtifact(fullText, toolName);
+			artifactId = await sessionManager.saveArtifact(fullText);
 		} catch (error) {
 			logger.warn("Failed to spill large tool result to artifact", {
 				tool: toolName,
@@ -766,25 +778,56 @@ async function wrappedExecute(
 ): Promise<AgentToolResult> {
 	const originalExecute = this[kUnwrappedExecute];
 
+	let own: AgentToolResult;
+	let result: AgentToolResult;
 	try {
-		let result = await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
+		own = await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
+		// A program parses the result: elision markers and notices would corrupt its payload, so it
+		// gets the tool's own result with truncation left structured in `details.meta`.
+		if (context?.programmatic) return own;
 
 		// Spill large results to artifact, truncate to tail
-		result = await spillLargeResultToArtifact(result, this.name, context);
+		result = await spillLargeResultToArtifact(own, this.name, context);
 
 		// Append notices from meta
 		const meta: OutputMeta | undefined = result.details?.meta;
 		if (meta) {
-			return {
+			result = {
 				...result,
 				content: appendOutputNotice(result.content, meta),
 			};
 		}
-		return result;
 	} catch (e) {
 		// Re-throw with formatted message so agent-loop sets isError flag
 		throw new Error(renderError(e));
 	}
+	// The Spotlight experiment shapes what the agent's own calls return; calls a tool or script makes stay whole.
+	const shape = context?.spotlightShape;
+	if (shape && isAgentCall(this, toolCallId, context)) {
+		result = await shape({
+			tool: this.name,
+			toolCallId,
+			args: params,
+			own,
+			result,
+			signal,
+		});
+	}
+	return result;
+}
+
+/**
+ * Whether call `toolCallId` of `tool` is one the agent made: the loop's batch lists it under this tool's name. Calls
+ * dispatched under another tool's call (an `xd://` device behind `write`) or outside the loop (eval's tool bridge, an
+ * advisor) are not.
+ */
+function isAgentCall(tool: AgentTool, toolCallId: string, context: AgentToolContext): boolean {
+	const calls = context.toolCall?.toolCalls;
+	if (!calls) return false;
+	for (const call of calls) {
+		if (call.id === toolCallId) return call.name === tool.name || call.name === tool.customWireName;
+	}
+	return false;
 }
 
 /**

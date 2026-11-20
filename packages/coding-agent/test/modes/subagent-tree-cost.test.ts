@@ -63,6 +63,7 @@ function ref(id: string, overrides: Partial<AgentRef> & { cost?: number } = {}):
 		status: "parked",
 		session: null,
 		sessionFile: path.join(artifacts, `${id}.jsonl`),
+		generation: 0,
 		createdAt: 0,
 		lastActivity: 0,
 		history: metrics ? { metrics } : undefined,
@@ -92,6 +93,15 @@ describe("sumSubagentTreeCost", () => {
 				ref("Main/advisor", {
 					kind: "advisor",
 					parentId: "Main",
+					sessionFile: path.join(artifacts, "__advisor.jsonl"),
+					cost: 5,
+				}),
+				// Multi-session hosts (ACP, SDK) register each root as `kind: "main"` under
+				// its own id; the root's own transcript and its advisor stay out of the tree.
+				ref("acp:root", { kind: "main", sessionFile: root, cost: 10 }),
+				ref("acp:root/advisor", {
+					kind: "advisor",
+					parentId: "acp:root",
 					sessionFile: path.join(artifacts, "__advisor.jsonl"),
 					cost: 5,
 				}),

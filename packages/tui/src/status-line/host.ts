@@ -10,6 +10,13 @@ export interface StatusAccountIdentity {
 	email?: string;
 	projectId?: string;
 	orgId?: string;
+	/**
+	 * Durable credential row id, set when the identity is credential-scoped
+	 * rather than OAuth-scoped (an API-key account carries no email/account
+	 * identifiers to attribute by). Usage reports probed from stored rows
+	 * carry the matching `metadata.credentialId`.
+	 */
+	credentialId?: number;
 }
 
 /** Nested repository selected as the active workspace context. */
@@ -18,6 +25,52 @@ export interface ActiveRepoContext {
 	repoRoot: string;
 	relativeRepoRoot: string;
 	source: "single-direct-child-repo";
+}
+
+/** Why the next request rewrites the cached prompt prefix instead of reading it. */
+export type PromptCacheColdReason =
+	| { kind: "expired"; at: number }
+	/** omp's warm refresh found the entry gone. */
+	| { kind: "refresh-missed" }
+	| { kind: "model"; from: string; to: string }
+	| { kind: "thinking"; from: string; to: string }
+	| { kind: "tools" }
+	| { kind: "system-prompt" }
+	| { kind: "retention" }
+	| { kind: "compaction" };
+
+/** omp's cache warmer as it concerns the entry. */
+export interface PromptCacheWarming {
+	/** `scheduled`: a refresh decision is armed; `refreshing`: a refresh was sent and is in flight. */
+	state: "scheduled" | "refreshing" | "inactive";
+	/** When the armed refresh decides. */
+	nextWarmAt?: number;
+	/** When warming gives up: the 30-minute idle window, or while streaming, when refreshing stops paying at current prices. */
+	stopsAt?: number;
+	/** Why nothing is scheduled. */
+	reason?: string;
+}
+
+/** What the next request finds in the prompt cache: the `cache` segment's marker and its details. */
+export interface PromptCacheStatus {
+	/** `cold`: the next request rewrites the cached prefix. */
+	state: "warm" | "cold";
+	/** Why it is cold; absent while warm. */
+	reason?: PromptCacheColdReason;
+	/** Read off the transcript of a reopened session, not a response this process saw: thinking level, tools and credential are unknown. */
+	inferred: boolean;
+	/** Retention tier the entry was written under: `short` (5m) or `long` (1h). */
+	tier: "short" | "long";
+	/** Send time of the last request that read or wrote the entry. */
+	touchedAt: number;
+	/** Lifetime after the last touch; undefined when the provider never expires the entry. */
+	ttlMs?: number;
+	/** Prompt tokens of the request that wrote or last read the entry: what a warm cache serves. */
+	cachedTokens: number;
+	/** Estimated prompt tokens of the next request. */
+	nextTokens: number;
+	/** Absent when the entry was inferred. */
+	warming?: PromptCacheWarming;
 }
 
 export interface StatusLineSession {
@@ -51,7 +104,7 @@ export interface StatusLineSession {
 		};
 	};
 	modelRegistry: {
-		isUsingOAuth(model: Model): boolean;
+		isUsingSubscription(model: Model): boolean;
 	};
 	getContextUsage(): { tokens: number; contextWindow: number; percent: number | null } | undefined;
 	autoResolvedThinkingLevel(): string | undefined;
@@ -66,6 +119,11 @@ export interface StatusLineSession {
 	getAdvisorStatusOverview?(): { configured: boolean; advisors: readonly { status: string; yielded: boolean }[] };
 	getAdvisorCost?(): number;
 	isAdvisorUsingSubscription?(): boolean;
+	/**
+	 * What the next request finds in the prompt cache at `nowMs`; undefined when there is nothing to reason about.
+	 * `nextTokens` is the caller's current context token count, so the session need not recount it.
+	 */
+	getPromptCacheStatus?(nowMs: number, nextTokens?: number): PromptCacheStatus | undefined;
 }
 
 export interface FooterSession {
@@ -73,7 +131,7 @@ export interface FooterSession {
 	isAutoThinking: boolean;
 	autoResolvedThinkingLevel(): string | undefined;
 	getContextUsage: StatusLineSession["getContextUsage"];
-	modelRegistry: Pick<StatusLineSession["modelRegistry"], "isUsingOAuth">;
+	modelRegistry: Pick<StatusLineSession["modelRegistry"], "isUsingSubscription">;
 	/**
 	 * Cumulative session rollup. Unlike the active-window stats it spans every
 	 * entry in the session, so compaction does not reset the counters, and it

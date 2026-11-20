@@ -32,8 +32,9 @@ import {
 	matchesSelectPageUp,
 	matchesSelectUp,
 } from "../keybinding-matchers";
-import { col, item, node } from "../native/describe";
-import { leafKey, type NativeNode, type NativeUiEvent } from "../native/node";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { col, item, node, span } from "../native/describe";
+import { leafKey, type NativeNode, type NativeScroll, type NativeUiEvent } from "../native/node";
 import { actionBar, actionButton } from "../native/overlay";
 import { PREVIEW_LIMITS, sanitizeDisplayLines } from "../render/render-utils";
 import { theme } from "../theme/theme";
@@ -105,6 +106,61 @@ function promptDetails(lines: string[]): string[] {
 	return details;
 }
 
+const ALLOWED_SEGMENT_RE = /^(\s*)✓(\s+)(.+)(\s+\((?:allowed: .*|\d+ allowed segments?)\))$/u;
+const PROMPTED_SEGMENT_RE = /^(\s*)\?(\s+)(.+)(\s+\((?:requires approval|prompt: .*|critical pattern)\))$/u;
+
+/**
+ * Indexes `[start, end)` of compound bash segment rows: the indented rows right after the first
+ * `Command:` row, when that row is bare. Lines elsewhere (a multi-line command, code, file
+ * content) are never styled as covered or prompted, however they read.
+ */
+function segmentRowRange(details: readonly string[]): readonly [number, number] {
+	const label = details.findIndex(line => line.startsWith("Command:"));
+	if (label < 0 || details[label] !== "Command:") return [0, 0];
+	let end = label + 1;
+	while (end < details.length && details[end]!.startsWith("  ")) end++;
+	return [label + 1, end];
+}
+
+/** Styles each detail row: segment rows by their covered/prompted marker, the rest in accent. */
+function styleApprovalDetails(details: readonly string[]): { ansi: string; spans?: TspSpan[] }[] {
+	const [start, end] = segmentRowRange(details);
+	return details.map((line, index) =>
+		index >= start && index < end ? styleSegmentLine(line) : { ansi: theme.fg("accent", line) },
+	);
+}
+
+function styleSegmentLine(line: string): { ansi: string; spans?: TspSpan[] } {
+	const allowed = ALLOWED_SEGMENT_RE.exec(line);
+	if (allowed) {
+		const [, indent = "", space = " ", command = "", suffix = ""] = allowed;
+		return {
+			ansi: `${indent}${theme.fg("success", "✓")}${space}${theme.fg("dim", `${command}${suffix}`)}`,
+			spans: [
+				...(indent ? [span(indent)] : []),
+				span("✓", "success"),
+				span(space),
+				span(`${command}${suffix}`, "dim"),
+			],
+		};
+	}
+	const prompted = PROMPTED_SEGMENT_RE.exec(line);
+	if (prompted) {
+		const [, indent = "", space = " ", command = "", suffix = ""] = prompted;
+		return {
+			ansi: `${indent}${theme.fg("warning", "?")}${space}${theme.bold(theme.fg("accent", command))}${theme.fg("warning", suffix)}`,
+			spans: [
+				...(indent ? [span(indent)] : []),
+				span("?", "warning"),
+				span(space),
+				span(command, "accent strong"),
+				span(suffix, "warning"),
+			],
+		};
+	}
+	return { ansi: theme.fg("accent", line) };
+}
+
 export class ApprovalDialogComponent implements Component {
 	readonly #title: string;
 	readonly #summary: readonly string[];
@@ -125,6 +181,10 @@ export class ApprovalDialogComponent implements Component {
 	#native: NativeNode | undefined;
 	/** Whether a draft held the keys when {@link #native} was described: it moves the highlight. */
 	#nativeDrafting = false;
+	/** Page Up/Down forwarded to the terminal's details scroller: bumped per key press. */
+	#nativeScroll: NativeScroll = { by: "start", n: 0 };
+	/** The summary's first prompted compound-bash segment row when it opens past {@link MAX_DETAIL_ROWS}. */
+	#promptedRow: number | undefined;
 	readonly #armedAt = performance.now() + APPROVE_ARM_MS;
 	readonly #countdown: CountdownTimer | undefined;
 
@@ -140,6 +200,14 @@ export class ApprovalDialogComponent implements Component {
 		this.#summary = promptDetails(lines);
 		this.#full =
 			options.fullPrompt === undefined ? undefined : promptDetails(sanitizeDisplayLines(options.fullPrompt));
+		const [segmentStart, segmentEnd] = segmentRowRange(this.#summary);
+		const firstPrompted = this.#summary
+			.slice(segmentStart, segmentEnd)
+			.findIndex(line => PROMPTED_SEGMENT_RE.test(line));
+		if (firstPrompted >= 0 && segmentStart + firstPrompted >= MAX_DETAIL_ROWS) {
+			this.#promptedRow = segmentStart + firstPrompted;
+			this.#scrollOffset = this.#promptedRow - MAX_DETAIL_ROWS + 1;
+		}
 		this.#choices = this.#buildChoices();
 		this.#choice = this.#choices.findIndex(choice => choice.answer === "once");
 		this.#panel = new OverlayPanel(title, "omp.overlay.approval");
@@ -230,8 +298,8 @@ export class ApprovalDialogComponent implements Component {
 		const page = Math.max(1, this.#bodyRows - 1);
 		if (matchesSelectUp(keyData)) this.#moveChoice(-1);
 		else if (matchesSelectDown(keyData)) this.#moveChoice(1);
-		else if (matchesSelectPageUp(keyData)) this.#scroll(-page);
-		else if (matchesSelectPageDown(keyData)) this.#scroll(page);
+		else if (matchesSelectPageUp(keyData)) this.#scroll(-page, "page-up");
+		else if (matchesSelectPageDown(keyData)) this.#scroll(page, "page-down");
 		else if (getKeybindings().matches(keyData, "tui.select.confirm")) {
 			if (performance.now() >= this.#armedAt) this.#take(this.#choices[this.#choice]!.answer);
 		}
@@ -355,11 +423,31 @@ export class ApprovalDialogComponent implements Component {
 			node("text", { text: this.#title, role: "omp.approval.title", tone: "accent" }, undefined, "title"),
 		];
 		if (this.#details.length > 0) {
-			// One clipped row per detail like the text view; expanded details wrap.
-			const rows = this.#details.map((line, index) =>
-				node("text", this.#expanded ? { text: line } : { text: line, truncate: "end" }, undefined, String(index)),
+			// One clipped row per detail like the text view; expanded details wrap. A `list` capped at the
+			// text view's row budget is the terminal's scroller (a capped `col` would only clip), so the
+			// rest scrolls by wheel or Page Up/Down while the choices and action bar stay in view.
+			const styledRows = styleApprovalDetails(this.#details);
+			const rows = this.#details.map((line, index) => {
+				const styled = styledRows[index]!;
+				const content = styled.spans ? { spans: styled.spans } : { text: line };
+				const row = node(
+					"text",
+					this.#expanded ? content : { ...content, truncate: "end" },
+					undefined,
+					String(index),
+				);
+				// Like the text view's opening offset: the first prompted segment past the fold scrolls into view on mount.
+				return !this.#expanded && index === this.#promptedRow ? { ...row, reveal: "nearest" as const } : row;
+			});
+			const details = node("col", { role: "omp.approval.details" }, rows, "details");
+			children.push(
+				node(
+					"list",
+					{ max: { lines: MAX_DETAIL_ROWS } },
+					[{ ...details, scroll: this.#nativeScroll }],
+					"details-scroll",
+				),
 			);
-			children.push(node("col", { role: "omp.approval.details" }, rows, "details"));
 		}
 		const choices = this.#choices.map(choice =>
 			item(choice.answer, {
@@ -398,9 +486,14 @@ export class ApprovalDialogComponent implements Component {
 	/** Detail rows at `width`: one clipped row per detail, or wrapped rows once expanded. */
 	#detailLines(width: number): string[] {
 		if (!this.#expanded) {
-			return this.#details.map(line => truncateToWidth(theme.fg("accent", line), width, Ellipsis.Unicode));
+			return styleApprovalDetails(this.#details).map(styled =>
+				truncateToWidth(styled.ansi, width, Ellipsis.Unicode),
+			);
 		}
-		return this.#details.flatMap(line => (line === "" ? [""] : wrapTextWithAnsi(theme.fg("accent", line), width)));
+		const styledRows = styleApprovalDetails(this.#details);
+		return this.#details.flatMap((line, index) =>
+			line === "" ? [""] : wrapTextWithAnsi(styledRows[index]!.ansi, width),
+		);
 	}
 
 	#footerHint(overflows: boolean, drafting: boolean): string {
@@ -415,8 +508,10 @@ export class ApprovalDialogComponent implements Component {
 		return `${choose} · ${keys}${scroll}${this.options.draft ? " · type to deny and steer" : ""}`;
 	}
 
-	#scroll(delta: number): void {
+	#scroll(delta: number, by: "page-up" | "page-down"): void {
 		this.#scrollOffset = Math.max(0, this.#scrollOffset + delta);
+		this.#nativeScroll = { by, n: this.#nativeScroll.n + 1 };
+		this.#native = undefined;
 		this.options.tui?.requestRender();
 	}
 

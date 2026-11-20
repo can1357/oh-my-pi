@@ -61,7 +61,7 @@ function makeSession(sessionName = "Cache Session") {
 		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
 		getAsyncJobSnapshot: () => ({ running: [] }),
 		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
+		modelRegistry: { isUsingSubscription: () => false },
 		sessionManager: {
 			getSessionName: () => sessionName,
 			getUsageStatistics: () => ({
@@ -282,6 +282,65 @@ describe("StatusLineComponent effective settings cache", () => {
 		const cleared = stripVTControlCharacters(component.getTopBorder(120).content);
 		expect(cleared).not.toContain("Indexer ready");
 		expect(cleared).not.toContain("Tests passing");
+	});
+
+	it("keeps an extension's colour in the status segment without disturbing the bar", () => {
+		const settings: StatusLineSettings = {
+			preset: "custom",
+			leftSegments: ["pi", "status", "model"],
+			rightSegments: [],
+			separator: "powerline-thin",
+			showHookStatus: false,
+			sessionAccent: false,
+			segmentOptions: { model: { showThinkingLevel: false } },
+		};
+		const plainBar = makeComponent(settings);
+		plainBar.setHookStatus("build", "building");
+		const styledBar = makeComponent(settings);
+		styledBar.setHookStatus("build", "\x1b[33;41mbuilding\x1b[0m");
+
+		const plain = plainBar.getTopBorder(120).content;
+		const styled = styledBar.getTopBorder(120).content;
+		expect(plain).toContain(`${theme.getFgAnsi("accent")}building`);
+		expect(styled).toContain("\x1b[33mbuilding\x1b[39m");
+		expect(styled).not.toContain("\x1b[41m");
+		// A full reset inside the segment would wipe the bar's background for what follows.
+		expect(styled.split("\x1b[0m").length).toBe(plain.split("\x1b[0m").length);
+		expect(stripVTControlCharacters(styled)).toBe(stripVTControlCharacters(plain));
+		expect(visibleWidth(styledBar.getTopBorder(24).content)).toBeLessThanOrEqual(24);
+	});
+
+	it("keeps the focus-proxy faint on everything after a bold status", () => {
+		const component = makeComponent({
+			preset: "custom",
+			leftSegments: ["status", "model"],
+			rightSegments: [],
+			separator: "powerline-thin",
+			showHookStatus: false,
+			sessionAccent: false,
+			segmentOptions: { model: { showThinkingLevel: false } },
+		});
+		component.setSession(makeSession(), "worker");
+		component.setHookStatus("a", "\x1b[1mbold\x1b[0m");
+		component.setHookStatus("b", "plain");
+
+		const content = component.getTopBorder(120).content;
+		const faintBefore = (needle: string): boolean => {
+			let faint = false;
+			for (const [, params] of content.slice(0, content.indexOf(needle)).matchAll(/\x1b\[([0-9;]*)m/g)) {
+				const codes = params === "" ? ["0"] : params.split(";");
+				for (let i = 0; i < codes.length; i++) {
+					const code = codes[i];
+					// Skip the arguments of 256-colour and truecolor selectors; their numbers are not SGR codes.
+					if (code === "38" || code === "48") i += codes[i + 1] === "5" ? 2 : 4;
+					else if (code === "2") faint = true;
+					else if (code === "22" || code === "0") faint = false;
+				}
+			}
+			return faint;
+		};
+		expect(faintBefore("plain")).toBe(true);
+		expect(faintBefore("Test Model")).toBe(true);
 	});
 
 	it("does not mutate shared preset segment options during narrow renders", () => {

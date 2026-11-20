@@ -6,6 +6,7 @@ import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/mo
 import { formatModelStringWithRouting, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import { DEFAULT_SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/spinner-clock";
 import {
 	disposeTerminalTitleState,
 	generateSessionTitle,
@@ -95,6 +96,45 @@ describe("title generator", () => {
 		expect(title).toBe("Local Title");
 		expect(generateMock).toHaveBeenCalledWith(localModel.id, "Investigate the resolver");
 		expect(completeSimpleMock).not.toHaveBeenCalled();
+	});
+
+	it("reports a produced local title as an unmetered request, and a null result as nothing", async () => {
+		const localModel = getBundledModel("local", "lfm2.5-230m");
+		if (!localModel) throw new Error("Expected bundled local tiny model");
+		const settings = createSettings(localModel);
+		const registry = createRegistry(localModel);
+		// A null result may be an abort or a failed model that never reached the worker.
+		vi.spyOn(tinyTitleClient, "generate").mockResolvedValueOnce("Local Title").mockResolvedValueOnce(null);
+		const reports: Array<{ message: ai.AssistantMessage; prompt: string }> = [];
+		const run = () =>
+			generateSessionTitle(
+				"Investigate the resolver",
+				registry,
+				settings,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				(message, prompt) => {
+					reports.push({ message, prompt });
+				},
+			);
+
+		expect(await run()).toBe("Local Title");
+		expect(await run()).toBeNull();
+
+		expect(reports).toHaveLength(1);
+		expect(reports[0]?.prompt).toContain("Investigate the resolver");
+		expect(reports[0]?.message).toMatchObject({
+			api: "local-inference",
+			provider: localModel.provider,
+			model: localModel.id,
+			stopReason: "stop",
+			content: [{ type: "text", text: "Local Title" }],
+		});
+		expect(reports[0]?.message.usage.totalTokens).toBe(0);
 	});
 
 	it("never falls back to a paid title model when local inference fails", async () => {
@@ -1006,7 +1046,7 @@ describe("terminal title runtime", () => {
 			expect(emittedTitles()).toEqual(["π ⠋ windows-project"]);
 
 			resetEmitted();
-			vi.advanceTimersByTime(160);
+			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS * 2);
 			const titles = emittedTitles();
 			expect(titles.length).toBeGreaterThan(0);
 			expect(titles.every(title => SPINNER_FRAMES.some(frame => title.includes(frame)))).toBe(true);

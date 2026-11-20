@@ -45,6 +45,7 @@ build:clippy-strict --@rules_rust//rust/settings:clippy_flag=-Aclippy::return_se
 build:clippy-strict --@rules_rust//rust/settings:clippy_flag=-Aclippy::significant_drop_tightening
 build:clippy-strict --@rules_rust//rust/settings:clippy_flag=-Aclippy::similar_names
 build:clippy-strict --@rules_rust//rust/settings:clippy_flag=-Aclippy::struct_excessive_bools
+build:clippy-strict --@rules_rust//rust/settings:clippy_flag=-Aclippy::tabs_in_doc_comments
 build:clippy-strict --@rules_rust//rust/settings:clippy_flag=-Aclippy::too_many_arguments
 build:clippy-strict --@rules_rust//rust/settings:clippy_flag=-Aclippy::too_many_lines
 build:clippy-strict --@rules_rust//rust/settings:clippy_flag=-Aclippy::tuple_array_conversions

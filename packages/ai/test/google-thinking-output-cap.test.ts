@@ -1,4 +1,5 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Api, Context, FetchImpl, Model, ThinkingBudgets } from "@oh-my-pi/pi-ai/types";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -24,7 +25,7 @@ function bundled(provider: GeneratedProvider, id: string): Model<Api> {
 async function captureGenerationConfig(
 	model: Model<Api>,
 	maxTokens: number | undefined,
-	options: { apiKey?: string; thinkingBudgets?: ThinkingBudgets } = {},
+	options: { apiKey?: string; thinkingBudgets?: ThinkingBudgets; reasoning?: Effort } = {},
 ): Promise<GenerationConfig | undefined> {
 	let generationConfig: GenerationConfig | undefined;
 	const fetch: FetchImpl = async (_url, init) => {
@@ -38,7 +39,7 @@ async function captureGenerationConfig(
 	await streamSimple(model, ctx, {
 		apiKey: options.apiKey ?? "k",
 		maxTokens,
-		reasoning: Effort.High,
+		reasoning: options.reasoning ?? Effort.High,
 		thinkingBudgets: options.thinkingBudgets,
 		fetch,
 	}).result();
@@ -46,6 +47,10 @@ async function captureGenerationConfig(
 }
 
 describe("Google thinking headroom in maxOutputTokens", () => {
+	// Antigravity is paused in its auth rules; its transport stays for when it is turned back on.
+	beforeEach(() => vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined));
+	afterEach(() => vi.restoreAllMocks());
+
 	it.each([
 		["google-generative-ai level", bundled("google", "gemini-3.1-pro-preview"), "k"],
 		["google-vertex level", bundled("google-vertex", "gemini-3.1-pro-preview"), "k"],
@@ -110,5 +115,17 @@ describe("Google thinking headroom in maxOutputTokens", () => {
 
 		expect(config).toBeDefined();
 		expect(config?.maxOutputTokens).toBeUndefined();
+	});
+});
+
+describe("Gemini 4 Hydrogen xhigh thinking level", () => {
+	// Google's SDK enum stops at HIGH; clamping xhigh to it silently drops Hydrogen's deepest tier.
+	it.each([
+		["google-generative-ai", bundled("google", "gemini-4-hydrogen")],
+		["google-vertex", bundled("google-vertex", "gemini-4-hydrogen")],
+	])("%s sends the documented xhigh level", async (_name, model) => {
+		const config = await captureGenerationConfig(model, 512, { reasoning: Effort.XHigh });
+
+		expect(config?.thinkingConfig?.thinkingLevel).toBe("xhigh");
 	});
 });

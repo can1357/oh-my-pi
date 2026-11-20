@@ -314,6 +314,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		enableAgentsProject = true,
 		customDirectories = [],
 		ignoredSkills = [],
+		manualSkills = [],
 		includeSkills = [],
 		disabledExtensions = [],
 		extensionRoots,
@@ -608,6 +609,15 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	}
 
 	const skills = Array.from(skillMap.values()).filter(skill => matchesIncludePatterns(skill.name));
+	if (manualSkills.length > 0) {
+		const manualGlobs = manualSkills.map(pattern => new Bun.Glob(pattern));
+		for (const skill of skills) {
+			const rawName = admitted.get(skill.name)?.rawName ?? skill.name;
+			if (manualGlobs.some(glob => glob.match(rawName) || glob.match(skill.name))) {
+				skill.hide = true;
+			}
+		}
+	}
 	// Deterministic ordering for prompt stability (case-insensitive, then exact name, then path).
 	skills.sort((a, b) => compareSkillOrder(a.name, a.filePath, b.name, b.filePath));
 	return {
@@ -626,6 +636,12 @@ export interface SkillRediscoveryHost {
 	replaceSkills?: (skills: readonly Skill[]) => Promise<void>;
 	/** Runs `rediscover`, or joins the holder's pass already in flight, so concurrent misses share one. */
 	shareRediscovery?: (rediscover: () => Promise<readonly Skill[]>) => Promise<readonly Skill[]>;
+	/**
+	 * Rediscovers the holder's own skills for a `skill://` name its list lacks (a skill created or
+	 * installed since), rate-limited by the holder; undefined when it skips the pass. Absent for a
+	 * fixed list, which gains no new skills.
+	 */
+	rediscoverForUnknownName?: () => Promise<readonly Skill[]> | undefined;
 	/** Settings for a one-off discovery; without them a fixed list cannot be re-pointed. */
 	settings?: Settings;
 	cwd?: string;

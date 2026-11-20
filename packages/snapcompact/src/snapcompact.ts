@@ -48,7 +48,7 @@
  *
  * The whole pass is local and deterministic — no LLM call, no API key, no
  * latency beyond rendering. Rasterization and PNG encoding happen in native
- * code (`renderSnapcompactPng` in `crates/pi-natives/src/snapcompact.rs`).
+ * code (`renderSnapcompactPng` in `crates/natives/src/snapcompact.rs`).
  * Frames persist in the compaction entry's `preserveData` and are
  * re-attached to the compaction summary message on every context rebuild.
  */
@@ -68,7 +68,7 @@ import {
 import { resolveImageCountBudget, resolveInlineImageByteBudget } from "@oh-my-pi/pi-catalog/compat/request-size";
 import { classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
 import { renderSnapcompactPng, snapcompactSupportedChars } from "@oh-my-pi/pi-natives";
-import { formatGroupedPaths, isRecord, prompt } from "@oh-my-pi/pi-utils";
+import { formatGroupedPaths, isRecord, prompt, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import fileOperationsTemplate from "./prompts/file-operations.md" with { type: "text" };
 import snapcompactSummaryPrompt from "./prompts/snapcompact-summary.md" with { type: "text" };
@@ -222,6 +222,23 @@ export const SHAPE_VARIANT_NAMES = Object.keys(SHAPE_VARIANTS) as readonly Shape
 /** Runtime guard for variant names loaded from config. */
 export function isShapeVariantName(value: unknown): value is ShapeVariantName {
 	return typeof value === "string" && value in SHAPE_VARIANTS;
+}
+
+/** Smallest configurable frame edge: the renderer's 64px floor, which still
+ *  fits at least one row and column of every variant's cell. */
+export const MIN_CONFIGURED_FRAME_SIZE = 64;
+/** Largest configurable frame edge: the largest any variant renders at. */
+export const MAX_CONFIGURED_FRAME_SIZE = 2576;
+
+/** Whether `value` is a frame edge a configured shape may set: an integer in
+ *  [{@link MIN_CONFIGURED_FRAME_SIZE}, {@link MAX_CONFIGURED_FRAME_SIZE}]. */
+export function isConfigurableFrameSize(value: unknown): value is number {
+	return (
+		typeof value === "number" &&
+		Number.isSafeInteger(value) &&
+		value >= MIN_CONFIGURED_FRAME_SIZE &&
+		value <= MAX_CONFIGURED_FRAME_SIZE
+	);
 }
 
 /** Wire API families with distinct default shapes and request hints. */
@@ -419,30 +436,43 @@ export function idealShapeVariant(modelId: string): IdealShape | undefined {
 }
 
 /** What will read the frames: the model id (shape and billing), the wire API
- *  (request hints, fallback billing), and optionally the host and parsed
- *  identity of a built model. */
+ *  (request hints, fallback billing), and optionally the host, parsed
+ *  identity and configured shape of a built model. */
 export interface ShapeTarget {
 	api?: Api;
 	id?: string;
 	provider?: string;
 	identity?: ImageTokenizationTarget["identity"];
+	snapcompactShape?: Model["snapcompactShape"];
 }
 
 /**
  * Pick the frame shape for a reader. An explicit `variant` (anything but
- * `"auto"`) forces that geometry; otherwise the model id selects the
- * eval-winning shape — and frame size — for its model line, falling back to
- * the API family's winner when the model is unmeasured. Either way the frame
- * is no wider than the host's catalog `image-max-edge`. Billing (token
- * estimate, detail hint) is computed for the resolved frame size from the
- * model's catalog image rule. Accepts a full pi-ai `Model` or any
- * `{ api, id }` subset.
+ * `"auto"`) forces that geometry; otherwise the model's configured shape
+ * (`snapcompactShape`), else its model id, selects the shape — and frame
+ * size — falling back to the API family's winner when the model is
+ * unmeasured. Either way the frame is no wider than the host's catalog
+ * `image-max-edge`. Billing (token estimate, detail hint) is computed for
+ * the resolved frame size from the model's catalog image rule. Accepts a
+ * full pi-ai `Model` or any `{ api, id }` subset.
  */
 export function resolveShape(model?: ShapeTarget, variant?: ShapeVariantName | "auto"): Shape {
 	if (variant && variant !== "auto") return priceShape(fitHostImageEdge(SHAPE_VARIANTS[variant], model), model);
-	const ideal = model?.id ? idealShapeVariant(model.id) : undefined;
+	const ideal = configuredShape(model) ?? (model?.id ? idealShapeVariant(model.id) : undefined);
 	const base = SHAPE_VARIANTS[ideal?.variant ?? FAMILY_VARIANT[apiFamily(model?.api)]];
 	return priceShape(fitHostImageEdge(ideal?.frameSize ? { ...base, frameSize: ideal.frameSize } : base, model), model);
+}
+
+/** The model's configured shape. An unknown variant name is ignored, and a
+ *  frame size outside {@link isConfigurableFrameSize} falls back to the
+ *  variant's own. */
+function configuredShape(target: ShapeTarget | undefined): IdealShape | undefined {
+	const configured = target?.snapcompactShape;
+	if (!configured || !isShapeVariantName(configured.variant)) return undefined;
+	const { frameSize } = configured;
+	return isConfigurableFrameSize(frameSize)
+		? { variant: configured.variant, frameSize }
+		: { variant: configured.variant };
 }
 
 /** Shrink `base` to the longest image edge `target`'s host passes to the model. */
@@ -475,15 +505,30 @@ function isCjkHeavyText(text: string): boolean {
  * the transcript and Silver can render it safely.
  */
 export function resolveShapeForText(text: string, model?: ShapeTarget, variant?: ShapeVariantName | "auto"): Shape {
+	if (variant && variant !== "auto") return resolveShape(model, variant);
+	return resolveShapeAndScan(text, model, variant).shape;
+}
+
+/** A shape picked for a text, with the text's {@link RenderabilityScan} under that shape. */
+export interface ShapeScan extends RenderabilityScan {
+	shape: Shape;
+}
+
+/**
+ * {@link resolveShapeForText} plus the {@link scanRenderability} verdict for the
+ * picked shape. Auto resolution already scans `text` with the shape it picks, so
+ * this reuses that pass instead of normalizing a long transcript twice.
+ */
+export function resolveShapeAndScan(text: string, model?: ShapeTarget, variant?: ShapeVariantName | "auto"): ShapeScan {
 	const shape = resolveShape(model, variant);
-	if (variant && variant !== "auto") return shape;
+	const scan = scanRenderability(text, { shape });
+	if (variant && variant !== "auto") return { shape, ...scan };
 	const silver = resolveShape(model, "silver16-bw");
-	if (!scanRenderability(text, { shape }).isSafe) {
-		return scanRenderability(text, { shape: silver }).isSafe ? silver : shape;
+	if (!scan.isSafe || (shape.font !== "silver" && isCjkHeavyText(text))) {
+		const silverScan = scanRenderability(text, { shape: silver });
+		if (silverScan.isSafe) return { shape: silver, ...silverScan };
 	}
-	return shape.font !== "silver" && isCjkHeavyText(text) && scanRenderability(text, { shape: silver }).isSafe
-		? silver
-		: shape;
+	return { shape, ...scan };
 }
 
 // ============================================================================
@@ -1419,14 +1464,19 @@ export function normalize(text: string, options?: NormalizeOptions): string {
 	return normalizeWithStats(text, options).text;
 }
 
+/** Verdict of {@link scanRenderability}. */
+export interface RenderabilityScan {
+	/** At most 5% of graphic characters hit the `?` fallback. */
+	isSafe: boolean;
+	/** Share of graphic characters the font cannot draw. */
+	unrenderableRatio: number;
+}
+
 /**
  * Scan text with the same font-aware path as {@link normalize}; unsafe means
  * more than 5% of graphic characters would hit the `?` fallback.
  */
-export function scanRenderability(
-	text: string,
-	options?: NormalizeOptions,
-): { isSafe: boolean; unrenderableRatio: number } {
+export function scanRenderability(text: string, options?: NormalizeOptions): RenderabilityScan {
 	const normalized = normalizeWithStats(text, options);
 	const unrenderableRatio = normalized.totalGraphics > 0 ? normalized.fallbackCount / normalized.totalGraphics : 0;
 	return { isSafe: unrenderableRatio <= 0.05, unrenderableRatio };
@@ -1489,7 +1539,7 @@ const DOC_GUTTER = 3;
 
 /** East Asian Wide / Fullwidth code points that occupy two grid cells when a
  *  narrow bitmap shape draws them through the Silver fallback. Mirrors
- *  `is_wide` in `crates/pi-natives/src/snapcompact.rs`; the two MUST stay in
+ *  `is_wide` in `crates/natives/src/snapcompact.rs`; the two MUST stay in
  *  sync or native layout and this capacity math disagree on cell counts. */
 function isWideCodePoint(cp: number): boolean {
 	return (
@@ -2280,16 +2330,21 @@ export function textWithoutThinking(text: string): string {
 const PREVIOUS_SUMMARY_HEAD = "[Summary of earlier history]";
 
 /**
- * `archive`'s kept source as a reader that excludes reasoning may unfold it.
- * An archive persisted without {@link Archive.text} keeps only its edges, and
- * the tail's lines before its first scope label continue a section cut off in
- * the dropped middle, whose scope is unknown; they are left out.
+ * Length of the opening of a text-less archive's tail that a reader excluding
+ * reasoning leaves out: an archive persisted without {@link Archive.text} keeps
+ * only its edges, and the tail's lines before its first scope label continue a
+ * section cut off in the dropped middle, whose scope is unknown.
  */
-function sourceForReaderWithoutThinking(archive: Archive): string {
-	if (archive.text) return archive.text;
+function unscopedTailLength(archive: Archive): number {
 	const tail = archive.textTail ?? "";
 	const labelled = tail.search(SECTION_START);
-	return [archive.textHead, labelled < 0 ? "" : tail.slice(labelled)]
+	return labelled < 0 ? tail.length : labelled;
+}
+
+/** `archive`'s kept source as a reader that excludes reasoning may unfold it. */
+function sourceForReaderWithoutThinking(archive: Archive): string {
+	if (archive.text) return archive.text;
+	return [archive.textHead, (archive.textTail ?? "").slice(unscopedTailLength(archive))]
 		.filter((part): part is string => typeof part === "string" && part.length > 0)
 		.join(NEWLINE_GLYPH);
 }
@@ -2473,6 +2528,9 @@ export function viewWithoutFrames(
 	};
 }
 
+/** Loop phase of the synchronous stages of {@link compact}; each can block the event loop for hundreds of milliseconds on a long history. */
+const COMPACT_LOOP_PHASE = "compaction.snapcompact";
+
 /**
  * Run a snapcompact compaction over prepared messages. Fully local: serializes
  * the discarded history, appends it to the accumulated archive source text, and
@@ -2485,6 +2543,9 @@ export function viewWithoutFrames(
  *
  * If the previous compaction was text-based, its summary is printed at the head
  * of the archive as `[Summary of earlier history]` so no continuity is lost.
+ *
+ * Building the source and planning the layout run as separate
+ * `compaction.snapcompact` loop phases with an event-loop turn between them.
  */
 export async function compact<TMessage = Message>(
 	preparation: CompactionPreparation<TMessage>,
@@ -2494,89 +2555,107 @@ export async function compact<TMessage = Message>(
 	if (!firstKeptEntryId) {
 		throw new Error("First kept entry has no ID - session may need migration");
 	}
-	const messages = preparation.messagesToSummarize.concat(preparation.turnPrefixMessages);
-	const llmMessages = (options?.convertToLlm ?? defaultConvertToLlm)(messages);
-	const serialized = serializeConversation(llmMessages, options);
-	const previousArchive = getPreservedArchive(previousPreserveData);
-	const excludeThinking = options?.includeThinking === false;
-	const previousTextRaw =
-		excludeThinking && previousArchive
-			? sourceForReaderWithoutThinking(previousArchive)
-			: (previousArchive?.text ??
-				[previousArchive?.textHead, previousArchive?.textTail]
-					.filter((part): part is string => typeof part === "string" && part.length > 0)
-					.join(NEWLINE_GLYPH));
-	// Legacy archives may carry `¶think:` sections from before includeThinking
-	// existed, and any archive may carry an earlier summary's reasoning legend;
-	// scrub both when this compaction excludes thinking so the re-rendered
-	// archive stops replaying reasoning (issue #6093). They may also carry data
-	// URLs a pre-guard slice cut at any offset; heal those in archive context
-	// before the text is folded into the new source.
-	const previousTextHealed = elideDataUrls(previousTextRaw, "archive");
-	const previousText =
-		excludeThinking && previousTextHealed.length > 0 ? textWithoutThinking(previousTextHealed) : previousTextHealed;
-	const hasPreviousText = previousText.length > 0;
-	const includedPreviousSummary = !hasPreviousText && !!previousSummary;
-	const shapeProbeText = renderabilityProbeText(serialized, previousPreserveData, previousSummary);
-	const baseShape = options?.shape ?? resolveShapeForText(shapeProbeText, options?.model);
-	const frameSize = options?.frameSize ?? baseShape.frameSize;
-	const high = frameSize === baseShape.frameSize ? baseShape : { ...baseShape, frameSize };
-	const low = denseCompanion(high, options?.model?.api);
+	const source = withLoopPhase(COMPACT_LOOP_PHASE, () => {
+		const messages = preparation.messagesToSummarize.concat(preparation.turnPrefixMessages);
+		const llmMessages = (options?.convertToLlm ?? defaultConvertToLlm)(messages);
+		const serialized = serializeConversation(llmMessages, options);
+		const previousArchive = getPreservedArchive(previousPreserveData);
+		const excludeThinking = options?.includeThinking === false;
+		const previousTextRaw =
+			excludeThinking && previousArchive
+				? sourceForReaderWithoutThinking(previousArchive)
+				: (previousArchive?.text ??
+					[previousArchive?.textHead, previousArchive?.textTail]
+						.filter((part): part is string => typeof part === "string" && part.length > 0)
+						.join(NEWLINE_GLYPH));
+		// Legacy archives may carry `¶think:` sections from before includeThinking
+		// existed, and any archive may carry an earlier summary's reasoning legend;
+		// scrub both when this compaction excludes thinking so the re-rendered
+		// archive stops replaying reasoning (issue #6093). They may also carry data
+		// URLs a pre-guard slice cut at any offset; heal those in archive context
+		// before the text is folded into the new source.
+		const previousTextHealed = elideDataUrls(previousTextRaw, "archive");
+		const previousText =
+			excludeThinking && previousTextHealed.length > 0
+				? textWithoutThinking(previousTextHealed)
+				: previousTextHealed;
+		const hasPreviousText = previousText.length > 0;
+		const includedPreviousSummary = !hasPreviousText && !!previousSummary;
+		const shapeProbeText = renderabilityProbeText(serialized, previousPreserveData, previousSummary);
+		const baseShape = options?.shape ?? resolveShapeForText(shapeProbeText, options?.model);
+		const frameSize = options?.frameSize ?? baseShape.frameSize;
+		const high = frameSize === baseShape.frameSize ? baseShape : { ...baseShape, frameSize };
+		const low = denseCompanion(high, options?.model?.api);
+		// The engine default caps archive growth; a caller-supplied maxFrames only
+		// lowers it further (an upper limit), never raising it past the default.
+		const maxFrames = Math.max(1, Math.min(options?.maxFrames ?? MAX_FRAMES_DEFAULT, MAX_FRAMES_DEFAULT));
+
+		let archiveText = normalize(serialized, { shape: high });
+
+		if (includedPreviousSummary && previousSummary) {
+			const lead = excludeThinking ? textWithoutThinking(previousSummary) : previousSummary;
+			const head = `${PREVIOUS_SUMMARY_HEAD} ${normalize(lead, { shape: high })}`;
+			archiveText = archiveText.length > 0 ? `${head} [Recent conversation] ${archiveText}` : head;
+		}
+
+		// An archive persisted without `text` (written before the text-first layout)
+		// holds its middle only as frames, which cannot be re-rendered: the new
+		// archive drops them, and for a reader without reasoning its tail's unscoped
+		// opening too, so count both as dropped history instead of dropping silently.
+		const droppedChars =
+			(previousArchive?.truncatedChars ?? 0) +
+			(previousArchive && previousArchive.text === undefined
+				? previousArchive.frames.reduce((sum, frame) => sum + frame.chars, 0) +
+					(excludeThinking ? unscopedTailLength(previousArchive) : 0)
+				: 0);
+
+		// Re-compacting a snapcompacted history unfolds the prior archive's source
+		// text and treats it as one coherent transcript: the previous kept source
+		// ages in ahead of the new history, then the whole thing is re-rendered.
+		if (hasPreviousText) {
+			archiveText = archiveText.length > 0 ? `${previousText}${NEWLINE_GLYPH}${archiveText}` : previousText;
+		}
+		// Data URLs must never reach planArchive: its edge slices are structure-
+		// blind, and a split payload replays as broken image input on every later
+		// request. previousText is already strictly healed above; this source-mode
+		// pass covers intact URLs in fresh user/assistant text, which the
+		// serializer never truncates.
+		return { archiveText: elideDataUrls(archiveText), high, low, maxFrames, droppedChars, includedPreviousSummary };
+	});
+	await Bun.sleep(0);
+
+	const { high, includedPreviousSummary } = source;
 	const geo = geometry(high);
-	// The engine default caps archive growth; a caller-supplied maxFrames only
-	// lowers it further (an upper limit), never raising it past the default.
-	const maxFrames = Math.max(1, Math.min(options?.maxFrames ?? MAX_FRAMES_DEFAULT, MAX_FRAMES_DEFAULT));
-
-	let archiveText = normalize(serialized, { shape: high });
-
-	if (includedPreviousSummary && previousSummary) {
-		const lead = excludeThinking ? textWithoutThinking(previousSummary) : previousSummary;
-		const head = `${PREVIOUS_SUMMARY_HEAD} ${normalize(lead, { shape: high })}`;
-		archiveText = archiveText.length > 0 ? `${head} [Recent conversation] ${archiveText}` : head;
-	}
-
-	let truncatedChars = previousArchive?.truncatedChars ?? 0;
-
-	// Re-compacting a snapcompacted history unfolds the prior archive's source
-	// text and treats it as one coherent transcript: the previous kept source
-	// ages in ahead of the new history, then the whole thing is re-rendered.
-	if (hasPreviousText) {
-		archiveText = archiveText.length > 0 ? `${previousText}${NEWLINE_GLYPH}${archiveText}` : previousText;
-	}
-	// Data URLs must never reach planArchive: its edge slices are structure-
-	// blind, and a split payload replays as broken image input on every later
-	// request. previousText is already strictly healed above; this source-mode
-	// pass covers intact URLs in fresh user/assistant text, which the
-	// serializer never truncates.
-	archiveText = elideDataUrls(archiveText);
-
-	const layout = planArchive(archiveText, high, low, maxFrames);
-	truncatedChars += layout.truncatedChars;
-
-	// Re-render the planned frames, carrying any open dim span across every
-	// boundary: textHead → frames → textTail.
-	let dimOpen = layout.textHead.lastIndexOf(DIM_ON) > layout.textHead.lastIndexOf(DIM_OFF);
-	const newFrames: Promise<Frame>[] = [];
-	for (const planned of layout.frames) {
-		let pageText: string = dimOpen ? DIM_ON + planned.text : planned.text;
-		dimOpen = pageText.lastIndexOf(DIM_ON) > pageText.lastIndexOf(DIM_OFF);
-		if (planned.shape.stopwordDim) pageText = dimStopwords(pageText);
-		newFrames.push(
-			render(pageText, planned.shape).then(rendered => ({
-				data: rendered.data,
-				mimeType: "image/png",
-				cols: rendered.cols,
-				rows: rendered.rows,
-				chars: rendered.chars,
-				font: planned.shape.font,
-				variant: planned.shape.variant,
-				lineRepeat: planned.shape.lineRepeat,
-				...(planned.shape.columns === 2 ? { columns: 2 } : {}),
-				...(planned.shape.stopwordDim ? { stopwordDim: true } : {}),
-				...(planned.shape.imageDetail ? { detail: planned.shape.imageDetail } : {}),
-			})),
-		);
-	}
+	const planned = withLoopPhase(COMPACT_LOOP_PHASE, () => {
+		const layout = planArchive(source.archiveText, high, source.low, source.maxFrames);
+		// Re-render the planned frames, carrying any open dim span across every
+		// boundary: textHead → frames → textTail.
+		let dimOpen = layout.textHead.lastIndexOf(DIM_ON) > layout.textHead.lastIndexOf(DIM_OFF);
+		const newFrames: Promise<Frame>[] = [];
+		for (const planned of layout.frames) {
+			let pageText: string = dimOpen ? DIM_ON + planned.text : planned.text;
+			dimOpen = pageText.lastIndexOf(DIM_ON) > pageText.lastIndexOf(DIM_OFF);
+			if (planned.shape.stopwordDim) pageText = dimStopwords(pageText);
+			newFrames.push(
+				render(pageText, planned.shape).then(rendered => ({
+					data: rendered.data,
+					mimeType: "image/png",
+					cols: rendered.cols,
+					rows: rendered.rows,
+					chars: rendered.chars,
+					font: planned.shape.font,
+					variant: planned.shape.variant,
+					lineRepeat: planned.shape.lineRepeat,
+					...(planned.shape.columns === 2 ? { columns: 2 } : {}),
+					...(planned.shape.stopwordDim ? { stopwordDim: true } : {}),
+					...(planned.shape.imageDetail ? { detail: planned.shape.imageDetail } : {}),
+				})),
+			);
+		}
+		return { layout, newFrames, dimOpen };
+	});
+	const { layout, newFrames, dimOpen } = planned;
+	const truncatedChars = source.droppedChars + layout.truncatedChars;
 
 	const textHead = layout.textHead;
 	const textTail = layout.textTail.length > 0 ? (dimOpen ? DIM_ON : "") + layout.textTail : "";

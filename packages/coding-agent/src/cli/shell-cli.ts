@@ -1,7 +1,7 @@
 /**
  * Shell CLI command handlers.
  *
- * Handles `omp shell` subcommand for testing the native brush-core shell.
+ * Handles `omp shell` subcommand for testing the native embedded bash engine.
  */
 import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -79,7 +79,7 @@ export async function runShellCommand(cmd: ShellCommandArgs): Promise<void> {
 
 ` +
 				`${chalk.bold("Notes:")}
-  Runs in a persistent brush-core shell session.
+  Runs in a persistent embedded bash session.
   Variables and functions defined in one command persist for the next.
 
 `,

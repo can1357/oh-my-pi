@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "18.16.0",
+	"version": "19.0.1",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"keywords": [
 		"agent",
@@ -280,6 +280,22 @@
 			"types": "./src/extensibility/plugins/marketplace/*.ts",
 			"import": "./src/extensibility/plugins/marketplace/*.ts"
 		},
+		"./disasm": {
+			"types": "./src/disasm/index.ts",
+			"import": "./src/disasm/index.ts"
+		},
+		"./disasm/*": {
+			"types": "./src/disasm/*.ts",
+			"import": "./src/disasm/*.ts"
+		},
+		"./ghidra": {
+			"types": "./src/ghidra/index.ts",
+			"import": "./src/ghidra/index.ts"
+		},
+		"./ghidra/*": {
+			"types": "./src/ghidra/*.ts",
+			"import": "./src/ghidra/*.ts"
+		},
 		"./ida": {
 			"types": "./src/ida/index.ts",
 			"import": "./src/ida/index.ts"
@@ -352,13 +368,9 @@
 			"types": "./src/mcp/*.ts",
 			"import": "./src/mcp/*.ts"
 		},
-		"./mcp/transports": {
-			"types": "./src/mcp/transports/index.ts",
-			"import": "./src/mcp/transports/index.ts"
-		},
-		"./mcp/transports/*": {
-			"types": "./src/mcp/transports/*.ts",
-			"import": "./src/mcp/transports/*.ts"
+		"./mcp/host/*": {
+			"types": "./src/mcp/host/*.ts",
+			"import": "./src/mcp/host/*.ts"
 		},
 		"./memories": {
 			"types": "./src/memories/index.ts",
@@ -518,7 +530,7 @@
 	"scripts": {
 		"build": "bun scripts/build-binary.ts",
 		"check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
-		"check:types": "tsgo -p tsconfig.json --noEmit",
+		"check:types": "bun check --no-script -p tsconfig.json",
 		"lint": "oxlint .",
 		"test": "bun ../../scripts/ci-test-ts.ts coding-agent-heavy --full",
 		"fix": "oxlint --fix --fix-suggestions . && bun run fmt",
@@ -559,10 +571,6 @@
 	},
 	"devDependencies": {
 		"@types/bun": "catalog:"
-	},
-	"optionalDependencies": {
-		"@huggingface/transformers": "catalog:",
-		"sherpa-onnx-node": "1.13.2"
 	},
 	"engines": {
 		"bun": ">=1.4.4"

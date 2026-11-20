@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { formatBytes, materializeString, sanitizeText } from "@oh-my-pi/pi-utils";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
+import { formatRawOutputNotice } from "./output-meta";
 
 // =============================================================================
 // Constants
@@ -60,11 +61,11 @@ export interface OutputSummary {
 	columnTruncatedRange?: { first: number; last: number };
 	/** Configured per-line column cap in effect (UTF-8 bytes), when > 0. */
 	columnMax?: number;
-	/** Artifact ID for internal URL access (artifact://<id>) when truncated */
+	/** Spill id of the full output (`local://<id>.log`) when truncated */
 	artifactId?: string;
 	/**
 	 * Bytes the artifact cap dropped from the middle of the saved file. When
-	 * set, `artifact://<id>` holds a head/tail sample, not the full output.
+	 * set, `local://<id>.log` holds a head/tail sample, not the full output.
 	 */
 	artifactElidedBytes?: number;
 	/** Full raw output was not completely saved; artifactId is unavailable. */
@@ -719,7 +720,7 @@ export interface InlineByteCapOptions {
 	maxBytes?: number;
 	/**
 	 * Persist the full text as a session artifact. When an artifact id is
-	 * returned, a `[raw output: artifact://<id>]` footer is appended so the
+	 * returned, a `[raw output: local://<id>.log]` footer is appended so the
 	 * elided bytes stay recoverable.
 	 */
 	saveArtifact?: (full: string) => string | undefined | Promise<string | undefined>;
@@ -745,7 +746,7 @@ function trimTailToLineBoundary(text: string): string {
  * ~60% of the budget from the head and ~25% from the tail — cut on line
  * boundaries, never splitting a multi-byte UTF-8 sequence — with an elision
  * marker between. The remaining ~15% is slack for the marker and the optional
- * `[raw output: artifact://<id>]` footer, so the result stays under `maxBytes`.
+ * `[raw output: local://<id>.log]` footer, so the result stays under `maxBytes`.
  */
 export async function enforceInlineByteCap(text: string, options: InlineByteCapOptions): Promise<string> {
 	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
@@ -762,7 +763,7 @@ export async function enforceInlineByteCap(text: string, options: InlineByteCapO
 	const artifactId = await options.saveArtifact?.(text);
 	if (artifactId) {
 		const sep = composed.endsWith(NL) ? "" : NL;
-		composed += `${sep}[raw output: artifact://${artifactId}]`;
+		composed += `${sep}${formatRawOutputNotice(artifactId)}`;
 	}
 	return composed;
 }
@@ -1543,7 +1544,7 @@ export class OutputSink {
 	 * were actually dropped from the middle (the head budget was exhausted
 	 * *and* the tail ring evicted), a single `[ARTIFACT TRUNCATED: …]`
 	 * notice is injected between head and tail so a reader of
-	 * `artifact://<id>` understands the gap. When the total stream simply
+	 * `local://<id>.log` understands the gap. When the total stream simply
 	 * spilled past the head budget but still fits below `artifactMaxBytes`,
 	 * `droppedBytes` is zero — head + tail together are the verbatim stream
 	 * and the notice is suppressed so we don't corrupt the artifact with a
@@ -1612,17 +1613,27 @@ export class OutputSink {
 		const effectiveTotalBytes = Math.max(0, this.#totalBytes - this.#columnDroppedBytes);
 
 		if (headBytes > 0 && effectiveTotalBytes > headBytes + tailBytes) {
-			// Middle was elided. Emit head + marker + tail.
-			const elidedBytes = Math.max(0, effectiveTotalBytes - headBytes - tailBytes);
-			const elidedLines = Math.max(0, totalLines - headLines - tailLines);
+			// Middle was elided. Emit head + marker + tail, each window cut back to whole lines (a window that is one
+			// line fragment stays as is): a line split at the marker reads as two lines, and the counts below would
+			// no longer name the source lines shown.
+			const headCut = this.#head.endsWith("\n") ? -1 : this.#head.lastIndexOf("\n");
+			const head = headCut >= 0 ? this.#head.slice(0, headCut + 1) : this.#head;
+			const tailCut = tailBuf.indexOf("\n");
+			const tail = tailCut >= 0 && tailCut < tailBuf.length - 1 ? tailBuf.slice(tailCut + 1) : tailBuf;
+			const keptHeadBytes = head === this.#head ? headBytes : Buffer.byteLength(head, "utf-8");
+			const keptTailBytes = tail === tailBuf ? tailBytes : Buffer.byteLength(tail, "utf-8");
+			const keptHeadLines = head === this.#head ? headLines : countNewlines(head);
+			const keptTailLines = tail === tailBuf ? tailLines : countNewlines(tail) + 1;
+			const elidedBytes = Math.max(0, effectiveTotalBytes - keptHeadBytes - keptTailBytes);
+			const elidedLines = Math.max(0, totalLines - keptHeadLines - keptTailLines);
 			const marker = formatMiddleElisionMarker(elidedLines, elidedBytes);
 			const markerBytes = Buffer.byteLength(marker, "utf-8");
-			const headSep = this.#head.endsWith("\n") ? "" : "\n";
-			const tailSep = tailBuf.startsWith("\n") ? "" : "\n";
+			const headSep = head.endsWith("\n") ? "" : "\n";
+			const tailSep = tail.startsWith("\n") ? "" : "\n";
 			return {
-				body: `${this.#head}${headSep}${marker}${tailSep}${tailBuf}`,
-				outputBytes: headBytes + markerBytes + tailBytes + headSep.length + tailSep.length,
-				outputLines: headLines + 1 + tailLines,
+				body: `${head}${headSep}${marker}${tailSep}${tail}`,
+				outputBytes: keptHeadBytes + markerBytes + keptTailBytes + headSep.length + tailSep.length,
+				outputLines: keptHeadLines + 1 + keptTailLines,
 				elidedBytes,
 				elidedLines,
 			};
@@ -1783,7 +1794,7 @@ export function formatHeadTruncationNotice(
 	const totalFileLines = options.totalFileLines ?? truncation.totalLines;
 	const endLineDisplay = startLineDisplay + (truncation.outputLines ?? truncation.totalLines) - 1;
 	const nextOffset = endLineDisplay + 1;
-	const notice = `[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines}. Use :${nextOffset} to continue]`;
+	const notice = `[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines}. Use :${nextOffset}- to continue]`;
 	return `\n\n${notice}`;
 }
 

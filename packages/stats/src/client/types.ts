@@ -19,6 +19,7 @@ import type {
 	ModelPerformancePoint,
 	ModelStats,
 	ModelTimeSeriesPoint,
+	SideChannelStats,
 	TimeSeriesPoint,
 } from "../shared-types";
 
@@ -63,11 +64,12 @@ export interface RequestDetails extends MessageStats {
 	output: unknown;
 }
 
-export type TimeRange = "1h" | "24h" | "7d" | "30d" | "90d" | "all";
+export type TimeRange = "1h" | "24h" | "2d" | "3d" | "7d" | "30d" | "90d" | "all";
 
 export interface OverviewStats {
 	overall: AggregatedStats;
 	byAgentType: AgentTypeStats[];
+	bySideChannel: SideChannelStats[];
 	timeSeries: TimeSeriesPoint[];
 }
 

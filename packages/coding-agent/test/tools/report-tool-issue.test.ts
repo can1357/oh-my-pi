@@ -1,8 +1,10 @@
 import { Database } from "bun:sqlite";
 import * as os from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { cfgDevAutoqa } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import * as reportIssue from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
 import {
 	__awaitAutoQaRecordPipelineForTests,
@@ -27,7 +29,8 @@ function openTempDb(): Database {
 			report TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			pushed INTEGER NOT NULL DEFAULT 0,
-			push_error TEXT
+			push_error TEXT,
+			source TEXT
 		);
 	`);
 	return db;
@@ -114,13 +117,17 @@ describe("flushGrievances", () => {
 	it("lets PI_AUTO_QA=false disable auto QA when the setting is enabled", () => {
 		Bun.env.PI_AUTO_QA = "0";
 
-		expect(isAutoQaEnabled(Settings.isolated({ "dev.autoqa": true }))).toBe(false);
+		const settings = Settings.isolated();
+		cfgDevAutoqa.set(settings, true);
+		expect(isAutoQaEnabled(settings)).toBe(false);
 	});
 
 	it("lets PI_AUTO_QA=true enable auto QA when the setting is disabled", () => {
 		Bun.env.PI_AUTO_QA = "1";
 
-		expect(isAutoQaEnabled(Settings.isolated({ "dev.autoqa": false }))).toBe(true);
+		const settings = Settings.isolated();
+		cfgDevAutoqa.set(settings, false);
+		expect(isAutoQaEnabled(settings)).toBe(true);
 	});
 
 	it("enables auto QA by default with consent still unset", () => {
@@ -659,6 +666,53 @@ describe("dispatchReportIssueDevice", () => {
 		} finally {
 			if (originalPush === undefined) delete Bun.env.PI_AUTO_QA_PUSH;
 			else Bun.env.PI_AUTO_QA_PUSH = originalPush;
+			openSpy.mockRestore();
+			db.close();
+		}
+	});
+
+	it.each([
+		[
+			'{"tool": "read", "description": "numbered lines had no snapshot hash"}',
+			"read",
+			"numbered lines had no snapshot hash",
+		],
+		['{\n  "tool": "grep",\n  "issue": "missed a match"\n}', "grep", "missed a match"],
+	])("records a JSON body %p", async (text, tool, report) => {
+		Bun.env.PI_AUTO_QA = "1";
+		const db = openTempDb();
+		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
+		try {
+			const session = { settings: consentedSettings() } as ToolSession;
+			await dispatchReportIssueDevice(session, text);
+			await settlePipeline();
+			const row = db.prepare("SELECT tool, report, source FROM grievances").get();
+			expect(row).toEqual({ tool, report, source: "builtin" });
+		} finally {
+			openSpy.mockRestore();
+			db.close();
+		}
+	});
+
+	it("rejects a JSON body without a tool and a description", async () => {
+		const session = { settings: Settings.isolated({ "dev.autoqa": true }) } as ToolSession;
+		await expect(dispatchReportIssueDevice(session, '{"note": "no issue"}')).rejects.toThrow("Invalid report format");
+	});
+
+	it("tags MCP tools with their server", async () => {
+		Bun.env.PI_AUTO_QA = "1";
+		const db = openTempDb();
+		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
+		try {
+			const session = {
+				settings: consentedSettings(),
+				getToolByName: (name: string) =>
+					name === "mcp__linear__search" ? ({ name, mcpServerName: "linear" } as unknown as AgentTool) : undefined,
+			} as ToolSession;
+			await dispatchReportIssueDevice(session, "mcp__linear__search: returned stale issues");
+			await settlePipeline();
+			expect(db.prepare("SELECT source FROM grievances").get()).toEqual({ source: "mcp:linear" });
+		} finally {
 			openSpy.mockRestore();
 			db.close();
 		}

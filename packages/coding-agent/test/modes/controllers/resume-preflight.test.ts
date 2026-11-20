@@ -43,6 +43,7 @@ function createResumeContext(opts: { flushFails?: boolean; sourceCwd?: string; p
 		session: { switchSession },
 		sessionManager: {
 			getCwd: () => state.cwd,
+			getRecordedCwd: () => state.cwd,
 			getSessionDir: () => "/tmp",
 			getSessionFile: () => opts.previousSessionFile,
 			moveTo,

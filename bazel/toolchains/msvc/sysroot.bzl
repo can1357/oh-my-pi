@@ -127,6 +127,10 @@ def _xwin_sysroot_impl(rctx):
             "--cache-dir",
             cache_dir,
             "splat",
+            # Release static CRT objects reference these PDBs too. Keep the
+            # matching Microsoft symbols beside the libraries so lld can read
+            # them, rather than emitting LNK4099 or discarding debug records.
+            "--include-debug-symbols",
             "--copy",
             "--output",
             "splat",

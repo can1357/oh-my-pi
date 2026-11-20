@@ -2,7 +2,7 @@
 /**
  * Post-link release stamp for pi_natives addons.
  *
- * `crates/pi-natives/src/lib.rs` links a fixed-size placeholder
+ * `crates/natives/src/lib.rs` links a fixed-size placeholder
  * (`PI_NATIVES_VERSION_STAMP:` + NUL padding, {@link VERSION_STAMP_SIZE} bytes)
  * that `__piNativesBuildVersion()` reads at runtime. This tool writes
  * `package.json#version` into that slot after the build, so a version bump
@@ -24,7 +24,7 @@ import { VERSION_STAMP_MAGIC, VERSION_STAMP_SIZE } from "../packages/natives/nat
 const repoRoot = path.join(import.meta.dir, "..");
 const magicBytes = Buffer.from(VERSION_STAMP_MAGIC, "latin1");
 /** Longest version that fits while keeping at least one NUL terminator. */
-export const MAX_STAMP_VERSION_LENGTH = VERSION_STAMP_SIZE - magicBytes.length - 1;
+const MAX_STAMP_VERSION_LENGTH = VERSION_STAMP_SIZE - magicBytes.length - 1;
 
 /** `packages/natives/package.json#version` — the version every addon install stamps. */
 export async function nativesPackageVersion(): Promise<string> {
@@ -135,7 +135,7 @@ export function hasVersionStampSlot(bytes: Uint8Array): boolean {
  * slot already holds exactly `version` (bytes untouched), true when it changed.
  * Throws when the magic occurs zero or several times, or `version` cannot fit.
  */
-export function stampNativeBytes(bytes: Buffer, version: string): boolean {
+function stampNativeBytes(bytes: Buffer, version: string): boolean {
 	const encoded = Buffer.from(version, "utf8");
 	if (encoded.length === 0) throw new Error("native version stamp: version is empty");
 	if (encoded.length > MAX_STAMP_VERSION_LENGTH) {

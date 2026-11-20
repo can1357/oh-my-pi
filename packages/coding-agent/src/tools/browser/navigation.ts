@@ -1,6 +1,30 @@
 import { untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { Page, WaitForOptions } from "puppeteer-core";
 import { puppeteerTimeoutError } from "./launch";
+import { urlPattern } from "./network";
+
+/** Whether `requested` is the address `current` already shows (`https://a.test` is `https://a.test/`). */
+export function sameAddress(requested: string, current: string): boolean {
+	if (requested === current) return true;
+	try {
+		return new URL(requested).href === new URL(current).href;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * `tab.waitForUrl()`'s pattern as every backend tests it ({@link urlPattern}): a RegExp, a `*` glob compiled to one,
+ * or a substring. A predicate function, among others, is refused with a {@link ToolError} before anything waits.
+ */
+export function parseUrlPattern(pattern: unknown): string | RegExp {
+	if (typeof pattern === "string" || pattern instanceof RegExp) return urlPattern(pattern);
+	const given = pattern === null ? "null" : typeof pattern === "function" ? "a function" : typeof pattern;
+	throw new ToolError(
+		`tab.waitForUrl() takes a string the URL contains, a glob with * (**/path), or a RegExp it matches, not ${given}`,
+	);
+}
 
 declare module "puppeteer-core" {
 	interface Frame {
@@ -62,14 +86,14 @@ export function readyStateInPage(): string {
 
 /**
  * Whether one of our own page evaluations failed because a navigation replaced the document whose execution context
- * it targeted: the context was destroyed while the call ran, or was already gone when it arrived (Puppeteer rewrites
- * that into the first message; the relay passes Chrome's own on). Puppeteer's own waits retry on the same two.
+ * it targeted: the context was destroyed, was already gone, or a handle belongs to the replaced document's world.
  */
 export function isNavigatedContextError(error: unknown): boolean {
 	return (
 		error instanceof Error &&
 		(error.message.includes("Execution context was destroyed") ||
-			error.message.includes("Cannot find context with specified id"))
+			error.message.includes("Cannot find context with specified id") ||
+			error.message.includes("should belong to the same JavaScript world"))
 	);
 }
 

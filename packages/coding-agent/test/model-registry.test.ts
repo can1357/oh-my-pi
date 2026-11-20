@@ -11,6 +11,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveMaxContextWindow } from "@oh-my-pi/pi-catalog/compat/context-window";
 import { factoryDroidRegistry, resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { writeThinkingCapability } from "@oh-my-pi/pi-catalog/thinking-capability";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import * as catalogModels from "@oh-my-pi/pi-catalog/models";
 import { calculateUsageCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
@@ -274,7 +275,7 @@ describe("ModelRegistry", () => {
 			expect(registry.getAll("all")).toEqual(
 				expect.arrayContaining([
 					expect.objectContaining({ provider: "local", id: "falcon-h1-90m", kind: "tiny" }),
-					expect.objectContaining({ provider: "local", id: "kokoro", kind: "tts" }),
+					expect.objectContaining({ provider: "local", id: "phonon-31m", kind: "tts" }),
 					expect.objectContaining({ provider: "local", id: "whisper-base", kind: "stt" }),
 					expect.objectContaining({ provider: "web", id: "duckduckgo", kind: "search" }),
 					expect.objectContaining({ provider: "typesafe", id: "jev-latest", kind: "judge" }),
@@ -284,7 +285,7 @@ describe("ModelRegistry", () => {
 				expect.objectContaining({ provider: "local", id: "falcon-h1-90m" }),
 			);
 			expect(registry.getAvailable("tts")).toContainEqual(
-				expect.objectContaining({ provider: "local", id: "kokoro" }),
+				expect.objectContaining({ provider: "local", id: "phonon-31m" }),
 			);
 			expect(registry.getAvailable("stt")).toContainEqual(
 				expect.objectContaining({ provider: "local", id: "whisper-base" }),
@@ -639,7 +640,9 @@ describe("ModelRegistry", () => {
 			// `mergeDiscoveredModel` dropped `transport: pi-native` (raw catalog
 			// rows carry no transport), so the next stream went out as plain
 			// openai-completions to `${baseUrl}/chat/completions` instead of the
-			// gateway's `/v1/pi/stream`.
+			// gateway's `/v1/pi/stream`. A pi-native provider no longer runs the
+			// provider's own discovery at all: the gateway serves none of
+			// OpenRouter's listing routes.
 			writeRawModelsJson({
 				openrouter: {
 					baseUrl: "http://localhost:4000",
@@ -652,18 +655,7 @@ describe("ModelRegistry", () => {
 			const fetchMock: FetchImpl = async input => {
 				const url = input instanceof Request ? input.url : String(input);
 				requestedUrls.push(url);
-				if (url === "http://localhost:4000/models") {
-					return new Response(
-						JSON.stringify({
-							data: [
-								{ id: "openai/gpt-5.4", name: "GPT-5.4", supported_parameters: ["tools"] },
-								{ id: "anthropic/claude-opus-4.6", name: "Claude Opus 4.6", supported_parameters: ["tools"] },
-							],
-						}),
-						{ status: 200, headers: { "Content-Type": "application/json" } },
-					);
-				}
-				throw new Error(`Unexpected URL: ${url}`);
+				return new Response("Not Found", { status: 404 });
 			};
 
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
@@ -675,10 +667,10 @@ describe("ModelRegistry", () => {
 			expect(preRefresh.every(m => m.baseUrl === "http://localhost:4000")).toBe(true);
 
 			await registry.refreshProvider("openrouter", "online");
-			expect(requestedUrls).toContain("http://localhost:4000/models");
+			expect(requestedUrls).toEqual([]);
 
-			// Post-refresh: every openrouter model — bundled or freshly
-			// discovered — must still route through the pi-native transport.
+			// Post-refresh: every openrouter model must still route through the
+			// pi-native transport.
 			const postRefresh = getModelsForProvider(registry, "openrouter");
 			expect(postRefresh.length).toBeGreaterThan(0);
 			for (const model of postRefresh) {
@@ -689,6 +681,92 @@ describe("ModelRegistry", () => {
 	});
 
 	describe("provider compat overrides", () => {
+		test("discovered model WebSocket overrides survive refresh and cache restoration", async () => {
+			const config = {
+				api: "openai-responses",
+				baseUrl: "https://discovery.example.com/v1",
+				apiKey: "TEST_KEY",
+				authHeader: true,
+				discovery: { type: "openai-models-list" },
+				modelOverrides: {
+					"explicit-http": { preferWebsockets: false },
+					"explicit-ws": { preferWebsockets: true },
+				},
+			};
+			const fetch = mockOpenAiCompatibleModels("https://discovery.example.com/v1/models", [
+				"discovered",
+				"explicit-http",
+				"explicit-ws",
+			]);
+			writeRawModelsJson({ "discovery-provider": config });
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch });
+			await registry.refresh("offline");
+			await registry.refreshProvider("discovery-provider", "online");
+			const reopened = new ModelRegistry(authStorage, modelsJsonPath, { fetch });
+			for (const current of [registry, reopened]) {
+				const discovered = current.find("discovery-provider", "discovered");
+				expect(discovered).toMatchObject({ id: "discovered", api: "openai-responses" });
+				expect(discovered?.preferWebsockets).toBeUndefined();
+				expect(current.find("discovery-provider", "explicit-http")?.preferWebsockets).toBe(false);
+				expect(current.find("discovery-provider", "explicit-ws")?.preferWebsockets).toBe(true);
+			}
+		});
+
+		test("runtime models preserve explicit WebSocket preferences before and after materialization", () => {
+			for (const materialized of [false, true]) {
+				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				const base = registry.find("openai", "gpt-5-mini");
+				if (!base) throw new Error("Expected bundled Responses model");
+				if (materialized) registry.getAll();
+				registry.registerProvider("runtime-ws", {
+					api: "openai-responses",
+					baseUrl: "https://runtime.example.com/v1",
+					apiKey: "test-key",
+					models: [
+						{ ...base, id: "default", contextWindow: 32000, maxTokens: 1024, preferWebsockets: undefined },
+						{ ...base, id: "explicit-http", contextWindow: 32000, maxTokens: 1024, preferWebsockets: false },
+						{ ...base, id: "explicit-ws", contextWindow: 32000, maxTokens: 1024, preferWebsockets: true },
+					],
+				});
+				expect(registry.find("runtime-ws", "default")?.preferWebsockets).toBeUndefined();
+				expect(registry.find("runtime-ws", "explicit-http")?.preferWebsockets).toBe(false);
+				expect(registry.find("runtime-ws", "explicit-ws")?.preferWebsockets).toBe(true);
+				registry.unregisterProvider("runtime-ws");
+				expect(registry.find("runtime-ws", "default")).toBeUndefined();
+			}
+		});
+
+		test("models.yml preserves standard Responses WebSocket preferences and explicit HTTP overrides", async () => {
+			const modelsPath = path.join(tempDir, "models.yml");
+			await Bun.write(
+				modelsPath,
+				`providers:
+  responses-proxy:
+    api: openai-responses
+    baseUrl: https://proxy.example.com/v1
+    apiKey: test-key
+    models:
+      - id: websocket-model
+      - id: http-model
+        preferWebsockets: true
+      - id: default-model
+    modelOverrides:
+      websocket-model:
+        preferWebsockets: true
+      http-model:
+        preferWebsockets: false
+`,
+			);
+			const registry = new ModelRegistry(authStorage, modelsPath);
+			const websocketModel = registry.find("responses-proxy", "websocket-model");
+			const httpModel = registry.find("responses-proxy", "http-model");
+			const defaultModel = registry.find("responses-proxy", "default-model");
+			expect(websocketModel?.api).toBe("openai-responses");
+			expect(websocketModel?.preferWebsockets).toBe(true);
+			expect(httpModel?.preferWebsockets).toBe(false);
+			expect(defaultModel?.preferWebsockets).toBeUndefined();
+		});
+
 		test("models.yml can opt a Responses provider in while opting one model out of stored chaining", async () => {
 			const modelsPath = path.join(tempDir, "models.yml");
 			await Bun.write(
@@ -1664,17 +1742,22 @@ describe("ModelRegistry", () => {
 					modelOverrides: {
 						"gpt-5.4": {
 							contextWindow: 512000,
+							preferWebsockets: true,
 						},
+						"gpt-5.5": { preferWebsockets: false },
 					},
 				},
 			});
-			const fetchMock = mockOpenAiCompatibleModels("https://my-proxy.example.com/v1/models", ["gpt-5.4"]);
+			const fetchMock = mockOpenAiCompatibleModels("https://my-proxy.example.com/v1/models", ["gpt-5.4", "gpt-5.5"]);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 			expect(registry.find("openai", "gpt-5.4")?.contextWindow).toBe(512000);
+			expect(registry.find("openai", "gpt-5.4")?.preferWebsockets).toBe(true);
 
 			await registry.refreshProvider("openai", "online");
 
 			expect(registry.find("openai", "gpt-5.4")?.contextWindow).toBe(512000);
+			expect(registry.find("openai", "gpt-5.4")?.preferWebsockets).toBe(true);
+			expect(registry.find("openai", "gpt-5.5")?.preferWebsockets).toBe(false);
 		});
 
 		test("newly discovered ids inherit provider fields, not another model's custom fields", async () => {
@@ -1785,6 +1868,67 @@ describe("ModelRegistry", () => {
 			expect(anthropicModels.some(m => m.id === "claude-custom")).toBe(false);
 			expect(anthropicModels.some(m => m.id.includes("claude"))).toBe(true);
 		});
+	});
+
+	describe("learned thinking capabilities", () => {
+		test.each([false, true])(
+			"loads saved capabilities from the registry's scoped database (override=%s)",
+			override => {
+				writeRawModelsJson({
+					"custom-thinking": {
+						api: "openai-completions",
+						baseUrl: "https://custom.example/v1",
+						apiKey: "test-key",
+						models: [
+							{ id: "unknown-local" },
+							{ id: "authored-plain", reasoning: false },
+							{
+								id: "authored-ladder",
+								reasoning: true,
+								thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] },
+							},
+							{ id: "gpt-5" },
+						],
+					},
+				});
+				const dbPath = path.join(tempDir, override ? "capabilities.db" : "models.db");
+				const options = override ? { cacheDbPath: dbPath } : undefined;
+				const initial = new ModelRegistry(authStorage, modelsJsonPath, options);
+				const unknown = initial.find("custom-thinking", "unknown-local");
+				expect(unknown?.thinking?.unverified).toBe(true);
+				for (const id of ["unknown-local", "authored-plain", "authored-ladder", "gpt-5"]) {
+					const model = initial.find("custom-thinking", id);
+					if (!model) throw new Error(`Expected custom-thinking/${id}`);
+					writeThinkingCapability(
+						model,
+						{
+							checkedAt: Date.now(),
+							format: "openai",
+							efforts: [Effort.Medium],
+							observed: false,
+							attempts: [{ format: "openai", effort: Effort.Medium, accepted: true, observed: false }],
+						},
+						dbPath,
+					);
+				}
+
+				const restored = new ModelRegistry(authStorage, modelsJsonPath, options);
+				const learned = restored.find("custom-thinking", "unknown-local");
+				expect(learned?.reasoning).toBe(true);
+				expect(learned?.thinking?.unverified).not.toBe(true);
+				expect(learned?.thinking?.efforts).toEqual([Effort.Medium]);
+				const plain = restored.find("custom-thinking", "authored-plain");
+				expect(plain?.reasoning).toBe(false);
+				expect(plain?.thinking).toBeUndefined();
+				expect(restored.find("custom-thinking", "authored-ladder")?.thinking?.efforts).toEqual([
+					Effort.Low,
+					Effort.High,
+				]);
+				expect(restored.find("custom-thinking", "gpt-5")?.thinking).toEqual(
+					initial.find("custom-thinking", "gpt-5")?.thinking,
+				);
+			},
+		);
 	});
 
 	describe("thinking metadata normalization", () => {

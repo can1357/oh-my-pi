@@ -27,11 +27,25 @@ describe("extractCodeBlocks", () => {
 		expect(blocks.map(b => b.lang)).toEqual(["", "py"]);
 		expect(blocks.map(b => b.code)).toEqual(["plain", "print(1)"]);
 	});
+
+	it("finds a fence indented under a list item and strips the opener's indentation", () => {
+		const text = "- Search the files directly:\n  ```fish\n  rg -il x ~/dir\n    nested\n  ```\n- next item";
+		expect(extractCodeBlocks(text)).toEqual([{ lang: "fish", code: "rg -il x ~/dir\n  nested" }]);
+	});
+
+	it("ends an unclosed list-item fence with its list, keeping later quotes and fences", () => {
+		const text = "- item\n  ```sh\n  echo hi\n\n> important\n\n```\nreal\n```";
+		expect(extractCodeBlocks(text)).toEqual([
+			{ lang: "sh", code: "echo hi" },
+			{ lang: "", code: "real" },
+		]);
+		expect(extractQuoteBlocks(text)).toEqual([{ text: "important" }]);
+	});
 });
 
 describe("extractQuoteBlocks", () => {
 	it("collects a `>`-prefixed run and strips the marker plus one space", () => {
-		const text = "intro\n> line one\n> line two\ntail";
+		const text = "intro\n> line one\n> line two\n\ntail";
 		expect(extractQuoteBlocks(text)).toEqual([{ text: "line one\nline two" }]);
 	});
 

@@ -70,7 +70,7 @@ export const coordinationFixtures: Record<string, GalleryFixture> = {
 		label: "Cancel job",
 		renderer: "write",
 		streamingArgs: { path: "proc://build-42/kill" },
-		args: { path: "proc://build-42/kill" },
+		args: { path: "proc://build-42/kill", content: "" },
 		result: {
 			content: [{ type: "text", text: "Cancelled background job build-42." }],
 			details: { proc: { op: "cancel", jobs: [job], cancelled: [{ id: "build-42", status: "cancelled" }] } },
@@ -92,7 +92,7 @@ export const coordinationFixtures: Record<string, GalleryFixture> = {
 		label: "Stop service",
 		renderer: "write",
 		streamingArgs: { path: "proc://web/kill" },
-		args: { path: "proc://web/kill" },
+		args: { path: "proc://web/kill", content: "" },
 		result: {
 			content: [{ type: "text", text: "Stopped web" }],
 			details: { proc: { action: "stop", daemon: { ...service, state: "exited", exitedAt: Date.now() } } },

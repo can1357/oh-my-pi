@@ -164,9 +164,9 @@ export function isAuthorized(req: Request, tokens: ReadonlySet<string>): boolean
 }
 
 /**
- * Allow-list of inbound request headers that the gateway captures and forwards
- * to the underlying parsers (which decide whether to surface them to the
- * provider). Case-insensitive; `x-stainless-` is a prefix match.
+ * Allow-list of inbound request headers that the gateway forwards to the
+ * provider for gateway-token requests (`applyCallerTrust`; scoped clients'
+ * are dropped). Case-insensitive; `x-stainless-` is a prefix match.
  */
 const PASSTHROUGH_HEADER_NAMES: Record<string, true> = {
 	"anthropic-beta": true,
@@ -193,8 +193,8 @@ const PASSTHROUGH_HEADER_NAMES: Record<string, true> = {
 
 /**
  * Extract allow-listed passthrough headers from an inbound request. Keys are
- * lowercased; empty values are dropped. Called once per request in
- * `handleFormatEndpoint`; parsers then read `options.headers`.
+ * lowercased; empty values are dropped. Used by `applyCallerTrust` and by the
+ * Anthropic parser, whose stream encoder reads the caller's `anthropic-beta`.
  */
 export function captureRequestHeaders(headers: Headers): Record<string, string> {
 	const out: Record<string, string> = {};

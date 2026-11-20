@@ -245,6 +245,73 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		}
 	});
 
+	it("cancels a cell parked on top-level await via SIGINT and keeps its state", async () => {
+		using tempDir = TempDir.createSync("@python-runner-cancel-await-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			await executePythonWithKernel(kernel, "seed = 41");
+			const ac = new AbortController();
+			// Abort once the cell reports it is parked, so SIGINT lands while the
+			// main thread idles in the event loop rather than in sync code.
+			const pending = executePythonWithKernel(
+				kernel,
+				"import asyncio\nprint('parked', flush=True)\nawait asyncio.sleep(30)",
+				{
+					signal: ac.signal,
+					onChunk: chunk => {
+						if (chunk.includes("parked")) ac.abort(new DOMException("user cancelled", "AbortError"));
+					},
+				},
+			);
+			const result = await pending;
+			expect(result.cancelled).toBe(true);
+			// The same kernel process must survive with its namespace intact.
+			expect(kernel.isAlive()).toBe(true);
+			const next = await executePythonWithKernel(kernel, "print(seed + 1)");
+			expect(next.exitCode).toBe(0);
+			expect(next.output).toContain("42");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("interrupts only the aborted cell when several are parked on await", async () => {
+		using tempDir = TempDir.createSync("@python-runner-cancel-one-of-two-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const { promise: siblingParked, resolve: onSiblingParked } = Promise.withResolvers<void>();
+			const sibling = executePythonWithKernel(
+				kernel,
+				"import asyncio\ngate = asyncio.Event()\nprint('sibling parked', flush=True)\nawait gate.wait()\nprint('sibling done')",
+				{
+					onChunk: chunk => {
+						if (chunk.includes("sibling parked")) onSiblingParked();
+					},
+				},
+			);
+			await siblingParked;
+			const ac = new AbortController();
+			const target = executePythonWithKernel(
+				kernel,
+				"import asyncio\nprint('target parked', flush=True)\nawait asyncio.sleep(30)",
+				{
+					signal: ac.signal,
+					onChunk: chunk => {
+						if (chunk.includes("target parked")) ac.abort(new DOMException("user cancelled", "AbortError"));
+					},
+				},
+			);
+
+			expect((await target).cancelled).toBe(true);
+			await executePythonWithKernel(kernel, "gate.set()");
+			const siblingResult = await sibling;
+			expect(siblingResult.cancelled).toBe(false);
+			expect(siblingResult.output).toContain("sibling done");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
 	it("executes file-backed cells in the retained namespace with script import semantics", async () => {
 		using tempDir = TempDir.createSync("@python-runner-file-");
 		const scriptDir = path.join(tempDir.path(), "scripts");
@@ -715,6 +782,79 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		}
 	});
 
+	it("coordinates concurrent async tool calls through a kernel-global asyncio lock", async () => {
+		using tempDir = TempDir.createSync("@python-runner-tool-lock-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const defined = await executePythonWithKernel(
+				kernel,
+				[
+					"GATE = asyncio.Lock()",
+					"@tool",
+					"async def gated(n: int) -> int:",
+					"    async with GATE:",
+					"        await asyncio.sleep(0.2)",
+					"    return n",
+				].join("\n"),
+			);
+			expect(defined.exitCode).toBe(0);
+
+			// Subagents call tools in parallel. The call that waits on GATE must be
+			// woken when the holder releases it, not parked until its caller gives up.
+			const calls = await Promise.all(
+				[1, 2].map(n => kernel.invokeTool({ op: "call", name: "gated", args: { n } }, { timeoutMs: 2_000 })),
+			);
+			expect(calls.map(call => call.reply)).toEqual([
+				{ ok: true, value: 1 },
+				{ ok: true, value: 2 },
+			]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("cancels an async tool call so it releases what it holds", async () => {
+		using tempDir = TempDir.createSync("@python-runner-tool-cancel-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const defined = await executePythonWithKernel(
+				kernel,
+				[
+					"import threading",
+					"GATE = asyncio.Lock()",
+					"HELD = threading.Event()",
+					"@tool",
+					"async def hold() -> str:",
+					"    async with GATE:",
+					"        HELD.set()",
+					"        await asyncio.sleep(30)",
+					"    return 'held'",
+					"@tool",
+					"def wait_held() -> bool:",
+					"    return HELD.wait(5)",
+					"@tool",
+					"async def gated(n: int) -> int:",
+					"    async with GATE:",
+					"        return n",
+				].join("\n"),
+			);
+			expect(defined.exitCode).toBe(0);
+
+			// An interrupted subagent abandons `hold`; its coroutine must not keep GATE for 30s.
+			const controller = new AbortController();
+			const held = kernel.invokeTool({ op: "call", name: "hold", args: {} }, { signal: controller.signal });
+			const holding = await kernel.invokeTool({ op: "call", name: "wait_held", args: {} });
+			expect(holding.reply).toEqual({ ok: true, value: true });
+			controller.abort();
+			expect((await held).cancelled).toBe(true);
+
+			const next = await kernel.invokeTool({ op: "call", name: "gated", args: { n: 7 } }, { timeoutMs: 2_000 });
+			expect(next.reply).toEqual({ ok: true, value: 7 });
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
 	it("preserves awaited arguments in calls named like speculative bridge operations", async () => {
 		using tempDir = TempDir.createSync("@python-runner-call-site-");
 		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
@@ -867,7 +1007,7 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			expect(result.output).toContain("ValueError");
 			expect(result.output).toContain("boom");
 			// Traceback starts at user code; runner-internal frames stay hidden.
-			expect(result.output).toContain('File "<cell>"');
+			expect(result.output).toMatch(/File "<cell(-\d+)?>"/);
 			expect(result.output).not.toContain("_exec_source_async");
 		} finally {
 			await kernel.shutdown();
@@ -881,7 +1021,7 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			const result = await executePythonWithKernel(kernel, 'echo "hi"');
 			expect(result.exitCode).toBe(1);
 			expect(result.output).toContain("SyntaxError");
-			expect(result.output).toContain('File "<cell>"');
+			expect(result.output).toMatch(/File "<cell(-\d+)?>"/);
 			// Caret display only — no stack header, no runner machinery.
 			expect(result.output).not.toContain("Traceback (most recent call last");
 			expect(result.output).not.toContain("_compile_source");

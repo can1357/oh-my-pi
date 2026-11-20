@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { AstGrepTool } from "@oh-my-pi/pi-coding-agent/tools/ast-grep";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 function createTestSession(cwd = "/tmp/test", overrides: Partial<ToolSession> = {}): ToolSession {
@@ -251,6 +252,35 @@ describe("ast_grep parse errors", () => {
 			});
 			const details = result.details as { matchCount?: number } | undefined;
 			expect(details?.matchCount).toBe(2);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+});
+
+describe("ast_grep display output", () => {
+	it("keeps a multi-line capture on one display row while the model reads it as written", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-grep-capture-"));
+		try {
+			const filePath = path.join(tempDir, "calls.ts");
+			await Bun.write(filePath, "foo({\n  a: 1,\n\n  b: 2,\n});\nfoo(x);\n");
+
+			const result = await new AstGrepTool(createTestSession(tempDir)).execute("ast-grep-capture", {
+				pat: "foo($A)",
+				path: filePath,
+			});
+
+			// One row per code-frame line or capture block: a capture's own newlines (and its blank
+			// line) would read as stray rows, or split the match from its file, in the rendered card.
+			const display = (result.details?.displayContent ?? "").split("\n");
+			expect(display.filter(line => line.startsWith("  meta: "))).toEqual([
+				"  meta: A={   a: 1,   b: 2, }",
+				"  meta: A=x",
+			]);
+			expect(display.every(line => /^[* ]\d+│/.test(line) || line.startsWith("  meta: "))).toBe(true);
+
+			const text = result.content.find(content => content.type === "text")?.text ?? "";
+			expect(text).toContain("  meta: A={\n  a: 1,\n\n  b: 2,\n}");
 		} finally {
 			await removeWithRetries(tempDir);
 		}

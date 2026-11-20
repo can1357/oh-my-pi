@@ -3,7 +3,7 @@ import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Component, Container, EditorTheme, KeyId, Loader, TUI } from "@oh-my-pi/pi-tui";
 import type { TspText } from "@oh-my-pi/pi-wire";
-import type { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
+import type { StatusNotice, StatusNoticeAction } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import type { CollabController } from "../collab/controller";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
@@ -32,6 +32,9 @@ import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
 import type { AgentSession } from "../session/agent-session";
+import type { BlockedKind } from "../utils/run-status";
+import type { DroppedPrompt } from "../session/agent-session-types";
+import type { AgentViewSession } from "../session/agent-session-handle";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import type { HistoryStorage } from "../session/history-storage";
@@ -39,7 +42,7 @@ import type { SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import type { DictationTarget } from "../stt";
-import type { SessionContinuation, SessionInfo } from "../session/session-listing";
+import type { SessionContinuation } from "../session/session-listing";
 import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { LspStartupServerInfo } from "../tools";
@@ -50,6 +53,7 @@ import type { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-executio
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import type { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import type { PresentedBlock } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import type { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
 import type { HookSelectorComponent, HookSelectorOptions } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import type { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
@@ -96,23 +100,31 @@ export type SubmittedUserInput = {
 	 *  it). Normal user Enter carries "steer" to match the streaming-branch Enter;
 	 *  background/continuation submits omit it and default to "followUp". */
 	streamingBehavior?: "steer" | "followUp";
+	/** Prompts sent after this one, in order, as the session prompt's `followUps`. */
+	followUps?: string[];
 	/** Set by `submitInteractiveInput` for a custom-message submission: the session took it (started a turn or queued it into one). */
 	dispatched?: boolean;
 	cancelled: boolean;
 	started: boolean;
 };
 
+/** A dialog that hands typing to the composer: registered by the ExtensionUiController approval, form and ask presenters, read by InputController's image and HTML paste routing. */
+export interface ComposerOwner {
+	component: Component;
+	owns(): boolean;
+}
+
 export interface InteractiveModeInitOptions {
 	suppressWelcomeIntro?: boolean;
 	clearInitialTerminalHistory?: boolean;
 	/** Opt into hosting when the caller owns outer startup readiness and shutdown. */
 	autoStartCollab?: boolean;
+	/** A command-line prompt runs once startup ends: report `working` from the first frame. */
+	startupRun?: boolean;
 }
 
 export type InteractiveSelectorDialogOptions = ExtensionUIDialogOptions &
 	Pick<HookSelectorOptions, "disabledIndices" | "inline">;
-
-export type SessionPickHandler = (session: SessionInfo) => void | Promise<void>;
 
 /** How {@link InteractiveModeContext.handleResumeSession} picks the file it opens. */
 export interface ResumeSessionOptions {
@@ -136,25 +148,32 @@ export interface RenderSessionContextOptions {
 	preservedLiveToolCallIds?: ReadonlySet<string>;
 }
 
+export interface RenderInitialMessagesOptions {
+	preserveExistingChat?: boolean;
+	clearTerminalHistory?: boolean;
+	/**
+	 * Called synchronously, once, with the session context the committed transcript was built from.
+	 * Not called when a newer replay supersedes this one.
+	 */
+	onCommit?: (context: SessionContext) => void;
+}
+
 /** How {@link InteractiveModeContext.showStatus} shows a notice. */
 export interface ShowStatusOptions {
 	/** Dims the ANSI line (default true). */
 	dim?: boolean;
 	/** Toasts it on a native terminal (default true); false keeps it to the ANSI transcript. */
 	toast?: boolean;
-}
-
-export interface SelectOnlyModelSelectorOptions {
-	/** Use the selected `provider/id` for the caller's operation without mutating session defaults. */
-	onSelect: (selector: string) => void | Promise<void>;
-	/** `provider/id` initially highlighted in the picker. */
-	currentSelector?: string;
+	/** A button on the native toast (Undo); the ANSI line has none. */
+	action?: StatusNoticeAction;
 }
 
 export interface AgentHubOpenOptions {
 	requireContent?: boolean;
 	armCloseTap?: boolean;
 	initialSection?: "agents" | "activity";
+	/** The agents-hub key: on a native host showing tray cards, focus moves into the tray instead. */
+	trayFirst?: boolean;
 }
 
 export interface InteractiveModeContext {
@@ -164,6 +183,8 @@ export interface InteractiveModeContext {
 	chatContainer: TranscriptContainer;
 	/** `!`/`$` runs started while the agent streams, until {@link flushPendingBashComponents} moves them into the transcript. */
 	pendingShellContainer: Container;
+	/** The ask waiting for answers above the composer: natively at the transcript's end, in rows just over it. */
+	askContainer: Container;
 	pendingMessagesContainer: Container;
 	statusContainer: Container;
 	/** Whether the status/working row rendered lines in the latest frame; the band composer's editor top gap collapses only then. */
@@ -180,6 +201,7 @@ export interface InteractiveModeContext {
 	reportContainer: Container;
 	editor: CustomEditor;
 	editorContainer: Container;
+	editorTopGapContainer: Container;
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
@@ -195,18 +217,18 @@ export interface InteractiveModeContext {
 	// Session access
 	session: AgentSession;
 	sessionManager: SessionManager;
-	/** Re-resolve the CLI/settings model scope after a successful OAuth login. */
-	refreshScopedModelsAfterLogin?: () => Promise<void>;
 	/** The current session display name / title. */
 	readonly sessionName: string | undefined;
 	/** Session the transcript/editor/status are attached to: the focused agent's, else `session`. */
-	readonly viewSession: AgentSession;
+	readonly viewSession: AgentViewSession;
 	/** Bind idle maintenance to the given view (default: the current one), or release the UI activity binding on null. */
-	syncIdleMaintenanceView(target?: AgentSession | null): void;
+	syncIdleMaintenanceView(target?: AgentViewSession | null): void;
 	/** Id of the focused agent, undefined when the main session is attached. */
 	readonly focusedAgentId: string | undefined;
 	/** Set while a tool-approval dialog owns the composer: its drafts steer the main session awaiting that approval, even from a focused agent's view. */
 	approvalOwnsComposer?: boolean;
+	/** The mounted dialog that currently hands typing to the composer, if any. */
+	composerOwner?: ComposerOwner;
 	/** Focus the main view on an agent's live session (delegates to SessionFocusController.focusAgent). */
 	focusAgentSession(id: string): Promise<void>;
 	/** Focus the focused agent's parent session, falling back to main (delegates to focusParent). */
@@ -252,6 +274,17 @@ export interface InteractiveModeContext {
 	 * the link browser closes while it covers the screen.
 	 */
 	rebuildTranscriptScrollback(): void;
+	/**
+	 * Run `redraw` over `blocks`; it returns whether the block's display changed. Live blocks (and
+	 * every block in Tern's native view) just repaint; a changed block with rows already in terminal
+	 * scrollback rebuilds the scrollback once for the batch, since a plain terminal cannot repaint them.
+	 */
+	redrawTranscriptBlocks(blocks: readonly Component[], redraw: (block: Component) => boolean): void;
+	/**
+	 * Ask the extension transcript presenters again for every block (only the parts `ids` selects,
+	 * when given) and redraw those whose display changed.
+	 */
+	refreshTranscriptPresentation(ids?: ReadonlySet<string>): void;
 	/** Flip the pinned jump list between its collapsed few and the full list. */
 	togglePinnedHudExpanded(): void;
 	/** Point the inline hover band at a click-candidate id (or clear it). */
@@ -269,7 +302,10 @@ export interface InteractiveModeContext {
 	collabController: CollabController;
 	/** Owned room; use {@link collabController}.host for current-session reuse and links. */
 	collabHost?: CollabHost;
-	collabGuest?: CollabGuestLink;
+	/** The collab session this process joined as a guest; set with {@link setCollabGuest}. */
+	readonly collabGuest?: CollabGuestLink;
+	/** Join (`guest`) or leave (`undefined`) a collab session as a guest. */
+	setCollabGuest(guest: CollabGuestLink | undefined): void;
 	eventController: EventController;
 	eventBus?: EventBus;
 	/** Root-scoped bus carrying this session tree's `task:subagent:*` frames. */
@@ -328,11 +364,13 @@ export interface InteractiveModeContext {
 	/** Settled user/assistant components reusable across post-compaction transcript rebuilds. */
 	transcriptMessageComponents: WeakMap<AgentMessage, Component>;
 	pendingTools: Map<string, ToolExecutionHandle>;
-	pendingBashComponents: BashExecutionComponent[];
+	pendingBashComponents: PresentedBlock<BashExecutionComponent>[];
 	bashComponent: BashExecutionComponent | undefined;
-	pendingPythonComponents: EvalExecutionComponent[];
+	pendingPythonComponents: PresentedBlock<EvalExecutionComponent>[];
 	pythonComponent: EvalExecutionComponent | undefined;
 	isPythonMode: boolean;
+	/** The draft starts with `?`, the `/btw` shortcut. */
+	isBtwMode: boolean;
 	streamingComponent: AssistantMessageComponent | undefined;
 	streamingMessage: AssistantMessage | undefined;
 	/**
@@ -381,7 +419,8 @@ export interface InteractiveModeContext {
 	// Lifecycle
 	init(options?: InteractiveModeInitOptions): Promise<void>;
 	playWelcomeIntro(): void;
-	shutdown(): Promise<void>;
+	/** Close and quit. Operator quits are cancellable by extensions; pass `cancellable: false` for forced closes. */
+	shutdown(options?: { cancellable?: boolean }): Promise<void>;
 	/** Tear down like {@link shutdown}, then relaunch the CLI with the original launch flags, resuming this session. */
 	restart(): Promise<void>;
 	/** Request graceful shutdown at the next fully settled boundary, including background turns. */
@@ -468,10 +507,13 @@ export interface InteractiveModeContext {
 			customType?: string;
 			display?: boolean;
 			streamingBehavior?: "steer" | "followUp";
+			followUps?: string[];
 		},
 		options?: { preserveDraft?: boolean; clearEditor?: boolean },
 	): SubmittedUserInput;
 	cancelPendingSubmission(): boolean;
+	/** Put a prompt that never reached the agent (and its unsent follow-ups, as one `=>` list) back in an empty editor. */
+	restoreDroppedPrompt(prompt: DroppedPrompt): void;
 	markPendingSubmissionStarted(input: SubmittedUserInput): boolean;
 	finishPendingSubmission(input: SubmittedUserInput): void;
 	/**
@@ -520,7 +562,7 @@ export interface InteractiveModeContext {
 		options: RenderSessionContextOptions,
 		renderChunk?: () => void,
 	): Promise<void>;
-	renderInitialMessages(options?: { preserveExistingChat?: boolean; clearTerminalHistory?: boolean }): Promise<void>;
+	renderInitialMessages(options?: RenderInitialMessagesOptions): Promise<void>;
 	/**
 	 * In-place transcript rewind: drop the rendered components at/after
 	 * `message` when none of their rows reached native scrollback. Returns
@@ -535,7 +577,7 @@ export interface InteractiveModeContext {
 	updateEditorBorderColor(): void;
 	rebuildChatFromMessages(options?: { reuseSettledComponents?: boolean }): void;
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;
-	reloadTodos(source?: AgentSession): Promise<void>;
+	reloadTodos(source?: AgentViewSession): Promise<void>;
 	toggleTodoExpansion(): void;
 	setTodoExpanded(expanded: boolean): void;
 	// Command handling
@@ -571,8 +613,8 @@ export interface InteractiveModeContext {
 		customInstructions?: string,
 		mode?: CompactMode,
 		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
+		options?: Pick<CompactOptions, "internalGuidance" | "readerModel">,
 	): Promise<CompactionOutcome>;
-	handleHandoffCommand(customInstructions?: string): Promise<void>;
 	handleShakeCommand(mode: ShakeMode): Promise<void>;
 	handleMoveCommand(targetPath?: string): Promise<void>;
 	/** `/wt`: fork the checkout into a new worktree (keeping changes unless `keepChanges` is false) and move there. */
@@ -610,16 +652,16 @@ export interface InteractiveModeContext {
 	showAgentsDashboard(): void;
 	/** Open the fullscreen git UI, optionally pinned to a revision (`/git <rev>`). */
 	showGitUi(revision?: string): void;
-	showModelSelector(options?: { temporaryOnly?: boolean; selectOnly?: SelectOnlyModelSelectorOptions }): void;
+	showModelSelector(options?: { temporaryOnly?: boolean }): void;
 	/** Session-only switch to an already-resolved model (`/switch <selector>`); compacts first when over context. */
 	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
-	showPluginSelector(mode?: "install" | "uninstall"): void;
-	showUserMessageSelector(): void;
+	showPluginSelector(mode?: "install" | "uninstall"): Promise<void>;
+	showUserMessageSelector(startAt?: string): void;
 	showCopySelector(): void;
 	showTreeSelector(): void;
 	/** Open the `/effort` picker over the levels the current model accepts. */
 	showThinkingSelector(): void;
-	showSessionSelector(source?: ForeignSessionSource, onSelect?: SessionPickHandler): void;
+	showSessionSelector(source?: ForeignSessionSource): void;
 	/** Settle side requests before replacing the session or deleting its artifacts. */
 	prepareSessionSwitch(): Promise<void>;
 	handleResumeSession(sessionPath: string, options?: ResumeSessionOptions): Promise<void>;
@@ -657,6 +699,12 @@ export interface InteractiveModeContext {
 	handleTanCommand(work: string, images?: ImageContent[]): Promise<boolean>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;
+	/** Gives the keys to the ask waiting above the composer; false when none waits. */
+	focusAsk(): boolean;
+	/** The composer talks to a `/btw` note (Tern): plain drafts go to its topic as follow-ups. */
+	readonly isBtwFocused: boolean;
+	/** Sends a draft to the focused `/btw` note's topic; false when no follow-up started. */
+	submitBtwFollowUp(question: string, images?: ImageContent[]): Promise<boolean>;
 	handleBtwBranchKey(): Promise<boolean>;
 	canBranchBtw(): boolean;
 	handlesBtwBranchKey(): boolean;
@@ -686,7 +734,8 @@ export interface InteractiveModeContext {
 	 */
 	showCommandReport(options: { title: string; head?: TspText; body: Component }): void;
 	/** The live background-jobs sheet (the jobs pill's). */
-	showJobsSheet(): void;
+	/** The jobs sheet, on job `selected` when it lists it. */
+	showJobsSheet(selected?: string): void;
 	/** Clear the docked command report; false when none was shown (Esc falls through). */
 	dismissCommandReport(): boolean;
 	/** Screen rows a report above the editor may take (all of them but the editor and the chrome under it). */
@@ -740,6 +789,7 @@ export interface InteractiveModeContext {
 		title: string,
 		options: ExtensionUISelectItem[],
 		dialogOptions?: InteractiveSelectorDialogOptions,
+		extra?: { kind?: BlockedKind },
 	): Promise<string | undefined>;
 	hideHookSelector(): void;
 	showHookInput(title: string, placeholder?: string): Promise<string | undefined>;

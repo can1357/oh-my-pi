@@ -43,6 +43,7 @@ import {
 	kimiCodeMaxTokens,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
+	NANO_GPT_THINKING_SUFFIX_RE,
 	openCodeGoBaseUrlForApi,
 	projectOpenAIProReasoningAliases,
 	stripFireworksDeepSeekThinkingToggle,
@@ -71,14 +72,14 @@ const prevModelsJson: Record<string, Record<string, Model<Api>>> = Object.fromEn
 );
 
 /**
- * Local/self-hosted providers (Ollama, vLLM, LM Studio, LiteLLM). Their model
+ * Local/self-hosted providers (Ollama, vLLM, LM Studio, LiteLLM, Bifrost). Their model
  * catalogs are whatever happens to be running on the machine that invokes the
  * generator — bundling them would leak machine-specific endpoints (e.g.
  * `http://localhost:4000/v1`) into the committed snapshot. They are discovered
  * dynamically at runtime instead, so they are never fetched during generation
  * and never written to models.json.
  */
-const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litellm"]);
+const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litellm", "bifrost"]);
 /**
  * Credential-scoped catalogs (Devin's Cascade roster is gated per account/team
  * via `allowed_model_uids`). Fetching them during generation would bake one
@@ -90,14 +91,15 @@ const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litell
  * runtime discovery is authoritative per credential (mirrors the GitLab Duo
  * fallback-only policy below).
  */
-const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin", "sambanova"]);
+const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin", "sambanova", "otari", "modal"]);
 /**
  * Providers whose authored seed is the complete documented fallback
  * catalog: their previous-snapshot rows are never resurrected, so an id
  * the host retired (e.g. CoralBricks' GLM 5.3 Flash, 2026-10-07) cannot
- * return as a previous-snapshot zombie.
+ * return as a previous-snapshot zombie. `local` lists exactly the on-device
+ * workers this build ships, so a replaced one (Kokoro → Phonon) drops out.
  */
-const STATIC_SEED_COMPLETE_PROVIDERS = new Set(["yolo-auto", "coralbricks"]);
+const STATIC_SEED_COMPLETE_PROVIDERS = new Set(["yolo-auto", "coralbricks", "local"]);
 
 /**
  * The rows one provider's authored seed (`rules/providers/<id>.kdl`) contributes
@@ -272,8 +274,22 @@ async function loadModelsDevData(): Promise<ModelSpec[]> {
 }
 
 function createGlobalModelsDevReferenceMap(modelsDevModels: readonly ModelSpec[]): Map<string, ModelSpec> {
-	const references = new Map<string, ModelSpec>();
+	// NanoGPT publishes a model's thinking route as a separate `<id>:thinking`
+	// row, so its base row carries `reasoning: false`. The base is still
+	// reasoning-capable when that sibling exists; without this the sibling's
+	// larger limits make the non-thinking row the cross-provider reference and
+	// its `reasoning: false` overwrites every same-id row (#18673).
+	const thinkingBaseKeys = new Set<string>();
 	for (const model of modelsDevModels) {
+		const match = NANO_GPT_THINKING_SUFFIX_RE.exec(model.id);
+		if (match && model.reasoning) {
+			thinkingBaseKeys.add(`${model.provider}/${model.id.slice(0, match.index)}`);
+		}
+	}
+	const references = new Map<string, ModelSpec>();
+	for (const row of modelsDevModels) {
+		const model =
+			!row.reasoning && thinkingBaseKeys.has(`${row.provider}/${row.id}`) ? { ...row, reasoning: true } : row;
 		const existing = references.get(model.id);
 		if (!existing) {
 			references.set(model.id, model);
@@ -293,7 +309,7 @@ function createGlobalModelsDevReferenceMap(modelsDevModels: readonly ModelSpec[]
 	return references;
 }
 
-function applyGlobalModelsDevFallback(
+export function applyGlobalModelsDevFallback(
 	models: readonly ModelSpec[],
 	modelsDevModels: readonly ModelSpec[],
 ): ModelSpec[] {

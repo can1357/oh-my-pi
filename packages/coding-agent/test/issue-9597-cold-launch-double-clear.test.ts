@@ -106,7 +106,6 @@ describe("issue #9597 — cold-launch welcome duplication", () => {
 			undefined,
 			undefined,
 			undefined,
-			undefined,
 			lease!.composer,
 		);
 		lease!.adopt();

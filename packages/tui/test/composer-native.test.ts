@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { TspKind } from "@oh-my-pi/pi-wire";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Container, Text } from "@oh-my-pi/pi-tui";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { describeWorkingRow, type WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
@@ -112,6 +114,42 @@ describe("native composer", () => {
 		editor.handleNativeEvent({ type: "action", key: "bar/stop", act: "interrupt", mods: [] });
 		expect(editor.onCycleThinkingLevel).toHaveBeenCalledTimes(1);
 		expect(editor.onEscape).toHaveBeenCalledTimes(1);
+	});
+
+	it("folds while an ask above holds the keys, and marks a draft that would skip it", () => {
+		let ask: ComposerNativeState["ask"] = "pending";
+		const editor = new CustomEditor(getEditorTheme());
+		editor.composerState = () => ({ running: true, ask });
+		editor.onSubmit = vi.fn();
+
+		const away = editor.describe(cx);
+		expect(away.p).toMatchObject({ folded: true });
+		expect(nodes(away).find(n => n.k === "editor")?.p).toMatchObject({
+			placeholder: "Answer above, or type here to skip the questions",
+		});
+		expect(byRole(away, "omp.composer.stop")).toBeDefined();
+
+		editor.focused = true;
+		expect(editor.describe(cx).p).not.toHaveProperty("folded");
+
+		ask = "skip";
+		editor.setText("drop them instead");
+		const skipping = editor.describe(cx);
+		expect(nodes(byRole(skipping, "omp.composer.mode")!).some(n => n.k === "text")).toBe(true);
+		expect(byRole(skipping, "omp.composer.stop")).toBeUndefined();
+		expect(byRole(skipping, "omp.composer.skip")?.p).toMatchObject({ actions: { click: "submit" } });
+		editor.handleNativeEvent({ type: "action", key: "bar/skip", act: "submit", mods: [] });
+		expect(editor.onSubmit).toHaveBeenCalledWith("drop them instead");
+	});
+
+	it("routes a picked thinking level (`thinking.set` with the level as value)", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		editor.composerState = () => ({ running: false, thinking: "high" });
+		editor.onSetThinkingLevel = vi.fn();
+		editor.handleNativeEvent({ type: "action", key: "bar/effort", act: "thinking.set", value: "low", mods: [] });
+		editor.handleNativeEvent({ type: "action", key: "bar/effort", act: "thinking.set", mods: [] });
+		expect(editor.onSetThinkingLevel).toHaveBeenCalledTimes(1);
+		expect(editor.onSetThinkingLevel).toHaveBeenCalledWith("low");
 	});
 
 	it("quotes the session title in italics as the placeholder; a viewed subagent's name wins", () => {
@@ -529,6 +567,19 @@ describe("native autocomplete list", () => {
 	});
 });
 
+describe("native composer queue shorthand", () => {
+	it("keeps typing on the prefix's line and dims the prefix", () => {
+		setNativeRendering(true);
+		for (const prefix of ["->", "=>"]) {
+			const editor = composer({ running: false });
+			for (const key of `${prefix} add`) editor.handleInput(key);
+			expect(editor.getText()).toBe(`${prefix} add`);
+			expect(editor.getCursor()).toEqual({ line: 0, col: 6 });
+			expect(editor.describeDecorations?.(editor.getLines())).toContainEqual({ from: 0, to: 2, s: "dim" });
+		}
+	});
+});
+
 describe("native composer startup typeahead", () => {
 	const field = (composer: Composer) => nodes(composer.editor.describe(cx)).find(n => n.k === "editor");
 
@@ -591,7 +642,7 @@ describe("native composer without a status strip", () => {
 		composer.start();
 		try {
 			composer.editor.composerState = () => ({ running: false, thinking: "high" });
-			const { dock } = composer.describeSurface();
+			const { dock } = composer.describeSurface(cx);
 			expect(dock).toEqual([composer.editor]);
 			const described = composer.editor.describe(cx);
 			expect(nodes(described).some(n => n.p !== undefined && "role" in n.p && n.p.role === "omp.status")).toBe(
@@ -645,6 +696,35 @@ describe("native composer without a status strip", () => {
 	});
 });
 
+describe("native composer first frame", () => {
+	it("draws the cached thinking level before the session wires its own state", () => {
+		setNativeRendering(true);
+		const composer = new Composer({
+			terminal: new VirtualTerminal(80, 24),
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+			status: {
+				statusLine: {
+					settings: { preset: "custom", leftSegments: ["model"], rightSegments: [], compactThinkingLevel: true },
+					gitEnabled: false,
+					model: getBundledModel("anthropic", "claude-sonnet-4-5"),
+					thinkingLevel: ThinkingLevel.High,
+					autoThinking: false,
+					fastMode: false,
+					usingSubscription: false,
+					autoCompactEnabled: false,
+					compactionBoundaries: null,
+				},
+			},
+		});
+		try {
+			const effort = byRole(composer.editor.describe(cx), "omp.composer.model.effort");
+			expect(effort).toMatchObject({ k: "effort", p: { level: "high" } });
+		} finally {
+			composer.stop();
+		}
+	});
+});
+
 describe("native surface tail", () => {
 	it("flows deferred output after the transcript, not in the dock, and keeps its place moving in", () => {
 		setNativeRendering(true);
@@ -663,14 +743,14 @@ describe("native surface tail", () => {
 			const queued = new Container();
 			composer.setRuntimeChildren([transcript, deferred, queued], { nativeTail: [deferred] });
 
-			const live = composer.describeSurface();
+			const live = composer.describeSurface(cx);
 			expect(live.main.slice(-2)).toEqual([answer, run]);
 			expect(live.dock).toEqual([queued]);
 
 			// The next prompt flushes it into the transcript: same block, same place.
 			deferred.removeChild(run);
 			transcript.addChild(run);
-			const flushed = composer.describeSurface();
+			const flushed = composer.describeSurface(cx);
 			expect(flushed.main.slice(-2)).toEqual([answer, run]);
 			expect(flushed.main).toHaveLength(live.main.length);
 		} finally {

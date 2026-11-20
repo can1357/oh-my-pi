@@ -472,4 +472,28 @@ describe("beam consolidation free functions", () => {
 		expect(rows[0]?.subject).not.toContain("install");
 		expect(rows[0]?.subject).not.toContain("run");
 	});
+
+	it("stores version facts only for version-shaped mentions, not decimals (regression #18886)", () => {
+		const beam = trackedState();
+		const text =
+			"Total cost came to 3.9949820000000003 dollars and 12.50 per seat. Host 192.168.1.20 is up. " +
+			"Upgraded bun to 1.3.2 and pinned release 2.4 of the SDK, now on v18.18.8. " +
+			"Schema version (3.1) and protocol version `5.0` ship together.\n";
+		extractAndStoreFacts(beam, text, 1, "version-source");
+
+		const rows = beam.db
+			.query("SELECT value FROM memoria_facts WHERE fact_type = 'version' ORDER BY id")
+			.all() as Array<{ value: string }>;
+		expect(rows.map(row => row.value)).toEqual(["1.3.2", "2.4", "v18.18.8", "3.1", "5.0"]);
+	});
+
+	it("drops symbols from metric keys (regression #18886)", () => {
+		const beam = trackedState();
+		extractAndStoreFacts(beam, "Upload must stay below max→ 25 MB.\n", 1, "symbol-source");
+
+		const rows = beam.db.query("SELECT subject FROM facts WHERE predicate = 'metric'").all() as Array<{
+			subject: string;
+		}>;
+		expect(rows.map(row => row.subject)).toEqual(["stay_below_max_mb"]);
+	});
 });

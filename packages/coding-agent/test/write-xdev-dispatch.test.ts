@@ -603,7 +603,7 @@ describe("read and write route xd:// device URLs", () => {
 			expect(docs.length).toBeLessThan(XDEV_DOCS_TOTAL_BUDGET + XDEV_DOCS_PER_DEVICE_CAP);
 			expect(docs).toContain(`## ${mounted[0]!.name}`);
 			expect(docs).toContain("## Additional devices (docs on demand)");
-			expect(docs).toContain("- xd://giant_mcp_tool —");
+			expect(docs).toContain("- giant_mcp_tool —");
 			expect(docs).not.toContain("## giant_mcp_tool");
 		} finally {
 			await removeWithRetries(tempDir);
@@ -640,12 +640,11 @@ describe("read and write route xd:// device URLs", () => {
 			const builtinsDocs = xdevDocsAll(xdev, "builtins");
 			expect(builtinsDocs).toContain("## ");
 			expect(builtinsDocs).not.toContain("## mcp_external_tool");
-			expect(builtinsDocs).toContain("- xd://mcp_external_tool —");
+			expect(builtinsDocs).toContain("- mcp_external_tool —");
 			expect(builtinsDocs).not.toContain("TAIL");
 			const catalogDocs = xdevDocsAll(xdev, "catalog");
 			expect(catalogDocs).not.toContain(`## ${mounted[0]!.name}`);
-			expect(catalogDocs).toContain("- xd://");
-			expect(catalogDocs).toContain("- xd://mcp_external_tool —");
+			expect(catalogDocs).toContain("- mcp_external_tool —");
 			expect(xdevDocs(xdev, "mcp_external_tool")).toContain("TAIL");
 
 			const contextMode = Object.create(mounted[0]!) as (typeof mounted)[number];
@@ -660,7 +659,7 @@ describe("read and write route xd:// device URLs", () => {
 			const allowlistedDocs = xdevDocsAll(xdev, "builtins", ["mcp__context_mode_*"]);
 			expect(allowlistedDocs).toContain("## mcp__context_mode_ctx_execute");
 			expect(allowlistedDocs).not.toContain("## mcp__other_server_execute");
-			expect(allowlistedDocs).toContain("- xd://mcp__other_server_execute —");
+			expect(allowlistedDocs).toContain("- mcp__other_server_execute —");
 
 			const catalogWithAllowlistDocs = xdevDocsAll(xdev, "catalog", ["mcp__context_mode_*"]);
 			expect(catalogWithAllowlistDocs).not.toContain("## mcp__context_mode_ctx_execute");
@@ -669,9 +668,9 @@ describe("read and write route xd:// device URLs", () => {
 			// registry unvalidated) degrades to the catalog listing instead of
 			// throwing while the system prompt is built.
 			const scalarAllowlistDocs = xdevDocsAll(xdev, "builtins", "mcp__context_mode_*" as never);
-			expect(scalarAllowlistDocs).toContain("- xd://mcp__context_mode_ctx_execute —");
+			expect(scalarAllowlistDocs).toContain("- mcp__context_mode_ctx_execute —");
 			const nonStringAllowlistDocs = xdevDocsAll(xdev, "builtins", [123] as never);
-			expect(nonStringAllowlistDocs).toContain("- xd://mcp__context_mode_ctx_execute —");
+			expect(nonStringAllowlistDocs).toContain("- mcp__context_mode_ctx_execute —");
 		} finally {
 			await removeWithRetries(tempDir);
 		}
@@ -716,6 +715,91 @@ describe("web_search stays top-level under xdev", () => {
 });
 
 describe("xd:// and top-level calls share the canonical tool map", () => {
+	it("documents an active apply_patch wire alias with the canonical edit schema", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "read-xdev-wire-"));
+		try {
+			const session = xdevSession(tempDir, {
+				enableLsp: false,
+				settings: Settings.isolated({ "edit.mode": "apply_patch" }),
+			});
+			const tools = await createTools(session, ["read", "write", "edit"]);
+			const read = tools.find(tool => tool.name === "read");
+			if (!read) throw new Error("expected read tool");
+
+			const canonical = await read.execute("read-xdev-edit", { path: "xd://edit" });
+			const alias = await read.execute("read-xdev-wire", { path: "xd://apply_patch" });
+			expect(alias.content).toEqual(canonical.content);
+			expect(alias.content.find(entry => entry.type === "text")?.text).toContain("input: string");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("applies a real patch through the active wire alias without writing a device path", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-wire-"));
+		try {
+			const target = path.join(tempDir, "target.txt");
+			await Bun.write(target, "before\n");
+			const session = xdevSession(tempDir, {
+				enableLsp: false,
+				settings: Settings.isolated({ "edit.mode": "apply_patch" }),
+			});
+			const tools = await createTools(session, ["read", "write", "edit"]);
+			const write = tools.find(tool => tool.name === "write");
+			if (!write) throw new Error("expected write tool");
+			const input = [
+				"*** Begin Patch",
+				"*** Update File: target.txt",
+				"@@",
+				"-before",
+				"+after",
+				"*** End Patch",
+			].join("\n");
+
+			const result = await write.execute("write-xdev-wire-patch", {
+				path: "xd://apply_patch",
+				content: JSON.stringify({ input }),
+			});
+
+			expect(result.isError).toBeUndefined();
+			expect(result.details?.xdev).toMatchObject({ tool: "apply_patch", mode: "execute", tier: "write" });
+			expect(await Bun.file(target).text()).toBe("after\n");
+			expect(await fs.readdir(tempDir)).toEqual(["target.txt"]);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("makes a mounted wire alias unavailable when its canonical tool is disabled", async () => {
+		let calls = 0;
+		const device: Tool = {
+			name: "canonical",
+			customWireName: "wire",
+			label: "Device",
+			description: "Mounted wire-alias fixture",
+			parameters: type({}),
+			async execute() {
+				calls++;
+				return { content: [{ type: "text", text: "executed" }] };
+			},
+		};
+		const xdev = createTestXdevState([device]);
+		const write = new WriteTool(xdevSession(process.cwd(), { xdev }));
+
+		const enabled = await write.execute("wire-mounted", { path: "xd://wire", content: "{}" });
+		expect(enabled.isError).toBeUndefined();
+		expect(calls).toBe(1);
+
+		xdev.mountedNames.clear();
+		for (const name of ["canonical", "wire"]) {
+			expect(() => xdevDocs(xdev, name)).toThrow(`No such tool: xd://${name}`);
+			const disabled = await write.execute(`disabled-${name}`, { path: `xd://${name}`, content: "{}" });
+			expect(disabled.isError).toBe(true);
+			expect(disabled.content.find(entry => entry.type === "text")?.text).toContain(`No such tool: xd://${name}`);
+		}
+		expect(calls).toBe(1);
+	});
+
 	it("dispatches and documents an unmounted top-level tool, and still rejects unknown names", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-fallback-"));
 		try {

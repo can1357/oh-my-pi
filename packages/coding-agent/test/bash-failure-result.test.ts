@@ -9,6 +9,7 @@ import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { Shell } from "@oh-my-pi/pi-natives";
 import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { bashToolRenderer } from "@oh-my-pi/pi-tui/tools/bash";
+import { formatRawOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 
 afterEach(() => {
 	mock.restore();
@@ -35,6 +36,15 @@ function makeSession(): ToolSession {
 }
 
 describe("BashTool execution results", () => {
+	it("persists the entire bounded trace when its JSON exceeds 200 KB", async () => {
+		const tool = new BashTool(makeSession());
+		const result = await tool.execute("call-large-trace", { command: "printf '%0210000d' 0" }, undefined, () => {});
+		const trace = result.details?.trace;
+		expect(trace).toBeDefined();
+		expect(JSON.stringify(trace).length).toBeGreaterThan(200_000);
+		expect(trace?.history?.some(event => event.kind === "Output")).toBe(true);
+	});
+
 	it.each([
 		{ wallTimeMs: 0, noticeCount: 1 },
 		{ wallTimeMs: 1000, noticeCount: 2 },
@@ -84,6 +94,15 @@ describe("BashTool execution results", () => {
 		// The LLM-facing text still states the exit code verbatim.
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
 		expect(text).toContain("Command exited with code 3");
+	});
+
+	it("says a command that printed nothing exited cleanly, so an empty result reads as success", async () => {
+		const tool = new BashTool(makeSession());
+
+		const result = await tool.execute("call-silent", { command: "true" });
+
+		expect(result.isError).toBeUndefined();
+		expect(result.content.find(c => c.type === "text")?.text).toStartWith("(no output, exit code 0)");
 	});
 
 	it("returns a warning-state timeout result with one timeout notice", async () => {
@@ -246,13 +265,14 @@ describe("BashTool execution results", () => {
 			});
 		});
 		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "bash-minimized-meta-"));
-		const ids: Record<string, string> = { bash: "1", "bash-original": "2" };
+		// Sequential ids like the session's spill manager: the output spill gets 1, the raw original 2.
+		let nextId = 1;
 		const session = {
 			...makeSession(),
-			allocateOutputArtifact: async (kind: string) => ({
-				id: ids[kind],
-				path: path.join(artifactsDir, `${kind}.log`),
-			}),
+			allocateOutputArtifact: async () => {
+				const id = String(nextId++);
+				return { id, path: path.join(artifactsDir, `${id}.log`) };
+			},
 		} as unknown as ToolSession;
 
 		try {
@@ -266,9 +286,9 @@ describe("BashTool execution results", () => {
 				artifactId: "2",
 			});
 			const text = result.content.find(c => c.type === "text")?.text ?? "";
-			expect(text).toContain("[raw output: artifact://2]");
+			expect(text).toContain(formatRawOutputNotice("2"));
 			expect(text).not.toContain("Minimized");
-			expect(await Bun.file(path.join(artifactsDir, "bash-original.log")).text()).toBe(rawOutput);
+			expect(await Bun.file(path.join(artifactsDir, "2.log")).text()).toBe(rawOutput);
 
 			const theme = await getThemeByName("dark");
 			if (!theme) throw new Error("Expected dark theme");

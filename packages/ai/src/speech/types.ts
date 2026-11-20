@@ -17,6 +17,7 @@ export const SPEECH_FORMAT_MIME_TYPES: Record<SpeechFormat, string> = {
 export interface SpeechRequest {
 	text: string;
 	voice?: string;
+	language?: string;
 	format: SpeechFormat;
 	speed?: number;
 	sampleRate?: number;

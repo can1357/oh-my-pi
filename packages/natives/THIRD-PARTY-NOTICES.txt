@@ -10,57 +10,7 @@ VENDORED SOURCE AND DATA
 ========================
 
 -------------------------------------------------------------------------------
-brush-core 0.5.0 — crates/vendor/brush-core
-
-This directory contains a vendored, locally-patched copy of brush-core from the
-brush shell project (https://github.com/reubeno/brush), used under the MIT
-License. It is wired into the workspace via `[patch.crates-io]` so these
-modifications can be maintained against the published release (brush-core
-0.5.0).
-
-  Copyright (c) 2024 reuben olinsky
-
-Local modifications include: Windows path handling fixes (drive-alias and
-rooted-path normalization in globs), an async background-PID fix for the nohup
-wrapper, treating `/dev/null` as poll-ready to avoid an infinite poll on macOS,
-and indentation/formatting standardization. The remaining logic tracks upstream
-so behavior matches the published crate.
-
-MIT License
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
--------------------------------------------------------------------------------
-brush-builtins — crates/pi-builtins
-
-The POSIX/bash builtins began as a locally-patched copy of brush-builtins from
-the brush shell project (https://github.com/reubeno/brush), used under the MIT
-License; the full license text is reproduced with brush-core above.
-
-  Copyright (c) 2024 reuben olinsky
-
-Local modifications include: implementing previously-stubbed builtins, the
-`wait` builtin (PID targeting plus the `-f`/`-n`/`-p` flags), and cancellation
-support for the `read` builtin via poll.
-
--------------------------------------------------------------------------------
-Command-line utilities — crates/pi-builtins
+Command-line utilities — crates/builtins
 
 ================================================================================
 uutils coreutils (https://github.com/uutils/coreutils), MIT
@@ -204,7 +154,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 -------------------------------------------------------------------------------
-ctok — crates/pi-natives/data
+ctok — crates/natives/data
 
 MIT License
 
@@ -214,7 +164,7 @@ Copyright (c) 2026 Sander Land
 Copyright (c) 2026 Can Bölük and the omp contributors
 Copyright (c) 2026 Stencil Labs, Inc.
   (Rust implementation and the compact binary vocabulary encoding in
-  crates/pi-natives/src/utok/claude)
+  crates/natives/src/utok/claude)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -235,7 +185,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-Silver font — crates/pi-natives/src/fonts/Silver.ttf
+Silver font — crates/natives/src/fonts/Silver.ttf
 
 Silver — a pixel font for games
 
@@ -251,7 +201,7 @@ License: Creative Commons Attribution 4.0 International (CC BY 4.0)
 
 This license allows the work and adaptations of it to be shared and used
 commercially, as long as it is attributed to Poppy Works. The font is bundled
-here (crates/pi-natives/src/fonts/Silver.ttf) as a CJK/Unicode bitmap fallback.
+here (crates/natives/src/fonts/Silver.ttf) as a CJK/Unicode bitmap fallback.
 
 Creative Commons Attribution 4.0 International full legal text:
 
@@ -771,6 +721,9 @@ Used by:
 - jj-lib-proc-macros 0.44.0 (https://github.com/jj-vcs/jj)
 - jj-lib 0.44.0 (https://github.com/jj-vcs/jj)
 - miette 7.6.0 (https://github.com/zkat/miette)
+- esaxx-rs 0.1.10 (https://github.com/Narsil/esaxx-rs)
+- spm_precompiled 0.1.4 (https://github.com/huggingface/spm_precompiled)
+- tokenizers 0.23.2 (https://github.com/huggingface/tokenizers)
 
 Full license text:
 
@@ -5286,6 +5239,7 @@ Used by:
 - unicode-segmentation 1.13.3 (https://github.com/unicode-rs/unicode-segmentation)
 - unicode-width 0.1.14 (https://github.com/unicode-rs/unicode-width)
 - unicode-width 0.2.2 (https://github.com/unicode-rs/unicode-width)
+- unicode-normalization-alignments 0.1.12 (https://github.com/n1t0/unicode-normalization)
 
 Full license text:
 
@@ -7006,6 +6960,7 @@ DEALINGS IN THE SOFTWARE.
 License: MIT License (MIT)
 Used by:
 - autocfg 1.5.1 (https://github.com/cuviper/autocfg)
+- rayon-cond 0.4.0 (https://github.com/cuviper/rayon-cond)
 
 Full license text:
 
@@ -8937,7 +8892,6 @@ DEALINGS IN THE SOFTWARE.
 License: MIT License (MIT)
 Used by:
 - atspi-common 0.14.0 (https://github.com/odilia-app/atspi)
-- atspi-connection 0.14.0 (https://github.com/odilia-app/atspi/)
 - atspi-proxies 0.14.0 (https://github.com/odilia-app/atspi)
 - atspi 0.30.0 (https://github.com/odilia-app/atspi)
 
@@ -11493,6 +11447,13 @@ Used by:
 - gemm-f64 0.19.0 (https://github.com/sarah-ek/gemm/)
 - gemm 0.19.0 (https://github.com/sarah-ek/gemm/)
 - pulp 0.22.3 (https://github.com/sarah-quinones/pulp/)
+- xn-gemm-c32 0.20.2 (https://github.com/gradium-ai/gemm/)
+- xn-gemm-c64 0.20.2 (https://github.com/gradium-ai/gemm/)
+- xn-gemm-common 0.20.2 (https://github.com/gradium-ai/gemm/)
+- xn-gemm-f16 0.20.2 (https://github.com/gradium-ai/gemm/)
+- xn-gemm-f32 0.20.2 (https://github.com/gradium-ai/gemm/)
+- xn-gemm-f64 0.20.2 (https://github.com/gradium-ai/gemm/)
+- xn-gemm 0.20.2 (https://github.com/gradium-ai/gemm/)
 
 Full license text:
 
@@ -11858,35 +11819,6 @@ SOFTWARE.
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- brush-parser 0.4.0 (https://github.com/reubeno/brush)
-
-Full license text:
-
-MIT License
-
-Copyright (c) 2024 reuben olinsky
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
--------------------------------------------------------------------------------
-License: MIT License (MIT)
-Used by:
 - archery 1.2.3 (https://github.com/orium/archery)
 - rpds 1.2.1 (https://github.com/orium/rpds)
 
@@ -12098,7 +12030,6 @@ SOFTWARE.
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- brush-core 0.5.0 (https://github.com/reubeno/brush)
 - napi 3.14.2 (https://github.com/napi-rs/napi-rs)
 - asn1-rs-impl 0.2.0 (https://github.com/rusticata/asn1-rs.git)
 - ast-grep-core 0.39.9 (https://github.com/ast-grep/ast-grep)
@@ -12164,7 +12095,7 @@ Used by:
 - tree-sitter-html 0.23.2 (https://github.com/tree-sitter/tree-sitter-html)
 - tree-sitter-java 0.23.5 (https://github.com/tree-sitter/tree-sitter-java)
 - tree-sitter-json 0.24.8 (https://github.com/tree-sitter/tree-sitter-json)
-- tree-sitter-md 0.5.3 (https://github.com/tree-sitter-grammars/tree-sitter-markdown)
+- tree-sitter-md 0.5.4 (https://github.com/tree-sitter-grammars/tree-sitter-markdown)
 - tree-sitter-toml-ng 0.7.0 (https://github.com/tree-sitter-grammars/tree-sitter-toml)
 - tree-sitter-typescript 0.23.2 (https://github.com/tree-sitter/tree-sitter-typescript)
 - tree-sitter 0.25.10 (https://github.com/tree-sitter/tree-sitter)
@@ -12232,6 +12163,9 @@ Used by:
 - windows_x86_64_msvc 0.52.6 (https://github.com/microsoft/windows-rs)
 - windows_x86_64_msvc 0.53.1 (https://github.com/microsoft/windows-rs)
 - yasna 0.5.2 (https://github.com/qnighy/yasna.rs)
+- dasp_frame 0.11.0 (https://github.com/rustaudio/dasp.git)
+- dasp_sample 0.11.0 (https://github.com/rustaudio/sample.git)
+- xn 0.2.14 (https://github.com/LaurentMazare/xn)
 
 Full license text:
 
@@ -12384,6 +12318,7 @@ Used by:
 - image-webp 0.2.4 (https://github.com/image-rs/image-webp)
 - image 0.25.10 (https://github.com/image-rs/image)
 - io-close 0.3.7 (https://gitlab.com/wufz/io-close)
+- ident_case 1.0.1 (https://github.com/TedDriggs/ident_case)
 
 Full license text:
 
@@ -12539,6 +12474,12 @@ Used by:
 - async-recursion 1.1.1 (https://github.com/dcchut/async-recursion)
 - flume 0.12.0 (https://github.com/zesterer/flume)
 - rustc-hash 2.1.3 (https://github.com/rust-lang/rustc-hash)
+- daachorse 3.0.3 (https://github.com/daac-tools/daachorse)
+- dary_heap 0.3.9 (https://github.com/hanmertens/dary_heap)
+- monostate-impl 0.1.18 (https://github.com/dtolnay/monostate)
+- monostate 0.1.18 (https://github.com/dtolnay/monostate)
+- pastey 0.2.3 (https://github.com/as1100k/pastey)
+- ptts 0.7.1 (https://github.com/gradium-ai/xn-ptts)
 
 Full license text:
 
@@ -12627,7 +12568,7 @@ Used by:
 - quote 1.0.47 (https://github.com/dtolnay/quote)
 - ref-cast-impl 1.0.27 (https://github.com/dtolnay/ref-cast)
 - ref-cast 1.0.27 (https://github.com/dtolnay/ref-cast)
-- reis 0.5.0 (https://github.com/ids1024/reis)
+- reis 0.7.1 (https://github.com/ids1024/reis)
 - rustix 0.38.44 (https://github.com/bytecodealliance/rustix)
 - rustix 1.1.5 (https://github.com/bytecodealliance/rustix)
 - rustversion 1.0.23 (https://github.com/dtolnay/rustversion)
@@ -15122,3 +15063,183 @@ the following restrictions:
     misrepresented as being the original software.
 
 3. This notice may not be removed or altered from any source distribution.
+
+-------------------------------------------------------------------------------
+License: MIT License (MIT)
+Used by:
+- ebur128 0.1.11 (https://github.com/sdroege/ebur128)
+
+Full license text:
+
+Copyright (c) 2011 Jan Kokemüller
+Copyright (c) 2020 Sebastian Dröge <sebastian@centricular.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+
+-------------------------------------------------------------------------------
+License: MIT License (MIT)
+Used by:
+- unicode_categories 0.1.1 (https://github.com/swgillespie/unicode-categories)
+
+Full license text:
+
+Copyright (c) 2015 The unicode-categories Developers
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+-------------------------------------------------------------------------------
+License: MIT License (MIT)
+Used by:
+- macro_rules_attribute-proc_macro 0.2.3 (https://github.com/danielhenrymantilla/macro_rules_attribute-rs)
+- macro_rules_attribute 0.2.3 (https://github.com/danielhenrymantilla/macro_rules_attribute-rs)
+
+Full license text:
+
+MIT License
+
+Copyright (c) 2019 Daniel Henry-Mantilla <daniel.henry.mantilla@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+-------------------------------------------------------------------------------
+License: MIT License (MIT)
+Used by:
+- compact_str 0.9.1 (https://github.com/ParkMyCar/compact_str)
+
+Full license text:
+
+MIT License
+
+Copyright (c) 2021 Parker Timmerman
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+-------------------------------------------------------------------------------
+License: MIT License (MIT)
+Used by:
+- castaway 0.2.4 (https://github.com/sagebind/castaway)
+
+Full license text:
+
+MIT License
+
+Copyright (c) 2021 Stephen M. Coakley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+-------------------------------------------------------------------------------
+License: MIT License (MIT)
+Used by:
+- derive_builder 0.20.2 (https://github.com/colin-kiegel/rust-derive-builder)
+- derive_builder_core 0.20.2 (https://github.com/colin-kiegel/rust-derive-builder)
+- derive_builder_macro 0.20.2 (https://github.com/colin-kiegel/rust-derive-builder)
+
+Full license text:
+
+The MIT License (MIT)
+
+Copyright (c) 2016 rust-derive-builder contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+

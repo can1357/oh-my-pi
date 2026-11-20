@@ -38,7 +38,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
-import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { getProjectDir, isInteractiveHost, setInteractiveHost, setProjectDir } from "@oh-my-pi/pi-utils";
 import * as utils from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
 import { createTestSession, type TestSessionContext } from "../utilities";
@@ -231,16 +231,21 @@ async function settled(publishSpy: Mock<typeof registry.publishCollabHost>, call
 }
 
 let tmp: string;
+let configRootSpy: Mock<typeof utils.getConfigRootDir>;
 let publishSpy: Mock<typeof registry.publishCollabHost>;
 let controller: CollabController | undefined;
 const guestCleanups: (() => void)[] = [];
 const publishWaiters: (() => void)[] = [];
 let capturedSockets: FakeWebSocket[] = [];
 
+let savedInteractiveHost: boolean;
+
 beforeEach(async () => {
+	savedInteractiveHost = isInteractiveHost();
 	tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-collabctl-"));
 	utils.setAgentDir(path.join(tmp, "agent"));
 	installInMemoryRelay();
+	configRootSpy = spyOn(utils, "getConfigRootDir").mockReturnValue(tmp);
 	// Record every fake socket so a test can drive a terminal close on the host's transport.
 	capturedSockets = [];
 	const Capturing = class extends FakeWebSocket {
@@ -263,8 +268,10 @@ afterEach(async () => {
 	for (const cleanup of guestCleanups.splice(0).reverse()) cleanup();
 	await controller?.shutdown("test cleanup").catch(() => {});
 	uninstallInMemoryRelay();
+	configRootSpy?.mockRestore();
 	publishSpy?.mockRestore();
 	// `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
+	setInteractiveHost(savedInteractiveHost);
 	clearOmpExtensionCliRoots();
 	restoreEnv("PI_CODING_AGENT_DIR", originalAgentDir);
 	restoreEnv("PI_PROFILE", originalPiProfile);
@@ -289,7 +296,6 @@ describe("interactive collaboration startup", () => {
 	beforeEach(async () => {
 		originalProject = getProjectDir();
 		setProjectDir(tmp);
-		spyOn(utils, "getConfigRootDir").mockReturnValue(tmp);
 		resetSettingsForTest();
 		await initTheme();
 		activeSettings = await Settings.init({ inMemory: true, cwd: tmp });
@@ -328,7 +334,6 @@ describe("interactive collaboration startup", () => {
 			undefined,
 			undefined,
 			undefined,
-			undefined,
 			new Composer({ terminal: new VirtualTerminal() }),
 		);
 		spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
@@ -349,7 +354,6 @@ describe("interactive collaboration startup", () => {
 			mode = new InteractiveMode(
 				testSession.session,
 				"test",
-				undefined,
 				undefined,
 				undefined,
 				undefined,
@@ -396,7 +400,6 @@ describe("interactive collaboration startup", () => {
 		mode = new InteractiveMode(
 			testSession.session,
 			"test",
-			undefined,
 			undefined,
 			undefined,
 			undefined,
@@ -502,7 +505,6 @@ describe("interactive collaboration startup", () => {
 		mode = new InteractiveMode(
 			testSession.session,
 			"test",
-			undefined,
 			undefined,
 			undefined,
 			undefined,
@@ -895,7 +897,7 @@ describe("CollabController", () => {
 		state.transitionWaited = waiting.resolve;
 		controller.autoStart();
 		await waiting.promise;
-		ctx.collabGuest = new CollabGuestLink(ctx);
+		Object.assign(ctx, { collabGuest: new CollabGuestLink(ctx) });
 		state.transition = undefined;
 		gate.resolve();
 		await controller.idle();

@@ -5,8 +5,9 @@ import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
-import { setKeybindings } from "@oh-my-pi/pi-tui";
-import type { DescribeContext, NativeUiEvent } from "../src/native/node";
+import { setKeybindings, type TerminalFrameProvider } from "@oh-my-pi/pi-tui";
+import type { NativeSurfaceProvider, NativeUiEvent } from "../src/native/node";
+import { TspHarness } from "./native/tsp-harness";
 
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
@@ -41,7 +42,7 @@ describe("AskDialogComponent", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("multi-question footer labels the question-switch keys", () => {
+	it("draws no footer: the key hints come from keyHints() for the host's composer", () => {
 		const questions: ExtensionAskDialogQuestion[] = [
 			{ id: "q1", question: "First?", options: [{ label: "A1" }, { label: "A2" }] },
 			{ id: "q2", question: "Second?", options: [{ label: "B1" }, { label: "B2" }] },
@@ -52,9 +53,14 @@ describe("AskDialogComponent", () => {
 			onPrompt: vi.fn(),
 		});
 		const lines = component.render(80).map(line => stripVTControlCharacters(line));
-		const footer = lines.find(line => line.includes("select"));
-		expect(footer).toContain("⇥/←/→ question · ");
-		expect(footer).toContain("cancel");
+		// The panel ends with its body: no divider, no hint row.
+		expect(lines.some(line => line.startsWith("├"))).toBe(false);
+		expect(lines.some(line => line.includes("select"))).toBe(false);
+		expect(lines.at(-1)).toMatch(/^╰─+╯$/);
+		const hints = stripVTControlCharacters(component.keyHints());
+		expect(hints).toContain("⏎ select · n note · ↑/↓ move · ⇥/←/→ question · ");
+		expect(hints).toContain("composer");
+		expect(hints).not.toContain("cancel");
 	});
 
 	it("single-question, single-select: Enter on option submits immediately", () => {
@@ -145,7 +151,7 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option B"]);
 	});
 
-	it("multi-question, single-select: Enter on option advances tab, does not submit", () => {
+	it("multi-question, single-select: Enter opens the next question, and on the last one submits", () => {
 		const onSubmit = vi.fn();
 		const onCancel = vi.fn();
 		const onPrompt = vi.fn();
@@ -169,16 +175,13 @@ describe("AskDialogComponent", () => {
 			onPrompt,
 		});
 
-		// Press Enter on A1 - should advance tab to Q2 (tab 1), not submit
+		// Enter on A1 opens Q2, without submitting.
 		component.handleInput(ENTER);
 		expect(onSubmit).not.toHaveBeenCalled();
+		expect(render(component)).toContain("❯ ○ A2");
 
-		// On Q2: Down to B2 and Enter - should advance tab to Submit (tab 2), not submit
+		// On Q2, the last question with every one answered: Enter on B2 submits.
 		component.handleInput(DOWN);
-		component.handleInput(ENTER);
-		expect(onSubmit).not.toHaveBeenCalled();
-
-		// On Submit tab: Enter on Submit row - should submit
 		component.handleInput(ENTER);
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit.mock.calls[0][0].results).toEqual([
@@ -287,7 +290,7 @@ describe("AskDialogComponent", () => {
 		expect(render(component)).not.toContain("Generic MLE loop (Recommended) (Recommended)");
 	});
 
-	it("tab-state persistence: answer question 0, Tab forward, Tab back, answer still present", () => {
+	it("keeps an answer when its question is left and opened again", () => {
 		const onSubmit = vi.fn();
 		const onCancel = vi.fn();
 		const onPrompt = vi.fn();
@@ -311,20 +314,16 @@ describe("AskDialogComponent", () => {
 			onPrompt,
 		});
 
-		// Enter on A1 selects it and auto-advances to Q2 (tab 1)
+		// Enter on A1 selects it and opens Q2.
 		component.handleInput(ENTER);
 
-		// Shift+Tab back to Q1 (tab 0)
+		// Shift+Tab back to Q1: its answer is still checked.
 		component.handleInput(SHIFT_TAB);
+		expect(render(component)).toContain("❯ ◉ A1");
 
-		// Enter again on Q1's currently selected option (which will re-select/keep it and auto-advance to Q2)
+		// Enter keeps it and opens Q2 again; B2 there submits.
 		component.handleInput(ENTER);
-
-		// On Q2: select B2 and advance to Submit
 		component.handleInput(DOWN);
-		component.handleInput(ENTER);
-
-		// On Submit: Enter to submit
 		component.handleInput(ENTER);
 
 		expect(onSubmit).toHaveBeenCalledTimes(1);
@@ -332,84 +331,60 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[1].selectedOptions).toEqual(["B2"]);
 	});
 
-	it("Tab and Shift+Tab switches tabs", () => {
-		const onSubmit = vi.fn();
+	it("Tab and Shift+Tab open the next and previous question; Tab stops at the last", () => {
 		const questions: ExtensionAskDialogQuestion[] = [
-			{
-				id: "q1",
-				question: "Q1?",
-				options: [{ label: "A1" }, { label: "B1" }],
-			},
-			{
-				id: "q2",
-				question: "Q2?",
-				options: [{ label: "A2" }, { label: "B2" }],
-			},
+			{ id: "q1", question: "Q1?", options: [{ label: "A1" }, { label: "B1" }] },
+			{ id: "q2", question: "Q2?", options: [{ label: "A2" }, { label: "B2" }] },
 		];
-
 		const component = new AskDialogComponent(questions, {
-			onSubmit,
+			onSubmit: vi.fn(),
 			onCancel: vi.fn(),
 			onPrompt: vi.fn(),
 		});
 
-		// Tab from Q1 -> Q2
 		component.handleInput(TAB);
-		// Tab from Q2 -> Submit
+		expect(render(component)).toContain("❯ ○ A2");
 		component.handleInput(TAB);
-		// Shift+Tab from Submit -> Q2
+		expect(render(component)).toContain("❯ ○ A2");
 		component.handleInput(SHIFT_TAB);
-
-		// Down to B2, Enter -> Submit
-		component.handleInput(DOWN);
-		component.handleInput(ENTER);
-
-		// Enter on Submit
-		component.handleInput(ENTER);
-
-		expect(onSubmit).toHaveBeenCalledTimes(1);
-		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual([]);
-		expect(onSubmit.mock.calls[0][0].results[1].selectedOptions).toEqual(["B2"]);
+		expect(render(component)).toContain("❯ ○ A1");
+		expect(render(component)).not.toContain("❯ ○ A2");
 	});
 
-	it("Submit tab shows unanswered warning but Enter still submits", () => {
+	it("Enter on the last question opens the first unanswered one instead of submitting", () => {
 		const onSubmit = vi.fn();
 		const questions: ExtensionAskDialogQuestion[] = [
-			{
-				id: "q1",
-				question: "Q1?",
-				options: [{ label: "A1" }, { label: "B1" }],
-			},
-			{
-				id: "q2",
-				question: "Q2?",
-				options: [{ label: "A2" }, { label: "B2" }],
-			},
+			{ id: "q1", question: "First?", options: [{ label: "A1" }, { label: "B1" }] },
+			{ id: "q2", question: "Second?", options: [{ label: "A2" }, { label: "B2" }] },
+			{ id: "q3", question: "Third?", options: [{ label: "A3" }, { label: "B3" }] },
 		];
-
 		const component = new AskDialogComponent(questions, {
 			onSubmit,
 			onCancel: vi.fn(),
 			onPrompt: vi.fn(),
 		});
 
-		// Tab to Submit
 		component.handleInput(TAB);
 		component.handleInput(TAB);
-
+		component.handleInput(ENTER); // A3 on the last question; First? and Second? have no answer
+		expect(onSubmit).not.toHaveBeenCalled();
 		const output = render(component);
-		expect(output.toLowerCase()).toContain("unanswered");
+		expect(output).toContain("❯ ○ A1");
+		expect(output).toContain("✓ Third?");
 
-		// Enter on Submit
-		component.handleInput(ENTER);
-
+		component.handleInput(ENTER); // A1, on to Second?
+		component.handleInput(ENTER); // A2, on to Third?
+		expect(onSubmit).not.toHaveBeenCalled();
+		component.handleInput(ENTER); // A3 again, every question answered: submits
 		expect(onSubmit).toHaveBeenCalledTimes(1);
-		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual([]);
-		expect(onSubmit.mock.calls[0][0].results[1].selectedOptions).toEqual([]);
+		expect(
+			onSubmit.mock.calls[0][0].results.map((result: { selectedOptions: string[] }) => result.selectedOptions),
+		).toEqual([["A1"], ["A2"], ["A3"]]);
 	});
 
-	it("Esc/cancel fires onCancel", () => {
+	it("Esc hands the keys to the composer without cancelling", () => {
 		const onCancel = vi.fn();
+		const releaseKeys = vi.fn();
 		const questions: ExtensionAskDialogQuestion[] = [
 			{
 				id: "q1",
@@ -418,14 +393,17 @@ describe("AskDialogComponent", () => {
 			},
 		];
 
-		const component = new AskDialogComponent(questions, {
-			onSubmit: vi.fn(),
-			onCancel,
-			onPrompt: vi.fn(),
-		});
+		const component = new AskDialogComponent(
+			questions,
+			{ onSubmit: vi.fn(), onCancel, onPrompt: vi.fn() },
+			{ releaseKeys },
+		);
 
 		component.handleInput(CANCEL);
-		expect(onCancel).toHaveBeenCalledTimes(1);
+		expect(releaseKeys).toHaveBeenCalledTimes(1);
+		expect(onCancel).not.toHaveBeenCalled();
+		// The ask stays pending: it still answers once the keys come back.
+		expect(render(component)).toContain("❯ ○ Option A");
 	});
 
 	it("n on an option calls onPrompt and stores note with marker", async () => {
@@ -480,7 +458,6 @@ describe("AskDialogComponent", () => {
 		await Promise.resolve();
 		component.handleInput(SPACE);
 		component.handleInput(SPACE);
-		component.handleInput(TAB);
 		component.handleInput(ENTER);
 
 		const submitted = onSubmit.mock.calls[0][0].results[0];
@@ -508,7 +485,7 @@ describe("AskDialogComponent", () => {
 		component.handleInput("n");
 		await Promise.resolve();
 		await Promise.resolve();
-		component.handleInput(TAB);
+		component.handleInput(UP); // Option A: Enter confirms without opening Other
 		component.handleInput(ENTER);
 
 		const submitted = onSubmit.mock.calls[0][0].results[0];
@@ -545,73 +522,122 @@ describe("AskDialogComponent", () => {
 		});
 	});
 
-	describe("Note right after a pick that moved to the next question", () => {
-		const twoQuestions: ExtensionAskDialogQuestion[] = [
+	describe("Note target", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
 			{ id: "q1", question: "Q1?", options: [{ label: "Alpha" }, { label: "Beta" }] },
 			{ id: "q2", question: "Q2?", options: [{ label: "Gamma" }, { label: "Delta" }] },
+			{ id: "q3", question: "Q3?", options: [{ label: "Epsilon" }, { label: "Zeta" }] },
 		];
-		const cx: DescribeContext = {
-			cols: 100,
-			reduceMotion: false,
-			dark: true,
-			supports: () => true,
-			feature: () => true,
-		};
 		const action = (act: string): NativeUiEvent => ({ type: "action", key: `actions/${act}`, act, mods: [] });
 		const flush = async (): Promise<void> => {
 			for (let i = 0; i < 4; i++) await Promise.resolve();
 		};
-		const surfaces = {
-			// Tern: a click commits a single-choice row, then the Note button.
-			tern: async (component: AskDialogComponent) => {
-				component.describe(cx);
-				component.handleNativeEvent({ type: "activate", key: "q0", item: "option:1" });
-				component.handleNativeEvent(action("note"));
-				await flush();
-				component.handleNativeEvent({ type: "activate", key: "q1", item: "option:0" });
-				component.handleNativeEvent(action("submit"));
-			},
-			tui: async (component: AskDialogComponent) => {
-				component.handleInput(DOWN);
-				component.handleInput(ENTER);
-				component.handleInput("n");
-				await flush();
-				component.handleInput(ENTER);
-				component.handleInput(ENTER);
-			},
-		};
+		const click = (component: AskDialogComponent, question: number, option: number): void =>
+			component.handleNativeEvent({ type: "activate", key: `q${question}`, item: `option:${option}` });
+		const rowMenuNote = (component: AskDialogComponent, question: number, row: string): void =>
+			component.handleNativeEvent({ type: "action", key: `q${question}/${row}`, act: "note", mods: [] });
 
-		for (const [surface, run] of Object.entries(surfaces)) {
-			it(`annotates that pick, not the next question's row (${surface})`, async () => {
-				const onPrompt = vi.fn().mockResolvedValue("why Beta");
-				const onSubmit = vi.fn();
-				const component = new AskDialogComponent(twoQuestions, { onSubmit, onCancel: vi.fn(), onPrompt });
-
-				await run(component);
-
-				expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Beta", question: "Q1?" });
-				const [first, second] = onSubmit.mock.calls[0][0].results;
-				expect(first).toMatchObject({ selectedOptions: ["Beta"], note: "why Beta", noteOption: "Beta" });
-				expect(second).toMatchObject({ selectedOptions: ["Gamma"], note: undefined, noteOption: undefined });
-			});
-		}
-
-		it("goes back to the highlighted row once the next question gets other input", async () => {
-			const onPrompt = vi.fn().mockResolvedValue("why Delta");
+		it("TUI: Enter then `n` annotates the highlighted row of the question shown", async () => {
+			const onPrompt = vi.fn().mockResolvedValue("why Gamma");
 			const onSubmit = vi.fn();
-			const component = new AskDialogComponent(twoQuestions, { onSubmit, onCancel: vi.fn(), onPrompt });
+			const component = new AskDialogComponent(questions, { onSubmit, onCancel: vi.fn(), onPrompt });
 
-			component.handleInput(ENTER); // Alpha, on to Q2
-			component.handleInput(DOWN); // Delta highlighted
+			component.handleInput(DOWN);
+			component.handleInput(ENTER); // Beta, on to Q2
 			component.handleInput("n");
 			await flush();
-			component.handleInput(ENTER);
-			component.handleInput(ENTER);
+			expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Gamma", question: "Q2?" });
 
-			expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Delta", question: "Q2?" });
+			component.handleInput(ENTER); // Gamma, on to Q3
+			component.handleInput(ENTER); // Epsilon, every question answered: submits
 			const [first, second] = onSubmit.mock.calls[0][0].results;
+			expect(first).toMatchObject({ selectedOptions: ["Beta"], note: undefined, noteOption: undefined });
+			expect(second).toMatchObject({ selectedOptions: ["Gamma"], note: "why Gamma", noteOption: "Gamma" });
+		});
+
+		it("TUI: annotates the middle answer after a cancelled note on the last question and going back (A > B > C)", async () => {
+			const onPrompt = vi.fn().mockResolvedValueOnce(undefined).mockResolvedValueOnce("why Gamma");
+			const onSubmit = vi.fn();
+			const component = new AskDialogComponent(questions, { onSubmit, onCancel: vi.fn(), onPrompt });
+
+			component.handleInput(ENTER); // Alpha, on to Q2
+			component.handleInput(ENTER); // Gamma, on to Q3
+			component.handleInput("n"); // cancelled
+			await flush();
+			component.handleInput(SHIFT_TAB); // back to Q2
+			component.handleInput("n");
+			await flush();
+
+			expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Epsilon", question: "Q3?" });
+			expect(onPrompt.mock.calls[1][0]).toEqual({ title: "Note for Gamma", question: "Q2?" });
+
+			component.handleInput(TAB); // Q3
+			component.handleInput(ENTER); // Epsilon, every question answered: submits
+			const [first, second, third] = onSubmit.mock.calls[0][0].results;
 			expect(first.note).toBeUndefined();
-			expect(second).toMatchObject({ selectedOptions: ["Delta"], note: "why Delta", noteOption: "Delta" });
+			expect(second).toMatchObject({ selectedOptions: ["Gamma"], note: "why Gamma", noteOption: "Gamma" });
+			expect(third).toMatchObject({ selectedOptions: ["Epsilon"], note: undefined });
+		});
+
+		it("Tern: the Note button after a click annotates the highlighted row of the question shown", async () => {
+			const onPrompt = vi.fn().mockResolvedValue("why Gamma");
+			const component = new AskDialogComponent(questions, { onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt });
+
+			click(component, 0, 1); // Beta, on to Q2
+			component.handleNativeEvent(action("note"));
+			await flush();
+			expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Gamma", question: "Q2?" });
+		});
+
+		it("Tern: a row's menu Note annotates that row without picking it, and the pick keeps the note", async () => {
+			const onPrompt = vi.fn().mockResolvedValue("why Beta");
+			const onSubmit = vi.fn();
+			const component = new AskDialogComponent(questions, { onSubmit, onCancel: vi.fn(), onPrompt });
+
+			rowMenuNote(component, 0, "option:1");
+			await flush();
+			expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Beta", question: "Q1?" });
+			click(component, 0, 1); // Beta, the row the menu highlighted, on to Q2
+			click(component, 1, 0);
+			click(component, 2, 0); // the last question, every one answered: submits
+
+			const [first, second] = onSubmit.mock.calls[0][0].results;
+			expect(first).toMatchObject({ selectedOptions: ["Beta"], note: "why Beta", noteOption: "Beta" });
+			expect(second).toMatchObject({ selectedOptions: ["Gamma"], note: undefined });
+		});
+
+		it("Tern: a menu Note from a list the dialog has moved past does nothing", async () => {
+			const onPrompt = vi.fn().mockResolvedValue("late");
+			const component = new AskDialogComponent(questions, { onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt });
+
+			click(component, 0, 1); // Beta, on to Q2
+			rowMenuNote(component, 0, "option:0");
+			await flush();
+			expect(onPrompt).not.toHaveBeenCalled();
+		});
+
+		it("Tern: a row's menu Note sent over the wire reaches that row", async () => {
+			const onPrompt = vi.fn().mockResolvedValue("why Beta");
+			const dialog = new AskDialogComponent(questions, { onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt });
+			const provider: TerminalFrameProvider & NativeSurfaceProvider = {
+				renderFrame: () => ({ viewport: [] }),
+				acknowledgeHistory: () => {},
+				describeSurface: () => ({ main: [], dock: [dialog] }),
+			};
+			const harness = await TspHarness.start(tui => {
+				tui.setFrameProvider(provider);
+				tui.setFocus(dialog);
+			});
+			try {
+				const beta = harness.find(node => node.k === "item" && node.id.endsWith("/option:1"));
+				expect(beta?.p).toMatchObject({ actions: { menu: ["note"] } });
+				harness.event({ ev: "action", sf: harness.terminal.surface!, id: beta!.id, act: "note" });
+				await flush();
+				expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Beta", question: "Q1?" });
+				expect(harness.errors).toEqual([]);
+			} finally {
+				harness.stop();
+			}
 		});
 	});
 
@@ -754,11 +780,9 @@ describe("AskDialogComponent", () => {
 		component.handleInput(SPACE);
 		expect(render(component)).not.toContain("✎ note");
 
-		// Select Option B and confirm from the Submit tab; the cleared note
-		// must not resurface.
+		// Select Option B and confirm with Enter; the cleared note must not resurface.
 		component.handleInput(DOWN);
 		component.handleInput(SPACE);
-		component.handleInput(TAB);
 		component.handleInput(ENTER);
 
 		expect(onSubmit).toHaveBeenCalledTimes(1);
@@ -795,10 +819,8 @@ describe("AskDialogComponent", () => {
 		await Promise.resolve();
 
 		expect(onSubmit).not.toHaveBeenCalled();
-		expect(render(component)).toContain("Second question?");
+		expect(render(component)).toContain("❯ ○ Option C");
 		component.handleInput(DOWN);
-		component.handleInput(ENTER);
-		expect(onSubmit).not.toHaveBeenCalled();
 		component.handleInput(ENTER);
 
 		expect(onPrompt).toHaveBeenCalledTimes(1);
@@ -809,7 +831,7 @@ describe("AskDialogComponent", () => {
 		]);
 	});
 
-	it("reviews a single multi-select custom answer and lets the user go back to edit it", async () => {
+	it("keeps a lone multi-select open after its custom answer so it can be edited", async () => {
 		const onPrompt = vi.fn().mockResolvedValueOnce("first draft").mockResolvedValueOnce("revised answer");
 		const onSubmit = vi.fn();
 		const component = new AskDialogComponent(
@@ -832,7 +854,6 @@ describe("AskDialogComponent", () => {
 		await Promise.resolve();
 		expect(onSubmit).not.toHaveBeenCalled();
 
-		component.handleInput(SHIFT_TAB);
 		component.handleInput(UP);
 		component.handleInput(SPACE);
 		component.handleInput(DOWN);
@@ -840,6 +861,7 @@ describe("AskDialogComponent", () => {
 		await Promise.resolve();
 		await Promise.resolve();
 		expect(onSubmit).not.toHaveBeenCalled();
+		component.handleInput(UP);
 		component.handleInput(ENTER);
 
 		expect(onPrompt).toHaveBeenCalledTimes(2);
@@ -875,17 +897,13 @@ describe("AskDialogComponent", () => {
 		});
 
 		// Space toggles Option A; Enter on the plain option row confirms and
-		// advances to Q2 instead of submitting the whole dialog (#8265 review).
+		// opens Q2 instead of submitting the whole dialog (#8265 review).
 		component.handleInput(SPACE);
 		component.handleInput(ENTER);
 		expect(onSubmit).not.toHaveBeenCalled();
 
-		// On Q2: Down to Option D and Enter advances to the Submit tab.
+		// On Q2, the last: Option D answers it, and with every question answered Enter submits once.
 		component.handleInput(DOWN);
-		component.handleInput(ENTER);
-		expect(onSubmit).not.toHaveBeenCalled();
-
-		// On the Submit tab Enter submits once with both answers.
 		component.handleInput(ENTER);
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit.mock.calls[0][0].results).toEqual([
@@ -1163,7 +1181,7 @@ describe("AskDialogComponent", () => {
 			const initial = renderAt(60);
 			expect(initial).toContain("Option 01");
 			expect(initial).not.toContain("Option 30");
-			expect(initial).toContain("↓ scroll");
+			expect(initial).toContain("█");
 
 			for (let i = 0; i < 28; i++) component.handleInput(DOWN);
 			const scrolled = renderAt(60);
@@ -1307,9 +1325,11 @@ describe("AskDialogComponent", () => {
 			expect(out).toContain("PREVIEW-FIRST");
 			expect(out).not.toContain("PREVIEW-MIDDLE");
 			expect(out).not.toContain("PREVIEW-LAST");
-			expect(out).toContain("↓ scroll");
+			expect(component.keyHints()).not.toContain("page");
 			component.handleInput(DOWN);
-			for (let page = 0; page < 4; page++) component.handleInput(PAGE_DOWN);
+			render(component);
+			expect(stripVTControlCharacters(component.keyHints())).toContain("PgUp/PgDn page");
+			for (let page = 0; page < 3; page++) component.handleInput(PAGE_DOWN);
 			out = render(component);
 			expect(out).toContain("PREVIEW-MIDDLE");
 			component.handleInput(DOWN);
@@ -1360,19 +1380,19 @@ describe("AskDialogComponent", () => {
 			let out = render(component);
 			expect(out).toContain("PREVIEW-SHORT-FIRST");
 			expect(out).toContain("PREVIEW-SHORT-LAST");
-			expect(out).toMatch(/[↓↑↕] scroll/);
+			expect(out).toContain("█");
 			component.handleInput(PAGE_DOWN);
 			out = render(component);
 			expect(out).toContain("PREVIEW-SHORT-FIRST");
 			expect(out).toContain("PREVIEW-SHORT-LAST");
-			expect(out).toMatch(/[↓↑↕] scroll/);
+			expect(out).toContain("█");
 		} finally {
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
 			else Reflect.deleteProperty(process.stdout, "rows");
 		}
 	});
 
-	it("does not repeat the tab chip in the question line", () => {
+	it("shows the open question's header over its question, not inside it", () => {
 		const questions: ExtensionAskDialogQuestion[] = [
 			{ id: "q1", question: "First question?", header: "Alpha", options: [{ label: "A" }] },
 			{ id: "q2", question: "Second question?", header: "Beta", options: [{ label: "B" }] },
@@ -1383,11 +1403,14 @@ describe("AskDialogComponent", () => {
 			onPrompt: vi.fn(),
 		});
 		const output = render(component);
-		// Tab bar still shows the chip…
+		// The open question shows its header on its own line…
 		expect(output).toContain("Alpha");
-		// …but the question line is just the question, not "[Alpha] First question?".
-		expect(output).toContain("First question?");
+		// …so the question line is just the question, not "[Alpha] First question?".
+		expect(output).toContain("○ First question?");
 		expect(output).not.toContain("[Alpha]");
+		// A folded question shows only its question.
+		expect(output).toContain("○ Second question?");
+		expect(output).not.toContain("Beta");
 	});
 
 	it("renders fenced diff questions as blocks separate from prose", () => {
@@ -1475,25 +1498,6 @@ describe("AskDialogComponent", () => {
 		component.handleInput("\x0f");
 		const recollapsed = render(component);
 		expect(recollapsed.match(/This is a very long question/g)?.length ?? 0).toBe(collapsedCount);
-	});
-
-	it("does not consume expansion while the submit tab hides the question header", () => {
-		const component = new AskDialogComponent(
-			[
-				{
-					id: "q1",
-					question: "This is a very long question ".repeat(30),
-					options: [{ label: "Option A" }],
-					multi: true,
-				},
-			],
-			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
-		);
-		component.render(80);
-		expect(component.toggleQuestionExpansion()).toBe(true);
-
-		component.handleInput(SHIFT_TAB);
-		expect(component.toggleQuestionExpansion()).toBe(false);
 	});
 
 	it("leaves a short question unchanged and does not advertise expand", () => {
@@ -1630,13 +1634,18 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option A"]);
 	});
 
-	it("keeps a fixed spawn-time height across tabs, clamped to 70% of the terminal", () => {
+	it("keeps a fixed spawn-time height whichever question is open, clamped to 70% of the terminal", () => {
 		const questions: ExtensionAskDialogQuestion[] = [
 			{
 				id: "q1",
-				question: "Pick one?",
+				question: "Pick some?",
 				options: [{ label: "Option A" }, { label: "Option B" }],
 				multi: true,
+			},
+			{
+				id: "q2",
+				question: "Pick one?",
+				options: Array.from({ length: 6 }, (_, index) => ({ label: `Choice ${index}`, description: "Detail" })),
 			},
 		];
 		const component = new AskDialogComponent(questions, {
@@ -1645,20 +1654,19 @@ describe("AskDialogComponent", () => {
 			onPrompt: vi.fn(),
 		});
 		const cap = Math.max(12, Math.floor((process.stdout.rows || 40) * 0.7));
-		const questionTab = component.render(80);
-		expect(questionTab.length).toBeLessThanOrEqual(cap);
+		const first = component.render(80);
+		expect(first.length).toBeLessThanOrEqual(cap);
 
-		// The submit tab renders at exactly the same height — the box is
-		// sized once from the tallest tab, not per-tab content.
+		// Opening the taller question renders at exactly the same height — the
+		// box is sized once from the tallest column, not per open question.
 		component.handleInput(TAB);
-		const submitTab = component.render(80);
-		expect(submitTab.length).toBe(questionTab.length);
+		expect(component.render(80).length).toBe(first.length);
 
-		// Toggling an option (which changes the review summary) does not
+		// Toggling an option (which changes the folded summary) does not
 		// resize the box either.
 		component.handleInput(SHIFT_TAB);
 		component.handleInput(SPACE);
-		expect(component.render(80).length).toBe(questionTab.length);
+		expect(component.render(80).length).toBe(first.length);
 	});
 
 	it("clears the custom answer when the Other prompt is submitted empty", async () => {
@@ -1687,8 +1695,7 @@ describe("AskDialogComponent", () => {
 		await Promise.resolve();
 		expect(render(component)).toContain("my custom answer");
 
-		// Return from review to edit the saved custom answer.
-		component.handleInput(SHIFT_TAB);
+		// The lone multi-select stays open: Enter on Other again edits the saved custom answer.
 		onPrompt.mockReturnValueOnce(Promise.resolve(""));
 		component.handleInput(ENTER);
 		await Promise.resolve();
@@ -1697,7 +1704,7 @@ describe("AskDialogComponent", () => {
 		expect(render(component)).not.toContain("my custom answer");
 
 		// Submitting confirms nothing was kept.
-		component.handleInput(TAB);
+		component.handleInput(UP);
 		component.handleInput(ENTER);
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit.mock.calls[0][0].results[0].customInput).toBeUndefined();
@@ -1719,10 +1726,10 @@ describe("AskDialogComponent", () => {
 		component.handleInput(ENTER);
 		await Promise.resolve();
 		await Promise.resolve();
-		component.handleInput(SHIFT_TAB);
 		component.handleInput(ENTER);
 		await Promise.resolve();
 		await Promise.resolve();
+		component.handleInput(UP);
 		component.handleInput(ENTER);
 
 		expect(onImagePrompt.mock.calls[1][1]).toEqual({ text: "see [Image #1]", images: [image] });
@@ -1730,6 +1737,36 @@ describe("AskDialogComponent", () => {
 			customInput: "see [Image #1] again",
 			customInputImages: [image],
 		});
+	});
+
+	it("reopens a cancelled Other prompt with its draft, leaving the submitted answer unchanged (#18211)", async () => {
+		const onPrompt = vi
+			.fn()
+			.mockResolvedValueOnce("first")
+			.mockResolvedValueOnce({ draft: { text: "first, then more" } })
+			.mockResolvedValueOnce({ draft: { text: "  " } })
+			.mockResolvedValueOnce(undefined);
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[{ id: "q1", question: "Choose multiple?", options: [{ label: "Option A" }], multi: true }],
+			{ onSubmit, onCancel: vi.fn(), onPrompt },
+		);
+		const openOther = async () => {
+			component.handleInput(ENTER);
+			await Promise.resolve();
+			await Promise.resolve();
+		};
+
+		component.handleInput(DOWN); // Other
+		await openOther();
+		await openOther(); // cancelled with a draft
+		await openOther(); // cancelled after blanking it
+		await openOther();
+
+		expect(onPrompt.mock.calls.map(call => call[1])).toEqual([undefined, "first", "first, then more", "first"]);
+		component.handleInput(UP);
+		component.handleInput(ENTER);
+		expect(onSubmit.mock.calls[0][0].results[0].customInput).toBe("first");
 	});
 
 	it("drops custom-answer images when the custom answer is cleared", async () => {
@@ -1748,11 +1785,10 @@ describe("AskDialogComponent", () => {
 		component.handleInput(ENTER);
 		await Promise.resolve();
 		await Promise.resolve();
-		component.handleInput(SHIFT_TAB);
 		component.handleInput(ENTER);
 		await Promise.resolve();
 		await Promise.resolve();
-		component.handleInput(TAB);
+		component.handleInput(UP);
 		component.handleInput(ENTER);
 
 		const submitted = onSubmit.mock.calls[0][0].results[0];
@@ -1814,33 +1850,10 @@ describe("AskDialogComponent", () => {
 		expect(rendered).toContain('if  "done"  in  state');
 	});
 
-	it("sanitizes carriage returns in question ids used as tab labels", () => {
-		const component = new AskDialogComponent(
-			[
-				{
-					id: "q\r\r3a",
-					question: "Pick one?",
-					options: [{ label: "Alpha" }, { label: "Beta" }],
-				},
-				{
-					id: "q3b",
-					question: "Pick another?",
-					options: [{ label: "Gamma" }],
-				},
-			],
-			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
-		);
-
-		const rendered = render(component);
-		expect(rendered).not.toContain("\r");
-		expect(rendered).toContain("q 3a");
-		expect(rendered).toContain("q3b");
-	});
-
 	it("echoes extension-supplied question ids verbatim in results", () => {
-		// The id is a caller correlation key: display sanitizes it (tab
-		// labels), but submitted results must carry the original value or
-		// code indexing the response by request id will miss.
+		// The id is a caller correlation key the dialog never shows:
+		// submitted results must carry the original value or code indexing
+		// the response by request id will miss.
 		const onSubmit = vi.fn();
 		const component = new AskDialogComponent(
 			[{ id: "q\r\r3a", question: "Pick one?", options: [{ label: "Alpha" }, { label: "Beta" }] }],
@@ -1922,5 +1935,150 @@ describe("AskDialogComponent", () => {
 		const rows = rendered.split("\n").filter(line => line.includes("Retry now (Recommended)"));
 		expect(rows).toHaveLength(2);
 		expect(rows[1]).toContain("Retry now (Recommended) (2)");
+	});
+
+	describe("stacked rows", () => {
+		const lines = (component: AskDialogComponent, width = 80): string[] =>
+			component.render(width).map(line => stripVTControlCharacters(line));
+		const withTerminalRows = (rows: number, run: () => void): void => {
+			const original = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+			Object.defineProperty(process.stdout, "rows", { configurable: true, value: rows });
+			try {
+				run();
+			} finally {
+				if (original) Object.defineProperty(process.stdout, "rows", original);
+				else Reflect.deleteProperty(process.stdout, "rows");
+			}
+		};
+
+		it("folds every question but the open one to its question over its summary", async () => {
+			const onPrompt = vi.fn().mockResolvedValue("my own words");
+			const rollout = ["Behind a flag", "Default on", "Next minor release", "Canary", "Beta", "Never"];
+			const component = new AskDialogComponent(
+				[
+					{ id: "q1", question: "First?", options: [{ label: "A1" }, { label: "B1" }] },
+					{ id: "q2", question: "Rollout?", options: rollout.map(label => ({ label })) },
+					{ id: "q3", question: "Third?", options: [{ label: "C1" }] },
+				],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt },
+			);
+
+			// Nothing chosen: a folded question lists its first four options and how many more.
+			let shown = lines(component);
+			expect(shown).toContainEqual(expect.stringContaining("│ ○ Rollout?"));
+			expect(shown).toContainEqual(
+				expect.stringContaining("│    Behind a flag   Default on   Next minor release   Canary   +2"),
+			);
+			expect(shown).not.toContainEqual(expect.stringContaining("○ Behind a flag"));
+
+			// A custom answer folds to its text; a chosen option shows marked among its options.
+			component.handleInput(DOWN);
+			component.handleInput(DOWN);
+			component.handleInput(ENTER);
+			await Promise.resolve();
+			await Promise.resolve();
+			component.handleInput(DOWN);
+			component.handleInput(ENTER);
+			shown = lines(component);
+			expect(shown).toContainEqual(expect.stringContaining("│ ✓ First?"));
+			expect(shown.join("\n")).toContain("Other: “my own words”");
+			expect(shown).toContainEqual(expect.stringContaining("│ ✓ Rollout?"));
+			expect(shown).toContainEqual(
+				expect.stringContaining("│    Behind a flag   ✓ Default on   Next minor release   Canary   +2"),
+			);
+			expect(shown).toContainEqual(expect.stringContaining("❯ ○ C1"));
+			expect(shown[0]).toContain("Ask · 2 of 3 answered");
+		});
+
+		it("↓ past a question's last row opens the next question; ↑ comes back to that row", () => {
+			const component = new AskDialogComponent(
+				[
+					{ id: "q1", question: "First?", options: [{ label: "A1" }, { label: "B1" }] },
+					{ id: "q2", question: "Second?", options: [{ label: "A2" }, { label: "B2" }] },
+				],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+			);
+
+			component.handleInput(DOWN);
+			component.handleInput(DOWN);
+			expect(render(component)).toContain("❯ ○ Other (type your own)");
+
+			component.handleInput(DOWN);
+			let out = render(component);
+			expect(out).toContain("❯ ○ A2");
+			expect(out).toContain("○ First?");
+			expect(out).toContain("A1   B1");
+			expect(out).not.toContain("○ B1");
+
+			component.handleInput(UP);
+			out = render(component);
+			expect(out).toContain("❯ ○ Other (type your own)");
+			expect(out).toContain("○ B1");
+			expect(out).toContain("A2   B2");
+		});
+
+		// A 16-row terminal leaves 8 rows to the panel (ASK_RESERVED_ROWS under it); a 10-row one only
+		// the minimum: the borders and five body rows.
+		for (const [terminalRows, panelRows] of [
+			[16, 8],
+			[10, 7],
+		] as const) {
+			it(`fits a ${terminalRows}-row terminal in ${panelRows} rows, scrolling to the focused row and its question both ways`, () => {
+				withTerminalRows(terminalRows, () => {
+					const names = ["First", "Second", "Third", "Fourth"];
+					const component = new AskDialogComponent(
+						names.map((name, index) => ({
+							id: `q${index}`,
+							question: `${name}?`,
+							options: Array.from({ length: 3 }, (_, option) => ({ label: `${name} option ${option}` })),
+						})),
+						{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+					);
+					// Each question has four rows (three options and Other).
+					const expectFocusShown = (step: number): void => {
+						const shown = lines(component);
+						expect(shown).toHaveLength(panelRows);
+						const open = names[Math.floor(step / 4)];
+						expect(shown).toContainEqual(expect.stringContaining(`○ ${open}?`));
+						const cursor = shown.find(line => line.includes("❯")) ?? "";
+						const row = step % 4;
+						expect(cursor).toContain(row === 3 ? "Other (type your own)" : `${open} option ${row}`);
+					};
+
+					for (let step = 0; step < 16; step++) {
+						expectFocusShown(step);
+						if (step < 15) component.handleInput(DOWN);
+					}
+					expect(lines(component)).not.toContainEqual(expect.stringContaining("First?"));
+
+					for (let step = 15; step >= 0; step--) {
+						expectFocusShown(step);
+						if (step > 0) component.handleInput(UP);
+					}
+					expect(lines(component)).not.toContainEqual(expect.stringContaining("Fourth?"));
+				});
+			});
+		}
+
+		it("shows the skip notice as one warning line under the body, keeping the panel's height", () => {
+			const skip: { notice?: string } = {};
+			const component = new AskDialogComponent(
+				[
+					{ id: "q1", question: "First?", options: [{ label: "A1" }] },
+					{ id: "q2", question: "Second?", options: [{ label: "A2" }] },
+				],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+				{ skipNotice: () => skip.notice },
+			);
+			const plain = lines(component);
+			expect(plain.join("\n")).not.toContain("⚠");
+
+			skip.notice = "Sending your draft skips this ask";
+			const warned = lines(component);
+			expect(warned).toHaveLength(plain.length);
+			const at = warned.findIndex(line => line.includes("⚠ Sending your draft skips this ask"));
+			expect(at).toBe(warned.length - 2);
+			expect(warned.at(-1)).toMatch(/^╰─+╯$/);
+		});
 	});
 });

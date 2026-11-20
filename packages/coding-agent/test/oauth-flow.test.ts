@@ -61,7 +61,7 @@ async function completeLocalOAuthCallback(url: string): Promise<void> {
 }
 
 describe("mcp oauth flow", () => {
-	it("uses oh-my-pi client name for dynamic client registration", async () => {
+	it("uses Codex client name for dynamic client registration", async () => {
 		let registrationPayload: Record<string, unknown> | null = null;
 
 		const flow = new MCPOAuthFlow(
@@ -78,7 +78,7 @@ describe("mcp oauth flow", () => {
 		const { url } = await flow.generateAuthUrl("test-state", "http://127.0.0.1:53172/callback");
 		const authUrl = new URL(url);
 
-		expect((registrationPayload as { client_name?: string } | null)?.client_name).toBe("oh-my-pi");
+		expect((registrationPayload as { client_name?: string } | null)?.client_name).toBe("Codex");
 		expect((registrationPayload as { scope?: string } | null)?.scope).toBeUndefined();
 		expect(authUrl.searchParams.get("client_id")).toBe("registered-client-id");
 		expect(authUrl.searchParams.get("state")).toBe("test-state");
@@ -764,7 +764,7 @@ describe("mcp oauth flow", () => {
 				return new Response(
 					JSON.stringify({
 						error: "unapproved_client",
-						error_description: "client_name 'oh-my-pi' is not on the approved list.",
+						error_description: "client_name 'Codex' is not on the approved list.",
 					}),
 					{ status: 403, headers: { "Content-Type": "application/json" } },
 				);
@@ -934,6 +934,50 @@ describe("mcp oauth flow", () => {
 		});
 
 		expect(new URLSearchParams(tokenRequestBody).has("client_id")).toBe(false);
+	});
+	describe("GitHub-style token endpoint", () => {
+		// github.com/login/oauth/access_token replies form-encoded unless the
+		// request asks for JSON via Accept.
+		const githubTokenEndpoint: FetchImpl = async (_input, init) => {
+			if (new Headers(init?.headers).get("accept")?.includes("application/json")) {
+				return Response.json({ access_token: "gho_token", refresh_token: "ghr_token", expires_in: 28800 });
+			}
+			return new Response("access_token=gho_token&token_type=bearer&refresh_token=ghr_token&expires_in=28800", {
+				headers: { "Content-Type": "application/x-www-form-urlencoded; charset=utf-8" },
+			});
+		};
+
+		it("exchanges the authorization code", async () => {
+			const flow = new MCPOAuthFlow(
+				{
+					authorizationUrl: "https://github.com/login/oauth/authorize",
+					tokenUrl: "https://github.com/login/oauth/access_token",
+					clientId: "client-id",
+					clientSecret: "client-secret",
+					fetch: githubTokenEndpoint,
+				},
+				{},
+			);
+
+			await flow.generateAuthUrl("state-x", "http://127.0.0.1:47923/callback");
+			const credentials = await flow.exchangeToken("code", "state-x", "http://127.0.0.1:47923/callback");
+
+			expect(credentials.access).toBe("gho_token");
+			expect(credentials.refresh).toBe("ghr_token");
+		});
+
+		it("refreshes the token", async () => {
+			const credentials = await refreshMCPOAuthToken(
+				"https://github.com/login/oauth/access_token",
+				"ghr_old",
+				"client-id",
+				"client-secret",
+				{ fetch: githubTokenEndpoint },
+			);
+
+			expect(credentials.access).toBe("gho_token");
+			expect(credentials.refresh).toBe("ghr_token");
+		});
 	});
 	describe("RFC 8707 resource indicator", () => {
 		// Provider-advertised resource indicators are authoritative, including

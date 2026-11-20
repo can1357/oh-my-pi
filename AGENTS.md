@@ -19,7 +19,7 @@ This repo contains multiple packages, but **`packages/coding-agent/`** is the pr
 |`packages/stats`|Local observability dashboard (`omp stats`)|
 |`packages/omptype`|ArkType-compatible schema validation with a lazy JIT runtime|
 |`packages/utils`|Shared utilities (logger, streams, temp files)|
-|`crates/pi-natives`|Rust crate for performance-critical text/grep ops|
+|`crates/natives`|Rust crate for performance-critical text/grep ops|
 
 **Catalog import convention**: code in this repo imports catalog _values_ (bundled models, model-thinking helpers, identity, descriptors, model manager/cache) from `@oh-my-pi/pi-catalog/<module>` — never via `@oh-my-pi/pi-ai`. The pi-ai barrel re-exports only the model/effort _types_ its own signatures use (`Model`, `Api`, `ThinkingConfig`, `Effort`, …); type-only imports of those from `@oh-my-pi/pi-ai` are fine.
 
@@ -260,7 +260,7 @@ For the bash tool specifically:
 
 - NEVER commit unless asked.
 - Never use `tsc`/`npx tsc` — always `bun check`.
-- Never run `cargo test` directly for Rust tests — use `bun run test:rs`. It runs `cargo nextest run` (config: `.config/nextest.toml`) followed by a `cargo test --doc` pass, because nextest does not execute doctests. The doctest pass runs every runnable doctest in the workspace's lib crates; today that is tree-sitter-go's one example (pi-natives is a `cdylib`, which rustdoc skips; pi-builtins' examples are `ignore`d vendored uutils docs).
+- Never run `cargo test` directly for Rust tests — use `bun run test:rs`. It runs `cargo nextest run` (config: `.config/nextest.toml`) followed by a `cargo test --doc` pass, because nextest does not execute doctests. The doctest pass runs every runnable doctest in the workspace's lib crates; today that is tree-sitter-go's one example (omp-natives is a `cdylib`, which rustdoc skips; omp-builtins' examples are `ignore`d vendored uutils docs).
 - `bun check`'s Rust half runs only when the branch changed a Rust-affecting file (`*.rs`, `crates/`, Cargo/toolchain files) since its merge base with `upstream/main` or `origin/main`, committed or not; it always runs in GitHub Actions, when that cannot be determined (e.g. shallow clone), or with `OMP_FORCE_RUST_TASKS=1`.
 - Merge commits (maintainer merges of PRs) follow: `Merge PR #<number>: <conventional PR subject> (@<author>)` — e.g. `Merge PR #6386: feat(catalog): add native Meta Model API provider (@eggpeat)`.
 ## Rust Build Profiles

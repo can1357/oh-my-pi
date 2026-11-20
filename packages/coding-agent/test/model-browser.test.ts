@@ -3,6 +3,7 @@ import { beforeAll, describe, expect, setSystemTime, test } from "bun:test";
 import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -18,7 +19,10 @@ import {
 	sortModelItems,
 } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import { createModelMentionSource } from "@oh-my-pi/pi-tui/prompt/model-mention-autocomplete";
+import {
+	createModelMentionSource,
+	getModelMentionSuggestions,
+} from "@oh-my-pi/pi-tui/prompt/model-mention-autocomplete";
 
 /** Optional presentation metadata a catalog or discovery source may attach. */
 type NativeMetadata = Pick<Model, "description" | "isNew" | "isBeta" | "isRecommended" | "int" | "tps"> &
@@ -125,7 +129,12 @@ describe("createModelMentionSource", () => {
 		const settings = Settings.isolated({ modelRoles: { default: "b/example-2" } });
 		const candidates = createModelMentionSource({
 			source: createModelBrowserSource(settings),
-			registry: { getError: () => undefined, getAvailable: () => [...available], getAll: () => [...available] },
+			registry: {
+				getError: () => undefined,
+				getAvailable: () => [...available],
+				getAll: () => [...available],
+				retryUnavailableDiscovery: () => undefined,
+			},
 			scopedModels: () => [],
 		});
 		const selectors = (query: string) => candidates(query).map(item => item.selector);
@@ -137,6 +146,40 @@ describe("createModelMentionSource", () => {
 
 		available.push(makeModel("c", "example-3"));
 		expect(selectors("example")).toContain("c/example-3");
+	});
+
+	test("hides an effort row whose selector names an available model outside the picker scope", async () => {
+		await initTheme();
+		const glm = buildModel({
+			id: "glm",
+			name: "GLM",
+			api: "ollama-chat",
+			provider: "a",
+			baseUrl: "https://example.com",
+			reasoning: true,
+			thinking: { mode: "budget", efforts: [Effort.Low, Effort.High, Effort.Max] },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 1024,
+		});
+		const glmMax = makeModel("a", "glm:max");
+		const candidates = createModelMentionSource({
+			source: createModelBrowserSource(Settings.isolated()),
+			registry: {
+				getError: () => undefined,
+				getAvailable: () => [glm, glmMax],
+				getAll: () => [glm, glmMax],
+				retryUnavailableDiscovery: () => undefined,
+			},
+			scopedModels: () => [glm],
+		});
+
+		const completion = getModelMentionSuggestions("^a/glm:", candidates);
+		expect(completion.kind === "matched" && completion.suggestions.items.map(item => item.value)).toEqual([
+			"a/glm:low",
+			"a/glm:high",
+		]);
 	});
 });
 
@@ -205,6 +248,48 @@ describe("ModelBrowser search ranking", () => {
 		browser.setQuery("gpt-5.5");
 
 		expect(browser.getSelected()?.selector).toBe("zenmux/gpt-5.5");
+	});
+
+	describe("provider/model queries", () => {
+		const models = [
+			makeModel("openai", "gpt-6-sol"),
+			makeModel("ollama-cloud", "deepseek-v4"),
+			makeModel("ollama", "qwen3.8:27b"),
+			makeModel("ollama", "gemma-4"),
+			makeModel("openrouter", "openai/gpt-6-sol"),
+		];
+		const mruOrder = ["openai/gpt-6-sol", "ollama-cloud/deepseek-v4"];
+		const rank = (query: string) =>
+			rankModelItems(query, buildBrowserItems(models), {
+				roles: {},
+				mruOrder,
+				affinity: buildSearchAffinity([], {}, mruOrder),
+			}).map(item => item.selector);
+
+		test("a provider prefix lists that provider's models before recent whole-text matches", () => {
+			// Regression: "ol/" collapsed to "ol", so recent "...-sol" models outranked ollama.
+			const ranked = rank("ol/");
+			expect(ranked.slice(0, 3).sort()).toEqual([
+				"ollama-cloud/deepseek-v4",
+				"ollama/gemma-4",
+				"ollama/qwen3.8:27b",
+			]);
+			expect(ranked[3]).toBe("openai/gpt-6-sol");
+		});
+
+		test("an exact provider outranks a recently used provider it prefixes", () => {
+			const ranked = rank("ollama/");
+			expect(ranked.slice(0, 2).sort()).toEqual(["ollama/gemma-4", "ollama/qwen3.8:27b"]);
+			expect(ranked[2]).toBe("ollama-cloud/deepseek-v4");
+		});
+
+		test("the model part filters the prefixed providers' models by id", () => {
+			expect(rank("ol/qw")).toEqual(["ollama/qwen3.8:27b"]);
+		});
+
+		test("a model id containing a slash stays reachable after the scoped rows", () => {
+			expect(rank("openai/gpt-6")).toEqual(["openai/gpt-6-sol", "openrouter/openai/gpt-6-sol"]);
+		});
 	});
 
 	test("a configured role provider outranks punctuation-biased fuzzy scores", () => {

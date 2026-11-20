@@ -10,12 +10,16 @@
  * and re-dials after Chrome reaps it while disconnected.
  */
 import {
+	DOWNLOADS_PROTOCOL_VERSION,
 	EXTENSION_RELOAD_PROTOCOL_VERSION,
 	type ExtToRelayMessage,
+	type FoundDownload,
 	type RelayToExtMessage,
 	type TabSnapshot,
 } from "../../coding-agent/src/tools/browser/relay/protocol";
 import { ownedDebuggerTabs } from "./debugger-ownership";
+import { DownloadPairing } from "./download-pairing";
+import { onForeignFramesHidden, pastForeignFrames } from "./foreign-frames";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
@@ -221,6 +225,9 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 		discardedTabsProtocol: 1, // Keep in sync with the relay protocol version.
 		ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
 		reloadProtocol: EXTENSION_RELOAD_PROTOCOL_VERSION,
+		// A degraded worker (no downloads API) omits the capability, so the relay answers lookups with
+		// the actionable "predates download tracking" error instead of a generic not-found.
+		downloadsProtocol: chrome.downloads === undefined ? undefined : DOWNLOADS_PROTOCOL_VERSION,
 		tabs: snapshots,
 		attachedTabIds,
 	};
@@ -229,9 +236,11 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 /** Run one relay RPC; `origin` is the socket it came in on, which alone can carry its answer. */
 async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, origin: WebSocket): Promise<unknown> {
 	switch (msg.op) {
-		case "attach":
-			await chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
+		case "attach": {
+			const attach = () => chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
+			await (msg.clearForeignFrames ? pastForeignFrames(msg.tabId, attach) : attach());
 			return {};
+		}
 		case "detach":
 			relayInitiatedDetachTabs.add(msg.tabId);
 			try {
@@ -241,12 +250,15 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, origin: Web
 				relayInitiatedDetachTabs.delete(msg.tabId);
 				throw error;
 			}
-		case "send":
-			return await chrome.debugger.sendCommand(
-				msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId },
-				msg.method,
-				msg.params,
-			);
+		case "send": {
+			const send = () =>
+				chrome.debugger.sendCommand(
+					msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId },
+					msg.method,
+					msg.params,
+				);
+			return await (msg.clearForeignFrames ? pastForeignFrames(msg.tabId, send) : send());
+		}
 		case "createTab": {
 			const tab = await chrome.tabs.create({ url: msg.url, active: msg.active ?? true });
 			const snap = snapshot(tab);
@@ -269,6 +281,15 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, origin: Web
 		case "ungroup":
 			await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
 			return {};
+		case "findDownload": {
+			// With no downloads API there is nothing to pair against; answer "not found" instead of throwing mid-RPC.
+			if (chrome.downloads === undefined) return null;
+			const id = downloads.idFor(msg.guid);
+			const [item] = id === undefined ? [] : await chrome.downloads.search({ id });
+			if (item && item.state !== "in_progress") downloads.forget(msg.guid);
+			const found: FoundDownload = item ? { filename: item.filename, state: item.state } : null;
+			return found;
+		}
 	}
 }
 
@@ -335,10 +356,26 @@ async function connect(): Promise<void> {
 	};
 }
 
+// ---- downloads ----------------------------------------------------------------
+
+/** Pairs the downloads driven tabs' pages report with Chrome's download items. */
+const downloads = new DownloadPairing();
+
+// A browser that runs this script without having granted `downloads` exposes no API here (the permission set
+// rides the loaded manifest, the script re-reads from disk); degrade to no download pairing, never to a dead worker.
+chrome.downloads?.onCreated.addListener(item => downloads.created(item.id, item.finalUrl));
+chrome.downloads?.onChanged.addListener(delta => {
+	const state = delta.state?.current;
+	if (state === "complete" || state === "interrupted") downloads.finished(delta.id, state);
+});
+
 // ---- event streaming ---------------------------------------------------------
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
 	if (source.tabId === undefined) return;
+	if (method === "Page.downloadWillBegin" && typeof params?.guid === "string" && typeof params.url === "string") {
+		downloads.report(params.guid, params.url);
+	}
 	post({ t: "cdpEvent", tabId: source.tabId, sessionId: source.sessionId, method, params });
 });
 
@@ -347,6 +384,8 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 	const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
 	post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
 });
+
+onForeignFramesHidden((tabId, frames) => post({ t: "framesHidden", tabId, frames }));
 
 chrome.tabs.onCreated.addListener(tab => {
 	const snap = snapshot(tab);

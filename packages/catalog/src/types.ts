@@ -18,11 +18,13 @@ export type KnownApi =
 	| "google-generative-ai"
 	| "google-gemini-cli"
 	| "google-vertex"
+	| "kiro-api"
 	| "ollama-chat"
 	| "cursor-agent"
 	| "factory-droid-agent"
 	| "gitlab-duo-agent"
 	| "devin-agent"
+	| "antigravity-acp"
 	| "apple-foundation-models";
 export type Api = KnownApi | (string & {});
 
@@ -53,7 +55,10 @@ export const RUNNER_APIS = [
 	"typesafe",
 	"openrouter-decisions",
 	"openai-decisions",
+	"google-decisions",
 	"workers-ai-systemone",
+	"liquid-systemone",
+	"nace-systemone",
 	"openai-images",
 	"openrouter-images",
 	"xai-tts",
@@ -69,7 +74,10 @@ export const RUNNER_API_KINDS: Record<Exclude<(typeof RUNNER_APIS)[number], "loc
 	typesafe: "judge",
 	"openrouter-decisions": "judge",
 	"openai-decisions": "judge",
+	"google-decisions": "judge",
 	"workers-ai-systemone": "judge",
+	"liquid-systemone": "judge",
+	"nace-systemone": "judge",
 	"openai-images": "image",
 	"openrouter-images": "image",
 	"xai-tts": "tts",
@@ -193,9 +201,9 @@ export interface ThinkingConfig {
 	requiresEffort?: boolean;
 	/**
 	 * The catalog has no evidence this model reasons (unclassified id, no
-	 * capability metadata). The ladder is offered for the user to opt into:
-	 * sessions leave thinking unset until the user picks an effort, and a
-	 * request without an effort goes out as non-reasoning (see
+	 * capability metadata). The provisional ladder follows the session/default
+	 * effort until live discovery verifies its controls. A request without an
+	 * effort goes out as non-reasoning (see
 	 * `withoutUnverifiedThinking`).
 	 */
 	unverified?: boolean;
@@ -469,7 +477,7 @@ export interface OpenAICompat {
 	/** Extra fields to include in request body (e.g. gateway routing hints for OpenClaw-style proxies). */
 	extraBody?: Record<string, unknown>;
 	/** Request-session header that should mirror the normalized prompt-cache key. Default: unset. */
-	promptCacheSessionHeader?: "x-grok-conv-id";
+	promptCacheSessionHeader?: "x-grok-conv-id" | "x-session-id";
 	/** Request header carrying the conversation session id, independent of prompt caching. Default: unset. */
 	sessionHeader?: "x-litellm-session-id";
 	/** Whether chat-completions payloads should include provider-specific prompt-cache markers. */
@@ -615,6 +623,14 @@ export interface AnthropicCompat {
 	 * Sonnet 4.6+, Fable/Mythos 5+ on supported hosts. Default: false.
 	 */
 	supportsServerCompaction?: boolean;
+	/**
+	 * Whether the model supports message threads (`message-threads-2026-08-12`):
+	 * later turns continue a server-held conversation and send only new
+	 * messages. Enabled on Claude 4.5+ for the first-party provider; the
+	 * transport still requires the official endpoint unless the caller opts in.
+	 * Default: false.
+	 */
+	supportsMessageThreads?: boolean;
 	/**
 	 * Whether the model is served by the first-party Anthropic provider (its
 	 * default route is the official API). Rule-owned on the provider; the
@@ -1139,6 +1155,12 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 * input into the in-flight response. Rule-owned: GPT-6 family.
 	 */
 	supportsSteering: boolean;
+	/**
+	 * Whether the model never prompt-caches the top-level `instructions` field,
+	 * so system prompts must ride as leading `developer` input items on every
+	 * host. Rule-owned: GPT-6.2 (openai/codex#62312).
+	 */
+	uncachedInstructions: boolean;
 	/** Inject the `# Juice: 0 !important` developer item when reasoning is forced off (gpt-5.6+). */
 	requiresReasoningOffJuiceInstruction: boolean;
 	/**
@@ -1157,6 +1179,14 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 * `PI_MUSE_STORE_RESPONSES`); stored runs retain prompts and outputs on the provider.
 	 */
 	storeResponses: boolean;
+	/**
+	 * Prefix the `openai-responses` handler puts on every function-tool name it
+	 * declares or replays, and strips from returned calls through the request's
+	 * wire-name table. Rule-owned: hosts that reject requests declaring certain
+	 * exact tool names (Muse Code). Unset sends names unchanged. Other
+	 * Responses-family handlers do not read it.
+	 */
+	toolNamePrefix?: string;
 	/**
 	 * Whether the host binds native history items (`encrypted_content`, item
 	 * ids) to the connection that issued them, so a new process must rebuild
@@ -1281,11 +1311,19 @@ export interface DevinCompat {
 	supportsParallelToolCalls?: boolean;
 	/** See {@link BedrockCompat.supportsSamplingParams}. */
 	supportsSamplingParams?: boolean;
+	/**
+	 * Smallest explicit `temperature` this wire accepts. Cascade rejects
+	 * `temperature: 0` with an opaque `invalid_argument` while any positive
+	 * value works, so callers that pin 0 for deterministic decoding (session
+	 * titles, memory extraction) would fail and silently fall back to another
+	 * model. Unset sends the caller's value through unchanged.
+	 */
+	temperatureFloor?: number;
 }
 
 /** Fully-resolved devin-agent compat view. */
-export type ResolvedDevinCompat = Required<Omit<DevinCompat, "supportsSamplingParams">> &
-	Pick<DevinCompat, "supportsSamplingParams">;
+export type ResolvedDevinCompat = Required<Omit<DevinCompat, "supportsSamplingParams" | "temperatureFloor">> &
+	Pick<DevinCompat, "supportsSamplingParams" | "temperatureFloor">;
 /**
  * Compatibility settings for the Google API family (google-generative-ai,
  * google-vertex, google-gemini-cli). Class-driven defaults come from the
@@ -1298,6 +1336,11 @@ export interface GoogleCompat {
 	requiresSkipThoughtSignature?: boolean;
 	/** Add the bypass sentinel when a Gemini turn's first function call is unsigned. */
 	requiresSkipThoughtSignatureOnFirstFunctionCall?: boolean;
+	/**
+	 * Send the bypass sentinel base64-encoded. For gateways that decode
+	 * `thoughtSignature` as bytes and reject the raw literal.
+	 */
+	base64SkipThoughtSignature?: boolean;
 	/** Drop unsigned thinking blocks from replayed history (Antigravity Claude). */
 	dropUnsignedThinking?: boolean;
 	/** Cloud Code Assist legacy `parameters` schema field instead of `parametersJsonSchema`. */
@@ -1342,6 +1385,7 @@ export type ResolvedGoogleCompat = Required<
 		| "streamIdleTimeoutMs"
 		| "antigravityUsageLabel"
 		| "supportsSamplingParams"
+		| "base64SkipThoughtSignature"
 		| "maxImageDimension"
 		| "maxImagePayloadBytes"
 	>
@@ -1350,6 +1394,7 @@ export type ResolvedGoogleCompat = Required<
 	streamIdleTimeoutMs?: number;
 	antigravityUsageLabel?: string;
 	supportsSamplingParams?: boolean;
+	base64SkipThoughtSignature?: boolean;
 	maxImageDimension?: number;
 	maxImagePayloadBytes?: number;
 };
@@ -1400,6 +1445,16 @@ export type CompatOf<TApi extends Api> = TApi extends "openrouter"
 							: TApi extends "ollama-chat"
 								? ResolvedOllamaCompat
 								: undefined;
+
+/**
+ * A configured snapcompact frame shape: a snapcompact shape variant name
+ * (`11on16-bw`, `8on22-bw`, …) and optionally the frame edge in px, which
+ * otherwise is the variant's own. An unknown variant name is ignored.
+ */
+export interface SnapcompactShapeConfig {
+	variant: string;
+	frameSize?: number;
+}
 
 /** Provider-native compaction endpoint configuration for one model. */
 export interface RemoteCompactionConfig<TApi extends Api = Api> {
@@ -1535,7 +1590,7 @@ export interface AntigravityModelWireProfile {
 	/** Fixed `generationConfig.maxOutputTokens` the client always sends. */
 	maxOutputTokens?: number;
 	/** SKU thinking level; the native client sends it in preference to a budget. */
-	thinkingLevel?: "LOW" | "MEDIUM" | "HIGH";
+	thinkingLevel?: "LOW" | "MEDIUM" | "HIGH" | "xhigh";
 	/** SKU thinking budget (`-1` is dynamic), sent when no level is advertised. */
 	thinkingBudget?: number;
 }
@@ -1628,6 +1683,14 @@ export interface Model<TApi extends Api = Api> {
 	 * gateway in front of a vendor with a higher limit.
 	 */
 	imageCountBudget?: number;
+	/**
+	 * Snapcompact frame shape for this model, from user or extension
+	 * configuration. Replaces the model line's eval default (a gateway may
+	 * serve a model whose readers or network path favor another shape); an
+	 * explicit `snapcompact.shape` setting still wins, and the frame stays
+	 * within the host's `image-max-edge`.
+	 */
+	snapcompactShape?: SnapcompactShapeConfig;
 	/**
 	 * Native provider tool-call support. `false` is the only unsupported signal:
 	 * `true` and `undefined` both mean callers may use native tools. Catalog and
@@ -1760,7 +1823,7 @@ export interface Model<TApi extends Api = Api> {
 	 * dispatch is redirected.
 	 */
 	transport?: "pi-native";
-	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
+	/** Standard Responses is opt-in and catalog-gated; either model/request false vetoes true. Codex keeps its independent policy. */
 	preferWebsockets?: boolean;
 	/** Codex Responses Lite transport: send the lite marker and carry instructions/tools as input items (mirrors codex-rs `use_responses_lite`). */
 	useResponsesLite?: boolean;
@@ -1861,6 +1924,7 @@ export interface Model<TApi extends Api = Api> {
 export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	Model<TApi>,
 	| "compat"
+	| "reasoning"
 	| "identity"
 	| "compatConfig"
 	| "requiresGlyphTokenization"
@@ -1870,6 +1934,8 @@ export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	| "supportsAssistantPrefill"
 	| "supportsComputerUseConfig"
 > {
+	/** Authored capability: undefined means no evidence; false explicitly rules out reasoning. */
+	reasoning?: boolean;
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */
 	compat?: CompatConfigOf<TApi>;
 }

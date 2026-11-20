@@ -301,16 +301,17 @@ describe("UsageDashboardComponent", () => {
 	function dashboard(
 		reports: UsageReport[],
 		unavailableAccounts: UnavailableUsageAccount[] = [],
+		onClose: () => void = () => {},
 	): UsageDashboardComponent {
 		return new UsageDashboardComponent({
 			reports,
 			unavailableAccounts,
-			renderDetail: () => "",
+			renderDetail: () => "detail-content",
 			loadActivity: async push => {
 				push([]);
 			},
 			requestRender: () => {},
-			onClose: () => {},
+			onClose,
 		});
 	}
 
@@ -478,6 +479,38 @@ describe("UsageDashboardComponent", () => {
 		}
 	});
 
+	it("tones a bar-less balance row by its reported status (issue #19764)", () => {
+		// A prepaid balance carries no fraction, so it renders as text; an
+		// exhausted verdict must still read as an error, while a balance that
+		// reports no status stays informational. An exhausted quota with no
+		// measurable amount (Antigravity) says so instead of "no data".
+		const balance = (id: string, label: string, status?: "exhausted", unit: "credits" | "unknown" = "credits") => ({
+			id,
+			label,
+			scope: { provider: "commandcode", accountId: "a", windowId: id },
+			amount: { remaining: 0, unit },
+			...(status ? { status } : {}),
+		});
+		const component = dashboard([
+			report("commandcode", "a@test", [
+				balance("drained", "Drained balance", "exhausted"),
+				balance("plain", "Plain balance"),
+				balance("spent", "Spent quota", "exhausted", "unknown"),
+			]),
+		]);
+		try {
+			const lines = component.render(100);
+			const drained = lines.find(line => Bun.stripANSI(line).includes("Drained balance"));
+			const plain = lines.find(line => Bun.stripANSI(line).includes("Plain balance"));
+			const spent = lines.find(line => Bun.stripANSI(line).includes("Spent quota"));
+			expect(drained).toContain(theme.fg("error", "0 credits left"));
+			expect(plain).toContain(theme.fg("dim", "0 credits left"));
+			expect(spent).toContain(theme.fg("error", "exhausted"));
+		} finally {
+			component.dispose();
+		}
+	});
+
 	it("keeps distinct buckets that share a label and window separate in the detail view", () => {
 		// Same payload as the cards regression (issue #16790): two weekly
 		// Google-counter limits with one label, distinct ids. The detail rows
@@ -564,6 +597,43 @@ describe("UsageDashboardComponent", () => {
 		expect(contentLine).toContain(
 			"Usage history unavailable (subprocess crashed at ~/.omp/stats.db: failed to open line 2).",
 		);
+	});
+
+	it("toggles bidirectionally between overview and detail views on tab", () => {
+		const component = dashboard([]);
+		try {
+			expect(component.render(80).join("\n")).not.toContain("detail-content");
+
+			component.handleInput("\t");
+			expect(component.render(80).join("\n")).toContain("detail-content");
+
+			component.handleInput("\t");
+			expect(component.render(80).join("\n")).not.toContain("detail-content");
+		} finally {
+			component.dispose();
+		}
+	});
+
+	it("returns to overview on escape or q from detail, and closes on escape or q from overview", () => {
+		for (const key of ["\x1b", "q"]) {
+			let closed = 0;
+			const component = dashboard([], [], () => {
+				closed++;
+			});
+			try {
+				component.handleInput("\t");
+				expect(component.render(80).join("\n")).toContain("detail-content");
+
+				component.handleInput(key);
+				expect(closed).toBe(0);
+				expect(component.render(80).join("\n")).not.toContain("detail-content");
+
+				component.handleInput(key);
+				expect(closed).toBe(1);
+			} finally {
+				component.dispose();
+			}
+		}
 	});
 });
 

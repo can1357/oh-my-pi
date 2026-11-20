@@ -2,6 +2,7 @@
  * Check for and install updates.
  */
 
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { updateHelp as commandHelp } from "../cli/command-help";
 import * as pluginCli from "../cli/plugin-cli";
@@ -28,11 +29,16 @@ export default class Update extends Command {
 		if (flags.plugins) {
 			await pluginCli.runPluginCommand({ action: "upgrade", args: [], flags: flags.check ? { dryRun: true } : {} });
 		} else {
-			await updateCli.runUpdateCommand({
-				force: flags.force,
-				check: flags.check,
-				channel: flags.canary ? "canary" : flags.stable ? "stable" : undefined,
-			});
+			try {
+				await updateCli.runUpdateCommand({
+					force: flags.force,
+					check: flags.check,
+					channel: flags.canary ? "canary" : flags.stable ? "stable" : undefined,
+				});
+			} catch (err) {
+				console.error(chalk.red(err instanceof Error ? err.message : String(err)));
+				process.exit(1);
+			}
 		}
 	}
 }

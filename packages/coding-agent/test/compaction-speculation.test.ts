@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, Context, Model, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Context, Model, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -11,6 +11,8 @@ import { type CompactionMethod, resolveSpeculationMethod } from "@oh-my-pi/pi-co
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
+import { hindsightBackend } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
 import * as snapcompactModule from "@oh-my-pi/snapcompact";
 
 import {
@@ -78,10 +80,8 @@ describe("async speculative compaction", () => {
 			convertToLlmForSideRequest?: (messages: AgentMessage[]) => never;
 			buildLiveProviderContext?: (summarized: AgentMessage[], retained: AgentMessage[]) => Promise<Context>;
 			persistTurnMessagesForMidRunCompaction?: () => Promise<boolean>;
-			generateHandoffDocument?: (
-				focus: string,
-				options?: { autoTriggered?: boolean; signal?: AbortSignal },
-			) => Promise<{ document: string } | undefined>;
+			generateHandoffDocument?: SessionMaintenanceHost["generateHandoffDocument"];
+			extensionRunner?: Pick<NonNullable<SessionMaintenanceHost["extensionRunner"]>, "hasHandlers">;
 		} = {},
 	): SessionMaintenance {
 		agent = new Agent({
@@ -102,7 +102,7 @@ describe("async speculative compaction", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			extensionRunner: undefined,
+			extensionRunner: options.extensionRunner,
 			sideStreamFn: async () => {
 				throw new Error("The compact seam should be used instead of the side stream");
 			},
@@ -112,7 +112,8 @@ describe("async speculative compaction", () => {
 			thinkingLevel: () => undefined,
 			isDisposed: () => false,
 			isStreaming: () => false,
-			isGeneratingHandoff: () => false,
+			isSessionTransitioning: () => false,
+			waitForIdle: async () => {},
 			promptGeneration: () => 0,
 			hasExperimentalContextRolloverTools: () => options.recoveryTools ?? true,
 			queueExperimentalContextNotesReminder: () => events.push("notes-reminder"),
@@ -135,6 +136,7 @@ describe("async speculative compaction", () => {
 			reconnectToAgent: () => {},
 			drainStrandedQueuedMessages: () => {},
 			buildDisplaySessionContext: () => sessionManager.buildSessionContext(),
+			replaceMessagesFromSessionContext: (messages: AgentMessage[]) => agent.replaceMessages(messages),
 			persistEvalStateContext: () => {},
 			convertToLlmForSideRequest:
 				options.convertToLlmForSideRequest ?? ((messages: AgentMessage[]) => messages as never),
@@ -162,7 +164,6 @@ describe("async speculative compaction", () => {
 			parseRetryAfterMsFromError: () => undefined,
 			setModelTemporary: async () => {},
 			abort: async () => {},
-			abortHandoff: () => {},
 		} as unknown as SessionMaintenanceHost;
 		return new SessionMaintenance(host);
 	}
@@ -256,6 +257,28 @@ describe("async speculative compaction", () => {
 		expect(maintenance.speculationState).toBe("running");
 		await waitForState("armed");
 		expect(compactSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not recall unused memory while arming native Codex compaction", async () => {
+		const bundled = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!bundled) throw new Error("Expected built-in Codex model");
+		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
+		authStorage.keys.setRuntime("openai-codex", "test-key");
+		maintenance = createMaintenance({ methodOrder: ["remote"] });
+		cfgMemoryBackend.override(maintenanceSettings, "hindsight");
+		const recallSpy = vi.spyOn(hindsightBackend, "preCompactionContext").mockResolvedValue("fresh memory");
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "native summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+			preserveData: { openaiRemoteCompaction: { provider: model.provider, replacementHistory: [] } },
+		}));
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+
+		expect(recallSpy).not.toHaveBeenCalled();
 	});
 
 	it("commits an armed summary at threshold without paying for another summarizer call", async () => {
@@ -651,7 +674,7 @@ describe("async speculative compaction", () => {
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		cfgCompactionAsyncEnabled.override(maintenanceSettings, true);
 		await maintenance.maintainContextMidRun(activeMessages, undefined, context);
-		await maintenance.speculationCompletion;
+		await maintenance.speculationCompletion();
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
 
@@ -659,8 +682,88 @@ describe("async speculative compaction", () => {
 		sessionManager.appendMessage(nextRequest);
 		activeMessages.push(nextRequest);
 		await maintenance.maintainContextMidRun(activeMessages, undefined, context);
-		await maintenance.speculationCompletion;
+		await maintenance.speculationCompletion();
 		expect(compactSpy).toHaveBeenCalledTimes(2);
+	});
+
+	/** A short conversation ending in a tool call whose result has not arrived. */
+	function appendPendingToolCall(): AssistantMessage {
+		sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage(userMessage("earlier request ".repeat(400)));
+		sessionManager.appendMessage(assistantMessage("earlier response ".repeat(400), model));
+		sessionManager.appendMessage(userMessage("retained request"));
+		const pending: AssistantMessage = {
+			...assistantMessage("", model),
+			content: [{ type: "toolCall", id: "call-1", name: "wait", arguments: {} }],
+			stopReason: "toolUse",
+		};
+		sessionManager.appendMessage(pending);
+		return pending;
+	}
+
+	it("bridges a pending tool call from what preceded it and commits at the tool's turn end below the threshold", async () => {
+		const pending = appendPendingToolCall();
+		let handoffMessages: readonly AgentMessage[] | undefined;
+		maintenance = createMaintenance({
+			methodOrder: ["handoff"],
+			persistTurnMessagesForMidRunCompaction: async () => true,
+			generateHandoffDocument: async (_instructions, options) => {
+				handoffMessages = options.messages;
+				return "## Goal\nFinish once the tool returns.\n";
+			},
+		});
+		// The live loop holds the call while its tool runs.
+		agent.replaceMessages([...sessionManager.buildSessionContext().messages, pending]);
+		expect(maintenance.bridgeCompactionEstimate(80_000)).toEqual({ summaryTokens: 5_000, keptTokens: 5_001 });
+
+		expect(await maintenance.startBridgeCompaction()).toBe("armed");
+		// The call's result has not arrived: the summarized request is the one the cache holds.
+		expect(handoffMessages?.map(message => message.role)).toEqual(["user", "assistant", "user"]);
+
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "wait",
+			content: [{ type: "text", text: "done" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		sessionManager.appendMessage(result);
+		agent.state.messages.push(result);
+		await maintenance.maintainContextMidRun(agent.state.messages, undefined, {
+			message: pending,
+			toolResults: [result],
+			willContinue: true,
+		});
+
+		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
+		const roles = sessionManager.buildSessionContext().messages.map(message => message.role);
+		expect(roles[0]).toBe("compactionSummary");
+		expect(roles.slice(-2)).toEqual(["assistant", "toolResult"]);
+	});
+
+	it("reports whether a failed bridge reached the provider, and offers none without a bridge-capable method", async () => {
+		const pending = appendPendingToolCall();
+		let billed = false;
+		maintenance = createMaintenance({
+			methodOrder: ["handoff"],
+			generateHandoffDocument: async (_instructions, options) => {
+				if (billed) options.onAttempt?.(assistantMessage("", model));
+				return undefined;
+			},
+		});
+		agent.replaceMessages([...sessionManager.buildSessionContext().messages, pending]);
+		expect(await maintenance.startBridgeCompaction()).toBe("failed-unaccepted");
+		billed = true;
+		expect(await maintenance.startBridgeCompaction()).toBe("failed-accepted");
+
+		// Soft summaries read nothing from the prompt cache; compaction hooks keep exact blocking semantics.
+		expect(createMaintenance({ methodOrder: ["soft"] }).bridgeCompactionEstimate(80_000)).toBeUndefined();
+		const hooked = createMaintenance({
+			methodOrder: ["handoff"],
+			extensionRunner: { hasHandlers: event => event === "session_before_compact" },
+		});
+		expect(hooked.bridgeCompactionEstimate(80_000)).toBeUndefined();
 	});
 
 	it("discards an armed summary after a reset boundary and re-summarizes the new branch", async () => {
@@ -845,7 +948,7 @@ describe("async speculative compaction", () => {
 		}));
 
 		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
-		await maintenance.speculationCompletion;
+		await maintenance.speculationCompletion();
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 
 		// Later boundaries neither re-send it nor hold the threshold pass for it.
@@ -865,7 +968,7 @@ describe("async speculative compaction", () => {
 		appendSummarizableConversation();
 		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
 		expect(maintenance.speculationState).toBe("running");
-		await maintenance.speculationCompletion;
+		await maintenance.speculationCompletion();
 		expect(compactSpy).toHaveBeenCalledTimes(2);
 	});
 
@@ -887,7 +990,7 @@ describe("async speculative compaction", () => {
 			}));
 
 		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
-		await maintenance.speculationCompletion;
+		await maintenance.speculationCompletion();
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 
 		// The failed native method is skipped; soft still runs in the background
@@ -917,10 +1020,10 @@ describe("async speculative compaction", () => {
 			);
 
 		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
-		await maintenance.speculationCompletion;
+		await maintenance.speculationCompletion();
 		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START + 500, CONTEXT_WINDOW);
 		expect(maintenance.speculationState).toBe("running");
-		await maintenance.speculationCompletion;
+		await maintenance.speculationCompletion();
 		expect(compactSpy).toHaveBeenCalledTimes(2);
 	});
 
@@ -935,12 +1038,12 @@ describe("async speculative compaction", () => {
 			);
 
 		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
-		await maintenance.speculationCompletion;
+		await maintenance.speculationCompletion();
 		await sessionManager.newSession();
 		appendSummarizableConversation();
 		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
 		expect(maintenance.speculationState).toBe("running");
-		await maintenance.speculationCompletion;
+		await maintenance.speculationCompletion();
 		expect(compactSpy).toHaveBeenCalledTimes(2);
 	});
 
@@ -1027,9 +1130,7 @@ describe("async speculative compaction", () => {
 
 	it("discards an armed handoff summary when post-snapshot branch growth prevents recovery headroom", async () => {
 		let handoffInvocation = 0;
-		const generateHandoffDocument = vi.fn(async () => ({
-			document: `handoff plan ${++handoffInvocation}`,
-		}));
+		const generateHandoffDocument = vi.fn(async () => `handoff plan ${++handoffInvocation}`);
 		maintenance = createMaintenance({
 			methodOrder: ["handoff"],
 			generateHandoffDocument,
@@ -1055,9 +1156,7 @@ describe("async speculative compaction", () => {
 
 	it("retains and claims an armed handoff summary when post-snapshot growth fits comfortably within recovery band", async () => {
 		let handoffInvocation = 0;
-		const generateHandoffDocument = vi.fn(async () => ({
-			document: `handoff plan ${++handoffInvocation}`,
-		}));
+		const generateHandoffDocument = vi.fn(async () => `handoff plan ${++handoffInvocation}`);
 		maintenance = createMaintenance({
 			methodOrder: ["handoff"],
 			generateHandoffDocument,
@@ -1087,6 +1186,6 @@ describe("resolveSpeculationMethod", () => {
 		const settings = cfgCompaction.get(Settings.isolated({ "compaction.methodOrder": ["snapcompact", "soft"] }));
 		// Same declared input; only the second drops images on the wire.
 		expect(resolveSpeculationMethod(getBundledModel("anthropic", "claude-sonnet-4-5"), settings)).toBeUndefined();
-		expect(resolveSpeculationMethod(getBundledModel("venice", "deepseek-v4-1-flash"), settings)).toBe("soft");
+		expect(resolveSpeculationMethod(getBundledModel("fireworks", "deepseek-v4-flash"), settings)).toBe("soft");
 	});
 });

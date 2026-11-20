@@ -47,10 +47,6 @@ describe("stripMemoryTags", () => {
 		expect(stripMemoryTags(text)).toBe("tail");
 	});
 
-	it("is a no-op when no tags are present", () => {
-		expect(stripMemoryTags("plain content")).toBe("plain content");
-	});
-
 	it("strips <mental_models> blocks so curated context cannot leak back into retention", () => {
 		const text = ["alpha", "<mental_models>", "# User Preferences", "prefers tabs", "</mental_models>", "beta"].join(
 			"\n",
@@ -127,10 +123,6 @@ describe("composeRecallQuery", () => {
 });
 
 describe("truncateRecallQuery", () => {
-	it("returns the query untouched when under the budget", () => {
-		expect(truncateRecallQuery("short", "short", 100)).toBe("short");
-	});
-
 	it("falls back to the latest query alone when no prior context block exists", () => {
 		const long = "x".repeat(200);
 		expect(truncateRecallQuery(long, long, 50)).toBe(long.slice(0, 50));

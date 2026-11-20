@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { AssistantMessage, CursorHistoryPayload, ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, CursorHistoryPayload, GeminiNativeContentPayload, ImageContent } from "@oh-my-pi/pi-ai";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getBlobsDir, TempDir } from "@oh-my-pi/pi-utils";
@@ -501,6 +501,51 @@ describe("SessionManager signature persistence", () => {
 			type: "text",
 			text: expect.stringContaining("[Session persistence truncated large content]"),
 		});
+		await reloaded.close();
+	}, 15_000);
+
+	it("preserves oversized Gemini native content byte-for-byte across reload", async () => {
+		using tempDir = TempDir.createSync("@pi-session-gemini-native-persistence-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		// >MAX_PERSIST_CHARS: the signed thought replays with its signature, so a cut would break it.
+		const thought = "T".repeat(600_000);
+		const providerPayload: GeminiNativeContentPayload = {
+			type: "geminiNativeContent",
+			digest: "digest",
+			content: {
+				role: "model",
+				parts: [{ text: thought, thought: true, thoughtSignature: "sig" }, { text: "done" }],
+			},
+		};
+		session.appendMessage({ role: "user", content: "think", timestamp: 1 });
+		session.appendMessage({
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: thought, thinkingSignature: "sig" },
+				{ type: "text", text: "done" },
+			],
+			api: "google-generative-ai",
+			provider: "factory-droid",
+			model: "gemini-4-argon",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			providerPayload,
+			timestamp: 2,
+		});
+		await session.flush();
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		await session.close();
+
+		const reloaded = await SessionManager.open(sessionFile);
+		expect(getAssistantMessage(reloaded).providerPayload).toEqual(providerPayload);
 		await reloaded.close();
 	}, 15_000);
 });

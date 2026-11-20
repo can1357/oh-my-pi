@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { isAssistantMessageLine } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { SessionStatus } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
@@ -126,8 +125,6 @@ describe("SessionManager.list session status (tail derivation)", () => {
 	});
 
 	it("keeps a gap assistant record serialized with valid JSON whitespace", async () => {
-		expect(isAssistantMessageLine('{"type" : "message", "message": {"role" : "assistant"}}')).toBe(true);
-		expect(isAssistantMessageLine('{"type":"message","message":{"role":\t"assistant"}}')).toBe(true);
 		const imageBlock = { type: "image", data: "a".repeat(5000), mimeType: "image/png" };
 		const bigAssistant = "b".repeat(40_000);
 		const userLine = JSON.stringify({ role: "user", content: [imageBlock] });
@@ -164,5 +161,38 @@ describe("SessionManager.list session status (tail derivation)", () => {
 
 		const status = await statusById(storage);
 		expect(status.get("huge-complete")).toBe("unknown");
+	});
+});
+
+describe("SessionManager.list first prompt past the prefix window", () => {
+	const recall = line({ type: "custom", customType: "memory_recall", data: "r".repeat(8_000) });
+	const skill = line({ type: "custom_message", customType: "skill-prompt", content: "/skill:docs", display: false });
+	const imageOnly = msg({
+		role: "user",
+		content: [{ type: "image", data: "a".repeat(8_000), mimeType: "image/png" }],
+	});
+
+	it("previews and searches the first prompt with text, wherever the windows missed it", async () => {
+		const storage = seed({
+			"after-recall": recall + user("Find the deployment runbook"),
+			"after-skill-reply":
+				skill + assistant("stop", [textBlock("done")]) + recall + user("Now update the changelog"),
+			"after-image-only": imageOnly + user("Explain this diagram"),
+			"huge-prompt": user("p".repeat(200_000)),
+		});
+		const byId = new Map((await SessionManager.list("/proj", SESSION_DIR, storage)).map(s => [s.id, s]));
+
+		expect(byId.get("after-recall")?.firstMessage).toBe("Find the deployment runbook");
+		expect(byId.get("after-recall")?.allMessagesText).toBe("Find the deployment runbook");
+		expect(byId.get("after-skill-reply")?.firstMessage).toBe("Now update the changelog");
+		// The recovered prompt leads the search text, ahead of the reply the prefix held.
+		expect(byId.get("after-skill-reply")?.allMessagesText).toBe("Now update the changelog done");
+		expect(byId.get("after-image-only")?.firstMessage).toBe("Explain this diagram");
+		expect(byId.get("huge-prompt")?.firstMessage).toBe("p".repeat(4096));
+	});
+
+	it("keeps an unanswered session whose prompt follows a large entry in the picker", async () => {
+		const storage = seed({ "unanswered-after-recall": recall + user("still waiting") });
+		expect(await pickerIds(storage)).toEqual(["unanswered-after-recall"]);
 	});
 });

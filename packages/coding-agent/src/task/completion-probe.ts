@@ -28,6 +28,7 @@ import {
 import type { Settings } from "../config/settings";
 import completionProbePrompt from "../prompts/system/subagent-completion-probe.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { completionRecord } from "../session/model-usage-journal";
 import { cfgTaskCompletionProbe } from "./settings";
 
 /**
@@ -60,7 +61,7 @@ export interface CompletionProbeOptions {
 export interface CompletionEstimate {
 	/** Whole-number completion, 0–100. */
 	percent: number;
-	/** The agent's current step in its own words; ≤ {@link MAX_STAGE_CHARS} chars, one line. */
+	/** Short label for the task's current work item; ≤ {@link MAX_STAGE_CHARS} chars, one line. */
 	stage?: string;
 	/** Which output or metric shows the agent's progress and what target; ≤ {@link MAX_WATCH_CHARS} chars, one line. */
 	watch?: string;
@@ -208,20 +209,26 @@ export function startCompletionProbe(options: CompletionProbeOptions): void {
 					},
 				}),
 				signal,
+				onUsage: message => {
+					if (!message.usage) return;
+					session.sessionManager.appendModelUsage(
+						{
+							purpose: "task-completion-probe",
+							api: message.api,
+							provider: message.provider,
+							model: message.model,
+							usage: message.usage,
+							stopReason: message.stopReason,
+							errorMessage: message.errorMessage,
+							duration: message.duration,
+							ttft: message.ttft,
+							// The prompt is a rendered template, so only the reply is kept.
+							completion: completionRecord(undefined, message),
+						},
+						usageOwner,
+					);
+				},
 			});
-			if (assistantMessage.usage) {
-				session.sessionManager.appendModelUsage(
-					{
-						purpose: "task-completion-probe",
-						api: assistantMessage.api,
-						provider: assistantMessage.provider,
-						model: assistantMessage.model,
-						usage: assistantMessage.usage,
-						stopReason: assistantMessage.stopReason,
-					},
-					usageOwner,
-				);
-			}
 			const estimate = parseCompletionEstimate(replyText);
 			if (signal.aborted) return;
 			if (estimate === undefined) {

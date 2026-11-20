@@ -1,8 +1,10 @@
 import { type } from "@oh-my-pi/omptype";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { Api, FetchImpl, Model, Usage } from "@oh-my-pi/pi-catalog/types";
-import { type ApiKey, withAuth } from "../auth-retry";
+import { type ApiKey, NO_AUTH_SENTINEL, withAuth } from "../auth-retry";
 import * as AIError from "../error";
+import { modelHeaders } from "../images/shared";
+import { mergeHeaders } from "../providers/anthropic-headers";
 import type { RerankRequest, RerankResult } from "./types";
 
 export interface RerankOptions {
@@ -17,7 +19,8 @@ export class RerankApiError extends AIError.ProviderHttpError {
 }
 
 const upstreamResponseSchema = type({
-	model: "string",
+	// Cohere v2 `/rerank` answers carry no `model` field.
+	"model?": "string",
 	results: type({
 		index: "number",
 		relevance_score: "number",
@@ -99,11 +102,13 @@ export async function rerankOpenRouter(
 		async key => {
 			const attempt = await fetchImpl(`${model.baseUrl.replace(/\/+$/, "")}/rerank`, {
 				method: "POST",
-				headers: {
-					Authorization: `Bearer ${key}`,
-					Accept: "application/json",
-					"Content-Type": "application/json",
-				},
+				// A configured Authorization (any case) replaces the bearer, and a
+				// keyless provider's sentinel is never sent as one.
+				headers: mergeHeaders(
+					key === NO_AUTH_SENTINEL ? undefined : { Authorization: `Bearer ${key}` },
+					await modelHeaders(model, options.signal),
+					{ Accept: "application/json", "Content-Type": "application/json" },
+				),
 				body,
 				signal: options.signal,
 			});
@@ -122,7 +127,7 @@ export async function rerankOpenRouter(
 		);
 	}
 	return {
-		model: parsed.model,
+		model: parsed.model ?? model.id,
 		results: parsed.results.map(result => {
 			const document = documentText(result.document);
 			return {

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "../../src/config/settings";
 import { resolveLocalUrlToPath } from "../../src/internal-urls";
+import { wrapToolWithMetaNotice } from "../../src/tools/output-meta";
 import { ReadTool } from "../../src/tools/read";
 
 type ToolTextResult = {
@@ -72,7 +73,7 @@ describe("JSON query in read tool", () => {
 
 		await fs.writeFile(jsonFile, JSON.stringify(testData, null, 2), "utf-8");
 		await fs.writeFile(jsonlFile, testLines.join("\n") + "\n", "utf-8");
-		// Literals JS numbers cannot hold; jaq prints them verbatim.
+		// Literals JS numbers cannot hold; jq prints them verbatim.
 		await fs.writeFile(numbersFile, '{"ids":[12345678901234567890,1.0,3]}', "utf-8");
 		// `.name` fails on the third element.
 		await fs.writeFile(mixedFile, '[{"name":"a"},{"name":"b"},3]', "utf-8");
@@ -122,13 +123,25 @@ describe("JSON query in read tool", () => {
 		expect(lines).toEqual(["alice", "charlie"]);
 	});
 
+	it("names the byte budget when pretty-printed query output is truncated", async () => {
+		const largeJsonlFile = path.join(tempDir, "large-events.jsonl");
+		await Bun.write(
+			largeJsonlFile,
+			`${JSON.stringify({ id: 0, text: "x".repeat(60_000) })}\n${JSON.stringify({ id: 1, text: "short" })}\n`,
+		);
+
+		const tool = wrapToolWithMetaNotice(new ReadTool(session));
+		const result = await tool.execute("call_large_pretty", { path: `${largeJsonlFile}?q=.&limit=8` });
+		expect(getText(result)).toBe('{\n  "id": 0,\n\n[Showing lines 1-2 of 8 (50.0KB limit). Use :3- to continue]');
+	});
+
 	it("fails cleanly with descriptive error on invalid jq syntax", async () => {
 		await expect(readTool.execute("call_6", { path: `${jsonFile}?q=invalid [[[` })).rejects.toThrow(
 			/Failed to execute JSON query/i,
 		);
 	});
 
-	it("retains the reason and key when jaq rejects a large JSON value", async () => {
+	it("retains the reason and key when jq rejects a large JSON value", async () => {
 		const largeFile = path.join(tempDir, "large.json");
 		const rows = Array.from({ length: 400 }, (_, index) => ({ label: `row ${index}`, input: "x".repeat(40) }));
 		await Bun.write(largeFile, JSON.stringify([{ rows }]));
@@ -138,8 +151,7 @@ describe("JSON query in read tool", () => {
 			error => error,
 		);
 		const message = String(error);
-		expect(message).toContain("cannot index");
-		expect(message).toContain('with "changedFiles"');
+		expect(message).toContain('Cannot index array with string ("changedFiles")');
 		expect(message.length).toBeLessThan(1000);
 	});
 
@@ -203,7 +215,7 @@ describe("JSON query in read tool", () => {
 		expect(text).toContain("[more results; append ?q=.user&raw=true&limit=1&offset=2 to continue]");
 	});
 
-	it("queries located local JSONL and artifact JSON without losing pagination or URI identity", async () => {
+	it("queries located local JSONL and spill JSON without losing pagination or URI identity", async () => {
 		const artifactsDir = path.join(tempDir, "artifacts");
 		const localProtocolOptions = { getArtifactsDir: () => artifactsDir, getSessionId: () => "json-query" };
 		const locatedTool = new ReadTool(
@@ -211,9 +223,8 @@ describe("JSON query in read tool", () => {
 		);
 		const localFile = resolveLocalUrlToPath("local://events.jsonl", localProtocolOptions);
 		await fs.mkdir(path.dirname(localFile), { recursive: true });
-		await fs.mkdir(artifactsDir, { recursive: true });
 		await fs.copyFile(jsonlFile, localFile);
-		await fs.copyFile(jsonFile, path.join(artifactsDir, "0.json"));
+		await fs.copyFile(jsonFile, path.join(path.dirname(localFile), "0.log"));
 
 		const localUrl = "local://events.jsonl?q=.user&raw=true&offset=1&limit=1";
 		const localResult = await locatedTool.execute("local-json-page", { path: localUrl });
@@ -227,7 +238,7 @@ describe("JSON query in read tool", () => {
 			),
 		).toBe("charlie");
 
-		const artifactUrl = "artifact://0?q=.items&compact=true&offset=1&limit=1";
+		const artifactUrl = "local://0.log?q=.items&compact=true&offset=1&limit=1";
 		const artifactResult = await locatedTool.execute("artifact-json-page", { path: artifactUrl });
 		expect(getText(artifactResult)).toBe(
 			'[{"id":2,"name":"item-two","active":false}]\n[1 more items; append ?q=.items&compact=true&limit=1&offset=2 to continue]',
@@ -264,7 +275,7 @@ describe("JSON query in read tool", () => {
 
 	it("stops jq once the page is full, before later results fail", async () => {
 		const result = await readTool.execute("call_early_stop", { path: `${mixedFile}?q=.[] | .name&raw=true&limit=1` });
-		// jaq may report the later failure before it is stopped; the page still stands
+		// jq may report the later failure before it is stopped; the page still stands
 		expect(getText(result).split("\n").slice(-2)).toEqual([
 			"a",
 			"[more results; append ?q=.[] | .name&raw=true&limit=1&offset=1 to continue]",

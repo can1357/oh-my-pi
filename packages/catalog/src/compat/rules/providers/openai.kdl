@@ -4,6 +4,9 @@ provider "openai" {
 	default-model "gpt-5.5"
 	env "OPENAI_API_KEY"
 	image-count-budget 200
+	on-api "openai-responses" {
+		supports-websockets #true
+	}
 	kind-apis {
 		embedding "openai-embeddings"
 		image "openai-responses"
@@ -204,10 +207,10 @@ provider "openai" {
 			cache-write 25.0
 		}
 	}
-	// GPT-6 Sol, GPT-6 Luna, and GPT-6.1 Terra use the same >272K whole-request
-	// multipliers as Astra. Derive the tier from each API card so upstream price
-	// changes carry through.
-	models "gpt-6-sol" "gpt-6-luna" "gpt-6.1-terra" {
+	// GPT-6 Sol, GPT-6 Luna, GPT-6.1 Terra, and GPT-6.2 Astra and Sol use the
+	// same >272K whole-request multipliers as Astra. Derive the tier from each
+	// API card so upstream price changes carry through.
+	models "gpt-6-sol" "gpt-6-luna" "gpt-6.1-terra" "gpt-6.2-astra" "gpt-6.2-sol" {
 		long-context-cost {
 			input-threshold 272000
 			multiplier 2.0
@@ -219,6 +222,15 @@ provider "openai" {
 	models "gpt-6-astra*" "gpt-6.1-sol*" {
 		service-tier-cost {
 			ultrafast 6
+		}
+	}
+	// GPT-6.2 Astra and Sol bill API Ultrafast at 3x Standard through
+	// 2027-02-28 and 6x from 2027-03-01 (Pacific); `service-tier-cost` carries
+	// no dated cards, so raise this to 6 on that date. Fast stays the generic 2x.
+	// https://developers.openai.com/api/docs/models/gpt-6.2-astra
+	models "gpt-6.2-astra*" "gpt-6.2-sol*" {
+		service-tier-cost {
+			ultrafast 3
 		}
 	}
 	// residue: the bare Daybreak rolling aliases pin the documented 5.6-gen

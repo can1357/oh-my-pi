@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getAgentDbPath, getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getStatsDbPath, isRecord, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import {
 	applySessionParseResults,
@@ -31,7 +31,6 @@ import {
 	getOverallStats,
 	getProviderHourlyBurn,
 	getProviderTimeSeries,
-	getStatsByAgentType,
 	getStatsByFolder,
 	getStatsByModel,
 	getStatsByProvider,
@@ -39,8 +38,10 @@ import {
 	getToolStats,
 	getToolStatsByModel,
 	getToolTimeSeries,
+	getUsageAttribution,
 	type RangeWindow,
 } from "./rollup";
+import { spotlightRowCount } from "./spotlight-ingest";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so the compiled binary and npm bundle only need one
@@ -53,6 +54,8 @@ import type {
 	ProviderDashboardStats,
 	ProviderWindowStats,
 	RequestDetails,
+	SessionEntry,
+	SessionModelUsageEntry,
 	ToolDashboardStats,
 } from "./types";
 import { computeUsageWindowStats, fetchUsageData, type UsageDataSnapshot } from "./usage-windows";
@@ -417,7 +420,9 @@ async function syncAllSessionsLocked(
 			result.userStats.length +
 			result.userLinks.length +
 			result.toolCalls.length +
-			result.toolResults.length;
+			result.toolResults.length +
+			result.snapcompactCompactions.length +
+			spotlightRowCount(result.spotlight);
 		if (pending.length >= SYNC_BATCH_FILES || pendingRows >= SYNC_BATCH_ROWS) flush();
 	};
 
@@ -487,7 +492,7 @@ async function syncAllSessionsLocked(
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 
-type TimeRange = "1h" | "24h" | "7d" | "30d" | "90d" | "all";
+type TimeRange = "1h" | "24h" | "2d" | "3d" | "7d" | "30d" | "90d" | "all";
 
 const DEFAULT_TIME_RANGE: TimeRange = "24h";
 
@@ -495,6 +500,8 @@ const DEFAULT_TIME_RANGE: TimeRange = "24h";
 const TIME_RANGES: Record<TimeRange, { spanMs: number | null; bucketMs: number }> = {
 	"1h": { spanMs: HOUR_MS, bucketMs: 5 * 60 * 1000 },
 	"24h": { spanMs: DAY_MS, bucketMs: HOUR_MS },
+	"2d": { spanMs: 2 * DAY_MS, bucketMs: HOUR_MS },
+	"3d": { spanMs: 3 * DAY_MS, bucketMs: HOUR_MS },
 	"7d": { spanMs: 7 * DAY_MS, bucketMs: DAY_MS },
 	"30d": { spanMs: 30 * DAY_MS, bucketMs: DAY_MS },
 	"90d": { spanMs: 90 * DAY_MS, bucketMs: DAY_MS },
@@ -524,7 +531,7 @@ export async function getDashboardStats(range?: string | null): Promise<Dashboar
 		overall: getOverallStats(window.cutoff),
 		byModel: getStatsByModel(window.cutoff),
 		byFolder: getStatsByFolder(window.cutoff, FOLDER_LIMIT),
-		byAgentType: getStatsByAgentType(window.cutoff),
+		...getUsageAttribution(window.cutoff),
 		timeSeries: getTimeSeries(window),
 		modelSeries: getModelTimeSeries(window),
 		modelPerformanceSeries: getModelPerformanceSeries(window),
@@ -534,12 +541,12 @@ export async function getDashboardStats(range?: string | null): Promise<Dashboar
 
 export async function getOverviewStats(
 	range?: string | null,
-): Promise<Pick<DashboardStats, "overall" | "byAgentType" | "timeSeries">> {
+): Promise<Pick<DashboardStats, "overall" | "byAgentType" | "bySideChannel" | "timeSeries">> {
 	await initDb();
 	const window = getTimeRangeConfig(range);
 	return {
 		overall: getOverallStats(window.cutoff),
-		byAgentType: getStatsByAgentType(window.cutoff),
+		...getUsageAttribution(window.cutoff),
 		timeSeries: getTimeSeries(window),
 	};
 }
@@ -576,15 +583,27 @@ export async function getRecentErrors(range?: string | null, limit?: number): Pr
 	return dbGetRecentErrors(limit, getTimeRangeConfig(range).cutoff);
 }
 
+/**
+ * What a `model_usage` entry journaled of its response: the reply of a text
+ * completion, else the answers of a native judgment, else nothing. The entry is
+ * read back from a transcript, so the shapes are checked, not assumed.
+ */
+function modelUsageOutput(entry: SessionEntry): unknown {
+	const { completion, judgment } = entry as Partial<SessionModelUsageEntry>;
+	if (isRecord(completion) && typeof completion.reply === "string") return completion.reply;
+	if (isRecord(judgment) && isRecord(judgment.answers)) return judgment.answers;
+	return null;
+}
+
 export async function getRequestDetails(id: number): Promise<RequestDetails | null> {
 	await initDb();
 	const msg = getMessageById(id);
 	if (!msg) return null;
 
 	const entry = await getSessionEntry(msg.sessionFile, msg.entryId);
-	// Role-model attempts (judge, auto-thinking, …) journal only a `model_usage`
-	// record: usage and outcome, no request or response payload.
-	if (entry?.type === "model_usage") return { ...msg, messages: [entry], output: null };
+	// Off-transcript model calls (judge, auto-thinking, title, …) journal only a
+	// `model_usage` record: usage, outcome, and for some the reply or answers.
+	if (entry?.type === "model_usage") return { ...msg, messages: [entry], output: modelUsageOutput(entry) };
 	if (entry?.type !== "message" || !("message" in entry)) return null;
 
 	return {

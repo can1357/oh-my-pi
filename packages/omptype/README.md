@@ -87,6 +87,39 @@ const user = ZodUser.parse({ name: "Ada" });
 `@oh-my-pi/omptype/ark` provides the repository's ArkType compatibility facade
 and re-exports the same `type` and `scope` implementations.
 
+## JSON Schema import
+
+`fromJsonSchema` turns any JSON Schema document into an omptype schema that
+validates exactly as drafts 2020-12 and 7 specify, including `$dynamicRef`,
+`unevaluatedProperties`/`unevaluatedItems`, `$id`/`$anchor` resolution, and
+meta-schema vocabularies:
+
+```ts
+import { fromJsonSchema } from "@oh-my-pi/omptype";
+
+const read = fromJsonSchema(mcpTool.inputSchema, {
+	draft: "2020-12", // semantics where a resource declares no `$schema` ("7" for draft 7)
+	schemas: { "https://example.com/defs.json": defs }, // documents `$ref`s may name
+	formats: { email: value => value.includes("@") }, // `format` only asserts with a check
+});
+read.allows(args); // boolean
+read(args); // args with absent `default`s filled in, or OmpErrors with paths
+```
+
+The first calls are interpreted from a compiled plan; hot schemas switch to
+generated code (tagged unions become a `switch`, simple patterns char-code
+checks). It passes all 1,298 draft 2020-12 and 925 draft 7 core tests of the
+JSON-Schema-Test-Suite. Hot checks from the
+[pi-schema benchmark](https://github.com/earendil-works/pi/tree/main/packages/schema)
+(Node 26, Apple M4 Max, ns per valid check):
+
+| Case                             | omptype | ata | Ajv | TypeBox | pi-schema |
+| -------------------------------- | ------: | --: | --: | ------: | --------: |
+| nested object with tagged unions |  **85** | 131 | 337 |     341 |       305 |
+| union of 5 messages              |  **11** |  24 |  48 |      75 |        60 |
+| MCP tool schema with `$ref`      |  **35** |  40 |  85 |      66 |       113 |
+| recursive `$ref` schema          | **158** | 196 | 246 |     776 |       570 |
+
 ## Performance
 
 Run the benchmark from the repository root:

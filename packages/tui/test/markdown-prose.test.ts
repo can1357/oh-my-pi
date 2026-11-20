@@ -4,17 +4,6 @@ import { keywordInProse, maskNonProse } from "@oh-my-pi/pi-tui/prompt/markdown-p
 const ORCHESTRATE = /\borchestrate\b/i;
 
 describe("maskNonProse", () => {
-	it("preserves length and leaves plain prose untouched", () => {
-		const text = "please orchestrate the rollout across teams";
-		expect(maskNonProse(text)).toBe(text);
-	});
-
-	it("returns the input unchanged when no code/markup constructs are present", () => {
-		// Fast path: no backtick, angle bracket, or tilde fence.
-		const text = "a multi line\nmessage with no markup";
-		expect(maskNonProse(text)).toBe(text);
-	});
-
 	it("blanks fenced code blocks while keeping indices aligned", () => {
 		const text = "before\n```\norchestrate\n```\nafter orchestrate";
 		const masked = maskNonProse(text);

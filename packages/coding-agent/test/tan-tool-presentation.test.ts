@@ -88,13 +88,7 @@ describe("/tan prompt-cache tool presentation", () => {
 										id: "ask-fixture",
 										name: "ask",
 										arguments: {
-											questions: [
-												{
-													id: "scope",
-													question: "Which scope?",
-													options: [{ label: "Narrow" }, { label: "Wide" }],
-												},
-											],
+											html: '<form><p>Which scope?</p><label><input type="radio" name="scope" value="narrow" checked> Narrow</label><label><input type="radio" name="scope" value="wide"> Wide</label></form>',
 										},
 									},
 								],

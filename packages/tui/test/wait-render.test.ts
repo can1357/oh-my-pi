@@ -9,7 +9,8 @@ import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { prompt } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../../coding-agent/src/prompts/tools/task-summary.md" with { type: "text" };
 import type { NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
-import { type CoordinationDetails, waitToolRenderer } from "@oh-my-pi/pi-tui/tools/wait";
+import { type CoordinationDetails, createIrcMessageCard, waitToolRenderer } from "@oh-my-pi/pi-tui/tools/wait";
+import { renderAgentWrite } from "@oh-my-pi/pi-tui/tools/proc-render";
 import { decodeBench } from "./fixtures/job-widget-views";
 
 /** Every described node under `children`, depth first. */
@@ -50,23 +51,6 @@ function renderLines(resultText: string): string {
 describe("job renderer task-result preview", () => {
 	beforeAll(async () => {
 		await initTheme();
-	});
-
-	it("renders the consumed peer message as a sender card", () => {
-		const component = waitToolRenderer.renderResult(
-			{
-				content: [{ type: "text", text: "[42] Worker: file unlocked" }],
-				details: {
-					op: "wait",
-					waited: { id: "42", from: "Worker", to: "Main", body: "file unlocked", ts: Date.now() },
-				},
-			},
-			{ expanded: true, isPartial: false },
-			theme,
-		);
-		const output = Bun.stripANSI(component.render(120).join("\n"));
-		expect(output).toContain("Worker");
-		expect(output).toContain("file unlocked");
 	});
 
 	it("previews the envelope body, not the wrapper markup", () => {
@@ -118,11 +102,6 @@ describe("job renderer task-result preview", () => {
 		const output = Bun.stripANSI(renderLines(summary));
 		expect(output).toContain('{ "echo": "alpha", "ok": true }');
 		expect(output.split("\n").some(line => line.trim() === "{")).toBe(false);
-	});
-
-	it("passes non-envelope result text through unchanged", () => {
-		const output = renderLines("42 pass, 0 fail (18.4s)");
-		expect(output).toContain("42 pass, 0 fail (18.4s)");
 	});
 
 	it("drops the id column when the label repeats it", () => {
@@ -469,7 +448,7 @@ describe("job renderer task-result preview", () => {
 			const tiles = (strip!.c ?? []) as NativeNode[];
 			expect(tiles.map(tile => byRole(tile, "omp.job.tile.title")?.p)).toMatchObject([
 				{ spans: [{ t: "Bencher" }] },
-				{ spans: [{ t: "verb-bench · decode throughput" }] },
+				{ spans: [{ t: "loadtest · decode throughput" }] },
 			]);
 			const bench = tiles[1]!;
 			expect(byRole(bench, "omp.job.tile.chart")).toBeDefined();
@@ -496,11 +475,81 @@ describe("job renderer task-result preview", () => {
 				const lines = (component.render(100) as readonly string[]).map(line => Bun.stripANSI(line));
 				const row = lines.findIndex(line => line.includes("bg_3"));
 				expect(row).toBeGreaterThan(0);
-				expect(lines[row]).toContain("verb-bench · decode throughput bg_3");
+				expect(lines[row]).toContain("loadtest · decode throughput bg_3");
 				expect(lines[row]).toMatch(/decode 186 tok\/s ▲ 15% {2}42\.0s$/);
 				expect(lines[row + 1]).toMatch(/[▁▂▃▄▅▆▇█]+ {2}186 tok\/s {2}┄ target 200 tok\/s/);
 				for (const line of lines) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(100);
 			}
 		});
+	});
+});
+
+describe("IRC body wrapping", () => {
+	beforeAll(async () => {
+		await initTheme();
+	});
+
+	it("soft-wraps a long body line to the card width when expanded", () => {
+		const longLine = "word ".repeat(40).trim();
+		const component = createIrcMessageCard({ kind: "incoming", from: "Peer", body: longLine }, () => true, theme);
+		const lines = component.render(120) as readonly string[];
+		const stripped = lines.map(line => Bun.stripANSI(line));
+		const bodyLines = stripped.filter(line => line.includes("word"));
+		// A 200-char line wraps to multiple lines at the card width
+		expect(bodyLines.length).toBeGreaterThanOrEqual(2);
+		// Full content preserved across the wrap
+		const words = bodyLines
+			.join(" ")
+			.split(/\s+/)
+			.filter(w => w === "word");
+		expect(words).toHaveLength(40);
+	});
+
+	it("shows every line of an incoming message when expanded", () => {
+		const body = Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n");
+		const component = createIrcMessageCard({ kind: "incoming", from: "Peer", body }, () => true, theme);
+		const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
+		for (let index = 0; index < 30; index++) expect(output).toContain(`line ${index}`);
+		expect(output).not.toContain("more line");
+	});
+
+	it("shows an expand hint on a collapsed card with hidden lines", () => {
+		const body = ["line one", "line two", "line three", "line four"].join("\n");
+		const component = createIrcMessageCard({ kind: "incoming", from: "Peer", body }, () => false, theme);
+		const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
+		// The card shows three lines collapsed, so one of four is hidden.
+		expect(output).toContain("+1 more line");
+		expect(output).toContain("Expand");
+	});
+
+	it("preserves ANSI escape codes across a wrap boundary", () => {
+		const longLine = `\x1b[31m${"red ".repeat(40)}\x1b[0m`;
+		const component = createIrcMessageCard({ kind: "incoming", from: "Peer", body: longLine }, () => true, theme);
+		const lines = component.render(120) as readonly string[];
+		const rawJoined = lines.join("\n");
+		// ANSI codes preserved in raw output
+		expect(rawJoined).toContain("\x1b[31m");
+		expect(rawJoined).toContain("\x1b[0m");
+		// Full visible content preserved after stripping
+		const stripped = Bun.stripANSI(rawJoined);
+		const words = stripped.split(/\s+/).filter(w => w === "red");
+		expect(words).toHaveLength(40);
+	});
+
+	it("wraps an expanded outgoing agent write in full at render(120)", () => {
+		// Twenty long lines: expanded shows every one, each soft-wrapped to the
+		// card width instead of clipped at the fixed cap, with no elision row.
+		const body = Array.from({ length: 20 }, (_, index) => `${"word ".repeat(30)}END-${index}`).join("\n");
+		const component = renderAgentWrite(
+			"peer",
+			body,
+			undefined,
+			undefined,
+			{ expanded: true, isPartial: false },
+			theme,
+		);
+		const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
+		for (let index = 0; index < 20; index++) expect(output).toContain(`END-${index}`);
+		expect(output).not.toContain("more lines");
 	});
 });

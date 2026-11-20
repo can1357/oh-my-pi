@@ -6,6 +6,7 @@
 
 - Entry: `packages/coding-agent/src/tools/read.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/read.md`
+- On-demand doc topics (`ReadTool.docTopics()`): `xd://read/sources` (`prompts/tools/read-sources.md`: SQLite, archive, JSON query, executable, video, SVG and merge-conflict selectors, plus `write` targets for archives and SQLite) and `xd://read/urls` (each internal URL scheme's `promptReference()`: sub-paths, queries and limits its one-line system-prompt entry leaves out).
 - Key collaborators:
    - `packages/coding-agent/src/tools/path-utils.ts` — prefer literal filenames; normalize local paths and recover accidental delimited path lists.
    - `packages/tui/src/tools/read.ts` / `line-ranges.ts` — split trailing selectors and parse line ranges; `packages/coding-agent/src/tools/read-selector.ts` resolves raw, range, and tail selectors.
@@ -14,7 +15,7 @@
    - `packages/coding-agent/src/tools/sqlite-reader.ts` — detect SQLite targets, parse selectors, render tables.
    - `packages/coding-agent/src/tools/fetch.ts` — URL parsing, fetch/render pipeline, URL cache/artifacts.
    - `packages/coding-agent/src/internal-urls/router.ts` — built-in internal-resource registry, including `ssh://` and `xd://`; MCP may advertise additional schemes.
-   - `crates/pi-natives/src/edit.rs` (`notebook_to_editable_text`, exposed as `notebookToEditableText`) — convert `.ipynb` to editable cell text.
+   - `crates/natives/src/edit.rs` (`notebook_to_editable_text`, exposed as `notebookToEditableText`) — convert `.ipynb` to editable cell text.
    - `packages/coding-agent/src/utils/cpuprofile.ts` / `sample-profile.ts` — summarize recognized profiler reports.
    - `packages/coding-agent/src/utils/file-display-mode.ts` — decide hashline vs line-number vs raw display.
    - `packages/coding-agent/src/workspace-tree.ts` — render directory trees.
@@ -24,7 +25,7 @@
 ## Registration / Visibility
 
 - Metadata: `strict = true`, `loadMode = "essential"`. Approval normally uses the internal scheme's read tier; PDF page screenshots require `"exec"`.
-- The model-facing prompt renders hashline guidance from the live display mode and executable-view guidance only when IDA is available.
+- The model-facing prompt renders hashline guidance from the live display mode; it names the special sources and links `xd://read/sources` for their selectors, which lists executable analysis views only when a disassembler backend resolves (`disassembler.backend`).
 
 ## Inputs
 
@@ -89,7 +90,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    - Plain URL reads call `executeReadUrl()`.
    - URL reads with line selectors fetch/render into the URL cache as needed, then paginate the rendered text locally.
 3. It checks the internal URL router, including built-ins and MCP-advertised schemes.
-   - URLs of file-backed schemes that the router locates to a local file (`local://`, `artifact://`, `agent://`, `skill://`, `memory://root/...`, `vault://`, ...) read that file through the filesystem pipeline, so images, `:img`, conversion, selectors, streaming, and snapshots behave like filesystem reads while the URL stays the result's source. An image question (`?q=`) is split off only for `local://` and `attachment://` images; on other schemes `?q=` stays part of the URL.
+   - URLs of file-backed schemes that the router locates to a local file (`local://` (spills included), `agent://`, `skill://`, `memory://root/...`, `vault://`, ...) read that file through the filesystem pipeline, so images, `:img`, conversion, selectors, streaming, and snapshots behave like filesystem reads while the URL stays the result's source. An image question (`?q=`) is split off only for `local://` and `attachment://` images; on other schemes `?q=` stays part of the URL.
    - `agent://` path extraction (`/path`) returns a discrete value that bypasses pagination.
    - Other internal resources are paginated in memory.
 4. It prefers an existing literal filesystem path before treating selector-looking colons as archive, SQLite, PDF-image, or line-selector syntax.
@@ -98,7 +99,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    - On success, `readArchive()` either lists a directory or decodes an entry as UTF-8 text.
 6. It tries SQLite resolution with `resolveSqliteReadPath()` in `read-sqlite.ts`.
    - `parseSqlitePathCandidates()` scans for `.sqlite`, `.sqlite3`, `.db`, `.db3` before any `:table`, `:key`, or `?query` suffix.
-   - `readSqlite()` dispatches on `parseSqliteSelector()`. Executable/IDA database view targets are then handled by `resolveBinaryViewPath()` and `readBinary()`.
+   - `readSqlite()` dispatches on `parseSqliteSelector()`. Executable/IDA database analysis view targets are then handled by `resolveBinaryViewPath()` and `readBinary()`.
 7. Otherwise it treats the input as a local filesystem path.
    - `resolveReadPath()` expands `~`, resolves relative to session cwd, treats bare `/` as session cwd, and retries macOS screenshot/NFD/curly-quote variants.
    - If the path does not exist, `findUniqueWorkspaceSuffix()` attempts a workspace-wide unique suffix match (skipped for remote mounts). A cwd-root filename matching the active `local://` plan basename may recover that plan. As a final guarded recovery, a mistakenly delimited list of existing paths is read part by part; callers should still issue one `read` per path.
@@ -150,7 +151,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 ### Archives
 
 - Supported archive containers (extension table in `packages/utils/src/ar/registry.ts`): tar family `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`/`.tbz`, `.tar.xz`/`.txz`, `.tar.zst`/`.tzst`, `.tar.z`; ZIP family `.zip`, `.jar`, `.war`, `.ear`, `.apk`, `.whl`, `.ipa`, `.xpi`, `.vsix`, `.nupkg`, `.cbz`; standalone `.rar`/`.cbr`, `.7z`, `.iso`, `.cab`, `.cpio`, `.rpm`, `.ar`/`.a`/`.lib`, `.deb`, `.lzh`/`.lha`, `.arj`, `.asar`; single-stream `.gz`, `.bz2`, `.xz`, `.zst`, `.z`, `.lzma`.
-- Syntax: `archive.ext`, `archive.ext:path/inside`, `archive.ext:path/inside:50-60`.
+- Syntax: `archive.ext`, `archive.ext:path/inside`, `archive.ext:path/inside:50-60`, `archive.ext:path/inside.json?q=.x`.
 - `openArchive()` dispatches through the `@oh-my-pi/pi-utils/ar` registry (`packages/utils/src/ar/open.ts`); limits live in `packages/utils/src/ar/limits.ts`: in-memory archives cap at 256 MiB, index reads at 64 MiB, and individual member extraction at 64 MiB.
 - Plain TAR indexing reads headers and bounded metadata through byte ranges, skipping member payloads. Its container size is not subject to the whole-buffer limit; selected members retain the extraction limit.
 - Archive paths normalize `/`, drop `.` segments, and reject `..`.
@@ -159,14 +160,15 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 - Selected PDF entries use the same Markdown conversion as ordinary PDF files, including line, multi-range, tail, and raw selectors. The read identity retains both the archive and member path and is immutable.
 - PDF page-image reads such as `a.zip:folder/sample document.pdf:page2.png` render only the selected member through Chromium. Its bounded temporary PDF is removed after success, failure, or cancellation; archive paths are never unpacked into the working directory.
 - Other file entries are UTF-8 decoded. Unsupported binary entries return `[Cannot read binary archive entry '...' (...)]` instead of bytes.
-- Text archive entries reuse the normal in-memory pagination/anchoring path.
+- Text archive entries are paginated in memory as immutable resources (no hashline anchors) and accept [JSON queries](#json-queries).
 
-### Executables and IDA databases
+### Executables and disassembler databases
 
-- When IDA is available, ELF/PE/Mach-O binaries (including extensionless files) and IDA database files open an IDA-backed overview and function list instead of a binary-file notice.
-- Views: `:<func|0xaddr>` for pseudocode, `:<func>:asm`, `:imports`, `:exports`, `:strings`, and `:xrefs:<func|0xaddr>`. Append line selectors to page the rendered view (`bin:main:10-40`).
-- Universal Mach-O reads use the host-architecture slice by default; `bin:@x86_64:main` selects another slice.
-- Views are immutable generated text and do not seed hashline edits. First use may open or create an IDA database; `:raw` bypasses the view path.
+- Bare reads of ELF/PE/Mach-O binaries (including extensionless files) and IDA `.i64`/`.idb` files return on-disk metadata only (`entityLabel: "binary metadata"`). They never open an analysis database or provision a backend; line selectors page the metadata text. `:raw` bypasses this path.
+- The metadata footer lists the explicit analysis selectors and points to eval's `dsm` namespace (`xd://eval/dsm`), or, when `disassembler.backend` resolves to no backend, says analysis is disabled.
+- Analysis views are explicit opt-in: `:overview` (function list), `:<func|0xaddr>` (pseudocode), `:<func>:asm`, `:imports`, `:exports`, `:strings`, and `:xrefs:<func|0xaddr>`. Append line selectors to page the rendered view (`bin:main:10-40`). They open the database through the selected backend (IDA or Ghidra), which may provision Ghidra on first use; see [`dsm`](dsm.md).
+- Universal Mach-O reads use the host-architecture slice by default; `bin:@x86_64` selects another slice's metadata and `bin:@x86_64:main` analyzes it.
+- Analysis selectors fail when no backend is available; `.i64`/`.idb` analysis requires `disassembler.backend=ida`. Views are immutable generated text and do not seed hashline edits.
 
 ### Video
 
@@ -231,6 +233,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 - Modifier-only selectors (`?limit=2`, `?offset=1`, `?raw=true`, `?compact=true`) and empty `q=`/`query=` use the identity filter `.`. Unknown-only query strings are not JSON selectors.
 - One leading UTF-8 BOM is accepted per JSON input, including JSONL. U+FEFF inside strings and raw-input (`jq -R`) bytes remain unchanged; malformed JSON still reports a parse error.
 - `ssh://HOST/tmp/data.json?q=.items&limit=2` resolves the bare SSH file URI and runs the same JSON renderer locally on its bounded text. The 1 MiB SSH ceiling still applies. Filters never enter the remote shell, `%3F` still names a literal `?`, and unsupported URL parameters remain errors. Temporary query input is owned and removed on success, failure, or cancellation; trailing line selectors address query output.
+- Archive members accept JSON queries (`archive.tar:receipt.json?q=.x`). A literal member name containing `?` wins; otherwise the query runs on the extracted UTF-8 member text, and trailing line selectors address query output. Directory, PDF, and binary members with a JSON selector throw a `ToolError`.
 
 ### Documents
 
@@ -265,7 +268,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 
 ### Internal URLs
 
-- `read` delegates internal and MCP-advertised schemes to `InternalUrlRouter`; the built-in registry currently includes `agent://`, `artifact://`, `attachment://`, `cfg://`, `conflict://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `mr://`, `omp://`, `out://` (write-only; reads fail), `pr://`, `proc://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`.
+- `read` delegates internal and MCP-advertised schemes to `InternalUrlRouter`; the built-in registry currently includes `agent://`, `attachment://`, `cfg://`, `conflict://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `mr://`, `omp://`, `out://` (write-only; reads fail), `pr://`, `proc://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`.
    - `security://` is reserved for the OMP-owned, producer-neutral, read-only security-analysis store.
    - `agent://<id>` reads a subagent's latest completed output, including a successful message-result follow-up after revival that the parent requested or the user typed into the focused subagent session; while a newer turn runs, the previous output is marked superseded. Agents without published output return status and progress. `/key/index` extracts from the latest published JSON result. Peer-woken message replies and cancelled or empty message-result follow-ups do not replace the accepted result, nor do structured wakes without a `yield`. `agent://all` is write-only. Bare `history://` lists registered agents and persisted subagents; `history://<id>` reads a transcript across turns.
    - `proc://` lists caller-visible background jobs (including running agents without job rows) and project services; `proc://<id>` returns status and available output/logs without consuming async-result delivery. A running subagent's row also shows its latest requests, cost, context fill, completion estimate and stage, as in `wait`. Service log files are searchable with `grep proc://<id>`.
@@ -277,13 +280,13 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
    - handles URLs with no local file (virtual, remote, and device schemes, plus located schemes whose target is a directory or missing)
    - returns discrete values (`shape: "value"`, e.g. `agent://` path extraction) without pagination; otherwise paginates the resolved text in memory
    - `:img` is rejected here; it requires a file-backed URL. A file-backed URL that only reached this path because locate deferred to a remote resolve (an unknown `skill://` while MCP is available) reports its local miss (`Unknown skill`) instead
-   - passes `immutable` (defaulted from the scheme spec) through to `resolveFileDisplayMode()` so anchors are suppressed for immutable resources such as artifacts, skills, memory, and agent outputs
+   - passes `immutable` (defaulted from the scheme spec) through to `resolveFileDisplayMode()` so anchors are suppressed for immutable resources such as skills, memory, and agent outputs
    - sets `ignoreResultLimits: true` for schemes whose spec is `unbounded` (`skill://`) so the full text is paginated only by explicit selectors, not by the normal default line limit; a resource can override that (`InternalResource.unbounded`), which `skill://` does for MCP-served skill text
 - `conflict://` blocks are registered by the `<path>:conflicts` selector; `conflict://<N>` reads one registered marker block, and `/ours`, `/theirs`, or `/base` selects a side. Ordinary head, tail, comma-list and `:raw` selectors address lines relative to that block or side (`conflict://1/theirs:1-3`, `conflict://1/theirs:raw:-20`); displayed line numbers retain their original file coordinates. `conflict://*` is write-only.
 - `issue://<N>` / `pr://<N>` (and the long form `issue://<owner>/<repo>/<N>` / `pr://<owner>/<repo>/<N>`) route through the same SQLite cache the `github` tool writes to; `?comments=0` selects the no-comments rendering. Bare `issue://` / `pr://` (and repository-qualified variants) browse live lists with `?state=`, `?limit=`, `?author=`, and `?label=`. PR diffs use `pr://<N>/diff`, `/diff/<i>`, and `/diff/all`. Every repository-qualified form also accepts a GitHub Enterprise host prefix (`pr://ghe.example.com/<owner>/<repo>/<N>`), and a host with no dot (`pr://ghe/<owner>/<repo>/<N>`) is recognized in the numbered form. Short forms resolve the host from the session checkout, so an enterprise repo needs no prefix.
 - `mr://<host>/<group…>/<project>/<iid>/diff` (or `mr://<iid>/diff` for the checkout's GitLab project) lists a GitLab merge request's changed files via `glab`; `/diff/<i>` returns one file and `/diff/all` the full diff. Rows share the `issue://`/`pr://` cache. When a `GITLAB_TOKEN`-style env token is set, only gitlab.com, `GITLAB_HOST`, hosts in glab's config, or the checkout's own GitLab host are contacted.
 - `memory://` accepts two grammars. `memory://root[/path]` reads file-backed memory artifacts under the project memory root (`memory://root` resolves to the compact startup summary `memory_summary.md`; deeper paths address files such as `MEMORY.md` and `skills/<name>/SKILL.md`, and `memory://root/...` supports glob patterns for `glob`). `memory://<memory-id>` looks up a live Mnemopi memory row by id — working or episodic — and returns the full stored content (not the clipped recall preview) behind a YAML frontmatter header carrying `id`, `bank`, `store`, `memory_type`, `source`, `timestamp`/`created_at`, `importance`, `veracity`, `session_id`, and `metadata`. The id grammar resolves against the calling session: it needs that session on `memory.backend = mnemopi` and searches only its own scoped banks, so a row held by another live session is not reachable; with `hindsight` it returns a corrective pointer (hindsight memories are not addressable), and unknown ids error with a pointer to `recall` for the available ids. This is the read counterpart to `memory_edit update`: read the full row before overwriting a truncated preview.
-- `artifact://<id>` locates the session artifact's backing file and reads it through the filesystem pipeline: reads stream at any size, and unbounded `:raw` follows the located-file raw cap below. Protocol-level whole-resource resolution by other consumers is hard-capped at 8 MiB (`MAX_INLINE_ARTIFACT_BYTES` in `packages/coding-agent/src/internal-urls/artifact-protocol.ts`); larger artifacts reject the whole-resource read with selector and backing-path hints. Path consumers (search/grep, the bash URL filesystem) use `locate` and work on artifacts of any size.
+- Spill `N` (truncated tool output, shaped or spotlight originals, shake placeholders, minimized-bash raw output, async job output) is the ordinary file `<N>.log` at the session's `local://` root, read as `local://N.log`; the usual selectors apply (`local://N.log:1-30`, `local://N.log:raw:1-3000`). `local://` locates the backing file and reads it through the filesystem pipeline: reads stream at any size, and unbounded `:raw` follows the located-file raw cap below. Protocol-level whole-resource resolution by other consumers (`LOCAL_TEXT_RESOURCE_MAX_BYTES` in `packages/coding-agent/src/internal-urls/local-protocol.ts`) is capped at 1 MiB; a larger file returns a notice pointing at filesystem path handling or a line selector. Path consumers (search/grep, the bash URL filesystem) use `locate` and work on files of any size.
 
 ### Web URLs
 
@@ -294,7 +297,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 - URL render pipeline in `renderUrl()`:
    1. normalize scheme (`https://` added for bare `www.`)
    2. try special handlers for known sites unless raw
-   3. fetch with `loadPage()`
+   3. fetch with `loadPage()`, which names the bot protection when the response is its challenge or block page and then never reports it `ok`, so a site handler or alternate fetched through `loadPage()` treats it as a failed fetch: on any status Cloudflare's `cf-mitigated: challenge` header or a `js_challenge` `<input>` outside comments and raw-text elements on a page of at most 64 KiB (an interstitial), and on an error status also `_cf_chl_opt` (Cloudflare), `captcha-delivery.com` (DataDome), `px-captcha` (PerimeterX) or "blocked by network security". A 2xx challenge page is not rendered: the URL goes to the remote readers (Parallel, Firecrawl, Jina) only, skipping the alternates, content negotiation, local renderers, `llms.txt` and raw-HTML fallbacks, and if none returns more than a JavaScript gate or a short block page the read ends with `method: "blocked"` and a note naming the protection and status and pointing to the `browser` tool, which runs the challenge script. A walled error status stays `method: "failed"`, with the protection named in its notes
    4. if content is image/PDF/DOCX/etc., try binary fetch + markit/image handling
    5. handle JSON directly, feeds via feed parser, plain text directly
    6. for HTML and non-raw mode, try declared markdown alternates, content negotiation, feed alternates, HTML-to-text renderers, extracted linked documents, then `llms.txt`
@@ -316,7 +319,9 @@ Notes: ...
    - profile (`/<handle>`, `/with_replies`, `/media`) → `x_user_search` plus a `from:<handle>` `x_keyword_search` (Latest, 10 posts), with `allowed_x_handles` pinned to the handle;
    - search (`/search?q=`; `f=live` → Latest, `f=media` → `filter:media`, `f=user` → `x_user_search`) and hashtag (`/hashtag/<tag>`) → `x_keyword_search`.
    - Models are tried in `xaiModelChain()` order (`web` role xAI candidates plus the provider default's `webSearchModel`, ranked by provider priority so `xai-oauth` runs before `xai` unless `modelProviderOrder` says otherwise) with `max_turns: 2` and low reasoning effort; the call bills the xAI account per post and profile fetched. The answer is the model's rendering of the tool output, which the API does not expose raw; the `Notes:` header names the model and fetch counts. Without xAI credentials, for other X pages (home, explore, followers, lists), or when every model fails, the result is a `text/plain` explanation with method `x-unavailable`.
-- `method` records the winning path (`json`, `feed`, `text`, `alternate-markdown`, `content-negotiation`, `image`, `markit`, `llms.txt`, `raw`, `raw-html`, etc.).
+- `method` records the winning path (`json`, `feed`, `text`, `alternate-markdown`, `content-negotiation`, `image`, `markit`, `llms.txt`, `raw`, `raw-html`, `blocked`, etc.).
+- Without a Jina key, the Jina reader (`r.jina.ai`) runs only while `providers.webKeyless` is on; Parallel and Firecrawl readers always require their credentials.
+- A Jina rendering whose header warns `Target URL returned error`, or a Firecrawl scrape whose `metadata.statusCode` is 400 or more, is rejected like an empty one: the reader's own fetch got the target's error or block page. A Parallel, Firecrawl or Jina rendering of at most 2 KB carrying block-page or JavaScript-gate wording ("blocked by network security", "verify you are human", "are you a robot", "access to this page has been denied", "enable javascript", "javascript required") is skipped the same way, so later readers still run.
 - URL reads may return an inline image block when the fetched resource is a supported image and survives resizing.
 
 ## Side Effects
@@ -324,7 +329,7 @@ Notes: ...
 - Filesystem
    - Buffers local files up to 4 MiB once; streams larger text files. SQLite reads may initialize WAL sidecars without permitting SQL writes.
    - Reads tar/tgz archives fully into memory before indexing (256 MiB cap); ZIP archives are indexed via ranged central-directory reads.
-   - May read URL-cache artifact files from the session artifacts directory.
+   - May read URL-cache spill files (`<id>.log`) from the session's `local://` root.
    - Writes URL output artifacts when URL output is truncated or when line-range pagination needs a persisted cache body.
 - Network
    - URL mode performs HTTP fetches, binary refetches, and alternate-endpoint probes.
@@ -369,7 +374,7 @@ Notes: ...
 - Unique suffix auto-resolution glob timeout: `5000` ms.
 - The local read buffering cap is `4 MiB` (`SNAPSHOT_MAX_BYTES`); larger files use streamed windows instead of a whole-file buffer.
 - An unbounded `:raw` read of a URL-located file (any file-backed scheme except `unbounded` ones such as `skill://`) is refused above `50 KiB` (`MAX_URL_RAW_INLINE_BYTES`) with a notice naming bounded ranges (`<url>:raw:1-3000`, `<url>:1-3000`) and the backing file path.
-- A numbered page of an immutable URL-located file (for example `artifact://`) over `50 KiB` appends the same backing-file notice; writable schemes (`local://`, `vault://`) never get it, so a write-back cannot persist it. Only `artifact://` pages (`SchemeSpec.artifactStore`) skip the artifact spill; every other URL read spills over `tools.artifactSpillThreshold` like a plain file.
+- A numbered page of an immutable URL-located file (for example `skill://`) over `50 KiB` appends the same backing-file notice; writable schemes (`local://`, `vault://`) never get it, so a write-back cannot persist it. Line-page reads of any `local://` file (spills included) get the full page budget and skip the artifact spill (`SchemeSpec.unspilledPages` on the local handler), since selectors re-read the file; every other URL read spills over `tools.artifactSpillThreshold` like a plain file.
 
 ## Errors
 
@@ -383,8 +388,8 @@ Notes: ...
 - Missing local/archive/sqlite paths first attempt unique suffix resolution; if no unique match or guarded recovery exists they error. Explicit semicolon lists fan out after literal/archive/SQLite precedence, including when the combined filename is too long; each member keeps its selectors and errors. A single overlong filename retains its filesystem error. Permission and I/O errors do not trigger missing-path recovery.
 - Targets that are neither regular files nor directories (character or block device, FIFO, socket) throw a `ToolError` naming the file kind; SQLite detection skips them rather than sniffing their header.
 - Out-of-bounds line reads do not throw. They return explanatory text with a suggestion such as `Use :1 ...` or `Use :<last line> ...`.
-- Probable binary local files return a notice unless `:raw` was requested or an available IDA-backed executable/database view handles them.
-- Binary archive entries do not throw; they return a text notice.
+- Probable binary local files return a notice unless `:raw` was requested; executables and IDA databases return metadata instead (see [Executables and disassembler databases](#executables-and-disassembler-databases)).
+- Binary archive entries return a text notice without throwing, unless a JSON selector is attached (JSON selectors on directory, PDF, or binary archive entries throw a `ToolError`).
 - Document conversion failure returns a text notice.
 - Image oversize/unsupported/invalid cases throw.
 - SQLite parser rejects unsupported parameter combinations early; DB/runtime errors are caught and rethrown as `ToolError(message)`.
@@ -402,3 +407,4 @@ Notes: ...
 - Raw SQLite `q=` execution is not keyword-restricted beyond “no bound parameters”; `PRAGMA query_only = ON` prevents database writes.
 - The file snapshot store is not a read acceleration cache. It exists to verify and recover hashline edits when the file changed after the read.
 - From the third identical successful text result for the same path, a per-session loop-breaking hint advises narrowing the selector or proceeding with the edit; tracking resets when the output changes.
+- A read that runs beside an earlier call of the same message that may write (its approval, asked with its arguments and no context, is not `read`, e.g. `bash`) gets `ctx.toolCall.earlierEffectsSettled` from the agent loop. `execute()` waits for those calls before reading, so it returns the file as they left it; an abort during the wait rejects the read. A single web URL (no `;`) does not wait.

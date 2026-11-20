@@ -1,6 +1,6 @@
 /**
  * Count a file or text through every embedded offline tokenizer and print a
- * per-encoding stats table (see `crates/pi-natives/src/utok`).
+ * per-encoding stats table (see `crates/natives/src/utok`).
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";

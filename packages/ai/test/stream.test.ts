@@ -8,7 +8,16 @@ import { Effort } from "@oh-my-pi/pi-ai";
 import { __resetVertexTokenCache } from "@oh-my-pi/pi-ai/providers/google-auth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 import { complete, stream } from "@oh-my-pi/pi-ai/stream";
-import type { Api, Context, ImageContent, Model, OptionsForApi, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import type {
+	Api,
+	AssistantMessage,
+	Context,
+	ImageContent,
+	Model,
+	OptionsForApi,
+	Tool,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { $which } from "@oh-my-pi/pi-utils";
@@ -802,6 +811,166 @@ describe("Generate E2E Tests", () => {
 				else Bun.env.GOOGLE_CLOUD_API_KEY = originalApiKey;
 				if (originalGac === undefined) delete Bun.env.GOOGLE_APPLICATION_CREDENTIALS;
 				else Bun.env.GOOGLE_APPLICATION_CREDENTIALS = originalGac;
+			}
+		});
+
+		it("routes Vertex Mistral rawPredict with ADC auth and an OpenAI-shaped body (#19010)", async () => {
+			const envKeys = [
+				"GOOGLE_CLOUD_PROJECT",
+				"GCP_PROJECT",
+				"GCLOUD_PROJECT",
+				"GOOGLE_VERTEX_LOCATION",
+				"GOOGLE_CLOUD_LOCATION",
+				"VERTEX_LOCATION",
+				"GOOGLE_CLOUD_API_KEY",
+				"GOOGLE_APPLICATION_CREDENTIALS",
+				"APPDATA",
+			] as const;
+			const originalEnv = envKeys.map(key => [key, Bun.env[key]] as const);
+			// Force the metadata-server token path (see the Claude rawPredict test above).
+			const absentAdcHome = path.join(os.tmpdir(), `vertex-adc-mistral-${Date.now()}`);
+			const homedirSpy = spyOn(os, "homedir").mockReturnValue(absentAdcHome);
+			const model: Model<"openai-completions"> = buildModel({
+				id: "mistral-small-2503",
+				name: "Mistral Small 2503",
+				api: "openai-completions",
+				provider: "google-vertex",
+				baseUrl:
+					"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/mistralai/models/mistral-small-2503:streamRawPredict",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 131_072,
+				maxTokens: 8_192,
+			});
+			const captured = Promise.withResolvers<{
+				url: string;
+				authorization: string | null;
+				body: unknown;
+			}>();
+
+			try {
+				__resetVertexTokenCache();
+				for (const key of envKeys) delete Bun.env[key];
+				Bun.env.GOOGLE_CLOUD_PROJECT = "vertex-project";
+				Bun.env.GOOGLE_VERTEX_LOCATION = "global";
+				Bun.env.APPDATA = absentAdcHome;
+
+				// Replay one tool call issued by another model: a long
+				// OpenAI-style id must be clamped to 9 alphanumerics, the tool
+				// result must carry its name, and `max_tokens` (not
+				// `max_completion_tokens`) must be sent with no `store`.
+				const priorAssistant: AssistantMessage = {
+					role: "assistant",
+					api: "openai-completions",
+					provider: "openai",
+					model: "gpt-4o",
+					content: [
+						{
+							type: "toolCall",
+							id: "call_abcdefghijklmnopqrstuvwxyz",
+							name: "math_operation",
+							arguments: { a: 1, b: 2, operation: "add" },
+						},
+					],
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: Date.now(),
+				};
+				const events = stream(
+					model,
+					{
+						messages: [
+							{ role: "user", content: "Hello", timestamp: Date.now() },
+							priorAssistant,
+							{
+								role: "toolResult",
+								toolCallId: "call_abcdefghijklmnopqrstuvwxyz",
+								toolName: "math_operation",
+								content: [{ type: "text", text: "3" }],
+								isError: false,
+								timestamp: Date.now(),
+							},
+							{ role: "user", content: "Thanks", timestamp: Date.now() },
+						],
+					},
+					{
+						apiKey: "<authenticated>",
+						maxTokens: 100,
+						fetch: async (input, init) => {
+							const url = input instanceof Request ? input.url : input.toString();
+							if (
+								url ===
+								"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+							) {
+								return new Response(JSON.stringify({ access_token: "vertex-token", expires_in: 3600 }));
+							}
+							const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+							const bodyText = input instanceof Request ? await input.clone().text() : String(init?.body ?? "");
+							captured.resolve({
+								url,
+								authorization: headers.get("authorization"),
+								body: JSON.parse(bodyText),
+							});
+							return new Response(JSON.stringify({ error: { message: "stop after capture" } }), {
+								status: 400,
+							});
+						},
+					},
+				);
+
+				for await (const _event of events) {
+				}
+
+				const request = await captured.promise;
+				// The openai-completions transport appends /chat/completions to
+				// the model baseUrl; the rawPredict endpoint takes no suffix.
+				expect(request.url).toBe(
+					"https://aiplatform.googleapis.com/v1/projects/vertex-project/locations/global/publishers/mistralai/models/mistral-small-2503:streamRawPredict",
+				);
+				expect(request.authorization).toBe("Bearer vertex-token");
+				// OpenAI-shaped body: the Anthropic transform must not strip
+				// `model` or inject `anthropic_version` on partner publishers.
+				const body = request.body as Record<string, unknown>;
+				expect(body.model).toBe("mistral-small-2503");
+				expect(body.anthropic_version).toBeUndefined();
+				// Mistral wire shape: `max_tokens`, no `store`, clamped ids.
+				expect(body.max_tokens).toBe(100);
+				expect(body.max_completion_tokens).toBeUndefined();
+				expect(body.store).toBeUndefined();
+				const wireMessages = body.messages as Array<Record<string, unknown>>;
+				const assistantMsg = wireMessages.find(
+					msg => msg.role === "assistant" && Array.isArray(msg.tool_calls),
+				) as unknown as {
+					tool_calls: Array<{ id: string; function: { name: string; arguments: string } }>;
+				};
+				expect(assistantMsg.tool_calls).toHaveLength(1);
+				expect(assistantMsg.tool_calls[0]?.id).toBe("callabcde");
+				expect(assistantMsg.tool_calls[0]?.function.name).toBe("math_operation");
+				const toolMsg = wireMessages.find(msg => msg.role === "tool") as unknown as {
+					tool_call_id: string;
+					name: string;
+				};
+				expect(toolMsg.tool_call_id).toBe("callabcde");
+				expect(toolMsg.name).toBe("math_operation");
+				// A synthetic bridge assistant follows the tool result: Mistral
+				// rejects user turns directly after tool results.
+				const toolIndex = wireMessages.findIndex(msg => msg.role === "tool");
+				expect((wireMessages[toolIndex + 1] as Record<string, unknown>).role).toBe("assistant");
+			} finally {
+				__resetVertexTokenCache();
+				homedirSpy.mockRestore();
+				for (const [key, value] of originalEnv) {
+					if (value === undefined) delete Bun.env[key];
+					else Bun.env[key] = value;
+				}
 			}
 		});
 	});

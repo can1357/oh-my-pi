@@ -78,8 +78,9 @@ describe("sdk edit-store session reset", () => {
 
 		await session.newSession();
 
-		// /new fired the session-change callbacks: the tool-side store is empty,
-		// so the stale tag can't be presented as "issued in this session".
-		expect(toolStore.byHashText("/tmp/omp-13370/a.rs", tag)).toBeNull();
+		// /new fired the session-change callbacks: the tool session starts a fresh
+		// conversation state, so the stale tag can't be presented as "issued in
+		// this session".
+		expect(getEditStore(toolSession).byHashText("/tmp/omp-13370/a.rs", tag)).toBeNull();
 	});
 });

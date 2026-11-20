@@ -5,61 +5,45 @@ export const miscFixtures: Record<string, GalleryFixture> = {
 	ask: {
 		label: "Ask",
 		streamingArgs: {
-			questions: [
-				{
-					id: "db",
-					question: "Which database should the new service use?",
-					options: [{ label: "Postgres" }],
-				},
-			],
+			html: '<form>\n  <fieldset>\n    <legend>Which database should the new service use?</legend>\n    <label><input type="radio" name="db" value="postgres" checked> Postgres',
 		},
 		args: {
-			questions: [
-				{
-					id: "db",
-					question: "Which database should the new service use?",
-					options: [
-						{ label: "Postgres", description: "Relational, strong consistency, JSONB support" },
-						{ label: "SQLite", description: "Embedded, zero-ops, great for single-node" },
-						{ label: "MongoDB", description: "Document store, flexible schema" },
-					],
-					recommended: 0,
-				},
-				{
-					id: "features",
-					question: "Which auth flows should ship in v1?",
-					options: [
-						{ label: "Email + password" },
-						{ label: "OAuth (Google, GitHub)" },
-						{ label: "Magic links" },
-						{ label: "SAML SSO", description: "Enterprise; can be deferred" },
-					],
-					multi: true,
-				},
-			],
+			html: [
+				"<form>",
+				"  <fieldset>",
+				"    <legend>Which database should the new service use?</legend>",
+				'    <label><input type="radio" name="db" value="postgres" checked> Postgres: relational, JSONB support</label>',
+				'    <label><input type="radio" name="db" value="sqlite"> SQLite: embedded, zero-ops</label>',
+				'    <label><input type="radio" name="db" value="mongodb"> MongoDB: document store, flexible schema</label>',
+				"  </fieldset>",
+				"  <fieldset>",
+				"    <legend>Which auth flows should ship in v1?</legend>",
+				'    <label><input type="checkbox" name="auth" value="password" checked> Email + password</label>',
+				'    <label><input type="checkbox" name="auth" value="oauth" checked> OAuth (Google, GitHub)</label>',
+				'    <label><input type="checkbox" name="auth" value="magic"> Magic links</label>',
+				'    <label><input type="checkbox" name="auth" value="saml"> SAML SSO (enterprise; can be deferred)</label>',
+				"  </fieldset>",
+				"</form>",
+			].join("\n"),
 		},
 		result: {
 			content: [
 				{
 					type: "text",
-					text: "db: Postgres\nfeatures: Email + password, OAuth (Google, GitHub)",
+					text: 'User answers:\n{\n  "db": "postgres",\n  "auth": [\n    "password",\n    "oauth"\n  ]\n}',
 				},
 			],
 			details: {
-				results: [
+				answers: [
 					{
-						id: "db",
+						name: "db",
 						question: "Which database should the new service use?",
-						options: ["Postgres", "SQLite", "MongoDB"],
-						multi: false,
-						selectedOptions: ["Postgres"],
+						answer: "Postgres: relational, JSONB support",
 					},
 					{
-						id: "features",
+						name: "auth",
 						question: "Which auth flows should ship in v1?",
-						options: ["Email + password", "OAuth (Google, GitHub)", "Magic links", "SAML SSO"],
-						multi: true,
-						selectedOptions: ["Email + password", "OAuth (Google, GitHub)"],
+						answer: "Email + password, OAuth (Google, GitHub)",
 					},
 				],
 			},

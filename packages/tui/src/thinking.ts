@@ -134,10 +134,10 @@ export function resolveThinkingLevelForModel(
 
 /**
  * Level applied to `model` when the user has not picked one for it (carried,
- * global default, auto). Unverified thinking stays unset until the user picks.
+ * global default, auto), including models awaiting capability discovery.
  */
-export function automaticThinkingLevel<T>(model: Model | undefined, fallback: T): T | undefined {
-	return model?.thinking?.unverified ? undefined : fallback;
+export function automaticThinkingLevel<T>(_model: Model | undefined, fallback: T): T {
+	return fallback;
 }
 
 /**
@@ -154,6 +154,37 @@ export type { ConfiguredThinkingLevel } from "./render/render-utils";
 /** Maps the session-level `auto` sentinel to `undefined`; concrete levels pass through. */
 export function concreteThinkingLevel(level: ConfiguredThinkingLevel | undefined): ThinkingLevel | undefined {
 	return level === AUTO_THINKING ? undefined : level;
+}
+
+/**
+ * Selector a new session on `model` starts with when neither the launch nor a
+ * restored session pins one: the default role's explicit selector, then the
+ * model's own default level (unless the configured default is `auto`), then the
+ * configured default. Shared by session startup and the next launch's prepaint.
+ */
+export function newSessionThinkingLevel(
+	model: Model | undefined,
+	roleLevel: ConfiguredThinkingLevel | undefined,
+	configuredDefault: ConfiguredThinkingLevel | undefined,
+): ConfiguredThinkingLevel | undefined {
+	if (roleLevel !== undefined) return roleLevel;
+	if (configuredDefault !== AUTO_THINKING && model?.thinking?.defaultLevel !== undefined) {
+		return model.thinking.defaultLevel;
+	}
+	return automaticThinkingLevel(model, configuredDefault);
+}
+
+/**
+ * Concrete level `selector` runs at on `model`: clamped to its ladder, or the
+ * provisional effort while `auto` awaits its first per-turn classification.
+ */
+export function resolveConfiguredThinkingLevel(
+	model: Model | undefined,
+	selector: ConfiguredThinkingLevel | undefined,
+): ResolvedThinkingLevel | undefined {
+	return selector === AUTO_THINKING
+		? resolveProvisionalAutoLevel(model)
+		: resolveThinkingLevelForModel(model, selector);
 }
 
 /**
@@ -388,7 +419,7 @@ export function assertModelSupportsEffortCeiling(model: Model, maxEffort: Effort
  * models.
  */
 export function resolveProvisionalAutoLevel(model: Model | undefined): Effort | undefined {
-	if (!model?.reasoning || model.thinking?.unverified) return undefined;
+	if (!model?.reasoning) return undefined;
 	const preferred = model.thinking?.defaultLevel ?? Effort.High;
 	return clampAutoThinkingEffort(model, preferred === Effort.Max ? Effort.XHigh : preferred, Effort.XHigh);
 }

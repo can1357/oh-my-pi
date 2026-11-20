@@ -15,12 +15,12 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 /**
- * Regression coverage for the `#hasPendingAsyncWake()` gate shared by the
- * stop-time passes in the `agent_end` settle path: a background async job
- * (bash/task) owned by this agent re-wakes the loop when it completes — its
- * result delivery enqueues an async-result follow-up that continues the run,
- * and the stop-time passes re-run at that settle. A text-only stop with such a
- * job in flight is a scheduling pause, not a terminal stop, so both:
+ * Regression coverage for the wake-source gate shared by the stop-time passes
+ * of loop-end routing: a background async job (bash/task) owned by this agent
+ * re-wakes the run when it completes — its result delivery enqueues an
+ * async-result follow-up that continues the run, and the stop-time passes
+ * re-run at that loop's end. A text-only stop with such a job in flight pauses
+ * the run instead of ending it, so both:
  *
  * - the todo reminder (`todo_reminder` event + injected `<system-reminder>`
  *   continuation in `#checkTodoCompletion`), and
@@ -66,8 +66,9 @@ describe("AgentSession todo reminder async-job deferral", () => {
 	let extensionEnds: AgentEndEvent[];
 	let gates: Array<PromiseWithResolvers<string>>;
 	let reminderAttempts: number[];
-	let agentEndTerminalStates: Array<boolean | undefined>;
-	let agentEndAwaitingAsyncWork: Array<boolean | undefined>;
+	/** `yielded` of every `agent_pause`. */
+	let pauses: boolean[];
+	let agentEnds: number;
 
 	function textOnlyAssistantMessage(): AssistantMessage {
 		return {
@@ -171,14 +172,12 @@ describe("AgentSession todo reminder async-job deferral", () => {
 		manager.registerDeliverySink("Main", () => {});
 
 		reminderAttempts = [];
-		agentEndTerminalStates = [];
-		agentEndAwaitingAsyncWork = [];
+		pauses = [];
+		agentEnds = 0;
 		session.subscribe((event: AgentSessionEvent) => {
 			if (event.type === "todo_reminder") reminderAttempts.push(event.attempt);
-			if (event.type === "agent_end") {
-				agentEndTerminalStates.push(event.isTerminal);
-				agentEndAwaitingAsyncWork.push(event.awaitingAsyncWork);
-			}
+			if (event.type === "agent_pause") pauses.push(event.yielded);
+			if (event.type === "agent_end") agentEnds++;
 		});
 	});
 
@@ -204,9 +203,12 @@ describe("AgentSession todo reminder async-job deferral", () => {
 
 		expect(reminderAttempts).toEqual([]);
 		expect(continueSpy).not.toHaveBeenCalled();
-		expect(agentEndTerminalStates).toEqual([false]);
-		// Only a background result can resume this pause, so the event says so.
-		expect(agentEndAwaitingAsyncWork).toEqual([true]);
+		// The model yielded and only the job's result can resume the run: it pauses, open.
+		expect(pauses).toEqual([true]);
+		expect(agentEnds).toBe(0);
+		expect(session.isRunActive).toBe(true);
+		expect(session.wakeSources?.jobs).toHaveLength(1);
+		// Extensions keep their per-loop agent_end: this one continues, waiting on background work.
 		expect(extensionEnds).toEqual([expect.objectContaining({ willContinue: true, awaitingAsyncWork: true })]);
 	});
 
@@ -219,10 +221,12 @@ describe("AgentSession todo reminder async-job deferral", () => {
 		await session.waitForIdle();
 
 		expect(reminderAttempts).toEqual([1]);
-		// The reminder is the agent's own continuation, not an async wait.
-		expect(agentEndAwaitingAsyncWork).toEqual([undefined]);
-		expect(extensionEnds).toHaveLength(1);
-		expect(extensionEnds[0]?.willContinue).toBe(true);
+		// The reminder is the agent's own continuation: the loop pauses without yielding. The
+		// mocked continue never starts a loop, so nothing is left and the run ends once.
+		expect(pauses).toEqual([false]);
+		expect(agentEnds).toBe(1);
+		// Extensions see the continuing loop, then the run's end.
+		expect(extensionEnds.map(event => event.willContinue)).toEqual([true, undefined]);
 		expect(extensionEnds[0]).not.toHaveProperty("awaitingAsyncWork");
 	});
 

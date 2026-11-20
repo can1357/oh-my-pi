@@ -19,6 +19,7 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { localSession } from "../helpers/local-session";
 
 const AGENT_ID = "FocusedYield";
 const PARENT_ID = "Main";
@@ -142,7 +143,7 @@ async function spawnKeptAliveChild(options?: { handler?: MockHandler; structured
 			id: AGENT_ID,
 			parentAgentId: PARENT_ID,
 			asyncJobManager: manager,
-			structured: options?.structured,
+			outputSchema: options?.structured === false ? undefined : {},
 			modelOverride: "mock/mock-model",
 			authStorage,
 			modelRegistry,
@@ -172,7 +173,7 @@ async function spawnKeptAliveChild(options?: { handler?: MockHandler; structured
 		close();
 		throw new Error("kept-alive subagent has no live session");
 	}
-	return { session, artifact, deliveries, firstDelivery: firstDelivery.promise, close, mock };
+	return { session: localSession(session), artifact, deliveries, firstDelivery: firstDelivery.promise, close, mock };
 }
 
 it("a focused manual prompt's yield rewrites the artifact and notifies the parent", async () => {
@@ -322,8 +323,7 @@ for (const source of ["queued steering", "async completion"] as const) {
 			expect(parent.outcome).toBe("injected");
 			expect(await Bun.file(child.artifact).text()).toContain("INITIAL_FINAL");
 			releaseContinuation.resolve();
-			await child.session.waitForIdle();
-			await child.session.settleAsyncWork();
+			await child.session.waitForRunEnd();
 			await child.session.waitForIrcReplies();
 			await manager.waitForOwnerJobs(PARENT_ID);
 			await manager.drainDeliveries({ filter: { ownerId: PARENT_ID } });

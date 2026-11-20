@@ -1,6 +1,6 @@
 /**
  * Autocomplete for internal-url schemes (skill://, rule://, omp://, local://,
- * memory://, agent://, artifact://) while composing a prompt.
+ * memory://, agent://) while composing a prompt.
  *
  * Detection here MUST stay in sync with the generic URL-scheme trigger in the
  * TUI editor (`packages/tui/src/components/editor.ts`); the editor fires the
@@ -76,7 +76,6 @@ export interface InternalUrlCallerContext {
 	cwd?: string;
 	sessionFile?: string;
 	sessionId?: string;
-	seanceSourceArtifactsDir?: string;
 }
 
 /**

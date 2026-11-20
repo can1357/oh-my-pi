@@ -1,8 +1,9 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import * as capability from "@oh-my-pi/pi-coding-agent/capability";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import type { ProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -12,6 +13,8 @@ import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-m
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { readArchiveEntries, writeArchive } from "@oh-my-pi/pi-utils/ar";
+import { fakeSshTransport } from "./helpers/fake-ssh-transport";
+import { rejectionOf } from "./helpers/rejection";
 
 import {
 	cfgReadDefaultLimit,
@@ -49,6 +52,7 @@ describe("write tool read projection guard", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		InternalUrlRouter.resetForTests();
 		await fs.rm(tmpDir, { recursive: true, force: true });
 	});
@@ -58,25 +62,25 @@ describe("write tool read projection guard", () => {
 			name: "Showing lines notice",
 			sourceLines: 60,
 			visibleLines: 20,
-			notice: "[Showing lines 1-20 of 60. Use :21 to continue]",
+			notice: "[Showing lines 1-20 of 60. Use :21- to continue]",
 		},
 		{
 			name: "byte-budget Showing lines notice",
 			sourceLines: 60,
 			visibleLines: 20,
-			notice: "[Showing lines 1-20 of 60 (50.0KB limit). Use :21 to continue]",
+			notice: "[Showing lines 1-20 of 60 (50.0KB limit). Use :21- to continue]",
 		},
 		{
 			name: "entity-labelled remaining-lines notice",
 			sourceLines: 60,
 			visibleLines: 20,
-			notice: "[40 more lines in notebook. Use :21 to continue]",
+			notice: "[40 more lines in notebook. Use :21- to continue]",
 		},
 		{
 			name: "unscanned remaining-lines notice",
 			sourceLines: 60,
 			visibleLines: 20,
-			notice: "[More lines in file (120.0KB total; not scanned to EOF). Use :21 to continue]",
+			notice: "[More lines in file (120.0KB total; not scanned to EOF). Use :21- to continue]",
 		},
 		{
 			name: "ASCII summary elision notice",
@@ -88,7 +92,7 @@ describe("write tool read projection guard", () => {
 			name: "stale-total notice",
 			sourceLines: 65,
 			visibleLines: 20,
-			notice: "[Showing lines 1-20 of 60. Use :21 to continue]",
+			notice: "[Showing lines 1-20 of 60. Use :21- to continue]",
 		},
 	])("rejects a shorter $name projection without changing the file", async ({ sourceLines, visibleLines, notice }) => {
 		const filePath = path.join(tmpDir, "sample.txt");
@@ -112,7 +116,7 @@ describe("write tool read projection guard", () => {
 		const projection = resultText(
 			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-1", { path: filePath }),
 		);
-		expect(projection).toContain("[Showing lines 1-20 of 60. Use :21 to continue]");
+		expect(projection).toContain("[Showing lines 1-20 of 60. Use :21- to continue]");
 
 		await expect(new WriteTool(session).execute("write-1", { path: filePath, content: projection })).rejects.toThrow(
 			"incomplete read projection",
@@ -129,7 +133,7 @@ describe("write tool read projection guard", () => {
 		const projection = resultText(
 			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-hashline", { path: filePath }),
 		);
-		expect(projection).toContain("[Showing lines 1-20 of 60. Use :21 to continue]");
+		expect(projection).toContain("[Showing lines 1-20 of 60. Use :21- to continue]");
 		expect(projection.length).toBeGreaterThan(original.length);
 
 		await expect(
@@ -241,7 +245,7 @@ describe("write tool read projection guard", () => {
 				path: `${archivePath}:${member}:1-20`,
 			}),
 		);
-		expect(projection).toContain("[37 more lines in archive entry. Use :24 to continue]");
+		expect(projection).toContain("[37 more lines in archive entry. Use :24- to continue]");
 
 		await expect(
 			new WriteTool(session).execute("write-archive", { path: `${archivePath}:${member}`, content: projection }),
@@ -278,7 +282,7 @@ describe("write tool read projection guard", () => {
 		const projection = resultText(
 			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-url", { path: `${url}:1-20` }),
 		);
-		expect(projection).toContain("[37 more lines in resource. Use :24 to continue]");
+		expect(projection).toContain("[37 more lines in resource. Use :24- to continue]");
 
 		await expect(new WriteTool(session).execute("write-url", { path: url, content: projection })).rejects.toThrow(
 			"incomplete read projection",
@@ -286,6 +290,48 @@ describe("write tool read projection guard", () => {
 		expect(writeCalled).toBe(false);
 		expect(resourceContent).toContain("resource 60");
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"writes a bounded projection to a new ssh:// file and still guards existing ones",
+		async () => {
+			vi.spyOn(capability, "loadCapability").mockResolvedValue({ items: [], all: [], warnings: [], providers: [] });
+			fakeSshTransport(() => tmpDir);
+			const session = createSession(tmpDir);
+			cfgReadDefaultLimit.set(session.settings, 20);
+			const sourcePath = path.join(tmpDir, "source.txt");
+			const original = `${Array.from({ length: 60 }, (_, index) => `line ${index + 1}`).join("\n")}\n`;
+			await Bun.write(sourcePath, original);
+			const projection = resultText(
+				await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-src", { path: sourcePath }),
+			);
+			expect(projection).toContain("[Showing lines 1-20 of 60. Use :21- to continue]");
+
+			// No remote file yet: nothing to discard, so the write lands as it does for a new disk file.
+			const newPath = path.join(tmpDir, "new.txt");
+			await new WriteTool(session).execute("write-new", { path: `ssh://fixture${newPath}`, content: projection });
+			expect(await Bun.file(newPath).text()).toBe(projection);
+
+			const longer = await rejectionOf(
+				new WriteTool(session).execute("write-existing", {
+					path: `ssh://fixture${sourcePath}`,
+					content: projection,
+				}),
+			);
+			expect(longer).toMatchObject({ message: expect.stringContaining("incomplete read projection") });
+			expect(await Bun.file(sourcePath).text()).toBe(original);
+
+			// An existing file the read cannot open is not "missing": its read error still fails the write.
+			const lockedPath = path.join(tmpDir, "locked.txt");
+			await Bun.write(lockedPath, original);
+			await fs.chmod(lockedPath, 0o200);
+			const locked = await rejectionOf(
+				new WriteTool(session).execute("write-locked", { path: `ssh://fixture${lockedPath}`, content: projection }),
+			);
+			expect(locked).toMatchObject({ message: expect.stringContaining("Permission denied") });
+			await fs.chmod(lockedPath, 0o600);
+			expect(await Bun.file(lockedPath).text()).toBe(original);
+		},
+	);
 
 	it("rejects write-back of a summarized read of a large local:// code file", async () => {
 		const localRoot = path.join(tmpDir, "artifacts", "local");
@@ -349,7 +395,7 @@ describe("write tool read projection guard", () => {
 				bridgeWriteCalled = true;
 			},
 		};
-		const partial = `${bufferContent.split("\n").slice(0, 20).join("\n")}\n[Showing lines 1-20 of 65. Use :21 to continue]\n`;
+		const partial = `${bufferContent.split("\n").slice(0, 20).join("\n")}\n[Showing lines 1-20 of 65. Use :21- to continue]\n`;
 
 		await expect(
 			new WriteTool(createSession(tmpDir, bridge)).execute("write-bridge", { path: filePath, content: partial }),
@@ -361,7 +407,7 @@ describe("write tool read projection guard", () => {
 
 	it("writes a literal read notice when the replacement does not shrink the current source", async () => {
 		const filePath = path.join(tmpDir, "documentation.txt");
-		const content = "Example omp output:\n[Showing lines 1-20 of 60. Use :21 to continue]\n";
+		const content = "Example omp output:\n[Showing lines 1-20 of 60. Use :21- to continue]\n";
 		await Bun.write(filePath, "old\n");
 
 		await new WriteTool(createSession(tmpDir)).execute("call-2", { path: filePath, content });

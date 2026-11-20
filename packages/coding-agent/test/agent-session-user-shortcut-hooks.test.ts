@@ -181,6 +181,47 @@ describe("AgentSession user shortcut hooks", () => {
 		).toBe(true);
 	});
 
+	it("records a user run even when its onRecorded callback throws", async () => {
+		const hookResult = {
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+			totalLines: 1,
+			totalBytes: 2,
+			outputLines: 1,
+			outputBytes: 2,
+		};
+		const extensionRunner = {
+			hasHandlers: vi.fn((eventType: string) => eventType === "user_bash" || eventType === "user_python"),
+			emitUserBash: vi.fn().mockResolvedValue({ result: { ...hookResult, output: "sh" } }),
+			emitUserPython: vi
+				.fn()
+				.mockResolvedValue({ result: { ...hookResult, output: "py", displayOutputs: [], stdinRequested: false } }),
+		} as unknown as ExtensionRunner;
+		const onRecorded = vi.fn((_message: unknown) => {
+			throw new Error("presenter redraw failed");
+		});
+
+		createSession(extensionRunner);
+		await session.executeBash("true", undefined, { onRecorded });
+		await session.executePython("1", undefined, { onRecorded });
+
+		expect(onRecorded).toHaveBeenCalledTimes(2);
+		const recorded = session.messages.filter(
+			message => message.role === "bashExecution" || message.role === "pythonExecution",
+		);
+		expect(recorded.map(message => message.output)).toEqual(["sh", "py"]);
+		expect(onRecorded.mock.calls.map(([message]) => message)).toEqual(recorded);
+
+		// Mid-turn, the run is queued for the next safe boundary instead.
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
+		await session.executeBash("true", undefined, { onRecorded });
+		await session.executePython("1", undefined, { onRecorded });
+		expect(onRecorded).toHaveBeenCalledTimes(4);
+		expect(session.hasPendingBashMessages).toBe(true);
+		expect(session.hasPendingPythonMessages).toBe(true);
+	});
+
 	it("shares Python state between eval and user shortcut execution", async () => {
 		createSession();
 		const evalSessionId = session.getEvalSessionId();

@@ -104,6 +104,43 @@ describe("provider in-flight request limits", () => {
 		expect(mock.calls).toHaveLength(2);
 	});
 
+	test("refuses a queued non-fetch provider attempt when the cap closes before dispatch", async () => {
+		registerMockApi();
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			provider: "tests",
+			handler: async () => {
+				started.resolve();
+				await release.promise;
+				return { content: ["first"] };
+			},
+		});
+		const first = streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();
+		await started.promise;
+
+		let capped = false;
+		const waiting = nextLimiterWait();
+		const second = streamSimple(mock.model, context(), {
+			maxInFlightRequests: { tests: 1 },
+			beforeDispatch: () => {
+				if (capped) throw new Error("Cost cap reached");
+			},
+		})
+			.result()
+			.then(
+				message => message.errorMessage,
+				error => String(error),
+			);
+		await waiting;
+		capped = true;
+		release.resolve();
+		await first;
+
+		expect(await second).toContain("Cost cap reached");
+		expect(mock.calls).toHaveLength(1);
+	});
+
 	test("holds a completions permit until a trailing [DONE] reaches the gateway", async () => {
 		configureProviderMaxInFlightRequests({ tests: 1 });
 		const model: Model<"openai-completions"> = {
