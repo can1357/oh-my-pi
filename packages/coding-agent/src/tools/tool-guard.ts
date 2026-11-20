@@ -11,6 +11,7 @@
  * directory, shell commands made only of reading commands that write no file, and web search. The
  * design, wording and thresholds come from nace-ai/intern's System 1 guard (`guard.py`, Apache-2.0).
  */
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, AgentTool, ToolTier } from "@oh-my-pi/pi-agent-core";
@@ -31,14 +32,19 @@ import questionFile from "../prompts/judge/tool-guard.json" with { type: "json" 
 import refusedTemplate from "../prompts/tools/tool-guard-refused.md" with { type: "text" };
 import { operatorTitleText, textFromContent } from "../session/messages";
 import { isMCPToolName } from "./builtin-names";
-import { resolveToCwd } from "./path-utils";
+import { resolveShellDirectory, resolveToCwd } from "./path-utils";
 import {
 	cfgToolGuardAllowances,
 	cfgToolGuardAskedThreshold,
 	cfgToolGuardEnabled,
 	cfgToolGuardRiskThreshold,
 } from "./settings";
-import { extractFlatShellCommandSegments, isShellEnvironmentAssignment, lexShellCommand } from "./shell-tokenize";
+import {
+	extractFlatShellCommandSegments,
+	extractLeadingCdTarget,
+	isShellEnvironmentAssignment,
+	lexShellCommand,
+} from "./shell-tokenize";
 
 const QUESTIONS = judgeQuestions(questionFile);
 
@@ -623,16 +629,42 @@ export function needsJudgement(call: GuardedCall, cwd: string): boolean {
 	}
 	if (call.tier === "write") {
 		const targets = call.targets ?? [];
-		// Internal URLs (`local://`, `xd://`) are the session's own artifacts or dispatch on their own.
-		if (targets.length > 0) return targets.some(target => !target.includes("://") && !pathIsWithin(cwd, target));
+		if (targets.length > 0) return targets.some(target => !staysInside(target, cwd));
 		// An MCP tool can act anywhere. Built-in write-tier tools without targets keep session state, unless a path
 		// argument (`tts` `output_path`) names a file outside the working directory.
 		if (isMCPToolName(call.toolName)) return true;
-		return pathArguments(call.args).some(
-			file => !file.includes("://") && !pathIsWithin(cwd, resolveToCwd(file, cwd)),
-		);
+		return pathArguments(call.args).some(file => !staysInside(file, cwd));
 	}
 	return true;
+}
+
+/** Internal URLs that are the session's own artifacts (`local://`) or dispatch a call the guard sees on its own (`xd://`). */
+const SESSION_URL = /^(?:local|xd):\/\//;
+
+/**
+ * Whether a write to `target` stays in the session: a {@link SESSION_URL}, or a file inside `cwd` once symlinks
+ * are followed, through the deepest existing ancestor for a file not yet there. Any other URL (`https://`,
+ * `ssh://`) is judged.
+ */
+function staysInside(target: string, cwd: string): boolean {
+	if (SESSION_URL.test(target)) return true;
+	if (target.includes("://")) return false;
+	return pathIsWithin(cwd, resolveToCwd(target, cwd), { throughMissing: true });
+}
+
+/**
+ * The directory a bash call's process runs in, as bash resolves it: its `cwd` (`~` expanded), or a leading
+ * `cd DIR &&` / `cd DIR;` bash hoists into one. A URL directory, or one that does not exist, leaves the
+ * session's directory.
+ */
+function processDirectory(command: string | undefined, runIn: string | undefined, cwd: string): string {
+	let dir: string | undefined;
+	if (runIn) dir = runIn.includes("://") ? undefined : resolveToCwd(runIn, cwd);
+	else if (command !== undefined) {
+		const cd = extractLeadingCdTarget(command);
+		if (cd && !cd.path.includes("://")) dir = resolveShellDirectory(cd.path, cwd);
+	}
+	return dir !== undefined && fs.statSync(dir, { throwIfNoEntry: false })?.isDirectory() ? dir : cwd;
 }
 
 /** The refusal for `answers`, when the named risks reach `thresholds.risk` and P(asked) stays below `thresholds.asked`. */
@@ -846,6 +878,7 @@ export class ToolGuard {
 			const urlCwd = runIn?.includes("://") === true;
 			const runDir = runIn && !urlCwd ? resolveToCwd(runIn, cwd) : cwd;
 			const scripts = command === undefined || urlCwd ? [] : scriptsRun(command, runDir);
+			const processDir = processDirectory(command, runIn, cwd);
 			const shown: JsonValue[] = [];
 			for (const file of scripts) shown.push({ path: file, content: await readScript(file) });
 			const state: Record<string, JsonValue> = {
@@ -864,7 +897,7 @@ export class ToolGuard {
 			};
 			const pressure = await untilAborted(
 				deadline,
-				this.#host.hostPressure ? this.#host.hostPressure(runDir) : readHostPressure(runDir),
+				this.#host.hostPressure ? this.#host.hostPressure(processDir) : readHostPressure(processDir),
 			).catch(() => undefined);
 			if (pressure) state.host = summarizeHostPressure(pressure);
 			// A judge that ignores its signal still cannot hold the call past the deadline or an abort.

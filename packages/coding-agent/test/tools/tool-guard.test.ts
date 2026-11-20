@@ -181,6 +181,38 @@ describe("tool guard", () => {
 		expect(judge.requests).toHaveLength(3);
 	});
 
+	it("judges a write through a symlinked parent to a file not yet there", async () => {
+		const judge = fakeJudge({ routine: 1 }, 0);
+		const { guard } = guardWith(judge);
+		const outside = TempDir.createSync("@omp-tool-guard-outside-");
+		try {
+			fs.symlinkSync(outside.path(), path.join(cwd, "out"));
+			await guard.check(tool("tts", "write"), { text: "hi", output_path: "out/new.wav" }, "write");
+			await guard.check(write, { path: path.join(cwd, "out/new.ts") }, "write");
+			expect(judge.requests).toHaveLength(2);
+		} finally {
+			outside.removeSync();
+		}
+	});
+
+	it("judges a write to a URL other than the session's own", async () => {
+		const judge = fakeJudge({ routine: 1 }, 0);
+		const { guard } = guardWith(judge);
+		const remote = tool("publish", "write", args =>
+			args && typeof args === "object" && "url" in args && typeof args.url === "string" ? [args.url] : [],
+		);
+
+		await guard.check(remote, { url: "local://notes.md" }, "write");
+		await guard.check(remote, { url: "xd://tts" }, "write");
+		await guard.check(tool("tts", "write"), { text: "hi", output_path: "local://hello.mp3" }, "write");
+		expect(judge.requests).toHaveLength(0);
+
+		await guard.check(remote, { url: "https://api.example/resource" }, "write");
+		await guard.check(remote, { url: "ssh://prod/etc/hosts" }, "write");
+		await guard.check(tool("tts", "write"), { text: "hi", output_path: "ssh://prod/x.mp3" }, "write");
+		expect(judge.requests).toHaveLength(3);
+	});
+
 	it("classifies only reading commands as read-only", () => {
 		for (const command of [
 			"cat a | wc -l",
@@ -285,6 +317,12 @@ describe("tool guard", () => {
 			"unset GIT_DIR; git status",
 			"set -k; git diff GIT_EXTERNAL_DIFF=/tmp/x.sh",
 			"printf -v PATH /tmp/attacker; git status",
+			// Bash keeps the session's shell: a definition changes what a later read-only name runs.
+			"cat() { echo x > /tmp/out; }",
+			"function cat { echo x; }",
+			"alias cat='rm -rf ~'",
+			"hash -p /tmp/x cat",
+			"enable -n echo",
 		]) {
 			expect(isReadOnlyCommand(command)).toBe(false);
 		}
@@ -562,21 +600,36 @@ describe("tool guard", () => {
 	it("reads disk pressure for the directory the command runs in", async () => {
 		const judge = fakeJudge({ routine: 1 }, 0);
 		const { guard } = guardWith(judge);
+		const outside = TempDir.createSync("@omp-tool-guard-disk-");
+		fs.mkdirSync(path.join(cwd, "sub"));
+		try {
+			await guard.check(bash, { command: "bun test" }, "exec");
+			await guard.check(bash, { command: "bun test", cwd: "sub" }, "exec");
+			await guard.check(bash, { command: "bun test", cwd: outside.path() }, "exec");
+			// `~` expands as bash expands it; a URL directory runs its process in the session's directory.
+			await guard.check(bash, { command: "bun test", cwd: "~" }, "exec");
+			await guard.check(bash, { command: "bun test", cwd: "skill://demo" }, "exec");
+			// Bash hoists a leading `cd DIR &&` (or `cd DIR;` onto a directory that exists) into the process directory.
+			await guard.check(bash, { command: `cd ${outside.path()} && bun test` }, "exec");
+			await guard.check(bash, { command: "cd sub; bun test" }, "exec");
+			// A directory that does not exist leaves the session's, whose pressure can still be read.
+			await guard.check(bash, { command: "bun test", cwd: "missing" }, "exec");
+			await guard.check(bash, { command: "cd missing; bun test" }, "exec");
 
-		await guard.check(bash, { command: "bun test" }, "exec");
-		await guard.check(bash, { command: "bun test", cwd: "sub" }, "exec");
-		await guard.check(bash, { command: "bun test", cwd: "/mnt/scratch" }, "exec");
-		// `~` expands as bash expands it; a URL directory runs its process in the session's directory.
-		await guard.check(bash, { command: "bun test", cwd: "~/scratch" }, "exec");
-		await guard.check(bash, { command: "bun test", cwd: "skill://demo" }, "exec");
-
-		expect(pressureDirs).toEqual([
-			cwd,
-			path.join(cwd, "sub"),
-			"/mnt/scratch",
-			path.join(os.homedir(), "scratch"),
-			cwd,
-		]);
+			expect(pressureDirs).toEqual([
+				cwd,
+				path.join(cwd, "sub"),
+				outside.path(),
+				os.homedir(),
+				cwd,
+				outside.path(),
+				path.join(cwd, "sub"),
+				cwd,
+				cwd,
+			]);
+		} finally {
+			outside.removeSync();
+		}
 	});
 
 	it("refuses heavy work on a strained host, naming the strain and pointing elsewhere", async () => {
