@@ -20,7 +20,13 @@ describe("ovnfsCommand", () => {
 		const ovnfs = "C:/Program Files/$HOME/it's/ovnfs.exe";
 		const project = await fs.mkdtemp(path.join(os.tmpdir(), "ovnfs-guidance-"));
 		try {
-			const prompt = await buildSystemPrompt({ cwd: project, contextFiles: [], rules: [], toolNames: ["bash"], ovnfs });
+			const prompt = await buildSystemPrompt({
+				cwd: project,
+				contextFiles: [],
+				rules: [],
+				toolNames: ["bash"],
+				ovnfs,
+			});
 			const text = prompt.systemPrompt.join("\n");
 			const line = text.split("\n").find(row => row.includes(" new --name <name>"));
 			const pasted = line?.match(/`cd <folder> && (.+) new --name <name>`/)?.[1];
