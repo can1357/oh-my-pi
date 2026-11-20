@@ -5,13 +5,15 @@ import { $which, isWsl, logger } from "@oh-my-pi/pi-utils";
 import { redactUrlForLog } from "./redact-url";
 
 const URL_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
+/** Like {@link URL_SCHEME_PATTERN}, but a one-letter "scheme" is a Windows drive (`C:\…`), not a URL. */
+const LOGGED_URL_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]+:/;
 
 /**
  * Redact any scheme URL (`https:`, `mailto:`, …). A local filename may contain a
- * literal `#`, so paths stay verbatim; a one-letter "scheme" is a Windows drive.
+ * literal `#`, so paths stay verbatim.
  */
 function logTarget(target: string): string {
-	return /^[a-zA-Z][a-zA-Z\d+.-]+:/.test(target) ? redactUrlForLog(target, "omit") : target;
+	return LOGGED_URL_PATTERN.test(target) ? redactUrlForLog(target, "omit") : target;
 }
 
 function getExistingWslLocalPath(urlOrPath: string): string | undefined {
