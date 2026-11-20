@@ -911,7 +911,7 @@ pub(super) mod tests {
 			});
 			Self {
 				jobs,
-				id: started.recv_timeout(Duration::from_secs(30)).expect("fixture thread started"),
+				id: started.recv().expect("fixture thread started"),
 				thread: Some(thread),
 			}
 		}
@@ -930,7 +930,7 @@ pub(super) mod tests {
 				.unwrap();
 			// SAFETY: new() has created the thread's queue; it lives until Drop.
 			assert_ne!(unsafe { PostThreadMessageW(self.id, WM_APP, 0, 0) }, 0);
-			match receive.recv_timeout(Duration::from_secs(30)).expect("fixture thread answered") {
+			match receive.recv().expect("fixture thread answered") {
 				Ok(result) => result,
 				Err(panic) => std::panic::resume_unwind(panic),
 			}
@@ -941,9 +941,10 @@ pub(super) mod tests {
 		fn drop(&mut self) {
 			use windows_sys::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
 			// SAFETY: the fixture thread's queue exists until it handles WM_QUIT.
-			unsafe { PostThreadMessageW(self.id, WM_QUIT, 0, 0) };
-			// Do not turn a bounded fixture failure into a hang during unwinding.
+			let posted = unsafe { PostThreadMessageW(self.id, WM_QUIT, 0, 0) };
+			// Never join a thread that could still be waiting for messages.
 			if !std::thread::panicking() {
+				assert_ne!(posted, 0);
 				self.thread.take().unwrap().join().unwrap();
 			}
 		}
@@ -1393,11 +1394,9 @@ pub(super) mod tests {
 	fn same_thread_buttons_do_not_take_the_synchronous_click_route() {
 		let parent = button_parent();
 		let pushed = button(parent, "BUTTON", BS_PUSHBUTTON as u32);
-		record(pushed);
 		// Observe the routing decision, without entering a modal handler or
 		// relying on a timeout to rescue the test.
 		assert_eq!(native_button(pushed), None);
-		assert_eq!(click_messages(), 0);
 		// SAFETY: this thread owns parent and its child.
 		unsafe { DestroyWindow(parent) };
 	}

@@ -895,7 +895,7 @@ mod background {
 
 		fn left_click_at(button: HWND, x: i32, y: i32) -> PointerEvent {
 			let mut point = POINT { x, y };
-			// SAFETY: this thread owns `button`; `point` is writable.
+			// SAFETY: the fixture keeps `button` alive; `point` is writable.
 			assert_ne!(unsafe { ClientToScreen(button, &raw mut point) }, 0);
 			PointerEvent::Click {
 				x:         f64::from(point.x),
