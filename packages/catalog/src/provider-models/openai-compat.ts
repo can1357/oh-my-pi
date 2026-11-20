@@ -5784,7 +5784,6 @@ type LiteLLMApiRoute = "openai" | "anthropic" | "other" | "unknown";
 type LiteLLMRichEndpointModel<TApi extends Api> = {
 	model: ModelSpec<TApi>;
 	apiRoute: LiteLLMApiRoute;
-	fallbackApi: TApi;
 	supportsVision: unknown;
 	supportsReasoning: unknown;
 	hasContextWindow: boolean;
@@ -6254,6 +6253,7 @@ function mergeLiteLLMCompat<TApi extends Api>(
 function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 	existing: LiteLLMRichEndpointModel<TApi>,
 	next: LiteLLMRichEndpointModel<TApi>,
+	fallbackApi: TApi,
 ): LiteLLMRichEndpointModel<TApi> {
 	// Endpoints that disagree on a known route (OpenAI-only vs Claude-only)
 	// describe a mixed group, which takes the fallback api.
@@ -6268,11 +6268,7 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 	const runnerApi = [next.model.api, existing.model.api].find(api => runnerApiKind(api) !== undefined);
 	const api =
 		runnerApi ??
-		(next.apiRoute === apiRoute
-			? next.model.api
-			: existing.apiRoute === apiRoute
-				? existing.model.api
-				: existing.fallbackApi);
+		(next.apiRoute === apiRoute ? next.model.api : existing.apiRoute === apiRoute ? existing.model.api : fallbackApi);
 	const model: ModelSpec<TApi> = {
 		...existing.model,
 		api,
@@ -6423,7 +6419,6 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 			const next: LiteLLMRichEndpointModel<TApi> = {
 				model,
 				apiRoute: classifyLiteLLMApiRoute(entry, model.id),
-				fallbackApi: options.api,
 				supportsVision,
 				supportsReasoning,
 				hasContextWindow: toPositiveNumber(getLiteLLMMetadataValue(entry, "max_input_tokens"), null) !== null,
@@ -6438,7 +6433,7 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 				reportedCost: getLiteLLMReportedCost(entry),
 			};
 			const existing = deduped.get(model.id);
-			deduped.set(model.id, existing ? mergeLiteLLMRichEndpointModels(existing, next) : next);
+			deduped.set(model.id, existing ? mergeLiteLLMRichEndpointModels(existing, next, options.api) : next);
 		}
 	}
 	if (deduped.size === 0 && excludedModelIds.size === 0) {
@@ -6502,7 +6497,7 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 					}
 					continue;
 				}
-				deduped.set(next.model.id, mergeLiteLLMRichEndpointModels(existing, next));
+				deduped.set(next.model.id, mergeLiteLLMRichEndpointModels(existing, next, options.api));
 			}
 			if (deduped.size === 0) {
 				continue;
