@@ -5,7 +5,6 @@ use std::{
 	borrow::Cow,
 	collections::{BTreeSet, HashMap},
 	path::Path,
-	sync::Arc,
 };
 
 use super::{
@@ -31,7 +30,7 @@ use crate::{
 	engine::{FileOp as EngineFileOp, HeaderKind, Resolved, StagedFile},
 	error::{EditError, Rejection},
 	files::FileSource,
-	store::{Clipboard, EditStore, Snapshot, file_hash, payload_hash},
+	store::{Clipboard, EditStore, file_hash, payload_hash},
 };
 
 const SEEN_LINE_REVEAL_CAP: usize = 40;
@@ -168,6 +167,23 @@ pub fn header_only_error(path: &str, files: &mut dyn FileSource) -> EditError {
 /// targeting evidence. Short closers (`}`, `});`) repeat everywhere; accepting
 /// on those would let stale anchors through.
 const SHIFT_RESCUE_EVIDENCE_MIN_CHARS: usize = 8;
+/// Fewest tokens a current line needs before a merely similar payload row
+/// (a mid-line modification) can identify it; shorter lines need their
+/// content carried verbatim.
+const SHIFT_RESCUE_SIMILAR_MIN_TOKENS: usize = 6;
+/// Lines with more tokens are not compared by similarity (bounds the LCS).
+const SHIFT_RESCUE_SIMILAR_MAX_TOKENS: usize = 256;
+/// Token-LCS ratio `2·LCS / (|a| + |b|)` a payload row needs against a line
+/// to identify it.
+const SHIFT_RESCUE_SIMILAR_MIN_RATIO: f64 = 0.7;
+/// How much better the identified line must match the row than every other
+/// line of the file: a near-twin within this margin could be the line the row
+/// was written from.
+const SHIFT_RESCUE_SIMILAR_MARGIN: f64 = 0.1;
+/// Ceiling on one row's whole-file comparison, in LCS cells (file tokens ×
+/// row tokens). Past it the similarity path is skipped and the anchor goes to
+/// the reveal, so a huge file cannot make one edit slow.
+const SHIFT_RESCUE_SIMILAR_LCS_BUDGET: usize = 40_000_000;
 
 /// One replacement op's anchors plus its payload body lines.
 struct ReplaceGroup {
@@ -202,86 +218,6 @@ fn replace_groups(section: &PatchSection) -> Result<Vec<ReplaceGroup>, EditError
 		}
 	}
 	Ok(groups)
-}
-
-/// Map every current-numbered line back through `old_text → new_text`: the
-/// old line it images when it lands inside an unchanged run (`None` for added
-/// lines and lines inside rewritten spans). One Myers walk serves every
-/// anchor, instead of one full-file diff per line.
-fn shifted_images(old_text: &str, new_text: &str) -> Vec<Option<u32>> {
-	let old_lines: Vec<&str> = old_text.split('\n').collect();
-	let new_lines: Vec<&str> = new_text.split('\n').collect();
-	let (old_ids, new_ids) = omp_diff::intern(&old_lines, &new_lines);
-	let mut image = vec![None; new_lines.len()];
-	let (mut old_line, mut current) = (1_u32, 1_u32);
-	for run in omp_diff::myers_diff(&old_ids, &new_ids) {
-		if run.added {
-			current += run.count;
-			continue;
-		}
-		if run.removed {
-			old_line += run.count;
-			continue;
-		}
-		let (mut new_line, mut old) = (current, old_line);
-		for _ in 0..run.count {
-			if let Some(slot) = image.get_mut(new_line as usize - 1) {
-				*slot = Some(old);
-			}
-			new_line += 1;
-			old += 1;
-		}
-		old_line = old;
-		current = new_line;
-	}
-	image
-}
-
-/// One retained version's seen set plus its lines' images in the current
-/// text, computed once per rescue instead of once per anchor.
-struct VersionMap {
-	seen:      Arc<BTreeSet<u32>>,
-	same_text: bool,
-	image:     Vec<Option<u32>>,
-}
-
-/// Snapshot histories newest-first into reusable shift mappings, skipping
-/// versions that displayed nothing.
-fn version_maps(versions: &[Snapshot], current_text: &str) -> Vec<VersionMap> {
-	versions
-		.iter()
-		.filter_map(|version| {
-			let seen = version.seen_lines.clone()?;
-			if seen.is_empty() {
-				return None;
-			}
-			if &*version.text == current_text {
-				Some(VersionMap { seen, same_text: true, image: Vec::new() })
-			} else {
-				Some(VersionMap {
-					seen,
-					same_text: false,
-					image: shifted_images(&version.text, current_text),
-				})
-			}
-		})
-		.collect()
-}
-
-/// True when `line` (current numbering) images a line some retained version
-/// displayed: the model saw exactly this content, only at another number.
-fn images_seen(maps: &[VersionMap], line: u32) -> bool {
-	maps.iter().any(|map| {
-		if map.same_text {
-			map.seen.contains(&line)
-		} else {
-			usize::try_from(line)
-				.ok()
-				.and_then(|n| n.checked_sub(1))
-				.and_then(|n| map.image.get(n).copied().flatten())
-				.is_some_and(|source| map.seen.contains(&source))
-		}
-	})
 }
 
 /// Trimmed content of current line `line` when it is long enough to serve as
@@ -323,49 +259,190 @@ fn line_carries(body_line: &str, evidence: &str) -> bool {
 	})
 }
 
-/// Body evidence that an op targets `first..=last` as currently numbered: the
-/// payload carries the first anchor's current content and, for ranges, the
-/// last anchor's current content at or after it. Checking both ends is what
-/// rejects stale numbers whichever way lines moved: after lines shift down,
-/// a stale range's first line holds content from above the intended range;
-/// after lines shift up, its last line holds content from below it. Either
-/// way that end's content is absent from the payload.
-fn body_targets(body: &[String], current_lines: &[&str], first: u32, last: u32) -> bool {
-	let Some(head) = unique_evidence(current_lines, first) else {
+/// Tokens of `line` for similarity evidence: identifier/number runs and single
+/// other non-space characters, at most `SHIFT_RESCUE_SIMILAR_MAX_TOKENS + 1`
+/// (one past the cap marks the line as too long to compare).
+fn similarity_tokens(line: &str) -> Vec<&str> {
+	let mut tokens = Vec::new();
+	let mut rest = line;
+	while tokens.len() <= SHIFT_RESCUE_SIMILAR_MAX_TOKENS {
+		rest = rest.trim_start();
+		let Some(first) = rest.chars().next() else {
+			break;
+		};
+		let len = if is_ident_char(first) {
+			rest.find(|c: char| !is_ident_char(c)).unwrap_or(rest.len())
+		} else {
+			first.len_utf8()
+		};
+		tokens.push(&rest[..len]);
+		rest = &rest[len..];
+	}
+	tokens
+}
+
+/// Token-LCS similarity `2·LCS / (|a| + |b|)`.
+fn token_ratio(a: &[&str], b: &[&str]) -> f64 {
+	if a.is_empty() && b.is_empty() {
+		return 0.0;
+	}
+	let (outer, inner) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+	let mut row = vec![0_u32; inner.len() + 1];
+	for token in outer {
+		let mut diagonal = 0;
+		for (j, other) in inner.iter().enumerate() {
+			let above = row[j + 1];
+			row[j + 1] = if token == other {
+				diagonal + 1
+			} else {
+				above.max(row[j])
+			};
+			diagonal = above;
+		}
+	}
+	2.0 * f64::from(row[inner.len()]) / (a.len() + b.len()) as f64
+}
+
+/// Highest [`token_ratio`] two token lists of these lengths can reach.
+fn token_ratio_bound(a: usize, b: usize) -> f64 {
+	if a + b == 0 {
+		return 0.0;
+	}
+	2.0 * a.min(b) as f64 / (a + b) as f64
+}
+
+/// The current file split into lines, tokenized on first use: only an end
+/// without exact evidence pays for the whole-file comparison. One per section,
+/// shared by its replacement groups.
+struct CurrentLines<'a> {
+	lines:  &'a [&'a str],
+	/// Per-line tokens plus their total count.
+	tokens: std::cell::OnceCell<(Vec<Vec<&'a str>>, usize)>,
+}
+
+impl<'a> CurrentLines<'a> {
+	const fn new(lines: &'a [&'a str]) -> Self {
+		Self { lines, tokens: std::cell::OnceCell::new() }
+	}
+
+	fn tokens(&self) -> &(Vec<Vec<&'a str>>, usize) {
+		self.tokens.get_or_init(|| {
+			let tokens: Vec<Vec<&str>> = self
+				.lines
+				.iter()
+				.map(|line| similarity_tokens(line))
+				.collect();
+			let total = tokens.iter().map(Vec::len).sum();
+			(tokens, total)
+		})
+	}
+}
+
+/// What can identify current line `line` (1-based) in a payload row.
+struct EndEvidence<'a> {
+	index:  usize,
+	/// The line's trimmed content, when [`unique_evidence`] accepts it.
+	exact:  Option<&'a str>,
+	/// The line's tokens, when long enough to score similarity against.
+	tokens: Option<Vec<&'a str>>,
+}
+
+impl<'a> EndEvidence<'a> {
+	fn of(current: &CurrentLines<'a>, line: u32) -> Option<Self> {
+		let index = usize::try_from(line).ok()?.checked_sub(1)?;
+		let content = current.lines.get(index)?.trim();
+		let exact = unique_evidence(current.lines, line);
+		let tokens = (content.chars().count() >= SHIFT_RESCUE_EVIDENCE_MIN_CHARS)
+			.then(|| similarity_tokens(content))
+			.filter(|tokens| {
+				(SHIFT_RESCUE_SIMILAR_MIN_TOKENS..=SHIFT_RESCUE_SIMILAR_MAX_TOKENS)
+					.contains(&tokens.len())
+			});
+		(exact.is_some() || tokens.is_some()).then_some(Self { index, exact, tokens })
+	}
+
+	/// True when `row` names this line: it carries the line's content
+	/// ([`line_carries`]), or it is similar enough to the line (a mid-line
+	/// modification) and the line is the file's clear best match for it, so a
+	/// near-twin elsewhere cannot be the line the row was written from.
+	fn identified_by(&self, row: &str, current: &CurrentLines<'a>) -> bool {
+		if self
+			.exact
+			.is_some_and(|evidence| line_carries(row, evidence))
+		{
+			return true;
+		}
+		let Some(anchor) = &self.tokens else {
+			return false;
+		};
+		let row = similarity_tokens(row);
+		if row.is_empty() || row.len() > SHIFT_RESCUE_SIMILAR_MAX_TOKENS {
+			return false;
+		}
+		let score = token_ratio(&row, anchor);
+		if score < SHIFT_RESCUE_SIMILAR_MIN_RATIO {
+			return false;
+		}
+		let (lines, total) = current.tokens();
+		if total.saturating_mul(row.len()) > SHIFT_RESCUE_SIMILAR_LCS_BUDGET {
+			return false;
+		}
+		let ceiling = score - SHIFT_RESCUE_SIMILAR_MARGIN;
+		lines.iter().enumerate().all(|(index, other)| {
+			index == self.index
+				|| token_ratio_bound(row.len(), other.len()) <= ceiling
+				|| (other.len() <= SHIFT_RESCUE_SIMILAR_MAX_TOKENS
+					&& token_ratio(&row, other) <= ceiling)
+		})
+	}
+}
+
+/// Body evidence that an op targets `first..=last` as currently numbered: a
+/// payload row identifies the first anchor's current content and, for ranges,
+/// a row at or after it identifies the last anchor's current content
+/// ([`EndEvidence::identified_by`]). Checking both ends is what rejects stale
+/// numbers whichever way lines moved: after lines shift down, a stale range's
+/// first line holds content from above the intended range; after lines shift
+/// up, its last line holds content from below it. Either way the payload was
+/// written from another line, which matches it better.
+fn body_targets(body: &[String], current: &CurrentLines<'_>, first: u32, last: u32) -> bool {
+	let Some(head) = EndEvidence::of(current, first) else {
 		return false;
 	};
-	let Some(head_at) = body.iter().position(|line| line_carries(line, head)) else {
+	let Some(head_at) = body.iter().position(|row| head.identified_by(row, current)) else {
 		return false;
 	};
 	if first == last {
 		return true;
 	}
-	let Some(tail) = unique_evidence(current_lines, last) else {
+	let Some(tail) = EndEvidence::of(current, last) else {
 		return false;
 	};
 	body
 		.iter()
-		.rposition(|line| line_carries(line, tail))
+		.rposition(|row| tail.identified_by(row, current))
 		.is_some_and(|tail_at| tail_at >= head_at)
 }
 
 /// Anchors the guard would reject that a shift-aware reading accepts: every
-/// unseen anchor of a replacement op images a displayed line of a retained
-/// version (same content, older number), and the payload carries the current
-/// content of both ends of the unseen span ([`body_targets`]). Stale-numbered
-/// anchors fail the payload check and stay rejected, as do anchors no retained
-/// version displayed, ends too short or repeated to identify a line, and pure
-/// inserts/cuts (no payload to evidence against).
+/// unseen anchor of a replacement op holds content an earlier version
+/// displayed at another number (`moved`), and the payload identifies the
+/// current content of both ends of the unseen span ([`body_targets`]).
+/// Stale-numbered anchors fail the payload check and stay rejected, as do
+/// anchors no ancestor displayed, ends too short, repeated, or nearly repeated
+/// to identify a line, and pure inserts/cuts (no payload to evidence against).
 fn rescue_shifted_anchors(
 	section: &PatchSection,
-	store: &EditStore,
-	canonical: &Path,
+	moved: Option<&BTreeSet<u32>>,
 	current_text: &str,
 	unseen: &[u32],
 ) -> Result<Vec<u32>, EditError> {
+	let Some(moved) = moved else {
+		return Ok(Vec::new());
+	};
 	let pending: BTreeSet<u32> = unseen.iter().copied().collect();
 	let current_lines: Vec<&str> = current_text.split('\n').collect();
-	let maps = version_maps(&store.versions(canonical), current_text);
+	let current = CurrentLines::new(&current_lines);
 	let mut rescued = Vec::new();
 	for group in replace_groups(section)? {
 		let group_unseen: Vec<u32> = group
@@ -377,8 +454,8 @@ fn rescue_shifted_anchors(
 		let (Some(&first), Some(&last)) = (group_unseen.first(), group_unseen.last()) else {
 			continue;
 		};
-		if body_targets(&group.body, &current_lines, first, last)
-			&& group_unseen.iter().all(|line| images_seen(&maps, *line))
+		if group_unseen.iter().all(|line| moved.contains(line))
+			&& body_targets(&group.body, &current, first, last)
 		{
 			rescued.extend(group_unseen);
 		}
@@ -456,12 +533,13 @@ fn assert_seen_lines(
 			unverified_wide_lines_message(section.path.as_str(), &wide),
 		));
 	};
-	let Some(seen) = snapshot.seen_lines else {
+	let Some(seen) = snapshot.seen_lines.as_deref() else {
 		return Ok(());
 	};
 	if seen.is_empty() {
 		return Ok(());
 	}
+	let moved = snapshot.moved_lines.as_deref();
 	let guarded = guarded_lines(section, blocks)?;
 	let mut unseen = guarded
 		.iter()
@@ -472,10 +550,10 @@ fn assert_seen_lines(
 		return Ok(());
 	}
 	// A follow-up edit below an earlier shifting edit anchors moved lines at
-	// their new numbers. When the payload carries the anchored content, the
+	// their new numbers. When the payload identifies the anchored content, the
 	// model targeted the lines as numbered — accept them instead of forcing a
 	// wasted reveal round-trip.
-	let rescued = rescue_shifted_anchors(section, store, canonical, text, &unseen)?;
+	let rescued = rescue_shifted_anchors(section, moved, text, &unseen)?;
 	if !rescued.is_empty() {
 		let rescued: BTreeSet<u32> = rescued.into_iter().collect();
 		unseen.retain(|line| !rescued.contains(line));
@@ -528,12 +606,16 @@ fn assert_seen_lines(
 			&revealed.iter().map(|item| item.line).collect::<Vec<_>>(),
 		);
 	}
+	let all_moved = moved.is_some_and(|moved| unseen.iter().all(|line| moved.contains(line)));
 	Err(EditError::rejected(
 		Rejection::UnseenLines,
-		unseen_lines_message(section.path.as_str(), &unseen, expected, &UnseenLinesReveal {
-			lines: revealed,
-			truncated,
-		}),
+		unseen_lines_message(
+			section.path.as_str(),
+			&unseen,
+			expected,
+			all_moved,
+			&UnseenLinesReveal { lines: revealed, truncated },
+		),
 	))
 }
 
@@ -1019,20 +1101,12 @@ fn stage_section(
 mod tests {
 	use super::*;
 
-	#[test]
-	fn shifted_images_maps_through_insertions() {
-		let image = shifted_images("a\nb\nc\nd", "a\nX\nY\nb\nc\nd");
-		assert_eq!(image.as_slice(), &[Some(1), None, None, Some(2), Some(3), Some(4)]);
-	}
-
-	#[test]
-	fn shifted_images_maps_through_replacements() {
-		let image = shifted_images("a\nb\nc", "a\nB1\nB2\nc");
-		assert_eq!(image.as_slice(), &[Some(1), None, None, Some(3)]);
-	}
-
 	fn body(lines: &[&str]) -> Vec<String> {
 		lines.iter().map(|line| (*line).to_owned()).collect()
+	}
+
+	fn body_targets(body: &[String], file: &[&str], first: u32, last: u32) -> bool {
+		super::body_targets(body, &CurrentLines::new(file), first, last)
 	}
 
 	#[test]
@@ -1064,6 +1138,57 @@ mod tests {
 		// Tail carried only before the head is not this range.
 		let reversed = body(&["let v0004 = 4;", "let v0001 = 1;"]);
 		assert!(!body_targets(&reversed, &file, 1, 4));
+	}
+
+	#[test]
+	fn body_targets_accepts_a_mid_line_modification_of_the_clear_best_match() {
+		let file = [
+			"var key = t.FullName;",
+			"var name = t.Name;",
+			"use super::format::render;",
+			"items.push(compute(alpha, 18));",
+			"items.push(compute(alpha, 19));",
+		];
+		assert!(body_targets(&body(&["var key = t.FullName + CtxKey;"]), &file, 1, 1));
+		assert!(body_targets(&body(&["use super::{format::render, parse};"]), &file, 3, 3));
+		// A row rewritten past the ratio names nothing.
+		assert!(!body_targets(&body(&["let key = ctx.key();"]), &file, 1, 1));
+		// The body was written from line 1, so line 2 is not its best match.
+		assert!(!body_targets(&body(&["var key = t.FullName + CtxKey;"]), &file, 2, 2));
+		// Near-twins score within the margin of each other: neither is named.
+		assert!(!body_targets(&body(&["items.push(compute(alpha, 18, beta));"]), &file, 4, 4));
+		assert!(!body_targets(&body(&["items.push(compute(alpha, 19, beta));"]), &file, 5, 5));
+	}
+
+	#[test]
+	fn body_targets_over_the_lcs_budget_never_accepts_by_similarity() {
+		let row = body(&["var key = t.FullName + CtxKey;"]);
+		let filler = ";".repeat(SHIFT_RESCUE_SIMILAR_MAX_TOKENS + 10);
+		let mut file = vec!["var key = t.FullName;"];
+		assert!(body_targets(&row, &file, 1, 1), "within budget the row names line 1");
+		// Each filler line counts one past the token cap; 9 row tokens times the
+		// file's tokens exceed the budget, though every filler line is far from
+		// the row.
+		let filler_lines = SHIFT_RESCUE_SIMILAR_LCS_BUDGET / 9 / SHIFT_RESCUE_SIMILAR_MAX_TOKENS + 1;
+		file.extend(std::iter::repeat_n(filler.as_str(), filler_lines));
+		assert!(!body_targets(&row, &file, 1, 1));
+	}
+
+	#[test]
+	fn body_targets_needs_exact_content_on_lines_with_few_tokens() {
+		// `let v0018 = 18;` has five tokens: a modified row must carry it whole.
+		let file = ["let v0017 = 17;", "let v0018 = 18;", "fn other() {}"];
+		assert!(!body_targets(&body(&["let v0018 = compute(18);"]), &file, 2, 2));
+		assert!(body_targets(&body(&["let v0018 = 18; // edit"]), &file, 2, 2));
+	}
+
+	#[test]
+	fn token_ratio_counts_the_longest_common_token_subsequence() {
+		let a = similarity_tokens("var key = t.FullName;");
+		assert_eq!(a, ["var", "key", "=", "t", ".", "FullName", ";"]);
+		let b = similarity_tokens("var key = t.FullName + CtxKey;");
+		assert!((token_ratio(&a, &b) - 14.0 / 16.0).abs() < 1e-12);
+		assert_eq!(token_ratio(&a, &[]), 0.0);
 	}
 }
 
@@ -1763,5 +1888,233 @@ mod lifecycle {
 			.await
 			.unwrap();
 		assert_eq!(ctx.text("carry.ts").lines().count(), 16);
+	}
+
+	/// Rows long enough for similarity evidence: eleven tokens each, two of
+	/// them differing from the neighbouring rows.
+	fn long_row(i: usize) -> String {
+		format!("    total_{i:04} = compute(items, {i}, scale);")
+	}
+
+	fn long_fixture(ctx: &Lifecycle, file: &str, lines: usize) {
+		let text: String = (1..=lines).map(|i| long_row(i) + "\n").collect();
+		ctx.write_text(file, &text);
+	}
+
+	/// Reads `file` in full and inserts two rows after line 5.
+	async fn read_and_shift(ctx: &Lifecycle, file: &str, lines: usize) -> String {
+		let tag0 = ctx.read(file, &all_seen(lines));
+		ctx.edit(&format!("[{file}#{tag0}]\nPUT >5:\n+// ins a\n+// ins b\n"))
+			.await
+			.unwrap();
+		ctx.head_tag(file)
+	}
+
+	/// A mid-line modification never restates the old line verbatim; the
+	/// payload still names it when the line is the file's clear best match.
+	#[tokio::test]
+	async fn mid_line_modification_at_shifted_number_applies() {
+		let ctx = Lifecycle::new("mid.ts", 30);
+		long_fixture(&ctx, "mid.ts", 30);
+		let tag1 = read_and_shift(&ctx, "mid.ts", 30).await;
+		ctx.edit(&format!(
+			"[mid.ts#{tag1}]\nPUT 20.=20:\n+    total_0018 = compute(items, 18, scale * 2);\n"
+		))
+		.await
+		.unwrap();
+		let text = ctx.text("mid.ts");
+		assert_eq!(text.lines().nth(19), Some("    total_0018 = compute(items, 18, scale * 2);"));
+		assert_eq!(text.lines().nth(17), Some(long_row(16).as_str()));
+	}
+
+	/// The same modification at the pre-shift number: the row was written from
+	/// old line 18, now line 20, which matches it better than line 18 does.
+	#[tokio::test]
+	async fn mid_line_modification_at_stale_number_stays_rejected() {
+		let ctx = Lifecycle::new("mid-stale.ts", 30);
+		long_fixture(&ctx, "mid-stale.ts", 30);
+		let tag1 = read_and_shift(&ctx, "mid-stale.ts", 30).await;
+		let before = ctx.text("mid-stale.ts");
+		let err = ctx
+			.edit(&format!(
+				"[mid-stale.ts#{tag1}]\nPUT 18.=18:\n+    total_0018 = compute(items, 18, scale * \
+				 2);\n"
+			))
+			.await
+			.unwrap_err();
+		assert!(err.contains("which an earlier change moved"), "unexpected error: {err}");
+		assert_eq!(ctx.text("mid-stale.ts"), before);
+	}
+
+	/// The moved set lives on the snapshot, so the rescue still works once the
+	/// version the read displayed is evicted by later edits.
+	#[tokio::test]
+	async fn rescue_survives_eviction_of_the_read_version() {
+		let ctx = Lifecycle::new("evict.ts", 30);
+		long_fixture(&ctx, "evict.ts", 30);
+		let tag0 = ctx.read("evict.ts", &all_seen(30));
+		let read = ctx.text("evict.ts");
+		let mut tag = tag0;
+		for edit in 1..=5 {
+			ctx.edit(&format!("[evict.ts#{tag}]\nPUT >1:\n+// note {edit}\n"))
+				.await
+				.unwrap();
+			tag = ctx.head_tag("evict.ts");
+		}
+		let versions = ctx.store.versions(&ctx.canonical("evict.ts"));
+		assert!(versions.iter().all(|version| *version.text != *read), "the read is evicted");
+		// Old line 25 sits at 30 after five single-row inserts.
+		ctx.edit(&format!(
+			"[evict.ts#{tag}]\nPUT 30.=30:\n+    total_0025 = compute(items, 25, scale, true);\n"
+		))
+		.await
+		.unwrap();
+		assert_eq!(
+			ctx.text("evict.ts").lines().nth(29),
+			Some("    total_0025 = compute(items, 25, scale, true);")
+		);
+	}
+
+	/// Rows that differ in a single token score within the margin of each
+	/// other, so a payload written from one names neither: rejected at the
+	/// stale number (18) and, conservatively, at the shifted one (20).
+	#[tokio::test]
+	async fn near_duplicate_rows_stay_rejected() {
+		for (line, intended) in [(18, 18), (20, 18)] {
+			let ctx = Lifecycle::new("twin.ts", 30);
+			let text = (1..=30)
+				.map(|i| format!("    register(handler, \"alpha\", {i});"))
+				.collect::<Vec<_>>()
+				.join("\n");
+			ctx.write_text("twin.ts", &text);
+			let tag1 = read_and_shift(&ctx, "twin.ts", 30).await;
+			let before = ctx.text("twin.ts");
+			let err = ctx
+				.edit(&format!(
+					"[twin.ts#{tag1}]\nPUT {line}.={line}:\n+    register(handler, \"alpha\", \
+					 {intended}, true);\n"
+				))
+				.await
+				.expect_err("near-twin rows identify nothing");
+			assert!(err.contains("which an earlier change moved"), "line {line}: {err}");
+			assert_eq!(ctx.text("twin.ts"), before);
+		}
+	}
+
+	/// `let v0018 = 18;` has too few tokens for similarity: a modified row
+	/// must restate it whole.
+	#[tokio::test]
+	async fn short_line_modification_needs_the_exact_content() {
+		let ctx = Lifecycle::new("short.ts", 30);
+		let tag1 = read_and_shift(&ctx, "short.ts", 30).await;
+		let before = ctx.text("short.ts");
+		let err = ctx
+			.edit(&format!("[short.ts#{tag1}]\nPUT 20.=20:\n+let v0018 = compute(18, extra);\n"))
+			.await
+			.unwrap_err();
+		assert!(err.contains("which an earlier change moved"), "unexpected error: {err}");
+		assert_eq!(ctx.text("short.ts"), before);
+	}
+
+	/// Inserts and cuts carry no payload: on a moved row they stay rejected,
+	/// and the reply says the row moved.
+	#[tokio::test]
+	async fn insert_and_cut_on_moved_line_name_the_move() {
+		for op in ["PUT >20:\n+// after", "CUT 20"] {
+			let ctx = Lifecycle::new("ops.ts", 30);
+			long_fixture(&ctx, "ops.ts", 30);
+			let tag1 = read_and_shift(&ctx, "ops.ts", 30).await;
+			let before = ctx.text("ops.ts");
+			let err = ctx
+				.edit(&format!("[ops.ts#{tag1}]\n{op}\n"))
+				.await
+				.expect_err(op);
+			assert!(
+				err.contains("which an earlier change moved: [ops.ts#")
+					&& err.contains("never displayed them at these numbers"),
+				"{op}: unexpected error: {err}"
+			);
+			assert!(err.contains(&format!("  20:{}", long_row(18))), "{op}: no reveal: {err}");
+			assert_eq!(ctx.text("ops.ts"), before, "{op} changed the file");
+		}
+	}
+
+	/// Replayed numbers-only mistake: the model kept the pre-shift number
+	/// (`PUT 201.=201:` where the row now sits at 205). It stays rejected; the
+	/// corrected replacement applies.
+	#[tokio::test]
+	async fn replayed_stale_replace_stays_rejected() {
+		let ctx = Lifecycle::new("replay.ts", 220);
+		long_fixture(&ctx, "replay.ts", 220);
+		let tag0 = ctx.read("replay.ts", &all_seen(220));
+		ctx.edit(&format!("[replay.ts#{tag0}]\nPUT >10:\n+// a\n+// b\n+// c\n+// d\n"))
+			.await
+			.unwrap();
+		let tag1 = ctx.head_tag("replay.ts");
+		let before = ctx.text("replay.ts");
+		let modified = "    total_0201 = compute(items, 201, scale.max(1));";
+		let err = ctx
+			.edit(&format!("[replay.ts#{tag1}]\nPUT 201.=201:\n+{modified}\n"))
+			.await
+			.unwrap_err();
+		assert!(err.contains("which an earlier change moved"), "unexpected error: {err}");
+		assert_eq!(ctx.text("replay.ts"), before);
+
+		ctx.edit(&format!("[replay.ts#{tag1}]\nPUT 205.=205:\n+{modified}\n"))
+			.await
+			.unwrap();
+		assert_eq!(ctx.text("replay.ts").lines().nth(204), Some(modified));
+	}
+
+	/// Replayed numbers-only mistake on an insert: `PUT >57:` where the row
+	/// now sits at 59. Inserts carry no payload, so it stays rejected.
+	#[tokio::test]
+	async fn replayed_stale_insert_stays_rejected() {
+		let ctx = Lifecycle::new("replay-ins.ts", 80);
+		long_fixture(&ctx, "replay-ins.ts", 80);
+		let tag1 = read_and_shift(&ctx, "replay-ins.ts", 80).await;
+		let before = ctx.text("replay-ins.ts");
+		let err = ctx
+			.edit(&format!("[replay-ins.ts#{tag1}]\nPUT >57:\n+// added\n"))
+			.await
+			.unwrap_err();
+		assert!(err.contains("which an earlier change moved"), "unexpected error: {err}");
+		assert_eq!(ctx.text("replay-ins.ts"), before);
+	}
+
+	/// Mid-line modifications seen in session replays, each at its shifted
+	/// number in one section: all apply without a reveal.
+	#[tokio::test]
+	async fn replayed_mid_line_modifications_apply() {
+		let ctx = Lifecycle::new("shapes.cs", 0);
+		let shapes = [
+			("var key = t.FullName;", "var key = t.FullName + CtxKey;"),
+			(
+				"const total = summarize(buffered, 0, 0, 0, 0, 0).totalFileLines;",
+				"const total = summarize(buffered, 0, 0, 0, 0, 0, 0).totalFileLines;",
+			),
+			("use super::format::render_row;", "use super::{format::render_row, parse_row};"),
+		];
+		let mut text = String::new();
+		for i in 1..=12 {
+			use std::fmt::Write as _;
+			writeln!(text, "// filler {i}").unwrap();
+		}
+		for (old, _) in &shapes {
+			text.push_str(old);
+			text.push('\n');
+		}
+		ctx.write_text("shapes.cs", &text);
+		let tag1 = read_and_shift(&ctx, "shapes.cs", 15).await;
+		let mut patch = format!("[shapes.cs#{tag1}]\n");
+		for (index, (_, new)) in shapes.iter().enumerate() {
+			use std::fmt::Write as _;
+			let line = 15 + index;
+			write!(patch, "PUT {line}.={line}:\n+{new}\n").unwrap();
+		}
+		ctx.edit(&patch).await.unwrap();
+		let text = ctx.text("shapes.cs");
+		let tail: Vec<&str> = text.lines().skip(14).collect();
+		assert_eq!(tail, shapes.map(|(_, new)| new));
 	}
 }

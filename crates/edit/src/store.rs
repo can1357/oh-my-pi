@@ -39,15 +39,21 @@ const CARRY_MAX_EDITS: usize = 1024;
 #[derive(Debug, Clone)]
 pub struct Snapshot {
 	/// Canonical path this version belongs to.
-	pub path:       PathBuf,
+	pub path:        PathBuf,
 	/// Full LF-normalized, BOM-stripped text.
-	pub text:       Arc<str>,
+	pub text:        Arc<str>,
 	/// Four-character content tag.
-	pub hash:       String,
+	pub hash:        String,
 	/// Lines displayed from this version, when provenance was recorded. Shared
 	/// so lookups hand out snapshots without copying a set that holds one entry
 	/// per displayed line.
-	pub seen_lines: Option<Arc<BTreeSet<u32>>>,
+	pub seen_lines:  Option<Arc<BTreeSet<u32>>>,
+	/// Lines whose content an ancestor version displayed at a different number:
+	/// an edit or outside change shifted them. The model saw the content but
+	/// not these numbers, so they are not seen; the guard accepts an anchor on
+	/// one only when the payload identifies the line. Held on the snapshot so
+	/// it outlives the version cap. `None` when no line moved.
+	pub moved_lines: Option<Arc<BTreeSet<u32>>>,
 }
 
 /// Clipboard registers threaded through one patch application.
@@ -139,25 +145,30 @@ struct StoredSnapshot {
 	carried:  Vec<u32>,
 }
 
+/// Estimated bytes of a shared line set.
+fn line_set_bytes(lines: Option<&Arc<BTreeSet<u32>>>) -> usize {
+	lines.map_or(0, |lines| {
+		// BTreeSet does not expose its nodes. Half-full u32 leaves (56 B, 5 of
+		// 11 keys) cost about 11 B per key and internal nodes at most 6 B
+		// more, so 20 B per line is an upper bound; sorted inserts
+		// pack nodes and overcount up to 4×, which only evicts
+		// sooner.
+		2 * size_of::<usize>()
+			+ size_of::<BTreeSet<u32>>()
+			+ lines.len() * (size_of::<u32>() + 2 * size_of::<usize>())
+	})
+}
+
 impl StoredSnapshot {
 	fn retained_bytes(&self) -> usize {
 		let snapshot = &self.snapshot;
 		let text_bytes =
 			(snapshot.text.len() + 2 * size_of::<usize>()).next_multiple_of(size_of::<usize>());
-		let seen_bytes = snapshot.seen_lines.as_ref().map_or(0, |lines| {
-			// BTreeSet does not expose its nodes. Half-full u32 leaves (56 B, 5 of
-			// 11 keys) cost about 11 B per key and internal nodes at most 6 B
-			// more, so 20 B per line is an upper bound; sorted inserts
-			// pack nodes and overcount up to 4×, which only evicts
-			// sooner.
-			2 * size_of::<usize>()
-				+ size_of::<BTreeSet<u32>>()
-				+ lines.len() * (size_of::<u32>() + 2 * size_of::<usize>())
-		});
 		snapshot.path.capacity()
 			+ snapshot.hash.capacity()
 			+ text_bytes
-			+ seen_bytes
+			+ line_set_bytes(snapshot.seen_lines.as_ref())
+			+ line_set_bytes(snapshot.moved_lines.as_ref())
 			+ self.carried.capacity() * size_of::<u32>()
 	}
 }
@@ -282,7 +293,7 @@ impl EditStore {
 	) -> String {
 		let hash = file_hash(text);
 		// Diffed outside the lock: the version change may span a large file.
-		let carried = self.carried_from_parent(path, text, parent);
+		let Carry { seen: carried, moved } = self.carried_from_parent(path, text, parent);
 		let mut state = self.inner.lock();
 		state.clock = state.clock.wrapping_add(1);
 		let touched = state.clock;
@@ -306,10 +317,11 @@ impl EditStore {
 		} else if max_versions > 0 {
 			history.versions.insert(0, StoredSnapshot {
 				snapshot: Snapshot {
-					path:       path.to_owned(),
-					text:       Arc::from(text),
-					hash:       hash.clone(),
-					seen_lines: None,
+					path:        path.to_owned(),
+					text:        Arc::from(text),
+					hash:        hash.clone(),
+					seen_lines:  None,
+					moved_lines: None,
 				},
 				carried:  Vec::new(),
 			});
@@ -326,6 +338,7 @@ impl EditStore {
 			} else {
 				carry_into(stored, carried);
 			}
+			merge_moved(stored, moved);
 		}
 		let current_bytes = history.retained_bytes(path_bytes);
 		state.retained_bytes = state.retained_bytes - previous_bytes + current_bytes;
@@ -335,37 +348,43 @@ impl EditStore {
 
 	/// Lines of the parent version (`parent`, else the current version) that
 	/// `text` keeps at the same number with the same content, filtered by what
-	/// the parent displayed.
-	fn carried_from_parent(&self, path: &Path, text: &str, parent: Option<&str>) -> Vec<u32> {
-		let (head, parent_seen) = {
+	/// the parent displayed, plus the parent's displayed or moved lines `text`
+	/// keeps at another number.
+	fn carried_from_parent(&self, path: &Path, text: &str, parent: Option<&str>) -> Carry {
+		let (head, parent_seen, parent_moved) = {
 			let state = self.inner.lock();
 			let versions = state
 				.histories
 				.get(path)
 				.map_or(&[][..], |history| history.versions.as_slice());
 			match parent {
-				Some(before) => (
-					None,
-					versions
+				Some(before) => {
+					let version = versions
 						.iter()
-						.find(|version| &*version.snapshot.text == before)
-						.and_then(|version| version.snapshot.seen_lines.clone()),
-				),
+						.find(|version| &*version.snapshot.text == before);
+					(
+						None,
+						version.and_then(|version| version.snapshot.seen_lines.clone()),
+						version.and_then(|version| version.snapshot.moved_lines.clone()),
+					)
+				},
 				None => match versions.first() {
-					Some(version) => {
-						(Some(version.snapshot.text.clone()), version.snapshot.seen_lines.clone())
-					},
-					None => return Vec::new(),
+					Some(version) => (
+						Some(version.snapshot.text.clone()),
+						version.snapshot.seen_lines.clone(),
+						version.snapshot.moved_lines.clone(),
+					),
+					None => return Carry::default(),
 				},
 			}
 		};
 		let Some(parent) = parent.or(head.as_deref()) else {
-			return Vec::new();
+			return Carry::default();
 		};
 		if parent == text {
-			return Vec::new();
+			return Carry::default();
 		}
-		carried_seen_lines(parent, text, parent_seen.as_deref())
+		carried_seen_lines(parent, text, parent_seen.as_deref(), parent_moved.as_deref())
 	}
 
 	/// Read, normalize, and record a file if it is readable and at most 4 MiB.
@@ -431,6 +450,7 @@ impl EditStore {
 	}
 
 	/// Every retained snapshot for a path, newest first.
+	#[cfg(test)]
 	pub fn versions(&self, path: &Path) -> Vec<Snapshot> {
 		let mut state = self.inner.lock();
 		touch(&mut state, path);
@@ -598,6 +618,15 @@ fn merge_seen(stored: &mut StoredSnapshot, lines: Option<&[u32]>) {
 	}
 }
 
+/// Union lines an ancestor displayed at another number into a version.
+fn merge_moved(stored: &mut StoredSnapshot, moved: Vec<u32>) {
+	if moved.is_empty() {
+		return;
+	}
+	// Copies the set only while a lookup still holds the previous version.
+	Arc::make_mut(stored.snapshot.moved_lines.get_or_insert_default()).extend(moved);
+}
+
 /// Credit a version with lines carried from the version it replaced: into a
 /// restricted seen set directly, held back on a version with no provenance
 /// yet, dropped on authored content (an empty set), which stays unrestricted.
@@ -616,17 +645,36 @@ fn carry_into(stored: &mut StoredSnapshot, carried: Vec<u32>) {
 	}
 }
 
+/// What a version change carries from the parent version.
+#[derive(Default)]
+struct Carry {
+	/// Child lines the parent displayed at the same number with the same
+	/// content.
+	seen:  Vec<u32>,
+	/// Child lines whose content the parent displayed, or itself held as moved,
+	/// at another number — or holds as moved at this number.
+	moved: Vec<u32>,
+}
+
 /// Parent lines that keep both their number and content in `child`: every
 /// unchanged run the change did not shift (the leading run, plus runs below
 /// line-neutral hunks), filtered by `seen`. A missing or empty `seen` is an
 /// unrestricted parent, whose every such line carries. Shifted lines never
-/// carry: their old numbers name other content.
-fn carried_seen_lines(parent: &str, child: &str, seen: Option<&BTreeSet<u32>>) -> Vec<u32> {
+/// carry: their old numbers name other content. They land in `moved` at their
+/// new numbers instead, when the parent displayed them or already held them
+/// as moved; `moved` lines in unshifted runs stay moved.
+fn carried_seen_lines(
+	parent: &str,
+	child: &str,
+	seen: Option<&BTreeSet<u32>>,
+	moved: Option<&BTreeSet<u32>>,
+) -> Carry {
 	let seen = seen.filter(|seen| !seen.is_empty());
 	let old_lines: Vec<&str> = parent.split('\n').collect();
 	let new_lines: Vec<&str> = child.split('\n').collect();
 	let (old_ids, new_ids) = omp_diff::intern(&old_lines, &new_lines);
-	let mut unshifted = Vec::new();
+	// Unchanged runs as (old range, new start).
+	let mut runs_kept = Vec::new();
 	if let Some(runs) = omp_diff::myers_diff_within(&old_ids, &new_ids, CARRY_MAX_EDITS) {
 		let (mut old_line, mut new_line) = (1_u32, 1_u32);
 		for run in runs {
@@ -635,9 +683,7 @@ fn carried_seen_lines(parent: &str, child: &str, seen: Option<&BTreeSet<u32>>) -
 			} else if run.removed {
 				old_line += run.count;
 			} else {
-				if old_line == new_line {
-					unshifted.push(old_line..old_line + run.count);
-				}
+				runs_kept.push((old_line..old_line + run.count, new_line));
 				old_line += run.count;
 				new_line += run.count;
 			}
@@ -648,26 +694,46 @@ fn carried_seen_lines(parent: &str, child: &str, seen: Option<&BTreeSet<u32>>) -
 			.zip(&new_ids)
 			.take_while(|(old, new)| old == new)
 			.count() as u32;
-		unshifted.push(1..prefix + 1);
-		if old_ids.len() == new_ids.len() {
-			let len = old_ids.len() as u32;
-			let suffix = old_ids
-				.iter()
-				.rev()
-				.zip(new_ids.iter().rev())
-				.take_while(|(old, new)| old == new)
-				.count() as u32;
-			unshifted.push(len - suffix + 1..len + 1);
-		}
+		runs_kept.push((1..prefix + 1, 1));
+		let (old_len, new_len) = (old_ids.len() as u32, new_ids.len() as u32);
+		let suffix = (old_ids
+			.iter()
+			.rev()
+			.zip(new_ids.iter().rev())
+			.take_while(|(old, new)| old == new)
+			.count() as u32)
+			.min(old_len.min(new_len) - prefix);
+		runs_kept.push((old_len - suffix + 1..old_len + 1, new_len - suffix + 1));
 	}
-	let mut carried = Vec::new();
-	for range in unshifted {
+	let mut carry = Carry::default();
+	for (range, new_start) in runs_kept {
+		if range.start == new_start {
+			match seen {
+				Some(seen) => carry.seen.extend(seen.range(range.clone())),
+				None => carry.seen.extend(range.clone()),
+			}
+			if let Some(moved) = moved {
+				carry.moved.extend(moved.range(range));
+			}
+			continue;
+		}
+		let old_start = range.start;
+		let to_new = move |line: u32| line - old_start + new_start;
 		match seen {
-			Some(seen) => carried.extend(seen.range(range)),
-			None => carried.extend(range),
+			Some(seen) => {
+				carry
+					.moved
+					.extend(seen.range(range.clone()).map(|&line| to_new(line)));
+				if let Some(moved) = moved {
+					carry
+						.moved
+						.extend(moved.range(range).map(|&line| to_new(line)));
+				}
+			},
+			None => carry.moved.extend(range.map(to_new)),
 		}
 	}
-	carried
+	carry
 }
 
 fn touch(state: &mut StoreState, path: &Path) {
@@ -759,6 +825,14 @@ fn take_retired(state: &mut StoreState, path: &Path, text: &str) -> Option<Vec<u
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	fn moved(store: &EditStore, path: &Path) -> BTreeSet<u32> {
+		store
+			.head(path)
+			.unwrap()
+			.moved_lines
+			.map_or_else(BTreeSet::new, |moved| (*moved).clone())
+	}
 
 	#[test]
 	fn file_hash_matches_typescript() {
@@ -911,6 +985,64 @@ mod tests {
 		let seen = store.head(path).unwrap().seen_lines.unwrap();
 		let expected: BTreeSet<u32> = (0..=101).chain(count - 99..=count).collect();
 		assert_eq!(*seen, expected);
+	}
+
+	#[test]
+	fn shifted_seen_lines_move_to_new_numbers_and_chain_across_edits() {
+		let store = EditStore::new();
+		let path = Path::new("f.txt");
+		let read = lines(30, |_| None);
+		store.record(path, &read, Some(&(1..=30).collect::<Vec<_>>()));
+		let mut first: Vec<String> = read.split('\n').map(str::to_owned).collect();
+		first.splice(5..5, ["ins a".to_owned(), "ins b".to_owned()]);
+		let first = first.join("\n");
+		store.record_edit(path, &read, &first);
+		let head = store.head(path).unwrap();
+		assert_eq!(*head.seen_lines.unwrap(), (1..=5).collect::<BTreeSet<_>>());
+		assert_eq!(moved(&store, path), (8..=32).collect::<BTreeSet<_>>());
+
+		let second = first.replacen("line 1\n", "line 1\nins c\n", 1);
+		store.record_edit(path, &first, &second);
+		let seen = store.head(path).unwrap().seen_lines.unwrap();
+		assert_eq!(*seen, BTreeSet::from([1]), "shifted lines never join the seen set");
+		let expected: BTreeSet<u32> = (3..=6).chain(9..=33).collect();
+		assert_eq!(moved(&store, path), expected, "moved lines shift again and the seen ones join");
+	}
+
+	#[test]
+	fn moved_lines_survive_eviction_of_the_displaying_version() {
+		let store = EditStore::new();
+		let path = Path::new("f.txt");
+		let read = lines(30, |_| None);
+		store.record(path, &read, Some(&(1..=30).collect::<Vec<_>>()));
+		let mut text = read.clone();
+		for edit in 1..=5 {
+			let next = text.replacen("line 1\n", &format!("line 1\nnew {edit}\n"), 1);
+			store.record_edit(path, &text, &next);
+			text = next;
+		}
+		let versions = store.versions(path);
+		assert_eq!(versions.len(), DEFAULT_MAX_VERSIONS_PER_PATH);
+		assert!(versions.iter().all(|version| *version.text != *read), "the read is evicted");
+		// Old line 2 sits at 7 and old line 30 at 35 after five insertions.
+		let moved = moved(&store, path);
+		assert!(moved.contains(&7) && moved.contains(&35), "{moved:?}");
+		assert!(!moved.contains(&2), "inserted lines were never displayed");
+	}
+
+	#[test]
+	fn rewrite_past_the_diff_bound_moves_a_shifted_tail() {
+		let store = EditStore::new();
+		let path = Path::new("f.txt");
+		let count = 3 * CARRY_MAX_EDITS as u32;
+		store.record(path, &lines(count, |_| None), Some(&(1..=count).collect::<Vec<_>>()));
+		let rewritten =
+			lines(count, |n| (n > 100 && n <= count - 100 && n % 2 == 0).then(|| format!("{n}!")));
+		let rewritten = rewritten.replacen("line 100\n", "line 100\nextra\n", 1);
+		store.record(path, &rewritten, Some(&[0]));
+		let seen = store.head(path).unwrap().seen_lines.unwrap();
+		assert_eq!(*seen, (0..=100).collect::<BTreeSet<_>>());
+		assert_eq!(moved(&store, path), (count - 98..=count + 1).collect::<BTreeSet<_>>());
 	}
 
 	#[test]

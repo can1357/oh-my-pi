@@ -974,20 +974,31 @@ pub struct UnseenLinesReveal {
 /// file content at those lines and merged them into the snapshot's seen-line
 /// set, so the message points the model at a straight retry with the same
 /// `[path#tag]` header; when the reveal is empty or truncated, the message
-/// falls back to instructing a range re-read.
+/// falls back to instructing a range re-read. `moved` = true means an earlier
+/// edit or outside change shifted every unseen line: the model saw the
+/// content, only at other numbers.
 pub fn unseen_lines_message(
 	section_path: &str,
 	unseen_lines: &[u32],
 	tag: &str,
+	moved: bool,
 	reveal: &UnseenLinesReveal,
 ) -> String {
 	let ranges = format_line_ranges(unseen_lines);
 	let selector = ranges.replace(", ", ",");
-	let header = format!(
-		"This edit anchors to lines {ranges} of {section_path} that \
-		 {HL_FILE_PREFIX}{section_path}{HL_FILE_HASH_SEP}{tag}{HL_FILE_SUFFIX} never displayed (it \
-		 showed a partial range, a search hit, or a folded summary)."
-	);
+	let header = if moved {
+		format!(
+			"This edit anchors to lines {ranges} of {section_path}, which an earlier change moved: \
+			 {HL_FILE_PREFIX}{section_path}{HL_FILE_HASH_SEP}{tag}{HL_FILE_SUFFIX} never displayed \
+			 them at these numbers, and nothing in the edit identifies the lines there."
+		)
+	} else {
+		format!(
+			"This edit anchors to lines {ranges} of {section_path} that \
+			 {HL_FILE_PREFIX}{section_path}{HL_FILE_HASH_SEP}{tag}{HL_FILE_SUFFIX} never displayed \
+			 (it showed a partial range, a search hit, or a folded summary)."
+		)
+	};
 	if reveal.lines.is_empty() {
 		return format!(
 			"{header} Re-read them in full first with a ranged read like `{section_path}:{selector}` \
@@ -1182,8 +1193,13 @@ mod tests {
 	#[test]
 	fn test_unseen_lines_message() {
 		// Empty reveal
-		let msg_empty =
-			unseen_lines_message("src/foo.ts", &[5, 6, 7, 10], "AB12", &UnseenLinesReveal::default());
+		let msg_empty = unseen_lines_message(
+			"src/foo.ts",
+			&[5, 6, 7, 10],
+			"AB12",
+			false,
+			&UnseenLinesReveal::default(),
+		);
 		assert_eq!(
 			msg_empty,
 			"This edit anchors to lines 5-7, 10 of src/foo.ts that [src/foo.ts#AB12] never displayed \
@@ -1197,7 +1213,7 @@ mod tests {
 			lines:     vec![RevealedLine { line: 5, text: "let x = 1;".to_string() }],
 			truncated: false,
 		};
-		let msg_reveal = unseen_lines_message("src/foo.ts", &[5], "AB12", &reveal);
+		let msg_reveal = unseen_lines_message("src/foo.ts", &[5], "AB12", false, &reveal);
 		assert_eq!(
 			msg_reveal,
 			"This edit anchors to lines 5 of src/foo.ts that [src/foo.ts#AB12] never displayed (it \
@@ -1212,13 +1228,25 @@ mod tests {
 			lines:     vec![RevealedLine { line: 5, text: "let x = 1;".to_string() }],
 			truncated: true,
 		};
-		let msg_trunc = unseen_lines_message("src/foo.ts", &[5, 6], "AB12", &reveal_trunc);
+		let msg_trunc = unseen_lines_message("src/foo.ts", &[5, 6], "AB12", false, &reveal_trunc);
 		assert_eq!(
 			msg_trunc,
 			"This edit anchors to lines 5-6 of src/foo.ts that [src/foo.ts#AB12] never displayed (it \
 			 showed a partial range, a search hit, or a folded summary). Preview of the actual file \
 			 content at the first 1 unseen line(s):\n  5:let x = 1;\nThe range exceeds the inline \
 			 preview cap — re-read the remainder with `src/foo.ts:5-6` before re-issuing the edit."
+		);
+
+		// Lines an earlier change moved
+		let msg_moved = unseen_lines_message("src/foo.ts", &[5], "AB12", true, &reveal);
+		assert_eq!(
+			msg_moved,
+			"This edit anchors to lines 5 of src/foo.ts, which an earlier change moved: \
+			 [src/foo.ts#AB12] never displayed them at these numbers, and nothing in the edit \
+			 identifies the lines there. Actual file content at those lines:\n  5:let x = 1;\nVerify \
+			 the content matches what you intend to touch, then re-issue the edit with the same \
+			 [path#tag] header — a straight retry now succeeds without a re-read. If the content \
+			 does NOT match, fix your line numbers."
 		);
 	}
 
