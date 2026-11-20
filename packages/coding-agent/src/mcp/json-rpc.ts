@@ -6,32 +6,11 @@
  */
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { isRecord, logger, readSseEvents } from "@oh-my-pi/pi-utils";
+import { redactUrlForLog } from "../utils/redact-url";
 import type { JsonRpcResponse } from "./types";
 
 /** Hard ceiling on a single MCP HTTP request when the caller provides no signal. */
 const MCP_DEFAULT_TIMEOUT_MS = 60_000;
-
-const SENSITIVE_QUERY_PARAM = /key|token|secret|auth/i;
-
-/**
- * Drop URL userinfo and fragments (which can carry a workspace access token),
- * and redact credential-bearing query params before logging.
- */
-export function redactUrlForLog(url: string): string {
-	try {
-		const parsed = new URL(url);
-		parsed.username = "";
-		parsed.password = "";
-		parsed.hash = "";
-		for (const name of parsed.searchParams.keys()) {
-			if (SENSITIVE_QUERY_PARAM.test(name)) parsed.searchParams.set(name, "[redacted]");
-		}
-		return parsed.toString();
-	} catch {
-		// An unparseable URL can still carry credentials.
-		return url.split(/[?#]/, 1)[0].replace(/^([^:/?#]+:\/\/)[^/@]*@/, "$1");
-	}
-}
 
 function decodeJsonRpcResponse(message: unknown): JsonRpcResponse | null {
 	if (!isRecord(message) || message.jsonrpc !== "2.0") {

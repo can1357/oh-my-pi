@@ -231,4 +231,21 @@ describe("openPath", () => {
 			expect.objectContaining({ exitCode: 1, target: "http://127.0.0.1:3849/" }),
 		);
 	});
+
+	it("keeps URL secrets out of the log when the opener cannot spawn, but logs local paths verbatim", () => {
+		setPlatform("win32");
+		vi.spyOn(fs, "existsSync").mockReturnValue(true);
+		const warnSpy = vi.spyOn(piUtils.logger, "warn").mockImplementation((() => {}) as never);
+		vi.spyOn(Bun, "spawn").mockImplementation(() => {
+			throw Object.assign(new Error("spawn failed: mailto:me@example.com?token=argv-secret"), { code: "ENOENT" });
+		});
+
+		openPath("mailto:me@example.com?token=argv-secret");
+		openPath("C:\\notes\\a#b.html");
+
+		const logged = JSON.stringify(warnSpy.mock.calls);
+		expect(logged).not.toContain("argv-secret");
+		expect(warnSpy.mock.calls[0]?.[1]).toMatchObject({ code: "ENOENT" });
+		expect(warnSpy.mock.calls[1]?.[1]).toMatchObject({ target: "C:\\notes\\a#b.html" });
+	});
 });

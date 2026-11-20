@@ -2,13 +2,16 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as url from "node:url";
 import { $which, isWsl, logger } from "@oh-my-pi/pi-utils";
-import { redactUrlForLog } from "../mcp/json-rpc";
+import { redactUrlForLog } from "./redact-url";
 
 const URL_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
 
-/** A local filename may contain a literal `#`; only redact URLs. */
+/**
+ * Redact any scheme URL (`https:`, `mailto:`, …). A local filename may contain a
+ * literal `#`, so paths stay verbatim; a one-letter "scheme" is a Windows drive.
+ */
 function logTarget(target: string): string {
-	return target.includes("://") ? redactUrlForLog(target) : target;
+	return /^[a-zA-Z][a-zA-Z\d+.-]+:/.test(target) ? redactUrlForLog(target) : target;
 }
 
 function getExistingWslLocalPath(urlOrPath: string): string | undefined {

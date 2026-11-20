@@ -1,13 +1,13 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import type { HostEvalPreludeDefinition } from "../../eval/preludes";
-import { redactUrlForLog } from "../../mcp/json-rpc";
 import relayGuidance from "../../prompts/system/browser-relay.md" with { type: "text" };
 import userSessionGuidance from "../../prompts/system/browser-user-session.md" with { type: "text" };
 import x11Guidance from "../../prompts/system/browser-x11.md" with { type: "text" };
 import browserCoreDescription from "../../prompts/tools/browser-core.md" with { type: "text" };
 import browserDescription from "../../prompts/tools/browser.md" with { type: "text" };
 import type { ToolSession } from "../../sdk";
+import { redactUrlForLog } from "../../utils/redact-url";
 // @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
 import browserJavascript from "./prelude.js" with { type: "text" };
 import browserPython from "./prelude.py" with { type: "text" };

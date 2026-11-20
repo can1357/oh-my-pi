@@ -8,7 +8,7 @@
  * the system browser.
  */
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
-import { redactUrlForLog } from "../../../mcp/json-rpc";
+import { redactUrlForLog } from "../../../utils/redact-url";
 import { resolveTernPane } from "./kind";
 import { TernError, TernSocketClient } from "./wire";
 
@@ -107,8 +107,10 @@ export async function openTernPage(url: string, how: TernPagePlacement): Promise
 		logger.debug("Tern could not open the page; using the system browser", {
 			url: redactUrlForLog(url),
 			how,
-			// Tern's free-text error can echo the original URL.
+			// Tern's free-text error can echo the original URL; log only its kind, or the
+			// socket error code (ECONNREFUSED, …) when the connection itself failed.
 			kind: error instanceof TernError ? error.kind : undefined,
+			code: error instanceof Error && "code" in error ? error.code : undefined,
 		});
 		client.close();
 		return null;

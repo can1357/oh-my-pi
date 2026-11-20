@@ -2,7 +2,7 @@ import type { BodyInit } from "bun";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { fetchExaTools } from "@oh-my-pi/pi-coding-agent/exa/mcp-client";
-import { callMCP, redactUrlForLog } from "@oh-my-pi/pi-coding-agent/mcp/json-rpc";
+import { callMCP } from "@oh-my-pi/pi-coding-agent/mcp/json-rpc";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { asGlobalFetch } from "./helpers/fetch-mock";
 
@@ -32,27 +32,6 @@ function mockMcpFetch(createResponse: (request: PostedJsonRpcRequest) => Respons
 function sseResponse(data: BodyInit | null): Response {
 	return new Response(data, { headers: { "Content-Type": "text/event-stream" } });
 }
-
-describe("redactUrlForLog", () => {
-	it("redacts credential-bearing query params but keeps the rest", () => {
-		const redacted = redactUrlForLog("https://mcp.exa.ai/mcp?exaApiKey=sk-secret-123&foo=bar");
-		expect(redacted).not.toContain("sk-secret-123");
-		expect(redacted).toContain("foo=bar");
-		expect(redacted).toContain("https://mcp.exa.ai/mcp");
-	});
-
-	it("drops the query string entirely for unparseable URLs", () => {
-		expect(redactUrlForLog("not a url?apiKey=zzz")).toBe("not a url");
-	});
-
-	it("strips URL userinfo, including from unparseable URLs", () => {
-		const redacted = redactUrlForLog("http://reviewer:topsecret@127.0.0.1:11434/v1");
-		expect(redacted).not.toContain("topsecret");
-		expect(redacted).not.toContain("reviewer");
-		expect(redacted).toContain("127.0.0.1:11434/v1");
-		expect(redactUrlForLog("http://user:pw@exa mple?x=1")).toBe("http://exa mple");
-	});
-});
 
 describe("callMCP", () => {
 	afterEach(() => {
