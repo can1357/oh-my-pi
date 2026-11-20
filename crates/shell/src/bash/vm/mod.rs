@@ -520,11 +520,13 @@ pub struct Kernel {
 	/// The last root run that `exit` or `set -e` ended
 	/// ([`Shell::ended_by_exit`]); not imaged.
 	pub exited:             Option<RunId>,
-	/// Of that run, whether the abort cut the script short — commands were
-	/// still left to run — as opposed to a trailing `exit` at the end of
-	/// its input, which ended it exactly where it would have ended anyway;
-	/// meaningful only together with [`Kernel::exited`]. Not imaged.
-	pub exited_cut_short:   bool,
+	/// Of that run, the attribution walk's frozen input, to judge once its
+	/// still-settling pipeline children have had their window — commands
+	/// were still left to run, as opposed to a trailing `exit` at the end
+	/// of its input, which ended it exactly where it would have ended
+	/// anyway; meaningful only together with [`Kernel::exited`]. Not
+	/// imaged; never drives execution.
+	pub pending_cut_short:  Option<(RunId, exec::CutShortInput)>,
 	/// First attribution captured for a root run, before cleanup unwinds
 	/// its frames. `None` as a cause records a non-exit control transfer.
 	/// Not imaged; never drives execution.
@@ -656,7 +658,7 @@ impl Kernel {
 			callout_labels: Vec::new(),
 			prior_jobs: Vec::new(),
 			exited: None,
-			exited_cut_short: false,
+			pending_cut_short: None,
 			exit_report: None,
 			exec_signals: HashMap::new(),
 			reported_signal: None,
@@ -2317,7 +2319,14 @@ impl Shell {
 		p.blocked = None;
 		p.stopped = false;
 		let top_unrun = p.frames.last().map_or(0, |frame| frame.pc);
-		exec::exit_shell(&mut self.k, p, cx, status, exec::TopCut::At(top_unrun), exec::ExitCause::FatalSignal);
+		exec::exit_shell(
+			&mut self.k,
+			p,
+			cx,
+			status,
+			exec::TopCut::At(top_unrun),
+			exec::ExitCause::FatalSignal,
+		);
 		true
 	}
 
@@ -2665,11 +2674,50 @@ impl Shell {
 
 	/// Whether that `exit`/`set -e` abort also left commands unrun: a
 	/// trailing `exit` at the end of the script's input ends the run where
-	/// it would have ended anyway, so nothing was cut short. Meaningful
-	/// only when [`Shell::ended_by_exit`] returns true for the same run;
-	/// ask right after its [`Step::Done`].
-	pub fn ended_by_exit_cut_short(&self, run: RunId) -> bool {
-		self.k.exited == Some(run) && self.k.exited_cut_short
+	/// it would have ended anyway, so nothing was cut short. The verdict
+	/// reads the pipeline children's statuses as they stand NOW — the
+	/// session gives them a window to settle first
+	/// ([`Shell::exit_children_pending`]); one still unresolved keeps the
+	/// conservative unrun verdict. Meaningful only when
+	/// [`Shell::ended_by_exit`] returns true for the same run; ask right
+	/// after its [`Step::Done`].
+	pub fn ended_by_exit_cut_short(&mut self, store: &mut dyn StateStore, run: RunId) -> bool {
+		if self.k.exited != Some(run) {
+			return false;
+		}
+		let Some((id, cut)) = self.k.pending_cut_short.take() else {
+			return false;
+		};
+		let verdict = id == run
+			&& cut.walk(|vpid| {
+				self
+					.k
+					.proc_state(store, vpid)
+					.and_then(|state| state.exited())
+			});
+		self.k.pending_cut_short = Some((id, cut));
+		verdict
+	}
+
+	/// Whether the run's cut-short verdict still waits on a pipeline child
+	/// that has not ended: the window before
+	/// [`Shell::ended_by_exit_cut_short`] is only worth giving while it
+	/// returns true.
+	pub fn exit_children_pending(&mut self, store: &mut dyn StateStore, run: RunId) -> bool {
+		let Some((id, cut)) = self.k.pending_cut_short.take() else {
+			return false;
+		};
+		let pending = id == run
+			&& self.k.exited == Some(run)
+			&& cut.pending_children().iter().any(|&vpid| {
+				self
+					.k
+					.proc_state(store, vpid)
+					.and_then(|state| state.exited())
+					.is_none()
+			});
+		self.k.pending_cut_short = Some((id, cut));
+		pending
 	}
 
 	/// The first termination cause of `run`, excluding cleanup re-entries.

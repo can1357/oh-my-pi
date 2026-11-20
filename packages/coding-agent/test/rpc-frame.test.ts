@@ -20,25 +20,28 @@ function oversizedMessageHistory(prefix: string) {
 }
 
 describe("RPC frame encoding", () => {
-	// Generic frame transport only: arbitrary response data fields survive
-	// encoding and decoding untouched (the bash exit flags as the example).
-	// It is not an end-to-end typed-BashResult claim.
-	it("preserves arbitrary response data fields (bash exit flags) through frame encoding and decoding", () => {
-		for (const endedByExit of [false, true]) {
-			for (const ephemeralShell of [false, true]) {
-				const frame = {
-					type: "response",
-					command: "bash",
-					success: true,
-					data: { output: "", exitCode: 0, cancelled: false, truncated: false, endedByExit, ephemeralShell },
-				};
-				for (const version of [1, 2] as const) {
-					const encoder = new RpcFrameEncoder();
-					encoder.setProtocolVersion(version);
-					const decoder = new RpcFrameDecoder();
-					const decoded = decoder.push(JSON.parse(encoder.encode(frame)));
-					expect(decoded).toEqual(frame);
-				}
+	// The bash exit flag's boundary shapes each carry a distinct downstream
+	// contract: absence (a server predating the flag) must stay absence —
+	// the notice gate is `"endedByExit" in result` — false and true must
+	// survive for the executor's `=== true` normalization, and a non-boolean
+	// value passes through untouched: the transport is generic, the typed
+	// layer owns interpretation.
+	it("preserves the bash exit flag's boundary shapes through frame encoding and decoding", () => {
+		const base = { output: "", exitCode: 0, cancelled: false, truncated: false };
+		for (const [data, present] of [
+			[base, false],
+			[{ ...base, endedByExit: false }, true],
+			[{ ...base, endedByExit: true }, true],
+			[{ ...base, endedByExit: "true" }, true],
+		] as const) {
+			const frame = { type: "response", command: "bash", success: true, data };
+			for (const version of [1, 2] as const) {
+				const encoder = new RpcFrameEncoder();
+				encoder.setProtocolVersion(version);
+				const decoder = new RpcFrameDecoder();
+				const decoded = decoder.push(JSON.parse(encoder.encode(frame))) as typeof frame;
+				expect(decoded).toEqual(frame);
+				expect("endedByExit" in decoded.data).toBe(present);
 			}
 		}
 	});

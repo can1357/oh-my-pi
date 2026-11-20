@@ -33,7 +33,9 @@ use crate::bash::{
 	mem::{self, Capture},
 	pattern::PatOpts,
 	store::{Attrs, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, TrapKey},
-	syntax::{AliasLookup, CompleteCommand, Features, ParseError, ParseErrorKind, Parser, Pos, Resume},
+	syntax::{
+		AliasLookup, CompleteCommand, Features, ParseError, ParseErrorKind, Parser, Pos, Resume,
+	},
 	zshopt::ZshOpt,
 };
 
@@ -660,11 +662,23 @@ fn script_has_command(src: impl Iterator<Item = u8>, aliases: Option<&dyn AliasL
 /// A byte that ends a word: blanks, newlines and the shell's
 /// metacharacters, plus quote and escape starts. `#` only starts a comment
 /// at a word start, so it is not one.
-fn ends_word(b: u8) -> bool {
+const fn ends_word(b: u8) -> bool {
 	matches!(
 		b,
-		b' ' | 0x09 | b'\n' | b';' | b'|' | b'&' | b'(' | b')' | b'<' | b'>' | b'\'' | b'"'
-			| b'`' | b'\\'
+		b' '
+			| 0x09
+			| b'\n'
+			| b';'
+			| b'|'
+			| b'&'
+			| b'('
+			| b')'
+			| b'<'
+			| b'>'
+			| b'\''
+			| b'"'
+			| b'`'
+			| b'\\'
 	)
 }
 
@@ -678,11 +692,7 @@ struct Source<S: Iterator<Item = u8>> {
 /// The replacement text for `word` when it names an alias that may expand
 /// now: unknown to the table, already in the active chain, or a chain
 /// deeper than nested expansions ever read all count as none.
-fn expansion<'a>(
-	aliases: &'a dyn AliasLookup,
-	word: &[u8],
-	chain: &[Vec<u8>],
-) -> Option<&'a [u8]> {
+fn expansion<'a>(aliases: &'a dyn AliasLookup, word: &[u8], chain: &[Vec<u8>]) -> Option<&'a [u8]> {
 	if chain.len() >= 32 || chain.iter().any(|name| name == word) {
 		return None;
 	}
@@ -1101,6 +1111,147 @@ pub(super) enum TopCut {
 	ReturnUnwind(i32),
 }
 
+/// One frame of an exiting root as the attribution walk reads it: frozen
+/// at `exit` ([`CutShortInput::of`]) so the verdict can be judged later,
+/// once the run's still-settling pipeline children have had their window.
+struct CutFrame {
+	/// Code being run; `None` for a script frame between commands.
+	unit:      Option<Arc<Unit>>,
+	pc:        u32,
+	kind:      FrameSnap,
+	loops:     Vec<LoopRec>,
+	/// The frame's scratch runs an unfinished expansion ([`PendingSub`]
+	/// `NoFork`/`Here`/`Math`).
+	expanding: bool,
+	/// Pipeline children of the op at `pc` ([`Scratch::children`]).
+	children:  Vec<(Vpid, Option<i32>)>,
+}
+
+/// The frame kinds the walk's rules name. `Subshell` and `Job` frames match
+/// no rule of their own (every arm that names a kind skips them), so they
+/// share [`FrameSnap::Other`].
+enum FrameSnap {
+	/// A script frame: what kind it is, and its unread source — pending
+	/// alias text followed by unread script bytes — as one buffer, in the
+	/// order the parser reads them.
+	Script {
+		what: ScriptKind,
+		tail: Box<[u8]>,
+	},
+	Function,
+	NoFork,
+	Stage,
+	Other,
+}
+
+/// The attribution walk's whole input, frozen at the root's `exit`: its
+/// frames, the options and aliases they parse under, and where the abort
+/// cut the top one. Judging is deferred ([`Self::walk`]) until the run's
+/// still-settling pipeline children have had their bounded window to end:
+/// their eventual statuses decide whether a conditional suffix would have
+/// run, so a verdict read at `exit` itself would guess at them.
+pub struct CutShortInput {
+	frames:       Vec<CutFrame>,
+	top:          TopCut,
+	status:       i32,
+	cleanup_runs: bool,
+	options:      Vec<super::exit_options::WalkOptions>,
+	aliases:      Option<builtins::Aliases>,
+}
+
+impl CutShortInput {
+	/// Freeze the walk's input from `vp`'s live frames, before `exit`'s
+	/// cleanup unwinds them.
+	fn of(
+		vp: &Vproc,
+		top: TopCut,
+		status: i32,
+		cleanup_runs: bool,
+		options: &[super::exit_options::WalkOptions],
+		aliases: Option<&builtins::Aliases>,
+	) -> Self {
+		Self {
+			frames: vp
+				.frames
+				.iter()
+				.map(|frame| CutFrame {
+					unit:      frame.unit.clone(),
+					pc:        frame.pc,
+					kind:      match &frame.kind {
+						FrameKind::Script { src, pos, aux, what, .. } => FrameSnap::Script {
+							what: *what,
+							tail: aux
+								.as_deref()
+								.and_then(|a| a.pending.as_ref())
+								.map_or(&[][..], |p| p.0.as_slice())
+								.iter()
+								.chain(src[pos.0 as usize..].iter())
+								.copied()
+								.collect(),
+						},
+						FrameKind::Function { .. } => FrameSnap::Function,
+						FrameKind::NoFork => FrameSnap::NoFork,
+						FrameKind::Stage => FrameSnap::Stage,
+						FrameKind::Subshell | FrameKind::Job { .. } => FrameSnap::Other,
+					},
+					loops:     frame.loops.clone(),
+					expanding: frame.scratch.as_ref().is_some_and(|sc| {
+						matches!(
+							sc.sub,
+							Some(
+								PendingSub::NoFork { .. }
+									| PendingSub::Here { .. }
+									| PendingSub::Math { .. }
+							)
+						)
+					}),
+					children:  frame
+						.scratch
+						.as_ref()
+						.map_or(Vec::new(), |sc| sc.children.clone()),
+				})
+				.collect(),
+			top,
+			status,
+			cleanup_runs,
+			options: options.to_vec(),
+			aliases: aliases.cloned(),
+		}
+	}
+
+	/// The pipeline children whose status the verdict still waits on: of
+	/// the frames that would merge them (the op at their `pc` is a `Spawn`
+	/// and `pipefail` is on for them), those with no status yet.
+	pub fn pending_children(&self) -> Vec<Vpid> {
+		let mut pending = Vec::new();
+		for (index, frame) in self.frames.iter().enumerate() {
+			if !self.options.get(index).is_some_and(|o| o.pipefail) {
+				continue;
+			}
+			if let Some(unit) = frame.unit.as_ref()
+				&& unit
+					.ops
+					.get(frame.pc as usize)
+					.is_some_and(|op| op.code == Opcode::Spawn)
+			{
+				pending.extend(
+					frame
+						.children
+						.iter()
+						.filter_map(|&(vpid, saved)| saved.is_none().then_some(vpid)),
+				);
+			}
+		}
+		pending
+	}
+
+	/// The frozen walk's verdict over `self`, with `child_status` read now
+	/// ([`walk_cut_short`]).
+	pub fn walk(&self, child_status: impl FnMut(Vpid) -> Option<i32>) -> bool {
+		walk_cut_short(self, child_status)
+	}
+}
+
 /// Whether `exit`/`set -e` fired with commands still left to run: any frame
 /// (its own continuation first, then whatever resumes below it) has a
 /// command-starting op still ahead of it, or — for a script frame, which
@@ -1114,28 +1265,20 @@ pub(super) enum TopCut {
 /// exactly where the script's end would have; loops stay in their frame,
 /// so a loop whose body holds the `exit` reports unrun input only when a
 /// command follows the loop (the loop-back jump is not a command start).
-fn exit_cut_short(
-	vp: &Vproc,
-	top: TopCut,
-	status: i32,
-	cleanup_runs: bool,
-	options: &[super::exit_options::WalkOptions],
-	aliases: Option<&dyn AliasLookup>,
+pub fn walk_cut_short(
+	input: &CutShortInput,
 	mut child_status: impl FnMut(Vpid) -> Option<i32>,
 ) -> bool {
-	let (top_from, initial) = match top {
+	let (top_from, initial) = match input.top {
 		TopCut::At(from) => {
-			(from, WalkEnd { status: WalkStatus::of(status), transfer: None })
+			(from, WalkEnd { status: WalkStatus::of(input.status), transfer: None })
 		},
-		TopCut::ReturnUnwind(ret) => (
-			0,
-			WalkEnd {
-				status: WalkStatus::of(status),
-				transfer: Some(WalkTransfer::Return(ret)),
-			},
-		),
+		TopCut::ReturnUnwind(ret) => (0, WalkEnd {
+			status:   WalkStatus::of(input.status),
+			transfer: Some(WalkTransfer::Return(ret)),
+		}),
 	};
-	let mut states = vec![(vp.frames.len(), initial, false)];
+	let mut states = vec![(input.frames.len(), initial, false)];
 	let mut visited = HashSet::new();
 	while let Some((count, mut end, resume_at_pc)) = states.pop() {
 		if !visited.insert((count, end, resume_at_pc)) {
@@ -1144,9 +1287,10 @@ fn exit_cut_short(
 		let Some(index) = count.checked_sub(1) else {
 			continue;
 		};
-		let frame = &vp.frames[index];
+		let frame = &input.frames[index];
 		let current_options =
-			options
+			input
+				.options
 				.get(index)
 				.copied()
 				.unwrap_or(super::exit_options::WalkOptions {
@@ -1155,15 +1299,7 @@ fn exit_cut_short(
 					continueonerror: false,
 				});
 		let outcomes = if let Some(unit) = frame.unit.as_ref() {
-			let expanding = end.transfer.is_none()
-				&& frame.scratch.as_ref().is_some_and(|sc| {
-					matches!(
-						sc.sub,
-						Some(
-							PendingSub::NoFork { .. } | PendingSub::Here { .. } | PendingSub::Math { .. }
-						)
-					)
-				});
+			let expanding = end.transfer.is_none() && frame.expanding;
 			// An interrupted expansion still owns unfinished work; only a
 			// loop header belongs to the structural iteration machinery.
 			if expanding
@@ -1176,7 +1312,7 @@ fn exit_cut_short(
 				}) {
 				return true;
 			}
-			let from = if index + 1 == vp.frames.len() {
+			let from = if index + 1 == input.frames.len() {
 				top_from as usize
 			} else if resume_at_pc || expanding {
 				frame.pc as usize
@@ -1186,9 +1322,8 @@ fn exit_cut_short(
 				if end.transfer.is_none()
 					&& current_options.pipefail
 					&& end.status != WalkStatus::NonZero
-					&& let Some(sc) = &frame.scratch
 				{
-					for &(vpid, saved) in &sc.children {
+					for &(vpid, saved) in &frame.children {
 						let prior = saved
 							.or_else(|| child_status(vpid))
 							.map_or(WalkStatus::Unknown, WalkStatus::of);
@@ -1203,8 +1338,14 @@ fn exit_cut_short(
 			} else {
 				frame.pc as usize + 1
 			};
-			match frame_continuation(unit, from, end.status, &frame.loops, cleanup_runs, end.transfer)
-			{
+			match frame_continuation(
+				unit,
+				from,
+				end.status,
+				&frame.loops,
+				input.cleanup_runs,
+				end.transfer,
+			) {
 				FrameExit::RunsInput => return true,
 				FrameExit::Exits(outcomes) => outcomes,
 			}
@@ -1217,32 +1358,28 @@ fn exit_cut_short(
 			let reads_source = end.transfer.is_none()
 				|| (end.transfer == Some(WalkTransfer::Error)
 					&& current_options.continueonerror
-					&& matches!(frame.kind, FrameKind::Script { what: ScriptKind::Run, .. }));
-			if reads_source && let FrameKind::Script { src, pos, aux, .. } = &frame.kind {
-				let pending = aux
-					.as_deref()
-					.and_then(|a| a.pending.as_ref())
-					.map_or(&[][..], |p| p.0.as_slice());
-				if script_has_command(
-					pending.iter().chain(src[pos.0 as usize..].iter()).copied(),
-					aliases,
+					&& matches!(frame.kind, FrameSnap::Script { what: ScriptKind::Run, .. }));
+			if reads_source
+				&& let FrameSnap::Script { tail, .. } = &frame.kind
+				&& script_has_command(
+					tail.iter().copied(),
+					input.aliases.as_ref().map(|a| a as &dyn AliasLookup),
 				) {
-					return true;
-				}
+				return true;
 			}
 			match end.transfer {
 				Some(WalkTransfer::Return(_))
 					if matches!(
 						frame.kind,
-						FrameKind::Function { .. }
-							| FrameKind::NoFork
-							| FrameKind::Script { what: ScriptKind::Source, .. }
+						FrameSnap::Function
+							| FrameSnap::NoFork
+							| FrameSnap::Script { what: ScriptKind::Source, .. }
 					) =>
 				{
 					end.transfer = None;
 				},
 				Some(WalkTransfer::Error)
-					if matches!(frame.kind, FrameKind::Script {
+					if matches!(frame.kind, FrameSnap::Script {
 						what: ScriptKind::Eval
 							| ScriptKind::Source
 							| ScriptKind::Trap { .. }
@@ -1254,20 +1391,20 @@ fn exit_cut_short(
 					end.transfer = None;
 				},
 				Some(WalkTransfer::Break { .. }) => {
-					let function = matches!(frame.kind, FrameKind::Function { .. });
+					let function = matches!(frame.kind, FrameSnap::Function);
 					if function
 						&& index
 							.checked_sub(1)
-							.and_then(|i| options.get(i))
+							.and_then(|i| input.options.get(i))
 							.is_some_and(|o| o.localloops)
 					{
 						end.transfer = None;
 					} else if !function
 						&& !matches!(
 							frame.kind,
-							FrameKind::NoFork
-								| FrameKind::Stage
-								| FrameKind::Script { what: ScriptKind::Eval, .. }
+							FrameSnap::NoFork
+								| FrameSnap::Stage
+								| FrameSnap::Script { what: ScriptKind::Eval, .. }
 						) {
 						continue;
 					}
@@ -1275,12 +1412,12 @@ fn exit_cut_short(
 				Some(WalkTransfer::Exit(_)) => continue,
 				_ => {},
 			}
-			let resume_at_pc = matches!(frame.kind, FrameKind::Script {
+			let resume_at_pc = matches!(frame.kind, FrameSnap::Script {
 				what: ScriptKind::Trap { key: TrapKey::Debug | TrapKey::Err | TrapKey::Signal(_), .. },
 				..
 			});
 			let mut next = index;
-			if let FrameKind::Script {
+			if let FrameSnap::Script {
 				what: ScriptKind::Trap { status: kept, return_target, .. },
 				..
 			} = &frame.kind
@@ -1331,7 +1468,10 @@ pub(super) fn capture_exit_report(
 		&& k.exit_report.is_none_or(|(id, _)| id != run.id)
 	{
 		k.exit_report = Some((run.id, cause));
-		k.exited_cut_short = cause == Some(ExitCause::Exit) && {
+		// The verdict waits for the run's pipeline children to settle
+		// ([`Shell::ended_by_exit_cut_short`]): freeze the walk's input
+		// now, before cleanup unwinds the frames it reads.
+		k.pending_cut_short = (cause == Some(ExitCause::Exit)).then(|| {
 			let options = super::exit_options::by_frame(k, vp, cx).unwrap_or_else(|err| {
 				k.fail(err);
 				Vec::new()
@@ -1340,19 +1480,8 @@ pub(super) fn capture_exit_report(
 				k.fail(err);
 				None
 			});
-			exit_cut_short(
-				vp,
-				top,
-				status,
-				cleanup_runs,
-				&options,
-				aliases.as_ref().map(|a| a as &dyn AliasLookup),
-				|vpid| {
-					k.proc_state(cx.store, vpid)
-						.and_then(|state| state.exited())
-				},
-			)
-		};
+			(run.id, CutShortInput::of(vp, top, status, cleanup_runs, &options, aliases.as_ref()))
+		});
 	}
 }
 
@@ -6348,6 +6477,20 @@ fn run_func_trap(
 mod tests {
 	use super::*;
 	use crate::bash::fd::FdTable;
+
+	/// Live-frame entry the unit tests use: freeze [`CutShortInput::of`]
+	/// from the constructed `vp` and judge it at once.
+	fn exit_cut_short(
+		vp: &Vproc,
+		top: TopCut,
+		status: i32,
+		cleanup_runs: bool,
+		options: &[super::super::exit_options::WalkOptions],
+		aliases: Option<&builtins::Aliases>,
+		child_status: impl FnMut(Vpid) -> Option<i32>,
+	) -> bool {
+		CutShortInput::of(vp, top, status, cleanup_runs, options, aliases).walk(child_status)
+	}
 
 	#[test]
 	fn exit_classification_parked_expansions_resume_parent_command() {

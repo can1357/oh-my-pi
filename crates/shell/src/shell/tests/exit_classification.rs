@@ -642,6 +642,61 @@ async fn exit_classification_counts_cleanup_only_when_it_is_left_unrun() {
 	}
 }
 
+/// Matrix: pipeline attribution must settle sibling statuses before judging
+/// the conditional suffix (F1). An unsettled sibling that settles to success
+/// leaves `||` unrun either way (no cut-short notice); one that settles to
+/// failure under pipefail leaves `||` submitted (notice). Siblings that
+/// outlive the settle window keep the conservative unresolved verdict.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_pipeline_sibling_settles_before_attribution() {
+	let _guard = shell_test_lock().lock().await;
+	for (name, command, expected) in [
+		(
+			"settle-success",
+			"set -o pipefail; shopt -s lastpipe; sleep 0.02 | exit 0 || printf live",
+			false,
+		),
+		(
+			"settle-failure",
+			"set -o pipefail; shopt -s lastpipe; { sleep 0.02; false; } | exit 0 || printf live",
+			true,
+		),
+		(
+			"settle-control",
+			"set -o pipefail; shopt -s lastpipe; sleep 0.02 | : || printf live",
+			false,
+		),
+		("no-pipefail", "shopt -s lastpipe; sleep 0.02 | exit 0 || printf live", false),
+		(
+			"settled-success",
+			"set -o pipefail; shopt -s lastpipe; true | { sleep 0.05; exit 0; } || printf live",
+			false,
+		),
+		(
+			"early-settled-failure",
+			"set -o pipefail; shopt -s lastpipe; false | exit 0 || printf live",
+			true,
+		),
+		("long-sibling", "set -o pipefail; shopt -s lastpipe; sleep 5 | exit 0 || printf live", true),
+	] {
+		let shell = Shell::new(None);
+		let (tx, rx) = flume::unbounded();
+		let result = shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await
+			.expect("shell run");
+		let output: String = rx.try_iter().collect();
+		assert!(output.is_empty(), "suffix ran: {command}");
+		assert_eq!(result.exit_code, Some(0), "{name}: {command}");
+		assert_eq!(result.ended_by_exit, expected, "{name}: {command}");
+	}
+}
+
 /// Matrix: the unread-source scan must apply alias expansion to raw script
 /// words (F2). An alias whose value holds no command leaves nothing to run
 /// regardless of layout; a command-valued alias (or a plain word, a quoted
@@ -664,7 +719,11 @@ async fn exit_classification_alias_expanded_unread_source_scan() {
 		("chain-empty", "shopt -s expand_aliases\nalias a=b\nalias b=''\nexit 0\na", false),
 		("chain-command", "shopt -s expand_aliases\nalias a=b\nalias b=:\nexit 0\na", true),
 		("self-alias", "shopt -s expand_aliases\nalias self='self'\nexit 0\nself", true),
-		("comment-then-next-line", "shopt -s expand_aliases\nalias noted='# n'\nexit 0\nnoted x\n:", true),
+		(
+			"comment-then-next-line",
+			"shopt -s expand_aliases\nalias noted='# n'\nexit 0\nnoted x\n:",
+			true,
+		),
 		("zsh-empty", "emulate zsh\nalias noop=''\nexit 0\nnoop", false),
 	] {
 		let shell = Shell::new(None);
@@ -679,11 +738,7 @@ async fn exit_classification_alias_expanded_unread_source_scan() {
 			.expect("shell run");
 		let output: String = rx.try_iter().collect();
 		assert!(output.is_empty(), "{name}: suffix ran: {command}");
-		assert_eq!(
-			result.ended_by_exit, expected,
-			"{name} (exit {:?}): {command}",
-			result.exit_code
-		);
+		assert_eq!(result.ended_by_exit, expected, "{name} (exit {:?}): {command}", result.exit_code);
 	}
 }
 
@@ -696,8 +751,22 @@ async fn exit_classification_alias_expanded_unread_source_scan() {
 async fn exit_classification_zsh_errexit_after_return_boundary() {
 	let _guard = shell_test_lock().lock().await;
 	for (name, dialect, command, expected_exit, expected_output, expected) in [
-		("fn-suffix", "zsh", "emulate zsh\nset -e; f() { return 1; printf unreachable; }; f", 1, "", false),
-		("caller-suffix", "zsh", "emulate zsh\nset -e; f() { return 1; }; f; printf live", 1, "", true),
+		(
+			"fn-suffix",
+			"zsh",
+			"emulate zsh\nset -e; f() { return 1; printf unreachable; }; f",
+			1,
+			"",
+			false,
+		),
+		(
+			"caller-suffix",
+			"zsh",
+			"emulate zsh\nset -e; f() { return 1; }; f; printf live",
+			1,
+			"",
+			true,
+		),
 		(
 			"both-suffixes",
 			"zsh",
@@ -707,15 +776,37 @@ async fn exit_classification_zsh_errexit_after_return_boundary() {
 			true,
 		),
 		("no-suffix", "zsh", "emulate zsh\nset -e; f() { return 1; }; f", 1, "", false),
-		("success-return", "zsh", "emulate zsh\nset -e; f() { return 0; printf unreachable; }; f; printf live", 0, "live", false),
-		("errexit-off", "zsh", "emulate zsh\nset +e; f() { return 1; printf unreachable; }; f", 1, "", false),
+		(
+			"success-return",
+			"zsh",
+			"emulate zsh\nset -e; f() { return 0; printf unreachable; }; f; printf live",
+			0,
+			"live",
+			false,
+		),
+		(
+			"errexit-off",
+			"zsh",
+			"emulate zsh\nset +e; f() { return 1; printf unreachable; }; f",
+			1,
+			"",
+			false,
+		),
 		("bash-fn-suffix", "bash", "set -e; f() { return 1; printf unreachable; }; f", 1, "", false),
-		("bash-caller-suffix", "bash", "set -e; f() { return 1; printf unreachable; }; f; printf live", 1, "", true),
+		(
+			"bash-caller-suffix",
+			"bash",
+			"set -e; f() { return 1; printf unreachable; }; f; printf live",
+			1,
+			"",
+			true,
+		),
 		("bash-no-suffix", "bash", "set -e; f() { return 1; }; f", 1, "", false),
 		(
 			"zsh-return-in-loop",
 			"zsh",
-			"emulate zsh\nset -e; f() { for i in 1; do return 1; printf unreachable; done; }; f; printf live",
+			"emulate zsh\nset -e; f() { for i in 1; do return 1; printf unreachable; done; }; f; \
+			 printf live",
 			1,
 			"",
 			true,

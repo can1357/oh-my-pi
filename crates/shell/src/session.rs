@@ -99,6 +99,11 @@ const SETTLE_STEPS: u32 = 4;
 /// a waker, so this only bounds the cost of a lost one.
 const MAX_PARK: Duration = Duration::from_secs(1);
 
+/// How long an exited run's still-settling pipeline children may hold its
+/// cut-short verdict: their statuses decide it, so they get this window to
+/// end on their own before it turns conservative.
+const EXIT_SETTLE_CAP: Duration = Duration::from_millis(100);
+
 /// Configuration of a new [`Session`].
 pub struct SessionConfig {
 	/// The shell's initial environment, all exported (no inheritance from
@@ -945,7 +950,7 @@ impl Driver {
 		}
 		let exited = self.shell.ended_by_exit(run);
 		let exit_cause = self.shell.exit_cause(run);
-		let cut_short = self.shell.ended_by_exit_cut_short(run);
+		let cut_short = self.settled_cut_short(run).await;
 		self.settle().await;
 		self.children.set_active(false);
 		self.host.streams().clear();
@@ -965,6 +970,56 @@ impl Driver {
 			cut_short,
 			cwd,
 		});
+	}
+
+	/// The run's cut-short verdict, judged after its still-settling
+	/// pipeline children had a bounded window to end
+	/// ([`Driver::settle_exit_window`]): their eventual statuses decide
+	/// whether the input `exit` left commands that would have run.
+	async fn settled_cut_short(&mut self, run: RunId) -> bool {
+		if !self.shell.ended_by_exit(run) {
+			return false;
+		}
+		if self.shell.exit_children_pending(&mut self.store, run) {
+			self.settle_exit_window(run, EXIT_SETTLE_CAP).await;
+		}
+		self.shell.ended_by_exit_cut_short(&mut self.store, run)
+	}
+
+	/// Give the exited run's in-flight pipeline children a bounded window
+	/// to end on their own: step — their reaps land in the engine's own
+	/// turn — and park until one wakes it, stopping at the cap. A child
+	/// that outlives the window keeps its unresolved status, and the
+	/// verdict stays conservative.
+	async fn settle_exit_window(&mut self, run: RunId, cap: Duration) {
+		let deadline = tokio::time::Instant::now() + cap;
+		loop {
+			self.poll_tools();
+			match self.step(Budget::default()) {
+				Step::Done { run: done, status } => self.on_done(done, status),
+				Step::Call { id, call } => self.on_call(id, call),
+				Step::Yield | Step::SuspendReady => {},
+				Step::Blocked | Step::Paused => {
+					let now = tokio::time::Instant::now();
+					if now >= deadline {
+						return;
+					}
+					let limit = (deadline - now).min(MAX_PARK);
+					let ctl = self.shell.control();
+					let bell = Arc::clone(&self.bell);
+					tokio::select! {
+						biased;
+						() = poll_fn(|cx| ctl.poll_runnable(cx)) => {},
+						() = bell.0.notified() => {},
+						() = tokio::time::sleep(limit) => return,
+					}
+				},
+				Step::Idle => return,
+			}
+			if !self.shell.exit_children_pending(&mut self.store, run) {
+				return;
+			}
+		}
 	}
 
 	/// Let the background work a command started reach its first wait (an
