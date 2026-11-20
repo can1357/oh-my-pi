@@ -157,6 +157,32 @@ describe("truncateRecallQuery", () => {
 	});
 });
 
+describe("truncateRecallQuery token cap", () => {
+	it("bounds an 800-character CJK prompt to the server's 500-token limit", () => {
+		const prompt = "中".repeat(800);
+		expect(truncateRecallQuery(prompt, prompt, 800, 500)).toBe("中".repeat(500));
+	});
+
+	it("drops the oldest prior-context turn before cutting the latest prompt", () => {
+		const latest = "中".repeat(250);
+		const query = composeRecallQuery(
+			latest,
+			[
+				{ role: "user", content: "中".repeat(300) },
+				{ role: "assistant", content: "好的" },
+				{ role: "user", content: latest },
+			],
+			3,
+		);
+		expect(truncateRecallQuery(query, latest, 800, 500)).toBe(`Prior context:\n\nassistant: 好的\n\n${latest}`);
+	});
+
+	it("keeps a query that is exactly at the server's token limit", () => {
+		const prompt = "中".repeat(500);
+		expect(truncateRecallQuery(prompt, prompt, 800, 500)).toBe(prompt);
+	});
+});
+
 describe("sliceLastTurnsByUserBoundary", () => {
 	const messages: HindsightMessage[] = [
 		{ role: "user", content: "u1" },
