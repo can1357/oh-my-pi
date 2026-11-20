@@ -302,7 +302,7 @@ describe("provider context image budgets", () => {
 		["Gemini on Devin", DEVIN_GEMINI_MODEL, 60],
 		["Gemini through a Devin gateway", DEVIN_GATEWAY_GEMINI_MODEL, 40],
 		["Claude on Devin", DEVIN_CLAUDE_MODEL, 20],
-	] as const)("keeps the newest images up to the count %s allows", (_label, model, budget) => {
+	] as const)("drops a step of the oldest images past the count %s allows", (_label, model, budget) => {
 		const context: Context = {
 			systemPrompt: [],
 			tools: [],
@@ -315,7 +315,36 @@ describe("provider context image budgets", () => {
 
 		const clamped = clampProviderContextImages(context, model);
 
-		expect(imageData(clamped)).toEqual(Array.from({ length: budget }, (_, index) => `image-${index + 1}`));
+		// One image over the budget drops a whole step: a quarter of the budget, rounded up.
+		const step = Math.ceil(budget / 4);
+		expect(imageData(clamped)).toEqual(
+			Array.from({ length: budget + 1 - step }, (_, index) => `image-${index + step}`),
+		);
+	});
+
+	it("keeps the evicted prefix identical for consecutive new images within one eviction step", () => {
+		// The official Anthropic budget is 600 images, so an eviction step is a quarter of it: 150.
+		const clampedAt = (count: number) =>
+			clampProviderContextImages(
+				{
+					systemPrompt: [],
+					tools: [],
+					messages: Array.from({ length: count }, (_, index) => ({
+						role: "user" as const,
+						content: [image(`image-${index}`)],
+						timestamp: index,
+					})),
+				},
+				ANTHROPIC_MODEL,
+			).messages;
+
+		for (let count = 602; count <= 750; count++) {
+			// Each new image only appends to the request: every earlier message is identical to the last request's.
+			expect(clampedAt(count).slice(0, count - 1)).toEqual(clampedAt(count - 1));
+		}
+		expect(imageData({ systemPrompt: [], tools: [], messages: clampedAt(750) })[0]).toBe("image-150");
+		// The 751st image crosses the step, so the boundary moves once, by a whole step.
+		expect(imageData({ systemPrompt: [], tools: [], messages: clampedAt(751) })[0]).toBe("image-300");
 	});
 
 	it("drops the oldest images over DeepSeek's 40 MiB inline-image budget", () => {
@@ -387,7 +416,8 @@ describe("provider context image budgets", () => {
 		const clamped = clampProviderContextImages(context, UMANS_MODEL);
 		const firstMessage = clamped.messages[0];
 
-		expect(imageData(clamped)).toEqual(Array.from({ length: 10 }, (_, index) => `image-${index + 1}`));
+		// One image over UMANS' 10 drops a whole step of ceil(10 / 4) = 3.
+		expect(imageData(clamped)).toEqual(Array.from({ length: 8 }, (_, index) => `image-${index + 3}`));
 		expect(firstMessage?.role).toBe("toolResult");
 		expect(firstMessage?.content).toEqual([text("[image omitted: provider image limit]")]);
 	});
@@ -435,7 +465,7 @@ describe("provider context image budgets", () => {
 		expect(clampedDeveloper.providerPayload).toBeUndefined();
 		expect(originalUser.providerPayload).toBe(userPayload);
 		expect(originalDeveloper.providerPayload).toBe(developerPayload);
-		expect(imageData(clamped)).toEqual(Array.from({ length: 10 }, (_, index) => `kept-image-${index}`));
+		expect(imageData(clamped)).toEqual(Array.from({ length: 9 }, (_, index) => `kept-image-${index + 1}`));
 	});
 
 	it("does not charge assistant images against the budget user and tool result images pay", () => {
@@ -501,7 +531,8 @@ describe("provider context image budgets", () => {
 
 		const clamped = clampProviderContextImages(context, OPENAI_RESPONSES_MODEL);
 
-		expect(imageData(clamped)).toEqual(Array.from({ length: 200 }, (_, index) => `input-${index + 2}`));
+		// Two over OpenAI's 200 rounds up to one eviction step of 50.
+		expect(imageData(clamped)).toEqual(Array.from({ length: 152 }, (_, index) => `input-${index + 50}`));
 	});
 
 	it("retains exactly the configured inline byte budget, then drops oldest images without mutating the context", () => {
@@ -1530,12 +1561,11 @@ describe("provider context image budgets", () => {
 		};
 		const countClamped = clampProviderContextImages(countLimited, UMANS_MODEL);
 		expect(countClamped.messages[0]?.content).toEqual([text("ref-0"), text(omitted())]);
-		expect(imageData(countClamped)).toHaveLength(10);
-		expect(textData(countClamped)).toEqual([
-			"ref-0",
-			omitted(),
-			...Array.from({ length: 10 }, (_, index) => `ref-${index + 1}`),
-		]);
+		// One image over UMANS' 10 drops a whole step of 3, which strips the images of the first three messages.
+		expect(imageData(countClamped)).toHaveLength(8);
+		expect(textData(countClamped)).toEqual(
+			Array.from({ length: 11 }, (_, index) => (index < 3 ? [`ref-${index}`, omitted()] : [`ref-${index}`])).flat(),
+		);
 	});
 
 	it("does not charge assistant output images against the inline byte budget", () => {
