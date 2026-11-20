@@ -153,7 +153,7 @@ pub(super) fn combo_target(
 
 /// Why a control's message went unanswered.
 #[cfg(target_os = "windows")]
-pub(super) enum Unanswered {
+enum Unanswered {
 	/// A pointer-bearing message for another thread of this process, refused
 	/// before sending: after a timeout its buffer could outlive the call.
 	OtherThread,
@@ -180,14 +180,14 @@ fn send_message(
 /// How long a message of the current operation may wait for its answer: 3 s,
 /// or what is left of the operation's deadline if that is sooner.
 #[cfg(target_os = "windows")]
-pub(super) fn operation_wait_ms() -> u32 {
+fn operation_wait_ms() -> u32 {
 	super::super::control::time_left().map_or(3000, |left| left.as_millis().min(3000) as u32)
 }
 
 /// Sends `message` and waits up to `wait_ms` for its result (Windows ignores
 /// the wait for a window of the calling thread, which answers at once).
 #[cfg(target_os = "windows")]
-pub(super) fn send_message_within(
+fn send_message_within(
 	target: windows_sys::Win32::Foundation::HWND,
 	message: u32,
 	wparam: usize,
