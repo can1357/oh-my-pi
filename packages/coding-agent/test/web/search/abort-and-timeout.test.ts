@@ -15,8 +15,11 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
+import * as sdk from "@oh-my-pi/pi-coding-agent/sdk";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
-import { runSearchQuery } from "@oh-my-pi/pi-coding-agent/web/search";
+import { runSearchQuery, WebSearchTool, webSearchCustomTool } from "@oh-my-pi/pi-coding-agent/web/search";
 import * as provider from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { searchAnthropic } from "@oh-my-pi/pi-coding-agent/web/search/providers/anthropic";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
@@ -401,5 +404,91 @@ describe("executeSearch abort propagation", () => {
 		expect(result.details.response.provider).toBe("exa");
 		expect(context.getProvider).toHaveBeenCalledTimes(1);
 		expect(fallbackSearch).not.toHaveBeenCalled();
+	});
+
+	/** A directly constructed tool: with no session auth store, each search opens its own fallback store. */
+	function directWebSearchTool(authStorage?: AuthStorage): WebSearchTool {
+		const session = {
+			cwd: process.cwd(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			authStorage,
+		} as unknown as ToolSession;
+		return new WebSearchTool(session);
+	}
+
+	/** Makes the fallback store a known instance and returns the spy on its close(). */
+	function stubFallbackAuthStorage() {
+		const fallback = createInMemoryAuthStorage();
+		openAuthStorages.push(fallback);
+		vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(fallback);
+		return vi.spyOn(fallback, "close");
+	}
+
+	it("closes the fallback auth store after a direct web_search succeeds", async () => {
+		await configureProviderChain([
+			fakeProvider("brave", async () => ({
+				provider: "brave",
+				sources: [{ title: "Fallback result", url: "https://example.com/fallback-result" }],
+			})),
+		]);
+		const close = stubFallbackAuthStorage();
+
+		const result = await directWebSearchTool().execute("call-success", { query: "anything" });
+
+		expect(result.details?.response.provider).toBe("brave");
+		expect(close).toHaveBeenCalledTimes(1);
+	});
+
+	it("closes the fallback auth store when a direct web_search is aborted", async () => {
+		await configureProviderChain([
+			fakeProvider("brave", async () => {
+				throw new DOMException("aborted", "AbortError");
+			}),
+		]);
+		const close = stubFallbackAuthStorage();
+		const ac = new AbortController();
+		ac.abort();
+
+		await expect(
+			directWebSearchTool().execute("call-aborted", { query: "anything" }, ac.signal),
+		).rejects.toBeInstanceOf(ToolAbortError);
+		expect(close).toHaveBeenCalledTimes(1);
+	});
+
+	it("leaves a session-provided auth store open after a direct web_search", async () => {
+		await configureProviderChain([
+			fakeProvider("brave", async () => ({
+				provider: "brave",
+				sources: [{ title: "Session result", url: "https://example.com/session-result" }],
+			})),
+		]);
+		const sessionAuthStorage = createInMemoryAuthStorage();
+		openAuthStorages.push(sessionAuthStorage);
+		const close = vi.spyOn(sessionAuthStorage, "close");
+
+		await directWebSearchTool(sessionAuthStorage).execute("call-session", { query: "anything" });
+
+		expect(close).not.toHaveBeenCalled();
+	});
+
+	it("closes the fallback auth store after the custom-tool entry point searches", async () => {
+		await configureProviderChain([
+			fakeProvider("brave", async () => ({
+				provider: "brave",
+				sources: [{ title: "Custom result", url: "https://example.com/custom-result" }],
+			})),
+		]);
+		const close = stubFallbackAuthStorage();
+		const ctx = {
+			sessionManager: { getSessionId: () => "session-custom" },
+			model: undefined,
+			modelRegistry: undefined,
+		} as unknown as CustomToolContext;
+
+		await webSearchCustomTool.execute("call-custom", { query: "anything" }, undefined, ctx, undefined);
+
+		expect(close).toHaveBeenCalledTimes(1);
 	});
 });
