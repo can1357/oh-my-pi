@@ -34,7 +34,7 @@ export const cfgAdvisorSyncBacklog = register({
 		group: "Advisor",
 		label: "Advisor Sync Backlog",
 		description:
-			"Pause main agent until advisor backlog falls below threshold. Numeric values cap wait at 30 seconds; strict waits for all scheduled reviews without a wall-clock cap. Off disables catch-up delays. Abort, failure, and disposal release waits.",
+			"Pause main agent until advisor backlog falls below threshold. Numeric values cap wait at 30 seconds and apply only at a run's final boundary, not between tool steps; strict waits for all scheduled reviews at every boundary without a wall-clock cap. Off disables catch-up delays. Abort, failure, and disposal release waits.",
 		condition: "advisorEnabled",
 	},
 });

@@ -211,7 +211,7 @@ On primary turn end:
 
 1. every advisor captures the primary delta; an advisor whose review is scheduled queues it together with any updates its cadence held since its last review
 2. the advisor drain loop starts or continues in the background
-3. each scheduled advisor resolves its own override or the global policy; unless it is `off`, the primary waits while that advisor's backlog is at or above its threshold
+3. each scheduled advisor resolves its own override or the global policy; unless it is `off`, the primary waits while that advisor's backlog is at or above its threshold. A numeric threshold waits only at the run's final boundary, not between tool-loop steps; `strict` waits at every boundary
 4. bounded values cap the wait at 30 seconds; `strict` waits without a wall-clock cap
 5. if the advisor catches up below the threshold, the primary continues immediately
 6. abort, failure, quota pause, session-transition pause, or disposal releases waiters; paused transitions also reject new waits
@@ -219,8 +219,9 @@ On primary turn end:
 Practical interpretation:
 
 - `off` favors maximum primary throughput.
-- `1` is the closest mode to synchronous review: after each queued advisor delta, the primary waits up to 30 seconds for backlog to return to zero.
+- `1` is the closest mode to synchronous review: at the run's final boundary, the primary waits up to 30 seconds for backlog to return to zero. Between tool-loop steps it does not wait.
 - `3` and `5` allow more advisor lag before the primary pauses.
+- At a tool-loop boundary a blocker is not held: it still steers the primary live when its review raises it. Non-blocker notes wait for the final boundary.
 
 `strict` with an `agent-end` advisor provides synchronous final review: the primary reaches its final boundary, the advisor reviews the accumulated run, then the primary can finish. Notes delivered at that boundary merge into one message, ordered newest turn first, then severity (`blocker` → `concern` → `nit`). Notes about earlier turns carry a `turns_ago` attribute and a dim `T-N` transcript marker between severity and advisor name. The first merged delivery, then at most once every 50 primary turns, includes guidance that findings may be outdated or wrong and may be ignored.
 

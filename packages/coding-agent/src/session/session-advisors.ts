@@ -750,6 +750,11 @@ export class SessionAdvisors {
 				const syncBacklog = scheduled.syncBacklog ?? globalSyncBacklog;
 				if (syncBacklog === "off") continue;
 				const strict = syncBacklog === "strict";
+				// The flush above withholds this boundary's non-blocker (nit and concern)
+				// notes until the terminal boundary, so a numeric wait here would hold the
+				// primary for them. A blocker still steers live when its review raises it.
+				// Strict still blocks every boundary.
+				if (!terminalBoundary && !strict) continue;
 				const threshold = strict ? 1 : Number.parseInt(syncBacklog, 10);
 				waits.push(scheduled.runtime.waitForCatchup(strict ? undefined : 30_000, threshold, signal));
 			}
