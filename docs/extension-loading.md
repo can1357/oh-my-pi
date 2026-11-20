@@ -313,6 +313,14 @@ Imports and file-backed factory calls run under `withHostGuard()`: load-time
 `process.exit` / `process.reallyExit` calls throw `ExtensionExitError`, and stdin
 listeners plus paused/raw input state are restored to their pre-load snapshot. This protects host startup, not arbitrary runtime extension code.
 
+A successful shutdown is not intercepted by an open guard window. A headless
+`-p` run that reaches its exit while an extension, hook or tool load is still in
+flight — a deferred import, a long-running factory — names every entry still
+holding a window on stderr once and exits through the native primitive with the
+host's real status, instead of turning a clean exit into `ExtensionExitError`
+and exit 1. A non-zero exit still routes through the throwing stub, so a module
+cannot terminate the host or hide a failure behind a load window.
+
 Common cases:
 
 - import failure / missing file
