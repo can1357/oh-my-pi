@@ -615,17 +615,23 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 		_onUpdate?: AgentToolUpdateCallback<SearchResultDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<SearchResultDetails>> {
-		const authStorage = this.#session.authStorage ?? (await discoverAuthStorage());
 		const sessionId = this.#session.getSessionId?.() ?? undefined;
-		return executeSearch(_toolCallId, params, {
-			authStorage,
-			modelRegistry: this.#session.modelRegistry,
-			sessionId,
-			sessionModel: this.#session.getActiveModel?.(),
-			settings: this.#session.settings,
-			signal,
-			usageLedger: this.#session.sessionManager,
-		});
+		// Close only the store this call discovered; the session's own store stays open.
+		let createdAuthStorage: AuthStorage | undefined;
+		try {
+			const authStorage = this.#session.authStorage ?? (createdAuthStorage = await discoverAuthStorage());
+			return await executeSearch(_toolCallId, params, {
+				authStorage,
+				modelRegistry: this.#session.modelRegistry,
+				sessionId,
+				sessionModel: this.#session.getActiveModel?.(),
+				settings: this.#session.settings,
+				signal,
+				usageLedger: this.#session.sessionManager,
+			});
+		} finally {
+			createdAuthStorage?.close();
+		}
 	}
 }
 
@@ -644,15 +650,20 @@ export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchResul
 		ctx: CustomToolContext,
 		signal?: AbortSignal,
 	) {
-		const authStorage = ctx.modelRegistry?.authStorage ?? (await discoverAuthStorage());
 		const sessionId = ctx.sessionManager.getSessionId();
-		return executeSearch(toolCallId, params, {
-			authStorage,
-			modelRegistry: ctx.modelRegistry,
-			sessionId,
-			sessionModel: ctx.model,
-			signal,
-		});
+		let createdAuthStorage: AuthStorage | undefined;
+		try {
+			const authStorage = ctx.modelRegistry?.authStorage ?? (createdAuthStorage = await discoverAuthStorage());
+			return await executeSearch(toolCallId, params, {
+				authStorage,
+				modelRegistry: ctx.modelRegistry,
+				sessionId,
+				sessionModel: ctx.model,
+				signal,
+			});
+		} finally {
+			createdAuthStorage?.close();
+		}
 	},
 };
 
