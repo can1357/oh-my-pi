@@ -438,8 +438,12 @@ async function executeCompletion(
 					disableReasoning: candidate.disableReasoning,
 					toolChoice: schema ? { type: "tool", name: STRUCTURED_TOOL_NAME } : undefined,
 					// Capture this request's raw provider frames (SSE / synthesized WS
-					// frames) so a failure can be diagnosed from what the wire returned.
-					onSseEvent: (event, model) => rawBuffer.recordEvent(event, model),
+					// frames): the local buffer backs the on-error dump; the session
+					// buffer surfaces the same frames in `/debug`.
+					onSseEvent: (event, model) => {
+						rawBuffer.recordEvent(event, model);
+						session.rawSseDebugBuffer?.recordEvent(event, model);
+					},
 				},
 				{ telemetry, oneshotKind: "eval_completion" },
 			);

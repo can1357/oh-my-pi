@@ -2,6 +2,7 @@ import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } 
 import type { ToolConversationState } from "./tool-state";
 import type { FetchImpl, ImageContent, Message, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
+import type { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import type { AsyncJobManagerApi } from "../async/job-manager";
 import type { NotifyBatch } from "../async/notify";
 import type { Rule } from "../capability/rule";
@@ -368,6 +369,11 @@ export interface ToolSession {
 	 */
 	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"> &
 		Partial<Pick<SessionManager, "getSessionId" | "getLeafId" | "appendModelUsage" | "getArtifactsDir">>;
+	/**
+	 * Session-owned raw SSE capture, shared with the `/debug` report. Optional:
+	 * helper and standalone contexts without one simply forgo `/debug` capture.
+	 */
+	rawSseDebugBuffer?: RawSseDebugBuffer;
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
 	/** Current enabled eval prelude definitions. */

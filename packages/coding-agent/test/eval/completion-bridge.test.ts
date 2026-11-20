@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { Api, AssistantMessage, Model, RawSseEvent } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-ai";
+import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import type { ModelRegistry } from "../../src/config/model-registry";
@@ -630,15 +631,34 @@ describe("runEvalCompletion", () => {
 			return assistant({});
 		});
 
-		const error = (await rejectionOf(
-			runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session }),
-		)) as Error;
+		const error = (await rejectionOf(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session }))) as Error;
 		expect(error.message).toContain("completion() returned no text output.");
 		const match = /Streamed provider frames written to (.+?)\.$/.exec(error.message);
 		expect(match).not.toBeNull();
 		const dumped = await Bun.file(match![1]!).text();
 		expect(dumped).toContain("content_block_delta");
 		expect(dumped).toContain('{"delta":"thinking"}');
+	});
+
+	it("mirrors completion frames into the session debug buffer for /debug", async () => {
+		const session = makeSession();
+		const debug = new RawSseDebugBuffer();
+		session.rawSseDebugBuffer = debug;
+		const frame: RawSseEvent = {
+			event: "content_block_delta",
+			data: '{"delta":"thinking"}',
+			raw: ["event: content_block_delta", 'data: {"delta":"thinking"}'],
+		};
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (model, _ctx, opts) => {
+			opts?.onSseEvent?.(frame, model);
+			return assistant({ text: "ok" });
+		});
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		const text = debug.toRawText();
+		expect(text).toContain("content_block_delta");
+		expect(text).toContain('{"delta":"thinking"}');
 	});
 
 	it("supplies a non-empty systemPrompt when system is omitted (codex 'Instructions are required' guard)", async () => {
