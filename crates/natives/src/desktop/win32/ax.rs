@@ -690,12 +690,8 @@ mod tests {
 		// because the native caller's reply deadline has elapsed.
 		const SCRIPT: &str = r#"
 $ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase
-Add-Type -ReferencedAssemblies @(
-    [System.Windows.Window].Assembly.Location,
-    [System.Windows.Media.Visual].Assembly.Location,
-    [System.Windows.Threading.Dispatcher].Assembly.Location
-) -TypeDefinition @'
+Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase,System.Xaml
+Add-Type -ReferencedAssemblies PresentationFramework,PresentationCore,WindowsBase,System.Xaml -TypeDefinition @'
 using System;
 using System.Threading;
 using System.Windows;
