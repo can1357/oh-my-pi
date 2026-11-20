@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { getProjectDir, isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
-import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import type { ArtifactAllocator, OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../../tools";
 import {
 	abortReasonError,
@@ -102,9 +102,8 @@ export interface PythonExecutorOptions {
 	 * preferred over `PI_SESSION_FILE`-derived paths.
 	 */
 	artifactsDir?: string;
-	/** Artifact path/id for full output storage */
-	artifactPath?: string;
-	artifactId?: string;
+	/** Claims the spill file for output that overflows the inline view. */
+	allocateArtifact?: ArtifactAllocator;
 	/**
 	 * On-disk roots the prelude helpers (`read`/`write`) substitute for
 	 * internal-URL schemes (e.g. `{ local: "/…/artifacts/local" }`). Exported to

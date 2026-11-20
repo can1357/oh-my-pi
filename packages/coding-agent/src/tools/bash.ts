@@ -1024,8 +1024,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			signal: AbortSignal | undefined;
 			/** `urlmap` commands for the session's URL paths ({@link shellMounts}). */
 			mounts: string;
-			artifactPath: string | undefined;
-			artifactId: string | undefined;
 		},
 	): Promise<BashInteractiveResult> {
 		const seed = await this.#sessionSeed(run.sessionId, run.hostCwd, run.signal);
@@ -1042,8 +1040,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				env: { ...seed.env, ...run.sessionEnv },
 				timeoutMs: run.timeoutMs,
 				signal: run.signal,
-				artifactPath: run.artifactPath,
-				artifactId: run.artifactId,
+				allocateArtifact: this.session.allocateOutputArtifact,
 				onStart: pid => {
 					board.entry = registerOnBoard({
 						kind: "external",
@@ -1420,7 +1417,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						: undefined;
 				// A cancelled job reports nothing more, even while its command is still shutting down.
 				if (notifier) runSignal.addEventListener("abort", () => notifier.stop(), { once: true });
-				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.()) ?? {};
 				const wallTimeStart = performance.now();
 				try {
 					const result = await executeBash(options.command, {
@@ -1448,8 +1444,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							toolCallId: options.toolCallId,
 						}).shellFilesystem(),
 						speech: sessionShellSpeech(this.session),
-						artifactPath,
-						artifactId,
+						allocateArtifact: this.session.allocateOutputArtifact,
 						onChunk: chunk => {
 							outputTap.append(chunk);
 							notifier?.poll();
@@ -2251,9 +2246,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			}
 		}
 
-		// Allocate artifact for truncated output storage
-		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.()) ?? {};
-
 		const interactiveUi = canUseInteractiveBashPty(pty === true, ctx) ? ctx?.ui : undefined;
 		if (pty && !interactiveUi) {
 			pendingNotices.push("pty requested but unavailable in this environment; ran without a terminal");
@@ -2283,8 +2275,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					timeoutMs,
 					signal,
 					mounts: await shellMounts(sessionResolveContext(this.session, { signal }), approvalTier),
-					artifactPath,
-					artifactId,
 				})
 			: // executeBash runs its OWN direnv preflight internally — pass the RAW
 				// command here so the unset prefix is not applied twice.
@@ -2308,8 +2298,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						toolCallId,
 					}).shellFilesystem(),
 					speech: sessionShellSpeech(this.session),
-					artifactPath,
-					artifactId,
+					allocateArtifact: this.session.allocateOutputArtifact,
 					// Stream the sink's own inline view rather than re-buffering chunks.
 					onPreview: emitFrame
 						? text => {

@@ -5,7 +5,7 @@ import { type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
 import { loadXtermTerminal } from "@oh-my-pi/pi-tui/tools/terminal-output";
 import { Settings } from "../config/settings";
 import { buildNonInteractiveEnv } from "../exec/non-interactive-env";
-import { OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { type ArtifactAllocator, OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { StreamNewlineNormalizer } from "../utils/stream-newlines";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
@@ -53,8 +53,7 @@ export async function runInteractiveBashPty(
 		signal?: AbortSignal;
 		/** The session shell's exports the program starts from. */
 		env: Record<string, string>;
-		artifactPath?: string;
-		artifactId?: string;
+		allocateArtifact?: ArtifactAllocator;
 		/** Called with the program's pid once the terminal spawned it. */
 		onStart?: (pid: number) => void;
 	},
@@ -65,8 +64,7 @@ export async function runInteractiveBashPty(
 	const graphics = new TerminalGraphicsDecoder();
 	const newlines = new StreamNewlineNormalizer();
 	const sink = new OutputSink({
-		artifactPath: options.artifactPath,
-		artifactId: options.artifactId,
+		allocateArtifact: options.allocateArtifact,
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
