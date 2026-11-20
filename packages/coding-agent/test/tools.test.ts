@@ -18,7 +18,7 @@ import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { RACY_STAMP_WINDOW_MS } from "@oh-my-pi/pi-coding-agent/tools/racy-stamp";
 import * as toolTimeouts from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { $which, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { $which, removeSyncWithRetries, Snowflake, spillFileName, spillUrl } from "@oh-my-pi/pi-utils";
 import { openArchive, readArchiveEntries } from "@oh-my-pi/pi-utils/ar";
 import { GlobTool } from "../src/tools/glob";
 import { DEFAULT_FILE_LIMIT, GrepTool, MULTI_FILE_PER_FILE_MATCHES } from "../src/tools/grep";
@@ -523,10 +523,10 @@ function createTestToolSession(
 		getSessionFile: () => sessionFile,
 		getSessionSpawns: () => "*",
 		getArtifactsDir: () => sessionDir,
-		allocateOutputArtifact: async (toolType: string) => {
-			fs.mkdirSync(sessionDir, { recursive: true });
+		allocateOutputArtifact: async () => {
+			fs.mkdirSync(path.join(sessionDir, "local"), { recursive: true });
 			const id = String(++artifactCounter);
-			return { id, path: path.join(sessionDir, `${id}.${toolType}.log`) };
+			return { id, path: path.join(sessionDir, "local", spillFileName(id)) };
 		},
 		settings,
 		...overrides,
@@ -936,7 +936,7 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should reject malformed internal-URL selectors instead of dumping the whole resource", async () => {
-			await expect(readTool.execute("test-call-bad-internal-sel", { path: "artifact://3:-100-5" })).rejects.toThrow(
+			await expect(readTool.execute("test-call-bad-internal-sel", { path: "local://3.log:-100-5" })).rejects.toThrow(
 				/Invalid selector ':-100-5'/,
 			);
 		});
@@ -1034,8 +1034,11 @@ describe("Coding Agent Tools", () => {
 
 		it("reports the artifact byte budget that truncated a ranged read", async () => {
 			const artifactsDir = path.join(testDir, "artifact-limit-session");
-			fs.mkdirSync(artifactsDir, { recursive: true });
-			fs.writeFileSync(path.join(artifactsDir, "7.mcp.log"), `skip\n{\n${"x".repeat(60 * 1024)}\ntail`);
+			fs.mkdirSync(path.join(artifactsDir, "local"), { recursive: true });
+			fs.writeFileSync(
+				path.join(artifactsDir, "local", spillFileName(7)),
+				`skip\n{\n${"x".repeat(60 * 1024)}\ntail`,
+			);
 			// Uncapped, so the 60KB line is charged its full size rather than its cut display.
 			const artifactSession = createTestToolSession(testDir, Settings.isolated({ "tools.outputMaxColumns": 0 }), {
 				localProtocolOptions: {
@@ -1046,12 +1049,12 @@ describe("Coding Agent Tools", () => {
 			const artifactReadTool = wrapToolWithMetaNotice(new ReadTool(artifactSession));
 
 			const result = await artifactReadTool.execute("test-call-artifact-byte-limit", {
-				path: "artifact://7:3-4",
+				path: "local://7.log:3-4",
 			});
 			const output = getTextOutput(result);
 			expect(output).toContain("[Showing lines 2-2 of 4 (50.0KB limit)]");
 			expect(output).toContain("Line 3 is 60.0KB");
-			expect(output).toContain("artifact://7:raw:3-3");
+			expect(output).toContain("local://7.log:raw:3-3");
 			expect(output).not.toContain("Use :3- to continue");
 		});
 
@@ -1172,7 +1175,7 @@ describe("Coding Agent Tools", () => {
 			}
 		});
 
-		it("bounds oversized URL reads like plain files, except pages of artifact storage", async () => {
+		it("bounds oversized URL reads like plain files, except pages of local:// files", async () => {
 			const payload = Array.from({ length: 3000 }, (_, index) => `payload line ${index}`).join("\n");
 			const skillDir = path.join(testDir, "skills", "demo");
 			fs.mkdirSync(skillDir, { recursive: true });
@@ -1228,7 +1231,7 @@ describe("Coding Agent Tools", () => {
 					expect(Buffer.byteLength(output, "utf-8")).toBeLessThan(20 * 1024);
 				}
 				// Line pages of a URL-located file stop at the threshold and name their continuation.
-				for (const url of ["local://big.md:1-3000", "agent://Lines:1-3000"]) {
+				for (const url of ["agent://Lines:1-3000"]) {
 					const result = await spillReadTool.execute(`page-${url}`, { path: url }, undefined, undefined, context);
 					const truncation = result.details?.meta?.truncation;
 					expect(truncation?.artifactId).toBeUndefined();
@@ -1236,17 +1239,15 @@ describe("Coding Agent Tools", () => {
 					expect(getTextOutput(result)).toContain(`Use :${truncation?.nextOffset}- to continue`);
 				}
 
-				const artifactId = await spillManager.saveArtifact(payload, "read");
+				// local:// files (spills included) are re-readable with selectors: a page keeps
+				// the full budget and is never copied into another spill.
+				const artifactId = await spillManager.saveArtifact(payload);
 				const saveArtifact = vi.spyOn(spillManager, "saveArtifact");
-				const artifactPage = await spillReadTool.execute(
-					"spill-artifact-page",
-					{ path: `artifact://${artifactId}:1-3000` },
-					undefined,
-					undefined,
-					context,
-				);
-				expect(artifactPage.details?.meta?.truncation?.artifactId).toBeUndefined();
-				expect(getTextOutput(artifactPage)).toContain("payload line 2999");
+				for (const url of [`${spillUrl(artifactId!)}:1-3000`, "local://big.md:1-3000"]) {
+					const page = await spillReadTool.execute(`page-${url}`, { path: url }, undefined, undefined, context);
+					expect(page.details?.meta?.truncation?.artifactId).toBeUndefined();
+					expect(getTextOutput(page)).toContain("payload line 2999");
+				}
 				expect(saveArtifact).not.toHaveBeenCalled();
 			} finally {
 				await spillManager.close();
@@ -1320,11 +1321,8 @@ describe("Coding Agent Tools", () => {
 					mimeType: image.mimeType,
 				});
 
-				const artifactPath = path.join(
-					spillManager.getArtifactsDir()!,
-					`${truncation.artifactId}.mcp__server__tool.log`,
-				);
-				expect(await Bun.file(artifactPath).text()).toBe(payload);
+				const artifactPath = await spillManager.getArtifactPath(truncation.artifactId!);
+				expect(await Bun.file(artifactPath!).text()).toBe(payload);
 			} finally {
 				await spillManager.close();
 			}
@@ -2596,7 +2594,7 @@ function b() {
 			const artifactId = result.details?.meta?.truncation?.artifactId;
 			expect(artifactId).toBeDefined();
 			if (artifactId) {
-				const artifactPath = path.join(testDir, "session", `${artifactId}.bash.log`);
+				const artifactPath = path.join(testDir, "session", "local", spillFileName(artifactId));
 				expect(fs.existsSync(artifactPath)).toBe(true);
 			}
 		});

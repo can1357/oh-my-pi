@@ -106,6 +106,12 @@ export interface AgentSessionHandle {
 	readonly runStartedAt: number | undefined;
 	/** Whether the session still owes turns to IRC messages (held, queued, or awaiting compaction). */
 	readonly ircWakesPending: boolean;
+	/**
+	 * Whether the agent acts again without anyone messaging it: its turn is streaming or
+	 * continues, or something wakes it once the turn ends (queued input, or a background
+	 * job, live service or running subagent of its own that is not waiting on it).
+	 */
+	readonly hasPendingWake: boolean;
 	/** Full message list, including custom message types. */
 	readonly messages: AgentMessage[];
 	/** Current transcript path, or undefined when sessions are disabled. */
@@ -183,8 +189,6 @@ export interface AgentViewSessionManager extends AgentSessionManagerHandle {
 	putBlobSync(data: Buffer, options?: BlobPutOptions): BlobPutResult;
 	/** Path of a session artifact, or null when it is gone. */
 	getArtifactPath(id: string): Promise<string | null>;
-	/** In-memory content of a session artifact (non-persistent sessions), or null; a worker-homed session answers asynchronously. */
-	getArtifactContent(id: string): string | null | Promise<string | null>;
 }
 
 /** TTSR rule source the TUI's link resolver reads. */
@@ -278,8 +282,6 @@ export interface AgentViewSession extends AgentSessionHandle {
 	readonly compactionSpeculation: "idle" | "running" | "armed";
 	/** Bumped whenever context usage changes. */
 	readonly contextUsageRevision: number;
-	/** Whether a handoff is being generated. */
-	readonly isGeneratingHandoff: boolean;
 	/** Whether a retry is pending. */
 	readonly isRetrying: boolean;
 	/** Current retry attempt (0 when not retrying). */
@@ -306,8 +308,6 @@ export interface AgentViewSession extends AgentSessionHandle {
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist?: boolean): void;
 	/** Advance to the next thinking level. */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined;
-	/** Thinking level a temporary switch to `model` would use. */
-	resolveTemporaryModelThinkingLevel(model: Model): ConfiguredThinkingLevel | undefined;
 	/** Switch model without persisting it as the default. */
 	setModelTemporary(
 		model: Model,
@@ -373,8 +373,6 @@ export interface AgentViewSession extends AgentSessionHandle {
 	abortRetry(): void;
 	/** Cancel an in-progress compaction. */
 	abortCompaction(reason?: unknown): void;
-	/** Cancel an in-progress handoff. */
-	abortHandoff(): void;
 	/** Run a side turn (e.g. /btw) against the session's model without touching its transcript. */
 	runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult>;
 	/** Whether an ephemeral turn's `maxTokens` reaches the provider unchanged. */

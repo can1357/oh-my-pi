@@ -25,7 +25,6 @@ import {
 	type ResolvedModelRoleValue,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
-import { getKnownRoleIds } from "../config/model-roles";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
@@ -70,27 +69,6 @@ function takesPerMessageEffort(model: Model): boolean {
 		compat.supportsConfigurationUpdate === true &&
 		model.reasoningMode !== "pro"
 	);
-}
-
-/**
- * Explicit thinking suffix of the first configured role that resolves to `model`
- * among `availableModels`; what a temporary picker applies when it selects that model.
- */
-export function roleThinkingLevelForModel(
-	settings: Settings,
-	availableModels: Model[],
-	model: Model,
-): ConfiguredThinkingLevel | undefined {
-	if (availableModels.length === 0) return undefined;
-	const matchPreferences = getModelMatchPreferences(settings);
-	for (const role of getKnownRoleIds(settings)) {
-		const roleValue = settings.getModelRole(role);
-		if (!roleValue) continue;
-		const resolved = resolveModelRoleValue(roleValue, availableModels, { settings, matchPreferences });
-		if (!resolved.explicitThinkingLevel || resolved.thinkingLevel === undefined || !resolved.model) continue;
-		if (modelsAreEqual(resolved.model, model)) return resolved.thinkingLevel;
-	}
-	return undefined;
 }
 
 /**
@@ -308,10 +286,6 @@ export class ModelControls {
 		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model);
 	}
 
-	resolveTemporaryModelThinkingLevel(model: Model): ConfiguredThinkingLevel | undefined {
-		return roleThinkingLevelForModel(this.#host.settings, this.#host.modelRegistry.getAvailable(), model);
-	}
-
 	async setModel(
 		model: Model,
 		role: string = "default",
@@ -347,8 +321,6 @@ export class ModelControls {
 		}
 		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
 
-		// Re-apply thinking for the newly selected model. Prefer the model's
-		// configured defaultLevel; otherwise preserve the current level (or auto).
 		this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
 		await this.#host.syncAfterModelChange(previousEditMode);
 		return { switched: true };
@@ -632,14 +604,13 @@ export class ModelControls {
 
 	/**
 	 * Re-apply the active thinking selection after a model change. Preserves `auto`
-	 * (re-clamping the provisional level to the new model); otherwise re-applies the
-	 * preferred default or the current effective level.
+	 * (re-clamping the provisional level to the new model); otherwise carries the
+	 * current level, clamped to the nearest effort the new model supports.
+	 * `fallback` (the new model's own default) applies only when no level is set.
 	 */
-	#reapplyThinkingLevel(preferredDefault?: ThinkingLevel): void {
+	#reapplyThinkingLevel(fallback?: ThinkingLevel): void {
 		this.setThinkingLevel(
-			this.#autoThinking
-				? AUTO_THINKING
-				: automaticThinkingLevel(this.#model, preferredDefault ?? this.#thinkingLevel),
+			this.#autoThinking ? AUTO_THINKING : automaticThinkingLevel(this.#model, this.#thinkingLevel ?? fallback),
 		);
 	}
 

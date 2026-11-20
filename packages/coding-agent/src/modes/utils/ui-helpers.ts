@@ -994,6 +994,9 @@ export class UiHelpers {
 				if (text) this.ctx.chatContainer.addChild(new RecapNotice(text));
 			}
 		}
+		// A compaction (or model/plan-mode switch) after the last assistant turn
+		// rewrote the prompt prefix: the next live turn's miss is expected.
+		if (sessionContext.nextCacheMissExplained) this.ctx.lastAssistantUsage = undefined;
 
 		// Entries still in `pendingTools` are toolCalls whose result never landed
 		// during the replay — with `keepInFlightToolCalls` these are exactly the

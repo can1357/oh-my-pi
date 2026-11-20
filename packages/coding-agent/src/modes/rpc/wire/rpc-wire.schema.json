@@ -3702,6 +3702,13 @@
 			],
 			"type": "string"
 		},
+		"CacheWarmingMethod": {
+			"enum": [
+				"prewarm",
+				"replay"
+			],
+			"type": "string"
+		},
 		"CacheWarmingOutcome": {
 			"enum": [
 				"hit",
@@ -4029,7 +4036,7 @@
 			"required": [
 				"type"
 			],
-			"description": "A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted."
+			"description": "A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle."
 		},
 		"ManualCompactionEndEvent": {
 			"type": "object",
@@ -4130,6 +4137,9 @@
 				"phase": {
 					"$ref": "#/$defs/CacheWarmingPhase"
 				},
+				"method": {
+					"$ref": "#/$defs/CacheWarmingMethod"
+				},
 				"provider": {
 					"type": "string"
 				},
@@ -4140,6 +4150,7 @@
 			"required": [
 				"type",
 				"phase",
+				"method",
 				"provider",
 				"model"
 			],
@@ -4153,6 +4164,9 @@
 				},
 				"phase": {
 					"$ref": "#/$defs/CacheWarmingPhase"
+				},
+				"method": {
+					"$ref": "#/$defs/CacheWarmingMethod"
 				},
 				"provider": {
 					"type": "string"
@@ -4175,6 +4189,7 @@
 			"required": [
 				"type",
 				"phase",
+				"method",
 				"provider",
 				"model",
 				"outcome"
@@ -5381,6 +5396,33 @@
 			],
 			"description": "Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it."
 		},
+		"FormUiRequest": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "extension_ui_request"
+				},
+				"id": {
+					"type": "string"
+				},
+				"method": {
+					"const": "form"
+				},
+				"html": {
+					"type": "string"
+				},
+				"timeout": {
+					"type": "integer"
+				}
+			},
+			"required": [
+				"type",
+				"id",
+				"method",
+				"html"
+			],
+			"description": "The HTML `<form>` of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required."
+		},
 		"CancelUiRequest": {
 			"type": "object",
 			"properties": {
@@ -5583,6 +5625,9 @@
 					"$ref": "#/$defs/AskUiRequest"
 				},
 				{
+					"$ref": "#/$defs/FormUiRequest"
+				},
+				{
 					"$ref": "#/$defs/CancelUiRequest"
 				},
 				{
@@ -5689,7 +5734,7 @@
 				"id",
 				"cancelled"
 			],
-			"description": "Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers)."
+			"description": "Dismisses a dialog; `timedOut` reports the host's own deadline (an `ask` dialog then takes its recommended answers, a `form` its defaults)."
 		},
 		"AnswersUiResponse": {
 			"type": "object",
@@ -5714,6 +5759,29 @@
 			],
 			"description": "Answers an `ask` request: one `AskAnswer` per question, in question order."
 		},
+		"DataUiResponse": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "extension_ui_response"
+				},
+				"id": {
+					"type": "string"
+				},
+				"data": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {},
+					"description": "Submitted values by control `name`: a string, a number, or a string array."
+				}
+			},
+			"required": [
+				"type",
+				"id",
+				"data"
+			],
+			"description": "Answers a `form` request with the submitted form data."
+		},
 		"ExtensionUiResponse": {
 			"anyOf": [
 				{
@@ -5727,6 +5795,9 @@
 				},
 				{
 					"$ref": "#/$defs/AnswersUiResponse"
+				},
+				{
+					"$ref": "#/$defs/DataUiResponse"
 				}
 			],
 			"description": "Host reply to an extension UI request; variants share `type` and differ by their payload key."

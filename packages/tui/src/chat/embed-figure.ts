@@ -26,7 +26,7 @@ import { embedHost, loadEmbed } from "./embed-host";
 import { type Embed, sameEmbed } from "./embed-source";
 import { type EmbedTarget, embedTargetUrl, resolveEmbedSource } from "./embed-target";
 import { figureBox, figureRoom } from "./figure-size";
-import { convertImageToPngShared } from "./image-loading";
+import { convertImageToPngShared } from "../png-conversion";
 import { SvgFigure } from "./svg-figure";
 
 export interface EmbedFigureOptions {

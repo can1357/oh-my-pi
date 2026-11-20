@@ -968,7 +968,7 @@ const LOOSE_QUOTIENT = 0.05;
 
 /**
  * `ratio = a ÷ b` in every row holding all three, `a` and `b` in one unit
- * (`Python (ms)` ÷ `old C++ (ms)` = `0.997`; `Go` ÷ `pi-walker` = `4.1×`),
+ * (`Python (ms)` ÷ `old C++ (ms)` = `0.997`; `Go` ÷ `omp-xfs` = `4.1×`),
  * within the precision each figure is written to, over three or more rows
  * pinned to {@link LOOSE_QUOTIENT}. Percent columns are left alone: a part's
  * share of a whole (`Share` = `Tokens` ÷ `Total`) is a measure the table states.

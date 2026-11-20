@@ -583,7 +583,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 	it("renders server instructions in name order regardless of connection order", async () => {
 		const config: MCPStdioServerConfig = { type: "stdio", command: process.execPath, args: [FIXTURE_PATH] };
 		const renderSection = async (connectOrder: string[]): Promise<string> => {
-			const manager = new MCPManager(tempDir, null, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
+			const manager = new MCPManager(tempDir, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
 			try {
 				for (const name of connectOrder) await manager.connectServers({ [name]: config }, {}, undefined, 0);
 				const { session } = await createAgentSession({
@@ -625,7 +625,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 	// reach the prompt through the host source, and leave it once that manager's
 	// servers are gone.
 	it("renders instructions from a host-owned manager when the session has no MCP of its own", async () => {
-		const manager = new MCPManager(tempDir, null, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
+		const manager = new MCPManager(tempDir, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,

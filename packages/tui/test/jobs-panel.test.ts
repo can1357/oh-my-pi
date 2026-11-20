@@ -1,14 +1,17 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
 import * as os from "node:os";
+import { RunTrace, Shell } from "@oh-my-pi/pi-natives";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import {
 	type JobsPanelDetail,
 	type JobsPanelJob,
 	type JobsPanelSnapshot,
+	type JobsPanelStream,
 	JobsSheet,
 	type JobsSheetSource,
 } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { isShellTrace } from "@oh-my-pi/pi-wire";
 import { modelEval } from "./fixtures/job-widget-views";
 
 const DOWN = "\x1b[B";
@@ -116,6 +119,19 @@ describe("JobsSheet", () => {
 		});
 		sheet.handleInput("x");
 		expect(source.cancel).toHaveBeenCalledTimes(1);
+	});
+
+	it("opens on the job asked for when it is listed, else on the first, as when opened any other way", () => {
+		const source = { load: () => JOBS, inspect: (id: string) => DETAILS[id], close: vi.fn() };
+		const onJob = new JobsSheet(source, { selected: "bash-2" });
+		expect(prop(list(onJob.describe(CX)), "selected")).toBe("bash-2");
+		expect(onJob.render(100).find(line => line.startsWith(">"))).toContain("bun lint");
+		// The keys move from there.
+		onJob.handleInput(UP);
+		expect(prop(list(onJob.describe(CX)), "selected")).toBe("bash-1");
+
+		const gone = new JobsSheet(source, { selected: "bg_9" });
+		expect(prop(list(gone.describe(CX)), "selected")).toBe("task-1");
 	});
 
 	it("keeps the selected settled job and its output after the session evicts it, until another is selected", () => {
@@ -341,6 +357,156 @@ describe("JobsSheet", () => {
 		expect(byRole(sheet.describe(CX), "omp.jobs.caption")).toHaveLength(0);
 		job = { ...settled, caption: "Waits about 2 min, printing nothing" };
 		expect(texts(byRole(sheet.describe(CX), "omp.jobs.caption")[0]!)).toContain("Waits about 2 min");
+	});
+
+	describe("with a command that pipes or redirects its output", () => {
+		const job: JobsPanelJob = {
+			id: "bg_13",
+			type: "bash",
+			status: "running",
+			label: "bench > bench.log 2>&1; grep -c round bench.log | head",
+			startTime: NOW,
+		};
+		const tabs = (root: NativeNode) => nodes(root).find(node => node.k === "tabs");
+
+		/** A sheet over `job` whose detail reads `state` anew every frame. */
+		function setupStreams(state: { output: string; streams: JobsPanelStream[] }) {
+			return new JobsSheet({
+				load: () => ({ running: [job], recent: [] }),
+				inspect: () => ({ command: job.label, pids: [7], output: state.output, streams: state.streams }),
+				close: vi.fn(),
+			});
+		}
+
+		function benchStreams() {
+			const log = {
+				id: "file:1",
+				kind: "file",
+				producer: "bench > bench.log 2>&1",
+				consumer: `${os.homedir()}/runs/bench.log`,
+				bytes: 20,
+				open: true,
+				tail: vi.fn(() => "round 1/3\nround 2/3\n"),
+			} satisfies JobsPanelStream;
+			const pipe = {
+				id: "pipe:2",
+				kind: "pipe",
+				producer: "grep -c round bench.log",
+				consumer: "LC_ALL=C /usr/bin/head",
+				bytes: 0,
+				open: true,
+				tail: vi.fn(() => ""),
+			} satisfies JobsPanelStream;
+			return { log, pipe };
+		}
+
+		it("opens the output pane on the stream that carries the output while the job's own is empty", async () => {
+			await initTheme();
+			const { log, pipe } = benchStreams();
+			const sheet = setupStreams({ output: "", streams: [log, pipe] });
+			const root = sheet.describe(CX);
+
+			expect(prop(tabs(root), "items")).toEqual([
+				{ id: "out", label: "Output" },
+				{ id: "file:1", label: "bench.log" },
+				{ id: "pipe:2", label: "grep → head" },
+			]);
+			expect(prop(tabs(root), "active")).toBe("file:1");
+			const output = byRole(root, "omp.jobs.output")[0];
+			expect(prop(output, "text")).toBe("round 1/3\nround 2/3\n");
+			expect(prop(output, "follow")).toBe(true);
+			expect(texts(byRole(root, "omp.jobs.stream")[0]!)).toBe("~/runs/bench.log · 20B");
+			expect(byRole(root, "omp.jobs.nooutput")).toHaveLength(0);
+
+			// A megabyte per stream per frame otherwise: only the shown one is read, and again only once it grew.
+			sheet.invalidate();
+			sheet.describe(CX);
+			expect(log.tail).toHaveBeenCalledTimes(1);
+			expect(pipe.tail).not.toHaveBeenCalled();
+
+			const lines = sheet.render(100).map(line => Bun.stripANSI(line));
+			expect(lines).toContain("   → ~/runs/bench.log · 20B");
+			expect(lines).toContain("   round 2/3");
+		});
+
+		it("moves to the job's own output once it prints, but stays on a source the user picked", () => {
+			const { log, pipe } = benchStreams();
+			const state = { output: "", streams: [log, pipe] };
+			const followed = setupStreams(state);
+			const picked = setupStreams(state);
+			picked.handleNativeEvent({ type: "select", key: "split/bg_13/out/sources", item: "pipe:2" });
+			expect(prop(tabs(picked.describe(CX)), "active")).toBe("pipe:2");
+			// The picked pipe carried nothing: the well says so instead of showing another source's text.
+			expect(byRole(picked.describe(CX), "omp.jobs.output")).toHaveLength(0);
+
+			state.output = "EXIT=0\n";
+			const root = followed.describe(CX);
+			expect(prop(tabs(root), "active")).toBe("out");
+			expect(prop(byRole(root, "omp.jobs.output")[0], "text")).toBe("EXIT=0\n");
+			expect(byRole(root, "omp.jobs.stream")).toHaveLength(0);
+			expect(prop(tabs(picked.describe(CX)), "active")).toBe("pipe:2");
+
+			// The click on a tab is not a click on a job row.
+			expect(prop(list(picked.describe(CX)), "selected")).toBe("bg_13");
+		});
+
+		it("never draws a binary stream as text", () => {
+			const archive: JobsPanelStream = {
+				id: "pipe:1",
+				kind: "pipe",
+				producer: "git archive HEAD",
+				consumer: "tar -x -C /tmp/out",
+				bytes: 4096,
+				open: false,
+				tail: () => undefined,
+			};
+			const root = setupStreams({ output: "", streams: [archive] }).describe(CX);
+			expect(prop(tabs(root), "active")).toBe("pipe:1");
+			expect(byRole(root, "omp.jobs.output")).toHaveLength(0);
+			expect(byRole(root, "omp.jobs.nooutput")).toHaveLength(1);
+		});
+	});
+
+	it("draws a traced command as its shell visualization where the terminal has one, changed only by its view controls", async () => {
+		const command = "printf 'first\\n' >/dev/null; printf done";
+		const run = new RunTrace(command);
+		await new Shell().run({ command, trace: run });
+		const trace: unknown = JSON.parse(run.snapshot());
+		if (!isShellTrace(trace)) throw new Error("the engine returned no shell trace");
+		const job: JobsPanelJob = {
+			id: "bg_5",
+			type: "bash",
+			status: "completed",
+			label: command,
+			startTime: NOW - 1_000,
+			endTime: NOW,
+		};
+		const sheet = new JobsSheet({
+			load: () => ({ running: [], recent: [job] }),
+			inspect: () => ({ command, pids: [], exitCode: 0, output: "done", trace }),
+			close: vi.fn(),
+		});
+		const commandNode = (cx: DescribeContext = CX) => byRole(sheet.describe(cx), "omp.jobs.command")[0];
+		const act = (value: string): NativeUiEvent => ({
+			type: "action",
+			key: "split/bg_5/command",
+			act: "shell-viz",
+			value,
+			mods: [],
+		});
+
+		expect(commandNode()?.k).toBe("shell");
+		expect(prop(commandNode(), "presentation")).toMatchObject({ preferences: { view: "pseudo" } });
+		sheet.handleNativeEvent(act("view:raw"));
+		expect(prop(commandNode(), "presentation")).toMatchObject({ preferences: { view: "raw" } });
+
+		// Replay is the transcript card's: a cursor set here would freeze the command at its first step.
+		sheet.handleNativeEvent(act("reset"));
+		expect(prop(commandNode(), "presentation")).not.toHaveProperty("preferences.cursor");
+
+		const plain = commandNode({ ...CX, supports: kind => kind !== "shell" });
+		expect(plain?.k).toBe("code");
+		expect(prop(plain, "text")).toBe(command);
 	});
 
 	describe("as a tree of subagents", () => {

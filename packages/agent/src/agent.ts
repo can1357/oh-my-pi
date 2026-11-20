@@ -33,6 +33,7 @@ import {
 	agentLoopContinue,
 	createSyntheticToolResultMessage,
 	lastContextMessage,
+	type NormalizeToolsOptions,
 	normalizeMessagesForProvider,
 	normalizeTools,
 	resolveOwnedDialectFromEnv,
@@ -445,6 +446,7 @@ export class Agent {
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	#transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 	#sentToolDefinitions = new SentToolDefinitions();
+	#standbyTools: AgentTool[] = [];
 	#steeringQueue: AgentMessage[] = [];
 	#followUpQueue: AgentMessage[] = [];
 	#queuedMessageClaims: Partial<Record<QueuedMessageQueue, QueuedMessageClaim>> = {};
@@ -999,19 +1001,19 @@ export class Agent {
 		if (!model) throw new Error("No active model on agent");
 		const ownedDialect = this.#ownedDialect(model);
 		const messages = normalizeMessagesForProvider(llmMessages, model);
-		const tools = ownedDialect
-			? []
-			: (normalizeTools(this.#toolsForModel(model), {
-					injectIntent: this.#intentTracing,
-					intentDescription: this.#intentDescription,
-					pruneDescriptions: this.#pruneToolDescriptions,
-				}) ?? []);
+		const toolOptions: NormalizeToolsOptions = {
+			injectIntent: this.#intentTracing,
+			intentDescription: this.#intentDescription,
+			pruneDescriptions: this.#pruneToolDescriptions,
+		};
+		const tools = ownedDialect ? [] : (normalizeTools(this.#toolsForModel(model), toolOptions) ?? []);
+		const standby = ownedDialect ? undefined : normalizeTools(this.#standbyTools, toolOptions);
 		let context: Context = { systemPrompt, messages, tools };
 		// Side requests reuse the main loop's sent definitions without recording their own; attached before the
 		// transform too, so a request-size clamp in it measures them.
-		context = this.#sentToolDefinitions.withInactiveTools(context);
+		context = this.#sentToolDefinitions.withInactiveTools(context, standby);
 		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
-		context = this.#sentToolDefinitions.withInactiveTools(context);
+		context = this.#sentToolDefinitions.withInactiveTools(context, context.inactiveTools);
 		return context;
 	}
 
@@ -1378,6 +1380,11 @@ export class Agent {
 
 	setTools(t: AgentTool<any>[]) {
 		this.#state.tools = t;
+	}
+
+	/** Set the inactive tools that may become active later ({@link AgentContext.standbyTools}). */
+	setStandbyTools(tools: AgentTool[]) {
+		this.#standbyTools = tools;
 	}
 
 	replaceMessages(ms: AgentMessage[]) {
@@ -1951,6 +1958,7 @@ export class Agent {
 			systemPrompt: this.#state.systemPrompt,
 			messages: this.#state.messages.slice(),
 			tools: this.#state.tools,
+			standbyTools: this.#standbyTools,
 		};
 
 		// Installed unconditionally. Both `cursorExecHandlers` and
@@ -2081,6 +2089,7 @@ export class Agent {
 				context.systemPrompt = this.#state.systemPrompt;
 				this.#onModelCallSystemPrompt?.(context.systemPrompt);
 				context.tools = this.#toolsForModel(this.#state.model ?? model);
+				context.standbyTools = this.#standbyTools;
 			},
 			beforeModelCall:
 				this.#beforeModelCall || this.#additionalBeforeModelCalls.size > 0

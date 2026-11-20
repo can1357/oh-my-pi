@@ -28,7 +28,6 @@ import {
 import { create, fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
-import { registerArtifactsDir } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import {
 	bridgeToolMap,
 	createBridgeEditTool,
@@ -46,7 +45,7 @@ import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import type { TruncationMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, spillFileName, spillUrl } from "@oh-my-pi/pi-utils";
 import { AdviseTool } from "../src/advisor/advise-tool";
 
 function yoloToolContext(): AgentToolContext {
@@ -2671,24 +2670,20 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		expect(splitText).not.toContain("IHDR");
 	});
 
-	it("routes internal artifact reads through both Cursor frames", async () => {
-		const artifacts = path.join(cwd, "artifacts");
-		await fs.mkdir(artifacts);
-		await Bun.write(path.join(artifacts, "0.read.log"), "cursor-artifact-content\n");
-		const unregister = registerArtifactsDir(artifacts);
-		try {
-			const handlers = new CursorExecHandlers({
-				cwd,
-				tools: new Map<string, Tool>([["read", new ReadTool(createTestSession(cwd))]]),
-			});
-			const legacy = await handlers.read(create(ReadArgsSchema, { path: "artifact://0:raw" }));
-			const modern = await handlers.piRead({ toolCallId: "artifact-read", args: { path: "artifact://0" } });
-			for (const result of [legacy, modern]) {
-				expect(result.isError).toBe(false);
-				expect(result.content).toEqual([{ type: "text", text: "cursor-artifact-content\n" }]);
-			}
-		} finally {
-			unregister();
+	it("routes spill reads through both Cursor frames", async () => {
+		const sessionDir = path.join(cwd, "session");
+		await Bun.write(path.join(sessionDir, "local", spillFileName(0)), "cursor-spill-content\n");
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([
+				["read", new ReadTool(createTestSession(cwd, { getArtifactsDir: () => sessionDir }))],
+			]),
+		});
+		const legacy = await handlers.read(create(ReadArgsSchema, { path: `${spillUrl(0)}:raw` }));
+		const modern = await handlers.piRead({ toolCallId: "spill-read", args: { path: spillUrl(0) } });
+		for (const result of [legacy, modern]) {
+			expect(result.isError).toBe(false);
+			expect(result.content).toEqual([{ type: "text", text: "cursor-spill-content\n" }]);
 		}
 	});
 

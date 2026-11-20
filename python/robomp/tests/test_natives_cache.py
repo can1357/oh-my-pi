@@ -60,9 +60,9 @@ def _seed_repo(root: Path, *, with_all_inputs: bool = True) -> Path:
     if with_all_inputs:
         (root / "Cargo.toml").write_text("[workspace]\nmembers = ['crates/*']\n")
         (root / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.85.0"\n')
-        crates = root / "crates" / "pi-natives"
+        crates = root / "crates" / "omp-natives"
         crates.mkdir(parents=True)
-        (crates / "Cargo.toml").write_text('[package]\nname = "pi-natives"\n')
+        (crates / "Cargo.toml").write_text('[package]\nname = "omp-natives"\n')
         (crates / "src.rs").write_text("// source\n")
         natives = root / "packages" / "natives"
         natives.mkdir(parents=True)
@@ -107,7 +107,7 @@ def test_compute_key_changes_when_each_input_changes(tmp_path: Path) -> None:
 
     # Touching a file under each key path must shift the key.
     mutations: dict[str, tuple[str, str]] = {
-        "crates": ("crates/pi-natives/src.rs", "// new comment\n"),
+        "crates": ("crates/natives/src.rs", "// new comment\n"),
         "Cargo.lock": ("Cargo.lock", "# lock v2\n"),
         "Cargo.toml": ("Cargo.toml", "[workspace]\nmembers = ['crates/*', 'extra']\n"),
         "rust-toolchain.toml": ("rust-toolchain.toml", '[toolchain]\nchannel = "1.86.0"\n'),
@@ -143,7 +143,7 @@ def test_compute_key_handles_missing_inputs(tmp_path: Path) -> None:
     # Lock-only repo: should compute without error, and adding a tracked
     # crates/ subtree shifts the key.
     key_before = compute_key(repo, target="linux-arm64")
-    crates = repo / "crates" / "pi-natives"
+    crates = repo / "crates" / "omp-natives"
     crates.mkdir(parents=True)
     (crates / "lib.rs").write_text("// new\n")
     _git(["-C", str(repo), "add", "."], cwd=repo.parent)

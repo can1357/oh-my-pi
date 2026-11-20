@@ -1,7 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { getWebKitHostPath, isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
-import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
+import type { EvalPreludeContext, HostEvalPreludeDefinition } from "../eval/preludes";
 import type { ToolSession } from "../sdk";
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { CmuxUnavailableError, resolveCmuxKind } from "./browser/cmux/rpc";
@@ -310,7 +310,7 @@ function chromiumKind(
 }
 
 /** Create the enabled-only browser host prelude for one tool session. */
-export function createBrowserPrelude(session: ToolSession): EvalPreludeDefinition {
+export function createBrowserPrelude(session: ToolSession): HostEvalPreludeDefinition {
 	// Eval-first-use boundary: source/declaration assets stay unloaded until a
 	// JavaScript or Python kernel actually asks for its enabled preludes.
 	const { createBrowserPreludeDefinition } = require("./browser/prelude-definition");
@@ -975,7 +975,7 @@ async function runBrowser(
 /** Persist over-cap browser run output as a session artifact; mirrors the bash minimizer's save path. */
 async function saveBrowserOutputArtifact(session: ToolSession, fullText: string): Promise<string | undefined> {
 	try {
-		const alloc = await session.allocateOutputArtifact?.("browser-original");
+		const alloc = await session.allocateOutputArtifact?.();
 		if (!alloc?.path || !alloc.id) return undefined;
 		await Bun.write(alloc.path, fullText);
 		return alloc.id;

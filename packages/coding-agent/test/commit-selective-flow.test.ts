@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { heapStats } from "bun:jsc";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { commitSelection, type CommitOutcome } from "@oh-my-pi/pi-coding-agent/commit/selective/apply";
 import { createDraft } from "@oh-my-pi/pi-coding-agent/commit/selective/draft";
 import { ChangeJournal, type JournalRecord } from "@oh-my-pi/pi-coding-agent/commit/selective/journal";
+import { createCommitPrelude } from "@oh-my-pi/pi-coding-agent/commit/selective/prelude-definition";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -90,7 +95,7 @@ async function emptyRepo() {
 		await Bun.write(absolute, after);
 		journal.recordChange({ agent, parent, tool: "edit", path: absolute, before, after });
 	};
-	return { root, journal, write };
+	return { root, artifacts, journal, write };
 }
 
 async function gitlinkWorkspace() {
@@ -151,6 +156,97 @@ async function sharedWorkspace() {
 }
 
 describe("selective commit flow", () => {
+	it("commits an inserted statement before a return changed only in the worktree", async () => {
+		const { root, journal, write } = await emptyRepo();
+		const file = "value.luau";
+		const head = "local function value()\n    return 1\nend\n";
+		const foreign = head.replace("return 1", "return 2");
+		const statement = "    assert(true)\n";
+		const insert = (source: string) => source.replace("    return", `${statement}    return`);
+		await Bun.write(path.join(root, file), head);
+		await git(root, ["add", file]);
+		await git(root, ["commit", "-qm", "seed"]);
+		await write("Other", undefined, file, foreign);
+		await write("Main", undefined, file, insert(foreign));
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		await commitSelection(draft, { subject: "test: assert before return" }, { journal, agent: { agent: "Main" } });
+
+		expect(await git(root, ["show", `HEAD:${file}`])).toBe(insert(head));
+		expect(await Bun.file(path.join(root, file)).text()).toBe(insert(foreign));
+
+		const replay = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(replay.selection()).toEqual([]);
+		expect(replay.summary()).not.toContain("Review:");
+		const remaining = await createDraft({ cwd: root, journal, caller: "Other" });
+		await commitSelection(remaining, { subject: "test: update return" }, { journal, agent: { agent: "Other" } });
+		expect(await git(root, ["show", `HEAD:${file}`])).toBe(insert(foreign));
+		expect(await git(root, ["status", "--porcelain"])).toBe("");
+	});
+
+	it("never selects a second copy of a paragraph already committed during a reorder", async () => {
+		const { root, journal, write } = await emptyRepo();
+		const file = "notes.md";
+		const contents = (order: string, main = "old", other = "old") =>
+			Array.from(order, key => `## ${key}\n\nsame body\n\n\n`).join("") +
+			`footer\nmain: ${main}\nseparator\nother: ${other}\n`;
+		await Bun.write(path.join(root, file), contents("AB"));
+		await git(root, ["add", file]);
+		await git(root, ["commit", "-qm", "initial paragraphs"]);
+		await write("Main", undefined, file, contents("BAC"));
+		await write("Other", undefined, file, contents("BADC", "old", "pending"));
+		// Another commit takes D alone without touching the working file.
+		await Bun.write(path.join(root, ".git", "snapshot"), contents("ABD"));
+		const sha = (await git(root, ["hash-object", "-w", ".git/snapshot"])).trim();
+		await git(root, ["update-index", "--cacheinfo", `100644,${sha},${file}`]);
+		await git(root, ["commit", "-qm", "take D"]);
+		await write("Main", undefined, file, contents("ABCD", "pending", "pending"));
+		await journal.flush();
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(draft.summary()).toContain("review the net change");
+		expect(draft.diff()).toContain("+main: pending");
+		expect(draft.diff()).not.toContain("+## B");
+		draft.take({ path: file, units: ["1"] }); // C only, not the other writer's footer
+		await commitSelection(draft, { subject: "add C" }, { journal, agent: { agent: "Main" } });
+		expect(await git(root, ["show", `HEAD:${file}`])).toBe(contents("ABCD", "pending", "old"));
+		expect(await Bun.file(path.join(root, file)).text()).toBe(contents("ABCD", "pending", "pending"));
+	});
+
+	it("prints a long edited line as one row within the session's column cap while diff still returns the patch", async () => {
+		const { root, artifacts, journal, write } = await emptyRepo();
+		// Four changes far apart in one line of some 530 characters.
+		const line = (word: string) =>
+			`${[0, 1, 2, 3].map(n => `${"prompt history, ".repeat(8)}${word}${n}`).join(" ")}.\n`;
+		await Bun.write(path.join(root, "notes.md"), line("old"));
+		await git(root, ["add", "notes.md"]);
+		await git(root, ["commit", "-qm", "seed"]);
+		await write("Main", undefined, "notes.md", line("new"));
+		await journal.flush();
+		const session: ToolSession = {
+			cwd: root,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			getArtifactsDir: () => artifacts,
+			getAgentId: () => "Main",
+			settings: Settings.isolated({ "tools.outputMaxColumns": 256 }),
+		};
+		const commit = createCommitPrelude(session);
+		const call = (parameters: object) => commit.invoke(parameters, { session, toolCallId: "test" });
+
+		const { id } = type({ id: "string" }).assert((await call({ action: "draft" })).details);
+		const shown = await call({ action: "diff", draft: id });
+
+		const printed = shown.content.map(block => (block.type === "text" ? block.text : "")).join("");
+		const row = printed.split("\n").find(printedLine => printedLine.startsWith("!")) ?? "";
+		expect(row.match(/\[-old\d-\]\{\+new\d\+\}/g)).toHaveLength(4);
+		expect(Buffer.byteLength(row)).toBeLessThanOrEqual(256);
+		expect(shown.details).toEqual({
+			patch: `diff --git a/notes.md b/notes.md\n--- a/notes.md\n+++ b/notes.md\n@@ -1,1 +1,1 @@\n-${line("old")}+${line("new")}`,
+		});
+	});
+
 	it("explicitly selects a gitlink SHA with ordinary edits without committing child dirt or other staged work", async () => {
 		const { root, module, journal, write, before, after } = await gitlinkWorkspace();
 		await Bun.write(path.join(root, "user.txt"), "user staged\n");
@@ -355,6 +451,53 @@ describe("selective commit flow", () => {
 		},
 	);
 
+	it.skipIf(process.platform === "win32")(
+		"syncs the shared index to what a formatting pre-commit hook committed",
+		async () => {
+			const { root, journal, write } = await emptyRepo();
+			await Bun.write(path.join(root, "fixture.txt"), "let value = 0\n");
+			await Bun.write(path.join(root, "other.txt"), "other\n");
+			await git(root, ["add", "."]);
+			await git(root, ["commit", "-q", "-m", "seed"]);
+			await Bun.write(path.join(root, "other.txt"), "staged by the user\n");
+			await git(root, ["add", "other.txt"]);
+			await git(root, ["config", "core.hooksPath", ".git/hooks"]);
+			// Formats the file in place and stages the result into the index the hook was handed.
+			const hook = path.join(root, ".git/hooks/pre-commit");
+			await Bun.write(
+				hook,
+				[
+					"#!/bin/sh",
+					"set -eu",
+					"sed 's/value=/value = /' fixture.txt > fixture.tmp",
+					"mv fixture.tmp fixture.txt",
+					"blob=$(git hash-object -w fixture.txt)",
+					'git update-index --cacheinfo "100644,$blob,fixture.txt"',
+				].join("\n") + "\n",
+			);
+			await fs.chmod(hook, 0o755);
+
+			for (const value of [1, 2]) {
+				await write("Main", undefined, "fixture.txt", `let value=${value}\n`);
+				await journal.flush();
+				const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+				const outcome = await commitSelection(
+					draft,
+					{ subject: `fix: set value ${value}` },
+					{ journal, agent: { agent: "Main" } },
+				);
+
+				const formatted = `let value = ${value}\n`;
+				expect(outcome.indexNotes).toEqual([]);
+				expect(await git(root, ["show", "HEAD:fixture.txt"])).toBe(formatted);
+				expect(await git(root, ["show", ":fixture.txt"])).toBe(formatted);
+				expect(await Bun.file(path.join(root, "fixture.txt")).text()).toBe(formatted);
+				// The user's staged work is neither committed nor unstaged.
+				expect(await git(root, ["status", "--porcelain"])).toBe("M  other.txt\n");
+			}
+		},
+	);
+
 	it("commits only one subagent's changes when scoped to it", async () => {
 		const { root, journal } = await sharedWorkspace();
 
@@ -490,54 +633,82 @@ describe("selective commit flow", () => {
 		expect(draft.summary()).toContain("✓ notes.md  +1  [Main]");
 	});
 
-	it("lists files a call deleted or renamed under review and commits them once taken", async () => {
-		const { root, journal } = await emptyRepo();
-		for (const file of ["gone.ts", "old.ts", "legacy/a.ts", "keep/x.ts", "keep/y.ts", "user.ts"]) {
+	it("lists what no edit tool changed as unrecorded and commits it once taken", async () => {
+		const { root, journal, write } = await emptyRepo();
+		for (const file of ["gone.ts", "old.ts", "generated.ts", "user.ts"]) {
 			await Bun.write(path.join(root, file), `export const file = "${file}";\n`);
 		}
 		await git(root, ["add", "."]);
 		await git(root, ["commit", "-q", "-m", "seed"]);
-		// `mv` keeps this mtime; only the ctime shows the rename landed inside the call.
-		const past = new Date(Date.now() - 3_600_000);
-		await fs.utimes(path.join(root, "old.ts"), past, past);
-		// The user's deletions: one never named, one under a directory the call names but did not remove.
-		await fs.rm(path.join(root, "user.ts"));
-		await fs.rm(path.join(root, "keep/y.ts"));
-
-		const start = Date.now();
+		await write("Main", undefined, "own.ts", "export const own = true;\n");
+		// What the agent's commands did, none of it through an edit tool, and the user's own edit.
 		await fs.rm(path.join(root, "gone.ts"));
-		await fs.rm(path.join(root, "legacy"), { recursive: true });
 		await fs.rename(path.join(root, "old.ts"), path.join(root, "new.ts"));
-		journal.recordCall({
-			agent: "Main",
-			tool: "bash",
-			start,
-			end: Date.now(),
-			label: "rm gone.ts",
-			script: `rm ${path.join(root, "gone.ts")} && rm -rf ./legacy/ && mv old.ts new.ts && bun test keep`,
-		});
+		await Bun.write(path.join(root, "generated.ts"), "export const generated = true;\n");
+		await Bun.write(path.join(root, "user.ts"), "export const user = true;\n");
 		await journal.flush();
 
 		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
-		const review = draft
-			.summary()
-			.split("\n")
-			.flatMap(line => line.match(/^ {2}\? (\S+) {2}.*; no edit record; (deleted|modified)/)?.slice(1, 3) ?? []);
-		expect(review).toEqual([
+		const summary = draft.summary();
+		expect(draft.selection().map(change => change.path)).toEqual(["own.ts"]);
+		expect(summary).not.toContain("Review:");
+		expect(summary).toContain("Unrecorded: 5 path(s)");
+		expect(summary.split("\n").flatMap(line => line.match(/^ {2}· (\S+) {2}/)?.slice(1) ?? [])).toEqual([
+			"generated.ts",
 			"gone.ts",
-			"deleted",
-			"legacy/a.ts",
-			"deleted",
 			"new.ts",
-			"modified",
 			"old.ts",
-			"deleted",
+			"user.ts",
 		]);
 
-		for (const file of ["gone.ts", "legacy/a.ts", "new.ts", "old.ts"]) draft.take({ path: file });
+		for (const file of ["generated.ts", "gone.ts", "new.ts", "old.ts"]) draft.take({ path: file });
 		await commitSelection(draft, { subject: "refactor: moved files" }, { journal, agent: { agent: "Main" } });
-		expect(await git(root, ["ls-tree", "-r", "--name-only", "HEAD"])).toBe("keep/x.ts\nkeep/y.ts\nnew.ts\nuser.ts\n");
-		expect(await git(root, ["status", "--porcelain"])).toBe(" D keep/y.ts\n D user.ts\n");
+		expect(await git(root, ["ls-tree", "-r", "--name-only", "HEAD"])).toBe("generated.ts\nnew.ts\nown.ts\nuser.ts\n");
+		expect(await git(root, ["show", "HEAD:generated.ts"])).toBe("export const generated = true;\n");
+		expect(await git(root, ["status", "--porcelain"])).toBe(" M user.ts\n");
+	});
+
+	it("holds a formatter's rewrite of the agent's lines for review and commits it once taken", async () => {
+		const { root, journal, write } = await emptyRepo();
+		const head = "fn a() {}\n\nfn keep() {}\n\nfn user() {}\n";
+		await Bun.write(path.join(root, "lib.rs"), head);
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-q", "-m", "seed"]);
+		const edited = head.replace("fn a() {}", "fn a() { let  x=1; }");
+		await write("Main", undefined, "lib.rs", edited);
+		// A formatter the agent ran reflows its line; the user changes another function.
+		const formatted = edited.replace("fn a() { let  x=1; }", "fn a() {\n    let x = 1;\n}");
+		const work = formatted.replace("fn user() {}", "fn user() { todo!() }");
+		await Bun.write(path.join(root, "lib.rs"), work);
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(draft.selection()).toEqual([]);
+		expect(draft.summary()).toContain(
+			"? lib.rs  hunk 1: in-scope lines rewritten afterwards by an unrecorded change",
+		);
+		expect(draft.show()).toContain("+    let x = 1;");
+
+		draft.take({ path: "lib.rs", units: ["1"] });
+		await commitSelection(draft, { subject: "feat: a" }, { journal, agent: { agent: "Main" } });
+		expect(await git(root, ["show", "HEAD:lib.rs"])).toBe(formatted);
+		expect(await Bun.file(path.join(root, "lib.rs")).text()).toBe(work);
+	});
+
+	it("asks for review of a file whose recorded edits cannot be replayed", async () => {
+		const { root, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "data.txt"), "one\n");
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-q", "-m", "seed"]);
+		// Content with a NUL is not stored: the record names its editor but replays nothing.
+		await write("Main", undefined, "data.txt", "one\0two\n");
+		await Bun.write(path.join(root, "data.txt"), "one\ntwo\n");
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(draft.selection()).toEqual([]);
+		expect(draft.summary()).toContain("? data.txt  +1; edited by Main, but the edit record cannot be replayed");
+		expect(draft.show()).toContain("+two");
 	});
 
 	it("refuses to commit on a HEAD that moved onto the same lines", async () => {
@@ -552,6 +723,33 @@ describe("selective commit flow", () => {
 			commitSelection(draft, { subject: "fix: a" }, { journal, agent: { agent: "Main" } }),
 		).rejects.toThrow(/HEAD moved .* changed a\.ts/);
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"retries the commit when a hook moves HEAD after the expected-HEAD check",
+		async () => {
+			const { root, journal, head } = await sharedWorkspace();
+			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+			await git(root, ["config", "core.hooksPath", ".git/hooks"]);
+			// A concurrent commit carrying the seed's tree, made without touching the worktree or index.
+			const moved = (await git(root, ["commit-tree", `${head}^{tree}`, "-p", head, "-m", "concurrent"])).trim();
+			// `commit-msg` runs after the expected-HEAD check and before the swap that updates HEAD.
+			const hook = path.join(root, ".git", "hooks", "commit-msg");
+			await fs.mkdir(path.dirname(hook), { recursive: true });
+			await Bun.write(hook, `#!/bin/sh\ngit update-ref refs/heads/main ${moved}\n`);
+			await fs.chmod(hook, 0o755);
+
+			const outcome = await commitSelection(
+				draft,
+				{ subject: "fix(parser): added parse" },
+				{ journal, agent: { agent: "Main" } },
+			);
+
+			// The lost swap is retried on the new HEAD instead of failing the commit.
+			expect(outcome.parent).toBe(moved);
+			expect((await git(root, ["rev-parse", "HEAD~1"])).trim()).toBe(moved);
+			expect(await git(root, ["show", "HEAD:a.ts"])).toBe("export const a = 2;\n");
+		},
+	);
 
 	it("refuses to commit during a merge in a linked worktree without changing HEAD or the index", async () => {
 		const { root: mainRoot, journal } = await emptyRepo();
@@ -914,7 +1112,43 @@ describe("selective commit flow", () => {
 		const draft = await createDraft({ cwd: root, journal: null, caller: "Main" });
 
 		expect(draft.summary()).toContain("No change journal: this session keeps no artifacts");
-		expect(draft.summary()).toContain("Not yours: 1 path(s).");
+		expect(draft.summary()).toContain("Unrecorded: 1 path(s)");
+	});
+
+	it("keeps a draft of many untracked files near their size", async () => {
+		const { root, journal } = await emptyRepo();
+		const body = Array.from({ length: 200 }, (_, line) => String(1_000_000 + line)).join("\n");
+		await Promise.all(
+			Array.from({ length: 1_000 }, (_, file) => Bun.write(path.join(root, "evidence", `${file}.txt`), `${body}\n`)),
+		);
+		Bun.gc(true);
+		const before = heapStats().heapSize;
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		Bun.gc(true);
+		const retained = heapStats().heapSize - before;
+
+		// 1.6 MB of text; per-line attribution of every file held ~60 MB.
+		expect(retained).toBeLessThan(20 * 1024 * 1024);
+		expect(draft.summary()).toContain("Unrecorded: 1000 path(s)");
+		expect(draft.summary()).toContain("… 988 more");
+	});
+
+	it("commits one taken hunk of a file no edit record explains", async () => {
+		const { root, journal } = await emptyRepo();
+		const lines = Array.from({ length: 20 }, (_, line) => `line ${line}`);
+		await Bun.write(path.join(root, "notes.txt"), `${lines.join("\n")}\n`);
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-qm", "seed"]);
+		const edited = lines.map((line, index) => (index === 1 || index === 18 ? `${line} edited` : line));
+		await Bun.write(path.join(root, "notes.txt"), `${edited.join("\n")}\n`);
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+
+		draft.take({ path: "notes.txt", units: ["2"] });
+		expect(draft.show("notes.txt")).toContain("+line 18 edited");
+		await commitSelection(draft, { subject: "fix: notes" }, { journal, agent: { agent: "Main" } });
+
+		const committed = lines.map((line, index) => (index === 18 ? `${line} edited` : line));
+		expect(await git(root, ["show", "HEAD:notes.txt"])).toBe(`${committed.join("\n")}\n`);
 	});
 
 	it("reports an amend against the replaced commit's parent with all of its paths", async () => {

@@ -30,6 +30,57 @@ export const cfgMcpStartupTimeoutMs = register({
 	},
 });
 
+export const cfgMcpShared = register({
+	id: "mcp.shared",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "Shared MCP Servers",
+		description:
+			"Run MCP servers through the daemon so every omp instance shares one process per server and a cached tool catalog. Servers that hold a session keep one process per instance (falls back to private servers when unavailable)",
+	},
+});
+
+export const cfgMcpIdleStopMinutes = register({
+	id: "mcp.idleStopMinutes",
+	type: "number",
+	default: 5,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "MCP Idle Stop",
+		description: "Stop a shared MCP server after this many minutes without use; it restarts on the next request",
+	},
+});
+
+export const cfgMcpEvalNamespaces = register({
+	id: "mcp.evalNamespaces",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "MCP Eval Namespaces",
+		description:
+			"Expose each MCP server as an eval global (github.create_issue(...)) instead of top-level or xd:// tools",
+	},
+});
+
+export const cfgMcpBuiltinTransforms = register({
+	id: "mcp.builtinTransforms",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "MCP Built-in Transforms",
+		description:
+			"Skip recognized MCP servers that omp's own tools replace (Codex's node_repl while eval runs JavaScript)",
+	},
+});
+
 export const cfgMcpRenderMarkdownResults = register({
 	id: "mcp.renderMarkdownResults",
 	type: "boolean",

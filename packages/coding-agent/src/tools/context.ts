@@ -33,6 +33,8 @@ declare module "@oh-my-pi/pi-agent-core" {
 		 *  then neither spills the result to an artifact nor appends display notices (truncation
 		 *  stays structured in `details.meta`), and `read` returns `:raw` selections whole. */
 		programmatic?: boolean;
+		/** Enclosing eval invocation for a host-dispatched session tool. */
+		parentToolCallId?: string;
 		/** Set while the session runs the Spotlight experiment: the tool wrapper passes the final result of each of
 		 *  the agent's own calls (`toolCall` lists it under the tool's name) through it. */
 		spotlightShape?: CalledToolShaper;

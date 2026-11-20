@@ -189,6 +189,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-all-turns-reasoning-context": wire("supportsAllTurnsReasoningContext", ["openai-responses"]),
 	"supports-configuration-update": wire("supportsConfigurationUpdate", ["openai-responses"]),
 	"supports-steering": wire("supportsSteering", ["openai-responses"]),
+	"uncached-instructions": wire("uncachedInstructions", ["openai-responses"]),
 	"strip-deepseek-special-tokens": wire("stripDeepseekSpecialTokens", OAI),
 	"stream-markup-healing-pattern": wire("streamMarkupHealingPattern", OAI, "scalar", [
 		"kimi",
@@ -599,6 +600,15 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * `compat/prompt-cache-persistent.ts`. Unassigned: entries expire.
 	 */
 	"prompt-cache-persistent": { key: "promptCachePersistent", set: "catalog", shape: "scalar", values: [true, false] },
+	/**
+	 * The provider's own endpoint accepts a `max_tokens: 0` pre-warm request
+	 * (Anthropic Messages): it reads the prompt, writes or refreshes the cache at
+	 * its breakpoints, and returns usage with no output billed. The coding
+	 * agent's cache warmer refreshes entries with it instead of a one-token
+	 * replay. Read through `compat/prompt-cache-prewarm.ts`. Unassigned: no
+	 * pre-warm request.
+	 */
+	"prompt-cache-prewarm": { key: "promptCachePrewarm", set: "catalog", shape: "scalar", values: [true, false] },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	/**

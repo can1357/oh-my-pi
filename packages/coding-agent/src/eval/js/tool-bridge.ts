@@ -38,6 +38,13 @@ import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
 import { isEvalBridgeToolCallable, withEvalBridgeToolCall } from "../tool-bridge-policy";
 import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } from "../workpool-bridge";
+import {
+	EVAL_MCP_BRIDGE_NAME,
+	isEvalNamespaceTool,
+	type MCPNamespaceValue,
+	mcpNamespaceValue,
+	parseMCPNamespaceCall,
+} from "../../mcp/eval-namespaces";
 import type { RuntimeCallIdentity } from "./shared/runtime";
 import type { JsStatusEvent } from "./shared/types";
 
@@ -48,6 +55,7 @@ export type { JsStatusEvent } from "./shared/types";
 
 export interface ToolBridgeOptions {
 	session: ToolSession;
+	parentToolCallId?: string;
 	signal?: AbortSignal;
 	/** The cell's `timeout` in ms, the budget of a prelude call that sets none (`EvalPreludeContext.cellTimeoutMs`). */
 	cellTimeoutMs?: number;
@@ -72,6 +80,7 @@ type ToolValue =
 	| EvalJudgmentBatchResult
 	| EvalHandleSnapshot
 	| EvalWorkpoolResult
+	| MCPNamespaceValue
 	| { items: EvalHandleSnapshot[] }
 	| { cancelled: boolean }
 	| {
@@ -292,9 +301,41 @@ async function dispatchSessionTool(name: string, args: unknown, options: ToolBri
 	if (name === EVAL_WORKPOOL_BRIDGE_NAME) {
 		return await runEvalWorkpool(args, options);
 	}
-	const tool = getTool(options.session, name);
+	if (name === EVAL_MCP_BRIDGE_NAME) {
+		return await runEvalMcpCall(args, options);
+	}
+	const call = await runSessionTool(getTool(options.session, name), args, options);
+	return bridgeValueFromToolResult(call.name, call.args, call.result, options.emitStatus);
+}
+
+/** An MCP eval namespace method (`github.search(…)`): the tool's own call, mapped by `mcpNamespaceValue`. */
+async function runEvalMcpCall(args: unknown, options: ToolBridgeOptions): Promise<MCPNamespaceValue> {
+	const request = parseMCPNamespaceCall(args);
+	const tool = getTool(options.session, request.tool);
+	if (!isEvalNamespaceTool(tool)) throw new ToolError(`${request.label} is not an MCP namespace method`);
+	const { result } = await runSessionTool(tool, request.args, options);
+	try {
+		const value = await mcpNamespaceValue(request.label, result, options.session.localProtocolOptions ?? {});
+		options.emitStatus?.({ op: request.label });
+		return value;
+	} catch (error) {
+		options.emitStatus?.({ op: request.label, error: error instanceof Error ? error.message : String(error) });
+		throw error;
+	}
+}
+
+/**
+ * Validate, authorize and run one session tool for a cell, as its direct call
+ * would; reports failures as status events. Returns the canonical name and the
+ * validated args with the result.
+ */
+async function runSessionTool(
+	tool: AgentTool,
+	args: unknown,
+	options: ToolBridgeOptions,
+): Promise<{ name: string; args: unknown; result: AgentToolResult }> {
 	// Wire aliases share every guard, status and bookkeeping path with the canonical tool.
-	name = tool.name;
+	const name = tool.name;
 	if (!isEvalBridgeToolCallable(tool)) {
 		throw new ToolError(`\`${name}\` cannot run through the eval bridge; call the direct \`${name}\` tool.`);
 	}
@@ -339,7 +380,7 @@ async function dispatchSessionTool(name: string, args: unknown, options: ToolBri
 			options.signal,
 		);
 		options.signal?.throwIfAborted();
-		if (claimed) return bridgeValueFromToolResult(name, validatedArgs, claimed, options.emitStatus);
+		if (claimed) return { name, args: validatedArgs, result: claimed };
 	}
 	let settled = false;
 	const isMcpTool = "mcpServerName" in tool && typeof tool.mcpServerName === "string";
@@ -365,7 +406,7 @@ async function dispatchSessionTool(name: string, args: unknown, options: ToolBri
 					validatedArgs,
 					options.signal,
 					onUpdate,
-					context && { ...context, programmatic: true },
+					context && { ...context, programmatic: true, parentToolCallId: options.parentToolCallId },
 				);
 			} finally {
 				settled = true;
@@ -383,7 +424,7 @@ async function dispatchSessionTool(name: string, args: unknown, options: ToolBri
 			if (!options.onReply) throw new ToolError(NO_REPLY_SINK);
 			for (const text of replies) options.onReply(text);
 		}
-		return bridgeValueFromToolResult(name, validatedArgs, result, options.emitStatus);
+		return { name, args: validatedArgs, result };
 	} catch (error) {
 		options.emitStatus?.({
 			op: name,

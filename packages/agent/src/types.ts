@@ -1325,6 +1325,12 @@ export interface AgentContext {
 	systemPrompt: string[];
 	messages: AgentMessage[];
 	tools?: AgentTool<any>[];
+	/**
+	 * Inactive tools that may become active later in the conversation. A provider that announces tool changes
+	 * in-band (Anthropic `tool_addition`) declares them from the first request, so activating one leaves the
+	 * cached prefix intact. See {@link SentToolDefinitions.withInactiveTools}.
+	 */
+	standbyTools?: AgentTool<any>[];
 }
 
 /**

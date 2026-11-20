@@ -56,6 +56,8 @@ The embedded shell resolves a command name in order: the engine's own bash 5.3 b
 - pi's in-process utilities replace the matching external binaries: `ast-grep`/`sg`, `awk`, `b2sum`, `base32`, `base64`, `basename`, `cat`, `chmod`, `cksum`, `cmp`, `combine`, `comm`, `cp`, `cut`, `date`, `dd`, `df`, `diff`, `dirname`, `du`, `errno`, `fd`, `file`, `find`, `fold`, `fswatch`, `grep`, `head`, `hostname`, `id`, `ifne`, `isutf8`, `jq`, `ln`, `ls`, `md5`, `md5sum`, `mkdir`, `mktemp`, `mv`, `nl`, `nproc`, `od`, `open`, `paste`, `printenv`, `readlink`, `realpath`, `rg`, `rm`, `rmdir`, `rsync`, `say`, `sd`, `sed`, `seq`, `sha1sum`, `sha224sum`, `sha256sum`, `sha384sum`, `sha512sum`, `shasum`, `sort`, `sponge`, `stat`, `strings`, `tac`, `tail`, `tar`, `tee`, `touch`, `tr`, `truncate`, `ts`, `uname`, `uniq`, `uptime`, `wc`, `which`, `whoami`, `xargs`, `xdg-open`, `yes`. `chmod`, `errno`, and `id` are Unix-only; `tar` needs a Unix or Windows target; `ast-grep`, `fd`, `find`, `grep`, `rg` are awaited natively so cancellation stops the work.
 - pi's process builtins are `ps`, `top`, `sleep`, `pgrep`, `pkill`, `pidwait`, and `lsof` (Linux, macOS, Windows); they buffer output and are never gated off.
 
+For a checked literal edit, use `sd -F --expect 3 -U 2 'oldName' 'newName' file.ts`. `--expect` checks the number of matches **per input**, before any `-n` limit; a count mismatch exits nonzero without writing any file. `-U 2` prints the applied unified diff with two lines of context. No change prints nothing; binary changes print a filename notice. `-U` requires file operands and cannot be combined with `--preview`.
+
 Gates are read once, from the environment the session starts with; a set, nonempty value other than `0`/`false` turns one on.
 
 | Variable                        | Effect                                                                     |
@@ -215,6 +217,7 @@ Choose the setting by the desired outcome:
    - Requires `pty: true`, UI context, and `PI_NO_PTY !== "1"`.
    - Uses `runInteractiveBashPty()` and a `PtySession` overlay.
    - Supports interactive input; `Esc` kills the session from the overlay.
+   - While the program waits on keys, the run shows as blocked on the user (title `!`, OSC 7501 `blocked`), and each new wait sends a `Console waiting for input` terminal notification unless `pty.notify` is `off` or keys were sent to the console in the last 10s. `PtySession.awaitsInput()` decides: terminal echo off (password prompts, full-screen programs) on every Unix; on Linux, also a foreground process blocked in `read` on the terminal (`/proc/<pid>/syscall`). Where it cannot tell (macOS and Windows line prompts, an uninspectable setuid process on Linux), 2s of silent output with the cursor after text counts as a prompt.
 4. Explicit background job
    - Requires `async: true` or `notify`, and `async.enabled`.
    - Registers a job with `session.asyncJobManager` and returns `{ state: "running", jobId }` immediately. `timeout: 0` leaves the job without a tool-imposed deadline.
@@ -303,5 +306,5 @@ Choose the setting by the desired outcome:
   - `echo|printf|cat` whose stdout goes to a file (`echo x > f`, `cat > f`, `cat 2>err > f`, `cat <<EOF > f`) -> `write`; redirects of other fds (`2>err.log`), fd duplication, `/dev` sinks and redirects after `;`, `&&`, `|` or a newline do not count
 - PTY mode is ignored in non-UI contexts and when `PI_NO_PTY=1` (gated by `canUseInteractiveBashPty()`); the tool falls back to non-PTY execution and appends a `pty requested but unavailable in this environment; ran without a terminal` notice.
 - Non-PTY runs layer `NON_INTERACTIVE_ENV` via `buildNonInteractiveEnv()`; PTY runs instead get the shell spawn environment (`getShellConfig().env`) minus `GIT_EDITOR`, `GPG_TTY`, `CI`, and `NO_COLOR`, then `TERM=xterm-256color`, then any direnv-provided values, which win.
-- When the shell minimizer rewrites output inside `executeBash()`, the visible output is replaced with minimized text and a `[raw output: artifact://<id>]` footer may be appended if `onMinimizedSave` persisted the original text.
+- When the shell minimizer rewrites output inside `executeBash()`, the visible output is replaced with minimized text and a `[raw output: local://<id>.log]` footer may be appended if `onMinimizedSave` persisted the original text.
 - For executor internals that are not tool-specific — shell session reuse keys, snapshots, prefix handling, and native timeout behavior — see `docs/bash-tool-runtime.md`.

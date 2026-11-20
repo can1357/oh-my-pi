@@ -40,6 +40,8 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
   - macOS dates are local ISO-8601, the form `setValue` takes.
   - A macOS slider, stepper or other number control takes `setValue(75)` or `setValue("0.5")` (plain decimal); when the app clamps or rounds it,
     the call throws `AxFailed` naming the value it settled on. One whose value is not settable names the `AXIncrement`/`AXDecrement` actions to step it.
+  - A letter sent to a focused macOS popup button may choose an option without opening the menu; the next read of that popup waits up to 1.5 s
+    for it. To choose an option, use `menu:`; when the user's setting refuses takeover, it refuses `menu:` too (below).
   - On macOS a long value shows its first 200 characters and ends `… (+N chars; (await computer.ref("eN")).value())`; that call returns it whole.
   - Linux and Windows show 80-character previews without that promise; Linux text values may already be clipped by AT-SPI.
   - To look inside a long value, slice or search it in JS (`v.slice(-300)`, `v.indexOf("…")`, a regex with context) rather than printing all of it;
@@ -224,6 +226,9 @@ await win.click(120, 48, button="right")
   - A display capture shows the lock screen and a window capture that window's last frame.
   - Keystrokes, takeover and AX fail until someone unlocks, while background clicks still reach the app.
   - Report the lock rather than retrying keys.
+- Windows `covered` (a screenshot result, or a tree's closing `… covered:` line): the window appeared fully covered around the read and Chromium can stop drawing it,
+  so its screenshot and tree may be stale; while it stays covered, do not wait and read it again by any route (screenshot, `ax()`, `find`), and never report a change as verified from it.
+  For a current view: the browser tool if it is connected to that app, else `raise()` (it takes the user's keyboard, and Windows refuses it while they use another window) and read again, checking for the expected state rather than trusting the first unmarked read, else tell the user what you could not confirm.
 - A screenshot's `path` holds the delivered PNG (`width`×`height`, downscaled when needed to fit the capture caps), not a separate uncapped original;
   for detail, `zoom` instead of cropping that file. Use `{ silent: true }` in loops.
 </rules>

@@ -16,6 +16,7 @@ import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid"
 import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
+import { DEVIN_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/wire/devin";
 import { factoryDroidWireBaseUrl } from "@oh-my-pi/pi-catalog/wire/factory-droid";
 import { decorateContextImages } from "@oh-my-pi/pi-coding-agent/blob-broker/context-images";
 import {
@@ -99,6 +100,23 @@ function factoryDroidModel(baseUrl: string) {
 		maxTokens: 64_000,
 	});
 }
+function devinModel(id: string, baseUrl = DEVIN_DEFAULT_BASE_URL) {
+	return buildModel({
+		id,
+		name: id,
+		api: "devin-agent",
+		provider: "devin",
+		baseUrl,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 64_000,
+	});
+}
+const DEVIN_GEMINI_MODEL = devinModel("gemini-4-carbon");
+const DEVIN_GATEWAY_GEMINI_MODEL = devinModel("gemini-4-carbon", "https://devin-gateway.example.com");
+const DEVIN_CLAUDE_MODEL = devinModel("claude-haiku-5-5");
 // Factory's hosted HTTP routes refuse request bodies over 4,500,000 bytes (HTTP 413).
 const FACTORY_DROID_ROUTE_BODY_LIMIT = 4_500_000;
 // A base64 character occupies one byte in Anthropic's JSON request body.
@@ -281,6 +299,9 @@ describe("provider context image budgets", () => {
 		["Cursor's default route", CURSOR_DEFAULT_MODEL, 20],
 		["the official DeepSeek API", DEEPSEEK_MODEL, 600],
 		["a DeepSeek proxy", DEEPSEEK_PROXY_MODEL, 5],
+		["Gemini on Devin", DEVIN_GEMINI_MODEL, 60],
+		["Gemini through a Devin gateway", DEVIN_GATEWAY_GEMINI_MODEL, 40],
+		["Claude on Devin", DEVIN_CLAUDE_MODEL, 20],
 	] as const)("keeps the newest images up to the count %s allows", (_label, model, budget) => {
 		const context: Context = {
 			systemPrompt: [],
@@ -323,6 +344,8 @@ describe("provider context image budgets", () => {
 		// Cursor took a 64 MB body for both upstreams.
 		["Claude on Cursor", CURSOR_CLAUDE_MODEL, 64_000_000],
 		["GPT on Cursor", CURSOR_GPT_MODEL, 64_000_000],
+		// Devin refuses a request over 32 MiB; a gateway gets no byte budget.
+		["Gemini through a Devin gateway", DEVIN_GATEWAY_GEMINI_MODEL, 33_554_432],
 	] as const)(
 		"keeps %s under its measured body limit at omp's 500 KiB image resize target",
 		(_label, model, bodyLimit) => {
@@ -583,6 +606,33 @@ describe("provider context image budgets", () => {
 		const body = await anthropicRequestBody(ANTHROPIC_MODEL, clamped);
 		expect(Buffer.byteLength(body)).toBeLessThan(ANTHROPIC_BODY_LIMIT);
 		expect(body.split(screenshot)).toHaveLength(12);
+	});
+
+	it("keeps a Devin-hosted request's 60 resized screenshots under its 32 MiB request limit", () => {
+		const resized = "A".repeat(Math.ceil((500 * 1024) / 3) * 4);
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: Array.from({ length: 60 }, (_, index) => ({
+				role: "toolResult",
+				toolCallId: `call-${index}`,
+				toolName: "screenshot",
+				content: [text(`result-${index}`), image(resized)],
+				isError: false,
+				timestamp: index,
+			})),
+		};
+		expect(clampProviderContextImages(context, DEVIN_GEMINI_MODEL)).toBe(context);
+
+		const clamped = clampProviderContextImageBytes(context, DEVIN_GEMINI_MODEL);
+		const kept = imageData(clamped);
+
+		expect(kept.length).toBeGreaterThan(5);
+		expect(kept.length).toBeLessThan(60);
+		expect(clamped.messages.at(-1)?.content).toHaveLength(2);
+		// The oldest result loses its screenshot, with or without a notice in its place.
+		expect(clamped.messages[0].content).not.toContainEqual(image(resized));
+		expect(JSON.stringify(clamped).length).toBeLessThan(33_554_432);
 	});
 
 	it("keeps a Factory-hosted request's inline images under the route body limit, but not a custom gateway's", () => {
@@ -1021,6 +1071,8 @@ describe("provider context image budgets", () => {
 		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
 		// The newest screenshots stay.
 		expect(body).toContain(`"[Previous computer result; call_id=call_199]`);
+		// The oldest went; each note opens with the omission, so cutting its long text keeps it.
+		expect(body).toContain(`call_id=call_0]: ${omitted()}`);
 	});
 
 	it("keeps five 1 MB computer screenshots on Factory's Responses route under the body limit", async () => {
