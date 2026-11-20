@@ -1916,9 +1916,10 @@ fn write_patch_worktree(
 			if entry.mode == Mode::COMMIT {
 				// Like `git apply`, a gitlink only ensures its directory: an added
 				// one is created empty, a checked-out submodule is left
-				// untouched.
+				// untouched. Parents are created without following a symlink, so
+				// the directory cannot appear outside the repository.
 				validate_repo_path(target).map_err(ApplyFailure::into_error)?;
-				fs::create_dir_all(repo.root().join(target))?;
+				super::worktree::ensure_worktree_directory(repo.root(), target)?;
 			} else {
 				write_worktree_entry(repo, gix_repo, filter, target, entry)?;
 			}
@@ -2088,7 +2089,8 @@ fn checkout_changed_paths(
 }
 
 /// Materialize `entry` at repo-relative `path`, regular files through the
-/// smudge filters as a checkout would.
+/// smudge filters as a checkout would. Symlink targets are stored raw, and an
+/// existing symlink at the path or a parent is replaced rather than followed.
 fn write_worktree_entry(
 	repo: &GitRepo,
 	gix_repo: &gix::Repository,
@@ -2097,64 +2099,37 @@ fn write_worktree_entry(
 	entry: &FileEntry,
 ) -> Result<()> {
 	validate_repo_path(path).map_err(ApplyFailure::into_error)?;
-	let absolute = repo.root().join(path);
-	if let Some(parent) = absolute.parent() {
-		fs::create_dir_all(parent)?;
-	}
 	let bytes = blob_bytes(gix_repo, entry.id)?;
 	if entry.mode == Mode::SYMLINK {
-		let _ = fs::remove_file(&absolute);
-		#[cfg(unix)]
-		{
-			use std::os::unix::{ffi::OsStrExt, fs::symlink};
-			symlink(std::ffi::OsStr::from_bytes(&bytes), &absolute)?;
-		}
-		#[cfg(not(unix))]
-		fs::write(&absolute, bytes)?;
-		return Ok(());
+		let enabled = gix_repo
+			.filesystem_options()
+			.map_err(|err| Error::backend("git checkout", err))?
+			.symlink;
+		return super::worktree::materialize_worktree_entry(
+			repo.root(),
+			path,
+			super::worktree::MaterializedEntry::Symlink { target: &bytes, enabled },
+		);
 	}
-	fs::write(&absolute, filter.git_to_worktree(path, bytes)?)?;
-	#[cfg(unix)]
-	{
-		use std::os::unix::fs::PermissionsExt;
-		let permissions = fs::Permissions::from_mode(if entry.mode == Mode::FILE_EXECUTABLE {
-			0o755
-		} else {
-			0o644
-		});
-		fs::set_permissions(&absolute, permissions)?;
-	}
-	Ok(())
+	let converted = filter.git_to_worktree(path, bytes)?;
+	super::worktree::materialize_worktree_entry(
+		repo.root(),
+		path,
+		super::worktree::MaterializedEntry::File {
+			executable: entry.mode == Mode::FILE_EXECUTABLE,
+			bytes:      &converted,
+		},
+	)
 }
 
 /// Remove `path` and the parent directories it leaves empty. A directory at
 /// `path` is a gitlink: like git, only an empty (uninitialized) one is
-/// removed, a checked-out submodule stays.
+/// removed, a checked-out submodule stays. A symlink parent is unlinked rather
+/// than followed, and a missing or non-directory parent means there is no
+/// in-repository leaf to remove.
 fn remove_worktree_path(repo: &GitRepo, path: &str) -> Result<()> {
 	validate_repo_path(path).map_err(ApplyFailure::into_error)?;
-	let absolute = repo.root().join(path);
-	if fs::symlink_metadata(&absolute).is_ok_and(|metadata| metadata.is_dir()) {
-		if fs::remove_dir(&absolute).is_err() {
-			return Ok(());
-		}
-	} else {
-		match fs::remove_file(&absolute) {
-			Ok(()) => {},
-			Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-			Err(err) => return Err(err.into()),
-		}
-	}
-	let mut directory = absolute.parent();
-	while let Some(current) = directory {
-		if current == repo.root() {
-			break;
-		}
-		match fs::remove_dir(current) {
-			Ok(()) => directory = current.parent(),
-			Err(_) => break,
-		}
-	}
-	Ok(())
+	super::worktree::remove_worktree_path(repo.root(), path)
 }
 
 fn validate_repo_path(path: &str) -> std::result::Result<(), ApplyFailure> {

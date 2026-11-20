@@ -1901,10 +1901,9 @@ fn checkout_tree(
 	for entry in current.entries() {
 		let path = entry.path(&current).to_str_lossy();
 		if !target_paths.contains(path.as_ref()) {
-			let full = owner.root().join(path.as_ref());
-			if full.is_file() || fs::symlink_metadata(&full).is_ok() {
-				fs::remove_file(full)?;
-			}
+			// A directory here is a gitlink checkout. Like `remove_file`, the
+			// helper fails on a real directory instead of deleting a submodule.
+			super::worktree::unlink_worktree_leaf(owner.root(), path.as_ref())?;
 		}
 	}
 	let mut opts = repo
@@ -2016,6 +2015,10 @@ fn restore_index_paths(
 	files: &[String],
 ) -> Result<()> {
 	let mut filter = WorktreeFilter::staging(repo, "git restore")?;
+	let symlinks = repo
+		.filesystem_options()
+		.map_err(|err| Error::backend("git restore", err))?
+		.symlink;
 	for entry in index.entries() {
 		let path = entry.path(index).to_str_lossy();
 		if files.is_empty() || files.iter().any(|wanted| path_matches(&path, wanted)) {
@@ -2025,11 +2028,26 @@ fn restore_index_paths(
 			let mut blob = object
 				.try_into_blob()
 				.map_err(|e| Error::backend("git restore", e))?;
-			let full = root.join(path.as_ref());
-			if let Some(parent) = full.parent() {
-				fs::create_dir_all(parent)?;
+			let data = blob.take_data();
+			// Symlink blobs are the link target. Smudge filters must not rewrite
+			// them, and the write must replace the link rather than follow it.
+			if entry.mode == gix::index::entry::Mode::SYMLINK {
+				super::worktree::materialize_worktree_entry(
+					root,
+					&path,
+					super::worktree::MaterializedEntry::Symlink { target: &data, enabled: symlinks },
+				)?;
+			} else {
+				let converted = filter.git_to_worktree(&path, data)?;
+				super::worktree::materialize_worktree_entry(
+					root,
+					&path,
+					super::worktree::MaterializedEntry::File {
+						executable: entry.mode == gix::index::entry::Mode::FILE_EXECUTABLE,
+						bytes:      &converted,
+					},
+				)?;
 			}
-			fs::write(full, filter.git_to_worktree(&path, blob.take_data())?)?;
 		}
 	}
 	Ok(())

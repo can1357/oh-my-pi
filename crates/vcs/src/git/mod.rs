@@ -17,6 +17,7 @@ mod mutate;
 mod open;
 mod patch;
 mod read;
+mod worktree;
 use std::{
 	path::{Path, PathBuf},
 	sync::OnceLock,

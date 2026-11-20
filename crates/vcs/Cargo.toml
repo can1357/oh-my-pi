@@ -24,6 +24,10 @@ xutf.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+[target.'cfg(not(unix))'.dependencies]
+cap-fs-ext = "4.0.3"
+cap-std = "4.0.3"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
 
