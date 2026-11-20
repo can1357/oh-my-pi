@@ -725,9 +725,12 @@ public static class FenceFixture {
     }
 
     public static void Run() {
+        Console.SetOut(new System.IO.StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true });
+        // Launched from the focused test terminal, the window comes to the
+        // front, so the main UI Automation route may act on it.
         Window = new Window {
             Title = "OMP AX dispatch fence fixture",
-            Width = 320, Height = 160, ShowActivated = false
+            Width = 320, Height = 160
         };
         Box = new CheckBox {
             Content = "Fence checkbox", Margin = new Thickness(24)
@@ -745,6 +748,7 @@ public static class FenceFixture {
             HwndSource.FromHwnd(new WindowInteropHelper(Window).Handle).AddHook(Hook);
         };
         Window.Loaded += delegate {
+            Window.Activate();
             Console.WriteLine("READY " + new WindowInteropHelper(Window).Handle.ToInt64());
         };
         var commands = new Thread(delegate() {
@@ -873,11 +877,11 @@ public static class FenceFixture {
 
 		// Toggle has entered the provider; its reply is withheld by Checked.
 		let result = press(&core);
-		assert_eq!(fixture.line(), "CHECKED");
 		let Err(error) = result else {
 			panic!("blocked Checked handler must time out")
 		};
-		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed, "{error}");
+		assert_eq!(fixture.line(), "CHECKED");
 		fixture.command("release");
 		Arc::get_mut(&mut core)
 			.expect("sole session owner")
