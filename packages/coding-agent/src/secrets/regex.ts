@@ -1,10 +1,16 @@
+import { LinearRegExp } from "@oh-my-pi/pi-utils/regex";
+
 /** Add global flag while preserving user-provided flags. */
 function enforceGlobalFlag(flags: string): string {
 	return flags.includes("g") ? flags : `${flags}g`;
 }
 
-/** Compile a secret regex entry with global scanning enabled by default. */
-export function compileSecretRegex(pattern: string, flags?: string): RegExp {
+/**
+ * Compile a secret regex entry with global scanning enabled by default, as a
+ * {@link LinearRegExp}: redaction scans the whole outbound history, so a user
+ * pattern must not backtrack catastrophically on it.
+ */
+export function compileSecretRegex(pattern: string, flags?: string): LinearRegExp {
 	let resolvedPattern = pattern;
 	let resolvedFlags = flags ?? "";
 
@@ -17,7 +23,7 @@ export function compileSecretRegex(pattern: string, flags?: string): RegExp {
 		resolvedFlags = [...combined].join("");
 	}
 
-	return new RegExp(resolvedPattern, enforceGlobalFlag(resolvedFlags));
+	return new LinearRegExp(resolvedPattern, enforceGlobalFlag(resolvedFlags));
 }
 
 /** Advance after an empty global match without splitting a Unicode code point or repeating a match at end. */

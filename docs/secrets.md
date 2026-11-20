@@ -118,6 +118,8 @@ The 12-character hash base is an HMAC of the exact secret under a private per-in
 
 Regex entries always scan globally (the `g` flag is enforced automatically). The regex literal syntax `/pattern/flags` is supported as an alternative to separate `content` + `flags` fields. Escaped slashes within the pattern (`\\/`) are handled correctly.
 
+Entries run as `LinearRegExp` (`packages/utils/src/regex/linear-regexp.ts`): JavaScript syntax and matches, but no catastrophic backtracking, so an unbounded pattern such as `[A-Za-z0-9._%+-]+@…` stays fast on long runs of matching characters in the outbound history. Patterns with the `u` or `v` flag, or `(?i:…)` modifier groups, use the native engine.
+
 #### Replace mode with regex
 
 ```yaml

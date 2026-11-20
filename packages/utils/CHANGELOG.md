@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `LinearRegExp` (`@oh-my-pi/pi-utils/regex`), a `RegExp` with JavaScript's syntax and matches that cannot backtrack catastrophically, and `RegexStream` for detecting a match in text that arrives in chunks
 - Added `getCodexClientVersionPath()` for the Codex client version cache record, resolving under `$XDG_CACHE_HOME/omp` when that root is initialized ([#19776](https://github.com/can1357/oh-my-pi/pull/19776) by [@Parsifa1](https://github.com/Parsifa1))
 
 ## [19.0.0] - 2026-11-18

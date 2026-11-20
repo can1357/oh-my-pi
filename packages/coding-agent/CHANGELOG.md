@@ -31,6 +31,8 @@
 
 ### Changed
 
+- TTSR and secret-redaction regexes use WebAssembly SIMD for hot DFA scans, speeding up long inputs without changing match or capture semantics
+- Dense regex scans find candidate starts from required literals and replay short greedy matches and ordered alternatives faster, without changing match priority or falling back to native backtracking
 - Listing sessions across every project (`/resume` across projects, `archive.sessions(project="*")`, `archive.projects()`) is faster with thousands of project directories
 - In the interactive session, `wait` on background jobs now blocks for up to 4 minutes on its first call instead of returning after 5 seconds, saving a wasted turn per wait ([#19873](https://github.com/can1357/oh-my-pi/pull/19873) by [@H4vC](https://github.com/H4vC))
 - Updated MCP OAuth client name to "Codex"
@@ -45,6 +47,8 @@
 
 ### Fixed
 
+- A TTSR rule whose `condition` regex backtracks badly, including one with a backreference, no longer freezes the session; conditions match exactly as before, and `omp ttsr test`/`scan` match the same way ([#19147](https://github.com/can1357/oh-my-pi/issues/19147), [#19360](https://github.com/can1357/oh-my-pi/issues/19360))
+- A `secrets.yml` regex entry that backtracks badly (such as an email pattern with an unbounded `+` on long runs of letters) no longer stalls requests while the history is redacted; entries match exactly as before ([#5372](https://github.com/can1357/oh-my-pi/issues/5372))
 - The shell's `rg` builtin prints paths under an explicit `.` as `./path` like ripgrep, so names starting with `-` (session directories such as `--work-pi--`) can be passed back to `rg` and other commands
 - The shell's `fd` builtin prints paths like fd: `./path` under an explicit `.`, with `-0`, or when a name starts with `-`; directories end in the path separator; `--strip-cwd-prefix` takes effect, `--format`'s `{//}` is the printed path's parent instead of an absolute one, and `--absolute-path` no longer prints `/./`
 - Sloppy edits reject incomplete Find/action pairs without writing, preserve numeric `||` expressions, and no longer mistake a nested or partial closing line for the end of a block range

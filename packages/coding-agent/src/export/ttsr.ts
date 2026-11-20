@@ -13,6 +13,7 @@ import * as path from "node:path";
 import type { Judge, JudgeOptions, NoulQuestion } from "@oh-my-pi/pi-ai";
 import { AstMatchStrictness, astMatch, countTokens, Encoding } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
+import { countCapturingGroups, type LinearRegExp, type RegexStream } from "@oh-my-pi/pi-utils/regex";
 import { compileRuleCondition, type Rule } from "../capability/rule";
 import { ensureGrammar } from "../utils/grammars";
 import type { TtsrSettings } from "./ttsr-settings";
@@ -33,8 +34,9 @@ export interface TtsrMatchContext {
 /** Options for {@link TtsrManager.checkDelta} and {@link TtsrManager.checkSnapshot}. */
 export interface TtsrCheckOptions {
 	/**
-	 * Whether the stream is complete. A non-final check may defer conditions that can match across
-	 * lines until the buffer has grown enough; a final check evaluates every condition against the
+	 * Whether the stream is complete. Conditions without lookarounds or backreferences are exact
+	 * on every check. A non-final check may defer the rest when they can match across lines,
+	 * until the buffer has grown enough; a final check evaluates every condition against the
 	 * whole buffer. Defaults: `false` for `checkDelta`, `true` for `checkSnapshot`.
 	 */
 	final?: boolean;
@@ -124,7 +126,7 @@ interface TtsrScope {
 
 interface TtsrEntry {
 	rule: Rule;
-	conditions: RegExp[];
+	conditions: LinearRegExp[];
 	/** Incremental-matching traits of `conditions`, index for index. */
 	conditionTraits: ConditionTraits[];
 	/** ast-grep pattern strings; matched only against edit/write tool snapshots. */
@@ -308,26 +310,6 @@ function readClass(source: string, start: number): { matchesLineBreak: boolean; 
 	return { matchesLineBreak: negated !== includesLineBreak, next: index + 1 };
 }
 
-/** Capturing groups in `source`; decides whether `\N` is a backreference or an octal escape. */
-function countCapturingGroups(source: string): number {
-	let count = 0;
-	let inClass = false;
-	for (let index = 0; index < source.length; index++) {
-		const char = source[index];
-		if (char === "\\") {
-			index++;
-		} else if (inClass) {
-			if (char === "]") inClass = false;
-		} else if (char === "[") {
-			inClass = true;
-		} else if (char === "(") {
-			const named = source[index + 2] === "<" && source[index + 3] !== "=" && source[index + 3] !== "!";
-			if (source[index + 1] !== "?" || named) count++;
-		}
-	}
-	return count;
-}
-
 /** Classifies a compiled condition for incremental matching; unmodeled syntax stays opaque. */
 function analyzeCondition(condition: RegExp): ConditionTraits {
 	if (condition.unicode || condition.unicodeSets) return OPAQUE_CONDITION;
@@ -411,16 +393,23 @@ function matchExcerpt(text: string, index: number, length: number): string {
 
 /**
  * One stream's accumulated text and how far each condition has scanned it.
- * Line-local conditions scan only from the start of the line holding the
- * previous end; cross-line conditions scan that region too (a match there is a
- * whole-buffer match) and rescan the whole buffer geometrically, or on a final
- * check. A long region — a line that never ends, like raw tool-argument JSON
- * whose newlines are escaped — is rescanned geometrically too, so a non-final
- * check may report its matches late. Deltas stay in `#parts` until a scan
- * needs the text.
+ *
+ * Each condition runs as a {@link RegexStream} fed every delta, so a check
+ * costs the delta alone. Without lookarounds or backreferences the stream's
+ * answer is exact; otherwise its "no" is final and its "yes" is confirmed by
+ * scanning with the condition itself, paced as follows.
+ *
+ * Scans: line-local conditions scan only from the start of the line
+ * holding the previous end; cross-line conditions scan that region too (a match
+ * there is a whole-buffer match) and rescan the whole buffer geometrically, or
+ * on a final check. A long region — a line that never ends, like raw
+ * tool-argument JSON whose newlines are escaped — is rescanned geometrically
+ * too, so a non-final check may report its matches late. Deltas stay in
+ * `#parts` until a scan needs the text.
  */
 class StreamBuffer {
 	readonly #scans = new Map<RegExp, ConditionScan>();
+	readonly #streams = new Map<LinearRegExp, RegexStream>();
 	readonly excerpts = new Map<string, string | undefined>();
 	#parts: string[] = [];
 	#joined = "";
@@ -437,7 +426,10 @@ class StreamBuffer {
 	#region = "";
 
 	append(delta: string): void {
-		if (delta.length > 0) this.#parts.push(delta);
+		if (delta.length > 0) {
+			this.#parts.push(delta);
+			for (const stream of this.#streams.values()) stream.push(delta);
+		}
 		this.#advance(delta);
 	}
 
@@ -445,11 +437,14 @@ class StreamBuffer {
 	replace(snapshot: string): void {
 		const current = this.#text();
 		if (snapshot === current || snapshot.startsWith(current)) {
-			this.#advance(snapshot.slice(current.length));
+			const extension = snapshot.slice(current.length);
+			for (const stream of this.#streams.values()) stream.push(extension);
+			this.#advance(extension);
 			this.#joined = snapshot;
 			return;
 		}
 		this.excerpts.clear();
+		this.#streams.clear();
 		for (const scan of this.#scans.values()) {
 			scan.scannedTo = -1;
 			scan.lineStart = 0;
@@ -464,8 +459,13 @@ class StreamBuffer {
 		this.#joined = snapshot;
 	}
 
-	/** Whether `condition` matches the text; a non-final check may defer whole-buffer rescans. */
-	matches(condition: RegExp, traits: ConditionTraits, final: boolean): boolean {
+	/** Whether `condition` matches the text; a non-final check may defer confirming scans. */
+	matches(condition: LinearRegExp, traits: ConditionTraits, final: boolean): boolean {
+		const stream = this.#stream(condition);
+		if (stream) {
+			if (!stream.matched) return false;
+			if (condition.streamsExactly) return true;
+		}
 		let scan = this.#scans.get(condition);
 		if (!scan) {
 			scan = { scannedTo: -1, lineStart: 0, matched: false, settled: false, fullScannedTo: -1, paceFrom: -1 };
@@ -493,7 +493,7 @@ class StreamBuffer {
 	}
 
 	/** Bounded one-line excerpt around the first matching condition. */
-	excerpt(ruleName: string, conditions: readonly RegExp[]): string | undefined {
+	excerpt(ruleName: string, conditions: readonly LinearRegExp[]): string | undefined {
 		if (this.excerpts.has(ruleName)) return this.excerpts.get(ruleName);
 		const text = this.#text();
 		let excerpt: string | undefined;
@@ -507,6 +507,18 @@ class StreamBuffer {
 		}
 		this.excerpts.set(ruleName, excerpt);
 		return excerpt;
+	}
+
+	/** The condition's stream over this buffer, fed the text so far when first asked for. */
+	#stream(condition: LinearRegExp): RegexStream | undefined {
+		let stream = this.#streams.get(condition);
+		if (!stream) {
+			stream = condition.stream();
+			if (!stream) return undefined;
+			stream.push(this.#text());
+			this.#streams.set(condition, stream);
+		}
+		return stream;
 	}
 
 	/** Whether a non-final check should rescan the region from the condition's last line start. */
@@ -608,8 +620,8 @@ export class TtsrManager {
 		return this.#messageCount - record.lastInjectedAt >= repeatGap;
 	}
 
-	#compileConditions(rule: Rule): RegExp[] {
-		const compiled: RegExp[] = [];
+	#compileConditions(rule: Rule): LinearRegExp[] {
+		const compiled: LinearRegExp[] = [];
 		for (const pattern of rule.condition ?? []) {
 			try {
 				compiled.push(compileRuleCondition(pattern));
@@ -796,16 +808,6 @@ export class TtsrManager {
 			return true;
 		}
 
-		return false;
-	}
-
-	#matchesCondition(entry: TtsrEntry, streamBuffer: string): boolean {
-		for (const condition of entry.conditions) {
-			condition.lastIndex = 0;
-			if (condition.test(streamBuffer)) {
-				return true;
-			}
-		}
 		return false;
 	}
 
@@ -1087,7 +1089,12 @@ export class TtsrManager {
 		if (entry.conditions.length === 0 && entry.astConditions.length === 0) {
 			return true;
 		}
-		if (this.#matchesCondition(entry, content)) {
+		if (
+			entry.conditions.some(condition => {
+				condition.lastIndex = 0;
+				return condition.test(content);
+			})
+		) {
 			return true;
 		}
 		const lang = context.source === "tool" ? this.#deriveLang(context.filePaths) : undefined;

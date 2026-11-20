@@ -18,6 +18,11 @@ function rule(name: string, condition: string): Rule {
 const TEXT: TtsrMatchContext = { source: "text" };
 /** Many complete lines: past the size where every check rescans the whole buffer. */
 const FILLER = "const value = compute(input);\n".repeat(2_000);
+/**
+ * Appended to a condition, a quantifier bound past `LinearRegExp`'s node limit keeps it
+ * on the native engine, so `RegExp.prototype` spies can count the paced scans.
+ */
+const NATIVE_ONLY = "x{0,20000}";
 
 function names(rules: Rule[]): string[] {
 	return rules.map(match => match.name);
@@ -34,6 +39,47 @@ describe("TTSR incremental stream matching", () => {
 		// A match on a completed line stays reported as the stream grows.
 		expect(names(manager.checkDelta(" line\n", TEXT))).toEqual(["forbidden"]);
 		expect(manager.matchExcerpt("forbidden", TEXT)).toContain("call FORBIDDEN_api(1); next");
+	});
+
+	it("streams a catastrophically backtracking condition without freezing and fires on the delta that completes it", () => {
+		// JSC needs seconds for one `test` of this shape on ~20 body lines (#19147); here there are 400.
+		const manager = new TtsrManager({ enabled: true });
+		manager.addRule(
+			rule("local-import", "(?m)^[ \\t]*def[ \\t]+[^\\n]+\\n(?:[ \\t]+[^\\n]*\\n|[ \\t]*\\n)*?[ \\t]+import "),
+		);
+		const body = Array.from({ length: 400 }, (_, line) => (line % 2 ? "    \n" : "    value = compute()\n")).join("");
+		const source = `def handler():\n${body}    import os\n`;
+		const matchEnd = source.indexOf("    import ") + "    import ".length;
+		const DELTA = 16;
+		let firstHit = -1;
+		for (let offset = 0; offset < source.length && firstHit < 0; offset += DELTA) {
+			if (manager.checkDelta(source.slice(offset, offset + DELTA), TEXT).length > 0) firstHit = offset / DELTA;
+		}
+		expect(firstHit).toBe(Math.floor((matchEnd - 1) / DELTA));
+		expect(manager.matchExcerpt("local-import", TEXT)).toStartWith("def handler(): value = compute()");
+	});
+
+	it("confirms a backreference condition without freezing once its automaton can match", () => {
+		// #19360: the indentation backreference keeps JSC backtracking exponentially per body line.
+		const manager = new TtsrManager({ enabled: true });
+		manager.addRule(
+			rule(
+				"n-plus-one",
+				"(?:^|\\n)([ \\t]*)for\\b[^\\n]*:[ \\t]*\\n(?:\\1[ \\t]+[^\\n]*\\n|[ \\t]*\\n)*?\\1[ \\t]+[^\\n]*(?:\\.objects\\.get\\s*\\()",
+			),
+		);
+		const body = Array.from({ length: 200 }, (_, line) =>
+			line % 2 ? "    \n" : "        total = total + item\n",
+		).join("");
+		// Shallower than the loop body: the automaton cannot rule it out, the backreference can.
+		const outside = `def total(items):\n    for item in items:\n${body}    user = User.objects.get(pk=1)\n`;
+		for (let offset = 0; offset < outside.length; offset += 64) {
+			expect(manager.checkDelta(outside.slice(offset, offset + 64), TEXT)).toEqual([]);
+		}
+		expect(manager.checkDelta("", TEXT, { final: true })).toEqual([]);
+		manager.resetBuffer();
+		const inside = `def total(items):\n    for item in items:\n${body}        User.objects.get(pk=1)\n`;
+		expect(names(manager.checkSnapshot(inside, TEXT))).toEqual(["n-plus-one"]);
 	});
 
 	it("finds a condition spanning lines on the final check of a long stream", () => {
@@ -124,7 +170,7 @@ describe("TTSR incremental stream matching", () => {
 
 	it("matches a condition that arrives late in a snapshot growing in small chunks, scanning each chunk once", () => {
 		const manager = new TtsrManager({ enabled: true });
-		manager.addRule(rule("forbidden", "FORBIDDEN_\\w+\\("));
+		manager.addRule(rule("forbidden", `FORBIDDEN_\\w+\\(${NATIVE_ONLY}`));
 		// Count regex input instead of timing it: wall-clock ratios flake under load.
 		const test = RegExp.prototype.test;
 		let scanned = 0;
@@ -166,7 +212,7 @@ describe("TTSR incremental stream matching", () => {
 
 		it("reads the line a bounded number of times instead of once per delta", () => {
 			const manager = new TtsrManager({ enabled: true });
-			manager.addRule(toolRule("force-push", "git\\s+push\\s+--force"));
+			manager.addRule(toolRule("force-push", `git\\s+push\\s+--force${NATIVE_ONLY}`));
 			const wire = JSON.stringify({ command: "echo ok\n".repeat(8_192) });
 			const test = RegExp.prototype.test;
 			let scanned = 0;
