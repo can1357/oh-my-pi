@@ -1,24 +1,38 @@
-use std::ptr::with_exposed_provenance_mut;
+use std::{
+	ptr::with_exposed_provenance_mut,
+	time::{Duration, Instant},
+};
 
 use uiautomation::{
 	UIAutomation, UIElement,
 	patterns::{
 		UIExpandCollapsePattern, UIInvokePattern, UILegacyIAccessiblePattern, UIScrollItemPattern,
-		UISelectionItemPattern, UITogglePattern, UIValuePattern,
+		UIScrollPattern, UISelectionItemPattern, UITogglePattern, UIValuePattern,
 	},
-	types::{ControlType, ExpandCollapseState, Handle, Point, UIProperty},
+	types::{ControlType, ExpandCollapseState, Handle, Point, ScrollAmount, UIProperty},
 	variants::Value,
+};
+use windows::{
+	Win32::{
+		System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx},
+		UI::Accessibility::{CUIAutomation8, IUIAutomation, IUIAutomation2},
+	},
+	core::Interface,
 };
 use windows_sys::Win32::{
 	Foundation::{HWND, POINT},
-	UI::WindowsAndMessaging::{GA_PARENT, GetAncestor, GetDesktopWindow, IsWindow, WindowFromPoint},
+	UI::WindowsAndMessaging::{
+		GA_PARENT, GetAncestor, GetDesktopWindow, IsWindow, SPI_GETWHEELSCROLLCHARS,
+		SPI_GETWHEELSCROLLLINES, SystemParametersInfoW, WindowFromPoint,
+	},
 };
 
 use super::{
 	super::{
 		ax::{AxBounds, AxHandle, AxProps, normalize_role_uia},
 		backend::AxBackend,
-		error::{CoreResult, DesktopError},
+		control,
+		error::{CoreResult, DesktopError, ErrorCode},
 		types::DesktopWindow,
 	},
 	window,
@@ -167,6 +181,283 @@ impl Win32Ax {
 			element = walker.get_parent(&element).map_err(ax_error)?;
 		}
 		Ok(false)
+	}
+
+	/// WPF drops posted wheels, and `ScrollPattern` can activate its window.
+	/// Only a foreground container under the point may receive these steps.
+	pub(super) fn scroll_at_point(
+		&mut self,
+		root: HWND,
+		point: POINT,
+		horizontal: i32,
+		vertical: i32,
+	) -> CoreResult<bool> {
+		let mut run =
+			ScrollRun { cutoff: control::reply_deadline(), now: Instant::now, sent: false };
+		if !window::owns_foreground(root) || !shows_at(root, point) {
+			return Ok(false);
+		}
+		if !self.automation_initialized {
+			let initialized = &mut self.automation_initialized;
+			run.call(|| {
+				// SAFETY: initialize the worker apartment in the same mode as
+				// UIAutomation::new.
+				let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() };
+				// Recorded at once, so a cutoff right after cannot lose it.
+				*initialized |= result.is_ok();
+				result
+			})?;
+		}
+		// A scroll-local client leaves other actions' timeout settings alone.
+		// SAFETY: this thread's COM apartment is initialized.
+		let client = run.call(|| unsafe {
+			CoCreateInstance::<_, IUIAutomation2>(&CUIAutomation8, None, CLSCTX_ALL)
+		})?;
+		if let Some(cutoff) = run.cutoff {
+			let timeout = u32::try_from(cutoff.saturating_duration_since((run.now)()).as_millis())
+				.unwrap_or(u32::MAX)
+				.max(1);
+			// SAFETY: these puts take scalar milliseconds on our local client.
+			run.call(|| unsafe { client.SetConnectionTimeout(timeout) })?;
+			// SAFETY: same local client and scalar timeout.
+			run.call(|| unsafe { client.SetTransactionTimeout(timeout) })?;
+		}
+		let automation = UIAutomation::from(run.call(|| client.cast::<IUIAutomation>())?);
+		let walker = run.call(|| automation.get_raw_view_walker())?;
+		let Ok(hit) = run.call(|| {
+			Ok::<_, DesktopError>(automation.element_from_point(Point::new(point.x, point.y)))
+		})?
+		else {
+			return Ok(false);
+		};
+		let mut eligible = false;
+		for (across, notches, setting) in
+			[(true, horizontal, SPI_GETWHEELSCROLLCHARS), (false, vertical, SPI_GETWHEELSCROLLLINES)]
+		{
+			let (amount, steps) = wheel_amount(notches, wheel_setting(setting));
+			if steps == 0 {
+				continue;
+			}
+			let mut element = run.call(|| Ok::<_, DesktopError>(hit.clone()))?;
+			let mut found = None;
+			for _ in 0..16 {
+				if let Ok(pattern) =
+					run.call(|| Ok::<_, DesktopError>(element.get_pattern::<UIScrollPattern>()))?
+					&& run.call(|| {
+						if across {
+							pattern.is_horizontally_scrollable()
+						} else {
+							pattern.is_vertically_scrollable()
+						}
+					})? {
+					found = bind_scroll_candidate(pattern, root.expose_provenance(), || {
+						let raw: isize = run.call(|| element.get_native_window_handle())?.into();
+						if raw != 0 {
+							return Ok(Some(
+								window::root(with_exposed_provenance_mut(raw as usize)).expose_provenance(),
+							));
+						}
+						let Ok(parent) =
+							run.call(|| Ok::<_, DesktopError>(walker.get_parent(&element)))?
+						else {
+							return Ok(Some(0));
+						};
+						element = parent;
+						Ok(None)
+					})?;
+					break;
+				}
+				let raw: isize = run.call(|| element.get_native_window_handle())?.into();
+				if raw != 0 && with_exposed_provenance_mut::<std::ffi::c_void>(raw as usize) == root {
+					break;
+				}
+				let Ok(parent) = run.call(|| Ok::<_, DesktopError>(walker.get_parent(&element)))?
+				else {
+					break;
+				};
+				element = parent;
+			}
+			let Some(pattern) = found else {
+				continue;
+			};
+			eligible = true;
+			for _ in 0..steps {
+				if !run.step(
+					notches > 0,
+					|run| {
+						let position = run.call(|| {
+							if across {
+								pattern.get_horizontal_scroll_percent()
+							} else {
+								pattern.get_vertical_scroll_percent()
+							}
+						})?;
+						let view = run.call(|| {
+							if across {
+								pattern.get_horizontal_view_size()
+							} else {
+								pattern.get_vertical_view_size()
+							}
+						})?;
+						if !window::owns_foreground(root) || !shows_at(root, point) {
+							return Err(run.failure(
+								ErrorCode::Unsupported,
+								"bring WPF in front or use takeover: true",
+							));
+						}
+						Ok(Sample { position, view })
+					},
+					|| {
+						if across {
+							pattern.scroll(amount, ScrollAmount::NoAmount)
+						} else {
+							pattern.scroll(ScrollAmount::NoAmount, amount)
+						}
+					},
+					control::wait,
+				)? {
+					break;
+				}
+			}
+		}
+		run.finish(eligible)
+	}
+}
+
+fn bind_scroll_candidate<T>(
+	candidate: T,
+	root: usize,
+	mut next_host: impl FnMut() -> CoreResult<Option<usize>>,
+) -> CoreResult<Option<T>> {
+	for _ in 0..16 {
+		if let Some(host) = next_host()? {
+			return Ok((host == root).then_some(candidate));
+		}
+	}
+	Ok(None)
+}
+
+#[derive(Clone, Copy)]
+struct Sample {
+	position: f64,
+	view:     f64,
+}
+
+/// Every provider call, including lookups and each property read, shares
+/// one operation cutoff. A late reply cannot confirm an already sent step.
+struct ScrollRun<N> {
+	cutoff: Option<Instant>,
+	now:    N,
+	sent:   bool,
+}
+
+impl<N: Fn() -> Instant> ScrollRun<N> {
+	fn failure(&self, code: ErrorCode, reason: impl std::fmt::Display) -> DesktopError {
+		let (code, delivery) = if self.sent {
+			(ErrorCode::AxUnconfirmed, "scroll sent, not confirmed")
+		} else {
+			(code, "nothing was sent")
+		};
+		DesktopError::new(code, format!("{reason}; {delivery}; inspect before retrying"))
+	}
+
+	fn finish(&self, eligible: bool) -> CoreResult<bool> {
+		if eligible && !self.sent {
+			return Err(DesktopError::input_failed("already at the end; nothing was sent"));
+		}
+		Ok(self.sent)
+	}
+
+	fn check(&self) -> CoreResult<()> {
+		if self.cutoff.is_some_and(|cutoff| (self.now)() >= cutoff) {
+			return Err(self.failure(ErrorCode::Timeout, "the operation's time ran out"));
+		}
+		control::check().map_err(|error| self.failure(error.code, error.message))
+	}
+
+	fn call<T, E: std::fmt::Display>(&self, call: impl FnOnce() -> Result<T, E>) -> CoreResult<T> {
+		self.check()?;
+		let result = call();
+		self.check()?;
+		result.map_err(|error| {
+			self.failure(
+				ErrorCode::Unsupported,
+				format!(
+					"UI Automation unavailable ({error}); bring WPF in front or use takeover: true"
+				),
+			)
+		})
+	}
+
+	fn step(
+		&mut self,
+		forward: bool,
+		mut sample: impl FnMut(&Self) -> CoreResult<Sample>,
+		send: impl FnOnce() -> uiautomation::Result<()>,
+		mut wait: impl FnMut(Duration) -> CoreResult<()>,
+	) -> CoreResult<bool> {
+		self.check()?;
+		let before = sample(self)?;
+		self.check()?;
+		if before.position < 0.0 {
+			return Err(
+				self.failure(ErrorCode::Unsupported, "no WPF scroll position; use takeover: true"),
+			);
+		}
+		if (forward && before.position >= 100.0) || (!forward && before.position <= 0.0) {
+			return Ok(false);
+		}
+		self.sent = true;
+		let result = send();
+		self.check()?;
+		result.map_err(|error| self.failure(ErrorCode::AxFailed, error))?;
+		let until = (self.now)() + Duration::from_millis(500);
+		loop {
+			let after = sample(self)?;
+			self.check()?;
+			if (after.view - before.view).abs() > f64::EPSILON {
+				return Err(self.failure(ErrorCode::AxFailed, "the list's size changed"));
+			}
+			let movement = after.position - before.position;
+			if after.position >= 0.0 && ((forward && movement > 0.0) || (!forward && movement < 0.0)) {
+				return Ok(true);
+			}
+			let now = (self.now)();
+			if now >= until {
+				return Err(DesktopError::input_failed(
+					"a sent scroll step did not move; inspect before retrying",
+				));
+			}
+			let end = self.cutoff.map_or(until, |cutoff| cutoff.min(until));
+			wait(
+				end.saturating_duration_since(now)
+					.min(Duration::from_millis(10)),
+			)
+			.map_err(|error| self.failure(error.code, error.message))?;
+		}
+	}
+}
+
+fn shows_at(root: HWND, point: POINT) -> bool {
+	// SAFETY: WindowFromPoint takes a scalar point.
+	let visible = unsafe { WindowFromPoint(point) };
+	!visible.is_null() && window::root(visible) == root
+}
+
+fn wheel_setting(action: u32) -> u32 {
+	let mut value = 3_u32;
+	// SAFETY: these actions write one u32 to the pointer given.
+	let read = unsafe { SystemParametersInfoW(action, 0, (&raw mut value).cast(), 0) };
+	if read == 0 { 3 } else { value }
+}
+
+const fn wheel_amount(notches: i32, per_notch: u32) -> (ScrollAmount, u32) {
+	let steps = notches.unsigned_abs();
+	match (notches > 0, per_notch == u32::MAX) {
+		(true, true) => (ScrollAmount::LargeIncrement, steps),
+		(false, true) => (ScrollAmount::LargeDecrement, steps),
+		(true, false) => (ScrollAmount::SmallIncrement, steps.saturating_mul(per_notch)),
+		(false, false) => (ScrollAmount::SmallDecrement, steps.saturating_mul(per_notch)),
 	}
 }
 
@@ -623,6 +914,76 @@ impl AxBackend for Win32Ax {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn scroll_candidate_rejects_foreign_and_unknown_hosts() {
+		for (hosts, expected) in [
+			(&[None, Some(1)][..], Some("pattern")),
+			(&[None, Some(2)][..], None),
+			(&[Some(0)][..], None),
+			(&[None; 16][..], None),
+		] {
+			let mut hosts = hosts.iter().copied();
+			assert_eq!(
+				bind_scroll_candidate("pattern", 1, || Ok(hosts.next().flatten())).unwrap(),
+				expected
+			);
+		}
+	}
+
+	#[test]
+	fn wpf_provider_failure_before_send_is_unsupported() {
+		let run = ScrollRun { cutoff: None, now: Instant::now, sent: false };
+		let error = run
+			.call(|| Err::<(), _>("provider disappeared"))
+			.unwrap_err();
+		assert_eq!(error.code, ErrorCode::Unsupported);
+	}
+
+	#[test]
+	fn wpf_scroll_deadline_and_position_readback() {
+		use std::cell::Cell;
+
+		use super::super::super::error::ErrorCode::{AxUnconfirmed, InputFailed, Timeout};
+
+		// The anchor is arbitrary; all decisions use the injected clock.
+		let start = Instant::now();
+		for (case, initial, growth, expected, reads, sends) in [
+			("expired", 50.0, 0.0_f64, Err(Timeout), 0, 0),
+			("late", 50.0, 0.0, Err(AxUnconfirmed), 3, 1),
+			("resize", 50.0, 10.0, Err(AxUnconfirmed), 4, 1),
+			("moved", 50.0, 0.0, Ok(true), 4, 1),
+			("end", 100.0, 0.0, Err(InputFailed), 2, 0),
+		] {
+			let cutoff = start + Duration::from_secs(1);
+			let clock = Cell::new(if case == "expired" { cutoff } else { start });
+			let (read_count, send_count) = (Cell::new(0), Cell::new(0));
+			let mut run = ScrollRun { cutoff: Some(cutoff), now: || clock.get(), sent: false };
+			let result = run.step(
+				true,
+				|run| {
+					let change = f64::from(u8::from(run.sent));
+					let mut values = [initial + change, growth.mul_add(change, 10.0)].into_iter();
+					let mut read = || {
+						read_count.set(read_count.get() + 1);
+						if run.sent && case == "late" {
+							clock.set(cutoff);
+						}
+						Ok::<_, DesktopError>(values.next().unwrap())
+					};
+					Ok(Sample { position: run.call(&mut read)?, view: run.call(read)? })
+				},
+				|| {
+					send_count.set(send_count.get() + 1);
+					Ok(())
+				},
+				|_| panic!("these samples settle without waiting"),
+			);
+			let result = result.and_then(|moved| if moved { Ok(true) } else { run.finish(true) });
+			assert_eq!(result.map_err(|error| error.code), expected, "{case}");
+			assert_eq!((read_count.get(), send_count.get()), (reads, sends), "{case}");
+		}
+	}
 
 	#[test]
 	fn coordinate_click_rejects_controls_with_position_dependent_subregions() {
