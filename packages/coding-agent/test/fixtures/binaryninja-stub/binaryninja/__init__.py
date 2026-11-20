@@ -71,12 +71,12 @@ class BinaryView:
             callback()
 
     def create_database(self, path):
-        with open(path, "w", encoding="utf-8") as f:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(MARKER)
         return True
 
     def save_auto_snapshot(self):
-        with open(self.file.filename, "a", encoding="utf-8") as f:
+        with open(self.file.filename, "a", encoding="utf-8", newline="\n") as f:
             f.write("saved\n")
         self.file.modified = False
         self.file.analysis_changed = False
