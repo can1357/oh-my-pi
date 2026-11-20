@@ -449,6 +449,12 @@ export class ModelHubComponent implements Component {
 	#strip: StripState | null = null;
 	#assignmentPending = false;
 	/**
+	 * The role the last successful hub assign wrote, and the row it was made on. The
+	 * row's chip now reads as assigned, so Enter there would toggle the role off; a
+	 * repeat Enter must not. Cleared when the cursor moves to another row or the view changes.
+	 */
+	#committed: { selector: string; role: string; scope: ModelRoleSelectionScope | undefined } | null = null;
+	/**
 	 * Last preset ctrl+←/→ tried in this hub, with the settings revision after the
 	 * attempt; steps from it while nothing matches the setup or nothing changed since.
 	 */
@@ -532,6 +538,9 @@ export class ModelHubComponent implements Component {
 		this.#browser.onActivate = item => this.#activateItem(item);
 		this.#browser.onCancel = () => this.#callbacks.onCancel();
 		this.#browser.onQueryChange = query => this.#onQueryChanged(query);
+		this.#browser.onSelectionChange = item => {
+			if (item?.selector !== this.#committed?.selector) this.#committed = null;
+		};
 
 		// Hydrate synchronously from the current registry snapshot so the first
 		// Enter after opening acts on cached models instead of being dropped
@@ -833,6 +842,7 @@ export class ModelHubComponent implements Component {
 	#setActiveEntry(id: string): void {
 		if (!this.#entries.some(entry => entry.id === id)) return;
 		this.#activeEntryId = id;
+		this.#committed = null;
 		this.#sidebarFollowActive = true;
 		this.#applyScope();
 		const entry = this.#activeEntry();
@@ -1308,6 +1318,7 @@ export class ModelHubComponent implements Component {
 		if (!supported.includes(level)) level = ThinkingLevel.Inherit;
 		const result = this.#callbacks.onAssign(item.model, role, level, item.selector, scope);
 		this.#finishAssignment(result, () => {
+			this.#committed = { selector: item.selector, role, scope };
 			this.#refreshAfterMutation();
 			if (supported.length === 0) {
 				if (returnToRoles) {
@@ -1612,8 +1623,15 @@ export class ModelHubComponent implements Component {
 					this.#assignRole(strip.item, chip.role, false, chip.scope);
 				}
 				return;
-			case "unassign":
-				if (chip.role) {
+			case "unassign": {
+				const committed = this.#committed;
+				// A repeat Enter on the row just committed is not a toggle back; moving the cursor re-arms it.
+				const repeatOfCommit =
+					committed !== null &&
+					committed.selector === strip.item.selector &&
+					committed.role === chip.role &&
+					committed.scope === chip.scope;
+				if (chip.role && !repeatOfCommit) {
 					if (this.#settings.modelRoleStorage === "project") {
 						this.#callbacks.onUnassign(chip.role, chip.scope);
 					} else {
@@ -1623,6 +1641,7 @@ export class ModelHubComponent implements Component {
 				}
 				this.#closeStrip();
 				return;
+			}
 			case "fallback":
 				this.#appendFallback(strip.item, "default");
 				this.#closeStrip();

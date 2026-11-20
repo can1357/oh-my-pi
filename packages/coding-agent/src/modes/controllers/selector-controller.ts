@@ -824,6 +824,8 @@ export class SelectorController {
 			this.ctx.ui.requestRender();
 		};
 		const isCurrent = () => this.#openMenus.get(menuKind) === menu;
+		// One pick at a time: an Enter repeated while a pick applies is dropped, not applied again.
+		let pickInFlight = false;
 		const picker = new ModelPickerComponent(
 			this.ctx.ui,
 			createModelBrowserSource(this.ctx.settings, model => viewed.effectiveServiceTier(model)),
@@ -831,7 +833,8 @@ export class SelectorController {
 			this.ctx.session.scopedModels,
 			{
 				onPick: async (model, selector, { overContext, thinkingLevel }) => {
-					if (!isCurrent()) return;
+					if (!isCurrent() || pickInFlight) return;
+					pickInFlight = true;
 					try {
 						// Over-context pick: close the picker first so the compaction
 						// loader is visible.
@@ -840,10 +843,13 @@ export class SelectorController {
 						if (!overContext) done();
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					} finally {
+						pickInFlight = false;
 					}
 				},
 				onPickRole: async entry => {
-					if (!isCurrent()) return;
+					if (!isCurrent() || pickInFlight) return;
+					pickInFlight = true;
 					try {
 						await this.ctx.viewSession.applyRoleModel(entry);
 						this.ctx.statusLine.invalidate();
@@ -855,6 +861,8 @@ export class SelectorController {
 						done();
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					} finally {
+						pickInFlight = false;
 					}
 				},
 				onPickTask: (_model, selector) => {

@@ -157,6 +157,41 @@ describe("SelectorController model selector writes", () => {
 		expect(showError).not.toHaveBeenCalled();
 	});
 
+	it("applies a session-only pick once when Enter repeats before the first apply settles", async () => {
+		const opus = model("claude-opus-4-5");
+		const { controller, showError } = start(Settings.isolated(), model("claude-sonnet-4-5"));
+		const { callbacks } = openModelPicker(controller);
+
+		// Two Enters land while the first apply is still awaiting the model switch; the picker stays on screen.
+		const first = callbacks.onPick(opus, "anthropic/claude-opus-4-5", { overContext: false });
+		const second = callbacks.onPick(opus, "anthropic/claude-opus-4-5", { overContext: false });
+		await Promise.all([first, second]);
+
+		// One pick is one session model change in the transcript, not one per Enter.
+		const switches = session!.sessionManager.getBranch().filter(entry => entry.type === "model_change");
+		expect(switches).toHaveLength(1);
+		expect(session!.model?.id).toBe("claude-opus-4-5");
+		expect(showError).not.toHaveBeenCalled();
+	});
+
+	it("applies a quick-role pick once when Enter repeats before the first apply settles", async () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "anthropic/claude-opus-4-5" }, cycleOrder: ["smol"] });
+		const { controller, showError } = start(settings, model("claude-sonnet-4-5"));
+		const { callbacks, options } = openModelPicker(controller);
+		const smol = options.quickRoles?.find(entry => entry.role === "smol");
+		if (!smol) throw new Error("the smol quick role was not offered");
+
+		// Two Enters land on the quick role while its first apply is still awaiting the model switch.
+		const first = callbacks.onPickRole?.(smol);
+		const second = callbacks.onPickRole?.(smol);
+		await Promise.all([first, second]);
+
+		const switches = session!.sessionManager.getBranch().filter(entry => entry.type === "model_change");
+		expect(switches).toHaveLength(1);
+		expect(session!.model?.id).toBe("claude-opus-4-5");
+		expect(showError).not.toHaveBeenCalled();
+	});
+
 	it("saves only the edited fallback chain, never the chains a --config overlay supplies", async () => {
 		const agentDir = tempDir.join("agent");
 		const overlayPath = tempDir.join("overlay.yml");
