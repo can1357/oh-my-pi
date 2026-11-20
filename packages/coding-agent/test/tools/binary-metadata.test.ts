@@ -261,6 +261,18 @@ describe("on-disk executable metadata", () => {
 		);
 	});
 
+	it("labels a database file with its owning backend and extension", async () => {
+		const cases: Array<[string, string]> = [
+			["saved.i64", "IDA database (.i64)"],
+			["saved.IDB", "IDA database (.idb)"],
+			["saved.bndb", "Binary Ninja database (.bndb)"],
+		];
+		for (const [name, heading] of cases) {
+			const { text } = await readBinaryMetadata(await fixture(Buffer.alloc(8), name));
+			expect(text).toBe(`${heading}\nfile size 8 bytes; database not opened`);
+		}
+	});
+
 	const malformed: Array<[string, () => Buffer, string]> = [
 		["short ELF header", () => elf().subarray(0, 32), "truncated header"],
 		[
