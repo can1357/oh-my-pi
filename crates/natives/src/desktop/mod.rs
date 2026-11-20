@@ -2221,8 +2221,8 @@ impl SessionCore {
 		}
 		let fence = token.dispatch_fence();
 		let reply_by = Instant::now() + self.operation_timeout;
-		// Only the caller's wait stops short of the run deadline; the worker keeps
-		// the native deadline, so input-lock waits keep their own reserve.
+		// Only the caller's wait stops short of the run deadline; the worker
+		// keeps the native deadline, so input-lock waits keep their own reserve.
 		let wait_by = token.reply_wait_deadline(reply_by);
 		// Input waiting for the user (to pause on macOS, to answer a Wayland
 		// permission prompt) or for another session's input lock gives up
@@ -4236,10 +4236,14 @@ mod capture_tests {
 		backend.on_windows = Some(Box::new({
 			let mutations = Arc::clone(&mutations);
 			move || {
-				entered_tx.send(()).expect("caller did not await provider entry");
+				entered_tx
+					.send(())
+					.expect("caller did not await provider entry");
 				blocked.recv().expect("provider was not unblocked");
 				let dispatched = control::dispatching();
-				result_tx.send(dispatched.as_ref().err().map(|error| error.code)).unwrap();
+				result_tx
+					.send(dispatched.as_ref().err().map(|error| error.code))
+					.unwrap();
 				dispatched?;
 				mutations.fetch_add(1, Ordering::AcqRel);
 				Ok(())
