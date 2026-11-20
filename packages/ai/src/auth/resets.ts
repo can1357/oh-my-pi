@@ -100,7 +100,16 @@ export class ResetCredits implements ResetsApi {
 				},
 			};
 			const list = provider === "anthropic" ? await listClaudeResetCredits(auth) : await listCodexResetCredits(auth);
-			if (!list)
+			if (!list) {
+				// Info, not debug: a failed listing leaves the auto-reset plan at
+				// `credits-unknown`, and whether it was throttled decides whether
+				// the caller re-reads it or gives up on the reset.
+				logger.info("Saved-reset listing failed", {
+					provider,
+					credentialId: account.credentialId,
+					rateLimited: retryAfterMs !== undefined,
+					retryAfterMs,
+				});
 				return {
 					...base,
 					availableCount: 0,
@@ -108,6 +117,7 @@ export class ResetCredits implements ResetsApi {
 					error: "Failed to load saved resets",
 					...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
 				};
+			}
 			return { ...base, ...list };
 		};
 		if (provider !== "anthropic") return Promise.all(accounts.map(loadAccount));
