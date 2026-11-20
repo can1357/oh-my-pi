@@ -497,6 +497,14 @@ describe.skipIf(!runtime)("Binary Ninja worker", () => {
 			const bySlot = await view(worker, "xrefs", slot);
 			expect(bySlot).toMatch(/^0x[0-9a-f]+ {2}CODE {2}in puts$/m);
 			expect(bySlot).toMatch(/^0x[0-9a-f]+ {2}CALL {2}in direct$/m);
+
+			// From the other end: `api` makes three calls, and `tail` only jumps.
+			const codeRefs = (target: string) =>
+				`[(x['type'], name_of(x['to'])) for x in xrefs_from('${target}') if x['type'] != 'DATA']`;
+			expect((await exec(worker, codeRefs("api"))).value).toBe(
+				"[('CALL', 'puts'), ('CALL', 'dep_fn'), ('CALL', 'helper')]",
+			);
+			expect((await exec(worker, codeRefs("tail"))).value).toBe("[('CODE', 'puts')]");
 			await worker.close({ save: false });
 		},
 		TEST_TIMEOUT_MS,
