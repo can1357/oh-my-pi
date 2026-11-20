@@ -399,13 +399,15 @@ pub(super) fn set_combo(
 }
 
 /// Writes a Win32 or `WinForms` edit control's whole value with `WM_SETTEXT`,
-/// one call that returns whether the edit took the value. A single-line edit
-/// tells its app with `EN_CHANGE`; a multi-line one does not, so its unchanged
-/// parent and ID are notified explicitly. Only a native Win32 EDIT is marked
-/// modified first, preserving Notepad's document change without dirtying
-/// `WinForms`. The system's UI Automation proxy for these classes activates the
-/// control's window to set a value, taking the foreground and the user's next
-/// keys; these messages need neither focus nor activation. `password` is UI
+/// one call that reports whether the edit took the value. `WM_SETTEXT` also
+/// clears the edit's modification flag, which typing leaves set, so the flag is
+/// set again (`EM_SETMODIFY`). A single-line edit tells its app with
+/// `EN_CHANGE` during `WM_SETTEXT`; a multi-line one does not, so its unchanged
+/// parent and ID are notified once the flag is set (Notepad marks its document
+/// changed).
+/// The system's UI Automation proxy for these classes activates the control's
+/// window to set a value, taking the foreground and the user's next keys;
+/// these messages need neither focus nor activation. `password` is UI
 /// Automation's verdict: a protected or unknown field's text is never quoted.
 #[cfg(target_os = "windows")]
 pub(super) fn set_edit(
@@ -488,10 +490,8 @@ pub(super) fn set_edit(
 		));
 	}
 	writing.set(true);
+	send(hwnd, EM_SETMODIFY, 1, 0, false)?;
 	if multiline {
-		if super::window::with_class_name(hwnd, |class| class.eq_ignore_ascii_case("Edit")) {
-			send(hwnd, EM_SETMODIFY, 1, 0, false)?;
-		}
 		// SAFETY: these calls only revalidate the original child and recipient.
 		let unchanged = unsafe {
 			IsWindow(hwnd) != 0
@@ -648,7 +648,7 @@ mod tests {
 			= const { std::cell::Cell::new(None) };
 		static IGNORED_SETTEXT_RESULT: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
 		static CHANGE_TARGETS: std::cell::RefCell<Vec<(isize, u16)>> = const { std::cell::RefCell::new(Vec::new()) };
-		static CLEAR_MODIFIED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+		static MODIFIED_AT_CHANGE: std::cell::RefCell<Vec<isize>> = const { std::cell::RefCell::new(Vec::new()) };
 	}
 
 	#[cfg(target_os = "windows")]
@@ -667,17 +667,16 @@ mod tests {
 			if code == windows_sys::Win32::UI::WindowsAndMessaging::EN_CHANGE {
 				CHANGE_TARGETS
 					.with(|targets| targets.borrow_mut().push((hwnd as isize, wparam as u16)));
-				if CLEAR_MODIFIED.with(std::cell::Cell::get) {
-					// SAFETY: lparam names the edit that sent this notification.
-					unsafe {
-						windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW(
-							lparam as _,
-							windows_sys::Win32::UI::Controls::EM_SETMODIFY,
-							0,
-							0,
-						)
-					};
-				}
+				// SAFETY: lparam names the edit that sent this notification.
+				let modified = unsafe {
+					windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW(
+						lparam as _,
+						windows_sys::Win32::UI::Controls::EM_GETMODIFY,
+						0,
+						0,
+					)
+				};
+				MODIFIED_AT_CHANGE.with(|seen| seen.borrow_mut().push(modified));
 			}
 			if code == DESTROY_ON_NOTIFICATION.with(|destroy| destroy.get()) {
 				// SAFETY: lparam is the combo this test created and owns.
@@ -820,9 +819,8 @@ mod tests {
 			Input::KeyboardAndMouse::GetFocus,
 			WindowsAndMessaging::{
 				CreateWindowExW, DestroyWindow, EN_CHANGE, ES_AUTOHSCROLL, ES_MULTILINE, ES_NUMBER,
-				ES_UPPERCASE, GWLP_USERDATA, GWLP_WNDPROC, GetClassInfoW, GetWindowTextW,
-				RegisterClassW, SendMessageW, SetWindowLongPtrW, UnregisterClassW, WM_SETTEXT,
-				WNDCLASSW, WNDPROC, WS_CHILD, WS_OVERLAPPED,
+				ES_UPPERCASE, GWLP_USERDATA, GWLP_WNDPROC, GetWindowTextW, SendMessageW,
+				SetWindowLongPtrW, WM_SETTEXT, WNDPROC, WS_CHILD, WS_OVERLAPPED,
 			},
 		};
 
@@ -880,53 +878,21 @@ mod tests {
 				})
 			};
 			// Single- and multi-line edits each tell the app once that their
-			// text changed; the multi-line one is marked modified, as after a
-			// paste.
+			// text changed and end marked modified, as after typing; the
+			// multi-line app's handler already sees the flag set.
 			for style in [ES_AUTOHSCROLL, ES_MULTILINE] {
 				let edit = child(style);
 				assert!(!edit.is_null());
 				changes();
-				CLEAR_MODIFIED.with(|clear| clear.set(style == ES_AUTOHSCROLL));
+				MODIFIED_AT_CHANGE.with(|seen| seen.borrow_mut().clear());
 				set_edit(edit, "new value", true, Some(false)).unwrap();
 				assert_eq!(read(edit), "new value");
 				assert_eq!(changes(), 1, "style {style:#x}");
-				assert_eq!(
-					SendMessageW(edit, EM_GETMODIFY, 0, 0),
-					isize::from(style == ES_MULTILINE),
-					"style {style:#x}"
-				);
+				assert_eq!(SendMessageW(edit, EM_GETMODIFY, 0, 0), 1, "style {style:#x}");
+				if style == ES_MULTILINE {
+					MODIFIED_AT_CHANGE.with(|seen| assert_eq!(*seen.borrow(), [1]));
+				}
 			}
-			CLEAR_MODIFIED.with(|clear| clear.set(false));
-			// A WinForms-named superclass retains EDIT's native behavior but
-			// must keep a programmatic multiline write clean.
-			let class = wide("WindowsForms10.EDIT.app.omp-value-write-test");
-			let mut definition = WNDCLASSW::default();
-			assert_ne!(GetClassInfoW(std::ptr::null_mut(), wide("EDIT").as_ptr(), &mut definition), 0);
-			definition.hInstance = std::ptr::null_mut();
-			definition.lpszClassName = class.as_ptr();
-			assert_ne!(RegisterClassW(&definition), 0);
-			let forms_edit = CreateWindowExW(
-				0,
-				class.as_ptr(),
-				wide("old").as_ptr(),
-				WS_CHILD | ES_MULTILINE as u32,
-				0,
-				0,
-				100,
-				20,
-				parent,
-				1 as _,
-				std::ptr::null_mut(),
-				std::ptr::null(),
-			);
-			assert!(!forms_edit.is_null());
-			changes();
-			set_edit(forms_edit, "new value", true, Some(false)).unwrap();
-			assert_eq!(read(forms_edit), "new value");
-			assert_eq!(SendMessageW(forms_edit, EM_GETMODIFY, 0, 0), 0);
-			assert_eq!(changes(), 1);
-			DestroyWindow(forms_edit);
-			assert_ne!(UnregisterClassW(class.as_ptr(), std::ptr::null_mut()), 0);
 			// Parent-only, ID-only and detachment changes are partial delivery,
 			// never a notification to either the old or a new recipient.
 			let new_parent = CreateWindowExW(

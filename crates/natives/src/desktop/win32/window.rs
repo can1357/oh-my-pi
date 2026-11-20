@@ -82,7 +82,7 @@ pub(super) fn class_name(hwnd: HWND) -> String {
 
 /// Runs `inspect` on `hwnd`'s class name without heap allocation; the name is
 /// empty when Win32 cannot report one.
-pub(super) fn with_class_name<R>(hwnd: HWND, inspect: impl FnOnce(&str) -> R) -> R {
+fn with_class_name<R>(hwnd: HWND, inspect: impl FnOnce(&str) -> R) -> R {
 	let mut wide = [0u16; 256];
 	// SAFETY: the buffer is writable for its advertised length; Win32 validates
 	// the handle.
