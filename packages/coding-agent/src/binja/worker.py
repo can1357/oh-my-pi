@@ -103,6 +103,7 @@ class _Request:
 _IDLE = "idle"
 _STARTING = "starting"
 _RUNNING = "running"
+_HELD = "held"
 _INTERRUPTED = "interrupted"
 _FINISHING = "finishing"
 
@@ -121,6 +122,8 @@ class _Transport:
         self._stage = _IDLE
         # An interrupt arrived for the request at hand before its handler started.
         self._early = False
+        # An interrupt arrived while the handler held interrupts back.
+        self._held = False
         # Guards the three fields below, shared with the reader threads' interrupt frames.
         self._running_lock = threading.Lock()
         self._running_id = None
@@ -150,10 +153,35 @@ class _Transport:
         if stage == _RUNNING:
             self._stage = _INTERRUPTED
             raise KeyboardInterrupt
-        if stage == _STARTING or (stage == _IDLE and self._requests):
+        if stage == _HELD:
+            self._held = True
+        elif stage == _STARTING or (stage == _IDLE and self._requests):
             # Ahead of its request's handler, which then never starts.
             self._early = True
         # Otherwise it is late: its request already finished.
+
+    def hold(self):
+        """Hold interrupts back until `release()`, for a step that must not be cut in half."""
+        if self._stage == _RUNNING:
+            self._held = False
+            self._stage = _HELD
+
+    def release(self):
+        """Accept interrupts again; one that arrived since `hold()` is raised here."""
+        if self._stage != _HELD:
+            return
+        self._stage = _RUNNING
+        if self._held:
+            self._stage = _INTERRUPTED
+            raise KeyboardInterrupt
+
+    def finish(self):
+        """Stop accepting interrupts for the request at hand: from here on one is too late.
+
+        Returning means no interrupt can be raised any more. So does a KeyboardInterrupt out of
+        this call: it is the request's one interrupt.
+        """
+        self._stage = _FINISHING
 
     def serve(self, methods, close, dirty):
         """Answer requests on the main thread until `close`, SIGTERM or the orphan timeout; never returns.
@@ -1111,16 +1139,33 @@ def _rpc_view(params):
 def _undo_span():
     """Commit the undo-recorded edits of the body, or revert them when it raises or is interrupted.
 
+    A request either fails with its edits reverted or succeeds with them committed: an interrupt
+    cannot land between the last edit and the commit, nor leave the span open. The span ends the
+    part of a request that an interrupt can stop, so it is a handler's last step.
+
     Auto-level changes, metadata and a function's `has_user_type` flag are outside undo and stay.
     """
     bv = _bv()
-    span = bv.begin_undo_actions()
+    span = None
     try:
+        # An interrupt between the native call and the assignment would leave a span nothing closes.
+        transport.hold()
+        span = bv.begin_undo_actions()
+        transport.release()
         yield
+        # The last moment an interrupt stops the request: raised in this call it still reverts,
+        # after it the edits are committed and the request succeeds.
+        transport.finish()
+        bv.commit_undo_actions(span)
     except BaseException:
-        bv.revert_undo_actions(span)
+        if span is not None:
+            try:
+                transport.finish()
+            except KeyboardInterrupt:
+                # The request's one interrupt, on the way in: nothing cuts the revert short now.
+                pass
+            bv.revert_undo_actions(span)
         raise
-    bv.commit_undo_actions(span)
 
 
 def _rpc_exec(params):

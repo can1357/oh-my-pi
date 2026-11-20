@@ -524,6 +524,56 @@ describe.skipIf(!runtime)("Binary Ninja worker", () => {
 	);
 
 	it(
+		"commits an edit whose interrupt arrives during the commit, and reverts one interrupted while its undo span opens",
+		async () => {
+			const dir = stageInput();
+			const worker = await open(storeLocation(dir, true));
+			const [first, second] = unnamedFunctions(await view(worker, "overview"));
+			if (!first || !second) throw new Error(`${INPUT} has no unnamed functions to edit`);
+			const undoEntries = async () => Number((await exec(worker, "len(bv.file.undo_entries)")).value);
+
+			// The interrupt lands exactly when the worker commits: too late to stop the request.
+			const atCommit = [
+				"import signal",
+				"commit = bv.commit_undo_actions",
+				"def interrupted_commit(span):",
+				"    bv.commit_undo_actions = commit",
+				"    signal.raise_signal(signal.SIGINT)",
+				"    return commit(span)",
+				"bv.commit_undo_actions = interrupted_commit",
+				`rename('${first[1]}', 'omp_committed')`,
+			].join("\n");
+			expect((await exec(worker, atCommit)).error).toBeNull();
+			expect(await ompFunctions(worker)).toBe("['omp_committed']");
+			expect(await undoEntries()).toBe(1);
+
+			// The interrupt lands right after the next request's undo span has opened: the request
+			// fails with nothing changed, and the span is closed.
+			const atBegin = [
+				"import signal",
+				"begin = bv.begin_undo_actions",
+				"def interrupted_begin():",
+				"    bv.begin_undo_actions = begin",
+				"    span = begin()",
+				"    signal.raise_signal(signal.SIGINT)",
+				"    return span",
+				"bv.begin_undo_actions = interrupted_begin",
+			].join("\n");
+			expect((await exec(worker, atBegin)).error).toBeNull();
+			await expect(worker.request("rename", { target: second[1], name: "omp_never" })).rejects.toThrow(
+				/interrupted/,
+			);
+			expect(await ompFunctions(worker)).toBe("['omp_committed']");
+			// An edit made under a span left open would never become an undo entry.
+			await worker.request("rename", { target: second[1], name: "omp_after" });
+			expect(await ompFunctions(worker)).toBe("['omp_committed', 'omp_after']");
+			expect(await undoEntries()).toBe(2);
+			await worker.close({ save: false });
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
 		"writes nothing on a saving close of an unchanged database, and saves exec edits the dirty flags miss",
 		async () => {
 			const dir = stageInput();
