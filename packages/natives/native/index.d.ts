@@ -1764,6 +1764,12 @@ export interface DesktopCapture {
    * frame. Windows also detects disconnected sessions and secure desktops.
    */
   screenLocked: boolean
+  /**
+   * Nothing of the target window showed on screen when this frame was
+   * taken, and its app stops drawing while covered (Chromium on Windows),
+   * so the frame can show it as it was before.
+   */
+  covered: boolean
 }
 
 export interface DesktopControlState {

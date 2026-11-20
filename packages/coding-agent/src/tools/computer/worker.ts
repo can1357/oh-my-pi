@@ -57,6 +57,7 @@ import {
 	type ComputerWorkerInbound,
 	type ComputerWorkerTransport,
 	type ControlVerdict,
+	COVERED_CAPTURE_NOTICE,
 	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
 	type RunErrorPayload,
@@ -154,7 +155,7 @@ type InputOptions = { takeover?: boolean };
 type ScreenshotOptions = { silent?: boolean };
 type ScreenshotResult = Pick<
 	ComputerScreenshot,
-	"path" | "width" | "height" | "coordinateWidth" | "coordinateHeight" | "region" | "screenLocked"
+	"path" | "width" | "height" | "coordinateWidth" | "coordinateHeight" | "region" | "screenLocked" | "covered"
 >;
 type MenuOptions = { menu?: string[] };
 type ClickOptions = InputOptions & MenuOptions & { button?: string; count?: number; modifiers?: string[] };
@@ -813,6 +814,7 @@ async function emitScreenshot(
 		...(frame.region ? { region: frame.region } : {}),
 	};
 	if (frame.screenLocked) result.screenLocked = true;
+	if (frame.covered) result.covered = true;
 	const scaled = frame.width !== frame.sourceWidth || frame.height !== frame.sourceHeight;
 	context.screenshots.push({
 		...result,
@@ -826,10 +828,11 @@ async function emitScreenshot(
 		const captured = frame.region
 			? `zoom ${frame.target} ${dimensions}; region=${JSON.stringify(frame.region)}; ${coordinates}; use the base full screenshot coordinates for input, not zoom pixels → ${destination}`
 			: `screenshot ${frame.target} ${dimensions}; ${coordinates} → ${destination}`;
-		context.output.push({
-			type: "text",
-			text: frame.screenLocked ? `${captured}\n${screenLockedCaptureNotice()}` : captured,
-		});
+		const notes = [
+			...(frame.screenLocked ? [screenLockedCaptureNotice()] : []),
+			...(frame.covered ? [COVERED_CAPTURE_NOTICE] : []),
+		];
+		context.output.push({ type: "text", text: [captured, ...notes].join("\n") });
 		context.output.push({
 			type: "image",
 			data: Buffer.from(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength).toString("base64"),

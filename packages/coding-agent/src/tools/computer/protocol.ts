@@ -4,6 +4,7 @@ import * as prompt from "@oh-my-pi/pi-utils/prompt";
 import escapeAfterCallMessage from "../../prompts/tools/computer-escape-after-call.md" with { type: "text" };
 import escapeRefusedMessage from "../../prompts/tools/computer-escape-refused.md" with { type: "text" };
 import escapeStoppedMessage from "../../prompts/tools/computer-escape-stopped.md" with { type: "text" };
+import coveredCaptureNote from "../../prompts/tools/computer-covered-capture.md" with { type: "text" };
 import screenLockedCaptureNote from "../../prompts/tools/computer-screen-locked-capture.md" with { type: "text" };
 import secureInputTemplate from "../../prompts/tools/computer-secure-input.md" with { type: "text" };
 import screenStateTemplate from "../../prompts/tools/computer-screen-state.md" with { type: "text" };
@@ -104,6 +105,9 @@ export function screenLockedCaptureNotice(platform: NodeJS.Platform = process.pl
 	return prompt.render(screenLockedCaptureNote, { windows: platform === "win32" });
 }
 
+/** Appended to a window screenshot taken while nothing of the window showed on screen. */
+export const COVERED_CAPTURE_NOTICE = prompt.render(coveredCaptureNote);
+
 /**
  * Tells the model a run ended with the screen locked or the session's
  * display asleep, so lock-screen pixels and failed captures are not taken
@@ -134,6 +138,8 @@ export interface ComputerScreenshot {
 	target: string;
 	/** The session was locked, disconnected or on a secure desktop when captured. */
 	screenLocked?: true;
+	/** Nothing of the target window showed on screen, and its app stops drawing while covered. */
+	covered?: true;
 }
 
 /** Clone-safe error metadata returned across the worker boundary. */

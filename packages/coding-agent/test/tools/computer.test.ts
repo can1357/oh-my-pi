@@ -16,6 +16,7 @@ import {
 	type ComputerWorkerInbound,
 	type ComputerWorkerOutbound,
 	type ComputerWorkerTransport,
+	COVERED_CAPTURE_NOTICE,
 	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_REFUSED_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
@@ -136,6 +137,8 @@ class FakeNativeSession implements NativeDesktopSession {
 	/** Lock and sleep state reported by captures, capabilities and screenState, as the native session reads it live. */
 	screenLocked = false;
 	displayAsleep = false;
+	/** Nothing of the captured window showed on screen. */
+	covered = false;
 	/** The app holding macOS secure input, reported by capabilities; unset while it is off. */
 	secureInputApp: string | undefined;
 	get capabilities(): DesktopCapabilities {
@@ -180,6 +183,7 @@ class FakeNativeSession implements NativeDesktopSession {
 			displays: [display],
 			backend: "fake",
 			screenLocked: this.screenLocked,
+			covered: this.covered,
 		};
 	}
 	async captureRegion(_target: string, _region: CaptureRegion): Promise<DesktopCapture> {
@@ -1803,6 +1807,36 @@ describe("computer worker round trips", () => {
 				expect(lines).toHaveLength(1);
 				expect(result.payload.screenshots[0]).not.toHaveProperty("screenLocked");
 				expect(result.payload.returnValue).not.toHaveProperty("screenLocked");
+			}
+		}
+	});
+
+	it("marks a screenshot of a window nothing of which showed, and only then", async () => {
+		for (const covered of [true, false]) {
+			const transport = new MemoryTransport();
+			const native = new FakeNativeSession();
+			native.covered = covered;
+			new ComputerWorkerCore(transport, () => native);
+
+			const result = await runWorker(
+				transport,
+				`covered-${covered}`,
+				'return await (await desktop.window("42")).screenshot()',
+			);
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			const text = result.payload.displays.flatMap(block => (block.type === "text" ? [block.text] : []));
+			if (covered) {
+				expect(text.join("\n").split("\n")).toEqual([
+					expect.stringMatching(/^screenshot 42 /),
+					COVERED_CAPTURE_NOTICE,
+				]);
+				expect(result.payload.returnValue).toMatchObject({ covered: true });
+				expect(result.payload.screenshots[0]?.covered).toBe(true);
+			} else {
+				expect(text.join("\n")).not.toContain(COVERED_CAPTURE_NOTICE);
+				expect(result.payload.returnValue).not.toHaveProperty("covered");
+				expect(result.payload.screenshots[0]).not.toHaveProperty("covered");
 			}
 		}
 	});

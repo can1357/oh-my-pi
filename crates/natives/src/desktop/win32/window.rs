@@ -2,14 +2,21 @@
 //! Automation delivery.
 
 use std::{
-	ptr::{null_mut, with_exposed_provenance_mut},
+	ptr::{null_mut, with_exposed_provenance, with_exposed_provenance_mut},
 	time::{Duration, Instant},
 };
 
 use windows_sys::{
 	Win32::{
-		Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT},
-		Graphics::Gdi::ScreenToClient,
+		Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, RECT},
+		Graphics::{
+			Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute},
+			Gdi::{
+				COMPLEXREGION, CombineRgn, CreateRectRgn, DeleteObject, EnumDisplayMonitors,
+				GDI_REGION_TYPE, GetWindowRgnBox, HDC, HMONITOR, HRGN, IntersectRect, NULLREGION,
+				RGN_AND, RGN_COMBINE_MODE, RGN_DIFF, RGN_ERROR, RGN_OR, SIMPLEREGION, ScreenToClient,
+			},
+		},
 		Security::{
 			GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL,
 			TOKEN_QUERY, TokenIntegrityLevel,
@@ -26,9 +33,11 @@ use windows_sys::{
 			Input::KeyboardAndMouse::IsWindowEnabled,
 			WindowsAndMessaging::{
 				CWP_SKIPDISABLED, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, ChildWindowFromPointEx,
-				EnumChildWindows, GA_PARENT, GA_ROOT, GUITHREADINFO, GetAncestor, GetClassNameW,
-				GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, IsChild,
-				IsWindowVisible, SetForegroundWindow,
+				EnumChildWindows, EnumWindows, GA_PARENT, GA_ROOT, GUITHREADINFO, GWL_EXSTYLE,
+				GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo,
+				GetLayeredWindowAttributes, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId,
+				IsChild, IsIconic, IsWindowVisible, LWA_ALPHA, LWA_COLORKEY, SetForegroundWindow,
+				WS_EX_LAYERED, WS_EX_TRANSPARENT,
 			},
 		},
 	},
@@ -104,6 +113,201 @@ pub(super) fn owns_foreground(hwnd: HWND) -> bool {
 	// SAFETY: GetForegroundWindow has no preconditions.
 	let foreground = unsafe { GetForegroundWindow() };
 	!foreground.is_null() && root(foreground) == root(hwnd)
+}
+
+/// Whether `hwnd` is drawn by Chromium (its own class or a renderer child),
+/// which runs its own occlusion check: once that finds nothing of the window
+/// showing, Chromium marks its pages hidden and stops painting them and
+/// updating their accessibility tree, while Windows keeps composing the last
+/// frame.
+pub(super) fn paused_while_covered(hwnd: HWND) -> bool {
+	with_class_name(hwnd, is_chromium_class) || has_chromium_descendant(hwnd)
+}
+
+/// Whether nothing of top-level `hwnd` shows on screen: no part of its frame
+/// lies on a display outside the visible, opaque windows above it in the
+/// z-order. False when any of that cannot be read.
+pub(super) fn fully_covered(hwnd: HWND) -> bool {
+	let (Some(frame), Some(displays), Some(above)) =
+		(frame_bounds(hwnd), displays(), occluders_above(hwnd))
+	else {
+		return false;
+	};
+	let Some(shown) = Region::new(frame) else {
+		return false;
+	};
+	let mut kind = shown.combine(&displays, RGN_AND);
+	for rect in above {
+		if kind != SIMPLEREGION && kind != COMPLEXREGION {
+			break;
+		}
+		let Some(cover) = Region::new(rect) else {
+			return false;
+		};
+		kind = shown.combine(&cover, RGN_DIFF);
+	}
+	kind == NULLREGION
+}
+
+/// The union of every display's rectangle, `None` when one cannot be read.
+fn displays() -> Option<Region> {
+	unsafe extern "system" fn add(_: HMONITOR, _: HDC, rect: *mut RECT, state: LPARAM) -> BOOL {
+		// SAFETY: `state` is the exposed address of the region owned by the
+		// enclosing call, which outlives this synchronous enumeration; `rect`
+		// is the monitor's rectangle for the duration of the callback.
+		let (union, rect) = unsafe { (&*with_exposed_provenance::<Region>(state as usize), *rect) };
+		BOOL::from(
+			Region::new(rect).is_some_and(|monitor| union.combine(&monitor, RGN_OR) != RGN_ERROR),
+		)
+	}
+
+	let union = Region::new(RECT::default())?;
+	// SAFETY: `add` runs only during this synchronous call and receives the
+	// address of `union`, which outlives it.
+	let complete = unsafe {
+		EnumDisplayMonitors(
+			null_mut(),
+			std::ptr::null(),
+			Some(add),
+			(&raw const union).expose_provenance() as LPARAM,
+		)
+	} != 0;
+	complete.then_some(union)
+}
+
+/// The screen rectangles hiding what lies under them of every top-level
+/// window above `hwnd`, from one top-to-bottom pass over the z-order; `None`
+/// when the pass does not reach `hwnd`.
+fn occluders_above(hwnd: HWND) -> Option<Vec<RECT>> {
+	struct Walk {
+		target: HWND,
+		found:  bool,
+		rects:  Vec<RECT>,
+	}
+
+	unsafe extern "system" fn visit(window: HWND, state: LPARAM) -> BOOL {
+		// SAFETY: `state` is the exposed address of the walk owned by the
+		// enclosing call, which outlives this synchronous enumeration.
+		let walk = unsafe { &mut *with_exposed_provenance_mut::<Walk>(state as usize) };
+		if window == walk.target {
+			walk.found = true;
+			return BOOL::from(false);
+		}
+		walk.rects.extend(occluder(window));
+		BOOL::from(true)
+	}
+
+	let mut walk = Walk { target: hwnd, found: false, rects: Vec::new() };
+	// SAFETY: `visit` runs only during this synchronous call and receives the
+	// address of `walk`, which outlives it.
+	unsafe {
+		EnumWindows(Some(visit), (&raw mut walk).expose_provenance() as LPARAM);
+	}
+	walk.found.then_some(walk.rects)
+}
+
+/// The screen rectangle `hwnd` hides what lies under: none unless it is
+/// visible, not minimized, not cloaked (another virtual desktop, a suspended
+/// UWP frame), not click-through and not see-through layered; its frame, cut
+/// to a rectangular window region, and none for an empty or shaped one.
+fn occluder(hwnd: HWND) -> Option<RECT> {
+	let mut cloaked = 0u32;
+	// SAFETY: every call validates the handle; the out-pointers are writable
+	// locals of the advertised size.
+	unsafe {
+		if IsWindowVisible(hwnd) == 0
+			|| IsIconic(hwnd) != 0
+			|| DwmGetWindowAttribute(
+				hwnd,
+				DWMWA_CLOAKED as u32,
+				(&raw mut cloaked).cast(),
+				size_of::<u32>() as u32,
+			) >= 0
+				&& cloaked != 0
+		{
+			return None;
+		}
+		let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+		if style & WS_EX_TRANSPARENT != 0 {
+			return None;
+		}
+		if style & WS_EX_LAYERED != 0 {
+			// Without attributes the window was drawn by UpdateLayeredWindow, with
+			// per-pixel alpha.
+			let (mut alpha, mut flags) = (0u8, 0u32);
+			if GetLayeredWindowAttributes(hwnd, null_mut(), &raw mut alpha, &raw mut flags) == 0
+				|| flags & LWA_COLORKEY != 0
+				|| flags & LWA_ALPHA != 0 && alpha < u8::MAX
+			{
+				return None;
+			}
+		}
+		let frame = frame_bounds(hwnd)?;
+		let mut region = RECT::default();
+		match GetWindowRgnBox(hwnd, &raw mut region) {
+			// No window region: the whole frame shows.
+			RGN_ERROR => Some(frame),
+			SIMPLEREGION => {
+				// The region box is relative to the window rectangle.
+				let mut window = RECT::default();
+				if GetWindowRect(hwnd, &raw mut window) == 0 {
+					return None;
+				}
+				let shown = RECT {
+					left:   window.left + region.left,
+					top:    window.top + region.top,
+					right:  window.left + region.right,
+					bottom: window.top + region.bottom,
+				};
+				let mut both = RECT::default();
+				(IntersectRect(&raw mut both, &raw const shown, &raw const frame) != 0).then_some(both)
+			},
+			_ => None,
+		}
+	}
+}
+
+/// The part of `hwnd` Windows draws on screen, in physical pixels: DWM's
+/// frame bounds, which leave out the invisible resize borders.
+fn frame_bounds(hwnd: HWND) -> Option<RECT> {
+	let mut rect = RECT::default();
+	// SAFETY: both calls validate the handle and write one RECT.
+	let read = unsafe {
+		DwmGetWindowAttribute(
+			hwnd,
+			DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+			(&raw mut rect).cast(),
+			size_of::<RECT>() as u32,
+		) >= 0
+			|| GetWindowRect(hwnd, &raw mut rect) != 0
+	};
+	(read && rect.right > rect.left && rect.bottom > rect.top).then_some(rect)
+}
+
+/// A GDI region, deleted on drop.
+struct Region(HRGN);
+
+impl Region {
+	fn new(rect: RECT) -> Option<Self> {
+		// SAFETY: CreateRectRgn takes plain coordinates; null means failure.
+		let region = unsafe { CreateRectRgn(rect.left, rect.top, rect.right, rect.bottom) };
+		(!region.is_null()).then_some(Self(region))
+	}
+
+	/// Combines `other` into this region with `mode` and returns the
+	/// result's kind.
+	fn combine(&self, other: &Self, mode: RGN_COMBINE_MODE) -> GDI_REGION_TYPE {
+		// SAFETY: both regions are live; GDI allows the destination to be a
+		// source.
+		unsafe { CombineRgn(self.0, self.0, other.0, mode) }
+	}
+}
+
+impl Drop for Region {
+	fn drop(&mut self) {
+		// SAFETY: the region is owned here and selected into no device context.
+		unsafe { DeleteObject(self.0) };
+	}
 }
 
 /// Whether a Chromium or CEF renderer lives in a descendant of `hwnd`.
@@ -493,4 +697,121 @@ pub(super) fn ensure_pattern_safe(root: HWND) -> CoreResult<()> {
 		)));
 	}
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use windows_sys::Win32::{
+		Graphics::Gdi::SetWindowRgn,
+		System::LibraryLoader::GetModuleHandleW,
+		UI::WindowsAndMessaging::{
+			CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SWP_NOACTIVATE,
+			SWP_NOZORDER, SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos, WNDCLASSW,
+			WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+		},
+	};
+
+	use super::{super::capture, *};
+
+	fn wide(text: &str) -> Vec<u16> {
+		text.encode_utf16().chain(Some(0)).collect()
+	}
+
+	/// A topmost popup of class `class` at `rect`, above every window made
+	/// before it.
+	fn popup(class: &str, rect: RECT) -> HWND {
+		let class = wide(class);
+		// SAFETY: the class name outlives the call; no parent, menu or data.
+		let hwnd = unsafe {
+			CreateWindowExW(
+				WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+				class.as_ptr(),
+				class.as_ptr(),
+				WS_POPUP | WS_VISIBLE,
+				rect.left,
+				rect.top,
+				rect.right - rect.left,
+				rect.bottom - rect.top,
+				null_mut(),
+				null_mut(),
+				GetModuleHandleW(std::ptr::null()),
+				std::ptr::null(),
+			)
+		};
+		assert!(!hwnd.is_null());
+		hwnd
+	}
+
+	fn place(hwnd: HWND, rect: RECT) {
+		// SAFETY: this thread owns `hwnd`.
+		unsafe {
+			SetWindowPos(
+				hwnd,
+				null_mut(),
+				rect.left,
+				rect.top,
+				rect.right - rect.left,
+				rect.bottom - rect.top,
+				SWP_NOZORDER | SWP_NOACTIVATE,
+			);
+		}
+	}
+
+	const fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+		RECT { left, top, right, bottom }
+	}
+
+	#[test]
+	fn a_chromium_window_is_marked_only_when_nothing_of_it_shows() {
+		let chromium = wide("Chrome_WidgetWin_7");
+		// SAFETY: the class name outlives the registration's use in this test.
+		unsafe {
+			RegisterClassW(&WNDCLASSW {
+				lpfnWndProc: Some(DefWindowProcW),
+				hInstance: GetModuleHandleW(std::ptr::null()),
+				lpszClassName: chromium.as_ptr(),
+				..Default::default()
+			});
+		}
+		let native = popup("STATIC", rect(100, 100, 300, 300));
+		let target = popup("Chrome_WidgetWin_7", rect(100, 100, 300, 300));
+		let cover = popup("STATIC", rect(50, 50, 400, 400));
+		let marked = |hwnd: HWND| capture::window_covered(&(hwnd as usize).to_string());
+		assert!(marked(target), "an opaque window over all of it");
+		assert!(!marked(native), "covered too, but the app keeps drawing");
+		assert!(!marked(cover));
+
+		place(cover, rect(50, 50, 299, 400));
+		assert!(!marked(target), "one column still shows");
+
+		place(cover, rect(50, 50, 400, 400));
+		// SAFETY: this thread owns `cover`; the system owns each region it is
+		// given.
+		unsafe { SetWindowRgn(cover, CreateRectRgn(0, 0, 100, 100), 1) };
+		assert!(!marked(target), "the cover's window region leaves most of it showing");
+		// SAFETY: as above; a null region restores the whole window.
+		unsafe { SetWindowRgn(cover, null_mut(), 1) };
+		assert!(marked(target));
+
+		// SAFETY: this thread owns `cover`.
+		unsafe {
+			SetWindowLongW(
+				cover,
+				GWL_EXSTYLE,
+				(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED) as i32,
+			);
+			SetLayeredWindowAttributes(cover, 0, 200, LWA_ALPHA);
+		}
+		assert!(!marked(target), "the target shows through a translucent window");
+
+		place(target, rect(-30_000, -30_000, -29_800, -29_800));
+		assert!(marked(target), "off every display");
+
+		// SAFETY: this thread owns the windows.
+		unsafe {
+			DestroyWindow(cover);
+			DestroyWindow(target);
+			DestroyWindow(native);
+		}
+	}
 }

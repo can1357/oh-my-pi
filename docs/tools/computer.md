@@ -104,8 +104,8 @@ macOS uses bundle/Launch Services identity, Windows includes registered/Start-me
 
 Both a selected window and `desktop` expose:
 
-- `screenshot({ silent? }) -> { path, width, height, coordinateWidth, coordinateHeight, screenLocked? }`
-- `zoom({ x, y, width, height }, { silent? }) -> { path, width, height, coordinateWidth, coordinateHeight, region, screenLocked? }`
+- `screenshot({ silent? }) -> { path, width, height, coordinateWidth, coordinateHeight, screenLocked?, covered? }`
+- `zoom({ x, y, width, height }, { silent? }) -> { path, width, height, coordinateWidth, coordinateHeight, region, screenLocked?, covered? }`
 - `click(x, y, { button?, count?, modifiers?, menu?, takeover? })`
 - `doubleClick(x, y, { button?, modifiers?, takeover? })`
 - `move(x, y, { takeover? })`: on macOS a background window move gives the app no hover and a takeover move's hover ends before it returns, so the first background window move of a session says so and names a takeover click as the way to press a control shown only on hover
@@ -195,6 +195,8 @@ Result details contain the resolved `code`, `readOnly`, `screenshots`, optional 
 On macOS a screenshot taken behind the lock screen sets `screenLocked: true` and adds a note to its status text; a native error raised while the screen is locked or the display asleep ends with that state in parentheses; and a run that ends locked or asleep returns a leading `Note:` text block. None of these refuse input. While it is in use, the native session keeps the display awake with a `PreventUserIdleDisplaySleep` assertion held from an agent turn's first desktop call until the turn ends or a prompt waits for the user's answer (outside an agent turn or in a subagent, until five minutes after the last desktop call) or on close; see [macOS display sleep and the lock screen](../computer-use.md#macos-display-sleep-and-the-lock-screen).
 
 On Windows, `screenLocked` also covers a disconnected session or an unavailable input desktop such as UAC's secure desktop. It uses the same screenshot tag, native error suffix and run note; captures and input do not confirm your app's state until the session is unlocked or reconnected, or the secure desktop is dismissed. Windows leaves `displayAsleep` false.
+
+On Windows, a screenshot or zoom of a window drawn by Chromium (Chrome, Edge, Electron apps) taken while nothing of the window shows on screen (other windows cover all of it, or it lies off every display) sets `covered: true` and adds a note to its status text, and that window's `ax()` ends with a `… covered:` line. Chromium stops drawing and updating its accessibility tree while covered, and Windows returns the last frame it drew, so both can show the app as it was before it was covered, and waiting or reading again returns the same. The note names the ways to a current view, least disruptive first: the browser tool when it is connected to that app, then `raise()` and read again (which brings the window in front of the user's and takes their keyboard, and which Windows refuses while the user is using another window), else telling the user what could not be confirmed. Nothing is refused; a window with even one column showing keeps drawing and is not marked, and other apps' covered windows keep drawing and carry no mark.
 
 ## Flow and lifecycle
 

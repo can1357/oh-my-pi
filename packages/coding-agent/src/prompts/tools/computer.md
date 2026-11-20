@@ -226,6 +226,9 @@ await win.click(120, 48, button="right")
   - A display capture shows the lock screen and a window capture that window's last frame.
   - Keystrokes, takeover and AX fail until someone unlocks, while background clicks still reach the app.
   - Report the lock rather than retrying keys.
+- Windows `covered` (a screenshot result, or a tree's closing `… covered:` line): nothing of the window shows on screen and Chromium stops drawing it,
+  so its screenshot and tree can predate the app's state, and waiting or reading either again returns the same; never report a change as verified from them.
+  For a current view: the browser tool if it is connected to that app, else `raise()` and read again (it takes the user's keyboard, and Windows refuses it while they use another window), else tell the user what you could not confirm.
 - A screenshot's `path` holds the delivered PNG (`width`×`height`, downscaled when needed to fit the capture caps), not a separate uncapped original;
   for detail, `zoom` instead of cropping that file. Use `{ silent: true }` in loops.
 </rules>

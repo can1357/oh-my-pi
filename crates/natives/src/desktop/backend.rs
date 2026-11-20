@@ -286,6 +286,12 @@ pub trait Backend: Send {
 	fn screen_state(&mut self, _display: Option<&DisplaySelector>) -> ScreenState {
 		ScreenState::default()
 	}
+	/// Whether nothing of window `id` shows on screen and its app stops
+	/// drawing and updating its tree while covered, so both can predate its
+	/// state. Backends that do not detect it report false.
+	fn window_covered(&mut self, _id: &str) -> bool {
+		false
+	}
 	/// Waits, before a window or element takeover takes the input lease,
 	/// until the backend lets it start: X11 and macOS wait for the user to
 	/// pause. Backends that see no user input admit it at once.
