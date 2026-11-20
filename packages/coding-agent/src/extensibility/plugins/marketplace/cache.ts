@@ -15,6 +15,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { runBunCli } from "../bun-cli";
 
 import { isValidNameSegment } from "./types";
 
@@ -55,13 +56,40 @@ export function getCachedPluginPath(
 }
 
 /**
+ * `bun install` arguments for a marketplace plugin's dependencies. `--production` leaves out its
+ * devDependencies, and `--ignore-scripts` keeps its own lifecycle scripts from running at install,
+ * upgrade or unattended auto-update.
+ */
+export const DEPENDENCY_INSTALL_ARGS = ["install", "--production", "--ignore-scripts"] as const;
+
+/**
+ * Install the dependencies that `dir/package.json` declares. A plugin with no package.json or no
+ * dependencies needs no install.
+ */
+async function installDeclaredDependencies(dir: string, pluginName: string): Promise<void> {
+	let manifest: { dependencies?: Record<string, string> };
+	try {
+		manifest = await Bun.file(path.join(dir, "package.json")).json();
+	} catch (err) {
+		if (isEnoent(err)) return;
+		throw err;
+	}
+	if (Object.keys(manifest.dependencies ?? {}).length === 0) return;
+	const { exitCode, stderr } = await runBunCli(DEPENDENCY_INSTALL_ARGS, dir);
+	if (exitCode !== 0) {
+		throw new Error(`Failed to install dependencies for ${pluginName}: ${stderr}`);
+	}
+}
+
+/**
  * Copy `sourcePath` into the cache, returning the absolute cache path.
  *
  * Idempotent: if the target already exists it is replaced, so a partial previous cache is never
  * silently reused. The copy is made beside the target and swapped in by two renames; the previous
  * copy is deleted only after the new one is in place, so a running session that reads the plugin
  * during a same-version reinstall finds it missing only between the two renames, not for the
- * whole recursive delete.
+ * whole recursive delete. Declared dependencies are installed in the copy before it replaces the
+ * cached one, so a failed install leaves the previous copy in place.
  */
 export async function cachePlugin(
 	sourcePath: string,
@@ -83,6 +111,7 @@ export async function cachePlugin(
 	let movedAside = false;
 	try {
 		await fs.cp(sourcePath, stagingPath, { recursive: true });
+		await installDeclaredDependencies(stagingPath, pluginName);
 		try {
 			await fs.rename(targetPath, previousPath);
 			movedAside = true;

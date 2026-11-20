@@ -82,6 +82,29 @@ function hasExactEntry(dirPath: string, entry: string): boolean {
 	return fs.readdirSync(dirPath).includes(entry);
 }
 
+// Imports `local-dep` the way a plugin's own extension does: from the plugin's cached directory.
+function importCachedDependency(cachePath: string): { exitCode: number; value: string } {
+	const proc = Bun.spawnSync([process.execPath, "-e", "import { value } from 'local-dep'; console.log(value)"], {
+		cwd: cachePath,
+	});
+	return { exitCode: proc.exitCode, value: proc.stdout.toString().trim() };
+}
+
+// A marketplace plugin whose package.json depends on a local `file:` package, so no network is needed.
+function buildPluginWithLocalDependency(root: string): { source: string; dependency: string } {
+	const marketplace = buildNamedMarketplace(root, "deps-market", "widget");
+	const source = path.join(marketplace, "plugins", "widget");
+	const dependency = path.join(source, "vendor", "local-dep");
+	fs.mkdirSync(dependency, { recursive: true });
+	fs.writeFileSync(path.join(dependency, "package.json"), JSON.stringify({ name: "local-dep", version: "1.0.0" }));
+	fs.writeFileSync(path.join(dependency, "index.js"), "export const value = 42;\n");
+	fs.writeFileSync(
+		path.join(source, "package.json"),
+		JSON.stringify({ name: "widget", version: "1.0.0", dependencies: { "local-dep": "file:./vendor/local-dep" } }),
+	);
+	return { source, dependency };
+}
+
 // ── Test helper ───────────────────────────────────────────────────────────────
 
 interface TestContext {
@@ -299,6 +322,90 @@ describe("MarketplaceManager", () => {
 		const installed = await ctx.manager.listInstalledPlugins();
 		expect(installed).toHaveLength(1);
 		expect(installed[0].id).toBe("hello-plugin@test-marketplace");
+	});
+
+	it("installs declared dependencies on install and upgrade, and keeps the old copy when one fails", async () => {
+		const { source, dependency } = buildPluginWithLocalDependency(path.join(ctx.tmpDir, "marketplace"));
+		await ctx.manager.addMarketplace(path.join(ctx.tmpDir, "marketplace"));
+
+		const installed = await ctx.manager.installPlugin("widget", "deps-market");
+		expect(importCachedDependency(installed.installPath)).toEqual({ exitCode: 0, value: "42" });
+
+		fs.writeFileSync(path.join(dependency, "index.js"), "export const value = 43;\n");
+		const upgraded = await ctx.manager.upgradePlugin("widget@deps-market");
+		expect(importCachedDependency(upgraded.installPath)).toEqual({ exitCode: 0, value: "43" });
+
+		fs.writeFileSync(
+			path.join(source, "package.json"),
+			JSON.stringify({ name: "widget", version: "1.0.0", dependencies: { missing: "file:./vendor/missing" } }),
+		);
+		await expect(ctx.manager.upgradePlugin("widget@deps-market")).rejects.toThrow(/install dependencies/);
+		expect(importCachedDependency(upgraded.installPath)).toEqual({ exitCode: 0, value: "43" });
+	});
+
+	it("doctor reports a marketplace plugin whose cached dependencies are missing, and repairs them with fix", async () => {
+		buildPluginWithLocalDependency(path.join(ctx.tmpDir, "marketplace"));
+		await ctx.manager.addMarketplace(path.join(ctx.tmpDir, "marketplace"));
+		const installed = await ctx.manager.installPlugin("widget", "deps-market");
+		fs.rmSync(path.join(installed.installPath, "node_modules"), { recursive: true, force: true });
+
+		const check = "marketplace:widget@deps-market:dependencies";
+		const spies = mockPluginManagerPaths(ctx.tmpDir);
+		try {
+			const doctor = new PluginManager(ctx.tmpDir);
+			expect(await doctor.doctor()).toContainEqual({
+				name: check,
+				status: "error",
+				message: "Missing dependencies: local-dep",
+				fixed: false,
+			});
+			expect(await doctor.doctor({ fix: true })).toContainEqual({
+				name: check,
+				status: "ok",
+				message: "Installed missing dependencies: local-dep",
+				fixed: true,
+			});
+		} finally {
+			for (const spy of spies) spy.mockRestore();
+		}
+		expect(importCachedDependency(installed.installPath)).toEqual({ exitCode: 0, value: "42" });
+	});
+
+	it("doctor checks a project-scope marketplace plugin's declared dependencies too", async () => {
+		buildPluginWithLocalDependency(path.join(ctx.tmpDir, "marketplace"));
+		const projectDir = path.join(ctx.tmpDir, "project-root");
+		fs.mkdirSync(path.join(projectDir, ".omp"), { recursive: true });
+		const projectManager = new MarketplaceManager({
+			marketplacesRegistryPath: path.join(ctx.tmpDir, "marketplaces.json"),
+			installedRegistryPath: path.join(ctx.tmpDir, "installed_plugins.json"),
+			projectInstalledRegistryPath: path.join(projectDir, ".omp", "plugins", "installed_plugins.json"),
+			marketplacesCacheDir: path.join(ctx.tmpDir, "cache", "marketplaces"),
+			pluginsCacheDir: path.join(ctx.tmpDir, "cache", "plugins"),
+		});
+		await projectManager.addMarketplace(path.join(ctx.tmpDir, "marketplace"));
+		const installed = await projectManager.installPlugin("widget", "deps-market", { scope: "project" });
+		fs.rmSync(path.join(installed.installPath, "node_modules"), { recursive: true, force: true });
+
+		const check = "marketplace:widget@deps-market:dependencies";
+		const spies = mockPluginManagerPaths(ctx.tmpDir);
+		try {
+			const doctor = new PluginManager(projectDir);
+			expect(await doctor.doctor()).toContainEqual({
+				name: check,
+				status: "error",
+				message: "Missing dependencies: local-dep",
+				fixed: false,
+			});
+			expect(await doctor.doctor({ fix: true })).toContainEqual({
+				name: check,
+				status: "ok",
+				message: "Installed missing dependencies: local-dep",
+				fixed: true,
+			});
+		} finally {
+			for (const spy of spies) spy.mockRestore();
+		}
+		expect(importCachedDependency(installed.installPath)).toEqual({ exitCode: 0, value: "42" });
 	});
 
 	it("installs mixed-case plugin names without duplicating them in the npm plugin list", async () => {

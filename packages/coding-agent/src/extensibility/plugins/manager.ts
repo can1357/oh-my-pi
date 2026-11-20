@@ -20,6 +20,7 @@ import { refreshBunGitCache } from "./bun-git-cache";
 import { linkPluginDirectory } from "./directory-link";
 import { type GitSource, parseGitUrl } from "./git-url";
 import { resolvePluginManifestEntries } from "./loader";
+import { DEPENDENCY_INSTALL_ARGS } from "./marketplace/cache";
 import { getInstalledPluginsRegistryPath, readInstalledPluginsRegistry } from "./marketplace/registry";
 import { parsePluginId } from "./marketplace/types";
 import { extractPackageName, parsePluginSpec } from "./parser";
@@ -1227,6 +1228,44 @@ export class PluginManager {
 							fixed,
 						});
 					}
+				}
+			}
+		}
+
+		// Marketplace plugins install into their own cache directories, which the shared node_modules
+		// check above never reads. Each one's declared dependencies must resolve from its own node_modules,
+		// in the user registry and in the active project's registry.
+		const registryPaths = [getInstalledPluginsRegistryPath(), await resolveActiveProjectRegistryPath(this.#cwd)];
+		const checkedInstallPaths = new Set<string>();
+		for (const registryPath of registryPaths) {
+			if (!registryPath) continue;
+			const marketplaceRegistry = await readInstalledPluginsRegistry(registryPath);
+			for (const [pluginId, entries] of Object.entries(marketplaceRegistry.plugins)) {
+				for (const entry of entries) {
+					if (checkedInstallPaths.has(entry.installPath)) continue;
+					checkedInstallPaths.add(entry.installPath);
+					let manifest: { dependencies?: Record<string, string> };
+					try {
+						manifest = await Bun.file(path.join(entry.installPath, "package.json")).json();
+					} catch (err) {
+						if (isEnoent(err)) continue;
+						throw err;
+					}
+					const isInstalled = (dependency: string) =>
+						fs.existsSync(path.join(entry.installPath, "node_modules", dependency));
+					const missing = Object.keys(manifest.dependencies ?? {}).filter(dependency => !isInstalled(dependency));
+					if (missing.length === 0) continue;
+					let fixed = false;
+					if (options.fix) {
+						const install = await runBunCli(DEPENDENCY_INSTALL_ARGS, entry.installPath);
+						fixed = install.exitCode === 0 && missing.every(isInstalled);
+					}
+					checks.push({
+						name: `marketplace:${pluginId}:dependencies`,
+						status: fixed ? "ok" : "error",
+						message: `${fixed ? "Installed missing" : "Missing"} dependencies: ${missing.join(", ")}`,
+						fixed,
+					});
 				}
 			}
 		}
