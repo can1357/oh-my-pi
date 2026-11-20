@@ -1,5 +1,6 @@
 //! Embedded bash engine shell execution exported via N-API.
 
+mod changes;
 pub mod speech;
 pub mod vfs;
 

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { type LogEvent, registerLogSink } from "@oh-my-pi/pi-utils/logger";
 import { card, md, node } from "@oh-my-pi/pi-tui/native/describe";
-import type { NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
+import type { DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import { nativeComponentId } from "@oh-my-pi/pi-tui/native/reconcile";
 import { settleNative } from "@oh-my-pi/pi-tui/native/settle";
 import { isNativeRendering, onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
@@ -337,6 +337,31 @@ describe("native backend", () => {
 		h.event({ ev: "resize", cols: 99 });
 		await h.render();
 		expect(sizes()).toEqual(narrow);
+		expect(h.errors).toEqual([]);
+	});
+
+	it("describes again what a `features` event changes, without waiting for a new hello", async () => {
+		// A component that shows one thing on a host with the tray, another without (omp's HUD).
+		class Gated implements Component {
+			render(): readonly string[] {
+				return ["gated rows"];
+			}
+			describe(cx: DescribeContext): NativeNode {
+				return md(cx.feature("tray") ? "in the tray" : "own counters");
+			}
+		}
+		const gated = new Gated();
+		harness = await TspHarness.start(tui => tui.addChild(gated), {
+			features: ["blobs", "settle", "adopt", "dock", "tray"],
+		});
+		const h = harness;
+		const id = nativeComponentId(gated);
+		expect(h.byId(id)?.p).toEqual({ text: "in the tray" });
+
+		h.event({ ev: "features", features: ["blobs", "settle", "adopt", "dock"] });
+		expect(h.byId(id)?.p).toEqual({ text: "own counters" });
+		h.event({ ev: "features", features: ["blobs", "settle", "adopt", "dock", "tray"] });
+		expect(h.byId(id)?.p).toEqual({ text: "in the tray" });
 		expect(h.errors).toEqual([]);
 	});
 });

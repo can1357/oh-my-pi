@@ -7,21 +7,27 @@
 //! - JS copies each string's UTF-16 into a pooled batch ([`TtyWriter::write`]);
 //!   no UTF-8 sizing or transcoding happens on its thread.
 //! - The worker transcodes one bounded chunk at a time and writes it through
-//!   its own handle to the terminal (see [`sys`]):
+//!   its own handle to the terminal (see [`sys`]). A chunk is at most 16 KiB,
+//!   below the size at which `ConPTY` hosts lose viewport tracking, and ends
+//!   where a write or a row ends whenever one fits (see [`cut_point`]).
 //!   - unix: an independently opened, nonblocking descriptor for the same TTY,
-//!     so stdout's own file-status flags are never touched.
-//!   - Windows: a duplicate of the console handle. Each chunk is one
-//!     `WriteFile` of at most 16 KiB, below the size at which `ConPTY` hosts
-//!     lose viewport tracking, preceded by a repair of the UTF-8 console code
-//!     pages that console-sharing children flip.
+//!     so stdout's own file-status flags are never touched. A TTY that cannot
+//!     be reopened (a PTY master, a TTY whose path the process may not open
+//!     after `su` or inside a sandbox) is written through a close-on-exec
+//!     duplicate instead, which shares stdout's flags.
+//!   - Windows: a duplicate of the console handle, with VT processing turned
+//!     back on if it was off. Each chunk is one `WriteFile`, preceded by a
+//!     repair of the UTF-8 console code pages that console-sharing children
+//!     flip.
 //! - [`TtyWriter::pending`] is a conservative UTF-8 bound (three bytes per
 //!   queued code unit), tightened as chunks are encoded and written. Crossing
 //!   the drain threshold, or a fatal write error, notifies JS.
 //! - [`TtyWriter::stop`] wakes the queue wait, cancels a blocked write (unix: a
 //!   `POLLOUT` wait; Windows: `CancelSynchronousIo`), and joins the worker:
-//!   nothing is written after it returns. The one exception is a Windows
-//!   console that refuses to abort a `WriteFile`; that single chunk completes
-//!   on the detached worker, like bytes a unix kernel had already accepted.
+//!   nothing is written after it returns. The one exception is a write that
+//!   cannot be aborted (a Windows console refusing to abort a `WriteFile`, a
+//!   blocking duplicate on unix); that single chunk completes on the detached
+//!   worker, like bytes a unix kernel had already accepted.
 
 use std::{
 	sync::{
@@ -54,7 +60,7 @@ type DrainCallback = ThreadsafeFunction<(), (), (), Status, false, true>;
 
 enum DrainNotifier {
 	Js(DrainCallback),
-	#[cfg(test)]
+	#[cfg(all(test, unix))]
 	Test(Arc<std::sync::atomic::AtomicUsize>),
 }
 
@@ -66,7 +72,7 @@ impl DrainNotifier {
 				// queue makes this nonblocking without dropping threshold edges.
 				let _ = callback.call((), ThreadsafeFunctionCallMode::NonBlocking);
 			},
-			#[cfg(test)]
+			#[cfg(all(test, unix))]
 			Self::Test(count) => {
 				count.fetch_add(1, Ordering::AcqRel);
 			},
@@ -178,15 +184,19 @@ struct EncodeCursor {
 }
 
 /// Fill one bounded output buffer, coalescing independent small writes without
-/// coalescing their Unicode boundaries. Returns (UTF-16 units read, UTF-8
-/// bytes).
+/// coalescing their Unicode boundaries. A chunk that fills up inside a write
+/// ends at its [`cut_point`] instead, giving the units past it back to the
+/// cursor. Returns (UTF-16 units read, UTF-8 bytes).
 fn encode_chunk(batch: &Batch, cursor: &mut EncodeCursor, output: &mut [u8]) -> (usize, usize) {
 	let start = cursor.unit;
 	let mut written = 0;
+	// Output up to the end of the last write completed in this chunk.
+	let mut write_end = 0;
 	while cursor.frame < batch.ends.len() && output.len() - written >= char::MAX_LEN_UTF8 {
 		let frame_end = batch.ends[cursor.frame];
 		if cursor.unit == frame_end {
 			cursor.frame += 1;
+			write_end = written;
 			continue;
 		}
 		if cursor.unit >= cursor.bmp_end {
@@ -218,7 +228,48 @@ fn encode_chunk(batch: &Batch, cursor: &mut EncodeCursor, output: &mut [u8]) -> 
 		cursor.unit += read;
 		written += bytes;
 	}
+	if let Some(&frame_end) = batch.ends.get(cursor.frame)
+		&& cursor.unit < frame_end
+	{
+		let cut = cut_point(&output[..written], write_end, batch.units[cursor.unit]);
+		if cut < written {
+			// Every byte past `write_end` came from the current write, so the
+			// cursor stays in it; the surrogate scan restarts at the cut.
+			cursor.unit -= utf16_len(&output[cut..written]);
+			cursor.bmp_end = cursor.unit;
+			written = cut;
+		}
+	}
 	(cursor.unit - start, written)
+}
+
+/// Where to end a chunk that filled up inside a write, so a foreign writer
+/// sharing the terminal cannot land inside a row or an escape sequence (which
+/// never contain a line end) at the seam: just past the last line end (`\n`,
+/// or a `\r` that does not open a `\r\n`) after `write_end`, else at
+/// `write_end`, else — one row longer than the chunk — at the chunk's end, a
+/// character boundary, short of a final `\r` that opens a `\r\n`.
+///
+/// `chunk` is the encoded output, `write_end` the end of the last whole write
+/// in it (0 for none), and `next` the code unit after it.
+fn cut_point(chunk: &[u8], write_end: usize, next: u16) -> usize {
+	let opens_crlf = chunk.last() == Some(&b'\r') && next == u16::from(b'\n');
+	let end = (chunk.len() - usize::from(opens_crlf)).max(write_end);
+	match memchr::memrchr2(b'\n', b'\r', &chunk[write_end..end]) {
+		Some(at) => write_end + at + 1,
+		None if write_end > 0 => write_end,
+		None if end > 0 => end,
+		None => chunk.len(),
+	}
+}
+
+/// UTF-16 length of UTF-8 `bytes` that start on a character boundary: one unit
+/// per character, two for a four-byte one.
+fn utf16_len(bytes: &[u8]) -> usize {
+	bytes
+		.iter()
+		.map(|&byte| usize::from(byte & 0xc0 != 0x80) + usize::from(byte >= 0xf0))
+		.sum()
 }
 
 fn cancelled_error() -> std::io::Error {
@@ -291,6 +342,26 @@ fn pump_loop(output: sys::Output, inner: &Inner, notifier: DrainNotifier) {
 	}
 }
 
+/// How long `stop` waits for a cancelled worker before detaching it. The worker
+/// checks the cancelled flag before every write, so a write that ignores
+/// cancellation is its last.
+const CANCEL_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Join the cancelled worker, calling `abort` until it exits; past
+/// [`CANCEL_TIMEOUT`] it is detached to finish its write alone.
+fn join_cancelled(thread: JoinHandle<()>, mut abort: impl FnMut()) {
+	let deadline = Instant::now() + CANCEL_TIMEOUT;
+	while !thread.is_finished() {
+		if Instant::now() >= deadline {
+			log::warn!("tty writer: a write ignored cancellation; detaching worker");
+			return;
+		}
+		abort();
+		std::thread::sleep(Duration::from_millis(1));
+	}
+	let _ = thread.join();
+}
+
 /// Platform terminal handles. Each backend provides `open(fd)`, returning the
 /// worker's `Output` and the stopping side's `Cancel`; `Output::write` makes
 /// one write attempt that blocks until the terminal accepts bytes or
@@ -306,9 +377,9 @@ mod sys {
 		thread::JoinHandle,
 	};
 
-	use super::cancelled_error;
+	use super::{cancelled_error, join_cancelled};
 
-	/// Worker side: the reopened TTY and the cancellation socket's read end.
+	/// Worker side: the TTY handle and the cancellation socket's read end.
 	pub(super) struct Output {
 		tty:    OwnedFd,
 		cancel: UnixStream,
@@ -319,7 +390,10 @@ mod sys {
 	pub(super) struct Cancel(pub(super) UnixStream);
 
 	pub(super) fn open(fd: i32) -> io::Result<(Output, Cancel)> {
-		let tty = reopen_tty(fd)?;
+		let tty = reopen_tty(fd).or_else(|err| {
+			log::debug!("tty fd {fd} cannot be reopened ({err}); writing through a duplicate");
+			dup_tty(fd)
+		})?;
 		// UnixStream::pair owns close-on-exec endpoints.
 		let (cancel, stop) = UnixStream::pair()?;
 		Ok((Output { tty, cancel }, Cancel(stop)))
@@ -378,11 +452,32 @@ mod sys {
 	}
 
 	impl Cancel {
-		/// Abort a blocked write and join the worker.
+		/// Abort a blocked write and join the worker. Closing the socket aborts
+		/// only a `POLLOUT` wait: a write blocked on a blocking duplicate runs
+		/// until the terminal accepts it, so the worker may be detached.
 		pub(super) fn stop(self, thread: JoinHandle<()>) {
 			drop(self.0);
-			let _ = thread.join();
+			join_cancelled(thread, || {});
 		}
+	}
+
+	/// Fallback for a TTY that cannot be reopened: a close-on-exec duplicate.
+	/// It shares stdout's file-status flags, so on a blocking descriptor a
+	/// stalled write cannot be aborted; the in-process write it replaces
+	/// blocked the JS thread instead.
+	fn dup_tty(fd: i32) -> io::Result<OwnedFd> {
+		// SAFETY: isatty only inspects the descriptor.
+		if unsafe { libc::isatty(fd) } == 0 {
+			return Err(io::Error::last_os_error());
+		}
+		// SAFETY: F_DUPFD_CLOEXEC only duplicates fd, returning a new descriptor
+		// or failing.
+		let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+		if duplicate < 0 {
+			return Err(io::Error::last_os_error());
+		}
+		// SAFETY: fcntl returned a new descriptor, uniquely owned here.
+		Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
 	}
 
 	pub(super) fn reopen_tty(fd: i32) -> io::Result<OwnedFd> {
@@ -449,7 +544,6 @@ mod sys {
 		os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
 		sync::atomic::{AtomicU32, Ordering},
 		thread::JoinHandle,
-		time::{Duration, Instant},
 	};
 
 	use windows_sys::Win32::{
@@ -457,20 +551,18 @@ mod sys {
 		Storage::FileSystem::WriteFile,
 		System::{
 			Console::{
-				GetConsoleCP, GetConsoleMode, GetConsoleOutputCP, GetStdHandle, STD_ERROR_HANDLE,
-				STD_OUTPUT_HANDLE, SetConsoleCP, SetConsoleOutputCP,
+				ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleCP, GetConsoleMode, GetConsoleOutputCP,
+				GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetConsoleCP, SetConsoleMode,
+				SetConsoleOutputCP,
 			},
 			IO::CancelSynchronousIo,
 			Threading::GetCurrentProcess,
 		},
 	};
 
-	const CP_UTF8: u32 = 65001;
+	use super::join_cancelled;
 
-	/// How long `stop` keeps cancelling a `WriteFile` before detaching the
-	/// worker. It checks the cancelled flag before every write, so a write that
-	/// ignores cancellation is its last.
-	const CANCEL_TIMEOUT: Duration = Duration::from_millis(500);
+	const CP_UTF8: u32 = 65001;
 
 	/// Last foreign output code page reported, so a child that keeps flipping
 	/// it warns once.
@@ -509,6 +601,13 @@ mod sys {
 		// SAFETY: handle is a live standard handle and mode is valid storage.
 		if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
 			return Err(io::Error::last_os_error());
+		}
+		// The runtime turns VT processing on at startup; a console that lost it
+		// would print every escape sequence as text.
+		if mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING == 0 {
+			// SAFETY: handle is a live console handle and the mode a flag word.
+			// Failure leaves the console as it was.
+			unsafe { SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) };
 		}
 		let mut owned = std::ptr::null_mut();
 		// SAFETY: both process handles are the current-process pseudo handle,
@@ -560,18 +659,12 @@ mod sys {
 		/// repeats until the worker sees the cancelled flag and exits.
 		#[expect(clippy::unused_self, reason = "the unix variant closes its wake socket")]
 		pub(super) fn stop(self, thread: JoinHandle<()>) {
-			let deadline = Instant::now() + CANCEL_TIMEOUT;
-			while !thread.is_finished() {
-				if Instant::now() >= deadline {
-					log::warn!("tty writer: console write ignored cancellation; detaching worker");
-					return;
-				}
-				// SAFETY: the thread handle stays live until join or drop. With no
-				// synchronous I/O pending, this fails harmlessly.
-				unsafe { CancelSynchronousIo(thread.as_raw_handle()) };
-				std::thread::sleep(Duration::from_millis(1));
-			}
-			let _ = thread.join();
+			let handle = thread.as_raw_handle();
+			// SAFETY: the thread handle stays live until join_cancelled joins or
+			// drops it. With no synchronous I/O pending, this fails harmlessly.
+			join_cancelled(thread, || unsafe {
+				CancelSynchronousIo(handle);
+			});
 		}
 	}
 
@@ -608,9 +701,11 @@ struct Worker {
 	cancel: sys::Cancel,
 }
 
-/// Dedicated, cancellable terminal writer. The destination must be a TTY that
-/// can be independently reopened (unix) or a console (Windows); pipes and
-/// files are deliberately rejected.
+/// Dedicated, cancellable terminal writer.
+///
+/// The destination must be a TTY (reopened independently when possible, else
+/// duplicated) on unix or a console on Windows; pipes and files are
+/// deliberately rejected.
 #[napi]
 pub struct TtyWriter {
 	inner:  Arc<Inner>,
@@ -710,7 +805,8 @@ impl TtyWriter {
 	}
 
 	/// Drain until the deadline, then cancel and join. Nothing is written after
-	/// return, except one chunk a Windows console refused to abort. Already
+	/// return, except one chunk whose write could not be aborted (a Windows
+	/// console refusing to, a blocking duplicate on unix). Already
 	/// queued JS callbacks may still run; callers must ignore callbacks from a
 	/// stopped writer.
 	#[napi]
@@ -757,20 +853,16 @@ mod tests {
 			let mut slave = -1;
 			// SAFETY: both outputs point to valid storage. No optional name,
 			// termios, or window-size pointers are passed.
-			assert_eq!(
-				unsafe {
-					libc::openpty(
-						&mut master,
-						&mut slave,
-						std::ptr::null_mut(),
-						std::ptr::null_mut(),
-						std::ptr::null_mut(),
-					)
-				},
-				0,
-				"openpty: {}",
-				std::io::Error::last_os_error()
-			);
+			let opened = unsafe {
+				libc::openpty(
+					&mut master,
+					&mut slave,
+					std::ptr::null_mut(),
+					std::ptr::null_mut(),
+					std::ptr::null_mut(),
+				)
+			};
+			assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());
 			// SAFETY: openpty succeeded and returned two newly owned fds.
 			let (master, slave) =
 				unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
@@ -781,7 +873,9 @@ mod tests {
 			let mut attrs = unsafe { attrs.assume_init() };
 			// SAFETY: attrs is initialized, and this test owns the PTY.
 			unsafe { libc::cfmakeraw(&mut attrs) };
-			assert_eq!(unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &attrs) }, 0);
+			// SAFETY: slave is a live, test-owned TTY and attrs is initialized.
+			let set = unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &attrs) };
+			assert_eq!(set, 0);
 			for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
 				// SAFETY: these are live, test-owned descriptors.
 				assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }, 0);
@@ -789,10 +883,9 @@ mod tests {
 			// The test's reads must have deadlines even if the writer fails.
 			let flags = flags(master.as_raw_fd());
 			// SAFETY: master is test-owned, unrelated to stdout.
-			assert_eq!(
-				unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
-				0
-			);
+			let set =
+				unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
+			assert_eq!(set, 0);
 			Self { master, slave }
 		}
 
@@ -875,17 +968,18 @@ mod tests {
 		assert_ne!(unsafe { libc::fcntl(output.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC, 0);
 		// Changing the original's flags cannot turn the worker into a blocking
 		// writer (which is exactly what dup-based implementations permit).
-		assert_eq!(
-			unsafe {
-				libc::fcntl(pty.slave.as_raw_fd(), libc::F_SETFL, original_flags & !libc::O_NONBLOCK)
-			},
-			0
-		);
+		// SAFETY: the slave fd is live and owned by this test's PTY.
+		let set = unsafe {
+			libc::fcntl(pty.slave.as_raw_fd(), libc::F_SETFL, original_flags & !libc::O_NONBLOCK)
+		};
+		assert_eq!(set, 0);
 		assert_ne!(flags(output.as_raw_fd()) & libc::O_NONBLOCK, 0);
 		let (mut writer, _) = pty.writer(0);
 		assert_eq!(flags(pty.slave.as_raw_fd()), original_flags);
 		let cancel = writer.worker.as_ref().unwrap().cancel.0.as_raw_fd();
-		assert_ne!(unsafe { libc::fcntl(cancel, libc::F_GETFD) } & libc::FD_CLOEXEC, 0);
+		// SAFETY: the cancel fd stays live until `writer.stop` below.
+		let fd_flags = unsafe { libc::fcntl(cancel, libc::F_GETFD) };
+		assert_ne!(fd_flags & libc::FD_CLOEXEC, 0);
 		writer.stop(0);
 		assert_eq!(flags(pty.slave.as_raw_fd()), original_flags);
 	}
@@ -900,6 +994,28 @@ mod tests {
 			let pty = Pty::new();
 			assert!(reopen_tty(pty.master.as_raw_fd()).is_err());
 		}
+	}
+
+	/// A PTY master cannot be reopened (on Linux it would allocate a new PTY):
+	/// the writer goes through a duplicate instead of refusing the terminal.
+	#[test]
+	fn an_unreopenable_tty_is_written_through_a_duplicate() {
+		let pty = Pty::new();
+		assert!(reopen_tty(pty.master.as_raw_fd()).is_err());
+		let mut writer = TtyWriter::start(
+			pty.master.as_raw_fd(),
+			0,
+			DrainNotifier::Test(Arc::new(AtomicUsize::new(0))),
+		)
+		.unwrap();
+		push(&writer, &[b'd' as u16, b'u' as u16, b'p' as u16]);
+		assert!(writer.flush_sync(2_000));
+		writer.stop(0);
+		let mut buf = [0u8; 16];
+		// SAFETY: buf is writable; the slave is a live raw TTY holding the bytes
+		// written above.
+		let read = unsafe { libc::read(pty.slave.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+		assert_eq!(&buf[..read as usize], b"dup");
 	}
 
 	#[test]
@@ -1096,7 +1212,7 @@ mod tests {
 		assert_eq!(progress, 1);
 	}
 
-	fn encoded_frames(frames: &[&[u16]], chunk_size: usize) -> Vec<u8> {
+	fn encoded_chunks(frames: &[&[u16]], chunk_size: usize) -> Vec<Vec<u8>> {
 		let mut batch = Batch::default();
 		for frame in frames {
 			batch.units.extend_from_slice(frame);
@@ -1104,7 +1220,7 @@ mod tests {
 		}
 		let mut cursor = EncodeCursor::default();
 		let mut buffer = vec![0u8; chunk_size];
-		let mut output = Vec::new();
+		let mut chunks = Vec::new();
 		let mut consumed = 0;
 		while cursor.unit < batch.units.len() {
 			let (units, bytes) = encode_chunk(&batch, &mut cursor, &mut buffer);
@@ -1112,10 +1228,42 @@ mod tests {
 			assert!(bytes <= chunk_size);
 			assert!(bytes <= units * 3);
 			consumed += units;
-			output.extend_from_slice(&buffer[..bytes]);
+			chunks.push(buffer[..bytes].to_vec());
 		}
 		assert_eq!(consumed, batch.units.len());
-		output
+		chunks
+	}
+
+	fn encoded_frames(frames: &[&[u16]], chunk_size: usize) -> Vec<u8> {
+		encoded_chunks(frames, chunk_size).concat()
+	}
+
+	#[test]
+	fn chunks_end_at_line_ends_then_write_ends() {
+		let cases: [(&[&str], &[&str]); 7] = [
+			// Full paint: the cut moves back to the last row end.
+			(&["ab\r\ncdef\r\ngh"], &["ab\r\n", "cdef\r\ngh"]),
+			// Diff paint: rows end in a bare `\r`.
+			(&["ab\rcdefgh"], &["ab\r", "cdefgh"]),
+			// A `\r\n` straddling the cap stays in one chunk.
+			(&["abcdefg\r\nh"], &["abcdefg", "\r\nh"]),
+			// No row end inside the write: the cut falls back to the write end.
+			(&["ab", "cdefghij"], &["ab", "cdefghij"]),
+			// A row longer than the chunk is cut at a character boundary.
+			(&["界界界"], &["界界", "界"]),
+			// Units past a cut are given back exactly, surrogate pairs included.
+			(&["ab\n界界界"], &["ab\n", "界界", "界"]),
+			(&["a\n🚀🚀"], &["a\n", "🚀🚀"]),
+		];
+		for (frames, expected) in cases {
+			let frames: Vec<Vec<u16>> = frames
+				.iter()
+				.map(|frame| frame.encode_utf16().collect())
+				.collect();
+			let frames: Vec<&[u16]> = frames.iter().map(Vec::as_slice).collect();
+			let expected: Vec<&[u8]> = expected.iter().map(|chunk| chunk.as_bytes()).collect();
+			assert_eq!(encoded_chunks(&frames, 8), expected);
+		}
 	}
 
 	#[test]

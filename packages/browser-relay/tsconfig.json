@@ -1,4 +1,10 @@
 {
 	"extends": "../tsconfig.workspace.json",
-	"include": ["extension", "scripts"]
+	"include": ["extension", "scripts", "test", "../stats/src/client/react-css.d.ts"],
+	"compilerOptions": {
+		"jsx": "react-jsx",
+		"lib": ["ES2024", "DOM", "DOM.Iterable"],
+		"noEmit": true,
+		"types": ["bun", "chrome", "react", "react-dom"]
+	}
 }

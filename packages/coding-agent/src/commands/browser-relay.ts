@@ -2,52 +2,48 @@
  * `omp browser-relay` — drive the user's own Chrome tabs.
  */
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
-import {
-	BROWSER_RELAY_ACTIONS,
-	type BrowserRelayAction,
-	DEFAULT_RELAY_PORT,
-	runBrowserRelayCommand,
-} from "../cli/browser-relay-cli";
+import { BROWSER_RELAY_ACTIONS, runBrowserRelayCommand } from "../cli/browser-relay-cli";
+import { browserRelayHelp } from "../cli/command-help";
 
+/** Install or sync the omp Chrome extension; Chrome launches its native host. */
 export default class BrowserRelay extends Command {
-	static description = "Run the local CDP relay that lets the browser prelude drive your own Chrome tabs";
+	static description = browserRelayHelp.description;
 
 	static args = {
 		action: Args.string({
-			description: `Action: ${BROWSER_RELAY_ACTIONS.join(" | ")} (default serve)`,
+			description: `Action: ${BROWSER_RELAY_ACTIONS.join(" | ")} (native-host is launched by Chrome)`,
 			options: [...BROWSER_RELAY_ACTIONS],
-			required: false,
+			required: true,
 		}),
 	};
 
 	static flags = {
-		port: Flags.integer({ char: "p", description: "Port to listen on", default: DEFAULT_RELAY_PORT }),
-		token: Flags.string({ description: "Require the extension to present this token" }),
 		dir: Flags.string({
 			description: "Extension install directory (install; default ~/.omp/browser-relay/extension)",
 		}),
-		"no-group": Flags.boolean({
-			description: "Don't gather controllable tabs into an 'omp' tab group",
+		"no-chrome": Flags.boolean({
+			description: "Skip the unattended install into Chrome and print the manual steps",
 			default: false,
 		}),
-		verbose: Flags.boolean({ char: "v", description: "Log relay traffic summaries to stderr", default: false }),
+		profile: Flags.string({
+			description: "Chrome profile directory for the unattended install (install; default: last used)",
+		}),
 	};
 
 	static examples = [
-		"omp browser-relay install    # write the Chrome extension to disk + setup steps",
-		"omp browser-relay            # serve the relay on the default port",
-		"omp browser-relay -p 9333 --token s3cret",
+		"omp browser-relay install    # install the omp extension, register it in Chrome and add its native host",
+		"omp browser-relay sync       # sync every registered extension directory",
 	];
 
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(BrowserRelay);
+		const action = BROWSER_RELAY_ACTIONS.find(candidate => candidate === args.action);
+		if (action === undefined) throw new Error(`Unknown action: ${args.action}`);
 		await runBrowserRelayCommand({
-			action: (args.action as BrowserRelayAction | undefined) ?? "serve",
-			port: flags.port,
-			token: flags.token,
+			action,
 			dir: flags.dir,
-			group: !flags["no-group"],
-			verbose: flags.verbose,
+			chrome: !flags["no-chrome"],
+			profile: flags.profile,
 		});
 	}
 }

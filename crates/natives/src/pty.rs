@@ -397,6 +397,7 @@ impl PtySession {
 	}
 
 	/// Restart reading output after `pauseOutput()`. No-op when not paused.
+	#[allow(clippy::missing_const_for_fn, reason = "napi macro is incompatible with const fn")]
 	#[napi]
 	pub fn resume_output(&self) {
 		#[cfg(unix)]
@@ -500,6 +501,10 @@ impl PtyMaster {
 		}
 	}
 
+	#[cfg_attr(
+		not(unix),
+		allow(clippy::missing_const_for_fn, reason = "unix arms read the fd at runtime")
+	)]
 	fn raw_fd(&self) -> Option<i32> {
 		match self {
 			#[cfg(unix)]

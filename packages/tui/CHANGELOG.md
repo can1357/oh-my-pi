@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Moved `convertImageToPng`, `convertImageToPngShared`, `cachedPngConversion` and `imagePayloadKey` from `@oh-my-pi/pi-tui/chat/image-loading` to `@oh-my-pi/pi-tui/png-conversion`; import them from the new path ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
+- `OutputSinkOptions.artifactPath`/`artifactId` are replaced by `allocateArtifact` (`ArtifactAllocator`), which the sink calls only when output first overflows its inline view
+- Removed the `windows-altgr` module (`translateWindowsAltGrSequence`, `readAltGrLayer`, `createRightAltLatch`, `RIGHT_ALT_LATCH_MS`, `AltGrHost`, `KeyboardLayoutHandle`); AltGr recovery is `translateWindowsAltGrSequence` in `@oh-my-pi/pi-natives`
+
+### Added
+
+- Added handling of `features` terminal events to update UI without waiting for a new hello
+
+### Changed
+
+- Native chats no longer show a crossed-out Spotlight star or leave an empty row under unchanged tool results.
+- Windows console VT input and AltGr recovery go through `@oh-my-pi/pi-natives` instead of `bun:ffi`
+
+### Fixed
+
+- Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
+- Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed WebP and JPEG images drawing as a blank gap on Kitty-graphics terminals (Ghostty, Kitty, herdr) when shown through a bare `Image`, such as an extension's pasted-image preview ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
+- Large repaints are again written in pieces that end between rows, so output from another process sharing the terminal cannot land inside a row or an escape sequence
+- Terminals the output writer cannot reopen (after `su` to another user, inside some sandboxes) are written off the JS thread too, so a slow terminal no longer freezes input there
+
+## [19.0.1] - 2026-11-19
+
+### Added
+
+- The native session sheet shows a `Local` report line (the session's `local://` directory) as a copyable field beside the ID and file ([#19778](https://github.com/can1357/oh-my-pi/pull/19778) by [@farnoy](https://github.com/farnoy))
+
+### Fixed
+
+- Answering a long ask question by question in native terminal hosts such as Tern no longer rescales the whole card body on every move, so the next question animates in without stalling
+- Fixed images from a previous session reappearing at the top-left of the screen after `/new` in herdr-app ([#19749](https://github.com/can1357/oh-my-pi/pull/19749) by [@jaredlyon](https://github.com/jaredlyon))
+- Loop-stall diagnostics (`ui.loop-blocked`) no longer sample the JS thread while no TUI runs, such as in an external editor or after the session ends ([#19703](https://github.com/can1357/oh-my-pi/pull/19703) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the usage dashboard rendering exhausted or pressured usage rows without a quota bar (prepaid balances, spent quotas) as dim informational text; they now take the error or warning color their reported status calls for, and a spent quota with no measurable amount reads "exhausted" instead of "no data" ([#19764](https://github.com/can1357/oh-my-pi/issues/19764))
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes

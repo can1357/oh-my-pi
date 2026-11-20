@@ -12,7 +12,15 @@ const FETCH_AVAILABLE_MODELS_PATH = "/v1internal:fetchAvailableModels";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 64_000;
-const ANTIGRAVITY_DISCOVERY_DENYLIST = new Set(["chat_20706", "chat_23310", "gemini-2.5-pro"]);
+// `gemini-4-hydrogen-sonar` is listed with no display name, a 65,536-token output cap and only
+// `thinkingLevel: 1`; it appears to be the slot the native client's "sonar" tool-call monitor uses,
+// not a model to pick.
+const ANTIGRAVITY_DISCOVERY_DENYLIST = new Set([
+	"chat_20706",
+	"chat_23310",
+	"gemini-2.5-pro",
+	"gemini-4-hydrogen-sonar",
+]);
 
 /** `fetchAvailableModels` `thinkingLevel` → wire `thinkingConfig.thinkingLevel` (verified against the native client). */
 const ANTIGRAVITY_THINKING_LEVELS: Readonly<Record<number, AntigravityModelWireProfile["thinkingLevel"]>> = {
