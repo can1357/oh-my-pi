@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Back-to-back and watcher-driven stats syncs now reuse their parse workers instead of booting a fresh one per pass, so repeat runs start faster ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [19.0.1] - 2026-11-19
 
 ### Added
@@ -23,8 +27,6 @@
 ### Changed
 
 - Token mix shares for the main agent, subagents, and advisor now reflect conversation turns only, excluding side-channel model calls.
-- Main agent, Subagents and Advisor shares in Token mix now count conversation turns only; side-channel calls no longer inflate them. Sessions changed since 2026-08-31 are re-read once after upgrading to attribute past calls
-- Back-to-back and watcher-driven stats syncs now reuse their parse workers instead of booting a fresh one per pass, so repeat runs start faster ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
 
 ### Fixed
 
