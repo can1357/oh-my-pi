@@ -6481,10 +6481,8 @@ mod tests {
 		// next turn. Seed the status after a real lastpipe capture so the cases
 		// do not depend on which vproc gets scheduled first.
 		for (suffix, on_success) in [("&& :", true), ("|| :", false)] {
-			for (child_status, fail) in
-				[(None, false), (Some(0), false), (Some(1), false), (None, true)]
-			{
-				for check_pending in [false, true] {
+			for child_status in [None, Some(0), Some(1)] {
+				for (check_pending, fail) in [(true, false), (true, true), (false, true)] {
 					let mut store = Store::default();
 					let mut host = FakeHost::new();
 					let engine = Engine::new(EngineConfig::default());
@@ -6519,23 +6517,39 @@ mod tests {
 							.unwrap();
 					}
 					store.reject_child = fail.then_some(*child);
+					let pending = child_status.is_none();
+					let cut_short = child_status.is_none_or(|s| (s == 0) == on_success);
 					if check_pending {
-						assert_eq!(
-							shell.exit_children_pending(&mut store, run),
-							!fail && child_status.is_none()
-						);
-						// A failed probe keeps the frozen input for the next
-						// turn instead of dropping it.
-						assert!(shell.k.pending_cut_short.is_some());
+						assert_eq!(shell.exit_children_pending(&mut store, run), !fail && pending);
+						assert_eq!(store.failed_reads > 0, fail);
+						assert!(!shell.k.root.has_fault());
+						if fail {
+							store.reject_child = None;
+							assert_eq!(
+								shell.exit_children_pending(&mut store, run),
+								pending,
+								"pending probe must recover: {suffix}, {child_status:?}"
+							);
+							store.reject_child = Some(*child);
+						}
 					}
-					let expected = !fail && child_status.is_none_or(|s| (s == 0) == on_success);
+					let previous_failures = store.failed_reads;
 					assert_eq!(
 						shell.ended_by_exit_cut_short(&mut store, run),
-						expected,
+						!fail && cut_short,
 						"{suffix}: {child_status:?}, fail={fail}"
 					);
-					assert_eq!(store.failed_reads > 0, fail);
+					assert_eq!(store.failed_reads > previous_failures, fail);
 					assert!(!shell.k.root.has_fault());
+					if fail {
+						store.reject_child = None;
+						assert_eq!(
+							shell.ended_by_exit_cut_short(&mut store, run),
+							cut_short,
+							"verdict probe must recover: {suffix}, {child_status:?}"
+						);
+						assert!(!shell.k.root.has_fault());
+					}
 				}
 			}
 		}

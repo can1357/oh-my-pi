@@ -2690,54 +2690,47 @@ impl Shell {
 	/// ([`Shell::exit_children_pending`]); one still unresolved keeps the
 	/// conservative unrun verdict. Meaningful only when
 	/// [`Shell::ended_by_exit`] returns true for the same run; ask right
-	/// after its [`Step::Done`].
+	/// after its [`Step::Done`]. A backend error invalidates this probe,
+	/// but leaves the capture available for a retry.
 	pub fn ended_by_exit_cut_short(&mut self, store: &mut dyn StateStore, run: RunId) -> bool {
-		if self.k.exited != Some(run) {
-			return false;
-		}
-		let Some((id, cut)) = self.k.pending_cut_short.take() else {
+		let Some(cut) = self.cut_short_input(run) else {
 			return false;
 		};
 		let mut read_failed = false;
-		let verdict = id == run
-			&& cut.walk(|vpid| {
-				let Ok(state) = Kernel::read_proc_state(store, vpid) else {
-					read_failed = true;
-					return None;
-				};
-				state.and_then(ProcState::exited)
-			});
-		// Like a failed capture, a failed attribution-only read invalidates
-		// the verdict. An ordinary missing child status remains conservative.
-		if !read_failed {
-			self.k.pending_cut_short = Some((id, cut));
-		}
+		let verdict = cut.walk(|vpid| {
+			let Ok(state) = Kernel::read_proc_state(store, vpid) else {
+				read_failed = true;
+				return None;
+			};
+			state.and_then(ProcState::exited)
+		});
 		verdict && !read_failed
 	}
 
 	/// Whether the run's cut-short verdict still waits on a pipeline child
 	/// that has not ended: the window before
 	/// [`Shell::ended_by_exit_cut_short`] is only worth giving while it
-	/// returns true.
+	/// returns true. A backend error ends this probe without discarding the
+	/// capture.
 	pub fn exit_children_pending(&mut self, store: &mut dyn StateStore, run: RunId) -> bool {
-		let Some((id, cut)) = self.k.pending_cut_short.take() else {
+		let Some(cut) = self.cut_short_input(run) else {
 			return false;
 		};
 		let mut pending = false;
-		if id == run && self.k.exited == Some(run) {
-			for vpid in cut.pending_children() {
-				let Ok(state) = Kernel::read_proc_state(store, vpid) else {
-					// Like a failed capture read, a failed attribution-only
-					// read keeps the frozen input for the next probe
-					// instead of dropping it.
-					self.k.pending_cut_short = Some((id, cut));
-					return false;
-				};
-				pending |= state.and_then(ProcState::exited).is_none();
-			}
+		for vpid in cut.pending_children() {
+			let Ok(state) = Kernel::read_proc_state(store, vpid) else {
+				return false;
+			};
+			pending |= state.and_then(ProcState::exited).is_none();
 		}
-		self.k.pending_cut_short = Some((id, cut));
 		pending
+	}
+
+	/// Both delayed probes borrow the same capture so neither consumes it on
+	/// a failed read. Only the owning root run can use it.
+	fn cut_short_input(&self, run: RunId) -> Option<&exec::CutShortInput> {
+		let (id, cut) = self.k.pending_cut_short.as_ref()?;
+		(*id == run && self.k.exited == Some(run)).then_some(cut)
 	}
 
 	/// The first termination cause of `run`, excluding cleanup re-entries.
