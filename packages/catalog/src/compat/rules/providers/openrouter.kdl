@@ -127,8 +127,12 @@ provider "openrouter" {
 			supports-tools #false
 		}
 	}
-	models "~typesafe/*" "typesafe/*" {
-		kind "judge"
+	// Judge kind belongs to the Decisions adapter only. The chat router
+	// typesafe/jev-router is a chat/completions model on api "openrouter".
+	on-api "openrouter-decisions" {
+		models "~typesafe/*" "typesafe/*" {
+			kind "judge"
+		}
 	}
 	models "~typesafe/jev-latest" "typesafe/jev-1.13" "typesafe/jev-1.14" {
 		input-modalities "text" "image"

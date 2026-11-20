@@ -10,6 +10,7 @@
 
 - Cursor's newly served models (Claude Fable 5.2, Claude Haiku 4.5, Claude Sonnet 5.5, Gemini 2.5 Flash, Gemini 4 Hydrogen/Neon, GLM 5.3, GPT-5.1, Muse Wonder 1.0) now use their documented per-token prices instead of $0 ([#19842](https://github.com/can1357/oh-my-pi/pull/19842) by [@fenilmodi00](https://github.com/fenilmodi00)).
 - Fixed the Codex client version cache so `codex-client-version.json` is read and written under `$XDG_CACHE_HOME/omp` when that root is initialized, instead of the agent directory ([#19776](https://github.com/can1357/oh-my-pi/pull/19776) by [@Parsifa1](https://github.com/Parsifa1))
+- Fixed custom providers that register the OpenRouter roster failing at startup because `typesafe/jev-router` was classified as a judge model instead of chat ([#15244](https://github.com/can1357/oh-my-pi/issues/15244))
 
 ## [19.0.1] - 2026-11-19
 
