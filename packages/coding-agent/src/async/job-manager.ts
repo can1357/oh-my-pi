@@ -155,7 +155,7 @@ export interface AsyncJob {
 	structured?: StructuredSubagentOutput;
 	/** Latest progress text the running job reported (a bash job's output tail). */
 	progressText?: string;
-	/** When {@link progressText} last changed: the job's latest new output. */
+	/** When the job last reported something new: changed {@link progressText} or a subagent `progress` record. */
 	lastProgressAt?: number;
 	/** Latest tool-render details reported by the running job. */
 	latestDetails?: AsyncJobDetails;
@@ -605,7 +605,9 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		};
 
 		const reportProgress = async (text: string, details?: AsyncJobDetails): Promise<void> => {
-			if (text !== job.progressText) job.lastProgressAt = Date.now();
+			// A subagent job repeats one status line while it works; each of its
+			// `progress` reports comes from an agent event, so it counts as output.
+			if (text !== job.progressText || details?.progress !== undefined) job.lastProgressAt = Date.now();
 			job.progressText = text;
 			if (details) job.latestDetails = details;
 			this.#notifyJobsChanged(id);
