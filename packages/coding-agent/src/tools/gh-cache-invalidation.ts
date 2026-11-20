@@ -76,6 +76,7 @@ const VALUE_TAKING_FLAGS: ReadonlySet<string> = new Set([
 	"--body",
 	"-F",
 	"--body-file",
+	"--attach",
 	"-a",
 	"--assignee",
 	"--add-assignee",
@@ -88,6 +89,13 @@ const VALUE_TAKING_FLAGS: ReadonlySet<string> = new Set([
 	"--project",
 	"--add-project",
 	"--remove-project",
+	"--parent",
+	"--add-sub-issue",
+	"--remove-sub-issue",
+	"--add-blocked-by",
+	"--add-blocking",
+	"--remove-blocked-by",
+	"--remove-blocking",
 	"--add-reviewer",
 	"--remove-reviewer",
 	"-B",
@@ -97,20 +105,29 @@ const VALUE_TAKING_FLAGS: ReadonlySet<string> = new Set([
 	"-r",
 	"--reason",
 	"--branch",
+	"--branch-repo",
+	"--worktree",
+	"-n",
+	"--name",
 	"--subject",
 	"--match-head-commit",
 	"--author-email",
 ]);
+
+interface GhMutationTarget {
+	number: number;
+	repo?: string;
+}
+
 /**
  * Walk a single shell command's token stream looking for a top-level
- * `gh (issue|pr) <subcmd> [<id-or-url>]` invocation and return the
- * invalidation key when one is found. `number === undefined` means the
- * subcommand mutates state but names no identifier (gh defaults to the
- * current branch's PR), so the caller must fall back to repo-wide
- * invalidation. Returns `null` for non-matching commands so the caller can
- * iterate cheaply.
+ * `gh (issue|pr) <subcmd> [<id-or-url>...]` invocation and return every
+ * number or URL it names. An empty `targets` list means the subcommand
+ * mutates state but names no identifier (gh defaults to the current
+ * branch's PR), so the caller must fall back to repo-wide invalidation.
+ * Returns `null` for non-matching commands so the caller can iterate cheaply.
  */
-function detectGhMutation(tokens: readonly string[]): { number?: number; repo?: string } | null {
+function detectGhMutation(tokens: readonly string[]): { repo?: string; targets: GhMutationTarget[] } | null {
 	const ghIdx = tokens.indexOf("gh");
 	if (ghIdx === -1) return null;
 	const subject = tokens[ghIdx + 1];
@@ -136,6 +153,7 @@ function detectGhMutation(tokens: readonly string[]): { number?: number; repo?: 
 			repo = token.slice("--repo=".length);
 		}
 	}
+	const targets: GhMutationTarget[] = [];
 	for (let i = ghIdx + 3; i < tokens.length; i++) {
 		const token = tokens[i];
 		if (token === "-R" || token === "--repo" || VALUE_TAKING_FLAGS.has(token)) {
@@ -147,20 +165,21 @@ function detectGhMutation(tokens: readonly string[]): { number?: number; repo?: 
 		if (token.startsWith("-")) continue;
 		const direct = /^\d+$/.test(token) ? Number(token) : undefined;
 		if (direct !== undefined && Number.isSafeInteger(direct) && direct > 0) {
-			return repo !== undefined ? { number: direct, repo } : { number: direct };
+			targets.push(repo !== undefined ? { number: direct, repo } : { number: direct });
+			continue;
 		}
 		const urlMatch = (subject === "pr" ? PR_URL_PATTERN : ISSUE_URL_PATTERN).exec(token);
 		if (urlMatch) {
 			const num = Number(urlMatch[3]);
 			if (Number.isSafeInteger(num) && num > 0) {
 				// URL carries its own repo and wins over a stray --repo flag.
-				return { number: num, repo: formatRepoRef(urlMatch[1], urlMatch[2]) };
+				targets.push({ number: num, repo: formatRepoRef(urlMatch[1], urlMatch[2]) });
 			}
 		}
 	}
-	// Mutating subcommand with no identifier: gh operates on the current
-	// branch's PR, which we cannot resolve synchronously here.
-	return repo !== undefined ? { repo } : {};
+	// No identifier: gh operates on the current branch's PR, which we cannot
+	// resolve synchronously here, so the caller clears the whole repo.
+	return repo !== undefined ? { repo, targets } : { targets };
 }
 
 /**
@@ -174,10 +193,12 @@ export function invalidateGithubCacheForBashCommand(command: string): void {
 	for (const segment of segments) {
 		const hit = detectGhMutation(segment);
 		if (!hit) continue;
-		if (hit.number !== undefined) {
-			invalidateAllForNumber(hit.number, hit.repo);
-		} else {
+		if (hit.targets.length === 0) {
 			invalidateAllForRepo(hit.repo);
+			continue;
+		}
+		for (const target of hit.targets) {
+			invalidateAllForNumber(target.number, target.repo);
 		}
 	}
 }
