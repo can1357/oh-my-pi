@@ -28,6 +28,8 @@
 - Sessions now record approval prompts in their session file, even before the first reply: a `tool_approval_requested` entry when a tool call starts waiting on you (naming the dispatching eval call in `parentToolCallId` for calls made from an eval) and a `tool_approval_resolved` entry when it is approved, denied, aborted, or refused, so tools that read session files (sidebars, dashboards) can show a session waiting on approval ([#18837](https://github.com/can1357/oh-my-pi/pull/18837) by [@baekjosh](https://github.com/baekjosh))
 - Added redirected files to a background bash job's streams: `proc://<id>/streams`, the jobs sheet and job widgets (source `file:<n>`) read what a command writes with `> log` while it runs, as they do for `|` stages
 - Added Binary Ninja as a disassembler backend for read analysis views and the dsm namespace. Select it with disassembler.backend = binja; it uses a local install found through binja.installDir, $BN_INSTALL_DIR, or the default install locations ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- Added `tui.tmuxWindowName` (default off), which renames the enclosing tmux window to the active session name without its title card and restores the original name and `automatic-rename` setting on every exit path ([#7850](https://github.com/can1357/oh-my-pi/pull/7850) by [@mvid](https://github.com/mvid)).
+- Added `tui.tmuxWindowNameColor` to tint the session's tmux status entry with its accent color, restoring the window's prior styles on exit ([#7850](https://github.com/can1357/oh-my-pi/pull/7850) by [@mvid](https://github.com/mvid)).
 
 ### Changed
 
