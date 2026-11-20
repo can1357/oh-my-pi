@@ -839,14 +839,15 @@ export interface ExtensionContext {
 	 * `input.role` selects an approval's execution tier, matched against `plan_review_requested`'s
 	 * `tiers` by role name; without it the approval runs on the tier selected in the
 	 * overlay's model slider. `role` applies only to approvals (`execute`, `compact`, `keep`).
-	 * False when that review is not open, the choice is disabled or missing its feedback,
-	 * `input.role` names no selectable tier or accompanies a non-approval choice, or the
-	 * mode has no plan review.
+	 * False when that review is not open, the choice is disabled (with `input.role`, on that tier) or
+	 * missing its feedback, `input.role` names no selectable tier or accompanies a non-approval choice,
+	 * or the mode has no plan review.
 	 */
 	resolvePlanReview(reviewId: string, choice: PlanReviewChoice, input?: { feedback?: string; role?: string }): boolean;
 	/**
-	 * The open interactive plan review still awaiting an answer, as `plan_review_requested` reported it,
-	 * or `undefined`. Lets an extension that loaded or reconnected after the event answer the review.
+	 * The open interactive plan review still awaiting an answer, as `plan_review_requested` reported it
+	 * with `options` re-measured for the currently selected tier, or `undefined`. Lets an extension that
+	 * loaded or reconnected after the event answer the review.
 	 */
 	getPendingPlanReview(): PlanReviewRequestedEvent | undefined;
 	/**
@@ -1491,6 +1492,7 @@ export interface PlanReviewRequestedEvent {
 	title: string;
 	planFilePath: string;
 	planContent: string;
+	/** Availability for the tier selected when the review opened: `keep` is measured against that tier's context window. */
 	options: PlanReviewOption[];
 	/** Execution tiers in slider order (not selection order); omitted when fewer than two resolve. */
 	tiers?: PlanReviewTier[];
@@ -1558,9 +1560,14 @@ export interface ModeChangedEvent {
 	state: SessionModeState;
 }
 
-interface ToolCallEventBase {
-	type: "tool_call";
+interface ToolEventIdentity {
 	toolCallId: string;
+	/** ID of the eval or kernel-defined tool invocation that dispatched this call. Absent for direct calls. */
+	parentToolCallId?: string;
+}
+
+interface ToolCallEventBase extends ToolEventIdentity {
+	type: "tool_call";
 }
 
 export interface BashToolCallEvent extends ToolCallEventBase {
@@ -1608,9 +1615,8 @@ export type ToolCallEvent =
 	| GlobToolCallEvent
 	| CustomToolCallEvent;
 
-interface ToolResultEventBase {
+interface ToolResultEventBase extends ToolEventIdentity {
 	type: "tool_result";
-	toolCallId: string;
 	input: Record<string, unknown>;
 	content: (TextContent | ImageContent)[];
 	isError: boolean;
@@ -2340,6 +2346,8 @@ export interface ProviderModelConfig {
 	thinking?: Model["thinking"];
 	/** Supported input types. */
 	input: ("text" | "image")[];
+	/** Snapcompact frame shape for this model, replacing the model line's default (see `Model.snapcompactShape`). */
+	snapcompactShape?: Model["snapcompactShape"];
 	/** Cost per million tokens. */
 	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	/** Premium Copilot requests charged per user-initiated request. */

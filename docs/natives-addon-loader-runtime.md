@@ -8,7 +8,7 @@ This page documents `packages/natives/native/loader-state.js`, the runtime betwe
 - `native/desktop.js`, `native/clipboard.js`, `native/path.js`, and `native/vcs.js` defer native loading. Desktop, path, and VCS wrappers cache their selected class/bindings; clipboard calls `loadNative()` on each invocation. Path helpers return their input unchanged without loading on non-Windows platforms.
 - Pure loader helpers are exported for focused tests and do not perform detection or filesystem probing until `loadNative()` or `initLoaderContext()` is called.
 
-A successful call is not memoized by JS. Repeated calls rely on the runtime's `require(...)` module cache, while post-load setup is idempotent or best-effort.
+A successful call is not memoized by JS. Repeated calls rely on `openNativeAddon`'s cache: it opens each `.node` path once with `process.dlopen` and returns the same exports on every later call, as `require`'s module cache did (a second `dlopen` would run the addon's init again and make new classes). Post-load setup is idempotent or best-effort.
 
 ## Loader context
 
@@ -103,7 +103,7 @@ Extraction errors are accumulated; the loader continues to ordinary candidates.
 For each candidate:
 
 1. Emit a startup marker when enabled.
-2. `require(candidate)`.
+2. Open `candidate` with `openNativeAddon`, which calls `process.dlopen` once per path. Bun's `require` cannot load a module from a path that contains `?`, which a `HOME`, `PI_NATIVES_DIR` or install directory can hold; `dlopen` takes the path as it is. A failed open records `dlopen`'s reason for the candidate, caches nothing, and the next candidate is tried.
 3. Unless this is workspace development, require `__piNativesBuildVersion()` to return the package version. The build pipeline writes that version into a fixed 64-byte slot (`PI_NATIVES_VERSION_STAMP:<version>` + NUL padding) after linking (`scripts/stamp-native-version.ts`, called from every `scripts/bazel-natives.ts` install, the local cargo build, and the Nix package build), so a release bump edits no Rust input. Addons published before the stamp expose a per-release `__piNativesV<version_with_underscores>` export instead; those are still read as their release for diagnosis.
 4. Call `__ompInstallTokioRuntime()` if the addon provides it.
 5. Best-effort remove valid semantic-version cache directories older than the current version.
@@ -133,7 +133,7 @@ entrypoint evaluates or lazy wrapper is invoked
   -> initialize loader context
   -> extract matching embedded addons, if any
   -> otherwise stage Windows node_modules addon, if applicable
-  -> require candidates in deterministic order
+  -> open candidates in deterministic order (process.dlopen, once per path)
        -> validate release stamp outside workspace development
        -> install optional post-load runtime; record addon identity
        -> best-effort clean older version caches

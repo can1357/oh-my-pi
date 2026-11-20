@@ -22,7 +22,7 @@ import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
 import type { MinimizedMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { type ArtifactAllocator, OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { attachShellTrace } from "@oh-my-pi/pi-tui/tools/shell-viz";
 import {
 	resolveOutputMaxColumns,
@@ -31,6 +31,7 @@ import {
 } from "../tools/output-meta";
 import { quotePosixArgv } from "../utils/shell-quote";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
+import { StreamNewlineNormalizer } from "../utils/stream-newlines";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { loadDirenvEnv } from "./direnv";
 import { buildNonInteractiveEnv } from "./non-interactive-env";
@@ -111,9 +112,8 @@ export interface BashExecutorOptions {
 	 * experiment shapes the output instead. Default: the setting decides.
 	 */
 	minimize?: boolean;
-	/** Artifact path/id for full output storage */
-	artifactPath?: string;
-	artifactId?: string;
+	/** Claims the spill file for output that overflows the inline view. */
+	allocateArtifact?: ArtifactAllocator;
 	/**
 	 * Invoked when the native minimizer rewrote the command's output, giving
 	 * the caller a chance to persist the lossless original capture (typically
@@ -668,6 +668,7 @@ async function executeUserShellPty(run: {
 	dump: (notice?: string) => Promise<OutputSummary & { images?: ImageContent[] }>;
 }): Promise<BashResult> {
 	const session = new PtySession();
+	const newlines = new StreamNewlineNormalizer();
 	const result = await session.startArgv(
 		{
 			application: run.shell,
@@ -685,7 +686,7 @@ async function executeUserShellPty(run: {
 			// Preserve raw bytes for the terminal display, but extract graphics
 			// before the transcript sink sanitizes or truncates the clean text.
 			const clean = run.graphics.push(chunk);
-			if (clean) run.sink.push(clean.replace(/\r\n?/gu, "\n"));
+			if (clean) run.sink.push(newlines.push(clean));
 		},
 		err => {
 			if (err) return;
@@ -789,8 +790,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 						onPreview?.(sink.preview());
 					}
 				: undefined,
-		artifactPath: options?.artifactPath,
-		artifactId: options?.artifactId,
+		allocateArtifact: options?.allocateArtifact,
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),

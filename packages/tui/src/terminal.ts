@@ -1,6 +1,11 @@
-import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as fs from "node:fs";
-import { isolateThreadStartsFromConsole, TtyWriter } from "@oh-my-pi/pi-natives";
+import {
+	enableConsoleVtInput,
+	isolateThreadStartsFromConsole,
+	restoreConsoleInputMode,
+	TtyWriter,
+	translateWindowsAltGrSequence,
+} from "@oh-my-pi/pi-natives";
 import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils/loop-phase";
@@ -34,7 +39,6 @@ import type { TerminalMultiplexerBackgroundColorCache } from "./multiplexers/typ
 import { classifyTerminalMultiplexerModule, terminalMultiplexerSessions } from "./terminal-multiplexer";
 import { setTmuxPaneApcTitles, tmuxSessionSpeaksTsp } from "./tmux";
 import { setHangulCompatibilityJamoWidth } from "./utils";
-import { translateWindowsAltGrSequence } from "./windows-altgr";
 import { Win32InputModeDecoder, Win32PasteMarkerNormalizer } from "./windows-input-mode";
 
 export { writeTerminalSequence, writeThroughActiveTerminal } from "./active-terminal";
@@ -386,9 +390,6 @@ function registerPostmortemTerminalRestore(): void {
 export function setAltScreenActive(active: boolean): void {
 	altScreenActive = active;
 }
-
-const STD_INPUT_HANDLE = -10;
-const ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200;
 
 /**
  * Emergency terminal restore - call this from signal/crash handlers
@@ -869,7 +870,8 @@ export class ProcessTerminal implements Terminal {
 	#stdoutDrainListener?: () => void;
 	#outputDrainListeners = new Set<() => void>();
 
-	#windowsVTInputRestore?: () => void;
+	// Stdin console mode found before VT input was enabled (Windows).
+	#windowsInputMode?: number;
 	#xtermScrollToBottomRestoreModes = new Set<number>();
 	#appearanceCallbacks: Array<
 		(appearance: TerminalAppearance, requestToken?: TerminalAppearanceRequestToken) => void
@@ -1315,47 +1317,13 @@ export class ProcessTerminal implements Terminal {
 	#enableWindowsVTInput(): void {
 		if (process.platform !== "win32") return;
 		this.#restoreWindowsVTInput();
-		try {
-			const kernel32 = dlopen("kernel32.dll", {
-				GetStdHandle: { args: [FFIType.i32], returns: FFIType.ptr },
-				GetConsoleMode: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
-				SetConsoleMode: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.bool },
-			});
-			const handle = kernel32.symbols.GetStdHandle(STD_INPUT_HANDLE);
-			const mode = new Uint32Array(1);
-			const modePtr = ptr(mode);
-			if (!modePtr || !kernel32.symbols.GetConsoleMode(handle, modePtr)) {
-				kernel32.close();
-				return;
-			}
-			const originalMode = mode[0]!;
-			const vtMode = originalMode | ENABLE_VIRTUAL_TERMINAL_INPUT;
-			if (vtMode !== originalMode && !kernel32.symbols.SetConsoleMode(handle, vtMode)) {
-				kernel32.close();
-				return;
-			}
-			this.#windowsVTInputRestore = () => {
-				try {
-					kernel32.symbols.SetConsoleMode(handle, originalMode);
-				} finally {
-					kernel32.close();
-				}
-			};
-		} catch {
-			// bun:ffi unavailable or console API unsupported; keep startup non-fatal.
-		}
+		this.#windowsInputMode = enableConsoleVtInput() ?? undefined;
 	}
 
 	#restoreWindowsVTInput(): void {
-		if (process.platform !== "win32") return;
-		const restore = this.#windowsVTInputRestore;
-		this.#windowsVTInputRestore = undefined;
-		if (!restore) return;
-		try {
-			restore();
-		} catch {
-			// Ignore restore errors during terminal teardown.
-		}
+		const mode = this.#windowsInputMode;
+		this.#windowsInputMode = undefined;
+		if (mode !== undefined) restoreConsoleInputMode(mode);
 	}
 
 	/**

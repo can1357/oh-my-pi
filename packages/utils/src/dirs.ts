@@ -836,6 +836,11 @@ export function getBrowserRelayDir(): string {
 	return dirs.rootSubdir("browser-relay", "data");
 }
 
+/** Get the install registry shared by every omp profile and browser. */
+export function getBrowserRelayInstallRegistryFile(): string {
+	return dirs.baseRootSubdir(path.join("browser-relay", "installs.json"));
+}
+
 /** Get the profile root for Chromium browsers the browser tool spawns via `app.path` (~/.omp/browser-profiles). */
 export function getBrowserProfilesDir(): string {
 	return dirs.rootSubdir("browser-profiles", "state");
@@ -912,6 +917,15 @@ export function getAuthBrokerSnapshotCachePath(): string {
 	const override = process.env.OMP_AUTH_BROKER_SNAPSHOT_CACHE;
 	if (override) return override;
 	return dirs.rootSubdir(path.join("cache", "auth-broker-snapshot.enc"), "cache");
+}
+
+/**
+ * Get the cached OpenAI Codex client version record
+ * (~/.omp/agent/codex-client-version.json; XDG default: $XDG_CACHE_HOME/omp/codex-client-version.json).
+ * It is a refetchable cache, not config, so it belongs under the cache dir.
+ */
+export function getCodexClientVersionPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "codex-client-version.json", "cache");
 }
 
 /** Get the commit-author avatar cache directory (~/.omp/cache/avatars). */
@@ -995,6 +1009,11 @@ export function getLastChangelogVersionPath(agentDir?: string): string {
 /** Get the path to history.db (SQLite database for session history). */
 export function getHistoryDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "history.db", "data");
+}
+
+/** Get the path to transcripts.db (full-text index of session transcripts). */
+export function getTranscriptIndexDbPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "transcripts.db", "data");
 }
 
 /** Get the path to models.db (model cache database). */

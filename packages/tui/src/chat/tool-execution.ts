@@ -60,7 +60,7 @@ import {
 } from "../render/render-utils";
 import type { XdevMountedState } from "../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
-import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
+import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "../png-conversion";
 import { FenceFigure } from "./fence-figure";
 import { SpotlightNotices } from "./spotlight";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
