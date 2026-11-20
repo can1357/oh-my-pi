@@ -103,21 +103,30 @@ impl Win32Ax {
 	}
 
 	/// Refuses known self-activating providers rather than disabling a foreign
-	/// window or trying to undo a foreground steal after the action.
-	fn contained(
+	/// window or trying to undo a foreground steal after the action. The check
+	/// runs again after `lookup`'s provider queries, right before `send`: the
+	/// user may switch windows while a provider answers.
+	fn contained<A>(
 		&mut self,
 		element: &UIElement,
-		call: impl FnOnce() -> CoreResult<()>,
+		lookup: impl FnOnce() -> CoreResult<A>,
+		send: impl FnOnce(A) -> CoreResult<()>,
 	) -> CoreResult<()> {
-		Self::contained_root(self.host_root(element), call)
+		Self::contained_root(self.host_root(element), lookup, send)
 	}
 
-	fn contained_root(root: Option<HWND>, call: impl FnOnce() -> CoreResult<()>) -> CoreResult<()> {
+	fn contained_root<A>(
+		root: Option<HWND>,
+		lookup: impl FnOnce() -> CoreResult<A>,
+		send: impl FnOnce(A) -> CoreResult<()>,
+	) -> CoreResult<()> {
 		let root = root.ok_or_else(|| {
 			DesktopError::ax_failed("cannot establish the native window hosting this UIA element")
 		})?;
 		window::ensure_pattern_safe(root)?;
-		call()
+		let action = lookup()?;
+		window::ensure_pattern_safe(root)?;
+		send(action)
 	}
 
 	/// Presses the control under a physical screen point through UI
@@ -274,6 +283,60 @@ impl PositionlessPress {
 			Self::Collapse(pattern) => pattern.collapse(),
 			Self::Toggle(pattern) => pattern.toggle(),
 			Self::Select(pattern) => pattern.select(),
+		}
+	}
+}
+
+/// A UI Automation action whose pattern has been looked up, ready to send.
+enum PatternAction {
+	Press(PositionlessPress),
+	ScrollIntoView(UIScrollItemPattern),
+	DefaultAction(UILegacyIAccessiblePattern),
+}
+
+impl PatternAction {
+	/// The pattern `action` sends on `element`.
+	fn lookup(element: &UIElement, action: &str) -> CoreResult<Self> {
+		let press = |pattern| -> CoreResult<Self> { Ok(Self::Press(pattern)) };
+		match action {
+			"press" => {
+				if let Some(pattern) = positionless_press(element) {
+					return press(pattern);
+				}
+				if let Ok(pattern) = element.get_pattern::<UIInvokePattern>() {
+					return press(PositionlessPress::Invoke(pattern));
+				}
+				if let Ok(pattern) = element.get_pattern::<UITogglePattern>() {
+					return press(PositionlessPress::Toggle(pattern));
+				}
+				if let Ok(pattern) = element.get_pattern::<UISelectionItemPattern>() {
+					return press(PositionlessPress::Select(pattern));
+				}
+				let pattern = element
+					.get_pattern::<UILegacyIAccessiblePattern>()
+					.map_err(ax_error)?;
+				if pattern.get_default_action().map_err(ax_error)?.is_empty() {
+					return Err(DesktopError::ax_failed("UIA element has no default press action"));
+				}
+				Ok(Self::DefaultAction(pattern))
+			},
+			"invoke" => press(PositionlessPress::Invoke(element.get_pattern().map_err(ax_error)?)),
+			"toggle" => press(PositionlessPress::Toggle(element.get_pattern().map_err(ax_error)?)),
+			"expand" => press(PositionlessPress::Expand(element.get_pattern().map_err(ax_error)?)),
+			"collapse" => press(PositionlessPress::Collapse(element.get_pattern().map_err(ax_error)?)),
+			"select" => press(PositionlessPress::Select(element.get_pattern().map_err(ax_error)?)),
+			"scrollintoview" => Ok(Self::ScrollIntoView(element.get_pattern().map_err(ax_error)?)),
+			other => {
+				Err(DesktopError::ax_failed(format!("unsupported UI Automation action '{other}'")))
+			},
+		}
+	}
+
+	fn send(&self) -> Result<(), uiautomation::Error> {
+		match self {
+			Self::Press(press) => press.run(),
+			Self::ScrollIntoView(pattern) => pattern.scroll_into_view(),
+			Self::DefaultAction(pattern) => pattern.do_default_action(),
 		}
 	}
 }
@@ -525,77 +588,19 @@ impl AxBackend for Win32Ax {
 			}
 		}
 		let root = walker.and_then(|walker| Self::host_root_from(element, &walker, direct));
-		Self::contained_root(root, || match action.as_str() {
-			"press" => {
-				if let Some(pattern) = positionless_press(element) {
-					control::dispatching()?;
-					return pattern.run().map_err(ax_error);
-				}
-				if let Ok(pattern) = element.get_pattern::<UIInvokePattern>() {
-					control::dispatching()?;
-					return pattern.invoke().map_err(ax_error);
-				}
-				if let Ok(pattern) = element.get_pattern::<UITogglePattern>() {
-					control::dispatching()?;
-					return pattern.toggle().map_err(ax_error);
-				}
-				if let Ok(pattern) = element.get_pattern::<UISelectionItemPattern>() {
-					control::dispatching()?;
-					return pattern.select().map_err(ax_error);
-				}
-				let pattern = element
-					.get_pattern::<UILegacyIAccessiblePattern>()
-					.map_err(ax_error)?;
-				if pattern.get_default_action().map_err(ax_error)?.is_empty() {
-					return Err(DesktopError::ax_failed("UIA element has no default press action"));
-				}
+		Self::contained_root(
+			root,
+			|| match invoke {
+				Some(pattern) => pattern
+					.map(|pattern| PatternAction::Press(PositionlessPress::Invoke(pattern)))
+					.map_err(ax_error),
+				None => PatternAction::lookup(element, &action),
+			},
+			|action| {
 				control::dispatching()?;
-				pattern.do_default_action().map_err(ax_error)
+				action.send().map_err(ax_error)
 			},
-			"invoke" => {
-				let pattern = invoke
-					.unwrap_or_else(|| element.get_pattern::<UIInvokePattern>())
-					.map_err(ax_error)?;
-				control::dispatching()?;
-				pattern.invoke().map_err(ax_error)
-			},
-			"toggle" => {
-				let pattern = element.get_pattern::<UITogglePattern>().map_err(ax_error)?;
-				control::dispatching()?;
-				pattern.toggle().map_err(ax_error)
-			},
-			"expand" => {
-				let pattern = element
-					.get_pattern::<UIExpandCollapsePattern>()
-					.map_err(ax_error)?;
-				control::dispatching()?;
-				pattern.expand().map_err(ax_error)
-			},
-			"collapse" => {
-				let pattern = element
-					.get_pattern::<UIExpandCollapsePattern>()
-					.map_err(ax_error)?;
-				control::dispatching()?;
-				pattern.collapse().map_err(ax_error)
-			},
-			"select" => {
-				let pattern = element
-					.get_pattern::<UISelectionItemPattern>()
-					.map_err(ax_error)?;
-				control::dispatching()?;
-				pattern.select().map_err(ax_error)
-			},
-			"scrollintoview" => {
-				let pattern = element
-					.get_pattern::<UIScrollItemPattern>()
-					.map_err(ax_error)?;
-				control::dispatching()?;
-				pattern.scroll_into_view().map_err(ax_error)
-			},
-			other => {
-				Err(DesktopError::ax_failed(format!("unsupported UI Automation action '{other}'")))
-			},
-		})
+		)
 	}
 
 	fn set_value(&mut self, handle: &AxHandle, text: &str) -> CoreResult<()> {
@@ -635,12 +640,11 @@ impl AxBackend for Win32Ax {
 					password,
 				);
 			},
-			super::value_write::ValueRoute::Pattern => self.contained(element, || {
-				element
-					.get_pattern::<UIValuePattern>()
-					.and_then(|pattern| pattern.set_value(text))
-					.map_err(ax_error)
-			})?,
+			super::value_write::ValueRoute::Pattern => self.contained(
+				element,
+				|| element.get_pattern::<UIValuePattern>().map_err(ax_error),
+				|pattern| pattern.set_value(text).map_err(ax_error),
+			)?,
 		}
 		// Password providers cannot supply evidence, so do not query hidden
 		// or protected representations just to discard them.
