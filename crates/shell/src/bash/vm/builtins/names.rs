@@ -83,31 +83,51 @@ pub fn alias_table(
 	cx: &mut Cx<'_>,
 	vp: &Vproc,
 ) -> Result<Option<Aliases>, StoreError> {
-	if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
-		return zsh_alias_table(k, cx, vp);
+	let zsh = vp.mode.dialect() == crate::bash::ids::Dialect::Zsh;
+	let on = if zsh {
+		state::zsh_option(&mut k.root, cx.store, vp, crate::bash::zshopt::ZshOpt::Aliases)?
+	} else {
+		state::option(&mut k.root, cx.store, vp, OptId::ExpandAliases)?
+			|| state::option(&mut k.root, cx.store, vp, OptId::Posix)?
+	};
+	Aliases::with_options(k, cx, vp, zsh, on)
+}
+
+/// The execution alias table under an explicitly restored mode/enable bit.
+/// Alias definitions and disabled reserved words are not scoped options.
+impl Aliases {
+	pub fn with_options(
+		k: &Kernel,
+		cx: &mut Cx<'_>,
+		vp: &Vproc,
+		zsh: bool,
+		on: bool,
+	) -> Result<Option<Self>, StoreError> {
+		if zsh {
+			return zsh_alias_table(k, cx, vp, on);
+		}
+		if !on {
+			return Ok(None);
+		}
+		let regular: HashMap<BString, BString> = state::scan(&k.root, cx.store, vp, Table::Alias)?
+			.into_iter()
+			.filter_map(|(k, r)| match (k, r) {
+				(KeyBuf::Alias(n), Record::Alias(v)) => Some((n, v)),
+				_ => None,
+			})
+			.collect();
+		Ok((!regular.is_empty()).then(|| Self { regular, ..Self::default() }))
 	}
-	let on = state::option(&mut k.root, cx.store, vp, OptId::ExpandAliases)?
-		|| state::option(&mut k.root, cx.store, vp, OptId::Posix)?;
-	if !on {
-		return Ok(None);
-	}
-	let regular: HashMap<BString, BString> = state::scan(&k.root, cx.store, vp, Table::Alias)?
-		.into_iter()
-		.filter_map(|(k, r)| match (k, r) {
-			(KeyBuf::Alias(n), Record::Alias(v)) => Some((n, v)),
-			_ => None,
-		})
-		.collect();
-	Ok((!regular.is_empty()).then(|| Aliases { regular, ..Aliases::default() }))
 }
 
 /// [`alias_table`] in the zsh dialect: with the `aliases` option on, the
 /// regular, global and suffix aliases not turned off by `disable -a`/`-s`;
 /// always the reserved words `disable -r` turned off.
 fn zsh_alias_table(
-	k: &mut Kernel,
+	k: &Kernel,
 	cx: &mut Cx<'_>,
 	vp: &Vproc,
+	on: bool,
 ) -> Result<Option<Aliases>, StoreError> {
 	use crate::bash::store::{Key, MiscKey};
 	fn words(cx: &mut Cx<'_>, vp: &Vproc, key: MiscKey) -> Result<Vec<BString>, StoreError> {
@@ -121,7 +141,7 @@ fn zsh_alias_table(
 		private: super::zsh_module::loaded(cx.store, vp, b"zsh/param/private")?,
 		..Aliases::default()
 	};
-	if state::zsh_option(&mut k.root, cx.store, vp, crate::bash::zshopt::ZshOpt::Aliases)? {
+	if on {
 		let off = words(cx, vp, MiscKey::ZshDisabledAliases)?;
 		let off_suffix = words(cx, vp, MiscKey::ZshDisabledSuffixAliases)?;
 		for (key, rec) in state::scan(&k.root, cx.store, vp, Table::Alias)? {

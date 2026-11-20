@@ -25,7 +25,7 @@ function oversizedMessageHistory(prefix: string) {
 describe("RPC frame encoding", () => {
 	// Transport preserves all JSON values. The wire type that generates the
 	// client decoders accepts absent/false/true, but rejects non-booleans.
-	it("preserves the bash exit flag's boundary shapes through frame encoding and decoding", () => {
+	it("preserves optional bash attribution through framing and validates its schema types", () => {
 		const bash = type.scope({ ...messageDefs, ...modelDefs, ...stateDefs }).export().BashResult;
 		const base = {
 			output: "",
@@ -37,24 +37,26 @@ describe("RPC frame encoding", () => {
 			outputLines: 0,
 			outputBytes: 0,
 		};
-		for (const flag of ["endedByExit", "ephemeralShell"] as const) {
-			for (const [data, present, valid] of [
-				[base, false, true],
-				[{ ...base, [flag]: false }, true, true],
-				[{ ...base, [flag]: true }, true, true],
-				[{ ...base, [flag]: "true" }, true, false],
-				[{ ...base, [flag]: 1 }, true, false],
-			] as const) {
-				const frame = { type: "response", command: "bash", success: true, data };
-				for (const version of [1, 2] as const) {
-					const encoder = new RpcFrameEncoder();
-					encoder.setProtocolVersion(version);
-					const decoder = new RpcFrameDecoder();
-					const decoded = decoder.push(JSON.parse(encoder.encode(frame))) as typeof frame;
-					expect(decoded).toEqual(frame);
-					expect(flag in decoded.data).toBe(present);
-					expect(bash.allows(decoded.data)).toBe(valid);
+		for (const [fields, valid] of [
+			[{}, true],
+			[{ endedByExit: false }, true],
+			[{ endedByExit: true }, true],
+			[{ ephemeralShell: false }, true],
+			[{ ephemeralShell: true }, true],
+			[{ endedByExit: "true", ephemeralShell: false }, false],
+			[{ endedByExit: true, ephemeralShell: 1 }, false],
+		] as const) {
+			const frame = { type: "response", command: "bash", success: true, data: { ...base, ...fields } };
+			for (const version of [1, 2] as const) {
+				const encoder = new RpcFrameEncoder();
+				encoder.setProtocolVersion(version);
+				const decoder = new RpcFrameDecoder();
+				const decoded = decoder.push(JSON.parse(encoder.encode(frame))) as typeof frame;
+				expect(decoded).toEqual(frame);
+				for (const flag of ["endedByExit", "ephemeralShell"] as const) {
+					expect(Object.hasOwn(decoded.data, flag)).toBe(Object.hasOwn(fields, flag));
 				}
+				expect(bash.allows(decoded.data)).toBe(valid);
 			}
 		}
 	});

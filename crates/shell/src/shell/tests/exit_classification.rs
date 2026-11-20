@@ -76,12 +76,21 @@ async fn exit_classification_cleanup_preserves_first_exit_report() {
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_classification_successors_follow_terminating_status() {
 	let _guard = shell_test_lock().lock().await;
-	for minimized in [false, true] {
+	for minimized in [
+		false,
+		#[cfg(unix)]
+		true,
+	] {
+		#[cfg(unix)]
 		let root = tempfile::tempdir().expect("chain directory");
-		let shell = Shell::new(minimized.then(|| ShellOptions {
+		#[cfg(unix)]
+		let options = minimized.then(|| ShellOptions {
 			minimizer: Some(printf_minimizer(&root.path().join("minimizer.toml"), None)),
 			..Default::default()
-		}));
+		});
+		#[cfg(not(unix))]
+		let options = None;
+		let shell = Shell::new(options);
 		for status in [0, 1] {
 			for operator in ["&&", "||"] {
 				for negated in [false, true] {
@@ -876,4 +885,240 @@ async fn exit_classification_zsh_errexit_after_return_boundary() {
 			assert_eq!(result.ended_by_exit, expected, "{dialect} {name}: {command}");
 		}
 	}
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_restored_parse_carriers_and_controls() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("source directory");
+	let path = root.path().join("caller.sh");
+	std::fs::write(&path, "g\nnoop").expect("caller source");
+	for (setup, expected) in [("shopt -s expand_aliases", true), ("shopt -u expand_aliases", true)] {
+		for exiting in [false, true] {
+			let transfer = if exiting { "exit 0" } else { ":" };
+			let command = format!("alias noop=''\n{setup}\nemulate sh -c '{transfer}'\nnoop");
+			let result = run_exit_case(&Shell::new(None), &command).await;
+			assert_eq!(result.exit_code, Some(if exiting { 0 } else { 127 }), "{command}");
+			assert_eq!(result.ended_by_exit, exiting && expected, "{command}");
+		}
+	}
+	// Scoped/leaking enable and disable, one/nested calls, incremental source
+	// versus zsh's saved eval parse snapshot, and non-aborting return controls.
+	for scoped in [false, true] {
+		for outer in [false, true] {
+			for carrier in ["root", "source", "nested-source", "eval", "nested-eval"] {
+				for exiting in [false, true] {
+					let initial = if outer { "aliases" } else { "noaliases" };
+					let changed = if outer { "noaliases" } else { "aliases" };
+					let local = if scoped { "localoptions " } else { "" };
+					let transfer = if exiting { "exit 0" } else { "return 0" };
+					let call = match carrier {
+						"root" => "g\nnoop".to_string(),
+						"source" => format!(". {}", quote_arg(path.to_str().unwrap())),
+						"nested-source" => format!(
+							"f() {{ eval {}; }}; f",
+							quote_arg(&format!(". {}", quote_arg(path.to_str().unwrap())))
+						),
+						"eval" => "eval 'g\nnoop'".to_string(),
+						_ => "f() { eval 'g\nnoop'; }; f".to_string(),
+					};
+					let command = format!(
+						"emulate zsh\nalias noop=''\nsetopt {initial}\ng() {{ setopt {local}{changed}; \
+						 {transfer}; }}\n{call}"
+					);
+					let effective = if scoped || carrier.contains("eval") {
+						outer
+					} else {
+						!outer
+					};
+					let result = run_exit_case(&Shell::new(None), &command).await;
+					assert_eq!(
+						result.exit_code,
+						Some(if exiting || effective { 0 } else { 127 }),
+						"{command}"
+					);
+					assert_eq!(result.ended_by_exit, exiting && !effective, "{carrier}: {command}");
+				}
+			}
+		}
+	}
+	// local - restores POSIX (a set option), not expand_aliases (a shopt).
+	// The restored POSIX bit must therefore independently gate alias lookup.
+	for scoped in [false, true] {
+		for outer in [false, true] {
+			for exiting in [false, true] {
+				let initial = if outer { "-o" } else { "+o" };
+				let changed = if outer { "+o" } else { "-o" };
+				let local = if scoped { "local -;" } else { "" };
+				let transfer = if exiting { "exit 0" } else { "return 0" };
+				let command = format!(
+					"set {initial} posix\nshopt -u expand_aliases\nalias noop=''\ng() {{ {local} set \
+					 {changed} posix; shopt -u expand_aliases; {transfer}; }}\ng\nnoop"
+				);
+				let effective = if scoped { outer } else { !outer };
+				let result = run_exit_case(&Shell::new(None), &command).await;
+				assert_eq!(
+					result.exit_code,
+					Some(if exiting || effective { 0 } else { 127 }),
+					"{command}"
+				);
+				assert_eq!(result.ended_by_exit, exiting && !effective, "{command}");
+			}
+		}
+	}
+}
+
+// A leaking alias change can only affect the unread source, not the other
+// commands already compiled in the same unit as the call.
+#[tokio::test]
+async fn exit_classification_alias_changes_respect_parse_timing() {
+	let _guard = shell_test_lock().lock().await;
+	for (separator, unrun) in [("; ", true), ("\n", false)] {
+		for exiting in [false, true] {
+			let transfer = if exiting { "exit 0" } else { "return 0" };
+			let command = format!(
+				"shopt -u expand_aliases\nalias noop=''\nf() {{ shopt -s expand_aliases; {transfer}; \
+				 }}\nf{separator}noop"
+			);
+			let result = run_exit_case(&Shell::new(None), &command).await;
+			assert_eq!(result.exit_code, Some(if !exiting && unrun { 127 } else { 0 }), "{command}");
+			assert_eq!(result.ended_by_exit, exiting && unrun, "{command}");
+		}
+	}
+}
+
+#[tokio::test]
+async fn exit_classification_restored_caller_parse_context() {
+	let _guard = shell_test_lock().lock().await;
+	// A function's scoped option change (`setopt localoptions aliases`) must not
+	// leak into the parser context that decides whether the caller's unread
+	// source holds another command: each caller frame needs its own effective
+	// context after counterfactual restoration, not the exiting frame's.
+	for (name, command, expected_exit, expected_output, expected) in [
+		// Caller has aliases disabled; f re-enables them locally and exits.
+		// After restoration `noop` is an unknown word at the caller, so the
+		// aborted run leaves unrun input.
+		(
+			"local-enable-exit-unrun-caller-word",
+			"emulate zsh\nalias noop=''\nsetopt noaliases\nf() { setopt localoptions aliases; exit \
+			 0; }\nf\nnoop",
+			0,
+			"",
+			true,
+		),
+		// Control: returning instead of exiting reaches `noop` and fails as a
+		// command, proving the caller really keeps aliases disabled.
+		(
+			"local-enable-return-runs-caller-word",
+			"emulate zsh\nalias noop=''\nsetopt noaliases\nf() { setopt localoptions aliases; return \
+			 0; }\nf\nnoop",
+			127,
+			"zsh:6: command not found: noop\n",
+			false,
+		),
+		// Caller has aliases enabled; f disables them locally and exits. After
+		// restoration `noop` expands to nothing, so no input was left unrun.
+		(
+			"local-disable-exit-expands-caller-word",
+			"emulate zsh\nalias noop=''\nf() { setopt localoptions noaliases; exit 0; }\nf\nnoop",
+			0,
+			"",
+			false,
+		),
+		// Control: returning keeps running; `noop` expands to nothing.
+		(
+			"local-disable-return-expands-caller-word",
+			"emulate zsh\nalias noop=''\nf() { setopt localoptions noaliases; return 0; }\nf\nnoop",
+			0,
+			"",
+			false,
+		),
+	] {
+		let shell = Shell::new(None);
+		let (tx, rx) = flume::unbounded();
+		let result = shell
+			.run(
+				ShellRunOptions { command: command.to_string(), ..Default::default() },
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await
+			.expect("shell run");
+		let output: String = rx.try_iter().collect();
+		assert_eq!(output, expected_output, "{name}: {command}");
+		assert_eq!(result.exit_code, Some(expected_exit), "{name}: {command}");
+		assert_eq!(result.ended_by_exit, expected, "{name}: {command}");
+	}
+}
+
+/// Locale is part of the parser context too: a multibyte trailing backslash
+/// is literal, while in C it escapes the newline and leaves an empty alias.
+/// Return controls exercise real scope restoration independently of the walk.
+#[tokio::test]
+async fn exit_classification_restored_caller_charset() {
+	let _guard = shell_test_lock().lock().await;
+	let mut failures = Vec::new();
+	for (charset, byte) in [("zh_TW.Big5", "a3"), ("ja_JP.Shift_JIS", "83"), ("zh_CN.GB18030", "81")]
+	{
+		for outer_multibyte in [false, true] {
+			let outer = if outer_multibyte { charset } else { "C" };
+			let inner = if outer_multibyte { "C" } else { charset };
+			for variable in ["LC_ALL", "LC_CTYPE", "LANG"] {
+				for binding in ["local", "temporary", "leaking", "retained-eval"] {
+					for exiting in [false, true] {
+						let transfer = if exiting { "exit 0" } else { "return 0" };
+						let (body, call) = match binding {
+							"local" => (format!("local {variable}={inner}; {transfer}"), "f".into()),
+							"temporary" => (transfer.into(), format!("{variable}={inner} f")),
+							"leaking" => (format!("{variable}={inner}; {transfer}"), "f".into()),
+							_ => (format!("local {variable}={outer}; {transfer}"), "f".into()),
+						};
+						let prefix = if binding == "retained-eval" {
+							format!("{variable}={inner} ")
+						} else {
+							String::new()
+						};
+						let command = format!(
+							"unset LC_ALL LC_CTYPE LANG\n{variable}={outer}\nshopt -s \
+							 expand_aliases\nalias $'\\x{byte}'=''\nf() {{ {body}; }}\n{prefix}eval \
+							 $'{call}\\n\\x{byte}\\\\\\n'"
+						);
+						let multibyte = if matches!(binding, "leaking" | "retained-eval") {
+							!outer_multibyte
+						} else {
+							outer_multibyte
+						};
+						let shell = Shell::new(None);
+						let (tx, rx) = flume::unbounded();
+						let result = shell
+							.run(
+								ShellRunOptions { command: command.clone(), ..Default::default() },
+								Some(tx),
+								CancelToken::default(),
+							)
+							.await
+							.expect("shell run");
+						let output: String = rx.try_iter().collect();
+						let expected_code = if !exiting && multibyte { 127 } else { 0 };
+						let expected_flag = exiting && multibyte;
+						let output_ok = if !exiting && multibyte {
+							output.contains("command not found")
+						} else {
+							output.is_empty()
+						};
+						if result.exit_code != Some(expected_code)
+							|| result.ended_by_exit != expected_flag
+							|| !output_ok
+						{
+							failures.push(format!(
+								"{binding}, exiting={exiting}, expected code={expected_code}, \
+								 flag={expected_flag}, actual={result:?}, output={output:?}: {command}"
+							));
+						}
+					}
+				}
+			}
+		}
+	}
+	assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

@@ -33,8 +33,21 @@ fn first_set<R>(
 	names: [&[u8]; 3],
 	f: impl Fn(&[u8]) -> R,
 ) -> Result<Option<R>, StoreError> {
+	first_set_scopes(root, store, vp, names, usize::MAX, f)
+}
+
+/// [`first_set`] under the outermost `upto` scopes of `vp` only (see
+/// [`state::lookup_upto`]).
+fn first_set_scopes<R>(
+	root: &state::Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+	names: [&[u8]; 3],
+	upto: usize,
+	f: impl Fn(&[u8]) -> R,
+) -> Result<Option<R>, StoreError> {
 	for name in names {
-		let found = state::lookup(root, store, vp, name)?
+		let found = state::lookup_upto(root, store, vp, name, upto)?
 			.and_then(|v| v.as_scalar())
 			.filter(|value| !value.is_empty())
 			.map(&f);
@@ -86,6 +99,23 @@ pub fn charset_root(
 		root.charset = Some((token, cs));
 	}
 	Ok(cs)
+}
+
+/// [`charset_root`] as a caller frame of the attribution walk sees it: the
+/// outermost `upto` scopes of `vp` alive, the rest discarded — the
+/// counterfactual of [`state::lookup_upto`]. Read-only: the answer is not
+/// written to the live [`state::Root::charset`] cache, whose view is the
+/// whole `vp`.
+///
+/// # Errors
+/// [`StoreError`] when a locale variable cannot be read.
+pub fn charset_upto(
+	root: &state::Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+	upto: usize,
+) -> Result<Charset, StoreError> {
+	Ok(first_set_scopes(root, store, vp, CTYPE_VARS, upto, charset_of)?.unwrap_or(Charset::Bytes))
 }
 
 /// Whether the shell's locale is UTF-8 ([`charset`] is [`Charset::Utf8`]).

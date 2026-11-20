@@ -965,10 +965,49 @@ fn bound_at(
 	vp: &Vproc,
 	name: &[u8],
 ) -> Result<At, StoreError> {
+	bound_at_upto(root, store, vp, name, usize::MAX)
+}
+
+/// [`bound_at`] for a caller frame of the attribution walk: the innermost
+/// scope binding `name` among the outermost `upto` scopes of `vp` only, the
+/// scopes the frames it called created discarded (see [`lookup_upto`]).
+/// `usize::MAX` is every scope, the [`bound_at`] case.
+fn bound_at_upto(
+	root: &Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+	name: &[u8],
+	upto: usize,
+) -> Result<At, StoreError> {
 	if vp.image.is_none() {
-		return Ok(root_binding(root, store, name)?.map_or(At::Global, |d| At::Scope(In::Store(d))));
+		// A lazy scope binds nothing: `root_binding_below` clamps to the
+		// materialized `depth` on its own.
+		let top = u32::try_from(upto).unwrap_or(u32::MAX);
+		return Ok(root_binding_below(root, store, name, top, true)?
+			.map_or(At::Global, |d| At::Scope(In::Store(d))));
 	}
-	Ok(vec_binding(vp, name).map_or(At::Global, |i| At::Scope(In::Vec(i))))
+	Ok(vec_binding_upto(vp, name, upto).map_or(At::Global, |i| At::Scope(In::Vec(i))))
+}
+
+/// [`vec_binding`] among the outermost `upto` scopes of a forked `vp` only;
+/// a zsh private parameter is hidden by a function scope within the bound,
+/// the discarded scopes above it not counting.
+fn vec_binding_upto(vp: &Vproc, name: &[u8], upto: usize) -> Option<usize> {
+	let bound = vp.scopes.len().min(upto);
+	vp.scopes[..bound]
+		.iter()
+		.enumerate()
+		.rev()
+		.find_map(|(i, s)| {
+			let entry = s.vars.get(name)?;
+			let private = entry
+				.as_ref()
+				.is_some_and(|v| v.attrs.contains(Attrs::ZSH_PRIVATE));
+			if private && vp.scopes[i + 1..bound].iter().any(|s| s.func.is_some()) {
+				return None;
+			}
+			Some(i)
+		})
 }
 
 /// The global state a child forked from `vp` starts with, and its locale
@@ -1096,12 +1135,27 @@ pub fn deref(
 	vp: &Vproc,
 	name: &[u8],
 ) -> Result<Deref, StoreError> {
+	deref_upto(root, store, vp, name, usize::MAX)
+}
+
+/// [`deref`] under the outermost `upto` scopes of `vp` only (see
+/// [`lookup_upto`]): each hop reads through [`lookup_declared_upto`].
+///
+/// # Errors
+/// [`StoreError`] when a variable cannot be read.
+fn deref_upto(
+	root: &Root,
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+	name: &[u8],
+	upto: usize,
+) -> Result<Deref, StoreError> {
 	if !may_be_nameref(root, vp) {
 		return Ok(Deref::Plain);
 	}
 	let mut cur = BString::from(name);
 	for hop in 0..MAX_DEREF {
-		let Some(target) = lookup_declared(root, store, vp, &cur)?
+		let Some(target) = lookup_declared_upto(root, store, vp, &cur, upto)?
 			.filter(|v| v.attrs.contains(Attrs::NAMEREF) && !v.attrs.contains(Attrs::INVISIBLE))
 			.and_then(Var::as_scalar)
 			.filter(|t| !t.is_empty())
@@ -1148,22 +1202,49 @@ pub fn lookup<'a>(
 	vp: &'a Vproc,
 	name: &[u8],
 ) -> Result<Option<&'a Var>, StoreError> {
+	lookup_scopes(root, store, vp, name, usize::MAX)
+}
+
+/// [`lookup`] as a caller frame of the attribution walk sees it: only the
+/// outermost `upto` scopes of `vp` alive, the ones the frames it called
+/// created discarded — a read-only counterfactual; the caller never pops a
+/// scope itself. Name references bound in a surviving scope resolve through
+/// the same bound view.
+///
+/// # Errors
+/// [`StoreError`] when a variable cannot be read.
+pub fn lookup_upto<'a>(
+	root: &Root,
+	store: &'a mut dyn StateStore,
+	vp: &'a Vproc,
+	name: &[u8],
+	upto: usize,
+) -> Result<Option<&'a Var>, StoreError> {
+	lookup_scopes(root, store, vp, name, upto)
+}
+
+fn lookup_scopes<'a>(
+	root: &Root,
+	store: &'a mut dyn StateStore,
+	vp: &'a Vproc,
+	name: &[u8],
+	upto: usize,
+) -> Result<Option<&'a Var>, StoreError> {
 	// The common case, a variable that is no nameref (every expansion reads
 	// through here): one walk, one read when the root holds no nameref,
 	// else the binding read once more to return it (a borrow returned on
 	// one path only cannot be held across the other).
-	let at = bound_at(root, store, vp, name)?;
+	let at = bound_at_upto(root, store, vp, name, upto)?;
 	if !may_be_nameref(root, vp)
 		|| !var_at(store, vp, name, at)?.is_some_and(|v| v.attrs.contains(Attrs::NAMEREF))
 	{
 		return Ok(var_at(store, vp, name, at)?.filter(|v| !v.attrs.contains(Attrs::INVISIBLE)));
 	}
-	match deref(root, store, vp, name)? {
-		Deref::Plain => {
-			Ok(lookup_declared(root, store, vp, name)?.filter(|v| !v.attrs.contains(Attrs::INVISIBLE)))
-		},
+	match deref_upto(root, store, vp, name, upto)? {
+		Deref::Plain => Ok(lookup_declared_upto(root, store, vp, name, upto)?
+			.filter(|v| !v.attrs.contains(Attrs::INVISIBLE))),
 		Deref::To { name: target, index: None } => {
-			Ok(lookup_declared(root, store, vp, &target)?
+			Ok(lookup_declared_upto(root, store, vp, &target, upto)?
 				.filter(|v| !v.attrs.contains(Attrs::INVISIBLE)))
 		},
 		Deref::To { index: Some(_), .. } | Deref::Circular => Ok(None),
@@ -1183,6 +1264,24 @@ pub fn lookup_declared<'a>(
 	name: &[u8],
 ) -> Result<Option<&'a Var>, StoreError> {
 	let at = bound_at(root, store, vp, name)?;
+	var_at(store, vp, name, at)
+}
+
+/// [`lookup_declared`] under the outermost `upto` scopes of `vp` only (see
+/// [`lookup_upto`]): no name references followed, declared-but-unset
+/// variables returned with their attributes.
+///
+/// # Errors
+/// [`StoreError`] when a variable cannot be read.
+#[inline]
+pub fn lookup_declared_upto<'a>(
+	root: &Root,
+	store: &'a mut dyn StateStore,
+	vp: &'a Vproc,
+	name: &[u8],
+	upto: usize,
+) -> Result<Option<&'a Var>, StoreError> {
+	let at = bound_at_upto(root, store, vp, name, upto)?;
 	var_at(store, vp, name, at)
 }
 
@@ -3473,6 +3572,93 @@ mod tests {
 			Level::Global,
 		);
 		assert_eq!(get(&root, &mut store, &vp, "c"), None);
+	}
+
+	#[test]
+	fn charset_upto_reads_the_caller_frame_not_the_exiting_one() {
+		use crate::bash::vm::locale::{Charset, charset_root, charset_upto};
+		let (mut store, mut root, mut vp) = shell();
+		// An empty `LC_ALL` shadows nothing: `LC_CTYPE` decides.
+		store_var(
+			&mut root,
+			&mut store,
+			&mut vp,
+			b"LC_ALL",
+			Some(Var::scalar("", Attrs::NONE)),
+			Level::Global,
+		);
+		store_var(
+			&mut root,
+			&mut store,
+			&mut vp,
+			b"LC_CTYPE",
+			Some(Var::scalar("C", Attrs::NONE)),
+			Level::Global,
+		);
+		assert_eq!(charset_root(&mut root, &mut store, &vp).unwrap(), Charset::Bytes);
+		// The exiting function's `local LC_ALL=zh_TW.Big5`: the live view is
+		// Big5, the caller's counterfactual (that scope discarded) is bytes.
+		push_scope(&mut root, &mut store, &mut vp, func_scope_named("f"));
+		store_var(
+			&mut root,
+			&mut store,
+			&mut vp,
+			b"LC_ALL",
+			Some(Var::scalar("zh_TW.Big5", Attrs::NONE)),
+			Level::Local,
+		);
+		assert_eq!(
+			charset_root(&mut root, &mut store, &vp).unwrap(),
+			Charset::Encoding(encoding_rs::BIG5)
+		);
+		assert_eq!(charset_upto(&mut root, &mut store, &vp, 0).unwrap(), Charset::Bytes);
+		assert_eq!(
+			charset_upto(&mut root, &mut store, &vp, 1).unwrap(),
+			Charset::Encoding(encoding_rs::BIG5)
+		);
+	}
+
+	#[test]
+	fn lookup_upto_resolves_name_references_through_the_bound() {
+		let (mut store, mut root, mut vp) = shell();
+		store_var(
+			&mut root,
+			&mut store,
+			&mut vp,
+			b"LANG",
+			Some(Var::scalar("ja_JP.Shift_JIS", Attrs::NONE)),
+			Level::Global,
+		);
+		// `g` holds `local -n N=LANG`; the function it called, `f`, holds
+		// `local LANG=C`.
+		push_scope(&mut root, &mut store, &mut vp, func_scope_named("g"));
+		store_var(
+			&mut root,
+			&mut store,
+			&mut vp,
+			b"N",
+			Some(Var::scalar("LANG", Attrs::NAMEREF)),
+			Level::Local,
+		);
+		push_scope(&mut root, &mut store, &mut vp, func_scope_named("f"));
+		store_var(
+			&mut root,
+			&mut store,
+			&mut vp,
+			b"LANG",
+			Some(Var::scalar("C", Attrs::NONE)),
+			Level::Local,
+		);
+		let mut value = |upto: usize| {
+			lookup_upto(&root, &mut store, &vp, b"N", upto)
+				.unwrap()
+				.and_then(Var::as_scalar)
+				.map(<[u8]>::to_vec)
+		};
+		// The live view resolves the reference to `f`'s shadowing `LANG`…
+		assert_eq!(value(2), Some(b"C".to_vec()));
+		// …`g`'s continuation (`f` unwound) to the global one.
+		assert_eq!(value(1), Some(b"ja_JP.Shift_JIS".to_vec()));
 	}
 
 	#[test]

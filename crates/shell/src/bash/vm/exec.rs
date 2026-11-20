@@ -671,7 +671,12 @@ fn script_has_command(
 			continue;
 		}
 		match byte {
-			b'#' => comment = true,
+			b'#'
+				if !feat.contains(Features::ZSH)
+					|| feat.contains(Features::ZSH_INTERACTIVE_COMMENTS) =>
+			{
+				comment = true;
+			},
 			b' ' | 0x09 | b'\n' => {},
 			b'\\' if bytes.peek() == Some(&b'\n') => {
 				bytes.next();
@@ -1182,11 +1187,12 @@ pub fn walk_cut_short(
 			input
 				.options
 				.get(index)
-				.copied()
+				.cloned()
 				.unwrap_or(super::exit_options::WalkOptions {
 					pipefail:        false,
 					localloops:      false,
 					continueonerror: false,
+					parse:           None,
 				});
 		let outcomes = if let Some(unit) = frame.unit.as_ref() {
 			let expanding = end.transfer.is_none() && frame.expanding;
@@ -1254,10 +1260,12 @@ pub fn walk_cut_short(
 				&& script_has_command(
 					tail,
 					parse
-						.as_ref()
+						.as_deref()
+						.or(current_options.parse.as_deref())
 						.map_or(input.features, |p| Features::from_bits(p.features)),
 					parse
-						.as_ref()
+						.as_deref()
+						.or(current_options.parse.as_deref())
 						.map_or(input.aliases.as_ref(), |p| p.aliases.as_ref())
 						.map(|a| a as &dyn AliasLookup),
 					resume,
@@ -6437,6 +6445,14 @@ mod tests {
 
 	#[test]
 	fn exit_classification_alias_and_source_trivia_share_lexer_state() {
+		for (features, expected) in [
+			(Features::NONE, false),
+			(Features::ZSH, true),
+			(Features::ZSH | Features::ZSH_INTERACTIVE_COMMENTS, false),
+		] {
+			assert_eq!(script_has_command(b"#word", features, None, &Resume::default()), expected);
+			assert!(script_has_command(b"#word\n:", features, None, &Resume::default()));
+		}
 		// The lexer reads pending alias bytes before source bytes. A
 		// comment/escaped newline may start in one and finish in the other.
 		for (alias, source, expected) in [
