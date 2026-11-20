@@ -91,7 +91,7 @@ const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litell
  * runtime discovery is authoritative per credential (mirrors the GitLab Duo
  * fallback-only policy below).
  */
-const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin", "sambanova", "otari", "modal"]);
+const CREDENTIAL_SCOPED_PROVIDERS = new Set(["crusoe", "devin", "sambanova", "otari", "modal"]);
 /**
  * Providers whose authored seed is the complete documented fallback
  * catalog: their previous-snapshot rows are never resurrected, so an id
@@ -605,7 +605,9 @@ async function generateModels(selectedProvider?: string) {
 			.map(batch => batch.descriptor.providerId),
 	);
 	const catalogProviderModels = catalogProviderModelBatches.flatMap(batch => batch.models);
-	const bundledModelsDevModels = modelsDevModels.filter(model => !authoritativeCatalogProviders.has(model.provider));
+	const bundledModelsDevModels = modelsDevModels.filter(
+		model => !authoritativeCatalogProviders.has(model.provider) && !CREDENTIAL_SCOPED_PROVIDERS.has(model.provider),
+	);
 	// getGitLabDuoModels returns built models; project back to spec stage for the bundle.
 	const gitLabDuoModels = getGitLabDuoModels().map(model => toModelSpec(model));
 	// Combine models. stencil.so has priority unless a provider's successful endpoint

@@ -30,13 +30,13 @@ provider "crusoe" {
 			cost input=0.30 output=1.83 cache-read=0.30 cache-write=0
 			limits context=262144
 		}
-		model "nvidia/nemotron-3.5-lightning-30b-a3b" name="Nemotron 3.5 Lightning 30B A3B" {
+		model "nvidia/Nemotron-3.5-Lightning-30B-A3B" name="Nemotron 3.5 Lightning 30B A3B" {
 			reasoning #false
 			input "text"
 			cost input=0.05 output=0.20 cache-read=0.03 cache-write=0
 			limits context=262144
 		}
-		model "nvidia/nemotron-3.5-super-vl-120b-a12b" name="Nemotron 3.5 Super VL 120B A12B" {
+		model "nvidia/NVIDIA-Nemotron-3.5-Super-VL" name="Nemotron 3.5 Super VL 120B A12B" {
 			reasoning #false
 			input "text" "image"
 			cost input=0.10 output=0.40 cache-read=0.08 cache-write=0
@@ -48,7 +48,7 @@ provider "crusoe" {
 			cost input=0.05 output=0.25 cache-read=0.05 cache-write=0
 			limits context=131072
 		}
-		model "qwen/Qwen3.8-27B" name="Qwen3.8 27B" {
+		model "Qwen/Qwen3.8-27B" name="Qwen3.8 27B" {
 			reasoning #true
 			input "text" "image"
 			cost input=0.25 output=2.00 cache-read=0.15 cache-write=0
@@ -88,12 +88,12 @@ provider "crusoe" {
 		cost-patch { input 0.30; output 1.83; cache-read 0.30; cache-write 0 }
 		limits-patch { context-window 262144 }
 	}
-	models "nvidia/nemotron-3.5-lightning-30b-a3b" {
+	models "nvidia/Nemotron-3.5-Lightning-30B-A3B" {
 		input-modalities "text"
 		cost-patch { input 0.05; output 0.20; cache-read 0.03; cache-write 0 }
 		limits-patch { context-window 262144 }
 	}
-	models "nvidia/nemotron-3.5-super-vl-120b-a12b" {
+	models "nvidia/NVIDIA-Nemotron-3.5-Super-VL" {
 		input-modalities "text" "image"
 		cost-patch { input 0.10; output 0.40; cache-read 0.08; cache-write 0 }
 		limits-patch { context-window 1048576 }
@@ -103,7 +103,7 @@ provider "crusoe" {
 		cost-patch { input 0.05; output 0.25; cache-read 0.05; cache-write 0 }
 		limits-patch { context-window 131072 }
 	}
-	models "qwen/Qwen3.8-27B" {
+	models "Qwen/Qwen3.8-27B" {
 		input-modalities "text" "image"
 		cost-patch { input 0.25; output 2.00; cache-read 0.15; cache-write 0 }
 		limits-patch { context-window 262144 }
