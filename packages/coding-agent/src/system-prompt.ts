@@ -1161,7 +1161,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevDocs,
 		autoQaEnabled,
 		// The guidance pastes it into shell commands: any path outside plain word characters is single-quoted.
-		ovnfs: ovnfs && !/^[\w./:@%+,=-]+$/.test(ovnfs) ? quotePosixArgument(ovnfs) : ovnfs,
+		ovnfs: ovnfs && !/^[\w./:@%+,-]+$/.test(ovnfs) ? quotePosixArgument(ovnfs) : ovnfs,
 		writeTransportOnly,
 		subagent,
 	};

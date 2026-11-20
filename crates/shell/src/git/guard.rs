@@ -64,7 +64,7 @@ fn own_checkout_hint(ovnfs: Option<&str>) -> Cow<'static, str> {
 			// literal.
 			let plain = command
 				.chars()
-				.all(|c| c.is_ascii_alphanumeric() || "_./:@%+,=-".contains(c));
+				.all(|c| c.is_ascii_alphanumeric() || "_./:@%+,-".contains(c));
 			let command = if plain {
 				Cow::Borrowed(command)
 			} else {
@@ -1084,6 +1084,9 @@ mod tests {
 		);
 		let hint = own_checkout_hint(Some("/opt/ovnfs"));
 		assert!(hint.contains("(/opt/ovnfs new --name <name>)"), "{hint}");
+		// A leading `NAME=value` word is an environment assignment, not the command.
+		let hint = own_checkout_hint(Some("ovnfs=dev"));
+		assert!(hint.contains("('ovnfs=dev' new --name <name>)"), "{hint}");
 	}
 	#[test]
 	fn reads_arguments_as_git_does() {

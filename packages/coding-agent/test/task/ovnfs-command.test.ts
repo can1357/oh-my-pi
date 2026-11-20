@@ -38,5 +38,6 @@ describe("ovnfsCommand", () => {
 		} finally {
 			await fs.rm(project, { recursive: true, force: true });
 		}
-	});
+		// A cold system-prompt build takes ~4s; under a parallel build it ran past the 5s default.
+	}, 30_000);
 });
