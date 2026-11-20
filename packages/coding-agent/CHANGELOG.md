@@ -48,6 +48,7 @@
 - TTSR rules that cannot interrupt what is streaming (`interruptMode: never`, which includes the built-in style rules; `prose-only` rules on tool calls; `tool-only` rules on replies and reasoning) are checked once when the reply, reasoning or tool call ends instead of on every streamed chunk, and a tool call no interrupting rule applies to is not inspected while it streams. They still report the same matches and send the same reminders.
 
 ### Fixed
+- Nix builds fetch all browser-relay dependencies without falling back to the npm registry ([#19991](https://github.com/can1357/oh-my-pi/issues/19991))
 
 - `--continue` (and `autoResume`) no longer resumes a session another running omp is writing, which duplicated its conversation into a new file on the first message; it starts a new session as plain `omp` does
 - `/handoff` now shows its progress like `/compact` while it writes the summary: a working row with a spinner and timer while the agent is idle, and a row above it while a turn runs. Previously only a one-off status line said it had started

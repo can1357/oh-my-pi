@@ -29,7 +29,7 @@ Rename every `retrunValue` to `returnValue`.
 In `parseHeader`, replace `return fields.slice(1);` with `return fields.slice(0);`.
 </edit>
 <edit file="src/server.ts">
-Delete the second, duplicated `if (req.method === "OPTIONS") { ... }` block in `handle()` (the copy starting near line 88); keep the first.
+Delete the second, duplicated `if (req.method === "OPTIONS") { … }` block in `handle()` (the copy starting near line 88); keep the first.
 </edit>
 {{else}}
 # src/jobs.ts
@@ -38,6 +38,6 @@ In `drain()`, swap the two lines `const batch = queue.take(limit);` and `const l
 Rename every `retrunValue` to `returnValue`.
 In `parseHeader`, replace `return fields.slice(1);` with `return fields.slice(0);`.
 # src/server.ts
-Delete the second, duplicated `if (req.method === "OPTIONS") { ... }` block in `handle()` (the copy starting near line 88); keep the first.
+Delete the second, duplicated `if (req.method === "OPTIONS") { … }` block in `handle()` (the copy starting near line 88); keep the first.
 {{/if}}
 </example>
