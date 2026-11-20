@@ -17,6 +17,7 @@
 
 ### Changed
 
+- Updated MCP OAuth client name to "Codex"
 - Selective commit previews show what changed inside a long line: `d.diff()` prints a long line edited in place once, with its `[-removed-]` and `{+added+}` words marked and the unchanged text far from them left out, instead of two lines cut at the output column cap; the returned patch is unchanged ([#19817](https://github.com/can1357/oh-my-pi/pull/19817) by [@baekjosh](https://github.com/baekjosh))
 
 ### Fixed
