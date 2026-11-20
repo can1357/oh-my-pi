@@ -11,13 +11,12 @@ export const cfgDisassembler = register({
 		group: "Available Tools",
 		label: "Disassembler",
 		description:
-			"Backend for analysis selectors in read and eval's dsm namespace; bare executable reads show metadata only. Auto uses IDA Pro when installed, else Ghidra (downloaded on first analysis), else Binary Ninja when installed",
+			"Backend for analysis selectors in read and eval's dsm namespace; bare executable reads show metadata only. Auto uses IDA Pro when installed, else Ghidra (downloaded on first analysis); Binary Ninja is used only when selected",
 		options: [
 			{
 				value: "auto",
 				label: "Auto",
-				description:
-					"IDA Pro when an install with idalib is found, otherwise Ghidra; Binary Ninja only where Ghidra is unsupported",
+				description: "IDA Pro when an install with idalib is found, otherwise Ghidra; never Binary Ninja",
 			},
 			{
 				value: "ghidra",
@@ -34,7 +33,7 @@ export const cfgDisassembler = register({
 				value: "binja",
 				label: "Binary Ninja",
 				description:
-					"Binary Ninja via its headless Python API (needs a headless-capable licence); analysis disabled when no install is found",
+					"Binary Ninja via its headless Python API (needs a headless-capable licence); never chosen by Auto; analysis disabled when no install is found",
 			},
 			{ value: "none", label: "None", description: "Executable metadata only; analysis disabled" },
 		],

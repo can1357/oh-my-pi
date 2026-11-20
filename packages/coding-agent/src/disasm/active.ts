@@ -5,8 +5,12 @@ import { cfgIdaInstall } from "../ida/install";
 import type { DisasmBackendId } from "./backend";
 import { cfgDisassembler } from "./settings";
 
-/** Order `auto` tries backends in; the first available one serves. */
-const AUTO_ORDER: readonly DisasmBackendId[] = ["ida", "ghidra", "binja"];
+/**
+ * Order `auto` tries backends in; the first available one serves. Binary Ninja is opt-in: an
+ * install does not show whether its licence allows headless use, so ahead of Ghidra it would turn
+ * `auto` into an error for everyone whose licence does not.
+ */
+const AUTO_ORDER: readonly DisasmBackendId[] = ["ida", "ghidra"];
 
 /** Backend serving explicit read analysis and eval's dsm namespace; undefined leaves metadata-only reads. */
 export const cfgDisasmBackend: Derived<DisasmBackendId | undefined> = combine(

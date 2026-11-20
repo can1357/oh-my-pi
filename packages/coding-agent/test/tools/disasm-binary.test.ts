@@ -171,9 +171,9 @@ describe("disassembler backend selection", () => {
 		expect(cfgDisasmBackend.get(settings)).toBe("ida");
 	});
 
-	it("reaches Binary Ninja in auto only when neither IDA nor Ghidra is available", () => {
+	it("never picks Binary Ninja in auto, even where it is the only backend installed", () => {
 		const settings = Settings.isolated({ "ida.installDir": withoutIdalib, "binja.installDir": withBinja });
-		expect(cfgDisasmBackend.get(settings)).toBe(ghidraHostSupported() ? "ghidra" : "binja");
+		expect(cfgDisasmBackend.get(settings)).toBe(ghidraHostSupported() ? "ghidra" : undefined);
 	});
 
 	it("honors explicit Binary Ninja selection despite an idalib install", () => {

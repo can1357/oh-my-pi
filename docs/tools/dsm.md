@@ -27,10 +27,10 @@
 ## Availability
 
 - `disassembler.backend` (`auto` default, `ida`, `ghidra`, `binja`, `none`) selects the backend. `cfgDisasmBackend` resolves it:
-   - `auto`: IDA when an install shipping idalib is found, else Ghidra when the host is supported, else Binary Ninja when an install is found, else none.
+   - `auto`: IDA when an install shipping idalib is found, else Ghidra when the host is supported, else none. Never Binary Ninja: an install does not show whether its license permits headless use.
    - `ida`: IDA only when an install is found; otherwise none.
    - `ghidra`: Ghidra when the host is supported (macOS/Linux x64/arm64, Windows x64); otherwise none.
-   - `binja`: Binary Ninja only when an install is found; otherwise none.
+   - `binja`: Binary Ninja only when an install is found; otherwise none. Opt-in: `auto` does not choose it.
    - `none`: analysis disabled.
 - With a resolved backend, `sdk.ts` adds the `dsm` prelude to eval (only when the `eval` tool is active). With none, `dsm` is absent, `read` analysis selectors fail, and bare executable reads still return metadata.
 - IDA install lookup: `ida.installDir` when set (authoritative), else `$IDADIR`, `Paths.ida-install-dir` in `ida-config.json`, else standard install locations. `ida.python` overrides the interpreter, which must import `ida_domain` and `idapro`.
