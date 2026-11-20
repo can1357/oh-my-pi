@@ -737,6 +737,8 @@ export interface CreateAgentSessionOptions {
 	resolveServiceTierByFamily?: (model: Model | undefined) => ServiceTierByFamily;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	/** The cycling scope was derived from enabledModels rather than an explicit override. */
+	scopedModelsFromSettings?: boolean;
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
 	prewalk?: Prewalk;
 	/** CLI prewalk selector awaiting extension provider registration; patterns retain role fallback order. */
@@ -2358,6 +2360,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		resolveModelRoleValue(defaultRoleValue, allowedModels, {
 			settings,
 			matchPreferences: modelMatchPreferences,
+			respectUpstreamPins: (cfgEnabledModels.get(settings)?.length ?? 0) > 0,
+			modelLookup: modelRegistry,
 		}),
 	);
 	let model = options.model;
@@ -3718,6 +3722,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const reResolvedRoleSpec = resolveModelRoleValue(settings.getModelRole("default"), fallbackCandidates, {
 					settings,
 					matchPreferences: modelMatchPreferences,
+					respectUpstreamPins: (cfgEnabledModels.get(settings)?.length ?? 0) > 0,
+					modelLookup: modelRegistry,
 				});
 				if (!reResolvedRoleSpec.model) return false;
 				defaultRoleSpec = reResolvedRoleSpec;
@@ -3784,7 +3790,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					originalModel,
 					{ allowMissingPrimary: true },
 				)) {
-					let resolved = parseModelPattern(candidate.raw, fallbackCandidates, modelMatchPreferences);
+					let resolved = parseModelPattern(candidate.raw, fallbackCandidates, modelMatchPreferences, {
+						respectUpstreamPins: scopedByEnabledModels,
+						modelLookup: modelRegistry,
+					});
 					if (!resolved.model && !scopedByEnabledModels && !disabledProviders?.includes(candidate.provider)) {
 						resolved = parseModelPattern(
 							candidate.raw,
@@ -5532,6 +5541,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			ownedAsyncJobManager: asyncJobManager,
 			asyncJobManager: scopedAsyncJobManager,
 			scopedModels: options.scopedModels,
+			scopedModelsFromSettings: options.scopedModelsFromSettings,
 			inheritedSessionAgents: options.inheritedSessionAgents,
 			promptTemplates,
 			slashCommands,

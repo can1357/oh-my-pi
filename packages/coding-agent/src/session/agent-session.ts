@@ -1111,6 +1111,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	#powerAssertion: PowerAssertionHandle | undefined;
 	#scopedModelsRefresher: (() => Promise<void>) | undefined;
+	readonly scopedModelsFromSettings: boolean;
 
 	readonly configWarnings: string[] = [];
 	/** Construction skipped fallback-chain validation; {@link validateRetryFallbackChains} still owes it. */
@@ -2233,6 +2234,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		this.scopedModelsFromSettings = config.scopedModelsFromSettings ?? false;
 		this.tokenRate = new TokenRateMeter(text => this.agent.tokenizer.countTokens(text));
 		this.#reseedTokenRate();
 		this.agent.setQueuedMessageGrouping(
@@ -8525,7 +8527,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.sessionManager.getSessionName();
 	}
 
-	/** Scoped models for cycling (from --models flag) */
+	/** Scoped models for cycling, from --models or enabledModels. */
 	get scopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> {
 		return this.#models.scopedModels;
 	}

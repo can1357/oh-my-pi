@@ -653,6 +653,47 @@ describe("parseModelPattern", () => {
 		});
 	});
 
+	describe("scoped wire variants", () => {
+		const base = { ...mockOpenRouterModels[2], id: "qwen/qwen3-coder" };
+		const paid = buildModel({
+			...base,
+			name: `${base.id}:free`,
+			api: "openai-completions",
+			compat: { openRouterRouting: { only: ["sambanova"], order: ["sambanova"] } },
+		});
+		const free = { ...paid, id: `${paid.id}:free` };
+		const options = { respectUpstreamPins: true };
+
+		test.each(["qwen/qwen3-coder:free", "qwen/qwen3-coder:FREE:high", "openrouter/qwen/qwen3-coder:nitro"])(
+			"rejects an unlisted wire variant %s instead of running or cloning the scoped paid model",
+			selector => {
+				expect(parseModelPattern(selector, [paid], undefined, options).model).toBeUndefined();
+			},
+		);
+
+		test("tries the next pattern when the requested wire variant is outside the scope", () => {
+			const result = resolveModelRoleValue(`${free.id},${paid.id}@sambanova:high`, [paid], options);
+			expect(result.matchedPatternIndex).toBe(1);
+			expect(result.model && formatModelStringWithRouting(result.model)).toBe(`openrouter/${paid.id}@sambanova`);
+			expect(result.thinkingLevel).toBe(Effort.High);
+		});
+
+		test("keeps the scoped literal variant and pin when applying an effort", () => {
+			const result = parseModelPattern("qwen3-coder:FREE:high", [paid, free], undefined, options);
+			expect(result.model && formatModelStringWithRouting(result.model)).toBe(`openrouter/${free.id}@sambanova`);
+			expect(result.thinkingLevel).toBe(Effort.High);
+		});
+
+		test("drops malformed effort only when it keeps the requested wire variant", () => {
+			for (const prefix of ["", "openrouter/"]) {
+				const result = parseModelPattern(`${prefix}${free.id}:typo`, [free], undefined, options);
+				expect(result.model?.id).toBe(free.id);
+				expect(result.warning).toContain("Invalid thinking level");
+			}
+			expect(parseModelPattern(`${paid.id}:typo`, [free], undefined, options).model).toBeUndefined();
+		});
+	});
+
 	describe("OpenRouter models with colons in IDs", () => {
 		test("qwen3-coder:exacto matches the model with undefined thinking level", () => {
 			const result = parseModelPattern("qwen/qwen3-coder:exacto", allModels);
@@ -2916,6 +2957,24 @@ describe("filterAvailableModelsByEnabledPatterns", () => {
 		expect(result[0].id).toBe("claude-sonnet-4-5");
 	});
 
+	test("uses settings provider order for both ordinary selectors and prospective role aliases", async () => {
+		const catalog = openaiGpt55Models;
+		const registry = { getAvailable: () => catalog };
+		const settings = Settings.isolated({
+			modelProviderOrder: ["openai", "openai-codex"],
+			modelRoles: { fable: "openai-codex/gpt-5.5" },
+		});
+		const roleLookup = { getModelRole: (role: string) => (role === "fable" ? "gpt-5.5" : undefined) };
+		const scoped = await resolveModelScope(["gpt-5.5"], registry, undefined, settings);
+		const expected = ["openai/gpt-5.5"];
+
+		expect(scoped.map(entry => formatModelStringWithRouting(entry.model))).toEqual(expected);
+		const ordinary = filterAvailableModelsByEnabledPatterns(catalog, ["gpt-5.5"], settings);
+		const prospective = filterAvailableModelsByEnabledPatterns(catalog, ["@fable"], settings, roleLookup);
+		expect(ordinary.map(formatModelStringWithRouting)).toEqual(expected);
+		expect(prospective.map(formatModelStringWithRouting)).toEqual(expected);
+	});
+
 	test("filters by exact provider/modelId", () => {
 		const result = filterAvailableModelsByEnabledPatterns(models, ["anthropic/claude-sonnet-4-5"]);
 		expect(result).toHaveLength(1);
@@ -2941,6 +3000,27 @@ describe("filterAvailableModelsByEnabledPatterns", () => {
 		expect(result[0].id).toBe("qwen/qwen3-coder:exacto");
 	});
 
+	test("keeps abbreviated Ollama tags usable after building CLI and enabledModels scopes", async () => {
+		const model = { ...mockModels[0], provider: "ollama", id: "qwen3:30b-a3b" };
+		const patterns = ["qwen3:30b"];
+		const registry = { getAvailable: () => [model] };
+		const scoped = await resolveModelScope(patterns, registry);
+		for (const allowed of [
+			scoped.map(entry => entry.model),
+			filterAvailableModelsByEnabledPatterns(registry.getAvailable(), patterns),
+		]) {
+			expect(allowed).toEqual([model]);
+			const options = { respectUpstreamPins: true };
+			expect(parseModelPattern("qwen3:30b", allowed, undefined, options).model).toBe(model);
+			expect(parseModelPattern("qwen3:30b:high", allowed, undefined, options)).toMatchObject({
+				model,
+				thinkingLevel: Effort.High,
+				explicitThinkingLevel: true,
+				warning: undefined,
+			});
+		}
+	});
+
 	test("keeps distinct upstream pins on the free wire ID in CLI scopes and enabled-model lists", async () => {
 		const base = { ...mockOpenRouterModels[2], id: "qwen/qwen3-coder" };
 		const free = { ...base, id: `${base.id}:free` };
@@ -2958,6 +3038,45 @@ describe("filterAvailableModelsByEnabledPatterns", () => {
 		]) {
 			expect(models.map(formatModelStringWithRouting)).toEqual([cerebras, sambanova, `openrouter/${base.id}`]);
 		}
+	});
+
+	test.each(["", "openrouter/"])("falls through a conflicting free pin with provider prefix %j", prefix => {
+		const base = { ...mockOpenRouterModels[2], id: "qwen/qwen3-coder" };
+		const free = { ...base, id: `${base.id}:free` };
+		const allowedFree = `openrouter/${free.id}@cerebras`;
+		const allowed = filterAvailableModelsByEnabledPatterns(
+			[base, free],
+			[`openrouter/${base.id}@sambanova`, allowedFree],
+		);
+		const resolved = resolveModelRoleValue(`${prefix}${free.id}@sambanova,${allowedFree}`, allowed, {
+			respectUpstreamPins: true,
+		});
+		expect(resolved.model && formatModelStringWithRouting(resolved.model)).toBe(allowedFree);
+		expect(resolved.matchedPatternIndex).toBe(1);
+	});
+
+	test("does not synthesize an unlisted wire variant from a scoped base model", () => {
+		const base = mockOpenRouterModels[2];
+		const resolved = resolveModelRoleValue(`openrouter/${base.id}:free@cerebras`, [base], {
+			respectUpstreamPins: true,
+		});
+		expect(resolved.model).toBeUndefined();
+	});
+
+	test("prefers an allowed exact pin over the bare model with the same ID", () => {
+		const bare = mockOpenRouterModels[2];
+		const selector = `openrouter/${bare.id}`;
+		const pinned = buildModel({
+			...bare,
+			api: "openai-completions",
+			compat: { openRouterRouting: { only: ["cerebras"], order: ["cerebras"] } },
+		});
+		const allowed = [bare, pinned];
+		const exactPin = resolveModelRoleValue(`${selector}@cerebras:high`, allowed, { respectUpstreamPins: true });
+		expect(exactPin.model?.compat).toMatchObject({ openRouterRouting: { only: ["cerebras"], order: ["cerebras"] } });
+		expect(exactPin.thinkingLevel).toBe(Effort.High);
+		const fromBare = resolveModelRoleValue(`${selector}@sambanova`, allowed, { respectUpstreamPins: true });
+		expect(fromBare.model && formatModelStringWithRouting(fromBare.model)).toBe(`${selector}@sambanova`);
 	});
 
 	test("matches bare OpenRouter-style model id with slash but no provider prefix", () => {

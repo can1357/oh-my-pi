@@ -12,7 +12,7 @@
  * `enableMCP: false`, regardless of what `baseOptions` carries.
  */
 
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it, mock } from "bun:test";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAcpSessionFactory } from "@oh-my-pi/pi-coding-agent/main";
@@ -33,7 +33,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 		const tempDir = TempDir.createSync("@pi-acp-mcp-isolation-");
 		try {
 			const settings = Settings.isolated({});
-			const fakeSession = {} as AgentSession;
+			const fakeSession = { addDisposer: mock(), setScopedModelsRefresher: mock() } as unknown as AgentSession;
 			const captured: CreateAgentSessionOptions[] = [];
 			const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 				captured.push(options);
@@ -120,7 +120,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 				`import { writeFileSync } from "node:fs"; export default function (pi) { pi.events.on("acp-session-live", () => writeFileSync(${JSON.stringify(firedPath)}, "fired")); }`,
 			);
 			let captured: CreateAgentSessionOptions | undefined;
-			const fakeSession = {} as AgentSession;
+			const fakeSession = { addDisposer: mock(), setScopedModelsRefresher: mock() } as unknown as AgentSession;
 			const factory = createAcpSessionFactory({
 				baseOptions: {
 					disableExtensionDiscovery: true,
@@ -196,7 +196,7 @@ describe("createAcpSessionFactory TITLE_SYSTEM.md per-cwd resolution (PR #3736)"
 			const projectDir = tempDir.join("project");
 			await Bun.write(`${projectDir}/.omp/TITLE_SYSTEM.md`, "Project-specific title policy.");
 
-			const fakeSession = {} as AgentSession;
+			const fakeSession = { addDisposer: mock(), setScopedModelsRefresher: mock() } as unknown as AgentSession;
 			const captured: CreateAgentSessionOptions[] = [];
 			const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 				captured.push(options);

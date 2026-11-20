@@ -363,6 +363,22 @@ describe("AgentSession model persistence", () => {
 		expect(created.settings.getModelRole("default")).toBe(defaultRoleValue);
 	});
 
+	it("cycles from a pinned free model using its unpinned scope slot", async () => {
+		const paid = getBundledModel("openrouter", "qwen/qwen3-coder");
+		const free = getBundledModel("openrouter", "qwen/qwen3-coder:free");
+		if (!paid || !free) throw new Error("Expected paid and free OpenRouter models");
+		const selector = `${modelValue(free)}@cerebras`;
+		const pinned = parseModelPattern(selector, [free]).model;
+		if (!pinned) throw new Error(`Expected routed model ${selector} to exist`);
+		expect(formatModelStringWithRouting(pinned)).toBe(selector);
+		const created = await createSession({ initialModel: pinned });
+		created.session.setScopedModels([{ model: paid }, { model: free }]);
+
+		await created.session.cycleModel();
+
+		expect(created.session.model?.id).toBe(paid.id);
+	});
+
 	it("cycles scoped routes of the same model in both directions", async () => {
 		const routeA = routedModel("cerebras");
 		const routeB = routedModel("sambanova");

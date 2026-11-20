@@ -20,6 +20,7 @@ import { classifyDifficulty } from "../auto-thinking/classifier";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	filterAvailableModelsByEnabledPatterns,
+	findScopedModelIndex,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
@@ -479,9 +480,7 @@ export class ModelControls {
 		const scopedModels = await this.#getScopedModelsWithApiKey();
 		if (scopedModels.length <= 1) return undefined;
 
-		const currentModel = this.#model;
-		const currentSelector = currentModel && formatModelStringWithRouting(currentModel);
-		let currentIndex = scopedModels.findIndex(sm => formatModelStringWithRouting(sm.model) === currentSelector);
+		let currentIndex = findScopedModelIndex(scopedModels, this.#model);
 
 		if (currentIndex === -1) currentIndex = 0;
 		const len = scopedModels.length;

@@ -2,10 +2,15 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { formatModelStringWithRouting } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { cfgEnabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
+import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { createAcpConnection } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-mode";
+import { createAgentSession, type CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -87,6 +92,25 @@ class LazyFakeSession {
 	systemPrompt = "system";
 	disposed = false;
 	settings = Settings.isolated({ "plan.enabled": false });
+	scopedModels: AgentSession["scopedModels"] = [];
+	#disposers: Array<() => void> = [];
+	refreshScopedModels?: () => Promise<void>;
+
+	addDisposer(disposer: () => void): void {
+		this.#disposers.push(disposer);
+	}
+
+	setScopedModelsRefresher(refresh: () => Promise<void>): void {
+		this.refreshScopedModels = refresh;
+	}
+
+	setScopedModels(models: AgentSession["scopedModels"]): void {
+		this.scopedModels = models;
+	}
+
+	get isDisposed(): boolean {
+		return this.disposed;
+	}
 
 	constructor(cwd: string) {
 		this.sessionManager = SessionManager.inMemory(cwd);
@@ -129,6 +153,7 @@ class LazyFakeSession {
 	}
 	async dispose(): Promise<void> {
 		this.disposed = true;
+		for (const dispose of this.#disposers) dispose();
 		await this.sessionManager.close();
 	}
 	async reload(): Promise<void> {}
@@ -187,8 +212,6 @@ afterEach(() => {
 
 describe("ACP lazy startup", () => {
 	it("applies schema defaults for ACP background jobs", async () => {
-		const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
-
 		type ObservedBackgroundSettings = {
 			asyncEnabled: boolean;
 			asyncMaxJobs: number;
@@ -257,8 +280,6 @@ describe("ACP lazy startup", () => {
 		// configured value (caller, project, --config overlay, or global) with the
 		// schema default. The fix (re-)added an `isConfigured` guard so explicit
 		// configuration survives, and the schema default only fills holes.
-		const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
-
 		const explicit = {
 			"task.isolation.enabled": true,
 			"isolation.backend": "rcopy",
@@ -405,6 +426,122 @@ describe("ACP lazy startup", () => {
 		}
 	});
 
+	it.each([false, true])("uses the workspace scope unless --models is explicit (%s)", async explicit => {
+		using launch = TempDir.createSync("@omp-acp-scope-launch-");
+		using workspace = TempDir.createSync("@omp-acp-scope-workspace-");
+		const launchSelector = "openrouter/z-ai/glm-4.7@sambanova";
+		const workspaceSelector = "openrouter/z-ai/glm-4.7@cerebras";
+		await Bun.write(launch.join(".omp/config.yml"), `enabledModels:\n  - ${launchSelector}\n`);
+		await Bun.write(workspace.join(".omp/config.yml"), `enabledModels:\n  - ${workspaceSelector}\n`);
+		const settings = await Settings.loadIsolated({ cwd: launch.path(), agentDir: launch.join("agent") });
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("openrouter", "test-key");
+		if (!explicit) authStorage.keys.setRuntime("anthropic", "other-provider-key");
+		const rawArgs = explicit ? ["--models", launchSelector] : ["--api-key", "workspace-cli-key"];
+		let created: LazyFakeSession | undefined;
+		try {
+			await expect(
+				runRootCommand(
+					{
+						...parseArgs(rawArgs),
+						mode: "acp",
+						offline: true,
+						noExtensions: true,
+						sessionDir: launch.join("sessions"),
+					},
+					rawArgs,
+					{
+						discoverAuthStorage: async () => authStorage,
+						settings,
+						createAgentSession: async options => {
+							expect(options?.scopedModelsFromSettings).toBe(!explicit);
+							const session = new LazyFakeSession(workspace.path());
+							session.model = options?.model;
+							session.settings = options?.settings ?? session.settings;
+							session.scopedModels = options?.scopedModels ?? [];
+							created = session;
+							return { session, setToolUIContext: () => {} } as unknown as CreateAgentSessionResult;
+						},
+						runAcpMode: async createSession => {
+							if (!explicit) {
+								const other = workspace.join("other-provider");
+								await Bun.write(
+									path.join(other, ".omp/config.yml"),
+									"enabledModels:\n  - anthropic/claude-sonnet-4-5\n",
+								);
+								await expect(createSession(other)).rejects.toThrow("bound to openrouter, not anthropic");
+								expect(await authStorage.keys.get("anthropic")).toBe("other-provider-key");
+							}
+							await createSession(workspace.path());
+							throw new Error("stop test ACP mode");
+						},
+					},
+				),
+			).rejects.toThrow("stop test ACP mode");
+			if (!created?.model) throw new Error("Expected ACP startup model");
+			const selector = explicit ? launchSelector : workspaceSelector;
+			expect(formatModelStringWithRouting(created.model)).toBe(selector);
+			if (!explicit) expect(await authStorage.keys.get(created.model.provider)).toBe("workspace-cli-key");
+			expect(created.scopedModels.map(entry => formatModelStringWithRouting(entry.model))).toEqual([selector]);
+
+			cfgEnabledModels.override(created.settings, explicit ? [] : [launchSelector]);
+			const { promise, resolve } = Promise.withResolvers<void>();
+			setImmediate(resolve);
+			await promise;
+			expect(created.scopedModels.map(entry => formatModelStringWithRouting(entry.model))).toEqual([launchSelector]);
+		} finally {
+			await created?.dispose();
+			authStorage.close();
+			settings.cancelPendingSaves();
+		}
+	});
+
+	it("binds --api-key to the launch scope provider without a stored credential", async () => {
+		using launch = TempDir.createSync("@omp-acp-key-launch-");
+		using other = TempDir.createSync("@omp-acp-key-other-");
+		using match = TempDir.createSync("@omp-acp-key-match-");
+		const selector = "openrouter/z-ai/glm-4.7@sambanova";
+		await Bun.write(launch.join(".omp/config.yml"), `enabledModels:\n  - ${selector}\n`);
+		await Bun.write(other.join(".omp/config.yml"), "enabledModels:\n  - anthropic/claude-sonnet-4-5\n");
+		await Bun.write(match.join(".omp/config.yml"), `enabledModels:\n  - ${selector}\n`);
+		const settings = await Settings.loadIsolated({ cwd: launch.path(), agentDir: launch.join("agent") });
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "own-anthropic-key");
+		const rawArgs = ["--api-key", "fake-launch-key"];
+		let created: LazyFakeSession | undefined;
+		try {
+			await expect(
+				runRootCommand(
+					{ ...parseArgs(rawArgs), mode: "acp", offline: true, noExtensions: true, sessionDir: launch.join("s") },
+					rawArgs,
+					{
+						discoverAuthStorage: async () => authStorage,
+						settings,
+						createAgentSession: async options => {
+							const session = new LazyFakeSession(match.path());
+							session.model = options?.model;
+							created = session;
+							return { session, setToolUIContext: () => {} } as unknown as CreateAgentSessionResult;
+						},
+						runAcpMode: async createSession => {
+							await expect(createSession(other.path())).rejects.toThrow("bound to openrouter, not anthropic");
+							expect(await authStorage.keys.get("anthropic")).toBe("own-anthropic-key");
+							await createSession(match.path());
+							throw new Error("stop test ACP mode");
+						},
+					},
+				),
+			).rejects.toThrow("stop test ACP mode");
+			if (!created?.model) throw new Error("Expected ACP startup model");
+			expect(formatModelStringWithRouting(created.model)).toBe(selector);
+			expect(await authStorage.keys.get("openrouter")).toBe("fake-launch-key");
+		} finally {
+			await created?.dispose();
+			authStorage.close();
+			settings.cancelPendingSaves();
+		}
+	});
+
 	it("applies CLI runtime API keys after ACP lazy session creation resolves extension models", async () => {
 		using tempDir = TempDir.createSync("@omp-acp-lazy-api-key-");
 		const cwd = tempDir.path();
@@ -433,8 +570,6 @@ describe("ACP lazy startup", () => {
 		const authStorage = createInMemoryAuthStorage();
 		try {
 			const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
-			const { runRootCommand } = await import("@oh-my-pi/pi-coding-agent/main");
-			const { createAgentSession } = await import("@oh-my-pi/pi-coding-agent/sdk");
 			let session: AgentSession | undefined;
 			let sessionHasUI: boolean | undefined;
 			let deferredUsageReserveConfirmation: boolean | undefined;
