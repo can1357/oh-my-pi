@@ -443,10 +443,18 @@ export class OutputMetaBuilder {
 		return this;
 	}
 
-	/** Add LSP diagnostics. No-op if no messages. */
-	diagnostics(summary: string, messages: string[]): this {
-		if (messages.length === 0) return this;
-		this.#meta.diagnostics = { summary, messages };
+	/**
+	 * Add LSP diagnostics. No-op when there is nothing to say: no messages and no
+	 * server that left the file unverified — a file nobody checked must not look
+	 * like one that came back clean (#15408).
+	 */
+	diagnostics(summary: string, messages: string[], unreported?: readonly string[]): this {
+		if (messages.length === 0 && (unreported?.length ?? 0) === 0) return this;
+		this.#meta.diagnostics = {
+			summary,
+			messages,
+			unreported: unreported && unreported.length > 0 ? [...unreported] : undefined,
+		};
 		return this;
 	}
 

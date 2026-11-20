@@ -61,6 +61,19 @@ export type SourceMeta =
 export interface DiagnosticMeta {
 	summary: string;
 	messages: string[];
+	/**
+	 * Servers that sent no report for the file: it was never checked, so the
+	 * result must not be presented as a clean one (#15408).
+	 */
+	unreported?: string[];
+}
+
+/**
+ * Notice for a file a server never gave a verdict on. Carries the same wording
+ * the `lsp diagnostics` tool uses, so the two never disagree (#15408).
+ */
+export function unverifiedFileNotice(servers: readonly string[]): string {
+	return `no diagnostics report yet from ${servers.join(", ")}`;
 }
 
 /**
@@ -421,9 +434,15 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 
 	// Diagnostics
 	let diagnosticsNotice = "";
-	if (meta.diagnostics && meta.diagnostics.messages.length > 0) {
+	if (meta.diagnostics) {
 		const d = meta.diagnostics;
-		diagnosticsNotice = `\n\nLSP Diagnostics (${d.summary}):\n${formatGroupedDiagnosticMessages(d.messages)}`;
+		if (d.messages.length > 0) {
+			diagnosticsNotice = `\n\nLSP Diagnostics (${d.summary}):\n${formatGroupedDiagnosticMessages(d.messages)}`;
+		} else if (d.unreported && d.unreported.length > 0) {
+			// Nothing to show and nothing checked: say the file is unverified instead
+			// of leaving a silent result that reads as clean (#15408).
+			diagnosticsNotice = `\n\nLSP diagnostics unavailable: ${unverifiedFileNotice(d.unreported)}`;
+		}
 	}
 
 	const notice = parts.length ? `\n\n[${parts.join(". ")}]` : "";
