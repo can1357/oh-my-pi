@@ -1190,7 +1190,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// bypass the sink (client-bridge terminals, minimizer misses). When the
 		// sink spilled, its artifact already holds the full raw stream — reuse
 		// that id instead of saving a second (already-truncated) copy, so the
-		// `[raw output: local://N.log]` footer and the truncation notice agree.
+		// `[raw output: local://N.log:raw]` footer and the truncation notice agree.
 		const inlineCap = {
 			maxBytes: resolveInlineByteCapBudget(this.session.settings),
 			saveArtifact: result.artifactError

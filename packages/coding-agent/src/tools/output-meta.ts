@@ -528,7 +528,7 @@ export function resolveOutputSinkHeadBytes(s: Settings | undefined): number {
  * Slack on top of the configured spill threshold before the final-defense
  * inline byte cap fires. The OutputSink already bounds inline bodies to the
  * threshold; only notice slop (wall time, exit code, elision marker,
- * `[raw output: local://N.log]` footer) rides above it. The slack keeps the
+ * `[raw output: local://N.log:raw]` footer) rides above it. The slack keeps the
  * cap a genuine last resort for paths that bypass the sink (e.g. ACP
  * client-bridge terminals) instead of re-truncating — and re-saving — every
  * sink-elided result (a second spill `N+1` while the footer still names
