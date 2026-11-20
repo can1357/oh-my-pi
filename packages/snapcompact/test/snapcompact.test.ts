@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { AssistantMessage, Message, Model, ModelSpec, Usage } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveSnapcompactShape } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -362,6 +363,24 @@ describe("shape resolution", () => {
 		expect(
 			snapcompact.resolveShape({ ...gemini, snapcompactShape: { variant: "11on16-bw" } }, "8on22-bw").cellWidth,
 		).toBe(8);
+	});
+
+	it("lets a model's configured shape replace its catalog rules' shape, frame size included", () => {
+		// Opus 5.5's catalog rules draw 11on16-bw at 1932px.
+		const opus = getBundledModel("anthropic", "claude-opus-5-5");
+		expect(resolveSnapcompactShape(opus)).toMatchObject({ variant: "11on16-bw", frameSize: 1932 });
+		const configured = snapcompact.resolveShape({ ...opus, snapcompactShape: { variant: "8on22-bw" } });
+		expect(configured.cellWidth).toBe(8);
+		expect(configured.cellHeight).toBe(22);
+		// The variant's own edge, not the frame size the catalog rule gave the model.
+		expect(configured.frameSize).toBe(1568);
+		expect(
+			snapcompact.resolveShape({ ...opus, snapcompactShape: { variant: "11on16-bw", frameSize: 1024 } }).frameSize,
+		).toBe(1024);
+		// An explicit setting still wins over the configured shape.
+		expect(
+			snapcompact.resolveShape({ ...opus, snapcompactShape: { variant: "8on22-bw" } }, "11on16-bw").cellWidth,
+		).toBe(11);
 	});
 
 	it("detects the ideal shape from the model id across gateways", () => {
