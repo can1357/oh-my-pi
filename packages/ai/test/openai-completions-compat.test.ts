@@ -1317,6 +1317,46 @@ describe("openai-completions compatibility", () => {
 		}
 	});
 
+	it.each([{ base: true }, { base: false }])("uses thinking compat for opaque replay ($base)", async ({ base }) => {
+		const model = buildModel({
+			...copilotGeminiSpec,
+			compat: { reasoningOpaqueReplay: base, whenThinking: { reasoningOpaqueReplay: !base } },
+		});
+		const fetchMock = (opaque: string) =>
+			createMockFetch([
+				{
+					choices: [
+						{ index: 0, delta: { content: "Answer", reasoning_text: "Summary", reasoning_opaque: opaque } },
+					],
+				},
+				{ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+				"[DONE]",
+			]);
+		const context = baseContext();
+		const prior = await streamOpenAICompletions(model, context, {
+			apiKey: "test-key",
+			reasoning: base ? undefined : "medium",
+			fetch: fetchMock("prior-state"),
+		}).result();
+		let assistant: Record<string, unknown> | undefined;
+		const next = await streamOpenAICompletions(
+			model,
+			{ messages: [...context.messages, prior] },
+			{
+				apiKey: "test-key",
+				reasoning: "medium",
+				fetch: fetchMock("next-state"),
+				onPayload: payload => {
+					assistant = getPayloadMessages(payload).find(message => message.role === "assistant");
+				},
+			},
+		).result();
+		expect(assistant?.content).toBe("Answer");
+		expect(assistant?.reasoning_opaque).toBe(base ? undefined : "prior-state");
+		const signature = next.content.find(block => block.type === "thinking")?.thinkingSignature;
+		expect(signature).toBe(base ? "reasoning_text" : '{"reasoningOpaque":"next-state","field":"reasoning_text"}');
+	});
+
 	it.each([
 		{ label: "opaque", provider: "github-copilot", envelope: { reasoningOpaque: "stale-state" } },
 		{

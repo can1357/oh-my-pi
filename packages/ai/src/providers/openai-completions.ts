@@ -1083,6 +1083,7 @@ const streamOpenAICompletionsOnce = (
 			const attemptedReasoningEffortFallbacks = new Set<string>();
 			let activeReasoningEffortFallbackKey: string | undefined;
 			let activeRequestParams: OpenAICompletionsParams | undefined;
+			let reasoningOpaqueReplay = false;
 			const providerSessionState = getOpenAICompletionsProviderSessionState(
 				model,
 				baseUrl,
@@ -1098,6 +1099,7 @@ const streamOpenAICompletionsOnce = (
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
 				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
 				appliedStrictTools = builtParams.strictToolsApplied;
+				reasoningOpaqueReplay = builtParams.reasoningOpaqueReplay;
 				let params = builtParams.params;
 				// Tool-triggered suppression is a hard wire constraint; cached
 				// enabled-effort negotiation must not overwrite its `none`.
@@ -1664,7 +1666,7 @@ const streamOpenAICompletionsOnce = (
 					// multiple aliases for the same reasoning text.
 					const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];
 					const deltaRecord = choice.delta as Record<string, unknown>;
-					if (model.compat.reasoningOpaqueReplay) {
+					if (reasoningOpaqueReplay) {
 						const opaque = deltaRecord.reasoning_opaque;
 						// Interleaved reasoning can send a new state at each tool call, with
 						// or without its text. Empty values never clear the latest state.
@@ -2332,6 +2334,7 @@ function buildParams(
 	toolStrictMode: AppliedToolStrictMode;
 	strictToolsApplied: boolean;
 	reasoningEffortFallbackAllowed: boolean;
+	reasoningOpaqueReplay: boolean;
 } {
 	const initialPolicy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
 	const initialCompat = initialPolicy.compat as ResolvedOpenAICompat;
@@ -2531,6 +2534,7 @@ function buildParams(
 		toolStrictMode,
 		strictToolsApplied,
 		reasoningEffortFallbackAllowed: finalPolicy.reasoning.disableReason !== "tools",
+		reasoningOpaqueReplay: compat.reasoningOpaqueReplay,
 	};
 }
 
@@ -3082,7 +3086,7 @@ export function convertMessages(
 			// it), the encrypted entries kept on unchanged tool calls still replay.
 			// A request that drops the model's own thinking also drops its unsigned text.
 			const receivedReasoningDetails: Record<string, unknown>[] = [];
-			const opaqueReplay = getReasoningOpaqueReplay(msg, model, model.compat.reasoningOpaqueReplay);
+			const opaqueReplay = getReasoningOpaqueReplay(msg, model, compat.reasoningOpaqueReplay);
 			for (const block of thinkingBlocks) {
 				const stored = parseReasoningDetailsSignature(block.thinkingSignature);
 				if (stored?.reasoningDetails) {

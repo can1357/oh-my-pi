@@ -559,6 +559,37 @@ describe("chat-completions history estimate", () => {
 		expect(withoutReplay.countMessage(turn)).toBe(withoutReplay.countMessage({ ...turn, content: [toolCall] }));
 	});
 
+	test.each([{ base: true }, { base: false }])("counts opaque replay from either view ($base)", ({ base }) => {
+		const model = buildModel({
+			...copilotGemini,
+			compat: {
+				replayReasoningContent: false,
+				reasoningOpaqueReplay: base,
+				whenThinking: { reasoningOpaqueReplay: !base },
+			},
+		});
+		const turn = thinkingTurn(model, '{"reasoningOpaque":"prior-state","field":"reasoning_text"}');
+		const tokenizer = new Tokenizer(model);
+		const expected = tokenizer.countMessage({ ...turn, content: [toolCall] }) + tokenizer.countTokens(THINKING);
+		expect(tokenizer.countMessage(turn, floor)).toBe(expected);
+	});
+
+	test("does not budget Copilot's summary when the wire drops a malformed call", () => {
+		const original = thinkingTurn(copilotGemini, '{"reasoningOpaque":"prior-state","field":"reasoning_text"}');
+		const nameless = { ...toolCall, id: "call_bad", name: "", arguments: {} };
+		const turn = { ...original, content: [nameless, ...original.content] };
+		const [assistant] = convertMessages(copilotGemini, { messages: [turn] }, copilotGemini.compat);
+		expect(assistant).toEqual({
+			role: "assistant",
+			content: "",
+			tool_calls: [{ id: toolCall.id, type: "function", function: { name: "read", arguments: '{"path":"a.ts"}' } }],
+		});
+		const tokenizer = new Tokenizer(copilotGemini);
+		expect(tokenizer.countMessage(turn, floor)).toBe(
+			tokenizer.countMessage({ ...turn, content: [nameless, toolCall] }, floor),
+		);
+	});
+
 	test.each([
 		{ stopReason: "length", replays: false },
 		{ stopReason: "stop", replays: true },
