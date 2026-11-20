@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { buildModel } from "../src/build";
-import type { ModelSpec } from "../src/types";
+import { calculateCost } from "../src/models";
+import type { ModelSpec, Usage } from "../src/types";
 
 /** Zero-cost discovery spec, mirroring GetUsableModels (no pricing upstream). */
 function spec(id: string): ModelSpec<"cursor-agent"> {
@@ -83,6 +84,37 @@ describe("cursor API-equivalent pricing", () => {
 		}
 		// The base lane's wire context is pinned to 256k; it must keep the cap.
 		expect(buildModel({ ...spec("grok-4.7"), contextWindow: 256_000 }).longContextWindowUncapped).toBeUndefined();
+	});
+
+	it("bills the explicit 500K Grok 4.7 SKUs at their published base cards", () => {
+		const cards = [
+			["grok-4.7-500k", 4, 12, 1],
+			["grok-4.7-500k-fast", 6, 18, 1.5],
+		] as const;
+		for (const [id, input, output, cacheRead] of cards) {
+			const model = buildModel({ ...spec(id), contextWindow: 500_000 });
+			expect(model.cost, id).toMatchObject({ input, output, cacheRead, cacheWrite: 0 });
+			// The 500K SKU's published rate is its base card, not only its
+			// long-context tier: requests below 256K must not fall back to the
+			// cheaper 256K-lane rates.
+			for (const prompt of [100_000, 300_000]) {
+				const usage: Usage = {
+					input: prompt - 3_000,
+					output: 7,
+					cacheRead: 2_000,
+					cacheWrite: 1_000,
+					totalTokens: prompt + 7,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				};
+				calculateCost(model, usage);
+				expect(usage.cost.input, `${id} input @${prompt}`).toBeCloseTo((usage.input * input) / 1e6, 10);
+				expect(usage.cost.output, `${id} output @${prompt}`).toBeCloseTo((usage.output * output) / 1e6, 10);
+				expect(usage.cost.cacheRead, `${id} cacheRead @${prompt}`).toBeCloseTo(
+					(usage.cacheRead * cacheRead) / 1e6,
+					10,
+				);
+			}
+		}
 	});
 
 	it("prices the newly served Cursor models from the docs", () => {

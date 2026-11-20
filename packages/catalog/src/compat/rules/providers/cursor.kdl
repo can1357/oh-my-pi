@@ -422,6 +422,25 @@ provider "cursor" {
 			cache-write 0
 		}
 	}
+	// Grok 4.7 500k: Cursor's explicit 500K SKU bills at the long-context
+	// rate from the first token: $4/$12, cache read $1.00.
+	models "grok-4.7-500k" "cursor-grok-4.7-500k" {
+		cost-patch {
+			input 4.0
+			output 12.0
+			cache-read 1.0
+			cache-write 0
+		}
+	}
+	// Grok 4.7 500k (Fast): $6/$18, cache read $1.50.
+	models "grok-4.7-500k-fast" "cursor-grok-4.7-500k-fast" {
+		cost-patch {
+			input 6.0
+			output 18.0
+			cache-read 1.5
+			cache-write 0
+		}
+	}
 	// DeepSeek V4.1 Flash 1017: $0.30/$1.20, cache read $0.006, no write fee.
 	// The bare id and every reasoning-effort wire id share one card.
 	models "deepseek-v41-flash-1017*" {
