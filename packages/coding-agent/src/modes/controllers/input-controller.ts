@@ -1865,7 +1865,7 @@ export class InputController {
 			// group keeps the shell's job-control view consistent. Long-lived
 			// children that must survive the suspend (Linux/other POSIX MCP stdio
 			// servers via the platform-specific `detached: true` spawn in
-			// `mcp/transports/stdio.ts`, every external the embedded bash engine
+			// `mcp/host/stdio-upstream.ts`, every external the embedded bash engine
 			// runs via `Sessions::Detach` in `crates/shell/src/host.rs`, which
 			// `setsid`s the child in `crates/shell/src/sys/spawn/unix.rs`) are
 			// their own sessions, so pgid=0 does not reach them.

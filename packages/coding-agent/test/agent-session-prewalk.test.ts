@@ -7,7 +7,8 @@ import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mo
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { CustomToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/wrapper";
-import { DeferredMCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
+import { MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
+import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { dispatchXdevTool, type XdevDispatch, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
@@ -1084,13 +1085,21 @@ describe("AgentSession prewalk", () => {
 	])(
 		"keeps write approval while honoring MCP readOnlyHint=$readOnlyHint at the prewalk gate",
 		async ({ readOnlyHint, thirdTurnModel }) => {
-			const mcp = new DeferredMCPTool(
-				"memory",
-				{ name: "list_projects", inputSchema: { type: "object" }, annotations: { readOnlyHint } },
-				async () => {
-					throw new Error("MCP connection is not used by this write fixture");
-				},
-			);
+			const unused = async (): Promise<never> => {
+				throw new Error("MCP connection is not used by this write fixture");
+			};
+			const connection: MCPServerConnection = {
+				name: "memory",
+				config: { command: "unused" },
+				transport: { connected: true, request: unused, notify: unused, close: unused },
+				serverInfo: { name: "memory", version: "1" },
+				capabilities: {},
+			};
+			const mcp = new MCPTool(connection, {
+				name: "list_projects",
+				inputSchema: { type: "object" },
+				annotations: { readOnlyHint },
+			});
 			const xdevState: XdevState = {
 				tools: new Map([
 					[

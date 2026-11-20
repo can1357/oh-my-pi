@@ -162,6 +162,7 @@ import { LocalProtocolHandler, type LocalProtocolOptions, outRepliesActive } fro
 import { onJudgeRejection } from "./judgment";
 import { stripXdUnderscorePrefix, stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { holdSharedLsp } from "./lsp/client";
+import { holdSharedMcp } from "./mcp/host/access";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
 	deduplicateMCPToolsByName,
@@ -171,7 +172,6 @@ import {
 	MCPManager,
 	type MCPManagerApi,
 	type MCPToolScope,
-	MCPToolCache,
 	type MCPToolsLoadResult,
 	reconnectMCPServers,
 	resolveMCPTransformContext,
@@ -465,6 +465,8 @@ import {
 	cfgMcpEvalNamespaces,
 	cfgMcpNotificationDebounceMs,
 	cfgMcpNotifications,
+	cfgMcpIdleStopMinutes,
+	cfgMcpShared,
 	cfgMcpStartupTimeoutMs,
 } from "./mcp/settings";
 import { cfgPlanEnabled } from "./plan-mode/settings";
@@ -2981,6 +2983,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// Restricted sessions cannot inherit or discover MCP capabilities.
 		const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
+		// Daemon-hosted MCP servers (see mcp/host/contract.ts). The mode is process
+		// state read whenever a server is attached, so like the shared-LSP mode below
+		// only a session that binds process state holds it, until disposed. Taken
+		// before discovery so the first connects already go to the shared host.
+		const sharedMcp = bindsProcessState ? holdSharedMcp(enableMCP && cfgMcpShared.get(settings)) : undefined;
+		if (sharedMcp) {
+			// Released on dispose, and by a startup that fails before any session exists to dispose.
+			disposeCallbacks.add(sharedMcp.release);
+			startupCleanup.defer(sharedMcp.release);
+		}
+		const mcpIdleStopMs = cfgMcpIdleStopMinutes.get(settings) * 60_000;
 		let mcpManager: MCPManagerApi | undefined = enableMCP ? options.mcpManager : undefined;
 		// A subagent worker thread never connects MCP servers itself: it reuses the main thread's manager.
 		if (enableMCP && !mcpManager && !isMainThread()) mcpManager = MCPManager.instance();
@@ -3025,8 +3038,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 		if (enableMCP && !mcpManager && isMainThread()) {
 			if (deferMCPDiscoveryForUI) {
-				const cacheStorage = settings.getStorage();
-				const deferredMCPManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
+				const deferredMCPManager = new MCPManager(cwd, undefined, mcpIdleStopMs);
 				ownedMcpManager = deferredMCPManager;
 				mcpManager = deferredMCPManager;
 				deferredMCPManager.setAuthStorage(authStorage);
@@ -3046,14 +3058,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							);
 							// The session can be torn down while servers are still connecting.
 							// Don't resurrect tools on a disposed session, and don't leak the
-							// transports/subprocesses the connect just spawned.
+							// server leases the connect just took.
 							if (liveSession.isDisposed) {
 								await deferredMCPManager.disconnectAll();
 								return;
 							}
 							applyMCPEnvironment(mcpResult);
 							logMCPLoadErrors(mcpResult.errors);
-							// Connected MCP tools (and cached routes of servers still connecting) are
+							// Connected MCP tools are
 							// enabled and mounted under xd:// devices right away, so a turn whose
 							// wait runs out still carries them.
 							await liveSession.refreshMCPTools(mcpResult.tools);
@@ -3076,10 +3088,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			} else {
 				const mcpResult = await logger.time("discoverAndLoadMCPTools", discoverAndLoadMCPTools, cwd, {
 					...mcpDiscoverOptions,
-					cacheStorage: settings.getStorage(),
+					idleStopMs: mcpIdleStopMs,
 					authStorage,
 				});
 				const discoveredMCPManager = mcpResult.manager;
+				// Its servers hold host leases from here on; a startup that fails before a
+				// session owns the manager must give them back.
+				startupCleanup.defer(() => {
+					void discoveredMCPManager.disconnectAll().catch(() => {});
+				});
 				ownedMcpManager = discoveredMCPManager;
 				mcpManager = discoveredMCPManager;
 				toolSession.mcpManager = discoveredMCPManager;
@@ -6211,6 +6228,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cfgLspShared.listen(session, shared => sharedLsp.set(shared));
 			}
 		}
+		// Re-applied live on `mcp.shared` changes; attached servers stay where they
+		// are until they are reconnected.
+		if (sharedMcp && enableMCP) cfgMcpShared.listen(session, shared => sharedMcp.set(shared));
 
 		// Start LSP warmup in the background so startup does not block on language server initialization.
 		// With `lsp.lazy` (the default) the warmup is skipped: recognized servers are still discovered and
