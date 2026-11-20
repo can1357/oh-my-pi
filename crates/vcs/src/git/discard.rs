@@ -278,10 +278,11 @@ fn loses_staged_changes(
 
 /// Whether any of `paths` (relative to the top of the work tree), which git
 /// saw modified in the work tree with every filter driver blanked, really
-/// changed: no blanked driver filters it, or its size differs from the size
-/// the index recorded. A path a blanked driver filters was compared
-/// unfiltered against its filtered blob, so it shows modified whenever its
-/// stat data changed. An index that cannot be read counts as a change.
+/// changed: no blanked driver filters it, or its size or mode differs from
+/// what the index recorded (a `chmod +x` alone is a change a reset undoes).
+/// A path a blanked driver filters was compared unfiltered against its
+/// filtered blob, so it shows modified whenever its stat data changed. An
+/// index that cannot be read counts as a change.
 fn changed_behind_filters(
 	git: &cli::InertGit,
 	dir: &Path,
@@ -316,13 +317,34 @@ fn changed_behind_filters(
 		return Ok(true);
 	};
 	Ok(filtered.iter().any(|path| {
+		let Some(entry) = index.entry_by_path(path.as_bytes().as_bstr()) else {
+			return true;
+		};
+		let Ok(meta) = std::fs::symlink_metadata(top.join(path)) else {
+			return true;
+		};
 		// The index keeps the low 32 bits of the size.
-		let recorded = index
-			.entry_by_path(path.as_bytes().as_bstr())
-			.map(|entry| entry.stat.size);
-		let actual = std::fs::symlink_metadata(top.join(path)).map(|meta| meta.len() as u32);
-		recorded.is_none() || recorded != actual.ok()
+		entry.stat.size != meta.len() as u32 || !has_index_mode(entry.mode, &meta)
 	}))
+}
+
+/// Whether a work-tree file has the mode its index entry records: a regular
+/// file, executable by its owner exactly when the entry is executable. Where
+/// files carry no executable bit (Windows), only the kind counts.
+fn has_index_mode(mode: gix::index::entry::Mode, meta: &std::fs::Metadata) -> bool {
+	#[cfg(unix)]
+	let executable = {
+		use std::os::unix::fs::PermissionsExt;
+		meta.permissions().mode() & 0o100 != 0
+	};
+	#[cfg(not(unix))]
+	let executable = mode == gix::index::entry::Mode::FILE_EXECUTABLE;
+	meta.is_file()
+		&& if mode == gix::index::entry::Mode::FILE {
+			!executable
+		} else {
+			mode == gix::index::entry::Mode::FILE_EXECUTABLE && executable
+		}
 }
 
 /// Whether checking the files `check` names out of its `source` would
@@ -826,6 +848,32 @@ mod tests {
 		assert!(!discards_work(root, &DISCOVERED, &HARD_RESET)?);
 		fs::write(root.join("b.dat"), "hello, world\n")?;
 		assert!(discards_work(root, &DISCOVERED, &HARD_RESET)?);
+		Ok(())
+	}
+
+	/// A `chmod +x` alone on a file behind a transforming filter keeps its
+	/// size, but `git reset --hard` restores its mode: it counts as a change.
+	#[cfg(unix)]
+	#[test]
+	fn a_mode_change_behind_a_transforming_filter_counts() -> TestResult {
+		use std::os::unix::fs::PermissionsExt;
+
+		let dir = repo()?;
+		let root = dir.path();
+		git(root, &["config", "core.filemode", "true"])?;
+		git(root, &["config", "filter.up.clean", "tr a-z A-Z"])?;
+		git(root, &["config", "filter.up.smudge", "tr A-Z a-z"])?;
+		git(root, &["config", "filter.up.required", "true"])?;
+		fs::write(root.join(".gitattributes"), "*.dat filter=up\n")?;
+		fs::write(root.join("b.dat"), "hello\n")?;
+		fs::set_permissions(root.join("b.dat"), fs::Permissions::from_mode(0o644))?;
+		git(root, &["add", ".gitattributes", "b.dat"])?;
+		git(root, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "dat"])?;
+
+		fs::set_permissions(root.join("b.dat"), fs::Permissions::from_mode(0o755))?;
+		assert!(discards_work(root, &DISCOVERED, &HARD_RESET)?, "the executable bit changed");
+		fs::set_permissions(root.join("b.dat"), fs::Permissions::from_mode(0o644))?;
+		assert!(!discards_work(root, &DISCOVERED, &HARD_RESET)?, "the mode is back");
 		Ok(())
 	}
 
