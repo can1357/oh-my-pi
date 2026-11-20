@@ -627,10 +627,11 @@ export interface SpotlightOverhead {
 
 /**
  * The net once fetch-backs that would have happened anyway are taken out: held-out results (the model saw them
- * unshaped) show how much of a would-be cut's output the agent reads again regardless, per tool and size bin (whether
- * `plain` capped the result: a capped result's cut hides lines beyond plain's page, which the agent fetches under plain
- * as well); only recoveries beyond that baseline are the cut's cost. While a bin with cuts has fewer than `minHoldouts`
- * holdouts, all of the tool's cuts take its pooled rate. A tool's baseline is thin while it has fewer than `minHoldouts`.
+ * unshaped) show how much of a would-be cut's output the agent reads again regardless, per tool and capped side
+ * (whether `plain` capped the result: a capped result's cut hides lines beyond plain's page, which the agent fetches
+ * under plain as well); only recoveries beyond that baseline are the cut's cost. While a capped side with cuts has
+ * fewer than `minHoldouts` holdouts, all of the tool's cuts take its pooled rate. A tool's baseline is thin while it
+ * has fewer than `minHoldouts`.
  */
 export interface SpotlightAdjustedTool {
 	tool: SpotlightTool;
@@ -644,8 +645,9 @@ export interface SpotlightAdjustedTool {
 	 */
 	baselinePerCut: SpotlightEstimate;
 	/**
-	 * max(0, recovered − expected): Σ bins' cuts × their own holdouts' per-cut rate when every bin with cuts has
-	 * `minHoldouts` of them, else cuts × `baselinePerCut` (a thin bin beside the other's own rate would misprice it).
+	 * max(0, recovered − expected): Σ capped sides' cuts × their own holdouts' per-cut rate when every side with cuts
+	 * has `minHoldouts` of them, else cuts × `baselinePerCut` (a thin side beside the other's own rate would misprice
+	 * it). The step rows charge each cut the same rate.
 	 */
 	excessTokens: SpotlightEstimate;
 }

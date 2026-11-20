@@ -73,7 +73,7 @@ export interface SessionMoney {
 /**
  * One tool's cuts and holdouts, with the share of each whose `plain` capped (showed less than the whole output). A
  * capped result's cut hides lines beyond plain's page too, which the agent would fetch under plain as well, so its
- * baseline is measured apart once enough holdouts back every size bin with cuts (see {@link expectedRecovered}).
+ * baseline is measured apart once enough holdouts back every capped side with cuts (see {@link cutRate}).
  */
 interface ToolCell {
 	cuts: number;
@@ -107,11 +107,29 @@ function emptyToolCell(): ToolCell {
 }
 
 /**
- * Tokens a tool's cuts get fetched back anyway: each size bin (plain-capped or not) at its own holdouts' per-cut rate
- * when every bin with cuts has {@link MIN_HOLDOUTS} of them, else every cut at the tool's pooled rate. The pooled rate
- * weighs the bins by the holdouts' capped share, which the holdout coin makes the cuts' share in expectation, so it is
- * unbiased only applied to all of the tool's cuts, never to one thin bin beside the other's own rate.
+ * Tokens a cut of a tool gets fetched back anyway, by whether `plain` capped it: the capped or the uncapped side's own
+ * holdouts' per-cut rate when every side with cuts has {@link MIN_HOLDOUTS} of them, else the tool's pooled rate. The
+ * pooled rate weighs the sides by the holdouts' capped share, which the holdout coin makes the cuts' share in
+ * expectation, so it is unbiased only applied to all of the tool's cuts, never to one thin side beside the other's own
+ * rate. Only asked for a side with cuts, which has its holdouts once the sides are apart.
  */
+function cutRate(
+	cuts: number,
+	holdouts: number,
+	baseline: number,
+	cappedCuts: number,
+	cappedHoldouts: number,
+	cappedBaseline: number,
+	capped: boolean,
+): number {
+	const uncappedHoldouts = holdouts - cappedHoldouts;
+	const apart =
+		(cuts === cappedCuts || uncappedHoldouts >= MIN_HOLDOUTS) && (cappedCuts === 0 || cappedHoldouts >= MIN_HOLDOUTS);
+	if (!apart) return holdouts > 0 ? baseline / holdouts : 0;
+	return capped ? cappedBaseline / cappedHoldouts : (baseline - cappedBaseline) / uncappedHoldouts;
+}
+
+/** Tokens a tool's cuts get fetched back anyway: each cut at its side's {@link cutRate}. */
 function expectedRecovered(
 	cuts: number,
 	holdouts: number,
@@ -121,12 +139,14 @@ function expectedRecovered(
 	cappedBaseline: number,
 ): number {
 	const uncappedCuts = cuts - cappedCuts;
-	const uncappedHoldouts = holdouts - cappedHoldouts;
-	const binned =
-		(uncappedCuts === 0 || uncappedHoldouts >= MIN_HOLDOUTS) && (cappedCuts === 0 || cappedHoldouts >= MIN_HOLDOUTS);
-	if (!binned) return holdouts > 0 ? (baseline / holdouts) * cuts : 0;
-	const uncapped = uncappedCuts > 0 ? ((baseline - cappedBaseline) / uncappedHoldouts) * uncappedCuts : 0;
-	const capped = cappedCuts > 0 ? (cappedBaseline / cappedHoldouts) * cappedCuts : 0;
+	const uncapped =
+		uncappedCuts > 0
+			? uncappedCuts * cutRate(cuts, holdouts, baseline, cappedCuts, cappedHoldouts, cappedBaseline, false)
+			: 0;
+	const capped =
+		cappedCuts > 0
+			? cappedCuts * cutRate(cuts, holdouts, baseline, cappedCuts, cappedHoldouts, cappedBaseline, true)
+			: 0;
 	return uncapped + capped;
 }
 
@@ -140,26 +160,35 @@ function toolCell(cells: ToolCells, tool: SpotlightTool): ToolCell {
 	return cell;
 }
 
-/** Would-be recovered tokens per held-out cut of a cell: its holdouts' rate, 0 without any. */
-function baselinePerCut(cell: ToolCell): number {
-	return cell.holdouts > 0 ? cell.baseline / cell.holdouts : 0;
+/** Counts a cut or a holdout into its tool's cell in `cells`; other results are skipped. */
+function addResult(cells: ToolCells, { call, result, tool }: Evaluated): void {
+	if (!result.shortened && !result.holdout) return;
+	const cell = toolCell(cells, tool);
+	const capped = result.plainTokens < result.inTokens;
+	if (result.shortened) {
+		cell.cuts++;
+		cell.recovered += recoveredTokens(call);
+		if (capped) cell.cappedCuts++;
+	} else {
+		cell.holdouts++;
+		cell.baseline += call.baselineTokens;
+		if (capped) {
+			cell.cappedHoldouts++;
+			cell.cappedBaseline += call.baselineTokens;
+		}
+	}
 }
 
 /**
- * Per-cut holdout baselines of the range's evaluated results (see {@link baselinePerCut}): what a cut of `tool`
- * gets fetched back anyway.
+ * Per-cut holdout baselines of the range's evaluated results: what a cut of `tool` gets fetched back anyway, by
+ * whether `plain` capped it ({@link cutRate}), the rate the adjusted net charges the cut.
  */
-export function holdoutBaselines(evaluated: readonly Evaluated[]): (tool: SpotlightTool) => number {
+export function holdoutBaselines(evaluated: readonly Evaluated[]): (tool: SpotlightTool, capped: boolean) => number {
 	const cells: ToolCells = new Map();
-	for (const { call, result, tool } of evaluated) {
-		if (!result.holdout) continue;
-		const cell = toolCell(cells, tool);
-		cell.holdouts++;
-		cell.baseline += call.baselineTokens;
-	}
-	return tool => {
-		const cell = cells.get(tool);
-		return cell ? baselinePerCut(cell) : 0;
+	for (const item of evaluated) addResult(cells, item);
+	return (tool, capped) => {
+		const c = cells.get(tool);
+		return c ? cutRate(c.cuts, c.holdouts, c.baseline, c.cappedCuts, c.cappedHoldouts, c.cappedBaseline, capped) : 0;
 	};
 }
 
@@ -173,7 +202,7 @@ export function emptyAdjusted(): SpotlightAdjusted {
 	};
 }
 
-/** Excess per tool of summed cells: max(0, recovered − what its cuts get fetched back anyway, by size bin). */
+/** Excess per tool of summed cells: max(0, recovered − what its cuts get fetched back anyway, by capped side). */
 function excessOf(cells: ToolCells): Map<SpotlightTool, number> {
 	const excess = new Map<SpotlightTool, number>();
 	for (const [tool, c] of cells) {
@@ -218,9 +247,9 @@ function recoveredOf(cells: ToolCells): number {
 
 /**
  * Holdout-adjusted net savings: each tool's applied cuts (scored and score-free) recover tokens; held-out would-be
- * cuts of the same tool and size bin (plain-capped or not; the tool's pooled holdouts while a bin with cuts has under
- * {@link MIN_HOLDOUTS}) show how many the agent fetches back anyway. Intervals resample experiment sessions jointly.
- * `byTool` lists `tools` in their order.
+ * cuts of the same tool and capped side (plain-capped or not; the tool's pooled holdouts while a side with cuts has
+ * under {@link MIN_HOLDOUTS}) show how many the agent fetches back anyway. Intervals resample experiment sessions
+ * jointly. `byTool` lists `tools` in their order.
  */
 export function computeAdjusted(
 	evaluated: readonly Evaluated[],
@@ -231,23 +260,9 @@ export function computeAdjusted(
 ): SpotlightAdjusted {
 	const sessions = new Map<string, AdjustedSession>();
 	for (const entry of money) sessions.set(entry.sessionFile, { money: entry, tools: new Map() });
-	for (const { call, result, analysis, tool } of evaluated) {
-		const session = sessions.get(analysis.session.session_file);
-		if (!session || (!result.shortened && !result.holdout)) continue;
-		const cell = toolCell(session.tools, tool);
-		const capped = result.plainTokens < result.inTokens;
-		if (result.shortened) {
-			cell.cuts++;
-			cell.recovered += recoveredTokens(call);
-			if (capped) cell.cappedCuts++;
-		} else if (result.holdout) {
-			cell.holdouts++;
-			cell.baseline += call.baselineTokens;
-			if (capped) {
-				cell.cappedHoldouts++;
-				cell.cappedBaseline += call.baselineTokens;
-			}
-		}
+	for (const item of evaluated) {
+		const session = sessions.get(item.analysis.session.session_file);
+		if (session) addResult(session.tools, item);
 	}
 	const list = [...sessions.values()];
 	const totals: ToolCells = new Map();
@@ -622,12 +637,13 @@ interface StepSums {
 
 /**
  * What each step combination earns per tool and saved-token bin over the range's cuts; combinations with
- * under {@link MIN_STEP_CUTS} cuts of a tool fold into `other`. The excess subtracts each cut's holdout baseline
- * ({@link holdoutBaselines}). Cells follow `tools`' order, then the most common combination first.
+ * under {@link MIN_STEP_CUTS} cuts of a tool fold into `other`. The excess subtracts each cut's holdout baseline by
+ * whether `plain` capped it ({@link holdoutBaselines}), as the adjusted net does. Cells follow `tools`' order, then the
+ * most common combination first.
  */
 export function computeSteps(
 	evaluated: readonly Evaluated[],
-	baselineOf: (tool: SpotlightTool) => number,
+	baselineOf: (tool: SpotlightTool, capped: boolean) => number,
 	tools: readonly SpotlightTool[],
 ): SpotlightStepCell[] {
 	const cuts = evaluated.filter(item => item.result.shortened);
@@ -657,7 +673,7 @@ export function computeSteps(
 		cell.cuts++;
 		cell.savedTokens += item.result.savedTokens;
 		cell.recoveredTokens += recoveredTokens(item.call);
-		cell.anyway += baselineOf(item.tool);
+		cell.anyway += baselineOf(item.tool, item.result.plainTokens < item.result.inTokens);
 		if (Number.isFinite(item.call.seq)) {
 			const file = item.analysis.session.session_file;
 			const pair = cell.fetchBacks.get(file) ?? [0, 0];
