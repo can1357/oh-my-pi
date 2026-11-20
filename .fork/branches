@@ -12,3 +12,4 @@ chore/fork-upstream-compat-fbb8085
 feat/resume-by-title-fbb8085
 feat/composer-draft-stash
 chore/fork-format-upstream-f4e3d0d
+fix/ai-compat-test-fixtures-fold-field
