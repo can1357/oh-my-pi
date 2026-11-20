@@ -1,0 +1,8 @@
+// Gemini Enterprise (gcp) sign-in runs Google's PKCE flow with agy's gcp OAuth
+// client and stores the grant under `antigravity-cli` with its project and location.
+auth "antigravity-cli-enterprise" {
+	name "Antigravity CLI (Gemini Enterprise)"
+	login-warning "Google explicitly supports ACP-compatible editors, but its guidance on third-party coding agents is inconsistent. This entry runs Google's PKCE flow with agy's gcp OAuth client rather than `agy acp --login`, and stores credentials under antigravity-cli."
+	login "custom" hook="antigravity-cli-enterprise"
+	store-as "antigravity-cli"
+}

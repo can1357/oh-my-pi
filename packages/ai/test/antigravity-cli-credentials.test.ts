@@ -4,6 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { isDefinitiveOAuthFailure } from "../src/error";
 import {
+	AGY_GCP_OAUTH_CLIENT_ID,
+	AGY_GCP_OAUTH_REDIRECT_URI,
 	AGY_OAUTH_CLIENT_ID,
 	agyCredentialEnv,
 	agyCredentialKey,
@@ -14,10 +16,14 @@ import {
 	refreshAgyCredentials,
 	stageAgyCredentials,
 } from "../src/providers/antigravity-cli/credentials";
-import { AgyAuthUrlParser, agyAuthorizationCode } from "../src/registry/oauth/antigravity-cli";
+import {
+	AgyAuthUrlParser,
+	agyAuthorizationCode,
+	loginAntigravityCli,
+	loginAntigravityGcp,
+} from "../src/registry/oauth/antigravity-cli";
 import { getOAuthApiKey } from "../src/registry/oauth";
 import type { OAuthCredentials } from "../src/registry/oauth/types";
-
 const directories: string[] = [];
 const grant: OAuthCredentials = {
 	access: "fixture-access",
@@ -231,7 +237,7 @@ try {
 	const credentials = await loginAntigravityCli({
 		signal: controller.signal,
 		onAuth: () => { if (process.env.FIXTURE_MODE === "cancel") controller.abort("secret-cancel-reason"); },
-		onPrompt: async () => process.env.FIXTURE_MODE === "cancel" ? new Promise(() => {}) : "fixture-code"
+		onPrompt: async () => (process.env.FIXTURE_MODE === "cancel" ? new Promise(() => {}) : "fixture-code")
 	});
 	console.log(JSON.stringify({
 		realGrant: typeof credentials === "object" && credentials.refresh === "fixture-refresh",
@@ -349,5 +355,178 @@ describe("Antigravity CLI refresh", () => {
 		} catch (error) {
 			expect(String(error)).not.toContain("secret-network-payload");
 		}
+	});
+});
+
+describe("Antigravity CLI Gemini Enterprise (gcp)", () => {
+	const gcpGrant: OAuthCredentials = {
+		...grant,
+		projectId: "konsai-labs",
+		region: "global",
+	};
+	const gcpApiKey = JSON.stringify({
+		token: gcpGrant.access,
+		refreshToken: gcpGrant.refresh,
+		expiresAt: gcpGrant.expires,
+		email: gcpGrant.email,
+		accountId: gcpGrant.accountId,
+		projectId: gcpGrant.projectId,
+		region: gcpGrant.region,
+	});
+
+	it("parses auth_method gcp with project_id and region, rejecting missing project_id", () => {
+		const parsed = parseAgyStoredCredentials({
+			...stored,
+			auth_method: "gcp",
+			project_id: " konsai-labs ",
+			region: " us-central1 ",
+		});
+		expect(parsed.projectId).toBe("konsai-labs");
+		expect(parsed.region).toBe("us-central1");
+
+		expect(() => parseAgyStoredCredentials({ ...stored, auth_method: "gcp" })).toThrow("project_id");
+	});
+
+	it("isolates credential key and version between consumer and gcp accounts", () => {
+		expect(agyCredentialKey(gcpApiKey)).not.toBe(agyCredentialKey(apiKey));
+		expect(agyCredentialVersion(gcpApiKey)).not.toBe(agyCredentialVersion(apiKey));
+		const usKey = JSON.stringify({ ...JSON.parse(gcpApiKey), region: "us-central1" });
+		expect(agyCredentialVersion(usKey)).not.toBe(agyCredentialVersion(gcpApiKey));
+	});
+
+	it("stages both antigravity-oauth-token (gcp) and settings.json for enterprise grants", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-gcp-stage-"));
+		directories.push(dir);
+		await stageAgyCredentials(gcpApiKey, dir);
+
+		const stagedToken = JSON.parse(
+			await fs.readFile(path.join(dir, "antigravity-cli", "antigravity-oauth-token"), "utf8"),
+		);
+		expect(stagedToken.auth_method).toBe("gcp");
+		expect(stagedToken.project_id).toBe("konsai-labs");
+		expect(stagedToken.region).toBe("global");
+		expect(stagedToken.id_token_email).toBe(gcpGrant.email);
+		expect(stagedToken.token.access_token).toBe(gcpGrant.access);
+
+		const settings = JSON.parse(await fs.readFile(path.join(dir, "antigravity-cli", "settings.json"), "utf8"));
+		expect(settings).toEqual({ gcp: { project: "konsai-labs", location: "global" } });
+	});
+
+	it("refreshes gcp credentials with AGY_GCP_OAUTH_CLIENT_ID and preserves projectId/region", async () => {
+		const refreshed = await refreshAgyCredentials(gcpGrant, undefined, async (_url, init) => {
+			const body = new URLSearchParams(String(init?.body));
+			expect(body.get("client_id")).toBe(AGY_GCP_OAUTH_CLIENT_ID);
+			expect(body.get("client_secret")).toBeTruthy();
+			expect(body.get("grant_type")).toBe("refresh_token");
+			return Response.json({ access_token: "new-gcp-access", expires_in: 3600 });
+		});
+		expect(refreshed.access).toBe("new-gcp-access");
+		expect(refreshed.projectId).toBe("konsai-labs");
+		expect(refreshed.region).toBe("global");
+	});
+
+	it("preserves projectId and region in structured API key from getOAuthApiKey", async () => {
+		const result = await getOAuthApiKey("antigravity-cli", {
+			"antigravity-cli": gcpGrant,
+		});
+		expect(result).not.toBeNull();
+		const parsed = parseAgyApiKey(result!.apiKey);
+		expect(parsed.projectId).toBe("konsai-labs");
+		expect(parsed.region).toBe("global");
+	});
+
+	it("runs enterprise loginAntigravityGcp flow with PKCE and exchanges code for OAuthCredentials", async () => {
+		const prompts = ["konsai-labs", ""];
+		let capturedUrl = "";
+		const creds = await loginAntigravityGcp({
+			onPrompt: async () => prompts.shift() ?? "auth-code-123",
+			onAuth: info => {
+				capturedUrl = info.url;
+			},
+			onManualCodeInput: async () => `${AGY_GCP_OAUTH_REDIRECT_URI}?code=enterprise-code-42`,
+			fetch: async (url, init) => {
+				expect(String(url)).toBe("https://oauth2.googleapis.com/token");
+				const body = new URLSearchParams(String(init?.body));
+				expect(body.get("client_id")).toBe(AGY_GCP_OAUTH_CLIENT_ID);
+				expect(body.get("code")).toBe("enterprise-code-42");
+				expect(body.get("redirect_uri")).toBe(AGY_GCP_OAUTH_REDIRECT_URI);
+				expect(body.get("code_verifier")).toBeTruthy();
+				expect(body.get("grant_type")).toBe("authorization_code");
+				return Response.json({
+					access_token: "gcp-access",
+					refresh_token: "gcp-refresh",
+					expires_in: 3600,
+					id_token: idToken,
+				});
+			},
+		});
+
+		const authUrl = new URL(capturedUrl);
+		expect(authUrl.origin + authUrl.pathname).toBe("https://accounts.google.com/o/oauth2/v2/auth");
+		expect(authUrl.searchParams.get("client_id")).toBe(AGY_GCP_OAUTH_CLIENT_ID);
+		expect(authUrl.searchParams.get("redirect_uri")).toBe(AGY_GCP_OAUTH_REDIRECT_URI);
+		expect(authUrl.searchParams.get("code_challenge_method")).toBe("S256");
+		expect(authUrl.searchParams.get("code_challenge")).toBeTruthy();
+		expect(authUrl.searchParams.get("scope")?.split(" ")).toEqual([
+			"https://www.googleapis.com/auth/cloud-platform",
+			"https://www.googleapis.com/auth/userinfo.email",
+			"https://www.googleapis.com/auth/userinfo.profile",
+			"https://www.googleapis.com/auth/cclog",
+			"https://www.googleapis.com/auth/experimentsandconfigs",
+			"openid",
+		]);
+
+		expect(creds.access).toBe("gcp-access");
+		expect(creds.refresh).toBe("gcp-refresh");
+		expect(creds.email).toBe(grant.email);
+		expect(creds.accountId).toBe(grant.accountId);
+		expect(creds.projectId).toBe("konsai-labs");
+		expect(creds.region).toBe("global");
+	});
+
+	it("validates OAuth state in callback URLs for enterprise loginAntigravityGcp", async () => {
+		let capturedUrl = "";
+		const matchPrompts = ["konsai-labs", ""];
+		const matched = await loginAntigravityGcp({
+			onPrompt: async () => matchPrompts.shift() ?? "",
+			onAuth: info => {
+				capturedUrl = info.url;
+			},
+			onManualCodeInput: async () => {
+				const matchedState = new URL(capturedUrl).searchParams.get("state");
+				expect(matchedState).toBeTruthy();
+				return `${AGY_GCP_OAUTH_REDIRECT_URI}?code=enterprise-code-ok&state=${matchedState}`;
+			},
+			fetch: async () =>
+				Response.json({
+					access_token: "gcp-access",
+					refresh_token: "gcp-refresh",
+					expires_in: 3600,
+					id_token: idToken,
+				}),
+		});
+		expect(matched.access).toBe("gcp-access");
+
+		const mismatchPrompts = ["konsai-labs", ""];
+		await expect(
+			loginAntigravityGcp({
+				onPrompt: async () => mismatchPrompts.shift() ?? "",
+				onAuth: () => {},
+				onManualCodeInput: async () => `${AGY_GCP_OAUTH_REDIRECT_URI}?code=enterprise-code-bad&state=wrong-state`,
+				fetch: async () => {
+					throw new Error("fetch should not be called on state mismatch");
+				},
+			}),
+		).rejects.toThrow("Antigravity CLI OAuth state mismatch");
+	});
+
+	it("rejects loginAntigravityGcp when onPrompt is missing or signal is pre-aborted", async () => {
+		await expect(loginAntigravityGcp({})).rejects.toThrow("requires");
+		await expect(
+			loginAntigravityGcp({
+				signal: AbortSignal.abort("cancelled"),
+				onPrompt: async () => "konsai-labs",
+			}),
+		).rejects.toThrow("cancelled");
 	});
 });

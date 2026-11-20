@@ -14,6 +14,7 @@ export const CUSTOM_LOGIN_HOOKS: Record<string, Lazy<LoginHook>> = {
 	"devin-cli": () => import("../oauth/devin-cli").then(module => module.loginDevinCliHook),
 	"devin-windsurf": () => import("../oauth/devin-windsurf").then(module => module.loginDevinWindsurfHook),
 	"antigravity-cli": () => import("../oauth/antigravity-cli").then(module => module.loginAntigravityCli),
+	"antigravity-cli-enterprise": () => import("../oauth/antigravity-cli").then(module => module.loginAntigravityGcp),
 	"kiro-login": () => import("../oauth/kiro").then(module => module.loginKiroHook),
 };
 export const CUSTOM_REFRESH_HOOKS: Record<string, Lazy<RefreshHook>> = {
