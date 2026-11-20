@@ -2,9 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19381](https://github.com/can1357/oh-my-pi/pull/19381) by [@Xytronix](https://github.com/Xytronix))
 ### Breaking Changes
 
 - Moved `convertImageToPng`, `convertImageToPngShared`, `cachedPngConversion` and `imagePayloadKey` from `@oh-my-pi/pi-tui/chat/image-loading` to `@oh-my-pi/pi-tui/png-conversion`; import them from the new path ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
@@ -24,6 +21,7 @@
 
 ### Fixed
 
+- Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 - Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
 - Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed WebP and JPEG images drawing as a blank gap on Kitty-graphics terminals (Ghostty, Kitty, herdr) when shown through a bare `Image`, such as an extension's pasted-image preview ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
