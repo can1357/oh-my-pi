@@ -2253,45 +2253,49 @@ export class CommandController {
 			!background || (this.ctx.viewSession === session && this.ctx.sessionManager.getSessionId() === sessionId);
 
 		const cancelHint = `(${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`;
-		const label = isAuto ? "Auto-compacting context" : "Compacting context";
-		let compactingLoader: Loader | undefined;
+		const verb = isAuto ? "Auto-compacting context" : "Compacting context";
+		const label = background ? `${verb} in the background` : verb;
+		const startedAt = Date.now();
+		const loader = new Loader(
+			this.ctx.ui,
+			spinner => theme.fg("accent", spinner),
+			text => theme.fg("muted", text),
+			`${label}… ${cancelHint}`,
+			getSymbolTheme().spinnerFrames,
+		);
+		loader.setWorkingRow(
+			() => ({
+				label: `${label}…`,
+				startedAt,
+				variant: { kind: "compaction" },
+				interruptKey: this.ctx.maintenanceInterruptKey(),
+			}),
+			() => this.ctx.interruptFromPointer(),
+		);
 		if (background) {
-			this.ctx.showStatus(`${label} in the background… ${cancelHint}`);
+			// The composer stays free: the run takes the status row only while no turn holds it.
+			this.ctx.backgroundCompaction.start({ loader, label: `${label} ${cancelHint}`, startedAt, inView });
 		} else {
 			if (this.ctx.loadingAnimation) {
 				this.ctx.loadingAnimation.stop();
 				this.ctx.loadingAnimation = undefined;
 			}
 			this.ctx.statusContainer.disposeChildren();
-			compactingLoader = new Loader(
-				this.ctx.ui,
-				spinner => theme.fg("accent", spinner),
-				text => theme.fg("muted", text),
-				`${label}… ${cancelHint}`,
-				getSymbolTheme().spinnerFrames,
-			);
-			const startedAt = Date.now();
-			compactingLoader.setWorkingRow(
-				() => ({
-					label: `${label}…`,
-					startedAt,
-					variant: { kind: "compaction" },
-					interruptKey: this.ctx.maintenanceInterruptKey(),
-				}),
-				() => this.ctx.interruptFromPointer(),
-			);
-			this.ctx.statusContainer.addChild(compactingLoader);
-			this.ctx.ui.requestRender();
+			this.ctx.statusContainer.addChild(loader);
 		}
+		this.ctx.ui.requestRender();
 
 		let outcome: CompactionOutcome = "ok";
 		try {
 			try {
 				await session.compact(instructions, options);
 			} finally {
-				if (compactingLoader) {
-					compactingLoader.stop();
-					this.ctx.statusContainer.removeChild(compactingLoader);
+				if (background) {
+					this.ctx.backgroundCompaction.stop();
+					this.ctx.ui.requestRender();
+				} else {
+					loader.stop();
+					this.ctx.statusContainer.removeChild(loader);
 				}
 			}
 			if (inView()) {
