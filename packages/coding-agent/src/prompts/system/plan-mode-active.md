@@ -86,7 +86,7 @@ Scannable markdown; depth follows change: one-file fix → few bullets; cross-cu
   - Concrete edit: verb, exact target, new behavior; NEVER merely area to “update”/“handle”.
   - Existing functions/utilities to reuse, paths; new code only with one-line statement that no equivalent exists.
   - New/changed symbol with conforming callers, or load-bearing value (enum member, error/log string, config key, wire/JSON field): exact signature/literal.
-  - Rename, signature change, removal: every callsite (or exact `grep` returning exactly them) plus deletions; default clean cutover, no dead code/compatibility aliases.
+  - Rename, signature change, removal: every callsite (or exact `grep` returning exactly them) plus deletions; apply declared compatibility posture. Internal-only → clean cutover/no dead code or aliases. Established public/persisted/config/wire contract → preserve it or plan an explicitly authorized migration.
   - Rival patterns: copy and avoid named.
   - Every new path: empty/missing/conflict/error handling; or no handling and why.
 - **Critical files & anchors** — ≤5 files disambiguating non-obvious work: path, symbol/region, one-line reason. Line numbers hints; implementer rereads before edit. Omit Approach-obvious files.
