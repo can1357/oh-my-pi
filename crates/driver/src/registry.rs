@@ -61,8 +61,8 @@ use omp_ai::{
 		zai::ZaiUsageFetcher,
 	},
 	provider::builtin::{
-		AuthApplicationConfig, AzureEndpointConfig, GoogleCcaConfig, ProductionDependencies,
-		discover_antigravity_version,
+		AuthApplicationConfig, AzureEndpointConfig, CloudflareGatewayConfig, GoogleCcaConfig,
+		ProductionDependencies, discover_antigravity_version,
 	},
 	router::Router,
 	session::{ConversationError, ConversationSessionPlanner},
@@ -135,6 +135,8 @@ const AZURE_BASE_URL_ENV: &str = "OMP_AZURE_OPENAI_BASE_URL";
 const AZURE_RESOURCE_NAME_ENV: &str = "OMP_AZURE_OPENAI_RESOURCE_NAME";
 const AZURE_DEPLOYMENT_ENV: &str = "OMP_AZURE_OPENAI_DEPLOYMENT";
 const AZURE_API_VERSION_ENV: &str = "OMP_AZURE_OPENAI_API_VERSION";
+const CLOUDFLARE_ACCOUNT_ID_ENV: &str = "OMP_CLOUDFLARE_ACCOUNT_ID";
+const CLOUDFLARE_GATEWAY_NAME_ENV: &str = "OMP_CLOUDFLARE_AI_GATEWAY_NAME";
 
 /// Production inference-registry or credential-state construction failure.
 #[derive(Debug, thiserror::Error)]
@@ -1584,7 +1586,8 @@ async fn production_assembly_with_catalog(
 	)
 	.with_settings(inference_settings)
 	.with_aws_registry_availability(aws_availability)
-	.with_azure_endpoint(production_azure_endpoint()?);
+	.with_azure_endpoint(production_azure_endpoint()?)
+	.with_cloudflare_gateway(production_cloudflare_gateway()?);
 	let dependencies = dependencies.with_usage_manager(usage_manager);
 	#[cfg(feature = "local-applefm")]
 	let dependencies = {
@@ -1783,6 +1786,38 @@ fn env_override(name: &str) -> Option<Str> {
 		(!value.is_empty()).then(|| Str::from(value))
 	})
 }
+/// Reads the Cloudflare AI Gateway coordinates from the environment.
+fn production_cloudflare_gateway() -> Result<Option<CloudflareGatewayConfig>, RegistryError> {
+	cloudflare_gateway_from(
+		env_override(CLOUDFLARE_ACCOUNT_ID_ENV),
+		env_override(CLOUDFLARE_GATEWAY_NAME_ENV),
+	)
+}
+
+/// Both values present and valid give a config; either absent leaves the
+/// gateway unconfigured, which fails each call with a typed error rather than
+/// sending a placeholder. A present but invalid value is refused at startup.
+fn cloudflare_gateway_from(
+	account: Option<Str>,
+	gateway: Option<Str>,
+) -> Result<Option<CloudflareGatewayConfig>, RegistryError> {
+	let invalid = |code: &'static str| {
+		RegistryError::CatalogComposition(Box::new(io::Error::new(io::ErrorKind::InvalidInput, code)))
+	};
+	match (account, gateway) {
+		(Some(account), Some(gateway)) => CloudflareGatewayConfig::new(account, gateway)
+			.map(Some)
+			.map_err(invalid),
+		(Some(account), None) => CloudflareGatewayConfig::new(account, "x")
+			.map(|_| None)
+			.map_err(invalid),
+		(None, Some(gateway)) => CloudflareGatewayConfig::new("x", gateway)
+			.map(|_| None)
+			.map_err(invalid),
+		(None, None) => Ok(None),
+	}
+}
+
 fn production_azure_endpoint() -> Result<Option<AzureEndpointConfig>, RegistryError> {
 	let base = match (env_override(AZURE_BASE_URL_ENV), env_override(AZURE_RESOURCE_NAME_ENV)) {
 		(Some(base), _) => Some(base),
@@ -1819,6 +1854,36 @@ fn production_azure_endpoint() -> Result<Option<AzureEndpointConfig>, RegistryEr
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn cloudflare_gateway_needs_both_values_and_refuses_invalid_ones() {
+		let some = |value: &str| Some(Str::from(value));
+		assert!(
+			cloudflare_gateway_from(None, None)
+				.expect("unset")
+				.is_none()
+		);
+		assert!(
+			cloudflare_gateway_from(some("acct-1"), None)
+				.expect("half")
+				.is_none()
+		);
+		assert!(
+			cloudflare_gateway_from(None, some("gw"))
+				.expect("half")
+				.is_none()
+		);
+		assert!(
+			cloudflare_gateway_from(some("acct-1"), some("gw"))
+				.expect("both")
+				.is_some()
+		);
+		for bad in ["a/b", "a b", "a?x=1", "a#f", "a:b", "..", "{account}"] {
+			assert!(cloudflare_gateway_from(some(bad), some("gw")).is_err(), "account {bad}");
+			assert!(cloudflare_gateway_from(some("acct"), some(bad)).is_err(), "gateway {bad}");
+			assert!(cloudflare_gateway_from(some(bad), None).is_err(), "lone account {bad}");
+		}
+	}
 
 	#[test]
 	fn default_context_declares_credential_key_source() {

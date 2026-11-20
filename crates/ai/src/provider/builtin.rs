@@ -186,6 +186,39 @@ impl AzureEndpointConfig {
 	}
 }
 
+/// Provider id whose base URL carries account and gateway coordinates.
+const CLOUDFLARE_GATEWAY_PROVIDER: &str = "cloudflare-ai-gateway";
+
+/// Validated account and gateway coordinates for Cloudflare AI Gateway routes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloudflareGatewayConfig {
+	account: Str,
+	gateway: Str,
+}
+
+impl CloudflareGatewayConfig {
+	/// Validates and constructs the coordinates. Each must be non-empty ASCII
+	/// alphanumeric or `-`, so neither can alter the URL path or authority.
+	pub fn new(account: impl Into<Str>, gateway: impl Into<Str>) -> Result<Self, &'static str> {
+		let account = account.into();
+		let gateway = gateway.into();
+		if !cloudflare_coordinate_is_valid(account.as_str()) {
+			return Err("cloudflare-account-invalid");
+		}
+		if !cloudflare_coordinate_is_valid(gateway.as_str()) {
+			return Err("cloudflare-gateway-invalid");
+		}
+		Ok(Self { account, gateway })
+	}
+}
+
+fn cloudflare_coordinate_is_valid(value: &str) -> bool {
+	!value.is_empty()
+		&& value
+			.chars()
+			.all(|character| character.is_ascii_alphanumeric() || character == '-')
+}
+
 /// Explicit route construction settings for the two Cloud Code Assist clients.
 #[derive(Clone)]
 pub struct GoogleCcaConfig {
@@ -356,6 +389,7 @@ pub struct ProductionDependencies {
 	auth_application:     AuthApplicationConfig,
 	credential_shapers:   Arc<CredentialShaperRegistry>,
 	azure_endpoint:       Option<AzureEndpointConfig>,
+	cloudflare_gateway:   Option<CloudflareGatewayConfig>,
 	usage_manager:        Option<ConsoleUsageManager>,
 	settings:             InferenceSettings,
 	provider_admission:   Arc<BTreeMap<ProviderId, AdmissionController>>,
@@ -370,6 +404,12 @@ impl ProductionDependencies {
 	/// route stack.
 	pub(crate) const fn settings(&self) -> &InferenceSettings {
 		&self.settings
+	}
+
+	/// Installs validated Cloudflare AI Gateway coordinates.
+	pub fn with_cloudflare_gateway(mut self, gateway: Option<CloudflareGatewayConfig>) -> Self {
+		self.cloudflare_gateway = gateway;
+		self
 	}
 
 	/// Installs validated Azure `OpenAI` endpoint coordinates.
@@ -406,6 +446,7 @@ impl ProductionDependencies {
 			transport_timeout,
 			credential_shapers,
 			azure_endpoint: None,
+			cloudflare_gateway: None,
 			usage_manager: None,
 			settings: InferenceSettings::default(),
 			provider_admission: Arc::new(BTreeMap::new()),
@@ -763,6 +804,7 @@ impl RouteComposer for ProductionRouteComposer {
 				.unwrap_or_default(),
 			codec,
 			azure_endpoint: self.dependencies.azure_endpoint.clone(),
+			cloudflare_gateway: self.dependencies.cloudflare_gateway.clone(),
 			regional_route,
 			// `ai_provider_timeout_seconds` is the operator's ceiling and wins
 			// outright. The ambient dependency default only applies when no
@@ -1331,13 +1373,14 @@ impl Codec for RouteCodecSet {
 
 #[derive(Clone)]
 struct RouteEncoder {
-	route:             RouteDef,
-	auth_schemes:      Box<[AuthScheme]>,
-	headers:           Box<[RequestHeader]>,
-	codec:             Arc<dyn Codec>,
-	azure_endpoint:    Option<AzureEndpointConfig>,
-	regional_route:    Option<RouteDef>,
-	transport_timeout: Duration,
+	route:              RouteDef,
+	auth_schemes:       Box<[AuthScheme]>,
+	headers:            Box<[RequestHeader]>,
+	codec:              Arc<dyn Codec>,
+	azure_endpoint:     Option<AzureEndpointConfig>,
+	cloudflare_gateway: Option<CloudflareGatewayConfig>,
+	regional_route:     Option<RouteDef>,
+	transport_timeout:  Duration,
 }
 
 /// Resolves the per-attempt transport ceiling.
@@ -1546,6 +1589,42 @@ fn azure_effective_route(
 	Ok(Some((effective_route, effective_target)))
 }
 
+fn cloudflare_effective_route(
+	route: &RouteDef,
+	target: Option<&omp_catalog::WireTarget>,
+	config: Option<&CloudflareGatewayConfig>,
+	context: &ExecutionContext,
+) -> Result<Option<(RouteDef, Option<omp_catalog::WireTarget>)>, Error> {
+	if route.provider.as_str() != CLOUDFLARE_GATEWAY_PROVIDER {
+		return Ok(None);
+	}
+	// A literal placeholder must never reach the wire: without both
+	// coordinates the call fails here, before any request is built.
+	let config = config
+		.ok_or_else(|| azure_configuration_error(context, "cloudflare-gateway-not-configured"))?;
+	let fill = |base: &str| {
+		base
+			.replace("{account}", config.account.as_str())
+			.replace("<account>", config.account.as_str())
+			.replace("{gateway}", config.gateway.as_str())
+			.replace("<gateway>", config.gateway.as_str())
+	};
+	let base_url = fill(route.endpoint.base_url.as_str());
+	if base_url.contains(['{', '}', '<', '>']) {
+		return Err(azure_configuration_error(context, "cloudflare-effective-endpoint-invalid"));
+	}
+	let parsed = Url::parse(&base_url)
+		.map_err(|_| azure_configuration_error(context, "cloudflare-effective-endpoint-invalid"))?;
+	let mut effective_route = route.clone();
+	effective_route.endpoint.base_url = Str::new(base_url);
+	effective_route.trust_domain.origin = Str::new(parsed.origin().ascii_serialization());
+	let effective_target = target.cloned().map(|mut target| {
+		target.endpoint = effective_route.endpoint.clone();
+		target
+	});
+	Ok(Some((effective_route, effective_target)))
+}
+
 impl AttemptEncoder<Call, Option<CredentialLease>> for RouteEncoder {
 	fn before_request(
 		&self,
@@ -1601,6 +1680,12 @@ impl AttemptEncoder<Call, Option<CredentialLease>> for RouteEncoder {
 			self.azure_endpoint.as_ref(),
 			execution,
 		)?;
+		let cloudflare = cloudflare_effective_route(
+			&self.route,
+			plan.wire_target(),
+			self.cloudflare_gateway.as_ref(),
+			execution,
+		)?;
 		let (effective_route, effective_target) = if let Some(endpoint_override) = endpoint_override {
 			let mut route = self.route.clone();
 			route.endpoint.base_url = endpoint_override.clone();
@@ -1615,6 +1700,8 @@ impl AttemptEncoder<Call, Option<CredentialLease>> for RouteEncoder {
 			(Some(route), target)
 		} else if let Some((route, target)) = azure {
 			(Some(route), Some(target))
+		} else if let Some((route, target)) = cloudflare {
+			(Some(route), target)
 		} else if let Some(route) = &self.regional_route {
 			(Some(route.clone()), mantle_effective_target(route, plan.wire_target()))
 		} else {
@@ -3007,6 +3094,95 @@ mod tests {
 		)
 	}
 	#[test]
+	fn cloudflare_gateway_route_fills_account_and_gateway_from_validated_config() {
+		let catalog = Catalog::embedded();
+		let route = catalog
+			.routes()
+			.iter()
+			.find(|route| route.provider.as_str() == CLOUDFLARE_GATEWAY_PROVIDER)
+			.expect("Cloudflare AI Gateway route");
+		// The shipped route still carries literal placeholders: this is the
+		// defect ADR 0059 names, and the reason the resolver must run.
+		assert!(route.endpoint.base_url.as_str().contains("{account}"));
+		let config = CloudflareGatewayConfig::new("acct-1", "my-gateway").expect("valid");
+		let context = ExecutionContext::new(ExecutionBudget::default());
+		let target = WireTarget {
+			route:      route.id.clone(),
+			codec:      route.codec.clone(),
+			endpoint:   route.endpoint.clone(),
+			wire_model: sf!("claude-sonnet-4-5").into(),
+		};
+		let (effective, target) =
+			cloudflare_effective_route(route, Some(&target), Some(&config), &context)
+				.expect("resolves")
+				.expect("cloudflare route");
+		assert_eq!(
+			effective.endpoint.base_url.as_str(),
+			"https://gateway.ai.cloudflare.com/v1/acct-1/my-gateway/anthropic"
+		);
+		assert_eq!(effective.trust_domain.origin.as_str(), "https://gateway.ai.cloudflare.com");
+		assert_eq!(target.expect("target").endpoint, effective.endpoint);
+		for part in ["{", "}", "<", ">"] {
+			assert!(!effective.endpoint.base_url.as_str().contains(part), "{part}");
+		}
+	}
+
+	#[test]
+	fn cloudflare_gateway_without_config_fails_and_never_yields_a_placeholder_url() {
+		let catalog = Catalog::embedded();
+		let context = ExecutionContext::new(ExecutionBudget::default());
+		let mut checked = 0;
+		for route in catalog
+			.routes()
+			.iter()
+			.filter(|route| route.provider.as_str() == CLOUDFLARE_GATEWAY_PROVIDER)
+		{
+			checked += 1;
+			let error = cloudflare_effective_route(route, None, None, &context)
+				.expect_err("unconfigured gateway must refuse the call");
+			assert_eq!(error.kind, ErrorKind::InvalidRequest);
+		}
+		assert!(checked > 0, "no Cloudflare route in the catalog");
+	}
+
+	#[test]
+	fn cloudflare_gateway_config_refuses_unsafe_coordinates() {
+		assert!(CloudflareGatewayConfig::new("acct-1", "gw").is_ok());
+		for bad in ["", "a/b", "a b", "a?q", "a#f", "a:b", "a.b", "..", "{account}", "a\u{e9}"] {
+			assert_eq!(
+				CloudflareGatewayConfig::new(bad, "gw"),
+				Err("cloudflare-account-invalid"),
+				"account {bad:?}"
+			);
+			assert_eq!(
+				CloudflareGatewayConfig::new("acct", bad),
+				Err("cloudflare-gateway-invalid"),
+				"gateway {bad:?}"
+			);
+		}
+	}
+
+	#[test]
+	fn other_providers_are_untouched_by_the_cloudflare_resolver() {
+		let catalog = Catalog::embedded();
+		let context = ExecutionContext::new(ExecutionBudget::default());
+		let config = CloudflareGatewayConfig::new("acct", "gw").expect("valid");
+		for route in catalog
+			.routes()
+			.iter()
+			.filter(|route| route.provider.as_str() != CLOUDFLARE_GATEWAY_PROVIDER)
+		{
+			assert!(
+				cloudflare_effective_route(route, None, Some(&config), &context)
+					.expect("never errors for other providers")
+					.is_none(),
+				"{}",
+				route.id
+			);
+		}
+	}
+
+	#[test]
 	fn azure_routes_shape_chat_deployments_and_resource_scoped_responses() {
 		let catalog = Catalog::embedded();
 		let chat = catalog
@@ -3767,6 +3943,7 @@ mod tests {
 				headers: Box::new([]),
 				codec,
 				azure_endpoint: None,
+				cloudflare_gateway: None,
 				regional_route: None,
 				transport_timeout: Duration::from_secs(30),
 			},
