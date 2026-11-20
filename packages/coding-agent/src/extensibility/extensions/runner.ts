@@ -1782,7 +1782,9 @@ export class ExtensionRunner {
 	 * that id, it has no `apply`, or `session_start` has not gone out. Otherwise resolves to why
 	 * the change is not accepted, or to `undefined` once the backend accepted it or when, by the
 	 * call's turn, no backend decides any more; it rejects as soon as `signal` aborts. Takes its
-	 * turn among the `replace` calls; `current` reads the session's list as it is when called.
+	 * turn among the `replace` calls; `current` reads the session's list as it is when called. The
+	 * change belongs to the session the call was made in: once that is no longer the live one, the
+	 * call is not accepted, whatever the live session's list holds.
 	 */
 	applyTodoBackend(
 		selected: () => string | undefined,
@@ -1796,20 +1798,24 @@ export class ExtensionRunner {
 			return backend !== undefined && owner?.definition.apply ? { backend, ...owner } : undefined;
 		};
 		if (!this.#sessionStartEvent || !decider()) return undefined;
+		const sessionId = this.sessionManager.getSessionId();
 		const asked = this.#todoCalls.then(async () => {
 			// Not put to a backend: a call whose turn comes as the session closes, one aborted while
-			// it waited, one whose backend was deselected or disabled meanwhile (no backend decides
-			// any more), and one whose list changed meanwhile, which would leave the backend with a
-			// list omp will not commit.
+			// it waited, one whose session or list changed meanwhile (the backend would hold a list
+			// omp will not commit), and one whose backend was deselected or disabled meanwhile (no
+			// backend decides any more).
 			if (this.#todoClosed) return "The session is closing; nothing was saved.";
+			if (signal?.aborted) return undefined;
+			// Asked before anything lets the call through: a list equal to `previous` proves nothing
+			// once the session changed, since two empty lists are equal.
+			if (this.sessionManager.getSessionId() !== sessionId) return TODO_LIST_CHANGED_ERROR;
 			const decides = decider();
-			if (signal?.aborted || !decides) return undefined;
+			if (!decides) return undefined;
 			const { backend, extension, definition } = decides;
 			// Extension text, also when omp reports a failure of the handler: one clean line for the tool result.
 			const refused = (why: string) =>
 				`Todo backend "${backend}" did not accept this change: ${sanitizeDisplayLine(why) || "no reason given"}`;
 			if (!Bun.deepEquals(current(), change.previous)) return TODO_LIST_CHANGED_ERROR;
-			const sessionId = this.sessionManager.getSessionId();
 			// The backend holds a change omp did not commit: omp's list follows, also when it equals
 			// the last one sent. Not as the session closes, nor once it has changed: the backend
 			// keeps that change for a session omp is no longer in.
@@ -1848,6 +1854,8 @@ export class ExtensionRunner {
 			);
 			waiting = false;
 			if (verdict === true) {
+				// Accepted for a session omp has left: its record of what the backend holds stays unknown.
+				if (this.sessionManager.getSessionId() !== sessionId) return TODO_LIST_CHANGED_ERROR;
 				this.#todoSent = { list: { backend, sessionId, phases: change.next }, definition };
 				return undefined;
 			}

@@ -573,6 +573,39 @@ describe("todo backend", () => {
 			expect(tasksOf(backend)).toEqual([["a"], ["y"]]);
 		});
 
+		it("a session change while a call waits fails it, also when the new session's list equals the one the call was built on", async () => {
+			// Asked already: /new leaves an empty list, as the call's `previous` was.
+			const asked = tracker("tracker", true);
+			const fresh = await open([asked.extension], "tracker");
+			const answer = Promise.withResolvers<void>();
+			asked.applyHold = answer.promise;
+			const deciding = asked.entered();
+			const init = todo(fresh.session, { op: "init", items: ["a"] });
+			await deciding;
+			await fresh.session.newSession();
+			answer.resolve();
+
+			// Not asked yet: a fork keeps the list under a new session id.
+			const waiting = tracker("tracker", true);
+			const forked = await open([waiting.extension], "tracker", {
+				sessionManager: SessionManager.create(dir.path(), path.join(dir.path(), "sessions")),
+			});
+			const gate = Promise.withResolvers<void>();
+			waiting.hold = gate.promise;
+			const inFlight = waiting.entered();
+			forked.session.commitTodoPhases(list("a"));
+			await inFlight;
+			const append = directTodo(forked.session).execute("call", { op: "append", phase: "Work", items: ["b"] });
+			expect(await forked.session.fork()).toBe(true);
+			gate.resolve();
+
+			expect((await init).isError).toBe(true);
+			expect(fresh.session.getTodoPhases()).toEqual([]);
+			expect((await append).isError).toBe(true);
+			expect(waiting.asked).toEqual([]);
+			expect(committed(forked.session)).toEqual(["a"]);
+		});
+
 		it("a call waiting its turn is not put to a backend that was disabled or deselected meanwhile", async () => {
 			const meanwhile: Array<(session: AgentSession) => void> = [
 				session => void session.extensionRunner?.setSuspendedExtensions(() => true),
