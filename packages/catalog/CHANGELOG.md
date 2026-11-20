@@ -5,6 +5,7 @@
 ### Added
 
 - Added `uncached-instructions` compatibility flag, enabled for GPT-6.2 models on every host, which moves the system prompt out of the uncached Responses `instructions` field
+- Added Crusoe Serverless Inference as a built-in provider with API-key login and live model discovery ([#19847](https://github.com/can1357/oh-my-pi/pull/19847) by [@kumarabd](https://github.com/kumarabd)).
 
 ### Fixed
 
