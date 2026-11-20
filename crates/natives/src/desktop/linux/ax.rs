@@ -42,7 +42,8 @@ pub struct AtSpiAx {
 	/// The display server's own list of windows, where it knows where each one
 	/// is (X11).
 	native:        Option<Box<dyn NativeWindows>>,
-	/// Wayland lists message dialogs by AT-SPI identity, without native title matching.
+	/// Wayland lists message dialogs by AT-SPI identity, without native title
+	/// matching.
 	alert_windows: bool,
 	frames:        FrameCache,
 }
@@ -4488,7 +4489,8 @@ mod tests {
 		fn native_windows_leave_alert_ownership_as_on_main() {
 			let (mut ax, _server) = app_with_message_dialog("Main");
 			let windows = [window("1", "Question", 0, 0), window("2", "tdlg.py", 0, 0)];
-			// Menu operations construct the default backend without a native provider.
+			// Menu operations construct the default backend without a native
+			// provider.
 			assert!(ax.window_root(&windows[0]).is_err());
 			let yes = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/yes"));
 			assert!(ax.window_id(&yes, &windows).is_err());
@@ -4497,14 +4499,22 @@ mod tests {
 				("2", "tdlg.py", 0, 0),
 			])));
 			let listed = ax.windows().unwrap();
-			let titles: Vec<_> = listed.windows.iter().map(|entry| entry.window.title.as_str()).collect();
+			let titles: Vec<_> = listed
+				.windows
+				.iter()
+				.map(|entry| entry.window.title.as_str())
+				.collect();
 			assert_eq!(titles, ["Main"]);
 			let element =
 				|path| AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, path));
 			assert!(ax.window_id(&element("/yes"), &windows).is_err());
 			assert!(ax.window_root(&windows[0]).is_err());
 			let main = window("1", "Main", 0, 0);
-			assert_eq!(ax.window_id(&element("/dismiss"), std::slice::from_ref(&main)).unwrap(), "1");
+			assert_eq!(
+				ax.window_id(&element("/dismiss"), std::slice::from_ref(&main))
+					.unwrap(),
+				"1"
+			);
 			let AxHandle::AtSpi(root) = ax.window_root(&main).unwrap() else {
 				panic!("expected AT-SPI root");
 			};
