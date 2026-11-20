@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- Fixed typed prose such as `SK whatevertext` rendering as a skill chip and deleting as one unit in the prompt and in sent messages; only skills invoked with `/skill:<name>` are styled as chips ([#17287](https://github.com/can1357/oh-my-pi/issues/17287))
 - Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
 - The terminal cursor no longer blinks off and on with every spinner tick in kitty
 - Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))

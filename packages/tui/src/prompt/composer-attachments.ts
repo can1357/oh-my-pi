@@ -22,9 +22,12 @@ export function modelMentionChipLabel(name: string): string {
 	return `${icon} ${name}`;
 }
 
+/** Prefix of the canonical skill invocation token; a skill chip's atom expansion starts with it. */
+export const SKILL_TOKEN_PREFIX = "/skill:";
+
 /** Canonical `/skill:<name>` token a skill chip expands to on submit. */
 export function skillToken(name: string): string {
-	return `/skill:${name}`;
+	return `${SKILL_TOKEN_PREFIX}${name}`;
 }
 
 function chipPillStyle(label: string, color: ThemeColor, restore: string): string {
@@ -45,20 +48,10 @@ export function modelChipStyle(label: string, restore = "\x1b[39m\x1b[49m"): str
 	return chipPillStyle(label, "statusLineModel", restore);
 }
 
-/** Every glyph a skill chip may start with, across all symbol presets. */
-const SKILL_ICONS = [...new Set(Object.values(SYMBOL_PRESETS).map(m => m["icon.extensionSkill"]))];
-
-/** Skill names as they appear in chips: word characters and dashes, dots only between segments,
- *  optionally behind one collision namespace (`<namespace>/<name>`). */
-const SKILL_NAME_SEGMENT_SOURCE = "[\\w-]+(?:\\.[\\w-]+)*";
-const SKILL_NAME_SOURCE = `${SKILL_NAME_SEGMENT_SOURCE}(?:/${SKILL_NAME_SEGMENT_SOURCE})?`;
-
 /** Regex source for a chip glyph; word glyphs (ASCII preset) must not continue a preceding word. */
 function glyphSource(icon: string): string {
 	return /^[a-z]+$/i.test(icon) ? `(?<![A-Za-z])${RegExp.escape(icon)}` : RegExp.escape(icon);
 }
-
-const SKILL_CHIP_SOURCE = `(?:${SKILL_ICONS.map(glyphSource).join("|")}) (${SKILL_NAME_SOURCE})(?![\\w-])`;
 
 /**
  * Replaces `/skill:<name>` tokens for known skills with compact chip labels and
@@ -161,11 +154,8 @@ export function attachmentSgr(kind: ChipKind, n: number): string {
 
 /** Matches expanded image, video, and paste markers, including optional marker metadata. */
 export const PLACEHOLDER_REGEX = /\[(Image|Video|Paste) #([1-9]\d*)(?:,[^\]\n]*)?\]/g;
-/** Matches an expanded attachment marker, a compact attachment chip, or a skill chip. */
-export const COMPOSER_TOKEN_REGEX = new RegExp(
-	`${PLACEHOLDER_REGEX.source}|${CHIP_TOKEN_SOURCE}|${SKILL_CHIP_SOURCE}`,
-	"gu",
-);
+/** Matches an expanded attachment marker or a compact attachment chip. */
+export const COMPOSER_TOKEN_REGEX = new RegExp(`${PLACEHOLDER_REGEX.source}|${CHIP_TOKEN_SOURCE}`, "gu");
 
 /** Last compiled {@link referencedAttachments} scanner, keyed by its source (labels and glyphs rarely change). */
 let cachedScanner: { source: string; scanner: RegExp } | undefined;
@@ -208,14 +198,36 @@ export function referencedAttachments(
 	return refs;
 }
 
-/** Add the registered model-chip labels to the composer placeholder matcher. */
-export function composerTokenRegex(mentionLabels: Iterable<string>): RegExp {
-	const labels = [...new Set(mentionLabels)].sort((a, b) => b.length - a.length);
-	if (labels.length === 0) return COMPOSER_TOKEN_REGEX;
-	return new RegExp(
-		`${COMPOSER_TOKEN_REGEX.source}|(?<mention>${labels.map(label => RegExp.escape(label)).join("|")})`,
-		"gu",
-	);
+/** Chip labels a composer buffer or transcript bubble actually contains, as registered when their token collapsed. */
+export interface ComposerChipLabels {
+	/** Skill chip labels (`skillChipLabel(name)`). Skill-glyph prose that no collapsed token registered stays plain. */
+	skills?: Iterable<string>;
+	/** Model mention chip labels. */
+	mentions?: Iterable<string>;
+}
+
+/**
+ * Longest-first alternation of the escaped `labels`, or `undefined` when there are none. With `wordGlyphs`,
+ * a label that starts with a word glyph (the ASCII preset's `SK` skill glyph) must not continue a preceding
+ * word, as {@link glyphSource} requires of a chip glyph.
+ */
+function labelSource(labels: Iterable<string> | undefined, wordGlyphs: boolean): string | undefined {
+	const unique = [...new Set(labels)].sort((a, b) => b.length - a.length);
+	if (unique.length === 0) return undefined;
+	return unique
+		.map(label => (wordGlyphs && /^[A-Za-z]/.test(label) ? "(?<![A-Za-z])" : "") + RegExp.escape(label))
+		.join("|");
+}
+
+/** Extends {@link COMPOSER_TOKEN_REGEX} with the registered skill and model chip labels. */
+export function composerTokenRegex({ skills, mentions }: ComposerChipLabels): RegExp {
+	const skillSource = labelSource(skills, true);
+	const mentionSource = labelSource(mentions, false);
+	if (skillSource === undefined && mentionSource === undefined) return COMPOSER_TOKEN_REGEX;
+	let source = COMPOSER_TOKEN_REGEX.source;
+	if (skillSource !== undefined) source += `|(?<skill>${skillSource})(?![\\w-])`;
+	if (mentionSource !== undefined) source += `|(?<mention>${mentionSource})`;
+	return new RegExp(source, "gu");
 }
 
 const VISION_MARKER_REGEX = /\[(Image|Video) #([1-9]\d*)((?:,[^\]\n]*)?)\](?: attachment:\/\/(\2))?/g;
@@ -320,8 +332,8 @@ export interface PlaceholderRenderers {
 	renderText: (text: string) => string;
 	/** Renders one parsed marker or compact chip token. */
 	renderReference: (label: string, kind: PlaceholderKind, index: number, form: "marker" | "chip") => string;
-	/** Renders one skill chip (`<icon> <name>`). */
-	renderSkill: (label: string, name: string) => string;
+	/** Renders one registered skill chip label (see {@link composerTokenRegex}). */
+	renderSkill: (label: string) => string;
 	/** Renders one registered model mention chip. */
 	renderMention: (label: string) => string;
 }
@@ -345,11 +357,11 @@ export function renderPlaceholders(
 		const label = match[0];
 		if (match.groups?.mention !== undefined) {
 			result += renderers.renderMention(label);
+		} else if (match.groups?.skill !== undefined) {
+			result += renderers.renderSkill(label);
 		} else if (label.startsWith("[")) {
 			const kind: PlaceholderKind = match[1] === "Paste" ? "paste" : match[1] === "Video" ? "video" : "image";
 			result += renderers.renderReference(label, kind, Number(match[2]), "marker");
-		} else if (match[3] !== undefined) {
-			result += renderers.renderSkill(label, match[3]);
 		} else {
 			const index = Number(label.slice(label.lastIndexOf("#") + 1));
 			result += renderers.renderReference(label, chipLabelKind(label), index, "chip");

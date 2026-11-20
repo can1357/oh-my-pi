@@ -10,11 +10,11 @@ import { ensureThemeSync, getMarkdownTheme, theme } from "../theme";
 import {
 	attachmentSgr,
 	collapseImageMarkers,
-	COMPOSER_TOKEN_REGEX,
 	composerTokenRegex,
 	modelChipStyle,
 	modelMentionChipLabel,
 	renderPlaceholders,
+	skillChipLabel,
 	skillChipStyle,
 } from "../prompt/composer-attachments";
 import { MODEL_MENTION_TAG_RE } from "../prompt/model-mention-syntax";
@@ -79,10 +79,15 @@ export interface UserBubbleOptions {
 	synthetic?: boolean;
 	/** Delivered into the response that was streaming; marked `*` at the bubble's top-left. */
 	liveSteered?: boolean;
-	/** SKILL.md path for a skill chip by name; `undefined` leaves the chip unlinked. */
-	skillPath?: (name: string) => string | undefined;
+	/** The invoked skill whose chip the text carries, linked to `path` when set. Other skill-glyph prose stays plain. */
+	skill?: { name: string; path?: string };
 	/** When the message was sent (ms); shown beside the native hover toolbar. */
 	timestamp?: number;
+}
+
+/** The invoked skill's chip label: the only skill chip a bubble styles. */
+function invokedSkillLabels(skill: UserBubbleOptions["skill"]): string[] {
+	return skill ? [skillChipLabel(skill.name)] : [];
 }
 
 /**
@@ -94,9 +99,9 @@ export interface UserBubbleOptions {
  */
 export function userBubbleColor(
 	options: UserBubbleOptions = {},
-	tokenRegex: RegExp = COMPOSER_TOKEN_REGEX,
+	tokenRegex: RegExp = composerTokenRegex({ skills: invokedSkillLabels(options.skill) }),
 ): (value: string) => string {
-	const { imageLinks, synthetic = false, skillPath } = options;
+	const { imageLinks, synthetic = false, skill } = options;
 	// The Markdown component routes code spans and fenced blocks through its own code styling
 	// (never `color`), so those are already excluded; `highlightMagicKeywords` additionally
 	// restores the bubble's own foreground after each painted keyword so the gradient never
@@ -111,10 +116,9 @@ export function userBubbleColor(
 			value,
 			{
 				renderText,
-				renderSkill: (label, name) => {
+				renderSkill: label => {
 					const styled = skillChipStyle(label, bubbleReset);
-					const path = skillPath?.(name);
-					return path ? fileHyperlink(path, styled, { line: 1 }) : styled;
+					return skill?.path ? fileHyperlink(skill.path, styled, { line: 1 }) : styled;
 				},
 				renderMention: label => modelChipStyle(label, bubbleReset),
 				renderReference: (label, kind, index, form) => {
@@ -185,7 +189,7 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 		this.#images = options.images ?? [];
 		this.#imageLinks = options.imageLinks;
 		this.#text = text;
-		this.#tokens = composerTokenRegex(mentionLabels);
+		this.#tokens = composerTokenRegex({ skills: invokedSkillLabels(options.skill), mentions: mentionLabels });
 		const markdown = new Markdown(text, 1, 1, getMarkdownTheme(), {
 			bgColor,
 			color: userBubbleColor(options, this.#tokens),

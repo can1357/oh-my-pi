@@ -6,6 +6,7 @@ import {
 	collapseSkillTokens,
 	compactImageMarkers,
 	composerTokenRegex,
+	type ComposerChipLabels,
 	modelMentionChipLabel,
 	type PlaceholderKind,
 	renderPlaceholders,
@@ -15,7 +16,7 @@ import {
 
 function capture(
 	text: string,
-	mentionLabels: readonly string[] = [],
+	labels: ComposerChipLabels = {},
 ): {
 	out: string;
 	refs: Array<{ label: string; kind: PlaceholderKind; index: number; form: "marker" | "chip" }>;
@@ -33,16 +34,16 @@ function capture(
 				refs.push({ label, kind, index, form });
 				return `<${kind}:${index}>`;
 			},
-			renderSkill: (_label, name) => {
-				skills.push(name);
-				return `<skill:${name}>`;
+			renderSkill: label => {
+				skills.push(label);
+				return `<skill:${label}>`;
 			},
 			renderMention: label => {
 				mentions.push(label);
 				return `<model:${label}>`;
 			},
 		},
-		composerTokenRegex(mentionLabels),
+		composerTokenRegex(labels),
 	);
 	return { out, refs, skills, mentions };
 }
@@ -99,23 +100,29 @@ describe("renderPlaceholders", () => {
 		expect(capture("boximg #1").refs).toHaveLength(0);
 	});
 
-	it("routes skill chips to renderSkill with the bare name, stopping at punctuation", () => {
-		const { out, skills, refs } = capture(`use ${skillChipLabel("stencil-design")}, then ${skillChipLabel("v2.1")}.`);
-		expect(skills).toEqual(["stencil-design", "v2.1"]);
+	it("routes registered skill chips to renderSkill as whole labels, stopping at punctuation", () => {
+		const design = skillChipLabel("stencil-design");
+		const version = skillChipLabel("v2.1");
+		const { out, skills, refs } = capture(`use ${design}, then ${version}.`, { skills: [design, version] });
+		expect(skills).toEqual([design, version]);
 		expect(refs).toHaveLength(0);
-		expect(out).toBe("use <skill:stencil-design>, then <skill:v2.1>.");
+		expect(out).toBe(`use <skill:${design}>, then <skill:${version}>.`);
+		expect(capture(`${design}x`, { skills: [design] }).skills).toHaveLength(0);
 	});
 
-	it("recognizes skill chips from every symbol preset", () => {
-		expect(capture("\uf0eb reviewer").skills).toEqual(["reviewer"]);
-		expect(capture("SK reviewer").skills).toEqual(["reviewer"]);
-		expect(capture("TASK reviewer").skills).toHaveLength(0);
+	it("leaves skill-glyph prose that no collapsed token registered as plain text (#17287)", () => {
+		expect(capture("SK whatevertext").skills).toHaveLength(0);
+	});
+
+	it("matches a registered ASCII skill label only as a whole word (#17287)", () => {
+		expect(capture("SK reviewer", { skills: ["SK reviewer"] }).skills).toEqual(["SK reviewer"]);
+		expect(capture("TASK reviewer", { skills: ["SK reviewer"] }).skills).toHaveLength(0);
 	});
 
 	it("routes registered model labels with spaces and parentheses as whole tokens", () => {
 		const short = modelMentionChipLabel("Claude");
 		const long = modelMentionChipLabel("Claude (Fast)");
-		const { out, mentions, refs } = capture(`ask ${long} then ${short}`, [short, long]);
+		const { out, mentions, refs } = capture(`ask ${long} then ${short}`, { mentions: [short, long] });
 		expect(mentions).toEqual([long, short]);
 		expect(refs).toHaveLength(0);
 		expect(out).toBe(`ask <model:${long}> then <model:${short}>`);
@@ -123,7 +130,7 @@ describe("renderPlaceholders", () => {
 
 	it("dispatches an ASCII model label before bracketed attachment markers", () => {
 		const label = "[M] Claude (Fast)";
-		const { out, mentions, refs } = capture(`ask ${label} now`, [label]);
+		const { out, mentions, refs } = capture(`ask ${label} now`, { mentions: [label] });
 		expect(mentions).toEqual([label]);
 		expect(refs).toHaveLength(0);
 		expect(out).toBe(`ask <model:${label}> now`);
@@ -190,7 +197,9 @@ describe("collapseSkillTokens", () => {
 		);
 		expect(out).toBe(`fix it ${skillChipLabel("superpowers/tdd")} now`);
 		expect(registered).toEqual([[skillChipLabel("superpowers/tdd"), "/skill:superpowers/tdd"]]);
-		expect(capture(out).skills).toEqual(["superpowers/tdd"]);
+		expect(capture(out, { skills: [skillChipLabel("superpowers/tdd")] }).skills).toEqual([
+			skillChipLabel("superpowers/tdd"),
+		]);
 	});
 });
 

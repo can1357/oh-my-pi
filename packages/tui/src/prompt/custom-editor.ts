@@ -40,6 +40,7 @@ import {
 	PLACEHOLDER_REGEX,
 	referencedAttachments,
 	renderPlaceholders,
+	SKILL_TOKEN_PREFIX,
 	skillChipLabel,
 	skillChipStyle,
 	skillToken,
@@ -705,6 +706,7 @@ export class CustomEditor extends Editor {
 		// Scan lines (no buffer join) so plain typing stays O(1) allocations per keystroke.
 		const lines = this.getLines();
 		if (!lines.some(line => line.includes("/skill:")) || !allowsSkillTokens(this.getText())) return;
+		let anyCollapsed = false;
 		for (let i = 0; i < lines.length; i++) {
 			let line = lines[i];
 			if (!line.includes("/skill:")) continue;
@@ -719,12 +721,14 @@ export class CustomEditor extends Editor {
 					if (this.skillFilePath(name) === undefined) continue;
 					this.collapseToAtom(i, start, end, skillChipLabel(name), skillToken(name));
 					collapsed = true;
+					anyCollapsed = true;
 					break;
 				}
 				if (!collapsed) break;
 				line = this.getLines()[i];
 			}
 		}
+		if (anyCollapsed) this.#syncComposerTokenPattern();
 	}
 
 	/** Collapse every completed mentionable `^provider/id` selector into an atomic model chip. */
@@ -872,9 +876,13 @@ export class CustomEditor extends Editor {
 		if (this.#tokenPatternAtomsRevision === this.atomsRevision && this.#tokenPattern === this.atomicTokenPattern) {
 			return;
 		}
-		const labels: string[] = [];
-		for (const [label, expansion] of this.atoms) if (expansion.startsWith("^")) labels.push(label);
-		const next = composerTokenRegex(labels);
+		const skills: string[] = [];
+		const mentions: string[] = [];
+		for (const [label, expansion] of this.atoms) {
+			if (expansion.startsWith("^")) mentions.push(label);
+			else if (expansion.startsWith(SKILL_TOKEN_PREFIX)) skills.push(label);
+		}
+		const next = composerTokenRegex({ skills, mentions });
 		if (next.source !== this.atomicTokenPattern.source) this.atomicTokenPattern = next;
 		this.#tokenPatternAtomsRevision = this.atomsRevision;
 		this.#tokenPattern = this.atomicTokenPattern;
@@ -965,10 +973,12 @@ export class CustomEditor extends Editor {
 					}
 					return highlighted;
 				},
-				renderSkill: (label, name) => {
+				renderSkill: label => {
 					locateSource(label);
 					const styled = skillChipStyle(label);
-					const filePath = this.skillFilePath(name);
+					const expansion = this.atoms.get(label);
+					const filePath =
+						expansion === undefined ? undefined : this.skillFilePath(expansion.slice(SKILL_TOKEN_PREFIX.length));
 					return filePath === undefined ? styled : this.fileHyperlink(filePath, styled);
 				},
 				renderMention: label => {
