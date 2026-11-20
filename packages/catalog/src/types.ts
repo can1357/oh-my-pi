@@ -1155,6 +1155,12 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 * input into the in-flight response. Rule-owned: GPT-6 family.
 	 */
 	supportsSteering: boolean;
+	/**
+	 * Whether the model never prompt-caches the top-level `instructions` field,
+	 * so system prompts must ride as leading `developer` input items on every
+	 * host. Rule-owned: GPT-6.2 (openai/codex#62312).
+	 */
+	uncachedInstructions: boolean;
 	/** Inject the `# Juice: 0 !important` developer item when reasoning is forced off (gpt-5.6+). */
 	requiresReasoningOffJuiceInstruction: boolean;
 	/**

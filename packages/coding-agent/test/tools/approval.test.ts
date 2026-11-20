@@ -13,7 +13,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { DeferredMCPTool, MCPTool } from "../../src/mcp/tool-bridge";
+import { MCPTool } from "../../src/mcp/tool-bridge";
 import type { MCPServerConnection, MCPToolDefinition } from "../../src/mcp/types";
 import { Settings } from "../../src/config/settings";
 import { EditTool } from "../../src/edit";
@@ -295,7 +295,6 @@ describe("MCP fallback and prompt formatting", () => {
 		const definition: MCPToolDefinition = { name: "apply", inputSchema: { type: "object" } };
 		const connection = { name: "kubernetes" } as MCPServerConnection;
 		const eager = new MCPTool(connection, definition);
-		const deferred = new DeferredMCPTool("kubernetes", definition, async () => connection);
 		const writeTool = new WriteTool({ cwd: "." } as ToolSession);
 		const expected = [
 			"Arguments:",
@@ -312,7 +311,6 @@ describe("MCP fallback and prompt formatting", () => {
 		].join("\n");
 		const cases: { subject: ApprovalTool; args: unknown }[] = [
 			{ subject: eager, args },
-			{ subject: deferred, args },
 			{ subject: tool(eager.name), args },
 			{ subject: writeTool, args: { path: `xd://${eager.name}`, content: JSON.stringify(args) } },
 		];

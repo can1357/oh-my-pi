@@ -1,7 +1,7 @@
 /**
- * HTTP header precedence and redirect-origin policy for remote MCP transports.
+ * HTTP header precedence and redirect-origin policy for remote MCP upstreams.
  *
- * Two invariants, applied at every transport fetch:
+ * Two invariants, applied at every upstream fetch:
  *
  * 1. Client-generated headers (protocol headers like `Content-Type`, `Accept`,
  *    `Mcp-Session-Id`, and authorization) take precedence over configured
@@ -80,6 +80,7 @@ export function withoutHeader(
 const REDIRECT_STATUSES: Record<number, true> = { 301: true, 302: true, 303: true, 307: true, 308: true };
 const MAX_REDIRECT_HOPS = 5;
 
+/** The request shapes an MCP upstream issues; everything else about a fetch is fixed by {@link mcpFetch}. */
 export interface MCPFetchInit {
 	method: "GET" | "POST" | "DELETE";
 	body?: string;
@@ -99,8 +100,7 @@ export interface MCPFetchInit {
  * long as the work takes — and that timer would end such a wait even where the
  * operator disabled MCP deadlines outright (`timeout: 0`,
  * `OMP_MCP_TIMEOUT_MS=0`). Deadlines and cancellation stay with `init.signal`,
- * which each transport composes from the configured per-request deadline,
- * caller cancellation, and transport close.
+ * which each upstream composes from caller cancellation and its own close.
  */
 export async function mcpFetch(
 	url: string,
