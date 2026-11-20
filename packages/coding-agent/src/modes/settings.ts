@@ -483,6 +483,19 @@ export const cfgTuiRenderSvg = register({
 	},
 });
 
+export const cfgTuiRenderEmbeds = register({
+	id: "tui.renderEmbeds",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Render Embedded Images and Pages",
+		description:
+			"Invite the agent to show pictures with <img> and web pages with <iframe>, loading them (remote addresses included) to draw inline on terminals that show graphics",
+	},
+});
+
 export const cfgTuiAutoGraph = register({
 	id: "tui.autoGraph",
 	type: "enum",
@@ -1171,7 +1184,7 @@ export const cfgSpellingAutocomplete = register({
 export const cfgComposerPredictions = register({
 	id: "composer.predictions",
 	type: "boolean",
-	default: false,
+	default: true,
 	ui: {
 		tab: "interaction",
 		group: "Input",
@@ -1467,6 +1480,19 @@ export const cfgAskNotify = register({
 		group: "Notifications",
 		label: "Ask Notification",
 		description: "Notify when the ask tool is waiting for input",
+	},
+});
+
+export const cfgPtyNotify = register({
+	id: "pty.notify",
+	type: "enum",
+	values: ["on", "off"] as const,
+	default: "on",
+	ui: {
+		tab: "interaction",
+		group: "Notifications",
+		label: "Console Notification",
+		description: "Notify when an interactive console (bash `pty`) is waiting on you",
 	},
 });
 

@@ -20,8 +20,20 @@ export type LiveSessionPayload = {
 	delegation: { type: "client" };
 };
 
+/**
+ * Session configuration a custom live endpoint receives in `session.update` once its sideband
+ * opens (signaling sent it only the SDP); the endpoint picks the model.
+ */
+export type LiveSessionUpdate = {
+	type: "realtime";
+	instructions: string;
+	audio: { output: { voice: string } };
+	delegation: { type: "client" };
+};
+
 /** Messages sent by the client over the Frameless Bidi data channel. */
 export type LiveClientMessage =
+	| { type: "session.update"; session: LiveSessionUpdate }
 	| {
 			type: "delegation.context.append";
 			delegation_item_id: string;
@@ -167,6 +179,14 @@ export function buildLiveSessionPayload(instructions: string, voice: string): Li
 		instructions,
 		audio: { output: { voice } },
 		delegation: { type: "client" },
+	};
+}
+
+/** Build the `session.update` that configures a custom endpoint's call. */
+export function buildLiveSessionUpdate(instructions: string, voice: string): LiveClientMessage {
+	return {
+		type: "session.update",
+		session: { type: "realtime", instructions, audio: { output: { voice } }, delegation: { type: "client" } },
 	};
 }
 

@@ -48,7 +48,7 @@ describe("subagent session MCP tools follow the shared manager", () => {
 		fs.mkdirSync(dir, { recursive: true });
 		authStorage = await AuthStorage.create(path.join(dir, "auth.db"));
 		authStorage.keys.setRuntime("openai", "test-key");
-		manager = new MCPManager(dir, null, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
+		manager = new MCPManager(dir, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
 	});
 
 	afterEach(async () => {

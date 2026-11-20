@@ -7,7 +7,8 @@ import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mo
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { CustomToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/wrapper";
-import { DeferredMCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
+import { MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
+import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { dispatchXdevTool, type XdevDispatch, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
@@ -133,6 +134,7 @@ describe("AgentSession prewalk", () => {
 			armed?: boolean;
 			agentKind?: "main" | "sub";
 			sessionManager?: SessionManager;
+			extendedContext?: boolean;
 			target?: Model;
 			startupTarget?: Model;
 			tools?: AgentTool[];
@@ -143,6 +145,7 @@ describe("AgentSession prewalk", () => {
 		const target = options.target ?? modelOrThrow("claude-sonnet-4-6");
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
+			extendedContext: options.extendedContext ?? false,
 			"prewalk.enabled": options.enabled ?? true,
 		});
 		// Resolution must honor role fallback lists and the target effort suffix.
@@ -217,6 +220,144 @@ describe("AgentSession prewalk", () => {
 			created.target.id,
 		]);
 		expect(created.nudges[boundary]).not.toContain("prewalk-checklist");
+	});
+
+	it("journals a session-fitted prewalk target and restores its source and effort on /new", async () => {
+		const row = modelRegistry.find("openai", "gpt-5.6-terra");
+		if (!row) throw new Error("Expected bundled gpt-5.6-terra");
+		const target = { ...row, baseUrl: "https://prewalk.example/v1", requestModelId: "routed-terra" };
+		authStorage.keys.setRuntime("openai", "test-key");
+		const created = createLifecycleSession(
+			[toolCall("todo", "todo"), toolCall("write", "write"), { content: ["done"] }],
+			{ target, extendedContext: true },
+		);
+		// Match the SDK's adoption path rather than mocking or copying a fitted model.
+		created.session.agent.setModelResolver(model => modelRegistry.fitContextWindow(model, created.settings));
+		const fitted = modelRegistry.fitContextWindow(target, created.settings);
+		expect(fitted).not.toBe(target);
+		expect(fitted.contextWindow).toBeGreaterThan(target.contextWindow ?? 0);
+
+		await created.session.prompt("task");
+
+		expect(created.session.model).toBe(fitted);
+		expect(created.session.model?.baseUrl).toBe(target.baseUrl);
+		expect(created.session.model?.requestModelId).toBe(target.requestModelId);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.Low);
+		expect(created.session.sessionManager.getSessionLocalModelChange()).toMatchObject({
+			model: `${target.provider}/${target.id}`,
+			role: "prewalk",
+		});
+		expect(created.nudges.at(-1)).toContain("prewalk-checklist");
+
+		expect(await created.session.newSession()).toBe(true);
+		expect(created.session.model?.id).toBe(created.primary.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.High);
+	});
+
+	it("a selection made while a configured handoff loads consumes the arm and reports the cancelled switch", async () => {
+		const created = createLifecycleSession([
+			toolCall("todo", "todo"),
+			toolCall("write", "write"),
+			{ content: ["done"] },
+			toolCall("later-write", "write"),
+			{ content: ["later done"] },
+		]);
+		const notices: string[] = [];
+		created.session.subscribe(event => {
+			if (event.type === "notice" && event.source === "prewalk") notices.push(event.message);
+		});
+		const loading = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(modelRegistry, "refreshSelectedModelMetadata").mockImplementation(async model => {
+			if (model.id === created.target.id) {
+				loading.resolve();
+				await release.promise;
+			}
+			return model;
+		});
+		const task = created.session.prompt("task");
+		await loading.promise;
+		const manual = modelOrThrow("claude-opus-4-6");
+		try {
+			await created.session.setModel(manual);
+		} finally {
+			release.resolve();
+		}
+		await task;
+
+		expect(created.session.model?.id).toBe(manual.id);
+		expect(created.session.getPrewalkState()).toBeUndefined();
+		expect(created.nudges.flat()).not.toContain("prewalk-checklist");
+		expect(notices.filter(message => message.startsWith("Prewalk: cancelled the switch"))).toHaveLength(1);
+		expect(notices.some(message => message.startsWith("Prewalk: switched"))).toBe(false);
+		// The consumed arm does not fire again on a later implementation action.
+		const boundary = created.requested.length;
+		await created.session.prompt("later task");
+		expect(created.requested.slice(boundary)).toEqual([manual.id, manual.id]);
+	});
+
+	it("/prewalk off while the handoff loads cancels the switch with only the disarm notice", async () => {
+		const created = createLifecycleSession([
+			toolCall("todo", "todo"),
+			toolCall("write", "write"),
+			{ content: ["done"] },
+		]);
+		const notices: string[] = [];
+		created.session.subscribe(event => {
+			if (event.type === "notice" && event.source === "prewalk") notices.push(event.message);
+		});
+		const loading = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(modelRegistry, "refreshSelectedModelMetadata").mockImplementation(async model => {
+			if (model.id === created.target.id) {
+				loading.resolve();
+				await release.promise;
+			}
+			return model;
+		});
+		const task = created.session.prompt("task");
+		await loading.promise;
+		created.session.disarmPrewalk();
+		release.resolve();
+		await task;
+
+		expect(created.session.model?.id).toBe(created.primary.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.High);
+		expect(created.nudges.flat()).not.toContain("prewalk-checklist");
+		expect(notices.filter(message => message.startsWith("Prewalk: disarmed"))).toHaveLength(1);
+		expect(notices.some(message => /^Prewalk: (switched|cancelled)/.test(message))).toBe(false);
+	});
+
+	it("/new keeps a selection made while the planning model loads instead of restoring over it", async () => {
+		const created = createLifecycleSession([
+			toolCall("todo", "todo"),
+			toolCall("write", "write"),
+			{ content: ["done"] },
+		]);
+		await created.session.prompt("task");
+		expect(created.session.model?.id).toBe(created.target.id);
+		const loading = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(modelRegistry, "refreshSelectedModelMetadata").mockImplementation(async model => {
+			if (model.id === created.primary.id) {
+				loading.resolve();
+				await release.promise;
+			}
+			return model;
+		});
+		const reset = created.session.newSession();
+		await loading.promise;
+		const manual = modelOrThrow("claude-opus-4-6");
+		try {
+			await created.session.setModel(manual);
+			created.session.setThinkingLevel(Effort.Medium);
+		} finally {
+			release.resolve();
+		}
+		expect(await reset).toBe(true);
+
+		expect(created.session.model?.id).toBe(manual.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.Medium);
 	});
 
 	it("resumes on the handoff target while retry-role lookup keeps the assigned role", async () => {
@@ -944,13 +1085,21 @@ describe("AgentSession prewalk", () => {
 	])(
 		"keeps write approval while honoring MCP readOnlyHint=$readOnlyHint at the prewalk gate",
 		async ({ readOnlyHint, thirdTurnModel }) => {
-			const mcp = new DeferredMCPTool(
-				"memory",
-				{ name: "list_projects", inputSchema: { type: "object" }, annotations: { readOnlyHint } },
-				async () => {
-					throw new Error("MCP connection is not used by this write fixture");
-				},
-			);
+			const unused = async (): Promise<never> => {
+				throw new Error("MCP connection is not used by this write fixture");
+			};
+			const connection: MCPServerConnection = {
+				name: "memory",
+				config: { command: "unused" },
+				transport: { connected: true, request: unused, notify: unused, close: unused },
+				serverInfo: { name: "memory", version: "1" },
+				capabilities: {},
+			};
+			const mcp = new MCPTool(connection, {
+				name: "list_projects",
+				inputSchema: { type: "object" },
+				annotations: { readOnlyHint },
+			});
 			const xdevState: XdevState = {
 				tools: new Map([
 					[

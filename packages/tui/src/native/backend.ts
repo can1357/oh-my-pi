@@ -189,6 +189,14 @@ class NativeContext implements DescribeContext {
 		return this.#features.has(name);
 	}
 
+	/** Adopts the features a `features` event lists; whether they differ from the ones held. */
+	setFeatures(features: readonly string[]): boolean {
+		const next = new Set(features);
+		if (sameSet(next, this.#features)) return false;
+		this.#features = next;
+		return true;
+	}
+
 	/** Whether `other` advertises exactly the same kinds and features. */
 	sameVocabulary(other: NativeContext): boolean {
 		return sameSet(this.#kinds, other.#kinds) && sameSet(this.#features, other.#features);
@@ -207,9 +215,18 @@ function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
  * once the real `hello` lists them, so the optimistic start never emits a node
  * an older terminal cannot draw (`media`: files Tern loads by path; `json`:
  * raw JSON values Tern draws as its own tree; `button`: omp's buttons, which
- * older builds get as role-styled rows; `shell`: the bash tool's live trace).
+ * older builds get as role-styled rows; `shell`: the bash tool's live trace;
+ * `buttons`, `menu`, `doc`: the plan review's dock and editable document).
  */
-const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = { media: true, json: true, button: true, shell: true };
+const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = {
+	media: true,
+	json: true,
+	button: true,
+	shell: true,
+	buttons: true,
+	menu: true,
+	doc: true,
+};
 
 /**
  * The reply a v1 terminal is assumed to give before its real `hello` arrives
@@ -828,6 +845,16 @@ export class NativeBackend {
 				this.#cx.reduceMotion = event.reduce;
 				this.#host.motionChanged(event.reduce);
 				return;
+			case "features":
+				// A setting changed what the terminal does (Tern's Agents tray): kept for a
+				// resumed surface too, and every component describes itself again, as after a
+				// `hello` with another vocabulary.
+				this.#hello = { ...this.#hello, features: event.features };
+				if (!this.#cx.setFeatures(event.features)) return;
+				setNativePacing(this.#cx.feature("pace"));
+				this.#host.invalidate();
+				this.#host.requestRender();
+				return;
 			case "visible":
 				return;
 			case "error":
@@ -852,7 +879,12 @@ export class NativeBackend {
 			case "edit":
 			case "undo":
 			case "send":
+			case "comment":
+			case "uncomment":
 				this.#routeUiEvent(event);
+				return;
+			case "editing":
+				// Edits arrive as `change` events; the editing state itself is the terminal's.
 				return;
 			case "focus": {
 				const reconciler = this.#surfaceFor(event.sf)?.reconciler;
@@ -870,7 +902,19 @@ export class NativeBackend {
 	#routeUiEvent(
 		event: Extract<
 			TspEvent,
-			{ ev: "toggle" | "select" | "activate" | "action" | "change" | "edit" | "undo" | "send" }
+			{
+				ev:
+					| "toggle"
+					| "select"
+					| "activate"
+					| "action"
+					| "change"
+					| "edit"
+					| "undo"
+					| "send"
+					| "comment"
+					| "uncomment";
+			}
 		>,
 	): void {
 		const reconciler = this.#surfaceFor(event.sf)?.reconciler;
@@ -901,7 +945,19 @@ export class NativeBackend {
 				ui = { type: "action", key: target.keypath, act: event.act, value: event.value, mods: event.mods ?? [] };
 				break;
 			case "change":
-				ui = { type: "change", key: target.keypath, item: event.item, value: event.value };
+				ui =
+					"text" in event
+						? { type: "docChange", key: target.keypath, text: event.text }
+						: { type: "change", key: target.keypath, item: event.item, value: event.value };
+				break;
+			case "comment":
+				ui =
+					"comment" in event
+						? { type: "commentNote", key: target.keypath, comment: event.comment, note: event.note }
+						: { type: "comment", key: target.keypath, quote: event.quote, at: event.at, note: event.note };
+				break;
+			case "uncomment":
+				ui = { type: "uncomment", key: target.keypath, comment: event.comment };
 				break;
 			case "edit": {
 				const { from, to, text, cursor, len } = event;

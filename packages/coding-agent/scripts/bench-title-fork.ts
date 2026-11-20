@@ -380,7 +380,7 @@ async function createHeadlessSession(cwd: string, config: Config, agentId: strin
 		enableIrc: false,
 		disableExtensionDiscovery: true,
 		skipPythonPreflight: true,
-		cacheWarming: false,
+		cacheWarming: "off",
 		agentId,
 	});
 	await session.modelRegistry.refresh();

@@ -13,7 +13,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
-import { cfgBrowserEnabled } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
+import { cfgBrowserEnabled, cfgBrowserRelay } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
 import { cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 // Guards the SDK/session boundary: browser and computer stay outside the tool
@@ -44,6 +44,7 @@ describe("AgentSession eval preludes", () => {
 			"browser.enabled": false,
 			"archive.enabled": false,
 			"commit.enabled": false,
+			"disassembler.backend": "none",
 		});
 		const { session } = await createAgentSession({
 			cwd: registryDir,
@@ -84,9 +85,37 @@ describe("AgentSession eval preludes", () => {
 		await session.runToolRegistryMutation(async () => undefined);
 		expect(session.agent.state.systemPrompt.join("\n\n")).not.toContain("# Computer Use");
 
+		const browserReconciled = Promise.withResolvers<void>();
+		const refresh = session.refreshBaseSystemPrompt.bind(session);
+		const refreshSpy = vi.spyOn(session, "refreshBaseSystemPrompt").mockImplementation(async (...args) => {
+			await refresh(...args);
+			browserReconciled.resolve();
+		});
 		cfgBrowserEnabled.override(session.settings, true);
 		expect(session.getEvalPreludes().map(definition => definition.name)).toEqual(["browser"]);
 		expect(session.getAllToolNames()).not.toContain("browser");
+		// The prefix assertion below depends on browser.enabled finishing its asynchronous MCP-filter reconcile.
+		await browserReconciled.promise;
+		refreshSpy.mockRestore();
+
+		const mock = createMockModel({ handler: { content: ["ok"] } });
+		session.agent.streamFn = mock.stream;
+		await session.prompt("first browser turn");
+		const prefix = session.agent.state.systemPrompt.join("\n\n");
+		expect(prefix).not.toContain("# Browser Relay");
+		cfgBrowserRelay.override(settings, true);
+		await session.prompt("relay browser turn");
+		expect(session.agent.state.systemPrompt.join("\n\n")).toBe(prefix);
+		const notices = session.agent.state.messages.filter(
+			message => message.role === "custom" && message.customType === "eval-prelude-notice",
+		);
+		expect(JSON.stringify(notices)).toContain("# Browser Relay");
+		await session.prompt("unchanged relay turn");
+		expect(
+			session.agent.state.messages.filter(
+				message => message.role === "custom" && message.customType === "eval-prelude-notice",
+			),
+		).toHaveLength(notices.length);
 
 		const gemini = getBundledModel("google", "gemini-2.5-flash");
 		if (!gemini) throw new Error("Expected bundled Google Gemini model to exist");
@@ -102,6 +131,7 @@ describe("AgentSession eval preludes", () => {
 			"browser.enabled": false,
 			"archive.enabled": false,
 			"commit.enabled": false,
+			"disassembler.backend": "none",
 		});
 		const { session } = await createAgentSession({
 			cwd: registryDir,
@@ -197,7 +227,7 @@ describe("AgentSession eval preludes", () => {
 	});
 
 	it("reconciles browser MCP filtering on live browser toggles", async () => {
-		const manager = new MCPManager(registryDir, null, async () => ({
+		const manager = new MCPManager(registryDir, async () => ({
 			configs: {},
 			sources: {},
 			exaApiKeys: [],

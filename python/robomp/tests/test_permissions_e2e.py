@@ -339,7 +339,7 @@ def test_git_pool_metadata_survives_root_push_and_retry_slot(
 
 def _prepare_shared_natives_cache(slot_tmp_path: Path) -> NativesCache:
     """Provision a root-only shared cache."""
-    cache_root = slot_tmp_path / "cache" / "pi-natives"
+    cache_root = slot_tmp_path / "cache" / "omp-natives"
     cache_root.mkdir(parents=True)
     os.chown(cache_root, 0, 0)
     cache_root.chmod(0o700)

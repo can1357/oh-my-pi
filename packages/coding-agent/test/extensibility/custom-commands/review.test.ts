@@ -19,6 +19,7 @@ import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
+import { resourceText } from "../../helpers/resource-text";
 
 const SAMPLE_JJ_DIFF = `diff --git a/src/workspace.ts b/src/workspace.ts
 --- a/src/workspace.ts
@@ -407,7 +408,7 @@ describe("ReviewCommand", () => {
 					const router = InternalUrlRouter.instance();
 					for (const row of rows) {
 						const resource = await router.resolve(row.url);
-						expect(resource.content.split("\n")[0]).toBe(`diff --git a/${row.path} b/${row.path}`);
+						expect(resourceText(resource).split("\n")[0]).toBe(`diff --git a/${row.path} b/${row.path}`);
 					}
 				} finally {
 					InternalUrlRouter.resetForTests();

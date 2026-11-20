@@ -395,6 +395,7 @@ export class EventController {
 						sessionId: session.sessionId,
 						metadataResolver: provider => session.agent.metadataForProvider(provider),
 						getSessionProvider: () => session.model?.provider,
+						usageLedger: session.sessionManager,
 					})
 				: null,
 		);
@@ -2446,11 +2447,17 @@ export class EventController {
 	async #handleAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
 		const stoppedWaiting = this.#stoppedWaiting;
 		this.#stoppedWaiting = false;
-		// A focused worker's run ended while main's run goes on: tear down only
-		// what the viewed worker owns (its loader); main's status stays `working`
-		// until main's own `agent_end`.
 		const view = this.ctx.viewSession;
-		if (view !== this.ctx.session && this.ctx.session.isRunActive) {
+		// A run is open again by the time this event reaches the serialized
+		// dispatch chain: a superseded end, or a subscriber that started the next
+		// run while this one waited. That ended run still owns its teardown, but
+		// it must not report `done`/`idle` now — that tells OSC 7501 receivers
+		// such as Rex the agent finished while it is still working (#17307).
+		const runActive = this.ctx.session.isRunActive;
+		if (view !== this.ctx.session && runActive) {
+			// A focused worker's run ended while main's run goes on: tear down
+			// only what the viewed worker owns (its loader); main's status stays
+			// `working` until main's own `agent_end`.
 			if (this.ctx.loadingAnimation) {
 				this.ctx.loadingAnimation.stop();
 				this.ctx.loadingAnimation = undefined;
@@ -2461,7 +2468,7 @@ export class EventController {
 			return;
 		}
 		if (stoppedWaiting) {
-			setRunStatus({ state: "idle" });
+			if (!runActive) setRunStatus({ state: "idle" });
 			await this.#finishAgentEnd(event, { interrupted: true });
 			const running = this.ctx.session.getAsyncJobSnapshot()?.running.length ?? 0;
 			if (running > 0) {
@@ -2470,7 +2477,7 @@ export class EventController {
 				);
 			}
 		} else {
-			setRunStatus(this.#settledRunStatus(event));
+			if (!runActive) setRunStatus(this.#settledRunStatus(event));
 			await this.#finishAgentEnd(event);
 		}
 		// This run may be extension-started while the main input loop remains
@@ -2728,7 +2735,6 @@ export class EventController {
 				this.ctx.showStatus("Auto-shake completed");
 			}
 		} else if (event.result) {
-			this.ctx.lastAssistantUsage = undefined;
 			this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
 			this.ctx.statusLine.invalidate();
 			// rebuildChatFromMessages clears the container's emission ledger,
@@ -2782,30 +2788,33 @@ export class EventController {
 		this.#syntheticFailureCards.clear();
 		this.#stopWorkingLoader();
 		this.ctx.statusContainer.disposeChildren();
-		if (AIError.is(event.errorId, AIError.Flag.ThinkingLoop)) {
-			// The retry path drops the failed assistant from runtime context. Do not
-			// restore its inline Error row; just unpin the fixed-region banner so the
-			// retry UI is the visible state.
-			this.#pinnedErrorComponent = undefined;
-			this.#pinnedErrorMessage = undefined;
-			this.#restorePinnedErrorInline = true;
-			this.ctx.clearPinnedError();
-		}
+		// The failed attempt is not the turn's outcome while a retry is pending:
+		// unpin its banner and keep its inline error hidden, so a recovered retry
+		// leaves no error in the transcript. The retry row names the reason;
+		// `auto_retry_end` marks the attempt recovered or superseded, or restores
+		// its error when the saga fails without accounting for it.
+		this.#pinnedErrorComponent = undefined;
+		this.#pinnedErrorMessage = undefined;
+		this.#restorePinnedErrorInline = true;
+		this.ctx.clearPinnedError();
+		const reason = previewLine(sanitizeText(event.errorMessage), TRUNCATE_LENGTHS.CONTENT);
 		const retryStartMs = Date.now();
 		const retryLabel = `Retrying (${event.attempt}/${event.maxAttempts})`;
+		const attemptLabel = `Retrying · attempt ${event.attempt} of ${event.maxAttempts}`;
 		this.ctx.retryLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("warning", spinner),
 			text => theme.fg("muted", text),
 			() => {
 				const remaining = Math.max(0, event.delayMs - (Date.now() - retryStartMs));
-				return `${retryLabel} in ${formatDuration(remaining)}…${this.#maintenanceEscHint()}`;
+				const wait = `${retryLabel} in ${formatDuration(remaining)}`;
+				return `${reason ? `${wait} · ${reason}` : `${wait}…`}${this.#maintenanceEscHint()}`;
 			},
 			getSymbolTheme().spinnerFrames,
 		);
 		this.ctx.retryLoader.setWorkingRow(
 			() => ({
-				label: `Retrying · attempt ${event.attempt} of ${event.maxAttempts}`,
+				label: reason ? `${attemptLabel} · ${reason}` : attemptLabel,
 				startedAt: retryStartMs,
 				variant: { kind: "retry", attempt: event.attempt, max: event.maxAttempts, delayMs: event.delayMs },
 				interruptKey: this.ctx.maintenanceInterruptKey(),
@@ -2849,6 +2858,13 @@ export class EventController {
 				this.#restorePinnedErrorInline = true;
 			}
 			appliedRetryUpdate = true;
+		}
+		if (!event.success) {
+			// Attempts the saga did not account for (a cancelled wait, a failed
+			// local continuation) were hidden at `auto_retry_start`; show their errors.
+			for (const component of this.#retrySupersededAssistantQueue) {
+				if (component !== this.#pinnedErrorComponent) component.setErrorPinned(false);
+			}
 		}
 		if (
 			!terminalFailurePinned &&

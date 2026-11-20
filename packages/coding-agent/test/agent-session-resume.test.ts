@@ -195,7 +195,7 @@ describe("AgentSession.resume", () => {
 			"## Goal\nFinish the thing",
 		);
 		try {
-			await session.handoff();
+			await session.compact(undefined, { mode: "handoff" });
 		} finally {
 			generateHandoff.mockRestore();
 		}
