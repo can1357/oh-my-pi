@@ -24,9 +24,11 @@ authStorage.keys.setRuntime("anthropic", "test-key");
 const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
 let holdContinuation = false;
 let accelerateIdleTimers = false;
+let idleTimeoutPatched = false;
 const continuationHold = Promise.withResolvers<void>();
 const idleMaintenance = Bun.env.GOAL_RPC_IDLE_MAINTENANCE === "1";
-if (idleMaintenance) {
+if (idleMaintenance && !idleTimeoutPatched) {
+	idleTimeoutPatched = true;
 	const originalSetTimeout = globalThis.setTimeout;
 	globalThis.setTimeout = ((callback: () => void, delay = 0, ...args: unknown[]) =>
 		originalSetTimeout(
@@ -155,6 +157,16 @@ session.agent.streamFn = mock.stream;
 if (Bun.env.GOAL_RPC_PLAN === "1") {
 	session.setPlanModeState({ enabled: true, planFilePath: path.join(cwd, "plan.md") });
 }
-await runRpcMode(session, {
-	goalWaitForIdle: () => (holdContinuation ? continuationHold.promise : originalWaitForIdle()),
+// Hold only the goal controller's direct wait. Every other member stays bound to the real
+// session, so idle maintenance keeps its real waitForRunEnd barrier and this test can catch
+// regressions in its scheduled-turn probe and drop refresh independently.
+const rpcSession = new Proxy(session, {
+	get(target, property) {
+		if (property === "waitForIdle") {
+			return () => (holdContinuation ? continuationHold.promise : originalWaitForIdle());
+		}
+		const value: unknown = Reflect.get(target, property, target);
+		return typeof value === "function" ? value.bind(target) : value;
+	},
 });
+await runRpcMode(rpcSession);

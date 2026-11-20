@@ -23,6 +23,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 
 import {
+	cfgAutoCompactionEnabled,
 	cfgCompactionEnabled,
 	cfgCompactionHandoffSaveToDisk,
 	cfgCompactionMethodOrder,
@@ -1080,6 +1081,48 @@ describe("AgentSession handoff", () => {
 			"soft",
 		]);
 		expect(session.autoCompactionEnabled).toBe(true);
+	});
+
+	it("notifies auto-compaction listeners only when the effective state changes", async () => {
+		cfgCompactionEnabled.set(session.settings, true);
+		cfgCompactionMethodOrder.set(session.settings, ["soft"]);
+		const transitions: boolean[] = [];
+		const stop = cfgAutoCompactionEnabled.listen(session, enabled => {
+			transitions.push(enabled);
+		});
+		const flush = async () => {
+			await Promise.resolve();
+			await Promise.resolve();
+		};
+		try {
+			session.setAutoCompactionEnabled(true);
+			await flush();
+			expect(transitions).toEqual([]);
+
+			session.setAutoCompactionEnabled(false);
+			await flush();
+			session.setAutoCompactionEnabled(false);
+			await flush();
+			expect(transitions).toEqual([false]);
+
+			cfgCompactionMethodOrder.set(session.settings, []);
+			await flush();
+			expect(transitions).toEqual([false]);
+			session.setAutoCompactionEnabled(true);
+			await flush();
+			expect(transitions).toEqual([false, true]);
+
+			cfgCompactionMethodOrder.override(session.settings, []);
+			await flush();
+			expect(transitions).toEqual([false, true, false]);
+			cfgCompactionMethodOrder.override(session.settings, ["soft"]);
+			await flush();
+			cfgCompactionMethodOrder.override(session.settings, ["soft"]);
+			await flush();
+			expect(transitions).toEqual([false, true, false, true]);
+		} finally {
+			stop();
+		}
 	});
 
 	/** Rebuild the session so one terminal text turn crosses a 1% threshold with a `handoff` method order. */

@@ -175,12 +175,7 @@ export class IdleMaintenance {
 	}
 
 	#recapWanted(): boolean {
-		return (
-			this.#options.recap !== false &&
-			cfgRecap.get(this.#session.settings).enabled &&
-			!this.#isBlocked() &&
-			this.#isSettled()
-		);
+		return cfgRecap.get(this.#session.settings).enabled && !this.#isBlocked() && !this.#isSettled();
 	}
 
 	#contextTokens(): number {
@@ -217,7 +212,7 @@ export class IdleMaintenance {
 
 	/** Start the recap delay, if this quiet stretch still owes a recap. */
 	#armRecap(): void {
-		if (this.#options.recap === false || !this.#pending?.recap || this.#recapRun) return;
+		if (!this.#pending?.recap || this.#recapRun) return;
 		const recap = cfgRecap.get(this.#session.settings);
 		if (!recap.enabled) return;
 		const seconds = Math.max(RECAP_MIN_SECONDS, Math.min(RECAP_MAX_SECONDS, recap.idleSeconds));
