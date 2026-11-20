@@ -4,6 +4,8 @@
 
 ### Added
 
+- The `sd` shell builtin can require an exact match count with `--expect N` and show the applied changes with `-U N` or `--unified N`.
+
 - Added `ShellFilesystem.onFileChange`: the embedded shell reports each text file git would track that a command changed itself (a builtin's write, rename or removal; a redirection's target) with its content before and after
 - Added `diffLineRunsWithin(oldText, newText, maxEdits)`: `diffLineRuns` that returns `null` once more than `maxEdits` lines are added or removed, instead of spending time quadratic in the size of a wholesale rewrite
 - Added `enableConsoleVtInput()` and `restoreConsoleInputMode()`, which turn Windows console VT input on and back off without `bun:ffi`
