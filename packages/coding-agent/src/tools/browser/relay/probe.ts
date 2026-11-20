@@ -146,7 +146,8 @@ export async function waitForRelayExtension(cdpUrl: string, signal?: AbortSignal
 }
 
 /** The steps that replace an out-of-date relay extension. */
-export const UPDATE_RELAY_EXTENSION = "Run `omp browser-relay install` and reload the extension in Chrome.";
+export const UPDATE_RELAY_EXTENSION =
+	"Run `omp browser-relay install` and reload the omp extension in Chrome.";
 
 /**
  * Notice for an open through a ready relay where a connected extension was
@@ -168,5 +169,5 @@ export async function relayExtensionNotice(cdpUrl: string, signal?: AbortSignal)
 	}
 	if (typeof installedBy !== "string" || !isOlderOmpVersion(installedBy, VERSION)) return null;
 	const origin = installedBy === "" ? "an older omp" : `omp ${installedBy}; this is omp ${VERSION}`;
-	return `The OMP Browser Relay extension is out of date (installed by ${origin}). ${UPDATE_RELAY_EXTENSION}`;
+	return `The omp extension is out of date (installed by ${origin}). ${UPDATE_RELAY_EXTENSION}`;
 }

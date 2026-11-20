@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- The omp extension now has a pinned Chrome ID. Remove the old unpinned extension and use _Load unpacked_ to install it again once.
+
+### Added
+
+- The omp extension adds a Chrome side panel, page overlays, image and element picks, Teach, scheduled shortcuts, and GIF export.
+
+### Changed
+
+- The omp extension now keeps registered installations current across omp upgrades and reloads when idle.
+
 ## [19.0.1] - 2026-11-19
 
 ### Fixed

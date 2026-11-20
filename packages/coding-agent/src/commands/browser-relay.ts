@@ -2,19 +2,16 @@
  * `omp browser-relay` — drive the user's own Chrome tabs.
  */
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
-import {
-	BROWSER_RELAY_ACTIONS,
-	type BrowserRelayAction,
-	DEFAULT_RELAY_PORT,
-	runBrowserRelayCommand,
-} from "../cli/browser-relay-cli";
+import { BROWSER_RELAY_ACTIONS, DEFAULT_RELAY_PORT, runBrowserRelayCommand } from "../cli/browser-relay-cli";
+import { browserRelayHelp } from "../cli/command-help";
 
+/** Install, sync, or serve omp in Chrome. */
 export default class BrowserRelay extends Command {
-	static description = "Run the local CDP relay that lets the browser prelude drive your own Chrome tabs";
+	static description = browserRelayHelp.description;
 
 	static args = {
 		action: Args.string({
-			description: `Action: ${BROWSER_RELAY_ACTIONS.join(" | ")} (default serve)`,
+			description: `Action: ${BROWSER_RELAY_ACTIONS.join(" | ")} (default serve; native-host is launched by Chrome)`,
 			options: [...BROWSER_RELAY_ACTIONS],
 			required: false,
 		}),
@@ -34,7 +31,8 @@ export default class BrowserRelay extends Command {
 	};
 
 	static examples = [
-		"omp browser-relay install    # write the Chrome extension to disk + setup steps",
+		"omp browser-relay install    # install the omp extension and its native host",
+		"omp browser-relay sync       # sync every registered extension directory",
 		"omp browser-relay            # serve the relay on the default port",
 		"omp browser-relay -p 9333 --token s3cret",
 	];
@@ -42,7 +40,7 @@ export default class BrowserRelay extends Command {
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(BrowserRelay);
 		await runBrowserRelayCommand({
-			action: (args.action as BrowserRelayAction | undefined) ?? "serve",
+			action: BROWSER_RELAY_ACTIONS.find(action => action === args.action) ?? "serve",
 			port: flags.port,
 			token: flags.token,
 			dir: flags.dir,

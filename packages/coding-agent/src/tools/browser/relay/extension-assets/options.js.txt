@@ -1,4 +1,4 @@
-// Options page for the OMP Browser Relay extension (plain JS: shipped as-is).
+// Settings for the omp extension (shipped as plain JavaScript).
 const DEFAULT_PORT = 9224;
 const portInput = document.getElementById("port");
 const tokenInput = document.getElementById("token");

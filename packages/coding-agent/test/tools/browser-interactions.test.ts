@@ -2158,6 +2158,46 @@ document.getElementById("rerender").addEventListener("pointerdown", () => {
 		}
 	}, 30_000);
 
+	test("keeps a click on an inert target undelivered while the relay's overlay host comes, changes and goes", async () => {
+		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
+		const page = await browserHandle.browser.newPage();
+		// On the press, the overlay host mounted before the click is replaced by a new one, which is then restyled;
+		// `pageToo` also changes the page itself, which still confirms the click.
+		const outcome = async (pageToo: boolean): Promise<string> => {
+			await page.setContent(`<div inert><button id="inert">Inert</button></div><p id="clock">0</p>
+<omp-overlay></omp-overlay>
+<script>
+addEventListener("pointerdown", () => {
+	document.querySelector("omp-overlay").remove();
+	const host = document.createElement("OMP-OVERLAY");
+	document.body.append(host);
+	host.attachShadow({ mode: "closed" }).innerHTML = "<div>pointer</div>";
+	host.setAttribute("data-state", "pressed");
+	host.style.opacity = "0";
+	${pageToo ? 'document.getElementById("clock").textContent = "1";' : ""}
+}, true);
+</script>`);
+			const handle = await page.$("#inert");
+			if (!handle) throw new Error("Expected #inert");
+			const result = await clickElement(handle, "click #inert").then(
+				() => "clicked",
+				error => (String(error).includes("could not confirm the click reached") ? "refused" : String(error)),
+			);
+			await handle.dispose();
+			// The host changed while the click was watched.
+			expect(await page.evaluate(`document.querySelector("omp-overlay").dataset.state`)).toBe("pressed");
+			return result;
+		};
+		try {
+			expect(await outcome(false)).toBe("refused");
+			expect(await outcome(true)).toBe("clicked");
+		} finally {
+			await page.close().catch(() => undefined);
+			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
+		}
+	}, 30_000);
+
 	test("fails a click whose frame the page removes while the first press is down, and keeps one it removes on a click", async () => {
 		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");

@@ -17,6 +17,7 @@ import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { splitKeyCombo, ternKey } from "./tern/keys";
 import { devtoolsFrameId } from "./frames";
 import { untilAbortedOrReleased } from "./op-timeouts";
+import { CANCELLED_RELEASE_POINT, OVERLAY_HOST_TAG } from "./relay/protocol";
 import type { SelectOptionChoice, SelectOptionInput } from "./select-options";
 import {
 	createFilePicker,
@@ -526,7 +527,8 @@ export async function focusElement(handle: ElementHandle, signal?: AbortSignal):
  * nothing, so a click the page never saw fails instead of reporting success. When the page took the record
  * with it, a navigation or a frame removed after the release counts as delivered. A child frame the page
  * removed while the first press was down took the element before any click, so that click fails as
- * unconfirmed even when the element saw the `mousedown`.
+ * unconfirmed even when the element saw the `mousedown`. The relay's page overlay host ({@link OVERLAY_HOST_TAG})
+ * is not the page: its mutations never confirm a click.
  */
 export async function clickElement(
 	handle: ElementHandle,
@@ -536,11 +538,17 @@ export async function clickElement(
 ): Promise<void> {
 	const point = await actionableClickPoint(handle, label, signal, options);
 	const watch = await untilAborted(signal, () =>
-		handle.evaluateHandle(el => {
+		handle.evaluateHandle((el, overlayHostTag) => {
 			interface InputEvent {
 				type: string;
 				defaultPrevented: boolean;
 				composedPath(): unknown[];
+			}
+			interface Mutation {
+				type: string;
+				target: unknown;
+				addedNodes: ArrayLike<unknown>;
+				removedNodes: ArrayLike<unknown>;
 			}
 			type Listen = (type: string, listener: (event: InputEvent) => void, capture: boolean) => void;
 			const target = el as unknown as { addEventListener: Listen; removeEventListener: Listen };
@@ -549,10 +557,24 @@ export async function clickElement(
 				removeEventListener: Listen;
 				location: { href: string };
 				document: { documentElement: unknown };
-				MutationObserver: new (callback: () => void) => {
+				MutationObserver: new (callback: (records: Mutation[]) => void) => {
 					observe(node: unknown, options: Record<string, boolean>): void;
 					disconnect(): void;
 				};
+			};
+			const isOverlayHost = (node: unknown) =>
+				typeof node === "object" &&
+				node !== null &&
+				"tagName" in node &&
+				typeof node.tagName === "string" &&
+				node.tagName.toLowerCase() === overlayHostTag;
+			// The overlay draws inside its host's closed shadow root, which the observer never sees; what it can see
+			// is the host itself coming, going, or changing its attributes.
+			const overlayOnly = (record: Mutation) => {
+				if (isOverlayHost(record.target)) return true;
+				if (record.type !== "childList") return false;
+				const nodes = [...Array.from(record.addedNodes), ...Array.from(record.removedNodes)];
+				return nodes.length > 0 && nodes.every(isOverlayHost);
 			};
 			const pointerDowns: InputEvent[] = [];
 			const href = page.location.href;
@@ -574,8 +596,8 @@ export async function clickElement(
 				stop: () => {},
 			};
 			if (state.detached) return state;
-			const observer = new page.MutationObserver(() => {
-				changed = true;
+			const observer = new page.MutationObserver(records => {
+				if (!records.every(overlayOnly)) changed = true;
 			});
 			const onChange = () => {
 				changed = true;
@@ -611,7 +633,7 @@ export async function clickElement(
 				for (const type of pageChanges) page.removeEventListener(type, onChange, true);
 			};
 			return state;
-		}),
+		}, OVERLAY_HOST_TAG.toLowerCase()),
 	);
 	const frame = handle.frame;
 	// The main frame outlives any press; a child frame's record is read once while the first press is down, since
@@ -2059,12 +2081,6 @@ async function releaseKeys(page: Page, keys: readonly KeyInput[], signal?: Abort
 	if (failure) throw failure.error;
 	throwIfAborted(signal);
 }
-
-/**
- * Where a cancelled press is released: off the page, so the press drops no drag (unless the page captured the
- * pointer), at a point no real pointer reports, so {@link CANCELLED_RELEASE_GUARD} can tell the release apart.
- */
-const CANCELLED_RELEASE_POINT = -7919;
 
 /**
  * Swallows the `click`/`auxclick` Chrome fires on the document root for a release at

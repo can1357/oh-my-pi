@@ -1,13 +1,7 @@
 /**
- * Builds the browser relay extension and its distribution artifacts:
- * - `dist/extension/` — unpacked extension (load via chrome://extensions)
- * - `dist/omp-browser-relay-extension.zip` — packaged extension for GH releases
- * - `../coding-agent/src/tools/browser/relay/extension-assets/*.txt` —
- *   generated text assets embedded into the omp CLI so `omp browser-relay
- *   install` works from the compiled binary. Re-run this script after touching
- *   anything under `extension/` and commit the regenerated assets.
- *
- * Dependency-free on purpose: CI runs this without `bun install`.
+ * Builds the omp extension, its GitHub release ZIP, and the unstamped assets
+ * embedded in the CLI for `omp browser-relay install`. Regenerate and commit the
+ * embedded assets after changing the extension.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -18,60 +12,160 @@ import {
 } from "../../coding-agent/src/tools/browser/relay/protocol";
 
 const root = path.resolve(import.meta.dir, "..");
-const repoRoot = path.resolve(root, "../..");
+const source = path.join(root, "extension");
 const dist = path.join(root, "dist");
 const distExtension = path.join(dist, "extension");
-const assetsDir = path.resolve(root, "../coding-agent/src/tools/browser/relay/extension-assets");
+const assetsDir = path.resolve(
+	root,
+	"../coding-agent/src/tools/browser/relay/extension-assets",
+);
 
 await fs.rm(dist, { recursive: true, force: true });
 await fs.mkdir(distExtension, { recursive: true });
 
-const bundle = await Bun.build({
-	entrypoints: [path.join(root, "extension/background.ts")],
-	outdir: distExtension,
-	target: "browser",
-	sourcemap: "none",
-});
-if (!bundle.success) {
-	for (const log of bundle.logs) console.error(log);
-	process.exit(1);
+await Promise.all([
+	bundle("background.ts", "background", "iife"),
+	bundle("panel/main.tsx", "panel", "esm"),
+	bundle("overlay/main.ts", "overlay", "iife"),
+	bundle("teach/recorder.ts", "recorder", "iife"),
+	bundle("offscreen/main.ts", "offscreen", "iife"),
+]);
+
+const staticFiles = [
+	"manifest.json",
+	"options.html",
+	"options.js",
+	"panel.html",
+	"offscreen.html",
+	...new Bun.Glob("icons/*.png").scanSync({ cwd: source }),
+];
+await Promise.all([
+	...staticFiles.map((name) =>
+		Bun.write(
+			path.join(distExtension, name),
+			Bun.file(path.join(source, name)),
+		),
+	),
+	Bun.write(
+		path.join(distExtension, "LICENSE"),
+		Bun.file(path.resolve(root, "../../LICENSE")),
+	),
+]);
+for (const name of [
+	"panel.css",
+	"icons/omp-16.png",
+	"icons/omp-32.png",
+	"icons/omp-48.png",
+	"icons/omp-128.png",
+]) {
+	if (!(await Bun.file(path.join(distExtension, name)).exists()))
+		throw new Error(`Missing extension file: ${name}`);
 }
 
-for (const file of ["options.html", "options.js"]) {
-	await Bun.write(path.join(distExtension, file), Bun.file(path.join(root, "extension", file)));
-}
-await Bun.write(path.join(distExtension, "LICENSE"), Bun.file(path.join(repoRoot, "LICENSE")));
-// The release zip carries the omp version it ships with, as `omp browser-relay install` stamps its copy;
-// the extension reports it to the relay. The embedded assets stay unstamped so releases do not rewrite them.
-const sourceManifest = path.join(root, "extension/manifest.json");
-const distScript = path.join(distExtension, "background.js");
-const unstampedScript = await Bun.file(distScript).text();
-const { version: ompVersion } = await Bun.file(path.join(root, "../coding-agent/package.json")).json();
-await Bun.write(distScript, stampRelayExtensionScript(unstampedScript, ompVersion));
-await Bun.write(
-	path.join(distExtension, "manifest.json"),
-	stampRelayExtensionManifest(await Bun.file(sourceManifest).text(), ompVersion),
-);
-
-const zip = await $`zip -qr ../omp-browser-relay-extension.zip .`.cwd(distExtension).nothrow();
-if (zip.exitCode !== 0) {
-	console.error("zip failed:", zip.stderr.toString());
-	process.exit(1);
-}
+const manifest = path.join(distExtension, "manifest.json");
+const background = path.join(distExtension, "background.js");
+const unstampedManifest = await Bun.file(manifest).text();
+const unstampedScript = await Bun.file(background).text();
+const { version: ompVersion } = await Bun.file(
+	path.join(root, "../coding-agent/package.json"),
+).json();
+const names = [
+	...new Bun.Glob("**/*").scanSync({ cwd: distExtension, dot: true }),
+]
+	.map((name) => name.replaceAll(path.sep, "/"))
+	.sort();
+const build = await buildId(names);
+// Only the release ZIP is pre-stamped. CLI installs stamp their own version with this build.
+await Promise.all([
+	Bun.write(
+		manifest,
+		stampRelayExtensionManifest(unstampedManifest, ompVersion),
+	),
+	Bun.write(
+		background,
+		stampRelayExtensionScript(unstampedScript, ompVersion, build),
+	),
+]);
+const zipPath = path.join(dist, "omp-browser-relay-extension.zip");
+await $`zip -qr ${zipPath} .`.cwd(distExtension);
 
 await fs.rm(assetsDir, { recursive: true, force: true });
-await Bun.write(path.join(assetsDir, "background.js.txt"), unstampedScript);
-const embeddedAssets = [
-	[sourceManifest, "manifest.json.txt"],
-	[path.join(distExtension, "options.html"), "options.html.txt"],
-	[path.join(distExtension, "options.js"), "options.js.txt"],
-	[path.join(distExtension, "LICENSE"), "LICENSE.txt"],
-] as const;
-for (const [source, destination] of embeddedAssets) {
-	await Bun.write(path.join(assetsDir, destination), Bun.file(source));
+const imports: string[] = [];
+const entries: string[] = [];
+for (const [index, name] of names.entries()) {
+	const file = Bun.file(path.join(distExtension, name));
+	const isText =
+		name === "LICENSE" || /\.(?:css|html|js|json|map|svg|txt)$/.test(name);
+	const asset = Bun.file(path.join(assetsDir, `${name}.txt`));
+	const content =
+		name === "background.js"
+			? unstampedScript
+			: name === "manifest.json"
+				? unstampedManifest
+				: isText
+					? file
+					: Buffer.from(await file.arrayBuffer()).toBase64();
+	await Bun.write(asset, content);
+	const binding = `asset${index}`;
+	const key = name === "LICENSE" ? name : JSON.stringify(name);
+	imports.push(
+		`import ${binding} from ${JSON.stringify(`./${name}.txt`)} with { type: "text" };`,
+	);
+	entries.push(`\t${key}: ${isText ? binding : `{ base64: ${binding} }`},`);
+}
+await Bun.write(
+	path.join(assetsDir, "index.ts"),
+	[
+		"// Generated by packages/browser-relay/scripts/build-extension.ts — do not edit.",
+		...imports,
+		"",
+		"/** The unstamped extension files, with binary assets encoded as base64. */",
+		"export const embeddedRelayFiles = {",
+		...entries,
+		"};",
+		"",
+		"/** Digest of the unstamped files above; installs stamp it into background.js so a relay can spot a stale build. */",
+		`export const embeddedRelayBuild = ${JSON.stringify(build)};`,
+		"",
+	].join("\n"),
+);
+
+console.log(
+	`Built:\n  ${distExtension}\n  ${zipPath}\n  ${assetsDir} (embedded CLI assets — commit these)`,
+);
+
+/** First 16 hex chars of SHA-256 over each unstamped file's name and bytes, in `names` order. */
+async function buildId(files: readonly string[]): Promise<string> {
+	const hasher = new Bun.CryptoHasher("sha256");
+	for (const name of files) {
+		hasher.update(`${name}\0`);
+		hasher.update(
+			new Uint8Array(
+				await Bun.file(path.join(distExtension, name)).arrayBuffer(),
+			),
+		);
+		hasher.update("\0");
+	}
+	return hasher.digest("hex").slice(0, 16);
 }
 
-console.log("built:");
-console.log(`  ${distExtension}`);
-console.log(`  ${path.join(dist, "omp-browser-relay-extension.zip")}`);
-console.log(`  ${assetsDir} (embedded CLI assets — commit these)`);
+async function bundle(
+	entry: string,
+	name: string,
+	format: "iife" | "esm",
+): Promise<void> {
+	const result = await Bun.build({
+		entrypoints: [path.join(source, entry)],
+		outdir: distExtension,
+		target: "browser",
+		format,
+		naming: { entry: `${name}.[ext]` },
+		minify: name === "panel",
+		define: { "process.env.NODE_ENV": JSON.stringify("production") },
+	});
+	if (!result.success)
+		throw new AggregateError(result.logs, `Failed to bundle ${entry}`);
+	if (!(await Bun.file(path.join(distExtension, `${name}.js`)).exists())) {
+		throw new Error(`Bundling ${entry} did not produce ${name}.js`);
+	}
+}
