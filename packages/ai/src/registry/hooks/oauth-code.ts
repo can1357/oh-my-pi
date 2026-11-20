@@ -4,6 +4,7 @@
  */
 import type { AfterExchangeHook, Lazy, LoginHook, ValueHook } from "./types";
 
+// Each loader imports its provider module on first use, so a sign-in loads only that provider's hook.
 export const OAUTH_CODE_AFTER_EXCHANGE_HOOKS: Record<string, Lazy<AfterExchangeHook>> = {
 	"anthropic-identity": () => import("../oauth/anthropic").then(m => m.anthropicIdentityHook),
 	"devin-identity": () => import("../oauth/devin").then(m => m.devinIdentityHook),
