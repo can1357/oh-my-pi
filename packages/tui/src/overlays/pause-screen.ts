@@ -424,6 +424,7 @@ export async function runPauseScreen(host: PauseScreenHost, options?: PauseScree
 		anchor: "top-left",
 		margin: 0,
 		fullscreen: true,
+		mouseTracking: false,
 	});
 	try {
 		host.ui.setFocus(component);
