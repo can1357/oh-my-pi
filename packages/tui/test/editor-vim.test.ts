@@ -1412,20 +1412,21 @@ describe("Editor vim mode", () => {
 			expect(editor.getText()).toBe("baz.qux");
 		});
 
-		it("promotes leading W operators crossing a line boundary to linewise", () => {
+		it("stops a W operator at the end of its line like Vim's fwd_word(eol)", () => {
+			// Vim 9.2 and Neovim: `dW` on a line's last WORD keeps the line break; `yW` yanks charwise.
 			const deleted = vimEditor("foo\nbar");
 			deleted.handleInput("dW");
-			expect(deleted.getText()).toBe("bar");
+			expect(deleted.getText()).toBe("\nbar");
 
 			const yanked = vimEditor("foo\nbar");
 			yanked.handleInput("yWjP");
-			expect(yanked.getText()).toBe("foo\nfoo\nbar");
+			expect(yanked.getText()).toBe("foo\nfoobar");
 		});
 
-		it("deletes empty and whitespace-only lines before the next WORD", () => {
+		it("deletes a leading empty line linewise before a whitespace-only one", () => {
 			const editor = vimEditor("\n   \nfoo");
 			editor.handleInput("dW");
-			expect(editor.getText()).toBe("foo");
+			expect(editor.getText()).toBe("   \nfoo");
 		});
 
 		it("preserves trailing whitespace when W has no following WORD", () => {
@@ -1512,6 +1513,180 @@ describe("Editor vim mode", () => {
 			const line = vimEditor("one\ntwo\nthree");
 			line.handleInput("l2d_");
 			expect(line.getText()).toBe("three");
+		});
+	});
+
+	// Expected results below were taken from Vim 9.2 (`vim -Nu NONE`) for the same keys and text.
+	describe("undo, redo, and dot repeat", () => {
+		it("repeats text typed in the same input chunk as the change that opened it", () => {
+			// Terminals batch fast keystrokes: `ccQ` can arrive as one read.
+			const editor = vimEditor("aa\nbb");
+			editor.handleInput("ccQ");
+			editor.handleInput(ESC);
+			editor.handleInput("j.");
+			expect(editor.getText()).toBe("Q\nQ");
+		});
+
+		it("takes a count for u and redoes with Ctrl-R until the next edit", () => {
+			const editor = vimEditor("one two three four");
+			editor.handleInput("dwdwdw");
+			editor.handleInput("2u");
+			expect(editor.getText()).toBe("two three four");
+			editor.handleInput("\x12");
+			expect(editor.getText()).toBe("three four");
+			editor.handleInput("x");
+			editor.handleInput("\x12");
+			expect(editor.getText()).toBe("hree four");
+		});
+
+		it("puts the cursor back where the undone change began", () => {
+			const visual = vimEditor("alpha beta\ngamma");
+			visual.handleInput("vjdu");
+			expect(cursor(visual)).toEqual({ line: 0, col: 0 });
+			const put = vimEditor("alpha beta\ngamma");
+			put.handleInput("wyyPu");
+			expect(cursor(put)).toEqual({ line: 0, col: 6 });
+		});
+
+		it("repeats a counted insert on Escape as one undo step", () => {
+			const editor = vimEditor("ab\ncd");
+			editor.handleInput("3ix");
+			editor.handleInput(ESC);
+			expect(editor.getText()).toBe("xxxab\ncd");
+			expect(cursor(editor)).toEqual({ line: 0, col: 2 });
+			editor.handleInput("j0.");
+			expect(editor.getText()).toBe("xxxab\nxxxcd");
+			editor.handleInput("u");
+			expect(editor.getText()).toBe("xxxab\ncd");
+			const lines = vimEditor("a");
+			lines.handleInput("2ofoo");
+			lines.handleInput(ESC);
+			expect(lines.getText()).toBe("a\nfoo\nfoo");
+		});
+	});
+
+	describe("Vim word motions across lines", () => {
+		it("w, b, e, and ge cross line breaks and skip indent", () => {
+			const editor = vimEditor("foo bar\n  baz qux");
+			editor.handleInput("2w");
+			expect(cursor(editor)).toEqual({ line: 1, col: 2 });
+			editor.handleInput("b");
+			expect(cursor(editor)).toEqual({ line: 0, col: 4 });
+			editor.handleInput("2e");
+			expect(cursor(editor)).toEqual({ line: 1, col: 4 });
+			editor.handleInput("ge");
+			expect(cursor(editor)).toEqual({ line: 0, col: 6 });
+		});
+
+		it("stops dw at the end of the line and keeps the line break", () => {
+			const editor = vimEditor("a b\nc");
+			editor.handleInput("wdw");
+			expect(editor.getText()).toBe("a \nc");
+		});
+
+		it("makes a multi-line delete from the indent linewise (2D, d2w)", () => {
+			const dollar = vimEditor("alpha\n  beta\ngamma");
+			dollar.handleInput("2D");
+			expect(dollar.getText()).toBe("gamma");
+			const words = vimEditor("alpha beta\ndelta\nzeta");
+			words.handleInput("3dw");
+			expect(words.getText()).toBe("zeta");
+		});
+
+		it("cancels dk on the first line instead of deleting it", () => {
+			const editor = vimEditor("one\ntwo");
+			editor.handleInput("dk");
+			expect(editor.getText()).toBe("one\ntwo");
+		});
+	});
+
+	describe("Vim editing commands", () => {
+		it("X, Y, and ~ act like dh, yy, and a stepping case toggle", () => {
+			const editor = vimEditor("abcd\nnext");
+			editor.handleInput("$2X");
+			expect(editor.getText()).toBe("ad\nnext");
+			editor.handleInput("Yp");
+			expect(editor.getText()).toBe("ad\nad\nnext");
+			editor.handleInput("0~~");
+			expect(editor.getText()).toBe("ad\nAD\nnext");
+		});
+
+		it("applies gU, gu, and g~ over motions, lines, and Visual selections", () => {
+			const editor = vimEditor("alpha beta\nGamma Delta");
+			editor.handleInput("gUiw");
+			expect(editor.getText()).toBe("ALPHA beta\nGamma Delta");
+			editor.handleInput("jguu");
+			expect(editor.getText()).toBe("ALPHA beta\ngamma delta");
+			editor.handleInput("kg~~");
+			expect(editor.getText()).toBe("alpha BETA\ngamma delta");
+			editor.handleInput("jveU");
+			expect(editor.getText()).toBe("alpha BETA\nGAMMA delta");
+		});
+
+		it("joins without touching whitespace on gJ, in Normal and Visual mode", () => {
+			const normal = vimEditor("a\n  b");
+			normal.handleInput("gJ");
+			expect(normal.getText()).toBe("a  b");
+			const visual = vimEditor("a\n  b\nc");
+			visual.handleInput("VjgJ");
+			expect(visual.getText()).toBe("a  b\nc");
+		});
+
+		it("selects the line break with v$ and replaces a selection with Visual p", () => {
+			const joined = vimEditor("ab\ncd");
+			joined.handleInput("v$d");
+			expect(joined.getText()).toBe("cd");
+			const swapped = vimEditor("alpha beta");
+			swapped.handleInput("yiwwviwp");
+			expect(swapped.getText()).toBe("alpha alpha");
+			// `p` leaves the replaced word in the register.
+			swapped.handleInput("0P");
+			expect(swapped.getText()).toBe("betaalpha alpha");
+		});
+
+		it("puts with gp and leaves the cursor after the text", () => {
+			const editor = vimEditor("one\ntwo");
+			editor.handleInput("yyjgp");
+			expect(editor.getText()).toBe("one\ntwo\none");
+			expect(cursor(editor)).toEqual({ line: 2, col: 0 });
+		});
+
+		it("reselects with gv and reinserts with gi", () => {
+			const editor = vimEditor("alpha beta");
+			editor.handleInput("vl");
+			editor.handleInput(ESC);
+			editor.handleInput("$gvd");
+			expect(editor.getText()).toBe("pha beta");
+			editor.handleInput("wiX");
+			editor.handleInput(ESC);
+			editor.handleInput("0giY");
+			expect(editor.getText()).toBe("pha XYbeta");
+		});
+	});
+
+	describe("Vim registers", () => {
+		it("keeps named, yank, and black-hole registers apart from the unnamed one", () => {
+			const editor = vimEditor("alpha\nbeta\ngamma");
+			editor.handleInput('"ayy');
+			editor.handleInput("jdd");
+			editor.handleInput('"ap');
+			expect(editor.getText()).toBe("alpha\ngamma\nalpha");
+			editor.handleInput('"_ddp');
+			expect(editor.getText()).toBe("alpha\ngamma\nbeta");
+			// Only an unnamed yank fills `"0`; it survives the delete that follows.
+			const yank = vimEditor("alpha\nbeta\ngamma");
+			yank.handleInput('yyjdd"0p');
+			expect(yank.getText()).toBe("alpha\ngamma\nalpha");
+		});
+
+		it("appends with an uppercase register and shifts deletes through 1-9", () => {
+			const editor = vimEditor("one\ntwo\nthree");
+			editor.handleInput('"ayiwj"Ayiw');
+			editor.handleInput('G"ap');
+			expect(editor.getText()).toBe("one\ntwo\ntonetwohree");
+			const shifted = vimEditor("one\ntwo\nthree");
+			shifted.handleInput('dddd"2p');
+			expect(shifted.getText()).toBe("three\none");
 		});
 	});
 });

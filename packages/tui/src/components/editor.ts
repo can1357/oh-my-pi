@@ -44,12 +44,14 @@ import {
 import {
 	countGraphemes,
 	diffInsertSession,
+	firstNonBlank,
 	flatten,
 	lastGraphemeStart,
 	nextGraphemeStart,
 	offsetToPos,
 	prevGraphemeStart,
 	stepGraphemes,
+	type VimCaseMode,
 	type VimCommand,
 	type VimInsertRecord,
 	type VimMode,
@@ -474,6 +476,12 @@ const MAX_UNDO_STACK = 100;
 interface UndoMark {
 	depth: number;
 	shifts: number;
+}
+
+/** A Vim register: its text (no trailing newline) and whether `p` puts it as whole lines. */
+interface VimRegister {
+	text: string;
+	linewise: boolean;
 }
 
 /**
@@ -934,6 +942,12 @@ export class Editor implements Component, Focusable {
 
 	// Undo stack for editor state changes
 	#undoStack: EditorState[] = [];
+	/** Vim's numbered (`"0`–`"9`), small-delete (`"-`), and named (`"a`–`"z`) registers. */
+	#vimRegisters = new Map<string, VimRegister>();
+	/** What Vim last stored as unnamed; the kill ring decides whether it is still the newest. */
+	#vimUnnamed: VimRegister | null = null;
+	/** States `u` stepped back from, newest last; Vim's `Ctrl-R` replays them until the next edit. */
+	#redoStack: EditorState[] = [];
 	#suspendUndo = false;
 	/** Snapshots evicted from the front of {@link #undoStack}, so {@link UndoMark}s stay aligned. */
 	#undoShifts = 0;
@@ -1155,7 +1169,14 @@ export class Editor implements Component, Focusable {
 	/** Lines spanned by the active Visual selection; 0 outside Visual modes. */
 	get vimSelectedLines(): number {
 		const selection = this.#vimSelection();
-		return selection === null ? 0 : selection.to.line - selection.from.line + 1;
+		if (selection === null) return 0;
+		// A charwise selection through a line break ends at column 0 of the next line; that line is
+		// not part of the selection.
+		const lastLine =
+			!selection.linewise && selection.to.col === 0 && selection.to.line > selection.from.line
+				? selection.to.line - 1
+				: selection.to.line;
+		return lastLine - selection.from.line + 1;
 	}
 
 	/**
@@ -1339,6 +1360,7 @@ export class Editor implements Component, Focusable {
 	#setTextInternal(text: string, cursorAnchor: HistoryCursorAnchor = "end"): void {
 		this.#endVimSession();
 		this.#undoStack.length = 0;
+		this.#redoStack.length = 0;
 		const lines = sanitizeLoadedText(text).split("\n");
 		this.#state.lines = lines.length === 0 ? [""] : lines;
 		// A single-row entry's top and bottom are the same row, so the directional
@@ -2617,6 +2639,8 @@ export class Editor implements Component, Focusable {
 		const mapped = canonical === undefined ? undefined : VIM_NAV_KEYS[canonical];
 		if (awaitingTarget && mapped !== undefined) return this.#runVimKey("escape", vim);
 		if (mapped !== undefined) return this.#runVimKey(mapped, vim);
+		// Vim's redo is the one control chord Normal mode keeps; Insert and Visual leave it to the host.
+		if (canonical === "ctrl+r" && vim.mode === "normal" && !awaitingTarget) return this.#runVimKey("ctrl+r", vim);
 
 		// Control chords, Enter, and Tab carry no printable text and stay with the host. A half-typed
 		// command (`r`, `f`, `d`) is cancelled first, like character-jump mode, so it cannot outlive a
@@ -2636,10 +2660,30 @@ export class Editor implements Component, Focusable {
 				continue;
 			}
 			if (this.#runVimKey(seg.segment, vim)) continue;
-			this.#insertCharacter(printable.slice(seg.index));
+			this.#insertVimRun(printable.slice(seg.index));
 			return true;
 		}
 		return true;
+	}
+
+	/**
+	 * Insert the literal tail of a batched run whose earlier keys entered Insert (`ccfoo` arriving as
+	 * one chunk). `handleInput` saw no session when that chunk began, so it cannot fold this edit into
+	 * the session window; without this `.` would replay the change but not the text typed into it.
+	 */
+	#insertVimRun(text: string): void {
+		const session = this.#vimSession;
+		const revision = this.#textRevision;
+		const linesBefore = session?.tracked && !session.replace ? this.#state.lines.slice() : undefined;
+		this.#insertCharacter(text);
+		if (
+			session !== null &&
+			session === this.#vimSession &&
+			linesBefore !== undefined &&
+			this.#textRevision !== revision
+		) {
+			this.#trackVimSessionEdit(session, linesBefore);
+		}
 	}
 
 	#runVimKey(key: string, vim: VimState): boolean {
@@ -2656,8 +2700,11 @@ export class Editor implements Component, Focusable {
 			return false;
 		}
 		const editing = (mode: VimMode) => mode === "insert" || mode === "replace";
+		const leaving = editing(before) && !editing(vim.mode);
+		// `3ifoo<Esc>` types its copies on the way out; they belong to the session's undo step.
+		const sessionMark = leaving ? this.#vimSession?.mark : undefined;
 		// Before applying: Escape's commands would otherwise clear the replace log this reads.
-		if (editing(before) && !editing(vim.mode)) this.#endVimSession();
+		if (leaving) this.#endVimSession();
 		this.#applyVimCommands(commands);
 		if (this.#textRevision !== revisionBefore) {
 			vim.commitChange();
@@ -2668,7 +2715,7 @@ export class Editor implements Component, Focusable {
 		// so one `u` restores the whole change. Every other key (`.` too) is a single undo step.
 		if (!editing(before) && editing(vim.mode)) this.#startVimSession(mark, vim.mode === "replace");
 		else if (this.#vimSession === null) {
-			this.#collapseUndoSince(mark);
+			this.#collapseUndoSince(sessionMark ?? mark);
 			this.#pinnedUndo = null;
 		}
 		// Pending and selection size are mode chrome too: hosts echo `2d` and the Visual line count
@@ -2744,6 +2791,7 @@ export class Editor implements Component, Focusable {
 		const session = this.#vimSession;
 		if (session === null) return;
 		this.#finalizeVimSegment();
+		this.#vim?.cancelInsertRepeat();
 		this.#resetKillSequence();
 		// Replace-mode Backspace cannot restore across a cursor move, and old overwrites must not leak
 		// into the next segment's record.
@@ -2786,39 +2834,62 @@ export class Editor implements Component, Focusable {
 					break;
 				case "yank": {
 					const body = this.#sliceRange(command.from, command.to, command.linewise);
-					// The trailing newline is what marks a register linewise, so `p` puts it back as
-					// whole lines rather than splicing it mid-line.
-					const text = command.linewise ? `${body}\n` : body;
-					if (text) {
-						this.#killRing.push(text, { prepend: false });
-						this.onYank?.(text);
+					if (body || command.linewise) {
+						this.#writeVimRegister(body, command.linewise, true, command.register);
+						if (command.register !== "_") this.onYank?.(command.linewise ? `${body}\n` : body);
 					}
 					break;
 				}
 				case "delete":
-					this.#deleteVimRange(command.from, command.to, command.linewise, command.insert);
+					this.#deleteVimRange(command.from, command.to, command.linewise, command.insert, command.register);
 					break;
 				case "openLine":
 					this.#openVimLine(command.below);
 					break;
 				case "paste":
-					this.#pasteVimRegister(command.after, command.count);
+					this.#pasteVimRegister(command.after, command.count, command.cursorAfter, command.register);
+					break;
+				case "visualPut":
+					this.#putOverVimSelection(
+						command.from,
+						command.to,
+						command.linewise,
+						command.keepRegister,
+						command.register,
+					);
 					break;
 				case "undo":
-					this.#applyUndo();
+					for (let i = 0; i < command.count && this.#undoStack.length > 0; i++) this.#applyUndo();
+					break;
+				case "redo":
+					for (let i = 0; i < command.count && this.#redoStack.length > 0; i++) this.#applyRedo();
 					break;
 				case "replace":
 					this.#replaceVimSpan(command.from, command.to, command.text);
 					break;
 				case "join":
-					this.#joinVimLines(command.fromLine, command.lines);
+					this.#joinVimLines(command.fromLine, command.lines, command.spaces);
 					break;
 				case "indent":
 					this.#indentVimLines(command.fromLine, command.toLine, command.out);
 					break;
+				case "case":
+					this.#caseVimRange(command.from, command.to, command.linewise, command.mode);
+					break;
 				case "retype":
 					this.#retypeVimInsert(command);
 					break;
+				case "insertRepeat": {
+					const text = this.#vim?.lastInsertText ?? "";
+					for (let n = 0; n < command.times && text !== ""; n++) {
+						if (command.newline) this.#openVimLine(true);
+						this.#spliceVimInsert({ deleteBefore: 0, deleteAfter: 0, text });
+					}
+					// Escape's step back off the end of the typed text.
+					const line = this.#state.lines[this.#state.cursorLine] ?? "";
+					this.#setCursorCol(prevGraphemeStart(line, this.#state.cursorCol));
+					break;
+				}
 			}
 		}
 		this.#clampVimCursor();
@@ -2882,7 +2953,8 @@ export class Editor implements Component, Focusable {
 		this.#notifyChange();
 	}
 
-	#joinVimLines(fromLine: number, span: number): void {
+	/** `J` (`spaces`) trims each joined line's indent and puts one seam space; `gJ` concatenates as is. */
+	#joinVimLines(fromLine: number, span: number, spaces: boolean): void {
 		const start = Math.max(0, Math.min(fromLine, this.#state.lines.length - 1));
 		const last = Math.min(start + Math.max(span, 2) - 1, this.#state.lines.length - 1);
 		if (last <= start) return;
@@ -2891,15 +2963,15 @@ export class Editor implements Component, Focusable {
 		let cursor = text.length;
 		for (let i = start + 1; i <= last; i++) {
 			const raw = this.#state.lines[i] ?? "";
-			let trim = /^[ \t]*/.exec(raw)?.[0].length ?? 0;
+			let trim = spaces ? (/^[ \t]*/.exec(raw)?.[0].length ?? 0) : 0;
 			const token = this.#atomicTokenAt(raw, 0);
 			if (token && token.start < trim) trim = token.start;
 			const next = raw.slice(trim);
-			const at = text.length;
-			if (i === start + 1) cursor = at;
+			// Vim leaves the cursor on the last seam it made.
+			cursor = text.length;
 			// Vim join: no extra space after whitespace, before `)`, or for an empty line; two spaces after `.!?`.
 			const gap =
-				text.length === 0 || next.length === 0 || /[ \t]$/.test(text) || next.startsWith(")")
+				!spaces || text.length === 0 || next.length === 0 || /[ \t]$/.test(text) || next.startsWith(")")
 					? ""
 					: /[.!?]$/.test(text)
 						? "  "
@@ -2925,14 +2997,15 @@ export class Editor implements Component, Focusable {
 			const spaces = /^ */.exec(text)?.[0].length ?? 0;
 			return text.slice(Math.min(2, spaces));
 		});
+		// Vim's `>>` starts from the first non-blank, so `u` comes back there rather than mid-line;
+		// the cursor goes there even when `<<` has nothing to remove.
+		this.#state.cursorLine = first;
+		this.#setCursorCol(firstNonBlank(this.#state.lines[first] ?? ""));
 		if (next.every((line, i) => line === (this.#state.lines[first + i] ?? ""))) return;
 		this.#recordUndoState();
 		for (let i = first; i <= last; i++) this.#state.lines[i] = next[i - first] ?? "";
 		this.#state.cursorLine = first;
-		const landed = this.#state.lines[first] ?? "";
-		let col = 0;
-		while (col < landed.length && /\s/.test(landed.charAt(col))) col++;
-		this.#setCursorCol(col);
+		this.#setCursorCol(firstNonBlank(this.#state.lines[first] ?? ""));
 		this.#lastAction = null;
 		this.#afterVimEdit();
 	}
@@ -2968,19 +3041,20 @@ export class Editor implements Component, Focusable {
 	}
 
 	/** `insert` marks a change (`cc`): a linewise range then leaves one empty line to type into. */
-	#deleteVimRange(from: VimPosition, to: VimPosition, linewise: boolean, insert: boolean): void {
+	#deleteVimRange(from: VimPosition, to: VimPosition, linewise: boolean, insert: boolean, register?: string): void {
 		const lines = this.#state.lines;
 		if (linewise) {
 			const last = Math.min(to.line, lines.length - 1);
 			const removed = this.#sliceRange(from, to, true);
 			if (!removed && from.line === last && (insert || lines.length === 1)) return;
 			this.#recordUndoState();
-			this.#killRing.push(`${removed}\n`, { prepend: false });
+			this.#writeVimRegister(removed, true, false, register);
 			if (insert) lines.splice(from.line, last - from.line + 1, "");
 			else lines.splice(from.line, last - from.line + 1);
 			if (lines.length === 0) lines.push("");
 			this.#state.cursorLine = Math.min(from.line, lines.length - 1);
-			this.#setCursorCol(0);
+			// `dd` lands on the next line's first non-blank (Vim's `beginline(BL_WHITE)`); `cc` types at 0.
+			this.#setCursorCol(insert ? 0 : firstNonBlank(lines[this.#state.cursorLine] ?? ""));
 			this.#afterVimEdit();
 			return;
 		}
@@ -2992,13 +3066,67 @@ export class Editor implements Component, Focusable {
 		const removed = this.#sliceRange(start, end, false);
 		if (!removed) return;
 		this.#recordUndoState();
-		this.#killRing.push(removed, { prepend: false });
+		this.#writeVimRegister(removed, false, false, register);
 		const head = (lines[start.line] ?? "").slice(0, start.col);
 		const tail = (lines[Math.min(end.line, lines.length - 1)] ?? "").slice(end.col);
 		lines.splice(start.line, Math.min(end.line, lines.length - 1) - start.line + 1, head + tail);
 		this.#state.cursorLine = start.line;
 		this.#setCursorCol(start.col);
 		this.#afterVimEdit();
+	}
+
+	/**
+	 * Store a yank or delete the way Vim does: `"x` into that register (`"X` appends), `"_` nowhere,
+	 * otherwise yanks into `"0` and deletes into `"1`–`"9` (whole lines or several) or `"-` (within a
+	 * line). The unnamed register always follows, and the kill ring too, so an Insert-mode `Ctrl+Y`
+	 * can yank what Vim deleted.
+	 */
+	#writeVimRegister(text: string, linewise: boolean, yank: boolean, name: string | undefined): void {
+		if (name === "_") return;
+		let entry: VimRegister = { text, linewise };
+		const named = name !== undefined && /^[a-zA-Z]$/.test(name) ? name.toLowerCase() : undefined;
+		if (named !== undefined) {
+			const previous = this.#vimRegisters.get(named);
+			if (name !== named && previous) {
+				// Appending to or with whole lines keeps the result linewise, each part on its own line.
+				entry =
+					previous.linewise || linewise
+						? { text: `${previous.text}\n${text}`, linewise: true }
+						: { text: previous.text + text, linewise: false };
+			}
+			this.#vimRegisters.set(named, entry);
+		} else if (name !== undefined && /^[0-9-]$/.test(name)) {
+			this.#vimRegisters.set(name, entry);
+		} else if (yank) {
+			this.#vimRegisters.set("0", entry);
+		} else if (linewise || text.includes("\n")) {
+			for (let n = 9; n > 1; n--) {
+				const shifted = this.#vimRegisters.get(String(n - 1));
+				if (shifted) this.#vimRegisters.set(String(n), shifted);
+			}
+			this.#vimRegisters.set("1", entry);
+		} else {
+			this.#vimRegisters.set("-", entry);
+		}
+		this.#vimUnnamed = entry;
+		this.#killRing.push(entry.linewise ? `${entry.text}\n` : entry.text, { prepend: false });
+	}
+
+	/**
+	 * What `p` would put from register `name`. The unnamed register is the kill ring's newest entry,
+	 * so text killed in Insert mode is puttable too; Vim's own entry keeps its linewise flag. `"+`
+	 * and `"*` are write-only here (every yank reaches the clipboard); the terminal's paste reads it.
+	 */
+	#readVimRegister(name: string | undefined): VimRegister | null {
+		if (name === undefined || name === '"') {
+			const top = this.#killRing.peek();
+			if (!top) return null;
+			const own = this.#vimUnnamed;
+			if (own && (own.linewise ? `${own.text}\n` : own.text) === top) return own;
+			return top.endsWith("\n") ? { text: top.slice(0, -1), linewise: true } : { text: top, linewise: false };
+		}
+		if (!/^[a-zA-Z0-9-]$/.test(name)) return null;
+		return this.#vimRegisters.get(name.toLowerCase()) ?? null;
 	}
 
 	/** Widen a charwise range so it never cuts through an atomic placeholder token. */
@@ -3081,26 +3209,115 @@ export class Editor implements Component, Focusable {
 		this.#afterVimEdit();
 	}
 
-	#pasteVimRegister(after: boolean, count: number): void {
-		const entry = this.#killRing.peek();
+	/** `p`/`P`, and `gp`/`gP` (`cursorAfter`), which leave the cursor just past the put text. */
+	#pasteVimRegister(after: boolean, count: number, cursorAfter: boolean, register?: string): void {
+		const entry = this.#readVimRegister(register);
 		if (!entry) return;
 		this.#recordUndoState();
-		const linewise = entry.endsWith("\n");
-		if (linewise) {
-			const body = entry.slice(0, -1).split("\n");
+		if (entry.linewise) {
+			const body = entry.text.split("\n");
 			const at = after ? this.#state.cursorLine + 1 : this.#state.cursorLine;
 			const payload: string[] = [];
 			for (let i = 0; i < count; i++) payload.push(...body);
 			this.#state.lines.splice(at, 0, ...payload);
-			this.#state.cursorLine = at;
-			this.#setCursorCol(0);
+			if (cursorAfter) {
+				this.#state.cursorLine = Math.min(at + payload.length, this.#state.lines.length - 1);
+				this.#setCursorCol(0);
+			} else {
+				this.#state.cursorLine = at;
+				// Vim lands linewise puts on the first non-blank of the first new line.
+				this.#setCursorCol(firstNonBlank(this.#state.lines[at] ?? ""));
+			}
 		} else {
 			const line = this.#state.lines[this.#state.cursorLine] ?? "";
 			const at = after ? nextGraphemeStart(line, this.#state.cursorCol) : this.#state.cursorCol;
-			const payload = entry.repeat(count);
-			this.#state.lines[this.#state.cursorLine] = line.slice(0, at) + payload + line.slice(at);
-			this.#setCursorCol(at + payload.length - 1);
+			const payload = entry.text.repeat(count);
+			const pieces = (line.slice(0, at) + payload + line.slice(at)).split("\n");
+			const first = this.#state.cursorLine;
+			this.#state.lines.splice(first, 1, ...pieces);
+			if (cursorAfter) {
+				const tail = payload.slice(payload.lastIndexOf("\n") + 1);
+				this.#state.cursorLine = first + pieces.length - 1;
+				this.#setCursorCol((pieces.length > 1 ? 0 : at) + tail.length);
+			} else {
+				// Vim leaves a one-line put on its last character but a multi-line one at its start.
+				this.#setCursorCol(pieces.length > 1 ? at : at + payload.length - 1);
+			}
 		}
+		this.#afterVimEdit();
+	}
+
+	/**
+	 * Visual `p`/`P`: replace the selection with the register. A linewise register over a charwise
+	 * selection splits the line around it; a charwise one over whole lines becomes a line of its own.
+	 * `p` then leaves the replaced text in the register, as Vim does; `P` keeps the register.
+	 */
+	#putOverVimSelection(
+		from: VimPosition,
+		to: VimPosition,
+		linewise: boolean,
+		keepRegister: boolean,
+		register?: string,
+	): void {
+		const entry = this.#readVimRegister(register);
+		if (!entry) return;
+		const lines = this.#state.lines;
+		const body = entry.text.split("\n");
+		this.#moveVimCursor(from);
+		this.#recordUndoState();
+		let removed: string;
+		if (linewise) {
+			const last = Math.min(to.line, lines.length - 1);
+			removed = this.#sliceRange(from, to, true);
+			lines.splice(from.line, last - from.line + 1, ...body);
+			this.#state.cursorLine = from.line;
+			this.#setCursorCol(firstNonBlank(lines[from.line] ?? ""));
+		} else {
+			const { start, end } = this.#expandVimRange(from, to);
+			removed = this.#sliceRange(start, end, false);
+			const head = (lines[start.line] ?? "").slice(0, start.col);
+			const tail = (lines[Math.min(end.line, lines.length - 1)] ?? "").slice(end.col);
+			const span = Math.min(end.line, lines.length - 1) - start.line + 1;
+			if (entry.linewise) {
+				lines.splice(start.line, span, head, ...body, tail);
+				this.#state.cursorLine = start.line + 1;
+				this.#setCursorCol(firstNonBlank(lines[start.line + 1] ?? ""));
+			} else {
+				const pieces = (head + entry.text + tail).split("\n");
+				lines.splice(start.line, span, ...pieces);
+				this.#state.cursorLine = start.line;
+				this.#setCursorCol(pieces.length > 1 ? start.col : Math.max(start.col, start.col + entry.text.length - 1));
+			}
+		}
+		if (!keepRegister && (removed || linewise)) this.#writeVimRegister(removed, linewise, false, undefined);
+		this.#afterVimEdit();
+	}
+
+	/** `gu`/`gU`/`g~` and `~`: convert the case of a range in place, grapheme by grapheme. */
+	#caseVimRange(from: VimPosition, to: VimPosition, linewise: boolean, mode: VimCaseMode): void {
+		const lines = this.#state.lines;
+		const convert = (text: string): string => {
+			if (mode === "upper") return text.toUpperCase();
+			if (mode === "lower") return text.toLowerCase();
+			let out = "";
+			for (const { segment } of segmenter.segment(text)) {
+				const upper = segment.toUpperCase();
+				out += segment === upper ? segment.toLowerCase() : upper;
+			}
+			return out;
+		};
+		const last = Math.min(to.line, lines.length - 1);
+		const next: string[] = [];
+		for (let line = from.line; line <= last; line++) {
+			const text = lines[line] ?? "";
+			const start = linewise || line > from.line ? 0 : from.col;
+			const end = linewise || line < last ? text.length : Math.min(to.col, text.length);
+			next.push(text.slice(0, start) + convert(text.slice(start, end)) + text.slice(end));
+		}
+		if (next.every((text, i) => text === lines[from.line + i])) return;
+		this.#recordUndoState();
+		lines.splice(from.line, next.length, ...next);
+		this.#lastAction = null;
 		this.#afterVimEdit();
 	}
 
@@ -4058,6 +4275,7 @@ export class Editor implements Component, Focusable {
 		this.#historyIndex = -1;
 		this.#scrollOffset = 0;
 		this.#undoStack.length = 0;
+		this.#redoStack.length = 0;
 
 		if (this.#vim !== null && (this.#vim.mode === "insert" || this.#vim.mode === "replace")) {
 			const mark = this.#undoMark();
@@ -4351,6 +4569,7 @@ export class Editor implements Component, Focusable {
 
 	#recordUndoState(): void {
 		if (this.#suspendUndo) return;
+		this.#redoStack.length = 0;
 		// EditorState holds only primitives plus an array of immutable strings:
 		// a shallow array copy is a complete snapshot. structuredClone pays for
 		// general-case dispatch per element on every edit keystroke.
@@ -4375,7 +4594,32 @@ export class Editor implements Component, Focusable {
 	#applyUndo(): void {
 		const snapshot = this.#undoStack.pop();
 		if (!snapshot) return;
+		// Redo lands where the undone change began, as Vim's does, not where the cursor was after it.
+		this.#redoStack.push({
+			lines: this.#state.lines,
+			cursorLine: snapshot.cursorLine,
+			cursorCol: snapshot.cursorCol,
+		});
+		this.#restoreUndoSnapshot(snapshot);
+	}
 
+	/** Re-apply the change the last undo reverted; any new edit discards the redo history. */
+	#applyRedo(): void {
+		const snapshot = this.#redoStack.pop();
+		if (!snapshot) return;
+		this.#undoStack.push({
+			lines: this.#state.lines,
+			cursorLine: snapshot.cursorLine,
+			cursorCol: snapshot.cursorCol,
+		});
+		if (this.#undoStack.length > MAX_UNDO_STACK) {
+			this.#undoStack.shift();
+			this.#undoShifts++;
+		}
+		this.#restoreUndoSnapshot(snapshot);
+	}
+
+	#restoreUndoSnapshot(snapshot: EditorState): void {
 		this.#historyIndex = -1;
 		this.#resetKillSequence();
 		this.#preferredVisualCol = null;
