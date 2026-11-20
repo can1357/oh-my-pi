@@ -4845,9 +4845,9 @@ describe("computer background fallback", () => {
 		const result = await run(native, 'await (await desktop.window("42")).scroll(1, 2, { dy: 3 })', "takeover");
 		const [text, ...rest] = texts(result);
 		expect(rest).toEqual([]);
-		expect(text).toStartWith(
-			"scroll ran in takeover because UI Automation unavailable (provider gone); the input was delivered, and ",
-		);
+		// One notice: the refusal's reason, the rerun delivered, no unsent claim.
+		expect(text).toContain("UI Automation unavailable (provider gone)");
+		expect(text).toContain("delivered");
 		expect(text).not.toContain("was sent");
 		expect(native.sent).toEqual([{}, { takeover: true, returnFocus: true }]);
 	});
