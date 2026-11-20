@@ -2348,6 +2348,15 @@ export declare enum Ellipsis {
 }
 
 /**
+ * Add `ENABLE_VIRTUAL_TERMINAL_INPUT` to the stdin console's mode.
+ *
+ * Call after entering raw mode, which clears it. Returns the mode found, for
+ * `restoreConsoleInputMode`; `null` when stdin is not a console or the
+ * console refuses VT input, and always off Windows.
+ */
+export declare function enableConsoleVtInput(): number | null
+
+/**
  * Matching-bracket context for an arbitrary tree-sitter language.
  *
  * For each multi-line named node whose span crosses the visible window, return
@@ -3825,6 +3834,12 @@ export declare function renderMermaidAscii(text: string, options?: MermaidRender
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
 
 /**
+ * Put back a stdin console mode `enableConsoleVtInput` returned. False when
+ * stdin is no longer a console or refuses the mode; always false off Windows.
+ */
+export declare function restoreConsoleInputMode(mode: number): boolean
+
+/**
  * Run the shell engine as a process shell in this process (`omp zsh`,
  * `omp bash`, `omp sh`).
  *
@@ -4616,6 +4631,16 @@ export interface TextPredictorOptions {
   /** Show threshold override; omit for the engine's tuned default. */
   showThreshold?: number
 }
+
+/**
+ * Translate a kitty CSI-u Alt/Ctrl+Alt chord into the text `AltGr` produced
+ * on the active keyboard layout; `null` when the sequence is not an `AltGr`
+ * keystroke there, and always off Windows.
+ *
+ * Only meaningful on native Windows `ConPTY` hosts with the kitty protocol
+ * active: other hosts report the produced text themselves.
+ */
+export declare function translateWindowsAltGrSequence(data: string): string | null
 
 /**
  * Truncate text to a visible width, preserving ANSI codes.
