@@ -475,6 +475,7 @@ describe("per-call model advertisement", () => {
 				state: { tools: [], messages: [], systemPrompt: [] },
 				setSystemPrompt: () => {},
 				setTools: () => {},
+				setStandbyTools: () => {},
 			} as unknown as Agent,
 			sessionManager: SessionManager.inMemory(),
 			settings,
