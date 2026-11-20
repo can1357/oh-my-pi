@@ -18,6 +18,7 @@
 - Windows console VT input and AltGr recovery go through `@oh-my-pi/pi-natives` instead of `bun:ffi`
 - The background jobs sheet reads a job's output from where its command sends it: a command that pipes (`| tail`) or redirects (`> log`) gets a tab per stream beside Output and opens on the one being written, instead of "No output yet" until it ends
 - The background jobs sheet draws a job's command as its live shell visualization with the running step in view, and fits what the job is for, its caption and its facts in fewer lines
+- `CustomEditor.onPasteImagePath` also receives pasted pdf, docx, pptx, xlsx, and epub paths, so hosts can attach documents; a payload with any other path still pastes as plain text ([#9931](https://github.com/can1357/oh-my-pi/issues/9931), [#19172](https://github.com/can1357/oh-my-pi/pull/19172) by [@Skare69](https://github.com/Skare69))
 
 ### Fixed
 
