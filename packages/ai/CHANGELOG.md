@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an optional abort message to `raceWithSignal`, so it reports the same abort reason as the published `raceSignal` alias that already took one ([#15308](https://github.com/can1357/oh-my-pi/pull/15308) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ### Fixed
 
 - GPT-6.2 system prompts are now sent as leading `developer` input messages on third-party Responses proxies too, so they hit the prompt cache instead of billing at the full input rate every turn ([openai/codex#62312](https://github.com/openai/codex/issues/62312))
