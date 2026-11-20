@@ -1,7 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as natives from "@oh-my-pi/pi-natives";
 import { type UserBubbleOptions, UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
-import { convertImageToPngShared } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import {
@@ -115,46 +114,6 @@ describe("user message image previews", () => {
 		expect(renderWithBudget(synthetic, budget)).toEqual(baselineLines("Session update", { synthetic: true }));
 	});
 
-	it("feeds Kitty a converted PNG for a non-PNG paste and repaints when it lands", async () => {
-		terminal.imageProtocol = ImageProtocol.Kitty;
-		setCellDimensions({ widthPx: 10, heightPx: 10 });
-		setKittyGraphics({ unicodePlaceholders: false });
-		let repaints = 0;
-		// Non-PNG bytes are what the Kitty branch keys on (mime is metadata; the
-		// decoder sniffs content), so PNG bytes labeled jpeg exercise the same
-		// decode → re-encode → cache → re-mount path as a real paste.
-		const jpegImage = { type: "image", data: PNG, mimeType: "image/jpeg" } as const;
-		const budget = new ImageBudget(8, () => {
-			repaints++;
-		});
-		const component = new UserMessageComponent("see photo", {
-			images: [jpegImage],
-			imageBudget: budget,
-			onImageUpdate: () => repaints++,
-			showImages: true,
-		});
-
-		// No cached conversion yet: no preview rows, no repaint request.
-		const before = renderWithBudget(component, budget);
-		expect(before).toEqual(baselineLines("see photo"));
-		expect(repaints).toBe(0);
-
-		// Await the same shared conversion the component queued; its handler (a
-		// continuation registered first) has run by the time this resolves.
-		await convertImageToPngShared(jpegImage);
-		expect(repaints).toBeGreaterThan(0);
-
-		const shown = renderWithBudget(component, budget);
-		expect(shown.length).toBeGreaterThan(before.length);
-		const last = shown.at(-1) ?? "";
-		expect(last).toContain("\x1b_Ga=p");
-		// The placement line is a direct placement: it carries no image payload at all.
-		expect(last).not.toContain(PNG);
-		const transmits = [...budget.takeTransmits()];
-		expect(transmits).toHaveLength(1);
-		expect(transmits[0]).toContain("\x1b_Ga=t");
-	});
-
 	it("renders no previews when terminal.showImages is off or the native renderer owns the bubble", () => {
 		terminal.imageProtocol = ImageProtocol.Kitty;
 		const budget = new ImageBudget(8, () => {});
@@ -183,30 +142,5 @@ describe("user message image previews", () => {
 		const textOnly = baselineLines("see shot");
 		expect(parseKittyDirectPlacementLine(shown.at(-1) ?? "")).not.toBeNull();
 		expect(shown.filter(line => line.includes(OSC133_ZONE_CLOSE))).toEqual([textOnly.at(-1) ?? ""]);
-	});
-
-	it("mounts one spacer when two Kitty conversions land at different times", async () => {
-		terminal.imageProtocol = ImageProtocol.Kitty;
-		setCellDimensions({ widthPx: 10, heightPx: 10 });
-		setKittyGraphics({ unicodePlaceholders: false });
-		const png = { type: "image", data: PNG, mimeType: "image/png" } as const;
-		const late = { type: "image", data: PNG, mimeType: "image/webp" } as const;
-		const budget = new ImageBudget(8, () => {});
-		const component = new UserMessageComponent("two shots", {
-			images: [png, late],
-			imageBudget: budget,
-			showImages: true,
-		});
-		await convertImageToPngShared(late);
-		const shown = renderWithBudget(component, budget);
-
-		// The same two images, both ready at construction: the layout a remount must reproduce.
-		const readyBudget = new ImageBudget(8, () => {});
-		const ready = new UserMessageComponent("two shots", {
-			images: [png, png],
-			imageBudget: readyBudget,
-			showImages: true,
-		});
-		expect(shown.length).toBe(renderWithBudget(ready, readyBudget).length);
 	});
 });

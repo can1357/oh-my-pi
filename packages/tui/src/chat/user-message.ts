@@ -5,9 +5,9 @@ import { Disclosure } from "../components/disclosure";
 import { Image, type ImageBudget } from "../components/image";
 import { Markdown } from "../components/markdown";
 import { Spacer } from "../components/spacer";
-import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
+import { TERMINAL } from "../terminal-capabilities";
 import { resolveImageOptions } from "../render/render-utils";
-import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
+import { imagePayloadKey } from "../png-conversion";
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
@@ -91,7 +91,7 @@ export interface UserBubbleOptions {
 	timestamp?: number;
 	/** Shared budget that caps how many attached images render as live graphics. */
 	imageBudget?: ImageBudget;
-	/** Schedules a repaint when an off-thread image step (Kitty PNG conversion) lands. */
+	/** Schedules a repaint when an off-thread image step (Kitty PNG conversion, SIXEL encode) lands. */
 	onImageUpdate?: () => void;
 	/** Render live previews of the attached images (the `terminal.showImages` setting). Off when omitted. */
 	showImages?: boolean;
@@ -172,8 +172,6 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 	readonly #markdown: Markdown;
 	/** Live image-preview children (spacer included) appended after the markdown, ANSI mode only. */
 	#previewChildren: Component[] = [];
-	/** Payload keys of in-flight Kitty PNG conversions, so one conversion runs per image. */
-	#kittyPending = new Set<string>();
 	/** Display text: image markers collapsed to chips and model mentions to their labels. */
 	readonly #text: string;
 	/** Matches the composer tokens in {@link #text} (chips, skills, this message's mentions). */
@@ -224,9 +222,9 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 
 	/**
 	 * Append a live preview per attached image after the markdown, the same way assistant tool
-	 * images render: graphics protocol resolved once here, Kitty's PNG-only transmit fed by the
-	 * shared conversion cache, sizing from {@link resolveImageOptions}, links following the same
-	 * policy as the chip hyperlinks. Videos and synthetic messages keep their chips only.
+	 * images render: sizing from {@link resolveImageOptions}, links following the same policy as
+	 * the chip hyperlinks; `Image` feeds Kitty a converted PNG itself. Videos and synthetic
+	 * messages keep their chips only.
 	 */
 	#mountImagePreviews(): void {
 		if (!this.#showImages || !TERMINAL.imageProtocol || this.#synthetic || isNativeRendering()) return;
@@ -234,17 +232,6 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 		let spacer = false;
 		this.#images.forEach((image, index) => {
 			if (!image.mimeType.startsWith("image/")) return;
-			let data = image.data;
-			let mimeType = image.mimeType;
-			if (TERMINAL.imageProtocol === ImageProtocol.Kitty && image.mimeType !== "image/png") {
-				const converted = cachedPngConversion(image);
-				if (!converted) {
-					this.#queueKittyConversion(image);
-					return;
-				}
-				data = converted.data;
-				mimeType = converted.mimeType;
-			}
 			if (!spacer) {
 				const gap = new Spacer(1);
 				this.#previewChildren.push(gap);
@@ -252,8 +239,8 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 				spacer = true;
 			}
 			const preview = new Image(
-				data,
-				mimeType,
+				image.data,
+				image.mimeType,
 				{ fallbackColor: (value: string) => theme.fg("accent", value) },
 				{
 					...resolveImageOptions(),
@@ -271,23 +258,6 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 	#unmountImagePreviews(): void {
 		for (const child of this.#previewChildren) this.removeChild(child);
 		this.#previewChildren = [];
-	}
-
-	/** Kitty transmits PNG data only; convert other formats off-thread and re-mount when it lands. */
-	#queueKittyConversion(image: ImageContent): void {
-		const key = imagePayloadKey(image);
-		if (this.#kittyPending.has(key)) return;
-		this.#kittyPending.add(key);
-		void convertImageToPngShared(image)
-			.then(() => {
-				this.#kittyPending.delete(key);
-				this.#mountImagePreviews();
-				this.#onImageUpdate?.();
-			})
-			.catch(() => {
-				// Conversion failed: the chip text stays the whole preview.
-				this.#kittyPending.delete(key);
-			});
 	}
 
 	override releaseRenderCaches(): void {
