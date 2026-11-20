@@ -447,9 +447,8 @@ describe("todo backend", () => {
 
 		session.commitTodoPhases(list("a"));
 		await settled(session);
-		// Asked in load order: the first extension is the one that holds the id.
-		let asked = 0;
-		session.extensionRunner?.setSuspendedExtensions(() => asked++ === 0);
+		const holder = session.extensionRunner?.getTodoBackends().get("tracker")?.extension;
+		session.extensionRunner?.setSuspendedExtensions(extension => extension === holder);
 		session.commitTodoPhases(list("a"));
 		await settled(session);
 		session.extensionRunner?.setSuspendedExtensions(() => true);
