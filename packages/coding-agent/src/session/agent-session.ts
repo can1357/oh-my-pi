@@ -12120,7 +12120,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Hand the list to the selected todo backend. Native todos never reach the runner. */
 	#mirrorTodoPhases(): void {
 		const backend = this.#todoBackend();
-		if (backend) this.#extensionRunner?.syncTodoBackend(backend, this.#todo.phases);
+		if (backend !== undefined) this.#extensionRunner?.syncTodoBackend(backend, this.#todo.phases);
 	}
 
 	/** See `ToolSession.applyTodoBackend`. */

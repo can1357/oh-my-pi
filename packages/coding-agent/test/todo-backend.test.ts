@@ -112,7 +112,7 @@ describe("todo backend", () => {
 			agentDir: dir.path(),
 			authStorage,
 			modelRegistry: new ModelRegistry(authStorage, path.join(dir.path(), "models.yml")),
-			settings: Settings.isolated(backend ? { "todo.backend": backend } : {}),
+			settings: Settings.isolated(backend === undefined ? {} : { "todo.backend": backend }),
 			sessionManager: SessionManager.inMemory(),
 			extensions,
 			disableExtensionDiscovery: true,
@@ -274,15 +274,17 @@ describe("todo backend", () => {
 		expect(tasksOf(backend)).toEqual([["a"], ["b"]]);
 	});
 
-	it("an id no extension registers is reported once and todos keep working", async () => {
-		const { session, errors } = await open([tracker().extension], "missing");
+	it("an id no extension registers, an empty one included, is reported once and todos keep working", async () => {
+		for (const id of ["missing", ""]) {
+			const { session, errors } = await open([tracker().extension], id);
 
-		await todo(session, { op: "init", items: ["a"] });
-		session.commitTodoPhases(list("b"));
-		await settled(session);
+			await todo(session, { op: "init", items: ["a"] });
+			session.commitTodoPhases(list("b"));
+			await settled(session);
 
-		expect(session.getTodoPhases()).toEqual(list("b"));
-		expect(errors).toEqual([expect.stringContaining('"missing"')]);
+			expect(session.getTodoPhases()).toEqual(list("b"));
+			expect(errors).toEqual([expect.stringContaining(`"${id}"`)]);
+		}
 	});
 
 	it("a list set before session_start waits for it; an empty one is not sent", async () => {
@@ -438,11 +440,16 @@ describe("todo backend", () => {
 		expect(order).toEqual(["shutdown"]);
 	});
 
-	it("an id two extensions registered goes to the first, and is still reported as unregistered once neither is enabled", async () => {
+	it("an id two extensions registered goes to the first; with that one disabled the next takes it over and gets the list, and with neither it is reported as unregistered", async () => {
 		const first = tracker();
 		const second = tracker();
 		const { session, errors } = await open([first.extension, second.extension], "tracker");
 
+		session.commitTodoPhases(list("a"));
+		await settled(session);
+		// Asked in load order: the first extension is the one that holds the id.
+		let asked = 0;
+		session.extensionRunner?.setSuspendedExtensions(() => asked++ === 0);
 		session.commitTodoPhases(list("a"));
 		await settled(session);
 		session.extensionRunner?.setSuspendedExtensions(() => true);
@@ -450,7 +457,7 @@ describe("todo backend", () => {
 		await settled(session);
 
 		expect(tasksOf(first)).toEqual([["a"]]);
-		expect(second.calls).toEqual([]);
+		expect(tasksOf(second)).toEqual([["a"]]);
 		expect(errors).toEqual([expect.stringContaining('"tracker"')]);
 	});
 
