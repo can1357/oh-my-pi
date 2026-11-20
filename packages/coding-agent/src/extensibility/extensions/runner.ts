@@ -686,6 +686,8 @@ export class ExtensionRunner {
 	#todoClosed = false;
 	/** Set when a backend accepted a change omp did not commit: the next list goes out even if it equals {@link #todoSent}. */
 	#todoStale = false;
+	/** The list a late acceptance put in {@link #todoPending}, which a later acceptance in time makes out of date. */
+	#todoCorrection: TodoBackendList | undefined;
 	/** `todo.backend` ids already reported as unregistered. */
 	#reportedTodoBackends = new Set<string>();
 	/** Todo backend ids already warned about as registered by several extensions. */
@@ -1823,7 +1825,8 @@ export class ExtensionRunner {
 			const resync = () => {
 				if (this.#todoClosed || this.sessionManager.getSessionId() !== sessionId || selected() !== backend) return;
 				this.#todoStale = true;
-				this.#todoPending ??= { backend, sessionId, phases: current() };
+				if (!this.#todoPending)
+					this.#todoPending = this.#todoCorrection = { backend, sessionId, phases: current() };
 				this.#queueTodoBackendCall();
 			};
 			let waiting = true;
@@ -1857,6 +1860,10 @@ export class ExtensionRunner {
 			if (verdict === true) {
 				// Accepted for a session omp has left: its record of what the backend holds stays unknown.
 				if (this.sessionManager.getSessionId() !== sessionId) return TODO_LIST_CHANGED_ERROR;
+				// A correction queued while this call was with the backend would go out before the tool
+				// commits `next`, and take the change back from the backend that just accepted it. The
+				// list that commit sends is the correction.
+				if (this.#todoPending === this.#todoCorrection) this.#todoPending = undefined;
 				this.#todoSent = { list: { backend, sessionId, phases: change.next }, definition };
 				return undefined;
 			}

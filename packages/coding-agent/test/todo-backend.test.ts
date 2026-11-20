@@ -659,7 +659,7 @@ describe("todo backend", () => {
 			expect(tasksOf(backend)).toEqual([["a"], ["a", "c"], ["a", "c"]]);
 		});
 
-		it("a late acceptance while another call is with the backend is still followed by the committed list", async () => {
+		it("a late acceptance while another call is with the backend is followed by the committed list only", async () => {
 			const backend = tracker("tracker", true);
 			const { session } = await open([backend.extension], "tracker");
 			session.commitTodoPhases(list("a"));
@@ -674,7 +674,8 @@ describe("todo backend", () => {
 			backend.applyHold = gate.promise;
 
 			const deciding = backend.entered();
-			const retry = todo(session, { op: "append", phase: "Work", items: ["c"] });
+			// With a signal, as the agent loop calls the tool, the commit comes a step after the backend's answer.
+			const retry = todo(session, { op: "append", phase: "Work", items: ["c"] }, new AbortController().signal);
 			await deciding;
 			late.resolve();
 			// The backend's late answer is handled in a continuation of its own promise.
@@ -685,8 +686,9 @@ describe("todo backend", () => {
 
 			expect(timedOut.isError).toBe(true);
 			expect(accepted.isError).not.toBe(true);
-			// The backend took both changes; omp committed only the second, and says so.
-			expect(tasksOf(backend).at(-1)).toEqual(["a", "c"]);
+			// The backend took both changes; omp committed only the second and says so once: it is never
+			// sent the list without the task it just accepted.
+			expect(tasksOf(backend)).toEqual([["a"], ["a", "c"]]);
 		});
 
 		it("a backend that accepts after the session changed, or after it was deselected, is sent nothing for it", async () => {
