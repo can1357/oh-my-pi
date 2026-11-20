@@ -222,6 +222,9 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 		return;
 	}
 	send({ t: "ready", pid: child.pid });
+	// First on stdin, so the child answers every extension command under v2's limits: a command queued behind the
+	// negotiation would get v1's 1 MiB ceiling and fail (an early `get_available_models` does).
+	child.write(`${JSON.stringify({ id: NEGOTIATE_ID, type: "negotiate_protocol", protocolVersion: 2 })}\n`);
 
 	let stderrTail = "";
 	const stderrDone = (async () => {
@@ -254,13 +257,6 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 			} else if (negotiating && line.includes(`"id":"${NEGOTIATE_ID}"`)) {
 				negotiating = false;
 				return;
-			} else if (negotiating && line.startsWith('{"type":"ready"')) {
-				const ready: unknown = JSON.parse(line);
-				const versions: unknown =
-					typeof ready === "object" && ready !== null ? Reflect.get(ready, "supportedProtocolVersions") : undefined;
-				if (Array.isArray(versions) && versions.includes(2))
-					child.write(`${JSON.stringify({ id: NEGOTIATE_ID, type: "negotiate_protocol", protocolVersion: 2 })}\n`);
-				else negotiating = false;
 			}
 			const id = ++chunkSeq;
 			for (const frame of rpcLineFrames(logical, id)) send(frame);

@@ -14,13 +14,15 @@ import {
 import type { FromNativeHost, ToNativeHost } from "../../../browser-relay/extension/messages";
 
 /**
- * Stand-in for `omp --mode rpc`: announces protocol v2, answers negotiation, echoes `echo` commands, emits one
- * oversized line (`big`) and one rpc_chunk-split frame (`chunked`), and exits 3 with a stderr note on `quit`.
+ * Stand-in for `omp --mode rpc`: announces protocol v2, answers negotiation, echoes `echo` commands with the protocol
+ * they were answered under, emits one oversized line (`big`) and one rpc_chunk-split frame (`chunked`), and exits 3
+ * with a stderr note on `quit`.
  */
 const FAKE_RPC = String.raw`
 const out = line => Bun.write(Bun.stdout, line + "\n");
 await out(JSON.stringify({ type: "ready", protocolVersion: 1, supportedProtocolVersions: [1, 2] }));
 let buffer = "";
+let protocol = 1;
 for await (const bytes of Bun.stdin.stream()) {
 	buffer += new TextDecoder().decode(bytes);
 	let newline;
@@ -28,9 +30,10 @@ for await (const bytes of Bun.stdin.stream()) {
 		const command = JSON.parse(buffer.slice(0, newline));
 		buffer = buffer.slice(newline + 1);
 		if (command.type === "negotiate_protocol") {
+			protocol = 2;
 			await out(JSON.stringify({ id: command.id, type: "response", command: "negotiate_protocol", success: true, data: { protocolVersion: 2 } }));
 		} else if (command.type === "echo") {
-			await out(JSON.stringify({ type: "response", command: "echo", success: true, data: { cwd: process.cwd(), relay: process.env.PI_BROWSER_RELAY } }));
+			await out(JSON.stringify({ type: "response", command: "echo", success: true, data: { cwd: process.cwd(), relay: process.env.PI_BROWSER_RELAY, protocol } }));
 		} else if (command.type === "big") {
 			await out(JSON.stringify({ type: "message_update", text: "é".repeat(600_000) }));
 		} else if (command.type === "chunked") {
@@ -163,13 +166,14 @@ describe("native host", () => {
 		expect(exit).toEqual({ t: "exit", code: 3, stderr: "fake rpc: bye\n" });
 		const lines = rpcLines(host.received).map(line => JSON.parse(line));
 		// The child's ready line passes through; the host's own negotiation response does not.
-		expect(lines.map(line => line.type === "response" ? line.command : line.type)).toEqual([
+		expect(lines.map(line => (line.type === "response" ? line.command : line.type))).toEqual([
 			"ready",
 			"echo",
 			"message_update",
 			"get_entries",
 		]);
-		expect(lines[1].data).toEqual({ cwd, relay: "1" });
+		// Sent without waiting for the child's ready line, yet answered under v2: the host negotiates first.
+		expect(lines[1].data).toEqual({ cwd, relay: "1", protocol: 2 });
 		expect(lines[2].text).toBe("é".repeat(600_000));
 		expect(lines[3].data).toBe("x".repeat(1_200_000));
 		const chunkIds = new Set(host.received.flatMap(message => (message.t === "chunk" ? [message.id] : [])));
