@@ -17,7 +17,14 @@ interface Edit {
 }
 
 /** Content committed when only `scope`'s preselected ops are applied, plus the per-op verdicts. */
-function commitFor(head: string | null, edits: Edit[], work: string | null, scope: string[], tailHint?: string) {
+function commitFor(
+	head: string | null,
+	edits: Edit[],
+	work: string | null,
+	scope: string[],
+	tailHint?: string,
+	headMoved = false,
+) {
 	const recorded: RecordedEdit[] = edits.map(edit => ({
 		actor: edit.actor,
 		before: toLines(edit.before),
@@ -26,7 +33,12 @@ function commitFor(head: string | null, edits: Edit[], work: string | null, scop
 	}));
 	const headLines = toLines(head);
 	const workLines = toLines(work);
-	const attribution = attribute(headLines, historySteps(headLines, recorded, workLines, tailHint), workLines);
+	const attribution = attribute(
+		headLines,
+		historySteps(headLines, recorded, workLines, tailHint),
+		workLines,
+		headMoved,
+	);
 	const { status, reasons } = classify(attribution, new Set(scope));
 	const selected = new Set(attribution.ops.filter(op => status[op.id] === "own").map(op => op.id));
 	const verdicts = attribution.ops.map(op => `${status[op.id]} ${op.kind}${op.text}`);
@@ -269,7 +281,7 @@ describe("selective commit attribution", () => {
 			const headCounts = tally(lines(head));
 			const workCounts = tally(before);
 
-			const committed = tally(commitFor(lines(head), edits, before, ["Main"]).content);
+			const committed = tally(commitFor(lines(head), edits, before, ["Main"], undefined, true).content);
 
 			for (const [line, count] of committed) {
 				expect(count).toBeLessThanOrEqual(Math.max(headCounts.get(line) ?? 0, workCounts.get(line) ?? 0));
@@ -295,10 +307,33 @@ describe("selective commit attribution", () => {
 			before = lines(after);
 		}
 
-		const { verdicts } = commitFor(lines("x B x D A q q q q"), edits, before, ["Main"]);
+		const { verdicts } = commitFor(lines("x B x D A q q q q"), edits, before, ["Main"], undefined, true);
 
 		expect(verdicts.at(-1)).toBe("own +C");
 		expect(verdicts.slice(0, -1).every(verdict => verdict.startsWith("review"))).toBe(true);
+	});
+
+	it("keeps the agent's lines selectable in a file that was only dirty before recording began", () => {
+		// The user dropped `}` and added `u` before any record; Main then added a `}` of its own.
+		const head = "\nc\n}";
+		const before = "\nc\nu";
+		const work = "\n}\nc\nu";
+		const edits = [{ actor: "Main", before, after: work }];
+
+		const { verdicts, content } = commitFor(head, edits, work, ["Main"]);
+
+		expect(verdicts).toEqual(["own +}", "other -}", "other +u"]);
+		expect(content).toBe("\n}\nc\n}");
+	});
+
+	it("never preselects a line already committed when its twin shares one hunk", () => {
+		// Main wrote `B`; a commit took it after recording began; Other then rewrote the rest.
+		const edits = [
+			{ actor: "Main", before: "A", after: "A\nB" },
+			{ actor: "Other", before: "A\nB", after: "B\nx" },
+		];
+
+		expect(commitFor("B", edits, "B\nx", ["Main"], undefined, true).content).toBe("B");
 	});
 
 	describe("subagents", () => {

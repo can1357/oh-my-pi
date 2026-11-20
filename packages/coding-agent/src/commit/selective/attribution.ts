@@ -270,10 +270,17 @@ function headStart(right: Item | undefined, headLength: number): number | undefi
 
 /**
  * Replay `steps` over `head` and derive the HEAD → `work` change ops with their actors.
+ * `headMoved`: a commit changed the file after its first recorded edit, so the {@link PRE} step
+ * may undo committed lines rather than replay uncommitted ones.
  * @throws when the chain is not contiguous (a step's `before` differs from the running content)
  * or does not end at `work` — both mean the caller assembled the history wrongly.
  */
-export function attribute(head: readonly string[], steps: readonly Step[], work: readonly string[]): Attribution {
+export function attribute(
+	head: readonly string[],
+	steps: readonly Step[],
+	work: readonly string[],
+	headMoved = false,
+): Attribution {
 	let items: Item[] = head.map((text, index) => ({ text, alive: true, head: index, by: HEAD, over: [], step: -1 }));
 	steps.forEach((step, stepIndex) => {
 		const aliveAt: number[] = [];
@@ -371,35 +378,11 @@ export function attribute(head: readonly string[], steps: readonly Step[], work:
 	const replay = deriveOps(items);
 	// After HEAD advances independently, crossing equal lines can strand a deletion and its
 	// reinsertion in different hunks. Selecting just one would commit a change neither side made.
-	// A replay that keeps each deletion and its equal reinsertion in one hunk is left alone: placing
-	// an insertion inside an unselected replacement repeats text by design, and review covers it.
-	if (
-		steps[0]?.actor !== PRE ||
-		replay.ops.length === Math.abs(work.length - head.length) ||
-		!strandsTwin(replay.hunks)
-	) {
+	// A file that was only dirty before recording began has no committed lines to strand.
+	if (!headMoved || steps[0]?.actor !== PRE || replay.ops.length === Math.abs(work.length - head.length)) {
 		return replay;
 	}
 	return reconcileNetHunks(head, work, replay, changedRegions(head, work));
-}
-
-/** Whether some line is deleted in one hunk and added back in another. */
-function strandsTwin(hunks: readonly Hunk[]): boolean {
-	const removed = new Map<string, Set<number>>();
-	const added = new Map<string, Set<number>>();
-	hunks.forEach((hunk, index) => {
-		for (const op of hunk.ops) {
-			const byText = op.kind === "-" ? removed : added;
-			let at = byText.get(op.text);
-			if (!at) byText.set(op.text, (at = new Set()));
-			at.add(index);
-		}
-	});
-	for (const [text, from] of removed) {
-		const to = added.get(text);
-		if (to && [...from].some(a => [...to].some(b => a !== b))) return true;
-	}
-	return false;
 }
 
 /** Keep a replayed hunk only where it spans exactly a net HEAD → worktree hunk and adds no line
