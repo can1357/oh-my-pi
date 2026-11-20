@@ -1026,6 +1026,11 @@ export interface ShellCommand {
 	/** Whether an earlier stage of its pipeline, or an input redirection (`<`, `<>`, `<&`), gives it input. */
 	fedInput: boolean;
 	/**
+	 * Whether its standard input is the pipe from the stage before it: an earlier stage of its
+	 * pipeline feeds it and no redirection of descriptor 0 replaces the pipe (`< /dev/null`, `0<&3`).
+	 */
+	pipedInput: boolean;
+	/**
 	 * Directory the program runs in: where the shell is after the `cd`, `pushd` and `popd` before the
 	 * command. `undefined` when the guard cannot tell (`cd "$dir"`), or when a wrapper's directory
 	 * option (`env -C`, `sudo -D`) moves the program, so relative paths are not resolved.
@@ -1325,6 +1330,8 @@ interface LexedToken {
 	literalTilde?: true;
 	/** Set on a word with a `{`, none of them unquoted (`'{"a":1}'`, `\{a,b}`), so the shell brace-expands nothing in it. */
 	literalBraces?: true;
+	/** Set on a redirection operator written after a descriptor number (`2>`, `0<&3`): that number. */
+	fd?: number;
 }
 
 /**
@@ -1419,12 +1426,16 @@ function lexCommandLine(text: string): { tokens: LexedToken[]; cut: boolean } {
 			continue;
 		}
 		// The file descriptor of `2>`.
+		let fd: number | undefined;
 		if ((operator[0] === "<" || operator[0] === ">") && started && !quoted && /^\d+$/.test(word)) {
+			fd = Number(word);
 			word = "";
 			started = false;
 		}
 		flush();
-		out.push({ text: operator, operator: true, quoted: false });
+		const token: LexedToken = { text: operator, operator: true, quoted: false };
+		if (fd !== undefined) token.fd = fd;
+		out.push(token);
 		i += operator.length;
 	}
 	flush();
@@ -1620,6 +1631,19 @@ interface UnwrappedCommand {
 }
 
 /**
+ * Whether `command`'s options from `words[start]` on ask it to describe its operand instead of
+ * running it: a `-v` or `-V` anywhere among them (`command -p -v cat`, `command -pV cat`).
+ */
+function looksUpCommand(words: readonly string[], start: number): boolean {
+	for (let i = start; i < words.length; i++) {
+		const arg = words[i];
+		if (arg === "--" || !arg.startsWith("-") || arg.length === 1) return false;
+		if (arg.includes("v") || arg.includes("V")) return true;
+	}
+	return false;
+}
+
+/**
  * The command a wrapper chain runs in `words` (`sudo env X=1 timeout 5 rm ...` runs `rm ...`), after
  * the shell's own assignments (an identifier name only: bash runs `A-B=1 cmd` as a command named
  * `A-B=1`) and a `!`, whether a wrapper's directory option ({@link SHELL_WRAPPER_CHDIRS}) moves it
@@ -1642,7 +1666,7 @@ function unwrapShellCommand(words: readonly string[]): UnwrappedCommand | undefi
 	while (i < words.length) {
 		const name = path.posix.basename(words[i]);
 		const valued = Object.hasOwn(SHELL_WRAPPERS, name) ? SHELL_WRAPPERS[name] : undefined;
-		if (!valued || (name === "command" && (words[i + 1] === "-v" || words[i + 1] === "-V"))) break;
+		if (!valued || (name === "command" && looksUpCommand(words, i + 1))) break;
 		const chdir = Object.hasOwn(SHELL_WRAPPER_CHDIRS, name) ? SHELL_WRAPPER_CHDIRS[name] : undefined;
 		const assigns = name === "env" || name === "sudo";
 		wrapper = name;
@@ -1789,6 +1813,8 @@ class Segment {
 	reads: string[] = [];
 	/** Whether an input redirection gives it input. */
 	input = false;
+	/** Whether a redirection of descriptor 0 replaces the input a pipe would give it. */
+	stdinReplaced = false;
 	/** Whether it has a word or a redirection. */
 	used = false;
 	literalTildes = new Set<string>();
@@ -1833,6 +1859,7 @@ function shellCommand(
 		assignments: unwrapped?.assignments ?? [],
 		reads: segment.reads,
 		fedInput: piped || segment.input,
+		pipedInput: piped && !segment.stdinReplaced,
 		cwd: unwrapped?.moved ? undefined : cwd,
 		shellCwd: cwd,
 		spawned: unwrapped?.spawned === true,
@@ -1968,6 +1995,8 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellLin
 		} else if (Object.hasOwn(SHELL_REDIRECTS, op)) {
 			segment.used = true;
 			segment.input ||= Object.hasOwn(SHELL_INPUT_REDIRECTS, op);
+			// An input redirection is of descriptor 0 unless it names another, an output one of 1.
+			segment.stdinReplaced ||= (token.fd ?? (Object.hasOwn(SHELL_INPUT_REDIRECTS, op) ? 0 : 1)) === 0;
 			redirect = op;
 			atCommand = false;
 		} else {
