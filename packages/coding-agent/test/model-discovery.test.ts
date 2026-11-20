@@ -4,7 +4,7 @@ import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { FetchImpl, Model } from "@oh-my-pi/pi-ai";
+import type { Api, FetchImpl, Model } from "@oh-my-pi/pi-ai";
 import { createNativeJudge } from "@oh-my-pi/pi-ai/judgment";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
@@ -3234,6 +3234,81 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(unknown?.reasoning).toBe(true);
 		expect(unknown?.thinking).toMatchObject({ unverified: true, efforts: THINKING_EFFORTS });
 		expect(unknown?.compatConfig).not.toMatchObject({ supportsReasoningEffort: false });
+	});
+
+	// Runs one `/v1/models` payload through `openai-models-list` discovery on an
+	// OpenAI-style `/v1` base URL, as a gateway-fronted provider would.
+	async function discoverGatewayRows(data: Array<Record<string, unknown>>): Promise<Model<Api>[]> {
+		const fetchMock: FetchImpl = async input => {
+			if (String(input) !== "https://gateway.example/v1/models") throw new Error(`Unexpected URL: ${String(input)}`);
+			return Response.json({ object: "list", data });
+		};
+		return discoverOpenAIModelsList(
+			{
+				provider: "gateway",
+				api: "openai-completions",
+				baseUrl: "https://gateway.example/v1",
+				discovery: { type: "openai-models-list" },
+			},
+			{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
+		);
+	}
+
+	test("openai-models-list names a row from metadata.display_name, then display_name, then name", async () => {
+		// codex-lb nests the label under `metadata`, Anthropic/Together/Novita send
+		// `display_name`, OpenRouter/agentgateway `name`. `display_name` outranks
+		// `name` because Synthetic puts a repo path in `name`. A value equal to the
+		// id (Envoy and new-api send `display_name == id`) is not a name.
+		const models = await discoverGatewayRows([
+			{ id: "gw-name-only", name: "  Gateway Name  " },
+			{ id: "gw-display-only", display_name: "Top Display Name" },
+			{ id: "gw-metadata-only", metadata: { display_name: "Metadata Name" } },
+			{
+				id: "gw-all-three",
+				name: "Name Loses",
+				display_name: "Display Loses",
+				metadata: { display_name: "Metadata Wins" },
+			},
+			{ id: "gw-display-and-name", name: "openai/gw-repo-path", display_name: "Display Wins" },
+			{ id: "gw-display-is-id", name: "Name After Display Equals Id", display_name: "gw-display-is-id" },
+			{
+				id: "gw-metadata-is-id",
+				display_name: "Display After Metadata Equals Id",
+				metadata: { display_name: "gw-metadata-is-id" },
+			},
+			{ id: "gw-name-is-id", name: "gw-name-is-id" },
+			{ id: "gw-display-is-id-only", display_name: "gw-display-is-id-only" },
+			{ id: "gw-blank-name", name: "   " },
+			{ id: "gw-non-string-name", name: 7 },
+		]);
+		const nameById = Object.fromEntries(models.map(model => [model.id, model.name]));
+
+		expect(nameById).toEqual({
+			"gw-name-only": "Gateway Name",
+			"gw-display-only": "Top Display Name",
+			"gw-metadata-only": "Metadata Name",
+			"gw-all-three": "Metadata Wins",
+			"gw-display-and-name": "Display Wins",
+			"gw-display-is-id": "Name After Display Equals Id",
+			"gw-metadata-is-id": "Display After Metadata Equals Id",
+			"gw-name-is-id": "gw-name-is-id",
+			"gw-display-is-id-only": "gw-display-is-id-only",
+			"gw-blank-name": "gw-blank-name",
+			"gw-non-string-name": "gw-non-string-name",
+		});
+	});
+
+	test("openai-models-list keeps the bundled reference name for a row that advertises no name of its own", async () => {
+		// Existing providers must not be renamed: no name key, a blank or
+		// non-string one, or a `name` / `display_name` equal to the id all leave
+		// the bundled catalog's name (`gpt-5` is "GPT-5") in place.
+		const models = await discoverGatewayRows([
+			{ id: "gpt-5" },
+			{ id: "gpt-5", name: "gpt-5", display_name: "gpt-5", metadata: { display_name: "gpt-5" } },
+			{ id: "gpt-5", name: "  ", display_name: 7 },
+		]);
+
+		expect(models.map(model => model.name)).toEqual(["GPT-5", "GPT-5", "GPT-5"]);
 	});
 
 	test.each(["openai-models-list", "proxy", "lm-studio"])(
