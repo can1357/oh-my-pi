@@ -207,6 +207,11 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		// Content index recorded at push, so deltas never scan `output.content`.
 		const blockIndices = new Map<TextContent | ThinkingContent | ToolCall, number>();
 		let activeToolCallId: string | undefined;
+		// Devin streams the turn's thought signature as `delta_signature` pieces,
+		// often on frames without `delta_thinking` (Gemini signs replies that have
+		// no visible thinking at all), and names its issuer in `delta_signature_type`.
+		let signature = "";
+		let signatureType = "";
 		let latestStopReason = StopReason.UNSPECIFIED;
 
 		const markFirstToken = () => {
@@ -422,7 +427,6 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 							});
 						}
 						block.thinking += msg.deltaThinking;
-						if (msg.deltaSignature) block.thinkingSignature = msg.deltaSignature;
 						stream.push({
 							type: "thinking_delta",
 							contentIndex: blockIndices.get(block)!,
@@ -430,6 +434,9 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 							partial: output,
 						});
 					}
+
+					if (msg.deltaSignature) signature += msg.deltaSignature;
+					if (msg.deltaSignatureType) signatureType = msg.deltaSignatureType;
 
 					if (msg.deltaText) {
 						markFirstToken();
@@ -517,6 +524,24 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 
 			endTextBlock();
 			endThinkingBlock();
+			if (signature) {
+				const thinkingSignature = JSON.stringify({
+					signature,
+					type: signatureType,
+					modelUid: request.chatModelUid,
+				} satisfies DevinThoughtSignature);
+				const signed = output.content.find(block => block.type === "thinking");
+				if (signed) {
+					signed.thinkingSignature = thinkingSignature;
+				} else {
+					// A signed reply without thinking text keeps its signature on an empty
+					// thinking block, which the next turn replays.
+					const block: ThinkingContent = { type: "thinking", thinking: "", thinkingSignature, summary: false };
+					const contentIndex = output.content.push(block) - 1;
+					stream.push({ type: "thinking_start", contentIndex, partial: output });
+					stream.push({ type: "thinking_end", contentIndex, content: "", partial: output });
+				}
+			}
 			for (const [id, block] of toolBlocks) {
 				block.arguments = parseToolCallArguments(toolPartialJson.get(id));
 				stream.push({
@@ -742,6 +767,39 @@ function buildUserPrompt(msg: UserMessage | DeveloperMessage, messageId: string)
 	return create(ChatMessagePromptSchema, { messageId, source: ChatMessageSource.USER, prompt, images });
 }
 
+/**
+ * A Devin turn's thought signature with the provenance its replay needs:
+ * `ChatMessagePrompt.signature` (12), `signature_type` (18) and
+ * `signature_model_uid` (22), as the Devin CLI sends them. Persisted as JSON in
+ * {@link ThinkingContent.thinkingSignature} by {@link streamDevin}.
+ */
+interface DevinThoughtSignature {
+	/** Concatenated `delta_signature` pieces. */
+	signature: string;
+	/** `delta_signature_type`: the issuer (`gemini`, `anthropic`), empty when unreported. */
+	type: string;
+	/** `chatModelUid` of the request that produced the signature. */
+	modelUid: string;
+}
+
+/** Decode a persisted signature; turns recorded before the envelope hold the bare signature. */
+function decodeThoughtSignature(raw: string): DevinThoughtSignature {
+	if (raw.startsWith("{")) {
+		try {
+			const value: unknown = JSON.parse(raw);
+			if (
+				isRecord(value) &&
+				typeof value.signature === "string" &&
+				typeof value.type === "string" &&
+				typeof value.modelUid === "string"
+			) {
+				return { signature: value.signature, type: value.type, modelUid: value.modelUid };
+			}
+		} catch {}
+	}
+	return { signature: raw, type: "", modelUid: "" };
+}
+
 /** Map omp `Message` history onto Cascade `ChatMessagePrompt`s (USER / SYSTEM / TOOL channels). */
 function buildChatMessagePrompts(
 	messages: Message[],
@@ -759,14 +817,16 @@ function buildChatMessagePrompts(
 				msg.api === model.api && msg.provider === model.provider && msg.model === model.id;
 			let promptText = "";
 			let thinkingText = "";
-			let signature = "";
+			let signed: DevinThoughtSignature | undefined;
 			const toolCalls: ChatToolCall[] = [];
 			for (const part of msg.content) {
 				if (part.type === "text") {
 					promptText += `${part.text}${isDemotedThinking(part) ? "\n" : ""}`;
 				} else if (part.type === "thinking") {
 					thinkingText += part.thinking;
-					if (isNativeDevinMessage && !signature && part.thinkingSignature) signature = part.thinkingSignature;
+					if (isNativeDevinMessage && !signed && part.thinkingSignature) {
+						signed = decodeThoughtSignature(part.thinkingSignature);
+					}
 				} else if (part.type === "toolCall") {
 					toolCalls.push(
 						create(ChatToolCallSchema, {
@@ -777,7 +837,7 @@ function buildChatMessagePrompts(
 					);
 				}
 			}
-			if (!promptText && !thinkingText && !signature && toolCalls.length === 0) continue;
+			if (!promptText && !thinkingText && !signed && toolCalls.length === 0) continue;
 			prompts.push(
 				create(ChatMessagePromptSchema, {
 					// Native assistant ids are bare UUIDs, like every other history row.
@@ -788,8 +848,9 @@ function buildChatMessagePrompts(
 					source: ChatMessageSource.SYSTEM,
 					prompt: promptText,
 					thinking: thinkingText,
-					signature,
-					signatureType: "",
+					signature: signed?.signature ?? "",
+					signatureType: signed?.type ?? "",
+					signatureModelUid: signed?.modelUid ?? "",
 					toolCalls,
 				}),
 			);

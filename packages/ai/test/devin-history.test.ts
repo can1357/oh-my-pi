@@ -4,8 +4,11 @@ import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
 import type { AssistantMessage, Context, Model, StreamOptions } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
+	ChatToolCallSchema,
 	type GetChatMessageRequest,
 	GetChatMessageRequestSchema,
+	type GetChatMessageResponse,
+	GetChatMessageResponseSchema,
 	GetUserJwtResponseSchema,
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
@@ -63,6 +66,21 @@ async function captureRequest(context: Context, onPayload?: StreamOptions["onPay
 	);
 	const message = requestPayload.subarray(5, 5 + length);
 	return fromBinary(GetChatMessageRequestSchema, requestPayload[0] & 0x01 ? gunzipSync(message) : message);
+}
+
+/** Stream one Devin reply made of `frames` and return the finished assistant turn. */
+async function streamReply(context: Context, frames: Partial<GetChatMessageResponse>[]) {
+	const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
+	const body = frames.map(fields => {
+		const payload = toBinary(GetChatMessageResponseSchema, create(GetChatMessageResponseSchema, fields));
+		const frame = new Uint8Array(5 + payload.length);
+		new DataView(frame.buffer).setUint32(1, payload.length, false);
+		frame.set(payload, 5);
+		return frame;
+	});
+	const fetchImpl = (async (input: string | URL | Request) =>
+		new Response(String(input).includes("GetUserJwt") ? authPayload : new Blob(body))) as typeof fetch;
+	return streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl }).result();
 }
 
 describe("streamDevin history handoff", () => {
@@ -198,5 +216,37 @@ describe("streamDevin history handoff", () => {
 
 		expect(seenPrompt).toBe("hi");
 		expect(request.prompt).toBe("replaced");
+	});
+
+	it.each<{ name: string; frames: Partial<GetChatMessageResponse>[]; thinking: string }>([
+		{
+			name: "a tool call signed by signature-only frames",
+			frames: [
+				{ deltaToolCalls: [create(ChatToolCallSchema, { id: "call_1", name: "read", argumentsJson: "{}" })] },
+				{ deltaSignature: "SIG-A" },
+				{ deltaSignature: "SIG-B", deltaSignatureType: "gemini" },
+			],
+			thinking: "",
+		},
+		{
+			name: "thinking whose signature continues past it",
+			frames: [
+				{ deltaThinking: "plan", deltaSignature: "SIG-A" },
+				{ deltaText: "done", deltaSignature: "SIG-B", deltaSignatureType: "gemini" },
+			],
+			thinking: "plan",
+		},
+	])("replays the signature of $name with its type and model", async ({ frames, thinking }) => {
+		const start = { role: "user" as const, content: "start", timestamp: 1 };
+		const reply = await streamReply({ messages: [start] }, frames);
+		const request = await captureRequest({
+			messages: [start, reply, { role: "user", content: "continue", timestamp: 2 }],
+		});
+
+		const replayed = request.chatMessagePrompts[1];
+		expect(replayed?.thinking).toBe(thinking);
+		expect(replayed?.signature).toBe("SIG-ASIG-B");
+		expect(replayed?.signatureType).toBe("gemini");
+		expect(replayed?.signatureModelUid).toBe(request.chatModelUid);
 	});
 });
