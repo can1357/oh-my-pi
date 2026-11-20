@@ -232,7 +232,7 @@ const CALL_TEXT_PREVIEW_WIDTH = 80;
 export function renderStreamingFallback(editMode: EditMode, args: unknown, theme: Theme): string {
 	if (editMode !== "replace" || !args || typeof args !== "object") return "";
 	const record = args as Record<string, unknown>;
-	// `edit.mode: magic_edit` calls carry `# path` sections of described changes, not replacement text.
+	// `edit.mode: magic` calls carry per-file sections of described changes, not replacement text.
 	const described = record.input ?? record._input;
 	if (typeof described === "string") {
 		return replaceTabs(sanitizeText(described))

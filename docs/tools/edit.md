@@ -27,28 +27,29 @@ Supported modes are `hashline`, `apply_patch`, `patch`, `replace`, and `sloppy`.
 
 This page primarily documents hashline. The schema, prompt, examples, renderer, and optional Lark format switch with the mode. Models with `editPromptVariant: "compact"` receive the compact hashline prompt. In `apply_patch` custom-tool mode the wire name is `apply_patch`; dispatch, including `xd://apply_patch`, still reaches the same internal tool. The tool is strict, essential, and uses exclusive concurrency.
 
-## `magic_edit` mode
+## `magic` mode
 
-`edit.mode: magic_edit` (or `PI_EDIT_VARIANT=magic_edit`) keeps the `edit` tool but changes its contract: the payload describes the changes in words, one section per file, and an auxiliary model writes each file's patch. `edit.modelVariants` cannot select it. Source: `packages/coding-agent/src/edit/magic.ts`; model-facing prompt: `packages/coding-agent/src/prompts/tools/magic-edit.md`.
-
-```text
-# src/jobs.ts
-In `drain()`, declare `limit` before `batch`.
-# src/parse.ts
-Rename every `retrunValue` to `returnValue`.
-```
-
-`edit.magic.format` (or `PI_EDIT_MAGIC_FORMAT`) selects the section syntax: `markdown`, the default shown above, or `xml`:
+`edit.mode: magic` (or `PI_EDIT_VARIANT=magic`) keeps the `edit` tool but changes its contract: the payload describes the changes in words, one section per file, and an auxiliary model writes each file's patch. `edit.modelVariants` cannot select it. Source: `packages/coding-agent/src/edit/magic.ts`; model-facing prompt: `packages/coding-agent/src/prompts/tools/magic-edit.md`.
 
 ```text
 <edit file="src/jobs.ts">
 In `drain()`, declare `limit` before `batch`.
 </edit>
+<edit file="src/parse.ts">
+Rename every `retrunValue` to `returnValue`.
+</edit>
 ```
 
-The schema is `{ input: string }`. Providers with custom-tool grammars receive the payload's Lark grammar and send it raw, as in `hashline` mode. In `markdown` a line starting with `# ` always opens the next file; in `xml` text outside the elements is rejected. Sections naming the same path merge.
+`edit.magic.format` (or `PI_EDIT_MAGIC_FORMAT`) selects the section syntax: `xml`, the default shown above, or `markdown`:
 
-1. Each file is read and shown to the apply model with a line-number gutter, together with its changes. The apply model is `edit.magic.model` when set, else the `smol` role. The files' completions run concurrently.
+```text
+# src/jobs.ts
+In `drain()`, declare `limit` before `batch`.
+```
+
+The schema is `{ input: string }`. Providers with custom-tool grammars receive the payload's Lark grammar and send it raw, as in `hashline` mode. In `xml` text outside the elements is rejected; in `markdown` a line starting with `# ` always opens the next file. Sections naming the same path merge.
+
+1. Each file is read and shown to the apply model with a line-number gutter, together with its changes. The apply model is `edit.magic.model` when set, else the `smol` role. The setting takes any model selector, including a role alias: `@slow`, or `@apply` for a custom `modelRoles.apply` entry. The files' completions run concurrently.
 2. It answers with SEARCH/REPLACE blocks (`<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE`); `<<<<<<< SEARCH ALL` replaces every occurrence of a fragment, and a first line `CANNOT: <reason>` declines the change.
 3. A file's blocks apply top to bottom as one `replace`-mode batch, before anything else reaches the native engine. The batch is atomic: one block that does not match leaves that file untouched. Writes go one file at a time; plan-mode policy, LSP diagnostics and the result diff are the same as for any other mode.
 4. A rejected batch, or a reply that is not a set of blocks, goes back to the model with the rejection: three completions per file inside one 120 second budget for the call.

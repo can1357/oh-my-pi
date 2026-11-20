@@ -404,17 +404,17 @@ export class EditTool implements AgentTool<TInput> {
 	get mode(): EditMode {
 		if (this.#editMode) return this.#editMode;
 		const mode = resolveEditMode(this.session);
-		// `magic_edit` applies its model-written batch through `replace` (see `#magic`). `edit.mode: none`
+		// `magic` applies its model-written batch through `replace` (see `#magic`). `edit.mode: none`
 		// unregisters this tool on the next built-in reconcile; until then keep a valid schema.
-		return mode === "none" || mode === "magic_edit" ? "replace" : mode;
+		return mode === "none" || mode === "magic" ? "replace" : mode;
 	}
 
 	/**
-	 * `edit.mode: magic_edit`: calls carry described changes, which {@link runMagicEdit} turns
+	 * `edit.mode: magic`: calls carry described changes, which {@link runMagicEdit} turns
 	 * into one `replace` batch per file before anything reaches the native engine.
 	 */
 	get #magic(): boolean {
-		return this.#editMode === undefined && resolveEditMode(this.session) === "magic_edit";
+		return this.#editMode === undefined && resolveEditMode(this.session) === "magic";
 	}
 
 	get description(): string {

@@ -205,14 +205,14 @@ describe("parseMagicInput", () => {
 	});
 });
 
-describe("edit tool in magic_edit mode", () => {
+describe("edit tool in magic mode", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
 
-	/** A session in `magic_edit` mode whose apply model answers each file's request through `reply`. */
+	/** A session in `magic` mode whose apply model answers each file's request through `reply`. */
 	function magicTool(cwd: string, reply: (request: string) => string, format: "markdown" | "xml" = "markdown") {
-		const settings = Settings.isolated({ "edit.mode": "magic_edit", "edit.magic.format": format });
+		const settings = Settings.isolated({ "edit.mode": "magic", "edit.magic.format": format });
 		settings.setModelRole("smol", "llama.cpp/apply-model");
 		const session = makeSession(cwd, settings, {
 			modelRegistry: {
@@ -246,6 +246,32 @@ describe("edit tool in magic_edit mode", () => {
 		expect(await Bun.file(file).text()).toBe(SOURCE.replace("return sum;", "return sum + 1;"));
 		expect(result.isError).toBeFalsy();
 		expect(result.details?.diff).toContain("return sum + 1;");
+	});
+
+	it("lets edit.magic.model name a role, which then replaces the smol role as the apply model", async () => {
+		using tempDir = TempDir.createSync("@omp-magic-edit-role-");
+		await Bun.write(path.join(tempDir.path(), "sample.ts"), SOURCE);
+		const roleModel = { ...APPLY_MODEL, id: "role-model" };
+		const settings = Settings.isolated({ "edit.mode": "magic", "edit.magic.model": "@apply" });
+		settings.setModelRole("smol", "llama.cpp/apply-model");
+		settings.setModelRole("apply", "llama.cpp/role-model");
+		const session = makeSession(tempDir.path(), settings, {
+			modelRegistry: {
+				getAvailable: () => [APPLY_MODEL, roleModel],
+				getApiKey: async () => "test-key",
+				resolver: () => async () => "test-key",
+			} as unknown as ModelRegistry,
+		});
+		const used: string[] = [];
+		vi.spyOn(ai, "completeSimple").mockImplementation(model => {
+			used.push(model.id);
+			return Promise.resolve(createAssistantMessage(block("\treturn sum;", "\treturn sum + 1;")));
+		});
+
+		await new EditTool(session).execute("call", {
+			input: '<edit file="sample.ts">\nMake total return sum + 1.\n</edit>',
+		});
+		expect(used).toEqual(["role-model"]);
 	});
 
 	it("reads the payload as xml when edit.magic.format says so", async () => {

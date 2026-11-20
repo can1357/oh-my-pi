@@ -1,5 +1,5 @@
 /**
- * `magic_edit` edit mode: edit a file from a described change.
+ * `magic` edit mode: edit a file from a described change.
  *
  * The calling agent states the changes in words, one section per file, in the
  * syntax `edit.magic.format` selects:
@@ -333,7 +333,7 @@ async function resolveApplier(session: ToolSession, signal?: AbortSignal): Promi
 		throw new ToolError(
 			selector
 				? `\`edit.magic.model\` (${selector}) matches no available model.`
-				: "`edit.mode: magic_edit` needs a model to apply the change: configure the `smol` role or `edit.magic.model`.",
+				: "`edit.mode: magic` needs a model to apply the change: configure the `smol` role or `edit.magic.model`.",
 		);
 	}
 	const name = `${model.provider}/${model.id}`;
@@ -429,7 +429,7 @@ async function applySection(options: {
 }
 
 /**
- * Carry out one `edit` call made in `magic_edit` mode. Every per-file section
+ * Carry out one `edit` call made in `magic` mode. Every per-file section
  * of `input` is applied on its own through `apply`, the edit tool's atomic
  * `replace` batch for one file: a section that fails leaves its file
  * untouched and does not stop the others.
