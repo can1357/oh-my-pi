@@ -397,7 +397,7 @@ describe("AgentLifecycleManager", () => {
 		lifecycle.adopt(id, { idleTtlMs: 0 }, replacement);
 		ready.resolve();
 
-		await expect(stale).rejects.toThrow(/changed/);
+		await expect(stale).rejects.toThrow(/changed while its persisted session was being prepared/);
 		await lifecycle.park(id);
 		expect(replacement.status).toBe("parked");
 		expect(live.disposeCalls()).toBe(1);
