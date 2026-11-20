@@ -520,9 +520,14 @@ export interface ToolSession {
 	 * Ask the selected todo backend to accept a `todo` call's change before it is committed.
 	 * Returns `undefined` at once when no backend decides (native todos); otherwise resolves to
 	 * the reason the change is not accepted, or to `undefined` once it is accepted or when no
-	 * backend decides any more by the call's turn, and rejects when `signal` aborts.
+	 * backend decides any more by the call's turn, and rejects when `signal` aborts. `toolCallId`
+	 * names the call: one that is not accepted, or aborted, gets no reminder to retry it.
 	 */
-	applyTodoBackend?: (change: TodoBackendChange, signal?: AbortSignal) => Promise<string | undefined> | undefined;
+	applyTodoBackend?: (
+		change: TodoBackendChange,
+		signal?: AbortSignal,
+		toolCallId?: string,
+	) => Promise<string | undefined> | undefined;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
 	/** The `i` intent the model wrote on a tool call of the current turn, by call ID. */

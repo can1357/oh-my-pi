@@ -1864,7 +1864,9 @@ export class ExtensionRunner {
 				// commits `next`, and take the change back from the backend that just accepted it. The
 				// list that commit sends is the correction.
 				if (this.#todoPending === this.#todoCorrection) this.#todoPending = undefined;
-				this.#todoSent = { list: { backend, sessionId, phases: change.next }, definition };
+				// After a failed call the backend may never have held `previous`. `next` is recorded only
+				// when omp knew what it held, so that otherwise the commit's list still goes out.
+				if (sent !== undefined) this.#todoSent = { list: { backend, sessionId, phases: change.next }, definition };
 				return undefined;
 			}
 			// Accepted in the moment omp stopped waiting.

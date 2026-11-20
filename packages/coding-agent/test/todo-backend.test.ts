@@ -5,6 +5,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as path from "node:path";
+import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -529,6 +531,52 @@ describe("todo backend", () => {
 			expect(tasksOf(backend)).toEqual([["a"]]);
 			// A refusal is the backend's answer, not an extension error.
 			expect(errors).toEqual([]);
+		});
+
+		it("after a failed replace, an accepted call is still followed by the whole list", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			backend.error = new Error("store is down");
+			session.commitTodoPhases(list("a"));
+			await settled(session);
+			backend.error = undefined;
+
+			await todo(session, { op: "append", phase: "Work", items: ["b"] });
+			await settled(session);
+
+			// The backend never took ["a"], so accepting the change does not stand in for the list.
+			expect(tasksOf(backend)).toEqual([["a"], ["a", "b"]]);
+		});
+
+		it("a call the backend refused, or the user aborted while it decided, leaves no reminder to retry it", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker", {
+				model: getBundledModel("anthropic", "claude-sonnet-4-5"),
+			});
+			const call = (id: string): MockResponse => ({
+				content: [{ type: "toolCall", id, name: "todo", arguments: { op: "init", items: [id] } }],
+			});
+			const mock = createMockModel({
+				responses: [call("refused"), { content: ["ok"] }, call("aborted"), { content: ["ok"] }],
+			});
+			session.agent.streamFn = mock.stream;
+			session.modelRegistry.authStorage.keys.setRuntime("anthropic", "test-key");
+
+			backend.error = new Error("not this week");
+			await session.prompt("plan");
+			backend.error = undefined;
+			backend.applyHold = Promise.withResolvers<void>().promise;
+			const deciding = backend.entered();
+			const aborted = session.prompt("plan again");
+			await deciding;
+			await session.abort();
+			await aborted.catch(() => {});
+			await session.waitForIdle();
+			await session.prompt("next");
+
+			expect(backend.asked.map(change => change.op)).toEqual(["init", "init"]);
+			// A reminder would reach the model as a developer message with the next prompt.
+			expect(mock.calls.at(-1)?.context.messages.filter(message => message.role === "developer")).toEqual([]);
 		});
 
 		it("an edit that lands while the backend decides fails the call, keeps the edit and reaches the backend", async () => {

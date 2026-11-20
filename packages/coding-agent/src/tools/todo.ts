@@ -702,7 +702,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 	}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
 		params: TodoParams,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<TodoToolDetails>,
@@ -731,7 +731,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		const deciding =
 			readOnly || errors.length > 0
 				? undefined
-				: this.session.applyTodoBackend?.({ op, previous: previousPhases, next: updated }, signal);
+				: this.session.applyTodoBackend?.({ op, previous: previousPhases, next: updated }, signal, toolCallId);
 		if (deciding) {
 			const refusal = await deciding;
 			current = clonePhases(this.session.getTodoPhases?.() ?? []);

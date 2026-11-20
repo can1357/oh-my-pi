@@ -1181,6 +1181,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
+	/** The `todo` call a backend did not accept or the user aborted while it decided: not a payload to fix and retry. */
+	#todoTurnedDown: string | undefined;
 	/** Rows kept out of context that arrived while a run was live; drawn and saved once it ends or the next prompt starts. */
 	#pendingExcludedRows: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
@@ -5249,7 +5251,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					const retry = this.#todoCallArguments(toolCallId);
 					if (retry) this.#dropSupersededTodoReminders(retry, details && stringProperty(details, "op"));
 				}
-				if (toolName === "todo" && isError) {
+				if (toolName === "todo" && isError && toolCallId !== this.#todoTurnedDown) {
 					const errorText = content.find(part => part.type === "text")?.text;
 					const attemptedArgs = this.#todoCallArguments(toolCallId);
 					// The tool result already contains the full snapshot. Only carry the
@@ -12124,12 +12126,26 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/** See `ToolSession.applyTodoBackend`. */
-	applyTodoBackend(change: TodoBackendChange, signal?: AbortSignal): Promise<string | undefined> | undefined {
-		return this.#extensionRunner?.applyTodoBackend(
+	applyTodoBackend(
+		change: TodoBackendChange,
+		signal?: AbortSignal,
+		toolCallId?: string,
+	): Promise<string | undefined> | undefined {
+		const deciding = this.#extensionRunner?.applyTodoBackend(
 			() => this.#todoBackend(),
 			change,
 			() => this.#todo.phases,
 			signal,
+		);
+		return deciding?.then(
+			why => {
+				if (why !== undefined) this.#todoTurnedDown = toolCallId;
+				return why;
+			},
+			(error: unknown) => {
+				this.#todoTurnedDown = toolCallId;
+				throw error;
+			},
 		);
 	}
 
