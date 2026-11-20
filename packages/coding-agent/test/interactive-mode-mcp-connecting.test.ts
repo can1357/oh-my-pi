@@ -203,6 +203,7 @@ describe("InteractiveMode MCP connection status", () => {
 			serverNames: ["alpha"],
 		} satisfies McpConnectionStatusEvent);
 		const connecting = mode.chatContainer.children.at(-1);
+		if (!connecting) throw new Error("Expected the connecting status to be shown");
 		mode.showHookNotify("A loaded", "info");
 		mode.showHookNotify("B loaded", "info");
 
@@ -212,7 +213,7 @@ describe("InteractiveMode MCP connection status", () => {
 		expect(batch.rows.join("\n")).toContain("A loaded");
 		mode.chatContainer.acknowledgeFinalizedBatch(batch.id);
 		expect(mode.chatContainer.children).toContain(connecting);
-		expect(mode.chatContainer.canRemoveBlock(connecting!)).toBe(false);
+		expect(mode.chatContainer.canRemoveBlock(connecting)).toBe(false);
 
 		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
 			type: "connected",
