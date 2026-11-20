@@ -40,6 +40,7 @@ import {
 } from "@oh-my-pi/pi-tui/render/render-utils";
 import { type EditMode, getEditInputPaths } from "@oh-my-pi/pi-tui/tools/edit";
 import {
+	filterAvailableModelsByEnabledPatterns,
 	formatModelStringWithRouting,
 	resolveAgentAdvisorRolePattern,
 	resolveAgentAdvisorSelection,
@@ -184,7 +185,7 @@ import {
 } from "../session/settings";
 import { type AutoPrewalkDecision, classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { type JudgmentUsage, journalJudgmentUsage, type NativeJudgmentDeps } from "../judgment";
-import { cfgDisabledProviders } from "../config/model-settings";
+import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import { getRetryFallbackRole, installRetryFallbackRole } from "../session/retry-fallback-chains";
 import {
@@ -361,6 +362,22 @@ function resolveSubagentInheritedRetryFallbackChain(
 		const resolved = resolveModelOverride([entry], modelRegistry, settings);
 		return !resolved.model || !disabledProviders.has(resolved.model.provider);
 	});
+}
+
+/**
+ * Membership test for the active `enabledModels` scope, or `undefined` when no
+ * scope is configured. Retry fallbacks resolve against the full registry at
+ * runtime, so every candidate the child may switch to is held to the same scope
+ * as its initial model.
+ */
+function resolveSubagentEnabledModelScope(
+	settings: Settings,
+	modelRegistry: ModelRegistry,
+): ((model: Model<Api>) => boolean) | undefined {
+	const enabledPatterns = cfgEnabledModels.get(settings);
+	if (enabledPatterns.length === 0) return undefined;
+	const scopedModels = filterAvailableModelsByEnabledPatterns(modelRegistry.getAvailable(), enabledPatterns, settings);
+	return model => scopedModels.some(scoped => scoped.provider === model.provider && scoped.id === model.id);
 }
 
 function installSubagentRetryFallbackChain(args: {
@@ -4985,19 +5002,23 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 								resolvedModel,
 								inheritedSubagentServiceTiers(settings, options.parentServiceTier),
 							);
+			const inEnabledModelScope = resolveSubagentEnabledModelScope(settings, modelRegistry);
+			const isAllowedRetryModel = (candidate: Model<Api> | undefined): boolean =>
+				candidate !== undefined &&
+				(allowedProvider === undefined || candidate.provider === allowedProvider) &&
+				(inEnabledModelScope === undefined || inEnabledModelScope(candidate));
 			const retryFallbackRole = installSubagentRetryFallbackChain({
 				settings: subagentSettings,
 				id,
 				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings).filter(
-					candidate => allowedProvider === undefined || candidate.model.provider === allowedProvider,
+					candidate => isAllowedRetryModel(candidate.model),
 				),
 				inheritedFallbackChain:
-					allowedProvider === undefined
+					allowedProvider === undefined && inEnabledModelScope === undefined
 						? inheritedRetryFallbackChain
-						: inheritedRetryFallbackChain?.filter(entry => {
-								const candidate = resolveModelOverride([entry], modelRegistry, subagentSettings).model;
-								return candidate?.provider === allowedProvider;
-							}),
+						: inheritedRetryFallbackChain?.filter(entry =>
+								isAllowedRetryModel(resolveModelOverride([entry], modelRegistry, subagentSettings).model),
+							),
 				model,
 				authFallbackUsed,
 			});

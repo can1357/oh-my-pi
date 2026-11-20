@@ -620,11 +620,14 @@ export async function resolveEffectiveSubagentPolicy(
 	if (enabledPatterns.length > 0 && modelOverride.length > 0 && modelRegistry) {
 		const available = modelRegistry.getAvailable();
 		const scopedModels = modelScope.filterAvailableModelsByEnabledPatterns(available, enabledPatterns, settings);
-		// Reject only what the registry can already decide: the selection resolves, every
-		// enabledModels pattern matches something, and none of it is in scope. A selection
-		// or scoped model that extensions or discovery may still register is left to
-		// execution, which resolves the same scope once models are loaded.
+		// Reject only what the registry can already decide: discovery has settled, the
+		// selection resolves, every enabledModels pattern matches something, and none of
+		// it is in scope. While discovery runs, a model matching both the selection and
+		// the scope may still arrive. A selection or scoped model that extensions may
+		// still register is left to execution, which resolves the same scope once models
+		// are loaded.
 		const decidable =
+			!modelRegistry.isBackgroundRefreshPending() &&
 			modelScope.resolveModelOverride(modelOverride, { getAvailable: () => available }, settings).model !==
 				undefined &&
 			enabledPatterns.every(

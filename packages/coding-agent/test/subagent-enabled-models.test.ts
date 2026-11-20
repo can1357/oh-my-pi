@@ -6,12 +6,17 @@ import { ModelRegistry } from "../src/config/model-registry";
 import { normalizeModelPatternList, resolveModelOverrideWithAuthFallback } from "../src/config/model-resolver";
 import { cfgEnabledModels } from "../src/config/model-settings";
 import { Settings } from "../src/config/settings";
+import * as sdkModule from "../src/sdk";
+import type { AgentSession } from "../src/session/agent-session";
 import type { AuthStorage } from "../src/session/auth-storage";
+import { cfgRetryFallbackChains } from "../src/session/settings";
 import * as discovery from "../src/task/discovery";
+import { runSubprocess } from "../src/task/executor";
 import { cfgTaskAgentModelOverrides } from "../src/task/settings";
 import { resolveEffectiveSubagentPolicy } from "../src/task/structured-subagent";
 import type { ToolSession } from "../src/tools";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { createSessionDefaults } from "./helpers/session-defaults";
 
 let tempDir: string;
 let authStorage: AuthStorage;
@@ -22,11 +27,16 @@ beforeEach(async () => {
 	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "subagent-enabled-models-"));
 	authStorage = createInMemoryAuthStorage();
 	registry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
-	registry.registerProvider("scope-test", {
+	registerModels("scope-test", ["forbidden", "allowed"]);
+	settings = Settings.isolated({ enabledModels: ["scope-test/allowed"] });
+});
+
+function registerModels(provider: string, ids: string[]): void {
+	registry.registerProvider(provider, {
 		baseUrl: "https://example.test/v1",
 		api: "openai-completions",
-		apiKey: "scope-test-key",
-		models: ["forbidden", "allowed"].map(id => ({
+		apiKey: `${provider}-key`,
+		models: ids.map(id => ({
 			id,
 			name: id,
 			reasoning: false,
@@ -36,12 +46,11 @@ beforeEach(async () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		})),
 	});
-	settings = Settings.isolated({ enabledModels: ["scope-test/allowed"] });
-});
+}
 
 afterEach(async () => {
 	vi.restoreAllMocks();
-	registry.unregisterProvider("scope-test");
+	for (const provider of ["scope-test", "scope-disc", "late-provider"]) registry.unregisterProvider(provider);
 	authStorage.close();
 	await fs.rm(tempDir, { recursive: true, force: true });
 });
@@ -90,19 +99,104 @@ test.each(["request", "settings override", "frontmatter"] as const)(
 );
 
 test.each([
-	["the enabled scope", "scope-test/allowed"],
-	["the requested model", "late-provider/ready"],
-] as const)("defers to execution while %s may still be registered by an extension", async (_label, requested) => {
-	// An unrelated model is already available; the scoped target registers later, during child setup.
-	cfgEnabledModels.override(settings, ["late-provider/ready"]);
+	["the enabled scope", undefined, undefined],
+	["the requested model", "late-provider/ready", "ready"],
+] as const)(
+	"defers to execution while %s may still be registered by an extension",
+	async (_label, requested, expected) => {
+		// An unrelated model is already available; the scoped target registers later, during child setup.
+		cfgEnabledModels.override(settings, ["late-provider/ready"]);
+		const policy = await resolveEffectiveSubagentPolicy({
+			session: session(),
+			invocationKind: "task",
+			assignment: "Inspect the target.",
+			agent: "worker",
+			model: requested,
+		});
+		registerModels("late-provider", ["ready"]);
+		const result = await resolveModelOverrideWithAuthFallback(
+			normalizeModelPatternList(policy.modelOverride),
+			policy.parentActiveModelPattern,
+			registry,
+			settings,
+		);
+		// The frontmatter model stays outside the late scope, so execution surfaces no model rather than running it.
+		expect(result.model?.id).toBe(expected);
+	},
+);
+
+test("defers preflight while discovery may add a model matching both the selection and the scope", async () => {
+	registerModels("scope-disc", ["preferred-old", "target"]);
+	cfgEnabledModels.override(settings, ["scope-disc/preferred-*"]);
+	vi.spyOn(registry, "isBackgroundRefreshPending").mockReturnValue(true);
 	const policy = await resolveEffectiveSubagentPolicy({
 		session: session(),
 		invocationKind: "task",
 		assignment: "Inspect the target.",
 		agent: "worker",
-		model: requested === "late-provider/ready" ? requested : undefined,
+		model: "target",
 	});
-	expect(policy.modelOverride?.length).toBeGreaterThan(0);
+	registry.unregisterProvider("scope-disc");
+	registerModels("scope-disc", ["preferred-old", "target", "preferred-target"]);
+	const result = await resolveModelOverrideWithAuthFallback(
+		normalizeModelPatternList(policy.modelOverride),
+		policy.parentActiveModelPattern,
+		registry,
+		settings,
+	);
+	expect(result.model?.id).toBe("preferred-target");
+});
+
+function yieldingChild(): AgentSession {
+	const listeners: Array<(event: { type: string; [key: string]: unknown }) => void> = [];
+	return {
+		...createSessionDefaults(),
+		agent: { state: { systemPrompt: ["test"] } },
+		state: { messages: [] },
+		extensionRunner: undefined,
+		sessionManager: { appendSessionInit: () => {} },
+		getActiveToolNames: () => ["yield"],
+		getEnabledToolNames: () => ["yield"],
+		subscribe: (listener: (event: { type: string; [key: string]: unknown }) => void) => {
+			listeners.push(listener);
+			return () => {};
+		},
+		prompt: async () => {
+			for (const listener of listeners) {
+				listener({
+					type: "tool_execution_end",
+					toolCallId: "tool-yield",
+					toolName: "yield",
+					result: { content: [{ type: "text", text: "Result submitted." }], details: { status: "success" } },
+					isError: false,
+				});
+			}
+		},
+	} as unknown as AgentSession;
+}
+
+test.each<[string, string[], Record<string, string[]>, string[] | undefined]>([
+	["a later ordered candidate", ["scope-test/allowed", "scope-test/forbidden"], {}, undefined],
+	["an inherited default chain entry", ["scope-test/allowed"], { default: ["scope-test/forbidden"] }, []],
+])("keeps %s outside enabledModels out of the child retry chain", async (_label, modelOverride, chains, expected) => {
+	let childChain: unknown;
+	vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+		childChain = options?.settings ? cfgRetryFallbackChains.get(options.settings)["subagent:scope-retry"] : undefined;
+		return { session: yieldingChild(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+	});
+	cfgRetryFallbackChains.override(settings, chains);
+	await runSubprocess({
+		cwd: tempDir,
+		agent: { name: "worker", description: "Test worker", systemPrompt: "Inspect the target.", source: "bundled" },
+		task: "Inspect the target.",
+		index: 0,
+		id: "scope-retry",
+		modelOverride,
+		settings,
+		modelRegistry: registry,
+		enableLsp: false,
+	});
+	expect(childChain).toEqual(expected);
 });
 
 test("still rejects at preflight once the scoped model is registered and the selection is outside it", async () => {
