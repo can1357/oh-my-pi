@@ -1,8 +1,9 @@
 import { encodeSixelAsync } from "@oh-my-pi/pi-natives";
-import { cachedPngConversion, convertImageToPngShared } from "../chat/image-loading";
+import { cachedPngConversion, convertImageToPngShared } from "../png-conversion";
 import { getKittyGraphics } from "../kitty-graphics";
 import { ensureSixelRasterWidth } from "../sixel";
 import {
+	calculateImageFit,
 	encodeSixelNow,
 	getCellDimensions,
 	getImageDimensions,
@@ -39,8 +40,8 @@ export interface ImageOptions {
 	/**
 	 * Schedules a repaint once this image's off-thread SIXEL encode or Kitty PNG
 	 * conversion lands. Defaults to the budget's repaint; a host without a budget
-	 * must pass one, or the image shows its pending state (reserved SIXEL rows, a
-	 * Kitty text fallback) until an unrelated repaint.
+	 * must pass one, or its pending rows (blank for SIXEL, the text fallback's
+	 * label on the last row for Kitty) stay until an unrelated repaint.
 	 */
 	requestRender?: () => void;
 }
@@ -719,9 +720,10 @@ export class Image implements Component {
 	#cachedSixelBackground: number | undefined;
 	#cachedKittyUnicodePlaceholders = false;
 	#cachedLinked = false;
-	// Tallest graphic placement this image has rendered. The text fallback
-	// pads itself to this height so a budget demotion never shrinks the block
-	// (its rows may already be committed to native scrollback).
+	// Tallest graphic placement this image has rendered or reserved (a pending
+	// Kitty PNG conversion). The text fallback pads itself to this height so a
+	// budget demotion never shrinks the block (its rows may already be committed
+	// to native scrollback).
 	#renderedGraphicRows = 0;
 	/** Described node and the link policy it was built under (an `off` switch drops its `href`). */
 	#native?: { linked: boolean; node: NativeNode };
@@ -838,7 +840,7 @@ export class Image implements Component {
 	/**
 	 * PNG to send over Kitty, whose `f=100` takes PNG only: any other format
 	 * leaves the placement's reserved rows blank. A non-PNG source answers
-	 * `undefined` (text fallback) until its off-thread conversion lands and
+	 * `undefined` (rows reserved) until its off-thread conversion lands and
 	 * repaints, and `null` when it cannot be decoded.
 	 */
 	#kittyPngData(): KittyPng | null | undefined {
@@ -846,6 +848,8 @@ export class Image implements Component {
 		if (this.#mimeType === "image/png") {
 			return (this.#kittyPng = { data: this.#base64Data, dimensions: this.#dimensions });
 		}
+		// Before the cache lookup: it hashes the whole payload, and a pending budgeted image misses the render cache every frame.
+		if (this.#kittyPngPending) return undefined;
 		const toKittyPng = (data: string): KittyPng => ({
 			data,
 			dimensions: getImageDimensions(data, "image/png") ?? this.#dimensions,
@@ -853,7 +857,6 @@ export class Image implements Component {
 		const source = { type: "image" as const, data: this.#base64Data, mimeType: this.#mimeType };
 		const cached = cachedPngConversion(source);
 		if (cached) return (this.#kittyPng = toKittyPng(cached.data));
-		if (this.#kittyPngPending) return undefined;
 		this.#kittyPngPending = true;
 		const settle = (png: KittyPng | null): void => {
 			this.#kittyPng = png;
@@ -945,6 +948,16 @@ export class Image implements Component {
 			const needsTransmit = transmitsSeparately && (this.#budget?.shouldTransmit(imageId) ?? false);
 			const kittyPng = imageProtocol === ImageProtocol.Kitty ? this.#kittyPngData() : undefined;
 			const dimensions = kittyPng?.dimensions ?? this.#dimensions;
+			if (imageProtocol === ImageProtocol.Kitty && kittyPng === undefined) {
+				// Reserve the image's rows while its PNG converts, as a pending SIXEL
+				// encode does, so landing it does not reflow everything below.
+				const fit = calculateImageFit(
+					this.#dimensions,
+					{ maxWidthCells: maxWidth, maxHeightCells: this.#options.maxHeightCells },
+					cellDimensions,
+				);
+				this.#renderedGraphicRows = Math.max(this.#renderedGraphicRows, fit.rows);
+			}
 			const result =
 				imageProtocol === ImageProtocol.Kitty && !kittyPng
 					? null

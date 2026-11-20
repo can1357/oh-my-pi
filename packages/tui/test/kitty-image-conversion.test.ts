@@ -287,18 +287,40 @@ describe("Image component Kitty format", () => {
 		setTerminalImageProtocol(originalProtocol);
 	});
 
-	it("sends a non-PNG source as PNG, not raw bytes Kitty cannot decode", async () => {
+	it("sends a non-PNG source as PNG in the rows it reserved while converting", async () => {
 		setTerminalImageProtocol(ImageProtocol.Kitty);
-		const webp = (await new Bun.Image(Buffer.from(IMAGE.data, "base64")).resize(7, 5).webp().bytes()).toBase64();
+		const webp = (await new Bun.Image(Buffer.from(IMAGE.data, "base64")).resize(100, 200).webp().bytes()).toBase64();
 		const landed = Promise.withResolvers<void>();
 		// No budget: a direct `a=T` placement, as extensions build it.
 		const image = new Image(webp, "image/webp", { fallbackColor: text => text }, { requestRender: landed.resolve });
 
-		expect(image.render(80).join("")).not.toContain("\x1b_G");
+		const pending = image.render(80);
+		expect(pending.join("")).not.toContain("\x1b_G");
 		await landed.promise;
-		const drawn = image.render(80).join("");
-		expect(drawn).toContain("\x1b_Ga=T,f=100");
-		expect(drawn).toContain(";iVBORw0KGgo");
+		const drawn = image.render(80);
+		expect(drawn.join("")).toContain("\x1b_Ga=T,f=100");
+		expect(drawn.join("")).toContain(";iVBORw0KGgo");
+		expect(drawn.length).toBeGreaterThan(1);
+		expect(pending.length).toBe(drawn.length);
+	});
+
+	it("keeps the text fallback in its reserved rows when the source cannot be decoded", async () => {
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const corrupt = Buffer.from("RIFF\x10\x00\x00\x00WEBPVP8 not an image", "latin1").toBase64();
+		const settled = Promise.withResolvers<void>();
+		const image = new Image(
+			corrupt,
+			"image/webp",
+			{ fallbackColor: text => text },
+			{ requestRender: settled.resolve },
+		);
+
+		const pending = image.render(80);
+		await settled.promise;
+		const failed = image.render(80);
+		expect(failed.join("")).not.toContain("\x1b_G");
+		expect(failed.at(-1)).toContain("[Image: [image/webp]");
+		expect(failed.length).toBe(pending.length);
 	});
 
 	it("sizes a converted JPEG from its EXIF-rotated PNG, not the unrotated JPEG header", async () => {
