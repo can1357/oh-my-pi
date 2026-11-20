@@ -1137,9 +1137,7 @@ describe("guard rule regressions", () => {
 				() => ({ success: false, stdout: Buffer.from("") }) as never,
 			);
 			// Each probe takes one second of clock time.
-			const clock = spyOn(performance, "now").mockImplementation(
-				() => 1_000_000 + spawn.mock.calls.length * 1_000,
-			);
+			const clock = spyOn(performance, "now").mockImplementation(() => 1_000_000 + spawn.mock.calls.length * 1_000);
 			try {
 				const tool = new BashTool(createSession(cwd));
 				const approval = tool.approval as (args: unknown, ctx?: AgentToolContext) => ToolApprovalDecision;

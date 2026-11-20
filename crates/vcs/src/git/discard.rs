@@ -180,8 +180,9 @@ fn changed_assumed_unchanged(
 		return Ok(false);
 	}
 	// `<tag> <path>`, the tag lowercase for an assume-unchanged entry.
-	let mut args: Vec<String> =
-		["ls-files", "-v", "-z", "--full-name", "--"].map(str::to_owned).to_vec();
+	let mut args: Vec<String> = ["ls-files", "-v", "-z", "--full-name", "--"]
+		.map(str::to_owned)
+		.to_vec();
 	args.extend(pathspecs.iter().cloned());
 	let listing = run_checked(git, dir, &args, &[], deadline)?;
 	if cli::is_truncated(&listing) {
