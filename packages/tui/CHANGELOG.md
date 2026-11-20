@@ -25,6 +25,7 @@
 - Large repaints are again written in pieces that end between rows, so output from another process sharing the terminal cannot land inside a row or an escape sequence
 - Terminals the output writer cannot reopen (after `su` to another user, inside some sandboxes) are written off the JS thread too, so a slow terminal no longer freezes input there
 - `ask` HTML forms keep a prefilled or hidden control named `__proto__` in their default data, so a timed-out form no longer drops it ([#18646](https://github.com/can1357/oh-my-pi/pull/18646) by [@pasquale95](https://github.com/pasquale95))
+- An ask form with one question submits on one Enter instead of stopping on Submit first
 
 ## [19.0.1] - 2026-11-19
 
