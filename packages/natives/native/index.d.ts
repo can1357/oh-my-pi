@@ -2050,6 +2050,16 @@ export interface DiffChange {
 export declare function diffLineRuns(oldText: string, newText: string): Array<DiffRun>
 
 /**
+ * [`diff_line_runs`] bounded to `max_edits` added or removed lines.
+ *
+ * Returns `null` once the edit script needs more. An exact diff of a
+ * wholesale rewrite takes time quadratic in its size; this one stops after
+ * `O((N + M) · max_edits)`, for callers that can treat such a rewrite as one
+ * replaced block.
+ */
+export declare function diffLineRunsWithin(oldText: string, newText: string, maxEdits: number): Array<DiffRun> | null
+
+/**
  * Line diff with jsdiff `diffLines(oldText, newText)` semantics (default
  * options). Change values keep line terminators, and common runs are joined
  * from the new text.
@@ -3911,6 +3921,19 @@ export interface ShellExecuteOptions {
   filesystem?: ShellFilesystem
 }
 
+/** One host text file a command changed, as `onFileChange` receives it. */
+export interface ShellFileChange {
+  /** Absolute host path. */
+  path: string
+  /**
+   * Content before the command touched the file; absent when there was
+   * no file.
+   */
+  before?: Buffer
+  /** Content once the command was done; absent when it removed the file. */
+  after?: Buffer
+}
+
 /** Host filesystem injected into shell sessions. */
 export interface ShellFilesystem {
   /**
@@ -3927,6 +3950,14 @@ export interface ShellFilesystem {
    * injected filesystem and receives every path, host paths included.
    */
   nativeLocalPaths?: boolean
+  /**
+   * Called for each host text file a command changed itself: a builtin's
+   * write, rename or removal (`sed -i`, `cp`, `mv`, `rm`, `tee`) and the
+   * target of a redirection, once the command is done with it. Only files
+   * git would track are reported (in a work tree, not ignored), at most
+   * 4 MiB each; what a spawned program writes on its own is not.
+   */
+  onFileChange?: (error: Error | null, change: ShellFileChange) => void
 }
 
 /** Permissions probed by an `access` request. */

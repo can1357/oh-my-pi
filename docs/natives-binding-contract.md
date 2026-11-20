@@ -55,7 +55,7 @@ Do not import unexported `native/*` implementation paths from package consumers.
 
 Consult `native/index.d.ts` for exact option/result fields and signatures. Notable current signatures include `renderSnapcompactPng(...): Promise<string>`, `readImageFromClipboard(): Promise<ClipboardImage | undefined | null>`, and typed-array vector inputs/results.
 
-`ShellOptions`, `ShellRunOptions`, and `ShellExecuteOptions` accept an injected `ShellFilesystem`. Its error-first `handler` returns a `Promise<ShellFsResponse>` with filesystem failures encoded as `error` data. `nativeLocalPaths: true` bypasses the handler for all host paths and sends only URL paths to it; absent/false routes every path to the handler. A run-specific filesystem replaces the session filesystem only for that run.
+`ShellOptions`, `ShellRunOptions`, and `ShellExecuteOptions` accept an injected `ShellFilesystem`. Its error-first `handler` returns a `Promise<ShellFsResponse>` with filesystem failures encoded as `error` data. `nativeLocalPaths: true` bypasses the handler for all host paths and sends only URL paths to it; absent/false routes every path to the handler. Its optional error-first `onFileChange` receives a `ShellFileChange` for each host text file a command's builtins or redirections changed. A run-specific filesystem replaces the session filesystem only for that run.
 
 Newer surface members on existing exports (all present in `native/index.d.ts`):
 

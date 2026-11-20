@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ShellFilesystem.onFileChange`: the embedded shell reports each text file git would track that a command changed itself (a builtin's write, rename or removal; a redirection's target) with its content before and after
+- Added `diffLineRunsWithin(oldText, newText, maxEdits)`: `diffLineRuns` that returns `null` once more than `maxEdits` lines are added or removed, instead of spending time quadratic in the size of a wholesale rewrite
+
 ### Fixed
 
 - Fixed the native addon failing to load when HOME, PI_NATIVES_DIR or the install directory contains `?` ([#19763](https://github.com/can1357/oh-my-pi/pull/19763) by [@sjawhar](https://github.com/sjawhar))

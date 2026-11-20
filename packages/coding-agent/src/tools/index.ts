@@ -215,11 +215,10 @@ export interface DeferredDiagnosticsEntry {
 export interface FileChangeReport {
 	/** Absolute path. */
 	path: string;
-	/** Reporting tool (`edit`, `write`, `ast_edit`, `task`). */
+	/** Reporting tool (`edit`, `write`, `ast_edit`, `task`, `bash`, `eval`). */
 	tool: string;
 	before: string | null;
 	after: string | null;
-	beforeMtimeMs?: number;
 	/** Agent whose work this is, when not the reporting session's own (isolated subagent merge-back). */
 	agent?: { agent: string; parent?: string };
 }
@@ -605,7 +604,7 @@ export interface ToolSession {
 	/**
 	 * Journal a file write made by this agent's edit tools (full contents; `null` = file absent),
 	 * so selective commits (`/commit`, the eval `commit` namespace) can attribute its lines.
-	 * `beforeMtimeMs` is the file's mtime before the write. Never throws.
+	 * Never throws.
 	 */
 	recordFileChange?(change: FileChangeReport): void;
 	/** Get the active OpenTelemetry config so subagent dispatch can forward

@@ -29,6 +29,7 @@ import {
 	raceJobSettlement,
 	resolveAutoBackgroundWaitMs,
 } from "../async";
+import { shellChangeSnapshots } from "../commit/selective/journal";
 import { type BoardEntry, registerOnBoard } from "../daemon/client";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import { shellMounts, shellProcessCommand } from "../exec/shell-process";
@@ -935,7 +936,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		signal: AbortSignal | undefined,
 		options: Omit<InternalUrlFilesystemOptions, "context">,
 	): InternalUrlFilesystem {
-		return new InternalUrlFilesystem({ ...options, context: sessionResolveContext(this.session, { signal }) });
+		return new InternalUrlFilesystem({
+			...options,
+			context: sessionResolveContext(this.session, { signal }),
+			// What the command's builtins and redirections write is journaled like an edit tool's write.
+			onFileChange:
+				this.session.recordFileChange &&
+				(change => this.session.recordFileChange?.({ tool: "bash", ...shellChangeSnapshots(change) })),
+		});
 	}
 
 	/**
