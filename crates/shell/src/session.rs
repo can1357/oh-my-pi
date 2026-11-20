@@ -974,23 +974,29 @@ impl Driver {
 
 	/// The run's cut-short verdict, judged after its still-settling
 	/// pipeline children had a bounded window to end
-	/// ([`Driver::settle_exit_window`]): their eventual statuses decide
-	/// whether the input `exit` left commands that would have run.
+	/// ([`Driver::settle_exit_window`]) — but only while an unresolved
+	/// child's eventual status can still change the verdict
+	/// ([`Shell::exit_verdict_hinges_on_children`]); a sibling the answer
+	/// cannot depend on never delays it.
 	async fn settled_cut_short(&mut self, run: RunId) -> bool {
 		if !self.shell.ended_by_exit(run) {
 			return false;
 		}
-		if self.shell.exit_children_pending(&mut self.store, run) {
+		if self
+			.shell
+			.exit_verdict_hinges_on_children(&mut self.store, run)
+		{
 			self.settle_exit_window(run, EXIT_SETTLE_CAP).await;
 		}
 		self.shell.ended_by_exit_cut_short(&mut self.store, run)
 	}
 
-	/// Give the exited run's in-flight pipeline children a bounded window
-	/// to end on their own: step — their reaps land in the engine's own
-	/// turn — and park until one wakes it, stopping at the cap. A child
-	/// that outlives the window keeps its unresolved status, and the
-	/// verdict stays conservative.
+	/// Give the exited run's verdict-relevant in-flight pipeline children a
+	/// bounded window to end on their own: step — their reaps land in the
+	/// engine's own turn — and park until one wakes it, stopping at the cap
+	/// or as soon as the verdict can no longer change. A child that outlives
+	/// the window keeps its unresolved status, and the verdict stays
+	/// conservative.
 	async fn settle_exit_window(&mut self, run: RunId, cap: Duration) {
 		let deadline = tokio::time::Instant::now() + cap;
 		loop {
@@ -1005,7 +1011,10 @@ impl Driver {
 				Step::Call { id, call } => self.on_call(id, call),
 				Step::Yield | Step::SuspendReady => {},
 				Step::Blocked | Step::Paused => {
-					if !self.shell.exit_children_pending(&mut self.store, run) {
+					if !self
+						.shell
+						.exit_verdict_hinges_on_children(&mut self.store, run)
+					{
 						return;
 					}
 					let now = tokio::time::Instant::now();
@@ -1028,7 +1037,10 @@ impl Driver {
 				},
 				Step::Idle => return,
 			}
-			if !self.shell.exit_children_pending(&mut self.store, run) {
+			if !self
+				.shell
+				.exit_verdict_hinges_on_children(&mut self.store, run)
+			{
 				return;
 			}
 			tokio::task::yield_now().await;

@@ -2555,6 +2555,81 @@ async fn execute_shell_streams_works_when_sinks_are_none() {
 	assert_eq!(result.exit_code, Some(0));
 }
 
+/// `exit` in a `lastpipe` pipeline is done in milliseconds while its sibling
+/// `/bin/sleep` outlives the caller's deadline: the deadline lands while the
+/// session is only attributing the exit. The attribution wait must not
+/// replace the completed command's status with a timeout it did not have —
+/// and under pipefail the sibling cannot change the verdict anyway (`exit 7`
+/// already fixes the pipeline status for every suffix shape), so no settle
+/// window is owed at all.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn completed_exit_keeps_its_status_when_the_timeout_lands_in_attribution() {
+	for suffix in ["", "&& :", "|| :", "; :"] {
+		let command = format!("set -o pipefail; shopt -s lastpipe; /bin/sleep 0.3 | exit 7 {suffix}");
+		let options = ShellExecuteOptions { command: command.clone(), ..Default::default() };
+		let result = execute_shell(options, None, CancelToken::new(Some(50)))
+			.await
+			.expect("execute should succeed");
+		assert_eq!(result.exit_code, Some(7), "suffix {suffix:?}");
+		assert!(!result.timed_out, "suffix {suffix:?}");
+		assert!(!result.cancelled, "suffix {suffix:?}");
+		// The verdict itself is settled — `exit 7` fixes the pipeline status,
+		// so whether the suffix would have run does not depend on the sleep.
+		assert_eq!(result.ended_by_exit, matches!(suffix, "|| :" | "; :"), "suffix {suffix:?}");
+	}
+}
+
+/// The same probe on the raw-stream path the process-stream callers use.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn completed_exit_keeps_its_status_when_the_timeout_lands_in_attribution_streams() {
+	let options = ShellExecuteOptions {
+		command: "set -o pipefail; shopt -s lastpipe; /bin/sleep 0.3 | exit 7".to_string(),
+		..Default::default()
+	};
+	let result = execute_shell_streams(options, StreamSinks::default(), CancelToken::new(Some(50)))
+		.await
+		.expect("execute should succeed");
+	assert_eq!(result.exit_code, Some(7));
+	assert!(!result.timed_out);
+	assert!(!result.cancelled);
+}
+
+/// A sibling whose status genuinely decides the verdict keeps its settle
+/// window — here `exit 0` leaves the pipeline status to `/bin/sleep`, which
+/// decides whether `echo` would have run. The window can outlive the
+/// caller's deadline; the completed `exit 0` status must still be reported.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn attribution_settle_window_still_reports_the_completed_status() {
+	let options = ShellExecuteOptions {
+		command: "set -o pipefail; shopt -s lastpipe; /bin/sleep 0.3 | exit 0 && echo ran"
+			.to_string(),
+		..Default::default()
+	};
+	let result = execute_shell(options, None, CancelToken::new(Some(50)))
+		.await
+		.expect("execute should succeed");
+	assert_eq!(result.exit_code, Some(0));
+	assert!(!result.timed_out);
+	assert!(!result.cancelled);
+}
+
+/// The completed-status delivery must not swallow real timeouts: a command
+/// still running when the deadline fires reports the timeout as before.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn still_running_command_keeps_reporting_the_timeout() {
+	let options = ShellExecuteOptions { command: "/bin/sleep 5".to_string(), ..Default::default() };
+	let result = execute_shell(options, None, CancelToken::new(Some(50)))
+		.await
+		.expect("execute should succeed");
+	assert_eq!(result.exit_code, None);
+	assert!(result.timed_out);
+	assert!(!result.cancelled);
+}
+
 /// The shell expands `$env:NAME` against the `env` shell variable by default,
 /// collapsing PowerShell references like `Write-Host $env:OMPCODE` to
 /// `:OMPCODE`. The session-level fallback below defines `env=$env` so the

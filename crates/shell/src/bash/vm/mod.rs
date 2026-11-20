@@ -2726,6 +2726,67 @@ impl Shell {
 		pending
 	}
 
+	/// Whether an unresolved pipeline child can still change the cut-short
+	/// verdict: [`Shell::exit_children_pending`] pending is not enough — a
+	/// sibling whose status the answer cannot depend on (a pipefail merge
+	/// already fixed by a non-zero exit, a continuation that runs whatever
+	/// the pipeline reported) must not delay it. Judged on the frozen
+	/// capture by walking it twice with the unresolved children assumed to
+	/// succeed, then to fail: the verdict is settled exactly when the two
+	/// agree. Sound while one frame holds the unresolved children — that
+	/// frame's merged status has exactly the two reachable outcomes the
+	/// probe tries, every other status being decided already. With
+	/// unresolved children in more than one frame the probe stays
+	/// conservative (the settle window is bounded regardless). A backend
+	/// error ends this probe without discarding the capture, like
+	/// [`Shell::exit_children_pending`].
+	pub fn exit_verdict_hinges_on_children(
+		&mut self,
+		store: &mut dyn StateStore,
+		run: RunId,
+	) -> bool {
+		let Some(cut) = self.cut_short_input(run) else {
+			return false;
+		};
+		let mut frames = 0usize;
+		let mut unresolved = false;
+		for (_, vpids) in cut.pending_child_frames() {
+			frames += 1;
+			for vpid in vpids {
+				let Ok(state) = Kernel::read_proc_state(store, vpid) else {
+					return false;
+				};
+				unresolved |= state.and_then(ProcState::exited).is_none();
+			}
+		}
+		if frames == 0 || !unresolved {
+			return false;
+		}
+		if frames > 1 {
+			return true;
+		}
+		let mut settled_verdict: Option<bool> = None;
+		for hypothesis in [0, 1] {
+			let mut read_failed = false;
+			let verdict = cut.walk(|vpid| {
+				let Ok(state) = Kernel::read_proc_state(store, vpid) else {
+					read_failed = true;
+					return None;
+				};
+				// A child not yet ended gets the hypothesis; the rest their
+				// real status.
+				state.and_then(ProcState::exited).or(Some(hypothesis))
+			});
+			if read_failed {
+				return false;
+			}
+			if let Some(first) = settled_verdict.replace(verdict) {
+				return first != verdict;
+			}
+		}
+		unreachable!("both hypotheses always return from the second pass");
+	}
+
 	/// Both delayed probes borrow the same capture so neither consumes it on
 	/// a failed read. Only the owning root run can use it.
 	fn cut_short_input(&self, run: RunId) -> Option<&exec::CutShortInput> {

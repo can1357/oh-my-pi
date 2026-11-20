@@ -1110,6 +1110,18 @@ impl CutShortInput {
 	/// the frames that would merge them (the op at their `pc` is a `Spawn`
 	/// and `pipefail` is on for them), those with no status yet.
 	pub fn pending_children(&self) -> Vec<Vpid> {
+		self
+			.pending_child_frames()
+			.into_iter()
+			.flat_map(|(_, vpids)| vpids)
+			.collect()
+	}
+
+	/// [`CutShortInput::pending_children`] grouped by the frame that would
+	/// merge them, dropping frames with nothing unresolved: one frame's
+	/// unresolved children share a single effective unknown — whether any
+	/// of them failed — which is what a relevance probe can stand in for.
+	pub fn pending_child_frames(&self) -> Vec<(usize, Vec<Vpid>)> {
 		let mut pending = Vec::new();
 		for (index, frame) in self.frames.iter().enumerate() {
 			if !self.options.get(index).is_some_and(|o| o.pipefail) {
@@ -1121,12 +1133,14 @@ impl CutShortInput {
 					.get(frame.pc as usize)
 					.is_some_and(|op| op.code == Opcode::Spawn)
 			{
-				pending.extend(
-					frame
-						.children
-						.iter()
-						.filter_map(|&(vpid, saved)| saved.is_none().then_some(vpid)),
-				);
+				let unresolved: Vec<Vpid> = frame
+					.children
+					.iter()
+					.filter_map(|&(vpid, saved)| saved.is_none().then_some(vpid))
+					.collect();
+				if !unresolved.is_empty() {
+					pending.push((index, unresolved));
+				}
 			}
 		}
 		pending
@@ -6523,12 +6537,26 @@ mod tests {
 						assert_eq!(shell.exit_children_pending(&mut store, run), !fail && pending);
 						assert_eq!(store.failed_reads > 0, fail);
 						assert!(!shell.k.root.has_fault());
+						// The settle window is owed only while the unresolved
+						// sibling can still change the verdict — with `exit 0`
+						// and a conditional suffix it can, so pending hinges;
+						// a resolved sibling never delays the verdict.
+						assert_eq!(
+							shell.exit_verdict_hinges_on_children(&mut store, run),
+							!fail && pending,
+							"hinge probe: {suffix}, {child_status:?}"
+						);
 						if fail {
 							store.reject_child = None;
 							assert_eq!(
 								shell.exit_children_pending(&mut store, run),
 								pending,
 								"pending probe must recover: {suffix}, {child_status:?}"
+							);
+							assert_eq!(
+								shell.exit_verdict_hinges_on_children(&mut store, run),
+								pending,
+								"hinge probe must recover: {suffix}, {child_status:?}"
 							);
 							store.reject_child = Some(*child);
 						}
@@ -6552,6 +6580,33 @@ mod tests {
 					}
 				}
 			}
+		}
+
+		// A pipefail merge already fixed by a non-zero exit cannot be
+		// changed by a still-unresolved sibling: for every suffix shape the
+		// verdict is settled, so the attribution owes no settle window even
+		// while the child is pending — the wait that turned a completed
+		// exit into a caller timeout.
+		for (suffix, cut) in [("", false), ("&& :", false), ("|| :", true), ("; :", true)] {
+			let mut store = Store::default();
+			let mut host = FakeHost::new();
+			let engine = Engine::new(EngineConfig::default());
+			let mut cx = Cx { host: &mut host, store: &mut store };
+			let mut shell = Shell::create(&engine, &mut cx, ShellInit::default()).unwrap();
+			let command =
+				format!("set -o pipefail; shopt -s lastpipe; while :; do :; done | exit 7 {suffix}");
+			let run = shell.submit(Script::command(command.as_bytes()));
+			let status = (0..20).find_map(|_| match shell.step(&mut cx, Budget::default()) {
+				Step::Done { run: done, status } if done == run => Some(status),
+				_ => None,
+			});
+			assert_eq!(status, Some(7), "suffix {suffix:?}");
+			assert!(shell.exit_children_pending(&mut store, run), "sibling still pending: {suffix:?}");
+			assert!(
+				!shell.exit_verdict_hinges_on_children(&mut store, run),
+				"verdict cannot change: {suffix:?}"
+			);
+			assert_eq!(shell.ended_by_exit_cut_short(&mut store, run), cut, "suffix {suffix:?}");
 		}
 	}
 
