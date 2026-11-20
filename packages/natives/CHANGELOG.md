@@ -26,6 +26,7 @@
 - Fixed macOS window reads losing a window once it is minimized: an AX snapshot or query of that exact window ID still reads its tree, marks the root `(minimized)`, and keeps its refs inspection-only until a visible read of the restored window completes; menu reads and commands report `WindowUnavailable` instead of restoring it or using a sibling's menu ([#19825](https://github.com/can1357/oh-my-pi/pull/19825) by [@baekjosh](https://github.com/baekjosh))
 - Fixed Windows window captures and accessibility trees of a fully covered window passing as current: for Chromium-based browsers and Electron apps, which can stop drawing while covered, they now report `covered` ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Windows `computer` `setValue` on a classic text box (Win32 and WinForms, including Windows 10 Notepad) bringing its window in front of yours, so the keys you typed next went into that box ([#19814](https://github.com/can1357/oh-my-pi/pull/19814) by [@will-bogusz](https://github.com/will-bogusz))
+- Applying a binary patch now refuses when the file's current contents are not the version the patch was built from, instead of replacing them ([#19392](https://github.com/can1357/oh-my-pi/pull/19392) by [@eggpeat](https://github.com/eggpeat))
 
 ## [19.0.1] - 2026-11-19
 
