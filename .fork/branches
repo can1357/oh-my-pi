@@ -10,3 +10,4 @@ relay/zys-10234-3ff86e7ac4
 fix/chat-completions-claude-demoted-reasoning
 chore/fork-upstream-compat-fbb8085
 feat/resume-by-title-fbb8085
+feat/composer-draft-stash
