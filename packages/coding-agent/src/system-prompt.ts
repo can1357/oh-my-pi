@@ -1159,7 +1159,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		hasDynamicXdevTools: xdevTools.some(mounted => mounted.dynamic === true),
 		xdevDocs,
 		autoQaEnabled,
-		ovnfs,
+		// The guidance pastes it into shell commands: a path with spaces must stay one word.
+		ovnfs: ovnfs && /\s/.test(ovnfs) ? `"${ovnfs}"` : ovnfs,
 		writeTransportOnly,
 		subagent,
 	};

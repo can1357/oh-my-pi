@@ -58,15 +58,24 @@ const OWN_WORKTREE: &str = "In a worktree of your own (git worktree add <path> [
 
 fn own_checkout_hint(ovnfs: Option<&str>) -> Cow<'static, str> {
 	match ovnfs.map(str::trim).filter(|command| !command.is_empty()) {
-		Some(command) => Cow::Owned(format!(
-			"In an ovnfs checkout of your own ({command} new --name <name>) it runs, and uncommitted \
-			 changes it would discard are saved first. Add --rev <rev> to start at a clean commit or \
-			 branch. Its work comes back with {command} land <name> (its commits onto the branch \
-			 checked out here, files included) or {command} apply <name> (its uncommitted edits). \
-			 Use {command} run --rev HEAD -- <command> for a clean-commit check without touching \
-			 this checkout; --take SRC:PATH mixes in paths from the folder (.), the index (empty \
-			 SRC), or another revision."
-		)),
+		Some(command) => {
+			// The hint is pasted into shell commands: a path with spaces must stay
+			// one word.
+			let command = if command.contains(char::is_whitespace) {
+				Cow::Owned(format!("\"{command}\""))
+			} else {
+				Cow::Borrowed(command)
+			};
+			Cow::Owned(format!(
+				"In an ovnfs checkout of your own ({command} new --name <name>) it runs, and \
+				 uncommitted changes it would discard are saved first. Add --rev <rev> to start at a \
+				 clean commit or branch. Its work comes back with {command} land <name> (its commits \
+				 onto the branch checked out here, files included) or {command} apply <name> (its \
+				 uncommitted edits). Use {command} run --rev HEAD -- <command> for a clean-commit \
+				 check without touching this checkout; --take SRC:PATH mixes in paths from the folder \
+				 (.), the index (empty SRC), or another revision."
+			))
+		},
 		None => Cow::Borrowed(OWN_WORKTREE),
 	}
 }
@@ -1062,6 +1071,13 @@ mod tests {
 		}
 	}
 
+	#[test]
+	fn ovnfs_hint_keeps_a_spaced_command_one_shell_word() {
+		let hint = own_checkout_hint(Some("C:/Program Files/ovnfs/ovnfs.exe"));
+		assert!(hint.contains("(\"C:/Program Files/ovnfs/ovnfs.exe\" new --name <name>)"), "{hint}");
+		let hint = own_checkout_hint(Some("/opt/ovnfs"));
+		assert!(hint.contains("(/opt/ovnfs new --name <name>)"), "{hint}");
+	}
 	#[test]
 	fn reads_arguments_as_git_does() {
 		for (line, expected) in [
