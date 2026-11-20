@@ -30,7 +30,7 @@ use crate::{
 	engine::{FileOp as EngineFileOp, HeaderKind, Resolved, StagedFile},
 	error::{EditError, Rejection},
 	files::FileSource,
-	store::{Clipboard, EditStore, file_hash, payload_hash},
+	store::{Clipboard, EditStore, VanishedLines, file_hash, payload_hash},
 };
 
 const SEEN_LINE_REVEAL_CAP: usize = 40;
@@ -312,22 +312,39 @@ fn token_ratio_bound(a: usize, b: usize) -> f64 {
 	2.0 * a.min(b) as f64 / (a + b) as f64
 }
 
-/// The current file split into lines, tokenized on first use: only an end
-/// without exact evidence pays for the whole-file comparison. One per rescue
-/// call, shared by every row of every replacement group, so the LCS budget
-/// bounds the whole call.
+/// Rival lines for similarity evidence, tokenized.
+struct RivalTokens<'a> {
+	/// Tokens of each current line, by index.
+	current:  Vec<Vec<&'a str>>,
+	/// Tokens of each line an ancestor displayed that the current text lost.
+	vanished: Vec<Vec<&'a str>>,
+	/// Token count over both.
+	total:    usize,
+}
+
+/// The current file split into lines, plus the lines earlier changes removed,
+/// tokenized on first use: only an end without exact evidence pays for the
+/// whole-file comparison. One per rescue call, shared by every row of every
+/// replacement group, so the LCS budget bounds the whole call.
 struct CurrentLines<'a> {
-	lines:  &'a [&'a str],
-	/// Per-line tokens plus their total count.
-	tokens: std::cell::OnceCell<(Vec<Vec<&'a str>>, usize)>,
-	/// LCS cells left for whole-file similarity scans.
-	budget: std::cell::Cell<usize>,
+	lines:    &'a [&'a str],
+	/// Lines ancestors displayed that the current text lost (the tagged
+	/// snapshot's [`VanishedLines`]). A stale payload may have been written
+	/// from one; when they are unknown (an overflowed set) such a line cannot
+	/// be ruled out, so similarity accepts nothing.
+	vanished: Option<&'a BTreeSet<std::sync::Arc<str>>>,
+	tokens:   std::cell::OnceCell<RivalTokens<'a>>,
+	/// LCS cells left for similarity scans.
+	budget:   std::cell::Cell<usize>,
 }
 
 impl<'a> CurrentLines<'a> {
-	const fn new(lines: &'a [&'a str]) -> Self {
+	/// `vanished` is `None` when nothing vanished.
+	fn new(lines: &'a [&'a str], vanished: Option<&'a VanishedLines>) -> Self {
+		static NONE_VANISHED: BTreeSet<std::sync::Arc<str>> = BTreeSet::new();
 		Self {
 			lines,
+			vanished: vanished.map_or(Some(&NONE_VANISHED), VanishedLines::lines),
 			tokens: std::cell::OnceCell::new(),
 			budget: std::cell::Cell::new(SHIFT_RESCUE_SIMILAR_LCS_BUDGET),
 		}
@@ -344,15 +361,21 @@ impl<'a> CurrentLines<'a> {
 		true
 	}
 
-	fn tokens(&self) -> &(Vec<Vec<&'a str>>, usize) {
+	fn tokens(&self) -> &RivalTokens<'a> {
 		self.tokens.get_or_init(|| {
-			let tokens: Vec<Vec<&str>> = self
+			let current: Vec<Vec<&str>> = self
 				.lines
 				.iter()
 				.map(|line| similarity_tokens(line))
 				.collect();
-			let total = tokens.iter().map(Vec::len).sum();
-			(tokens, total)
+			let vanished: Vec<Vec<&str>> = self
+				.vanished
+				.into_iter()
+				.flatten()
+				.map(|line| similarity_tokens(line))
+				.collect();
+			let total = current.iter().chain(&vanished).map(Vec::len).sum();
+			RivalTokens { current, vanished, total }
 		})
 	}
 }
@@ -385,7 +408,9 @@ impl<'a> EndEvidence<'a> {
 	/// modification) and the line is the only one in the file that similar,
 	/// with every other line also scoring clearly lower. Another line at the
 	/// threshold could be the one the row was written from (a stale number
-	/// plus a rename), so it identifies nothing.
+	/// plus a rename), so it identifies nothing; so could a line an earlier
+	/// change removed (a stale number for a deleted line), so ancestor lines
+	/// missing from the current text are rivals too.
 	fn identified_by(&self, row: &str, current: &CurrentLines<'a>) -> bool {
 		if self
 			.exact
@@ -401,20 +426,25 @@ impl<'a> EndEvidence<'a> {
 			return false;
 		}
 		let score = token_ratio(&row, anchor);
-		if score < SHIFT_RESCUE_SIMILAR_MIN_RATIO {
+		if score < SHIFT_RESCUE_SIMILAR_MIN_RATIO || current.vanished.is_none() {
 			return false;
 		}
-		let (lines, total) = current.tokens();
-		if !current.charge(total.saturating_mul(row.len())) {
+		let rival_tokens = current.tokens();
+		if !current.charge(rival_tokens.total.saturating_mul(row.len())) {
 			return false;
 		}
 		let ceiling = score - SHIFT_RESCUE_SIMILAR_MARGIN;
 		let rivals = |ratio: f64| ratio > ceiling || ratio >= SHIFT_RESCUE_SIMILAR_MIN_RATIO;
-		lines.iter().enumerate().all(|(index, other)| {
-			index == self.index
-				|| !rivals(token_ratio_bound(row.len(), other.len()))
+		let beaten = |other: &Vec<&str>| {
+			!rivals(token_ratio_bound(row.len(), other.len()))
 				|| (other.len() <= SHIFT_RESCUE_SIMILAR_MAX_TOKENS && !rivals(token_ratio(&row, other)))
-		})
+		};
+		rival_tokens
+			.current
+			.iter()
+			.enumerate()
+			.all(|(index, other)| index == self.index || beaten(other))
+			&& rival_tokens.vanished.iter().all(beaten)
 	}
 }
 
@@ -455,6 +485,7 @@ fn body_targets(body: &[String], current: &CurrentLines<'_>, first: u32, last: u
 fn rescue_shifted_anchors(
 	section: &PatchSection,
 	moved: Option<&BTreeSet<u32>>,
+	vanished: Option<&VanishedLines>,
 	current_text: &str,
 	unseen: &[u32],
 ) -> Result<Vec<u32>, EditError> {
@@ -463,7 +494,7 @@ fn rescue_shifted_anchors(
 	};
 	let pending: BTreeSet<u32> = unseen.iter().copied().collect();
 	let current_lines: Vec<&str> = current_text.split('\n').collect();
-	let current = CurrentLines::new(&current_lines);
+	let current = CurrentLines::new(&current_lines, vanished);
 	let mut rescued = Vec::new();
 	for group in replace_groups(section)? {
 		let group_unseen: Vec<u32> = group
@@ -574,7 +605,8 @@ fn assert_seen_lines(
 	// their new numbers. When the payload identifies the anchored content, the
 	// model targeted the lines as numbered — accept them instead of forcing a
 	// wasted reveal round-trip.
-	let rescued = rescue_shifted_anchors(section, moved, text, &unseen)?;
+	let rescued =
+		rescue_shifted_anchors(section, moved, snapshot.vanished_lines.as_deref(), text, &unseen)?;
 	if !rescued.is_empty() {
 		let rescued: BTreeSet<u32> = rescued.into_iter().collect();
 		unseen.retain(|line| !rescued.contains(line));
@@ -1126,8 +1158,10 @@ mod tests {
 		lines.iter().map(|line| (*line).to_owned()).collect()
 	}
 
+	/// `body_targets` against `file` with nothing vanished: only current lines
+	/// rival.
 	fn body_targets(body: &[String], file: &[&str], first: u32, last: u32) -> bool {
-		super::body_targets(body, &CurrentLines::new(file), first, last)
+		super::body_targets(body, &CurrentLines::new(file, None), first, last)
 	}
 
 	#[test]
@@ -1206,9 +1240,31 @@ mod tests {
 		let first = body(&["var key = t.FullName + CtxKey;"]);
 		let second = body(&["use super::{format::render, parse};"]);
 		assert!(body_targets(&second, &file, 2, 2), "the second row fits a fresh budget");
-		let shared = CurrentLines::new(&file);
+		let shared = CurrentLines::new(&file, None);
 		assert!(super::body_targets(&first, &shared, 1, 1));
 		assert!(!super::body_targets(&second, &shared, 2, 2), "the first scan spent the budget");
+	}
+
+	#[test]
+	fn similarity_rivals_vanished_lines_and_needs_them_known() {
+		let file = ["let v0001 = 1;", "alpha beta = compute(a,b,c,d);", "let v0003 = 3;"];
+		let row = body(&["alpha delta = compute(a,b,c,d,e);"]);
+		assert!(body_targets(&row, &file, 2, 2), "no rival: line 2 is named");
+		// An earlier change removed a line the row resembles as much; it may be
+		// the deleted line a stale number meant.
+		let mut vanished = VanishedLines::default();
+		vanished.insert("gamma delta = compute(a,b,c,d);");
+		assert!(!super::body_targets(&row, &CurrentLines::new(&file, Some(&vanished)), 2, 2));
+		// Unknown vanished lines (an overflowed set) cannot be ruled out.
+		let mut overflowed = VanishedLines::default();
+		for n in 0..2_000 {
+			overflowed.insert(&format!("{n:0>200}"));
+		}
+		assert!(overflowed.lines().is_none());
+		assert!(!super::body_targets(&row, &CurrentLines::new(&file, Some(&overflowed)), 2, 2));
+		// The exact rule does not depend on them.
+		let exact = body(&["alpha beta = compute(a,b,c,d); // edit"]);
+		assert!(super::body_targets(&exact, &CurrentLines::new(&file, Some(&overflowed)), 2, 2));
 	}
 
 	#[test]
@@ -2042,6 +2098,89 @@ mod lifecycle {
 			.unwrap_err();
 		assert!(err.contains("which an earlier change moved"), "unexpected error: {err}");
 		assert_eq!(ctx.text("rename.ts"), before);
+	}
+
+	/// A stale number for a line an earlier change deleted: old line 10 is cut,
+	/// then two rows are inserted after 5, so line 10 now holds old line 8. A
+	/// replacement written from the deleted old line 10 and anchored at 10
+	/// resembles line 10 with no current rival; the deleted line, kept in a
+	/// retained ancestor version, rivals it, so the edit is rejected.
+	#[tokio::test]
+	async fn stale_number_for_a_deleted_line_stays_rejected() {
+		let ctx = Lifecycle::new("deleted.ts", 20);
+		let text: String = (1..=20)
+			.map(|i| match i {
+				8 => "alpha beta = compute(a,b,c,d);\n".to_owned(),
+				10 => "gamma delta = compute(a,b,c,d);\n".to_owned(),
+				_ => format!("let v{i:04} = {i};\n"),
+			})
+			.collect();
+		ctx.write_text("deleted.ts", &text);
+		let tag0 = ctx.read("deleted.ts", &all_seen(20));
+		ctx.edit(&format!("[deleted.ts#{tag0}]\nCUT 10\n"))
+			.await
+			.unwrap();
+		let tag1 = ctx.head_tag("deleted.ts");
+		ctx.edit(&format!("[deleted.ts#{tag1}]\nPUT >5:\n+// ins a\n+// ins b\n"))
+			.await
+			.unwrap();
+		let tag2 = ctx.head_tag("deleted.ts");
+		assert_eq!(ctx.text("deleted.ts").lines().nth(9), Some("alpha beta = compute(a,b,c,d);"));
+		assert!(!ctx.text("deleted.ts").contains("gamma"));
+		let before = ctx.text("deleted.ts");
+		let err = ctx
+			.edit(&format!("[deleted.ts#{tag2}]\nPUT 10.=10:\n+alpha delta = compute(a,b,c,d,e);\n"))
+			.await
+			.unwrap_err();
+		assert!(err.contains("which an earlier change moved"), "unexpected error: {err}");
+		assert_eq!(ctx.text("deleted.ts"), before);
+	}
+
+	/// The deleted-line case after five further edits: the version that held
+	/// the deleted line is evicted, but the snapshot chain still carries it as
+	/// vanished, so the stale replacement stays rejected.
+	#[tokio::test]
+	async fn stale_number_for_a_deleted_line_stays_rejected_after_eviction() {
+		let ctx = Lifecycle::new("deleted-late.ts", 20);
+		let text: String = (1..=20)
+			.map(|i| match i {
+				8 => "alpha beta = compute(a,b,c,d);\n".to_owned(),
+				10 => "gamma delta = compute(a,b,c,d);\n".to_owned(),
+				_ => format!("let v{i:04} = {i};\n"),
+			})
+			.collect();
+		ctx.write_text("deleted-late.ts", &text);
+		let mut tag = ctx.read("deleted-late.ts", &all_seen(20));
+		ctx.edit(&format!("[deleted-late.ts#{tag}]\nCUT 10\n"))
+			.await
+			.unwrap();
+		tag = ctx.head_tag("deleted-late.ts");
+		for edit in 1..=5 {
+			ctx.edit(&format!("[deleted-late.ts#{tag}]\nPUT >1:\n+// note {edit}\n"))
+				.await
+				.unwrap();
+			tag = ctx.head_tag("deleted-late.ts");
+		}
+		let versions = ctx.store.versions(&ctx.canonical("deleted-late.ts"));
+		assert!(
+			versions
+				.iter()
+				.all(|version| !version.text.contains("gamma")),
+			"every version holding the deleted line is evicted"
+		);
+		assert_eq!(
+			ctx.text("deleted-late.ts").lines().nth(12),
+			Some("alpha beta = compute(a,b,c,d);")
+		);
+		let before = ctx.text("deleted-late.ts");
+		let err = ctx
+			.edit(&format!(
+				"[deleted-late.ts#{tag}]\nPUT 13.=13:\n+alpha delta = compute(a,b,c,d,e);\n"
+			))
+			.await
+			.unwrap_err();
+		assert!(err.contains("which an earlier change moved"), "unexpected error: {err}");
+		assert_eq!(ctx.text("deleted-late.ts"), before);
 	}
 
 	/// Rows that differ in a single token score within the margin of each

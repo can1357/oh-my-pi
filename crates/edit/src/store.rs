@@ -39,21 +39,81 @@ const CARRY_MAX_EDITS: usize = 1024;
 #[derive(Debug, Clone)]
 pub struct Snapshot {
 	/// Canonical path this version belongs to.
-	pub path:        PathBuf,
+	pub path:           PathBuf,
 	/// Full LF-normalized, BOM-stripped text.
-	pub text:        Arc<str>,
+	pub text:           Arc<str>,
 	/// Four-character content tag.
-	pub hash:        String,
+	pub hash:           String,
 	/// Lines displayed from this version, when provenance was recorded. Shared
 	/// so lookups hand out snapshots without copying a set that holds one entry
 	/// per displayed line.
-	pub seen_lines:  Option<Arc<BTreeSet<u32>>>,
+	pub seen_lines:     Option<Arc<BTreeSet<u32>>>,
 	/// Lines whose content an ancestor version displayed at a different number:
 	/// an edit or outside change shifted them. The model saw the content but
 	/// not these numbers, so they are not seen; the guard accepts an anchor on
 	/// one only when the payload identifies the line. Held on the snapshot so
 	/// it outlives the version cap. `None` when no line moved.
-	pub moved_lines: Option<Arc<BTreeSet<u32>>>,
+	pub moved_lines:    Option<Arc<BTreeSet<u32>>>,
+	/// Lines ancestors displayed (or held as moved) that this text no longer
+	/// contains: a stale payload may have been written from one. Every version
+	/// change carried from a parent computes it; `None` when nothing vanished.
+	pub vanished_lines: Option<Arc<VanishedLines>>,
+}
+
+/// Estimated bytes of vanished-line text one snapshot keeps; past it the set
+/// overflows and stops naming its lines.
+const VANISHED_LINES_MAX_BYTES: usize = 256 * 1024;
+
+/// Distinct trimmed lines that ancestors of a version displayed and the
+/// version no longer contains, accumulated across version changes.
+#[derive(Debug, Clone, Default)]
+pub struct VanishedLines {
+	lines:      BTreeSet<Arc<str>>,
+	/// Estimated bytes `lines` holds.
+	bytes:      usize,
+	/// Lines were dropped (past [`VANISHED_LINES_MAX_BYTES`], or an ancestry
+	/// the store no longer holds): the set cannot rule a line out.
+	overflowed: bool,
+}
+
+impl VanishedLines {
+	/// Every vanished line, or `None` when some may be missing.
+	pub fn lines(&self) -> Option<&BTreeSet<Arc<str>>> {
+		(!self.overflowed).then_some(&self.lines)
+	}
+
+	/// Add one trimmed line, overflowing past the byte cap.
+	pub(crate) fn insert(&mut self, line: &str) {
+		if self.overflowed || line.is_empty() || self.lines.contains(line) {
+			return;
+		}
+		let cost = line.len() + 4 * size_of::<usize>();
+		if self.bytes + cost > VANISHED_LINES_MAX_BYTES {
+			self.overflow();
+			return;
+		}
+		self.bytes += cost;
+		self.lines.insert(Arc::from(line));
+	}
+
+	fn overflow(&mut self) {
+		self.overflowed = true;
+		self.lines = BTreeSet::new();
+		self.bytes = 0;
+	}
+
+	fn union(&mut self, other: &Self) {
+		if other.overflowed {
+			self.overflow();
+		}
+		for line in &other.lines {
+			self.insert(line);
+		}
+	}
+
+	const fn retained_bytes(&self) -> usize {
+		2 * size_of::<usize>() + size_of::<Self>() + self.bytes
+	}
 }
 
 /// Clipboard registers threaded through one patch application.
@@ -169,6 +229,10 @@ impl StoredSnapshot {
 			+ text_bytes
 			+ line_set_bytes(snapshot.seen_lines.as_ref())
 			+ line_set_bytes(snapshot.moved_lines.as_ref())
+			+ snapshot
+				.vanished_lines
+				.as_ref()
+				.map_or(0, |vanished| vanished.retained_bytes())
 			+ self.carried.capacity() * size_of::<u32>()
 	}
 }
@@ -293,7 +357,7 @@ impl EditStore {
 	) -> String {
 		let hash = file_hash(text);
 		// Diffed outside the lock: the version change may span a large file.
-		let Carry { seen: carried, moved } = self.carried_from_parent(path, text, parent);
+		let Carry { seen: carried, moved, vanished } = self.carried_from_parent(path, text, parent);
 		let mut state = self.inner.lock();
 		state.clock = state.clock.wrapping_add(1);
 		let touched = state.clock;
@@ -317,11 +381,12 @@ impl EditStore {
 		} else if max_versions > 0 {
 			history.versions.insert(0, StoredSnapshot {
 				snapshot: Snapshot {
-					path:        path.to_owned(),
-					text:        Arc::from(text),
-					hash:        hash.clone(),
-					seen_lines:  None,
-					moved_lines: None,
+					path:           path.to_owned(),
+					text:           Arc::from(text),
+					hash:           hash.clone(),
+					seen_lines:     None,
+					moved_lines:    None,
+					vanished_lines: None,
 				},
 				carried:  Vec::new(),
 			});
@@ -339,6 +404,7 @@ impl EditStore {
 				carry_into(stored, carried);
 			}
 			merge_moved(stored, moved);
+			merge_vanished(stored, vanished);
 		}
 		let current_bytes = history.retained_bytes(path_bytes);
 		state.retained_bytes = state.retained_bytes - previous_bytes + current_bytes;
@@ -349,9 +415,9 @@ impl EditStore {
 	/// Lines of the parent version (`parent`, else the current version) that
 	/// `text` keeps at the same number with the same content, filtered by what
 	/// the parent displayed, plus the parent's displayed or moved lines `text`
-	/// keeps at another number.
+	/// keeps at another number, and the lines the change left vanished.
 	fn carried_from_parent(&self, path: &Path, text: &str, parent: Option<&str>) -> Carry {
-		let (head, parent_seen, parent_moved) = {
+		let (head, parent_seen, parent_moved, parent_vanished) = {
 			let state = self.inner.lock();
 			let versions = state
 				.histories
@@ -366,6 +432,7 @@ impl EditStore {
 						None,
 						version.and_then(|version| version.snapshot.seen_lines.clone()),
 						version.and_then(|version| version.snapshot.moved_lines.clone()),
+						version.map(|version| version.snapshot.vanished_lines.clone()),
 					)
 				},
 				None => match versions.first() {
@@ -373,6 +440,7 @@ impl EditStore {
 						Some(version.snapshot.text.clone()),
 						version.snapshot.seen_lines.clone(),
 						version.snapshot.moved_lines.clone(),
+						Some(version.snapshot.vanished_lines.clone()),
 					),
 					None => return Carry::default(),
 				},
@@ -384,7 +452,17 @@ impl EditStore {
 		if parent == text {
 			return Carry::default();
 		}
-		carried_seen_lines(parent, text, parent_seen.as_deref(), parent_moved.as_deref())
+		let mut carry =
+			carried_seen_lines(parent, text, parent_seen.as_deref(), parent_moved.as_deref());
+		carry.vanished = Some(vanished_lines(
+			parent,
+			text,
+			parent_seen.as_deref(),
+			parent_moved.as_deref(),
+			parent_vanished.is_some(),
+			parent_vanished.flatten().as_deref(),
+		));
+		carry
 	}
 
 	/// Read, normalize, and record a file if it is readable and at most 4 MiB.
@@ -627,6 +705,19 @@ fn merge_moved(stored: &mut StoredSnapshot, moved: Vec<u32>) {
 	Arc::make_mut(stored.snapshot.moved_lines.get_or_insert_default()).extend(moved);
 }
 
+/// Union lines a change left vanished into a version.
+fn merge_vanished(stored: &mut StoredSnapshot, vanished: Option<VanishedLines>) {
+	let Some(vanished) =
+		vanished.filter(|vanished| vanished.overflowed || !vanished.lines.is_empty())
+	else {
+		return;
+	};
+	match stored.snapshot.vanished_lines.as_mut() {
+		Some(existing) => Arc::make_mut(existing).union(&vanished),
+		None => stored.snapshot.vanished_lines = Some(Arc::new(vanished)),
+	}
+}
+
 /// Credit a version with lines carried from the version it replaced: into a
 /// restricted seen set directly, held back on a version with no provenance
 /// yet, dropped on authored content (an empty set), which stays unrestricted.
@@ -650,10 +741,55 @@ fn carry_into(stored: &mut StoredSnapshot, carried: Vec<u32>) {
 struct Carry {
 	/// Child lines the parent displayed at the same number with the same
 	/// content.
-	seen:  Vec<u32>,
+	seen:     Vec<u32>,
 	/// Child lines whose content the parent displayed, or itself held as moved,
 	/// at another number — or holds as moved at this number.
-	moved: Vec<u32>,
+	moved:    Vec<u32>,
+	/// Lines the child no longer holds that an ancestor displayed; `None` when
+	/// nothing was carried.
+	vanished: Option<VanishedLines>,
+}
+
+/// Lines `child` no longer holds that the parent, or an ancestor before it,
+/// displayed: the parent's vanished lines plus its displayed or moved lines
+/// (every line, when unrestricted), minus every line `child` holds.
+/// A parent version the store no longer retains has unknown ancestry: the
+/// result overflows.
+fn vanished_lines(
+	parent: &str,
+	child: &str,
+	seen: Option<&BTreeSet<u32>>,
+	moved: Option<&BTreeSet<u32>>,
+	parent_retained: bool,
+	parent_vanished: Option<&VanishedLines>,
+) -> VanishedLines {
+	let mut vanished = VanishedLines::default();
+	if !parent_retained {
+		vanished.overflow();
+		return vanished;
+	}
+	let present: std::collections::HashSet<&str> = child.split('\n').map(str::trim).collect();
+	if let Some(parent_vanished) = parent_vanished {
+		if parent_vanished.overflowed {
+			vanished.overflow();
+			return vanished;
+		}
+		for line in &parent_vanished.lines {
+			if !present.contains(&**line) {
+				vanished.insert(line);
+			}
+		}
+	}
+	let seen = seen.filter(|seen| !seen.is_empty());
+	for (line, content) in (1_u32..).zip(parent.split('\n')) {
+		let displayed = seen.is_none_or(|seen| seen.contains(&line))
+			|| moved.is_some_and(|moved| moved.contains(&line));
+		let content = content.trim();
+		if displayed && !present.contains(content) {
+			vanished.insert(content);
+		}
+	}
+	vanished
 }
 
 /// Parent lines that keep both their number and content in `child`: every
@@ -1030,6 +1166,74 @@ mod tests {
 		assert!(!moved.contains(&2), "inserted lines were never displayed");
 	}
 
+	/// `None` when overflowed; empty when nothing vanished.
+	fn vanished(store: &EditStore, path: &Path) -> Option<Vec<String>> {
+		let snapshot = store.head(path).unwrap();
+		let Some(vanished) = snapshot.vanished_lines else {
+			return Some(Vec::new());
+		};
+		let lines = vanished.lines()?;
+		Some(lines.iter().map(|line| line.to_string()).collect())
+	}
+
+	/// Retained bytes of a vanished set holding lines of these lengths.
+	fn vanished_bytes(lines: &[usize]) -> usize {
+		2 * size_of::<usize>()
+			+ size_of::<VanishedLines>()
+			+ lines
+				.iter()
+				.map(|len| len + 4 * size_of::<usize>())
+				.sum::<usize>()
+	}
+
+	#[test]
+	fn vanished_lines_chain_across_edits_and_eviction() {
+		let store = EditStore::new();
+		let path = Path::new("f.txt");
+		let read = lines(30, |_| None);
+		store.record(path, &read, Some(&(1..=20).collect::<Vec<_>>()));
+		assert_eq!(vanished(&store, path), Some(vec![]), "a first read carries nothing");
+		// Line 10 was displayed, line 25 was not.
+		let first = lines(30, |n| match n {
+			10 => Some("line TEN".into()),
+			25 => Some("line 25!".into()),
+			_ => None,
+		});
+		store.record_edit(path, &read, &first);
+		assert_eq!(vanished(&store, path), Some(vec!["line 10".to_owned()]));
+		let mut text = first;
+		for edit in 1..=5 {
+			let next = text.replacen("line 1\n", &format!("line 1\nnew {edit}\n"), 1);
+			store.record_edit(path, &text, &next);
+			text = next;
+		}
+		assert!(store.by_content(path, &read).is_none(), "the read is evicted");
+		assert_eq!(vanished(&store, path), Some(vec!["line 10".to_owned()]));
+		// A line that comes back is no longer vanished; `line TEN` was never
+		// displayed, so its removal adds nothing.
+		let restored = text.replacen("line TEN", "line 10", 1);
+		store.record_edit(path, &text, &restored);
+		assert_eq!(vanished(&store, path), Some(vec![]));
+	}
+
+	#[test]
+	fn vanished_lines_overflow_past_the_cap_or_an_unknown_parent() {
+		let store = EditStore::new();
+		let path = Path::new("f.txt");
+		let wide = |n: u32| format!("{n:0>300}");
+		let count = (VANISHED_LINES_MAX_BYTES / 300 + 10) as u32;
+		let read = lines(count, |n| Some(wide(n)));
+		store.record(path, &read, Some(&(1..=count).collect::<Vec<_>>()));
+		store.record_edit(path, &read, "rewritten");
+		assert_eq!(vanished(&store, path), None, "past the cap");
+		store.record_edit(path, "rewritten", "rewritten again");
+		assert_eq!(vanished(&store, path), None, "overflow chains");
+
+		let store = EditStore::new();
+		store.record_edit(path, "never recorded", "after");
+		assert_eq!(vanished(&store, path), None, "unknown ancestry");
+	}
+
 	#[test]
 	fn rewrite_past_the_diff_bound_moves_a_shifted_tail() {
 		let store = EditStore::new();
@@ -1147,8 +1351,11 @@ mod tests {
 
 	#[test]
 	fn unicode_budget_survives_promotion_and_version_truncation() {
-		// 64-bit: a + b = 6_000 text + 125 metadata + 8 slots; c adds 1_310 B.
-		let store = EditStore::with_limits(10, 2, 6_125 + 8 * size_of::<StoredSnapshot>());
+		// 64-bit: a + b = 6_000 text + 125 metadata + 8 slots, plus a's vanished
+		// lines (the replacement lost the 2_000 B emoji and 1_000 B accented
+		// lines, the promoted emoji version the accented one); c adds 1_310 B.
+		let vanished = vanished_bytes(&[2_000, 1_000]) + vanished_bytes(&[1_000]);
+		let store = EditStore::with_limits(10, 2, 6_125 + 8 * size_of::<StoredSnapshot>() + vanished);
 		let a = Path::new("a");
 		let b = Path::new("b");
 		let emoji = "😀".repeat(500);
@@ -1192,15 +1399,20 @@ mod tests {
 	fn relocation_releases_duplicate_and_truncated_versions() {
 		// 64-bit: initially 8_632 data + 12 slots, 504 B less two slots under the
 		// limit. Relocation leaves `to` two slots, so after the filler
-		// 9_112 data + 10 slots sit 24 B under it.
-		let store = EditStore::with_limits(10, 2, 9_136 + 10 * size_of::<StoredSnapshot>());
+		// 9_112 data + 10 slots sit 24 B under it. Both counts include the
+		// accented version's vanished emoji line; `to`'s emoji version displays
+		// no line, so `abc` loses none and only adds that one-line seen set,
+		// which relocation drops with the duplicate.
+		let vanished = vanished_bytes(&[2_000]);
+		let store =
+			EditStore::with_limits(10, 2, 9_136 + 10 * size_of::<StoredSnapshot>() + vanished);
 		let from = Path::new("from");
 		let to = Path::new("to");
 		let emoji = "😀".repeat(500);
 		let accented = "é".repeat(500);
 		store.record(from, &emoji, None);
 		store.record(from, &accented, None);
-		store.record(to, &emoji, None);
+		store.record(to, &emoji, Some(&[2]));
 		store.record(to, &"abc".repeat(500), None);
 		store.record(Path::new("other"), &"wxyz".repeat(500), None);
 		store.relocate(from, to);
