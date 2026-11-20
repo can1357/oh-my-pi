@@ -1,6 +1,6 @@
-# 0071. `/wt` may clone ignored cache directories into new worktrees; subagent isolation is unchanged; ovnfs is not adopted
+# 0071. `/wt` does not clone ignored cache directories; subagent isolation is unchanged; ovnfs is not adopted
 
-Status: Proposed 2026-11-14; machine-reviewed (EGM, 3 rounds), not owner-approved
+Status: Withdrawn 2026-11-19 (class b, owner ruling on O1); proposed 2026-11-14, machine-reviewed (EGM, 3 rounds)
 Date: 2026-11-13 (revised 2026-11-14 after three EGM rounds)
 Area: runtime
 
@@ -124,6 +124,13 @@ Two slices. S0 is a measurement with no code; S1 is one PR. No slice adds a jour
 - Acceptance: with the convar off, `/wt`, its notice and forge checkout are unchanged. With it on, on APFS, the new worktree holds the source's ignored `node_modules/` and signed `target/`, no unlisted ignored directory, no ignored `.env`, no directory holding `pyvenv.cfg` or `CMakeCache.txt`, and no carried directory with an absolute link into the source; the notice matches the D2 table. Off macOS, `/wt` succeeds as today with the "cannot clone" sentence. `just test-pkg omp-core`, `omp-envd`, `omp-app` and `omp-chat` and `just e2e-p9` pass; both lint jobs are clean; no lintx baseline rises.
 - Gate: `sv_worktree_clone`, default off. Preconditions: S0 met; O1 not answered "yes".
 
+> **Withdrawn by the owner, 2026-11-19.** O1 was answered **yes**: ADR 0007's
+> "no gitignored path is safe to copy" does cover user-initiated worktrees, so no
+> gitignored path is copied. The gate above requires "O1 not answered yes", so S0 and
+> S1 are not built and this record is class b. `omp_core::cow` (D3) is not built;
+> O2 and O14 are moot. O15 is discarded: omp2 has no JS extension surface
+> (`extensions/` is Python, ADR 0036).
+
 ## Upstream origin and license
 
 No upstream code is drawn on. The behaviour comes from `upstream:packages/coding-agent/src/task/settings.ts:83-94` and the prune rule from `upstream:crates/pi-vcs/src/git/mutate.rs:1842-1872`, both reimplemented; the clone FFI is omp2's own, moved from `omp-envd`; the cache names and the tag rule are conventions listed in ovnfs's documentation (`ovnfs@c43f05a:docs/configuration.md:77`, `:102`; MIT, `ovnfs@c43f05a:LICENSE:1-3`). No NOTICE or `THIRD-PARTY-NOTICES.txt` entry is needed.
@@ -139,7 +146,7 @@ No upstream code is drawn on. The behaviour comes from `upstream:packages/coding
 
 ## Open questions for the owner
 
-- **O1. Open.** Does ADR 0007's "no gitignored path is safe to copy" (`docs/adr/0007-subagent-filesystem-isolation.md:93`) cover user-initiated worktrees? Default taken: no, because ADR 0007 decides subagent views (`:1`, `:26`). Under the gap-closure brief's no-owner rule (`docs/research/upstream-gap-closure-brief.md:88-96`, not yet on `omp2`), S1 may proceed behind its default-off convar; a "yes" withdraws S1 and makes part (a) class b.
+- **O1. Answered yes, 2026-11-19 (owner).** ADR 0007's "no gitignored path is safe to copy" (`docs/adr/0007-subagent-filesystem-isolation.md:93`) does cover user-initiated worktrees: no gitignored path is copied. Per :86 this withdraws part (a) and makes this record class b.
 - **O2.** Default of `sv_worktree_clone`. Upstream defaults its broader setting on (`upstream:packages/coding-agent/src/task/settings.ts:86`); a v1 user loses carried caches after import. Recommendation: keep it off; flipping it needs its own record after S0 and a release.
 - **O4.** The isolated view omits symlinks and empty directories (`crates/envd/src/workspace/operations.rs:709-727`, `:1053`), read, not exercised. Recommendation: file it against ADR 0007 with a failing test; a fix changes the manifest (`MANIFEST_MAGIC`, `:52`).
 - **O6.** Who owns `scheme://` paths inside shell commands (`upstream:packages/coding-agent/src/internal-urls/url-filesystem.ts:1-14`)? ADR 0054 declined `pi-vfs` (`docs/adr/0054-shell-builtins.md:51`) without naming one.
