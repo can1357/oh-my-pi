@@ -730,7 +730,7 @@ describe("AgentLifecycleManager", () => {
 		try {
 			await expect(waiter).rejects.toThrow(/changed while waiting/);
 			await disposing.promise;
-			await expect(lifecycle.ensureLive(id)).rejects.toThrow(/still shutting down/);
+			await expect(lifecycle.ensureLive(id)).rejects.toThrow(/being removed and cannot be revived/);
 		} finally {
 			finish.resolve();
 			await Promise.all([parking, removing]);

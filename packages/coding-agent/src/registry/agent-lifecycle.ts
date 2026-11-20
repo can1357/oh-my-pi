@@ -131,6 +131,12 @@ interface ReopeningAgent {
 	promise: Promise<AgentRef>;
 }
 
+/** In-flight releases of one ref, split so ensureLive can tell a kill (retryable) from a removal. */
+interface ReleaseFence {
+	kills: number;
+	removals: number;
+}
+
 /** How {@link AgentLifecycleApi.release} ends an agent. */
 export interface AgentReleaseOptions {
 	/** Explicit kill: keep a terminal `aborted` row and persist the kill marker. */
@@ -229,7 +235,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 	/** In-flight reopens of killed refs, bound to the killed ref, so concurrent {@link ensureLive} calls coalesce. */
 	readonly #reopens = new Map<string, ReopeningAgent>();
 	/** Releases can overlap; keep the exact ref fenced until the last one finishes. */
-	readonly #releasing = new WeakMap<AgentRef, number>();
+	readonly #releasing = new WeakMap<AgentRef, ReleaseFence>();
 	#unsubscribe: (() => void) | undefined;
 	#persistedReviverFactory: PersistedSubagentReviverFactory | undefined;
 	/** Resolves the TTL applied when a cold-revived ref is adopted on demand (read per revive). */
@@ -464,7 +470,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 	 *
 	 * Throws a plain Error when:
 	 * - the id is unknown;
-	 * - the ref is being released (killed or removed) — retry once it has stopped;
+	 * - the ref is being killed (retry once it has stopped) or removed;
 	 * - the ref was replaced, released, or killed while its park was in flight;
 	 * - the ref was replaced while its killed transcript was being reopened;
 	 * - its transcript cannot be revived (no reviver, no session contract, workspace gone).
@@ -476,8 +482,13 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				`Unknown agent "${id}" — it was never registered or has been released. If a transcript exists, read history://${id}.`,
 			);
 		}
-		if (this.#releasing.has(ref)) {
-			throw new Error(`Agent "${id}" is still shutting down; retry once it has stopped.`);
+		const fence = this.#releasing.get(ref);
+		if (fence) {
+			throw new Error(
+				fence.removals > 0
+					? `Agent "${id}" is being removed and cannot be revived. If a transcript exists, read history://${id}.`
+					: `Agent "${id}" is still shutting down after its kill; retry once it has stopped.`,
+			);
 		}
 		const park = this.#parks.get(id);
 		if (park?.ref === ref) {
@@ -486,7 +497,8 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			// (or cold-revive) a newer owner of the id after the await.
 			const kept = ref.session && !park.detached && park.cancel();
 			await park.promise;
-			// Release can be waiting on this same park, before it marks or unregisters the ref.
+			// Release can be waiting on this same park, before it marks or unregisters the ref;
+			// other owners (task executor, vibe runtime) mark a turn aborted without release.
 			const becameAborted = !wasKilled && ref.status === "aborted";
 			if (this.#registry.get(id) !== ref || this.#releasing.has(ref) || becameAborted) {
 				throw new Error(`Agent "${id}" changed while waiting for its session to park.`);
@@ -651,14 +663,19 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 
 		// Fence this generation before the first await: a waiter that joined the same
 		// park resumes before the ref is marked aborted or unregistered.
-		this.#releasing.set(ref, (this.#releasing.get(ref) ?? 0) + 1);
+		const kind = options?.tombstone ? "kills" : "removals";
+		let fence = this.#releasing.get(ref);
+		if (!fence) {
+			fence = { kills: 0, removals: 0 };
+			this.#releasing.set(ref, fence);
+		}
+		fence[kind]++;
 		try {
 			await this.#releaseRef(id, ref, adopted, options);
 			return true;
 		} finally {
-			const remaining = this.#releasing.get(ref)! - 1;
-			if (remaining === 0) this.#releasing.delete(ref);
-			else this.#releasing.set(ref, remaining);
+			fence[kind]--;
+			if (fence.kills + fence.removals === 0) this.#releasing.delete(ref);
 		}
 	}
 
