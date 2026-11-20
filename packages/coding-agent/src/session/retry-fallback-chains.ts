@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { AuthCredential, Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../config/model-registry";
 import { cfgModelRoles } from "../config/model-settings";
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
@@ -65,6 +65,13 @@ export interface ActiveRetryFallbackState {
 	 * model, so no observer may report the run as having used it.
 	 */
 	served?: boolean;
+	/**
+	 * Set when a usage limit on this session's credentials of one type started
+	 * the fallback: the primary's provider and that type. The revert ends the
+	 * fallback once a credential of that type in this session's pool can serve
+	 * the primary again.
+	 */
+	usageLimit?: { provider: string; credentialType: AuthCredential["type"] };
 }
 
 /** Model a session's produced work is attributed to. */

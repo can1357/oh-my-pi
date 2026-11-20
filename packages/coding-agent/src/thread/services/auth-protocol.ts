@@ -257,6 +257,10 @@ export type AuthStorageProtocol = {
 		[provider: string, sessionId: string | undefined, options?: MarkUsageLimitOptions],
 		UsageLimitMarkResult
 	>;
+	"limits.hasAvailableCredential": RpcMethod<
+		[provider: string, sessionId: string | undefined, credentialType: AuthCredential["type"], modelId?: string],
+		boolean
+	>;
 	"limits.rotate": RpcMethod<
 		[provider: string, sessionId: string | undefined, options?: RotateCredentialOptions],
 		CredentialRotation

@@ -11,6 +11,7 @@ import type {
 	AssistantMessage,
 	AssistantRetryRecovery,
 	AssistantRetryRecoveryKind,
+	AuthCredential,
 	CodexCompactionContext,
 	Effort,
 	Model,
@@ -394,6 +395,8 @@ type UsageLimitOutcome = {
 	priorBlockedUntilMs: number | undefined;
 	priorBlockedUntilTimed: boolean | undefined;
 	reportResetAtMs: number | undefined;
+	/** Type of the credential the limit was marked on, when one resolved. */
+	credentialType: AuthCredential["type"] | undefined;
 };
 
 /** Request-time provider for the main Agent; not serialized into session history. */
@@ -908,6 +911,7 @@ export class TurnRecovery {
 						priorBlockedUntilMs: outcome.priorBlockedUntilMs,
 						priorBlockedUntilTimed: outcome.priorBlockedUntilTimed,
 						reportResetAtMs: outcome.reportResetAtMs,
+						credentialType: outcome.credentialType,
 					};
 				} catch (error) {
 					if (!bookkeepingTimeout.aborted) throw error;
@@ -919,6 +923,7 @@ export class TurnRecovery {
 						priorBlockedUntilMs: undefined,
 						priorBlockedUntilTimed: undefined,
 						reportResetAtMs: undefined,
+						credentialType: undefined,
 					};
 				}
 			})();
@@ -1990,6 +1995,37 @@ export class TurnRecovery {
 	}
 
 	/**
+	 * Whether the primary's cooldown still holds for this session. When this
+	 * session left the primary because its accounts of one credential type hit
+	 * their usage limit, the cooldown no longer holds once a credential of that
+	 * type that this session may use can serve the primary again (a sibling
+	 * account healed or its window reset). The type is this session's own
+	 * record, not the shared cooldown's, and the shared cooldown is never
+	 * cleared: other sessions each check their own account pool. A failed
+	 * check keeps the cooldown.
+	 */
+	async #retryFallbackPrimaryStillSuppressed(selector: RetryFallbackSelector): Promise<boolean> {
+		const registry = this.#host.modelRegistry;
+		if (!registry.isSelectorSuppressed(selector.raw)) return false;
+		const usageLimit = this.#activeRetryFallback?.usageLimit;
+		if (!usageLimit || usageLimit.provider !== selector.provider) return true;
+		try {
+			return !(await registry.authStorage.limits.hasAvailableCredential(
+				usageLimit.provider,
+				this.#host.sessionId(),
+				usageLimit.credentialType,
+				selector.id,
+			));
+		} catch (error) {
+			logger.debug("retry fallback: credential availability check failed; keeping the cooldown", {
+				provider: usageLimit.provider,
+				error: String(error),
+			});
+			return true;
+		}
+	}
+
+	/**
 	 * Map the failing model selector to the chain key that owns it, by
 	 * specificity: an exact model-selector key, then a `provider/*` wildcard,
 	 * then a model role whose current assignment matches, then `default`.
@@ -2705,12 +2741,12 @@ export class TurnRecovery {
 		if (!currentModel) return false;
 		const currentSelector = formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel());
 		if (currentSelector === originalSelector.raw) {
-			if (!this.isRetryFallbackSelectorSuppressed(originalSelector)) {
+			if (!(await this.#retryFallbackPrimaryStillSuppressed(originalSelector))) {
 				this.clearActiveRetryFallback();
 			}
 			return false;
 		}
-		if (this.isRetryFallbackSelectorSuppressed(originalSelector)) return false;
+		if (await this.#retryFallbackPrimaryStillSuppressed(originalSelector)) return false;
 
 		const resolvedPrimary = resolveModelOverride(
 			[originalSelector.raw],
@@ -3233,6 +3269,24 @@ export class TurnRecovery {
 								: delayMs,
 						),
 				});
+				// A fallback this usage limit started remembers which of this
+				// session's credentials ran out, so its revert can end it once
+				// one of that type recovers (#retryFallbackPrimaryStillSuppressed).
+				const limitedCredentialType = AIError.is(id, AIError.Flag.UsageLimit)
+					? recordedUsageLimitOutcome?.credentialType
+					: undefined;
+				if (
+					switchedModel &&
+					currentModel !== undefined &&
+					limitedCredentialType !== undefined &&
+					this.#activeRetryFallback?.originalSelector === currentSelector &&
+					this.#activeRetryFallback.usageLimit === undefined
+				) {
+					this.#activeRetryFallback.usageLimit = {
+						provider: currentModel.provider,
+						credentialType: limitedCredentialType,
+					};
+				}
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
 			// of the role-fallback setting: it's intrinsic to the Fast contract (speed
