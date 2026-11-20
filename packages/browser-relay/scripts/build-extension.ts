@@ -15,10 +15,7 @@ const root = path.resolve(import.meta.dir, "..");
 const source = path.join(root, "extension");
 const dist = path.join(root, "dist");
 const distExtension = path.join(dist, "extension");
-const assetsDir = path.resolve(
-	root,
-	"../coding-agent/src/tools/browser/relay/extension-assets",
-);
+const assetsDir = path.resolve(root, "../coding-agent/src/tools/browser/relay/extension-assets");
 
 await fs.rm(dist, { recursive: true, force: true });
 await fs.mkdir(distExtension, { recursive: true });
@@ -38,51 +35,26 @@ const staticFiles = [
 	...new Bun.Glob("icons/*.png").scanSync({ cwd: source }),
 ];
 await Promise.all([
-	...staticFiles.map((name) =>
-		Bun.write(
-			path.join(distExtension, name),
-			Bun.file(path.join(source, name)),
-		),
-	),
-	Bun.write(
-		path.join(distExtension, "LICENSE"),
-		Bun.file(path.resolve(root, "../../LICENSE")),
-	),
+	...staticFiles.map(name => Bun.write(path.join(distExtension, name), Bun.file(path.join(source, name)))),
+	Bun.write(path.join(distExtension, "LICENSE"), Bun.file(path.resolve(root, "../../LICENSE"))),
 ]);
-for (const name of [
-	"panel.css",
-	"icons/omp-16.png",
-	"icons/omp-32.png",
-	"icons/omp-48.png",
-	"icons/omp-128.png",
-]) {
-	if (!(await Bun.file(path.join(distExtension, name)).exists()))
-		throw new Error(`Missing extension file: ${name}`);
+for (const name of ["panel.css", "icons/omp-16.png", "icons/omp-32.png", "icons/omp-48.png", "icons/omp-128.png"]) {
+	if (!(await Bun.file(path.join(distExtension, name)).exists())) throw new Error(`Missing extension file: ${name}`);
 }
 
 const manifest = path.join(distExtension, "manifest.json");
 const background = path.join(distExtension, "background.js");
 const unstampedManifest = await Bun.file(manifest).text();
 const unstampedScript = await Bun.file(background).text();
-const { version: ompVersion } = await Bun.file(
-	path.join(root, "../coding-agent/package.json"),
-).json();
-const names = [
-	...new Bun.Glob("**/*").scanSync({ cwd: distExtension, dot: true }),
-]
-	.map((name) => name.replaceAll(path.sep, "/"))
+const { version: ompVersion } = await Bun.file(path.join(root, "../coding-agent/package.json")).json();
+const names = [...new Bun.Glob("**/*").scanSync({ cwd: distExtension, dot: true })]
+	.map(name => name.replaceAll(path.sep, "/"))
 	.sort();
 const build = await buildId(names);
 // Only the release ZIP is pre-stamped. CLI installs stamp their own version with this build.
 await Promise.all([
-	Bun.write(
-		manifest,
-		stampRelayExtensionManifest(unstampedManifest, ompVersion),
-	),
-	Bun.write(
-		background,
-		stampRelayExtensionScript(unstampedScript, ompVersion, build),
-	),
+	Bun.write(manifest, stampRelayExtensionManifest(unstampedManifest, ompVersion)),
+	Bun.write(background, stampRelayExtensionScript(unstampedScript, ompVersion, build)),
 ]);
 const zipPath = path.join(dist, "omp-browser-relay-extension.zip");
 await $`zip -qr ${zipPath} .`.cwd(distExtension);
@@ -92,8 +64,7 @@ const imports: string[] = [];
 const entries: string[] = [];
 for (const [index, name] of names.entries()) {
 	const file = Bun.file(path.join(distExtension, name));
-	const isText =
-		name === "LICENSE" || /\.(?:css|html|js|json|map|svg|txt)$/.test(name);
+	const isText = name === "LICENSE" || /\.(?:css|html|js|json|map|svg|txt)$/.test(name);
 	const asset = Bun.file(path.join(assetsDir, `${name}.txt`));
 	const content =
 		name === "background.js"
@@ -106,9 +77,7 @@ for (const [index, name] of names.entries()) {
 	await Bun.write(asset, content);
 	const binding = `asset${index}`;
 	const key = name === "LICENSE" ? name : JSON.stringify(name);
-	imports.push(
-		`import ${binding} from ${JSON.stringify(`./${name}.txt`)} with { type: "text" };`,
-	);
+	imports.push(`import ${binding} from ${JSON.stringify(`./${name}.txt`)} with { type: "text" };`);
 	entries.push(`\t${key}: ${isText ? binding : `{ base64: ${binding} }`},`);
 }
 await Bun.write(
@@ -128,30 +97,20 @@ await Bun.write(
 	].join("\n"),
 );
 
-console.log(
-	`Built:\n  ${distExtension}\n  ${zipPath}\n  ${assetsDir} (embedded CLI assets — commit these)`,
-);
+console.log(`Built:\n  ${distExtension}\n  ${zipPath}\n  ${assetsDir} (embedded CLI assets — commit these)`);
 
 /** First 16 hex chars of SHA-256 over each unstamped file's name and bytes, in `names` order. */
 async function buildId(files: readonly string[]): Promise<string> {
 	const hasher = new Bun.CryptoHasher("sha256");
 	for (const name of files) {
 		hasher.update(`${name}\0`);
-		hasher.update(
-			new Uint8Array(
-				await Bun.file(path.join(distExtension, name)).arrayBuffer(),
-			),
-		);
+		hasher.update(new Uint8Array(await Bun.file(path.join(distExtension, name)).arrayBuffer()));
 		hasher.update("\0");
 	}
 	return hasher.digest("hex").slice(0, 16);
 }
 
-async function bundle(
-	entry: string,
-	name: string,
-	format: "iife" | "esm",
-): Promise<void> {
+async function bundle(entry: string, name: string, format: "iife" | "esm"): Promise<void> {
 	const result = await Bun.build({
 		entrypoints: [path.join(source, entry)],
 		outdir: distExtension,
@@ -161,8 +120,7 @@ async function bundle(
 		minify: name === "panel",
 		define: { "process.env.NODE_ENV": JSON.stringify("production") },
 	});
-	if (!result.success)
-		throw new AggregateError(result.logs, `Failed to bundle ${entry}`);
+	if (!result.success) throw new AggregateError(result.logs, `Failed to bundle ${entry}`);
 	if (!(await Bun.file(path.join(distExtension, `${name}.js`)).exists())) {
 		throw new Error(`Bundling ${entry} did not produce ${name}.js`);
 	}
