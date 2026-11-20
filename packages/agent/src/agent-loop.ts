@@ -1733,12 +1733,12 @@ async function runLoopBody(
 					// reminder pays no message-cache invalidation. Re-engage so the loop
 					// never yields while the requirement is unmet.
 					for (const toolCall of toolCalls) {
-						const result = createAbortedToolResult(
-							toolCall,
-							stream,
-							"skipped",
-							`Not executed: call the \`${softRequiredTool}\` tool to resolve the pending action before using other tools.`,
-						);
+						const satisfied = softSatisfies?.(toolCall) ?? toolCall.name === softRequiredTool;
+						const reason =
+							satisfied && toolCalls.length > 1
+								? `Not executed: other calls came in the same response, so the whole response was refused. Send \`${softRequiredTool}\` alone in its own response to resolve the pending action.`
+								: `Not executed: call the \`${softRequiredTool}\` tool to resolve the pending action before using other tools.`;
+						const result = createAbortedToolResult(toolCall, stream, "skipped", reason);
 						currentContext.messages.push(result);
 						newMessages.push(result);
 						toolResults.push(result);

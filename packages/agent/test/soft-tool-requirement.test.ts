@@ -134,6 +134,46 @@ describe("agentLoop soft tool requirement", () => {
 		expect(peekResult).toBeDefined();
 	});
 
+	it("refuses a resolving write batched with a detour and says the other calls caused the refusal", async () => {
+		const h = makeSoftResolveHarness();
+		const context: AgentContext = { systemPrompt: ["sys"], messages: [], tools: h.tools };
+		const mock = createMockModel({
+			responses: [
+				// Turn 1: the resolving write arrives in the same response as a detour call.
+				{
+					content: [
+						{ type: "toolCall", id: "r1", name: "resolve", arguments: {} },
+						{ type: "toolCall", id: "p1", name: "peek", arguments: {} },
+					],
+				},
+				// Turn 2: forced to resolve on its own.
+				{ content: [{ type: "toolCall", id: "r2", name: "resolve", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			getToolChoice: h.getToolChoice,
+		};
+
+		const stream = agentLoop([createUserMessage("go")], context, config, undefined, mock.stream);
+		for await (const _ of stream) {
+			// drain
+		}
+		const messages = await stream.result();
+
+		// The batch was refused whole: nothing ran in turn 1, and the forced turn resolved once.
+		expect(h.peekRuns).toBe(0);
+		expect(h.resolveRuns).toBe(1);
+		expect(mock.calls[1]?.options?.toolChoice).toEqual({ type: "tool", name: "resolve" });
+		// The refused resolving write tells the model that other calls caused the refusal.
+		const refusal = messages.find(m => m.role === "toolResult" && m.toolCallId === "r1");
+		const refusalText =
+			refusal?.role === "toolResult" ? refusal.content.map(c => (c.type === "text" ? c.text : "")).join("") : "";
+		expect(refusalText).toMatch(/other calls came in the same response/);
+	});
+
 	it("uses the satisfies predicate over bare name matching for compliance", async () => {
 		let pendingPreview = true;
 		const writeRuns: string[] = [];

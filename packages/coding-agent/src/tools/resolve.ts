@@ -49,7 +49,7 @@ export const PROPOSE_DEVICE_PATH = `${XD_URL_PREFIX}${PROPOSE_DEVICE_NAME}`;
  * byte-identical to applied-edit output — without this line the model reads
  * the result as an already-applied change.
  */
-export const PREVIEW_PENDING_NOTICE = `Staged as a proposal — files NOT modified yet. To apply: write a one-sentence reason to ${RESOLVE_DEVICE_PATH}. To discard: write to ${REJECT_DEVICE_PATH}.`;
+export const PREVIEW_PENDING_NOTICE = `Staged as a proposal — files NOT modified yet. To apply: write a one-sentence reason to ${RESOLVE_DEVICE_PATH}. To discard: write to ${REJECT_DEVICE_PATH}. Send that write alone; every other call in the same response is refused.`;
 
 /** One-line usage string returned by `read xd://<device>` — the only "docs" these devices carry. */
 export function resolutionDeviceUsage(device: ResolutionDeviceName): string {
