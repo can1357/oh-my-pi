@@ -163,7 +163,7 @@ export class SkillMessageComponent extends Container {
 		const leading = display.startsWith(label) && /^\s*$/.test(display.charAt(label.length));
 		const bubble: UserBubbleOptions = {
 			imageLinks: this.#imageLinks,
-			skillPath: candidate => (candidate === name ? details?.path : undefined),
+			skill: { name, path: details?.path },
 		};
 
 		if (!leading) {
