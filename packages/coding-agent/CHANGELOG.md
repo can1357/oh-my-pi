@@ -30,6 +30,7 @@
 
 - Listing sessions across every project (`/resume` across projects, `archive.sessions(project="*")`, `archive.projects()`) is faster with thousands of project directories
 - Updated MCP OAuth client name to "Codex"
+- Auto-retries are quieter: once a retry is scheduled, the failed attempt's error leaves the pinned banner and stays out of the transcript; the retry status line shows the reason, and a recovered retry leaves only a dim "retried" note
 - Selective commits (`/commit`, eval `commit`) no longer guess which changes a `bash` or `eval` call made. Edit-tool writes are attributed, and so is what the shell writes itself: builtins such as `sed -i`, `cp`, `mv`, `rm` and redirections such as `cat > file`. Files changed by programs you run (formatters, codegen) are listed under Unrecorded and a formatter's rewrite of your lines under Review, for you to `take`
 - A session's change journal takes far less disk: it keeps one copy of each file an edit tool touched plus the changed lines of every later write, instead of a full copy per write, and no longer logs every `bash` and `eval` command (about 160 MB → 21 MB for a 7,600-edit session)
 - Selective commit previews show what changed inside a long line: `d.diff()` prints a long line edited in place once, with its `[-removed-]` and `{+added+}` words marked and the unchanged text far from them left out, instead of two lines cut at the output column cap; the returned patch is unchanged ([#19817](https://github.com/can1357/oh-my-pi/pull/19817) by [@baekjosh](https://github.com/baekjosh))
