@@ -197,6 +197,14 @@ impl DispatchFence {
 	}
 }
 
+/// The `Timeout` of a fenced request whose caller stopped waiting before it
+/// dispatched: both sides of the fence report this one outcome.
+pub(crate) fn abandoned_before_dispatch() -> DesktopError {
+	DesktopError::timeout(
+		"desktop caller stopped waiting before dispatch; nothing was sent and nothing will be",
+	)
+}
+
 #[derive(Clone)]
 pub(crate) struct OperationToken {
 	source:     CancellationSource,
@@ -389,9 +397,7 @@ pub(crate) fn dispatching() -> CoreResult<()> {
 			Ordering::Acquire,
 		) {
 			Ok(_) | Err(DISPATCH_SENT) => Ok(()),
-			Err(_) => Err(DesktopError::timeout(
-				"desktop caller stopped waiting before dispatch; nothing was sent and nothing will be",
-			)),
+			Err(_) => Err(abandoned_before_dispatch()),
 		}
 	})
 }

@@ -2245,10 +2245,7 @@ impl SessionCore {
 						);
 					}
 					if expired && fence.is_some() {
-						return DesktopError::timeout(
-							"desktop caller stopped waiting before dispatch; nothing was sent and \
-							 nothing will be",
-						);
+						return control::abandoned_before_dispatch();
 					}
 					DesktopError::timeout(format!("native desktop operation did not complete: {e}"))
 				})
@@ -3248,7 +3245,7 @@ mod capture_tests {
 		/// receiver's sender drops.
 		hang_windows:           Option<(flume::Sender<()>, flume::Receiver<()>)>,
 		/// Injects a provider call, including its dispatch boundary.
-		on_windows:             Option<Box<dyn Fn() -> CoreResult<()> + Send>>,
+		on_list_windows:        Option<Box<dyn Fn() -> CoreResult<()> + Send>>,
 		/// Runs as each menu read is served.
 		on_menu_read:           Option<Box<dyn Fn() + Send>>,
 		/// Another process drawing the window, such as an Open panel's.
@@ -3341,7 +3338,7 @@ mod capture_tests {
 				overlap: None,
 				window_present: true,
 				minimized_id: None,
-				on_windows: None,
+				on_list_windows: None,
 				tree: None,
 				menu_control: false,
 				no_input: false,
@@ -3605,8 +3602,8 @@ mod capture_tests {
 		}
 
 		fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>> {
-			if let Some(on_windows) = &self.on_windows {
-				on_windows()?;
+			if let Some(on_list_windows) = &self.on_list_windows {
+				on_list_windows()?;
 			}
 			if let Some((entered, hang)) = &self.hang_windows {
 				let _ = entered.send(());
@@ -4198,7 +4195,7 @@ mod capture_tests {
 		let (entered_tx, entered) = flume::bounded(0);
 		let (unblock, blocked) = flume::bounded::<()>(0);
 		let mutations = Arc::new(AtomicUsize::new(0));
-		backend.on_windows = Some(Box::new({
+		backend.on_list_windows = Some(Box::new({
 			let mutations = Arc::clone(&mutations);
 			move || {
 				let dispatched = control::dispatching();
@@ -4243,7 +4240,7 @@ mod capture_tests {
 		let (unblock, blocked) = flume::bounded::<()>(0);
 		let (result_tx, result) = flume::bounded(1);
 		let mutations = Arc::new(AtomicUsize::new(0));
-		backend.on_windows = Some(Box::new({
+		backend.on_list_windows = Some(Box::new({
 			let mutations = Arc::clone(&mutations);
 			move || {
 				entered_tx
@@ -4290,7 +4287,7 @@ mod capture_tests {
 	fn a_dispatched_provider_can_reply_on_time() {
 		let mut backend = FakeWaylandBackend::new();
 		let mutations = Arc::new(AtomicUsize::new(0));
-		backend.on_windows = Some(Box::new({
+		backend.on_list_windows = Some(Box::new({
 			let mutations = Arc::clone(&mutations);
 			move || {
 				control::dispatching()?;
