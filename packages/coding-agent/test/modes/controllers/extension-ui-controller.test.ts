@@ -753,6 +753,19 @@ describe("ExtensionUiController tool approval", () => {
 		expect(harness.ctx.composerOwner).toBeUndefined();
 	});
 
+	it("Ctrl+Enter with an empty composer approves outright", async () => {
+		const now = vi.spyOn(performance, "now").mockReturnValue(Number.POSITIVE_INFINITY);
+		try {
+			const harness = makeHarness();
+			const pending = harness.controller.showCollabAwareApproval(prompt);
+			harness.handleInput("\x11");
+			expect(await pending).toBe("once");
+			expect(harness.steering).toHaveLength(0);
+		} finally {
+			now.mockRestore();
+		}
+	});
+
 	it("lets the composer steer while a call waits: the queued message denies the call", async () => {
 		const harness = makeHarness();
 		// A steer queued before the prompt appeared does not answer it.

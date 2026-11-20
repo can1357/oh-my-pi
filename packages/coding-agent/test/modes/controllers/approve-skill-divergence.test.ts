@@ -60,10 +60,13 @@ function makeHarness(harnessOptions?: { inputHook?: (text: string) => string; sk
 			terminal: { rows: 40, columns: 120 },
 		},
 		editorContainer,
+		locallySubmittedUserSignatures: new Set<string>(),
 		skillCommands,
 		fileSlashCommands: new Map(),
 		session: {
 			agent,
+			messages: [],
+			isStreaming: false,
 			extensionRunner: harnessOptions?.inputHook
 				? {
 						hasHandlers: () => true,
@@ -257,5 +260,17 @@ describe("approve vs deny /skill: steer", () => {
 		expect(h.editor.getExpandedText()).toBe(h.firstSkill);
 		h.handleInput("\x1b");
 		expect(await pending).toBe("deny");
+	});
+
+	it("APPROVE sends c as a message, not a continue", async () => {
+		const h = makeHarness();
+		const nowSpy = vi.spyOn(performance, "now").mockReturnValue(Number.POSITIVE_INFINITY);
+		const pending = h.controller.showCollabAwareApproval(prompt);
+		h.handleInput("c");
+		h.handleInput("\x11");
+		nowSpy.mockRestore();
+		expect(await pending).toBe("once");
+		expect(h.steerMessages).toEqual(["c"]);
+		expect(h.skillMessages.length).toBe(0);
 	});
 });
