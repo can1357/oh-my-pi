@@ -618,7 +618,7 @@ const FORK_JOBS_NOTICE =
 
 /** Shown when `exit` or an armed `set -e` ended the run before its input was exhausted. */
 const ENDED_BY_EXIT_NOTICE =
-	"Stopped by `exit` or an armed `set -e` before the command finished: the rest of this call did not run, and options like `set -e` stay set in this session until unset.";
+	"Stopped by `exit` or an armed `set -e` before the command finished: the rest of this call did not run. Options still in effect at that point stay with the session — an option scoped to a function that returned, or one an EXIT trap disarms, does not.";
 
 /**
  * The unretained-state variant of {@link ENDED_BY_EXIT_NOTICE}: options in

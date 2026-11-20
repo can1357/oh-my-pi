@@ -208,8 +208,9 @@ it("says so when exit or an armed set -e ends the call before its remaining stat
 		const aborted = await run(tool, "false; echo never-ran");
 		expect(aborted.text).toContain("Stopped by `exit` or an armed `set -e`");
 		expect(aborted.text).toContain("the rest of this call did not run");
-		// Options armed by an earlier call keep applying; the notice says so.
-		expect(aborted.text).toContain("stay set in this session");
+		// Options still in effect keep applying; the notice says so, with the
+		// scope-restoration and EXIT-trap exceptions spelled out.
+		expect(aborted.text).toContain("Options still in effect at that point stay with the session");
 
 		const failed = await run(tool, "false");
 		expect(failed.text).toContain("Command exited with code 1");
@@ -241,7 +242,7 @@ it("does not promise options persist when an aborted fork's state is not adopted
 		expect(aborted.text).toContain("Ran in a copy of the busy session shell");
 		expect(aborted.text).toContain("Stopped by `exit` or an armed `set -e`");
 		expect(aborted.text).toContain("the rest of this call did not run");
-		expect(aborted.text).not.toContain("stay set in this session");
+		expect(aborted.text).not.toContain("stay with the session");
 		finishFirst(nativeResult());
 		await first;
 	} finally {
@@ -390,8 +391,9 @@ it.skipIf(process.platform === "win32" || !hasNativeExitFlag)(
 		const aborted = await run(tool, "false; echo never-ran");
 		expect(aborted.text).toContain("Stopped by `exit` or an armed `set -e`");
 		expect(aborted.text).toContain("the rest of this call did not run");
-		// Options armed by an earlier call keep applying; the notice says so.
-		expect(aborted.text).toContain("stay set in this session");
+		// Options still in effect keep applying; the notice says so, with the
+		// scope-restoration and EXIT-trap exceptions spelled out.
+		expect(aborted.text).toContain("Options still in effect at that point stay with the session");
 
 		const exited = await run(tool, "exit 3; echo never-ran");
 		expect(exited.text).toContain("Stopped by `exit` or an armed `set -e`");
