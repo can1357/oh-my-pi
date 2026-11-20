@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/login antigravity-cli-enterprise` for Google Cloud Gemini Enterprise (`gcp`) sign-in, running Google's PKCE flow with `agy`'s `gcp` OAuth client and storing the project ID and location under `antigravity-cli` ([#19858](https://github.com/can1357/oh-my-pi/pull/19858) by [@konsailabs](https://github.com/konsailabs)).
+
 ### Fixed
 
 - GPT-6.2 system prompts are now sent as leading `developer` input messages on third-party Responses proxies too, so they hit the prompt cache instead of billing at the full input rate every turn ([openai/codex#62312](https://github.com/openai/codex/issues/62312))
