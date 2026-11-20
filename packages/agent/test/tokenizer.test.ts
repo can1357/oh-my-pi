@@ -518,6 +518,42 @@ describe("chat-completions history estimate", () => {
 		}
 	});
 
+	test("counts all replayed Copilot summary text but not its opaque state", () => {
+		const model = buildModel({
+			...dropping,
+			id: "gemini-4-neon",
+			provider: "github-copilot",
+			baseUrl: "https://api.githubcopilot.com",
+			compat: { replayReasoningContent: false },
+		});
+		const first = "Start with the README. ".repeat(120);
+		const second = "Then check the manifest. ".repeat(120);
+		const opaque = "opaque-state".repeat(300);
+		const turn: AssistantMessage = {
+			...thinkingTurn(model, "reasoning_text"),
+			content: [
+				{
+					type: "thinking",
+					thinking: first,
+					thinkingSignature: JSON.stringify({ field: "reasoning_text", reasoningOpaque: opaque }),
+				},
+				{ type: "thinking", thinking: second, thinkingSignature: "reasoning_text" },
+				toolCall,
+			],
+		};
+		const messages = convertMessages(model, { messages: [turn] }, model.compat);
+		expect(messages[0]).toMatchObject({
+			role: "assistant",
+			reasoning_text: first + second,
+			reasoning_opaque: opaque,
+		});
+
+		const tokenizer = new Tokenizer(model);
+		const expected = tokenizer.countMessage({ ...turn, content: [toolCall] }) + tokenizer.countTokens(first + second);
+		expect(tokenizer.countMessage(turn)).toBe(expected);
+		expect(tokenizer.countMessage(turn, floor)).toBe(expected);
+	});
+
 	test("recounts after the replay policy changes", () => {
 		const turn = thinkingTurn(dropping, "reasoning_content");
 		const agent = new Agent({ initialState: { model: dropping, systemPrompt: [], tools: [], messages: [] } });

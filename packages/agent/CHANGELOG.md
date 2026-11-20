@@ -62,6 +62,10 @@
 
 - Added standby tools support through `Agent.setStandbyTools()` and `AgentContext.standbyTools`, allowing tools to remain inactive until a request explicitly enables tool use.
 
+### Fixed
+
+- Context estimates now count replayed GitHub Copilot reasoning summaries without charging for the encrypted state.
+
 ## [19.0.0] - 2026-11-18
 
 ### Added

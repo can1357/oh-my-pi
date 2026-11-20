@@ -2,7 +2,11 @@ import type { Api, AssistantMessage, ImageContent, Model } from "@oh-my-pi/pi-ai
 import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect/demotion";
 import { isFactoryDroidGeminiWire, keepsFactoryGeminiReasoning } from "@oh-my-pi/pi-ai/providers/factory-droid/gemini";
 import { ollamaChatDropsOwnThinking } from "@oh-my-pi/pi-ai/providers/ollama";
-import { completionsDropsOwnThinking, isLiteLLMThinkingSignature } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import {
+	completionsDropsOwnThinking,
+	getCopilotReasoningReplay,
+	isLiteLLMThinkingSignature,
+} from "@oh-my-pi/pi-ai/providers/openai-completions";
 import {
 	getNativeResponsesHistoryItems,
 	getReplayableNativeResponsesHistoryItems,
@@ -13,7 +17,7 @@ import {
 	isSameModelTurn,
 	shouldDropTruncatedThinkingOnlyAssistant,
 } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import { replaysSignedReasoningText } from "@oh-my-pi/pi-ai/utils/reasoning-source";
+import { parseReasoningDetailsSignature, replaysSignedReasoningText } from "@oh-my-pi/pi-ai/utils/reasoning-source";
 import { resolveThinkingReplayTokens, type ThinkingReplayTokens } from "@oh-my-pi/pi-catalog/compat/thinking-replay";
 import type { ModelTokenizer } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
@@ -540,6 +544,10 @@ export class Tokenizer {
 					message.stopReason !== "toolUse" &&
 					content.some(block => block.type === "toolCall");
 				const untrustedIndex = invalidStop ? content.length - 1 : -1;
+				const copilotReasoning = abandonedToolUse
+					? undefined
+					: getCopilotReasoningReplay(message, this.#reasoningReader, untrustedIndex);
+				if (copilotReasoning?.text) fragments.push(copilotReasoning.text);
 				// A filtering Responses reader replays no reasoning item and its encoder
 				// drops the turn's own thinking blocks, so usually neither their text nor
 				// their signature reaches the wire (the reconstruction below is the one
@@ -576,6 +584,18 @@ export class Tokenizer {
 							continue;
 						}
 						if (this.#dropsOllamaThinking && ownOllamaTurn) continue;
+						// Copilot's summary is sent as one field, including later source-marked
+						// blocks. Count it once and leave out the opaque metadata.
+						const trustedCopilotBlock = copilotReasoning !== undefined && index !== untrustedIndex;
+						const copilotSignature = trustedCopilotBlock
+							? parseReasoningDetailsSignature(block.thinkingSignature)
+							: undefined;
+						if (
+							trustedCopilotBlock &&
+							(block.thinkingSignature === "reasoning_text" || copilotSignature?.field === "reasoning_text")
+						) {
+							continue;
+						}
 						// Chat-completions drops it unless LiteLLM replays it in `thinking_blocks`
 						// or signed `reasoning_details` text replays with it.
 						if (
@@ -600,6 +620,7 @@ export class Tokenizer {
 						// (its local byte size diverges from provider billing).
 						if (
 							block.thinkingSignature &&
+							!copilotSignature?.reasoningOpaque &&
 							!excludeEncryptedReasoning &&
 							signaturesPriced &&
 							typeof replayedReasoning !== "number" &&
@@ -607,7 +628,14 @@ export class Tokenizer {
 						) {
 							fragments.push(block.thinkingSignature);
 						}
-						if (block.thinkingSignature && !abandonedToolUse && index !== untrustedIndex) signedReasoning = true;
+						if (
+							block.thinkingSignature &&
+							!copilotSignature?.reasoningOpaque &&
+							!abandonedToolUse &&
+							index !== untrustedIndex
+						) {
+							signedReasoning = true;
+						}
 					} else if (block.type === "toolCall") {
 						fragments.push(block.name);
 						fragments.push(stringifyJson(block.arguments) ?? "null");

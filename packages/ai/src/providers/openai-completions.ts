@@ -2018,7 +2018,11 @@ const streamOpenAICompletionsOnce = (
 				const field = isReasoningField(holderField) ? holderField : mirroredReasoningField;
 				if (field) stored.field = field;
 				if (holder) holder.thinkingSignature = JSON.stringify(stored);
-				else if (output.content.length > 0) openThinkingBlock(JSON.stringify(stored));
+				else if (
+					receivedReasoningDetails.length > 0 ? output.content.length > 0 : hasVisibleAssistantContent(output)
+				) {
+					openThinkingBlock(JSON.stringify(stored));
+				}
 			}
 
 			if (currentBlock?.type === "toolCall") {
@@ -2661,6 +2665,32 @@ export function completionsDropsOwnThinking(
 	);
 }
 
+/**
+ * Copilot replays the latest opaque state with the whole turn's summary, but only
+ * to the exact model that issued it. Counts on pre-transform history can skip an
+ * untrusted trailing block as `transformMessages` does.
+ */
+export function getCopilotReasoningReplay(
+	turn: AssistantMessage,
+	model: Pick<Model, "api" | "provider" | "id"> | undefined,
+	untrustedIndex = -1,
+): { opaque: string; text: string } | undefined {
+	if (model?.api !== "openai-completions" || model.provider !== "github-copilot" || !isSameModelTurn(turn, model)) {
+		return undefined;
+	}
+	let opaque: string | undefined;
+	let text = "";
+	for (let index = 0; index < turn.content.length; index++) {
+		const block = turn.content[index];
+		if (index === untrustedIndex || block.type !== "thinking") continue;
+		const signature = block.thinkingSignature;
+		const stored = parseReasoningDetailsSignature(signature);
+		if (stored?.reasoningOpaque) opaque = stored.reasoningOpaque;
+		if (signature === "reasoning_text" || stored?.field === "reasoning_text") text += block.thinking;
+	}
+	return opaque === undefined ? undefined : { opaque, text };
+}
+
 export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -3051,26 +3081,16 @@ export function convertMessages(
 			// it), the encrypted entries kept on unchanged tool calls still replay.
 			// A request that drops the model's own thinking also drops its unsigned text.
 			const receivedReasoningDetails: Record<string, unknown>[] = [];
-			let reasoningOpaque: string | undefined;
-			const replaysCopilotReasoning = model.provider === "github-copilot" && isSameModelTurn(msg, model);
+			const copilotReasoning = getCopilotReasoningReplay(msg, model);
 			for (const block of thinkingBlocks) {
 				const stored = parseReasoningDetailsSignature(block.thinkingSignature);
 				if (stored?.reasoningDetails) {
 					for (const detail of stored.reasoningDetails) receivedReasoningDetails.push(detail);
 				}
-				if (replaysCopilotReasoning && stored?.reasoningOpaque) reasoningOpaque = stored.reasoningOpaque;
 			}
-			if (reasoningOpaque !== undefined) {
-				assistantMsg.reasoning_opaque = reasoningOpaque;
-				// Copilot expects the latest opaque state with the full summary, in
-				// order and without any separators that weren't in the stream.
-				let reasoningText = "";
-				for (const block of thinkingBlocks) {
-					if (signatureReasoningField(block.thinkingSignature) === "reasoning_text") {
-						reasoningText += block.thinking;
-					}
-				}
-				if (reasoningText.length > 0) assistantMsg.reasoning_text = reasoningText;
+			if (copilotReasoning) {
+				assistantMsg.reasoning_opaque = copilotReasoning.opaque;
+				if (copilotReasoning.text.length > 0) assistantMsg.reasoning_text = copilotReasoning.text;
 				hasReasoningField = true;
 			}
 			const reasoningDetails =
