@@ -1,5 +1,6 @@
 //! Embedded bash engine shell execution exported via N-API.
 
+mod changes;
 pub mod speech;
 pub mod vfs;
 
@@ -332,32 +333,40 @@ impl RunTrace {
 	}
 }
 
-/// The bytes crossing one shell run's pipeline pipes, during and after the run.
+/// The output of one shell run that never reaches its own stdout, during and
+/// after the run: the bytes crossing its pipeline pipes, and the files its
+/// commands redirect their output into.
 ///
 /// For `cargo build 2>&1 | tail -5`, stream 1 holds what `cargo` has written
-/// so far while `tail` still holds it back. Create one per run and pass it as
+/// so far while `tail` still holds it back; for `cargo build > build.log`,
+/// stream 1 reads `build.log`. Create one per run and pass it as
 /// [`ShellRunOptions::streams`]. Streams are numbered from 1 in the order the
-/// run opened its pipes; each keeps its most recent 1 MiB, and a run keeps its
-/// 4 newest finished streams.
+/// run opened them; each keeps (a file: reads) its most recent 1 MiB, and a
+/// run keeps its 4 newest finished pipes and its 8 newest files.
 #[derive(Default)]
 #[napi]
 pub struct PipeStreams {
 	taps: Arc<PipeTaps>,
 }
 
-/// A tapped pipe of a run.
+/// A tapped pipe or redirected file of a run.
 #[napi(object)]
 pub struct PipeStreamInfo {
 	/// Stream number, from 1.
 	pub id:       u32,
-	/// Source text of the stage writing into the pipe.
+	/// Source text of the stage writing into the pipe, or of the command whose
+	/// redirection opened the file.
 	pub producer: String,
-	/// Source text of the stage reading from it.
+	/// Source text of the stage reading from the pipe, or the file's absolute
+	/// path.
 	pub consumer: String,
-	/// Bytes written so far, including those no longer retained.
+	/// Bytes written so far, including those no longer retained; a file's
+	/// size now.
 	pub total:    f64,
-	/// Whether bytes may still arrive.
+	/// Whether bytes may still arrive; for a file, whether the run goes on.
 	pub open:     bool,
+	/// The stream is a file a command redirected its output into.
+	pub file:     bool,
 }
 
 /// Retained bytes of a stream, as stream offsets `start..end`.
@@ -394,6 +403,7 @@ impl PipeStreams {
 				consumer: stream.consumer,
 				total:    stream.total as f64,
 				open:     stream.open,
+				file:     stream.file,
 			})
 			.collect()
 	}

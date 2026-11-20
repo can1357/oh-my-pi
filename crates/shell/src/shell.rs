@@ -372,6 +372,7 @@ impl Shell {
 		on_chunk: Option<Sender<String>>,
 		mut cancel_token: CancelToken,
 	) -> Result<ShellRunResult> {
+		let taps = options.pipe_taps.clone();
 		let run_config = ShellRunConfig {
 			command:    options.command,
 			cwd:        options.cwd,
@@ -382,7 +383,7 @@ impl Shell {
 			trace:      options.trace,
 			speech:     options.speech,
 		};
-		run_shell_session(
+		let result = run_shell_session(
 			self.session.clone(),
 			self.abort_state.clone(),
 			self.active.clone(),
@@ -393,7 +394,11 @@ impl Shell {
 			on_chunk,
 			&mut cancel_token,
 		)
-		.await
+		.await;
+		if let Some(taps) = taps {
+			taps.end();
+		}
+		result
 	}
 
 	pub async fn abort(&self) {

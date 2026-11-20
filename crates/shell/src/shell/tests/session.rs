@@ -3056,6 +3056,51 @@ async fn process_shell_exit_attribution_distinguishes_cause_and_unrun_input() {
 	}
 }
 
+/// A command whose output is redirected prints nothing: its file is a stream,
+/// under the path the shell resolved in the directory it had moved to, and
+/// reads what the command wrote so far while it still runs.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn pipe_tap_lists_the_file_a_command_redirects_into() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("output directory");
+	let mut cancel = CancelToken::default();
+	let abort = cancel.emplace_abort_token();
+	let command = format!(
+		"cd {} && {{ printf 'a\\nb\\n'; sleep 30; }} > run.log 2>/dev/null",
+		quote_arg(&root.path().to_string_lossy()),
+	);
+	let (taps, run, rx) = run_tapped(&command, cancel);
+
+	let seen = time::timeout(Duration::from_secs(10), async {
+		loop {
+			if let Some(read) = taps.read(1, None)
+				&& read.data == b"a\nb\n"
+			{
+				return read;
+			}
+			time::sleep(Duration::from_millis(20)).await;
+		}
+	})
+	.await
+	.expect("the redirected output never became stream 1");
+	assert!(seen.open);
+	assert!(rx.try_recv().is_err(), "redirected output reached the run's own");
+	// `/dev/null` is no file to read back.
+	let [stream] = taps.list().try_into().expect("one stream");
+	assert!(stream.file);
+	assert_eq!(std::path::Path::new(&stream.consumer), root.path().join("run.log"));
+	assert!(stream.producer.contains("printf"), "command text: {}", stream.producer);
+
+	abort.abort(AbortReason::Signal);
+	time::timeout(Duration::from_secs(10), run)
+		.await
+		.expect("run did not stop after abort")
+		.expect("run task panicked")
+		.expect("run");
+	assert!(!taps.read(1, None).expect("stream 1").open);
+}
+
 /// A process's own shell ([`Shell::for_process`]) is the bash tool's shell on
 /// the process's streams: pi's utilities run ahead of `PATH`, and an external
 /// stays in the process's group instead of leading a session of its own, so

@@ -666,6 +666,8 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 - `tool_execution_start` / `tool_execution_update` / `tool_execution_end` (observability)
 - `tool_approval_requested` / `tool_approval_resolved` (observability; emitted by `wrapper.ts` only when a tool requires approval and an approval handler is registered)
 
+`tool_call` and `tool_result` identify the call with `toolCallId`. When a JS or Python eval cell or kernel-defined tool calls a session tool, both events also carry `parentToolCallId`: the ID of the invocation that made the nested call, not the ID of the eval that defined the tool. Direct calls omit this field.
+
 `tool_result` is middleware-style: handlers run in extension order and each sees prior modifications. Distinct non-blank `additionalContext` from every handler is preserved in registration order (repeats, compared ignoring surrounding whitespace, are dropped) and delivered before that call's `tool_call` context.
 
 ### Plan review lifecycle

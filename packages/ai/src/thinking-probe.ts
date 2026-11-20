@@ -30,7 +30,7 @@ type RunRequest<TApi extends Api> = (
 
 interface ProbeFlight {
 	controller: AbortController;
-	promise: Promise<ThinkingCapability | undefined>;
+	promise: Promise<ThinkingCapability>;
 	waiters: number;
 }
 
@@ -140,11 +140,42 @@ async function probeAttempt<TApi extends Api>(
 	}
 }
 
+function ladderComplete(
+	format: ThinkingProbeFormat,
+	rows: readonly ThinkingProbeAttempt[],
+	effortCount: number,
+): boolean {
+	return rows.length === (TOGGLE_FORMATS[format] ? 1 : effortCount);
+}
+
+function capabilityFor(
+	format: ThinkingProbeFormat,
+	accepted: readonly ThinkingProbeAttempt[],
+	attempts: readonly ThinkingProbeAttempt[],
+): ThinkingCapability {
+	return {
+		checkedAt: Date.now(),
+		format,
+		efforts: TOGGLE_FORMATS[format]
+			? [Effort.High]
+			: THINKING_EFFORTS.filter(effort => accepted.some(attempt => attempt.effort === effort)),
+		observed: accepted.some(attempt => attempt.observed),
+		attempts,
+	};
+}
+
+interface ProbeSelection {
+	/** Present only when the chosen format and every higher-precedence format finished probing. */
+	persist: ThinkingCapability | undefined;
+	/** Format and efforts for this turn, avoiding rejected probes unless even the plain check was refused. */
+	dispatch: ThinkingCapability;
+}
+
 async function probe<TApi extends Api>(
 	model: Model<TApi>,
 	options: SimpleStreamOptions,
 	run: RunRequest<TApi>,
-): Promise<ThinkingCapability | undefined> {
+): Promise<ProbeSelection> {
 	const batches = formatBatches(model.api);
 	const requested = options.reasoning ?? Effort.High;
 	const efforts = [requested, ...THINKING_EFFORTS.filter(effort => effort !== requested)];
@@ -154,45 +185,87 @@ async function probe<TApi extends Api>(
 	let baseline: ThinkingProbeAttempt | undefined;
 	for (let index = 0; index < batches.length; index++) {
 		const formats = batches[index];
-		const pending = formats.flatMap(format =>
-			(TOGGLE_FORMATS[format] ? [undefined] : efforts).map(effort =>
-				probeAttempt(model, format, effort, options, run),
-			),
-		);
-		if (index === 0) pending.push(probeAttempt(model, "none", undefined, options, run));
-		const results = await Promise.all(pending);
-		options.signal?.throwIfAborted();
-		// A quota, auth, transport or timeout failure is not evidence against a
-		// tier. Never save a truncated ladder as the model's full capability.
-		if (results.some(result => result === undefined)) return undefined;
-		for (const result of results) {
-			if (result === undefined) continue;
-			attempts.push(result);
-			if (result.format === "none") baseline = result;
-		}
+		if (!formats) continue;
+		const probed = new Map<ThinkingProbeFormat, ThinkingProbeAttempt[]>();
+		const rowsOf = (format: ThinkingProbeFormat): readonly ThinkingProbeAttempt[] => probed.get(format) ?? [];
+		const jobs: { format: ThinkingProbeFormat; promise: Promise<ThinkingProbeAttempt | undefined> }[] = [];
 		for (const format of formats) {
-			const accepted = attempts.filter(attempt => attempt.format === format && attempt.accepted);
-			if (accepted.length === 0) continue;
+			probed.set(format, []);
+			for (const effort of TOGGLE_FORMATS[format] ? [undefined] : efforts) {
+				jobs.push({ format, promise: probeAttempt(model, format, effort, options, run) });
+			}
+		}
+		if (index === 0) jobs.push({ format: "none", promise: probeAttempt(model, "none", undefined, options, run) });
+		const results = await Promise.all(jobs.map(job => job.promise));
+		options.signal?.throwIfAborted();
+		for (let jobIndex = 0; jobIndex < jobs.length; jobIndex++) {
+			const result = results[jobIndex];
+			const job = jobs[jobIndex];
+			if (!result || !job) continue;
+			attempts.push(result);
+			if (job.format === "none") baseline = result;
+			else probed.get(job.format)?.push(result);
+		}
+		// A quota, auth, transport, or timeout failure is not a rejection, and it
+		// belongs only to the format that failed. Cache a winning format only when
+		// its own ladder and every preferred format ahead of it finished probing.
+		let priorComplete = true;
+		for (const format of formats) {
+			const rows = rowsOf(format);
+			const complete = ladderComplete(format, rows, efforts.length);
+			const accepted = rows.filter(attempt => attempt.accepted);
+			if (accepted.length > 0) {
+				const capability = capabilityFor(format, accepted, attempts);
+				return { persist: priorComplete && complete ? capability : undefined, dispatch: capability };
+			}
+			if (!complete) priorComplete = false;
+		}
+		// No format in this batch was accepted yet. If a format did not finish,
+		// stop before later batches and dispatch its first unrejected hypothesis.
+		for (const format of formats) {
+			const rows = rowsOf(format);
+			if (ladderComplete(format, rows, efforts.length)) continue;
+			const rejected = new Set(
+				rows.flatMap(attempt => (!attempt.accepted && attempt.effort !== undefined ? [attempt.effort] : [])),
+			);
+			if (TOGGLE_FORMATS[format] || rejected.size === 0) {
+				return { persist: undefined, dispatch: { ...hypothesis(format), attempts } };
+			}
+			const usable = THINKING_EFFORTS.filter(effort => !rejected.has(effort));
 			return {
-				checkedAt: Date.now(),
-				format,
-				efforts: TOGGLE_FORMATS[format]
-					? [Effort.High]
-					: THINKING_EFFORTS.filter(effort => accepted.some(attempt => attempt.effort === effort)),
-				observed: accepted.some(attempt => attempt.observed),
-				attempts,
+				persist: undefined,
+				dispatch: { checkedAt: Date.now(), format, efforts: usable, observed: false, attempts },
 			};
 		}
 	}
-	if (!baseline?.accepted) return undefined;
-	return { checkedAt: Date.now(), format: "none", efforts: [], observed: baseline.observed, attempts };
+	if (baseline?.accepted) {
+		const capability: ThinkingCapability = {
+			checkedAt: Date.now(),
+			format: "none",
+			efforts: [],
+			observed: baseline.observed,
+			attempts,
+		};
+		return { persist: capability, dispatch: capability };
+	}
+	// Every thinking dialect finished as a rejection. A plain check that never
+	// completed is not a refusal, so send plain without saving; fall back to the
+	// primary hypothesis only when the plain check was refused too.
+	if (!baseline) {
+		return {
+			persist: undefined,
+			dispatch: { checkedAt: Date.now(), format: "none", efforts: [], observed: false, attempts },
+		};
+	}
+	const fallback = batches[0]?.[0] ?? "openai";
+	return { persist: undefined, dispatch: { ...hypothesis(fallback), attempts } };
 }
 
 async function learn<TApi extends Api>(
 	model: Model<TApi>,
 	options: SimpleStreamOptions,
 	run: RunRequest<TApi>,
-): Promise<ThinkingCapability | undefined> {
+): Promise<ThinkingCapability> {
 	const cached = readThinkingCapability(model, options.thinkingCapabilityDbPath);
 	if (cached) return cached;
 	const key = JSON.stringify([
@@ -206,7 +279,8 @@ async function learn<TApi extends Api>(
 	if (!flight) {
 		const controller = new AbortController();
 		const sharedOptions = { ...options, signal: controller.signal };
-		const promise = probe(model, sharedOptions, run).then(capability => {
+		const promise = probe(model, sharedOptions, run).then(selection => {
+			const capability = selection.persist;
 			if (capability) {
 				writeThinkingCapability(model, capability, options.thinkingCapabilityDbPath);
 				logger.debug("Learned thinking capability", {
@@ -217,7 +291,7 @@ async function learn<TApi extends Api>(
 					observed: capability.observed,
 				});
 			}
-			return capability;
+			return selection.dispatch;
 		});
 		flight = { controller, promise, waiters: 0 };
 		flights.set(key, flight);
@@ -258,9 +332,9 @@ export function withProbedThinking<TApi extends Api>(
 		try {
 			const capability = await learn(model, options, run);
 			options.signal?.throwIfAborted();
-			// Inconclusive probes leave the capability unknown. Still honor the
-			// requested string rather than silently downgrading it to thinking-off.
-			const learned = applyThinkingCapability(model, capability ?? hypothesis(formatBatches(model.api)[0][0]));
+			// Use a format this run accepted, or the first unrejected one; fall
+			// back to the primary hypothesis only if even the plain check was refused.
+			const learned = applyThinkingCapability(model, capability);
 			const inner = run(learned, context, {
 				...options,
 				reasoning: clampThinkingLevelForModel(learned, options.reasoning),

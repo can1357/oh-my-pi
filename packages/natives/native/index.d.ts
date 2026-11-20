@@ -589,13 +589,16 @@ export declare class PhononTts {
 }
 
 /**
- * The bytes crossing one shell run's pipeline pipes, during and after the run.
+ * The output of one shell run that never reaches its own stdout, during and
+ * after the run: the bytes crossing its pipeline pipes, and the files its
+ * commands redirect their output into.
  *
  * For `cargo build 2>&1 | tail -5`, stream 1 holds what `cargo` has written
- * so far while `tail` still holds it back. Create one per run and pass it as
+ * so far while `tail` still holds it back; for `cargo build > build.log`,
+ * stream 1 reads `build.log`. Create one per run and pass it as
  * [`ShellRunOptions::streams`]. Streams are numbered from 1 in the order the
- * run opened its pipes; each keeps its most recent 1 MiB, and a run keeps its
- * 4 newest finished streams.
+ * run opened them; each keeps (a file: reads) its most recent 1 MiB, and a
+ * run keeps its 4 newest finished pipes and its 8 newest files.
  */
 export declare class PipeStreams {
   constructor()
@@ -688,6 +691,18 @@ export declare class PtySession {
   masterFd(): number | null
   /** Process id of the running session's child. */
   pid(): number | null
+  /**
+   * Whether the program in the terminal waits on the user's keys.
+   *
+   * `true` while echo is off (a password prompt such as `sudo`'s, or a
+   * full-screen program like `less`) or, on Linux, while a foreground
+   * process is blocked reading the terminal (a `[y/N]` prompt). `false` when
+   * no session runs or, on Linux, no foreground process reads the terminal.
+   * `null` when an echoing line prompt cannot be told from a busy program:
+   * always on macOS and Windows, and on Linux when a foreground process
+   * cannot be inspected (one running setuid).
+   */
+  awaitsInput(): boolean | null
   /**
    * Start a shell command, stream output chunks, and report the spawned child
    * PID.
@@ -883,9 +898,11 @@ export declare class TextPredictor {
 }
 
 /**
- * Dedicated, cancellable terminal writer. The destination must be a TTY that
- * can be independently reopened (unix) or a console (Windows); pipes and
- * files are deliberately rejected.
+ * Dedicated, cancellable terminal writer.
+ *
+ * The destination must be a TTY (reopened independently when possible, else
+ * duplicated) on unix or a console on Windows; pipes and files are
+ * deliberately rejected.
  */
 export declare class TtyWriter {
   /**
@@ -907,7 +924,8 @@ export declare class TtyWriter {
   flushSync(timeoutMs: number): boolean
   /**
    * Drain until the deadline, then cancel and join. Nothing is written after
-   * return, except one chunk a Windows console refused to abort. Already
+   * return, except one chunk whose write could not be aborted (a Windows
+   * console refusing to, a blocking duplicate on unix). Already
    * queued JS callbacks may still run; callers must ignore callbacks from a
    * stopped writer.
    */
@@ -1539,6 +1557,12 @@ export interface AxSnapshot {
   text: string
   nodeCount: number
   truncated: boolean
+  /**
+   * The window appeared fully covered around the read, and its app can stop
+   * updating its tree while covered (Chromium on Windows), so the tree may
+   * be stale.
+   */
+  covered: boolean
 }
 
 export interface AxSnapshotOptions {
@@ -1764,6 +1788,12 @@ export interface DesktopCapture {
    * frame. Windows also detects disconnected sessions and secure desktops.
    */
   screenLocked: boolean
+  /**
+   * The target window appeared fully covered around this frame, and its app
+   * can stop drawing while covered (Chromium on Windows), so the frame may
+   * be stale.
+   */
+  covered: boolean
 }
 
 export interface DesktopControlState {
@@ -2036,6 +2066,16 @@ export interface DiffChange {
  * not another copy of the text.
  */
 export declare function diffLineRuns(oldText: string, newText: string): Array<DiffRun>
+
+/**
+ * [`diff_line_runs`] bounded to `max_edits` added or removed lines.
+ *
+ * Returns `null` once the edit script needs more. An exact diff of a
+ * wholesale rewrite takes time quadratic in its size; this one stops after
+ * `O((N + M) · max_edits)`, for callers that can treat such a rewrite as one
+ * replaced block.
+ */
+export declare function diffLineRunsWithin(oldText: string, newText: string, maxEdits: number): Array<DiffRun> | null
 
 /**
  * Line diff with jsdiff `diffLines(oldText, newText)` semantics (default
@@ -2321,6 +2361,15 @@ export declare enum Ellipsis {
   /** Omit ellipsis entirely. */
   Omit = 2
 }
+
+/**
+ * Add `ENABLE_VIRTUAL_TERMINAL_INPUT` to the stdin console's mode.
+ *
+ * Call after entering raw mode, which clears it. Returns the mode found, for
+ * `restoreConsoleInputMode`; `null` when stdin is not a console or the
+ * console refuses VT input, and always off Windows.
+ */
+export declare function enableConsoleVtInput(): number | null
 
 /**
  * Matching-bracket context for an arbitrary tree-sitter language.
@@ -3531,18 +3580,29 @@ export interface PipeStreamChunk {
   open: boolean
 }
 
-/** A tapped pipe of a run. */
+/** A tapped pipe or redirected file of a run. */
 export interface PipeStreamInfo {
   /** Stream number, from 1. */
   id: number
-  /** Source text of the stage writing into the pipe. */
+  /**
+   * Source text of the stage writing into the pipe, or of the command whose
+   * redirection opened the file.
+   */
   producer: string
-  /** Source text of the stage reading from it. */
+  /**
+   * Source text of the stage reading from the pipe, or the file's absolute
+   * path.
+   */
   consumer: string
-  /** Bytes written so far, including those no longer retained. */
+  /**
+   * Bytes written so far, including those no longer retained; a file's
+   * size now.
+   */
   total: number
-  /** Whether bytes may still arrive. */
+  /** Whether bytes may still arrive; for a file, whether the run goes on. */
   open: boolean
+  /** The stream is a file a command redirected its output into. */
+  file: boolean
 }
 
 export interface PointerOptions {
@@ -3800,6 +3860,12 @@ export declare function renderMermaidAscii(text: string, options?: MermaidRender
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
 
 /**
+ * Put back a stdin console mode `enableConsoleVtInput` returned. False when
+ * stdin is no longer a console or refuses the mode; always false off Windows.
+ */
+export declare function restoreConsoleInputMode(mode: number): boolean
+
+/**
  * Run the shell engine as a process shell in this process (`omp zsh`,
  * `omp bash`, `omp sh`).
  *
@@ -3899,6 +3965,19 @@ export interface ShellExecuteOptions {
   filesystem?: ShellFilesystem
 }
 
+/** One host text file a command changed, as `onFileChange` receives it. */
+export interface ShellFileChange {
+  /** Absolute host path. */
+  path: string
+  /**
+   * Content before the command touched the file; absent when there was
+   * no file.
+   */
+  before?: Buffer
+  /** Content once the command was done; absent when it removed the file. */
+  after?: Buffer
+}
+
 /** Host filesystem injected into shell sessions. */
 export interface ShellFilesystem {
   /**
@@ -3915,6 +3994,14 @@ export interface ShellFilesystem {
    * injected filesystem and receives every path, host paths included.
    */
   nativeLocalPaths?: boolean
+  /**
+   * Called for each host text file a command changed itself: a builtin's
+   * write, rename or removal (`sed -i`, `cp`, `mv`, `rm`, `tee`) and the
+   * target of a redirection, once the command is done with it. Only files
+   * git would track are reported (in a work tree, not ignored), at most
+   * 4 MiB each; what a spawned program writes on its own is not.
+   */
+  onFileChange?: (error: Error | null, change: ShellFileChange) => void
 }
 
 /** Permissions probed by an `access` request. */
@@ -4578,6 +4665,16 @@ export interface TextPredictorOptions {
   /** Show threshold override; omit for the engine's tuned default. */
   showThreshold?: number
 }
+
+/**
+ * Translate a kitty CSI-u Alt/Ctrl+Alt chord into the text `AltGr` produced
+ * on the active keyboard layout; `null` when the sequence is not an `AltGr`
+ * keystroke there, and always off Windows.
+ *
+ * Only meaningful on native Windows `ConPTY` hosts with the kitty protocol
+ * active: other hosts report the produced text themselves.
+ */
+export declare function translateWindowsAltGrSequence(data: string): string | null
 
 /**
  * Truncate text to a visible width, preserving ANSI codes.

@@ -139,7 +139,7 @@ import {
 	type JudgmentBatchProgress,
 } from "../eval/judgment-batch-events";
 import { onDownloadActivity } from "../downloads/activity";
-import { DownloadActivityHud, JudgmentBatchProgressHud } from "./progress-hud";
+import { BackgroundCompactionHud, DownloadActivityHud, JudgmentBatchProgressHud } from "./progress-hud";
 import { autosaveApprovedPlan, planSaveFileName } from "../plan-mode/plan-autosave";
 import { resolvePlanModelTransition } from "../plan-mode/model-transition";
 import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md" with { type: "text" };
@@ -991,7 +991,8 @@ class StatusHudContainer extends AnchoredLiveContainer {
 	}
 
 	override describe(cx: DescribeContext): NativeNode {
-		return this.mode.describeStatusHud(this.children, cx);
+		const idle = this.#idle();
+		return this.mode.describeStatusHud(idle ? [idle] : this.children, cx);
 	}
 
 	override render(width: number): readonly string[] {
@@ -1000,8 +1001,14 @@ class StatusHudContainer extends AnchoredLiveContainer {
 		return lines;
 	}
 
+	/** A background compaction's working row, shown in place of nothing: any child of the row outranks it. */
+	#idle(): Loader | undefined {
+		return this.children.length === 0 ? this.mode.backgroundCompaction.idleRow() : undefined;
+	}
+
 	#renderLines(width: number): readonly string[] {
-		const childLines = super.render(width);
+		const idle = this.#idle();
+		const childLines = idle ? idle.render(width) : super.render(width);
 		if (!this.mode.isCompactTodoMode()) {
 			if (childLines.length === 0) {
 				const idle = this.mode.renderIdleStatusHud(width);
@@ -1501,6 +1508,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#composerStatusPersistTimer: NodeJS.Timeout | undefined;
 	readonly #judgmentBatchProgressHud = new JudgmentBatchProgressHud();
 	readonly #downloadActivityHud = new DownloadActivityHud(() => this.ui.requestRender());
+	readonly backgroundCompaction = new BackgroundCompactionHud(() => this.statusContainer.children.length > 0);
 	readonly #judgmentBatchProgressClearTimers = new Map<string, NodeJS.Timeout>();
 	#nextAppearanceRequestToken = 1;
 	#appearanceRefreshRequest: { token: TerminalAppearanceRequestToken; deadline: number } | undefined;
@@ -2423,6 +2431,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.progressHudContainer = new AnchoredLiveContainer();
 		this.progressHudContainer.addChild(this.#judgmentBatchProgressHud);
 		this.progressHudContainer.addChild(this.#downloadActivityHud);
+		this.progressHudContainer.addChild(this.backgroundCompaction);
 		this.#eventBusUnsubscribers.push(onDownloadActivity(activity => this.#downloadActivityHud.update(activity)));
 		this.statusContainer = new StatusHudContainer(this);
 		this.todoContainer = new TodoHudContainer(this);
@@ -2506,6 +2515,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.showGitUi();
 					return;
 				case "status.cost":
+				case "status.usage":
 					void this.handleUsageCommand();
 					return;
 				// Only the main session has a cache warmer, so a focused subagent's bar shows no
@@ -8425,6 +8435,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#liveCommandController.dispose();
 		this.#clearJudgmentBatchProgress();
 		this.#downloadActivityHud.dispose();
+		this.backgroundCompaction.dispose();
 		this.#cancelTodoAutoClearTimer();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();

@@ -2,23 +2,29 @@
  * The async background jobs of a session as {@link JobsSheet}: the dismissable
  * sheet the native jobs pill and `/jobs` open. A master–detail split lists
  * every job of the session's agent and its subagents as a tree (see
- * {@link buildJobTree}) beside the selected one's status, command, facts
- * (cwd, live pids, exit code, artifact) and live output.
+ * {@link buildJobTree}) beside the selected one's status, command (drawn
+ * live from its shell trace: what runs now, ran and failed), facts (cwd, live
+ * pids, exit code, artifact) and live output, read from wherever the command
+ * sends it: its own stdout, a pipe a later stage holds back, a file it
+ * redirects into.
  */
-import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
-import { formatDuration, sanitizeText, spillUrl } from "@oh-my-pi/pi-utils";
+import type { ShellTrace, ShellVizPreferences, ShellVizPresentation, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
+import { formatBytes, formatDuration, sanitizeText, spillUrl } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { matchesKey } from "../keys";
 import { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "../utils";
 import { collapseCommand } from "../apps/ps-data";
-import { PREVIEW_LIMITS, shortenEmbeddedPaths } from "../render/render-utils";
-import { ansi, code, col, compact, item, node, row, span, stableKey, text } from "../native/describe";
-import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
-import { actionBar, actionButton, selectList } from "../native/overlay";
+import { chatTranscriptDisplayPreferences } from "../chat/display-preferences";
+import { PREVIEW_LIMITS, shortenEmbeddedPaths, shortenPath } from "../render/render-utils";
+import { ansi, code, col, compact, item, keyed, node, row, span, stableKey, text } from "../native/describe";
+import { type DescribeContext, leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
+import { actionBar, actionButton, segmentedTabs, selectList } from "../native/overlay";
 import { theme } from "../theme/theme";
 import { buildJobTree, type JobTreeAgent, type JobTreeRow, jobTreeGuide } from "./job-tree";
 import { describeJobWidget, type JobWidgetView, renderJobWidgetLines } from "../tools/job-widget";
+import { changeShellVizPreferences, shellVizEventAction } from "../tools/shell-trace";
+import { defaultShellVizPreferences, readShellPresentation, shellVisualization } from "../tools/shell-viz";
 
 /** One async job as the session snapshots it. */
 export interface JobsPanelJob {
@@ -48,6 +54,28 @@ export interface JobsPanelSnapshot {
 	readonly agents?: readonly JobTreeAgent[];
 }
 
+/**
+ * A place a job's command writes that is not its own output: a pipe between
+ * two of its stages, or a file it redirects into. The sheet reads the job's
+ * progress there while its own output stays empty (`build 2>&1 | tail -5`,
+ * `bench > bench.log 2>&1`).
+ */
+export interface JobsPanelStream {
+	/** Stable within the job (`pipe:1`, `file:2`). */
+	readonly id: string;
+	readonly kind: "pipe" | "file";
+	/** Source text of the stage writing a pipe, or of the command whose redirection opened a file. */
+	readonly producer: string;
+	/** Source text of the stage reading a pipe; a file's absolute path. */
+	readonly consumer: string;
+	/** Bytes written so far; a file's size. */
+	readonly bytes: number;
+	/** Whether more may arrive. */
+	readonly open: boolean;
+	/** Its newest text, from a whole line on; undefined when it carries binary data. Read for the shown stream only. */
+	tail(): string | undefined;
+}
+
 /** What the sheet shows about the selected job beyond its row. */
 export interface JobsPanelDetail {
 	/** Full command line of a job that runs a process (rows show the cut label). */
@@ -62,6 +90,10 @@ export interface JobsPanelDetail {
 	readonly artifactId?: string;
 	/** The job's live widget (frozen once it settles), drawn above the output. */
 	readonly widget?: JobWidgetView;
+	/** The command's shell trace, live while it runs: the command is drawn from it, the running step marked. */
+	readonly trace?: ShellTrace;
+	/** Where the command's output goes besides `output`, oldest first. */
+	readonly streams?: readonly JobsPanelStream[];
 }
 
 /** The session behind a {@link JobsSheet}. */
@@ -110,17 +142,42 @@ const TYPE_ICON: Record<string, string> = { bash: "bash", task: "agent" };
 /** Output tail rows the terminal fallback shows under the selected job. */
 const FALLBACK_TAIL_LINES = 8;
 
+/** Lines of the selected job's command shown before Expand; a traced command keeps its running step among them. */
+const COMMAND_PREVIEW_LINES = 6;
+
+/** Key of the selected job's command node, the shell visualization's events arrive under. */
+const COMMAND_KEY = "command";
+/** Key of the output pane's source tabs. */
+const SOURCES_KEY = "sources";
+/** Id of the job's own output among the output pane's sources; streams keep their {@link JobsPanelStream.id}. */
+const OWN_OUTPUT = "out";
+
+/** What the output pane shows: one of its sources and that source's text now. */
+interface ShownOutput {
+	/** {@link OWN_OUTPUT}, or the shown stream's id. */
+	readonly id: string;
+	/** Absent for the job's own output. */
+	readonly stream?: JobsPanelStream;
+	/** The source's text; undefined for a stream of binary data. */
+	readonly text: string | undefined;
+}
+
 /**
  * The jobs pill's sheet: a centred `lg` glass sheet titled Background jobs.
  * A master–detail split (it stacks in a narrow pane): the selectable job tree
  * beside the selected job's detail — a status pill with live elapsed and
- * Cancel job, its command or task, facts (agent, cwd, live pids, exit code,
- * artifact) and a tail-following output pane. With no jobs it shows an empty
- * state. It re-reads the session every frame, so the caller re-renders it on
- * a timer while it is open. ↑/↓ select, X cancels the selected running job,
- * Esc or Close dismisses; nothing enters the transcript. A source without
- * `cancel` renders read-only, and a subagent's job never offers Cancel: only
- * the root's own jobs can be stopped here.
+ * Cancel job, what it is for, its command (the shell visualization of its
+ * trace where the terminal draws one, the running step in view) or task, one
+ * line of facts (agent, cwd, live pids, exit code, artifact) and a
+ * tail-following output pane. A command that pipes or redirects its output
+ * gets a tab per stream beside Output, and the pane opens on the one that
+ * carries text, so a job whose own output is empty still shows what it is
+ * doing. With no jobs it shows an empty state. It re-reads the session every
+ * frame, so the caller re-renders it on a timer while it is open. ↑/↓
+ * select, X cancels the selected running job, Esc or Close dismisses;
+ * nothing enters the transcript. A source without `cancel` renders
+ * read-only, and a subagent's job never offers Cancel: only the root's own
+ * jobs can be stopped here.
  */
 export class JobsSheet implements Component {
 	readonly nativeOverlay = {
@@ -132,6 +189,22 @@ export class JobsSheet implements Component {
 	readonly #source: JobsSheetSource;
 	#selectedId: string | undefined;
 	#native: { key: string; output: string | undefined; node: NativeNode } | undefined;
+	/** The output source the user picked for a job; without a pick the pane follows the output (see {@link shownSourceId}). */
+	#picked: { job: string; id: string } | undefined;
+	/** The shown stream's tail, reread only once the stream grew. */
+	#streamTail: { key: string; text: string | undefined } | undefined;
+	/**
+	 * The selected job's shell visualization: the view preferences its controls
+	 * changed (`revision` counts the changes) and the presentation last read.
+	 */
+	#shell:
+		| {
+				job: string;
+				preferences: ShellVizPreferences;
+				revision: number;
+				read?: { trace: ShellTrace; revision: number; presentation: ShellVizPresentation | undefined };
+		  }
+		| undefined;
 	/** Fallback output tail, reused while the selected job's output is unchanged. */
 	#tail: { id: string; output: string; lines: readonly string[] } | undefined;
 	/**
@@ -147,14 +220,20 @@ export class JobsSheet implements Component {
 		this.#selectedId = options.selected;
 	}
 
-	describe(_cx: DescribeContext): NativeNode {
+	describe(cx: DescribeContext): NativeNode {
 		const { rows, jobs, selected, cancellable } = this.#current();
 		const detail = selected && this.#inspect(selected.id);
 		const now = Date.now();
+		const view = selected && {
+			cancellable,
+			shown: this.#shownOutput(selected.id, detail),
+			presentation: cx.supports("shell") ? this.#presentation(selected.id, detail?.trace) : undefined,
+		};
 		// Elapsed nodes tick on their own; list values and the output pane redraw
 		// when a job starts, settles, leaves or moves in the tree, gets its
 		// caption (it can land after the job settles), its process changes, its
-		// output grows, or (while one runs) once a second.
+		// command moves on, a stream opens, grows or ends, the shown source
+		// changes, its output grows, or (while one runs) once a second.
 		const key = [
 			rows
 				.map(
@@ -167,25 +246,29 @@ export class JobsSheet implements Component {
 			detail?.exitCode,
 			detail?.artifactId,
 			detail?.widget ? `${detail.widget.updatedAt}:${detail.widget.state}` : "",
+			detail?.streams?.map(stream => `${stream.id}:${stream.bytes}:${stream.open}`).join(" "),
+			view?.shown.id,
+			view?.presentation ? `${detail?.trace?.seq}:${this.#shell?.revision}` : "",
 			jobs.some(job => job.status === "running") ? Math.floor(now / 1000) : "",
 		].join("|");
-		const output = detail?.output;
+		const output = view?.shown.text;
 		if (this.#native?.key === key && this.#native.output === output) return this.#native.node;
 		const close = actionButton("Close", "close", { keys: "escape" });
-		const described = selected
-			? col([
-					node(
-						"row",
-						{ role: "omp.jobs.split" },
-						[
-							node("col", { role: "omp.jobs.master" }, [describeJobList(rows, selected, now)], "master"),
-							describeDetail(selected, detail, now, cancellable),
-						],
-						"split",
-					),
-					actionBar([describeSummary(jobs), null, close]),
-				])
-			: col([describeEmpty(), actionBar([null, close])]);
+		const described =
+			selected && view
+				? col([
+						node(
+							"row",
+							{ role: "omp.jobs.split" },
+							[
+								node("col", { role: "omp.jobs.master" }, [describeJobList(rows, selected, now)], "master"),
+								describeDetail(selected, detail, now, view),
+							],
+							"split",
+						),
+						actionBar([describeSummary(jobs), null, close]),
+					])
+				: col([describeEmpty(), actionBar([null, close])]);
 		this.#native = { key, output, node: described };
 		return described;
 	}
@@ -244,7 +327,12 @@ export class JobsSheet implements Component {
 					lines.push(`   ${line}`);
 				}
 			}
-			for (const line of this.#tailLines(selected.id, detail.output ?? "")) {
+			// No tabs here: the tail is of the source the output pane would open on.
+			const shown = this.#shownOutput(selected.id, detail);
+			if (shown.stream) {
+				lines.push(truncateToWidth(`   ${theme.fg("muted", `→ ${streamNote(shown.stream)}`)}`, width));
+			}
+			for (const line of this.#tailLines(`${selected.id}|${shown.id}`, shown.text ?? "")) {
 				if (line) lines.push(truncateToWidth(`   ${line}`, width));
 			}
 		}
@@ -262,11 +350,68 @@ export class JobsSheet implements Component {
 		else if (matchesKey(data, "x")) this.#cancelSelected();
 	}
 
-	/** Clicks select a row; Close and Cancel job run what Esc and X run. */
+	/**
+	 * Clicks select a row or an output source; the command's own controls
+	 * change how it is drawn; Close and Cancel job run what Esc and X run.
+	 */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "select" || event.type === "activate") this.#selectedId = event.item;
-		else if (event.type === "action" && event.act === "close") this.#source.close();
+		const leaf = leafKey(event.key);
+		if (leaf === COMMAND_KEY) this.#changeShell(event);
+		else if (event.type === "select" || event.type === "activate") {
+			if (leaf !== SOURCES_KEY) this.#selectedId = event.item;
+			else this.#pickSource(event.item);
+		} else if (event.type === "action" && event.act === "close") this.#source.close();
 		else if (event.type === "action" && event.act === "cancel") this.#cancelSelected();
+	}
+
+	/**
+	 * The selected job's command as its shell visualization, read again when
+	 * the trace moved on or a control changed the view. Undefined without a
+	 * trace, with the visualization turned off, or for a trace the engine
+	 * cannot restore: the command then shows as plain code.
+	 */
+	#presentation(job: string, trace: ShellTrace | undefined): ShellVizPresentation | undefined {
+		if (!trace || !chatTranscriptDisplayPreferences.shellVisualization) return undefined;
+		if (this.#shell?.job !== job) this.#shell = { job, preferences: defaultShellVizPreferences(), revision: 0 };
+		const shell = this.#shell;
+		if (shell.read?.trace !== trace || shell.read.revision !== shell.revision) {
+			const source = shellVisualization(trace);
+			shell.read = {
+				trace,
+				revision: shell.revision,
+				presentation: source && readShellPresentation(source, shell.preferences, trace),
+			};
+		}
+		return shell.read.presentation;
+	}
+
+	/**
+	 * A control of the command's visualization: the view, a layer, a selected
+	 * or expanded step. Replay and the full inspector belong to the
+	 * transcript's card, so those actions change nothing here.
+	 */
+	#changeShell(event: NativeUiEvent): void {
+		const shell = this.#shell;
+		if (!shell) return;
+		const action = shellVizEventAction(event, shell.preferences);
+		if (!action || !/^(?:view|layer|select|expand):|^split$/.test(action)) return;
+		shell.preferences = changeShellVizPreferences(shell.preferences, action, 0);
+		shell.revision++;
+	}
+
+	#pickSource(id: string): void {
+		const job = this.#current().selected;
+		if (job) this.#picked = { job: job.id, id };
+	}
+
+	/** The source the output pane shows for job `id` and its text now. */
+	#shownOutput(id: string, detail: JobsPanelDetail | undefined): ShownOutput {
+		const shown = shownSourceId(detail, this.#picked?.job === id ? this.#picked.id : undefined);
+		const stream = detail?.streams?.find(stream => stream.id === shown);
+		if (!stream) return { id: OWN_OUTPUT, text: detail?.output ?? "" };
+		const key = `${id}|${stream.id}|${stream.bytes}`;
+		if (this.#streamTail?.key !== key) this.#streamTail = { key, text: stream.tail() };
+		return { id: stream.id, stream, text: this.#streamTail.text };
 	}
 
 	/**
@@ -443,17 +588,108 @@ function describeEmpty(): NativeNode {
 }
 
 /**
+ * The source the output pane shows: the user's pick while it is still there,
+ * else the job's own output once it printed something, else the newest
+ * stream that carries bytes (one still open first), which is where a command
+ * that pipes or redirects everything is writing.
+ */
+function shownSourceId(detail: JobsPanelDetail | undefined, picked: string | undefined): string {
+	const streams = detail?.streams ?? [];
+	if (picked !== undefined && (picked === OWN_OUTPUT || streams.some(stream => stream.id === picked))) return picked;
+	if (detail?.output?.trim()) return OWN_OUTPUT;
+	const carrying = streams.filter(stream => stream.bytes > 0);
+	return (carrying.findLast(stream => stream.open) ?? carrying.at(-1))?.id ?? OWN_OUTPUT;
+}
+
+/** The program a stage runs, without its directory: its first word past assignments and grouping. */
+function stageName(source: string): string {
+	const words = sanitizeText(source).trim().split(/\s+/);
+	const word = words.find(word => !/^[A-Za-z_][A-Za-z0-9_]*=|^[({!]+$/.test(word)) ?? words[0] ?? "";
+	return word.slice(word.lastIndexOf("/") + 1);
+}
+
+/** A stream's tab: a file's name, a pipe's two programs. */
+function streamLabel(stream: JobsPanelStream): string {
+	if (stream.kind === "file") return stageName(stream.consumer);
+	return `${stageName(stream.producer)} → ${stageName(stream.consumer)}`;
+}
+
+/** What the shown stream is, on one line: a file's path or a pipe's two stages, and its size. */
+function streamNote(stream: JobsPanelStream): string {
+	const what =
+		stream.kind === "file"
+			? shortenPath(sanitizeText(stream.consumer))
+			: shortenEmbeddedPaths(collapseCommand(sanitizeText(`${stream.producer} → ${stream.consumer}`)));
+	return `${what} · ${formatBytes(stream.bytes)}`;
+}
+
+/** What the output pane says in the well's place when the shown source has no text to draw. */
+function emptyOutputNote(shown: ShownOutput, settled: boolean): string | undefined {
+	if (shown.text === undefined) return "Binary data";
+	if (shown.text.trim() !== "") return undefined;
+	if (shown.stream) return shown.stream.open ? "Nothing written yet" : "Nothing written";
+	return settled ? "No output" : "No output yet";
+}
+
+/**
+ * The output pane: the job's own output, or with streams a tab per source
+ * (Output, then each stream) over the shown one's note and text. Empty
+ * sources and binary streams say so in the well's place.
+ */
+function describeOutput(detail: JobsPanelDetail | undefined, shown: ShownOutput, settled: boolean): NativeNode {
+	const streams = detail?.streams ?? [];
+	const stream = shown.stream;
+	const empty = emptyOutputNote(shown, settled);
+	return node(
+		"col",
+		{ role: "omp.jobs.out", gap: "sm" },
+		compact<NativeChild>([
+			streams.length > 0
+				? segmentedTabs(
+						{
+							items: [
+								{ id: OWN_OUTPUT, label: "Output" },
+								...streams.map(stream => ({ id: stream.id, label: streamLabel(stream) })),
+							],
+							active: shown.id,
+						},
+						SOURCES_KEY,
+					)
+				: text("Output", { role: "omp.jobs.label" }),
+			stream &&
+				keyed(
+					text([span(streamNote(stream), "mono")], { role: "omp.jobs.stream", wrap: "none", truncate: "end" }),
+					"stream",
+				),
+			empty !== undefined
+				? keyed(text(empty, { role: "omp.jobs.nooutput" }), "empty")
+				: keyed(
+						ansi(shown.text ?? "", {
+							follow: stream ? stream.open : !settled,
+							role: "omp.jobs.output",
+							max: { h: "16lines" },
+						}),
+						`text-${stableKey(shown.id)}`,
+					),
+		]),
+		"out",
+	);
+}
+
+/**
  * The selected job: a status line (pill, live elapsed, type · id, Cancel job
- * when `cancellable`), what it is for, what its command does (the cheap
- * model's caption), its full command, facts, its widget
- * when it has data to draw and the output pane (or its empty state).
+ * when `cancellable`), what it is for and what its command does (the cheap
+ * model's caption), its command (its shell visualization when `presentation`
+ * is given, else the plain text), its facts on one line, its widget when it
+ * has data to draw and the output pane.
  */
 function describeDetail(
 	job: JobsPanelJob,
 	detail: JobsPanelDetail | undefined,
 	nowMs: number,
-	cancellable: boolean,
+	view: { cancellable: boolean; presentation: ShellVizPresentation | undefined; shown: ShownOutput },
 ): NativeNode {
+	const { cancellable, presentation, shown } = view;
 	const settled = job.status !== "running";
 	const exit = detail?.exitCode;
 	const age = Math.round(jobAge(job, nowMs));
@@ -488,26 +724,50 @@ function describeDetail(
 			]),
 			{ role: "omp.jobs.status", gap: "sm", align: "center" },
 		),
-		title ? text(title, { role: "omp.jobs.title", wrap: "word" }) : undefined,
-		job.caption ? text([span(job.caption, "muted")], { role: "omp.jobs.caption", wrap: "word" }) : undefined,
-		command
-			? code(command, { lang: "bash", wrap: true, preview: { lines: 4 }, role: "omp.jobs.command" })
+		// The intent is the calling model's and can run to a paragraph: the terminal clamps it, the tooltip has it whole.
+		title || job.caption
+			? node(
+					"col",
+					{ role: "omp.jobs.about", gap: "xs" },
+					compact<NativeChild>([
+						title ? text(title, { role: "omp.jobs.title", wrap: "word", title }) : undefined,
+						job.caption
+							? text([span(job.caption, "muted")], {
+									role: "omp.jobs.caption",
+									wrap: "word",
+									title: job.caption,
+								})
+							: undefined,
+					]),
+					"about",
+				)
 			: undefined,
-		facts.length > 0 && node("kv", { items: facts, role: "omp.jobs.facts" }),
+		presentation
+			? node(
+					"shell",
+					{
+						role: "omp.jobs.command",
+						presentation,
+						lang: "bash",
+						liveOrigin: !settled,
+						preview: { lines: COMMAND_PREVIEW_LINES },
+					},
+					undefined,
+					COMMAND_KEY,
+				)
+			: command
+				? code(command, {
+						lang: "bash",
+						wrap: true,
+						preview: { lines: COMMAND_PREVIEW_LINES },
+						role: "omp.jobs.command",
+					})
+				: undefined,
+		facts.length > 0 && node("kv", { items: facts, layout: "inline", role: "omp.jobs.facts" }),
 		detail?.widget &&
 			widgetHasData(detail.widget) &&
 			node("col", { role: "omp.jobs.widget" }, [describeJobWidget(detail.widget)], "widget"),
-		node(
-			"col",
-			{ role: "omp.jobs.out", gap: "sm" },
-			[
-				text("Output", { role: "omp.jobs.label" }),
-				detail?.output
-					? ansi(detail.output, { follow: !settled, role: "omp.jobs.output", max: { h: "16lines" } })
-					: text(settled ? "No output" : "No output yet", { role: "omp.jobs.nooutput" }),
-			],
-			"out",
-		),
+		describeOutput(detail, shown, settled),
 	]);
 	return node("col", { role: "omp.jobs.detail" }, children, stableKey(job.id));
 }

@@ -523,8 +523,9 @@ impl ShellPaths {
 		// Scoped to the command's own cancellation (the operand's token under
 		// `timeout`), so a utility reading a host file stops when it fires
 		// instead of draining the file first: `timeout 1 cat /dev/zero` never
-		// returned.
-		let filesystem = fs.blocking();
+		// returned. The host files the command changes are reported once it
+		// (every clone of this resolver) is done.
+		let filesystem = fs.begin_changes().blocking();
 		let filesystem = match cancel {
 			Some(token) => filesystem.with_cancellation(token),
 			None => filesystem,

@@ -5,8 +5,6 @@ import {
 	readResource,
 	serverSupportsResourceSubscriptions,
 	serverSupportsResources,
-	subscribeToResources,
-	unsubscribeFromResources,
 } from "@oh-my-pi/pi-coding-agent/mcp/client";
 import type {
 	MCPResource,
@@ -14,7 +12,6 @@ import type {
 	MCPResourcesListResult,
 	MCPResourceTemplate,
 	MCPResourceTemplatesListResult,
-	MCPTransport,
 } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { createMockConnection, createMockTransport } from "./mcp-test-utils";
 
@@ -140,37 +137,5 @@ describe("serverSupportsResourceSubscriptions", () => {
 
 	it("returns false when no resources capability", () => {
 		expect(serverSupportsResourceSubscriptions({})).toBe(false);
-	});
-});
-
-describe("subscribeToResources", () => {
-	it("does not throw when one subscription fails", async () => {
-		const transport: MCPTransport = {
-			connected: true,
-			async request<T>(_method: string, params?: Record<string, unknown>): Promise<T> {
-				if (params?.uri === "fail://x") throw new Error("boom");
-				return {} as T;
-			},
-			async notify() {},
-			async close() {},
-		};
-		const conn = createMockConnection({ resources: { subscribe: true } }, transport);
-		await subscribeToResources(conn, ["test://ok", "fail://x"]);
-	});
-});
-
-describe("unsubscribeFromResources", () => {
-	it("does not throw when one unsubscription fails", async () => {
-		const transport: MCPTransport = {
-			connected: true,
-			async request<T>(_method: string, params?: Record<string, unknown>): Promise<T> {
-				if (params?.uri === "fail://x") throw new Error("boom");
-				return {} as T;
-			},
-			async notify() {},
-			async close() {},
-		};
-		const conn = createMockConnection({ resources: { subscribe: true } }, transport);
-		await unsubscribeFromResources(conn, ["test://ok", "fail://x"]);
 	});
 });

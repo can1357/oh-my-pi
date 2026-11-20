@@ -89,11 +89,28 @@ class "gemini" {
 			thinking-upgrade-neutral #true
 			thinking-efforts "low" "medium" "high"
 		}
-		// Gemini 4 Hydrogen adds an `xhigh` level (default `high`).
-		models "gemini-4-hydrogen" {
+		// Gemini 4 Hydrogen and Neon add an `xhigh` level (default `high`).
+		models "gemini-4-hydrogen" "gemini-4-neon" {
 			thinking-upgrade-neutral #true
 			thinking-efforts "low" "medium" "high" "xhigh"
 		}
+	}
+	// Gemini 4 Neon ends about half of the requests that close on a user
+	// message directly after a function response with native finish reason
+	// MALFORMED_RESPONSE: thousands of reasoning tokens, then an empty reply.
+	// Agent harnesses produce that shape whenever a steering, IRC, or async
+	// notification lands mid tool loop. Observed through OpenRouter's Google
+	// endpoint (google/gemini-4-neon-20261118): 32 of 62 such turns failed,
+	// against 1 of 738 turns ending on a tool result; Gemini 3.x Flash and 3.1
+	// Pro on the same route took 1,515 such turns without one. Replaying one
+	// failing 456k-token state with the message folded into the preceding tool
+	// result succeeded 5 of 5 times; a synthetic assistant turn between the
+	// tool result and the message (requires-assistant-after-tool-result) still
+	// failed 4 of 4.
+	// residue: Neon has no family rank, and revision 4 also covers Argon (119
+	// such turns on google-antigravity, none failed), Carbon, and Hydrogen.
+	models "*gemini-4-neon" {
+		fold-user-after-tool-result #true
 	}
 	// Gemini 4 models decode past one 65,536-token streaming segment only when
 	// the request's `maxOutputTokens` is larger (up to 1,048,576 minus input);
@@ -102,12 +119,12 @@ class "gemini" {
 	// API's models.get lists for Argon and Carbon) end every long answer with
 	// MAX_TOKENS at the first segment, often before any visible text. 262,144
 	// is the output cap Google's own Antigravity client advertises for Carbon
-	// and Hydrogen. Zen is left alone: its continuation passthrough is
-	// unverified.
+	// and Hydrogen; Neon, adapted from Carbon, documents the same long decode.
+	// Zen is left alone: its continuation passthrough is unverified.
 	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen#long-decodes
 	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-argon
 	on "google" "google-vertex" {
-		models "gemini-4-argon" "gemini-4-carbon" "gemini-4-hydrogen" {
+		models "gemini-4-argon" "gemini-4-carbon" "gemini-4-hydrogen" "gemini-4-neon" {
 			limits-patch {
 				max-tokens 262144
 			}
@@ -158,10 +175,11 @@ class "gemini" {
 		}
 	}
 
-	// Gemini 4 Neon: $3/$15, cache read $0.15 on the Gemini API; Antigravity
-	// discovery reports $0, so the collapsed row is pinned to the same card.
-	// https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-neon/
-	on "google-antigravity" {
+	// Gemini 4 Neon: $3/$15, cache read $0.15 on the paid Gemini API tier;
+	// Antigravity discovery reports $0, so the collapsed row is pinned to the
+	// same card.
+	// https://aistudio.google.com/docs/pricing
+	on "google" "google-antigravity" {
 		models "gemini-4-neon" {
 			cost-patch {
 				input 3
