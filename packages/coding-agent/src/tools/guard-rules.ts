@@ -726,6 +726,10 @@ const TAR_ENTRY_OPTIONS: Record<string, string> = {
 	"--list": "--list",
 	"--delete": "--dele",
 };
+/** tar's letter that extracts members to standard output. */
+const TAR_STDOUT_LETTER = "O";
+/** tar's long option that extracts members to standard output, with the shortest abbreviation GNU tar takes for it. */
+const TAR_STDOUT_OPTION = { long: "--to-stdout", shortest: "--to-s" };
 
 /**
  * The files a `tar` command reads ({@link ReadWords}): its archive and member lists, and its
@@ -733,7 +737,8 @@ const TAR_ENTRY_OPTIONS: Record<string, string> = {
  * tar changes to. A member's braces are expanded when it is checked, as the shell expands them
  * before tar sees the member (`{/etc/shadow,x}`). Option values stay as written, and exclusions are
  * left out. An extraction, listing or deletion (`x`, `t`, `--delete`) reads only the archive and the
- * member lists: its members name entries of the archive, not files.
+ * member lists: its members name entries of the archive, not files. What it reads reaches its
+ * output when it writes the archive there (`-f -`, `-f /dev/stdout`, or no `-f`) or extracts to it (`-O`).
  */
 function tarReadWords(command: ShellCommand): ReadWords {
 	const argv = args(command);
@@ -742,14 +747,19 @@ function tarReadWords(command: ShellCommand): ReadWords {
 	const moved: string[] = [];
 	let entries = false;
 	let changed = false;
+	// The archive (`-f`), `undefined` for tar's default, and whether `-O` sends extracted members to stdout.
+	let archive: string | undefined;
+	let toStdout = false;
 	let i = 0;
 	// An old-style first word (`tar cfC x.tar ~ .ssh`): each letter that takes a value takes the next word.
 	if (argv.length > 0 && !argv[0].startsWith("-")) {
 		const letters = argv[i++];
 		for (const letter of letters) {
 			entries ||= TAR_ENTRY_LETTERS.includes(letter);
+			toStdout ||= letter === TAR_STDOUT_LETTER;
 			if (!TAR_VALUE_LETTERS.includes(letter) || i >= argv.length) continue;
 			const value = argv[i++];
+			if (letter === "f") archive = value;
 			if (letter === "C") changed = true;
 			else if (letter !== TAR_EXCLUDE_LETTER) words.push(value);
 		}
@@ -771,6 +781,9 @@ function tarReadWords(command: ShellCommand): ReadWords {
 			} else if (Object.hasOwn(TAR_VALUE_OPTIONS, flag)) {
 				const target = value ?? argv[++i];
 				if (target !== undefined && TAR_VALUE_OPTIONS[flag]) words.push(target);
+				if (flag === "--file") archive = target;
+			} else if (flag.length >= TAR_STDOUT_OPTION.shortest.length && TAR_STDOUT_OPTION.long.startsWith(flag)) {
+				toStdout = true;
 			} else {
 				entries ||= Object.entries(TAR_ENTRY_OPTIONS).some(
 					([full, shortest]) => flag.startsWith(shortest) && full.startsWith(flag),
@@ -780,18 +793,22 @@ function tarReadWords(command: ShellCommand): ReadWords {
 			let k = 1;
 			for (; k < arg.length && !TAR_VALUE_LETTERS.includes(arg[k]); k++) {
 				entries ||= TAR_ENTRY_LETTERS.includes(arg[k]);
+				toStdout ||= arg[k] === TAR_STDOUT_LETTER;
 			}
 			if (k === arg.length) continue;
 			const value = k + 1 < arg.length ? attachedValue(arg.slice(k + 1)) : argv[++i];
 			if (value === undefined) continue;
+			if (arg[k] === "f") archive = value;
 			if (arg[k] === "C") changed = true;
 			else if (arg[k] !== TAR_EXCLUDE_LETTER) words.push(value);
 		} else {
 			(changed ? moved : members).push(arg);
 		}
 	}
-	if (entries) return { words, moved: [] };
-	return { words: [...words, ...members], moved };
+	// What it reads reaches its output when it writes the archive there (`-f -`, or no `-f`) or extracts to it.
+	const stdout = toStdout || archive === undefined || Object.hasOwn(STDOUT_FILES, archive);
+	if (entries) return { words, moved: [], stdout };
+	return { words: [...words, ...members], moved, stdout };
 }
 
 /**
@@ -1058,20 +1075,26 @@ const WRITING_READERS: Record<
 /**
  * The words a {@link WRITING_READERS} command reads: the values of its `reads` options and its
  * operands (none for a download), without what it writes to and the values of its other options,
- * {@link KEY_VALUE_OPTIONS} included. A value after an `=` or in its option's word gets no tilde
+ * {@link KEY_VALUE_OPTIONS} included; and what it writes to (`outputs`), its destination or the
+ * values of its `writes` options. A value after an `=` or in its option's word gets no tilde
  * expansion ({@link attachedValue}).
  */
-function writingReaderWords(command: ShellCommand): string[] {
+function writingReaderWords(command: ShellCommand): { words: string[]; outputs: string[] } {
 	const { letters, writes, reads = [], valued = [], destination, urls } = WRITING_READERS[command.argv[0]];
 	const keys = Object.hasOwn(KEY_VALUE_OPTIONS, command.argv[0]) ? KEY_VALUE_OPTIONS[command.argv[0]] : [];
 	const argv = args(command);
 	const words: string[] = [];
 	const operands: string[] = [];
+	const outputs: string[] = [];
 	let targeted = false;
 	// The value of an option that takes one: where the command writes, a file it reads, or neither.
 	const take = (option: string, value: string | undefined) => {
-		if (writes.includes(option)) targeted = true;
-		else if (reads.includes(option) && value !== undefined) words.push(value);
+		if (writes.includes(option)) {
+			targeted = true;
+			if (value !== undefined) outputs.push(value);
+		} else if (reads.includes(option) && value !== undefined) {
+			words.push(value);
+		}
 	};
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
@@ -1096,8 +1119,11 @@ function writingReaderWords(command: ShellCommand): string[] {
 			append(operands, shellBraces(command, arg));
 		}
 	}
-	if (destination && !targeted) operands.pop();
-	return [...words, ...operands];
+	if (destination && !targeted) {
+		const last = operands.pop();
+		if (last !== undefined) outputs.push(last);
+	}
+	return { words: [...words, ...operands], outputs };
 }
 
 /** A number, maybe with a `+` or a unit (`5`, `+5`, `1K`): after an option, the option's value. */
@@ -1125,6 +1151,16 @@ function readerArgs(command: ShellCommand): string[] {
 /** A URL (`https://host/x`, `hkps://keys.example`), which names no local file. */
 const URL_RE = /^[a-z][a-z\d+.-]*:\/\//i;
 
+/** The names a command opens its standard input by, as a file it reads (`curl -d @/dev/stdin`). */
+const STDIN_FILES: Record<string, true> = { "-": true, "/dev/stdin": true, "/dev/fd/0": true, "/proc/self/fd/0": true };
+/** The names a command opens its standard output by, as a file it writes (`tar -cf - .env`, `cp .env /dev/stdout`). */
+const STDOUT_FILES: Record<string, true> = {
+	"-": true,
+	"/dev/stdout": true,
+	"/dev/fd/1": true,
+	"/proc/self/fd/1": true,
+};
+
 /** The files a reading command reads, as written ({@link readWords}). */
 interface ReadWords {
 	/** Read from where the command runs. */
@@ -1135,32 +1171,84 @@ interface ReadWords {
 	 * resolves and a `.env` counts by its name ({@link sentSecret}).
 	 */
 	moved: string[];
+	/** Whether what it reads reaches its standard output, rather than only a file it writes (`cp .env /tmp/x`). */
+	stdout: boolean;
+}
+
+/** Compressors, which write a file next to each they read unless told to write to stdout. */
+const COMPRESSORS: Record<string, true> = { gzip: true, bzip2: true, xz: true };
+
+/**
+ * Whether a {@link READERS} command that is neither a copy, a search nor a {@link WRITING_READERS}
+ * entry puts what it reads on its output: a compressor only with `-c`/`--stdout` (`gzip -c .env`),
+ * `zip` only into the archive `-` (its first word that is no option), `7z` only with `-so`. The
+ * others print what they read.
+ */
+function readerPrints(command: ShellCommand): boolean {
+	const name = command.argv[0];
+	const argv = args(command);
+	const end = argv.indexOf("--");
+	const options = (end < 0 ? argv : argv.slice(0, end)).filter(arg => arg.startsWith("-") && arg.length > 1);
+	if (Object.hasOwn(COMPRESSORS, name)) {
+		return options.some(arg => arg === "--stdout" || arg === "--to-stdout" || /^-[^-]*c/.test(arg));
+	}
+	if (name === "zip") return argv.find(arg => arg === "-" || !arg.startsWith("-")) === "-";
+	if (name === "7z") return options.includes("-so");
+	return true;
+}
+
+/** The one-letter options of `sed` that take a value; in a bundle, the first of them takes the rest of the word. */
+const SED_VALUE_LETTERS = "efl";
+
+/** Whether a `sed` edits its files in place (`-i`, `-i.bak`, `-ni`, `--in-place`), so it prints none of them. */
+function editsInPlace(command: ShellCommand): boolean {
+	for (const arg of args(command)) {
+		if (arg === "--") return false;
+		if (arg.startsWith("--")) {
+			const flag = arg.split("=")[0];
+			if (flag.length >= 3 && "--in-place".startsWith(flag)) return true;
+			continue;
+		}
+		if (!arg.startsWith("-")) continue;
+		for (let k = 1; k < arg.length && !SED_VALUE_LETTERS.includes(arg[k]); k++) {
+			if (arg[k] === "i") return true;
+		}
+	}
+	return false;
 }
 
 /**
  * The words a reading command reads files from: a copy's local sources, a search's operands after
  * its pattern, the files a download reads (`curl -K`, `wget -i`) but not where it saves, any other
  * reader's operands; never `-` (standard input) or a URL. The value of an option that names a key
- * it authenticates with is not read ({@link KEY_VALUE_OPTIONS}).
+ * it authenticates with is not read ({@link KEY_VALUE_OPTIONS}). What a copy, a download, a
+ * `sed -i` or a `sort -o` reads does not reach its output, nor does what `cp` or `mv` reads unless
+ * it copies to the output (`cp .env /dev/stdout`) ({@link readerPrints} for the others).
  */
 function readWords(command: ShellCommand): ReadWords {
 	const name = command.argv[0];
 	let words: string[];
 	let moved: string[] = [];
+	let stdout: boolean;
 	if (name === "tar") {
-		({ words, moved } = tarReadWords(command));
+		({ words, moved, stdout } = tarReadWords(command));
 	} else if (Object.hasOwn(COPY_VALUE_OPTIONS, name)) {
 		words = copyOperands(command)
 			.slice(0, -1)
 			.filter(operand => !REMOTE_OPERAND_RE.test(operand));
+		stdout = false;
 	} else if (Object.hasOwn(PATTERN_READERS, name)) {
 		words = patternReaderWords(command);
+		stdout = name !== "sed" || !editsInPlace(command);
 	} else if (Object.hasOwn(WRITING_READERS, name)) {
-		words = writingReaderWords(command);
+		let outputs: string[];
+		({ words, outputs } = writingReaderWords(command));
+		stdout = !WRITING_READERS[name].urls && outputs.every(output => Object.hasOwn(STDOUT_FILES, output));
 	} else {
 		words = Object.hasOwn(READERS, name) ? readerArgs(command) : [];
+		stdout = readerPrints(command);
 	}
-	return { words: words.filter(word => word !== "-" && !URL_RE.test(word)), moved };
+	return { words: words.filter(word => word !== "-" && !URL_RE.test(word)), moved, stdout };
 }
 
 // -- credential_read ---------------------------------------------------------------------------------
@@ -1392,11 +1480,15 @@ function firstSecret(
 
 /**
  * The secret a command puts on its output: the environment, or a credential or `.env` file it
- * reads, through its arguments from where it runs or its `<` redirections from where the shell opens them.
+ * reads, through its arguments from where it runs or its `<` redirections from where the shell
+ * opens them, when what it reads reaches its output ({@link ReadWords.stdout}): `cp .env /tmp/x`
+ * puts out none.
  */
 function secretOutput(command: ShellCommand, credentials: CredentialIndex): string | undefined {
 	if (dumpsEnvironment(command)) return "the environment";
-	const { words, moved } = command.argv[0] === "source" ? { words: args(command), moved: [] } : readWords(command);
+	const { words, moved, stdout } =
+		command.argv[0] === "source" ? { words: args(command), moved: [], stdout: true } : readWords(command);
+	if (!stdout) return undefined;
 	return (
 		firstSecret(command, command.reads, command.shellCwd, credentials) ??
 		firstSecret(command, words, command.cwd, credentials) ??
@@ -1404,19 +1496,57 @@ function secretOutput(command: ShellCommand, credentials: CredentialIndex): stri
 	);
 }
 
+/** Whether `file` names standard input ({@link STDIN_FILES}). */
+function namesStdin(file: string): boolean {
+	return Object.hasOwn(STDIN_FILES, file);
+}
+
+/**
+ * Whether a network command sends what it reads on its standard input: `nc`, `socat`, `telnet`,
+ * `ftp` and `sftp` always; `http`/`xh` unless told not to (`--ignore-stdin`, `-I`); `curl` only
+ * through standard input named as a file it sends or reads (`-d @-`, `-T -`, `-T .`,
+ * `-F f=@/dev/stdin`, `-K -`, `--variable name@-`), `wget` likewise (`--post-file=-`, `-i -`), and
+ * `rsync` when a list option reads it (`--files-from=-`); `scp` never.
+ */
+function readsStdin(command: ShellCommand): boolean {
+	const name = command.argv[0];
+	const argv = args(command);
+	switch (name) {
+		case "scp":
+			return false;
+		case "http":
+		case "https":
+		case "xh":
+			return !argv.some(arg => arg === "--ignore-stdin" || arg === "-I");
+		case "curl":
+			return (
+				sentFiles(command).some(file => namesStdin(file) || file === ".") ||
+				writingReaderWords(command).words.some(namesStdin) ||
+				argv.some(arg => arg.endsWith("@-"))
+			);
+		case "wget":
+			return sentFiles(command).some(namesStdin) || writingReaderWords(command).words.some(namesStdin);
+		case "rsync":
+			return argv.some(arg => namesStdin(arg) || namesStdin(arg.slice(arg.indexOf("=") + 1)));
+		default:
+			return true;
+	}
+}
+
 /**
  * A network command sending a secret: on its input from a `<` redirection, in a file it uploads, or
- * `upstream`, the secret an earlier stage of its pipeline puts on its output.
+ * `upstream`, the secret an earlier stage of its pipeline puts on its output, when it reads the
+ * pipe ({@link ShellCommand.pipedInput}, {@link readsStdin}).
  */
 function secretSend(
 	command: ShellCommand,
-	upstream: string | undefined,
+	upstream: () => string | undefined,
 	credentials: CredentialIndex,
 ): GuardHit | undefined {
 	const found =
 		firstSecret(command, command.reads, command.shellCwd, credentials) ??
 		firstSecret(command, sentFiles(command), command.cwd, credentials) ??
-		upstream;
+		(command.pipedInput && readsStdin(command) ? upstream() : undefined);
 	return found ? hit("secret_send", `it sends ${found} over the network (\`${command.argv[0]}\`)`) : undefined;
 }
 
@@ -1437,8 +1567,11 @@ export function findPipelineGuardHits(command: string, scope: GuardScope): (Guar
 		let read = 0;
 		for (const [index, sender] of pipeline.entries()) {
 			if (!Object.hasOwn(SENDERS, sender.argv[0])) continue;
-			for (; read < index && upstream === undefined; read++) upstream = secretOutput(pipeline[read], credentials);
-			const found = secretSend(sender, upstream, credentials);
+			const earlier = () => {
+				for (; read < index && upstream === undefined; read++) upstream = secretOutput(pipeline[read], credentials);
+				return upstream;
+			};
+			const found = secretSend(sender, earlier, credentials);
 			if (found) return found;
 		}
 		for (const reader of pipeline) {
