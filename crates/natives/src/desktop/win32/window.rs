@@ -1411,7 +1411,7 @@ pub(super) mod tests {
 		unsafe { DestroyWindow(parent) };
 	}
 
-	/// Posted to the WPF window: it prints `mark` when it reads it.
+	/// Posted to the WPF window: it prints `mark` after queued WPF clicks.
 	const MARK: u32 = WM_APP + 7;
 	/// Posted to the WPF window: it opens its context menu.
 	const OPEN_MENU: u32 = WM_APP + 9;
@@ -1424,8 +1424,8 @@ pub(super) mod tests {
 	/// `armed`.
 	const SWITCH_ON_LOOKUP: u32 = WM_APP + 11;
 
-	/// A WPF window whose context menu holds a `Mark` item, with a modeless
-	/// dialog it owns and an unrelated window of the same app, in its own
+	/// A WPF window whose context menu holds a `Mark` item, with an activatable
+	/// popup it owns and an unrelated window of the same app, in its own
 	/// `PowerShell` process as an app's would be. It prints `ready` and the
 	/// three windows' handles once they show; `opened` and the screen centre of
 	/// the `Mark` item when the menu opens; `activated` or `deactivated` and a
@@ -1434,6 +1434,7 @@ pub(super) mod tests {
 	const WPF_MENU: &str = r#"
 Add-Type -ReferencedAssemblies PresentationFramework,PresentationCore,WindowsBase,System.Xaml,UIAutomationProvider,UIAutomationTypes -TypeDefinition @'
 using System;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Automation.Peers;
 using System.Windows.Controls;
@@ -1453,15 +1454,17 @@ public class SwitchingPeer : MenuItemAutomationPeer {
 	}
 }
 public static class Fixture {
+	[DllImport("user32.dll")] static extern int GetWindowLong(IntPtr hwnd, int index);
+	[DllImport("user32.dll")] static extern int SetWindowLong(IntPtr hwnd, int index, int value);
 	public static bool switchOnLookup;
 	public static Window other;
 	static Window window;
 	static ContextMenu menu;
 	static void Say(string line) { Console.Out.WriteLine(line); Console.Out.Flush(); }
 	static IntPtr Hook(IntPtr hwnd, int message, IntPtr w, IntPtr l, ref bool handled) {
-		if (message == 0x8007) Say("mark");
+		if (message == 0x8007) window.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => Say("mark")));
 		else if (message == 0x8009) { menu.IsOpen = false; menu.IsOpen = true; }
-		else if (message == 0x800A) (w == IntPtr.Zero ? other : window).Activate();
+		else if (message == 0x800A) Say((w == IntPtr.Zero ? other : window).Activate() ? "switch succeeded" : "switch failed");
 		else if (message == 0x800B) { switchOnLookup = true; Say("armed"); }
 		return IntPtr.Zero;
 	}
@@ -1485,6 +1488,10 @@ public static class Fixture {
 		var press = new Button { Content = "Dialog button" };
 		press.Click += (sender, e) => Say("dialog pressed");
 		var dialog = new Window { Title = "omp test: wpf dialog", ShowActivated = false, Left = 360, Top = 40, Width = 240, Height = 140, Content = press };
+		dialog.SourceInitialized += (sender, e) => {
+			var hwnd = Handle(dialog);
+			SetWindowLong(hwnd, -16, GetWindowLong(hwnd, -16) | unchecked((int)0x80000000));
+		};
 		other = new Window { Title = "omp test: wpf other", ShowActivated = false, Left = 360, Top = 220, Width = 240, Height = 140 };
 		Watch(window, "main");
 		window.SourceInitialized += (sender, e) => HwndSource.FromHwnd(Handle(window)).AddHook(Hook);
@@ -1516,11 +1523,11 @@ public static class Fixture {
 			line.split_whitespace().map(str::to_string).collect()
 		}
 
-		/// What `window` printed since the last call: everything it did before
-		/// reading a mark posted now.
+		/// What `window` printed before a dispatcher mark queued below Render,
+		/// after the WPF clicks queued before the mark was posted.
 		fn printed(&mut self, window: HWND) -> Vec<String> {
 			// SAFETY: a plain message to a window this test's fixture owns.
-			unsafe { PostMessageW(window, MARK, 0, 0) };
+			assert_ne!(unsafe { PostMessageW(window, MARK, 0, 0) }, 0, "posting mark failed");
 			let mut lines = Vec::new();
 			loop {
 				let line = self.line().join(" ");
@@ -1537,6 +1544,7 @@ public static class Fixture {
 			let mut lines = Vec::new();
 			loop {
 				let line = self.line().join(" ");
+				assert_ne!(line, "switch failed", "the fixture could not activate its window");
 				if line == wanted {
 					return lines;
 				}
@@ -1568,17 +1576,12 @@ public static class Fixture {
 		let handle = |word: &str| {
 			with_exposed_provenance_mut::<std::ffi::c_void>(word.parse::<usize>().unwrap())
 		};
-		// The window may report activation before or after it shows the others;
-		// a slow activation is left to the harness's timeout.
-		let (mut ready, mut active) = (None, false);
-		while ready.is_none() || !active {
+		let ready = loop {
 			let line = app.line();
-			active |= line == ["activated", "main"];
 			if line[0] == "ready" {
-				ready = Some(line);
+				break line;
 			}
-		}
-		let ready = ready.unwrap();
+		};
 		let (main, dialog, other) = (handle(&ready[1]), handle(&ready[2]), handle(&ready[3]));
 		let mut worker = Worker::new(DisplaySelector::Active, Arc::default(), Arc::default());
 		let token = CancellationSource::default().token();
@@ -1629,7 +1632,7 @@ public static class Fixture {
 		};
 		let open_menu = |app: &mut WpfMenu| {
 			// SAFETY: a plain message to a window this test's fixture owns.
-			unsafe { PostMessageW(main, OPEN_MENU, 0, 0) };
+			assert_ne!(unsafe { PostMessageW(main, OPEN_MENU, 0, 0) }, 0, "posting open menu failed");
 			let opened = app.line();
 			assert_eq!(opened[0], "opened", "{opened:?}");
 			(opened[1].parse::<f64>().unwrap(), opened[2].parse::<f64>().unwrap())
@@ -1648,7 +1651,14 @@ public static class Fixture {
 		assert_eq!(app.printed(main), ["marked"]);
 		assert_eq!(foreground(), main);
 
-		// The dialog the window owns can activate itself: refused.
+		// The owned popup can activate itself despite being shown without
+		// activation: refused, unlike the menu's WS_EX_NOACTIVATE popup.
+		// SAFETY: these queries read the fixture's live popup handle.
+		unsafe {
+			assert_ne!(GetWindowLongW(dialog, GWL_STYLE) as u32 & WS_POPUP, 0);
+			assert_eq!(GetWindowLongW(dialog, GWL_EXSTYLE) as u32 & WS_EX_NOACTIVATE, 0);
+			assert_eq!(GetWindow(dialog, GW_OWNER), foreground());
+		}
 		let button = named(&mut worker, dialog, "Dialog button");
 		let error = press(&mut worker, button).unwrap_err();
 		assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
@@ -1659,7 +1669,7 @@ public static class Fixture {
 		// pattern query: refused before anything is sent.
 		let item = at(&mut worker, open_menu(&mut app));
 		// SAFETY: a plain message to a window this test's fixture owns.
-		unsafe { PostMessageW(main, SWITCH_ON_LOOKUP, 0, 0) };
+		assert_ne!(unsafe { PostMessageW(main, SWITCH_ON_LOOKUP, 0, 0) }, 0, "posting arm failed");
 		app.until("armed");
 		let error = press(&mut worker, item).unwrap_err();
 		assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
@@ -1671,16 +1681,16 @@ public static class Fixture {
 		);
 		assert_eq!(foreground(), other);
 		// SAFETY: a plain message to a window this test's fixture owns.
-		unsafe { PostMessageW(main, ACTIVATE, 1, 0) };
-		app.until("activated main");
+		assert_ne!(unsafe { PostMessageW(main, ACTIVATE, 1, 0) }, 0, "posting activation failed");
+		app.until("switch succeeded");
 		app.printed(main);
 		assert_eq!(foreground(), main);
 
 		// With another window in front, the menu is behind it: refused.
 		let item = at(&mut worker, open_menu(&mut app));
 		// SAFETY: a plain message to a window this test's fixture owns.
-		unsafe { PostMessageW(main, ACTIVATE, 0, 0) };
-		app.until("activated other");
+		assert_ne!(unsafe { PostMessageW(main, ACTIVATE, 0, 0) }, 0, "posting activation failed");
+		app.until("switch succeeded");
 		app.printed(main);
 		assert_eq!(foreground(), other);
 		let error = press(&mut worker, item).unwrap_err();
