@@ -3263,7 +3263,7 @@ describe("cch attestation", () => {
 });
 
 describe("Anthropic empty-messages guard", () => {
-	// `streamAnthropic` runs in an async IIFE, so a `buildParams` throw is
+	// `streamAnthropic` runs in an async IIFE, so a `prepareParams` throw is
 	// pushed as an "error" event instead of being thrown synchronously. Drain
 	// the stream and surface the captured AssistantMessage's errorMessage.
 	const captureError = async (context: Context): Promise<string | undefined> => {
@@ -3285,13 +3285,52 @@ describe("Anthropic empty-messages guard", () => {
 			tools: [],
 		});
 		expect(errMsg).toBeDefined();
-		expect(errMsg).toContain("refusing to build request with empty messages");
+		expect(errMsg).toContain("refusing to send a request with no messages");
 		expect(errMsg).toContain("claude-sonnet-4-5");
 		expect(errMsg).toContain("anthropic");
 	});
 
+	it("reports the cause when a non-empty context encodes away to nothing", async () => {
+		// A user message whose content a context handler filtered down to
+		// nothing: `context.messages` has one entry, the encoder emits zero wire
+		// messages. The reported input count is what separates this from an
+		// empty context.
+		const errMsg = await captureError({
+			systemPrompt: ["Be helpful."],
+			messages: [{ role: "user", content: [], timestamp: 1 }],
+			tools: [],
+		});
+		expect(errMsg).toBeDefined();
+		expect(errMsg).toContain("refusing to send a request with no messages");
+		expect(errMsg).toContain("Context had 1 input messages");
+	});
+
+	it("reports the cause when an onPayload hook empties the request", async () => {
+		// The guard runs on the final request shape, so a hook that drops every
+		// message is diagnosed too instead of reaching the provider.
+		const stream = streamAnthropic(
+			ANTHROPIC_MODEL,
+			{
+				systemPrompt: ["Be helpful."],
+				messages: [{ role: "user", content: "hello", timestamp: 1 }],
+				tools: [],
+			},
+			{
+				apiKey: "sk-ant-oat-test",
+				signal: createAbortedSignal(),
+				onPayload: params => ({ ...(params as MessageCreateParams), messages: [] }),
+			},
+		);
+		let captured: string | undefined;
+		for await (const evt of stream) {
+			if (evt.type === "error") captured = evt.error.errorMessage;
+		}
+		expect(captured).toContain("refusing to send a request with no messages");
+		expect(captured).toContain("Context had 1 input messages");
+	});
+
 	it("does not emit the empty-messages error when context has at least one message", async () => {
-		// onPayload short-circuits before the fetch: we only assert buildParams
+		// onPayload short-circuits before the fetch: we only assert the guard
 		// accepted the non-empty context.
 		const stream = streamAnthropic(
 			ANTHROPIC_MODEL,
@@ -3313,10 +3352,7 @@ describe("Anthropic empty-messages guard", () => {
 		);
 		let sawEmptyError = false;
 		for await (const evt of stream) {
-			if (
-				evt.type === "error" &&
-				evt.error.errorMessage?.includes("refusing to build request with empty messages")
-			) {
+			if (evt.type === "error" && evt.error.errorMessage?.includes("refusing to send a request with no messages")) {
 				sawEmptyError = true;
 			}
 		}

@@ -2417,6 +2417,20 @@ const streamAnthropicOnce = (
 					];
 				}
 				nextParams = toWellFormedDeep(nextParams) as typeof nextParams;
+				// Diagnose an empty provider request here, at the final request
+				// shape: after `onPayload` (which may repair or empty the body) and
+				// after the transport controls above. Anthropic answers
+				// `messages: []` with a bare HTTP 400 "messages is required" that
+				// does not say who emptied the conversation, so name the model,
+				// provider, and how many messages arrived — which separates
+				// "nothing was passed in" from "everything was encoded away".
+				const wireMessageCount = Array.isArray(nextParams.messages) ? nextParams.messages.length : 0;
+				if (wireMessageCount === 0) {
+					throw new Error(
+						`anthropic: refusing to send a request with no messages for model ${model.id} (provider ${model.provider}). ` +
+							`Context had ${context.messages.length} input messages; none survived encoding and hooks.`,
+					);
+				}
 				if (transport) {
 					const preparedRequest = await transport.prepareRequest(nextParams, requestExtraBetas);
 					transportPayload = preparedRequest.payload;
@@ -5547,19 +5561,6 @@ function buildParams(
 		isOAuthToken,
 		conversion,
 	);
-	// Diagnose an empty provider request before spending a round-trip on it:
-	// Anthropic answers `messages: []` with a bare HTTP 400 "messages is
-	// required" that does not say who emptied the conversation. Encoding can
-	// drop every message (context handlers returning an empty replacement,
-	// aborts, compaction, dropped images), so report the model, provider, and
-	// how many messages arrived, which separates "nothing was passed in" from
-	// "everything was filtered out".
-	if (wireMessages.length === 0) {
-		throw new Error(
-			`anthropic: refusing to build request with empty messages for model ${model.id} (provider ${model.provider}). ` +
-				`Context had ${context.messages.length} input messages; all were filtered out before reaching the provider.`,
-		);
-	}
 
 	// Anchor the stable tools+system head so it stays cached across turns; the
 	// moving message tail is anchored separately in applyPromptCaching below.
