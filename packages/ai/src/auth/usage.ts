@@ -707,12 +707,16 @@ export class UsageService implements UsageApi {
 
 			if (entries.length === 0) {
 				const runtimeKey = this.#deps.overrides.runtimeKey(providerId);
+				// Requests send the config override next and never fall past it to the env key (KeyCascade).
+				const configKeyConfig = this.#deps.overrides.configKey(providerId),
+					configKey =
+						configKeyConfig !== undefined ? await this.#deps.overrides.resolve(configKeyConfig) : undefined;
 				const extensionUsageKeyConfig = this.#runtimeUsageProviderOverrides.get(provider)?.apiKey,
 					extensionUsageKey = extensionUsageKeyConfig
 						? await this.#deps.overrides.resolve(extensionUsageKeyConfig)
 						: undefined,
 					envKey = getEnvApiKey(providerId);
-				const apiKey = runtimeKey ?? extensionUsageKey ?? envKey;
+				const apiKey = runtimeKey ?? (configKeyConfig !== undefined ? configKey : (extensionUsageKey ?? envKey));
 				if (!apiKey) continue;
 				const request = usageRequest(provider, { type: "api_key", apiKey }, baseUrl);
 				if (providerImpl.supports && !providerImpl.supports(request)) continue;
