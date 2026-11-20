@@ -945,6 +945,13 @@ describe("model thinking derivation", () => {
 		expect(haiku45.compat.supportsSamplingParams).toBe(true);
 	});
 
+	it("omits sampling params on Bedrock Grok 4.6 and 4.7, which reject temperature", () => {
+		for (const id of ["us.xai.grok-4.6", "us.xai.grok-4.7"]) {
+			const model = createModel({ id, api: "bedrock-converse-stream", provider: "amazon-bedrock", reasoning: true });
+			expect(model.compat.supportsSamplingParams).toBe(false);
+		}
+	});
+
 	it("keeps per-message effort off every Vertex Claude line that takes it on the Claude API", () => {
 		for (const id of ["claude-fable-5-1", "claude-opus-5"]) {
 			const direct = createModel({ id, api: "anthropic-messages", provider: "anthropic" });

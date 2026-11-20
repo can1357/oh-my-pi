@@ -32,6 +32,8 @@ provider "amazon-bedrock" {
 			revision ">=4.6" {
 				thinking-mode "effort"
 				thinking-efforts "low" "medium" "high" "xhigh"
+				// Converse rejects temperature and top_p on Grok 4.6+ with a 400 (#13730).
+				supports-sampling-params #false
 			}
 		}
 	}
