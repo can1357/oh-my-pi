@@ -98,6 +98,16 @@ import {
 	cfgToolsXdevNotices,
 } from "../tools/settings";
 
+/**
+ * Registered tools a mode may activate mid-session that `active` leaves out, for {@link Agent.setStandbyTools}:
+ * goal mode activates `goal`, and declaring it only then re-writes Anthropic's cached prompt (issue #19826).
+ * Applied when the session's agent is created and on every active-tool change.
+ */
+export function standbyTools(registry: ReadonlyMap<string, AgentTool>, active: readonly string[]): AgentTool[] {
+	const goal = active.includes("goal") ? undefined : registry.get("goal");
+	return goal ? [goal] : [];
+}
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionToolsHost {
 	agent: Agent;
@@ -1686,6 +1696,7 @@ export class SessionTools {
 			if (currentTools.length !== tools.length || currentTools.some((tool, index) => tool !== tools[index])) {
 				this.#host.agent.setTools(tools);
 			}
+			this.#host.agent.setStandbyTools(standbyTools(this.#toolRegistry, validToolNames));
 			// The first primary model call can capture the prompt while the rebuild
 			// awaits; that prompt is bound from then on, so an implicit rebuild ends
 			// exactly as if it had frozen up front. Before that call, a resumed
