@@ -810,7 +810,7 @@ describe("openai-completions wire-quirk compat detection", () => {
 		expect(other.filterReasoningHistory).toBe(false);
 	});
 
-	it("requires a synthetic assistant bridge after tool results only for Mistral hosts", () => {
+	it("requires a synthetic assistant bridge after tool results only for Mistral hosts and Gemini 4 Neon", () => {
 		// Mistral/Devstral reject a user message directly after a tool result; the chat
 		// builder bridges it with a synthetic assistant turn, keyed on the Mistral host.
 		expect(
@@ -828,6 +828,13 @@ describe("openai-completions wire-quirk compat detection", () => {
 				}),
 			).compat.requiresAssistantAfterToolResult,
 		).toBe(true);
+		// Gemini 4 Neon fails with an empty MALFORMED_RESPONSE on that shape; Gemini 4 Argon does not.
+		expect(
+			resolveModelPolicy(openrouterSpec({ id: "google/gemini-4-neon" })).compat.requiresAssistantAfterToolResult,
+		).toBe(true);
+		expect(
+			resolveModelPolicy(openrouterSpec({ id: "google/gemini-4-argon" })).compat.requiresAssistantAfterToolResult,
+		).toBe(false);
 		// Non-Mistral hosts must not insert the bridge.
 		expect(resolveModelPolicy(completionsSpec()).compat.requiresAssistantAfterToolResult).toBe(false);
 		expect(

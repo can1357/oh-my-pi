@@ -1869,6 +1869,7 @@ export function buildParams(
 		repairOrphanOutputs: true,
 		toolNaming,
 		dropEncryptedReasoning,
+		requiresAssistantAfterToolResult: model.compat.requiresAssistantAfterToolResult,
 	});
 
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);

@@ -131,6 +131,7 @@ import {
 	resolveOpenAIRequestSetup,
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
+	TOOL_RESULT_BRIDGE_TEXT,
 } from "./openai-shared";
 import { completionsSendsOwnThinking, transformMessages } from "./transform-messages";
 import {
@@ -2633,7 +2634,7 @@ export function convertMessages(
 		) {
 			params.push({
 				role: "assistant",
-				content: "I have processed the tool results.",
+				content: TOOL_RESULT_BRIDGE_TEXT,
 			});
 		}
 
@@ -3016,7 +3017,7 @@ export function convertMessages(
 				if (compat.requiresAssistantAfterToolResult) {
 					params.push({
 						role: "assistant",
-						content: "I have processed the tool results.",
+						content: TOOL_RESULT_BRIDGE_TEXT,
 					});
 				}
 

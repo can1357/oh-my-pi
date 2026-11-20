@@ -381,6 +381,7 @@ function buildParams(
 		developerStringContent: true,
 		preserveAssistantMessageIds: true,
 		repairOrphanOutputs: true,
+		requiresAssistantAfterToolResult: model.compat.requiresAssistantAfterToolResult,
 	});
 
 	const params: AzureOpenAIResponsesSamplingParams = {
