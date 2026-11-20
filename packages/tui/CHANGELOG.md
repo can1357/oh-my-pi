@@ -28,6 +28,7 @@
 - Terminals the output writer cannot reopen (after `su` to another user, inside some sandboxes) are written off the JS thread too, so a slow terminal no longer freezes input there
 - `ask` HTML forms keep a prefilled or hidden control named `__proto__` in their default data, so a timed-out form no longer drops it ([#18646](https://github.com/can1357/oh-my-pi/pull/18646) by [@pasquale95](https://github.com/pasquale95))
 - An ask form with one question submits on one Enter instead of stopping on Submit first
+- Fixed the status-line `session` segment showing identical IDs for sessions created within about a minute of each other; it now shows the first 13 characters of the ID ([#9572](https://github.com/can1357/oh-my-pi/issues/9572))
 
 ## [19.0.1] - 2026-11-19
 
