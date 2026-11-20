@@ -718,13 +718,22 @@ export class TtsrCoordinator {
 		// turn now keeps the retry exempt even when this task runs before the aborted turn's turn_end.
 		const retryTurn = (this.#manager?.getMessageCount() ?? 0) + 1;
 		this.#host.schedulePostPromptTask(
-			async () => {
+			async signal => {
+				// The abort only requests the stop: a run whose message already ended (`toolUse`) unwinds through
+				// tool execution and appends its aborted assistant later. Appending first would leave that
+				// assistant as the tail and the continuation would have nothing to resume from.
+				await this.#host.agent.waitForIdle();
 				if (this.#retryToken !== retryToken) {
 					this.resolveResume();
 					return;
 				}
 				const targetAssistantIndex = this.#findAssistantIndex(targetTimestamp);
-				if (!this.#abortPending || this.#host.promptGeneration() !== generation || targetAssistantIndex === -1) {
+				if (
+					signal.aborted ||
+					!this.#abortPending ||
+					this.#host.promptGeneration() !== generation ||
+					targetAssistantIndex === -1
+				) {
 					this.#abortPending = false;
 					this.#pendingInjections = [];
 					this.#pendingExcerpts = {};
