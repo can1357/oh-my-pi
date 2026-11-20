@@ -14,11 +14,12 @@ import * as path from "node:path";
 import { parseArgs } from "node:util";
 import { type ResolvedThinkingLevel, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
-import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
+import { postmortem } from "@oh-my-pi/pi-utils";
 import { loadTasksFromDir, validateFixturesFromDir } from "@oh-my-pi/typescript-edit-benchmark/tasks";
 import { LiveProgress } from "./live-progress";
 import { generateJsonReport, generateReport } from "./report";
 import { type BenchmarkConfig, type BenchmarkResult, buildBenchmarkResult, runBenchmark } from "./runner";
+import { createScratch, removeScratch } from "./scratch";
 
 const EDIT_PACKAGE = path.resolve(import.meta.dir, "..", "..", "..", "typescript-edit-benchmark");
 const RUNS_DIR = path.resolve(import.meta.dir, "..", "..", "..", "..", "runs");
@@ -94,27 +95,24 @@ async function resolveConversationDumpDir(outputPath: string): Promise<string> {
 	return path.join(parsed.dir, `${parsed.name}.${timestamp}.dump`);
 }
 
-interface ResolvedFixtures {
-	dir: string;
-	cleanup?: () => Promise<void>;
-}
-
-/** Resolve `--fixtures` (directory or tarball; default: the built-in tarball). */
-async function resolveFixtures(fixturesArg: string | undefined): Promise<ResolvedFixtures> {
+/**
+ * Resolve `--fixtures` (directory or tarball; default: the built-in tarball) to a fixtures
+ * directory. A tarball is extracted into scratch, which `removeScratch` reclaims.
+ */
+async function resolveFixtures(fixturesArg: string | undefined): Promise<string> {
 	const source = fixturesArg ?? path.join(EDIT_PACKAGE, "fixtures.tar.gz");
 	if (!source.endsWith(".tar.gz") && !source.endsWith(".tgz")) {
-		return { dir: source };
+		return source;
 	}
-	const temp = await TempDir.create("@metaharness-edit-fixtures-");
+	const extracted = (await createScratch()).dir;
 	const archive = new Bun.Archive(await Bun.file(source).arrayBuffer());
 	for (const [filePath, file] of await archive.files()) {
-		await Bun.write(path.join(temp.path(), filePath), file);
+		await Bun.write(path.join(extracted, filePath), file);
 	}
-	const entries = await fs.readdir(temp.path(), { withFileTypes: true });
+	const entries = await fs.readdir(extracted, { withFileTypes: true });
 	const directories = entries.filter(entry => entry.isDirectory());
 	const files = entries.filter(entry => entry.isFile());
-	const dir = directories.length === 1 && files.length === 0 ? path.join(temp.path(), directories[0]!.name) : temp.path();
-	return { dir, cleanup: () => temp.remove() };
+	return directories.length === 1 && files.length === 0 ? path.join(extracted, directories[0]!.name) : extracted;
 }
 
 function printUsage(): void {
@@ -205,10 +203,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 		return;
 	}
 
-	const fixtures = await resolveFixtures(values.fixtures);
+	const fixturesDir = await resolveFixtures(values.fixtures);
 	try {
 		if (values["check-fixtures"]) {
-			const issues = await validateFixturesFromDir(fixtures.dir);
+			const issues = await validateFixturesFromDir(fixturesDir);
 			if (issues.length === 0) {
 				log("Fixtures OK");
 				return;
@@ -219,7 +217,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 			return;
 		}
 
-		let tasks = await loadTasksFromDir(fixtures.dir);
+		let tasks = await loadTasksFromDir(fixturesDir);
 		if (values.list) {
 			process.stdout.write(`${JSON.stringify(tasks.map(task => ({ id: task.id, name: task.name })))}\n`);
 			return;
@@ -317,7 +315,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 			progress?.finish();
 			log("Benchmark interrupted; writing partial report...");
 			await Bun.write(outputPath, renderReport(latestResult));
-			await fixtures.cleanup?.();
+			await removeScratch();
 		});
 
 		const result = await runBenchmark(
@@ -348,7 +346,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 		if (result.summary.timeoutRuns > 0) log(`  Timeout runs: ${result.summary.timeoutRuns}`);
 		log(`Report written to: ${outputPath}`);
 	} finally {
-		await fixtures.cleanup?.();
+		await removeScratch();
 	}
 }
 
