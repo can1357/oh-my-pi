@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed Vercel AI Gateway model refresh leaving public models undiscovered when a stored API key has expired
 - Fixed OpenRouter models that require reasoning but list no effort levels (e.g. `liquid/lfm-3-1.7b`) failing with `400 Reasoning is mandatory for this endpoint and cannot be disabled` when used for magic edits, titles, and other requests that turn thinking off; they now run at the lowest effort instead
 - Fixed Gemini 4 models (Argon, Carbon, Hydrogen, Neon) repeatedly failing with an empty `MALFORMED_RESPONSE` when an IRC, async-result, or steering message arrives right after a tool result; such messages now reach the model inside the preceding tool result
 - Cursor's newly served models (Claude Fable 5.2, Claude Haiku 4.5, Claude Sonnet 5.5, Gemini 2.5 Flash, Gemini 4 Hydrogen/Neon, GLM 5.3, GPT-5.1, Muse Wonder 1.0) now use their documented per-token prices instead of $0 ([#19842](https://github.com/can1357/oh-my-pi/pull/19842) by [@fenilmodi00](https://github.com/fenilmodi00)).
