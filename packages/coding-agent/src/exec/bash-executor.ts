@@ -20,6 +20,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { formatRawOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
+import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { Settings } from "../config/settings";
 import type { MinimizedMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { type ArtifactAllocator, OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -669,6 +670,11 @@ async function executeUserShellPty(run: {
 }): Promise<BashResult> {
 	const session = new PtySession();
 	const newlines = new StreamNewlineNormalizer();
+	// Nothing plays terminal behind this PTY, so a probing program (gh, termenv)
+	// waits out its reply timeout (#10214). Answer its queries from the output.
+	// ConPTY answers its own session-start cursor handshake (crates/natives/src/pty.rs),
+	// so that one query stays unanswered on Windows.
+	const responder = new TerminalQueryResponder({ hostCursorHandshake: process.platform === "win32" });
 	const result = await session.startArgv(
 		{
 			application: run.shell,
@@ -682,6 +688,14 @@ async function executeUserShellPty(run: {
 		},
 		(err, chunk) => {
 			if (err || !chunk) return;
+			const reply = responder.feed(chunk);
+			if (reply) {
+				try {
+					session.write(reply);
+				} catch {
+					// The command exited between its output and the reply.
+				}
+			}
 			run.pty.onChunk(chunk);
 			// Preserve raw bytes for the terminal display, but extract graphics
 			// before the transcript sink sanitizes or truncates the clean text.
