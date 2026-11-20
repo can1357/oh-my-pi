@@ -21,6 +21,8 @@ import {
 	rediscoverSkills,
 	type Skill,
 	type SkillRediscoveryHost,
+	claudeCodeToolNote,
+	withClaudeCodeToolNote,
 } from "../extensibility/skills";
 import { MCPManager, type MCPManagerApi } from "../mcp/manager";
 import skillDoc from "../prompts/internal-urls/skill.md" with { type: "text" };
@@ -57,6 +59,8 @@ const UNKNOWN_SKILL_MCP_WAIT_MS = 5_000;
 interface SkillTarget {
 	skill: Skill;
 	path: string;
+	/** Whether the URL addresses the skill's own instruction file, rather than a path inside it. */
+	instructions: boolean;
 }
 
 /** The loaded skill a skill:// URL names, and the URL path inside that skill. */
@@ -107,6 +111,7 @@ async function skillTargetPath(
 	contain = false,
 ): Promise<SkillTarget> {
 	let resolvedPath: string;
+	const instructions = (!urlPath || urlPath === "/") && !directory;
 	if (!urlPath || urlPath === "/") {
 		resolvedPath = path.resolve(directory ? skill.baseDir : skill.filePath);
 	} else {
@@ -121,7 +126,7 @@ async function skillTargetPath(
 	// Agent Plugin skills (§4.1): every target, including the bare instruction
 	// file and base directory, must canonically resolve within the plugin root.
 	// Symlinks may target other files inside the same package.
-	if (!skill.containRoot && !contain) return { skill, path: resolvedPath };
+	if (!skill.containRoot && !contain) return { skill, path: resolvedPath, instructions };
 	const containRoot = skill.containRoot ?? (await fs.realpath(skill.baseDir));
 	// Local skill roots may themselves be links. Rebase their lexical children
 	// onto the real root before the shared helper checks descendant links.
@@ -131,7 +136,7 @@ async function skillTargetPath(
 	const escape = `skill:// path resolves outside the ${skill.containRoot ? "plugin" : "skill"} root: ${url.href}`;
 	const contained = await resolveContainedPath(containRoot, containmentPath);
 	if (contained.status === "outside") throw new UrlContainmentError(escape);
-	if (contained.status === "ok") return { skill, path: contained.realPath };
+	if (contained.status === "ok") return { skill, path: contained.realPath, instructions };
 	if (create) {
 		try {
 			await ensureCreatableWithinRoot(containmentPath, containRoot, "skill", url.href);
@@ -140,7 +145,7 @@ async function skillTargetPath(
 			throw error instanceof UrlContainmentError ? new UrlContainmentError(escape) : error;
 		}
 	}
-	return { skill, path: resolvedPath };
+	return { skill, path: resolvedPath, instructions };
 }
 
 async function statIfExists(filePath: string): Promise<fsTypes.Stats | null> {
@@ -181,6 +186,10 @@ function contextRediscoveryHost(skills: readonly Skill[], context: ResolveContex
 interface LocatedSkillTarget {
 	path: string;
 	stats: fsTypes.Stats | null;
+	/** The skill the target belongs to, for delivery-time rewriting of its own instruction file. */
+	skill: Skill;
+	/** Whether the URL addresses the skill's own instruction file (rather than a file inside it). */
+	instructions: boolean;
 }
 
 /**
@@ -256,7 +265,13 @@ async function locateSkillTarget(
 				contain,
 			);
 			const heldStats = await statIfExists(heldTarget.path);
-			if (!(await isStaleTarget(heldTarget, heldStats, host))) return { path: heldTarget.path, stats: heldStats };
+			if (!(await isStaleTarget(heldTarget, heldStats, host)))
+				return {
+					path: heldTarget.path,
+					stats: heldStats,
+					skill: heldTarget.skill,
+					instructions: heldTarget.instructions,
+				};
 		}
 		const rediscovered = findStaleSkillStandIn(named.skill, await rediscoverSkills(host));
 		// Not an UnknownSkillError: when an upgrade dropped the skill, another plugin's colliding skill
@@ -266,12 +281,16 @@ async function locateSkillTarget(
 		target = await skillTargetPath(url, { skill: rediscovered, urlPath: named.urlPath }, directory, create, contain);
 		stats = await statIfExists(target.path);
 	}
-	return { path: target.path, stats };
+	return { path: target.path, stats, skill: target.skill, instructions: target.instructions };
 }
 
-/** The file or directory resource at a located target; a target removed since it was located rejects with ENOENT. */
+/**
+ * The file or directory resource at a located target; a target removed since it was located rejects
+ * with ENOENT. A skill's own instruction file is delivered through the same Claude-dialect rewriting
+ * as `loadSkillPromptBody`, so every path that reads a skill body agrees.
+ */
 async function readSkillTarget(url: InternalUrl, target: LocatedSkillTarget): Promise<InternalResource> {
-	const { path: targetPath, stats } = target;
+	const { path: targetPath, stats, skill, instructions } = target;
 	if (!stats) throw new Error(`File not found: ${targetPath}`);
 
 	if (stats.isDirectory()) {
@@ -281,7 +300,9 @@ async function readSkillTarget(url: InternalUrl, target: LocatedSkillTarget): Pr
 		throw new Error(`skill:// URL must resolve to a file or directory: ${url.href}`);
 	}
 
-	const content = await Bun.file(targetPath).text();
+	const raw = await Bun.file(targetPath).text();
+	// Only the skill's own instruction file is Claude-dialect prose; a referenced asset is not.
+	const content = instructions ? await withClaudeCodeToolNote(skill, raw) : raw;
 	return {
 		url: url.href,
 		content,
@@ -290,6 +311,20 @@ async function readSkillTarget(url: InternalUrl, target: LocatedSkillTarget): Pr
 		sourcePath: targetPath,
 		notes: [],
 	};
+}
+
+/**
+ * The Claude Code tool note for `url` when it names a Claude-dialect skill's own instruction file
+ * ({@link claudeCodeToolNote}); undefined for any other target. `read` locates skill files and reads
+ * them through the filesystem pipeline, bypassing {@link readSkillTarget}, so it appends this itself.
+ */
+export async function skillUrlClaudeCodeToolNote(
+	url: InternalUrl,
+	context?: ResolveContext,
+): Promise<string | undefined> {
+	const target = await locateSkillTarget(url, context, false);
+	if (!target.instructions || !target.stats?.isFile()) return undefined;
+	return claudeCodeToolNote(target.skill, await Bun.file(target.path).text());
 }
 
 /**

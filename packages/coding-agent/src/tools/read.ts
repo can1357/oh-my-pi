@@ -44,6 +44,7 @@ import readSourcesDoc from "../prompts/tools/read-sources.md" with { type: "text
 import type { ToolSession } from "../sdk";
 import { McpResourceNotFoundError } from "../internal-urls/mcp-protocol";
 import { parseInternalUrl } from "../internal-urls/parse";
+import { skillUrlClaudeCodeToolNote } from "../internal-urls/skill-protocol";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -2298,6 +2299,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// The TUI falls back to this block when no structured display content exists.
 			if (firstText) firstText.text = `${provenance}\n${firstText.text}`;
 			else result.content.unshift({ type: "text", text: provenance });
+			if (located.sel === undefined) {
+				const note = await skillUrlClaudeCodeToolNote(
+					parseInternalUrl(located.url),
+					sessionResolveContext(this.session, { signal }),
+				);
+				if (note) result.content.push({ type: "text", text: note });
+			}
 		}
 		return { ...result, details };
 	}

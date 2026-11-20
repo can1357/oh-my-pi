@@ -185,6 +185,7 @@ import {
 	loadSkillPrompt,
 	renderSkillPromptMessage,
 	type Skill,
+	type SkillFile,
 	type SkillPromptInput,
 	type SkillRediscoveryHost,
 	type SkillWarning,
@@ -12023,7 +12024,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * install was replaced or deleted) is read from this session's rediscovered same-named skill.
 	 */
 	async buildUserSkillPrompt(
-		skill: Pick<Skill, "name" | "filePath" | "baseDir">,
+		skill: SkillFile & Pick<Skill, "name" | "baseDir">,
 		input: SkillPromptInput,
 	): Promise<BuiltSkillPromptMessage> {
 		const loaded = await loadSkillPrompt(skill, this);

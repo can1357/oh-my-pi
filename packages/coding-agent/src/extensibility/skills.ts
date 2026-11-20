@@ -24,6 +24,7 @@ import {
 	loadCapability,
 	type SkillFrontmatter,
 } from "../discovery";
+import { pluginUsesClaudeModelDialect } from "../discovery/agent-plugin-format";
 import {
 	clearPluginRootsAndCaches,
 	compareSkillOrder,
@@ -33,9 +34,11 @@ import {
 } from "../discovery/helpers";
 import { allowsSkillTokens, SKILL_TOKEN_RE } from "@oh-my-pi/pi-tui/prompt/skill-tokens";
 import autoloadTemplate from "../prompts/skills/autoload.md" with { type: "text" };
+import claudeCodeToolNoteTemplate from "../prompts/skills/claude-code-tool-note.md" with { type: "text" };
 import userInvocationTemplate from "../prompts/skills/user-invocation.md" with { type: "text" };
 import { SKILLSHARE_PROVIDER_ID } from "../discovery/skillshare";
 import type { SkillPromptDetails } from "../session/messages";
+import { CLAUDE_CODE_TOOL_NAMES } from "../tools/builtin-names";
 import { expandTilde } from "../tools/path-utils";
 
 export { allowsSkillTokens, SKILL_TOKEN_RE };
@@ -853,17 +856,96 @@ export type SkillInvocationKind = "user" | "autoload";
 /** What the user typed around a skill token: `args` feed the template, `prompt` only the transcript. */
 export type SkillPromptInput = Pick<ParsedSkillInvocation, "args"> & Partial<Pick<ParsedSkillInvocation, "prompt">>;
 
+/**
+ * The fields skill delivery reads off a skill: its file, plus the provider metadata that decides
+ * whether its prose is Claude Code's. Callers holding a full {@link Skill} (or a narrowed view
+ * without `_source`, which is simply never rewritten) both satisfy it.
+ */
+export type SkillFile = Pick<Skill, "filePath"> & Partial<Pick<Skill, "_source">>;
+
+/**
+ * Claude Code tool names distinctive enough to be recognized without backticks or a following
+ * `tool`: everyday words (`Task`, `Read`, `Edit`) only count when written as a tool reference.
+ */
+const DISTINCTIVE_CLAUDE_TOOL_NAMES = [
+	"TodoWrite",
+	"TodoRead",
+	"AskUserQuestion",
+	"WebFetch",
+	"WebSearch",
+	"MultiEdit",
+	"NotebookEdit",
+	"NotebookRead",
+];
+const GENERIC_CLAUDE_TOOL_NAMES = ["Task", "Agent", "Bash", "Read", "Write", "Edit", "Glob", "Grep", "LS", "Skill"];
+// Case-sensitive: only Claude Code's exact PascalCase names are tool references.
+const CLAUDE_TOOL_MENTION_RE = new RegExp(
+	`\\b(?:${DISTINCTIVE_CLAUDE_TOOL_NAMES.join("|")})\\b|\`(${GENERIC_CLAUDE_TOOL_NAMES.join("|")})\`|\\b(${GENERIC_CLAUDE_TOOL_NAMES.join("|")})\\s+tool\\b`,
+	"g",
+);
+
+/** Claude Code tool names a body mentions, in first-mention order, as written. */
+function claudeToolMentions(body: string): string[] {
+	const names: string[] = [];
+	const seen = new Set<string>();
+	for (const match of body.matchAll(CLAUDE_TOOL_MENTION_RE)) {
+		// Group 1 holds a backticked generic name, group 2 one followed by `tool`; the
+		// distinctive alternative has no group and is recovered from the whole match.
+		const name = match[1] ?? match[2] ?? match[0];
+		if (seen.has(name)) continue;
+		seen.add(name);
+		names.push(name);
+	}
+	return names;
+}
+
+/**
+ * Whether a skill's prose is written in the Claude Code dialect: the `claude` provider, or a
+ * `claude-plugins` root whose manifest makes it a Claude Code plugin (the same
+ * {@link pluginUsesClaudeModelDialect} test that decides the agent frontmatter dialect). OMP-native
+ * plugins (`.omp-plugin/plugin.json`), Agent Plugins packages, and every other provider are not.
+ */
+async function isClaudeDialectSkill(skill: SkillFile): Promise<boolean> {
+	const provider = skill._source?.provider;
+	if (provider === "claude") return true;
+	if (provider !== "claude-plugins") return false;
+	// Same rule as agent dialect detection in task/discovery.ts: foreign Claude roots (origin
+	// "claude") always are; an omp-installed or --plugin-dir root only when its manifest says so.
+	if (skill._source?.origin === "claude") return true;
+	const root = registeredPluginRootOf(skill.filePath)?.root;
+	return root !== undefined && (await pluginUsesClaudeModelDialect(root));
+}
+
+/**
+ * The note appended to a Claude-dialect skill body that names Claude Code tools, mapping each to
+ * the omp tool that covers it; undefined when the skill is not Claude-dialect or names none.
+ */
+export async function claudeCodeToolNote(skill: SkillFile, body: string): Promise<string | undefined> {
+	if (!(await isClaudeDialectSkill(skill))) return undefined;
+	const names = claudeToolMentions(body);
+	if (names.length === 0) return undefined;
+	const tools = names.map(claude => ({ claude, omp: CLAUDE_CODE_TOOL_NAMES.get(claude.toLowerCase()) }));
+	return prompt.render(claudeCodeToolNoteTemplate, { tools }).trim();
+}
+
+/** `body` with {@link claudeCodeToolNote} appended, or `body` itself when there is no note. */
+export async function withClaudeCodeToolNote(skill: SkillFile, body: string): Promise<string> {
+	const note = await claudeCodeToolNote(skill, body);
+	return note ? `${body}\n\n${note}` : body;
+}
+
 /** Read a skill's instruction body before rendering user-provided arguments. */
-export async function loadSkillPromptBody(skill: Pick<Skill, "filePath">): Promise<string> {
+export async function loadSkillPromptBody(skill: SkillFile): Promise<string> {
 	const content = await Bun.file(skill.filePath).text();
 	// Only the body is used: keep HTML comments (`repair: false`) and leave YAML
 	// diagnostics to the loader, which already parsed this frontmatter.
-	return parseFrontmatter(content, { source: skill.filePath, repair: false, level: "off" }).body.trim();
+	const body = parseFrontmatter(content, { source: skill.filePath, repair: false, level: "off" }).body.trim();
+	return withClaudeCodeToolNote(skill, body);
 }
 
 /** A skill's instruction body and the skill it was read from. */
 export interface LoadedSkillPrompt {
-	skill: Pick<Skill, "name" | "filePath" | "baseDir">;
+	skill: SkillFile & Pick<Skill, "name" | "baseDir">;
 	body: string;
 }
 
@@ -875,7 +957,7 @@ export interface LoadedSkillPrompt {
  * with it.
  */
 export async function loadSkillPrompt(
-	skill: Pick<Skill, "name" | "filePath" | "baseDir">,
+	skill: SkillFile & Pick<Skill, "name" | "baseDir">,
 	source?: SkillRediscoverySource,
 ): Promise<LoadedSkillPrompt> {
 	const host = source?.skillRediscoveryHost?.();
@@ -949,7 +1031,7 @@ export function renderSkillPromptMessage(
  * `details.path` names the file actually read.
  */
 export async function buildSkillPromptMessage(
-	skill: Pick<Skill, "name" | "filePath" | "baseDir">,
+	skill: SkillFile & Pick<Skill, "name" | "baseDir">,
 	input: SkillPromptInput,
 	invocation: SkillInvocationKind = "user",
 	source?: SkillRediscoverySource,

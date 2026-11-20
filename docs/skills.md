@@ -190,6 +190,8 @@ Invoked skill content is identified by invocation kind, each with its own prompt
 - **User-invoked** (`user-invocation.md`, used by `/skill:<name>`): the message opens by announcing that the user invoked the skill, embeds the skill body, and appends the skill directory (`[Skill directory: <baseDir>]`) with instructions to resolve the skill's relative paths (scripts, templates) against it, plus optional `User: <args>`.
 - **Autoloaded** (`autoload.md`): a minimal provenance-only format — body followed by `Skill: <path>` and optional `User: <args>` — used when subagents auto-inject skills declared via the `autoloadSkills` agent frontmatter field; these hidden messages must not claim the user invoked them.
 
+Skills from Claude Code (provider `claude`, or a Claude-format plugin: one from the Claude Code plugin tree, or with `.claude-plugin/plugin.json` and no `.omp-plugin/plugin.json`) are written against Claude Code's tool names. When such a skill body is delivered (`/skill:`, autoload, or a whole `skill://<name>` read), omp appends one line mapping the names the body mentions to omp tools, e.g. `This skill was written for Claude Code. In omp: Task → task, TodoWrite → todo.` Distinctive names (`TodoWrite`, `AskUserQuestion`, `WebFetch`, ...) count anywhere; generic ones (`Task`, `Read`, `Bash`, ...) only when backticked or followed by ` tool`. Bodies with no mention, and skills from other providers or `.omp-plugin` roots, are delivered unchanged. The mapping is `CLAUDE_CODE_TOOL_NAMES` in `src/tools/builtin-names.ts`.
+
 ## `skill://` URL behavior
 
 `src/internal-urls/skill-protocol.ts` supports:
