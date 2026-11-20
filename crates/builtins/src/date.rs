@@ -191,6 +191,34 @@ mod format_modifiers {
 		)
 	}
 
+	/// GNU `date` treats a width on `%N` as a precision: the value is the
+	/// leading digits of the 9-digit nanosecond field, truncated, never
+	/// rounded. Widths above 9 zero-pad on the right. Every other specifier
+	/// keeps width as a minimum field width.
+	fn is_nanosecond_precision(specifier: &str) -> bool {
+		matches!(specifier.chars().last(), Some('N'))
+	}
+
+	/// Truncate or right-pad the 9-digit nanosecond field to `width` digits,
+	/// matching GNU coreutils `date`. A width of 0 is the bare `%N` field (9
+	/// digits); `-` strips leading zeros after truncation.
+	fn apply_nanosecond_precision(value: &str, width: usize, no_pad: bool) -> String {
+		let digits: String = value.chars().filter(|c| c.is_ascii_digit()).collect();
+		let mut field = if width == 0 {
+			digits
+		} else if width <= digits.len() {
+			digits[..width].to_string()
+		} else {
+			let mut padded = digits;
+			padded.extend(std::iter::repeat_n('0', width - padded.len()));
+			padded
+		};
+		if no_pad {
+			field = strip_default_padding(&field);
+		}
+		field
+	}
+
 	/// Returns the default width for a specifier.
 	/// This is used when a flag like `_` is used without an explicit width.
 	fn get_default_width(specifier: &str) -> usize {
@@ -223,9 +251,6 @@ mod format_modifiers {
 			Some('g') => 2,
 			// Epoch seconds: typically 10 digits (but variable)
 			Some('s') => 0,
-			// Nanoseconds: 9 digits
-			Some('N') => 9,
-			// Quarter: 1 digit
 			Some('q') => 1,
 			// Timezone offset: varies
 			Some('z') => 0,
@@ -340,6 +365,14 @@ mod format_modifiers {
 			{
 				result = result.to_uppercase();
 			}
+		}
+
+		// `%N` width is a precision, not a minimum field width: GNU date
+		// prints the leading `width` digits of the 9-digit nanosecond field
+		// and zero-pads on the right past 9. Flags other than `-` do not
+		// change it (`%_3N` truncates exactly as `%3N` does).
+		if is_nanosecond_precision(specifier) {
+			return Ok(apply_nanosecond_precision(&result, width, no_pad));
 		}
 
 		// If no_pad flag is active, suppress all padding and return
@@ -666,6 +699,24 @@ mod format_modifiers {
 			// Width smaller than result strips default padding
 			assert_eq!(apply_modifiers("01", "", 1, "d", true).unwrap(), "1");
 			assert_eq!(apply_modifiers("06", "", 1, "m", true).unwrap(), "6");
+		}
+
+		#[test]
+		fn test_nanosecond_width_is_precision() {
+			// GNU date truncates %N to the leading `width` digits instead of
+			// left-padding. `date +%s%3N` is 13 digits for this reason.
+			let nanos = "123456789";
+			assert_eq!(apply_modifiers(nanos, "", 0, "N", false).unwrap(), "123456789");
+			assert_eq!(apply_modifiers(nanos, "", 1, "N", true).unwrap(), "1");
+			assert_eq!(apply_modifiers(nanos, "", 3, "N", true).unwrap(), "123");
+			assert_eq!(apply_modifiers(nanos, "", 6, "N", true).unwrap(), "123456");
+			assert_eq!(apply_modifiers(nanos, "", 9, "N", true).unwrap(), "123456789");
+			// Past 9 digits GNU zero-pads on the right, never the left.
+			assert_eq!(apply_modifiers(nanos, "", 12, "N", true).unwrap(), "123456789000");
+			// `-` strips leading zeros after truncation; other flags do not.
+			assert_eq!(apply_modifiers("004567890", "-", 3, "N", true).unwrap(), "4");
+			assert_eq!(apply_modifiers(nanos, "_", 3, "N", true).unwrap(), "123");
+			assert_eq!(apply_modifiers(nanos, "0", 3, "N", true).unwrap(), "123");
 		}
 
 		#[test]
