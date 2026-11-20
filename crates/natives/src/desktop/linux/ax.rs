@@ -1742,21 +1742,23 @@ impl AxBackend for AtSpiAx {
 					.get_application()
 					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI application: {err}")))?;
-				let mut namesakes = 0;
 				for frame in Self::frames(connection, &app, self.reply_timeout).await? {
-					let proxy = frame
+					if frame == object {
+						continue;
+					}
+					let name = frame
 						.as_accessible_proxy(connection)
 						.await
-						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window: {err}")))?;
-					if proxy.name().await.is_ok_and(|name| name == title) {
-						namesakes += 1;
+						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window: {err}")))?
+						.name()
+						.await
+						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window title: {err}")))?;
+					if name == title {
+						return Err(DesktopError::ax_failed(format!(
+							"another AT-SPI window of the application is titled '{title}'; refusing \
+							 ambiguous input ownership"
+						)));
 					}
-				}
-				if namesakes > 1 {
-					return Err(DesktopError::ax_failed(format!(
-						"{namesakes} AT-SPI windows of the application are titled '{title}'; refusing \
-						 ambiguous input ownership"
-					)));
 				}
 				native_window_for_frame(windows, pid, &title)
 			})
