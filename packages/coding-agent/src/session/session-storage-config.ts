@@ -16,7 +16,8 @@
  * string: an unreadable or empty file, contents the driver cannot parse as a
  * connection URL (the driver's own error embeds the string, so it is not
  * attached as a cause either), and a database that cannot be opened each
- * refuse in those terms.
+ * refuse in those terms; the last also names the driver's code and, when a
+ * server answered, the SQLSTATE it answered with.
  *
  * There is one fallback, and it is narrow: a launch that resumes a session
  * whose transcript is already a file on disk continues on the file store when
@@ -178,7 +179,10 @@ export async function resolveSessionStorage({
 		void client.end().catch(() => undefined);
 		const error = toError(err);
 		const code = "code" in error ? error.code : undefined;
-		const detail = typeof code === "string" && code.length > 0 ? `${error.message} (${code})` : error.message;
+		const labels = [code, serverSqlState(error)].filter(
+			(label): label is string => typeof label === "string" && label.length > 0,
+		);
+		const detail = labels.length > 0 ? `${error.message} (${labels.join(" ")})` : error.message;
 		return await fallbackOrRefuse(
 			"db-unreachable",
 			dsnFile,
@@ -186,6 +190,23 @@ export async function resolveSessionStorage({
 			error,
 		);
 	}
+}
+
+/** Five digits or upper-case letters: the SQL standard's SQLSTATE, which PostgreSQL and MySQL both send. */
+const SQLSTATE = /^[0-9A-Z]{5}$/;
+
+/**
+ * The SQLSTATE a database server refused with, when the driver read one: Bun
+ * keeps PostgreSQL's as `errno` and MySQL's as `sqlState`. Each driver gives
+ * every server refusal one `code` (`ERR_POSTGRES_SERVER_ERROR`,
+ * `ERR_MYSQL_SERVER_ERROR`), so the SQLSTATE is what tells a server that
+ * refuses for now (PostgreSQL 57P03, starting up; 53300, no connection slot
+ * left) from one that will keep refusing (28P01, a password it rejects).
+ */
+function serverSqlState(error: Error): string | undefined {
+	const state =
+		error instanceof SQL.PostgresError ? error.errno : error instanceof SQL.MySQLError ? error.sqlState : undefined;
+	return state !== undefined && SQLSTATE.test(state) ? state : undefined;
 }
 
 /**

@@ -55,8 +55,105 @@ async function rejection(promise: Promise<unknown>): Promise<SessionStorageConfi
 	throw new Error("expected resolveSessionStorage to reject");
 }
 
+const servers: Array<{ stop(closeActiveConnections?: boolean): void }> = [];
+
+/** A connection URL for a fake server, with a password that no refusal may echo. */
+function fakeServerUrl(scheme: string, port: number, query = ""): string {
+	const url = new URL(`${scheme}://127.0.0.1:${port}/sessions${query}`);
+	url.username = "app";
+	url.password = "hunter2";
+	return url.href;
+}
+
+/**
+ * A PostgreSQL server that answers each connection's startup message with one
+ * FATAL `ErrorResponse` carrying `sqlState`, as a server that is starting up,
+ * has no connection slot left, or refuses a password answers, and closes it.
+ * Returns a connection URL for it.
+ */
+function refusingPostgres(sqlState: string, message: string): string {
+	const fields = new TextEncoder().encode(`SFATAL\0VFATAL\0C${sqlState}\0M${message}\0\0`);
+	const response = new Uint8Array(5 + fields.length);
+	response[0] = 0x45; // 'E': ErrorResponse, then a length that counts itself
+	new DataView(response.buffer).setInt32(1, 4 + fields.length);
+	response.set(fields, 5);
+	const server = Bun.listen({
+		hostname: "127.0.0.1",
+		port: 0,
+		socket: {
+			data(socket) {
+				socket.write(response);
+				socket.end();
+			},
+		},
+	});
+	servers.push(server);
+	return fakeServerUrl("postgres", server.port, "?sslmode=disable");
+}
+
+/** One MySQL protocol packet: a three-byte little-endian payload length, the sequence id, the payload. */
+function mysqlPacket(sequence: number, payload: Uint8Array): Uint8Array {
+	const packet = new Uint8Array(4 + payload.length);
+	packet.set([payload.length & 0xff, (payload.length >>> 8) & 0xff, (payload.length >>> 16) & 0xff, sequence]);
+	packet.set(payload, 4);
+	return packet;
+}
+
+/**
+ * A MySQL server that sends its handshake and answers the client's reply with
+ * one `ERR` packet carrying `errno` and `sqlState`, as a server that refuses a
+ * login or has no connection left answers, and closes the connection. Returns
+ * a connection URL for it.
+ */
+function refusingMysql(errno: number, sqlState: string, message: string): string {
+	const text = new TextEncoder();
+	// CLIENT_PROTOCOL_41 (which puts the SQLSTATE in an ERR packet), SECURE_CONNECTION and PLUGIN_AUTH among them.
+	const capabilities = 0x81bff7ff;
+	const handshake = Uint8Array.from([
+		10, // protocol version
+		...text.encode("8.0.36\0"),
+		// connection id
+		1,
+		0,
+		0,
+		0,
+		...text.encode("abcdefgh\0"), // auth data, first 8 bytes, and a filler
+		// capabilities, low half
+		capabilities & 0xff,
+		(capabilities >>> 8) & 0xff,
+		0x21, // character set
+		// status
+		2,
+		0,
+		// capabilities, high half
+		(capabilities >>> 16) & 0xff,
+		capabilities >>> 24,
+		21, // auth data length
+		...new Uint8Array(10),
+		...text.encode("ijklmnopqrst\0"), // auth data, the rest
+		...text.encode("mysql_native_password\0"),
+	]);
+	const refusal = Uint8Array.from([0xff, errno & 0xff, errno >>> 8, ...text.encode(`#${sqlState}${message}`)]);
+	const server = Bun.listen({
+		hostname: "127.0.0.1",
+		port: 0,
+		socket: {
+			open(socket) {
+				socket.write(mysqlPacket(0, handshake));
+			},
+			data(socket) {
+				socket.write(mysqlPacket(2, refusal));
+				socket.end();
+			},
+		},
+	});
+	servers.push(server);
+	return fakeServerUrl("mysql", server.port);
+}
+
 afterEach(async () => {
 	setDefaultSessionStorage(new FileSessionStorage());
+	for (const server of servers.splice(0)) server.stop(true);
 	await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
 });
 
@@ -215,8 +312,49 @@ describe("resolveSessionStorage", () => {
 		);
 		// The driver names the failure (`ERR_POSTGRES_CONNECTION_REFUSED` on Bun 1.4,
 		// `…_CLOSED` on 1.3); the contract is that its error reaches the user, not
-		// which code the connect attempt happened to fail with.
-		expect(error.message).toMatch(/ERR_POSTGRES_CONNECTION_\w+/);
+		// which code the connect attempt happened to fail with. No server answered,
+		// so the code stands alone in the parenthesis, with no SQLSTATE beside it.
+		expect(error.message).toMatch(/ \(ERR_POSTGRES_CONNECTION_[A-Z_]+\)$/);
 		expect(error.message).not.toContain("hunter2");
 	});
+
+	it.each([
+		["57P03", "the database system is starting up"],
+		["53300", "sorry, too many clients already"],
+		["28P01", 'password authentication failed for user "app"'],
+	])("names the SQLSTATE %s a PostgreSQL server refused with, beside the driver's code", async (sqlState, message) => {
+		const dsnFile = await writeDsnFile(refusingPostgres(sqlState, message));
+		const error = await rejection(
+			resolveSessionStorage({
+				settings: Settings.isolated(),
+				env: { OMP_SESSION_STORAGE: "sql", OMP_SESSION_SQL_DSN_FILE: dsnFile },
+			}),
+		);
+		// A connection error has no SQLSTATE (the test above); a server's refusal does, and every one
+		// has the same code, so the SQLSTATE is what tells "starting up" from "wrong password".
+		expect(error.message).toBe(
+			`OMP_SESSION_SQL_DSN_FILE names ${dsnFile}, but the session database could not be opened: ${message} (ERR_POSTGRES_SERVER_ERROR ${sqlState})`,
+		);
+		expect(error.message).not.toContain("hunter2");
+	});
+
+	it.each([
+		[1045, "28000", "Access denied for user 'app'@'localhost' (using password: YES)"],
+		[1040, "08004", "Too many connections"],
+	])(
+		"names the SQLSTATE of a MySQL server's refusal (error %d) beside the driver's code",
+		async (errno, sqlState, message) => {
+			const dsnFile = await writeDsnFile(refusingMysql(errno, sqlState, message));
+			const error = await rejection(
+				resolveSessionStorage({
+					settings: Settings.isolated(),
+					env: { OMP_SESSION_STORAGE: "sql", OMP_SESSION_SQL_DSN_FILE: dsnFile },
+				}),
+			);
+			expect(error.message).toBe(
+				`OMP_SESSION_SQL_DSN_FILE names ${dsnFile}, but the session database could not be opened: ${message} (ERR_MYSQL_SERVER_ERROR ${sqlState})`,
+			);
+			expect(error.message).not.toContain("hunter2");
+		},
+	);
 });
