@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `snapcompact-variant` and `snapcompact-frame-size` catalog rules and `resolveSnapcompactShape()`, which now hold each model's snapcompact frame shape below a configured `snapcompactShape` ([#19880](https://github.com/can1357/oh-my-pi/pull/19880) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Devin usage from two organizations under one email is no longer merged into one account ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
@@ -18,8 +22,6 @@
 - Added runtime provider rules (`setRuntimeProviderRule` in `compat/cascade`). They apply KDL directives to one provider's models, win ties with bundled rules, and clear rule-derived caches when they change.
 - Added the `prompt-perturbation` catalog axis, which opts a provider or model into per-install prompt paraphrasing.
 - Added the `uncached-instructions` compatibility flag for GPT-6.2 models across all hosts, moving system prompts out of the uncached Responses `instructions` field.
-- Added `uncached-instructions` compatibility flag, enabled for GPT-6.2 models on every host, which moves the system prompt out of the uncached Responses `instructions` field
-- Added the `snapcompact-variant` and `snapcompact-frame-size` catalog rules and `resolveSnapcompactShape()`, which now hold each model's snapcompact frame shape below a configured `snapcompactShape`
 
 ### Fixed
 
