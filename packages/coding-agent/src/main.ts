@@ -8,7 +8,7 @@ import * as fsSync from "node:fs";
 import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
-import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
+import { getModelPricingStatus, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import { bindAgentMesh } from "./irc/mesh";
 import {
@@ -411,6 +411,16 @@ export interface InteractiveModeNotify {
 	message: string;
 }
 
+/** The startup fallback warning, unless setup selected a model the session did not have before it. */
+function postSetupModelFallback(
+	message: string | undefined,
+	modelBeforeSetup: Model | undefined,
+	modelAfterSetup: Model | undefined,
+): string | undefined {
+	if (modelAfterSetup && !modelsAreEqual(modelBeforeSetup, modelAfterSetup)) return undefined;
+	return message;
+}
+
 export function buildModelScopeNotification(
 	scopedModelsForDisplay: readonly Pick<ScopedModel, "model" | "thinkingLevel" | "explicitThinkingLevel">[],
 	startupQuiet: boolean,
@@ -669,7 +679,10 @@ async function runInteractiveMode(
 	startupLease?: ComposerLease,
 	startupGoal?: string,
 	startupRestore?: () => Promise<RestoreOutcome>,
+	modelFallbackMessage?: string,
 ): Promise<void> {
+	// Captured before setup: the setup wizard may replace the model the fallback warning describes.
+	const modelBeforeSetup = session.model;
 	const InteractiveModeConstructor = await loadInteractiveModeConstructor();
 	let mode: InteractiveMode;
 	try {
@@ -780,6 +793,11 @@ async function runInteractiveMode(
 			// Pulled here, not pushed from SessionAdvisors: the constructor-time
 			// `emitNotice` fired before the UI subscribed and was silently lost.
 			mode.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(advisorConfigWarnings).join("; ")}`);
+		}
+
+		const postSetupFallback = postSetupModelFallback(modelFallbackMessage, modelBeforeSetup, session.model);
+		if (postSetupFallback) {
+			mode.showWarning(postSetupFallback);
 		}
 
 		for (const notify of notifs) {
@@ -2788,7 +2806,6 @@ export async function runRootCommand(
 			watchScopedModelSettings(session, parsedArgs, modelRegistry, settingsInstance);
 
 			if (modelFallbackMessage) {
-				notifs.push({ kind: "warn", message: modelFallbackMessage });
 				// Non-interactive runs have no notification surface: a model that still
 				// started in place of the requested one is reported on stderr, keeping
 				// structured stdout clean. A run with no model reports it below.
@@ -2920,6 +2937,7 @@ export async function runRootCommand(
 						startupLease,
 						initialArgs.goal,
 						parsedArgs.restore ? () => restoreSession(session, { eventBus, subagentEventBus }) : undefined,
+						modelFallbackMessage,
 					);
 				} finally {
 					startupLease?.dispose();
