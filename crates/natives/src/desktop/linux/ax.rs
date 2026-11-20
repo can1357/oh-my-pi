@@ -1742,14 +1742,33 @@ impl AxBackend for AtSpiAx {
 					.get_application()
 					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI application: {err}")))?;
-				for frame in Self::frames(connection, &app, self.reply_timeout).await? {
-					if frame == object {
+				// Every child is read here rather than through `Self::frames`,
+				// which skips a child whose role read fails: a sibling that cannot
+				// say whether it is a window, or what it is titled, refuses
+				// ownership.
+				let children = app
+					.as_accessible_proxy(connection)
+					.await
+					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI application: {err}")))?
+					.get_children()
+					.await
+					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI application: {err}")))?;
+				for child in children {
+					if child == object {
 						continue;
 					}
-					let name = frame
+					let proxy = child
 						.as_accessible_proxy(connection)
 						.await
-						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window: {err}")))?
+						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window: {err}")))?;
+					let role = proxy
+						.get_role()
+						.await
+						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window role: {err}")))?;
+					if !top_level_role(role, true) {
+						continue;
+					}
+					let name = proxy
 						.name()
 						.await
 						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window title: {err}")))?;
