@@ -77,6 +77,7 @@
 - Fixed `computer` on Windows passing off a fully covered window's screenshot and `ax()` tree as current: for Chrome, Edge and Electron apps, which can stop drawing while covered, both now say the window appeared covered and may be stale ([#19849](https://github.com/can1357/oh-my-pi/pull/19849) by [@will-bogusz](https://github.com/will-bogusz))
 - Entering `/goal` on Anthropic no longer re-writes the cached system prompt and transcript ([#19826](https://github.com/can1357/oh-my-pi/issues/19826))
 - Fixed isolated `task` subagents starting with no git work tree when the session cwd is a bare-repository container (`.git` with `core.bare=true`); isolation now refuses before spawning and names the repository's work trees to start from ([#19791](https://github.com/can1357/oh-my-pi/issues/19791))
+- The quick model picker (alt+p) in a session open for hours now shows models a provider added since the session started: once the catalog is two hours old, opening the picker re-runs discovery in the background; built-in providers fetch again, while custom `discovery:` and extension providers (cached for 24 h) pick up what another session fetched ([#19878](https://github.com/can1357/oh-my-pi/pull/19878) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [19.0.1] - 2026-11-19
 
