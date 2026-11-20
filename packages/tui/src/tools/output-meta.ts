@@ -204,10 +204,12 @@ export function stripTrailingNotice(
 
 const RAW_OUTPUT_PREFIX = "[raw output: ";
 const RAW_OUTPUT_SUFFIX = "]";
+/** The read selector the footer names; `:raw` reads the spill's original text. */
+const RAW_OUTPUT_SELECTOR = ":raw";
 
 /** The footer naming the spill that holds the raw output a tool result was cut from. */
 export function formatRawOutputNotice(artifactId: string): string {
-	return `${RAW_OUTPUT_PREFIX}${spillUrl(artifactId)}${RAW_OUTPUT_SUFFIX}`;
+	return `${RAW_OUTPUT_PREFIX}${spillUrl(artifactId)}${RAW_OUTPUT_SELECTOR}${RAW_OUTPUT_SUFFIX}`;
 }
 
 /** Remove the trailing bash raw-output artifact footer while preserving its artifact id. */
@@ -217,8 +219,9 @@ export function stripRawOutputArtifactNotice(text: string): { text: string; arti
 		if (!line.startsWith(RAW_OUTPUT_PREFIX) || !line.endsWith(RAW_OUTPUT_SUFFIX)) return false;
 		const url = line.slice(RAW_OUTPUT_PREFIX.length, line.length - RAW_OUTPUT_SUFFIX.length);
 		const id = parseSpillUrl(url);
-		// The footer names the bare spill, never a selector into it.
-		if (id === undefined || spillUrl(id) !== url) return false;
+		if (id === undefined) return false;
+		// Footers persisted before the selector was added name the bare spill; both forms are accepted.
+		if (url !== spillUrl(id) && url !== `${spillUrl(id)}${RAW_OUTPUT_SELECTOR}`) return false;
 		artifactId = String(id);
 		return true;
 	});
