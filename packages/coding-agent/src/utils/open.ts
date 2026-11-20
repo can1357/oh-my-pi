@@ -11,7 +11,7 @@ const URL_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]*:/;
  * literal `#`, so paths stay verbatim; a one-letter "scheme" is a Windows drive.
  */
 function logTarget(target: string): string {
-	return /^[a-zA-Z][a-zA-Z\d+.-]+:/.test(target) ? redactUrlForLog(target) : target;
+	return /^[a-zA-Z][a-zA-Z\d+.-]+:/.test(target) ? redactUrlForLog(target, "omit") : target;
 }
 
 function getExistingWslLocalPath(urlOrPath: string): string | undefined {

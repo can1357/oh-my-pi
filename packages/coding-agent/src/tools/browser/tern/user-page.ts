@@ -105,7 +105,7 @@ export async function openTernPage(url: string, how: TernPagePlacement): Promise
 		return new TernPage(client, pane.socketPath, block);
 	} catch (error) {
 		logger.debug("Tern could not open the page; using the system browser", {
-			url: redactUrlForLog(url),
+			url: redactUrlForLog(url, "omit"),
 			how,
 			// Tern's free-text error can echo the original URL; log only its kind, or the
 			// socket error code (ECONNREFUSED, …) when the connection itself failed.

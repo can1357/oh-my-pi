@@ -1,17 +1,21 @@
 const SENSITIVE_QUERY_PARAM = /key|token|secret|auth/i;
 
 /**
- * Drop URL userinfo and fragments (which can carry a workspace access token),
- * and redact credential-bearing query params before logging.
+ * Drop URL userinfo and fragments. Openers omit the whole query since OAuth
+ * verification URLs can carry credentials under provider-specific names.
  */
-export function redactUrlForLog(url: string): string {
+export function redactUrlForLog(url: string, query: "redact-sensitive" | "omit" = "redact-sensitive"): string {
 	try {
 		const parsed = new URL(url);
 		parsed.username = "";
 		parsed.password = "";
 		parsed.hash = "";
-		for (const name of parsed.searchParams.keys()) {
-			if (SENSITIVE_QUERY_PARAM.test(name)) parsed.searchParams.set(name, "[redacted]");
+		if (query === "omit") {
+			parsed.search = "";
+		} else {
+			for (const name of parsed.searchParams.keys()) {
+				if (SENSITIVE_QUERY_PARAM.test(name)) parsed.searchParams.set(name, "[redacted]");
+			}
 		}
 		return parsed.toString();
 	} catch {

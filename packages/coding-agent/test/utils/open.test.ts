@@ -211,7 +211,7 @@ describe("openPath", () => {
 		}
 	});
 
-	it("logs when the opener exits non-zero so Start-Process failures are diagnosable", async () => {
+	it("logs the non-zero exit and verification URL without its device code or fragment", async () => {
 		setPlatform("win32");
 		vi.spyOn(fs, "existsSync").mockReturnValue(true);
 		const warnSpy = vi.spyOn(piUtils.logger, "warn").mockImplementation((() => {}) as never);
@@ -222,13 +222,13 @@ describe("openPath", () => {
 		} as unknown as Subprocess;
 		vi.spyOn(Bun, "spawn").mockImplementation(() => failing);
 
-		openPath("http://127.0.0.1:3849/#t=workspace-secret");
+		openPath("https://auth.x.ai/activate?user_code=ABCD-EFGH#t=workspace-secret");
 		await failing.exited;
 		await Promise.resolve();
 
 		expect(warnSpy).toHaveBeenCalledWith(
 			"External opener exited with non-zero status",
-			expect.objectContaining({ exitCode: 1, target: "http://127.0.0.1:3849/" }),
+			expect.objectContaining({ exitCode: 1, target: "https://auth.x.ai/activate" }),
 		);
 	});
 
@@ -245,7 +245,7 @@ describe("openPath", () => {
 
 		const logged = JSON.stringify(warnSpy.mock.calls);
 		expect(logged).not.toContain("argv-secret");
-		expect(warnSpy.mock.calls[0]?.[1]).toMatchObject({ code: "ENOENT" });
+		expect(warnSpy.mock.calls[0]?.[1]).toMatchObject({ code: "ENOENT", target: "mailto:me@example.com" });
 		expect(warnSpy.mock.calls[1]?.[1]).toMatchObject({ target: "C:\\notes\\a#b.html" });
 	});
 });
