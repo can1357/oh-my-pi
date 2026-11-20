@@ -34,10 +34,10 @@ use windows_sys::{
 			WindowsAndMessaging::{
 				CWP_SKIPDISABLED, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, ChildWindowFromPointEx,
 				EnumChildWindows, EnumWindows, GA_PARENT, GA_ROOT, GUITHREADINFO, GWL_EXSTYLE,
-				GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo,
+				GWL_STYLE, GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo,
 				GetLayeredWindowAttributes, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId,
 				IsChild, IsIconic, IsWindowVisible, LWA_ALPHA, LWA_COLORKEY, SetForegroundWindow,
-				WS_EX_LAYERED, WS_EX_TRANSPARENT,
+				WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 			},
 		},
 	},
@@ -125,28 +125,50 @@ pub(super) fn paused_while_covered(hwnd: HWND) -> bool {
 }
 
 /// Whether top-level `hwnd` appears fully covered: no part of its frame lies
-/// on a display outside the visible, opaque windows above it in the z-order.
-/// False when any of that cannot be read.
+/// on a display outside the windows above it in the z-order that Chromium
+/// counts as covers (see [`occluder`]). An approximation of Chromium's own
+/// check, whose geometry differs in places. False when any of that cannot be
+/// read.
 pub(super) fn fully_covered(hwnd: HWND) -> bool {
-	let (Some(frame), Some(displays), Some(above)) =
-		(frame_bounds(hwnd), displays(), occluders_above(hwnd))
-	else {
+	struct Walk {
+		target: HWND,
+		shown:  Region,
+		kind:   GDI_REGION_TYPE,
+	}
+
+	unsafe extern "system" fn visit(window: HWND, state: LPARAM) -> BOOL {
+		// SAFETY: `state` is the exposed address of the walk owned by the
+		// enclosing call, which outlives this synchronous enumeration.
+		let walk = unsafe { &mut *with_exposed_provenance_mut::<Walk>(state as usize) };
+		if window == walk.target {
+			return BOOL::from(false);
+		}
+		if let Some(rect) = occluder(window) {
+			walk.kind =
+				Region::new(rect).map_or(RGN_ERROR, |cover| walk.shown.combine(&cover, RGN_DIFF));
+		}
+		// Every window still to come lies below what already covers it all.
+		BOOL::from(walk.kind == SIMPLEREGION || walk.kind == COMPLEXREGION)
+	}
+
+	let (Some(frame), Some(displays)) = (frame_bounds(hwnd), displays()) else {
 		return false;
 	};
 	let Some(shown) = Region::new(frame) else {
 		return false;
 	};
-	let mut kind = shown.combine(&displays, RGN_AND);
-	for rect in above {
-		if kind != SIMPLEREGION && kind != COMPLEXREGION {
-			break;
+	let kind = shown.combine(&displays, RGN_AND);
+	let mut walk = Walk { target: hwnd, shown, kind };
+	if walk.kind == SIMPLEREGION || walk.kind == COMPLEXREGION {
+		// SAFETY: `visit` runs only during this synchronous call and receives
+		// the address of `walk`, which outlives it.
+		unsafe {
+			EnumWindows(Some(visit), (&raw mut walk).expose_provenance() as LPARAM);
 		}
-		let Some(cover) = Region::new(rect) else {
-			return false;
-		};
-		kind = shown.combine(&cover, RGN_DIFF);
 	}
-	kind == NULLREGION
+	// Nothing left showing, whether the walk reached `hwnd` or stopped above
+	// it; an error or any part still showing reads as not covered.
+	walk.kind == NULLREGION
 }
 
 /// The union of every display's rectangle, `None` when one cannot be read.
@@ -175,42 +197,14 @@ fn displays() -> Option<Region> {
 	complete.then_some(union)
 }
 
-/// The screen rectangles hiding what lies under them of every top-level
-/// window above `hwnd`, from one top-to-bottom pass over the z-order; `None`
-/// when the pass does not reach `hwnd`.
-fn occluders_above(hwnd: HWND) -> Option<Vec<RECT>> {
-	struct Walk {
-		target: HWND,
-		found:  bool,
-		rects:  Vec<RECT>,
-	}
-
-	unsafe extern "system" fn visit(window: HWND, state: LPARAM) -> BOOL {
-		// SAFETY: `state` is the exposed address of the walk owned by the
-		// enclosing call, which outlives this synchronous enumeration.
-		let walk = unsafe { &mut *with_exposed_provenance_mut::<Walk>(state as usize) };
-		if window == walk.target {
-			walk.found = true;
-			return BOOL::from(false);
-		}
-		walk.rects.extend(occluder(window));
-		BOOL::from(true)
-	}
-
-	let mut walk = Walk { target: hwnd, found: false, rects: Vec::new() };
-	// SAFETY: `visit` runs only during this synchronous call and receives the
-	// address of `walk`, which outlives it.
-	unsafe {
-		EnumWindows(Some(visit), (&raw mut walk).expose_provenance() as LPARAM);
-	}
-	walk.found.then_some(walk.rects)
-}
-
 /// The screen rectangle `hwnd` hides what lies under, as Chromium's own
-/// occlusion check counts it: none unless it is visible, not minimized, not
+/// occlusion check counts it (`IsWindowVisibleAndFullyOpaque` in
+/// `ui/gfx/win/hwnd_util.cc`): none unless it is visible, not minimized, not
 /// cloaked (another virtual desktop, a suspended UWP frame), without
-/// `WS_EX_TRANSPARENT` and not see-through layered; its frame, cut to a
-/// rectangular window region, and none for an empty or shaped one.
+/// `WS_EX_TRANSPARENT`, not a tool window other than the taskbar, not a popup
+/// other than the taskbar or a Chromium widget, and not see-through layered;
+/// its frame, cut to a rectangular window region, and none for an empty or
+/// shaped one.
 fn occluder(hwnd: HWND) -> Option<RECT> {
 	let mut cloaked = 0u32;
 	// SAFETY: every call validates the handle; the out-pointers are writable
@@ -229,10 +223,16 @@ fn occluder(hwnd: HWND) -> Option<RECT> {
 			return None;
 		}
 		let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-		// Chromium skips such a window as an occluder even when it is opaque
-		// (`IsWindowVisibleAndFullyOpaque` in ui/gfx/win/hwnd_util.cc), so it
-		// keeps drawing under it and its reads stay current.
+		// Chromium skips these windows as covers even when they are opaque, so
+		// it keeps drawing under them and its reads stay current.
 		if style & WS_EX_TRANSPARENT != 0 {
+			return None;
+		}
+		let tool = style & WS_EX_TOOLWINDOW != 0;
+		if (tool || GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_POPUP != 0)
+			&& with_class_name(hwnd, |class| {
+				class != "Shell_TrayWnd" && (tool || !class.starts_with("Chrome_WidgetWin_"))
+			}) {
 			return None;
 		}
 		if style & WS_EX_LAYERED != 0 {
@@ -829,6 +829,32 @@ mod tests {
 		);
 		// SAFETY: as above.
 		unsafe { SetWindowLongW(cover, GWL_EXSTYLE, plain) };
+		assert!(marked(target));
+
+		// SAFETY: this thread owns `cover`.
+		unsafe { SetWindowLongW(cover, GWL_EXSTYLE, plain | WS_EX_TOOLWINDOW as i32) };
+		assert!(!marked(target), "Chromium does not count an opaque tool window as covering it");
+		// SAFETY: as above.
+		unsafe { SetWindowLongW(cover, GWL_EXSTYLE, plain) };
+		assert!(marked(target));
+
+		// SAFETY: `GetWindowLongW` validates the handle.
+		let framed = unsafe { GetWindowLongW(cover, GWL_STYLE) };
+		// SAFETY: this thread owns `cover`.
+		unsafe { SetWindowLongW(cover, GWL_STYLE, framed | WS_POPUP as i32) };
+		assert!(!marked(target), "Chromium does not count an opaque popup as covering it");
+		let widget = window("Chrome_WidgetWin_7", rect(50, 50, 400, 400));
+		// SAFETY: this thread owns `widget`.
+		unsafe {
+			let style = GetWindowLongW(widget, GWL_STYLE);
+			SetWindowLongW(widget, GWL_STYLE, style | WS_POPUP as i32);
+		}
+		assert!(marked(target), "but it counts a popup of its own");
+		// SAFETY: this thread owns both windows.
+		unsafe {
+			DestroyWindow(widget);
+			SetWindowLongW(cover, GWL_STYLE, framed);
+		}
 		assert!(marked(target));
 
 		// SAFETY: this thread owns `cover`.
