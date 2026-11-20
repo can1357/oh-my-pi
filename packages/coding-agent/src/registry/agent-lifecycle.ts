@@ -457,12 +457,17 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 
 	/**
 	 * Return the live session, reviving from the sessionFile if parked or
-	 * killed. Throws a plain Error if the id is unknown, or its transcript
-	 * cannot be revived (no reviver, no session contract, workspace gone).
-	 * Concurrent calls share one in-flight revive.
+	 * killed. Concurrent calls share one in-flight revive.
 	 *
 	 * Never returns a session that is mid-dispose: an in-flight park is either
 	 * cancelled (session still live) or awaited to completion before revive.
+	 *
+	 * Throws a plain Error when:
+	 * - the id is unknown;
+	 * - the ref is being released (killed or removed) — retry once it has stopped;
+	 * - the ref was replaced, released, or killed while its park was in flight;
+	 * - the ref was replaced while its killed transcript was being reopened;
+	 * - its transcript cannot be revived (no reviver, no session contract, workspace gone).
 	 */
 	async ensureLive(id: string): Promise<AgentSessionHandle> {
 		let ref = this.#registry.get(id);
@@ -472,7 +477,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			);
 		}
 		if (this.#releasing.has(ref)) {
-			throw new Error(`Agent "${id}" is still shutting down.`);
+			throw new Error(`Agent "${id}" is still shutting down; retry once it has stopped.`);
 		}
 		const park = this.#parks.get(id);
 		if (park?.ref === ref) {
