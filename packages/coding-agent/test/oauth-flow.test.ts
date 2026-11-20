@@ -1065,6 +1065,30 @@ describe("mcp oauth flow", () => {
 			expect(tokenParams.get("resource")).toBeNull();
 		});
 
+		it("keeps the scope the token response granted, else the one requested", async () => {
+			const signIn = async (grantedScope: string | undefined) => {
+				const flow = new MCPOAuthFlow(
+					{
+						authorizationUrl: "https://login.example/authorize",
+						tokenUrl: "https://login.example/token",
+						clientId: "client-id",
+						scopes: "api://hub/access_as_user api://hub/admin offline_access",
+						callbackPort: 14580,
+						fetch: async () =>
+							Response.json({ access_token: "access", refresh_token: "refresh", scope: grantedScope }),
+					},
+					{},
+				);
+				await flow.generateAuthUrl("state-x", REDIRECT_URI);
+				await flow.exchangeToken("test-code", "state-x", REDIRECT_URI);
+				return flow.grantedScope;
+			};
+
+			// RFC 6749 §6: a refresh must not ask for more than was granted.
+			expect(await signIn("api://hub/access_as_user")).toBe("api://hub/access_as_user");
+			expect(await signIn(undefined)).toBe("api://hub/access_as_user api://hub/admin offline_access");
+		});
+
 		it("keeps a discovered path-scoped resource under the auth-server origin", async () => {
 			let tokenRequestBody = "";
 			const flow = await buildFlow({

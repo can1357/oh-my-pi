@@ -23,7 +23,7 @@
 ### Fixed
 
 - Failed browser launches no longer log URL userinfo, query strings (including OAuth device codes), or fragments ([#19844](https://github.com/can1357/oh-my-pi/pull/19844) by [@JustasMasiulis](https://github.com/JustasMasiulis))
-- MCP OAuth refresh now repeats the scopes the original sign-in requested, so a Microsoft Entra MCP server whose client is also its resource keeps working past the first hour instead of failing every refresh with `AADSTS90009`. Credentials saved before this fix need one `/mcp reauth`
+- MCP OAuth refresh now sends the scope the sign-in was granted (the token response's `scope`, else the one requested), so a Microsoft Entra MCP server whose client is also its resource keeps working past the first hour instead of failing every refresh with `AADSTS90009`. A refresh that also passed no `resource` no longer drops its options (abort signal, authorization URL). Credentials saved before this fix need one `/mcp reauth`
 - `read` suggests the line-range syntax for `file:1:2` when `file` exists, directly or by unique suffix, but `file:1` does not ([#19821](https://github.com/can1357/oh-my-pi/pull/19821) by [@baekjosh](https://github.com/baekjosh)).
 - `read` suggests only the line for a `file:line:column` selector such as `file:10:5`, instead of a reversed range it would reject
 - Fixed in-memory text reads (including converted documents, URLs, notebooks, and internal resources) losing source line totals and continuation selectors to a second output truncation when their rendered page fits the inline budget.
