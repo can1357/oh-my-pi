@@ -10,6 +10,10 @@
 
 - Added handling of `features` terminal events to update UI without waiting for a new hello
 
+### Changed
+
+- Native chats no longer show a crossed-out Spotlight star or leave an empty row under unchanged tool results.
+
 ### Fixed
 
 - Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
