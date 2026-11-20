@@ -6,18 +6,26 @@
 //! See the implementation in the `jaq` crate if you are interested in
 //! more complex use cases, such as lazy JSON file loading, error handling etc.
 //!
+//! This host-neutral example combines core definitions with standard-library
+//! native filters and JSON values. It deliberately does not load `jaq_std::defs()`:
+//! that full prelude also requires host-provided `debug/0` and `halt_error/1`
+//! natives (see `jaq_std::defs`). Sorting the input exercises a standard-library
+//! native filter before yielding `"Hello"` and `"world"`.
+//!
+//! The worker thread provides stack headroom for parsing and compilation on Windows.
 //! ~~~
+//! # std::thread::Builder::new().stack_size(8 * 1024 * 1024).spawn(|| {
 //! use jaq_core::{data, unwrap_valr, Compiler, Ctx, Vars};
 //! use jaq_core::load::{Arena, File, Loader};
 //! use jaq_json::{read, Val};
 //!
-//! let input = r#"["Hello", "world"]"#;
+//! let input = r#"["world", "Hello"]"#;
 //! let input = read::parse_single(&input.as_bytes()).unwrap();
-//! let program = File { code: ".[]", path: () };
+//! let program = File { code: "sort | .[]", path: () };
 //!
-//! // named filters, such as `keys`, `map`, ...
-//! let defs = jaq_core::defs().chain(jaq_std::defs()).chain(jaq_json::defs());
-//! let funs = jaq_core::funs().chain(jaq_std::funs()).chain(jaq_json::funs());
+//! // Core definitions and host-neutral native filters.
+//! let defs = jaq_core::defs().chain(jaq_json::defs());
+//! let funs = jaq_core::funs().chain(jaq_std::base_funs()).chain(jaq_json::funs());
 //!
 //! let loader = Loader::new(defs);
 //! let arena = Arena::default();
@@ -39,6 +47,7 @@
 //! assert_eq!(out.next(), Some(Ok(Val::from("Hello".to_owned()))));;
 //! assert_eq!(out.next(), Some(Ok(Val::from("world".to_owned()))));;
 //! assert_eq!(out.next(), None);;
+//! # }).unwrap().join().unwrap();
 //! ~~~
 #![no_std]
 #![forbid(unsafe_code)]
