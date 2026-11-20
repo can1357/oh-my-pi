@@ -1848,7 +1848,7 @@ export interface TodoBackendChange {
 	op: TodoOperation;
 	/** The list before the call. */
 	previous: TodoPhase[];
-	/** The list omp commits when the backend accepts, unless the list changed meanwhile. */
+	/** The list omp commits when the backend accepts, unless the list or the session changed meanwhile. */
 	next: TodoPhase[];
 }
 
@@ -1878,9 +1878,9 @@ export interface TodoBackendDefinition {
 	 * naming the backend and the error's message, and the list stays as it was, as it does when no
 	 * answer comes within the extension handler timeout. A change accepted here is not passed to
 	 * `replace` as well. When `apply` accepts after omp stopped waiting (a timeout or an abort),
-	 * omp's list is sent through `replace` once more, unless the session has changed or is closing
-	 * by then. Edits the user or a client makes (`/todo`, RPC `set_todos`) and resets cannot be
-	 * refused; they only reach `replace`.
+	 * omp's list is sent through `replace` once more, unless by then the session has changed or is
+	 * closing, or this backend is no longer selected. Edits the user or a client makes (`/todo`,
+	 * RPC `set_todos`) and resets cannot be refused; they only reach `replace`.
 	 */
 	apply?(change: TodoBackendChange, ctx: ExtensionContext): void | Promise<void>;
 }

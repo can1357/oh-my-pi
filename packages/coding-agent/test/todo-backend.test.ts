@@ -715,7 +715,8 @@ describe("todo backend", () => {
 				// The backend's late answer is handled in a continuation of its own promise.
 				await Bun.sleep(0);
 				await settled(session);
-				// Setting the live list again tells the backend nothing either.
+				// After a session change the backend holds the new session's list: setting it again
+				// tells it nothing. (Once deselected it is not told anyway.)
 				session.commitTodoPhases(session.getTodoPhases());
 				await settled(session);
 

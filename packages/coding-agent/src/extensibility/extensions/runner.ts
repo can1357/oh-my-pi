@@ -1819,7 +1819,7 @@ export class ExtensionRunner {
 			// The backend holds a change omp did not commit: omp's list follows, also when it equals
 			// the last one sent. Not as the session closes, nor once it has changed: the backend
 			// keeps that change for a session omp is no longer in. Nor once it is no longer selected:
-			// it gets no list from then on, this one included.
+			// omp has stopped mirroring changes to it.
 			const resync = () => {
 				if (this.#todoClosed || this.sessionManager.getSessionId() !== sessionId || selected() !== backend) return;
 				this.#todoStale = true;
