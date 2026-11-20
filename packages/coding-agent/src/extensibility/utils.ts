@@ -56,10 +56,9 @@ export class ExtensionExitError extends Error {
 	constructor(
 		code: number | string | undefined,
 		readonly alias = "process.exit",
-		label?: string | null,
 	) {
 		super(
-			`${label ? `Module ${label} called` : "Module called"} ${alias}(${code === undefined ? "" : String(code)}) during guarded extension/hook loading; ` +
+			`Module called ${alias}(${code === undefined ? "" : String(code)}) during guarded extension/hook loading; ` +
 				`OMP extension/hook modules must not terminate the host process.`,
 		);
 		this.name = "ExtensionExitError";
@@ -88,13 +87,14 @@ let hostGuardStdinWasPaused = false;
 let hostGuardStdinWasRaw = false;
 
 /**
- * Mutable record of the extension / hook / tool entry whose load window is
- * currently open. Each throwing exit replacement is stamped with this record
- * under {@link postmortem.HOST_GUARD_EXIT_INFO}, so the host's own shutdown can
- * name the module that kept the guard installed instead of failing with an
- * anonymous `ExtensionExitError` (#ZYS-10217).
+ * Load windows currently open, keyed by the entry being imported. Loads
+ * interleave, so this is a count per entry rather than one current label: an
+ * exit intercepted while several windows are open must name all of them, never
+ * whichever was entered last. The map is stamped on the exit replacements under
+ * {@link postmortem.HOST_GUARD_EXIT_INFO} and read by the host's own shutdown
+ * (#ZYS-10217).
  */
-const hostGuardWindow: { label: string | null } = { label: null };
+const hostGuardWindows = new Map<string, number>();
 
 /**
  * Run `fn` with host-owned process state fenced off from third-party module
@@ -120,7 +120,7 @@ const hostGuardWindow: { label: string | null } = { label: null };
  */
 function guardedExit(alias: ExitAliasName): (code?: number | string) => never {
 	return (code?: number | string): never => {
-		throw new ExtensionExitError(code, alias, hostGuardWindow.label);
+		throw new ExtensionExitError(code, alias);
 	};
 }
 
@@ -132,14 +132,14 @@ export async function withHostGuard<T>(fn: () => Promise<T>, label?: string): Pr
 		hostGuardOriginalProcessExit = process.exit;
 		const processExitGuard = guardedExit("process.exit") as typeof process.exit;
 		Reflect.set(processExitGuard, postmortem.NATIVE_PROCESS_EXIT, hostGuardOriginalProcessExit);
-		Reflect.set(processExitGuard, postmortem.HOST_GUARD_EXIT_INFO, hostGuardWindow);
+		Reflect.set(processExitGuard, postmortem.HOST_GUARD_EXIT_INFO, hostGuardWindows);
 		process.exit = processExitGuard;
 
 		if (typeof process.reallyExit === "function") {
 			hostGuardOriginalReallyExit = process.reallyExit;
 			const reallyExitGuard = guardedExit("process.reallyExit") as typeof process.reallyExit;
 			Reflect.set(reallyExitGuard, postmortem.NATIVE_PROCESS_EXIT, hostGuardOriginalReallyExit);
-			Reflect.set(reallyExitGuard, postmortem.HOST_GUARD_EXIT_INFO, hostGuardWindow);
+			Reflect.set(reallyExitGuard, postmortem.HOST_GUARD_EXIT_INFO, hostGuardWindows);
 			process.reallyExit = reallyExitGuard;
 		}
 
@@ -152,13 +152,16 @@ export async function withHostGuard<T>(fn: () => Promise<T>, label?: string): Pr
 		}
 		hostGuardStdinListeners = snapshot;
 	}
-	const previousLabel = hostGuardWindow.label;
-	if (label !== undefined) hostGuardWindow.label = label;
+	if (label !== undefined) hostGuardWindows.set(label, (hostGuardWindows.get(label) ?? 0) + 1);
 	hostGuardDepth++;
 	try {
 		return await fn();
 	} finally {
-		hostGuardWindow.label = previousLabel;
+		if (label !== undefined) {
+			const open = hostGuardWindows.get(label) ?? 1;
+			if (open <= 1) hostGuardWindows.delete(label);
+			else hostGuardWindows.set(label, open - 1);
+		}
 		hostGuardDepth--;
 		if (hostGuardDepth === 0) {
 			if (hostGuardOriginalProcessExit) {

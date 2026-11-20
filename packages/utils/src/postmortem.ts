@@ -76,10 +76,10 @@ const CLEANUP_DEADLINE_MS = 10_000;
 export const NATIVE_PROCESS_EXIT = Symbol.for("omp.postmortem.nativeProcessExit");
 
 /**
- * Stamped by `withHostGuard` on each throwing exit replacement, carrying the
- * mutable record of the module whose load window is open (see
- * {@link guardedExitWindow}). Read by the host's own shutdown so an exit that
- * an open guard window would intercept can name its offender (#ZYS-10217).
+ * Stamped by `withHostGuard` on each throwing exit replacement: the map of load
+ * windows still open, keyed by the entry being imported. Read by the host's own
+ * shutdown so an exit an open guard window would intercept can name every
+ * offender, not the most recent one (#ZYS-10217).
  */
 export const HOST_GUARD_EXIT_INFO = Symbol.for("omp.postmortem.hostGuardExitInfo");
 
@@ -130,18 +130,18 @@ function nativeHardExit(fn: HardExitFn | undefined): HardExitFn | undefined {
  * signal and fatal exit.
  */
 /**
- * The open guard window behind a throwing exit primitive, if any.
+ * The load windows still open behind a throwing exit primitive, if any.
  *
  * Walks the same `NATIVE_PROCESS_EXIT` chain {@link nativeHardExit} follows so
- * nested guard windows are seen through, and returns the record stamped there.
+ * nested guard windows are seen through, and reads the map stamped there.
  */
-function guardedExitWindow(fn: HardExitFn | undefined): { label: string | null } | undefined {
+function guardedExitWindows(fn: HardExitFn | undefined): ReadonlyMap<string, number> | undefined {
 	let current = fn;
 	const seen = new Set<HardExitFn>();
 	while (typeof current === "function" && !seen.has(current)) {
 		seen.add(current);
 		const info = Reflect.get(current, HOST_GUARD_EXIT_INFO);
-		if (info && typeof info === "object") return info as { label: string | null };
+		if (info instanceof Map) return info as ReadonlyMap<string, number>;
 		const behind = Reflect.get(current, NATIVE_PROCESS_EXIT);
 		if (typeof behind !== "function") return undefined;
 		current = behind as HardExitFn;
@@ -151,9 +151,9 @@ function guardedExitWindow(fn: HardExitFn | undefined): { label: string | null }
 
 const reportedInterceptedShutdowns = new Set<string>();
 
-/** Names an intercepted shutdown's offender once per label on stderr. */
-function reportInterceptedShutdown(label: string | null): void {
-	const who = label ?? "an extension/hook module";
+/** Names the entries holding an intercepted shutdown open, once per set, on stderr. */
+function reportInterceptedShutdown(windows: ReadonlyMap<string, number>): void {
+	const who = [...windows.keys()].join(", ") || "an extension/hook module";
 	if (reportedInterceptedShutdowns.has(who)) return;
 	reportedInterceptedShutdowns.add(who);
 	process.stderr.write(`[omp] extension loading was still guarded for ${who} at shutdown; exiting through the native exit.\n`);
@@ -1048,9 +1048,9 @@ async function runQuit(code: number, exitMode: "guarded" | "native", options: Qu
 			// a non-zero code still routes through the stub, so the guard's protection
 			// against a module terminating the host mid-turn is unchanged.
 			if (code === 0) {
-				const window = guardedExitWindow(process.exit as HardExitFn);
-				if (window) {
-					reportInterceptedShutdown(window.label);
+				const windows = guardedExitWindows(process.exit as HardExitFn);
+				if (windows) {
+					reportInterceptedShutdown(windows);
 					return exitProcess(code);
 				}
 			}

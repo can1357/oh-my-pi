@@ -309,8 +309,49 @@ try {
 `);
 
 		expect(exitCode).not.toBe(0);
-		expect(stderr).toContain("failing-extension.ts");
 		expect(stderr).toContain("must not terminate the host process");
+	});
+
+	it("names every entry whose load window was still open at shutdown (#ZYS-10217)", async () => {
+		const { exitCode, stderr } = await runProbe(`
+import { postmortem } from "@oh-my-pi/pi-utils";
+import { withHostGuard } from "@oh-my-pi/pi-coding-agent/extensibility/utils";
+
+// Extension paths load concurrently, so several windows can be open at once; the
+// report must name all of them rather than whichever was entered last.
+void withHostGuard(async () => {
+	await Bun.sleep(10_000);
+}, "/opt/ext/first-extension.ts");
+void withHostGuard(async () => {
+	await Bun.sleep(10_000);
+}, "/opt/ext/second-extension.ts");
+await postmortem.quit(0);
+`);
+
+		expect(exitCode).toBe(0);
+		expect(stderr).toContain("first-extension.ts");
+		expect(stderr).toContain("second-extension.ts");
+	});
+
+	it("does not attribute an intercepted exit to another entry's load window (#ZYS-10217)", async () => {
+		const exiting = writeModule("exiting-extension.ts", "process.exit(0)\n");
+		const other = writeModule("other-extension.ts", "export default function() {}\n");
+		const cwd = project!.path();
+
+		// Both paths load concurrently, so both guard windows are open when the first
+		// module exits; the recorded failure must name only its own path.
+		const [exitingResult, otherResult] = await Promise.all([
+			loadExtensions([exiting], cwd),
+			loadExtensions([other], cwd),
+		]);
+
+		expect(otherResult.errors).toEqual([]);
+		expect(exitingResult.extensions).toEqual([]);
+		expect(exitingResult.errors).toHaveLength(1);
+		const [failure] = exitingResult.errors;
+		expect(failure.path).toBe(exiting);
+		expect(failure.error).toContain("must not terminate the host process");
+		expect(failure.error).not.toContain(other);
 	});
 
 	it("only the outermost guard restores process.exit when guards nest", async () => {
