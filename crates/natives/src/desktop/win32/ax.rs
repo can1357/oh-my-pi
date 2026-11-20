@@ -3,11 +3,12 @@ use std::ptr::with_exposed_provenance_mut;
 use uiautomation::{
 	UIAutomation, UIElement,
 	patterns::{
-		UIExpandCollapsePattern, UIInvokePattern, UILegacyIAccessiblePattern, UIScrollItemPattern,
-		UISelectionItemPattern, UITogglePattern, UIValuePattern,
+		UIExpandCollapsePattern, UIInvokePattern, UILegacyIAccessiblePattern, UIRangeValuePattern,
+		UIScrollItemPattern, UISelectionItemPattern, UISelectionPattern, UITogglePattern,
+		UIValuePattern,
 	},
-	types::{ControlType, ExpandCollapseState, Handle, Point, UIProperty},
-	variants::Value,
+	types::{ControlType, ExpandCollapseState, Handle, Point, TreeScope, UIProperty},
+	variants::{Value, Variant},
 };
 use windows_sys::Win32::{
 	Foundation::{HWND, POINT},
@@ -16,10 +17,13 @@ use windows_sys::Win32::{
 
 use super::{
 	super::{
-		ax::{AxBounds, AxHandle, AxProps, normalize_role_uia},
+		ax::{
+			AxBounds, AxHandle, AxProps, decimal_value, normalize_role_uia, plain_decimal,
+			real_reached,
+		},
 		backend::AxBackend,
 		control,
-		error::{CoreResult, DesktopError},
+		error::{CoreResult, DesktopError, ErrorCode},
 		types::DesktopWindow,
 	},
 	window,
@@ -184,10 +188,426 @@ impl Win32Ax {
 		}
 		Ok(false)
 	}
+
+	/// Writes `text` into a windowless control without a text value: as a
+	/// number into a range control (a WPF slider), or by selecting the item it
+	/// names in a selection container (a WPF combo box or list). Either is read
+	/// back.
+	fn set_number_or_item(&mut self, element: &UIElement, text: &str) -> CoreResult<()> {
+		let root = self.host_root(element).ok_or_else(|| {
+			DesktopError::background_unavailable(
+				"cannot establish the window hosting this UIA element; nothing was sent",
+			)
+		})?;
+		fresh_write(root)?;
+		if let Some(range) = present(element.get_pattern::<UIRangeValuePattern>(), "RangeValue")? {
+			control::check()?;
+			return Self::set_number(root, &range, text);
+		}
+		if let Some(selection) = present(element.get_pattern::<UISelectionPattern>(), "Selection")? {
+			control::check()?;
+			return self.select_item(root, element, &selection, text);
+		}
+		Err(DesktopError::ax_failed(
+			"this element offers none of UI Automation's Value, RangeValue and Selection patterns, \
+			 so it takes no text, number or item; nothing was written; set it via press/click instead",
+		))
+	}
+
+	fn set_number(root: HWND, range: &UIRangeValuePattern, text: &str) -> CoreResult<()> {
+		let current = range.get_value().map_err(ax_error)?;
+		control::check()?;
+		let refusal = |reason: &str| {
+			DesktopError::ax_failed(format!("{reason}; it reads {current} now; nothing was written"))
+		};
+		// The number written must spell the text back, so no digit is lost to
+		// the parse.
+		let value = plain_decimal(text)
+			.filter(|_| {
+				let (_, integer, fraction) = decimal_value(text);
+				let digits = if integer.is_empty() {
+					fraction.trim_start_matches('0').len()
+				} else {
+					integer.len() + fraction.len()
+				};
+				digits <= 15
+			})
+			.and_then(|_| text.parse::<f64>().ok())
+			.filter(|value| decimal_value(text) == decimal_value(&value.to_string()))
+			.ok_or_else(|| {
+				refusal(
+					"this control takes a number and the text given is not one it can hold: write \
+					 plain digits such as \"75\" or \"0.5\", at most 32 characters and 15 significant \
+					 digits",
+				)
+			})?;
+		let readonly = range.is_readonly().map_err(ax_error)?;
+		control::check()?;
+		if readonly {
+			return Err(refusal("this control is read-only"));
+		}
+		let (minimum, maximum) =
+			(range.get_minimum().map_err(ax_error)?, range.get_maximum().map_err(ax_error)?);
+		control::check()?;
+		if !(minimum..=maximum).contains(&value) {
+			return Err(refusal(&format!(
+				"{text} is outside the control's range {minimum} to {maximum}"
+			)));
+		}
+		fresh_write(root)?;
+		range.set_value(value).map_err(|error| {
+			DesktopError::input_failed(format!(
+				"RangeValue.SetValue({text}) was attempted and may have taken effect ({error})"
+			))
+		})?;
+		let read = range.get_value().map_err(|error| {
+			DesktopError::input_failed(format!(
+				"wrote {text}, but the control's value could not be read back ({error}); inspect it \
+				 before writing again"
+			))
+		})?;
+		if real_reached(value, read) {
+			Ok(())
+		} else {
+			Err(DesktopError::input_failed(format!(
+				"wrote {text}; the control now reads {read}. The app may have rounded it to a step or \
+				 not taken it: inspect it before writing again"
+			)))
+		}
+	}
+
+	/// Selects the item of the selection container `element` named exactly
+	/// `text` among the items currently exposed. A cold combo is opened to
+	/// expose its items and closed again while its window remains in front.
+	/// Read-back follows a bounded pause for deferred close handlers.
+	fn select_item(
+		&mut self,
+		root: HWND,
+		element: &UIElement,
+		selection: &UISelectionPattern,
+		text: &str,
+	) -> CoreResult<()> {
+		let items = self.selection_items(element)?;
+		if !items.is_empty() {
+			let item = pick(items, text)?;
+			fresh_write(root)?;
+			item.pattern.select().map_err(|error| {
+				DesktopError::input_failed(format!(
+					"SelectionItem.Select({text:?}) was attempted and may have taken effect ({error})"
+				))
+			})?;
+			return self.confirm_selected(selection, &item.element, text, false);
+		}
+		let combo = matches!(element.get_control_type().map_err(ax_error)?, ControlType::ComboBox);
+		control::check()?;
+		let expander = if combo {
+			let pattern = present(element.get_pattern::<UIExpandCollapsePattern>(), "ExpandCollapse")?;
+			control::check()?;
+			match pattern {
+				Some(pattern) => {
+					let state = pattern.get_state().map_err(|error| {
+						DesktopError::ax_failed(format!("ExpandCollapse.GetState failed ({error})"))
+					})?;
+					control::check()?;
+					matches!(state, ExpandCollapseState::Collapsed).then_some(pattern)
+				},
+				None => None,
+			}
+		} else {
+			None
+		};
+		let Some(expander) = expander else {
+			return Err(DesktopError::ax_failed(
+				"this list exposes no selectable items to UI Automation; nothing was selected",
+			));
+		};
+		// Before Expand, cancellation or loss of foreground still sent nothing.
+		fresh_write(root)?;
+		let expanded = expander.expand();
+		let selected = expanded
+			.map_err(|error| format!("Expand was attempted and failed ({error})"))
+			.and_then(|()| {
+				let foreground = || {
+					control::check().map_err(|error| error.message)?;
+					if !window::owns_foreground(root) {
+						return Err(
+							"the window lost the foreground after Expand; Select was not sent".to_string(),
+						);
+					}
+					Ok(())
+				};
+				let realize = std::time::Duration::from_millis(500);
+				let realize = control::time_left().map_or(realize, |left| left.min(realize));
+				let until = std::time::Instant::now() + realize;
+				// A cold combo can return from Expand before its items enter
+				// the UIA tree. Wait only while the hosting window stays in front.
+				let items = loop {
+					foreground()?;
+					let items = self
+						.selection_items(element)
+						.map_err(|error| error.message)?;
+					foreground()?;
+					let left = until.saturating_duration_since(std::time::Instant::now());
+					if !items.is_empty() || left.is_zero() {
+						break items;
+					}
+					let pause = left.min(std::time::Duration::from_millis(10));
+					let pause = control::time_left().map_or(pause, |left| left.min(pause));
+					control::wait(pause).map_err(|error| error.message)?;
+				};
+				let item = pick(items, text).map_err(|error| error.message)?;
+				fresh_write(root).map_err(|error| {
+					if error.code == ErrorCode::BackgroundUnavailable {
+						"the window lost the foreground after Expand; Select was not sent".to_string()
+					} else {
+						format!("Select was not sent: {}", error.message)
+					}
+				})?;
+				item.pattern.select().map_err(|error| {
+					format!("SelectionItem.Select({text:?}) was attempted and failed ({error})")
+				})?;
+				self
+					.confirm_selected(selection, &item.element, text, false)
+					.map_err(|error| error.message)?;
+				Ok(item)
+			});
+		// Expand was attempted, even if it returned an error. Cleanup must not
+		// be skipped by cancellation or by an unreadable expansion state.
+		let before_close = std::time::Instant::now();
+		let deadline = control::time_left().map(|left| before_close + left);
+		let closed = Self::close_opened(root, &expander);
+		match (selected, closed) {
+			(Ok(item), Ok(())) => {
+				let settle = std::time::Duration::from_millis(150);
+				if deadline.is_some_and(|deadline| std::time::Instant::now() + settle > deadline) {
+					return Err(DesktopError::ax_unconfirmed(format!(
+						"selected {text:?} and the list now reads closed, but the remaining time cannot \
+						 cover the full post-close settling window; the selection could not be \
+						 confirmed; inspect it before writing again"
+					)));
+				}
+				control::wait(settle).map_err(|error| {
+					DesktopError::ax_unconfirmed(format!(
+						"selected {text:?} and the list now reads closed, but the selection could not \
+						 be confirmed because the full post-close settling window did not finish ({}); \
+						 inspect the selection before writing again",
+						error.message
+					))
+				})?;
+				self.confirm_selected(selection, &item.element, text, true)
+			},
+			(Ok(_), Err(close)) => Err(DesktopError::input_failed(format!(
+				"selected {text:?}; Expand was attempted; {close}"
+			))),
+			(Err(failed), closed) => Err(DesktopError::input_failed(format!(
+				"Expand was attempted; {failed}; {}",
+				closed
+					.err()
+					.unwrap_or_else(|| "the list now reads closed".to_string())
+			))),
+		}
+	}
+
+	/// Cleanup is independent of cancellation, but never sends Collapse
+	/// after the hosting window loses the foreground.
+	fn close_opened(root: HWND, expander: &UIExpandCollapsePattern) -> Result<(), String> {
+		let before = expander.get_state();
+		if matches!(before, Ok(ExpandCollapseState::Collapsed)) {
+			return Ok(());
+		}
+		if !window::owns_foreground(root) {
+			return Err(match before {
+				Ok(_) => "the list still reads open; the window lost the foreground, so Collapse was \
+				          not sent"
+					.to_string(),
+				Err(error) => format!(
+					"the list state is unknown ({error}); the window lost the foreground, so Collapse \
+					 was not sent"
+				),
+			});
+		}
+		let collapsed = expander.collapse();
+		// A provider error does not prove the mutation had no effect.
+		match (collapsed, expander.get_state()) {
+			(Ok(()), Ok(ExpandCollapseState::Collapsed)) => Ok(()),
+			(Err(error), Ok(ExpandCollapseState::Collapsed)) => {
+				Err(format!("Collapse failed ({error}), but the list now reads closed"))
+			},
+			(Ok(()), Ok(_)) => Err("Collapse returned, but the list still reads open".to_string()),
+			(Err(error), Ok(_)) => {
+				Err(format!("Collapse failed ({error}); the list still reads open"))
+			},
+			(Ok(()), Err(error)) => {
+				Err(format!("Collapse returned, but the list state could not be read ({error})"))
+			},
+			(Err(error), Err(read)) => {
+				Err(format!("Collapse failed ({error}); the list state could not be read ({read})"))
+			},
+		}
+	}
+
+	/// The selectable items of the selection container `element`: exposed
+	/// descendants offering `SelectionItem` whose container it is, which a
+	/// grouped list nests under its groups.
+	fn selection_items(&mut self, element: &UIElement) -> CoreResult<Vec<SelectionItem>> {
+		let read_failed = |error: uiautomation::Error| {
+			DesktopError::ax_failed(format!(
+				"reading the list's items failed ({error}); nothing was selected"
+			))
+		};
+		let automation = self.automation()?;
+		let condition = automation
+			.create_property_condition(
+				UIProperty::IsSelectionItemPatternAvailable,
+				Variant::from(true),
+				None,
+			)
+			.map_err(ax_error)?;
+		let mut items = Vec::new();
+		let found = element
+			.find_all(TreeScope::Descendants, &condition)
+			.map_err(read_failed)?;
+		control::check()?;
+		for found in found {
+			let pattern = found
+				.get_pattern::<UISelectionItemPattern>()
+				.map_err(read_failed)?;
+			let container = pattern.get_selection_container().map_err(read_failed)?;
+			control::check()?;
+			if automation
+				.compare_elements(&container, element)
+				.map_err(read_failed)?
+			{
+				items.push(SelectionItem {
+					name: found.get_name().map_err(read_failed)?,
+					element: found,
+					pattern,
+				});
+			}
+		}
+		control::check()?;
+		Ok(items)
+	}
+
+	/// Checks that the container's selection is the item selected, alone.
+	fn confirm_selected(
+		&mut self,
+		selection: &UISelectionPattern,
+		item: &UIElement,
+		text: &str,
+		closed: bool,
+	) -> CoreResult<()> {
+		let automation = self.automation()?;
+		let selected = selection.get_selection().map_err(|error| {
+			DesktopError::input_failed(format!(
+				"selected {text:?}, but the selection could not be read back ({error})"
+			))
+		})?;
+		if let [only] = selected.as_slice() {
+			let same = automation.compare_elements(only, item).map_err(|error| {
+				DesktopError::input_failed(format!(
+					"selected {text:?}, but CompareElements failed during read-back ({error})"
+				))
+			})?;
+			if same {
+				return Ok(());
+			}
+		}
+		let names = selected
+			.iter()
+			.map(|item| item.get_name().unwrap_or_default())
+			.collect::<Vec<_>>()
+			.join(", ");
+		if closed {
+			Err(DesktopError::ax_failed(format!(
+				"after the list closed, the selection reads [{}] instead of {text:?}; inspect it \
+				 before writing again, do not retry blindly",
+				truncate(names)
+			)))
+		} else {
+			Err(DesktopError::input_failed(format!(
+				"selected {text:?}, but the selection now reads [{}]; the app may have changed it",
+				truncate(names)
+			)))
+		}
+	}
+}
+
+/// Fresh writes honour cancellation after provider reads and require the
+/// exact host window in front, regardless of its toolkit or class.
+fn fresh_write(root: HWND) -> CoreResult<()> {
+	control::check()?;
+	if !window::owns_foreground(root) {
+		return Err(DesktopError::background_unavailable(
+			"the window must own the foreground for this UIA write; nothing was sent",
+		));
+	}
+	Ok(())
+}
+
+/// A selectable item of a selection container.
+struct SelectionItem {
+	name:    String,
+	element: UIElement,
+	pattern: UISelectionItemPattern,
+}
+
+/// The one item of `items` named exactly `text`.
+fn pick(items: Vec<SelectionItem>, text: &str) -> CoreResult<SelectionItem> {
+	let count = items.iter().filter(|item| item.name == text).count();
+	if count > 1 {
+		return Err(DesktopError::ax_failed(format!(
+			"{count} items are named {text:?}; nothing was selected"
+		)));
+	}
+	if count == 0 {
+		let names = items
+			.iter()
+			.map(|item| item.name.as_str())
+			.collect::<Vec<_>>()
+			.join(", ");
+		return Err(DesktopError::ax_failed(format!(
+			"no currently exposed item is named exactly {text:?}; the exposed items are {}; \
+			 virtualized offscreen rows are not searched; nothing was selected",
+			truncate(names)
+		)));
+	}
+	Ok(items
+		.into_iter()
+		.find(|item| item.name == text)
+		.expect("one item has the name"))
 }
 
 fn ax_error(error: impl std::fmt::Display) -> DesktopError {
 	DesktopError::ax_failed(format!("UI Automation failed: {error}"))
+}
+
+/// The pattern a lookup found, or `None` when the element does not offer it:
+/// UI Automation answers that with success and no interface, which reaches us
+/// as an error with code 0 ("The operation completed successfully"). Any
+/// other failure is an error naming the pattern.
+fn present<P>(lookup: uiautomation::Result<P>, name: &str) -> CoreResult<Option<P>> {
+	match lookup {
+		Ok(pattern) => Ok(Some(pattern)),
+		Err(error) if error.code() == 0 => Ok(None),
+		Err(error) => Err(DesktopError::ax_failed(format!(
+			"reading UI Automation's {name} pattern failed: {error}"
+		))),
+	}
+}
+
+/// Maps a failed lookup of a pattern an action needs, as [`present`] tells
+/// a missing pattern from a failed lookup.
+fn pattern_error(name: &'static str) -> impl Fn(uiautomation::Error) -> DesktopError {
+	move |error| {
+		if error.code() == 0 {
+			DesktopError::ax_failed(format!(
+				"this element does not offer UI Automation's {name} pattern; nothing was sent"
+			))
+		} else {
+			ax_error(error)
+		}
+	}
 }
 
 /// Handle for `element` carrying the `RuntimeId` that identifies it across
@@ -545,7 +965,7 @@ impl AxBackend for Win32Ax {
 				}
 				let pattern = element
 					.get_pattern::<UILegacyIAccessiblePattern>()
-					.map_err(ax_error)?;
+					.map_err(pattern_error("LegacyIAccessible"))?;
 				if pattern.get_default_action().map_err(ax_error)?.is_empty() {
 					return Err(DesktopError::ax_failed("UIA element has no default press action"));
 				}
@@ -600,9 +1020,22 @@ impl AxBackend for Win32Ax {
 
 	fn set_value(&mut self, handle: &AxHandle, text: &str) -> CoreResult<()> {
 		let element = Self::element(handle)?;
+		// A windowless control without a text value, such as a WPF slider or
+		// combo box, takes a number or the item it should select.
+		let native = native_window(element);
+		let mut value = None;
+		if native.is_none() {
+			self.contained(element, || {
+				value = present(element.get_pattern::<UIValuePattern>(), "Value")?;
+				Ok(())
+			})?;
+			if value.is_none() {
+				return self.set_number_or_item(element, text);
+			}
+		}
 		let password = element.is_password().ok();
 		let secure = password.unwrap_or(true);
-		let hwnd = native_window(element).map(super::value_write::combo_target);
+		let hwnd = native.map(super::value_write::combo_target);
 		let class = hwnd.map_or_default(window::class_name);
 		let parent_class = hwnd.map_or_default(|hwnd| {
 			// SAFETY: GetAncestor only queries the native control's true parent.
@@ -635,12 +1068,17 @@ impl AxBackend for Win32Ax {
 					password,
 				);
 			},
-			super::value_write::ValueRoute::Pattern => self.contained(element, || {
-				element
-					.get_pattern::<UIValuePattern>()
-					.and_then(|pattern| pattern.set_value(text))
-					.map_err(ax_error)
-			})?,
+			super::value_write::ValueRoute::Pattern => {
+				self.contained(element, || {
+					let pattern = match value {
+						Some(pattern) => pattern,
+						None => element
+							.get_pattern::<UIValuePattern>()
+							.map_err(pattern_error("Value"))?,
+					};
+					pattern.set_value(text).map_err(ax_error)
+				})?;
+			},
 		}
 		// Password providers cannot supply evidence, so do not query hidden
 		// or protected representations just to discard them.
@@ -786,6 +1224,238 @@ mod tests {
 		assert_eq!(fixture.run(|| (clicks(), click_messages())), (2, 2));
 		// SAFETY: the fixture thread owns the window.
 		fixture.run(move || unsafe { DestroyWindow(parent_id as HWND) });
+	}
+
+	/// A WPF window with a slider, a combo box and a second combo box nobody
+	/// opens before the test, and an unrelated window of the same app, in its
+	/// own `PowerShell` process as an app's would be. It prints `ready` and
+	/// the two windows' handles once they show, then what happens to its
+	/// controls (`level`, `opened`, `selected`, `closed`) and `mark` for each
+	/// mark posted to it.
+	const WPF_VALUES: &str = r#"
+Add-Type -ReferencedAssemblies PresentationFramework,PresentationCore,WindowsBase,System.Xaml -TypeDefinition @'
+using System;
+using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Controls;
+using System.Windows.Interop;
+public static class Fixture {
+	static Window window, other;
+	static bool steal;
+	static void Say(string line) { Console.Out.WriteLine(line); Console.Out.Flush(); }
+	static IntPtr Hook(IntPtr hwnd, int message, IntPtr w, IntPtr l, ref bool handled) {
+		if (message == 0x8007) Say("mark");
+		else if (message == 0x8008) steal = true;
+		return IntPtr.Zero;
+	}
+	static ComboBox Combo(string name, params string[] items) {
+		var combo = new ComboBox();
+		foreach (var item in items) combo.Items.Add(item);
+		AutomationProperties.SetName(combo, name);
+		combo.DropDownOpened += (sender, e) => {
+			Say("opened");
+			if (steal) { steal = false; other.Activate(); }
+		};
+		combo.DropDownClosed += (sender, e) => Say("closed");
+		combo.SelectionChanged += (sender, e) => Say("selected " + combo.SelectedItem);
+		return combo;
+	}
+	static IntPtr Handle(Window window) { return new WindowInteropHelper(window).Handle; }
+	public static void Run() {
+		var level = new Slider { Minimum = 0, Maximum = 100 };
+		AutomationProperties.SetName(level, "Level");
+		level.ValueChanged += (sender, e) => Say("level " + e.NewValue);
+		var panel = new StackPanel();
+		panel.Children.Add(level);
+		panel.Children.Add(Combo("Choice", "One", "Two", "Three"));
+		panel.Children.Add(Combo("Cold", "Red", "Blue"));
+		panel.Children.Add(Combo("Missing", "Red", "Blue"));
+		var reset = Combo("Reset", "One", "Two");
+		reset.DropDownClosed += (sender, e) => { reset.SelectedItem = "One"; };
+		panel.Children.Add(reset);
+		window = new Window { Title = "omp test: wpf values", Left = 40, Top = 40, Width = 300, Height = 200, Content = panel };
+		other = new Window { Title = "omp test: wpf other", ShowActivated = false, Left = 360, Top = 40, Width = 240, Height = 140 };
+		window.SourceInitialized += (sender, e) => HwndSource.FromHwnd(Handle(window)).AddHook(Hook);
+		window.ContentRendered += (sender, e) => { other.Show(); Say("ready " + Handle(window) + " " + Handle(other)); };
+		window.ShowDialog();
+	}
+}
+'@
+[Fixture]::Run()
+"#;
+
+	struct WpfValues {
+		host:   std::process::Child,
+		output: std::io::BufReader<std::process::ChildStdout>,
+		window: HWND,
+	}
+
+	impl WpfValues {
+		fn line(&mut self) -> String {
+			use std::io::BufRead;
+			let mut line = String::new();
+			assert_ne!(self.output.read_line(&mut line).unwrap(), 0, "the WPF window closed");
+			line.trim().to_string()
+		}
+
+		/// Posts `message` to the window.
+		fn post(&self, message: u32) {
+			use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
+			// SAFETY: a plain message to a window this test's fixture owns.
+			unsafe { PostMessageW(self.window, message, 0, 0) };
+		}
+
+		/// What the window printed since the last call: everything that
+		/// happened in it before it read a mark posted now.
+		fn printed(&mut self) -> Vec<String> {
+			self.post(MARK);
+			let mut lines = Vec::new();
+			loop {
+				match self.line() {
+					mark if mark == "mark" => return lines,
+					line => lines.push(line),
+				}
+			}
+		}
+	}
+
+	impl Drop for WpfValues {
+		fn drop(&mut self) {
+			let _ = self.host.kill();
+			let _ = self.host.wait();
+		}
+	}
+
+	/// Posted to the WPF window: it prints `mark` when it reads it.
+	const MARK: u32 = 0x8007;
+	/// Posted to the WPF window: the next list to open activates its other
+	/// window, as a user switching windows would.
+	const STEAL: u32 = 0x8008;
+
+	#[test]
+	#[ignore = "moves the foreground between windows it opens; run with --ignored from a focused \
+	            terminal in a signed-in desktop session"]
+	fn set_value_writes_a_wpf_slider_as_a_number_and_a_combo_box_as_its_item() {
+		use std::{process::Stdio, sync::Arc, time::Duration};
+
+		use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+
+		use crate::desktop::{
+			Request, Response, Worker,
+			control::{self, CancellationSource},
+			types::{AxQuery, DisplaySelector, Target},
+		};
+
+		let _serial = control::OWNERSHIP_TEST.lock();
+		let mut host = std::process::Command::new("powershell")
+			.args(["-NoProfile", "-Command", WPF_VALUES])
+			.stdout(Stdio::piped())
+			.spawn()
+			.unwrap();
+		let output = std::io::BufReader::new(host.stdout.take().unwrap());
+		// From here a failed assertion still closes the windows.
+		let mut app = WpfValues { host, output, window: std::ptr::null_mut() };
+		let ready = app.line();
+		let words = ready.split(' ').collect::<Vec<_>>();
+		assert_eq!(words[0], "ready");
+		let handle = |word: &str| with_exposed_provenance_mut(word.parse::<usize>().unwrap());
+		let (window, other): (HWND, HWND) = (handle(words[1]), handle(words[2]));
+		app.window = window;
+		let mut worker = Worker::new(DisplaySelector::Active, Arc::default(), Arc::default());
+		let token = CancellationSource::default().token();
+		// SAFETY: GetForegroundWindow has no preconditions.
+		let foreground = || unsafe { GetForegroundWindow() };
+		let mut set = |name: &str, value: &str| {
+			let query = AxQuery { title: Some(name.to_string()), ..AxQuery::default() };
+			let request = Request::AxQuery {
+				target: Target::Window(window.expose_provenance().to_string()),
+				query,
+				reply: flume::unbounded().0,
+			};
+			let Response::Nodes(nodes) = worker.execute(&request, &token).unwrap() else {
+				panic!("AxQuery returns nodes");
+			};
+			let request = Request::AxSetValue {
+				reference: nodes[0].ref_.clone(),
+				value:     value.to_string(),
+				reply:     flume::unbounded().0,
+			};
+			worker.execute(&request, &token).map(drop)
+		};
+		// SAFETY: a window of this test's fixture.
+		unsafe { SetForegroundWindow(window) };
+		assert!(
+			window::wait_for_foreground(window, Duration::from_secs(2)).unwrap(),
+			"the WPF window did not come to the front: run from a focused terminal"
+		);
+
+		set("Level", "0.5").unwrap();
+		assert_eq!(app.printed(), ["level 0.5"]);
+		// More digits than the number written holds: refused before writing.
+		let error = set("Level", "0.5000000000000001").unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxFailed, "{error}");
+		assert_eq!(app.printed(), Vec::<String>::new());
+
+		// A combo box never opened has no items until its list opens: it is
+		// opened, the item selected, and the list closed again.
+		set("Choice", "Two").unwrap();
+		assert_eq!(app.printed(), ["opened", "selected Two", "closed"]);
+		let error = set("Choice", "Four").unwrap_err();
+		assert!(
+			error
+				.message
+				.contains("the exposed items are One, Two, Three"),
+			"{error}"
+		);
+		assert_eq!(app.printed(), Vec::<String>::new());
+
+		let error = set("Missing", "Green").unwrap_err();
+		assert_eq!(error.code, ErrorCode::InputFailed, "{error}");
+		assert!(error.message.contains("the list now reads closed"), "{error}");
+		// UIA's Collapsed state can precede WPF's deferred DropDownClosed.
+		// Wait for the event, not a posted mark, before checking what was sent.
+		let mut printed = Vec::new();
+		loop {
+			let line = app.line();
+			let closed = line == "closed";
+			printed.push(line);
+			if closed {
+				break;
+			}
+		}
+		assert_eq!(printed, ["opened", "closed"]);
+		assert_eq!(app.printed(), Vec::<String>::new());
+
+		let error = set("Reset", "Two").unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxFailed, "{error}");
+		assert!(
+			error
+				.message
+				.contains("after the list closed, the selection reads"),
+			"{error}"
+		);
+		assert!(error.message.contains("selection reads [One]"), "{error}");
+		assert_eq!(app.printed(), ["opened", "selected Two", "closed", "selected One"]);
+
+		// The window losing the foreground once the list is open stops the
+		// selection.
+		app.post(STEAL);
+		assert_eq!(app.printed(), Vec::<String>::new());
+		let error = set("Cold", "Blue").unwrap_err();
+		assert_eq!(error.code, ErrorCode::InputFailed, "{error}");
+		assert!(error.message.contains("lost the foreground"), "{error}");
+		let printed = app.printed();
+		assert!(printed.iter().any(|line| line == "opened"), "{printed:?}");
+		assert!(!printed.iter().any(|line| line.starts_with("selected")), "{printed:?}");
+		assert_eq!(foreground(), other);
+
+		// Behind another window nothing is sent.
+		for (name, value) in [("Level", "70"), ("Choice", "Three")] {
+			let error = set(name, value).unwrap_err();
+			assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
+		}
+		assert_eq!(app.printed(), Vec::<String>::new());
+		assert_eq!(foreground(), other);
 	}
 
 	#[test]
