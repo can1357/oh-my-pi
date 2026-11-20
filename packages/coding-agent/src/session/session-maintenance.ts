@@ -74,6 +74,7 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { isRecord, logger, prompt, Snowflake, spillUrl, toError, withLoopPhase } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import * as fs from "node:fs/promises";
 import { writeArtifact } from "./artifacts";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
@@ -1128,7 +1129,6 @@ export class SessionMaintenance {
 		} catch {
 			if (opts.requireArtifact) throw new Error("shake could not save a recovery artifact");
 		}
-		assertCurrent();
 		let artifactId = reservedArtifact.id;
 		const calculateReplacementState = (id: string | undefined) => {
 			const replacements = regions.map((region, index) => this.#shakeElidePlaceholder(region, index, id));
@@ -1141,27 +1141,46 @@ export class SessionMaintenance {
 			);
 			return { replacements, replacementTokenCounts, savings };
 		};
-		let { replacements, replacementTokenCounts, savings } = calculateReplacementState(artifactId);
-		if (opts.toolResultsOnly && savings < config.minSavings) {
-			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
-		}
-		if (reservedArtifact.path && reservedArtifact.id) {
-			try {
-				await writeArtifact(reservedArtifact.path, this.#shakeArtifactText(regions));
-			} catch {
-				if (opts.requireArtifact) throw new Error("shake could not save a recovery artifact");
-				artifactId = undefined;
-				({ replacements, replacementTokenCounts, savings } = calculateReplacementState(artifactId));
-			}
-		} else {
-			artifactId = await this.#saveShakeArtifact(regions);
+		let replacements: string[];
+		let replacementTokenCounts: number[];
+		// The reservation is an empty `<id>.log` until written; any exit that leaves it empty removes it.
+		let reservationFilled = false;
+		try {
 			assertCurrent();
-			if (opts.requireArtifact && !artifactId) {
-				throw new Error("shake could not save a recovery artifact");
-			}
+			let savings: number;
 			({ replacements, replacementTokenCounts, savings } = calculateReplacementState(artifactId));
 			if (opts.toolResultsOnly && savings < config.minSavings) {
 				return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+			}
+			if (reservedArtifact.path && reservedArtifact.id) {
+				try {
+					await writeArtifact(reservedArtifact.path, this.#shakeArtifactText(regions));
+					reservationFilled = true;
+				} catch {
+					if (opts.requireArtifact) throw new Error("shake could not save a recovery artifact");
+					artifactId = undefined;
+					({ replacements, replacementTokenCounts } = calculateReplacementState(artifactId));
+				}
+			} else {
+				artifactId = await this.#saveShakeArtifact(regions);
+				assertCurrent();
+				if (opts.requireArtifact && !artifactId) {
+					throw new Error("shake could not save a recovery artifact");
+				}
+				({ replacements, replacementTokenCounts, savings } = calculateReplacementState(artifactId));
+				if (opts.toolResultsOnly && savings < config.minSavings) {
+					return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+				}
+			}
+		} finally {
+			const reservedPath = reservedArtifact.path;
+			if (!reservationFilled && reservedPath) {
+				await fs.rm(reservedPath, { force: true }).catch((error: unknown) => {
+					logger.warn("Failed to remove unused shake artifact reservation", {
+						path: reservedPath,
+						error: toError(error).message,
+					});
+				});
 			}
 		}
 
