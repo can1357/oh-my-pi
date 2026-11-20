@@ -838,16 +838,26 @@ impl Kernel {
 	/// collected). A store failure reads as unknown (and is kept for the
 	/// next turn).
 	pub fn proc_state(&mut self, store: &mut dyn StateStore, vpid: Vpid) -> Option<ProcState> {
-		match store.get(Key::Proc(vpid)) {
-			Ok(Some(Record::Proc { status, .. })) => {
-				Some(status.map_or(ProcState::Running, ProcState::Exited))
-			},
-			Ok(_) => None,
+		match Self::read_proc_state(store, vpid) {
+			Ok(state) => state,
 			Err(err) => {
 				self.root.fail(err);
 				None
 			},
 		}
+	}
+
+	/// Read a process record without attaching a fault to the live kernel.
+	fn read_proc_state(
+		store: &mut dyn StateStore,
+		vpid: Vpid,
+	) -> Result<Option<ProcState>, StoreError> {
+		Ok(match store.get(Key::Proc(vpid))? {
+			Some(Record::Proc { status, .. }) => {
+				Some(status.map_or(ProcState::Running, ProcState::Exited))
+			},
+			_ => None,
+		})
 	}
 
 	/// Whether `vp` started child vproc `vpid` (its record names `vp` as
@@ -2688,15 +2698,21 @@ impl Shell {
 		let Some((id, cut)) = self.k.pending_cut_short.take() else {
 			return false;
 		};
+		let mut read_failed = false;
 		let verdict = id == run
 			&& cut.walk(|vpid| {
-				self
-					.k
-					.proc_state(store, vpid)
-					.and_then(|state| state.exited())
+				let Ok(state) = Kernel::read_proc_state(store, vpid) else {
+					read_failed = true;
+					return None;
+				};
+				state.and_then(ProcState::exited)
 			});
-		self.k.pending_cut_short = Some((id, cut));
-		verdict
+		// Like a failed capture, a failed attribution-only read invalidates
+		// the verdict. An ordinary missing child status remains conservative.
+		if !read_failed {
+			self.k.pending_cut_short = Some((id, cut));
+		}
+		verdict && !read_failed
 	}
 
 	/// Whether the run's cut-short verdict still waits on a pipeline child
@@ -2707,15 +2723,15 @@ impl Shell {
 		let Some((id, cut)) = self.k.pending_cut_short.take() else {
 			return false;
 		};
-		let pending = id == run
-			&& self.k.exited == Some(run)
-			&& cut.pending_children().iter().any(|&vpid| {
-				self
-					.k
-					.proc_state(store, vpid)
-					.and_then(|state| state.exited())
-					.is_none()
-			});
+		let mut pending = false;
+		if id == run && self.k.exited == Some(run) {
+			for vpid in cut.pending_children() {
+				match Kernel::read_proc_state(store, vpid) {
+					Ok(state) => pending |= state.and_then(ProcState::exited).is_none(),
+					Err(_) => return false,
+				}
+			}
+		}
 		self.k.pending_cut_short = Some((id, cut));
 		pending
 	}

@@ -6394,6 +6394,7 @@ mod tests {
 		struct Store {
 			inner:              MemStore,
 			reject_attribution: bool,
+			reject_child:       Option<Vpid>,
 			failed_reads:       usize,
 		}
 
@@ -6401,7 +6402,9 @@ mod tests {
 			fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError> {
 				// The Bash parser does not read the zsh-only aliases option;
 				// the attribution snapshot reads it to model restored modes.
-				if self.reject_attribution && matches!(key, Key::ZshOpt(ZshOpt::Aliases)) {
+				if (self.reject_attribution && matches!(key, Key::ZshOpt(ZshOpt::Aliases)))
+					|| matches!(key, Key::Proc(child) if self.reject_child == Some(child))
+				{
 					self.failed_reads += 1;
 					return Err(StoreError::Backend(
 						std::io::Error::other("attribution read failed").into(),
@@ -6471,6 +6474,67 @@ mod tests {
 					.unwrap()
 					.is_none()
 			);
+		}
+
+		// The delayed reads are attribution-only as well. A backend error is
+		// not the same as an unresolved child and must not poison the kernel's
+		// next turn. Seed the status after a real lastpipe capture so the cases
+		// do not depend on which vproc gets scheduled first.
+		for (suffix, on_success) in [("&& :", true), ("|| :", false)] {
+			for (child_status, fail) in
+				[(None, false), (Some(0), false), (Some(1), false), (None, true)]
+			{
+				for check_pending in [false, true] {
+					let mut store = Store::default();
+					let mut host = FakeHost::new();
+					let engine = Engine::new(EngineConfig::default());
+					let mut cx = Cx { host: &mut host, store: &mut store };
+					let mut shell = Shell::create(&engine, &mut cx, ShellInit::default()).unwrap();
+					let command = format!(
+						"set -o pipefail; shopt -s lastpipe; while :; do :; done | exit 0 {suffix}"
+					);
+					let run = shell.submit(Script::command(command.as_bytes()));
+					let status = (0..20).find_map(|_| match shell.step(&mut cx, Budget::default()) {
+						Step::Done { run: done, status } if done == run => Some(status),
+						_ => None,
+					});
+					assert_eq!(status, Some(0));
+					let children = shell
+						.k
+						.pending_cut_short
+						.as_ref()
+						.unwrap()
+						.1
+						.pending_children();
+					let [child] = children.as_slice() else {
+						panic!("expected one pending pipeline sibling: {children:?}");
+					};
+					if let Some(status) = child_status {
+						store
+							.inner
+							.apply(Change::Put(Key::Proc(*child), Record::Proc {
+								parent: Some(Vpid(1)),
+								status: Some(status),
+							}))
+							.unwrap();
+					}
+					store.reject_child = fail.then_some(*child);
+					if check_pending {
+						assert_eq!(
+							shell.exit_children_pending(&mut store, run),
+							!fail && child_status.is_none()
+						);
+					}
+					let expected = !fail && child_status.is_none_or(|s| (s == 0) == on_success);
+					assert_eq!(
+						shell.ended_by_exit_cut_short(&mut store, run),
+						expected,
+						"{suffix}: {child_status:?}, fail={fail}"
+					);
+					assert_eq!(store.failed_reads > 0, fail);
+					assert!(!shell.k.root.has_fault());
+				}
+			}
 		}
 	}
 
