@@ -60,14 +60,22 @@ export function assertIndexSize(size: number, limits: ArchiveLimits, what: strin
 }
 
 /**
+ * Reject a member size field that is not a byte count. Indexing checks only this: `maxMemberSize` bounds
+ * extraction, so one oversized member never hides the rest of the archive.
+ */
+export function assertArchiveMemberSizeField(size: number, memberPath: string): void {
+	if (!Number.isSafeInteger(size) || size < 0) {
+		throw new ArchiveError(`Archive member '${formatArchivePathForError(memberPath)}' has an invalid size`);
+	}
+}
+
+/**
  * Reject a member whose declared (uncompressed) size exceeds `maxMemberSize`.
  * The declared size is metadata — a crafted entry can claim multi-GB sizes
  * that would be allocated up front before any data decompresses.
  */
 export function assertArchiveMemberSize(size: number, memberPath: string, limits: ArchiveLimits): void {
-	if (!Number.isSafeInteger(size) || size < 0) {
-		throw new ArchiveError(`Archive member '${formatArchivePathForError(memberPath)}' has an invalid size`);
-	}
+	assertArchiveMemberSizeField(size, memberPath);
 	if (size > limits.maxMemberSize) {
 		throw new ArchiveError(
 			`Archive member '${formatArchivePathForError(memberPath)}' is too large to extract in memory (${formatBytes(size)} > ${formatBytes(limits.maxMemberSize)} limit)`,

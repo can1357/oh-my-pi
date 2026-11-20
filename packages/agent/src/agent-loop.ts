@@ -684,6 +684,26 @@ export function agentLoop(
 }
 
 /**
+ * Whether `message` is kept out of model context: drawn and saved, never sent (a `!!` bash run, a
+ * custom row sent with `excludeFromContext`).
+ */
+export function isExcludedFromContext(message: AgentMessage): boolean {
+	return "excludeFromContext" in message && message.excludeFromContext === true;
+}
+
+/** Index of the last message the model sees, or -1; rows kept out of context after it do not change the request tail. */
+export function lastContextIndex(messages: readonly AgentMessage[]): number {
+	let i = messages.length - 1;
+	while (i >= 0 && isExcludedFromContext(messages[i])) i--;
+	return i;
+}
+
+/** The last message the model sees (see {@link lastContextIndex}). */
+export function lastContextMessage(messages: readonly AgentMessage[]): AgentMessage | undefined {
+	return messages[lastContextIndex(messages)];
+}
+
+/**
  * Trailing assistant message whose runnable tool calls have no results yet.
  *
  * A harness that strips failed/aborted tool results in order to re-execute
@@ -2019,29 +2039,33 @@ async function prepareProviderCall(
 	const normalizedMessages = normalizeMessagesForProvider(llmMessages, model);
 	const ownedDialect: Dialect | undefined =
 		(config.getDialect ? config.getDialect(model) : config.dialect) ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
-	const pruneToolDescriptions = !!config.pruneToolDescriptions && !ownedDialect;
+	const toolOptions: NormalizeToolsOptions = {
+		injectIntent: !!config.intentTracing,
+		intentDescription: config.intentDescription,
+		pruneDescriptions: !!config.pruneToolDescriptions && !ownedDialect,
+	};
 	let llmContext: Context;
 	if (config.appendOnlyContext) {
 		config.appendOnlyContext.syncMessages(normalizedMessages);
 		llmContext = config.appendOnlyContext.build(context, {
-			intentTracing: !!config.intentTracing,
-			intentDescription: config.intentDescription,
-			pruneToolDescriptions,
+			intentTracing: toolOptions.injectIntent,
+			intentDescription: toolOptions.intentDescription,
+			pruneToolDescriptions: toolOptions.pruneDescriptions,
 		});
 	} else {
 		llmContext = {
 			systemPrompt: context.systemPrompt,
 			messages: normalizedMessages,
-			tools: normalizeTools(context.tools, {
-				injectIntent: !!config.intentTracing,
-				intentDescription: config.intentDescription,
-				pruneDescriptions: pruneToolDescriptions,
-			}),
+			tools: normalizeTools(context.tools, toolOptions),
 		};
 	}
 	// Before the transform too, so a request-size clamp in it measures the withdrawn definitions the provider
-	// re-declares; recomputed below against what the transform returns.
-	if (config.sentToolDefinitions) llmContext = config.sentToolDefinitions.withInactiveTools(llmContext);
+	// re-declares; recomputed below against what the transform returns. Standby tools are normalized like
+	// `tools`, so a standby tool's definition matches the one it is sent with once active.
+	if (config.sentToolDefinitions) {
+		const standbyTools = normalizeTools(context.standbyTools, toolOptions);
+		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext, standbyTools);
+	}
 	if (config.transformProviderContext) {
 		llmContext = await config.transformProviderContext(llmContext, model);
 	}
@@ -2059,7 +2083,9 @@ async function prepareProviderCall(
 	// After `transformProviderContext`, so the recorded definitions are exactly what the provider receives.
 	if (config.sentToolDefinitions) {
 		if (llmContext.tools) config.sentToolDefinitions.record(llmContext.tools);
-		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext);
+		if (llmContext.inactiveTools) config.sentToolDefinitions.record(llmContext.inactiveTools);
+		// The transformed standby definitions, when no request has declared tools yet.
+		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext, llmContext.inactiveTools);
 	}
 	return { model, context: llmContext, promptToolWireTools, ownedDialect };
 }

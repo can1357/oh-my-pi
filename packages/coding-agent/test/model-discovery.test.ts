@@ -11,7 +11,7 @@ import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shar
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
@@ -23,7 +23,11 @@ import {
 import type { ModelKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { CODEX_CLIENT_VERSION } from "@oh-my-pi/pi-catalog/wire/codex";
 import {
+	DISCOVERY_DEFAULT_CONTEXT_WINDOW,
+	type DiscoveryProviderConfig,
+	discoverLlamaCppModels,
 	discoverLiteLLMModels,
+	discoverOllamaModels,
 	discoverOpenAIModelsList,
 	discoverProxyModels,
 	discoveryProbeTimeoutMs,
@@ -1415,7 +1419,40 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(gemma?.contextWindow).toBe(131072);
 		expect(gemma?.maxTokens).toBe(32_768);
 		expect(gemma?.input).toEqual(["text"]);
-		expect(gemma?.reasoning).toBe(false);
+	});
+
+	test("local discovery leaves models unverified when native metadata has no capability evidence", async () => {
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url.endsWith("/api/tags")) return Response.json({ models: [{ name: "unlisted-local" }] });
+			if (url.endsWith("/api/show") || url.endsWith("/props")) return Response.json({});
+			if (url.endsWith("/models")) return Response.json({ data: [{ id: "unlisted-local" }] });
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const ctx = { fetch: fetchMock, getBearerApiKeyResolver: async () => undefined };
+		const ollama = await discoverOllamaModels(
+			{
+				provider: "ollama",
+				api: "openai-completions",
+				baseUrl: "http://127.0.0.1:11434",
+				discovery: { type: "ollama" },
+			},
+			ctx,
+		);
+		const llamaCpp = await discoverLlamaCppModels(
+			{
+				provider: "llama.cpp",
+				api: "openai-responses",
+				baseUrl: "http://127.0.0.1:8080",
+				discovery: { type: "llama.cpp" },
+			},
+			ctx,
+		);
+		for (const models of [ollama, llamaCpp]) {
+			expect(models).toHaveLength(1);
+			expect(models[0]?.reasoning).toBe(true);
+			expect(models[0]?.thinking).toMatchObject({ unverified: true, efforts: THINKING_EFFORTS });
+		}
 	});
 
 	test("discovery failure does not fail model registry refresh", async () => {
@@ -1760,7 +1797,6 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(bonsai1?.compat).toMatchObject({ qwenTemplateReasoningEffort: false });
 
 		const plain = registry.find("llama.cpp", "llama-3.1-8b");
-		expect(plain?.reasoning).toBe(false);
 		expect(plain?.api).toBe("openai-responses");
 		expect(plain?.baseUrl).toBe("http://127.0.0.1:8080/v1");
 		expect(plain?.compat).not.toMatchObject({ reasoningDisableMode: "qwen-enable-thinking-false" });
@@ -2949,6 +2985,50 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(models.map(model => model.id)).toEqual(["mistral/mistral-large-latest"]);
 	});
 
+	test("proxy discovery derives the context window from nested token limits before clamping the output cap", async () => {
+		// A proxy that publishes only `limits.max_input_tokens` +
+		// `limits.max_output_tokens` states a 400K window without
+		// `context_length`. Ignoring the nested limits left the context at the
+		// 128K default, and the new `Math.min` clamp then also truncated a valid
+		// 200K output cap to 128K — diverging from the generic list discovery,
+		// which already derives the window from the same row shape.
+		const fetchMock: FetchImpl = async input => {
+			if (String(input) !== "http://127.0.0.1:9992/v1/models") throw new Error(`Unexpected URL: ${String(input)}`);
+			return Response.json({
+				data: [
+					{
+						id: "openai-test/nested-limits",
+						supported_endpoint_types: ["openai"],
+						limits: { max_input_tokens: 200_000, max_output_tokens: 200_000 },
+					},
+					{
+						id: "openai-test/incomplete-nested-limits",
+						supported_endpoint_types: ["openai"],
+						limits: { max_input_tokens: 200_000 },
+					},
+				],
+			});
+		};
+		const models = await discoverProxyModels(
+			{
+				provider: "proxy-test",
+				api: "openai-completions",
+				baseUrl: "http://127.0.0.1:9992/v1",
+				discovery: { type: "proxy" },
+			},
+			{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
+		);
+
+		const nested = models.find(model => model.id === "openai-test/nested-limits");
+		expect(nested?.contextWindow).toBe(400_000);
+		expect(nested?.maxTokens).toBe(200_000);
+
+		// Half a budget is not a window: the guarded fallback must stay silent.
+		const incomplete = models.find(model => model.id === "openai-test/incomplete-nested-limits");
+		expect(incomplete?.contextWindow).toBe(DISCOVERY_DEFAULT_CONTEXT_WINDOW);
+		expect(incomplete?.maxTokens).toBe(32_768);
+	});
+
 	test("litellm discovery skips a model group whose name names two vendors instead of dropping the provider (#18770)", async () => {
 		const fetchMock: FetchImpl = async input => {
 			if (String(input) !== "http://127.0.0.1:4001/model_group/info") {
@@ -3151,8 +3231,50 @@ describe("ModelRegistry runtime discovery", () => {
 		// Unknown model ids stay on the default fallback path.
 		const unknown = registry.find("openai-test", "unknown-proxy-model");
 		expect(unknown?.contextWindow).toBe(128000);
-		expect(unknown?.reasoning).toBe(false);
+		expect(unknown?.reasoning).toBe(true);
+		expect(unknown?.thinking).toMatchObject({ unverified: true, efforts: THINKING_EFFORTS });
+		expect(unknown?.compatConfig).not.toMatchObject({ supportsReasoningEffort: false });
 	});
+
+	test.each(["openai-models-list", "proxy", "lm-studio"])(
+		"%s discovery distinguishes missing reasoning evidence from advertised true and false",
+		async type => {
+			const fetchMock: FetchImpl = async input => {
+				const url = String(input);
+				if (url.endsWith("/v1/models")) {
+					return Response.json({
+						data: [
+							{ id: "unlisted-silent" },
+							{ id: "unlisted-native", reasoning: true },
+							{ id: "unlisted-plain", reasoning: false },
+						],
+					});
+				}
+				return new Response(null, { status: 404 });
+			};
+			const ctx = { fetch: fetchMock, getBearerApiKeyResolver: async () => undefined };
+			const config: DiscoveryProviderConfig = {
+				provider: "custom-discovery",
+				api: "openai-completions",
+				baseUrl: "https://custom.example/v1",
+				discovery: {
+					type: type === "proxy" ? "proxy" : type === "lm-studio" ? "lm-studio" : "openai-models-list",
+				},
+			};
+			const models = await (type === "proxy"
+				? discoverProxyModels(config, ctx)
+				: discoverOpenAIModelsList(config, ctx));
+			const silent = models.find(model => model.id === "unlisted-silent");
+			expect(silent?.reasoning).toBe(true);
+			expect(silent?.thinking).toMatchObject({ unverified: true, efforts: THINKING_EFFORTS });
+			const native = models.find(model => model.id === "unlisted-native");
+			expect(native?.reasoning).toBe(true);
+			expect(native?.thinking?.unverified).not.toBe(true);
+			const plain = models.find(model => model.id === "unlisted-plain");
+			expect(plain?.reasoning).toBe(false);
+			expect(plain?.thinking).toBeUndefined();
+		},
+	);
 
 	test("openai-models-list discovery marks advertised reasoning ladders reasoning-capable (codex-lb metadata shape)", async () => {
 		writeRawModelsJson({
@@ -3688,6 +3810,66 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(zeroCtx?.contextWindow).toBe(128000);
 	});
 
+	test("proxy discovery honors API-reported input modalities and output cap", async () => {
+		writeRawModelsJson({
+			"proxy-test": {
+				baseUrl: "http://127.0.0.1:9998",
+				auth: "none",
+				discovery: { type: "proxy" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9998/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "vision-row-model",
+								supported_endpoint_types: ["openai"],
+								context_length: 200000,
+								input_modalities: ["text", "image"],
+								max_output_tokens: 64000,
+							},
+							{
+								id: "architecture-row-model",
+								supported_endpoint_types: ["anthropic"],
+								context_length: 200000,
+								architecture: { input_modalities: ["text", "image", "pdf"] },
+								limits: { max_output_tokens: 32000 },
+							},
+							{
+								id: "clamped-row-model",
+								supported_endpoint_types: ["openai"],
+								context_length: 32000,
+								max_output_tokens: 999999,
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		const visionRow = registry.find("proxy-test", "vision-row-model");
+		expect(visionRow?.input).toEqual(["text", "image"]);
+		expect(visionRow?.maxTokens).toBe(64000);
+
+		// OpenRouter-shaped rows carry the modalities under `architecture`.
+		const architectureRow = registry.find("proxy-test", "architecture-row-model");
+		expect(architectureRow?.input).toEqual(["text", "image"]);
+		expect(architectureRow?.maxTokens).toBe(32000);
+
+		// A row that advertises no modalities stays text-only, and an output cap
+		// larger than the advertised context window is clamped to it.
+		const clampedRow = registry.find("proxy-test", "clamped-row-model");
+		expect(clampedRow?.input).toEqual(["text"]);
+		expect(clampedRow?.maxTokens).toBe(32000);
+	});
+
 	test("proxy discovery uses proxy-reported name over bundled placeholder", async () => {
 		writeRawModelsJson({
 			"proxy-test": {
@@ -3832,10 +4014,11 @@ describe("ModelRegistry runtime discovery", () => {
 			{ apiKey: "TEST_KEY", fetch: chatFetch, disableReasoning: true },
 		).result();
 		expect(requestPayload?.reasoning_effort).toBe("none");
-		// A row that advertises nothing keeps the conservative non-reasoning default.
+		// A silent row remains eligible for request-time capability discovery.
 		const plain = registry.find("proxy-test", "acme-plain");
-		expect(plain?.reasoning).toBe(false);
-		expect(plain?.thinking).toBeUndefined();
+		expect(plain?.reasoning).toBe(true);
+		expect(plain?.thinking).toMatchObject({ unverified: true, efforts: THINKING_EFFORTS });
+		expect(plain?.compatConfig).not.toMatchObject({ supportsReasoningEffort: false });
 	});
 
 	test("proxy discovery pins an advertised ladder's default so catalog policy cannot inject a tier it omits", async () => {
@@ -3948,8 +4131,8 @@ describe("ModelRegistry runtime discovery", () => {
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
 		const model = registry.find("proxy-test", "acme-think-1");
-		expect(model?.reasoning).toBe(false);
-		expect(model?.thinking).toBeUndefined();
+		expect(model?.reasoning).toBe(true);
+		expect(model?.thinking).toMatchObject({ unverified: true, efforts: THINKING_EFFORTS });
 	});
 
 	test("proxy discovery keeps a catalog default that the advertised ladder contains", async () => {

@@ -1,7 +1,9 @@
 import { encodeSixelAsync } from "@oh-my-pi/pi-natives";
+import { cachedPngConversion, convertImageToPngShared } from "../png-conversion";
 import { getKittyGraphics } from "../kitty-graphics";
 import { ensureSixelRasterWidth } from "../sixel";
 import {
+	calculateImageFit,
 	encodeSixelNow,
 	getCellDimensions,
 	getImageDimensions,
@@ -36,9 +38,10 @@ export interface ImageOptions {
 	 */
 	imageKey?: string;
 	/**
-	 * Schedules a repaint once this image's off-thread SIXEL encode lands.
-	 * Defaults to the budget's repaint; a host without a budget must pass one,
-	 * or the image's reserved rows stay blank until an unrelated repaint.
+	 * Schedules a repaint once this image's off-thread SIXEL encode or Kitty PNG
+	 * conversion lands. Defaults to the budget's repaint; a host without a budget
+	 * must pass one, or its pending rows (blank for SIXEL, the text fallback's
+	 * label on the last row for Kitty) stay until an unrelated repaint.
 	 */
 	requestRender?: () => void;
 }
@@ -48,6 +51,12 @@ interface SixelEncode {
 	heightPx: number;
 	backgroundRgb: number;
 	sequence?: string | null;
+}
+
+/** A PNG copy of an image for Kitty, sized from the PNG itself. */
+interface KittyPng {
+	data: string;
+	dimensions: ImageDimensions;
 }
 
 /** Renders in progress whose rows are bound for native scrollback. */
@@ -711,14 +720,22 @@ export class Image implements Component {
 	#cachedSixelBackground: number | undefined;
 	#cachedKittyUnicodePlaceholders = false;
 	#cachedLinked = false;
-	// Tallest graphic placement this image has rendered. The text fallback
-	// pads itself to this height so a budget demotion never shrinks the block
-	// (its rows may already be committed to native scrollback).
+	// Tallest graphic placement this image has rendered or reserved (a pending
+	// Kitty PNG conversion). The text fallback pads itself to this height so a
+	// budget demotion never shrinks the block (its rows may already be committed
+	// to native scrollback).
 	#renderedGraphicRows = 0;
 	/** Described node and the link policy it was built under (an `off` switch drops its `href`). */
 	#native?: { linked: boolean; node: NativeNode };
 	/** Newest SIXEL encode: target size, compositing background, and settled sequence. */
 	#sixel?: SixelEncode;
+	/**
+	 * PNG copy of the source for Kitty, with its own size (decoding applies JPEG
+	 * EXIF orientation, so it can differ from the source header's); `null` once
+	 * conversion failed.
+	 */
+	#kittyPng?: KittyPng | null;
+	#kittyPngPending = false;
 
 	constructor(
 		base64Data: string,
@@ -750,6 +767,14 @@ export class Image implements Component {
 	invalidate(): void {
 		this.#cachedLines = undefined;
 		this.#cachedWidth = undefined;
+	}
+
+	/** Refit to a new column ceiling. */
+	setMaxWidthCells(maxWidthCells: number): void {
+		if (this.#options.maxWidthCells === maxWidthCells) return;
+		this.#options.maxWidthCells = maxWidthCells;
+		this.#native = undefined;
+		this.invalidate();
 	}
 
 	/**
@@ -807,6 +832,40 @@ export class Image implements Component {
 		};
 		encodeSixelAsync(new Uint8Array(Buffer.from(this.#base64Data, "base64")), widthPx, heightPx, backgroundRgb).then(
 			settle,
+			() => settle(null),
+		);
+		return undefined;
+	}
+
+	/**
+	 * PNG to send over Kitty, whose `f=100` takes PNG only: any other format
+	 * leaves the placement's reserved rows blank. A non-PNG source answers
+	 * `undefined` (rows reserved) until its off-thread conversion lands and
+	 * repaints, and `null` when it cannot be decoded.
+	 */
+	#kittyPngData(): KittyPng | null | undefined {
+		if (this.#kittyPng !== undefined) return this.#kittyPng;
+		if (this.#mimeType === "image/png") {
+			return (this.#kittyPng = { data: this.#base64Data, dimensions: this.#dimensions });
+		}
+		// Before the cache lookup: it hashes the whole payload, and a pending budgeted image misses the render cache every frame.
+		if (this.#kittyPngPending) return undefined;
+		const toKittyPng = (data: string): KittyPng => ({
+			data,
+			dimensions: getImageDimensions(data, "image/png") ?? this.#dimensions,
+		});
+		const source = { type: "image" as const, data: this.#base64Data, mimeType: this.#mimeType };
+		const cached = cachedPngConversion(source);
+		if (cached) return (this.#kittyPng = toKittyPng(cached.data));
+		this.#kittyPngPending = true;
+		const settle = (png: KittyPng | null): void => {
+			this.#kittyPng = png;
+			this.invalidate();
+			if (this.#options.requestRender) this.#options.requestRender();
+			else this.#budget?.requestRender();
+		};
+		convertImageToPngShared(source).then(
+			({ data }) => settle(toKittyPng(data)),
 			() => settle(null),
 		);
 		return undefined;
@@ -887,13 +946,28 @@ export class Image implements Component {
 			// Transmit the data once (keyed by id); thereafter renderImage returns
 			// just the placement, so repaints never re-send the base64.
 			const needsTransmit = transmitsSeparately && (this.#budget?.shouldTransmit(imageId) ?? false);
-			const result = renderImage(this.#base64Data, this.#dimensions, {
-				maxWidthCells: maxWidth,
-				maxHeightCells: this.#options.maxHeightCells,
-				imageId: this.#imageId,
-				includeTransmit: needsTransmit,
-				sixel: (widthPx, heightPx) => this.#sixelSequence(widthPx, heightPx, sixelBackground!),
-			});
+			const kittyPng = imageProtocol === ImageProtocol.Kitty ? this.#kittyPngData() : undefined;
+			const dimensions = kittyPng?.dimensions ?? this.#dimensions;
+			if (imageProtocol === ImageProtocol.Kitty && kittyPng === undefined) {
+				// Reserve the image's rows while its PNG converts, as a pending SIXEL
+				// encode does, so landing it does not reflow everything below.
+				const fit = calculateImageFit(
+					this.#dimensions,
+					{ maxWidthCells: maxWidth, maxHeightCells: this.#options.maxHeightCells },
+					cellDimensions,
+				);
+				this.#renderedGraphicRows = Math.max(this.#renderedGraphicRows, fit.rows);
+			}
+			const result =
+				imageProtocol === ImageProtocol.Kitty && !kittyPng
+					? null
+					: renderImage(kittyPng?.data ?? this.#base64Data, dimensions, {
+							maxWidthCells: maxWidth,
+							maxHeightCells: this.#options.maxHeightCells,
+							imageId: this.#imageId,
+							includeTransmit: needsTransmit,
+							sixel: (widthPx, heightPx) => this.#sixelSequence(widthPx, heightPx, sixelBackground!),
+						});
 
 			if (result?.transmit && this.#imageId != null && this.#budget !== undefined) {
 				this.#budget.enqueueTransmit(this.#imageId, result.transmit);
@@ -912,11 +986,7 @@ export class Image implements Component {
 				// for SIXEL or rewrites the Kitty placement's visible source slice
 				// from the geometry registered below.
 				if (this.#imageId != null && this.#budget !== undefined) {
-					this.#budget.registerPlacementGeometry(
-						this.#imageId,
-						this.#dimensions.widthPx,
-						this.#dimensions.heightPx,
-					);
+					this.#budget.registerPlacementGeometry(this.#imageId, dimensions.widthPx, dimensions.heightPx);
 				}
 				lines = [];
 				for (let i = 0; i < result.rows - 1; i++) {

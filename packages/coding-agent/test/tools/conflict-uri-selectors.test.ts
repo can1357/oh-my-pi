@@ -90,7 +90,7 @@ describe("conflict URI read selectors", () => {
 	it("slices raw tail and comma ranges from the selected side", async () => {
 		for (const [selector, expected] of [
 			["raw:-20", THEIRS.slice(-20).join("\n")],
-			["2-3,28-29:raw", [...THEIRS.slice(1, 3), ...THEIRS.slice(27, 29)].join("\n")],
+			["2-3,28-29:raw", `${[...THEIRS.slice(1, 3), ...THEIRS.slice(27, 29)].join("\n")}\n`],
 		]) {
 			expect(text(await read.execute("raw-range", { path: `conflict://1/theirs:${selector}` }))).toBe(expected!);
 		}

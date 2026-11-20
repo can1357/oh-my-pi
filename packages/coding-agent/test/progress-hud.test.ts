@@ -60,4 +60,27 @@ describe("download HUD", () => {
 		expect(plain(hud.render(120))).toContain("Chromium failed: GET https://storage.googleapis.com: 403");
 		hud.dispose();
 	});
+
+	it("shows step progress as counts, not byte sizes", () => {
+		const hud = hudAt(1_000_000);
+		hud.update(activity({ label: "Optimizing skills", unit: "steps", loaded: 0, total: 12 }));
+		clock += 200;
+		hud.update(activity({ label: "Optimizing skills", unit: "steps", loaded: 3, total: 12 }));
+		const row = plain(hud.render(100));
+
+		expect(row).toContain("Optimizing skills");
+		expect(row).toMatch(/ 3\/12$/);
+		hud.dispose();
+	});
+
+	it("shows a lone step under its label without calling it a download", () => {
+		const hud = hudAt(1_000_000);
+		hud.update(activity({ label: "Optimizing MCP: github", unit: "steps" }));
+		clock += 200;
+		const row = plain(hud.render(100));
+
+		expect(row).toContain("Optimizing MCP: github");
+		expect(row).not.toContain("downloading");
+		hud.dispose();
+	});
 });

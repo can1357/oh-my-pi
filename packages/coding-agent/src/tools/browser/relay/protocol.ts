@@ -66,7 +66,30 @@ export const EXTENSION_RELOAD_PROTOCOL_VERSION = 1;
 /** Chrome's refusal of a debugger request while another extension's frame (a password manager's menu) is in the tab. */
 export const FOREIGN_FRAME_REFUSAL = /chrome-extension:\/\/ URL of different extension/i;
 
-/** Hello capability of an extension that answers `findDownload` (it holds Chrome's `downloads` permission). */
+/** Another extension's frame the relay extension emptied and hid in a tab omp drives, so Chrome lets omp attach. */
+export interface HiddenFrame {
+	/** The id in the frame's `chrome-extension://<id>/` URL. */
+	extensionId: string;
+	/** The page the frame showed: its URL's path, without the query or fragment, which may carry tokens. */
+	path: string;
+	/** That page's own `<title>`, as the other extension wrote it, cut short. */
+	title?: string;
+}
+
+/** Whether `value`, read off a socket, is a well-formed `HiddenFrame`. */
+export function isHiddenFrame(value: unknown): value is HiddenFrame {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"extensionId" in value &&
+		typeof value.extensionId === "string" &&
+		"path" in value &&
+		typeof value.path === "string" &&
+		(!("title" in value) || value.title === undefined || typeof value.title === "string")
+	);
+}
+
+/** Hello capability of an extension that answers `findDownload`, advertised only while the browser exposes the `downloads` API. */
 export const DOWNLOADS_PROTOCOL_VERSION = 1;
 /**
  * Whether a relay or extension reported a well-formed omp release version.
@@ -130,11 +153,12 @@ export type ExtToRelayMessage =
 			ompVersion?: string;
 			/** {@link EXTENSION_RELOAD_PROTOCOL_VERSION} when the extension reloads itself on `reload`. Absent in older extensions. */
 			reloadProtocol?: number;
-			/** {@link DOWNLOADS_PROTOCOL_VERSION} when the extension answers `findDownload`. Absent in older extensions. */
+			/** {@link DOWNLOADS_PROTOCOL_VERSION} when the extension answers `findDownload`. Absent in older extensions, and when a degraded worker runs without the browser's `downloads` API. */
 			downloadsProtocol?: number;
 	  }
 	| { t: "cdpEvent"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
 	| { t: "detached"; tabId: number; reason: string; relayInitiated?: boolean }
+	| { t: "framesHidden"; tabId: number; frames: HiddenFrame[] }
 	| { t: "tabCreated"; tab: TabSnapshot }
 	| { t: "tabUpdated"; tab: TabSnapshot }
 	| { t: "tabRemoved"; tabId: number }

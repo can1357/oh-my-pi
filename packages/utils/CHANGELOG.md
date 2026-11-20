@@ -2,10 +2,41 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `getCodexClientVersionPath()` for the Codex client version cache record, resolving under `$XDG_CACHE_HOME/omp` when that root is initialized ([#19776](https://github.com/can1357/oh-my-pi/pull/19776) by [@Parsifa1](https://github.com/Parsifa1))
+
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added utilities for formatting and parsing session spill URLs using the `local://N.log` format.
+- Added `postmortem.exitCleanlyOnStopSignals()` so long-running services exit successfully after completing cleanup on SIGINT or SIGTERM.
+
 ### Fixed
 
-- Fixed HTML-to-Markdown conversion (web fetch, pasted HTML) dropping the spaces of whitespace-only inline elements (`Hello<span> </span>world` → `Helloworld`) and code indentation inside `<pre>` (Sphinx/Pygments blocks) ([#19263](https://github.com/can1357/oh-my-pi/pull/19263) by [@tuschla](https://github.com/tuschla)).
-- Fixed HTML-to-Markdown conversion leaving a lone-space line between block elements ([#19263](https://github.com/can1357/oh-my-pi/pull/19263) by [@tuschla](https://github.com/tuschla)).
+- Fixed Windows shell discovery incorrectly selecting the WSL `bash.exe` launcher, which could cause services to run under WSL.
+- Fixed archive opening so the extraction-size limit is enforced when an oversized member is read rather than preventing access to the entire archive.
+- Fixed `OMP_LOG_LEVEL` so it also controls console output from services such as `omp auth-broker serve`, not just log-file output.
+- Fixed Markdown parsing so emphasis and link labels are not prematurely terminated by marker characters inside code spans, autolinks, inline HTML tags, or link destinations.
+
+## [18.22.2] - 2026-11-18
+
+### Added
+
+- Added `readBoundedBody` and `readBoundedJson` for reading HTTP response bodies with a size limit, with an optional signal so a stalled peer cannot outlive the caller's deadline ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix))
+
+## [18.21.0] - 2026-11-16
+
+### Fixed
+
+- Fixed bare URLs swallowing the following word when Korean, Japanese, or Chinese text follows a parenthesized URL without a space.
+
+## [18.20.3] - 2026-11-16
+
+### Fixed
+
+- Fixed HTML-to-Markdown conversion for fetched and pasted HTML to preserve whitespace in inline elements, maintain code indentation in preformatted blocks, and avoid inserting stray blank lines between block elements.
 
 ## [18.20.2] - 2026-11-14
 

@@ -18,7 +18,6 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { ToolSession } from "../tools";
 import { TIER_RANK } from "../tools/approval";
 import { AgentProtocolHandler } from "./agent-protocol";
-import { ArtifactProtocolHandler } from "./artifact-protocol";
 import { AttachmentProtocolHandler } from "./attachment-protocol";
 import { CfgProtocolHandler } from "./cfg-protocol";
 import { ConflictProtocolHandler } from "./conflict-protocol";
@@ -114,7 +113,6 @@ export class InternalUrlRouter {
 		this.register(new OutProtocolHandler());
 		this.register(new AgentProtocolHandler());
 		this.register(new HistoryProtocolHandler());
-		this.register(new ArtifactProtocolHandler());
 		this.register(new LocalProtocolHandler());
 		this.register(new ProcProtocolHandler());
 		this.register(new CfgProtocolHandler());
@@ -272,11 +270,17 @@ export class InternalUrlRouter {
 	 * A mutating tool's URL target ({@link normalize}d) with a whole-file display selector
 	 * (`:raw`/`:conflicts`) peeled, so it names the file `read` does. Any other selector — a line
 	 * range, `raw:1-20`, a malformed `:-10` — throws ToolError: the tool addresses a whole file, and
-	 * dropping the selector would mutate a file the caller never named. Non-URLs pass through.
+	 * dropping the selector would mutate a file the caller never named. Device URLs (xd://) refuse
+	 * every selector: write approval judges the unpeeled URL, so peeling `xd://ast_edit:raw` would
+	 * dispatch a device the gate never judged. Non-URLs pass through.
 	 */
 	peelWriteSelector(input: string, tool: string): string {
 		const { path, sel } = this.split(input);
-		if (sel === undefined || WHOLE_FILE_SELECTOR_RE.test(sel)) return path;
+		if (sel === undefined) return path;
+		if (this.#registered(path)?.handler.spec.backing === "device") {
+			throw new ToolError(`${tool} does not accept the trailing selector ":${sel}" on a device URL. Remove it.`);
+		}
+		if (WHOLE_FILE_SELECTOR_RE.test(sel)) return path;
 		throw new ToolError(
 			`${tool} does not accept the trailing selector ":${sel}" — it addresses a whole file. ` +
 				`Remove ":${sel}", or if the filename truly ends with it, percent-encode the ":" as %3A.`,
@@ -314,8 +318,8 @@ export class InternalUrlRouter {
 
 	/**
 	 * locate or throw ToolError. A locatable, immutable, non-remote scheme resolves from session-local
-	 * stores, so its resolve error diagnoses the miss (`Cannot find artifact://9: Artifact 9 not found.
-	 * Available: …`); otherwise `Cannot ${action} ${scheme}:// URL: no local file backs ${input}`
+	 * stores, so its resolve error diagnoses the miss (`Cannot find agent://x: Not found: x`);
+	 * otherwise `Cannot ${action} ${scheme}:// URL: no local file backs ${input}`
 	 * (+ a `read` hint for remote/virtual schemes).
 	 */
 	async requireLocal(
@@ -496,7 +500,7 @@ export class InternalUrlRouter {
 	}
 
 	/** Resolve an internal URL through its registered protocol handler. */
-	async resolve(input: string, context?: ResolveContext): Promise<InternalResource> {
+	async resolve(input: string, context?: ResolveContext): Promise<InternalResource<string | Buffer>> {
 		const { parsed, handler } = this.#route(input, true);
 		const resource = await handler.resolve(parsed, context);
 		return { ...resource, immutable: resource.immutable ?? handler.spec.immutable };

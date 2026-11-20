@@ -2,8 +2,7 @@
  * Owner-routed async delivery + quiescence (structured concurrency for
  * background jobs): each AgentSession registers a delivery sink for its own
  * agent id, owned job completions inject async-result follow-up turns into
- * THAT session, and `hasPendingAsyncWork()` / `settleAsyncWork()` define the
- * run quiescence the task executor's barrier is built on.
+ * THAT session, and `wakeSources` reports what can still wake it.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
@@ -15,10 +14,10 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { DaemonCompletionEvent } from "@oh-my-pi/pi-coding-agent/daemon/protocol";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
-import type { DaemonCompletionNotification } from "@oh-my-pi/pi-coding-agent/launch/protocol";
 import { AcpAgent } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import { buildAsyncResultBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -42,6 +41,18 @@ import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { AgentSideConnection, SessionNotification } from "@oh-my-pi/pi-utils/acp";
+/**
+ * Wait out the session's owned jobs, their deliveries, and the run their results start.
+ * These jobs are registered outside any run, so no open run waits for them on its own.
+ */
+async function settleOwnedJobs(session: AgentSession, manager: AsyncJobManager): Promise<void> {
+	const ownerId = session.getAgentId();
+	if (!ownerId) throw new Error("Expected an agent id");
+	await manager.waitForOwnerJobs(ownerId, { excludeSuppressed: true });
+	await manager.drainDeliveries({ filter: { ownerId } });
+	await session.waitForRunEnd();
+}
+
 function observeAsyncResultEnqueue(session: AgentSession): Promise<void> {
 	const queued = Promise.withResolvers<void>();
 	const enqueue = session.yieldQueue.enqueueWithReceipt.bind(session.yieldQueue);
@@ -109,14 +120,14 @@ describe("AgentSession owner-routed async delivery", () => {
 		);
 
 		// A running owned job holds the session out of quiescence.
-		expect(session.hasPendingAsyncWork()).toBe(true);
+		expect(session.wakeSources).toBeDefined();
 
 		gate.resolve("job finished: ALL GREEN");
-		await session.settleAsyncWork();
+		await settleOwnedJobs(session, manager);
 
 		// The completion routed to THIS session (not a global default sink) and
 		// ran as a follow-up turn whose context carries the job result.
-		expect(session.hasPendingAsyncWork()).toBe(false);
+		expect(session.wakeSources).toBeUndefined();
 		const sawResult = mock.calls.some(call =>
 			call.context.messages.some(message => {
 				if (typeof message.content === "string") {
@@ -201,7 +212,7 @@ describe("AgentSession owner-routed async delivery", () => {
 				id: "open-acp-result",
 				ownerId: "Lead",
 			});
-			await session.settleAsyncWork();
+			await settleOwnedJobs(session, manager);
 			expect(mock.calls).toHaveLength(2);
 			expect(
 				updates.some(
@@ -218,10 +229,10 @@ describe("AgentSession owner-routed async delivery", () => {
 				id: "late-acp-result",
 				ownerId: "Lead",
 			});
-			await session.settleAsyncWork();
+			await settleOwnedJobs(session, manager);
 			expect(mock.calls).toHaveLength(2);
 			expect(session.isStreaming).toBe(false);
-			expect(session.hasPendingAsyncWork()).toBe(false);
+			expect(session.wakeSources).toBeUndefined();
 
 			const nextPrompt = await acp.prompt({
 				sessionId: created.sessionId,
@@ -285,7 +296,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(running.find(job => job.id === "task-job")?.command).toBeUndefined();
 
 		gate.resolve("done");
-		await session.settleAsyncWork();
+		await settleOwnedJobs(session, manager);
 		const recent = session.getAsyncJobSnapshot()?.recent ?? [];
 		expect(recent.find(job => job.id === "proc-job")?.command).toBe(command);
 	});
@@ -339,7 +350,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		);
 		expect(envelope).toContain("<output>");
 		manager.register("task", "review", async () => envelope, { id: "Reviewer", ownerId: "Lead" });
-		await session.settleAsyncWork();
+		await settleOwnedJobs(session, manager);
 
 		const delivered = mock.calls
 			.flatMap(call => call.context.messages)
@@ -390,7 +401,7 @@ describe("AgentSession owner-routed async delivery", () => {
 				},
 				{ id: "capture-job", ownerId: "CaptureOwner" },
 			);
-			await session.settleAsyncWork();
+			await settleOwnedJobs(session, manager);
 			const delivered = mock.calls
 				.flatMap(call => call.context.messages)
 				.map(message =>
@@ -400,7 +411,7 @@ describe("AgentSession owner-routed async delivery", () => {
 				)
 				.find(text => text.includes("preview-only"));
 			expect(delivered?.match(/not saved completely/g)).toHaveLength(1);
-			expect(delivered).not.toContain("Full output: artifact://");
+			expect(delivered).not.toContain("Full output: local://");
 			expect(allocate).not.toHaveBeenCalled();
 			const custom = agent.state.messages.find(
 				message => message.role === "custom" && message.customType === "async-result",
@@ -436,7 +447,9 @@ describe("AgentSession owner-routed async delivery", () => {
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
 		const store = SessionManager.inMemory(temp.path());
-		store.adoptArtifactManager(new ArtifactManager(path.join(temp.path(), "artifacts")));
+		store.adoptArtifactManager(
+			new ArtifactManager(path.join(temp.path(), "artifacts", "local"), path.join(temp.path(), "artifacts")),
+		);
 		const settings = Settings.isolated();
 		session = new AgentSession({
 			agent,
@@ -463,7 +476,7 @@ describe("AgentSession owner-routed async delivery", () => {
 				id: "complete-followup",
 				ownerId: "MixedCaptureOwner",
 			});
-			await session.settleAsyncWork();
+			await settleOwnedJobs(session, manager);
 			const messages = agent.state.messages.filter(
 				(message): message is CustomMessage => message.role === "custom" && message.customType === "async-result",
 			);
@@ -479,7 +492,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			expect(manager.isJobResultConsumed(failedId)).toBe(true);
 			expect(manager.isJobResultConsumed(completeId)).toBe(true);
 			expect(manager.getJob(failedId)?.status).toBe("completed");
-			const artifactUrl = text.match(/artifact:\/\/\d+/)?.[0];
+			const artifactUrl = text.match(/local:\/\/\d+\.log/)?.[0];
 			if (!artifactUrl) throw new Error("Expected complete job recovery artifact");
 			const readSession: ToolSession = {
 				cwd: temp.path(),
@@ -520,7 +533,9 @@ describe("AgentSession owner-routed async delivery", () => {
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
 		const store = SessionManager.inMemory(temp.path());
-		store.adoptArtifactManager(new ArtifactManager(path.join(temp.path(), "artifacts")));
+		store.adoptArtifactManager(
+			new ArtifactManager(path.join(temp.path(), "artifacts", "local"), path.join(temp.path(), "artifacts")),
+		);
 		const settings = Settings.isolated({
 			"async.enabled": true,
 			"bashInterceptor.enabled": false,
@@ -540,7 +555,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			getSessionFile: () => null,
 			getSessionSpawns: () => null,
 			getAgentId: () => "RawCaptureOwner",
-			allocateOutputArtifact: toolType => store.allocateArtifactPath(toolType),
+			allocateOutputArtifact: () => store.allocateArtifactPath(),
 			asyncJobManager: manager,
 			settings,
 		};
@@ -553,7 +568,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			});
 			const jobId = started.details?.async?.jobId;
 			if (!jobId) throw new Error("Expected background job");
-			await session.settleAsyncWork();
+			await settleOwnedJobs(session, manager);
 			const rawArtifactId = manager.getJob(jobId)?.latestDetails?.meta?.truncation?.artifactId;
 			if (!rawArtifactId) throw new Error("Expected the bash sink to capture raw output");
 			const followUp = agent.state.messages
@@ -567,7 +582,7 @@ describe("AgentSession owner-routed async delivery", () => {
 						: message.content.map(block => (block.type === "text" ? block.text : "")).join("\n"),
 				)
 				.join("\n");
-			expect(followUp).toContain(`Full output: artifact://${rawArtifactId}`);
+			expect(followUp).toContain(`Full output: local://${rawArtifactId}.log`);
 			// The raw capture holds only the stream; the exit notice the tool appended
 			// after it must survive in the preview's tail.
 			expect(followUp).toContain("Command exited with code 3");
@@ -1016,13 +1031,18 @@ describe("AgentSession owner-routed async delivery", () => {
 			modelRegistry: new ModelRegistry(authStorage),
 		});
 		const completion = {
-			event: "daemon-completed",
+			ev: "completed",
 			completionId: "advisor-completion",
 			owner,
-			daemon: {
-				name: "advisor-worker",
-				id: "daemon-id",
+			unit: {
+				id: "unit-id",
+				kind: "proc",
+				scope: { kind: "session", id: sessionManager.getSessionId() },
+				key: "advisor-worker",
+				label: "advisor-worker",
+				generation: "generation-1",
 				state: "exited",
+				pids: [],
 				createdAt: 1,
 				startedAt: 1,
 				exitedAt: 2,
@@ -1030,10 +1050,11 @@ describe("AgentSession owner-routed async delivery", () => {
 				restartCount: 0,
 				outputBytes: 0,
 				owner,
-				persist: false,
-				detached: false,
+				leases: 0,
+				policy: { hold: "leases", idleMs: 0, onIdle: "stop", restart: "no", survive: "exec" },
+				supervised: true,
 			},
-		} satisfies DaemonCompletionNotification;
+		} satisfies DaemonCompletionEvent;
 
 		await session.queueLaunchCompletion(completion);
 		await session.waitForIdle();
@@ -1137,11 +1158,11 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 		await manager.waitForOwnerJobs("Main");
 		await resultQueued;
-		expect(session.hasPendingAsyncWork()).toBe(true);
+		expect(session.wakeSources).toBeDefined();
 
 		expect(await session.newSession()).toBe(true);
 		await manager.drainDeliveries({ timeoutMs: 1_000, filter: { ownerId: "Main" } });
-		expect(session.hasPendingAsyncWork()).toBe(false);
+		expect(session.wakeSources).toBeUndefined();
 
 		// A fresh turn in the replacement session must not carry the prior result.
 		const callsBefore = mock.calls.length;
@@ -1199,7 +1220,7 @@ describe("AgentSession owner-routed async delivery", () => {
 
 		const callsBefore = mock.calls.length;
 		await session.sendUserMessage("fresh turn");
-		await session.settleAsyncWork();
+		await settleOwnedJobs(session, manager);
 		const leaked = mock.calls.slice(callsBefore).some(call =>
 			call.context.messages.some(message => {
 				if (typeof message.content === "string") return message.content.includes("STALE ASYNC RESULT");
@@ -1212,7 +1233,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(leaked).toBe(false);
 		// The stale entry was consumed by the run's aside/flush path and dropped,
 		// not left lingering as pending work.
-		expect(session.hasPendingAsyncWork()).toBe(false);
+		expect(session.wakeSources).toBeUndefined();
 	});
 
 	async function startResumableSession(
@@ -1286,16 +1307,16 @@ describe("AgentSession owner-routed async delivery", () => {
 			},
 			{ id: "outgoing-job", ownerId: "Main" },
 		);
-		expect(session.hasPendingAsyncWork()).toBe(true);
+		expect(session.wakeSources).toBeDefined();
 
 		expect(await session.switchSession(targetSessionFile)).toBe(true);
 		gate.resolve();
 		await manager.waitForAll();
 		await manager.drainDeliveries({ timeoutMs: 1_000, filter: { ownerId: "Main" } });
-		await session.settleAsyncWork();
+		await settleOwnedJobs(session, manager);
 
 		expect(manager.getJob("outgoing-job")?.status).toBe("cancelled");
-		expect(session.hasPendingAsyncWork()).toBe(false);
+		expect(session.wakeSources).toBeUndefined();
 		expect(mock.calls).toHaveLength(0);
 		const leaked = session.sessionManager
 			.getEntries()
@@ -1407,7 +1428,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(manager.getJob("resumed-session-job")?.status).toBe("running");
 		gate.resolve();
 		await manager.waitForAll();
-		await session.settleAsyncWork();
+		await settleOwnedJobs(session, manager);
 
 		const delivered = session.sessionManager
 			.getEntries()
@@ -1446,12 +1467,12 @@ describe("AgentSession owner-routed async delivery", () => {
 		await manager.waitForOwnerJobs("SubAgent");
 
 		await resultQueued;
-		expect(session.hasPendingAsyncWork()).toBe(true);
+		expect(session.wakeSources).toBeDefined();
 		expect(manager.isJobResultConsumed("sub-job")).toBe(false);
 
-		await session.settleAsyncWork();
+		await settleOwnedJobs(session, manager);
 
-		expect(session.hasPendingAsyncWork()).toBe(false);
+		expect(session.wakeSources).toBeUndefined();
 		expect(manager.isJobResultConsumed("sub-job")).toBe(true);
 		expect(mock.calls.some(call => JSON.stringify(call.context.messages).includes("QUEUED RESULT"))).toBe(true);
 	});

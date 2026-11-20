@@ -12,7 +12,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type {
 	BusChannel,
 	CollabUiRequest,
@@ -25,6 +25,7 @@ import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
+import { toWireEvent } from "../session/loop-end-wire";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
@@ -69,6 +70,7 @@ import {
 /** Events that change the footer state guests render. */
 const STATE_TRIGGER_EVENTS: Record<string, true> = {
 	agent_start: true,
+	agent_pause: true,
 	agent_end: true,
 	message_end: true,
 	tool_execution_end: true,
@@ -122,6 +124,16 @@ function isWireAgentEvent(event: AgentSessionEvent): event is AgentSessionEvent 
 
 function isWireSessionEntry(entry: StoredSessionEntry): entry is StoredSessionEntry & WireSessionEntry {
 	return entry.type in WIRE_SESSION_ENTRY_TYPES;
+}
+
+/**
+ * The queue key one subagent's progress frames share: its agent id, which is unique where index and parent tool
+ * call are not (eval `agent()` and workpool spawns all report index 0 with no parent call). Undefined for an
+ * unkeyable payload, which then goes out unsuperseded.
+ */
+function progressKey(data: unknown): string | undefined {
+	if (!isRecord(data) || !isRecord(data.progress) || typeof data.progress.id !== "string") return undefined;
+	return `bus-progress:${data.progress.id}`;
 }
 const CONNECT_TIMEOUT_MS = 15_000;
 /** Max bytes served per fetch-transcript reply (guest re-requests from `newSize`). */
@@ -535,7 +547,9 @@ export class CollabHost {
 		// peer); a joining guest's welcome snapshot covers everything before that.
 		// The local registry work below is independent of this.
 		this.#unsubscribe = this.#ctx.session.subscribe(event => {
-			if (isWireAgentEvent(event)) this.#broadcastEvent(event);
+			// Guests speak the per-loop `agent_end` wire shape (see loop-end-wire.ts).
+			const wireEvent = toWireEvent(event);
+			if (isWireAgentEvent(wireEvent)) this.#broadcastEvent(wireEvent);
 			this.#onEventForState(event);
 		});
 		// Subagent frames publish on the session tree's observability bus at
@@ -547,7 +561,13 @@ export class CollabHost {
 			for (const channel of COLLAB_BUS_CHANNELS) {
 				this.#busUnsubscribers.push(
 					observabilityBus.on(channel, data => {
-						if (this.#broadcastAllowed()) this.#send({ t: "bus", channel, data });
+						if (!this.#broadcastAllowed()) return;
+						// A progress frame is the subagent's whole progress so far, so a newer one
+						// supersedes any still queued for the same subagent (as message_update does):
+						// a busy host's subagents can't fill the queue behind a slow welcome.
+						const key = channel === TASK_SUBAGENT_PROGRESS_CHANNEL ? progressKey(data) : undefined;
+						if (key) this.#socket?.sendLatest(key, { t: "bus", channel, data });
+						else this.#send({ t: "bus", channel, data });
 					}),
 				);
 			}

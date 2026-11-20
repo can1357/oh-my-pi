@@ -345,8 +345,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	hasIrcInterrupts?: () => boolean | Promise<boolean>;
 	/**
-	 * Peeks whether a background completion (finished job, exited supervised
-	 * process) is queued for aside injection at the next boundary.
+	 * Peeks whether a background notice (finished job, exited supervised
+	 * process, output a running job was asked to report) is queued for aside
+	 * injection at the next boundary.
 	 *
 	 * Same rules as {@link hasIrcInterrupts}: non-consuming, only cuts
 	 * *interruptible* waits short, in either interruptMode. Without
@@ -1317,6 +1318,12 @@ export interface AgentContext {
 	systemPrompt: string[];
 	messages: AgentMessage[];
 	tools?: AgentTool<any>[];
+	/**
+	 * Inactive tools that may become active later in the conversation. A provider that announces tool changes
+	 * in-band (Anthropic `tool_addition`) declares them from the first request, so activating one leaves the
+	 * cached prefix intact. See {@link SentToolDefinitions.withInactiveTools}.
+	 */
+	standbyTools?: AgentTool<any>[];
 }
 
 /**

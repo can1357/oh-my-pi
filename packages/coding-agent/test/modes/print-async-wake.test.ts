@@ -1,9 +1,10 @@
 /**
  * Contract (issue #10363): print mode is single-shot by default — it disposes
  * after its prompts, so a background job the run started never reaches the
- * model. With `async.printWake` the run stays alive while owned async work is
- * pending, each job result wakes the same session for another turn (a turn may
- * start further jobs), and the text output is the answer of the last turn.
+ * model. With `async.printWake` print mode waits for the run to end: each job
+ * result resumes the same run for another loop (a loop may start further jobs),
+ * the session ends the run once nothing can resume it, and the text output is
+ * the answer of the last loop.
  */
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -25,11 +26,12 @@ function assistant(text: string): AssistantMessage {
 }
 
 /**
- * Session whose first prompt starts `jobs` background jobs. Each settle delivers
- * one job result, which runs a follow-up turn answering `result <n>`; the first
- * follow-up turn starts `jobsStartedByFirstWake` more jobs. `retryBackoff` puts the
- * prompt turn or the first follow-up turn into a retry backoff that, as in the real
- * session, keeps `waitForIdle()` pending until dispose cancels the retry.
+ * Session whose first prompt starts `jobs` background jobs; the run stays open while any
+ * is pending. Once print mode waits for the run's end, each job finishes one macrotask
+ * (or `settleMs`) later and resumes the run for a loop answering `result <n>`; the first
+ * resumed loop starts `jobsStartedByFirstWake` more jobs. `retryBackoff` puts the prompt
+ * loop or the first resumed loop into a retry backoff that, as in the real session, keeps
+ * `waitForIdle()` and so `waitForRunEnd()` pending until dispose cancels the retry.
  */
 function sessionWithJobs(
 	settings: Settings,
@@ -46,9 +48,28 @@ function sessionWithJobs(
 	let last: AssistantMessage | undefined;
 	let delivered = 0;
 	let retrying = false;
+	let disposed = false;
 	const retryCancelled = Promise.withResolvers<void>();
 	const waitForIdle = async () => {
 		if (retrying) await retryCancelled.promise;
+	};
+	const waitForRunEnd = async () => {
+		await waitForIdle();
+		while (pending > 0 && !disposed) {
+			// a job that never finishes on its own: only the deadline can end the wait
+			if (options.jobsNeverFinish) await Promise.withResolvers<void>().promise;
+			// Real delay on purpose: the oversized-deadline test needs Bun's real setTimeout
+			// overflow (an oversized delay fires in ~1 ms) to beat a job that takes longer.
+			await Bun.sleep(options.settleMs ?? 0);
+			if (disposed) return;
+			delivered++;
+			pending--;
+			if (delivered === 1) pending += options.jobsStartedByFirstWake ?? 0;
+			events.push(`wake:${delivered}`);
+			last = assistant(`result ${delivered}`);
+			if (delivered === 1 && options.retryBackoff === "follow-up") retrying = true;
+			await waitForIdle();
+		}
 	};
 	const session = {
 		extensionRunner: undefined,
@@ -65,6 +86,10 @@ function sessionWithJobs(
 		disableStopTimeTodoReminders: () => {},
 		prepareForHeadlessAdvisorDrain: () => events.push("advisor-drain"),
 		waitForIdle,
+		waitForRunEnd,
+		get isRunActive() {
+			return !disposed && (pending > 0 || retrying);
+		},
 		setTextOutputCommitted: () => {},
 		waitForAdvisorCatchup: async () => {
 			events.push("advisor-catchup");
@@ -76,23 +101,9 @@ function sessionWithJobs(
 			last = assistant("started");
 			retrying = options.retryBackoff === "prompt";
 		},
-		hasPendingAsyncWork: () => pending > 0,
-		settleAsyncWork: async () => {
-			// a job that never finishes on its own: only the deadline can end the wait
-			if (options.jobsNeverFinish) await Promise.withResolvers<void>().promise;
-			// Real delay on purpose: the oversized-deadline test needs Bun's real setTimeout
-			// overflow (an oversized delay fires in ~1 ms) to beat a settle that takes longer.
-			if (options.settleMs) await Bun.sleep(options.settleMs);
-			delivered++;
-			pending--;
-			if (delivered === 1) pending += options.jobsStartedByFirstWake ?? 0;
-			events.push(`wake:${delivered}`);
-			last = assistant(`result ${delivered}`);
-			if (delivered === 1 && options.retryBackoff === "follow-up") retrying = true;
-			await waitForIdle();
-		},
 		getLastAssistantMessage: () => last,
 		dispose: async () => {
+			disposed = true;
 			retryCancelled.resolve();
 			events.push(`dispose(pending=${pending})`);
 		},
@@ -126,7 +137,7 @@ describe("print mode async-result wake", () => {
 		expect(lines.join("")).toBe("started\n");
 	});
 
-	test("with async.printWake, every job result wakes the session before the advisor drain and exit", async () => {
+	test("with async.printWake, every job result resumes the run before the advisor drain and exit", async () => {
 		const { lines } = captureStdout();
 		const settings = Settings.isolated();
 		cfgAsyncPrintWake.override(settings, true);
@@ -145,7 +156,7 @@ describe("print mode async-result wake", () => {
 		expect(lines.join("")).toBe("result 2\n");
 	});
 
-	test("with async.printWake, a job started by a follow-up turn is waited for and answers last", async () => {
+	test("with async.printWake, a job started by a resumed loop is waited for and answers last", async () => {
 		const { lines } = captureStdout();
 		const settings = Settings.isolated();
 		cfgAsyncPrintWake.override(settings, true);
@@ -209,10 +220,10 @@ describe("print mode async-result wake", () => {
 		// no advisor catch-up: the jobs stay live until dispose cancels them
 		expect(events).toEqual(["prompt:go", "advisor-drain", "dispose(pending=1)"]);
 		expect(lines.join("")).toBe("");
-		expect(stderr.join("")).toContain("--max-time reached before background work settled");
+		expect(stderr.join("")).toContain("--max-time reached before the run ended");
 	});
 
-	test("with async.printWake, a deadline already past does not deliver work that finished meanwhile", async () => {
+	test("with async.printWake, a deadline already past fails the run without waiting for it", async () => {
 		const { lines } = captureStdout();
 		const settings = Settings.isolated();
 		cfgAsyncPrintWake.override(settings, true);
@@ -225,7 +236,7 @@ describe("print mode async-result wake", () => {
 		expect(lines.join("")).toBe("");
 	});
 
-	test("with async.printWake, --max-time during a follow-up turn's retry backoff still disposes and fails the run", async () => {
+	test("with async.printWake, --max-time during a resumed loop's retry backoff still disposes and fails the run", async () => {
 		const { lines } = captureStdout();
 		const settings = Settings.isolated();
 		cfgAsyncPrintWake.override(settings, true);
@@ -263,7 +274,7 @@ describe("print mode async-result wake with a real session", () => {
 	async function realSession(printWake: boolean) {
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
-		// The job finishes only once the first run is idle, so only the print-mode wait can deliver it.
+		// The job finishes only once print mode waits for the run's end, so only that wait can deliver it.
 		const firstRunIdle = Promise.withResolvers<void>();
 		const mock = createMockModel({
 			handler: context => {
@@ -306,10 +317,10 @@ describe("print mode async-result wake with a real session", () => {
 		});
 		// Without the wake the job must still be running at dispose: keep its gate shut.
 		if (printWake) {
-			const waitForIdle = session.waitForIdle.bind(session);
-			vi.spyOn(session, "waitForIdle").mockImplementation(async () => {
-				await waitForIdle();
+			const waitForRunEnd = session.waitForRunEnd.bind(session);
+			vi.spyOn(session, "waitForRunEnd").mockImplementation(async () => {
 				firstRunIdle.resolve();
+				await waitForRunEnd();
 			});
 		}
 		return { session, mock, manager };
@@ -326,7 +337,7 @@ describe("print mode async-result wake with a real session", () => {
 		expect(manager.getJob("print-job")?.status).toBe("cancelled");
 	});
 
-	test("with async.printWake, the job result wakes the same session and its answer is printed", async () => {
+	test("with async.printWake, the job result resumes the same run and its answer is printed", async () => {
 		const { lines } = captureStdout();
 		const { session, mock } = await realSession(true);
 

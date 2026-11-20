@@ -62,7 +62,7 @@ describe("integrations thread service", () => {
 		frameLog = path.join(dir, "frames.log");
 		authStorage = createInMemoryAuthStorage();
 		registry = new ModelRegistry(authStorage, path.join(dir, "models.yml"));
-		manager = new MCPManager(dir, null, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
+		manager = new MCPManager(dir, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
 		const configs: Record<string, MCPStdioServerConfig> = {
 			progress: { type: "stdio", command: process.execPath, args: [path.join(FIXTURES, "progress-mcp.ts")] },
 			cancel: {
@@ -197,7 +197,6 @@ describe("integrations thread service", () => {
 			index: 0,
 			id: "probe-0",
 			extensionRoots: () => roots,
-			preparedSession: { fork: { sourceFile: "source.jsonl" }, promptSuffix: model => `suffix:${model}` },
 			localProtocolOptions: local,
 			customTools: [
 				{
@@ -213,7 +212,6 @@ describe("integrations thread service", () => {
 		const read = await probe.readOptions(bridgeIntegrationOptions(options));
 		expect(read).toEqual({
 			roots,
-			suffix: "suffix:model-x",
 			localRoot: resolveLocalRoot(local),
 			approvalTargets: ["a.txt"],
 		});

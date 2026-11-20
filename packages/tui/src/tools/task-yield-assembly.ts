@@ -12,7 +12,6 @@ export type YieldSectionShapes = ReadonlyMap<string, "array" | "scalar">;
 interface AssembledYieldResult {
 	data: unknown;
 	schemaOverridden: boolean;
-	rawText: boolean;
 	missingData: boolean;
 }
 
@@ -33,27 +32,6 @@ function getYieldLabels(type: YieldItem["type"]): string[] {
 		if (label) labels.push(label);
 	}
 	return labels;
-}
-
-function resolveYieldPayload(
-	item: YieldItem,
-	lastAssistantText: string | undefined,
-	labels: string[],
-): { value: unknown; fromLastAssistantText: boolean; missingData: boolean } {
-	const hasData = item.data !== undefined;
-	const shouldUseLastTurn = item.useLastTurn === true || (labels.length > 0 && !hasData);
-	if (shouldUseLastTurn && lastAssistantText !== undefined) {
-		return {
-			value: lastAssistantText,
-			fromLastAssistantText: true,
-			missingData: lastAssistantText.length === 0,
-		};
-	}
-	return {
-		value: item.data,
-		fromLastAssistantText: false,
-		missingData: item.data === undefined || item.data === null,
-	};
 }
 
 function appendYieldSection(
@@ -81,16 +59,12 @@ function appendYieldSection(
  * Assemble typed yield calls into the final payload consumed by schema validation.
  *
  * A non-empty array `type` contributes an incremental section and never decides
- * termination by itself. A string `type` with omitted `data` makes the last
- * assistant turn the raw terminal result. Other string-typed yields contribute
- * the terminal labelled section. Untyped terminal yields keep the historical
- * "last yield wins" behavior unless no terminal yield exists, in which case
- * accumulated typed sections finalize on idle. Repeated sections merge per
- * `sectionShapes` (see {@link YieldSectionShapes}).
+ * termination by itself. The last terminal yield carrying `data` is the whole
+ * result; a data-less terminal yield (or none at all) finalizes the accumulated
+ * sections. Repeated sections merge per `sectionShapes` (see {@link YieldSectionShapes}).
  */
 export function assembleYieldResult(
 	yieldItems: YieldItem[],
-	lastAssistantText?: string,
 	sectionShapes?: YieldSectionShapes,
 ): AssembledYieldResult | undefined {
 	if (yieldItems.length === 0) return undefined;
@@ -122,12 +96,11 @@ export function assembleYieldResult(
 		if (!isIncrementalYieldType(item.type)) continue;
 		const overridden = item.schemaOverridden === true;
 		const labels = getYieldLabels(item.type);
-		const resolved = resolveYieldPayload(item, lastAssistantText, labels);
-		missingData ||= resolved.missingData;
+		missingData ||= item.data === undefined || item.data === null;
 		if (labels.length === 0) schemaOverridden ||= overridden;
 		for (const label of labels) {
 			const shape = sectionShapes?.get(label);
-			appendYieldSection(sections, sectionCounts, label, resolved.value, shape);
+			appendYieldSection(sections, sectionCounts, label, item.data, shape);
 			if (shape === "scalar") {
 				if (overridden) overriddenScalars.add(label);
 				else overriddenScalars.delete(label);
@@ -142,32 +115,26 @@ export function assembleYieldResult(
 	// `type: "result"` finalize that carries `data` is the complete result, used
 	// verbatim — never wrapped in a section.
 	if (terminalItem && terminalItem.data !== undefined) {
-		const resolved = resolveYieldPayload(terminalItem, lastAssistantText, []);
 		return {
-			data: resolved.value,
+			data: terminalItem.data,
 			schemaOverridden: terminalItem.schemaOverridden === true,
-			rawText: resolved.fromLastAssistantText && typeof resolved.value === "string",
-			missingData: resolved.missingData,
+			missingData: terminalItem.data === null,
 		};
 	}
 
-	// A data-less terminal finalize keeps accumulated sections; only when none
-	// exist does the last assistant turn become the raw result.
+	// A data-less terminal finalize keeps the accumulated sections.
 	if (hasSections) {
 		return {
 			data: sections,
 			schemaOverridden: schemaOverridden || overriddenScalars.size > 0,
-			rawText: false,
 			missingData,
 		};
 	}
 
 	if (!terminalItem) return undefined;
-	const resolved = resolveYieldPayload(terminalItem, lastAssistantText, getYieldLabels(terminalItem.type));
 	return {
-		data: resolved.value,
+		data: terminalItem.data,
 		schemaOverridden: terminalItem.schemaOverridden === true,
-		rawText: resolved.fromLastAssistantText && typeof resolved.value === "string",
-		missingData: resolved.missingData,
+		missingData: true,
 	};
 }
