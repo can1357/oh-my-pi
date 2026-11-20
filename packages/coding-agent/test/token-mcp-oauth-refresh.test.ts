@@ -57,6 +57,43 @@ test("refresh without server-url recovery advertises no resource", async () => {
 	expect(resources).toEqual([null]);
 });
 
+test("refresh repeats the stored grant scope and keeps it on the refreshed credential", async () => {
+	// Entra v2 refuses a scope-less refresh when the client is also the
+	// resource (AADSTS90009), so the original grant's scope must be sent again.
+	const provider = "mcp_oauth:profile:default:https://hub.example.test/mcp";
+	const scopes: (string | null)[] = [];
+	const tokenServer = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		async fetch(request) {
+			scopes.push(new URLSearchParams(await request.text()).get("scope"));
+			return Response.json({ access_token: "access-1", refresh_token: "refresh-1", expires_in: 3600 });
+		},
+	});
+	try {
+		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
+		await storage.credentials.reload();
+		const credential: MCPStoredOAuthCredential = {
+			type: "oauth",
+			access: "access-0",
+			refresh: "refresh-0",
+			expires: Date.now() - 60_000,
+			tokenUrl: `http://127.0.0.1:${tokenServer.port}/token`,
+			resource: "https://hub.example.test/mcp",
+			scope: "https://hub.example.test/mcp/access_as_user offline_access",
+		};
+		await storage.credentials.set(provider, credential);
+		const first = await refreshStoredManagedMcpOAuthCredential(storage, provider, { forceRefresh: true });
+		const second = await refreshStoredManagedMcpOAuthCredential(storage, provider, { forceRefresh: true });
+		storage.close();
+		expect(first.credential?.access).toBe("access-1");
+		expect((second.credential as MCPStoredOAuthCredential | undefined)?.scope).toBe(credential.scope);
+		expect(scopes).toEqual([credential.scope!, credential.scope!]);
+	} finally {
+		tokenServer.stop(true);
+	}
+});
+
 const cliEntry = path.join(import.meta.dir, "..", "src", "cli.ts");
 
 test("token refreshes and persists a rotating local MCP OAuth grant", async () => {

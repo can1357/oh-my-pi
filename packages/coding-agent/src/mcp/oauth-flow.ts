@@ -92,6 +92,13 @@ export interface MCPStoredOAuthCredential extends OAuthCredential {
 	 * Unset on legacy credentials minted before issue #3502's fix.
 	 */
 	authorizationUrl?: string;
+	/**
+	 * Scopes the original grant requested (space-separated). Sent again on
+	 * refresh: Microsoft Entra v2 refuses a refresh that names no scope when the
+	 * client is also the resource (AADSTS90009). RFC 6749 §6 allows a refresh to
+	 * repeat the original scopes. Unset on credentials minted before it was kept.
+	 */
+	scope?: string;
 }
 
 const DEFAULT_PORT = 3000;
@@ -361,6 +368,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	#codeVerifier?: string;
 	#fetch: FetchImpl;
 	#resource?: string;
+	#requestedScope?: string;
 	/**
 	 * Details of a rejected dynamic client-registration attempt. Populated by
 	 * {@link #tryRegisterClient} when the provider advertises a registration
@@ -421,6 +429,10 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	get authorizationUrl(): string {
 		return this.config.authorizationUrl;
 	}
+	/** The `scope` the authorization request carried; persisted for refresh. */
+	get requestedScope(): string | undefined {
+		return this.#requestedScope;
+	}
 
 	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
 		if (!this.#resolvedClientId) {
@@ -451,6 +463,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		if (this.config.scopes && !params.get("scope")) {
 			params.set("scope", this.config.scopes);
 		}
+		this.#requestedScope = params.get("scope")?.trim() || undefined;
 		const prompt = this.config.prompt ?? (hasOAuthScope(params.get("scope"), "offline_access") ? "consent" : "");
 		if (prompt && !params.get("prompt")) {
 			params.set("prompt", prompt);
@@ -805,6 +818,8 @@ export interface RefreshMCPOAuthTokenOptions {
 	 * Preserved advertised resources leave this false/undefined.
 	 */
 	stripSameOriginResource?: boolean;
+	/** Scopes to request on refresh (the original grant's). Omitted when unset. */
+	scope?: string;
 }
 
 /**
@@ -840,6 +855,8 @@ export async function refreshMCPOAuthToken(
 	});
 	if (resolvedResource) params.set("resource", resolvedResource);
 	if (clientSecret) params.set("client_secret", clientSecret);
+	const scope = optsFromTrailing?.scope?.trim();
+	if (scope) params.set("scope", scope);
 
 	const response = await fetchImpl(tokenUrl, {
 		method: "POST",

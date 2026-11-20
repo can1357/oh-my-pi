@@ -923,6 +923,21 @@ describe("mcp oauth flow", () => {
 
 		expect(tokenParams.get("grant_type")).toBe("refresh_token");
 		expect(tokenParams.get("resource")).toBeNull();
+		expect(tokenParams.has("scope")).toBe(false);
+	});
+	it("repeats the original grant's scopes when refreshing (Entra AADSTS90009)", async () => {
+		let tokenRequestBody = "";
+
+		await refreshMCPOAuthToken("https://provider.example/token", "refresh-token", "app-id", undefined, {
+			scope: " https://hub.example/mcp/access_as_user offline_access ",
+			fetch: mockProviderTokenEndpoint(body => {
+				tokenRequestBody = body;
+			}),
+		});
+
+		expect(new URLSearchParams(tokenRequestBody).get("scope")).toBe(
+			"https://hub.example/mcp/access_as_user offline_access",
+		);
 	});
 	it("omits a whitespace-only client id from token refresh", async () => {
 		let tokenRequestBody = "";
