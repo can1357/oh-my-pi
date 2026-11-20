@@ -9,3 +9,4 @@ fix/eval-names-top-level-only-tip
 fix/force-cli-verify
 fix/tern-fork-launch
 relay/zys-10234-3ff86e7ac4
+fix/chat-completions-claude-demoted-reasoning
