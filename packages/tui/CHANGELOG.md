@@ -29,6 +29,7 @@
 - Terminals the output writer cannot reopen (after `su` to another user, inside some sandboxes) are written off the JS thread too, so a slow terminal no longer freezes input there
 - `ask` HTML forms keep a prefilled or hidden control named `__proto__` in their default data, so a timed-out form no longer drops it ([#18646](https://github.com/can1357/oh-my-pi/pull/18646) by [@pasquale95](https://github.com/pasquale95))
 - An ask form with one question submits on one Enter instead of stopping on Submit first
+- The raw-paste shortcut works while a tool approval is pending, and keys typed right after it land after the pasted text ([#18466](https://github.com/can1357/oh-my-pi/pull/18466) by [@heitor-lassarote](https://github.com/heitor-lassarote))
 
 ## [19.0.1] - 2026-11-19
 
@@ -317,7 +318,6 @@
 - Fixed unnecessary repainting in the setup wizard while waiting for input in ANSI terminals.
 - Fixed Windows ConPTY event handling so delayed terminal event data no longer appears in the composer.
 - Fixed OSC 8 hyperlink support in Rex terminals so transcript URLs and file paths are command-clickable.
-- The raw-paste shortcut works while a tool approval is pending, and keys typed right after it land after the pasted text ([#18466](https://github.com/can1357/oh-my-pi/pull/18466) by [@heitor-lassarote](https://github.com/heitor-lassarote))
 
 ## [18.18.1] - 2026-11-08
 
