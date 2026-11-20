@@ -1,11 +1,15 @@
 /**
  * Read-only views over the user's local history, backing the `archive` eval
- * prelude: recent projects, their sessions with idle recaps, and prompt history.
+ * prelude: recent projects, their sessions with idle recaps, prompt history,
+ * and session search over titles, recaps, and transcripts.
  *
  * Sources: session JSONL files under the sessions root (stat-ordered; only the
- * listed files get a bounded header/tail scan, never a full transcript read)
- * and history.db (prompt history plus the recap journal). Each view returns
- * plain records and a compact text rendering the prelude prints.
+ * listed files get a bounded header/tail scan, never a full transcript read),
+ * history.db (prompt history, the title index, and the recap journal), and
+ * the transcript index (transcripts.db).
+ * Each view returns plain records and a compact text rendering the prelude
+ * prints. Records carry every declared key: an absent value is `null`, never
+ * a missing key, so Python callers can index them directly.
  *
  * Scopes are resolved by the caller: a project is an absolute working
  * directory, and `undefined` spans every project.
@@ -13,9 +17,10 @@
 import * as path from "node:path";
 import { previewLine, shortenPath, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { formatAge, formatCount } from "@oh-my-pi/pi-utils";
+import { formatAge, formatCount, logger } from "@oh-my-pi/pi-utils";
 import { type HistoryEntry, HistoryStorage } from "../session/history-storage";
-import { listSessionRecaps, type SessionRecap } from "../session/session-index";
+import { type WordQuery, wordQuery } from "../session/search-query";
+import { listSessionRecaps, listSessionTitles, type SessionRecap } from "../session/session-index";
 import {
 	findSessionFiles,
 	listRecentProjects,
@@ -26,6 +31,14 @@ import {
 	sessionDisplayName,
 } from "../session/session-listing";
 import { sessionDirForCwd } from "../session/session-paths";
+import {
+	indexedMessageCounts,
+	indexedSessionFiles,
+	syncTranscriptIndex,
+	transcriptMatches,
+	transcriptSessionIds,
+} from "../session/transcript-index";
+import { syncTranscriptsInBackground } from "../session/transcript-index-client";
 
 /** A listed session. Times are ISO-8601. */
 export interface ArchiveSession {
@@ -39,9 +52,9 @@ export interface ArchiveSession {
 	created: string;
 	modified: string;
 	messages: number;
-	status?: SessionStatus;
+	status: SessionStatus | null;
 	/** Newest journaled idle recap. */
-	recap?: string;
+	recap: string | null;
 }
 
 /** A project with its newest session. */
@@ -59,8 +72,8 @@ export interface ArchivePrompt {
 	text: string;
 	/** Latest submission time. */
 	at: string;
-	project?: string;
-	session?: string;
+	project: string | null;
+	session: string | null;
 	/** Submissions of this exact prompt. */
 	uses: number;
 }
@@ -73,10 +86,26 @@ export interface ArchiveRecap {
 	project: string;
 }
 
+/** Text in a session that answered a search. */
+export interface ArchiveMatch {
+	/** The title, an idle recap, or a user or assistant message of the transcript. */
+	source: "title" | "recap" | "user" | "assistant";
+	/** The whole title or recap; a message is cut to a snippet around the hit. */
+	text: string;
+	/** When the recap was journaled or the message sent; `null` for titles. */
+	at: string | null;
+}
+
+/** A session whose title, recaps, or transcript answered a search. */
+export interface ArchiveSearchHit extends ArchiveSession {
+	/** The matching title, then matching recaps, then the newest matching messages, each newest first. */
+	matches: ArchiveMatch[];
+}
+
 /** One session with its full recap journal and prompt history. */
 export interface ArchiveSessionDetail extends ArchiveSession {
 	/** Session file this one was forked from. */
-	parent?: string;
+	parent: string | null;
 	/** Every journaled recap, oldest first. */
 	recaps: ArchiveRecap[];
 	/** Newest prompts submitted in this session, oldest first. */
@@ -93,6 +122,19 @@ export interface ArchiveView<T> {
 const PROMPT_PREVIEW_WIDTH = 160;
 /** Display width of a prompt inside a session detail view. */
 const PROMPT_DETAIL_WIDTH = 600;
+/** Matching recaps and messages printed under a search hit; records keep them all. */
+const SEARCH_MATCH_LINES = 3;
+/** Newest matching messages a search hit carries. */
+const SEARCH_MESSAGE_MATCHES = 5;
+/**
+ * Largest transcript backlog, in bytes, a search indexes on the calling thread
+ * (tens of milliseconds); a larger one goes to the worker thread.
+ */
+const INLINE_SYNC_BYTES = 16 * 1024 * 1024;
+/** How long a search waits for the worker to catch up before answering from what the index holds. */
+const TRANSCRIPT_SYNC_WAIT_MS = 1000;
+/** A sync completed this recently, in any process, spares a search its catch-up. */
+const TRANSCRIPT_FRESH_MS = 30_000;
 /**
  * Listed id length. 13 characters cover the 48-bit millisecond timestamp of a
  * UUIDv7 id (and 48 random bits of a UUIDv4), so listed prefixes stay unique
@@ -133,15 +175,98 @@ export async function archiveSessions(cwd: string | undefined, limit: number): P
 	if (records.length === 0) return { text: `No sessions ${scopeLabel(cwd)}.`, records };
 	const lines = [`Sessions ${scopeLabel(cwd)}, newest first:`];
 	for (const session of records) {
-		const facts = [shortId(session.id), ago(session.modified)];
-		if (!cwd && session.project) facts.push(shortenPath(session.project));
-		facts.push(formatCount("msg", session.messages));
-		if (session.status && session.status !== "complete" && session.status !== "unknown") facts.push(session.status);
-		facts.push(session.title);
-		lines.push(`- ${facts.join(" · ")}`);
+		lines.push(sessionLine(session, cwd));
 		if (session.recap) lines.push(`  recap: ${previewLine(session.recap, TRUNCATE_LENGTHS.RECAP)}`);
 	}
 	return { text: lines.join("\n"), records };
+}
+
+/**
+ * Sessions of one project (`cwd`) or every project whose indexed title, a
+ * journaled recap, or a user or assistant message holds every `query` term as
+ * words ({@link WordQuery}), newest activity first. Brings the transcript index
+ * up to date first, answering from what it holds when a large backlog takes
+ * longer than {@link TRANSCRIPT_SYNC_WAIT_MS}; the listing then says so.
+ */
+export async function archiveSearch(
+	query: string,
+	cwd: string | undefined,
+	limit: number,
+): Promise<ArchiveView<ArchiveSearchHit[]>> {
+	const words = wordQuery(query);
+	const caughtUp = words ? await transcriptsCaughtUp() : true;
+	const records = words ? await searchSessions(words, cwd, limit) : [];
+	const subject = `${scopeLabel(cwd)} matching ${JSON.stringify(query)}`;
+	const lines = records.length === 0 ? [`No sessions ${subject}.`] : [`Sessions ${subject}, newest first:`];
+	for (const hit of records) {
+		lines.push(sessionLine(hit, cwd));
+		// The session line already shows the title.
+		const shown = hit.matches.filter(match => match.source !== "title");
+		for (const match of shown.slice(0, SEARCH_MATCH_LINES)) {
+			const width = match.source === "recap" ? TRUNCATE_LENGTHS.RECAP : PROMPT_PREVIEW_WIDTH;
+			lines.push(`  ${match.source}: ${previewLine(match.text, width)}`);
+		}
+		if (shown.length > SEARCH_MATCH_LINES) lines.push(`  … ${shown.length - SEARCH_MATCH_LINES} more`);
+	}
+	if (!caughtUp) {
+		lines.push(
+			"Transcript index is still catching up: messages of recent or not yet indexed sessions may be missing.",
+		);
+	}
+	return { text: lines.join("\n"), records };
+}
+
+/** The newest `limit` sessions matching `words`, each with its matches. */
+async function searchSessions(words: WordQuery, cwd: string | undefined, limit: number): Promise<ArchiveSearchHit[]> {
+	const matches = new Map<string, ArchiveMatch[]>();
+	const add = (session: string, match: ArchiveMatch) => {
+		const found = matches.get(session);
+		if (found) found.push(match);
+		else matches.set(session, [match]);
+	};
+	for (const [session, title] of listSessionTitles()) {
+		if (words.test(title)) add(session, { source: "title", text: title, at: null });
+	}
+	for (const recap of listSessionRecaps({ cwd }).map(toArchiveRecap)) {
+		if (words.test(recap.text)) add(recap.session, { source: "recap", text: recap.text, at: recap.at });
+	}
+	const ids = transcriptSessionIds(words, cwd);
+	for (const session of matches.keys()) ids.add(session);
+	// The index knows every synced session's file; a directory scan would cost more than the search.
+	const files = indexedSessionFiles(ids, cwd);
+	if (files.length === 0) return [];
+	const sessions = await withExactMessageCounts(await listRecentSessions({ limit, files }));
+	const listed = sessions.map(session => session.id);
+	for (const match of transcriptMatches(words, listed, SEARCH_MESSAGE_MATCHES)) {
+		add(match.sessionId, { source: match.role, text: match.snippet, at: new Date(match.at).toISOString() });
+	}
+	const recaps = latestRecaps(listed);
+	return sessions.map(session => ({
+		...toArchiveSession(session, recaps.get(session.id)),
+		matches: matches.get(session.id) ?? [],
+	}));
+}
+
+/**
+ * Brings the transcript index up to date unless a sync completed within
+ * {@link TRANSCRIPT_FRESH_MS}: inline for a backlog up to
+ * {@link INLINE_SYNC_BYTES}, otherwise on the worker, waited for up to
+ * {@link TRANSCRIPT_SYNC_WAIT_MS}. False while a sync still runs (here or in
+ * another process) or after one failed; true when there is no index to sync.
+ */
+async function transcriptsCaughtUp(): Promise<boolean> {
+	const failed = (error: unknown) => {
+		logger.warn("Transcript index sync failed", { error: String(error) });
+		return false;
+	};
+	try {
+		const inline = await syncTranscriptIndex({ maxBytes: INLINE_SYNC_BYTES, maxAgeMs: TRANSCRIPT_FRESH_MS });
+		if (inline.outcome !== "deferred") return inline.outcome !== "busy";
+	} catch (error) {
+		return failed(error);
+	}
+	const sync = syncTranscriptsInBackground().then(result => result.outcome === "synced", failed);
+	return Promise.race([sync, Bun.sleep(TRANSCRIPT_SYNC_WAIT_MS).then(() => false)]);
 }
 
 /**
@@ -161,7 +286,7 @@ export async function archiveSession(idOrFile: string, limit: number): Promise<A
 	const prompts = HistoryStorage.open().getRecent(limit, { sessionId: info.id }).map(toArchivePrompt).reverse();
 	const record: ArchiveSessionDetail = {
 		...toArchiveSession(info, recaps.at(-1)?.text),
-		parent: info.parentSessionPath,
+		parent: info.parentSessionPath ?? null,
 		recaps,
 		prompts,
 	};
@@ -186,7 +311,7 @@ export async function archiveSession(idOrFile: string, limit: number): Promise<A
 	return { text: lines.join("\n"), records: record };
 }
 
-/** Prompt history of one project (`cwd`) or every project, newest first; `query` switches to token search. */
+/** Prompt history of one project (`cwd`) or every project, newest first; `query` keeps prompts holding every term at the start of a word. */
 export function archivePrompts(
 	query: string | undefined,
 	cwd: string | undefined,
@@ -194,7 +319,12 @@ export function archivePrompts(
 ): ArchiveView<ArchivePrompt[]> {
 	const history = HistoryStorage.open();
 	const filter = { cwd };
-	const entries = query ? history.search(query, limit, filter) : history.getRecent(limit, filter);
+	let entries: HistoryEntry[] = [];
+	if (query === undefined) entries = history.getRecent(limit, filter);
+	else {
+		const words = wordQuery(query);
+		if (words) entries = history.searchWords(words, limit, filter);
+	}
 	const records = entries.map(toArchivePrompt);
 	const subject = query ? `${scopeLabel(cwd)} matching ${JSON.stringify(query)}` : scopeLabel(cwd);
 	if (records.length === 0) return { text: `No prompts ${subject}.`, records };
@@ -256,17 +386,31 @@ async function countSessionMessages(file: string, size: number, mtimeMs: number)
 	return count;
 }
 
+/** `sessions` with whole-file message counts: the transcript index's where it is current, else a file read. */
 async function withExactMessageCounts(sessions: SessionInfo[]): Promise<SessionInfo[]> {
+	const indexed = indexedMessageCounts(sessions.map(session => ({ path: session.path, size: session.size })));
 	return await Promise.all(
 		sessions.map(async session => {
 			try {
-				const messageCount = await countSessionMessages(session.path, session.size, session.modified.getTime());
+				const messageCount =
+					indexed.get(session.path) ??
+					(await countSessionMessages(session.path, session.size, session.modified.getTime()));
 				return { ...session, messageCount };
 			} catch {
 				return session;
 			}
 		}),
 	);
+}
+
+/** One listing line: `id · age · [project ·] msgs · [status ·] title`; the project shows only across projects. */
+function sessionLine(session: ArchiveSession, cwd: string | undefined): string {
+	const facts = [shortId(session.id), ago(session.modified)];
+	if (!cwd && session.project) facts.push(shortenPath(session.project));
+	facts.push(formatCount("msg", session.messages));
+	if (session.status && session.status !== "complete" && session.status !== "unknown") facts.push(session.status);
+	facts.push(session.title);
+	return `- ${facts.join(" · ")}`;
 }
 
 /** Newest recap per session id. */
@@ -289,8 +433,8 @@ function toArchiveSession(info: SessionInfo, recap: string | undefined): Archive
 		created: created.toISOString(),
 		modified: info.modified.toISOString(),
 		messages: info.messageCount,
-		status: info.status,
-		recap,
+		status: info.status ?? null,
+		recap: recap ?? null,
 	};
 }
 
@@ -298,8 +442,8 @@ function toArchivePrompt(entry: HistoryEntry): ArchivePrompt {
 	return {
 		text: entry.prompt,
 		at: new Date(entry.created_at * 1000).toISOString(),
-		project: entry.cwd,
-		session: entry.sessionId,
+		project: entry.cwd ?? null,
+		session: entry.sessionId ?? null,
 		uses: entry.useCount,
 	};
 }

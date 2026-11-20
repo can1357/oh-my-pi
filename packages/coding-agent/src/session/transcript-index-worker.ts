@@ -1,0 +1,42 @@
+/**
+ * Transcript index worker thread: runs {@link syncTranscriptIndex} off the UI
+ * thread. Spawned by `transcript-index-client.ts` through the CLI host's
+ * `__omp_worker_transcript_index` selector, or loaded directly outside a CLI host.
+ */
+import { parentPort } from "node:worker_threads";
+import { consumeWorkerInbox } from "@oh-my-pi/pi-utils/worker-host";
+import { syncTranscriptIndex, type TranscriptSyncResult } from "./transcript-index";
+
+export type TranscriptIndexWorkerInbound = { type: "ping" } | { type: "sync" };
+
+export type TranscriptIndexWorkerOutbound =
+	| { type: "pong" }
+	| { type: "synced"; result: TranscriptSyncResult }
+	| { type: "error"; error: string };
+
+if (!parentPort) throw new Error("transcript index worker: missing parentPort");
+
+const port = parentPort;
+
+function send(message: TranscriptIndexWorkerOutbound): void {
+	port.postMessage(message);
+}
+
+function handle(data: unknown): void {
+	const message = data as TranscriptIndexWorkerInbound;
+	switch (message.type) {
+		case "ping":
+			send({ type: "pong" });
+			return;
+		case "sync":
+			syncTranscriptIndex().then(
+				result => send({ type: "synced", result }),
+				error => send({ type: "error", error: error instanceof Error ? error.message : String(error) }),
+			);
+			return;
+	}
+}
+
+const inbox = consumeWorkerInbox();
+if (inbox) inbox.bind(handle);
+else port.on("message", handle);
