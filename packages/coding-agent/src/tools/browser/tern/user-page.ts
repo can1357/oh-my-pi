@@ -107,10 +107,10 @@ export async function openTernPage(url: string, how: TernPagePlacement): Promise
 		logger.debug("Tern could not open the page; using the system browser", {
 			url: redactUrlForLog(url, "omit"),
 			how,
-			// Tern's free-text error can echo the original URL; log only its kind, or the
-			// socket error code (ECONNREFUSED, …) when the connection itself failed.
+			// Tern's answers can echo the original URL; log only their kind. Connect failures
+			// are built locally from the transport reason (ENOENT, ECONNREFUSED, …), so keep those.
 			kind: error instanceof TernError ? error.kind : undefined,
-			code: error instanceof Error && "code" in error ? error.code : undefined,
+			reason: error instanceof TernError && error.kind === "connect" ? error.message : undefined,
 		});
 		client.close();
 		return null;
