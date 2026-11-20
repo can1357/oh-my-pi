@@ -5421,7 +5421,7 @@
 				"method",
 				"html"
 			],
-			"description": "The HTML `<form>` of one `ask` tool call; no opt-in is required."
+			"description": "The HTML `<form>` of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required."
 		},
 		"CancelUiRequest": {
 			"type": "object",

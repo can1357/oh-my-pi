@@ -1218,6 +1218,12 @@ class RpcClientTests(unittest.TestCase):
             with self.assertRaises(TypeError):
                 client.send_ui_data("ui-form", {"checks": ["lint", float("nan")]})
 
+    def test_form_data_rejects_values_that_are_not_string_sequences(self) -> None:
+        with self.make_client() as client:
+            for value in (None, {"lint": True}, {"lint"}):
+                with self.subTest(value=value), self.assertRaises(TypeError):
+                    client.send_ui_data("ui-form", {"checks": value})
+
     def test_headless_ui_cancels_form_so_the_prompt_completes(self) -> None:
         with self.make_client() as client:
             client.install_headless_ui()

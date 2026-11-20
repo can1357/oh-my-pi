@@ -1351,7 +1351,7 @@ export interface AskUiRequest {
 	timeout?: number;
 }
 
-/** The HTML `<form>` of one `ask` tool call; no opt-in is required. */
+/** The HTML `<form>` of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required. */
 export interface FormUiRequest {
 	type: "extension_ui_request";
 	id: string;

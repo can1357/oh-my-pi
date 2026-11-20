@@ -728,24 +728,28 @@ describe("RPC form dialog", () => {
 	});
 
 	it.each([
-		["no data object", { data: ["prod"] }],
-		["a field the form lacks", { data: { target: "prod", region: "eu" } }],
-		["a string for a checkbox group", { data: { checks: "lint" } }],
-		["an array for a radio group", { data: { target: ["prod"] } }],
-		["an option checked twice", { data: { checks: ["lint", "lint"] } }],
-		["two free-text answers in one group", { data: { checks: ["Rollback", "Canary bake"] } }],
-		["a number below the input's min", { data: { replicas: 0 } }],
-		["a disabled radio option", { data: { target: "legacy" } }],
-		["a disabled checkbox option", { data: { checks: ["lint", "e2e"] } }],
-		["a number for a text input", { data: { owner: 7 } }],
-	])("rejects %s", async (_case, response) => {
+		["no data object", { data: ["prod"] }, "must carry a data object"],
+		["a field the form lacks", { data: { target: "prod", region: "eu" } }, 'unknown field "region"'],
+		["a string for a checkbox group", { data: { checks: "lint" } }, "must carry an array of strings"],
+		["an array for a radio group", { data: { target: ["prod"] } }, "must carry one string, not an array"],
+		["an option checked twice", { data: { checks: ["lint", "lint"] } }, 'unexpected value "lint"'],
+		[
+			"two free-text answers in one group",
+			{ data: { checks: ["Rollback", "Canary bake"] } },
+			'unexpected value "Canary bake"',
+		],
+		["a number below the input's min", { data: { replicas: 0 } }, 'Form field "replicas": '],
+		["a disabled radio option", { data: { target: "legacy" } }, 'disabled option "legacy"'],
+		["a disabled checkbox option", { data: { checks: ["lint", "e2e"] } }, 'disabled option "e2e"'],
+		["a number for a text input", { data: { owner: 7 } }, 'Form field "owner" must carry a string'],
+	])("rejects %s", async (_case, response, message) => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
 		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, DEPLOY_FORM);
 
 		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, response);
 
-		await expect(result).rejects.toThrow(Error);
+		await expect(result).rejects.toThrow(message);
 		expect(pendingRequests.size).toBe(0);
 	});
 
@@ -771,6 +775,22 @@ describe("RPC form dialog", () => {
 		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { enabled: "off" } });
 
 		expect(await result).toEqual({ data: { enabled: "off" } });
+	});
+
+	it("drops a hidden value echoed inside a checkbox group's array instead of taking it as Other", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const html = `<form>
+  <input type="hidden" name="checks" value="none">
+  <label><input type="checkbox" name="checks" value="lint"> Lint</label>
+  <label><input type="checkbox" name="checks" value="smoke"> Smoke</label>
+</form>`;
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, html);
+
+		// Browser-style form data: the hidden value rides along with the checked boxes.
+		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { checks: ["none", "lint"] } });
+
+		expect(await result).toEqual({ data: { checks: ["lint"] } });
 	});
 
 	it("keeps a selection that matches both a same-name hidden value and an enabled option", async () => {
@@ -840,6 +860,39 @@ describe("RPC form dialog", () => {
 		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: {} });
 
 		await expect(result).rejects.toThrow("Required");
+	});
+
+	it("gives a shared name's entry to the field whose shape carries it", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const html = `<form>
+  <label><input type="radio" name="pick" value="a"> A</label>
+  <label><input type="radio" name="pick" value="b"> B</label>
+  <label><input type="checkbox" name="pick" value="x"> X</label>
+  <label><input type="checkbox" name="pick" value="y"> Y</label>
+</form>`;
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, html);
+
+		// The array fits only the checkbox group; the radio group beside it counts as unanswered.
+		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { pick: ["x"] } });
+
+		expect(await result).toEqual({ data: { pick: ["x"] } });
+	});
+
+	it("rejects a shared name's entry that no field of that name carries", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const html = `<form>
+  <label><input type="radio" name="pick" value="a"> A</label>
+  <label><input type="radio" name="pick" value="b"> B</label>
+  <label>Pick <input type="number" name="pick"></label>
+</form>`;
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, html);
+
+		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { pick: ["a"] } });
+
+		await expect(result).rejects.toThrow('Form field "pick" must carry');
+		expect(pendingRequests.size).toBe(0);
 	});
 
 	it("treats an omitted field named like an Object.prototype member as absent", async () => {

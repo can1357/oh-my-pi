@@ -209,7 +209,7 @@ export const frameDefs = {
 	),
 	FormUiRequest: doc(
 		{ type: UI, id: "string", method: "'form'", html: "string", "timeout?": "number.integer" },
-		"The HTML `<form>` of one `ask` tool call; no opt-in is required.",
+		"The HTML `<form>` of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required.",
 	),
 	CancelUiRequest: doc(
 		{ type: UI, id: "string", method: "'cancel'", targetId: "string" },

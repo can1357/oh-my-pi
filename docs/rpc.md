@@ -1304,7 +1304,7 @@ Extensions in RPC mode use request/response UI frames. `--no-ui` disables the ex
 
 `--mode rpc-ui` independently enables the tool UI context, including with `--no-ui`:
 
-- The `ask` tool sends one `form` request carrying the complete HTML form, without an enable command. Hosts must render the form and reply with submitted `data` or cancellation; the tool no longer walks fields through `select`, `input` or `editor` over RPC.
+- The `ask` tool sends one `form` request carrying the complete HTML form, without an enable command. Hosts must render the form and reply with submitted `data` or cancellation; the tool no longer walks fields through `select`, `input` or `editor` over RPC. Extension `ui.formDialog` calls send the same `form` request in both RPC modes.
 - Other callers using the tool UI context retain its supported dialog methods (`select`, `confirm`, `input`, `editor`, and cancellation) and presentation methods (`notify`, `setStatus`, string-array `setWidget`, `set_editor_text`, and opt-in `setTitle`). `--no-ui` is not a transport-level filter on these methods.
 - Tool approval prompts use the extension runner, not the tool UI context. Under `--no-ui`, tools requiring approval fail closed with a no-interactive-UI error rather than sending an approval dialog, just as with `--mode rpc --no-ui`.
 - MCP authentication challenges do not gain an RPC UI handler in either mode; the interactive-mode MCP auth handler is not installed.
@@ -1336,7 +1336,7 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
      `questions: Array<{ id: string, question: string, header?: string, options: Array<{ label: string, description?: string, preview?: string }>, multi?: boolean, recommended?: number }>`
      plus `timeout?: number`. `options` never include an "Other" entry; hosts
      always offer free text.
-   - `form` requires no opt-in. It carries the HTML `<form>` of one `ask` tool call as `html: string`, plus `timeout?: number`. Hosts render the form whole; radio and checkbox groups of two or more options offer a free-text "Other" answer, unless the group already has an option labelled `Other`. Hosts must answer every `form` request with submitted `data` or `{ cancelled: true }`; a host without a form renderer must cancel. An unanswered `form` can block the `ask` call indefinitely, because plan mode disables the ask timeout.
+   - `form` requires no opt-in. It carries the HTML `<form>` of one `ui.formDialog` call as `html: string`, plus `timeout?: number`. Hosts render the form whole; radio and checkbox groups of two or more options offer a free-text "Other" answer, unless the group already has an option labelled `Other`. Hosts must answer every `form` request with submitted `data` or `{ cancelled: true }`; a host without a form renderer must cancel. An unanswered `form` can block the `ask` call indefinitely, because plan mode disables the ask timeout.
 - `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`
 - `open_url` (emitted by RPC login flows): includes `url`, optional `launchUrl`, and optional `instructions`. When present, `launchUrl` is a short loopback redirect and is the recommended copy target so terminal truncation cannot corrupt OAuth query parameters.
 
@@ -1398,7 +1398,9 @@ Unknown names, disabled options, wrong types, and answers that break `required`,
 exceeds the transport limit (1 MiB under protocol v1, 64 MiB after `negotiate_protocol` to v2) fails the `ask` tool
 call without being sent, instead of reaching the host truncated.
 
-A valid choice answer, including a permitted "Other" answer, takes precedence over a same-name hidden value. An otherwise invalid choice value that exactly matches that hidden value counts as no selection; it does not satisfy a required field.
+A valid choice answer, including a permitted "Other" answer, takes precedence over a same-name hidden value. An otherwise invalid choice value that exactly matches that hidden value counts as no selection; it does not satisfy a required field. Inside a checkbox group's or multi-select's array, one entry equal to the hidden value is dropped as the hidden input's echo (as browser form data sends it) when no option carries that value, or when keeping it would make the array invalid.
+
+Fields sharing a `name` share its one entry. Each field whose shape fits the entry takes it; a same-name field that cannot carry it (a radio group beside a checkbox group, a group without "Other" beside a text input) counts as unanswered and must still pass its own constraints. An entry no field of its name can carry fails the call.
 
 An invalid `data` reply fails the whole `ask` call, with no round for correcting a field, so hosts must enforce the form's constraints before sending: `required` (a whitespace-only text answer counts as empty), `min`/`max`, `minlength`/`maxlength`, `email`, `url`, and `pattern` (anchored to the whole value; an invalid pattern is ignored).
 

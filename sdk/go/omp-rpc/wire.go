@@ -5912,7 +5912,7 @@ func (v AskUiRequest) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"extension_ui_request","method":"ask"`, nil)
 }
 
-// The HTML `<form>` of one `ask` tool call; no opt-in is required.
+// The HTML `<form>` of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required.
 type FormUiRequest struct {
 	ID      string `json:"id"`
 	HTML    string `json:"html"`

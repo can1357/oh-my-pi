@@ -4624,7 +4624,7 @@ pub struct AskUiRequest {
 	pub timeout: Option<i64>,
 }
 
-/// The HTML `<form>` of one `ask` tool call; no opt-in is required.
+/// The HTML `<form>` of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FormUiRequest {
 	pub id: String,
@@ -4701,7 +4701,7 @@ pub enum ExtensionUiRequest {
 	Editor(EditorUiRequest),
 	/// Every question of one extension `ui.askDialog` call; sent only after `set_ask_dialog` enables it.
 	Ask(AskUiRequest),
-	/// The HTML `<form>` of one `ask` tool call; no opt-in is required.
+	/// The HTML `<form>` of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required.
 	Form(FormUiRequest),
 	/// Close the dialog opened by request `targetId`; a later answer to it is ignored.
 	Cancel(CancelUiRequest),

@@ -957,9 +957,10 @@ class RpcClient(WireClient):
     def send_ui_data(self, request_id: str, data: Mapping[str, str | int | float | Sequence[str]]) -> None:
         """Answer a `form` request with the submitted values by control `name`.
 
-        Raises `TypeError` for a `bool` (forms submit option values, never booleans)
-        or a list member that is not a string, and `ValueError` for a non-finite float,
-        which JSON cannot carry.
+        Raises `TypeError` for a `bool` (forms submit option values, never booleans),
+        a value that is neither a string, a number nor a sequence of strings (`None`,
+        a mapping, a set), or a list member that is not a string, and `ValueError` for
+        a non-finite float, which JSON cannot carry.
         """
         wire_data: JsonObject = {}
         for name, value in data.items():
@@ -970,6 +971,10 @@ class RpcClient(WireClient):
             if isinstance(value, (str, int, float)):
                 wire_data[name] = value
                 continue
+            if not isinstance(value, Sequence):
+                raise TypeError(
+                    f"form field {name!r} must be a string, a number or a list of strings, not {type(value).__name__}"
+                )
             # Members are checked too: a NaN inside a list would write invalid JSON the server cannot parse.
             members = list(value)
             if not all(isinstance(member, str) for member in members):

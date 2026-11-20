@@ -1576,7 +1576,7 @@ class AskUiRequest:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class FormUiRequest:
-    """The HTML `<form>` of one `ask` tool call; no opt-in is required."""
+    """The HTML `<form>` of one `ui.formDialog` call (the `ask` tool or an extension); no opt-in is required."""
     type: Literal["extension_ui_request"] = "extension_ui_request"
     id: str
     method: Literal["form"] = "form"
