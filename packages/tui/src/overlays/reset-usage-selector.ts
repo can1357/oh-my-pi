@@ -264,6 +264,11 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 	#activateSelection(): void {
 		const account = this.#menu.selectedItem;
 		if (!account) return;
+		if (account.error) {
+			this.#statusMessage = `That account's saved resets are unavailable (${account.error}), so nothing was spent.`;
+			this.#updateList();
+			return;
+		}
 		if (account.redeemableCount <= 0) {
 			this.#statusMessage = account.unavailableReason
 				? `That account's saved resets are unavailable: ${account.unavailableReason}`
