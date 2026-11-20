@@ -579,6 +579,11 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 					`Agent "${id}" revival aborted: its lifecycle was disposed while its persisted session was being prepared.`,
 				);
 			}
+			// The id may have been reused while the factory was reading the transcript.
+			// Never overwrite the replacement's adoption with the stale reviver.
+			if (this.#registry.get(id) !== ref) {
+				throw new Error(`Agent "${id}" changed while its persisted session was being prepared.`);
+			}
 			if (revive) {
 				adoption = {
 					ref,
