@@ -442,6 +442,11 @@ export class InputController {
 					if (this.ctx.ui.hasOverlay() || this.ctx.ui.getFocused() instanceof HistorySearchComponent) {
 						return undefined;
 					}
+					// Vim Normal mode owns Ctrl-R as redo; history search stays on it in Insert mode.
+					const editor = this.ctx.editor;
+					if (this.ctx.ui.getFocused() === editor && editor.vimEnabled && editor.vimMode === "normal") {
+						return undefined;
+					}
 					this.ctx.showHistorySearch();
 					return { consume: true };
 				}
