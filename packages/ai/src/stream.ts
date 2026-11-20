@@ -7,6 +7,7 @@ import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
 	isVertexAnthropicRawPredictUrl,
 	isVertexExpressOpenAIUrl,
+	isVertexPublisherResponsesUrl,
 	isVertexRawPredictUrl,
 	resolveVertexEndpointHost,
 } from "@oh-my-pi/pi-catalog/hosts";
@@ -102,6 +103,7 @@ function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
 		model.provider === "google-vertex" &&
 		((model.api === "openai-completions" &&
 			(isVertexExpressOpenAIUrl(model.baseUrl) || isVertexRawPredictUrl(model.baseUrl))) ||
+			(model.api === "openai-responses" && isVertexPublisherResponsesUrl(model.baseUrl)) ||
 			(model.api === "anthropic-messages" && isVertexRawPredictUrl(model.baseUrl)))
 	);
 }
@@ -811,24 +813,21 @@ function transformVertexAnthropicBody(bodyText: string): string {
 function resolveVertexRequest(input: string | URL | Request): string | URL | Request {
 	const project = $env.GOOGLE_CLOUD_PROJECT || $env.GCP_PROJECT || $env.GCLOUD_PROJECT;
 	const location = $env.GOOGLE_VERTEX_LOCATION || $env.GOOGLE_CLOUD_LOCATION || $env.VERTEX_LOCATION;
-	if (!project || !location) return input;
-
 	const rewriteUrl = (url: string): string => {
-		const hasPlaceholder =
-			url.includes("{project}") ||
-			url.includes("{location}") ||
-			url.includes("%7Bproject%7D") ||
-			url.includes("%7Blocation%7D");
-		const host = resolveVertexEndpointHost(location);
-		const rewritten = hasPlaceholder
-			? url
-					.replace("https://{location}-aiplatform.googleapis.com", `https://${host}`)
-					.replace("https://%7Blocation%7D-aiplatform.googleapis.com", `https://${host}`)
-					.replaceAll("{project}", encodeURIComponent(project))
-					.replaceAll("%7Bproject%7D", encodeURIComponent(project))
-					.replaceAll("{location}", encodeURIComponent(location))
-					.replaceAll("%7Blocation%7D", encodeURIComponent(location))
-			: url;
+		let rewritten = url;
+		if (project) {
+			const encodedProject = encodeURIComponent(project);
+			rewritten = rewritten.replaceAll("{project}", encodedProject).replaceAll("%7Bproject%7D", encodedProject);
+		}
+		if (location) {
+			const host = resolveVertexEndpointHost(location);
+			const encodedLocation = encodeURIComponent(location);
+			rewritten = rewritten
+				.replace("https://{location}-aiplatform.googleapis.com", `https://${host}`)
+				.replace("https://%7Blocation%7D-aiplatform.googleapis.com", `https://${host}`)
+				.replaceAll("{location}", encodedLocation)
+				.replaceAll("%7Blocation%7D", encodedLocation);
+		}
 		return rewritten
 			.replace(":streamRawPredict/v1/messages", ":streamRawPredict")
 			.replace(":streamRawPredict/chat/completions", ":streamRawPredict");
