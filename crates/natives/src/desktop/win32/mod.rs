@@ -992,7 +992,7 @@ public static class Fixture {
 		};
 		let initial = list.state();
 		let error = scroll(x, y, (0.0, 100.0), None).unwrap_err();
-		assert_eq!(error.code, ErrorCode::Unsupported, "{error}");
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
 		assert_eq!(list.state(), initial);
 		assert_eq!(foreground(), list.other);
 		scroll(width * 0.85, y, (0.0, 100.0), None).unwrap();
@@ -1009,7 +1009,7 @@ public static class Fixture {
 		assert!(window::has_chromium_descendant(list.window));
 		for point in [(x, y), (width * 0.85, y)] {
 			let error = scroll(point.0, point.1, (0.0, 100.0), None).unwrap_err();
-			assert_eq!(error.code, ErrorCode::Unsupported, "{error}");
+			assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
 			assert_eq!(list.state(), hosted);
 			assert_eq!(foreground(), list.other);
 		}
@@ -1028,7 +1028,7 @@ public static class Fixture {
 		assert_eq!(moved[OFFSET], initial[OFFSET] + f64::from(per_notch));
 		assert!(moved[CALLS] > initial[CALLS]);
 		let error = scroll(x, height * 0.2, (0.0, 100.0), None).unwrap_err();
-		assert_eq!(error.code, ErrorCode::Unsupported, "{error}");
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable, "{error}");
 		assert_eq!(list.state(), moved);
 		assert_eq!(foreground(), list.window);
 		list.post(PIN_ACROSS);

@@ -178,6 +178,8 @@ impl Win32Ax {
 
 	/// WPF drops posted wheels, and `ScrollPattern` can activate its window.
 	/// Only a foreground container under the point may receive these steps.
+	/// `Ok(false)` and `BackgroundUnavailable` send nothing: the caller refuses
+	/// the scroll so the background fallback can rerun it with a real wheel.
 	pub(super) fn scroll_at_point(
 		&mut self,
 		root: HWND,
@@ -185,6 +187,19 @@ impl Win32Ax {
 		horizontal: i32,
 		vertical: i32,
 	) -> CoreResult<bool> {
+		let axes = [
+			(true, horizontal, wheel_setting(SPI_GETWHEELSCROLLCHARS)),
+			(false, vertical, wheel_setting(SPI_GETWHEELSCROLLLINES)),
+		];
+		if axes
+			.iter()
+			.all(|&(_, notches, per_notch)| notches == 0 || per_notch == 0)
+		{
+			return Err(DesktopError::unsupported(
+				"wheel scrolling is turned off in Windows settings (0 lines or characters per notch); \
+				 no input was sent",
+			));
+		}
 		let mut run =
 			ScrollRun { cutoff: control::reply_deadline(), now: Instant::now, sent: false };
 		if !window::owns_foreground(root) || !shows_at(root, point) {
@@ -199,10 +214,8 @@ impl Win32Ax {
 			return Ok(false);
 		};
 		let mut eligible = false;
-		for (across, notches, setting) in
-			[(true, horizontal, SPI_GETWHEELSCROLLCHARS), (false, vertical, SPI_GETWHEELSCROLLLINES)]
-		{
-			let (amount, steps) = wheel_amount(notches, wheel_setting(setting));
+		for (across, notches, per_notch) in axes {
+			let (amount, steps) = wheel_amount(notches, per_notch);
 			if steps == 0 {
 				continue;
 			}
@@ -269,8 +282,8 @@ impl Win32Ax {
 						})?;
 						if !window::owns_foreground(root) || !shows_at(root, point) {
 							return Err(run.failure(
-								ErrorCode::Unsupported,
-								"bring WPF in front or use takeover: true",
+								ErrorCode::BackgroundUnavailable,
+								"the WPF window is no longer in front under the point",
 							));
 						}
 						Ok(Sample { position, view })
@@ -349,10 +362,8 @@ impl<N: Fn() -> Instant> ScrollRun<N> {
 		self.check()?;
 		result.map_err(|error| {
 			self.failure(
-				ErrorCode::Unsupported,
-				format!(
-					"UI Automation unavailable ({error}); bring WPF in front or use takeover: true"
-				),
+				ErrorCode::BackgroundUnavailable,
+				format!("UI Automation unavailable ({error})"),
 			)
 		})
 	}
@@ -368,9 +379,7 @@ impl<N: Fn() -> Instant> ScrollRun<N> {
 		let before = sample(self)?;
 		self.check()?;
 		if before.position < 0.0 {
-			return Err(
-				self.failure(ErrorCode::Unsupported, "no WPF scroll position; use takeover: true"),
-			);
+			return Err(self.failure(ErrorCode::BackgroundUnavailable, "no WPF scroll position"));
 		}
 		if (forward && before.position >= 100.0) || (!forward && before.position <= 0.0) {
 			return Ok(false);
@@ -900,12 +909,12 @@ mod tests {
 	}
 
 	#[test]
-	fn wpf_provider_failure_before_send_is_unsupported() {
+	fn wpf_provider_failure_before_send_leaves_the_scroll_to_the_fallback() {
 		let run = ScrollRun { cutoff: None, now: Instant::now, sent: false };
 		let error = run
 			.call(|| Err::<(), _>("provider disappeared"))
 			.unwrap_err();
-		assert_eq!(error.code, ErrorCode::Unsupported);
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
 	}
 
 	#[test]
