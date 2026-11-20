@@ -3203,6 +3203,75 @@ describe("ExtensionRunner", () => {
 			]);
 			delete globalState.__deniedApprovalEvents;
 		});
+
+		it("writes each approval wait to a fresh session's file before the prompt opens, with no extension listening", async () => {
+			// No assistant message yet: the session would otherwise not create its file at all.
+			const persistent = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "approval-sessions"));
+			const records = () => {
+				const file = persistent.getSessionFile();
+				if (!file || !fs.existsSync(file)) return [];
+				return fs
+					.readFileSync(file, "utf8")
+					.split("\n")
+					.filter(line => line.length > 0)
+					.map(line => JSON.parse(line))
+					.filter(entry => entry.type === "custom" && entry.customType.startsWith("tool_approval_"))
+					.map(entry => ({ customType: entry.customType, ...entry.data }));
+			};
+			const runner = new ExtensionRunner([], new ExtensionRuntime(), tempDir.path(), persistent, modelRegistry);
+			const onDiskAtPrompt: unknown[][] = [];
+			const answers = ["Approve", "Deny"];
+			initializeRunner(runner, async () => {
+				onDiskAtPrompt.push(records());
+				return answers.shift();
+			});
+			const wrapper = new ExtensionToolWrapper({ ...approvalTool, parameters: Type.Object({}) }, runner);
+			const context = () => ({
+				sessionManager: persistent,
+				modelRegistry,
+				model: undefined,
+				isIdle: () => true,
+				hasQueuedMessages: () => false,
+				abort: () => {},
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+			});
+
+			await wrapper.execute("call-approved", {}, undefined, undefined, context());
+			await expect(wrapper.execute("call-denied", {}, undefined, undefined, context())).rejects.toThrow(
+				"Tool call denied by user: dangerous_tool",
+			);
+
+			const approvedRequest = expect.objectContaining({
+				customType: "tool_approval_requested",
+				toolCallId: "call-approved",
+				toolName: "dangerous_tool",
+				approvalMode: "always-ask",
+				requestedAt: expect.any(String),
+			});
+			const approvedResolution = expect.objectContaining({
+				customType: "tool_approval_resolved",
+				toolCallId: "call-approved",
+				approved: true,
+				resolvedAt: expect.any(String),
+			});
+			const deniedRequest = expect.objectContaining({
+				customType: "tool_approval_requested",
+				toolCallId: "call-denied",
+			});
+			expect(onDiskAtPrompt).toEqual([[approvedRequest], [approvedRequest, approvedResolution, deniedRequest]]);
+			expect(records()).toEqual([
+				approvedRequest,
+				approvedResolution,
+				deniedRequest,
+				expect.objectContaining({
+					customType: "tool_approval_resolved",
+					toolCallId: "call-denied",
+					approved: false,
+					reason: "denied by user",
+				}),
+			]);
+		});
+
 		it("emits resolved false when the approval prompt throws", async () => {
 			const events: Array<{ type: string; approved?: boolean; reason?: string }> = [];
 			const extCode = `
