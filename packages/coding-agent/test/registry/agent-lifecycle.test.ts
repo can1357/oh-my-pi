@@ -678,6 +678,66 @@ describe("AgentLifecycleManager", () => {
 		expect(registry.get("Race-Keep")?.session).toBe(stub.session);
 	});
 
+	it("a same-turn kill rejects the caller that cancelled the park, but a later call can revive", async () => {
+		using tempDir = TempDir.createSync("@omp-lifecycle-kill-cancelled-park-");
+		const id = "KillCancelledPark";
+		const disposing = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		const original = makeSessionStub(() => {
+			disposing.resolve();
+			return finish.promise;
+		});
+		const ref = registerIdleSub(id, original.session, path.join(tempDir.path(), `${id}.jsonl`));
+		lifecycle.adopt(id, { idleTtlMs: 0 }, ref);
+		const revived = makeSessionStub();
+		const factory = vi.fn(async () => async () => revived.session);
+		lifecycle.setPersistedSubagentReviverFactory(factory, () => 0);
+
+		const parking = lifecycle.park(id);
+		const live = lifecycle.ensureLive(id);
+		const killing = lifecycle.release(id, ref, { tombstone: true });
+		try {
+			await expect(live).rejects.toThrow(/changed while waiting/);
+			await disposing.promise;
+			// The park has finished and the ref is aborted, but release still owns disposal.
+			await expect(lifecycle.ensureLive(id)).rejects.toThrow(/still shutting down/);
+			expect(factory).not.toHaveBeenCalled();
+		} finally {
+			finish.resolve();
+			await Promise.all([parking, killing]);
+		}
+		expect(original.disposeCalls()).toBe(1);
+		expect(registry.get(id)).toBe(ref);
+		expect(ref).toMatchObject({ status: "aborted", session: null });
+		expect(await lifecycle.ensureLive(id)).toBe(revived.session);
+		expect(registry.get(id)).not.toBe(ref);
+	});
+
+	it("a kill waiting for a detached park does not fence a replacement with the same id", async () => {
+		const id = "KillReplacedPark";
+		const disposing = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		const original = makeSessionStub(() => {
+			disposing.resolve();
+			return finish.promise;
+		});
+		const ref = registerIdleSub(id, original.session, null);
+		lifecycle.adopt(id, { idleTtlMs: 0 }, ref);
+		const parking = lifecycle.park(id);
+		await disposing.promise;
+		const stale = lifecycle.ensureLive(id);
+		const killing = lifecycle.release(id, ref, { tombstone: true });
+		const replacementSession = makeSessionStub().session;
+		const replacement = registerIdleSub(id, replacementSession);
+		const fresh = lifecycle.ensureLive(id);
+		finish.resolve();
+
+		await Promise.all([expect(stale).rejects.toThrow(/changed while waiting/), parking, killing]);
+		expect(await fresh).toBe(replacementSession);
+		expect(registry.get(id)).toBe(replacement);
+		expect(replacement.status).toBe("idle");
+	});
+
 	it("ensureLive after park detaches waits for dispose then revives once", async () => {
 		const gate = deferred();
 		const stub = makeSessionStub(() => gate.promise);

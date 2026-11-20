@@ -14,7 +14,7 @@
  * Park/dispose is gated against concurrent ensureLive/peer sends:
  * - A disposing session is never handed out.
  * - ensureLive during an in-flight park either cancels the park (session still
- *   live) or waits for detach+park and then revives.
+ *   live) or waits for detach+park and then revives, unless a kill intervenes.
  * - Concurrent ensureLive/park operations coalesce per id.
  *
  * Every adoption, park, and revival is bound to the exact {@link AgentRef} it
@@ -228,6 +228,8 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 	readonly #revivals = new Map<string, RevivingAgent>();
 	/** In-flight reopens of killed refs, bound to the killed ref, so concurrent {@link ensureLive} calls coalesce. */
 	readonly #reopens = new Map<string, ReopeningAgent>();
+	/** Active tombstone releases, counted per generation until persistence and disposal finish. */
+	readonly #pendingKills = new WeakMap<AgentRef, number>();
 	#unsubscribe: (() => void) | undefined;
 	#persistedReviverFactory: PersistedSubagentReviverFactory | undefined;
 	/** Resolves the TTL applied when a cold-revived ref is adopted on demand (read per revive). */
@@ -463,33 +465,36 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 	 * cancelled (session still live) or awaited to completion before revive.
 	 */
 	async ensureLive(id: string): Promise<AgentSessionHandle> {
-		const park = this.#parks.get(id);
-		if (park) {
-			const parked = this.#registry.get(id);
-			const wasKilled = parked?.status === "aborted";
-			// Cancel before detach; otherwise wait for disposal. Neither path may hand out
-			// (or cold-revive) a newer owner of the id after the await.
-			const kept = parked === park.ref && parked.session && !park.detached && park.cancel();
-			await park.promise;
-			// A kill that lands while we wait is the user's latest word on this agent:
-			// fail the caller instead of reopening the transcript that was just killed.
-			// An agent already killed before the wait still reopens below.
-			if (this.#registry.get(id) !== parked || (!wasKilled && parked?.status === "aborted")) {
-				throw new Error(`Agent "${id}" changed while waiting for its session to park.`);
-			}
-			if (kept && parked.session) {
-				const adopted = this.#adopted.get(id);
-				if (adopted && adopted.ref === parked && parked.status === "idle") this.#armTimer(id, adopted);
-				return parked.session;
-			}
-		}
-
 		let ref = this.#registry.get(id);
 		if (!ref) {
 			throw new Error(
 				`Unknown agent "${id}" — it was never registered or has been released. If a transcript exists, read history://${id}.`,
 			);
 		}
+		if (this.#pendingKills.has(ref)) {
+			throw new Error(`Agent "${id}" is still shutting down after its kill; retry once it has stopped.`);
+		}
+		const park = this.#parks.get(id);
+		if (park?.ref === ref) {
+			const wasKilled = ref.status === "aborted";
+			// Cancel before detach; otherwise wait for disposal. Neither path may hand out
+			// (or cold-revive) a newer owner of the id after the await.
+			const kept = ref.session && !park.detached && park.cancel();
+			await park.promise;
+			// A kill that lands while we wait is the user's latest word on this agent:
+			// fail the caller instead of reopening the transcript that was just killed.
+			// An agent already killed before the wait still reopens below.
+			const killed = this.#pendingKills.has(ref) || (!wasKilled && ref.status === "aborted");
+			if (this.#registry.get(id) !== ref || killed) {
+				throw new Error(`Agent "${id}" changed while waiting for its session to park.`);
+			}
+			if (kept && ref.session) {
+				const adopted = this.#adopted.get(id);
+				if (adopted?.ref === ref && ref.status === "idle") this.#armTimer(id, adopted);
+				return ref.session;
+			}
+		}
+
 		if (ref.status === "aborted") {
 			ref = await this.#reopen(id, ref);
 			if (this.#registry.get(id) !== ref) throw new Error(`Agent "${id}" changed while reopening its transcript.`);
@@ -638,8 +643,28 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		const adoptedMatches =
 			adopted && (expected === undefined || adopted.ref === expected || adopted.ref.session === expected);
 		const ref = currentMatches ? current : adoptedMatches ? adopted.ref : undefined;
-		const onRelease = adopted && adopted.ref === ref ? adopted.onRelease : undefined;
 		if (!ref) return false;
+		if (!options?.tombstone) return this.#release(id, ref, adopted, options);
+
+		// A waiter may have joined park.promise before release did. Fence this exact
+		// generation before yielding; the registry may not be aborted when that waiter runs.
+		this.#pendingKills.set(ref, (this.#pendingKills.get(ref) ?? 0) + 1);
+		try {
+			return await this.#release(id, ref, adopted, options);
+		} finally {
+			const remaining = this.#pendingKills.get(ref)! - 1;
+			if (remaining === 0) this.#pendingKills.delete(ref);
+			else this.#pendingKills.set(ref, remaining);
+		}
+	}
+
+	async #release(
+		id: string,
+		ref: AgentRef,
+		adopted: AdoptedAgent | undefined,
+		options?: AgentReleaseOptions,
+	): Promise<boolean> {
+		const onRelease = adopted?.ref === ref ? adopted.onRelease : undefined;
 		if (adopted?.ref === ref) {
 			clearTimeout(adopted.timer);
 			this.#adopted.delete(id);
@@ -655,7 +680,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 
 		const live = this.#registry.get(id) === ref ? ref.session : null;
 		if (options?.tombstone) {
-			// Apply the terminal transition synchronously, before any await. The
+			// Apply the terminal transition before persisting or disposing. The
 			// dying session's own dispose path calls unregisterUnlessParked
 			// (sdk.ts), which spares a ref only when it is already `aborted` AND
 			// already detached; awaiting persistAgentTombstone before this
