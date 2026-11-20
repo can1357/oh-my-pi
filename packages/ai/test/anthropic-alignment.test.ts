@@ -18,6 +18,7 @@ import {
 	stripClaudeToolPrefix,
 } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { streamBedrock } from "@oh-my-pi/pi-ai/providers/amazon-bedrock";
+import { bedrockAnthropicChunkEvent } from "./helpers/bedrock-stream";
 import { buildAnthropicHeaders, mapStainlessArch, mapStainlessOs } from "@oh-my-pi/pi-ai/providers/anthropic-headers";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import { getClaudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
@@ -3266,30 +3267,45 @@ describe("cch attestation", () => {
 describe("Anthropic empty-messages guard", () => {
 	// `streamAnthropic` runs in an async IIFE, so a `prepareParams` throw is
 	// pushed as an "error" event instead of being thrown synchronously. Drain
-	// the stream and surface the captured AssistantMessage's errorMessage.
-	const captureError = async (context: Context): Promise<string | undefined> => {
+	// the stream and report both the error and whether a request ever reached
+	// the transport — a pre-aborted signal would make a missing guard look
+	// identical to a present one, since both stop before the provider.
+	const captureError = async (context: Context): Promise<{ error?: string; fetched: boolean }> => {
+		let fetched = false;
+		const controller = new AbortController();
 		const stream = streamAnthropic(ANTHROPIC_MODEL, context, {
 			apiKey: "sk-ant-oat-test",
-			signal: createAbortedSignal(),
+			signal: controller.signal,
+			fetch: (async () => {
+				fetched = true;
+				// Abort only after the transport was reached: a request that escapes
+				// the guard must be observed as sent, not stall in a retry loop.
+				controller.abort();
+				return new Response('event: message_stop\ndata: {"type":"message_stop"}\n\n', {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				});
+			}) as unknown as typeof fetch,
 		});
-		let captured: string | undefined;
+		let error: string | undefined;
 		for await (const evt of stream) {
-			if (evt.type === "error") captured = evt.error.errorMessage;
+			if (evt.type === "error") error = evt.error.errorMessage;
 		}
-		return captured;
+		return { error, fetched };
 	};
 
-	it("emits an error before sending when context.messages is empty (regression: 400 'messages is required')", async () => {
-		const errMsg = await captureError({
+	it("refuses to send a request when context.messages is empty (regression: 400 'messages is required')", async () => {
+		const { error, fetched } = await captureError({
 			systemPrompt: ["Be helpful."],
 			messages: [], // <-- the bug: a context handler/abort/compaction emptied the context
 			tools: [],
 		});
-		expect(errMsg).toBeDefined();
-		expect(errMsg).toContain("refusing to send a request with no messages");
-		expect(errMsg).toContain("claude-sonnet-4-5");
-		expect(errMsg).toContain("anthropic");
-		expect(errMsg).toContain("none survived encoding.");
+		expect(error).toContain("refusing to send a request with no messages");
+		expect(error).toContain("claude-sonnet-4-5");
+		expect(error).toContain("anthropic");
+		expect(error).toContain("none survived encoding.");
+		// The point of the guard: the provider was never asked.
+		expect(fetched).toBe(false);
 	});
 
 	it("fails when the encoded context is empty and no hook repairs it", async () => {
@@ -3298,21 +3314,25 @@ describe("Anthropic empty-messages guard", () => {
 		// messages. Pairs with "does not fail when the hook repairs that same
 		// empty encoding": same context, opposite expectation, so the pair
 		// brackets the guard around the hook.
-		const errMsg = await captureError({
+		const { error, fetched } = await captureError({
 			systemPrompt: ["Be helpful."],
 			messages: [{ role: "user", content: [], timestamp: 1 }],
 			tools: [],
 		});
-		expect(errMsg).toBeDefined();
-		expect(errMsg).toContain("refusing to send a request with no messages");
-		expect(errMsg).toContain("Context had 1 input messages");
-		expect(errMsg).toContain("none survived encoding.");
+		expect(error).toContain("refusing to send a request with no messages");
+		expect(error).toContain("Context had 1 input messages");
+		expect(error).toContain("none survived encoding.");
+		expect(fetched).toBe(false);
 	});
 
 	it("reports the cause when an onPayload hook empties the request", async () => {
 		// The guard runs on the final request shape, so a hook that drops every
 		// message is diagnosed too instead of reaching the provider — and the
-		// message names the hook, not the encoder, as the culprit.
+		// message names the hook, not the encoder, as the culprit. The fetch
+		// probe keeps that claim honest: if the guard ever stopped covering the
+		// hook, this request would be observed as sent.
+		const seen = { fetched: false };
+		const controller = new AbortController();
 		const stream = streamAnthropic(
 			ANTHROPIC_MODEL,
 			{
@@ -3322,7 +3342,14 @@ describe("Anthropic empty-messages guard", () => {
 			},
 			{
 				apiKey: "sk-ant-oat-test",
-				signal: createAbortedSignal(),
+				signal: controller.signal,
+				fetch: (async () => {
+					seen.fetched = true;
+					// Abort only after the transport was reached, so a request that
+					// escapes the guard is observed as sent instead of retrying.
+					controller.abort();
+					return new Response("", { status: 200 });
+				}) as unknown as typeof fetch,
 				onPayload: params => ({ ...(params as MessageCreateParams), messages: [] }),
 			},
 		);
@@ -3333,6 +3360,7 @@ describe("Anthropic empty-messages guard", () => {
 		expect(captured).toContain("refusing to send a request with no messages");
 		expect(captured).toContain("Context had 1 input messages");
 		expect(captured).toContain("encoding produced 1, then the onPayload hook returned an empty list");
+		expect(seen.fetched).toBe(false);
 	});
 
 	it("does not fail when the hook repairs that same empty encoding", async () => {
@@ -3436,11 +3464,46 @@ describe("Anthropic empty-messages guard on the Bedrock compaction transport", (
 			compat: { supportsServerCompaction: true },
 		});
 
-	// Each call returns its own response: a Body is single-use.
-	const eventStream = (): Response =>
+	// A complete stream: the decoder rejects a body that ends before
+	// `message_stop`, which would surface here as an envelope error instead of
+	// a clean success and make the "no refusal" assertion meaningless.
+	const compactionResponse = (): Response =>
 		new Response(
 			new ReadableStream<Uint8Array>({
 				start(controller) {
+					for (const event of [
+						{
+							type: "message_start",
+							message: {
+								id: "msg_compaction",
+								type: "message",
+								role: "assistant",
+								model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+								content: [],
+								stop_reason: null,
+								stop_sequence: null,
+								usage: { input_tokens: 1, output_tokens: 0 },
+							},
+						},
+						{
+							type: "content_block_start",
+							index: 0,
+							content_block: {
+								type: "compaction",
+								content: "Signed compacted context",
+								signature: "opaque-bedrock-signature",
+							},
+						},
+						{ type: "content_block_stop", index: 0 },
+						{
+							type: "message_delta",
+							delta: { stop_reason: "compaction", stop_sequence: null },
+							usage: { input_tokens: 1, output_tokens: 0 },
+						},
+						{ type: "message_stop" },
+					]) {
+						controller.enqueue(bedrockAnthropicChunkEvent(event));
+					}
 					controller.close();
 				},
 			}),
@@ -3453,7 +3516,7 @@ describe("Anthropic empty-messages guard on the Bedrock compaction transport", (
 			init.onFetch?.();
 			const raw = requestInit?.body;
 			init.sentBody = raw instanceof Uint8Array ? new TextDecoder().decode(raw) : String(raw ?? "");
-			return eventStream();
+			return compactionResponse();
 		};
 
 	it("lets the transport's hook repair an empty encoded context", async () => {
@@ -3471,13 +3534,16 @@ describe("Anthropic empty-messages guard on the Bedrock compaction transport", (
 				}),
 			},
 		);
-		let refusal: string | undefined;
+		const errors: string[] = [];
+		let completed = false;
 		for await (const evt of stream) {
-			if (evt.type === "error" && evt.error.errorMessage?.includes("refusing")) {
-				refusal = evt.error.errorMessage;
-			}
+			if (evt.type === "error") errors.push(evt.error.errorMessage ?? "(no message)");
+			if (evt.type === "done") completed = true;
 		}
-		expect(refusal).toBeUndefined();
+		// A complete fixture: the request must finish cleanly, so "no refusal"
+		// cannot be satisfied by an unrelated envelope failure.
+		expect(errors).toEqual([]);
+		expect(completed).toBe(true);
 		expect(seen.sentBody).toContain("repaired by transport hook");
 	});
 
