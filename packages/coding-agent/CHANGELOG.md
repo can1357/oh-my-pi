@@ -28,6 +28,10 @@
 - Sessions now record approval prompts in their session file, even before the first reply: a `tool_approval_requested` entry when a tool call starts waiting on you (naming the dispatching eval call in `parentToolCallId` for calls made from an eval) and a `tool_approval_resolved` entry when it is approved, denied, aborted, or refused, so tools that read session files (sidebars, dashboards) can show a session waiting on approval ([#18837](https://github.com/can1357/oh-my-pi/pull/18837) by [@baekjosh](https://github.com/baekjosh))
 - Added redirected files to a background bash job's streams: `proc://<id>/streams`, the jobs sheet and job widgets (source `file:<n>`) read what a command writes with `> log` while it runs, as they do for `|` stages
 - Added Binary Ninja as a disassembler backend for read analysis views and the dsm namespace. Select it with disassembler.backend = binja; it uses a local install found through binja.installDir, $BN_INSTALL_DIR, or the default install locations ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- Added saved `/panel` roles with independent family-diverse or named-persona lineups for isolated read-only participants ([#7750](https://github.com/can1357/oh-my-pi/pull/7750) by [@mvid](https://github.com/mvid)).
+- Panel members accept a ranked candidate list, so a seat falls through to the next model when its primary is unavailable and records which candidate served ([#7750](https://github.com/can1357/oh-my-pi/pull/7750) by [@mvid](https://github.com/mvid)).
+- Panel roles accept a `minFamilies` floor on distinct resolved model families, so a lineup that collapses onto fewer lineages than required never dispatches ([#7750](https://github.com/can1357/oh-my-pi/pull/7750) by [@mvid](https://github.com/mvid)).
+- Panel runs now carry a `lineupHash` naming the served routes and the policy that admitted them, and extension packages can resolve rosters through `resolvePanelLineup` ([#7750](https://github.com/can1357/oh-my-pi/pull/7750) by [@mvid](https://github.com/mvid)).
 
 ### Changed
 
