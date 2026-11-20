@@ -28,6 +28,10 @@
 - Sessions now record approval prompts in their session file, even before the first reply: a `tool_approval_requested` entry when a tool call starts waiting on you (naming the dispatching eval call in `parentToolCallId` for calls made from an eval) and a `tool_approval_resolved` entry when it is approved, denied, aborted, or refused, so tools that read session files (sidebars, dashboards) can show a session waiting on approval ([#18837](https://github.com/can1357/oh-my-pi/pull/18837) by [@baekjosh](https://github.com/baekjosh))
 - Added redirected files to a background bash job's streams: `proc://<id>/streams`, the jobs sheet and job widgets (source `file:<n>`) read what a command writes with `> log` while it runs, as they do for `|` stages
 - Added Binary Ninja as a disassembler backend for read analysis views and the dsm namespace. Select it with disassembler.backend = binja; it uses a local install found through binja.installDir, $BN_INSTALL_DIR, or the default install locations ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- Added opt-in `tier.autoFastMode` and `tier.autoFastModeDurationMinutes` settings for temporary priority processing after primary-session user prompts ([#15783](https://github.com/can1357/oh-my-pi/pull/15783) by [@mvid](https://github.com/mvid)).
+- Added a blocked fast-mode status for provider refusals and ineligible accounts, with `/fast status` reporting the same state ([#15783](https://github.com/can1357/oh-my-pi/pull/15783) by [@mvid](https://github.com/mvid)).
+- Added Anthropic priority entitlement to usage reports so automatic fast mode skips known-ineligible accounts ([#15783](https://github.com/can1357/oh-my-pi/pull/15783) by [@mvid](https://github.com/mvid)).
+- Added OpenAI priority downgrade detection without treating Codex service-tier echoes as served-tier evidence ([#15783](https://github.com/can1357/oh-my-pi/pull/15783) by [@mvid](https://github.com/mvid)).
 
 ### Changed
 
@@ -40,6 +44,7 @@
 - Changed read to treat a file named .i64 or .idb as an IDA database even when it is a SQLite file: it shows database metadata instead of a table listing ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 - Changed an in-place disassembler database to be identified by its real path, so one opened through a symlink gets a new id and dsm handle ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 - Changed dsm.open() to reject a database file that belongs to another disassembler backend, with an error naming the backend to switch to ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- Bumped the Anthropic usage-report cache key so older processes cannot keep refilling entitlement-free cached reports ([#15783](https://github.com/can1357/oh-my-pi/pull/15783) by [@mvid](https://github.com/mvid)).
 
 ### Fixed
 
