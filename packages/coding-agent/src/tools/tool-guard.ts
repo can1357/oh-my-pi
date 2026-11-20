@@ -31,18 +31,14 @@ import questionFile from "../prompts/judge/tool-guard.json" with { type: "json" 
 import refusedTemplate from "../prompts/tools/tool-guard-refused.md" with { type: "text" };
 import { operatorTitleText, textFromContent } from "../session/messages";
 import { isMCPToolName } from "./builtin-names";
+import { resolveToCwd } from "./path-utils";
 import {
 	cfgToolGuardAllowances,
 	cfgToolGuardAskedThreshold,
 	cfgToolGuardEnabled,
 	cfgToolGuardRiskThreshold,
 } from "./settings";
-import {
-	extractFlatShellCommandSegments,
-	isShellEnvironmentAssignment,
-	lexShellCommand,
-	tokenizeShellSegments,
-} from "./shell-tokenize";
+import { extractFlatShellCommandSegments, isShellEnvironmentAssignment, lexShellCommand } from "./shell-tokenize";
 
 const QUESTIONS = judgeQuestions(questionFile);
 
@@ -192,6 +188,14 @@ function stringArg(args: unknown, key: string): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
 
+/** The string arguments that name a file: `path` and any `..._path` (`output_path`). */
+function pathArguments(args: unknown): string[] {
+	if (!args || typeof args !== "object") return [];
+	return Object.entries(args as Record<string, unknown>).flatMap(([key, value]) =>
+		/(?:^|_)path$/i.test(key) && typeof value === "string" && value.length > 0 ? [value] : [],
+	);
+}
+
 /** `word` resolved against `base` (with `~/` as the home directory); undefined when it needs expansion. */
 function resolveWord(word: string, base: string): string | undefined {
 	if (/[$`*?{]/.test(word)) return undefined;
@@ -251,8 +255,10 @@ function longOption(arg: string, options: readonly string[], exact: readonly str
 	return options.some(option => name.startsWith(option) || option.startsWith(name));
 }
 
-/** Read-subcommand options that write a file or run a program: `--output=F`, external diff and textconv drivers, `git grep --open-files-in-pager`. */
-const GIT_EXEC_OPTIONS = ["--output", "--open-files-in-pager", "--ext-diff", "--textconv"];
+/** Read-subcommand options that write a file or run a program: `--output=F`, external diff and textconv drivers, `git grep --open-files-in-pager`, and `git cat-file --filters`, which runs the smudge filter. */
+const GIT_EXEC_OPTIONS = ["--output", "--open-files-in-pager", "--ext-diff", "--textconv", "--filters"];
+/** Real options that begin a judged long option without being one: `--text` (`-a`), and `git cat-file --filter=SPEC` and `git rev-list --filter=SPEC`, which choose objects. */
+const GIT_EXACT = ["--text", "--filter"];
 /** `git grep -O[CMD]`, also inside a cluster (`-iO`), runs a pager on the matching files. */
 const GIT_PAGER_FLAG = /^-[^-]*O/;
 /** Legacy `git config` actions that read a value or list them. */
@@ -280,7 +286,7 @@ function readOnlyGit(args: string[]): boolean {
 	const positional = rest.filter(arg => !arg.startsWith("-"));
 	const flags = rest.filter(arg => arg.startsWith("-"));
 	if (sub === undefined) return true;
-	if (flags.some(flag => GIT_PAGER_FLAG.test(flag) || longOption(flag, GIT_EXEC_OPTIONS, ["--text"]))) return false;
+	if (flags.some(flag => GIT_PAGER_FLAG.test(flag) || longOption(flag, GIT_EXEC_OPTIONS, GIT_EXACT))) return false;
 	if (inTable(GIT_READS, sub)) return true;
 	if (sub === "branch") return positional.length === 0 && flags.every(flag => inTable(GIT_BRANCH_LISTING, flag));
 	if (sub === "remote" || sub === "stash" || sub === "tag") {
@@ -528,18 +534,61 @@ function writtenWords(segment: string[]): string[] {
 	return written;
 }
 
-/** The files a shell command runs as code (`python x.py`, `bash x.sh`, `./x`, `uv run x.py`), at most three. Sourced files are never read: they are often credentials. */
+/** Separators that run the next command in the shell the previous one left: `&&`, `;` and newlines. */
+const SEQUENTIAL = /^(?:&&|[;\n])*$/;
+
+/** Where `cd DIR`, `pushd DIR` or a bare `cd` moves from `base`; undefined for a move the call does not show (`cd -`, `popd`, a bare `pushd`, an expanded name). */
+function changedDirectory(command: string[], base: string): string | undefined {
+	const [name, ...args] = command;
+	let i = 0;
+	while (i < args.length && args[i].startsWith("-") && args[i] !== "-") {
+		if (args[i++] === "--") break;
+	}
+	const target = args[i];
+	if (name === "popd" || target === "-" || (target === undefined && name !== "cd")) return undefined;
+	return resolveWord(target ?? "~", base);
+}
+
+/**
+ * The files a shell command runs as code (`python x.py`, `bash x.sh`, `./x`, `uv run x.py`), at most three. Sourced files are never read: they are often credentials.
+ * A script after `cd DIR &&` resolves in DIR; after a directory change the scanner cannot follow (`cd -`, `popd`, a change inside a pipeline, group or `||`), none is shown.
+ */
 export function scriptsRun(command: string, cwd: string): string[] {
-	const segments = tokenizeShellSegments(command);
+	const tokens = lexShellCommand(command);
+	const grouped = tokens.some(token => token.kind === "separator" && /[()]/.test(token.raw));
+	// Each simple command with the operators before and after it, split as `tokenizeShellSegments` splits.
+	const segments: { words: string[]; before: string; after: string }[] = [];
+	let words: string[] = [];
+	let before = "";
+	for (const token of tokens) {
+		if (token.kind === "word") {
+			if (token.value.length > 0) words.push(token.value);
+		} else if (/[\n;&|()]/.test(token.raw) && words.length > 0) {
+			const operators = token.raw.replace(/[ \t]/g, "");
+			segments.push({ words, before, after: operators });
+			words = [];
+			before = operators;
+		}
+	}
+	if (words.length > 0) segments.push({ words, before, after: "" });
+	let base: string | undefined = cwd;
 	const written = new Set<string>();
 	const found: string[] = [];
 	for (const segment of segments) {
-		for (const word of writtenWords(segment)) {
-			const target = resolveWord(word, cwd);
+		if (base === undefined) break;
+		for (const word of writtenWords(segment.words)) {
+			const target = resolveWord(word, base);
 			if (target) written.add(target);
 		}
-		const script = scriptFile(segment);
-		const file = script === undefined ? undefined : resolveWord(script, cwd);
+		const plain =
+			segment.words[0] === "builtin" || segment.words[0] === "command" ? segment.words.slice(1) : segment.words;
+		if (inTable(DIRECTORY_CHANGES, plain[0] ?? "")) {
+			const sequential = !grouped && SEQUENTIAL.test(segment.before) && SEQUENTIAL.test(segment.after);
+			base = sequential ? changedDirectory(plain, base) : undefined;
+			continue;
+		}
+		const script = scriptFile(segment.words);
+		const file = script === undefined ? undefined : resolveWord(script, base);
 		if (file === undefined || written.has(file) || found.includes(file)) continue;
 		if (SYSTEM_TREES.some(tree => file === tree || file.startsWith(`${tree}/`))) continue;
 		found.push(file);
@@ -576,8 +625,12 @@ export function needsJudgement(call: GuardedCall, cwd: string): boolean {
 		const targets = call.targets ?? [];
 		// Internal URLs (`local://`, `xd://`) are the session's own artifacts or dispatch on their own.
 		if (targets.length > 0) return targets.some(target => !target.includes("://") && !pathIsWithin(cwd, target));
-		// Built-in write-tier tools without targets keep session state; an MCP tool can act anywhere.
-		return isMCPToolName(call.toolName);
+		// An MCP tool can act anywhere. Built-in write-tier tools without targets keep session state, unless a path
+		// argument (`tts` `output_path`) names a file outside the working directory.
+		if (isMCPToolName(call.toolName)) return true;
+		return pathArguments(call.args).some(
+			file => !file.includes("://") && !pathIsWithin(cwd, resolveToCwd(file, cwd)),
+		);
 	}
 	return true;
 }
@@ -789,8 +842,10 @@ export class ToolGuard {
 			const allowances = cfgToolGuardAllowances.get(authority)?.trim();
 			const command = call.toolName === "bash" ? stringArg(call.args, "command") : undefined;
 			const runIn = stringArg(call.args, "cwd");
-			const runDir = runIn ? path.resolve(cwd, runIn) : cwd;
-			const scripts = command === undefined ? [] : scriptsRun(command, runDir);
+			// Resolved as bash resolves it (`~` expanded); a URL directory runs its process in the session's.
+			const urlCwd = runIn?.includes("://") === true;
+			const runDir = runIn && !urlCwd ? resolveToCwd(runIn, cwd) : cwd;
+			const scripts = command === undefined || urlCwd ? [] : scriptsRun(command, runDir);
 			const shown: JsonValue[] = [];
 			for (const file of scripts) shown.push({ path: file, content: await readScript(file) });
 			const state: Record<string, JsonValue> = {

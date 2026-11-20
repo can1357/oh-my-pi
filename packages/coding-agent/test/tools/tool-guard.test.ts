@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, setSystemTime, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, AgentTool, AgentToolContext, ToolTier } from "@oh-my-pi/pi-agent-core";
 import type { JudgmentRequest, Questions } from "@oh-my-pi/pi-ai";
@@ -14,6 +15,7 @@ import {
 	type GuardJudge,
 	guardVerdict,
 	isReadOnlyCommand,
+	scriptsRun,
 	ToolGuard,
 	type ToolGuardHost,
 } from "@oh-my-pi/pi-coding-agent/tools/tool-guard";
@@ -163,6 +165,22 @@ describe("tool guard", () => {
 		expect(judge.requests).toHaveLength(4);
 	});
 
+	it("judges a targetless write-tier tool whose path argument leaves the working directory", async () => {
+		const judge = fakeJudge({ routine: 1 }, 0);
+		const { guard } = guardWith(judge);
+		const tts = tool("tts", "write");
+
+		await guard.check(tts, { text: "hi", output_path: "out/hello.mp3" }, "write");
+		await guard.check(tts, { text: "hi", output_path: path.join(cwd, "hello.wav") }, "write");
+		await guard.check(tool("context_notes", "write"), { text: "notes" }, "write");
+		expect(judge.requests).toHaveLength(0);
+
+		await guard.check(tts, { text: "hi", output_path: "/etc/hosts" }, "write");
+		await guard.check(tts, { text: "hi", output_path: "~/.bashrc" }, "write");
+		await guard.check(tts, { text: "hi", output_path: "../outside.mp3" }, "write");
+		expect(judge.requests).toHaveLength(3);
+	});
+
 	it("classifies only reading commands as read-only", () => {
 		for (const command of [
 			"cat a | wc -l",
@@ -183,6 +201,9 @@ describe("tool guard", () => {
 			"git config --get user.name",
 			"git config -l",
 			"git config --global --show-origin --get core.pager",
+			// `--filter=SPEC` chooses objects; only `--filters` runs the smudge filter.
+			"git rev-list --objects --filter=blob:none HEAD",
+			"git cat-file --batch-check --batch-all-objects --filter=blob:none",
 		]) {
 			expect(isReadOnlyCommand(command)).toBe(true);
 		}
@@ -211,6 +232,9 @@ describe("tool guard", () => {
 			"git log -p --textconv",
 			"sort --compress-program=/tmp/x data.txt",
 			"sort -o /etc/passwd data.txt",
+			// `git cat-file --filters` runs the repository's smudge filter on the blob.
+			"git cat-file --filters --path=notes.txt HEAD:notes.txt",
+			"git cat-file --filters=x HEAD:notes.txt",
 			"sort -uo out data.txt",
 			// GNU time writes its report to a file; rg runs programs to fill a hyperlink's host; bare git stash pushes.
 			"time --output=/etc/important.conf git status",
@@ -478,6 +502,29 @@ describe("tool guard", () => {
 		]);
 	});
 
+	it("resolves the scripts a command runs in the directory it moved to", () => {
+		expect(scriptsRun("cd job && python task.py", cwd)).toEqual([path.join(cwd, "job/task.py")]);
+		expect(scriptsRun("cd /tmp/job; ./run.sh", cwd)).toEqual(["/tmp/job/run.sh"]);
+		expect(scriptsRun("python a.py && cd sub && command cd deeper && python b.py", cwd)).toEqual([
+			path.join(cwd, "a.py"),
+			path.join(cwd, "sub/deeper/b.py"),
+		]);
+		expect(scriptsRun("cd && ./x.sh", cwd)).toEqual([path.join(os.homedir(), "x.sh")]);
+		// After a move the scanner cannot follow, no further script is shown.
+		for (const command of [
+			"cd - && python x.py",
+			"popd && python x.py",
+			"cd $DIR && python x.py",
+			"(cd sub && python x.py)",
+			"cd sub || python x.py",
+			"ls | cd sub && python x.py",
+			"cd sub & python x.py",
+		]) {
+			expect(scriptsRun(command, cwd)).toEqual([]);
+		}
+		expect(scriptsRun("python first.py; cd - && python x.py", cwd)).toEqual([path.join(cwd, "first.py")]);
+	});
+
 	/** A host short of memory: tasks stalled on memory, 3% of memory left, swap mostly used. */
 	const strainedHost: HostPressure = {
 		cpu: { some: { avg10: 20, avg60: 15 } },
@@ -519,8 +566,17 @@ describe("tool guard", () => {
 		await guard.check(bash, { command: "bun test" }, "exec");
 		await guard.check(bash, { command: "bun test", cwd: "sub" }, "exec");
 		await guard.check(bash, { command: "bun test", cwd: "/mnt/scratch" }, "exec");
+		// `~` expands as bash expands it; a URL directory runs its process in the session's directory.
+		await guard.check(bash, { command: "bun test", cwd: "~/scratch" }, "exec");
+		await guard.check(bash, { command: "bun test", cwd: "skill://demo" }, "exec");
 
-		expect(pressureDirs).toEqual([cwd, path.join(cwd, "sub"), "/mnt/scratch"]);
+		expect(pressureDirs).toEqual([
+			cwd,
+			path.join(cwd, "sub"),
+			"/mnt/scratch",
+			path.join(os.homedir(), "scratch"),
+			cwd,
+		]);
 	});
 
 	it("refuses heavy work on a strained host, naming the strain and pointing elsewhere", async () => {
