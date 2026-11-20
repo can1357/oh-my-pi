@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed a failing embedding provider (`embeddings.provider` or `setEmbeddingProvider`) leaving no trace: when its `embed()` or `available()` throws, the failure is now logged with the error, at debug level or at warn with runtime debug on, like local model failures; embedding still falls back to `null` as before
+- Fixed gist participants leaving out names used mid-sentence when sentence openers like `The` or `It` filled the five slots first ([#16725](https://github.com/can1357/oh-my-pi/issues/16725))
 
 ## [18.22.1] - 2026-11-17
 
