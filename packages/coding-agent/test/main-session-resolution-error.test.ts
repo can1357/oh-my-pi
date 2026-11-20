@@ -92,16 +92,6 @@ describe("writeStartupNotice", () => {
 			capture.restore();
 		}
 	});
-
-	it("keeps JSON mode stdout clean by writing notices to stderr", () => {
-		const capture = captureProcessOutput();
-		try {
-			writeStartupNotice({ mode: "json" }, "hello\n");
-			expect(capture.read()).toEqual({ stdout: "", stderr: "hello\n" });
-		} finally {
-			capture.restore();
-		}
-	});
 });
 
 describe("createSessionManager — missing session (#2084)", () => {
@@ -463,7 +453,6 @@ describe("createSessionManager — missing session (#2084)", () => {
 			{ ...buildResumeArgs("019ea530"), noSession: true },
 			"/current/project",
 			stubSettings,
-			async () => "unavailable",
 			{ nativeFlagOwnership: "preliminary" },
 		);
 

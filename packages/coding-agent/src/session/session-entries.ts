@@ -54,6 +54,12 @@ export function modelRoleOf(role: string | undefined): string | undefined {
 		: role;
 }
 
+/** Git worktree roots recorded for the session's project, used to resume after its directory is removed. */
+export interface SessionRepository {
+	sessionWorktreeRoot: string;
+	primaryWorktreeRoot: string;
+}
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
@@ -82,6 +88,7 @@ export interface SessionHeader {
 	providerPromptCacheKey?: string;
 	/** Local-only Task candidate, gated by the actual request model's cache policy; omitted from shares and HTML. */
 	taskPromptCacheKey?: string;
+	repository?: SessionRepository;
 }
 
 export interface NewSessionOptions {

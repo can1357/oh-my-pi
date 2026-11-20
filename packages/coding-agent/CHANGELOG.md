@@ -155,6 +155,9 @@
 - Fixed MCP OAuth reauthentication errors to expose registration endpoints, status details, and remedies, and fixed auth-broker shutdown so refreshed tokens are saved safely.
 - Fixed Spotlight retry and account handling, including waitlisted accounts, rate limits, outages, and request identification.
 - Fixed cross-platform shell and desktop behavior, including macOS startup and redraw performance, Windows file operations and application lookup, speech output, and desktop opening.
+- Commit draft `show()` now prints each run of lines from one unit under a single `1a ✓ Main` header instead of repeating the unit, mark, and owner on every line
+- The "Separate checkouts" guidance and the git guard's hint for a refused command now say how work comes back from an ovnfs checkout: `ovnfs land` puts its commits on the folder's branch with their files, `ovnfs pull` brings the folder's newer files in to resolve a conflict there, and `ovnfs rm` discards the rest. They no longer send agents through `apply --branch` and a fast-forward merge of their own, and point at `ovnfs help` for the rest (needs an ovnfs with `land`)
+- Resuming a session from a removed worktree while outside its repository now recovers it into the session's saved primary checkout when the session still belongs to it, instead of prompting to re-root it into the current folder; otherwise it asks for an existing directory, and a failed switch rolls the move back ([#16781](https://github.com/can1357/oh-my-pi/pull/16781) by [@ton-anywhere](https://github.com/ton-anywhere))
 
 ## [18.22.2] - 2026-11-18
 

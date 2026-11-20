@@ -273,8 +273,8 @@ describe("resume of a session whose directory is gone", () => {
 		}, 15_000);
 	}
 
-	it("interactive asks, and yes moves", async () => {
-		answer = "y";
+	it("interactive asks for an existing directory, and the answer moves", async () => {
+		answer = launchDir;
 		const run = await runCli(["--resume", storedId.slice(0, 8)], true);
 
 		expect(createInterface).toHaveBeenCalledTimes(1);
