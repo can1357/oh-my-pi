@@ -440,6 +440,13 @@ describe("chat-completions history estimate", () => {
 
 	const dropping = completionsModel("Qwen3.8-27B", { replayReasoningContent: false });
 	const replaying = completionsModel("Qwen3.8-27B", { replayReasoningContent: true });
+	const copilotGemini = buildModel({
+		...dropping,
+		id: "gemini-4-neon",
+		provider: "github-copilot",
+		baseUrl: "https://api.githubcopilot.com",
+		compat: { replayReasoningContent: false },
+	});
 	const floor = { excludeEncryptedReasoning: true };
 	const toolCallOnly = new Tokenizer(dropping).countMessage({ ...thinkingTurn(dropping, "x"), content: [toolCall] });
 
@@ -519,18 +526,11 @@ describe("chat-completions history estimate", () => {
 	});
 
 	test("counts all replayed Copilot summary text but not its opaque state", () => {
-		const model = buildModel({
-			...dropping,
-			id: "gemini-4-neon",
-			provider: "github-copilot",
-			baseUrl: "https://api.githubcopilot.com",
-			compat: { replayReasoningContent: false },
-		});
 		const first = "Start with the README. ".repeat(120);
 		const second = "Then check the manifest. ".repeat(120);
 		const opaque = "opaque-state".repeat(300);
 		const turn: AssistantMessage = {
-			...thinkingTurn(model, "reasoning_text"),
+			...thinkingTurn(copilotGemini, "reasoning_text"),
 			content: [
 				{
 					type: "thinking",
@@ -541,15 +541,42 @@ describe("chat-completions history estimate", () => {
 				toolCall,
 			],
 		};
-		const messages = convertMessages(model, { messages: [turn] }, model.compat);
+		const messages = convertMessages(copilotGemini, { messages: [turn] }, copilotGemini.compat);
 		expect(messages[0]).toMatchObject({
 			role: "assistant",
 			reasoning_text: first + second,
 			reasoning_opaque: opaque,
 		});
 
-		const tokenizer = new Tokenizer(model);
+		const tokenizer = new Tokenizer(copilotGemini);
 		const expected = tokenizer.countMessage({ ...turn, content: [toolCall] }) + tokenizer.countTokens(first + second);
+		expect(tokenizer.countMessage(turn)).toBe(expected);
+		expect(tokenizer.countMessage(turn, floor)).toBe(expected);
+	});
+
+	test.each([
+		{ stopReason: "length", replays: false },
+		{ stopReason: "stop", replays: true },
+	] as const)("counts Copilot thinking-only turns as replayed after $stopReason", ({ stopReason, replays }) => {
+		const signature = JSON.stringify({ field: "reasoning_text", reasoningOpaque: "opaque-state" });
+		const turn: AssistantMessage = {
+			...thinkingTurn(copilotGemini, signature),
+			content: [{ type: "thinking", thinking: THINKING, thinkingSignature: signature }],
+			stopReason,
+		};
+		const messages = convertMessages(copilotGemini, { messages: [turn] }, copilotGemini.compat);
+		if (replays) {
+			expect(messages).toHaveLength(1);
+			expect(messages[0]).toMatchObject({
+				role: "assistant",
+				reasoning_text: THINKING,
+				reasoning_opaque: "opaque-state",
+			});
+		} else {
+			expect(messages).toEqual([]);
+		}
+		const tokenizer = new Tokenizer(copilotGemini);
+		const expected = replays ? tokenizer.countTokens(THINKING) : 0;
 		expect(tokenizer.countMessage(turn)).toBe(expected);
 		expect(tokenizer.countMessage(turn, floor)).toBe(expected);
 	});

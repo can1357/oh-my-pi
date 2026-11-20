@@ -544,9 +544,10 @@ export class Tokenizer {
 					message.stopReason !== "toolUse" &&
 					content.some(block => block.type === "toolCall");
 				const untrustedIndex = invalidStop ? content.length - 1 : -1;
-				const copilotReasoning = abandonedToolUse
-					? undefined
-					: getCopilotReasoningReplay(message, this.#reasoningReader, untrustedIndex);
+				const copilotReasoning =
+					abandonedToolUse || shouldDropTruncatedThinkingOnlyAssistant(message)
+						? undefined
+						: getCopilotReasoningReplay(message, this.#reasoningReader, untrustedIndex);
 				if (copilotReasoning?.text) fragments.push(copilotReasoning.text);
 				// A filtering Responses reader replays no reasoning item and its encoder
 				// drops the turn's own thinking blocks, so usually neither their text nor
