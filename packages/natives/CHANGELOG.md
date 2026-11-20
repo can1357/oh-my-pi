@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `vcs.discardsWorkSync()` to check, within an optional timeout, whether a git command would discard uncommitted work ([#19717](https://github.com/can1357/oh-my-pi/pull/19717) by [@Xytronix](https://github.com/Xytronix))
+- Added `vcs.discardsWorkSync()` to check, within an optional timeout, whether a git command would discard uncommitted work ([#19892](https://github.com/can1357/oh-my-pi/pull/19892) by [@Xytronix](https://github.com/Xytronix))
 - The `sd` shell builtin can require an exact match count with `--expect N` and show the applied changes with `-U N` or `--unified N`.
 
 - Added `ShellFilesystem.onFileChange`: the embedded shell reports each text file git would track that a command changed itself (a builtin's write, rename or removal; a redirection's target) with its content before and after

@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added opt-in `tools.guardRules` setting: best-effort checks that ask before top-level bash commands read credentials or send secrets over the network, and before `read`/`grep` of credential files ([#19293](https://github.com/can1357/oh-my-pi/pull/19293) by [@Xytronix](https://github.com/Xytronix))
-- Added `discard_changes` and `kills_harness` guard rules under `tools.guardRules`: ask before a git command would discard uncommitted work or a `pkill`/`killall` would stop omp ([#19717](https://github.com/can1357/oh-my-pi/pull/19717) by [@Xytronix](https://github.com/Xytronix))
 ### Breaking Changes
 
 - Removed the `mcp/transports/*` and `mcp/tool-cache` SDK exports, `DeferredMCPTool`, and the cache and reconnect-policy parameters of `MCPManager`; MCP servers are now reached through the MCP host (`mcp/host/*`)
@@ -15,6 +11,8 @@
 
 ### Added
 
+- Added opt-in `tools.guardRules` setting: best-effort checks that ask before top-level bash commands read credentials or send secrets over the network, and before `read`/`grep` of credential files ([#19902](https://github.com/can1357/oh-my-pi/pull/19902) by [@Xytronix](https://github.com/Xytronix))
+- Added `discard_changes` and `kills_harness` guard rules under `tools.guardRules`: ask before a git command would discard uncommitted work or a `pkill`/`killall` would stop omp ([#19892](https://github.com/can1357/oh-my-pi/pull/19892) by [@Xytronix](https://github.com/Xytronix))
 - Sloppy edits can replace, delete or move a syntax block by its opening line without quoting its body, and rename a whole identifier with `*** Find all`
 - MCP servers now run in the omp daemon instead of inside every session: sessions with the same server configuration share one process for servers on MCP 2026-07-28, and `/mcp list` shows each server's state, pid and how many sessions share it. Turn off with `mcp.shared` ([#6819](https://github.com/can1357/oh-my-pi/issues/6819))
 - MCP servers start on first use: tool, prompt and resource lists come from a shared cache, so a session that never calls a server starts no process for it, and an unused 2026-07-28 server stops after `mcp.idleStopMinutes` (default 5) ([#2888](https://github.com/can1357/oh-my-pi/issues/2888))
