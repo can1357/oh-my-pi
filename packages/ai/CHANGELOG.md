@@ -10,6 +10,7 @@
 - Fixed chat completions dropping reasoning sent only as `reasoning_details` (Bifrost Gemini) ([#19595](https://github.com/can1357/oh-my-pi/pull/19595) by [@Xytronix](https://github.com/Xytronix))
 - Fixed Antigravity CLI quota exhaustion (`RESOURCE_EXHAUSTED`) streaming into replies as "API error" text; the request now fails with a 429 rate-limit error, so omp's retry, credential rotation and model fallback policy applies instead of a thinking-loop retry ([#19382](https://github.com/can1357/oh-my-pi/pull/19382) by [@gimso2x](https://github.com/gimso2x))
 - Anthropic requests now declare `Context.inactiveTools` as deferred from the first request, so a tool activated later no longer re-writes the cached system prompt and transcript ([#19826](https://github.com/can1357/oh-my-pi/issues/19826))
+- Fixed tool-call arguments on OpenAI-compatible chat completions hosts staying hidden until the call finished, so tool cards fill in as they stream and speculative subagent launch can start early ([#17551](https://github.com/can1357/oh-my-pi/issues/17551))
 
 ## [19.0.1] - 2026-11-19
 
