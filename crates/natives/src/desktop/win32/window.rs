@@ -34,10 +34,10 @@ use windows_sys::{
 			WindowsAndMessaging::{
 				CWP_SKIPDISABLED, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, ChildWindowFromPointEx,
 				EnumChildWindows, EnumWindows, GA_PARENT, GA_ROOT, GUITHREADINFO, GWL_EXSTYLE,
-				GWL_STYLE, GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo,
+				GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo,
 				GetLayeredWindowAttributes, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId,
 				IsChild, IsIconic, IsWindowVisible, LWA_ALPHA, LWA_COLORKEY, SetForegroundWindow,
-				WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+				WS_EX_LAYERED,
 			},
 		},
 	},
@@ -125,9 +125,9 @@ pub(super) fn paused_while_covered(hwnd: HWND) -> bool {
 }
 
 /// Whether top-level `hwnd` appears fully covered: no part of its frame lies
-/// on a display outside the windows above it in the z-order that Chromium
-/// counts as covers (see [`occluder`]). An approximation of Chromium's own
-/// check, whose geometry differs in places. False when any of that cannot be
+/// on a display outside the opaque windows above it in the z-order (see
+/// [`occluder`]). Geometry only: it approximates, and never reads, the
+/// occlusion state Chromium last published. False when any of that cannot be
 /// read.
 pub(super) fn fully_covered(hwnd: HWND) -> bool {
 	struct Walk {
@@ -197,14 +197,14 @@ fn displays() -> Option<Region> {
 	complete.then_some(union)
 }
 
-/// The screen rectangle `hwnd` hides what lies under, as Chromium's own
-/// occlusion check counts it (`IsWindowVisibleAndFullyOpaque` in
-/// `ui/gfx/win/hwnd_util.cc`): none unless it is visible, not minimized, not
-/// cloaked (another virtual desktop, a suspended UWP frame), without
-/// `WS_EX_TRANSPARENT`, not a tool window other than the taskbar, not a popup
-/// other than the taskbar or a Chromium widget, and not see-through layered;
-/// its frame, cut to a rectangular window region, and none for an empty or
-/// shaped one.
+/// The screen rectangle `hwnd` hides what lies under: none unless it is
+/// visible, not minimized, not cloaked (another virtual desktop, a suspended
+/// UWP frame) and not see-through layered; its frame, cut to a rectangular
+/// window region, and none for an empty or shaped one. A click-through, tool
+/// or popup style does not by itself disqualify a cover: Chromium's next
+/// occlusion pass skips such windows, but a page it paused under an earlier
+/// cover can stay paused until it recalculates, after such a window takes
+/// that cover's place or its style.
 fn occluder(hwnd: HWND) -> Option<RECT> {
 	let mut cloaked = 0u32;
 	// SAFETY: every call validates the handle; the out-pointers are writable
@@ -223,18 +223,6 @@ fn occluder(hwnd: HWND) -> Option<RECT> {
 			return None;
 		}
 		let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-		// Chromium skips these windows as covers even when they are opaque, so
-		// it keeps drawing under them and its reads stay current.
-		if style & WS_EX_TRANSPARENT != 0 {
-			return None;
-		}
-		let tool = style & WS_EX_TOOLWINDOW != 0;
-		if (tool || GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_POPUP != 0)
-			&& with_class_name(hwnd, |class| {
-				class != "Shell_TrayWnd" && (tool || !class.starts_with("Chrome_WidgetWin_"))
-			}) {
-			return None;
-		}
 		if style & WS_EX_LAYERED != 0 {
 			// Without attributes the window was drawn by UpdateLayeredWindow, with
 			// per-pixel alpha.
@@ -709,9 +697,10 @@ mod tests {
 		Graphics::Gdi::SetWindowRgn,
 		System::LibraryLoader::GetModuleHandleW,
 		UI::WindowsAndMessaging::{
-			CreateWindowExW, DefWindowProcW, DestroyWindow, HWND_TOPMOST, RegisterClassW,
+			CreateWindowExW, DefWindowProcW, DestroyWindow, GWL_STYLE, HWND_TOPMOST, RegisterClassW,
 			SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-			SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+			SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos, WNDCLASSW, WS_EX_TOOLWINDOW,
+			WS_EX_TRANSPARENT, WS_OVERLAPPEDWINDOW, WS_POPUP,
 		},
 	};
 
@@ -819,41 +808,23 @@ mod tests {
 		unsafe { SetWindowRgn(cover, null_mut(), 1) };
 		assert!(marked(target));
 
-		// SAFETY: `GetWindowLongW` validates the handle.
-		let plain = unsafe { GetWindowLongW(cover, GWL_EXSTYLE) };
-		// SAFETY: this thread owns `cover`.
-		unsafe { SetWindowLongW(cover, GWL_EXSTYLE, plain | WS_EX_TRANSPARENT as i32) };
-		assert!(
-			!marked(target),
-			"Chromium does not count an opaque WS_EX_TRANSPARENT window as covering it"
-		);
-		// SAFETY: as above.
-		unsafe { SetWindowLongW(cover, GWL_EXSTYLE, plain) };
-		assert!(marked(target));
-
-		// SAFETY: this thread owns `cover`.
-		unsafe { SetWindowLongW(cover, GWL_EXSTYLE, plain | WS_EX_TOOLWINDOW as i32) };
-		assert!(!marked(target), "Chromium does not count an opaque tool window as covering it");
-		// SAFETY: as above.
-		unsafe { SetWindowLongW(cover, GWL_EXSTYLE, plain) };
-		assert!(marked(target));
-
-		// SAFETY: `GetWindowLongW` validates the handle.
-		let framed = unsafe { GetWindowLongW(cover, GWL_STYLE) };
-		// SAFETY: this thread owns `cover`.
-		unsafe { SetWindowLongW(cover, GWL_STYLE, framed | WS_POPUP as i32) };
-		assert!(!marked(target), "Chromium does not count an opaque popup as covering it");
-		let widget = window("Chrome_WidgetWin_7", rect(50, 50, 400, 400));
-		// SAFETY: this thread owns `widget`.
-		unsafe {
-			let style = GetWindowLongW(widget, GWL_STYLE);
-			SetWindowLongW(widget, GWL_STYLE, style | WS_POPUP as i32);
-		}
-		assert!(marked(target), "but it counts a popup of its own");
-		// SAFETY: this thread owns both windows.
-		unsafe {
-			DestroyWindow(widget);
-			SetWindowLongW(cover, GWL_STYLE, framed);
+		// SAFETY: `GetWindowLongW` validates each handle.
+		let (plain, framed) =
+			unsafe { (GetWindowLongW(cover, GWL_EXSTYLE), GetWindowLongW(cover, GWL_STYLE)) };
+		for (index, style, kind) in [
+			(GWL_EXSTYLE, plain | WS_EX_TRANSPARENT as i32, "click-through"),
+			(GWL_EXSTYLE, plain | WS_EX_TOOLWINDOW as i32, "tool"),
+			(GWL_STYLE, framed | WS_POPUP as i32, "popup"),
+		] {
+			// SAFETY: this thread owns `cover`; `GetWindowLongW` validates it.
+			let set = unsafe {
+				SetWindowLongW(cover, index, style);
+				GetWindowLongW(cover, index)
+			};
+			assert_eq!(set, style, "the {kind} style took");
+			assert!(marked(target), "an opaque {kind} window over all of it");
+			// SAFETY: as above.
+			unsafe { SetWindowLongW(cover, index, if index == GWL_STYLE { framed } else { plain }) };
 		}
 		assert!(marked(target));
 
