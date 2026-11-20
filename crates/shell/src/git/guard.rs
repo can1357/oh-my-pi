@@ -59,12 +59,16 @@ const OWN_WORKTREE: &str = "In a worktree of your own (git worktree add <path> [
 fn own_checkout_hint(ovnfs: Option<&str>) -> Cow<'static, str> {
 	match ovnfs.map(str::trim).filter(|command| !command.is_empty()) {
 		Some(command) => {
-			// The hint is pasted into shell commands: a path with spaces must stay
-			// one word.
-			let command = if command.contains(char::is_whitespace) {
-				Cow::Owned(format!("\"{command}\""))
-			} else {
+			// The hint is pasted into shell commands: a path outside plain word
+			// characters is single-quoted, so spaces, `$` and backticks stay
+			// literal.
+			let plain = command
+				.chars()
+				.all(|c| c.is_ascii_alphanumeric() || "_./:@%+,=-".contains(c));
+			let command = if plain {
 				Cow::Borrowed(command)
+			} else {
+				Cow::Owned(format!("'{}'", command.replace('\'', r"'\''")))
 			};
 			Cow::Owned(format!(
 				"In an ovnfs checkout of your own ({command} new --name <name>) it runs, and \
@@ -1072,9 +1076,12 @@ mod tests {
 	}
 
 	#[test]
-	fn ovnfs_hint_keeps_a_spaced_command_one_shell_word() {
-		let hint = own_checkout_hint(Some("C:/Program Files/ovnfs/ovnfs.exe"));
-		assert!(hint.contains("(\"C:/Program Files/ovnfs/ovnfs.exe\" new --name <name>)"), "{hint}");
+	fn ovnfs_hint_keeps_the_command_one_literal_shell_word() {
+		let hint = own_checkout_hint(Some("C:/Program Files/$HOME/it's/ovnfs.exe"));
+		assert!(
+			hint.contains(r"('C:/Program Files/$HOME/it'\''s/ovnfs.exe' new --name <name>)"),
+			"{hint}"
+		);
 		let hint = own_checkout_hint(Some("/opt/ovnfs"));
 		assert!(hint.contains("(/opt/ovnfs new --name <name>)"), "{hint}");
 	}
