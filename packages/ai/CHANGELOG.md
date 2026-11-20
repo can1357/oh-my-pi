@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Strict tool schemas no longer close a bare `type: "object"` property into a `{}`-only shape while still reporting `strict: true`; such tools now send a non-strict schema, so calls that set fields of that property are accepted ([#10125](https://github.com/can1357/oh-my-pi/issues/10125))
 - LiteLLM requests now switch to another configured key when a 422 budget-exceeded response stops the current key ([#19860](https://github.com/can1357/oh-my-pi/issues/19860)).
 - GPT-6.2 system prompts are now sent as leading `developer` input messages on third-party Responses proxies too, so they hit the prompt cache instead of billing at the full input rate every turn ([openai/codex#62312](https://github.com/openai/codex/issues/62312))
 - Fixed thinking detection so a failed check of one request style no longer ignores another style that already worked, and the next request no longer repeats a style the server already refused. ([#19758](https://github.com/can1357/oh-my-pi/pull/19758) by [@eggpeat](https://github.com/eggpeat))
