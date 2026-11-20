@@ -300,4 +300,33 @@ describe("Image component Kitty format", () => {
 		expect(drawn).toContain("\x1b_Ga=T,f=100");
 		expect(drawn).toContain(";iVBORw0KGgo");
 	});
+
+	it("sizes a converted JPEG from its EXIF-rotated PNG, not the unrotated JPEG header", async () => {
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const seed = Buffer.from(IMAGE.data, "base64");
+		const jpeg = Buffer.from(await new Bun.Image(seed).resize(400, 100).jpeg().bytes());
+		// APP1 Exif, big-endian TIFF, one IFD entry: Orientation (0x0112) = 6, rotate 90° clockwise.
+		const exif = Buffer.from(
+			"457869660000" + "4d4d002a00000008" + "0001" + "011200030000000100060000" + "00000000",
+			"hex",
+		);
+		const app1 = Buffer.concat([Buffer.from([0xff, 0xe1, 0, exif.length + 2]), exif]);
+		const rotated = Buffer.concat([jpeg.subarray(0, 2), app1, jpeg.subarray(2)]).toBase64();
+		const portrait = (await new Bun.Image(seed).resize(100, 400).png().bytes()).toBase64();
+		const placement = (lines: readonly string[]) =>
+			lines.join("").match(/\x1b_Ga=T,f=100,q=2,C=1,(c=\d+,r=\d+)/)?.[1];
+		const landed = Promise.withResolvers<void>();
+		const image = new Image(
+			rotated,
+			"image/jpeg",
+			{ fallbackColor: text => text },
+			{ requestRender: landed.resolve },
+		);
+
+		image.render(80);
+		await landed.promise;
+		const expected = placement(new Image(portrait, "image/png", { fallbackColor: text => text }).render(80));
+		expect(expected).toBeDefined();
+		expect(placement(image.render(80))).toBe(expected);
+	});
 });

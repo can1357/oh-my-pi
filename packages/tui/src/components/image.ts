@@ -52,6 +52,12 @@ interface SixelEncode {
 	sequence?: string | null;
 }
 
+/** A PNG copy of an image for Kitty, sized from the PNG itself. */
+interface KittyPng {
+	data: string;
+	dimensions: ImageDimensions;
+}
+
 /** Renders in progress whose rows are bound for native scrollback. */
 let scrollbackRenderDepth = 0;
 
@@ -721,8 +727,12 @@ export class Image implements Component {
 	#native?: { linked: boolean; node: NativeNode };
 	/** Newest SIXEL encode: target size, compositing background, and settled sequence. */
 	#sixel?: SixelEncode;
-	/** PNG copy of a non-PNG source for Kitty: data once converted, `null` once conversion failed. */
-	#kittyPng?: string | null;
+	/**
+	 * PNG copy of the source for Kitty, with its own size (decoding applies JPEG
+	 * EXIF orientation, so it can differ from the source header's); `null` once
+	 * conversion failed.
+	 */
+	#kittyPng?: KittyPng | null;
 	#kittyPngPending = false;
 
 	constructor(
@@ -826,27 +836,33 @@ export class Image implements Component {
 	}
 
 	/**
-	 * Base64 PNG to send over Kitty, whose `f=100` takes PNG only: any other
-	 * format leaves the placement's reserved rows blank. A non-PNG source answers
+	 * PNG to send over Kitty, whose `f=100` takes PNG only: any other format
+	 * leaves the placement's reserved rows blank. A non-PNG source answers
 	 * `undefined` (text fallback) until its off-thread conversion lands and
 	 * repaints, and `null` when it cannot be decoded.
 	 */
-	#kittyPngData(): string | null | undefined {
-		if (this.#mimeType === "image/png") return this.#base64Data;
+	#kittyPngData(): KittyPng | null | undefined {
 		if (this.#kittyPng !== undefined) return this.#kittyPng;
+		if (this.#mimeType === "image/png") {
+			return (this.#kittyPng = { data: this.#base64Data, dimensions: this.#dimensions });
+		}
+		const toKittyPng = (data: string): KittyPng => ({
+			data,
+			dimensions: getImageDimensions(data, "image/png") ?? this.#dimensions,
+		});
 		const source = { type: "image" as const, data: this.#base64Data, mimeType: this.#mimeType };
 		const cached = cachedPngConversion(source);
-		if (cached) return (this.#kittyPng = cached.data);
+		if (cached) return (this.#kittyPng = toKittyPng(cached.data));
 		if (this.#kittyPngPending) return undefined;
 		this.#kittyPngPending = true;
-		const settle = (png: string | null): void => {
+		const settle = (png: KittyPng | null): void => {
 			this.#kittyPng = png;
 			this.invalidate();
 			if (this.#options.requestRender) this.#options.requestRender();
 			else this.#budget?.requestRender();
 		};
 		convertImageToPngShared(source).then(
-			({ data }) => settle(data),
+			({ data }) => settle(toKittyPng(data)),
 			() => settle(null),
 		);
 		return undefined;
@@ -927,11 +943,12 @@ export class Image implements Component {
 			// Transmit the data once (keyed by id); thereafter renderImage returns
 			// just the placement, so repaints never re-send the base64.
 			const needsTransmit = transmitsSeparately && (this.#budget?.shouldTransmit(imageId) ?? false);
-			const data = imageProtocol === ImageProtocol.Kitty ? this.#kittyPngData() : this.#base64Data;
+			const kittyPng = imageProtocol === ImageProtocol.Kitty ? this.#kittyPngData() : undefined;
+			const dimensions = kittyPng?.dimensions ?? this.#dimensions;
 			const result =
-				data == null
+				imageProtocol === ImageProtocol.Kitty && !kittyPng
 					? null
-					: renderImage(data, this.#dimensions, {
+					: renderImage(kittyPng?.data ?? this.#base64Data, dimensions, {
 							maxWidthCells: maxWidth,
 							maxHeightCells: this.#options.maxHeightCells,
 							imageId: this.#imageId,
@@ -956,11 +973,7 @@ export class Image implements Component {
 				// for SIXEL or rewrites the Kitty placement's visible source slice
 				// from the geometry registered below.
 				if (this.#imageId != null && this.#budget !== undefined) {
-					this.#budget.registerPlacementGeometry(
-						this.#imageId,
-						this.#dimensions.widthPx,
-						this.#dimensions.heightPx,
-					);
+					this.#budget.registerPlacementGeometry(this.#imageId, dimensions.widthPx, dimensions.heightPx);
 				}
 				lines = [];
 				for (let i = 0; i < result.rows - 1; i++) {
