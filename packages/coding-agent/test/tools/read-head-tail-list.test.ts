@@ -182,4 +182,22 @@ describe("read tool head+tail selectors", () => {
 		expect(output).toContain("literal-3.");
 		expect(output).not.toContain("row-1.");
 	});
+	it("rejects a bare trailing number and quotes the raw path", async () => {
+		const raw = `${filePath}:62:105`;
+
+		expect(splitPathAndSel(raw)).toEqual({ path: raw });
+
+		const error = await tool.execute("bare-trailing", { path: raw }).then(
+			() => {
+				throw new Error("read resolved a path that does not exist");
+			},
+			(caught: unknown) => caught,
+		);
+		expect(error).toBeInstanceOf(Error);
+		const message = error instanceof Error ? error.message : String(error);
+		expect(message).toContain(raw);
+		expect(message).not.toContain(`${filePath}:62'`);
+		expect(message).toContain("50-80");
+		expect(message).toContain("50+150");
+	});
 });
