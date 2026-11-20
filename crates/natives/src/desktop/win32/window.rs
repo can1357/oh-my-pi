@@ -22,7 +22,7 @@ use windows_sys::{
 			TOKEN_QUERY, TokenIntegrityLevel,
 		},
 		System::Threading::{
-			GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
+			GetCurrentProcess, GetCurrentThreadId, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
 			PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 		},
 		UI::{
@@ -718,9 +718,13 @@ pub(super) enum NativeButton {
 }
 
 /// Whether `hwnd` is a button [`click_button`] can click, and whether it is
-/// enabled; `None` for other windows, group boxes and split buttons.
+/// enabled; `None` for other windows, group boxes, split buttons and windows
+/// owned by this thread, whose synchronous message handlers cannot time out.
 pub(super) fn native_button(hwnd: HWND) -> Option<NativeButton> {
-	if !with_class_name(hwnd, |class| is_native_class(class, "Button")) {
+	// SAFETY: these APIs only query thread identifiers.
+	if unsafe { GetWindowThreadProcessId(hwnd, null_mut()) == GetCurrentThreadId() }
+		|| !with_class_name(hwnd, |class| is_native_class(class, "Button"))
+	{
 		return None;
 	}
 	// SAFETY: GetWindowLongW only queries the handle.
@@ -873,6 +877,77 @@ pub(super) mod tests {
 		super::{super::error::ErrorCode, capture},
 		*,
 	};
+
+	/// Owns fixture windows on a pumping thread, separate from the caller
+	/// sending bounded synchronous messages to them.
+	pub(in crate::desktop::win32) struct ButtonThread {
+		jobs: std::sync::mpsc::Sender<Box<dyn FnOnce() + Send>>,
+		id: u32,
+		thread: Option<std::thread::JoinHandle<()>>,
+	}
+
+	impl ButtonThread {
+		pub(in crate::desktop::win32) fn new() -> Self {
+			let (jobs, receive) = std::sync::mpsc::channel::<Box<dyn FnOnce() + Send>>();
+			let (ready, started) = std::sync::mpsc::sync_channel(1);
+			let thread = std::thread::spawn(move || {
+				use windows_sys::Win32::UI::WindowsAndMessaging::{
+					DispatchMessageW, GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, WM_APP,
+				};
+				let mut message = MSG::default();
+				// SAFETY: creates this thread's message queue before publishing its id.
+				unsafe { PeekMessageW(&raw mut message, null_mut(), 0, 0, PM_NOREMOVE) };
+				// SAFETY: queries only this thread.
+				ready.send(unsafe { GetCurrentThreadId() }).unwrap();
+				// SAFETY: message is writable; the loop dispatches only this thread's messages.
+				while unsafe { GetMessageW(&raw mut message, null_mut(), 0, 0) } > 0 {
+					if message.hwnd.is_null() && message.message == WM_APP {
+						receive.recv().unwrap()();
+					} else {
+						// SAFETY: GetMessageW filled message.
+						unsafe { DispatchMessageW(&raw const message) };
+					}
+				}
+			});
+			Self {
+				jobs,
+				id: started.recv_timeout(Duration::from_secs(30)).expect("fixture thread started"),
+				thread: Some(thread),
+			}
+		}
+
+		pub(in crate::desktop::win32) fn run<R: Send + 'static>(
+			&self,
+			job: impl FnOnce() -> R + Send + 'static,
+		) -> R {
+			use windows_sys::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP};
+			let (send, receive) = std::sync::mpsc::sync_channel(1);
+			self.jobs
+				.send(Box::new(move || {
+					let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+					let _ = send.send(result);
+				}))
+				.unwrap();
+			// SAFETY: new() has created the thread's queue; it lives until Drop.
+			assert_ne!(unsafe { PostThreadMessageW(self.id, WM_APP, 0, 0) }, 0);
+			match receive.recv_timeout(Duration::from_secs(30)).expect("fixture thread answered") {
+				Ok(result) => result,
+				Err(panic) => std::panic::resume_unwind(panic),
+			}
+		}
+	}
+
+	impl Drop for ButtonThread {
+		fn drop(&mut self) {
+			use windows_sys::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
+			// SAFETY: the fixture thread's queue exists until it handles WM_QUIT.
+			unsafe { PostThreadMessageW(self.id, WM_QUIT, 0, 0) };
+			// Do not turn a bounded fixture failure into a hang during unwinding.
+			if !std::thread::panicking() {
+				self.thread.take().unwrap().join().unwrap();
+			}
+		}
+	}
 
 	fn wide(text: &str) -> Vec<u16> {
 		text.encode_utf16().chain(Some(0)).collect()
@@ -1229,20 +1304,23 @@ pub(super) mod tests {
 
 	#[test]
 	fn button_clicks_land_before_returning_and_unchanged_check_boxes_fail() {
-		let parent = button_parent();
-		let child = |style: i32| button(parent, "BUTTON", style as u32);
-		// SAFETY: this thread owns the windows and subclasses only them.
+		let fixture = ButtonThread::new();
+		let parent_id = fixture.run(|| button_parent() as usize);
+		let parent = parent_id as HWND;
+		let child = |style: i32| {
+			fixture.run(move || button(parent_id as HWND, "BUTTON", style as u32) as usize) as HWND
+		};
+		// SAFETY: handles remain live on the fixture thread until cleanup.
 		unsafe {
 			let check = |button| SendMessageW(button, BM_GETCHECK, 0, 0);
 
-			// No message pump runs: the click must have reached the app when
-			// click_button reports success.
+			// Synchronous delivery must finish before click_button reports success.
 			let pushed = child(BS_PUSHBUTTON);
 			let group = child(BS_GROUPBOX);
 			assert_eq!(native_button(pushed), Some(NativeButton::Enabled));
 			assert_eq!(native_button(group), None);
 			click_button(pushed, parent).unwrap();
-			assert_eq!(clicks(), 1);
+			assert_eq!(fixture.run(clicks), 1);
 			EnableWindow(pushed, 0);
 			assert_eq!(native_button(pushed), Some(NativeButton::Disabled));
 			// A pointer click on a Win32 owner-drawn button stays a click at
@@ -1255,48 +1333,72 @@ pub(super) mod tests {
 			assert_eq!(check(toggles), BST_CHECKED as isize);
 
 			let refuses = child(BS_AUTOCHECKBOX);
-			subclass(refuses, Some(refusing_button));
+			let refuses_id = refuses as usize;
+			fixture.run(move || subclass(refuses_id as HWND, Some(refusing_button)));
 			let error = click_button(refuses, parent).unwrap_err();
 			assert!(matches!(error.code, ErrorCode::InputFailed), "{error:?}");
 			assert_eq!(check(refuses), BST_UNCHECKED as isize);
 
 			// The pre-read can synchronously disable the form. Recheck before
 			// delivery, not only when classifying the original target.
-			CLICK_MESSAGES.with(|clicks| clicks.set(0));
-			DISABLE_ON_CHECK.with(|disable| disable.set(true));
+			fixture.run(|| {
+				CLICK_MESSAGES.with(|clicks| clicks.set(0));
+				DISABLE_ON_CHECK.with(|disable| disable.set(true));
+			});
 			let error = click_button(refuses, parent).unwrap_err();
 			assert!(matches!(error.code, ErrorCode::InputFailed), "{error:?}");
-			assert_eq!(click_messages(), 0);
+			assert_eq!(fixture.run(click_messages), 0);
 			assert_eq!(check(refuses), BST_UNCHECKED as isize);
 			EnableWindow(parent, 1);
 
 			// It can also move the button into another enabled window, where
 			// it is still an eligible button: not the window asked for.
-			let other = top_level();
-			MOVE_ON_CHECK.with(|target| target.set(other));
+			let other_id = fixture.run(|| top_level() as usize);
+			let other = other_id as HWND;
+			fixture.run(move || MOVE_ON_CHECK.with(|target| target.set(other_id as HWND)));
 			let error = click_button(refuses, parent).unwrap_err();
 			assert!(matches!(error.code, ErrorCode::InputFailed), "{error:?}");
 			assert_eq!(GetParent(refuses), other);
 			assert_eq!(native_button(refuses), Some(NativeButton::Enabled));
-			assert_eq!(click_messages(), 0);
-			DestroyWindow(other);
+			assert_eq!(fixture.run(click_messages), 0);
+			fixture.run(move || {
+				DestroyWindow(other_id as HWND);
+			});
 
 			// A check box destroyed by its click leaves no state to read: the
 			// click may have landed, so neither ok nor unsent.
 			let destroyed = child(BS_AUTOCHECKBOX);
-			subclass(destroyed, Some(refusing_button));
-			DESTROY_ON_CLICK.with(|destroy| destroy.set(true));
+			let destroyed_id = destroyed as usize;
+			fixture.run(move || {
+				subclass(destroyed_id as HWND, Some(refusing_button));
+				DESTROY_ON_CLICK.with(|destroy| destroy.set(true));
+			});
 			let error = click_button(destroyed, parent).unwrap_err();
 			assert!(matches!(error.code, ErrorCode::InputFailed), "{error:?}");
 			assert!(error.message.contains("may have taken effect"), "{error:?}");
-			assert_eq!(click_messages(), 1);
+			assert_eq!(fixture.run(click_messages), 1);
 
 			// A disabled parent (a form behind its modal dialog) disables the
 			// buttons inside it.
 			assert_eq!(native_button(toggles), Some(NativeButton::Enabled));
 			EnableWindow(parent, 0);
 			assert_eq!(native_button(toggles), Some(NativeButton::Disabled));
-			DestroyWindow(parent);
+			fixture.run(move || {
+				DestroyWindow(parent_id as HWND);
+			});
 		}
+	}
+
+	#[test]
+	fn same_thread_buttons_do_not_take_the_synchronous_click_route() {
+		let parent = button_parent();
+		let pushed = button(parent, "BUTTON", BS_PUSHBUTTON as u32);
+		record(pushed);
+		// Observe the routing decision, without entering a modal handler or
+		// relying on a timeout to rescue the test.
+		assert_eq!(native_button(pushed), None);
+		assert_eq!(click_messages(), 0);
+		// SAFETY: this thread owns parent and its child.
+		unsafe { DestroyWindow(parent) };
 	}
 }

@@ -724,16 +724,22 @@ mod tests {
 	use super::{
 		super::{
 			super::error::ErrorCode,
-			window::tests::{button, button_parent, click_messages, clicks, record},
+			window::tests::{ButtonThread, button, button_parent, click_messages, clicks, record},
 		},
 		*,
 	};
 
 	#[test]
 	fn native_buttons_are_pressed_by_their_click_message_and_never_behind_a_dialog() {
-		let parent = button_parent();
-		let pushed = button(parent, "BUTTON", BS_PUSHBUTTON as u32);
-		record(pushed);
+		let fixture = ButtonThread::new();
+		let (parent_id, pushed_id) = fixture.run(|| {
+			let parent = button_parent();
+			let pushed = button(parent, "BUTTON", BS_PUSHBUTTON as u32);
+			record(pushed);
+			(parent as usize, pushed as usize)
+		});
+		let parent = parent_id as HWND;
+		let pushed = pushed_id as HWND;
 		let mut ax = Win32Ax::new();
 		let element = ax
 			.automation()
@@ -742,22 +748,21 @@ mod tests {
 			.unwrap();
 		let handle = uia_handle(element);
 
-		// No message pump runs: the click must have reached the app, as the
-		// button's own click message, when the action returns.
+		// The button's own synchronous click must finish before the action returns.
 		ax.perform(&handle, "press").unwrap();
-		assert_eq!((clicks(), click_messages()), (1, 1));
+		assert_eq!(fixture.run(|| (clicks(), click_messages())), (1, 1));
 		ax.perform(&handle, "invoke").unwrap();
-		assert_eq!((clicks(), click_messages()), (2, 2));
+		assert_eq!(fixture.run(|| (clicks(), click_messages())), (2, 2));
 
 		// A form behind its modal dialog: refused with nothing sent, never
 		// handed on to UI Automation.
-		// SAFETY: this thread owns the window.
+		// SAFETY: the fixture keeps the window alive.
 		unsafe { EnableWindow(parent, 0) };
 		let error = ax.perform(&handle, "press").unwrap_err();
 		assert!(matches!(error.code, ErrorCode::InputFailed), "{error:?}");
-		assert_eq!((clicks(), click_messages()), (2, 2));
-		// SAFETY: this thread owns the window.
-		unsafe { DestroyWindow(parent) };
+		assert_eq!(fixture.run(|| (clicks(), click_messages())), (2, 2));
+		// SAFETY: the fixture thread owns the window.
+		fixture.run(move || unsafe { DestroyWindow(parent_id as HWND) });
 	}
 
 	#[test]
