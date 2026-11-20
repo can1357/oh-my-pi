@@ -119,30 +119,32 @@ interface UnfinishedTurn {
 }
 
 /**
- * Index of the branch's tail in `entries[0, end)`: its last `message` entry, or -1. An
- * eval runtime snapshot that directly follows a completed answer (an assistant `stop`,
- * with no custom message prompt between them) is not the tail: an idle context rebuild
- * (compaction, pruning) persists one after a finished turn without starting another, so
- * that answer is. Any other snapshot stays the tail, so a request that overflow recovery
- * was retrying (after Esc and `/retry`, or for an extension's `triggerTurn` prompt, which
- * is a `custom_message` entry) still counts as unfinished.
+ * Index of the branch's tail: its last `message` entry, or -1. An eval runtime snapshot
+ * that follows a completed answer (an assistant `stop`) is not the tail when nothing
+ * that could start a turn came after that answer: an idle context rebuild (compaction,
+ * pruning) persists one after a finished turn without starting another, so the answer
+ * is the tail. Any other snapshot stays the tail, so a request that overflow recovery
+ * was retrying (after Esc and `/retry`) still counts as unfinished, and so does a custom
+ * message prompt (an extension's `triggerTurn`, which is a `custom_message` entry, not a
+ * `message`) before or after the snapshot. A custom message after an answer with no
+ * snapshot is not the tail, as before.
  */
-function findTailIndex(entries: readonly SessionEntry[], end: number): number {
+function findTailIndex(entries: readonly SessionEntry[]): number {
 	let snapshotIndex = -1;
-	for (let index = end - 1; index >= 0; index--) {
+	let customPrompt = false;
+	for (let index = entries.length - 1; index >= 0; index--) {
 		const entry = entries[index]!;
-		if (entry.type === "custom_message" && snapshotIndex >= 0 && entry.customType !== EVAL_STATE_CONTEXT_TYPE) {
-			return snapshotIndex;
+		if (entry.type === "custom_message") {
+			if (entry.customType !== EVAL_STATE_CONTEXT_TYPE && !entry.excludeFromContext) customPrompt = true;
+			continue;
 		}
 		if (entry.type !== "message") continue;
 		if (isEvalStateContext(entry.message)) {
 			if (snapshotIndex < 0) snapshotIndex = index;
 			continue;
 		}
-		if (snapshotIndex >= 0 && !(entry.message.role === "assistant" && entry.message.stopReason === "stop")) {
-			return snapshotIndex;
-		}
-		return index;
+		const finished = entry.message.role === "assistant" && entry.message.stopReason === "stop";
+		return snapshotIndex >= 0 && (customPrompt || !finished) ? snapshotIndex : index;
 	}
 	return snapshotIndex;
 }
@@ -152,17 +154,15 @@ function findTailIndex(entries: readonly SessionEntry[], end: number): number {
  * ({@link findTailIndex}: a prompt or tool results the model never answered, tool calls
  * without results) followed by a process exit, recorded or (with `assumeExit`) assumed.
  * A recorded normal exit with nothing pending, a terminal assistant tail, and tool
- * results that close an aborted or failed turn leave nothing unfinished. Only
- * `entries[0, end)` is read.
+ * results that close an aborted or failed turn leave nothing unfinished.
  */
 function findUnfinishedTurn(
 	entries: readonly SessionEntry[],
 	options?: InterruptedTurnOptions,
-	end = entries.length,
 ): UnfinishedTurn | undefined {
 	let exitIndex = -1;
 	let exit: SessionExitData | undefined;
-	for (let index = end - 1; index >= 0; index--) {
+	for (let index = entries.length - 1; index >= 0; index--) {
 		const candidate = readSessionExit(entries[index]!);
 		if (!candidate) continue;
 		exitIndex = index;
@@ -170,7 +170,7 @@ function findUnfinishedTurn(
 		break;
 	}
 
-	const tailIndex = findTailIndex(entries, end);
+	const tailIndex = findTailIndex(entries);
 	const tailEntry = tailIndex >= 0 ? entries[tailIndex] : undefined;
 	const tail: AgentMessage | undefined = tailEntry?.type === "message" ? tailEntry.message : undefined;
 	if (!tail) return undefined;
@@ -214,13 +214,13 @@ function isEvalSnapshotEntry(entry: SessionEntry): boolean {
 }
 
 /**
- * Whether the interrupted-turn abort at `abortIndex` is one that releases which read
- * a trailing eval snapshot as the tail wrote after a finished turn. Exit recovery
- * writes its aborts without `completedAt`, which every live assistant message gets,
- * so an abort a live shutdown wrote is always genuine. A recovery abort is false only
- * when the record it follows is an eval snapshot (exits and other bookkeeping between
- * them aside) and the branch up to that snapshot, read as {@link findUnfinishedTurn}
- * reads it, had no turn to go on with.
+ * Whether the interrupted-turn abort at `abortIndex` is a false one: written by exit
+ * recovery in releases that read a trailing idle eval snapshot as an unfinished tail.
+ * Exit recovery writes its aborts without `completedAt`, which every live assistant
+ * message gets, so an abort a live shutdown wrote is always genuine. A recovery abort
+ * is false only when the record it follows is an eval snapshot (exits and other
+ * bookkeeping between them aside) and the branch up to that snapshot, read as
+ * {@link findUnfinishedTurn} reads it, had no turn to go on with.
  */
 function isFalseAbortAfterSnapshot(entries: readonly SessionEntry[], abortIndex: number): boolean {
 	const abort = entries[abortIndex]!;
@@ -243,7 +243,7 @@ function isFalseAbortAfterSnapshot(entries: readonly SessionEntry[], abortIndex:
  * abort only closed an idle eval snapshot ({@link isFalseAbortAfterSnapshot}).
  */
 export function hasRestorableTurn(entries: readonly SessionEntry[]): boolean {
-	const tailIndex = findTailIndex(entries, entries.length);
+	const tailIndex = findTailIndex(entries);
 	for (let index = entries.length - 1; index > tailIndex; index--) {
 		if (readSessionExit(entries[index]!)?.kind === "normal") return false;
 	}

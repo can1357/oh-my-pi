@@ -488,6 +488,19 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 		reopenedOverflow.appendCustomMessageEntry("extension-prompt", "check the build", true);
 		reopenedOverflow.appendMessage(snapshot);
 		expect(hasRestorableTurn(reopenedOverflow.getBranch())).toBe(true);
+
+		// An idle compaction's snapshot, then later an extension's prompt that a kill cut off
+		// before any answer (the prompt comes after the snapshot this time).
+		const promptAfterSnapshot = SessionManager.inMemory();
+		promptAfterSnapshot.appendMessage({ role: "user", content: "say hi", timestamp: Date.now() });
+		promptAfterSnapshot.appendMessage(assistant(model, { content: [{ type: "text", text: "hi" }] }));
+		promptAfterSnapshot.appendMessage(snapshot);
+		promptAfterSnapshot.appendCustomMessageEntry("extension-prompt", "check the build", true);
+		promptAfterSnapshot.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
+		expect(hasRestorableTurn(promptAfterSnapshot.getBranch())).toBe(true);
+		expect(
+			createInterruptedTurnAbortMessage(promptAfterSnapshot.getBranch(), undefined, { assumeExit: true }),
+		).toBeDefined();
 	});
 
 	it("leaves an older release's abort after an eval snapshot stored as a custom message entry", () => {
@@ -504,6 +517,30 @@ describe("AgentSession.restoreInterruptedTurn (omp --restore)", () => {
 		);
 		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, signalExit);
 		sessionManager.appendMessage(assistant(model, { stopReason: "aborted", errorMessage: INTERRUPTED_TURN_ERROR }));
+		expect(hasRestorableTurn(sessionManager.getBranch())).toBe(false);
+	});
+
+	it("leaves an idle snapshot followed only by a display-only custom message", () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "say hi", timestamp: Date.now() });
+		sessionManager.appendMessage(assistant(model, { content: [{ type: "text", text: "hi" }] }));
+		sessionManager.appendMessage({
+			role: "custom",
+			customType: EVAL_STATE_CONTEXT_TYPE,
+			content: "<system-reminder>eval runtime state</system-reminder>",
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		// Rendered and saved, never sent to the model: it cannot have started a turn.
+		sessionManager.appendCustomMessageEntry("bash-row", "ls", true, undefined, "user", Date.now(), true);
+		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "sighup",
+			kind: "signal",
+			recordedAt: new Date().toISOString(),
+		});
 		expect(hasRestorableTurn(sessionManager.getBranch())).toBe(false);
 	});
 });
