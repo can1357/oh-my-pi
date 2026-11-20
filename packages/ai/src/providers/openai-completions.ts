@@ -129,6 +129,7 @@ import {
 	resolveOpenAICompletionsOutputClamp,
 	resolveOpenAIOutputTokenParam,
 	resolveOpenAIRequestSetup,
+	resolveOpenRouterAffordableMaxTokens,
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
@@ -988,9 +989,14 @@ const streamOpenAICompletionsOnce = (
 			const completionsUrl = query
 				? `${trimmedBaseUrl}/chat/completions?${new URLSearchParams(query)}`
 				: `${trimmedBaseUrl}/chat/completions`;
+			let affordableMaxTokens: number | undefined;
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
-				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
+				const requestOptions =
+					affordableMaxTokens === undefined
+						? options
+						: { ...options, maxTokens: affordableMaxTokens, maxTokensExplicit: true };
+				const builtParams = buildParams(model, context, requestOptions, effectiveToolStrictModeOverride);
 				appliedStrictTools = builtParams.strictToolsApplied;
 				let params = builtParams.params;
 				// Tool-triggered suppression is a hard wire constraint; cached
@@ -1086,7 +1092,14 @@ const streamOpenAICompletionsOnce = (
 								explicitDisable: isExplicitDisable,
 							})
 						: undefined;
-				if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
+				const affordable =
+					affordableMaxTokens === undefined && !requestSignal.aborted
+						? resolveOpenRouterAffordableMaxTokens(error, model.compat.isOpenRouterHost)
+						: undefined;
+				if (affordable !== undefined) {
+					affordableMaxTokens = affordable;
+					openaiStream = await createCompletionsStream();
+				} else if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
 					const retryMarker = `${activeReasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
 					if (attemptedReasoningEffortFallbacks.has(retryMarker)) throw error;
 					attemptedReasoningEffortFallbacks.add(retryMarker);

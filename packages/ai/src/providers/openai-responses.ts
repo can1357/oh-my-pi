@@ -123,6 +123,7 @@ import {
 	resolveOpenAIOutputTokenParam,
 	resolveOpenAIRequestSetup,
 	resolveOpenAIResponsesOutputClamp,
+	resolveOpenRouterAffordableMaxTokens,
 	resolveReasoningSummaryOption,
 	type ResponsesToolNaming,
 	shouldDropAutoToolChoiceForReasoning,
@@ -886,11 +887,13 @@ const streamOpenAIResponsesOnce = (
 			// Rebuilt with each request so the table reflects the tools that
 			// survived construction (schema quarantine, strict-mode retry).
 			let wireToolNames: ReadonlyMap<string, string> | undefined;
+			// Swapped once for a capped copy after OpenRouter's "can only afford N" 402.
+			let requestOptions = options;
 			const prepareRequest = async (disableStrictTools = false) => {
 				const builtParams = buildParams(
 					model,
 					context,
-					options,
+					requestOptions,
 					providerSessionState,
 					strictToolsScope,
 					disableStrictTools,
@@ -1150,6 +1153,20 @@ const streamOpenAIResponsesOnce = (
 								continue;
 							}
 							if (await prepareEncryptedReasoningRetry(error)) continue;
+							const affordableMaxTokens =
+								requestOptions === options && !requestSignal.aborted
+									? resolveOpenRouterAffordableMaxTokens(error, model.compat.isOpenRouterHost)
+									: undefined;
+							if (affordableMaxTokens !== undefined) {
+								requestOptions = { ...options, maxTokens: affordableMaxTokens, maxTokensExplicit: true };
+								const retry = await prepareRequest(forceDisableStrictTools);
+								chained = retry.chained;
+								activeRawRequestDump.body = chained.params;
+								activeParams = retry.builtParams.params;
+								activeTrailingScaffoldingItems = retry.builtParams.trailingScaffoldingItems;
+								activeStrictToolsApplied = retry.builtParams.strictToolsApplied;
+								continue;
+							}
 							const compiledGrammarTooLarge =
 								model.compat.retryWithoutStrictOnGrammarError &&
 								isCompiledGrammarTooLargeStrictError(error, capturedErrorResponse);
@@ -1201,7 +1218,7 @@ const streamOpenAIResponsesOnce = (
 							const currentBuilt = buildParams(
 								model,
 								context,
-								options,
+								requestOptions,
 								providerSessionState,
 								strictToolsScope,
 								forceDisableStrictTools,

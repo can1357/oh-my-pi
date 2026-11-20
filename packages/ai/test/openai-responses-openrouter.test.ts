@@ -609,3 +609,49 @@ describe("Responses direct-provider max-token defaults", () => {
 		expect(body).not.toHaveProperty("max_output_tokens");
 	});
 });
+
+describe("OpenRouter low-credit 402 recovery (#9569)", () => {
+	const affordable = 30_104;
+	const creditMessage = `This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford ${affordable}. To increase, visit https://openrouter.ai/settings/credits and upgrade to a paid account`;
+
+	async function run(transport: "chat" | "responses", alwaysRefuse = false) {
+		const caps: unknown[] = [];
+		const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			const cap = body.max_tokens ?? body.max_completion_tokens ?? body.max_output_tokens;
+			caps.push(cap);
+			if (alwaysRefuse || cap === undefined) {
+				return Response.json({ error: { message: creditMessage, code: 402 } }, { status: 402 });
+			}
+			return transport === "chat" ? createChatDoneResponse() : createSseResponse();
+		});
+		const stream =
+			transport === "chat"
+				? streamOpenAICompletions(buildOpenRouterModel() as unknown as Model<"openai-completions">, context, {
+						apiKey: "test-key",
+						fetch: fetchMock,
+					})
+				: streamOpenAIResponses(buildOpenRouterResponsesModel(), context, { apiKey: "test-key", fetch: fetchMock });
+		let last: AssistantMessage | undefined;
+		for await (const event of stream) {
+			if (event.type === "done") last = event.message;
+			if (event.type === "error") last = event.error;
+		}
+		return { caps, last };
+	}
+
+	for (const transport of ["chat", "responses"] as const) {
+		it(`retries an uncapped ${transport} request once with the affordable cap`, async () => {
+			const { caps, last } = await run(transport);
+			expect(caps).toEqual([undefined, affordable]);
+			expect(last?.stopReason).toBe("stop");
+		});
+	}
+
+	it("surfaces the 402 when the capped retry is refused too", async () => {
+		const { caps, last } = await run("responses", true);
+		expect(caps).toEqual([undefined, affordable]);
+		expect(last?.stopReason).toBe("error");
+		expect(last?.errorMessage).toContain("can only afford");
+	});
+});
