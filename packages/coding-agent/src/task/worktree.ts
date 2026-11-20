@@ -72,9 +72,12 @@ export async function getRepoRoot(cwd: string): Promise<string> {
 	// A linked work tree's git dir differs from the common dir; git ignores
 	// `core.bare` there, so only the main git dir can be bare.
 	if (gitDir === commonDir && isGitTrue(await repo.configGet("core.bare"))) {
-		// The listing names the bare repository itself too, by its real path.
-		const own = new Set([repoRoot, gitDir, await fs.realpath(repoRoot), await fs.realpath(gitDir)]);
-		const worktrees = (await repo.worktrees()).map(entry => entry.path).filter(dir => !own.has(dir));
+		// The listing names the bare repository itself too, by its real path, and
+		// in git's forward-slash form on Windows; `path.resolve` normalizes both.
+		const own = new Set(
+			[repoRoot, gitDir, await fs.realpath(repoRoot), await fs.realpath(gitDir)].map(dir => path.resolve(dir)),
+		);
+		const worktrees = (await repo.worktrees()).map(entry => path.resolve(entry.path)).filter(dir => !own.has(dir));
 		const remedy =
 			worktrees.length > 0
 				? `Start the session in one of its work trees: ${worktrees.join(", ")}`
