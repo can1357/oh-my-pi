@@ -82,7 +82,9 @@
 		}
 		async diff(...args) {
 			const [, { silent }] = parse("diff", args, ["silent"], 0);
-			return (await this.#run("diff", {}, silent)).text;
+			const { text, details } = await this.#run("diff", {}, silent);
+			// What printed may show long edited lines as word rows; the patch is returned as it is.
+			return details?.patch ?? text;
 		}
 		async commit(...args) {
 			const [[subject, body], options] = parse("commit", args, ["body", "fixes", "amend", "noVerify", "silent"], 2);

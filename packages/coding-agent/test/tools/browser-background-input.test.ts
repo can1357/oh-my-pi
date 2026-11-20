@@ -11,6 +11,10 @@ import {
 	type BrowserKind,
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import {
+	unpackedExtensionId,
+	writeRelayExtension,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/relay/extension-files";
 import { waitForRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import { startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
 import {
@@ -20,11 +24,15 @@ import {
 	runInTab,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
-import puppeteer, { type Browser, type Page, type WebWorker } from "puppeteer-core";
+import { VERSION } from "@oh-my-pi/pi-utils/dirs";
+import puppeteer, {
+	type Browser,
+	type Page,
+	type WebWorker,
+} from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
-const ASSETS = path.resolve(import.meta.dir, "../../src/tools/browser/relay/extension-assets");
 
 const session = {
 	cwd: process.cwd(),
@@ -47,12 +55,17 @@ const origin = `http://127.0.0.1:${site.port}`;
 afterAll(() => site.stop(true));
 
 /** Opens the user's tab selected and the tab omp will drive in the background, which therefore reads hidden. */
-async function openTabs(browser: Browser, openBackground: (url: string) => Promise<unknown>): Promise<Page> {
+async function openTabs(
+	browser: Browser,
+	openBackground: (url: string) => Promise<unknown>,
+): Promise<Page> {
 	const human = await browser.newPage();
 	await human.goto(`${origin}/human`);
 	await human.bringToFront();
 	await openBackground(`${origin}/target`);
-	const target = await (await browser.waitForTarget(t => t.url() === `${origin}/target`)).page();
+	const target = await (
+		await browser.waitForTarget((t) => t.url() === `${origin}/target`)
+	).page();
 	if (!target) throw new Error("Missing background page");
 	await target.waitForFunction("document.readyState === 'complete'");
 	expect(await target.evaluate(() => document.visibilityState)).toBe("hidden");
@@ -62,12 +75,17 @@ async function openTabs(browser: Browser, openBackground: (url: string) => Promi
 /** Resolves once the page reads hidden: a session ends after omp's connection closes, a beat after the release. */
 async function waitHidden(target: Page): Promise<void> {
 	// rAF polling would never fire in the hidden tab this waits for.
-	await target.waitForFunction(() => document.visibilityState === "hidden", { polling: 50, timeout: 5_000 });
+	await target.waitForFunction(() => document.visibilityState === "hidden", {
+		polling: 50,
+		timeout: 5_000,
+	});
 }
 
 /** Hovers and clicks the background page through omp, then releases it; hover needs a rendered frame, which a hidden tab never produces. */
 async function driveAndRelease(kind: BrowserKind, target: Page): Promise<void> {
-	const handle: BrowserHandle = await acquireBrowser(kind, { cwd: process.cwd() });
+	const handle: BrowserHandle = await acquireBrowser(kind, {
+		cwd: process.cwd(),
+	});
 	const name = `background-${kind.kind}-${process.pid}`;
 	try {
 		await acquireTab(name, handle, { target: "Target", timeoutMs: 15_000 });
@@ -95,36 +113,52 @@ interface RelayFixture {
 }
 
 /** Headless Chromium running the real relay extension against a relay on a free port, with the tabs of {@link openTabs}. */
-async function withRelay(run: (fixture: RelayFixture) => Promise<void>): Promise<void> {
+async function withRelay(
+	run: (fixture: RelayFixture) => Promise<void>,
+): Promise<void> {
 	const port = await findFreeCdpPort();
 	const server = startRelayServer({ port, group: false });
-	const extensionDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-background-"));
+	const extensionDir = await fs.mkdtemp(
+		path.join(os.tmpdir(), "omp-relay-background-"),
+	);
 	let browser: Browser | undefined;
 	try {
-		for (const file of ["manifest.json", "options.html", "options.js"]) {
-			await fs.copyFile(path.join(ASSETS, `${file}.txt`), path.join(extensionDir, file));
-		}
-		const background = await Bun.file(path.join(ASSETS, "background.js.txt")).text();
+		await writeRelayExtension(extensionDir, VERSION);
+		const backgroundPath = path.join(extensionDir, "background.js");
+		const background = await Bun.file(backgroundPath).text();
 		// Point the disposable extension at this relay before its code can dial a user's default relay.
 		await Bun.write(
-			path.join(extensionDir, "background.js"),
+			backgroundPath,
 			`chrome.storage.local.set({ port: ${port} }).then(() => {\n${background}\n});`,
 		);
+		const extensionId = await unpackedExtensionId(extensionDir);
+		if (!extensionId) throw new Error("Missing relay extension directory");
 		browser = await puppeteer.launch({
 			executablePath: await ensureChromiumExecutable(),
 			headless: true,
 			pipe: true,
 			enableExtensions: [extensionDir],
-			args: ["--no-first-run", "--no-default-browser-check", "--use-mock-keychain"],
+			args: [
+				"--no-first-run",
+				"--no-default-browser-check",
+				"--use-mock-keychain",
+			],
 		});
 		const extension = await (
-			await browser.waitForTarget(target => target.type() === "service_worker", { timeout: 15_000 })
+			await browser.waitForTarget(
+				(target) =>
+					target.type() === "service_worker" &&
+					target.url() === `chrome-extension://${extensionId}/background.js`,
+				{ timeout: 15_000 },
+			)
 		).worker();
 		if (!extension) throw new Error("Missing relay extension worker");
 		const cdpUrl = `http://127.0.0.1:${port}`;
 		expect(await waitForRelayExtension(cdpUrl)).toBe("ready");
-		const target = await openTabs(browser, url =>
-			extension.evaluate(`chrome.tabs.create({ url: ${JSON.stringify(url)}, active: false })`),
+		const target = await openTabs(browser, (url) =>
+			extension.evaluate(
+				`chrome.tabs.create({ url: ${JSON.stringify(url)}, active: false })`,
+			),
 		);
 		await run({ cdpUrl, extension, target });
 	} finally {
@@ -149,10 +183,20 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("background tab input", () => {
 
 	it("keeps a relay page driveable through a second named tab after the first is released", async () => {
 		await withRelay(async ({ cdpUrl, target }) => {
-			const handle = await acquireBrowser({ kind: "relay", cdpUrl }, { cwd: process.cwd() });
-			const names = [`background-first-${process.pid}`, `background-second-${process.pid}`];
+			const handle = await acquireBrowser(
+				{ kind: "relay", cdpUrl },
+				{ cwd: process.cwd() },
+			);
+			const names = [
+				`background-first-${process.pid}`,
+				`background-second-${process.pid}`,
+			];
 			try {
-				for (const name of names) await acquireTab(name, handle, { target: "Target", timeoutMs: 15_000 });
+				for (const name of names)
+					await acquireTab(name, handle, {
+						target: "Target",
+						timeoutMs: 15_000,
+					});
 				await releaseTab(names[0]!);
 				const result = await runInTab(names[1]!, {
 					code: "await tab.hover('#hover'); return await tab.text('#hover');",
@@ -171,21 +215,27 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("background tab input", () => {
 
 	it("ends a relay page's emulation when its tab worker dies without closing", async () => {
 		await withRelay(async ({ cdpUrl, target }) => {
-			const handle = await acquireBrowser({ kind: "relay", cdpUrl }, { cwd: process.cwd() });
+			const handle = await acquireBrowser(
+				{ kind: "relay", cdpUrl },
+				{ cwd: process.cwd() },
+			);
 			const name = `background-killed-${process.pid}`;
 			// Another live tab keeps omp's relay connection, and with it the page's debugger session, attached.
 			const other = `background-other-${process.pid}`;
 			try {
 				await acquireTab(other, handle, { target: "Human", timeoutMs: 15_000 });
 				await acquireTab(name, handle, { target: "Target", timeoutMs: 15_000 });
-				expect(await target.evaluate(() => document.visibilityState)).toBe("visible");
+				expect(await target.evaluate(() => document.visibilityState)).toBe(
+					"visible",
+				);
 				const tab = getTabsMapForTest().get(name);
 				if (tab?.backend !== "worker") throw new Error("Expected a worker tab");
 				await tab.worker.terminate();
 				await releaseTab(name);
 				await waitHidden(target);
 			} finally {
-				for (const tab of [name, other]) await releaseTab(tab).catch(() => undefined);
+				for (const tab of [name, other])
+					await releaseTab(tab).catch(() => undefined);
 				await releaseBrowser(handle, { kill: false });
 			}
 		});
@@ -205,8 +255,13 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("background tab input", () => {
 		});
 		try {
 			const root = await browser.target().createCDPSession();
-			const target = await openTabs(browser, url => root.send("Target.createTarget", { url, background: true }));
-			await driveAndRelease({ kind: "connected", cdpUrl: `http://127.0.0.1:${port}` }, target);
+			const target = await openTabs(browser, (url) =>
+				root.send("Target.createTarget", { url, background: true }),
+			);
+			await driveAndRelease(
+				{ kind: "connected", cdpUrl: `http://127.0.0.1:${port}` },
+				target,
+			);
 		} finally {
 			await browser.close();
 		}

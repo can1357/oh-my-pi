@@ -584,6 +584,7 @@ export class CommandController {
 		let info = "";
 		info += `${theme.fg("dim", "File:")} ${stats.sessionFile ?? "In-memory"}\n`;
 		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n`;
+		info += `${theme.fg("dim", "Local:")} ${this.ctx.session.localRoot}\n`;
 		const builds = runtimeIdentityHistory(this.ctx.session.sessionManager.getEntries());
 		const running = currentRuntimeIdentity();
 		// A source checkout's diff hash changes with each edit, so a long-lived session can collect

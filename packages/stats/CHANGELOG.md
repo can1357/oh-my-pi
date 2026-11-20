@@ -5,6 +5,12 @@
 ### Fixed
 
 - Fixed the Spotlight page charging a fetch-back turn the cache-write premium on context the next request would have written anyway ([#19377](https://github.com/can1357/oh-my-pi/pull/19377) by [@Xytronix](https://github.com/Xytronix))
+## [19.0.1] - 2026-11-19
+
+### Added
+
+- Added 2d and 3d range presets with hourly buckets to the stats dashboard time selector ([#19766](https://github.com/can1357/oh-my-pi/issues/19766), [#19774](https://github.com/can1357/oh-my-pi/pull/19774) by [@thekitaev](https://github.com/thekitaev)).
+
 ## [19.0.0] - 2026-11-18
 
 ### Breaking Changes

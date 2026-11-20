@@ -117,6 +117,7 @@ export function refreshManagedMcpOAuthCredential(
 	return refreshMCPOAuthToken(tokenUrl, credential.refresh, material?.clientId, material?.clientSecret, resource, {
 		authorizationUrl,
 		stripSameOriginResource: resourceIsFallback,
+		scope: credential.scope,
 		signal: opts.signal,
 	});
 }

@@ -597,12 +597,12 @@ export const cfgFindEnabled = register({
 		group: "Available Tools",
 		label: "Find (semantic grep)",
 		description:
-			"Enable the find tool: natural-language search for files and line ranges, judged by the judge model role. Auto enables it only when the judge role resolves to a native TypeSafe jev model",
+			"Enable the find tool: natural-language search for files and line ranges, judged by the judge model role. Auto enables it when the first usable judge is native",
 		options: [
 			{
 				value: "auto",
 				label: "Auto",
-				description: "Enable when the judge role resolves to a native TypeSafe jev model",
+				description: "Enable when the first usable judge is native",
 			},
 			{ value: "on", label: "On", description: "Always enable, whichever model the judge role resolves to" },
 			{ value: "off", label: "Off", description: "Disable the find tool" },
