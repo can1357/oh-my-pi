@@ -3,6 +3,7 @@ import type { PipeStreams } from "@oh-my-pi/pi-natives";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import type { ShellTrace } from "@oh-my-pi/pi-wire";
 import { IrcBus } from "../irc/bus";
 import type { JobWidgetInputs, JobWidgetRegistry } from "../job-widgets/types";
 
@@ -216,8 +217,16 @@ export interface AsyncJobProcess {
 	readonly cwd: string;
 	/** Live pids the command spawned, in spawn order; empty before it starts and after it ends. */
 	pids(): readonly number[];
-	/** Copies of the bytes crossing the command's pipes, kept with the job row (`proc://<id>/streams`). */
+	/**
+	 * The command's output that never reaches its own: copies of the bytes crossing its pipes and the files it
+	 * redirects into, kept with the job row (`proc://<id>/streams`).
+	 */
 	readonly streams?: PipeStreams;
+	/**
+	 * The run's shell trace: the live one while it runs, the final one once it ended. Undefined before the first
+	 * poll, and always with the shell visualization off.
+	 */
+	trace?(): ShellTrace | undefined;
 }
 
 /** Delivery callback for a settled job's result text. */

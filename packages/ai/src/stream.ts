@@ -2366,7 +2366,7 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"kiro-api">({
 				...base,
 				reasoning: options?.reasoning,
-				disableReasoning: options?.disableReasoning,
+				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
 				hideThinkingSummary: options?.hideThinkingSummary,
 			});
 

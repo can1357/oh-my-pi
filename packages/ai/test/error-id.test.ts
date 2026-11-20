@@ -155,6 +155,18 @@ describe("error-id classification", () => {
 		expect(AIError.isProviderRetryableError(new Error(errorMessage))).toBe(true);
 	});
 
+	it("retries a statusless gateway stream interruption but not a 400 rejection with the same wording", () => {
+		const errorMessage = "Provider error (Dots3 Note Preview (Kilo)): stream interrupted";
+		const id = AIError.classifyMessage(message({ errorMessage }));
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.retriable(id)).toBe(true);
+		expect(AIError.isProviderRetryableError(new Error(errorMessage))).toBe(true);
+
+		const denied = AIError.classifyMessage(message({ errorMessage, errorStatus: 400 }));
+		expect(AIError.retriable(denied)).toBe(false);
+		expect(AIError.isProviderRetryableError(new AIError.ProviderHttpError(errorMessage, 400))).toBe(false);
+	});
+
 	it("keeps a stream-drop phrase riding on a terminal 4xx terminal", () => {
 		const errorMessage = "stream closed before response.completed";
 		const id = AIError.classifyMessage(message({ errorStatus: 400, errorMessage }));
