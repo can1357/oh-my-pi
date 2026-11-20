@@ -4,6 +4,7 @@ import {
 	embed,
 	embedQuery,
 	getEmbeddingApiCallCountForTests,
+	type LocalEmbeddingModel,
 	type LocalModelInitializer,
 	resetEmbeddingProviderForTests,
 	setEmbeddingProviderForTests,
@@ -264,6 +265,34 @@ describe("optional embeddings", () => {
 			expect(initCalls).toBe(2);
 			expect(observedCacheDirs).toEqual([getFastembedCacheDir(), getFastembedCacheDir()]);
 			expect(observedCacheDirs.some(cacheDir => cacheDir?.includes(".hermes") ?? false)).toBe(false);
+		});
+	});
+
+	it("returns null to every caller sharing a failed local model initialization, then retries", async () => {
+		await withEnv(LOCAL_EMBEDDING_ENV, async () => {
+			let initCalls = 0;
+			const initStarted = Promise.withResolvers<void>();
+			const unavailable = Promise.withResolvers<LocalEmbeddingModel>();
+			setLocalModelInitializerForTests(() => {
+				initCalls += 1;
+				if (initCalls > 1) {
+					return Promise.resolve({
+						embed: streamRows(texts => texts.map(text => [text.length, text.charCodeAt(0) || 0])),
+					});
+				}
+				initStarted.resolve();
+				return unavailable.promise;
+			});
+
+			// The waiter must join the first caller's in-flight init, so it is started after that init begins.
+			const first = embed(["first"]);
+			await initStarted.promise;
+			const waiter = embed(["waiter"]);
+			unavailable.reject(new Error("mnemopi embedding server unavailable"));
+
+			expect(await Promise.all([first, waiter])).toEqual([null, null]);
+			expect(await embed(["second"])).toEqual([new Float32Array([6, 115])]);
+			expect(initCalls).toBe(2);
 		});
 	});
 

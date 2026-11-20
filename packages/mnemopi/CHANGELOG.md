@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed a failing embedding provider (`embeddings.provider` or `setEmbeddingProvider`) leaving no trace: when its `embed()` or `available()` throws, the failure is now logged with the error, at debug level or at warn with runtime debug on, like local model failures; embedding still falls back to `null` as before
+- Fixed recall failing for concurrent calls when the local embedding model could not load: they now fall back to full-text recall, as `noEmbeddings` does, instead of throwing ([#10241](https://github.com/can1357/oh-my-pi/issues/10241))
 
 ## [18.22.1] - 2026-11-17
 

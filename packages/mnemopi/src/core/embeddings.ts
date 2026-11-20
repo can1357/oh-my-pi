@@ -56,7 +56,7 @@ let providerOverride: EmbeddingProvider | null = null;
 // in one process configured with different local models must each load their own
 // encoder instead of reusing whichever model happened to initialize first. A failed
 // init evicts only that model's entry so other models' encoders stay warm.
-const localModelPromises = new Map<string, Promise<LocalEmbeddingModel>>();
+const localModelPromises = new Map<string, Promise<LocalEmbeddingModel | null>>();
 const readyLocalModels = new Set<string>();
 let localModelInitializer: LocalModelInitializer = defaultLocalModelInitializer;
 let apiCallCount = 0;
@@ -361,24 +361,28 @@ async function getLocalModel(): Promise<LocalEmbeddingModel | null> {
 
 	const cacheDir = getFastembedCacheDir();
 	mkdirSync(cacheDir, { recursive: true });
-	const loading = localModelInitializer({
+	// The failure becomes `null` inside the shared promise: concurrent callers await this one init
+	// and must all fall back to FTS-only recall, not inherit its rejection.
+	const loading: Promise<LocalEmbeddingModel | null> = localModelInitializer({
 		model: modelName,
 		cacheDir,
 		showDownloadProgress: false,
-	});
+	}).then(
+		model => {
+			if (localModelPromises.get(modelName) === loading) readyLocalModels.add(modelName);
+			return model;
+		},
+		error => {
+			logger[mnemopiDebugEnabled() ? "warn" : "debug"]("mnemopi: local embedding model failed to load", {
+				model: modelName,
+				error: String(error),
+			});
+			if (localModelPromises.get(modelName) === loading) localModelPromises.delete(modelName);
+			return null;
+		},
+	);
 	localModelPromises.set(modelName, loading);
-	try {
-		const model = await loading;
-		if (localModelPromises.get(modelName) === loading) readyLocalModels.add(modelName);
-		return model;
-	} catch (error) {
-		logger[mnemopiDebugEnabled() ? "warn" : "debug"]("mnemopi: local embedding model failed to load", {
-			model: modelName,
-			error: String(error),
-		});
-		if (localModelPromises.get(modelName) === loading) localModelPromises.delete(modelName);
-		return null;
-	}
+	return loading;
 }
 
 const DEFAULT_EMBEDDING_BATCH_SIZE = 64;
