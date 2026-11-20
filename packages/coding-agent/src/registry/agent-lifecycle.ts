@@ -595,6 +595,9 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				coldAdopted = true;
 			}
 		}
+		if (this.#registry.get(id) !== ref) {
+			throw new Error(`Agent "${id}" changed while its persisted session was being prepared.`);
+		}
 		if (ref.status !== "parked" || !revive || !adoption) {
 			throw new Error(
 				`Agent "${id}" is ${ref.status} and cannot be revived${revive ? "" : " (no reviver registered)"}. Its transcript remains readable at history://${id}.`,
