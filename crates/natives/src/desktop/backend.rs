@@ -286,9 +286,9 @@ pub trait Backend: Send {
 	fn screen_state(&mut self, _display: Option<&DisplaySelector>) -> ScreenState {
 		ScreenState::default()
 	}
-	/// Whether nothing of window `id` shows on screen and its app stops
-	/// drawing and updating its tree while covered, so both can predate its
-	/// state. Backends that do not detect it report false.
+	/// Whether window `id` appears fully covered and its app can stop drawing
+	/// and updating its tree while covered, so both may be stale. Backends
+	/// that do not detect it report false.
 	fn window_covered(&mut self, _id: &str) -> bool {
 		false
 	}

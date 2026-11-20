@@ -1765,9 +1765,9 @@ export interface DesktopCapture {
    */
   screenLocked: boolean
   /**
-   * Nothing of the target window showed on screen when this frame was
-   * taken, and its app stops drawing while covered (Chromium on Windows),
-   * so the frame can show it as it was before.
+   * The target window appeared fully covered around this frame, and its app
+   * can stop drawing while covered (Chromium on Windows), so the frame may
+   * be stale.
    */
   covered: boolean
 }

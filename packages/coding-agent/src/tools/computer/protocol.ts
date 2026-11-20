@@ -138,7 +138,7 @@ export interface ComputerScreenshot {
 	target: string;
 	/** The session was locked, disconnected or on a secure desktop when captured. */
 	screenLocked?: true;
-	/** Nothing of the target window showed on screen, and its app stops drawing while covered. */
+	/** The target window appeared fully covered around the capture, and its app can stop drawing while covered. */
 	covered?: true;
 }
 

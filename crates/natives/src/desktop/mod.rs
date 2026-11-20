@@ -54,16 +54,17 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Captures of a window that keeps changing size between its capture and the
 /// check of its frame.
 const WINDOW_CAPTURE_ATTEMPTS: usize = 3;
-/// Closing line of a tree read from a Chromium window that nothing of shows
-/// on screen.
+/// Closing line of a tree read from a Chromium window that appeared fully
+/// covered around the read.
 const COVERED_TREE_NOTE: &str =
-	"… covered: nothing of this window shows on screen, and Chromium stops updating the tree and \
-	 drawing of a window it finds covered, so this tree and the window's screenshot can show the \
-	 app as it was before; waiting and reading again return the same until part of the window \
-	 shows. To see its current state, read the page with the browser tool if it is connected to \
-	 this app; otherwise raise() the window and read it again (it comes in front of the user's \
-	 windows and takes their keyboard; Windows refuses it while they are using another window); \
-	 otherwise go on without it, telling the user what you could not confirm";
+	"… covered: this window appeared fully covered around the read, and Chromium can stop updating \
+	 the tree of a window it finds covered, so this tree and the window's screenshot may be stale; \
+	 while it stays covered, do not wait and read it again by any route (screenshot, ax(), find), \
+	 since those may be stale too. To see its current state, read the page with the browser tool \
+	 if it is connected to this app; otherwise raise() the window (it comes in front of the user's \
+	 windows and takes their keyboard; Windows refuses it while they are using another window) and \
+	 read it again, checking for the state you expect rather than trusting the first read after \
+	 it; otherwise go on without it, telling the user what you could not confirm";
 /// How long the display stays awake after the last desktop request, unless an
 /// agent turn holds it (see [`DisplayAwake::hold_until_released`]). Releasing
 /// the assertion restarts the OS display-sleep countdown, so the display can
@@ -1103,7 +1104,7 @@ impl Worker {
 		})
 	}
 
-	/// Whether `target` is a window nothing of which shows on screen.
+	/// Whether `target` is a window that appears fully covered.
 	fn window_covered(&mut self, target: &Target) -> CoreResult<bool> {
 		Ok(match target {
 			Target::Window(id) => self.backend()?.window_covered(id),

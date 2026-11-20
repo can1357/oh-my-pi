@@ -67,9 +67,9 @@ pub struct DesktopCapture {
 	/// a display capture shows the lock screen and a window capture its last
 	/// frame. Windows also detects disconnected sessions and secure desktops.
 	pub screen_locked:     bool,
-	/// Nothing of the target window showed on screen when this frame was
-	/// taken, and its app stops drawing while covered (Chromium on Windows),
-	/// so the frame can show it as it was before.
+	/// The target window appeared fully covered around this frame, and its app
+	/// can stop drawing while covered (Chromium on Windows), so the frame may
+	/// be stale.
 	pub covered:           bool,
 }
 

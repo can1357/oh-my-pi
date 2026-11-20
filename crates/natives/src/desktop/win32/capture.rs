@@ -116,9 +116,9 @@ const fn hwnd_from_id(id: u32) -> *mut c_void {
 	std::ptr::with_exposed_provenance_mut(id as usize)
 }
 
-/// Whether window `id` is drawn by an app that pauses while covered and
-/// nothing of it shows on screen, so its frame and tree can predate its
-/// state; false for an id that names no live window.
+/// Whether window `id` is drawn by an app that can pause while covered and
+/// appears fully covered, so its frame and tree may be stale; false for an
+/// id that names no live window.
 pub(super) fn window_covered(id: &str) -> bool {
 	id.parse::<u32>().is_ok_and(|id| {
 		let hwnd = hwnd_from_id(id);

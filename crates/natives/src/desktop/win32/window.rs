@@ -117,16 +117,16 @@ pub(super) fn owns_foreground(hwnd: HWND) -> bool {
 
 /// Whether `hwnd` is drawn by Chromium (its own class or a renderer child),
 /// which runs its own occlusion check: once that finds nothing of the window
-/// showing, Chromium marks its pages hidden and stops painting them and
+/// showing, Chromium can mark its pages hidden and stop painting them and
 /// updating their accessibility tree, while Windows keeps composing the last
 /// frame.
 pub(super) fn paused_while_covered(hwnd: HWND) -> bool {
 	with_class_name(hwnd, is_chromium_class) || has_chromium_descendant(hwnd)
 }
 
-/// Whether nothing of top-level `hwnd` shows on screen: no part of its frame
-/// lies on a display outside the visible, opaque windows above it in the
-/// z-order. False when any of that cannot be read.
+/// Whether top-level `hwnd` appears fully covered: no part of its frame lies
+/// on a display outside the visible, opaque windows above it in the z-order.
+/// False when any of that cannot be read.
 pub(super) fn fully_covered(hwnd: HWND) -> bool {
 	let (Some(frame), Some(displays), Some(above)) =
 		(frame_bounds(hwnd), displays(), occluders_above(hwnd))
@@ -705,9 +705,9 @@ mod tests {
 		Graphics::Gdi::SetWindowRgn,
 		System::LibraryLoader::GetModuleHandleW,
 		UI::WindowsAndMessaging::{
-			CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SWP_NOACTIVATE,
-			SWP_NOZORDER, SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos, WNDCLASSW,
-			WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+			CreateWindowExW, DefWindowProcW, DestroyWindow, HWND_TOP, RegisterClassW, SWP_NOACTIVATE,
+			SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetLayeredWindowAttributes,
+			SetWindowLongW, SetWindowPos, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 		},
 	};
 
@@ -717,21 +717,21 @@ mod tests {
 		text.encode_utf16().chain(Some(0)).collect()
 	}
 
-	/// A topmost popup of class `class` at `rect`, above every window made
-	/// before it.
-	fn popup(class: &str, rect: RECT) -> HWND {
+	/// An ordinary opaque top-level window of class `class` whose visible frame
+	/// is `frame`, shown without activation above every window made before it.
+	fn window(class: &str, frame: RECT) -> HWND {
 		let class = wide(class);
 		// SAFETY: the class name outlives the call; no parent, menu or data.
 		let hwnd = unsafe {
 			CreateWindowExW(
-				WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+				0,
 				class.as_ptr(),
 				class.as_ptr(),
-				WS_POPUP | WS_VISIBLE,
-				rect.left,
-				rect.top,
-				rect.right - rect.left,
-				rect.bottom - rect.top,
+				WS_OVERLAPPEDWINDOW,
+				frame.left,
+				frame.top,
+				frame.right - frame.left,
+				frame.bottom - frame.top,
 				null_mut(),
 				null_mut(),
 				GetModuleHandleW(std::ptr::null()),
@@ -739,19 +739,40 @@ mod tests {
 			)
 		};
 		assert!(!hwnd.is_null());
+		// SAFETY: this thread owns `hwnd`.
+		unsafe {
+			SetWindowPos(
+				hwnd,
+				HWND_TOP,
+				0,
+				0,
+				0,
+				0,
+				SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE,
+			);
+		}
+		place(hwnd, frame);
 		hwnd
 	}
 
-	fn place(hwnd: HWND, rect: RECT) {
+	/// Moves `hwnd` so that its visible frame is `frame`, around which the
+	/// window rectangle keeps its invisible resize border.
+	fn place(hwnd: HWND, frame: RECT) {
+		let mut window = RECT::default();
+		// SAFETY: this thread owns `hwnd`; `window` is a writable RECT.
+		unsafe { GetWindowRect(hwnd, &raw mut window) };
+		let shown = frame_bounds(hwnd).expect("the frame of a shown window");
+		let (left, top) = (shown.left - window.left, shown.top - window.top);
+		let (right, bottom) = (window.right - shown.right, window.bottom - shown.bottom);
 		// SAFETY: this thread owns `hwnd`.
 		unsafe {
 			SetWindowPos(
 				hwnd,
 				null_mut(),
-				rect.left,
-				rect.top,
-				rect.right - rect.left,
-				rect.bottom - rect.top,
+				frame.left - left,
+				frame.top - top,
+				frame.right - frame.left + left + right,
+				frame.bottom - frame.top + top + bottom,
 				SWP_NOZORDER | SWP_NOACTIVATE,
 			);
 		}
@@ -773,9 +794,9 @@ mod tests {
 				..Default::default()
 			});
 		}
-		let native = popup("STATIC", rect(100, 100, 300, 300));
-		let target = popup("Chrome_WidgetWin_7", rect(100, 100, 300, 300));
-		let cover = popup("STATIC", rect(50, 50, 400, 400));
+		let native = window("STATIC", rect(100, 100, 300, 300));
+		let target = window("Chrome_WidgetWin_7", rect(100, 100, 300, 300));
+		let cover = window("STATIC", rect(50, 50, 400, 400));
 		let marked = |hwnd: HWND| capture::window_covered(&(hwnd as usize).to_string());
 		assert!(marked(target), "an opaque window over all of it");
 		assert!(!marked(native), "covered too, but the app keeps drawing");
@@ -795,11 +816,7 @@ mod tests {
 
 		// SAFETY: this thread owns `cover`.
 		unsafe {
-			SetWindowLongW(
-				cover,
-				GWL_EXSTYLE,
-				(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED) as i32,
-			);
+			SetWindowLongW(cover, GWL_EXSTYLE, WS_EX_LAYERED as i32);
 			SetLayeredWindowAttributes(cover, 0, 200, LWA_ALPHA);
 		}
 		assert!(!marked(target), "the target shows through a translucent window");
