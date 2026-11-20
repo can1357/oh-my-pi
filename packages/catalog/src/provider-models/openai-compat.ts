@@ -6036,8 +6036,11 @@ function classifyLiteLLMApiRoute(entry: LiteLLMRichModelEntry | undefined, id: s
 		}
 	}
 
+	// Without provider metadata (the `/v1/models` fallback, or a key that cannot
+	// read the management endpoints), the id is the only routing evidence.
 	const modelId = id.toLowerCase().startsWith("openai/") ? id.slice("openai/".length) : id;
-	return isLikelyOpenAIResponsesModelId(modelId) ? "openai" : "unknown";
+	if (isLikelyOpenAIResponsesModelId(modelId)) return "openai";
+	return isLiteLLMClaudeModel(id) ? "anthropic" : "unknown";
 }
 
 /**

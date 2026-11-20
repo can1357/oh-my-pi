@@ -1983,6 +1983,35 @@ describe("LiteLLM provider discovery", () => {
 		]);
 	});
 
+	test("routes Claude rows from the /v1/models fallback through Anthropic Messages", async () => {
+		// A key without access to the management endpoints leaves only the ids.
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === MODELS_DEV_URL) {
+				return Response.json({});
+			}
+			if (url === "http://fallback:4000/v1/models") {
+				return Response.json({
+					data: [
+						{ id: "claude-haiku-5-5", mode: "chat" },
+						{ id: "deepseek-v4-flash", mode: "chat" },
+					],
+				});
+			}
+			return new Response("Forbidden", { status: 403 });
+		}) as FetchImpl;
+
+		const models = await litellmModelManagerOptions({
+			baseUrl: "http://fallback:4000/v1",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		expect(models?.map(model => ({ id: model.id, api: model.api }))).toEqual([
+			{ id: "claude-haiku-5-5", api: "anthropic-messages" },
+			{ id: "deepseek-v4-flash", api: "openai-completions" },
+		]);
+	});
+
 	test("enriches LiteLLM /v1/models fallback entries missing from stencil.so with bundled reasoning metadata", async () => {
 		const calls: string[] = [];
 		const fetchMock = vi.fn(async (input: string | URL | Request) => {
