@@ -145,6 +145,13 @@ function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
 }
 
+/** The stop reason and how many blocks of each delivered class arrived, for the capped empty-stop error. */
+function describeDeliveredShape(message: AssistantMessage): string {
+	const types = message.content.map(block => block.type);
+	const count = (...matches: string[]): number => types.filter(type => matches.includes(type)).length;
+	return `stopReason=${message.stopReason}, delivered: text=${count("text")} toolCalls=${count("toolCall")} reasoning=${count("thinking", "redactedThinking")}`;
+}
+
 /**
  * End of the conversation in `messages`, before trailing context-only messages:
  * eval runtime snapshots (appended at startup and on display-context rebuilds),
@@ -1165,6 +1172,7 @@ export class TurnRecovery {
 		if (this.#emptyStopRetryCount > EMPTY_STOP_MAX_RETRIES) {
 			const attempts = this.#emptyStopRetryCount - 1;
 			const outputTokens = assistantMessage.usage.output;
+			const deliveredShape = describeDeliveredShape(assistantMessage);
 			const outputTokensExcludingKnownReasoning = Math.max(
 				0,
 				outputTokens - (assistantMessage.usage.reasoningTokens ?? 0),
@@ -1179,10 +1187,9 @@ export class TurnRecovery {
 					reasoningTokens === undefined
 						? ""
 						: ` (${reasoningTokens} reasoning token${reasoningTokens === 1 ? "" : "s"})`;
-				finalError = `Assistant returned an empty stop after retry cap; provider reported ${outputTokens} output token${outputTokens === 1 ? "" : "s"}${reasoningDetail}, but no text or tool calls were delivered. Usage alone does not establish the cause`;
+				finalError = `Assistant returned an empty stop after retry cap; ${deliveredShape}; provider reported ${outputTokens} output token${outputTokens === 1 ? "" : "s"}${reasoningDetail}, but no text or tool calls were delivered. Usage alone does not establish the cause`;
 			} else {
-				finalError =
-					"Assistant returned empty stop after retry cap; try switching models or `/shake images` to remove archived frames";
+				finalError = `Assistant returned empty stop after retry cap; ${deliveredShape}; try switching models or \`/shake images\` to remove archived frames`;
 			}
 			assistantMessage.errorMessage = finalError;
 			if (providerEmptyOutput) assistantMessage.errorId = AIError.create();

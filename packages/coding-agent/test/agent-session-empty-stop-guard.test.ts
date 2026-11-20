@@ -61,6 +61,22 @@ function emptyStop(): MockResponse {
 	};
 }
 
+function emptyToolUseStop(): MockResponse {
+	return {
+		content: [],
+		stopReason: "toolUse",
+		usage: { output: 0, cacheRead: 100 },
+	};
+}
+
+function reportedOutputToolUseStop(): MockResponse {
+	return {
+		content: [],
+		stopReason: "toolUse",
+		usage: { output: 192, cacheRead: 100 },
+	};
+}
+
 function reportedOutputEmptyStop(reasoningTokens?: number): MockResponse {
 	return {
 		content: [],
@@ -554,6 +570,31 @@ describe("AgentSession empty stop guard", () => {
 				}
 			}
 			expect(diagnostic).not.toMatch(/filter|dropped|generated and/i);
+		},
+	);
+
+	it.each([
+		["with no blocks", emptyToolUseStop, "stopReason=toolUse, delivered: text=0 toolCalls=0 reasoning=0"],
+		["with reasoning only", orphanedToolUseStop, "stopReason=toolUse, delivered: text=0 toolCalls=0 reasoning=1"],
+		[
+			"that reports output tokens",
+			reportedOutputToolUseStop,
+			"stopReason=toolUse, delivered: text=0 toolCalls=0 reasoning=0; provider reported 192 output tokens",
+		],
+	] as const)(
+		"names the stop reason and delivered block counts when a toolUse stop %s exhausts the retry cap",
+		async (_label, response, expected) => {
+			const { session } = await createHarness(Array.from({ length: 4 }, () => response()));
+			const retryEndEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
+			session.subscribe(event => {
+				if (event.type === "auto_retry_end") retryEndEvents.push(event);
+			});
+
+			await expectPromptCompletes(session.prompt("answer without tools"));
+			await session.waitForIdle();
+
+			expect(retryEndEvents).toEqual([expect.objectContaining({ success: false, attempt: 3 })]);
+			expect(retryEndEvents[0]?.finalError).toContain(expected);
 		},
 	);
 
