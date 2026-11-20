@@ -231,7 +231,9 @@ impl OperationToken {
 		self.dispatch.clone()
 	}
 
-	/// A fenced result must reach JS before the run's abort discards it.
+	/// When the caller stops waiting for a fenced reply: early enough before the
+	/// run's end to leave its result a reserve for reaching JS before the run's
+	/// abort, which it does not guarantee.
 	pub(crate) fn reply_wait_deadline(&self, reply_by: Instant) -> Instant {
 		if self.dispatch.is_none() {
 			return reply_by;

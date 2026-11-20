@@ -211,7 +211,7 @@ await win.click(120, 48, button="right")
 - Partial-delivery or restoration error? Inspect the target before retrying; input may already have landed. NEVER blindly repeat it.
 - When the user's setting refuses takeover, `perform("open")`, `perform("showMenu")`
   and every other spelling `perform()` takes for `AXOpen` and `AXShowMenu` are refused too.
-- On macOS, or Windows AX `press()`/`perform()` without a menu path, `AxUnconfirmed` means an action
+- On macOS, or Windows AX `press()` (no chord) or `perform()` without a menu path, `AxUnconfirmed` means an action
   may already have been sent or may still take effect.
   Inspect fresh AX or a screenshot before repeating it; NEVER retry blindly.
 - `UserIntervened` (macOS or X11): the user kept typing or clicking until the takeover's admission deadline, so no takeover started;

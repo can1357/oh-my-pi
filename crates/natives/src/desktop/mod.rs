@@ -2221,7 +2221,9 @@ impl SessionCore {
 		}
 		let fence = token.dispatch_fence();
 		let reply_by = Instant::now() + self.operation_timeout;
-		let reply_by = token.reply_wait_deadline(reply_by);
+		// Only the caller's wait stops short of the run deadline; the worker keeps
+		// the native deadline, so input-lock waits keep their own reserve.
+		let wait_by = token.reply_wait_deadline(reply_by);
 		// Input waiting for the user (to pause on macOS, to answer a Wayland
 		// permission prompt) or for another session's input lock gives up
 		// before this caller does.
@@ -2230,7 +2232,7 @@ impl SessionCore {
 			.send(QueuedRequest { request, token })
 			.map_err(|_| DesktopError::internal("native desktop worker stopped unexpectedly"))
 			.and_then(|()| {
-				wait(&rxr, reply_by).map_err(|e| {
+				wait(&rxr, wait_by).map_err(|e| {
 					let expired = matches!(e, flume::RecvTimeoutError::Timeout);
 					let dispatched =
 						expired && fence.as_ref().is_some_and(|fence| fence.abandon_reply());
@@ -4192,12 +4194,8 @@ mod capture_tests {
 			let mutations = Arc::clone(&mutations);
 			move || {
 				control::dispatching()?;
-				entered_tx
-					.send_timeout((), Duration::from_secs(30))
-					.expect("caller did not await dispatch");
-				blocked
-					.recv_timeout(Duration::from_secs(30))
-					.expect("provider was not unblocked");
+				entered_tx.send(()).expect("caller did not await dispatch");
+				blocked.recv().expect("provider was not unblocked");
 				mutations.fetch_add(1, Ordering::AcqRel);
 				Ok(())
 			}
@@ -4213,9 +4211,7 @@ mod capture_tests {
 				|reply| Request::ListWindows { reply },
 				|_, reply_by| {
 					assert_eq!(reply_by, run_by.checked_sub(control::DEADLINE_MARGIN / 2).unwrap());
-					entered
-						.recv_timeout(Duration::from_secs(30))
-						.expect("provider did not dispatch");
+					entered.recv().expect("provider did not dispatch");
 					Err(flume::RecvTimeoutError::Timeout)
 				},
 			)
@@ -4224,9 +4220,7 @@ mod capture_tests {
 		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
 		assert!(error.message.contains("may still take effect"));
 		assert_eq!(mutations.load(Ordering::Acquire), 0);
-		unblock
-			.send_timeout((), Duration::from_secs(30))
-			.expect("provider did not resume");
+		unblock.send(()).expect("provider did not resume");
 		drop(unblock);
 		core.close().unwrap();
 		assert_eq!(mutations.load(Ordering::Acquire), 1);
@@ -4242,19 +4236,10 @@ mod capture_tests {
 		backend.on_windows = Some(Box::new({
 			let mutations = Arc::clone(&mutations);
 			move || {
-				entered_tx
-					.send_timeout((), Duration::from_secs(30))
-					.expect("caller did not await provider entry");
-				blocked
-					.recv_timeout(Duration::from_secs(30))
-					.expect("provider was not unblocked");
+				entered_tx.send(()).expect("caller did not await provider entry");
+				blocked.recv().expect("provider was not unblocked");
 				let dispatched = control::dispatching();
-				result_tx
-					.send_timeout(
-						dispatched.as_ref().err().map(|error| error.code),
-						Duration::from_secs(30),
-					)
-					.unwrap();
+				result_tx.send(dispatched.as_ref().err().map(|error| error.code)).unwrap();
 				dispatched?;
 				mutations.fetch_add(1, Ordering::AcqRel);
 				Ok(())
@@ -4271,9 +4256,7 @@ mod capture_tests {
 				|reply| Request::ListWindows { reply },
 				|_, reply_by| {
 					assert_eq!(reply_by, run_by.checked_sub(control::DEADLINE_MARGIN / 2).unwrap());
-					entered
-						.recv_timeout(Duration::from_secs(30))
-						.expect("provider did not enter");
+					entered.recv().expect("provider did not enter");
 					Err(flume::RecvTimeoutError::Timeout)
 				},
 			)
@@ -4285,13 +4268,9 @@ mod capture_tests {
 				.message
 				.contains("nothing was sent and nothing will be")
 		);
-		unblock
-			.send_timeout((), Duration::from_secs(30))
-			.expect("provider did not resume");
+		unblock.send(()).expect("provider did not resume");
 		assert_eq!(
-			result
-				.recv_timeout(Duration::from_secs(30))
-				.expect("provider did not check the fence"),
+			result.recv().expect("provider did not check the fence"),
 			Some(ErrorCode::Timeout),
 		);
 		core.close().unwrap();
@@ -4317,9 +4296,7 @@ mod capture_tests {
 			core.call_with_wait(
 				token,
 				|reply| Request::ListWindows { reply },
-				|reply, _| Ok(reply
-					.recv_timeout(Duration::from_secs(30))
-					.expect("provider did not reply")),
+				|reply, _| Ok(reply.recv().expect("provider did not reply")),
 			),
 			Ok(Response::Windows(_))
 		));
