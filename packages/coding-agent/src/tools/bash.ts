@@ -693,6 +693,14 @@ function resolveCommandCwd(cwd: string | undefined, sessionCwd: string, hoistedS
 }
 
 /**
+ * The input a bash call's guard probes check, keying its probe budget ({@link callProbeBudget}):
+ * its command and `cwd`.
+ */
+function probeInput(command: string, cwd: unknown): string {
+	return `${typeof cwd === "string" ? cwd : ""}\0${command}`;
+}
+
+/**
  * Bash tool implementation.
  *
  * Executes bash commands with optional timeout and working directory.
@@ -800,7 +808,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 		const guardHit = this.#guardHit(command, input.cwd, {
 			probe,
-			budget: probe ? callProbeBudget(ctx?.toolCall) : undefined,
+			budget: probe ? callProbeBudget(probeInput(command, input.cwd), ctx?.toolCall) : undefined,
 		});
 		if (guardHit) return { tier: "exec", override: true, reason: guardHit.reason };
 		if (decision.kind === "allow") return { tier: "write", policy: "allow" };
@@ -899,7 +907,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// segment can carry (`size_limit`), or a parse with more pipelines than segments, leaves the chain
 		// to the plain command row. The rows are checks for this call: their probes share the budget of
 		// the call's approval paths, so they ask nothing the gate already asked.
-		const budget = callProbeBudget();
+		const budget = callProbeBudget(probeInput(command, cwd));
 		const segmentGuards = cfgToolsGuardRules.get(this.session.settings)
 			? findPipelineGuardHits(command, this.#guardScope(cwd), { budget })
 			: [];

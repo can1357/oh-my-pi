@@ -60,8 +60,8 @@
  *   `kills_harness` no executable for a relative `killall` path: `cd "$d" && git reset --hard`,
  *   `env -C repo git reset --hard`. A bash `cwd` that is an internal URL or does not resolve makes
  *   the starting directory unknown to them.
- * - The probes of one call share {@link PROBE_BUDGET_MS}; in a command that asks more than fit, such
- *   as many distinct `pkill` patterns, the ones left without time count as no match.
+ * - The probes of one call on one input share {@link PROBE_BUDGET_MS}; in a command that asks more
+ *   than fit, such as many distinct `pkill` patterns, the ones left without time count as no match.
  * - Brace expansion is followed only in words up to 4096 characters and for their first 1024
  *   words: `{a,b}{a,b}...{a,b}{x,.env}`.
  * - A path that reaches a credential location through a symlink, hard link or bind mount is not
@@ -1475,12 +1475,14 @@ const PROBE_BUDGET_MS = 3_000;
 type ProbeAnswer = string | boolean | undefined;
 
 /**
- * The probes of the checks one tool call makes: its approval paths (the ACP permission gate, the
- * extension wrapper before and after `tool_call` hooks) and the rows of its prompt (the segments
- * of a compound command, each one pipeline of the whole chain's parse). Together their probes take
- * at most {@link PROBE_BUDGET_MS}, each probe is asked once among them, and a pipeline checked again
- * gets what its first check found. Never shared across calls: an earlier call of the same batch may
- * change the tree before a later call's gate.
+ * The probes of the checks one tool call makes on one input: its approval paths (the ACP permission
+ * gate, the extension wrapper before and after `tool_call` hooks) and the rows of its prompt (the
+ * segments of a compound command, each one pipeline of the whole chain's parse). Together their
+ * probes take at most {@link PROBE_BUDGET_MS}, each probe is asked once among them, and a pipeline
+ * checked again gets what its first check found. A `tool_call` hook that rewrites the input gives
+ * the rewritten one its own budget, so probes of the input it replaced cannot use up the time of the
+ * one that runs. Never shared across calls: an earlier call of the same batch may change the tree
+ * before a later call's gate.
  */
 export class GuardProbeBudget {
 	#left = PROBE_BUDGET_MS;
@@ -1509,13 +1511,13 @@ export class GuardProbeBudget {
 	}
 }
 
-/** Each tool call's probe budget, by its loop context. */
-const toolCallBudgets = new WeakMap<ToolCallContext, GuardProbeBudget>();
+/** Each tool call's probe budgets, by its loop context, then by input ({@link callProbeBudget}). */
+const toolCallBudgets = new WeakMap<ToolCallContext, Map<string, GuardProbeBudget>>();
 /**
- * Each tool call's probe budget, by the approval scope ({@link toolApprovalScopeToken}) the
- * extension wrapper approves that call in and shows its prompt from.
+ * Each tool call's probe budgets, by the approval scope ({@link toolApprovalScopeToken}) the
+ * extension wrapper approves that call in and shows its prompt from, then by input.
  */
-const scopeBudgets = new WeakMap<object, GuardProbeBudget>();
+const scopeBudgets = new WeakMap<object, Map<string, GuardProbeBudget>>();
 
 /**
  * Marks the current approval scope as one tool call's own: the extension wrapper binds it (through
@@ -1525,7 +1527,7 @@ const scopeBudgets = new WeakMap<object, GuardProbeBudget>();
  */
 export function bindGuardProbeScope(): void {
 	const scope = toolApprovalScopeToken();
-	if (scope && !scopeBudgets.has(scope)) scopeBudgets.set(scope, new GuardProbeBudget());
+	if (scope && !scopeBudgets.has(scope)) scopeBudgets.set(scope, new Map());
 }
 
 /** Whether the current approval scope is a tool call's own ({@link bindGuardProbeScope}). */
@@ -1535,18 +1537,22 @@ export function inGuardProbeScope(): boolean {
 }
 
 /**
- * The probe budget of the tool call being approved, shared by its approval paths and the rows of
- * its prompt: found by its loop context `toolCall`, or by the call's own approval scope
- * ({@link bindGuardProbeScope}), which the prompt rows have without a context. A new one when
- * neither knows one.
+ * The probe budget of the tool call being approved on `input` (the checked input, as the caller
+ * keys it), shared by its approval paths and the rows of its prompt: found by its loop context
+ * `toolCall`, or by the call's own approval scope ({@link bindGuardProbeScope}), which the prompt
+ * rows have without a context. A new one when neither knows one for `input`.
  */
-export function callProbeBudget(toolCall?: ToolCallContext): GuardProbeBudget {
+export function callProbeBudget(input: string, toolCall?: ToolCallContext): GuardProbeBudget {
 	const token = toolApprovalScopeToken();
-	const scope = token && scopeBudgets.has(token) ? token : undefined;
-	const budget =
-		(toolCall && toolCallBudgets.get(toolCall)) ?? (scope && scopeBudgets.get(scope)) ?? new GuardProbeBudget();
-	if (toolCall) toolCallBudgets.set(toolCall, budget);
-	if (scope) scopeBudgets.set(scope, budget);
+	const scoped = token ? scopeBudgets.get(token) : undefined;
+	let called = toolCall ? toolCallBudgets.get(toolCall) : undefined;
+	if (toolCall && !called) {
+		called = new Map();
+		toolCallBudgets.set(toolCall, called);
+	}
+	const budget = called?.get(input) ?? scoped?.get(input) ?? new GuardProbeBudget();
+	called?.set(input, budget);
+	scoped?.set(input, budget);
 	return budget;
 }
 

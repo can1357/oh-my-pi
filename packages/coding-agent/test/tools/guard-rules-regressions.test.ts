@@ -1130,6 +1130,36 @@ describe("guard rule regressions", () => {
 		}
 	});
 
+	it.skipIf(process.platform === "win32")(
+		"gives an input a `tool_call` hook rewrote its own probe time after the check of the original",
+		() => {
+			const spawn = spyOn(Bun, "spawnSync").mockImplementation(
+				() => ({ success: false, stdout: Buffer.from("") }) as never,
+			);
+			// Each probe takes one second of clock time.
+			const clock = spyOn(performance, "now").mockImplementation(
+				() => 1_000_000 + spawn.mock.calls.length * 1_000,
+			);
+			try {
+				const tool = new BashTool(createSession(cwd));
+				const approval = tool.approval as (args: unknown, ctx?: AgentToolContext) => ToolApprovalDecision;
+				const ctx = callContext();
+				// The wrapper's deny-only check of the original input uses up its three seconds.
+				const original = Array.from({ length: 10 }, (_, i) => `pkill zz-n${i}`).join("; ");
+				expect(approval({ command: original }, ctx)).toBe("exec");
+				expect(spawn.mock.calls.length).toBe(3);
+				// The final gate of the rewritten input still probes it, and a second check of it reuses that.
+				expect(approval({ command: "pkill zz-rewritten" }, ctx)).toBe("exec");
+				expect(spawn.mock.calls.length).toBe(4);
+				expect(approval({ command: "pkill zz-rewritten" }, ctx)).toBe("exec");
+				expect(spawn.mock.calls.length).toBe(4);
+			} finally {
+				clock.mockRestore();
+				spawn.mockRestore();
+			}
+		},
+	);
+
 	it("parses a long `&&` chain in time linear in its length", () => {
 		// Each `&&` once copied the whole chain before it: quadratic, and seconds at this length.
 		const members = 15_000;
