@@ -12,13 +12,6 @@ use uiautomation::{
 	types::{ControlType, ExpandCollapseState, Handle, Point, ScrollAmount, UIProperty},
 	variants::Value,
 };
-use windows::{
-	Win32::{
-		System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx},
-		UI::Accessibility::{CUIAutomation8, IUIAutomation, IUIAutomation2},
-	},
-	core::Interface,
-};
 use windows_sys::Win32::{
 	Foundation::{HWND, POINT},
 	UI::WindowsAndMessaging::{
@@ -212,32 +205,7 @@ impl Win32Ax {
 		if !window::owns_foreground(root) || !shows_at(root, point) {
 			return Ok(false);
 		}
-		if !self.automation_initialized {
-			let initialized = &mut self.automation_initialized;
-			run.call(|| {
-				// SAFETY: initialize the worker apartment in the same mode as
-				// UIAutomation::new.
-				let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok() };
-				// Recorded at once, so a cutoff right after cannot lose it.
-				*initialized |= result.is_ok();
-				result
-			})?;
-		}
-		// A scroll-local client leaves other actions' timeout settings alone.
-		// SAFETY: this thread's COM apartment is initialized.
-		let client = run.call(|| unsafe {
-			CoCreateInstance::<_, IUIAutomation2>(&CUIAutomation8, None, CLSCTX_ALL)
-		})?;
-		if let Some(cutoff) = run.cutoff {
-			let timeout = u32::try_from(cutoff.saturating_duration_since((run.now)()).as_millis())
-				.unwrap_or(u32::MAX)
-				.max(1);
-			// SAFETY: these puts take scalar milliseconds on our local client.
-			run.call(|| unsafe { client.SetConnectionTimeout(timeout) })?;
-			// SAFETY: same local client and scalar timeout.
-			run.call(|| unsafe { client.SetTransactionTimeout(timeout) })?;
-		}
-		let automation = UIAutomation::from(run.call(|| client.cast::<IUIAutomation>())?);
+		let automation = run.call(|| self.automation())?;
 		let walker = run.call(|| automation.get_raw_view_walker())?;
 		let Ok(hit) = run.call(|| {
 			Ok::<_, DesktopError>(automation.element_from_point(Point::new(point.x, point.y)))
