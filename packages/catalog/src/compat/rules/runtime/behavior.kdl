@@ -29,7 +29,7 @@ behavior {
 	// These hosts reuse an unchanged message prefix across turns; history
 	// rewrites otherwise discard their warm prompt cache.
 	append-only-context-providers "deepseek" "ollama" "ollama-cloud" "lm-studio" "llama.cpp" \
-		"google-antigravity" "google" "google-vertex"
+		"google-antigravity" "google" "google-vertex" "openai-codex"
 
 	// Discovered Responses/Codex models receive these additional operations.
 	model-operations provider="openai" {

@@ -25,6 +25,15 @@ describe("shouldEnableAppendOnlyContext", () => {
 		);
 	});
 
+	test("auto enables for OpenAI Codex", () => {
+		expect(
+			shouldEnableAppendOnlyContext("auto", {
+				provider: "openai-codex",
+				baseUrl: "https://chatgpt.com/backend-api/codex",
+			}),
+		).toBe(true);
+	});
+
 	test("auto preserves prefix caches on Google hosts while respecting explicit off", () => {
 		for (const provider of ["google-antigravity", "google", "google-vertex"]) {
 			const model = { provider, baseUrl: "https://generativelanguage.googleapis.com" };
