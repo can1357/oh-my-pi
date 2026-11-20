@@ -196,6 +196,9 @@ await win.click(120, 48, button="right")
     - it reruns that call in takeover, hands the keyboard back to the user's window and says what it did in the output
       (`… ran in takeover because …; the input was delivered, and handed the keyboard back to …'s window`), or,
     - when the user's setting refuses, throws `BackgroundUnavailable` with nothing taken over; then use AX or another route.
+  - Windows WPF scrolls use UI Automation only while the window is in front, choosing a container for each requested axis. If that route cannot be used,
+    `Unsupported` means nothing was sent and never triggers automatic takeover: bring it forward or explicitly use `takeover: true`.
+    Hosted non-WPF child windows keep their normal posted-wheel route.
   - Only when a screenshot proves a background call did nothing and AX cannot do it, repeat that call with `{ takeover: true }`.
   - OS acceptance alone does not prove the application acted.
 {{/if}}
@@ -229,10 +232,10 @@ await win.click(120, 48, button="right")
       then use `win.menu.select` if the menu bar has the command, or tell the user the step needs their screen.
   - A right-button or Control drag, `holdMouse` or multi-click has no background route,
     nor does a drag, `holdMouse` or multi-click on a menu button or popup button: click it once with `menu` instead.
-- Partial-delivery or restoration error? Inspect the target before retrying; input may already have landed. NEVER blindly repeat it.
+- Partial-delivery or restoration error, such as a partial WPF `InputFailed`? Inspect the target before retrying; input may already have landed. NEVER blindly repeat it.
 - When the user's setting refuses takeover, `perform("open")`, `perform("showMenu")`
   and every other spelling `perform()` takes for `AXOpen` and `AXShowMenu` are refused too.
-- On macOS, `AxUnconfirmed` means an AX action may already have taken effect.
+- On macOS and for Windows WPF scrolling, `AxUnconfirmed` means an accessibility action may already have taken effect.
   Inspect fresh AX or a screenshot before repeating it; NEVER retry blindly.
 - `UserIntervened` (macOS or X11): the user kept typing or clicking until the takeover's admission deadline, so no takeover started;
   on macOS they also came to that app, or typed or clicked in it; on X11 they pressed a key or button during takeover.

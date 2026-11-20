@@ -240,8 +240,9 @@ mod background {
 	use crate::desktop::win32::{
 		ax::Win32Ax,
 		delivery::{
-			EventKind, TargetTraits, TextUnit, is_chromium_class, non_client_drag_region,
-			posts_double_click, text_input_unsupported, text_units, would_be_silently_dropped,
+			EventKind, TargetTraits, TextUnit, is_chromium_class, is_wpf_class,
+			non_client_drag_region, posts_double_click, text_input_unsupported, text_units,
+			would_be_silently_dropped,
 		},
 		window,
 	};
@@ -315,9 +316,19 @@ mod background {
 	}
 
 	fn refusal(id: &str, class: &str, kind: EventKind, reason: &str) -> DesktopError {
+		if kind == EventKind::MouseScroll && is_wpf_class(class) {
+			return wpf_scroll_unsupported(id, class);
+		}
 		DesktopError::background_unavailable(format!(
 			"window {id} ({class}) drops background {} events: {reason}; no input was sent",
 			kind.name()
+		))
+	}
+
+	fn wpf_scroll_unsupported(id: &str, class: &str) -> DesktopError {
+		DesktopError::unsupported(format!(
+			"window {id} ({class}) drops posted wheels; bring it to the front for scrolling over a \
+			 scroll container, or use takeover: true; no input was sent"
 		))
 	}
 
@@ -418,7 +429,10 @@ mod background {
 	///
 	/// Toolkits that drop posted clicks still get a single unmodified left
 	/// click when UI Automation can invoke the control under the point, except
-	/// Chromium, whose Invoke reports success without acting.
+	/// Chromium, whose Invoke reports success without acting. While a WPF
+	/// window holds the foreground, its scrolls go to the UI Automation scroll
+	/// container under the point; behind other windows they are refused
+	/// ([`wpf_scroll_unsupported`]).
 	pub(super) fn pointer(ax: &mut Win32Ax, id: &str, event: PointerEvent) -> CoreResult<()> {
 		control::check()?;
 		let root = hwnd(id)?;
@@ -430,7 +444,11 @@ mod background {
 			PointerEvent::Scroll { .. } => EventKind::MouseScroll,
 		};
 		let class = window::class_name(root);
-		if let Some(reason) = drop_reason(root, &class, kind) {
+		let wpf_scroll = kind == EventKind::MouseScroll && is_wpf_class(&class);
+		if wpf_scroll && window::has_chromium_descendant(root) {
+			return Err(wpf_scroll_unsupported(id, &class));
+		}
+		if !wpf_scroll && let Some(reason) = drop_reason(root, &class, kind) {
 			if let PointerEvent::Click { x, y, button: MouseButton::Left, count: 1, modifiers } = event
 				&& modifiers == Modifiers::default()
 				&& !is_chromium_class(&class)
@@ -548,7 +566,19 @@ mod background {
 				let point = screen_point(x, y);
 				// Wheel messages carry screen coordinates; unhandled wheel input
 				// bubbles from the child up its parent chain.
-				let (target, _) = child_under(root, point)?;
+				let (target, _) = match child_under(root, point) {
+					Err(_) if wpf_scroll => return Err(wpf_scroll_unsupported(id, &class)),
+					result => result?,
+				};
+				if wpf_scroll && (target == root || is_wpf_class(&window::class_name(target))) {
+					let (horizontal, vertical) = (super::scroll_steps(dx), super::scroll_steps(dy));
+					if (horizontal != 0 || vertical != 0)
+						&& ax.scroll_at_point(root, point, horizontal, vertical)?
+					{
+						return Ok(());
+					}
+					return Err(wpf_scroll_unsupported(id, &class));
+				}
 				ensure_delivery(id, target, kind)?;
 				let point = window::logical_screen_point(target, point).ok_or_else(|| {
 					DesktopError::input_failed("cannot map wheel coordinates to the target's DPI")
