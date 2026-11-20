@@ -881,8 +881,8 @@ pub(super) mod tests {
 	/// Owns fixture windows on a pumping thread, separate from the caller
 	/// sending bounded synchronous messages to them.
 	pub(in crate::desktop::win32) struct ButtonThread {
-		jobs: std::sync::mpsc::Sender<Box<dyn FnOnce() + Send>>,
-		id: u32,
+		jobs:   std::sync::mpsc::Sender<Box<dyn FnOnce() + Send>>,
+		id:     u32,
 		thread: Option<std::thread::JoinHandle<()>>,
 	}
 
@@ -895,11 +895,13 @@ pub(super) mod tests {
 					DispatchMessageW, GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, WM_APP,
 				};
 				let mut message = MSG::default();
-				// SAFETY: creates this thread's message queue before publishing its id.
+				// SAFETY: creates this thread's message queue before publishing its
+				// id.
 				unsafe { PeekMessageW(&raw mut message, null_mut(), 0, 0, PM_NOREMOVE) };
 				// SAFETY: queries only this thread.
 				ready.send(unsafe { GetCurrentThreadId() }).unwrap();
-				// SAFETY: message is writable; the loop dispatches only this thread's messages.
+				// SAFETY: message is writable; the loop dispatches only this
+				// thread's messages.
 				while unsafe { GetMessageW(&raw mut message, null_mut(), 0, 0) } > 0 {
 					if message.hwnd.is_null() && message.message == WM_APP {
 						receive.recv().unwrap()();
@@ -909,11 +911,7 @@ pub(super) mod tests {
 					}
 				}
 			});
-			Self {
-				jobs,
-				id: started.recv().expect("fixture thread started"),
-				thread: Some(thread),
-			}
+			Self { jobs, id: started.recv().expect("fixture thread started"), thread: Some(thread) }
 		}
 
 		pub(in crate::desktop::win32) fn run<R: Send + 'static>(
@@ -922,7 +920,8 @@ pub(super) mod tests {
 		) -> R {
 			use windows_sys::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP};
 			let (send, receive) = std::sync::mpsc::sync_channel(1);
-			self.jobs
+			self
+				.jobs
 				.send(Box::new(move || {
 					let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
 					let _ = send.send(result);
@@ -1315,7 +1314,8 @@ pub(super) mod tests {
 		unsafe {
 			let check = |button| SendMessageW(button, BM_GETCHECK, 0, 0);
 
-			// Synchronous delivery must finish before click_button reports success.
+			// Synchronous delivery must finish before click_button reports
+			// success.
 			let pushed = child(BS_PUSHBUTTON);
 			let group = child(BS_GROUPBOX);
 			assert_eq!(native_button(pushed), Some(NativeButton::Enabled));

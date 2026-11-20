@@ -748,7 +748,8 @@ mod tests {
 			.unwrap();
 		let handle = uia_handle(element);
 
-		// The button's own synchronous click must finish before the action returns.
+		// The button's own synchronous click must finish before the action
+		// returns.
 		ax.perform(&handle, "press").unwrap();
 		assert_eq!(fixture.run(|| (clicks(), click_messages())), (1, 1));
 		ax.perform(&handle, "invoke").unwrap();

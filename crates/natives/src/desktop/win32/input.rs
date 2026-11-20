@@ -882,7 +882,8 @@ mod background {
 			UI::{
 				HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
 				WindowsAndMessaging::{
-					BS_OWNERDRAW, BS_PUSHBUTTON, DestroyWindow, SW_SHOWNOACTIVATE, ShowWindow, WS_VISIBLE,
+					BS_OWNERDRAW, BS_PUSHBUTTON, DestroyWindow, SW_SHOWNOACTIVATE, ShowWindow,
+					WS_VISIBLE,
 				},
 			},
 		};
@@ -926,10 +927,14 @@ mod background {
 			let id = parent.expose_provenance().to_string();
 			let mut ax = Win32Ax::new();
 
-			// The button's own synchronous click must finish before pointer returns.
+			// The button's own synchronous click must finish before pointer
+			// returns.
 			let forms_id = fixture.run(move || {
-				let forms =
-					button(parent_id as HWND, winforms_button_class(), WS_VISIBLE | BS_PUSHBUTTON as u32);
+				let forms = button(
+					parent_id as HWND,
+					winforms_button_class(),
+					WS_VISIBLE | BS_PUSHBUTTON as u32,
+				);
 				record(forms);
 				forms as usize
 			});
