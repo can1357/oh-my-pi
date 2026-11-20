@@ -9,6 +9,7 @@ import { mcpModule } from "./mcp";
 import { mutexModule } from "./mutex";
 import { predictModule } from "./predict";
 import { speechModule } from "./speech";
+import { transcriptsModule } from "./transcripts";
 
 export const DAEMON_MODULES: readonly DaemonModule[] = [
 	lspModule,
@@ -20,4 +21,5 @@ export const DAEMON_MODULES: readonly DaemonModule[] = [
 	agentsModule,
 	mutexModule,
 	mcpModule,
+	transcriptsModule,
 ];

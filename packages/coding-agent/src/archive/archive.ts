@@ -31,14 +31,14 @@ import {
 	sessionDisplayName,
 } from "../session/session-listing";
 import { sessionDirForCwd } from "../session/session-paths";
+import { syncTranscripts } from "../daemon/modules/transcripts";
 import {
 	indexedMessageCounts,
 	indexedSessionFiles,
-	syncTranscriptIndex,
+	isTranscriptIndexFresh,
 	transcriptMatches,
 	transcriptSessionIds,
 } from "../session/transcript-index";
-import { syncTranscriptsInBackground } from "../session/transcript-index-client";
 
 /** A listed session. Times are ISO-8601. */
 export interface ArchiveSession {
@@ -126,12 +126,7 @@ const PROMPT_DETAIL_WIDTH = 600;
 const SEARCH_MATCH_LINES = 3;
 /** Newest matching messages a search hit carries. */
 const SEARCH_MESSAGE_MATCHES = 5;
-/**
- * Largest transcript backlog, in bytes, a search indexes on the calling thread
- * (tens of milliseconds); a larger one goes to the worker thread.
- */
-const INLINE_SYNC_BYTES = 16 * 1024 * 1024;
-/** How long a search waits for the worker to catch up before answering from what the index holds. */
+/** How long a search waits for the index to catch up before answering from what it holds. */
 const TRANSCRIPT_SYNC_WAIT_MS = 1000;
 /** A sync completed this recently, in any process, spares a search its catch-up. */
 const TRANSCRIPT_FRESH_MS = 30_000;
@@ -185,8 +180,8 @@ export async function archiveSessions(cwd: string | undefined, limit: number): P
  * Sessions of one project (`cwd`) or every project whose indexed title, a
  * journaled recap, or a user or assistant message holds every `query` term as
  * words ({@link WordQuery}), newest activity first. Brings the transcript index
- * up to date first, answering from what it holds when a large backlog takes
- * longer than {@link TRANSCRIPT_SYNC_WAIT_MS}; the listing then says so.
+ * up to date first, answering from what it holds when that takes longer than
+ * {@link TRANSCRIPT_SYNC_WAIT_MS}; the listing then says so.
  */
 export async function archiveSearch(
 	query: string,
@@ -248,25 +243,20 @@ async function searchSessions(words: WordQuery, cwd: string | undefined, limit: 
 }
 
 /**
- * Brings the transcript index up to date unless a sync completed within
- * {@link TRANSCRIPT_FRESH_MS}: inline for a backlog up to
- * {@link INLINE_SYNC_BYTES}, otherwise on the worker, waited for up to
- * {@link TRANSCRIPT_SYNC_WAIT_MS}. False while a sync still runs (here or in
- * another process) or after one failed; true when there is no index to sync.
+ * Brings the transcript index up to date, off this thread, unless a sync
+ * completed within {@link TRANSCRIPT_FRESH_MS}; waits up to
+ * {@link TRANSCRIPT_SYNC_WAIT_MS}. False while the sync still runs (here or in
+ * another process) or after it failed; true when there is no index to sync.
  */
 async function transcriptsCaughtUp(): Promise<boolean> {
-	const failed = (error: unknown) => {
-		logger.warn("Transcript index sync failed", { error: String(error) });
-		return false;
-	};
+	if (isTranscriptIndexFresh(TRANSCRIPT_FRESH_MS)) return true;
+	const wait = AbortSignal.timeout(TRANSCRIPT_SYNC_WAIT_MS);
 	try {
-		const inline = await syncTranscriptIndex({ maxBytes: INLINE_SYNC_BYTES, maxAgeMs: TRANSCRIPT_FRESH_MS });
-		if (inline.outcome !== "deferred") return inline.outcome !== "busy";
+		return (await syncTranscripts(wait)).outcome !== "busy";
 	} catch (error) {
-		return failed(error);
+		if (!wait.aborted) logger.warn("Transcript index sync failed", { error: String(error) });
+		return false;
 	}
-	const sync = syncTranscriptsInBackground().then(result => result.outcome === "synced", failed);
-	return Promise.race([sync, Bun.sleep(TRANSCRIPT_SYNC_WAIT_MS).then(() => false)]);
 }
 
 /**

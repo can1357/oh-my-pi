@@ -8,10 +8,9 @@
  * {@link syncTranscriptIndex} tails each session file from the byte offset it
  * last indexed, newest files first, so once the first pass is done a sync
  * reads only appended lines; a file that shrank is indexed afresh and a
- * vanished one dropped. The first pass reads every transcript, so callers on
- * the UI thread cap the backlog they index inline (`maxBytes`) and hand a
- * larger one to `transcript-index-client.ts`. Queries answer from whatever is
- * indexed.
+ * vanished one dropped. The first pass reads every transcript, so syncs run on
+ * a worker thread (`transcript-index-client.ts`), hosted by the daemon's
+ * `transcripts` module. Queries answer from whatever is indexed.
  */
 import type { Database, Statement } from "bun:sqlite";
 import * as fs from "node:fs";
@@ -95,11 +94,10 @@ export type TranscriptRole = "user" | "assistant";
 
 /**
  * How a {@link syncTranscriptIndex} pass ended: `synced` (the index holds every
- * complete line on disk), `busy` (another process holds the sync), `deferred`
- * (the backlog exceeded `maxBytes`), or `unavailable` (the index cannot be
- * opened). Only `synced` indexed anything.
+ * complete line on disk), `busy` (another process holds the sync), or
+ * `unavailable` (the index cannot be opened). Only `synced` indexed anything.
  */
-export type TranscriptSyncOutcome = "synced" | "busy" | "deferred" | "unavailable";
+export type TranscriptSyncOutcome = "synced" | "busy" | "unavailable";
 
 /** What one {@link syncTranscriptIndex} pass did. */
 export interface TranscriptSyncResult {
@@ -110,14 +108,12 @@ export interface TranscriptSyncResult {
 	messages: number;
 }
 
-/** Narrows one {@link syncTranscriptIndex} pass. */
+/** The store one {@link syncTranscriptIndex} pass brings up to date, and the sessions it reads. */
 export interface TranscriptSyncOptions {
+	/** Index store. Default: {@link getTranscriptIndexDbPath}. */
+	dbPath?: string;
 	/** Root holding one directory per project. Default: {@link getSessionsDir}. */
 	sessionsRoot?: string;
-	/** Largest backlog of unindexed transcript bytes to take on; a larger one is left `deferred`. */
-	maxBytes?: number;
-	/** Skip the pass, reporting `synced`, when a sync in any process completed within this many milliseconds. */
-	maxAgeMs?: number;
 }
 
 /** A message that answered a transcript search. */
@@ -131,7 +127,6 @@ export interface TranscriptMatch {
 }
 
 interface IndexHandle {
-	dbPath: string;
 	identity: SqliteFileIdentity;
 	db: Database;
 }
@@ -156,71 +151,78 @@ interface Chunk {
 	records: number;
 }
 
-let handle: IndexHandle | undefined;
-/** Db path whose open failed; skip retries (and log spam) until the path changes. */
-let failedPath: string | undefined;
+/** Open connections by store path: the daemon's indexer serves the store of every profile. */
+const handles = new Map<string, IndexHandle>();
+/** Store paths whose open failed; skipped, without retries or log spam, until {@link closeTranscriptIndex}. */
+const failedPaths = new Set<string>();
 
 /**
- * The index connection for the current agent dir, reopened when the path or the
- * file behind it changed. `undefined` when the store cannot be opened, and under
- * the test runner unless a test chose the agent dir, so tests never touch the
- * user's index.
+ * The connection to the store at `dbPath`, by default the current agent dir's,
+ * reopened when the file behind the path changed. `undefined` when the store
+ * cannot be opened.
  */
-function openTranscriptIndex(): Database | undefined {
-	if (isBunTestRuntime() && !process.env.PI_CODING_AGENT_DIR) return undefined;
-	const dbPath = getTranscriptIndexDbPath();
-	if (handle?.dbPath === dbPath) {
-		const identity = sqliteFileIdentity(dbPath);
-		if (identity !== undefined && identity === handle.identity) return handle.db;
+function openTranscriptIndex(dbPath?: string): Database | undefined {
+	// Tests never touch the user's index: the default store needs an agent dir the test chose.
+	if (dbPath === undefined && isBunTestRuntime() && !process.env.PI_CODING_AGENT_DIR) return undefined;
+	const store = dbPath ?? getTranscriptIndexDbPath();
+	const open = handles.get(store);
+	if (open) {
+		const identity = sqliteFileIdentity(store);
+		if (identity !== undefined && identity === open.identity) return open.db;
+		open.db.close();
+		handles.delete(store);
 	}
-	if (failedPath === dbPath) return undefined;
-	handle?.db.close();
-	handle = undefined;
+	if (failedPaths.has(store)) return undefined;
 	try {
-		fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+		fs.mkdirSync(path.dirname(store), { recursive: true });
 		const db = openSqliteDatabaseSync(
-			dbPath,
+			store,
 			db => {
 				db.run(TRANSCRIPT_INDEX_DDL);
 				return db;
 			},
 			{ recoverCorruption: true },
 		);
-		handle = { dbPath, identity: sqliteFileIdentity(dbPath), db };
-		failedPath = undefined;
+		handles.set(store, { identity: sqliteFileIdentity(store), db });
 		return db;
 	} catch (error) {
-		failedPath = dbPath;
-		logger.warn("Transcript index unavailable", { dbPath, error: String(error) });
+		failedPaths.add(store);
+		logger.warn("Transcript index unavailable", { dbPath: store, error: String(error) });
 		return undefined;
 	}
 }
 
-/** Closes the cached connection; the next call reopens it. */
+/** Closes the cached connections; the next call reopens them. */
 export function closeTranscriptIndex(): void {
-	handle?.db.close();
-	handle = undefined;
-	failedPath = undefined;
+	for (const open of handles.values()) open.db.close();
+	handles.clear();
+	failedPaths.clear();
+}
+
+/** Whether a sync of the current agent dir's index, in any process, completed within `maxAgeMs`. */
+export function isTranscriptIndexFresh(maxAgeMs: number): boolean {
+	const db = openTranscriptIndex();
+	if (!db) return false;
+	try {
+		const synced = db.query<{ value: number }, []>("SELECT value FROM meta WHERE key = 'synced_at'").get();
+		return synced !== null && Date.now() - synced.value < maxAgeMs;
+	} catch (error) {
+		logger.debug("Transcript index query failed", { error: String(error) });
+		return false;
+	}
 }
 
 /**
  * Brings the index up to date with the top-level session files, newest first.
- * One process syncs at a time; a call that finds another sync running returns
- * `busy` at once. Reads every new transcript line, so the first pass over a
- * large history takes minutes: on the UI thread, pass `maxBytes`.
+ * One process syncs a store at a time; a call that finds another sync running
+ * returns `busy` at once. Reads every new transcript line, so the first pass
+ * over a large history takes a minute or more: never run it on the UI thread.
  */
 export async function syncTranscriptIndex(options: TranscriptSyncOptions = {}): Promise<TranscriptSyncResult> {
 	const result: TranscriptSyncResult = { outcome: "unavailable", files: 0, messages: 0 };
-	const db = openTranscriptIndex();
+	const db = openTranscriptIndex(options.dbPath);
 	if (!db) return result;
-	if (options.maxAgeMs !== undefined) {
-		const synced = db.query<{ value: number }, []>("SELECT value FROM meta WHERE key = 'synced_at'").get();
-		if (synced && Date.now() - synced.value < options.maxAgeMs) {
-			result.outcome = "synced";
-			return result;
-		}
-	}
-	const lock = tryAcquireFileLock(`${getTranscriptIndexDbPath()}.sync`);
+	const lock = tryAcquireFileLock(`${options.dbPath ?? getTranscriptIndexDbPath()}.sync`);
 	if (!lock) {
 		result.outcome = "busy";
 		return result;
@@ -231,18 +233,6 @@ export async function syncTranscriptIndex(options: TranscriptSyncOptions = {}): 
 			known.set(row.path, row);
 		}
 		const files = await listSessionFiles(options.sessionsRoot ?? getSessionsDir());
-		if (options.maxBytes !== undefined) {
-			let backlog = 0;
-			for (const { file, stat } of files) {
-				const indexed = known.get(file)?.indexed ?? 0;
-				// A file shorter than its indexed end is read again from the start.
-				backlog += stat.size >= indexed ? stat.size - indexed : stat.size;
-			}
-			if (backlog > options.maxBytes) {
-				result.outcome = "deferred";
-				return result;
-			}
-		}
 		result.outcome = "synced";
 		const writer = new IndexWriter(db);
 		for (const { file, stat } of files) {

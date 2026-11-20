@@ -6,6 +6,7 @@ import { wordQuery } from "@oh-my-pi/pi-coding-agent/session/search-query";
 import {
 	closeTranscriptIndex,
 	indexedMessageCounts,
+	isTranscriptIndexFresh,
 	syncTranscriptIndex,
 	transcriptSessionIds,
 } from "@oh-my-pi/pi-coding-agent/session/transcript-index";
@@ -77,10 +78,9 @@ it("indexes user and assistant text as session files grow, shrink, and vanish", 
 		path.join(bucket, "2024-01-02T00-00-00-000Z_s2.jsonl"),
 		'{"type": "session", "id": "s2", "cwd": "/proj"}\n{"type": "message", "message": {"role": "user", "content": "spaced widget"}}\n',
 	);
-	// A backlog over the cap is left for a worker, untouched.
-	expect((await syncTranscriptIndex({ maxBytes: 1 })).outcome).toBe("deferred");
-	expect(sessionsMatching("widget")).toEqual([]);
+	expect(isTranscriptIndexFresh(60_000)).toBe(false);
 	expect((await syncTranscriptIndex()).outcome).toBe("synced");
+	expect(isTranscriptIndexFresh(60_000)).toBe(true);
 	expect(sessionsMatching("widget")).toEqual(["s1", "s2"]);
 	expect(sessionsMatching("musing")).toEqual([]);
 	expect(sessionsMatching("noise")).toEqual([]);
@@ -94,9 +94,6 @@ it("indexes user and assistant text as session files grow, shrink, and vanish", 
 		line(message("user", "rotate the keys")) +
 			JSON.stringify(message("assistant", [{ type: "text", text: "gizmo" }])),
 	);
-	// A sync that recent spares the pass.
-	expect((await syncTranscriptIndex({ maxAgeMs: 60_000 })).outcome).toBe("synced");
-	expect(sessionsMatching("rotate keys")).toEqual([]);
 	await syncTranscriptIndex();
 	expect(sessionsMatching("rotate keys")).toEqual(["s1"]);
 	expect(sessionsMatching("gizmo")).toEqual([]);

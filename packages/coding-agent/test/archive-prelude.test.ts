@@ -19,7 +19,7 @@ import {
 	recordSessionTitle,
 } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { sessionDirForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
-import { syncTranscriptsInBackground } from "@oh-my-pi/pi-coding-agent/session/transcript-index-client";
+import { syncTranscripts } from "@oh-my-pi/pi-coding-agent/daemon/modules/transcripts";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { getConfigRootDir, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { makeAssistantMessage } from "./session-manager/helpers";
@@ -179,8 +179,8 @@ describe("archive prelude", () => {
 		});
 		recordSessionTitle(oldApp, "Archive retention policy");
 		recordSessionTitle(libSession, "archive internals");
-		// Index on the worker thread, as a search does with a large backlog.
-		expect((await syncTranscriptsInBackground()).outcome).toBe("synced");
+		// The test runner never reaches the user's daemon, so this indexes on a worker thread here.
+		expect((await syncTranscripts()).outcome).toBe("synced");
 		const search = (params: Record<string, unknown>) => call<ArchiveSearchHit[]>({ action: "search", ...params });
 		const found = (hits: ArchiveSearchHit[]) =>
 			hits.map(hit => [hit.id, hit.matches.map(match => [match.source, match.text])]);
