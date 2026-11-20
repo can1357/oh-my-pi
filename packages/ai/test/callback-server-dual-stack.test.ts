@@ -58,6 +58,23 @@ function freeLoopbackPort(): number {
 	return port;
 }
 
+/** Reproduce Android/Termux, where `getifaddrs` is denied to apps (issue #16127). */
+function denyInterfaceEnumeration(): void {
+	vi.spyOn(os, "networkInterfaces").mockImplementation(() => {
+		throw Object.assign(new Error("A system error occurred: getifaddrs returned an error"), {
+			code: "ERR_SYSTEM_ERROR",
+			syscall: "getifaddrs",
+			errno: 13,
+		});
+	});
+}
+
+/** Deliver a successful callback to the redirect URI the flow advertised, through `host`. */
+function deliverCallback(flow: TestCallbackFlow, host: string): Promise<Response> {
+	const redirect = new URL(flow.lastRedirectUri ?? "");
+	return fetch(`http://${host}:${redirect.port}${redirect.pathname}?code=termux&state=${flow.lastState}`);
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
 });
@@ -167,5 +184,68 @@ describe("OAuthCallbackFlow loopback address families", () => {
 		// failure as a collision and throw a ConfigurationError before onAuth.
 		expect(flow.lastRedirectUri).toBe(`http://localhost:${port}/callback`);
 		expect(progress.some(msg => msg.includes("unavailable"))).toBe(false);
+	});
+
+	it("completes an IPv4 callback when interface enumeration is denied", async () => {
+		denyInterfaceEnumeration();
+		let delivered: Promise<Response> | undefined;
+		const flow = new TestCallbackFlow(
+			{
+				onAuth: () => {
+					delivered = deliverCallback(flow, "127.0.0.1");
+				},
+			},
+			{ preferredPort: 0 },
+		);
+
+		const credentials = await flow.login();
+		expect(credentials.access).toBe("access-termux");
+		expect((await delivered)?.status).toBe(200);
+	});
+
+	it.skipIf(!ipv6Loopback)("keeps the ::1 listener when interface enumeration is denied", async () => {
+		denyInterfaceEnumeration();
+		let delivered: Promise<Response> | undefined;
+		const flow = new TestCallbackFlow(
+			{
+				onAuth: () => {
+					delivered = deliverCallback(flow, "[::1]");
+				},
+			},
+			{ preferredPort: 0 },
+		);
+
+		// `localhost` can resolve to `::1`; denied enumeration must not strand that listener.
+		const credentials = await flow.login();
+		expect(credentials.access).toBe("access-termux");
+		expect((await delivered)?.status).toBe(200);
+	});
+
+	it("serves IPv4 alone when interface enumeration is denied and ::1 cannot bind", async () => {
+		denyInterfaceEnumeration();
+		const realServe = Bun.serve.bind(Bun) as typeof Bun.serve;
+		// Bun words a failed `::1` bind as an in-use collision (oven-sh/bun#7187). Enumeration is
+		// denied, so only the probe can tell this host has no `::1`; assuming one exists fails on that message.
+		vi.spyOn(Bun, "serve").mockImplementation(((options: { hostname?: string; port?: number }) => {
+			if (options.hostname === "::1") {
+				throw Object.assign(new Error(`Failed to start server. Is port ${options.port} in use?`), {
+					code: "EADDRINUSE",
+				});
+			}
+			return realServe(options as Parameters<typeof Bun.serve>[0]);
+		}) as typeof Bun.serve);
+		let delivered: Promise<Response> | undefined;
+		const flow = new TestCallbackFlow(
+			{
+				onAuth: () => {
+					delivered = deliverCallback(flow, "127.0.0.1");
+				},
+			},
+			{ preferredPort: 0 },
+		);
+
+		const credentials = await flow.login();
+		expect(credentials.access).toBe("access-termux");
+		expect((await delivered)?.status).toBe(200);
 	});
 });
