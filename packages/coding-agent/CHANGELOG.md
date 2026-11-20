@@ -18,6 +18,9 @@
 ### Changed
 
 - Selective commit previews show what changed inside a long line: `d.diff()` prints a long line edited in place once, with its `[-removed-]` and `{+added+}` words marked and the unchanged text far from them left out, instead of two lines cut at the output column cap; the returned patch is unchanged ([#19817](https://github.com/can1357/oh-my-pi/pull/19817) by [@baekjosh](https://github.com/baekjosh))
+### Added
+
+- Made the per-turn auto-thinking classification timeout configurable via `providers.autoThinkingTimeoutMs` and `PI_AUTO_THINKING_TIMEOUT_MS` ([#14756](https://github.com/can1357/oh-my-pi/pull/14756) by [@twotnguyen](https://github.com/twotnguyen), fixing [#14321](https://github.com/can1357/oh-my-pi/issues/14321))
 
 ### Fixed
 
