@@ -10,9 +10,9 @@
  * - a rerun is a bash command equal to, extending (pipe, redirect, `&&`), or ≥ 60% token-similar to a recent one;
  *   for any other tool but `read`, a call of the same tool whose argument tokens (`argumentTokens`) are ≥ 60%
  *   similar;
- * - an extra turn costs what it added to the bill: its cache writes are priced at its own cache-read rate, since the
- *   next request would have written those tokens had the turn not run and reads them instead, and one that read no
- *   cache keeps its whole cost (see {@link Request.turnUsd}).
+ * - an extra turn costs what it added to the bill: the cache writes the next request reads back are priced at the
+ *   turn's own cache-read rate, since that request would have written them had the turn not run; writes nothing reads
+ *   back keep their full price, and a turn that read no cache keeps its whole cost (see {@link Request.turnUsd}).
  */
 
 import type { Database, Statement } from "bun:sqlite";
@@ -272,11 +272,13 @@ export interface Request {
 	/** Model time of the request (ms). */
 	durationMs: number;
 	context: number;
+	/** Provider cost of the request. */
+	costTotal: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
 	/**
-	 * What the request added to the bill, as an extra turn: its cost with every cache write priced at its own cache-read
-	 * rate. Had it not run, the next request would have written the same context (the previous request's output and
-	 * tool results, or a rewrite after a cache miss or a compaction); with it, the next request reads that context
-	 * instead. A request that read no cache bills no read rate to price its writes at, so it keeps its whole cost.
+	 * What the request added to the bill, as an extra turn: its cost with the cache writes the next request reads back
+	 * priced at its own cache-read rate (see {@link extraTurnUsd}).
 	 */
 	turnUsd: number;
 	compacted: boolean;
@@ -469,14 +471,28 @@ function toRequest(row: RequestRow): Request {
 		timestamp: row.timestamp,
 		durationMs: row.duration,
 		context: row.input_tokens + row.cache_read_tokens + row.cache_write_tokens,
-		turnUsd:
-			row.cache_read_tokens > 0
-				? row.cost_total - row.cache_write_tokens * Math.max(0, writeRate - readRate)
-				: row.cost_total,
+		costTotal: row.cost_total,
+		cacheReadTokens: row.cache_read_tokens,
+		cacheWriteTokens: row.cache_write_tokens,
+		turnUsd: row.cost_total,
 		compacted: false,
 		readRate,
 		writeRate,
 	};
+}
+
+/**
+ * What `request` added to the bill as an extra turn. Had it not run, `next` would have written the context it reads
+ * back from the turn's cache writes (the previous request's output and tool results, or a rewrite after a cache miss);
+ * with it, `next` reads that context instead, so those writes are priced at the turn's cache-read rate. Writes nothing
+ * reads back (the session's last request, or a next request that misses the cache or compacts) keep their full price.
+ * A request that read no cache bills no read rate to price them at, so it keeps its whole cost.
+ */
+function extraTurnUsd(request: Request, next: Request | undefined): number {
+	if (request.cacheReadTokens <= 0 || next === undefined) return request.costTotal;
+	// The turn wrote the prompt span right after its cached prefix; `next` reuses the part of it its own read covers.
+	const reused = Math.min(request.cacheWriteTokens, Math.max(0, next.cacheReadTokens - request.cacheReadTokens));
+	return request.costTotal - reused * Math.max(0, request.writeRate - request.readRate);
 }
 
 /** Loads and analyzes experiment sessions with one set of prepared statements. */
@@ -581,6 +597,7 @@ class SessionLoader {
 			request.compacted = previous !== undefined && request.context < previous.context * COMPACTION_RATIO;
 			requests.push(request);
 		}
+		for (let i = 0; i < requests.length; i++) requests[i].turnUsd = extraTurnUsd(requests[i], requests[i + 1]);
 		const turnUsdByEntry = new Map(requests.map(request => [request.entryId, request.turnUsd]));
 		const analysis: SessionAnalysis = {
 			session,

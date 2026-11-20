@@ -427,9 +427,9 @@ export interface SpotlightRecoveryTotals {
 	/** Requests that issued nothing but recovery calls. */
 	turns: number;
 	/**
-	 * What those requests added to the bill: their provider cost with every cache write priced at their own cache-read
-	 * rate, since the next request would have written that context had they not run and reads it instead. A request that
-	 * read no cache bills no read rate, so it keeps its whole cost.
+	 * What those requests added to the bill: their provider cost with the cache writes the next request reads back priced
+	 * at their own cache-read rate, since that request would have written that context had they not run. Writes nothing
+	 * reads back keep their full price, and a request that read no cache bills no read rate, so it keeps its whole cost.
 	 */
 	turnsUsd: number;
 	/**
