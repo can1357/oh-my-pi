@@ -74,9 +74,10 @@ Sources: [`packages/metaharness/README.md`](../packages/metaharness/README.md), 
 Sources: [`packages/browser-relay/README.md`](../packages/browser-relay/README.md), [`packages/browser-relay/package.json`](../packages/browser-relay/package.json), [`packages/coding-agent/src/tools/browser/relay/`](../packages/coding-agent/src/tools/browser/relay/).
 
 - Package: private `@oh-my-pi/browser-relay`; user command: `omp browser-relay`.
-- Setup: run `omp browser-relay install`, load the unpacked extension from
-  `~/.omp/browser-relay/extension`, then opt in per call with `app: "relay"` — or set
-  `browser.relay`, which makes the relay the profile-wide default across projects (scope
+- Setup: run `omp browser-relay install`; it stages `~/.omp/browser-relay/extension`, registers the
+  native host, and writes Chrome's own unpacked-install record into the last-used profile (restarting
+  Chrome if needed). `--no-chrome` prints the manual load steps. Opt in per call with `app: "relay"` —
+  or set `browser.relay`, which makes the relay the profile-wide default across projects (scope
   details in the package README).
 - Behavior: the relay auto-starts through the profile-independent global daemon broker; consumers
   across projects hold leases, and the relay stops after the last lease is released. `target`

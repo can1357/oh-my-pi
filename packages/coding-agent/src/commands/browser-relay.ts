@@ -27,11 +27,18 @@ export default class BrowserRelay extends Command {
 			description: "Don't gather controllable tabs into an 'omp' tab group",
 			default: false,
 		}),
+		"no-chrome": Flags.boolean({
+			description: "Skip the unattended install into Chrome and print the manual steps",
+			default: false,
+		}),
+		profile: Flags.string({
+			description: "Chrome profile directory for the unattended install (install; default: last used)",
+		}),
 		verbose: Flags.boolean({ char: "v", description: "Log relay traffic summaries to stderr", default: false }),
 	};
 
 	static examples = [
-		"omp browser-relay install    # install the omp extension and its native host",
+		"omp browser-relay install    # install the omp extension, register it in Chrome and add its native host",
 		"omp browser-relay sync       # sync every registered extension directory",
 		"omp browser-relay            # serve the relay on the default port",
 		"omp browser-relay -p 9333 --token s3cret",
@@ -45,6 +52,8 @@ export default class BrowserRelay extends Command {
 			token: flags.token,
 			dir: flags.dir,
 			group: !flags["no-group"],
+			chrome: !flags["no-chrome"],
+			profile: flags.profile,
 			verbose: flags.verbose,
 		});
 	}
