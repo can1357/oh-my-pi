@@ -38,7 +38,7 @@ const DEFAULT_DIR_LIMIT = 500;
 
 // Avoid OOM when users @mention very large files. Above these limits we skip
 // auto-reading and only include the path in the message.
-const MAX_AUTO_READ_TEXT_BYTES = 5 * 1024 * 1024; // 5MB
+export const MAX_AUTO_READ_TEXT_BYTES = 5 * 1024 * 1024; // 5MB
 const MAX_AUTO_READ_IMAGE_BYTES = 25 * 1024 * 1024; // 25MB
 
 function isMentionBoundary(text: string, index: number): boolean {
@@ -73,7 +73,7 @@ async function resolveMentionPath(
 	}
 }
 
-interface TextOutput {
+export interface TextOutput {
 	/** Source text shown: the head of the file, or a byte prefix of line 1 when `firstLineCut`. */
 	body: string;
 	/** Truncation notice appended after `body`; never source text, so never numbered. */
@@ -85,7 +85,7 @@ interface TextOutput {
 	shownLines?: number;
 }
 
-function buildTextOutput(textContent: string): TextOutput {
+export function buildTextOutput(textContent: string): TextOutput {
 	const allLines = textContent.split("\n");
 	const totalFileLines = allLines.length;
 	const truncation = truncateHead(textContent);
