@@ -287,6 +287,13 @@ pub fn unwrap_hashline_header_path(target: &str) -> &str {
 
 /// Snapshot key: realpath, parent realpath plus basename, or input.
 pub fn canonical_key(absolute: &Path) -> PathBuf {
+	// 正常路径与「父目录缺失」都走 physical_path：向上找最深存在的祖先，
+	// canonicalize 后把缺失尾部逐段拼回，因而「写前算」与「写后算」一致。
+	if let Some(real) = physical_path(absolute) {
+		return real;
+	}
+	// physical_path 返回 None 的唯一情形：缺失尾部里有 dangling symlink，
+	// 目的地无法判定。保留旧回落，行为零变化。
 	let resolved = std::fs::canonicalize(absolute)
 		.or_else(|_| {
 			let parent = absolute.parent().ok_or(std::io::ErrorKind::NotFound)?;
@@ -1072,6 +1079,41 @@ mod tests {
 					.unwrap()
 					.join("missing.txt")
 			)
+		);
+	}
+
+	// Windows symlink creation needs special privileges, so the stability
+	// regression is covered on Unix where temp paths commonly cross symlinks.
+	#[cfg(unix)]
+	#[test]
+	fn canonical_key_is_stable_before_and_after_creation() {
+		let tmp = tempfile::tempdir().unwrap();
+		let real = tmp.path().join("real");
+		std::fs::create_dir(&real).unwrap();
+		let link = tmp.path().join("link");
+		std::os::unix::fs::symlink(&real, &link).unwrap();
+
+		// a/b 都不存在 + 父链含软链 → macOS 与 Linux 都能测出问题
+		let target = link.join("a/b/new.txt");
+		let before = canonical_key(&target);
+		std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+		std::fs::write(&target, "x").unwrap();
+		let after = canonical_key(&target);
+
+		assert_eq!(before, after, "canonical_key 对同一路径必须时间稳定");
+	}
+
+	#[test]
+	fn canonical_key_matches_canonicalize_for_existing_path() {
+		let tmp = tempfile::tempdir().unwrap();
+		let file = tmp.path().join("exists.txt");
+		std::fs::write(&file, "x").unwrap();
+
+		// 已存在路径：必须与「strip_verbatim(canonicalize(p))」完全一致，
+		// 证明复用 physical_path 没有改变最常见路径的行为。
+		assert_eq!(
+			canonical_key(&file),
+			strip_windows_verbatim_path(std::fs::canonicalize(&file).unwrap())
 		);
 	}
 }
