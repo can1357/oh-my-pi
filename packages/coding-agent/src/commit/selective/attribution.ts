@@ -29,6 +29,8 @@ export const GAP = "~gap";
 export const TAIL = "~tail";
 /** Lines of a file no record covers at all. */
 export const UNRECORDED = "~none";
+/** A net change whose ownership the edit replay cannot separate from already committed lines. */
+export const REORDERED = "~reordered";
 /** Inserter of lines present in HEAD. */
 const HEAD = "~head";
 /** Largest HEAD-side × worktree-side item product a cancellation window aligns; larger ones stay as replayed. */
@@ -268,10 +270,17 @@ function headStart(right: Item | undefined, headLength: number): number | undefi
 
 /**
  * Replay `steps` over `head` and derive the HEAD → `work` change ops with their actors.
+ * `headMoved`: a commit changed the file after its first recorded edit, so the {@link PRE} step
+ * may undo committed lines rather than replay uncommitted ones.
  * @throws when the chain is not contiguous (a step's `before` differs from the running content)
  * or does not end at `work` — both mean the caller assembled the history wrongly.
  */
-export function attribute(head: readonly string[], steps: readonly Step[], work: readonly string[]): Attribution {
+export function attribute(
+	head: readonly string[],
+	steps: readonly Step[],
+	work: readonly string[],
+	headMoved = false,
+): Attribution {
 	let items: Item[] = head.map((text, index) => ({ text, alive: true, head: index, by: HEAD, over: [], step: -1 }));
 	steps.forEach((step, stepIndex) => {
 		const aliveAt: number[] = [];
@@ -366,7 +375,71 @@ export function attribute(head: readonly string[], steps: readonly Step[], work:
 	});
 	const alive = items.filter(item => item.alive).map(item => item.text);
 	if (!linesEqual(alive, work)) throw new Error("attribution chain does not end at the worktree content");
-	return deriveOps(items);
+	const replay = deriveOps(items);
+	// After HEAD advances independently, crossing equal lines can strand a deletion and its
+	// reinsertion in different hunks. Selecting just one would commit a change neither side made.
+	// A file that was only dirty before recording began has no committed lines to strand.
+	if (!headMoved || steps[0]?.actor !== PRE || replay.ops.length === Math.abs(work.length - head.length)) {
+		return replay;
+	}
+	return reconcileNetHunks(head, work, replay, changedRegions(head, work));
+}
+
+/** Keep a replayed hunk only where it spans exactly a net HEAD → worktree hunk and adds no line
+ * a disputed hunk deletes (or deletes one it adds); offer every other net hunk whole, for explicit
+ * review. Matching op counts or repeated text is not proof of who wrote a line. */
+function reconcileNetHunks(
+	head: readonly string[],
+	work: readonly string[],
+	replay: Attribution,
+	regions: readonly Region[],
+): Attribution {
+	const byRange = new Map(replay.hunks.map(hunk => [`${hunk.headStart}:${hunk.workStart}`, hunk]));
+	const kept = regions.map(r => {
+		const hunk = byRange.get(`${r.i1}:${r.j1}`);
+		return hunk && hunk.headCount === r.i2 - r.i1 && hunk.workCount === r.j2 - r.j1 ? hunk : undefined;
+	});
+	if (regions.length === replay.hunks.length && kept.every(hunk => hunk !== undefined)) return replay;
+	// A kept hunk could pair a line with its stranded twin in a disputed hunk: a kept `+A` whose
+	// `-A` goes to review, or a kept `-A` whose `+A` does. Such a hunk is disputed too. A line both
+	// add (or both delete) is no twin, so shared blank lines and braces leave kept hunks alone.
+	// Each pass disputes at least one more hunk, so this runs at most `regions.length` times.
+	const disputedRemoved = new Set<string>();
+	const disputedAdded = new Set<string>();
+	const dispute = (r: Region) => {
+		for (let i = r.i1; i < r.i2; i++) disputedRemoved.add(head[i]);
+		for (let j = r.j1; j < r.j2; j++) disputedAdded.add(work[j]);
+	};
+	regions.forEach((r, n) => {
+		if (!kept[n]) dispute(r);
+	});
+	for (let grew = true; grew;) {
+		grew = false;
+		regions.forEach((r, n) => {
+			if (kept[n]?.ops.some(op => (op.kind === "+" ? disputedRemoved : disputedAdded).has(op.text))) {
+				kept[n] = undefined;
+				dispute(r);
+				grew = true;
+			}
+		});
+	}
+	const sources = replay.items.filter(item => item.op !== undefined);
+	const result: Item[] = [];
+	const base = { by: HEAD, over: [], step: -1 };
+	let i = 0;
+	regions.forEach((r, n) => {
+		for (; i < r.i1; i++) result.push({ ...base, text: head[i], head: i, alive: true });
+		const hunk = kept[n];
+		if (hunk) {
+			for (const op of hunk.ops) result.push(sources[op.id]);
+			i = r.i2;
+			return;
+		}
+		for (; i < r.i2; i++) result.push({ ...base, text: head[i], head: i, alive: false, deletedBy: REORDERED });
+		for (let j = r.j1; j < r.j2; j++) result.push({ ...base, text: work[j], by: REORDERED, alive: true });
+	});
+	for (; i < head.length; i++) result.push({ ...base, text: head[i], head: i, alive: true });
+	return deriveOps(result);
 }
 
 /** An unchanged HEAD line: present in HEAD and alive in the current content. */
@@ -613,6 +686,7 @@ export type OpStatus = "own" | "other" | "review";
 
 /** Why an op is not plainly own/other; drives the review explanation shown to the agent. */
 export type ReviewReason =
+	| { kind: "reordered" }
 	/** An in-scope agent edited lines that out-of-scope actors added and never committed. */
 	| { kind: "entangled"; with: readonly string[] }
 	/** The insertion is inside a replacement with no corresponding gap in HEAD. */
@@ -661,6 +735,12 @@ export function classify(attribution: Attribution, scope: ReadonlySet<string>): 
 		}
 		let review = false;
 		for (const op of hunk.ops) {
+			if (op.by === REORDERED) {
+				status[op.id] = "review";
+				reasons.set(op.id, { kind: "reordered" });
+				review = true;
+				continue;
+			}
 			const inferred = likelySteps.has(op.step) && isPseudoActor(op.by);
 			if ((inScope(op.by) || inferred) && op.placementDependencies?.length) {
 				const missing = op.placementDependencies.filter(actor => !inScope(actor));

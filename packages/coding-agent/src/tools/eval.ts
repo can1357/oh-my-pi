@@ -551,6 +551,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			const execution = runWithEvalShadowCell(activeShadowCell, () =>
 				this.#runCells({
 					session,
+					parentToolCallId: _toolCallId,
 					cells,
 					languages,
 					notice,
@@ -758,6 +759,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	 */
 	async #runCells(options: {
 		session: ToolSession;
+		parentToolCallId: string;
 		cells: ResolvedEvalCell[];
 		languages: EvalLanguage[];
 		notice: string | undefined;
@@ -917,6 +919,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					result = await backend.execute(cell.code, {
 						cwd: session.cwd,
 						sessionId,
+						parentToolCallId: options.parentToolCallId,
 						sessionFile: sessionFile ?? undefined,
 						kernelOwnerId,
 						signal: combinedSignal,

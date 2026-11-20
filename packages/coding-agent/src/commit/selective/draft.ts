@@ -29,6 +29,7 @@ import {
 	historySteps,
 	PRE,
 	type RecordedEdit,
+	REORDERED,
 	type ReviewReason,
 	TAIL,
 	toLines,
@@ -47,6 +48,10 @@ const WINDOW_SLACK_MS = 1500;
 const PATH_TOKEN = /[\p{L}\p{N}_.+@/-]+/gu;
 /** Concurrent file reads while building a draft. */
 const READ_CONCURRENCY = 16;
+/** First-parent commits walked back from HEAD to find where it was when recording began. */
+const RECENT_COMMIT_LIMIT = 256;
+/** Author dates have whole seconds; a commit in the same second as a record counts as after it. */
+const COMMIT_DATE_SLACK_MS = 1000;
 /** Display cap for one change line. */
 const LINE_DISPLAY_CHARS = 160;
 
@@ -154,6 +159,7 @@ function actorName(actor: string): string {
 		case GAP:
 		case TAIL:
 		case UNRECORDED:
+		case REORDERED:
 			return "unrecorded";
 		default:
 			return actor;
@@ -195,6 +201,8 @@ function spellings(file: string, roots: readonly string[]): string[] {
 
 function describeReason(reason: ReviewReason): string {
 	switch (reason.kind) {
+		case "reordered":
+			return "replayed edits disagree with the HEAD-to-worktree diff after a reorder; review the net change";
 		case "entangled":
 			return `edits lines added by ${reason.with.map(actorName).join(", ")} that were never committed`;
 		case "placement":
@@ -406,13 +414,14 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 			? (await repo.lsTree(head, tracked, source.signal)).map(entry => [entry.path, entry.mode])
 			: [],
 	);
+	const recent = head && byPath.size > 0 ? await recentCommits(repo, head, byPath, source.signal) : [];
 	const files: FileChange[] = [];
 	const skipped: string[] = [];
 	const load = (entry: { path: string }) =>
 		loadFile(
 			repo,
 			root,
-			{ sha: head, mode: headModes.get(entry.path) ?? null },
+			{ sha: head, mode: headModes.get(entry.path) ?? null, recent },
 			entry.path,
 			byPath.get(entry.path) ?? [],
 			source.journal,
@@ -467,6 +476,54 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 	});
 }
 
+/** A first-parent commit on HEAD and its parent (`undefined` for a root commit). */
+interface RecentCommit {
+	time: number;
+	parent: string | undefined;
+}
+
+/** First-parent commits on `head` made since the earliest recorded edit, newest first. */
+async function recentCommits(
+	repo: VcsGitRepo,
+	head: string,
+	byPath: ReadonlyMap<string, readonly ChangeRecord[]>,
+	signal: AbortSignal | undefined,
+): Promise<RecentCommit[]> {
+	let since = Number.POSITIVE_INFINITY;
+	for (const list of byPath.values()) since = Math.min(since, list[0].at);
+	const commits: RecentCommit[] = [];
+	for (let rev: string | undefined = head; rev !== undefined && commits.length < RECENT_COMMIT_LIMIT;) {
+		const details = await repo.commitDetails(rev, signal);
+		const time = Date.parse(details.author.date ?? "");
+		if (!(time + COMMIT_DATE_SLACK_MS > since)) break;
+		rev = details.parents[0];
+		commits.push({ time, parent: rev });
+	}
+	return commits;
+}
+
+/**
+ * Whether a commit changed `file` after its first recorded edit at `since`: its blob at HEAD
+ * differs from the one in the commit HEAD was on then. Author dates can predate a rebase or a
+ * pull, so a miss leaves attribution as plain replay.
+ */
+async function headMovedSince(
+	repo: VcsGitRepo,
+	head: string,
+	file: string,
+	since: number,
+	recent: readonly RecentCommit[],
+): Promise<boolean> {
+	const after = recent.filter(commit => commit.time + COMMIT_DATE_SLACK_MS > since);
+	if (after.length === 0) return false;
+	const base = after[after.length - 1].parent;
+	const [now, then] = await Promise.all([
+		repo.resolveRef(`${head}:${file}`),
+		base === undefined ? undefined : repo.resolveRef(`${base}:${file}`),
+	]);
+	return (now ?? null) !== (then ?? null);
+}
+
 /**
  * One changed path of the worktree against `head` (`sha: null` on an unborn HEAD; `mode: null`
  * when HEAD lacks the path). `"skip"` for submodules and other directories; a {@link PendingFile}
@@ -475,7 +532,7 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 async function loadFile(
 	repo: VcsGitRepo,
 	root: string,
-	head: { sha: string | null; mode: string | null },
+	head: { sha: string | null; mode: string | null; recent: readonly RecentCommit[] },
 	file: string,
 	records: readonly ChangeRecord[],
 	journal: ChangeJournal | null,
@@ -544,7 +601,12 @@ async function loadFile(
 	// Symlinks commit as their link target, whole; this also covers a file replaced by a link and back.
 	if (head.mode === SYMLINK_MODE || mode === SYMLINK_MODE) return whole("symlink");
 	const headBytes = head.sha && head.mode ? (await repo.showBlob(`${head.sha}:${file}`)).data : null;
-	const snapshots = journal && records.length > 0 ? await loadSnapshots(journal, records, calls) : undefined;
+	const [snapshots, headMoved] = await Promise.all([
+		journal && records.length > 0 ? loadSnapshots(journal, records, calls) : undefined,
+		head.sha && head.mode && records.length > 0
+			? headMovedSince(repo, head.sha, file, records[0].at, head.recent)
+			: false,
+	]);
 	const encoder = new TextEncoder();
 	const recorded = (snapshots ?? []).flatMap(snapshot => [snapshot.before, snapshot.after]);
 	const inputs = [
@@ -571,7 +633,7 @@ async function loadFile(
 				gapHint: snapshot.gapHint,
 			}));
 			const steps = historySteps(headLines, edits ?? [], workLines, lastCall?.agent);
-			const attribution = attribute(headLines, steps, workLines);
+			const attribution = attribute(headLines, steps, workLines, headMoved);
 			const change: FileChange = {
 				...base,
 				head: headText,

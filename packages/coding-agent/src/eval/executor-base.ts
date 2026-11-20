@@ -83,6 +83,7 @@ export interface KernelExecutorBaseOptions {
 	/** Shows the user `out://` replies of the cell's bridged tool calls; absent, those calls are refused. */
 	onReply?: (text: string) => void;
 	toolSession?: ToolSession;
+	parentToolCallId?: string;
 	bridgeSessionId?: string;
 	artifactId?: string;
 	artifactPath?: string;
@@ -542,6 +543,7 @@ export async function executeWithKernelBase<
 		options?.toolSession && options?.bridgeSessionId
 			? registerPyToolBridge(options.bridgeSessionId, runId, {
 					toolSession: options.toolSession,
+					parentToolCallId: options.parentToolCallId,
 					signal: options.signal,
 					cellTimeoutMs: executionTimeoutMs ?? options.idleTimeoutMs ?? 0,
 					shieldedSignal: abortShield.signal,

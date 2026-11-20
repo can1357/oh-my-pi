@@ -150,6 +150,8 @@ describe("read tool head+tail selectors", () => {
 	it("diagnoses a colon between line numbers only when the underlying path exists", async () => {
 		const read = (input: string) => tool.execute("read", { path: input });
 		await expect(read(`${filePath}:1:2`)).rejects.toThrow(":1-2");
+		// A compiler-style line:column must not be offered as a range that fails as reversed.
+		await expect(read(`${filePath}:3:1`)).rejects.toThrow("Use :3 for a single line.");
 		await expect(read(`${filePath}.missing:1:2`)).rejects.toThrow("not found");
 		if (process.platform !== "win32") {
 			await Bun.write(`${filePath}:1`, "literal first\nliteral second\n");

@@ -4,9 +4,13 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { commitSelection, type CommitOutcome } from "@oh-my-pi/pi-coding-agent/commit/selective/apply";
 import { createDraft } from "@oh-my-pi/pi-coding-agent/commit/selective/draft";
 import { ChangeJournal, type JournalRecord } from "@oh-my-pi/pi-coding-agent/commit/selective/journal";
+import { createCommitPrelude } from "@oh-my-pi/pi-coding-agent/commit/selective/prelude-definition";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -91,7 +95,7 @@ async function emptyRepo() {
 		await Bun.write(absolute, after);
 		journal.recordChange({ agent, parent, tool: "edit", path: absolute, before, after });
 	};
-	return { root, journal, write };
+	return { root, artifacts, journal, write };
 }
 
 async function gitlinkWorkspace() {
@@ -179,6 +183,68 @@ describe("selective commit flow", () => {
 		await commitSelection(remaining, { subject: "test: update return" }, { journal, agent: { agent: "Other" } });
 		expect(await git(root, ["show", `HEAD:${file}`])).toBe(insert(foreign));
 		expect(await git(root, ["status", "--porcelain"])).toBe("");
+	});
+
+	it("never selects a second copy of a paragraph already committed during a reorder", async () => {
+		const { root, journal, write } = await emptyRepo();
+		const file = "notes.md";
+		const contents = (order: string, main = "old", other = "old") =>
+			Array.from(order, key => `## ${key}\n\nsame body\n\n\n`).join("") +
+			`footer\nmain: ${main}\nseparator\nother: ${other}\n`;
+		await Bun.write(path.join(root, file), contents("AB"));
+		await git(root, ["add", file]);
+		await git(root, ["commit", "-qm", "initial paragraphs"]);
+		await write("Main", undefined, file, contents("BAC"));
+		await write("Other", undefined, file, contents("BADC", "old", "pending"));
+		// Another commit takes D alone without touching the working file.
+		await Bun.write(path.join(root, ".git", "snapshot"), contents("ABD"));
+		const sha = (await git(root, ["hash-object", "-w", ".git/snapshot"])).trim();
+		await git(root, ["update-index", "--cacheinfo", `100644,${sha},${file}`]);
+		await git(root, ["commit", "-qm", "take D"]);
+		await write("Main", undefined, file, contents("ABCD", "pending", "pending"));
+		await journal.flush();
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(draft.summary()).toContain("review the net change");
+		expect(draft.diff()).toContain("+main: pending");
+		expect(draft.diff()).not.toContain("+## B");
+		draft.take({ path: file, units: ["1"] }); // C only, not the other writer's footer
+		await commitSelection(draft, { subject: "add C" }, { journal, agent: { agent: "Main" } });
+		expect(await git(root, ["show", `HEAD:${file}`])).toBe(contents("ABCD", "pending", "old"));
+		expect(await Bun.file(path.join(root, file)).text()).toBe(contents("ABCD", "pending", "pending"));
+	});
+
+	it("prints a long edited line as one row within the session's column cap while diff still returns the patch", async () => {
+		const { root, artifacts, journal, write } = await emptyRepo();
+		// Four changes far apart in one line of some 530 characters.
+		const line = (word: string) =>
+			`${[0, 1, 2, 3].map(n => `${"prompt history, ".repeat(8)}${word}${n}`).join(" ")}.\n`;
+		await Bun.write(path.join(root, "notes.md"), line("old"));
+		await git(root, ["add", "notes.md"]);
+		await git(root, ["commit", "-qm", "seed"]);
+		await write("Main", undefined, "notes.md", line("new"));
+		await journal.flush();
+		const session: ToolSession = {
+			cwd: root,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			getArtifactsDir: () => artifacts,
+			getAgentId: () => "Main",
+			settings: Settings.isolated({ "tools.outputMaxColumns": 256 }),
+		};
+		const commit = createCommitPrelude(session);
+		const call = (parameters: object) => commit.invoke(parameters, { session, toolCallId: "test" });
+
+		const { id } = type({ id: "string" }).assert((await call({ action: "draft" })).details);
+		const shown = await call({ action: "diff", draft: id });
+
+		const printed = shown.content.map(block => (block.type === "text" ? block.text : "")).join("");
+		const row = printed.split("\n").find(printedLine => printedLine.startsWith("!")) ?? "";
+		expect(row.match(/\[-old\d-\]\{\+new\d\+\}/g)).toHaveLength(4);
+		expect(Buffer.byteLength(row)).toBeLessThanOrEqual(256);
+		expect(shown.details).toEqual({
+			patch: `diff --git a/notes.md b/notes.md\n--- a/notes.md\n+++ b/notes.md\n@@ -1,1 +1,1 @@\n-${line("old")}+${line("new")}`,
+		});
 	});
 
 	it("explicitly selects a gitlink SHA with ordinary edits without committing child dirt or other staged work", async () => {
