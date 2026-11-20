@@ -183,12 +183,27 @@ const DISPATCH_SENT: u8 = 1;
 const DISPATCH_ABANDONED: u8 = 2;
 
 #[derive(Clone)]
+pub(crate) struct DispatchFence(Arc<AtomicU8>);
+
+impl DispatchFence {
+	/// Closes an idle fence; true means expiry cannot suppress the action.
+	pub(crate) fn abandon_reply(&self) -> bool {
+		self.0.compare_exchange(
+			DISPATCH_IDLE,
+			DISPATCH_ABANDONED,
+			Ordering::AcqRel,
+			Ordering::Acquire,
+		) == Err(DISPATCH_SENT)
+	}
+}
+
+#[derive(Clone)]
 pub(crate) struct OperationToken {
 	source:     CancellationSource,
 	generation: u64,
 	/// When the caller stops waiting for this request's reply.
 	reply_by:   Option<Instant>,
-	dispatch:   Option<Arc<AtomicU8>>,
+	dispatch:   Option<DispatchFence>,
 }
 
 impl OperationToken {
@@ -204,20 +219,29 @@ impl OperationToken {
 
 	/// This token for a request whose caller waits for its reply until `at`.
 	pub(crate) fn replying_by(self, at: Instant) -> Self {
-		Self { reply_by: Some(at), dispatch: Some(Arc::new(AtomicU8::new(DISPATCH_IDLE))), ..self }
+		Self { reply_by: Some(at), ..self }
 	}
 
-	/// Fences out a not-yet-dispatched request when its caller stops waiting.
-	/// Returns whether the route already crossed its dispatch boundary.
-	pub(crate) fn abandon_reply(&self) -> bool {
-		self.dispatch.as_ref().is_some_and(|dispatch| {
-			dispatch.compare_exchange(
-				DISPATCH_IDLE,
-				DISPATCH_ABANDONED,
-				Ordering::AcqRel,
-				Ordering::Acquire,
-			) == Err(DISPATCH_SENT)
-		})
+	/// Arms only requests whose mutation route participates in dispatch fencing.
+	pub(crate) fn fence_dispatch(&mut self) {
+		self.dispatch = Some(DispatchFence(Arc::new(AtomicU8::new(DISPATCH_IDLE))));
+	}
+
+	pub(crate) fn dispatch_fence(&self) -> Option<DispatchFence> {
+		self.dispatch.clone()
+	}
+
+	/// A fenced result must reach JS before the run's abort discards it.
+	pub(crate) fn reply_wait_deadline(&self, reply_by: Instant) -> Instant {
+		if self.dispatch.is_none() {
+			return reply_by;
+		}
+		self
+			.source
+			.0
+			.deadline
+			.lock()
+			.map_or(reply_by, |run_by| reply_by.min(run_by - DEADLINE_MARGIN / 2))
 	}
 
 	pub(crate) fn enter(&self) -> OperationScope {
@@ -352,15 +376,14 @@ pub(crate) fn check() -> CoreResult<()> {
 	CURRENT.with_borrow(|token| token.as_ref().map_or(Ok(()), OperationToken::check))
 }
 
-/// Crosses the current request's dispatch boundary immediately before a
-/// mutation.
+/// Crosses the boundary after which reply expiry cannot suppress a mutation.
 #[cfg(any(target_os = "windows", test))]
 pub(crate) fn dispatching() -> CoreResult<()> {
 	CURRENT.with_borrow(|token| {
 		let Some(dispatch) = token.as_ref().and_then(|token| token.dispatch.as_ref()) else {
 			return Ok(());
 		};
-		match dispatch.compare_exchange(
+		match dispatch.0.compare_exchange(
 			DISPATCH_IDLE,
 			DISPATCH_SENT,
 			Ordering::AcqRel,
@@ -368,7 +391,7 @@ pub(crate) fn dispatching() -> CoreResult<()> {
 		) {
 			Ok(_) | Err(DISPATCH_SENT) => Ok(()),
 			Err(_) => Err(DesktopError::timeout(
-				"desktop caller stopped waiting before dispatch; nothing was sent",
+				"desktop caller stopped waiting before dispatch; nothing was sent and nothing will be",
 			)),
 		}
 	})
@@ -1342,18 +1365,34 @@ mod tests {
 	fn dispatch_fence_tracks_each_request_independently() {
 		dispatching().unwrap();
 		let source = CancellationSource::default();
-		let token = source.token().replying_by(Instant::now());
+		let plain = source.token();
+		let _plain_scope = plain.enter();
+		dispatching().unwrap();
+		assert!(plain.dispatch_fence().is_none());
+		let mut outer = source.token().replying_by(Instant::now());
+		assert!(outer.dispatch_fence().is_none());
+		outer.fence_dispatch();
+		let _outer_scope = outer.enter();
+		dispatching().unwrap();
 		{
-			let _scope = token.enter();
-			dispatching().unwrap();
-			dispatching().unwrap();
-			assert!(token.abandon_reply());
+			let mut inner = source.token();
+			inner.fence_dispatch();
+			let fence = inner.dispatch_fence().unwrap();
+			assert!(!fence.abandon_reply());
+			assert!(!fence.abandon_reply());
+			let _inner_scope = inner.enter();
+			assert_eq!(dispatching().unwrap_err().code, ErrorCode::Timeout);
 		}
-		let abandoned = token.replying_by(Instant::now());
-		assert!(!abandoned.abandon_reply());
-		assert!(!abandoned.abandon_reply());
-		let _scope = abandoned.enter();
-		assert_eq!(dispatching().unwrap_err().code, ErrorCode::Timeout);
+		dispatching().unwrap();
+		assert!(outer.dispatch_fence().unwrap().abandon_reply());
+		let start = Instant::now();
+		let run_by = start + Duration::from_secs(10);
+		source.set_deadline(Some(run_by));
+		let early_reply = start + Duration::from_secs(5);
+		let late_reply = start + Duration::from_secs(20);
+		assert_eq!(outer.reply_wait_deadline(early_reply), early_reply);
+		assert_eq!(outer.reply_wait_deadline(late_reply), run_by - DEADLINE_MARGIN / 2);
+		assert_eq!(plain.reply_wait_deadline(late_reply), late_reply);
 	}
 
 	/// Removes this process's private kernel lock (see `KernelLease::path`).

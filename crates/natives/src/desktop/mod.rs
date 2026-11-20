@@ -418,6 +418,12 @@ impl Request {
 		reply.send(result).is_ok()
 	}
 
+	/// Only routes that mark their mutation boundary may change timeout
+	/// outcomes.
+	fn dispatch_fenced(&self) -> bool {
+		cfg!(target_os = "windows") && matches!(self, Self::AxPerform { menu: None, .. })
+	}
+
 	/// Requests that can send input or move focus, which hold the input lease.
 	/// A menu read counts: on macOS it makes its window key first.
 	const fn is_mutation(&self) -> bool {
@@ -2191,30 +2197,55 @@ impl SessionCore {
 		token: OperationToken,
 		make: impl FnOnce(Reply) -> Request,
 	) -> CoreResult<Response> {
+		self.call_with_wait(token, make, |reply, deadline| reply.recv_deadline(deadline))
+	}
+
+	fn call_with_wait(
+		&self,
+		mut token: OperationToken,
+		make: impl FnOnce(Reply) -> Request,
+		wait: impl FnOnce(
+			&flume::Receiver<CoreResult<Response>>,
+			Instant,
+		) -> Result<CoreResult<Response>, flume::RecvTimeoutError>,
+	) -> CoreResult<Response> {
 		token.check()?;
 		// Rendezvous delivery: a timed-out/dropped caller must never commit a
 		// capture frame that it did not receive.
 		let (txr, rxr) = flume::bounded(0);
 		let tx = self.ensure_started()?;
 		self.in_flight.fetch_add(1, Ordering::AcqRel);
+		let request = make(txr);
+		if request.dispatch_fenced() {
+			token.fence_dispatch();
+		}
+		let fence = token.dispatch_fence();
 		let reply_by = Instant::now() + self.operation_timeout;
+		let reply_by = token.reply_wait_deadline(reply_by);
 		// Input waiting for the user (to pause on macOS, to answer a Wayland
 		// permission prompt) or for another session's input lock gives up
 		// before this caller does.
 		let token = token.replying_by(reply_by);
 		let response = tx
-			.send(QueuedRequest { request: make(txr), token: token.clone() })
+			.send(QueuedRequest { request, token })
 			.map_err(|_| DesktopError::internal("native desktop worker stopped unexpectedly"))
 			.and_then(|()| {
-				rxr.recv_deadline(reply_by).map_err(|e| {
+				wait(&rxr, reply_by).map_err(|e| {
+					let expired = matches!(e, flume::RecvTimeoutError::Timeout);
 					let dispatched =
-						matches!(e, flume::RecvTimeoutError::Timeout) && token.abandon_reply();
+						expired && fence.as_ref().is_some_and(|fence| fence.abandon_reply());
 					self.display_awake.cancel_and_release(&self.cancellation);
 					if dispatched {
 						return DesktopError::new(
 							error::ErrorCode::AxUnconfirmed,
-							"desktop input was sent, but the operation did not reply in time; inspect \
-							 before retrying",
+							"desktop action may already have been sent or may still take effect, but the \
+							 operation did not reply in time; inspect before retrying",
+						);
+					}
+					if expired && fence.is_some() {
+						return DesktopError::timeout(
+							"desktop caller stopped waiting before dispatch; nothing was sent and \
+							 nothing will be",
 						);
 					}
 					DesktopError::timeout(format!("native desktop operation did not complete: {e}"))
@@ -4090,11 +4121,18 @@ mod capture_tests {
 	/// A session serving `backend` with an hour's grace, so while a request
 	/// hangs only the session giving up can release the display.
 	fn session_serving(backend: FakeWaylandBackend) -> Arc<SessionCore> {
+		session_serving_with_timeout(backend, HUNG_CALL_TIMEOUT)
+	}
+
+	fn session_serving_with_timeout(
+		backend: FakeWaylandBackend,
+		operation_timeout: Duration,
+	) -> Arc<SessionCore> {
 		let core = SessionCore::with_operation_timeout(
 			DisplaySelector::Active,
 			Arc::default(),
 			None,
-			HUNG_CALL_TIMEOUT,
+			operation_timeout,
 		);
 		let display_awake = Arc::clone(&core.display_awake);
 		let (tx, rx) = flume::unbounded();
@@ -4154,22 +4192,44 @@ mod capture_tests {
 			let mutations = Arc::clone(&mutations);
 			move || {
 				control::dispatching()?;
+				entered_tx
+					.send_timeout((), Duration::from_secs(30))
+					.expect("caller did not await dispatch");
+				blocked
+					.recv_timeout(Duration::from_secs(30))
+					.expect("provider was not unblocked");
 				mutations.fetch_add(1, Ordering::AcqRel);
-				entered_tx.send(()).unwrap();
-				let _ = blocked.recv();
 				Ok(())
 			}
 		}));
-		let core = session_serving(backend);
-		let caller = thread::spawn({
-			let core = Arc::clone(&core);
-			move || core.call(core.cancellation.token(), |reply| Request::ListWindows { reply })
-		});
-		entered.recv().unwrap();
-		assert_eq!(caller.join().unwrap().err().unwrap().code, ErrorCode::AxUnconfirmed);
-		assert_eq!(mutations.load(Ordering::Acquire), 1);
+		let core = session_serving_with_timeout(backend, Duration::from_secs(180));
+		let run_by = Instant::now() + Duration::from_secs(60);
+		core.cancellation.set_deadline(Some(run_by));
+		let mut token = core.cancellation.token();
+		token.fence_dispatch();
+		let error = core
+			.call_with_wait(
+				token,
+				|reply| Request::ListWindows { reply },
+				|_, reply_by| {
+					assert_eq!(reply_by, run_by - control::DEADLINE_MARGIN / 2);
+					entered
+						.recv_timeout(Duration::from_secs(30))
+						.expect("provider did not dispatch");
+					Err(flume::RecvTimeoutError::Timeout)
+				},
+			)
+			.err()
+			.unwrap();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		assert!(error.message.contains("may still take effect"));
+		assert_eq!(mutations.load(Ordering::Acquire), 0);
+		unblock
+			.send_timeout((), Duration::from_secs(30))
+			.expect("provider did not resume");
 		drop(unblock);
 		core.close().unwrap();
+		assert_eq!(mutations.load(Ordering::Acquire), 1);
 	}
 
 	#[test]
@@ -4182,26 +4242,58 @@ mod capture_tests {
 		backend.on_windows = Some(Box::new({
 			let mutations = Arc::clone(&mutations);
 			move || {
-				entered_tx.send(()).unwrap();
-				let _ = blocked.recv();
+				entered_tx
+					.send_timeout((), Duration::from_secs(30))
+					.expect("caller did not await provider entry");
+				blocked
+					.recv_timeout(Duration::from_secs(30))
+					.expect("provider was not unblocked");
 				let dispatched = control::dispatching();
 				result_tx
-					.send(dispatched.as_ref().err().map(|error| error.code))
+					.send_timeout(
+						dispatched.as_ref().err().map(|error| error.code),
+						Duration::from_secs(30),
+					)
 					.unwrap();
 				dispatched?;
 				mutations.fetch_add(1, Ordering::AcqRel);
 				Ok(())
 			}
 		}));
-		let core = session_serving(backend);
-		let caller = thread::spawn({
-			let core = Arc::clone(&core);
-			move || core.call(core.cancellation.token(), |reply| Request::ListWindows { reply })
-		});
-		entered.recv().unwrap();
-		assert_eq!(caller.join().unwrap().err().unwrap().code, ErrorCode::Timeout);
-		drop(unblock);
-		assert_eq!(result.recv().unwrap(), Some(ErrorCode::Timeout));
+		let core = session_serving_with_timeout(backend, Duration::from_secs(180));
+		let run_by = Instant::now() + Duration::from_secs(60);
+		core.cancellation.set_deadline(Some(run_by));
+		let mut token = core.cancellation.token();
+		token.fence_dispatch();
+		let error = core
+			.call_with_wait(
+				token,
+				|reply| Request::ListWindows { reply },
+				|_, reply_by| {
+					assert_eq!(reply_by, run_by - control::DEADLINE_MARGIN / 2);
+					entered
+						.recv_timeout(Duration::from_secs(30))
+						.expect("provider did not enter");
+					Err(flume::RecvTimeoutError::Timeout)
+				},
+			)
+			.err()
+			.unwrap();
+		assert_eq!(error.code, ErrorCode::Timeout);
+		assert!(
+			error
+				.message
+				.contains("nothing was sent and nothing will be")
+		);
+		unblock
+			.send_timeout((), Duration::from_secs(30))
+			.expect("provider did not resume");
+		assert_eq!(
+			result
+				.recv_timeout(Duration::from_secs(30))
+				.expect("provider did not check the fence"),
+			Some(ErrorCode::Timeout),
+		);
 		core.close().unwrap();
 		assert_eq!(mutations.load(Ordering::Acquire), 0);
 	}
@@ -4219,12 +4311,61 @@ mod capture_tests {
 			}
 		}));
 		let core = session_serving(backend);
+		let mut token = core.cancellation.token();
+		token.fence_dispatch();
 		assert!(matches!(
-			core.call(core.cancellation.token(), |reply| Request::ListWindows { reply }),
+			core.call_with_wait(
+				token,
+				|reply| Request::ListWindows { reply },
+				|reply, _| Ok(reply
+					.recv_timeout(Duration::from_secs(30))
+					.expect("provider did not reply")),
+			),
 			Ok(Response::Windows(_))
 		));
 		assert_eq!(mutations.load(Ordering::Acquire), 1);
 		core.close().unwrap();
+	}
+
+	#[test]
+	fn unfenced_requests_keep_their_native_reply_deadline_and_timeout() {
+		let core = session_serving(FakeWaylandBackend::new());
+		let run_by = Instant::now();
+		core.cancellation.set_deadline(Some(run_by));
+		let token = core.cancellation.token();
+		assert!(token.dispatch_fence().is_none());
+		let error = core
+			.call_with_wait(
+				token,
+				|reply| Request::ListWindows { reply },
+				|_, reply_by| {
+					assert!(reply_by > run_by);
+					Err(flume::RecvTimeoutError::Timeout)
+				},
+			)
+			.err()
+			.unwrap();
+		assert_eq!(error.code, ErrorCode::Timeout);
+		assert!(
+			error
+				.message
+				.starts_with("native desktop operation did not complete:")
+		);
+		core.close().unwrap();
+	}
+
+	#[test]
+	fn dispatch_fencing_participates_only_in_windows_ax_actions_without_menus() {
+		let (reply, _) = flume::bounded(1);
+		let action = |menu| Request::AxPerform {
+			reference: "e1".into(),
+			action: "press".into(),
+			menu,
+			reply: reply.clone(),
+		};
+		assert_eq!(action(None).dispatch_fenced(), cfg!(target_os = "windows"));
+		assert!(!action(Some(vec!["Open".into()])).dispatch_fenced());
+		assert!(!Request::ListWindows { reply }.dispatch_fenced());
 	}
 
 	#[test]
