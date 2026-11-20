@@ -245,7 +245,8 @@ describe("openPath", () => {
 
 		const logged = JSON.stringify(warnSpy.mock.calls);
 		expect(logged).not.toContain("argv-secret");
-		expect(warnSpy.mock.calls[0]?.[1]).toMatchObject({ code: "ENOENT", target: "mailto:me@example.com" });
+		expect(logged).not.toContain("me@example.com");
+		expect(warnSpy.mock.calls[0]?.[1]).toMatchObject({ code: "ENOENT", target: "mailto:" });
 		expect(warnSpy.mock.calls[1]?.[1]).toMatchObject({ target: "C:\\notes\\a#b.html" });
 	});
 });

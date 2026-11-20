@@ -2,7 +2,9 @@ const SENSITIVE_QUERY_PARAM = /key|token|secret|auth/i;
 
 /**
  * Drop URL userinfo and fragments. By default, redact only query parameters
- * with credential-like names; `"omit"` drops the whole query.
+ * with credential-like names; `"omit"` drops the whole query, and keeps only
+ * the scheme of a host-less non-file URL (`mailto:`, `tel:`, `data:`), whose
+ * path is the private payload itself.
  */
 export function redactUrlForLog(url: string, query: "redact-sensitive" | "omit" = "redact-sensitive"): string {
 	try {
@@ -11,6 +13,7 @@ export function redactUrlForLog(url: string, query: "redact-sensitive" | "omit" 
 		parsed.password = "";
 		parsed.hash = "";
 		if (query === "omit") {
+			if (!parsed.host && parsed.protocol !== "file:") return parsed.protocol;
 			parsed.search = "";
 		} else {
 			for (const name of parsed.searchParams.keys()) {
