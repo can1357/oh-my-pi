@@ -32,6 +32,17 @@ const gpt4oMiniSpec: ModelSpec<"openai-completions"> = (() => {
 	return { ...rest, compat: compatConfig };
 })();
 
+const copilotGeminiSpec: ModelSpec<"openai-completions"> = {
+	...gpt4oMiniSpec,
+	id: "gemini-4-neon",
+	name: "Gemini 4 Neon",
+	api: "openai-completions",
+	provider: "github-copilot",
+	baseUrl: "https://api.githubcopilot.com",
+	reasoning: true,
+	compat: undefined,
+};
+
 function createAbortedSignal(): AbortSignal {
 	const controller = new AbortController();
 	controller.abort();
@@ -1245,16 +1256,7 @@ describe("openai-completions compatibility", () => {
 		{ name: "interleaved reasoning", first: "Check ", second: "the file.", replayText: "Check the file." },
 		{ name: "opaque-only reasoning", first: undefined, second: undefined, replayText: undefined },
 	])("persists and replays Copilot $name only to the issuing model", async ({ first, second, replayText }) => {
-		const spec: ModelSpec<"openai-completions"> = {
-			...gpt4oMiniSpec,
-			id: "gemini-4-neon",
-			name: "Gemini 4 Neon",
-			provider: "github-copilot",
-			baseUrl: "https://api.githubcopilot.com",
-			reasoning: true,
-			compat: undefined,
-		};
-		const model = buildModel(spec);
+		const model = buildModel(copilotGeminiSpec);
 		const deltas = [
 			{ reasoning_text: first },
 			{ reasoning_opaque: "earlier-state" },
@@ -1303,14 +1305,33 @@ describe("openai-completions compatibility", () => {
 		expect(own?.reasoning_text).toBe(replayText);
 		expect(own?.thinking_blocks).toBeUndefined();
 		for (const target of [
-			buildModel({ ...spec, id: "gemini-4-hydrogen" }),
-			buildModel({ ...spec, provider: "openai", baseUrl: "https://api.openai.com/v1" }),
+			buildModel({ ...copilotGeminiSpec, id: "gemini-4-hydrogen" }),
+			buildModel({ ...copilotGeminiSpec, provider: "openai", baseUrl: "https://api.openai.com/v1" }),
 		]) {
 			const foreign = await replay(target);
 			expect(foreign?.tool_calls).toHaveLength(2);
 			expect(foreign?.reasoning_opaque).toBeUndefined();
 			expect(foreign?.reasoning_text).toBeUndefined();
 		}
+	});
+
+	it.each([
+		{ name: "no text", text: undefined },
+		{ name: "a newline", text: "\n" },
+	])("does not turn a Copilot empty stop with $name into a replayable turn", async ({ text }) => {
+		const model = buildModel(copilotGeminiSpec);
+		const fetchMock = createMockFetch([
+			{ choices: [{ index: 0, delta: { content: text, reasoning_opaque: "opaque-state" } }] },
+			{ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+			"[DONE]",
+		]);
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			acceptEmptyResponse: true,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual(text === undefined ? [] : [{ type: "text", text }]);
 	});
 
 	it("maps MiMo unsupported reasoning efforts to opencode-go accepted wire values", async () => {
