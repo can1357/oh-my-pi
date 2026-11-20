@@ -47,6 +47,7 @@
 
 ### Fixed
 
+- `--continue` (and `autoResume`) no longer resumes a session another running omp is writing, which duplicated its conversation into a new file on the first message; it starts a new session as plain `omp` does
 - `/handoff` now shows its progress like `/compact` while it writes the summary: a working row with a spinner and timer while the agent is idle, and a row above it while a turn runs. Previously only a one-off status line said it had started
 - On macOS, reading a cloud-only iCloud Drive, Desktop & Documents, Google Drive or Dropbox file now downloads it instead of failing with `EDEADLK`, in tools and in the commands omp runs, even when the terminal turned downloads off for its shells
 - A TTSR rule whose `condition` regex backtracks badly, including one with a backreference, no longer freezes the session; conditions match exactly as before, and `omp ttsr test`/`scan` match the same way ([#19147](https://github.com/can1357/oh-my-pi/issues/19147), [#19360](https://github.com/can1357/oh-my-pi/issues/19360))
