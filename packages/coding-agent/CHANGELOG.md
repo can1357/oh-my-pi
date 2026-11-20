@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- A background wake can retry its own empty model responses even if the previous turn exhausted its retries ([#19997](https://github.com/can1357/oh-my-pi/pull/19997) by [@ashtacore](https://github.com/ashtacore))
 - Improved Magic Edit so it can search and read the current draft, retry failed replacements without losing successful edits, validate syntax before writing, and support models that emit tool calls as text.
 - Fixed shell tool command handling when `bash` is replaced by an extension, including support for tool-only command lines with remote or sandboxed shells.
 - Fixed browser scrolling validation and documentation so invalid object forms explain the correct pixel-delta signature and equivalent call.
