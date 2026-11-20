@@ -143,8 +143,10 @@ describe("collapseModelMentions", () => {
 		expect(registered).toEqual([[modelMentionChipLabel("X One"), "^a/x"]]);
 	});
 
-	it("keeps unknown and punctuation-attached selectors literal", () => {
-		expect(collapseModelMentions("^nope/z and ^a/x,", labelFor, () => {})).toBe("^nope/z and ^a/x,");
+	it("keeps unknown selectors literal but collapses a known selector before attached punctuation", () => {
+		expect(collapseModelMentions("^nope/z and ^a/x,", labelFor, () => {})).toBe(
+			`^nope/z and ${modelMentionChipLabel("X One")},`,
+		);
 	});
 
 	it("allows slash prompts but not local-execution drafts", () => {

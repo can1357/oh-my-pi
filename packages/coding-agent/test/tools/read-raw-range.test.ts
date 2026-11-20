@@ -53,23 +53,24 @@ describe("read tool raw range exactness", () => {
 
 	describe.each(["disk", "located", "in-memory"])("%s raw reads", source => {
 		it.each([
-			["raw:2", "B"],
-			["2:raw", "B"],
-			["2-2:raw", "B"],
-			["raw:1,3", "A\nC"],
-			["1,3:raw", "A\nC"],
-			["raw:3-4,2-3", "B\nC\nD"],
-			["raw:-2", "C\nD"],
+			["raw:2", "B\n"],
+			["2:raw", "B\n"],
+			["2-2:raw", "B\n"],
+			["raw:1,3", "A\nC\n"],
+			["1,3:raw", "A\nC\n"],
+			["1-1:raw,3:raw", "A\nC\n"],
+			["raw:3-4,2-3", "B\nC\nD\n"],
+			["raw:-2", "C\nD\n"],
 			["2-:raw", "B\nC\nD\n"],
 			["raw:1,3-", "A\nC\nD\n"],
-			["raw:1,3-99", "A\nC\nD"],
-			["raw:1,99", "A"],
+			["raw:1,3-99", "A\nC\nD\n"],
+			["raw:1,99", "A\n"],
 			["raw:99,101", ""],
 			["raw:99", ""],
 		])("returns only selected source lines for %s", async (selector, expected) => {
 			const body = "A\nB\nC\nD\n";
 			await Bun.write(filePath, body);
-			await Bun.write(path.join(testDir, "session", "0.read.log"), body);
+			await Bun.write(path.join(testDir, "session", "local", "0.log"), body);
 			const handler: ProtocolHandler = {
 				scheme: "verbatim",
 				spec: { backing: "virtual", selectors: "lines", immutable: true },
@@ -79,7 +80,7 @@ describe("read tool raw range exactness", () => {
 			InternalUrlRouter.instance().register(handler);
 			const wrapped = wrapToolWithMetaNotice(new ReadTool(makeSession(testDir)));
 
-			const target = source === "disk" ? filePath : source === "located" ? "artifact://0" : "verbatim://fixture";
+			const target = source === "disk" ? filePath : source === "located" ? "local://0.log" : "verbatim://fixture";
 			const result = await wrapped.execute("raw-selected-lines", { path: `${target}:${selector}` });
 			expect(getTextOutput(result)).toBe(expected);
 			expect(result.details?.meta?.truncation).toBeUndefined();
@@ -130,8 +131,9 @@ describe("read tool raw range exactness", () => {
 			}
 			const read = wrapToolWithMetaNotice(new ReadTool(makeSession(testDir, bridge)));
 			for (const [selector, expected] of [
-				["2:raw", "B"],
-				["1,99:raw", "A"],
+				// The query output's last line has no terminator.
+				["2:raw", source === "json" ? "B" : "B\n"],
+				["1,99:raw", "A\n"],
 			]) {
 				const result = await read.execute("recovered-raw", { path: `${target}:${selector}` });
 				expect(getTextOutput(result)).toBe(expected);
@@ -146,7 +148,7 @@ describe("read tool raw range exactness", () => {
 		const read = wrapToolWithMetaNotice(tool);
 		for (let count = 1; count <= 4; count++) {
 			const result = await read.execute("repeat-raw", { path: `${filePath}:2:raw` });
-			expect(getTextOutput(result)).toBe("B");
+			expect(getTextOutput(result)).toBe("B\n");
 			if (count >= 3) expect(result.details?.notes?.join("\n")).toContain(`identical output ${count} times`);
 		}
 		const normal = wrapToolWithMetaNotice(new ReadTool(makeSession(testDir)));
@@ -157,12 +159,12 @@ describe("read tool raw range exactness", () => {
 		);
 	});
 
-	it("preserves CR bytes and joins disjoint raw windows with only a source line separator", async () => {
+	it("preserves CR bytes and keeps each raw window's own line terminators", async () => {
 		await Bun.write(filePath, "A\r\nB\r\nC\r\nD\r\n");
 		const wrapped = wrapToolWithMetaNotice(tool);
 
-		expect(getTextOutput(await wrapped.execute("crlf-comma", { path: `${filePath}:1,3:raw` }))).toBe("A\r\nC\r");
-		expect(getTextOutput(await wrapped.execute("crlf-single", { path: `${filePath}:2:raw` }))).toBe("B\r");
+		expect(getTextOutput(await wrapped.execute("crlf-comma", { path: `${filePath}:1,3:raw` }))).toBe("A\r\nC\r\n");
+		expect(getTextOutput(await wrapped.execute("crlf-single", { path: `${filePath}:2:raw` }))).toBe("B\r\n");
 		expect(getTextOutput(await wrapped.execute("crlf-open", { path: `${filePath}:raw:3-` }))).toBe("C\r\nD\r\n");
 	});
 
@@ -173,7 +175,7 @@ describe("read tool raw range exactness", () => {
 		const wrapped = wrapToolWithMetaNotice(new ReadTool(session));
 		const raw = await wrapped.execute("raw-conflict", { path: `${filePath}:2-6:raw` });
 
-		expect(getTextOutput(raw)).toBe(conflict);
+		expect(getTextOutput(raw)).toBe(`${conflict}\n`);
 		expect(raw.details?.conflictCount).toBe(1);
 		expect(raw.details?.notes?.join("\n")).toContain("conflict://<N>");
 		expect(getConflictHistory(session).entries()).toMatchObject([{ id: 1, startLine: 2, endLine: 6 }]);
@@ -237,7 +239,7 @@ describe("read tool raw range exactness", () => {
 	it("reads a bare line number beside raw as that one line, and N- as open-ended", async () => {
 		for (const selector of ["31:raw", "raw:31"]) {
 			const result = await tool.execute("call-raw-bare", { path: `${filePath}:${selector}` });
-			expect(getTextOutput(result)).toBe("L31");
+			expect(getTextOutput(result)).toBe("L31\n");
 		}
 
 		const open = await tool.execute("call-raw-open", { path: `${filePath}:58-:raw` });
@@ -249,11 +251,11 @@ describe("read tool raw range exactness", () => {
 		await Bun.write(filePath, `${lines.join("\n")}\n`);
 
 		const result = await tool.execute("closed-raw-range", { path: `${filePath}:raw:5-8` });
-		expect(getTextOutput(result)).toBe(lines.slice(4, 8).join("\n"));
+		expect(getTextOutput(result)).toBe(`${lines.slice(4, 8).join("\n")}\n`);
 		expect(result.details?.totalLines).toBe(40);
 
 		const last = await tool.execute("last-raw-line", { path: `${filePath}:raw:-1` });
-		expect(getTextOutput(last)).toBe("line 40");
+		expect(getTextOutput(last)).toBe("line 40\n");
 
 		const open = await tool.execute("open-raw-range", { path: `${filePath}:raw:40-` });
 		expect(getTextOutput(open)).toBe("line 40\n");
@@ -267,7 +269,7 @@ describe("read tool raw range exactness", () => {
 		const result = await wrapToolWithMetaNotice(tool).execute("streamed-raw-range", {
 			path: `${streamedFile}:raw:2-3`,
 		});
-		expect(getTextOutput(result)).toBe("line 2\nline 3");
+		expect(getTextOutput(result)).toBe("line 2\nline 3\n");
 	});
 
 	it("reads an empty archive member verbatim in raw mode, matching an empty disk file", async () => {
@@ -328,7 +330,7 @@ describe("read tool raw range exactness", () => {
 		expect(shownRange).toBeDefined();
 		if (!shownRange) throw new Error("expected shown range");
 		expect(truncation.nextOffset).toBe(shownRange.end + 1);
-		expect(formatTruncationMetaNotice(truncation)).toContain(`Use :${truncation.nextOffset} to continue`);
+		expect(formatTruncationMetaNotice(truncation)).toContain(`Use :${truncation.nextOffset}- to continue`);
 	});
 
 	it("reports an oversized selected line from a buffered local file with a safe raw recovery selector", async () => {
@@ -354,7 +356,7 @@ describe("read tool raw range exactness", () => {
 		expect(truncation?.totalBytes).toBeGreaterThan(70_000);
 		expect(truncation?.nextOffset).toBeUndefined();
 		if (!truncation) throw new Error("expected truncation metadata");
-		expect(formatTruncationMetaNotice(truncation)).not.toContain("Use :2 to continue");
+		expect(formatTruncationMetaNotice(truncation)).not.toContain("Use :2- to continue");
 
 		const recovered = await tool.execute("call-buffered-oversized-raw", { path: `${bufferedFile}:raw:2-2` });
 		const recoveredOutput = getTextOutput(recovered);

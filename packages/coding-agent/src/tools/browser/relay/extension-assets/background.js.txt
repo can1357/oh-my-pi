@@ -360,7 +360,7 @@ async function buildHello() {
     discardedTabsProtocol: 1,
     ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
     reloadProtocol: EXTENSION_RELOAD_PROTOCOL_VERSION,
-    downloadsProtocol: DOWNLOADS_PROTOCOL_VERSION,
+    downloadsProtocol: chrome.downloads === undefined ? undefined : DOWNLOADS_PROTOCOL_VERSION,
     tabs: snapshots,
     attachedTabIds
   };
@@ -409,6 +409,8 @@ async function runRpc(msg, origin) {
       await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
       return {};
     case "findDownload": {
+      if (chrome.downloads === undefined)
+        return null;
       const id = downloads.idFor(msg.guid);
       const [item] = id === undefined ? [] : await chrome.downloads.search({ id });
       if (item && item.state !== "in_progress")
@@ -479,8 +481,8 @@ async function connect() {
   };
 }
 var downloads = new DownloadPairing;
-chrome.downloads.onCreated.addListener((item) => downloads.created(item.id, item.finalUrl));
-chrome.downloads.onChanged.addListener((delta) => {
+chrome.downloads?.onCreated.addListener((item) => downloads.created(item.id, item.finalUrl));
+chrome.downloads?.onChanged.addListener((delta) => {
   const state = delta.state?.current;
   if (state === "complete" || state === "interrupted")
     downloads.finished(delta.id, state);

@@ -144,8 +144,20 @@ export function createKernelSessionRegistry<
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
 	const replacingSessionKernels = new Map<TSession, { kernel: TKernel; promise: Promise<TKernel> }>();
-	// Kernel each session record's latest started cell ran on; a different live kernel means the old one died.
-	const servedKernels = new WeakMap<TSession, TKernel>();
+	// Kernel each session key's latest started cell ran on; a different kernel means the old one's state is gone.
+	// Keyed by the session key string, not the session record, so a disposed and recreated record
+	// (owner release, session switch and back, disposeAll) still reports the loss. Only an explicit reset clears it.
+	const kernelIds = new WeakMap<TKernel, number>();
+	let nextKernelId = 1;
+	const servedKernelIds = new Map<string, number>();
+	function kernelIdOf(kernel: TKernel): number {
+		let id = kernelIds.get(kernel);
+		if (id === undefined) {
+			id = nextKernelId++;
+			kernelIds.set(kernel, id);
+		}
+		return id;
+	}
 
 	const context: KernelSessionRegistryContext<TKernel, TOptions, TSession> = {
 		sessions,
@@ -331,6 +343,7 @@ export function createKernelSessionRegistry<
 	async function disposeAll(): Promise<void> {
 		const pending = [...startingSessions.values()].map(starting => starting.promise);
 		startingSessions.clear();
+		servedKernelIds.clear();
 		if (descriptor.clearResetsOnDisposeAll) resettingSessions.clear();
 		const all = [...sessions.entries()];
 		for (const [id, session] of all) {
@@ -360,8 +373,6 @@ export function createKernelSessionRegistry<
 				cwd: session.cwd,
 				reason,
 			});
-			// Intentional disposal: a later replacement is no surprise restart.
-			servedKernels.delete(session);
 			if (!sessions.has(id)) sessions.set(id, session);
 		}
 	}
@@ -418,7 +429,6 @@ export function createKernelSessionRegistry<
 				cwd: session.cwd,
 				reason,
 			});
-			servedKernels.delete(session);
 			if (!sessions.has(session.sessionKey)) sessions.set(session.sessionKey, session);
 		}
 	}
@@ -445,6 +455,7 @@ export function createKernelSessionRegistry<
 			const inFlight = resettingSessions.get(sessionKey);
 			if (inFlight) await inFlight.catch(() => undefined);
 			else {
+				servedKernelIds.delete(sessionKey);
 				const resetPromise = resetSession(sessionKey);
 				resettingSessions.set(
 					sessionKey,
@@ -466,9 +477,10 @@ export function createKernelSessionRegistry<
 		if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
 		throwIfCallerCancelled(options);
 		const claimKernelRestartNotice = (): boolean => {
-			const previous = servedKernels.get(session);
-			servedKernels.set(session, kernel);
-			return previous !== undefined && previous !== kernel;
+			const id = kernelIdOf(kernel);
+			const previous = servedKernelIds.get(sessionKey);
+			servedKernelIds.set(sessionKey, id);
+			return previous !== undefined && previous !== id;
 		};
 		const runOptions = { ...options, cwd, claimKernelRestartNotice };
 		let result: R;

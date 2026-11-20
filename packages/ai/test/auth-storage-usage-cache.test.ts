@@ -178,6 +178,11 @@ function makeTieredReport(account: string): UsageReport {
 	};
 }
 
+/** Expected shape of a stored-row report after collection: tagged with the probing row's id. */
+function withCredentialId(report: UsageReport, credentialId = 1): UsageReport {
+	return { ...report, metadata: { ...report.metadata, credentialId } };
+}
+
 function usageHeaders(fiveHour: string, sevenDay: string, sevenDayModelScoped?: string): Record<string, string> {
 	return {
 		"anthropic-ratelimit-unified-5h-utilization": fiveHour,
@@ -479,7 +484,7 @@ describe("AuthStorage usage cache: Claude rate limits", () => {
 		let usageRequests = 0;
 		const usageFetch = (async (input: string | URL | Request) => {
 			const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
-			if (url.search === "") usageRequests += 1;
+			if (url.pathname.endsWith("/usage") && url.search === "") usageRequests += 1;
 			if (usageRequests === 1) {
 				return Response.json(
 					{ error: { type: "rate_limit_error", message: "Rate limited. Please try again later." } },
@@ -545,7 +550,7 @@ describe("AuthStorage usage cache: explicit invalidation", () => {
 			expect(calls).toBe(1);
 
 			expireCachePayloads(store);
-			expect(await storage.usage.reports()).toEqual([recovered]);
+			expect(await storage.usage.reports()).toEqual([withCredentialId(recovered)]);
 			expect(calls).toBe(2);
 		} finally {
 			storage.close();
@@ -631,10 +636,11 @@ describe("AuthStorage usage cache: explicit invalidation", () => {
 			const peer = storage.usage.reports();
 			release.resolve(stale);
 
-			expect(await Promise.all([initial, refreshed, peer])).toEqual([[fresh], [fresh], [fresh]]);
+			const taggedFresh = withCredentialId(fresh);
+			expect(await Promise.all([initial, refreshed, peer])).toEqual([[taggedFresh], [taggedFresh], [taggedFresh]]);
 			expect(calls).toBe(2);
 			expect(peak).toBe(1);
-			expect(await storage.usage.reports()).toEqual([fresh]);
+			expect(await storage.usage.reports()).toEqual([withCredentialId(fresh)]);
 			expect(calls).toBe(2);
 		} finally {
 			release.resolve(null);
@@ -676,7 +682,7 @@ describe("AuthStorage usage cache: explicit invalidation", () => {
 			await storage.usage.invalidate("openai-codex");
 			release.resolve(report);
 
-			expect(await pending).toEqual([report]);
+			expect(await pending).toEqual([withCredentialId(report)]);
 			expect(calls).toBe(1);
 		} finally {
 			release.resolve(null);

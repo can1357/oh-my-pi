@@ -128,7 +128,7 @@ export const RETAINED_BACKEND_FILE = ".omp-retained-backend.json";
  *
  * Notably absent: ZFS clones also need dataset-aware teardown, but `isoStop`
  * locates the dataset by its recorded mountpoint property, which no longer
- * matches after the retain rename — that needs pi-iso mount-table support
+ * matches after the retain rename — that needs omp-iso mount-table support
  * before a sidecar here could help.
  */
 export function needsNativeTeardown(backend: unknown): backend is number {

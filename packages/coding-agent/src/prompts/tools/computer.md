@@ -40,6 +40,8 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
   - macOS dates are local ISO-8601, the form `setValue` takes.
   - A macOS slider, stepper or other number control takes `setValue(75)` or `setValue("0.5")` (plain decimal); when the app clamps or rounds it,
     the call throws `AxFailed` naming the value it settled on. One whose value is not settable names the `AXIncrement`/`AXDecrement` actions to step it.
+  - A letter sent to a focused macOS popup button may choose an option without opening the menu; the next read of that popup waits up to 1.5 s
+    for it. To choose an option, use `menu:`; when the user's setting refuses takeover, it refuses `menu:` too (below).
   - On macOS a long value shows its first 200 characters and ends `… (+N chars; (await computer.ref("eN")).value())`; that call returns it whole.
   - Linux and Windows show 80-character previews without that promise; Linux text values may already be clipped by AT-SPI.
   - To look inside a long value, slice or search it in JS (`v.slice(-300)`, `v.indexOf("…")`, a regex with context) rather than printing all of it;
@@ -188,6 +190,8 @@ await win.click(120, 48, button="right")
   NEVER call them to make input work; launching, reopening and window input work in the background.
 - macOS background routes cover left-button drags and `holdMouse` that start on a slider, scroll bar, splitter or stepper,
   middle-button drags, modified clicks, right-clicks and scrolls.
+  - A background `win.move` gives the app no hover, and a takeover move's hover ends before it returns. On a web page a plain click
+    often reaches a control shown only on hover; otherwise click it with `{ takeover: true }`.
   - A plain left drag across the text of one native text element (TextEdit, other AppKit text views and fields)
     becomes an AX selection with no mouse input: `drag` returns `{start, length, text}`,
     or throws `AxFailed`/`AxUnconfirmed` as `selectText` does (check the selection before retrying).

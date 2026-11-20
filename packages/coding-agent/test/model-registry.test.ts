@@ -640,7 +640,9 @@ describe("ModelRegistry", () => {
 			// `mergeDiscoveredModel` dropped `transport: pi-native` (raw catalog
 			// rows carry no transport), so the next stream went out as plain
 			// openai-completions to `${baseUrl}/chat/completions` instead of the
-			// gateway's `/v1/pi/stream`.
+			// gateway's `/v1/pi/stream`. A pi-native provider no longer runs the
+			// provider's own discovery at all: the gateway serves none of
+			// OpenRouter's listing routes.
 			writeRawModelsJson({
 				openrouter: {
 					baseUrl: "http://localhost:4000",
@@ -653,18 +655,7 @@ describe("ModelRegistry", () => {
 			const fetchMock: FetchImpl = async input => {
 				const url = input instanceof Request ? input.url : String(input);
 				requestedUrls.push(url);
-				if (url === "http://localhost:4000/models") {
-					return new Response(
-						JSON.stringify({
-							data: [
-								{ id: "openai/gpt-5.4", name: "GPT-5.4", supported_parameters: ["tools"] },
-								{ id: "anthropic/claude-opus-4.6", name: "Claude Opus 4.6", supported_parameters: ["tools"] },
-							],
-						}),
-						{ status: 200, headers: { "Content-Type": "application/json" } },
-					);
-				}
-				throw new Error(`Unexpected URL: ${url}`);
+				return new Response("Not Found", { status: 404 });
 			};
 
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
@@ -676,10 +667,10 @@ describe("ModelRegistry", () => {
 			expect(preRefresh.every(m => m.baseUrl === "http://localhost:4000")).toBe(true);
 
 			await registry.refreshProvider("openrouter", "online");
-			expect(requestedUrls).toContain("http://localhost:4000/models");
+			expect(requestedUrls).toEqual([]);
 
-			// Post-refresh: every openrouter model — bundled or freshly
-			// discovered — must still route through the pi-native transport.
+			// Post-refresh: every openrouter model must still route through the
+			// pi-native transport.
 			const postRefresh = getModelsForProvider(registry, "openrouter");
 			expect(postRefresh.length).toBeGreaterThan(0);
 			for (const model of postRefresh) {

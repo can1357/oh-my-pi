@@ -13,7 +13,7 @@
 import type { CompactionMethod } from "./compaction-methods";
 
 /** Subcommand selecting a one-off compaction mode for manual `/compact`. */
-export type CompactMode = "soft" | "remote" | "snapcompact";
+export type CompactMode = "soft" | "remote" | "snapcompact" | "handoff";
 
 /**
  * Per-invocation ordered methods merged over the configured
@@ -23,12 +23,15 @@ export interface CompactionOverride {
 	methodOrder?: CompactionMethod[];
 }
 
+/** How a one-off mode selects and runs compaction. */
 export interface CompactModeDef {
 	readonly name: CompactMode;
 	/** One-line description surfaced in autocomplete + help. */
 	readonly description: string;
 	/** Settings overrides applied on top of `compaction.*` for this run. */
 	readonly overrides: CompactionOverride;
+	/** Prepare the summary without interrupting the live turn. */
+	readonly background?: boolean;
 	/**
 	 * When true, the mode produces no LLM summary, so trailing focus text is
 	 * meaningless and rejected by the parser (snapcompact archives history into
@@ -37,6 +40,7 @@ export interface CompactModeDef {
 	readonly rejectsFocus?: boolean;
 }
 
+/** Modes exposed by the compaction command and session API. */
 export const COMPACT_MODES: readonly CompactModeDef[] = [
 	{
 		name: "soft",
@@ -53,6 +57,12 @@ export const COMPACT_MODES: readonly CompactModeDef[] = [
 		description: "Archive history onto dense bitmap images the model reads back (no LLM call)",
 		overrides: { methodOrder: ["snapcompact"] },
 		rejectsFocus: true,
+	},
+	{
+		name: "handoff",
+		description: "Generate a handoff summary in the background and compact in place",
+		overrides: { methodOrder: ["handoff"] },
+		background: true,
 	},
 ];
 
