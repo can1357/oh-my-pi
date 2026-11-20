@@ -60,6 +60,10 @@
 - Fixed RAR4 extraction stalling for seconds per filter on archives that declare an out-of-range delta filter channel count; such archives are now rejected as corrupt.
 - Fixed `formatAge` to display durations of one year or more in years, such as `23y ago`, instead of months.
 
+### Fixed
+
+- Fixed `readSalvageableRows()` skipping every readable row trapped between two separate damaged regions, so damaged-store recovery of input history, session titles, and recaps keeps the rows that were still readable ([#16144](https://github.com/can1357/oh-my-pi/pull/16144) by [@jchanghong023](https://github.com/jchanghong023))
+
 ## [19.0.0] - 2026-11-18
 
 ### Added
@@ -79,10 +83,6 @@
 ### Added
 
 - Added `readBoundedBody` and `readBoundedJson` for reading HTTP response bodies with a size limit, with an optional signal so a stalled peer cannot outlive the caller's deadline ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix))
-
-### Fixed
-
-- Fixed `readSalvageableRows()` skipping every readable row trapped between two separate damaged regions, so damaged-store recovery of input history, session titles, and recaps keeps the rows that were still readable ([#16144](https://github.com/can1357/oh-my-pi/pull/16144) by [@jchanghong023](https://github.com/jchanghong023))
 
 ## [18.21.0] - 2026-11-16
 
