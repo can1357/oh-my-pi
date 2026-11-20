@@ -1,14 +1,8 @@
 import * as path from "node:path";
 import { $env, logger } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
-import { Settings } from "../config/settings";
 import { DisasmUnavailableError, type WorkerRuntime } from "../disasm/backend";
-import {
-	enumeratePythonRuntimes,
-	filterEnv,
-	type PythonRuntime,
-	resolveExplicitPythonRuntime,
-} from "../eval/py/runtime";
+import { findWorkerRuntime, memoizeWorkerRuntime } from "../disasm/python-runtime";
 import type { ToolSession } from "../tools";
 import { binjaPythonDir, cfgBinjaInstall } from "./install";
 import { cfgBinjaPython } from "./settings";
@@ -20,8 +14,6 @@ const PROBE = "import binaryninja as b; b.BinaryView.new(b'\\x00')";
 const LICENSE_REFUSAL = "License is not valid";
 
 type ProbeResult = "ok" | "license" | "unusable";
-
-const runtimes = new Map<string, Promise<WorkerRuntime>>();
 
 /**
  * Resolve the Python interpreter and environment that run the Binary Ninja worker, memoized per
@@ -38,15 +30,31 @@ export function resolveBinjaRuntime(session: ToolSession): Promise<WorkerRuntime
 		);
 	}
 	const python = cfgBinjaPython.get(session.settings)?.trim() || undefined;
-	const key = `${python ?? ""}\0${installDir}\0${session.cwd}`;
-	const cached = runtimes.get(key);
-	if (cached) return cached;
-	const promise = probeBinjaRuntime(python, installDir, session.cwd);
-	runtimes.set(key, promise);
-	promise.catch(() => {
-		if (runtimes.get(key) === promise) runtimes.delete(key);
-	});
-	return promise;
+	const pythonDir = binjaPythonDir(installDir);
+	return memoizeWorkerRuntime("binja", [python, installDir, session.cwd], () =>
+		findWorkerRuntime(
+			python,
+			session.cwd,
+			async candidate => {
+				const runtime: WorkerRuntime = {
+					pythonPath: candidate.pythonPath,
+					env: buildBinjaEnv(candidate.env, pythonDir),
+				};
+				const result = await probeCandidate(runtime);
+				if (result === "license") {
+					// The licence belongs to the install and user folder, not the interpreter: no other candidate can pass.
+					throw new DisasmUnavailableError(
+						`Binary Ninja unavailable: the install at ${installDir} refused its license (${runtime.pythonPath}). Headless use needs a license that permits it, in license.dat in the Binary Ninja user folder ($BN_USER_DIRECTORY when set).`,
+					);
+				}
+				return result === "ok" ? runtime : undefined;
+			},
+			tried =>
+				new DisasmUnavailableError(
+					`Binary Ninja unavailable: no Python interpreter can import binaryninja from ${pythonDir} (tried: ${tried}). Set binja.python to a Python 3 interpreter supported by this Binary Ninja release.`,
+				),
+		),
+	);
 }
 
 /**
@@ -75,34 +83,6 @@ export function buildBinjaEnv(
 	const userDir = parentEnv.BN_USER_DIRECTORY;
 	if (userDir) env.BN_USER_DIRECTORY = userDir;
 	return env;
-}
-
-async function probeBinjaRuntime(python: string | undefined, installDir: string, cwd: string): Promise<WorkerRuntime> {
-	const baseEnv = filterEnv((await Settings.init()).getShellConfig().env);
-	const candidates: PythonRuntime[] = python
-		? [resolveExplicitPythonRuntime(python, cwd, baseEnv)]
-		: enumeratePythonRuntimes(cwd, baseEnv);
-	const pythonDir = binjaPythonDir(installDir);
-
-	for (const candidate of candidates) {
-		const runtime: WorkerRuntime = {
-			pythonPath: candidate.pythonPath,
-			env: buildBinjaEnv(candidate.env, pythonDir),
-		};
-		const result = await probeCandidate(runtime);
-		if (result === "ok") return runtime;
-		if (result === "license") {
-			// The licence belongs to the install and user folder, not the interpreter: no other candidate can pass.
-			throw new DisasmUnavailableError(
-				`Binary Ninja unavailable: the install at ${installDir} refused its license (${runtime.pythonPath}). Headless use needs a license that permits it, in license.dat in the Binary Ninja user folder ($BN_USER_DIRECTORY when set).`,
-			);
-		}
-	}
-
-	const paths = candidates.length > 0 ? candidates.map(c => c.pythonPath).join(", ") : "none";
-	throw new DisasmUnavailableError(
-		`Binary Ninja unavailable: no Python interpreter can import binaryninja from ${pythonDir} (tried: ${paths}). Set binja.python to a Python 3 interpreter supported by this Binary Ninja release.`,
-	);
 }
 
 async function probeCandidate(runtime: WorkerRuntime): Promise<ProbeResult> {
