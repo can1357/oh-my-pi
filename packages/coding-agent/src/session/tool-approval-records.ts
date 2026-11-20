@@ -8,6 +8,8 @@ const TOOL_APPROVAL_RESOLVED_CUSTOM_TYPE = "tool_approval_resolved";
 /** Persisted when a tool call starts waiting on the user's approval. */
 export interface ToolApprovalRequestedData {
 	toolCallId: string;
+	/** Eval or kernel-defined tool invocation that dispatched this call; absent for direct calls. */
+	parentToolCallId?: string;
 	toolName: string;
 	approvalMode: ApprovalMode;
 	reason?: string;
@@ -28,8 +30,10 @@ export type ApprovalRecordSink = Pick<SessionManager, "appendCustomEntry" | "ens
 /**
  * Approval prompts otherwise reach only extension hooks and the terminal, so a process reading the
  * session file (a multiplexer sidebar, a dashboard) cannot tell a session blocked on the user from
- * one still working. A request is pending until a resolution or a tool result for its call follows:
- * fork and resume repair close an interrupted call with a tool result, never with a resolution.
+ * one still working. A request is pending until a resolution follows, or a tool result for its call or,
+ * for a call dispatched from an eval, for its `parentToolCallId`: fork and resume repair close an
+ * interrupted assistant call with a tool result, never with a resolution, and never close the nested
+ * calls an eval made.
  *
  * The request is on disk before the prompt opens, even in a session that has no assistant message
  * yet and so no file (a first-turn Cursor exec frame, a direct tool call).

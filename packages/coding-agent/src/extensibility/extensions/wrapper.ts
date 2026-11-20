@@ -424,6 +424,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			const sessionId = context?.sessionManager?.getSessionId() ?? "";
 			await recordToolApprovalRequested(this.runner.approvalRecords, {
 				toolCallId,
+				...(context?.parentToolCallId !== undefined && { parentToolCallId: context.parentToolCallId }),
 				toolName: this.tool.name,
 				approvalMode,
 				...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),

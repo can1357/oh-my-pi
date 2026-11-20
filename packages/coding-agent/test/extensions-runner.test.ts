@@ -3237,9 +3237,10 @@ describe("ExtensionRunner", () => {
 			});
 
 			await wrapper.execute("call-approved", {}, undefined, undefined, context());
-			await expect(wrapper.execute("call-denied", {}, undefined, undefined, context())).rejects.toThrow(
-				"Tool call denied by user: dangerous_tool",
-			);
+			// Dispatched from an eval: readers close this request once the eval call's result lands.
+			await expect(
+				wrapper.execute("call-denied", {}, undefined, undefined, { ...context(), parentToolCallId: "eval-call" }),
+			).rejects.toThrow("Tool call denied by user: dangerous_tool");
 
 			const approvedRequest = expect.objectContaining({
 				customType: "tool_approval_requested",
@@ -3257,6 +3258,7 @@ describe("ExtensionRunner", () => {
 			const deniedRequest = expect.objectContaining({
 				customType: "tool_approval_requested",
 				toolCallId: "call-denied",
+				parentToolCallId: "eval-call",
 			});
 			expect(onDiskAtPrompt).toEqual([[approvedRequest], [approvedRequest, approvedResolution, deniedRequest]]);
 			expect(records()).toEqual([
@@ -3270,6 +3272,7 @@ describe("ExtensionRunner", () => {
 					reason: "denied by user",
 				}),
 			]);
+			expect(records()[0]).not.toHaveProperty("parentToolCallId");
 		});
 
 		it("emits resolved false when the approval prompt throws", async () => {
