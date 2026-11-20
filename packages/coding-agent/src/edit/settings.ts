@@ -25,10 +25,11 @@ export const EDIT_MODES = [
 ] as const satisfies readonly EditMode[];
 
 /**
- * `edit.mode` value: an edit tool variant, or `"none"` to unregister the edit tool and force-enable
- * `bash` (see `resolveBuiltinToolPlan` in `tools/index.ts`).
+ * `edit.mode` value: an edit tool variant, `"magic_edit"` for calls that describe the change in
+ * words (see `edit/magic.ts`), or `"none"` to unregister the edit tool and force-enable `bash` (see
+ * `resolveBuiltinToolPlan` in `tools/index.ts`).
  */
-export type EditModeSetting = EditMode | "none";
+export type EditModeSetting = EditMode | "magic_edit" | "none";
 
 /** Narrows free text (config values, per-model variants) to an edit mode; `undefined` when unknown. */
 export function normalizeEditMode(mode?: string | null): EditMode | undefined {
@@ -43,7 +44,7 @@ export function normalizeEditMode(mode?: string | null): EditMode | undefined {
 export const cfgEditMode = register({
 	id: "edit.mode",
 	type: "enum",
-	values: [...EDIT_MODES, "none"] as const satisfies readonly EditModeSetting[],
+	values: [...EDIT_MODES, "magic_edit", "none"] as const satisfies readonly EditModeSetting[],
 	default: "hashline",
 	// Pins the variant: it also skips the per-model hashline fallback (see `utils/edit-mode.ts`).
 	env: "PI_EDIT_VARIANT",
@@ -52,7 +53,36 @@ export const cfgEditMode = register({
 		group: "Editing",
 		label: "Edit Mode",
 		description:
-			"Select the edit tool variant (replace, patch, hashline, or apply_patch); none removes the edit tool and keeps bash enabled",
+			"Select the edit tool variant (replace, patch, hashline, or apply_patch); magic_edit takes described changes that a fast model writes; none removes the edit tool and keeps bash enabled",
+	},
+});
+
+/** Payload syntax of `magic_edit` calls: `# path` lines or `<edit file="path">` elements. */
+export const cfgEditMagicFormat = register({
+	id: "edit.magic.format",
+	type: "enum",
+	values: ["markdown", "xml"] as const,
+	default: "markdown",
+	env: "PI_EDIT_MAGIC_FORMAT",
+	ui: {
+		tab: "files",
+		group: "Editing",
+		label: "Magic Edit Format",
+		description:
+			'How magic_edit calls name each file: a "# path" line (markdown) or an <edit file="path"> element (xml)',
+	},
+});
+
+/** Model that writes the patch for a `magic_edit` call; unset uses the `smol` role. */
+export const cfgEditMagicModel = register({
+	id: "edit.magic.model",
+	type: "string",
+	default: undefined,
+	ui: {
+		tab: "files",
+		group: "Editing",
+		label: "Magic Edit Model",
+		description: "Model selector for the model that applies magic_edit changes, empty = smol role",
 	},
 });
 
