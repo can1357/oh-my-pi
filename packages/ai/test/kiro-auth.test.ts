@@ -134,6 +134,34 @@ describe("Kiro device login", () => {
 		});
 	});
 
+	it("Identity Center in GovCloud lists profiles only in GovCloud regions and keeps the us-gov profile", async () => {
+		const govProfile = "arn:aws-us-gov:codewhisperer:us-gov-west-1:123456789012:profile/gov";
+		const { fetch, calls } = server(
+			oidcHandler(url =>
+				url === "https://management.us-gov-west-1.kiro.dev/"
+					? json({ profiles: [{ arn: govProfile, profileName: "Gov" }] })
+					: json({ profiles: [] }),
+			),
+		);
+		const row = (await loginKiroHook(controller(fetch, "1", START, "us-gov-west-1").ctrl)) as OAuthCredentials;
+
+		expect(
+			calls
+				.slice(4)
+				.map(call => call.url)
+				.sort(),
+		).toEqual(["https://management.us-gov-east-1.kiro.dev/", "https://management.us-gov-west-1.kiro.dev/"]);
+		expect(row).toMatchObject({
+			kiroOidcRegion: "us-gov-west-1",
+			kiroProfileArn: govProfile,
+			region: "us-gov-west-1",
+		});
+		expect(decodeKiroCredential(encodeKiroOAuthRow(row), {})).toMatchObject({
+			region: "us-gov-west-1",
+			profileArn: govProfile,
+		});
+	});
+
 	it("Builder ID signs in on us-east-1 without a Start URL, region, or profile", async () => {
 		const { fetch, calls } = server(oidcHandler(() => json({}, 500)));
 		const row = (await loginKiroHook(controller(fetch, "2").ctrl)) as OAuthCredentials;

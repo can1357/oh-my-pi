@@ -16,6 +16,8 @@ import {
 	type ComputerWorkerInbound,
 	type ComputerWorkerOutbound,
 	type ComputerWorkerTransport,
+	COVERED_CAPTURE_NOTICE,
+	COVERED_TREE_NOTICE,
 	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_REFUSED_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
@@ -136,6 +138,8 @@ class FakeNativeSession implements NativeDesktopSession {
 	/** Lock and sleep state reported by captures, capabilities and screenState, as the native session reads it live. */
 	screenLocked = false;
 	displayAsleep = false;
+	/** Nothing of the captured window showed on screen. */
+	covered = false;
 	/** The app holding macOS secure input, reported by capabilities; unset while it is off. */
 	secureInputApp: string | undefined;
 	get capabilities(): DesktopCapabilities {
@@ -180,6 +184,7 @@ class FakeNativeSession implements NativeDesktopSession {
 			displays: [display],
 			backend: "fake",
 			screenLocked: this.screenLocked,
+			covered: this.covered,
 		};
 	}
 	async captureRegion(_target: string, _region: CaptureRegion): Promise<DesktopCapture> {
@@ -217,7 +222,7 @@ class FakeNativeSession implements NativeDesktopSession {
 	async observe(target: string) {
 		return {
 			capture: await this.capture(target),
-			accessibility: { text: "- button [ref=e1]", nodeCount: 1, truncated: false },
+			accessibility: { text: "- button [ref=e1]", nodeCount: 1, truncated: false, covered: this.covered },
 		};
 	}
 	async holdKeys(target: string, keys: string[], options: { duration: number }) {
@@ -272,8 +277,8 @@ class FakeNativeSession implements NativeDesktopSession {
 	async typeText(_target: string, _text: string, _opts?: PointerOptions | null): Promise<DesktopTypeResult | void> {}
 	async keyChord(_target: string, _keys: string[], _opts?: PointerOptions | null): Promise<void> {}
 	async raiseWindow(_windowId: string): Promise<void> {}
-	async axSnapshot(_target: string, _opts?: AxSnapshotOptions | null): Promise<{ text: string }> {
-		return { text: "- button [ref=e1]" };
+	async axSnapshot(_target: string, _opts?: AxSnapshotOptions | null): Promise<{ text: string; covered?: boolean }> {
+		return { text: "- button [ref=e1]", covered: this.covered };
 	}
 	async axQuery(_target: string, _query: AxQuery): Promise<AxNode[]> {
 		return [axNode];
@@ -747,7 +752,7 @@ describe("computer prelude", () => {
 		);
 		await prelude.invoke({ action: "call", chain: [{ method: "press", args: ["cmd+s"] }], timeout: 9 }, context);
 		expect(calls[2]).toMatchObject({
-			code: 'return await (await desktop.window("42")).ax({"maxDepth":3});',
+			code: 'return await desktop.windowAccess("42").ax({"maxDepth":3});',
 			snapshot: { readOnly: true },
 		});
 		expect(calls[3]).toMatchObject({
@@ -1804,6 +1809,55 @@ describe("computer worker round trips", () => {
 				expect(result.payload.screenshots[0]).not.toHaveProperty("screenLocked");
 				expect(result.payload.returnValue).not.toHaveProperty("screenLocked");
 			}
+		}
+	});
+
+	it("marks a screenshot of a window nothing of which showed, and only then", async () => {
+		for (const covered of [true, false]) {
+			const transport = new MemoryTransport();
+			const native = new FakeNativeSession();
+			native.covered = covered;
+			new ComputerWorkerCore(transport, () => native);
+
+			const result = await runWorker(
+				transport,
+				`covered-${covered}`,
+				'return await (await desktop.window("42")).screenshot()',
+			);
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			const text = result.payload.displays.flatMap(block => (block.type === "text" ? [block.text] : []));
+			if (covered) {
+				expect(text.join("\n").split("\n")).toEqual([
+					expect.stringMatching(/^screenshot 42 /),
+					COVERED_CAPTURE_NOTICE,
+				]);
+				expect(result.payload.returnValue).toMatchObject({ covered: true });
+				expect(result.payload.screenshots[0]?.covered).toBe(true);
+			} else {
+				expect(text.join("\n")).not.toContain(COVERED_CAPTURE_NOTICE);
+				expect(result.payload.returnValue).not.toHaveProperty("covered");
+				expect(result.payload.screenshots[0]).not.toHaveProperty("covered");
+			}
+		}
+	});
+
+	it("closes the tree of a window nothing of which showed with the covered note, and only then", async () => {
+		for (const covered of [true, false]) {
+			const transport = new MemoryTransport();
+			const native = new FakeNativeSession();
+			native.covered = covered;
+			new ComputerWorkerCore(transport, () => native);
+
+			const result = await runWorker(
+				transport,
+				`covered-tree-${covered}`,
+				'const win = await desktop.window("42"); return [await win.ax(), (await win.observe({ silent: true })).ax]',
+			);
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			const expected = covered ? `- button [ref=e1]\n${COVERED_TREE_NOTICE}` : "- button [ref=e1]";
+			expect(result.payload.returnValue).toEqual([expected, expected]);
 		}
 	});
 
@@ -4066,7 +4120,7 @@ describe("expanded computer APIs", () => {
 		class FailingObservation extends ZoomNativeSession {
 			override async observe(_target: string): Promise<{
 				capture: DesktopCapture;
-				accessibility: { text: string; nodeCount: number; truncated: boolean };
+				accessibility: { text: string; nodeCount: number; truncated: boolean; covered: boolean };
 			}> {
 				throw new Error("AccessibilityUnavailable");
 			}
@@ -4452,6 +4506,85 @@ describe("display hold follows the agent turn", () => {
 		await run;
 		expect(native.displayHolds).toEqual(["turn"]);
 		await supervisor.close();
+	});
+});
+
+describe("retained window menu", () => {
+	it.each(["menu.items", "menu.select"])(
+		"passes %s the original id after its window leaves the listing",
+		async (method: string) => {
+			const native = new FakeNativeSession();
+			const transport = new MemoryTransport();
+			new ComputerWorkerCore(transport, () => native);
+			const handle = await runWorker(
+				transport,
+				"get-window",
+				renderComputerCall([{ method: "window", args: ["42"] }]),
+			);
+			if (!handle.ok) throw new Error(handle.error.message);
+			const { id } = handle.payload.returnValue as { id: string };
+			native.listWindows = async () => [{ ...windowFixture, id: "43" }];
+			const unavailable = (target: string): never => {
+				throw new Error(`WindowUnavailable: window '${target}' is minimized`);
+			};
+			native.menuItems = async target => unavailable(target);
+			native.menuSelect = async target => unavailable(target);
+			const chain = [
+				{ method: "window", args: [id] },
+				{ method, args: [["Window"]] },
+			];
+			const result = await runWorker(
+				transport,
+				"held-menu",
+				renderComputerCall(chain),
+				isReadOnlyComputerCall(chain),
+			);
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.error.message).toContain("WindowUnavailable: window '42' is minimized");
+		},
+	);
+
+	it("propagates loss of the window while expanding a submenu", async () => {
+		const native = new FakeNativeSession();
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		native.menuItems = async (id, path = []) => {
+			if (path.length > 1) throw new Error(`WindowUnavailable: window '${id}' is minimized`);
+			return [{ title: "Tabs", path: [...path, "Tabs"], enabled: true, checked: false, hasSubmenu: true }];
+		};
+		const chain = [
+			{ method: "window", args: ["42"] },
+			{ method: "menu.items", args: [["Window"]] },
+		];
+		const result = await runWorker(transport, "menu-tree", renderComputerCall(chain));
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error.message).toContain("WindowUnavailable: window '42' is minimized");
+	});
+
+	it("keeps the retained window's AX reads working without admitting pointer input", async () => {
+		const native = new FakeNativeSession();
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const root = { method: "window", args: ["42"] };
+		const handle = await runWorker(transport, "get-window", renderComputerCall([root]));
+		expect(handle.ok).toBe(true);
+		native.listWindows = async () => [{ ...windowFixture, id: "43" }];
+		native.axSnapshot = async id => ({ text: `AX root ${id}` });
+		native.axQuery = async id => [{ ...axNode, title: `AX child ${id}` }];
+		const read = await runWorker(transport, "snapshot", renderComputerCall([root, { method: "ax", args: [] }]), true);
+		expect(read.ok && read.payload.returnValue).toBe("AX root 42");
+		// `computer.window` also takes the id as a number.
+		const numbered = renderComputerCall([
+			{ method: "window", args: [42] },
+			{ method: "ax", args: [] },
+		]);
+		const byNumber = await runWorker(transport, "snapshot-number", numbered, true);
+		expect(byNumber.ok && byNumber.payload.returnValue).toBe("AX root 42");
+		const find = await runWorker(transport, "find", renderComputerCall([root, { method: "find", args: [{}] }]), true);
+		expect(find.ok && find.payload.returnValue).toMatchObject([{ title: "AX child 42" }]);
+		const click = await runWorker(transport, "click", renderComputerCall([root, { method: "click", args: [1, 2] }]));
+		expect(click.ok).toBe(false);
+		expect(native.clickCount).toBe(0);
 	});
 });
 

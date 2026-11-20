@@ -92,6 +92,15 @@ export interface MCPStoredOAuthCredential extends OAuthCredential {
 	 * Unset on legacy credentials minted before issue #3502's fix.
 	 */
 	authorizationUrl?: string;
+	/**
+	 * Scope the grant holds (space-separated): the token response's `scope`
+	 * (RFC 6749 §5.1), else the authorization request's. Sent again on refresh,
+	 * and updated from the refresh response: Microsoft Entra v2 refuses a
+	 * refresh that names no scope when the client is also the resource
+	 * (AADSTS90009), and §6 forbids asking for more than was granted. Unset on
+	 * credentials minted before it was kept.
+	 */
+	scope?: string;
 }
 
 const DEFAULT_PORT = 3000;
@@ -361,6 +370,8 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	#codeVerifier?: string;
 	#fetch: FetchImpl;
 	#resource?: string;
+	#requestedScope?: string;
+	#grantedScope?: string;
 	/**
 	 * Details of a rejected dynamic client-registration attempt. Populated by
 	 * {@link #tryRegisterClient} when the provider advertises a registration
@@ -421,6 +432,14 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	get authorizationUrl(): string {
 		return this.config.authorizationUrl;
 	}
+	/**
+	 * Scope to persist for refresh: what the token response says was granted
+	 * (RFC 6749 §5.1), else what the authorization request asked for. A refresh
+	 * must not ask for more than was granted (§6).
+	 */
+	get grantedScope(): string | undefined {
+		return this.#grantedScope ?? this.#requestedScope;
+	}
 
 	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
 		if (!this.#resolvedClientId) {
@@ -451,6 +470,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		if (this.config.scopes && !params.get("scope")) {
 			params.set("scope", this.config.scopes);
 		}
+		this.#requestedScope = params.get("scope")?.trim() || undefined;
 		const prompt = this.config.prompt ?? (hasOAuthScope(params.get("scope"), "offline_access") ? "consent" : "");
 		if (prompt && !params.get("prompt")) {
 			params.set("prompt", prompt);
@@ -549,6 +569,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			token_type?: string;
 			error?: string;
 			error_description?: string;
+			scope?: string;
 		};
 
 		// Some providers (e.g. the Slack Web API) signal failure with HTTP 200 and
@@ -562,6 +583,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		// Calculate expiry timestamp
 		const expiresIn = data.expires_in ?? 3600; // Default to 1 hour
 		const expires = Date.now() + expiresIn * 1000;
+		this.#grantedScope = typeof data.scope === "string" ? data.scope.trim() || undefined : undefined;
 
 		return {
 			access: data.access_token,
@@ -639,7 +661,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 
 		try {
 			const registrationBody: Record<string, unknown> = {
-				client_name: "oh-my-pi",
+				client_name: "Codex",
 				redirect_uris: [redirectUri],
 				grant_types: ["authorization_code", "refresh_token"],
 				response_types: ["code"],
@@ -805,6 +827,8 @@ export interface RefreshMCPOAuthTokenOptions {
 	 * Preserved advertised resources leave this false/undefined.
 	 */
 	stripSameOriginResource?: boolean;
+	/** Scopes to request on refresh (the original grant's). Omitted when unset. */
+	scope?: string;
 }
 
 /**
@@ -818,8 +842,10 @@ export async function refreshMCPOAuthToken(
 	clientSecret?: string,
 	resourceOrOpts?: string | RefreshMCPOAuthTokenOptions,
 	opts?: RefreshMCPOAuthTokenOptions,
-): Promise<OAuthCredentials> {
-	const optsFromTrailing = typeof resourceOrOpts === "string" ? opts : resourceOrOpts;
+): Promise<OAuthCredentials & { scope?: string }> {
+	// Only an object in the fifth position is the options; a positional
+	// `undefined` resource keeps the trailing options.
+	const optsFromTrailing = typeof resourceOrOpts === "object" ? resourceOrOpts : opts;
 	const fetchImpl: FetchImpl = optsFromTrailing?.fetch ?? fetch;
 	const resource = typeof resourceOrOpts === "string" ? resourceOrOpts : undefined;
 	// Filter against the authorization-server origin when known (RFC 8414
@@ -840,6 +866,8 @@ export async function refreshMCPOAuthToken(
 	});
 	if (resolvedResource) params.set("resource", resolvedResource);
 	if (clientSecret) params.set("client_secret", clientSecret);
+	const scope = optsFromTrailing?.scope?.trim();
+	if (scope) params.set("scope", scope);
 
 	const response = await fetchImpl(tokenUrl, {
 		method: "POST",
@@ -857,11 +885,14 @@ export async function refreshMCPOAuthToken(
 		access_token: string;
 		refresh_token?: string;
 		expires_in?: number;
+		scope?: string;
 	};
 	const expiresIn = data.expires_in ?? 3600;
+	const grantedScope = typeof data.scope === "string" ? data.scope.trim() : "";
 	return {
 		access: data.access_token,
 		refresh: data.refresh_token ?? refreshToken,
 		expires: Date.now() + expiresIn * 1000,
+		...(grantedScope ? { scope: grantedScope } : {}),
 	};
 }

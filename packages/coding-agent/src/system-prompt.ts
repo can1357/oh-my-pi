@@ -43,6 +43,7 @@ import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
 import { XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { normalizePromptPath } from "./utils/prompt-path";
+import { quotePosixArgument } from "./utils/shell-quote";
 import { expandTilde } from "./tools/path-utils";
 import { matchModelPattern, type ModelPatternEntry } from "./utils/model-patterns";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
@@ -1159,7 +1160,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		hasDynamicXdevTools: xdevTools.some(mounted => mounted.dynamic === true),
 		xdevDocs,
 		autoQaEnabled,
-		ovnfs,
+		// The guidance pastes it into shell commands: always single-quoted, so no path character splits or expands it.
+		ovnfs: ovnfs && quotePosixArgument(ovnfs),
 		writeTransportOnly,
 		subagent,
 	};

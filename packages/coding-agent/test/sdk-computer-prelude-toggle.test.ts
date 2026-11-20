@@ -227,7 +227,7 @@ describe("AgentSession eval preludes", () => {
 	});
 
 	it("reconciles browser MCP filtering on live browser toggles", async () => {
-		const manager = new MCPManager(registryDir, null, async () => ({
+		const manager = new MCPManager(registryDir, async () => ({
 			configs: {},
 			sources: {},
 			exaApiKeys: [],
