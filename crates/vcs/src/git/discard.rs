@@ -122,10 +122,105 @@ fn loses_tracked_changes(
 			_ => return Ok(true),
 		}
 	}
-	if unsure.is_empty() {
+	if !unsure.is_empty() && changed_behind_filters(git, dir, &unsure, deadline)? {
+		return Ok(true);
+	}
+	changed_assumed_unchanged(git, dir, &check.pathspecs, deadline)
+}
+
+/// The top of the work tree and the index, which counts as unreadable when
+/// it is missing or malformed.
+fn work_tree_index(
+	git: &cli::InertGit,
+	dir: &Path,
+	deadline: Instant,
+) -> Result<(PathBuf, Option<gix::index::File>)> {
+	let args: Vec<String> =
+		["rev-parse", "--show-toplevel", "--git-path", "index", "--show-object-format"]
+			.map(str::to_owned)
+			.to_vec();
+	let location = run_checked(git, dir, &args, &[], deadline)?;
+	let mut lines = location.lines();
+	let (Some(top), Some(index_path), Some(object_format)) =
+		(lines.next(), lines.next(), lines.next())
+	else {
+		return Err(Error::backend("git rev-parse", "missing the work tree or index location"));
+	};
+	// `--git-path` is relative to the directory rev-parse ran in.
+	let index = object_format
+		.parse::<gix::hash::Kind>()
+		.ok()
+		.and_then(|kind| {
+			gix::index::File::at(dir.join(index_path), kind, true, Default::default()).ok()
+		});
+	Ok((PathBuf::from(top), index))
+}
+
+/// Whether a regular file `pathspecs` select (all of them when empty) that
+/// the index marks assume-unchanged (`git update-index --assume-unchanged`)
+/// differs from its index entry. `git status` trusts the mark and never
+/// compares such a file, but a reset or a restore overwrites it all the same.
+/// A marked file that is gone or no longer a regular file, a marked symlink,
+/// and an unreadable index count as a change.
+fn changed_assumed_unchanged(
+	git: &cli::InertGit,
+	dir: &Path,
+	pathspecs: &[String],
+	deadline: Instant,
+) -> Result<bool> {
+	let (top, index) = work_tree_index(git, dir, deadline)?;
+	let Some(index) = index else {
+		return Ok(true);
+	};
+	if !index
+		.entries()
+		.iter()
+		.any(|entry| entry.flags.contains(gix::index::entry::Flags::ASSUME_VALID))
+	{
 		return Ok(false);
 	}
-	changed_behind_filters(git, dir, &unsure, deadline)
+	// `<tag> <path>`, the tag lowercase for an assume-unchanged entry.
+	let mut args: Vec<String> =
+		["ls-files", "-v", "-z", "--full-name", "--"].map(str::to_owned).to_vec();
+	args.extend(pathspecs.iter().cloned());
+	let listing = run_checked(git, dir, &args, &[], deadline)?;
+	if cli::is_truncated(&listing) {
+		return Ok(true);
+	}
+	let mut paths = Vec::new();
+	let mut recorded = Vec::new();
+	for entry in listing.split('\0') {
+		let Some((tag, path)) = entry.split_once(' ') else {
+			continue;
+		};
+		if !tag.bytes().all(|byte| byte.is_ascii_lowercase()) {
+			continue;
+		}
+		let Some(entry) = index.entry_by_path(path.as_bytes().as_bstr()) else {
+			return Ok(true);
+		};
+		if entry.mode.is_submodule() {
+			continue;
+		}
+		let is_file = std::fs::symlink_metadata(top.join(path)).is_ok_and(|meta| meta.is_file());
+		let regular = entry.mode == gix::index::entry::Mode::FILE
+			|| entry.mode == gix::index::entry::Mode::FILE_EXECUTABLE;
+		if path.contains('\n') || !regular || !is_file {
+			return Ok(true);
+		}
+		paths.push(path);
+		recorded.push(entry.id.to_string());
+	}
+	if paths.is_empty() {
+		return Ok(false);
+	}
+	// The hash git would store for each file now, with its attributes'
+	// line-ending conversion.
+	let mut stdin = paths.join("\n").into_bytes();
+	stdin.push(b'\n');
+	let args: Vec<String> = ["hash-object", "--stdin-paths"].map(str::to_owned).to_vec();
+	let hashes = run_checked(git, &top, &args, &stdin, deadline)?;
+	Ok(hashes.lines().ne(recorded.iter().map(String::as_str)))
 }
 
 /// `git status` of the tracked files `pathspecs` select (all of them when
@@ -192,18 +287,7 @@ fn changed_behind_filters(
 	paths: &[&str],
 	deadline: Instant,
 ) -> Result<bool> {
-	let args: Vec<String> =
-		["rev-parse", "--show-toplevel", "--git-path", "index", "--show-object-format"]
-			.map(str::to_owned)
-			.to_vec();
-	let location = run_checked(git, dir, &args, &[], deadline)?;
-	let mut lines = location.lines();
-	let (Some(top), Some(index_path), Some(object_format)) =
-		(lines.next(), lines.next(), lines.next())
-	else {
-		return Err(Error::backend("git rev-parse", "missing the work tree or index location"));
-	};
-	let top = PathBuf::from(top);
+	let (top, index) = work_tree_index(git, dir, deadline)?;
 
 	let args: Vec<String> = ["check-attr", "-z", "--stdin", "filter"]
 		.map(str::to_owned)
@@ -227,13 +311,6 @@ fn changed_behind_filters(
 		return Ok(true);
 	}
 
-	// `--git-path` is relative to the directory rev-parse ran in.
-	let index = object_format
-		.parse::<gix::hash::Kind>()
-		.ok()
-		.and_then(|kind| {
-			gix::index::File::at(dir.join(index_path), kind, true, Default::default()).ok()
-		});
 	let Some(index) = index else {
 		return Ok(true);
 	};
@@ -571,6 +648,32 @@ mod tests {
 		assert!(discards_work(&root.join("sub"), &DISCOVERED, &clean(here.clone()))?);
 		fs::create_dir(root.join("empty-sub"))?;
 		assert!(!discards_work(&root.join("empty-sub"), &DISCOVERED, &clean(here))?);
+		Ok(())
+	}
+
+	/// `git status` never compares a file the index marks assume-unchanged,
+	/// but `git reset --hard` and `git checkout -- <file>` overwrite it.
+	#[test]
+	fn compares_files_the_index_assumes_unchanged() -> TestResult {
+		let dir = repo()?;
+		let root = dir.path();
+		git(root, &["update-index", "--assume-unchanged", "a.txt"])?;
+		assert!(!discards_work(root, &DISCOVERED, &HARD_RESET)?, "the file is as committed");
+
+		fs::write(root.join("a.txt"), "two\n")?;
+		assert!(discards_work(root, &DISCOVERED, &HARD_RESET)?);
+		let from_index = |pathspec: &str| {
+			DiscardCheck::Tracked(TrackedCheck {
+				worktree_only: true,
+				pathspecs: vec![pathspec.to_owned()],
+				..TrackedCheck::default()
+			})
+		};
+		assert!(discards_work(root, &DISCOVERED, &from_index("a.txt"))?);
+		assert!(!discards_work(root, &DISCOVERED, &from_index("b.txt"))?);
+
+		fs::remove_file(root.join("a.txt"))?;
+		assert!(discards_work(root, &DISCOVERED, &HARD_RESET)?);
 		Ok(())
 	}
 
