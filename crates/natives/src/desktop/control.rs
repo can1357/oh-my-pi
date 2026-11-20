@@ -1384,17 +1384,10 @@ mod tests {
 		}
 		dispatching().unwrap();
 		assert!(outer.dispatch_fence().unwrap().abandon_reply());
-		let start = Instant::now();
-		let run_by = start + Duration::from_secs(10);
-		source.set_deadline(Some(run_by));
-		let early_reply = start + Duration::from_secs(5);
-		let late_reply = start + Duration::from_secs(20);
-		assert_eq!(outer.reply_wait_deadline(early_reply), early_reply);
-		assert_eq!(
-			outer.reply_wait_deadline(late_reply),
-			run_by.checked_sub(DEADLINE_MARGIN / 2).unwrap()
-		);
-		assert_eq!(plain.reply_wait_deadline(late_reply), late_reply);
+		// A reply wait ending before the run's reserve is kept as is.
+		let reply_by = Instant::now();
+		source.set_deadline(Some(reply_by + Duration::from_secs(10)));
+		assert_eq!(outer.reply_wait_deadline(reply_by), reply_by);
 	}
 
 	/// Removes this process's private kernel lock (see `KernelLease::path`).

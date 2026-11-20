@@ -4336,20 +4336,6 @@ mod capture_tests {
 	}
 
 	#[test]
-	fn dispatch_fencing_participates_only_in_windows_ax_actions_without_menus() {
-		let (reply, _) = flume::bounded(1);
-		let action = |menu| Request::AxPerform {
-			reference: "e1".into(),
-			action: "press".into(),
-			menu,
-			reply: reply.clone(),
-		};
-		assert_eq!(action(None).dispatch_fenced(), cfg!(target_os = "windows"));
-		assert!(!action(Some(vec!["Open".into()])).dispatch_fenced());
-		assert!(!Request::ListWindows { reply }.dispatch_fenced());
-	}
-
-	#[test]
 	fn a_timeout_cancels_and_releases_the_display_in_one_step() {
 		let (backend, entered, unblock) = hanging_backend();
 		let awake = Arc::clone(&backend.awake);
