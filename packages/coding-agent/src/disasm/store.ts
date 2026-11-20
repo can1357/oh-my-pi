@@ -294,17 +294,16 @@ export async function locateDatabase(
 }
 
 /**
- * Validate an in-place location (refuses when IDA has it unpacked) or stage a store binary and settle `loc.openPath`/`loc.isNew`.
+ * Validate an in-place location (refuses while the backend's application has it unpacked) or stage a store binary and settle `loc.openPath`/`loc.isNew`.
  * Call only while holding the lock on `loc.lockTarget` and only when the DB is not already open in this process.
  */
 export async function prepareStoreDir(backend: DisasmBackend, loc: DatabaseLocation): Promise<void> {
 	if (loc.kind === "inplace") {
-		// Only IDA unpacks a database beside itself while it has it open.
-		if (backend.id !== "ida") return;
-		const id0Path = path.join(loc.dir, `${path.basename(loc.openPath, path.extname(loc.openPath))}.id0`);
-		if (await Bun.file(id0Path).exists()) {
+		if (!backend.unpackedExt) return;
+		const stem = path.basename(loc.openPath, path.extname(loc.openPath));
+		if (await Bun.file(path.join(loc.dir, `${stem}${backend.unpackedExt}`)).exists()) {
 			throw new ToolError(
-				`${shortenPath(loc.openPath)} appears open in IDA (unpacked .id0 present); close it in IDA first`,
+				`${shortenPath(loc.openPath)} appears open in ${backend.label} (unpacked ${backend.unpackedExt} present); close it in ${backend.label} first`,
 			);
 		}
 		return;

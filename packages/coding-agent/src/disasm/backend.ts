@@ -34,6 +34,11 @@ export interface DisasmBackend {
 	interrupt: "signal" | "frame";
 	/** Ghidra rejects hidden path elements; use a temporary symlink/junction to its store directory. */
 	projectAlias: boolean;
+	/**
+	 * Extension of the file the backend's own application unpacks beside a database while it has
+	 * it open; an in-place open is refused while that file exists.
+	 */
+	unpackedExt?: string;
 }
 
 /** Backend-specific paths, worker sources, and interruption mechanisms; no settings dependencies. */
@@ -52,6 +57,7 @@ export const DISASM_BACKENDS: Record<DisasmBackendId, DisasmBackend> = {
 		workerStageDir: "omp-ida-worker",
 		interrupt: "signal",
 		projectAlias: false,
+		unpackedExt: ".id0",
 	},
 	ghidra: {
 		id: "ghidra",

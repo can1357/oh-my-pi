@@ -8,7 +8,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgDisasmBackend } from "@oh-my-pi/pi-coding-agent/disasm/active";
 import { DISASM_BACKENDS, type DisasmBackendId } from "@oh-my-pi/pi-coding-agent/disasm/backend";
 import * as client from "@oh-my-pi/pi-coding-agent/disasm/client";
-import { locateDatabase } from "@oh-my-pi/pi-coding-agent/disasm/store";
+import { locateDatabase, prepareStoreDir } from "@oh-my-pi/pi-coding-agent/disasm/store";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { readBinary } from "@oh-my-pi/pi-coding-agent/tools/read-binary";
@@ -246,5 +246,21 @@ describe("single writer for in-place databases", () => {
 		expect(viaLink.lockTarget).toBe(database);
 		expect(viaLink.id).toBe(own.id);
 		expect((await locateDatabase(DISASM_BACKENDS.binja, nested)).lockTarget).toBe(nested);
+	});
+
+	it("refuses an in-place database its own application has unpacked, for a backend that unpacks one", async () => {
+		setAgentDir(path.join(root, "agent"));
+		// IDA unpacks `<name>.id0` beside a database while it has it open.
+		const idb = await fixture(sqliteBytes(), "open.i64");
+		await fixture(new Uint8Array(), "open.id0");
+		await expect(
+			prepareStoreDir(DISASM_BACKENDS.ida, await locateDatabase(DISASM_BACKENDS.ida, idb)),
+		).rejects.toThrow(/appears open in IDA \(unpacked \.id0 present\)/);
+
+		// Binary Ninja unpacks nothing: the same stray sibling does not block a `.bndb`.
+		const bndb = await fixture(sqliteBytes(), "open.bndb");
+		const location = await locateDatabase(DISASM_BACKENDS.binja, bndb);
+		await prepareStoreDir(DISASM_BACKENDS.binja, location);
+		expect(location.openPath).toBe(bndb);
 	});
 });
