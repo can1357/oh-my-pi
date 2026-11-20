@@ -10426,6 +10426,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			prependMessages: queued.prependMessages,
 			rawText: text,
 			onPromptQueued: options?.onPromptQueued,
+			approvalLine: options?.approvalLine,
 		});
 	}
 
@@ -10514,7 +10515,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
 		this.#allowQueuedMessageDrainRetry();
-		if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 		const directive: AgentMessage = {
 			role: "developer",
 			content,
@@ -10525,8 +10525,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// user's prompt anchor, matching the live agent_start clear.
 			synthetic: true,
 		};
+		const queued = imageDescriptionNotice ? [imageDescriptionNotice, directive] : [directive];
+		// The callback runs before the queue listeners fire, so a caller can
+		// recognize these messages before the follow-up queue notifies.
+		options.onPromptQueued?.(queued);
+		if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 		this.agent.followUp(directive);
-		options.onPromptQueued?.(imageDescriptionNotice ? [imageDescriptionNotice, directive] : [directive]);
 		this.#scheduleIdleQueueDrain();
 	}
 
@@ -10673,7 +10677,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			};
 			/** Called synchronously once the message is pushed onto its queue. See {@link PromptOptions.onPromptAdmitted}. */
 			onPromptAdmitted?: () => void;
-			/** Called synchronously with the messages pushed onto the queue. See {@link PromptOptions.onPromptQueued}. */
+			/** Called synchronously just before the messages are pushed onto the queue. See {@link PromptOptions.onPromptQueued}. */
 			onPromptQueued?: (queued: readonly AgentMessage[]) => void;
 			/**
 			 * `joinActiveTurn` admission: the caller treats "not admitted" as "keep
@@ -10697,6 +10701,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			 * message is not queued, matching prompt()'s idle drop.
 			 */
 			promptGeneration?: number;
+			approvalLine?: string;
 		},
 	): Promise<boolean> {
 		const attribution = options?.attribution ?? "user";
@@ -10770,15 +10775,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		// The session-agent notice rides in prependMessages (from prompt() or
 		// #expandQueuedMentions), so it arrives alongside the user message in the same turn (#14093).
-		const queued = this.#pushQueuedUserMessage(
+		this.#pushQueuedUserMessage(
 			mode,
 			[...prependMessages, ...attachmentSourceNotices, ...(imageDescriptionNotice ? [imageDescriptionNotice] : [])],
 			content,
 			attribution,
 			timestamp ?? Date.now(),
 			rawText,
+			options?.approvalLine,
+			options?.onPromptQueued,
 		);
-		options?.onPromptQueued?.(queued);
 		options?.onPromptAdmitted?.();
 		// joinActiveTurn admission must never start an autonomous turn: the
 		// live run owns delivery, and an idle queue stays put until the host
@@ -10800,14 +10806,24 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		attribution: MessageAttribution,
 		timestamp: number,
 		rawText: string,
+		approvalLine?: string,
+		onPromptQueued?: (queued: readonly AgentMessage[]) => void,
 	): AgentMessage[] {
 		this.#allowQueuedMessageDrainRetry();
 		const userMessage: AgentMessage =
 			mode === "followUp"
 				? { role: "user", content, attribution, timestamp }
-				: { role: "user", content, steering: true, attribution, timestamp };
+				: {
+						role: "user",
+						content,
+						steering: true,
+						attribution,
+						timestamp,
+						...(approvalLine ? { approvalLine } : {}),
+					};
 		this.#queuedMessageRawText.set(userMessage, rawText);
 		const group = [...companions, userMessage];
+		onPromptQueued?.(group);
 		if (mode === "followUp") {
 			for (const message of group) this.agent.followUp(message);
 			return group;
@@ -11301,7 +11317,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			prependMessages?: readonly CustomMessage[];
 			/** Called synchronously once the message is pushed onto its queue. See {@link PromptOptions.onPromptAdmitted}. */
 			onPromptAdmitted?: () => void;
-			/** Called synchronously with the messages pushed onto the queue. See {@link PromptOptions.onPromptQueued}. */
+			/** Called synchronously just before the messages are pushed onto the queue. See {@link PromptOptions.onPromptQueued}. */
 			onPromptQueued?: (queued: readonly AgentMessage[]) => void;
 		},
 	): Promise<void> {
@@ -11349,13 +11365,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			onPromptAdmitted?.();
 			// The image-normalization await above can span the run's settle, so the run may
 			// already be idle by the time the record lands in the aside queue with no loop
-			// left to drain it. Resuming here is a no-op while streaming and wakes/folds
-			// correctly once idle, matching #queueUserMessage's aside branch.
+			// left to drain it. Resuming here is a no-op while streaming and wakes/folds correctly
+			// once idle, matching #queueUserMessage's aside branch.
 			this.#resumeStrandedIrcAsides();
 			return;
 		}
 		this.#allowQueuedMessageDrainRetry();
 		// Keyword notices and their user message must enter the queue in one synchronous phase.
+		const queued = [...prependMessages, ...(descriptionNotice ? [descriptionNotice] : []), normalizedAppMessage];
+		// The callback runs before the queue listeners fire, so a deny-watch can
+		// filter the exact messages this admission will enqueue.
+		onPromptQueued?.(queued);
 		if (deliverAs === "followUp") {
 			for (const notice of prependMessages) this.agent.followUp(notice);
 			if (descriptionNotice) this.agent.followUp(descriptionNotice);
@@ -11365,7 +11385,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (descriptionNotice) this.agent.steer(descriptionNotice);
 			this.agent.steer(normalizedAppMessage);
 		}
-		onPromptQueued?.([...prependMessages, ...(descriptionNotice ? [descriptionNotice] : []), normalizedAppMessage]);
 		onPromptAdmitted?.();
 		this.#scheduleIdleQueueDrain();
 	}

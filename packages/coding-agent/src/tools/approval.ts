@@ -908,6 +908,7 @@ export async function requestApproval(
 			{
 				full,
 				compact,
+				toolName: tool.name,
 				...(session ? { session } : {}),
 				...(grants.length > 0 ? { grants } : {}),
 			},

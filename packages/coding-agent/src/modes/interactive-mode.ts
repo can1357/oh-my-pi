@@ -397,6 +397,8 @@ import {
 import { getSlashCommandTypeIcon } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 import type {
 	AgentHubOpenOptions,
+	ApprovalSubmit,
+	ApprovalSubmitOutcome,
 	CompactionQueuedMessage,
 	ComposerOwner,
 	InteractiveModeContext,
@@ -9954,6 +9956,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	waitForSubmissionDispatches(): Promise<void> {
 		return this.#inputController.waitForSubmissionDispatches();
+	}
+
+	submitApprovalNote(text: string, approval: ApprovalSubmit): Promise<ApprovalSubmitOutcome> {
+		return this.#inputController.submitApprovalNote(text, approval);
 	}
 
 	handleImagePaste(): Promise<boolean> {
