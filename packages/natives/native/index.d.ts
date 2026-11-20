@@ -1539,6 +1539,12 @@ export interface AxSnapshot {
   text: string
   nodeCount: number
   truncated: boolean
+  /**
+   * The window appeared fully covered around the read, and its app can stop
+   * updating its tree while covered (Chromium on Windows), so the tree may
+   * be stale.
+   */
+  covered: boolean
 }
 
 export interface AxSnapshotOptions {
@@ -1764,6 +1770,12 @@ export interface DesktopCapture {
    * frame. Windows also detects disconnected sessions and secure desktops.
    */
   screenLocked: boolean
+  /**
+   * The target window appeared fully covered around this frame, and its app
+   * can stop drawing while covered (Chromium on Windows), so the frame may
+   * be stale.
+   */
+  covered: boolean
 }
 
 export interface DesktopControlState {

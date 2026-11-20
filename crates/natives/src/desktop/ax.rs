@@ -1361,7 +1361,7 @@ pub(super) fn snapshot(
 		}
 		let _ = write!(text, "… skipped {} unreadable nodes", state.skipped);
 	}
-	Ok(AxSnapshot { text, node_count, truncated: state.truncated })
+	Ok(AxSnapshot { text, node_count, truncated: state.truncated, covered: false })
 }
 
 /// How many elements `find()` reads; bounds its work.
