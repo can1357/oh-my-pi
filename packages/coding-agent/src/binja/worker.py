@@ -37,7 +37,6 @@ import sys
 import threading
 import time
 import traceback
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
 
 
 # ---------------------------------------------------------------------------
@@ -1138,13 +1137,16 @@ def _rpc_view(params):
     raise ValueError(f"unknown view: {kind}")
 
 
-@contextmanager
-def _undo_span():
-    """Commit the undo-recorded edits of the body, or revert them when it raises or is interrupted.
+def _in_undo_span(body):
+    """Run `body()` and commit its undo-recorded edits, or revert them when it raises or is interrupted.
 
     A request either fails with its edits reverted or succeeds with them committed: an interrupt
-    cannot land between the last edit and the commit, nor leave the span open. The span ends the
-    part of a request that an interrupt can stop, so it is a handler's last step.
+    cannot land between the last edit and the commit, nor leave the span open. That holds because
+    the span opens, the body runs and the span closes in this one frame. A context manager would
+    put frames of its own around the body, and an interrupt raised in those escapes the `except`.
+
+    Once this returns or raises, the request accepts no interrupt: it is a handler's last
+    interruptible step.
 
     Auto-level changes, metadata and a function's `has_user_type` flag are outside undo and stay.
     """
@@ -1155,18 +1157,19 @@ def _undo_span():
         transport.hold()
         span = bv.begin_undo_actions()
         transport.release()
-        yield
+        result = body()
         # The last moment an interrupt stops the request: raised in this call it still reverts,
         # after it the edits are committed and the request succeeds.
         transport.finish()
         bv.commit_undo_actions(span)
+        return result
     except BaseException:
+        try:
+            transport.finish()
+        except KeyboardInterrupt:
+            # The request's one interrupt, on the way in: nothing cuts the revert short now.
+            pass
         if span is not None:
-            try:
-                transport.finish()
-            except KeyboardInterrupt:
-                # The request's one interrupt, on the way in: nothing cuts the revert short now.
-                pass
             bv.revert_undo_actions(span)
         raise
 
@@ -1179,28 +1182,35 @@ def _rpc_exec(params):
     buf = io.StringIO()
     value = None
     error = None
+
+    def run():
+        # The wait sits inside the error boundary: an interrupt during analysis comes back as `error`.
+        wait_analysis()
+        tree = ast.parse(code, _EXEC_FILE, "exec")
+        last = None
+        if tree.body and isinstance(tree.body[-1], ast.Expr):
+            last = ast.Expression(tree.body.pop().value)
+        sys.stdout = sys.stderr = buf
+        if tree.body:
+            exec(compile(tree, _EXEC_FILE, "exec"), NS)
+        if last is not None:
+            v = eval(compile(last, _EXEC_FILE, "eval"), NS)
+            if v is not None:
+                return repr(v)
+        return None
+
+    streams = sys.stdout, sys.stderr
     try:
-        # The helpers open no span of their own, so nothing nests. The wait sits inside the error
-        # boundary: an interrupt during analysis comes back as `error`.
-        with _undo_span():
-            wait_analysis()
-            tree = ast.parse(code, _EXEC_FILE, "exec")
-            last = None
-            if tree.body and isinstance(tree.body[-1], ast.Expr):
-                last = ast.Expression(tree.body.pop().value)
-            with redirect_stdout(buf), redirect_stderr(buf):
-                if tree.body:
-                    exec(compile(tree, _EXEC_FILE, "exec"), NS)
-                if last is not None:
-                    v = eval(compile(last, _EXEC_FILE, "eval"), NS)
-                    if v is not None:
-                        value = repr(v)
+        # The helpers open no span of their own, so nothing nests.
+        value = _in_undo_span(run)
     except KeyboardInterrupt:
-        value = None
         error = "KeyboardInterrupt: interrupted (timeout or cancel)"
     except BaseException:
-        value = None
         error = traceback.format_exc()
+    finally:
+        # Restored here and not by a `with` in `run`: the span has stopped accepting interrupts, so
+        # nothing can skip this.
+        sys.stdout, sys.stderr = streams
     return {"output": buf.getvalue(), "value": value, "error": error}
 
 
@@ -1209,8 +1219,7 @@ def _mutation(apply):
 
     def handler(params):
         wait_analysis()
-        with _undo_span():
-            return apply(params)
+        return _in_undo_span(lambda: apply(params))
 
     return handler
 
