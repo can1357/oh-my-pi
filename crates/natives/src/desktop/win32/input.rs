@@ -446,6 +446,14 @@ mod background {
 			PointerEvent::Click { x, y, button, count, modifiers } => {
 				let (target, point) = child_at(root, x, y)?;
 				ensure_delivery(id, target, kind)?;
+				if button == MouseButton::Left
+					&& count == 1
+					&& modifiers == Modifiers::default()
+					&& window::native_button(target) == Some(window::NativeButton::Enabled)
+					&& window::click_ignores_point(target)
+				{
+					return window::click_button(target, root);
+				}
 				let (down, up, double, button_flag) = mouse_messages(button);
 				ensure_unmodified(
 					target,
@@ -865,6 +873,79 @@ mod background {
 			}
 		}
 		Ok(())
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use windows_sys::Win32::{
+			Graphics::Gdi::ClientToScreen,
+			UI::{
+				HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
+				WindowsAndMessaging::{
+					BS_OWNERDRAW, BS_PUSHBUTTON, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE,
+					PeekMessageW, SW_SHOWNOACTIVATE, ShowWindow, WS_VISIBLE,
+				},
+			},
+		};
+
+		use super::*;
+		use crate::desktop::win32::window::tests::{
+			button, button_parent, click_messages, clicks, pressed_at, record, winforms_button_class,
+		};
+
+		fn left_click_at(button: HWND, x: i32, y: i32) -> PointerEvent {
+			let mut point = POINT { x, y };
+			// SAFETY: this thread owns `button`; `point` is writable.
+			assert_ne!(unsafe { ClientToScreen(button, &raw mut point) }, 0);
+			PointerEvent::Click {
+				x:         f64::from(point.x),
+				y:         f64::from(point.y),
+				button:    MouseButton::Left,
+				count:     1,
+				modifiers: Modifiers::default(),
+			}
+		}
+
+		#[test]
+		fn left_clicks_send_buttons_their_click_except_owner_drawn_system_buttons() {
+			// Windows made per-monitor aware report physical screen points,
+			// the coordinates pointer input takes.
+			// SAFETY: changes only this test thread's DPI context.
+			unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+			let parent = button_parent();
+			// Point lookup skips windows that are not shown.
+			// SAFETY: this thread owns the window.
+			unsafe { ShowWindow(parent, SW_SHOWNOACTIVATE) };
+			let id = parent.expose_provenance().to_string();
+			let mut ax = Win32Ax::new();
+
+			// No message pump runs: a WinForms button's click must have reached
+			// the app, as its own click message, when the click returns.
+			let forms = button(parent, winforms_button_class(), WS_VISIBLE | BS_PUSHBUTTON as u32);
+			record(forms);
+			pointer(&mut ax, &id, left_click_at(forms, 10, 10)).unwrap();
+			assert_eq!((clicks(), click_messages()), (1, 1));
+			// SAFETY: this thread owns the button.
+			unsafe { DestroyWindow(forms) };
+
+			// A system owner-drawn button may give the point meaning: it is
+			// pressed at the requested point, never sent its click message.
+			let drawn = button(parent, "BUTTON", WS_VISIBLE | BS_OWNERDRAW as u32);
+			record(drawn);
+			pointer(&mut ax, &id, left_click_at(drawn, 70, 15)).unwrap();
+			let mut message = MSG::default();
+			// SAFETY: `message` is writable; this thread owns the posted-to
+			// windows.
+			while unsafe { PeekMessageW(&raw mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0
+			{
+				// SAFETY: `message` was just filled by PeekMessageW.
+				unsafe { DispatchMessageW(&raw const message) };
+			}
+			assert_eq!(pressed_at(), Some((70, 15)));
+			assert_eq!(click_messages(), 0);
+			// SAFETY: this thread owns the window.
+			unsafe { DestroyWindow(parent) };
+		}
 	}
 }
 

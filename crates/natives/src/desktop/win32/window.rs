@@ -26,18 +26,20 @@ use windows_sys::{
 			PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 		},
 		UI::{
+			Controls::BST_CHECKED,
 			HiDpi::{
 				DPI_AWARENESS_CONTEXT, GetWindowDpiAwarenessContext,
 				PhysicalToLogicalPointForPerMonitorDPI, SetThreadDpiAwarenessContext,
 			},
 			Input::KeyboardAndMouse::IsWindowEnabled,
 			WindowsAndMessaging::{
-				CWP_SKIPDISABLED, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, ChildWindowFromPointEx,
-				EnumChildWindows, EnumWindows, GA_PARENT, GA_ROOT, GUITHREADINFO, GWL_EXSTYLE,
-				GWL_STYLE, GetAncestor, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo,
-				GetLayeredWindowAttributes, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId,
-				IsChild, IsIconic, IsWindowVisible, LWA_ALPHA, LWA_COLORKEY, SetForegroundWindow,
-				WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+				BM_CLICK, BM_GETCHECK, BS_AUTO3STATE, BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON,
+				BS_OWNERDRAW, CWP_SKIPDISABLED, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT,
+				ChildWindowFromPointEx, EnumChildWindows, EnumWindows, GA_PARENT, GA_ROOT,
+				GUITHREADINFO, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW, GetForegroundWindow,
+				GetGUIThreadInfo, GetLayeredWindowAttributes, GetWindowLongW, GetWindowRect,
+				GetWindowThreadProcessId, IsChild, IsIconic, IsWindowVisible, LWA_ALPHA, LWA_COLORKEY,
+				SetForegroundWindow, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 			},
 		},
 	},
@@ -49,7 +51,8 @@ use super::{
 		control,
 		error::{CoreResult, DesktopError},
 	},
-	delivery::{is_chromium_class, is_wpf_class},
+	delivery::{button_takes_bm_click, is_chromium_class, is_native_class, is_wpf_class},
+	value_write::{Unanswered, operation_wait_ms, send_message_within},
 };
 
 /// Top-level classes that host XAML/UWP/WinUI content.
@@ -703,19 +706,173 @@ pub(super) fn ensure_pattern_safe(root: HWND) -> CoreResult<()> {
 	Ok(())
 }
 
+/// A system or `WinForms` button whose click `BM_CLICK` performs
+/// ([`click_button`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NativeButton {
+	/// Enabled together with every window up to its top-level one.
+	Enabled,
+	/// Disabled, itself or through a window above it (a form behind its modal
+	/// dialog disables its children): a click would do nothing.
+	Disabled,
+}
+
+/// Whether `hwnd` is a button [`click_button`] can click, and whether it is
+/// enabled; `None` for other windows, group boxes and split buttons.
+pub(super) fn native_button(hwnd: HWND) -> Option<NativeButton> {
+	if !with_class_name(hwnd, |class| is_native_class(class, "Button")) {
+		return None;
+	}
+	// SAFETY: GetWindowLongW only queries the handle.
+	let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
+	if !button_takes_bm_click(style) {
+		return None;
+	}
+	let top = root(hwnd);
+	let mut current = hwnd;
+	loop {
+		// SAFETY: IsWindowEnabled only queries the handle.
+		if current.is_null() || unsafe { IsWindowEnabled(current) } == 0 {
+			return Some(NativeButton::Disabled);
+		}
+		if current == top {
+			return Some(NativeButton::Enabled);
+		}
+		// SAFETY: GetAncestor only queries the handle.
+		current = unsafe { GetAncestor(current, GA_PARENT) };
+	}
+}
+
+/// Whether a click on button `hwnd` means the same wherever it lands: every
+/// `WinForms` button, and system buttons the system draws. A Win32
+/// owner-drawn button paints itself and may give the point meaning, so a
+/// pointer click on it stays a click at that point.
+pub(super) fn click_ignores_point(hwnd: HWND) -> bool {
+	with_class_name(hwnd, |class| !class.eq_ignore_ascii_case("Button"))
+		// SAFETY: GetWindowLongW only queries the handle.
+		|| unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32 & 0xf != BS_OWNERDRAW as u32
+}
+
+/// System automatic buttons expose their state through `BM_GETCHECK`.
+pub(super) fn native_auto_button(hwnd: HWND) -> bool {
+	with_class_name(hwnd, |class| class.eq_ignore_ascii_case("Button"))
+		&& matches!(
+			// SAFETY: GetWindowLongW only queries the handle.
+			unsafe { GetWindowLongW(hwnd, GWL_STYLE) } & 0xf,
+			BS_AUTOCHECKBOX | BS_AUTO3STATE | BS_AUTORADIOBUTTON
+		)
+}
+
+/// Sends a system or `WinForms` button its own `BM_CLICK` message and waits
+/// for the answer. A reply alone does not prove that the app acted on it.
+/// UI Automation's `Invoke` on these buttons activates their window first,
+/// taking the foreground and the user's next keys, and a press and release
+/// posted to the button can leave it unclicked. An automatic check box must
+/// change state and an automatic radio button must end up checked, or the click
+/// is reported as not taken. The click is sent only while the button is still
+/// an enabled one inside `top`, the top-level window it was found in.
+pub(super) fn click_button(hwnd: HWND, top: HWND) -> CoreResult<()> {
+	let id = hwnd.expose_provenance();
+	if let Some(reason) = uipi_block(hwnd) {
+		return Err(DesktopError::permission_denied(format!(
+			"button {id} cannot receive synthetic input: {reason}"
+		)));
+	}
+	// SAFETY: GetWindowLongW only queries the handle.
+	let kind = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32 & 0xf;
+	let checkable = native_auto_button(hwnd);
+	let send = |message| send_message_within(hwnd, message, 0, 0, false, operation_wait_ms());
+	let check_state = || send(BM_GETCHECK).ok();
+	let before = if checkable {
+		Some(check_state().ok_or_else(|| {
+			DesktopError::input_failed(format!(
+				"button {id} did not report its check state; no input was sent"
+			))
+		})?)
+	} else {
+		None
+	};
+	control::check()?;
+	// The state read and the caller's own queries run app code, which can
+	// disable the button or move it into another window.
+	if native_button(hwnd) != Some(NativeButton::Enabled) || root(hwnd) != top {
+		return Err(DesktopError::input_failed(format!(
+			"button {id} is no longer an eligible enabled button inside window {}, or its window is \
+			 disabled; nothing was clicked",
+			top.expose_provenance()
+		)));
+	}
+	// A click that may have landed is reported as `InputFailed` with wording
+	// that says so, not `AxUnconfirmed`: naming its target would query the same
+	// possibly blocked app again.
+	match send(BM_CLICK) {
+		Ok(_) => {},
+		Err(Unanswered::NoAnswer) => {
+			return Err(DesktopError::input_failed(format!(
+				"button {id}'s BM_CLICK was not confirmed and may already have taken effect; inspect \
+				 the target before clicking again"
+			)));
+		},
+		Err(Unanswered::Undelivered | Unanswered::OtherThread) => {
+			return Err(DesktopError::input_failed(format!(
+				"button {id} could not be sent BM_CLICK; nothing was clicked"
+			)));
+		},
+	}
+	let Some(before) = before else { return Ok(()) };
+	// A control destroyed by its click reads as no answer here: the click may
+	// have landed without changing anything.
+	let Some(after) = check_state() else {
+		return Err(DesktopError::input_failed(format!(
+			"button {id} answered BM_CLICK but did not report its check state afterwards, so the \
+			 click may have taken effect; inspect the target before clicking again"
+		)));
+	};
+	let taken = if kind as i32 == BS_AUTORADIOBUTTON {
+		after == BST_CHECKED as isize
+	} else {
+		after != before
+	};
+	if !taken {
+		let state = if kind as i32 == BS_AUTORADIOBUTTON {
+			"it was not checked after the click"
+		} else {
+			"its check state did not change"
+		};
+		return Err(DesktopError::input_failed(format!(
+			"button {id} answered BM_CLICK but {state}; the app may have refused the click"
+		)));
+	}
+	Ok(())
+}
+
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
+	use std::cell::Cell;
+
 	use windows_sys::Win32::{
+		Foundation::{HWND, LPARAM, LRESULT, WPARAM},
 		Graphics::Gdi::SetWindowRgn,
 		System::LibraryLoader::GetModuleHandleW,
-		UI::WindowsAndMessaging::{
-			CreateWindowExW, DefWindowProcW, DestroyWindow, HWND_TOPMOST, RegisterClassW,
-			SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-			SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+		UI::{
+			Controls::{BST_CHECKED, BST_UNCHECKED},
+			Input::KeyboardAndMouse::EnableWindow,
+			WindowsAndMessaging::{
+				BM_CLICK, BM_GETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_GROUPBOX, BS_OWNERDRAW,
+				BS_PUSHBUTTON, CallWindowProcW, CreateWindowExW, DefWindowProcW, DestroyWindow,
+				GWLP_WNDPROC, GetClassInfoW, GetParent, HWND_TOPMOST, RegisterClassW, SWP_NOACTIVATE,
+				SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW,
+				SetLayeredWindowAttributes, SetParent, SetWindowLongPtrW, SetWindowLongW, SetWindowPos,
+				WM_COMMAND, WM_LBUTTONDOWN, WM_LBUTTONUP, WNDCLASSW, WNDPROC, WS_CHILD, WS_OVERLAPPED,
+				WS_OVERLAPPEDWINDOW,
+			},
 		},
 	};
 
-	use super::{super::capture, *};
+	use super::{
+		super::{super::error::ErrorCode, capture},
+		*,
+	};
 
 	fn wide(text: &str) -> Vec<u16> {
 		text.encode_utf16().chain(Some(0)).collect()
@@ -872,6 +1029,274 @@ mod tests {
 			DestroyWindow(cover);
 			DestroyWindow(target);
 			DestroyWindow(native);
+		}
+	}
+
+	std::thread_local! {
+		static PARENT_PROC: Cell<WNDPROC> = const { Cell::new(None) };
+		static BUTTON_PROC: Cell<WNDPROC> = const { Cell::new(None) };
+		static CLICKS: Cell<usize> = const { Cell::new(0) };
+		static DISABLE_ON_CHECK: Cell<bool> = const { Cell::new(false) };
+		static MOVE_ON_CHECK: Cell<HWND> = const { Cell::new(std::ptr::null_mut()) };
+		static DESTROY_ON_CLICK: Cell<bool> = const { Cell::new(false) };
+		static CLICK_MESSAGES: Cell<usize> = const { Cell::new(0) };
+		static PRESSED_AT: Cell<Option<(i32, i32)>> = const { Cell::new(None) };
+	}
+
+	unsafe extern "system" fn counting_parent(
+		hwnd: HWND,
+		message: u32,
+		wparam: WPARAM,
+		lparam: LPARAM,
+	) -> LRESULT {
+		if message == WM_COMMAND && ((wparam >> 16) & 0xffff) as u32 == BN_CLICKED {
+			CLICKS.with(|clicks| clicks.set(clicks.get() + 1));
+		}
+		// SAFETY: the test saved this parent's original procedure.
+		unsafe { CallWindowProcW(PARENT_PROC.with(Cell::get), hwnd, message, wparam, lparam) }
+	}
+
+	/// A check box whose app swallows the release, so a click never lands. On
+	/// request, reading its state disables its form or moves it into another
+	/// window, and its click destroys it.
+	unsafe extern "system" fn refusing_button(
+		hwnd: HWND,
+		message: u32,
+		wparam: WPARAM,
+		lparam: LPARAM,
+	) -> LRESULT {
+		if message == BM_GETCHECK {
+			if DISABLE_ON_CHECK.with(|disable| disable.replace(false)) {
+				// SAFETY: this fixture owns the button and its parent.
+				unsafe { EnableWindow(GetParent(hwnd), 0) };
+			}
+			let other = MOVE_ON_CHECK.with(|other| other.replace(std::ptr::null_mut()));
+			if !other.is_null() {
+				// SAFETY: this fixture owns the button and both windows.
+				unsafe { SetParent(hwnd, other) };
+			}
+		}
+		if message == BM_CLICK {
+			CLICK_MESSAGES.with(|clicks| clicks.set(clicks.get() + 1));
+			if DESTROY_ON_CLICK.with(|destroy| destroy.replace(false)) {
+				// SAFETY: this fixture owns the button.
+				unsafe { DestroyWindow(hwnd) };
+				return 0;
+			}
+		}
+		if message == WM_LBUTTONUP {
+			return 0;
+		}
+		// SAFETY: the test saved this button's original procedure.
+		unsafe { CallWindowProcW(BUTTON_PROC.with(Cell::get), hwnd, message, wparam, lparam) }
+	}
+
+	/// A button that records its click messages and where it was pressed.
+	unsafe extern "system" fn recording_button(
+		hwnd: HWND,
+		message: u32,
+		wparam: WPARAM,
+		lparam: LPARAM,
+	) -> LRESULT {
+		if message == BM_CLICK {
+			CLICK_MESSAGES.with(|clicks| clicks.set(clicks.get() + 1));
+		}
+		if message == WM_LBUTTONDOWN {
+			let point = (i32::from(lparam as i16), i32::from((lparam >> 16) as i16));
+			PRESSED_AT.with(|pressed| pressed.set(Some(point)));
+		}
+		// SAFETY: the test saved this button's original procedure.
+		unsafe { CallWindowProcW(BUTTON_PROC.with(Cell::get), hwnd, message, wparam, lparam) }
+	}
+
+	/// Replaces `button`'s window procedure with `procedure`, which forwards
+	/// to the saved original.
+	fn subclass(button: HWND, procedure: WNDPROC) {
+		// SAFETY: this thread owns `button`; the original procedure is saved
+		// before any message reaches the replacement.
+		unsafe {
+			let original = SetWindowLongPtrW(
+				button,
+				GWLP_WNDPROC,
+				procedure.map_or(0, |procedure| procedure as usize as isize),
+			);
+			BUTTON_PROC.with(|proc| proc.set(std::mem::transmute::<isize, WNDPROC>(original)));
+		}
+	}
+
+	fn top_level() -> HWND {
+		// SAFETY: the strings outlive the synchronous call.
+		let hwnd = unsafe {
+			CreateWindowExW(
+				0,
+				wide("STATIC").as_ptr(),
+				wide("").as_ptr(),
+				WS_OVERLAPPED,
+				0,
+				0,
+				200,
+				100,
+				std::ptr::null_mut(),
+				std::ptr::null_mut(),
+				std::ptr::null_mut(),
+				std::ptr::null(),
+			)
+		};
+		assert!(!hwnd.is_null());
+		hwnd
+	}
+
+	/// A hidden top-level window counting its buttons' `BN_CLICKED`
+	/// notifications ([`clicks`]).
+	pub(in crate::desktop::win32) fn button_parent() -> HWND {
+		let parent = top_level();
+		// SAFETY: this thread owns `parent`; its original procedure is saved
+		// before any message reaches the replacement.
+		unsafe {
+			let original =
+				SetWindowLongPtrW(parent, GWLP_WNDPROC, counting_parent as *const () as isize);
+			PARENT_PROC.with(|proc| proc.set(std::mem::transmute::<isize, WNDPROC>(original)));
+		}
+		parent
+	}
+
+	/// An 80 x 20 button of `class` and `style` at the top left of `parent`.
+	pub(in crate::desktop::win32) fn button(parent: HWND, class: &str, style: u32) -> HWND {
+		// SAFETY: the strings outlive the synchronous call.
+		let button = unsafe {
+			CreateWindowExW(
+				0,
+				wide(class).as_ptr(),
+				wide("b").as_ptr(),
+				WS_CHILD | style,
+				0,
+				0,
+				80,
+				20,
+				parent,
+				1 as _,
+				GetModuleHandleW(std::ptr::null()),
+				std::ptr::null(),
+			)
+		};
+		assert!(!button.is_null());
+		button
+	}
+
+	/// Name of a `WinForms`-named subclass of the system button class,
+	/// registered once per process.
+	pub(in crate::desktop::win32) fn winforms_button_class() -> &'static str {
+		const NAME: &str = "WindowsForms10.BUTTON.app.0.omp_test";
+		static REGISTER: std::sync::Once = std::sync::Once::new();
+		REGISTER.call_once(|| {
+			// SAFETY: `class` is a writable WNDCLASSW; Win32 copies the class
+			// name during registration.
+			unsafe {
+				let mut class: WNDCLASSW = std::mem::zeroed();
+				assert_ne!(
+					GetClassInfoW(std::ptr::null_mut(), wide("BUTTON").as_ptr(), &raw mut class),
+					0
+				);
+				let name = wide(NAME);
+				class.hInstance = GetModuleHandleW(std::ptr::null());
+				class.lpszClassName = name.as_ptr();
+				assert_ne!(RegisterClassW(&raw const class), 0);
+			}
+		});
+		NAME
+	}
+
+	/// Records `button`'s click messages ([`click_messages`]) and where it is
+	/// pressed ([`pressed_at`]) from now on.
+	pub(in crate::desktop::win32) fn record(button: HWND) {
+		CLICK_MESSAGES.with(|clicks| clicks.set(0));
+		PRESSED_AT.with(|pressed| pressed.set(None));
+		subclass(button, Some(recording_button));
+	}
+
+	pub(in crate::desktop::win32) fn clicks() -> usize {
+		CLICKS.with(Cell::get)
+	}
+
+	pub(in crate::desktop::win32) fn click_messages() -> usize {
+		CLICK_MESSAGES.with(Cell::get)
+	}
+
+	/// Client point of the last `WM_LBUTTONDOWN` a recorded button received.
+	pub(in crate::desktop::win32) fn pressed_at() -> Option<(i32, i32)> {
+		PRESSED_AT.with(Cell::get)
+	}
+
+	#[test]
+	fn button_clicks_land_before_returning_and_unchanged_check_boxes_fail() {
+		let parent = button_parent();
+		let child = |style: i32| button(parent, "BUTTON", style as u32);
+		// SAFETY: this thread owns the windows and subclasses only them.
+		unsafe {
+			let check = |button| SendMessageW(button, BM_GETCHECK, 0, 0);
+
+			// No message pump runs: the click must have reached the app when
+			// click_button reports success.
+			let pushed = child(BS_PUSHBUTTON);
+			let group = child(BS_GROUPBOX);
+			assert_eq!(native_button(pushed), Some(NativeButton::Enabled));
+			assert_eq!(native_button(group), None);
+			click_button(pushed, parent).unwrap();
+			assert_eq!(clicks(), 1);
+			EnableWindow(pushed, 0);
+			assert_eq!(native_button(pushed), Some(NativeButton::Disabled));
+			// A pointer click on a Win32 owner-drawn button stays a click at
+			// its point; the system draws (and so ignores the point of) the rest.
+			assert!(click_ignores_point(pushed));
+			assert!(!click_ignores_point(child(BS_OWNERDRAW)));
+
+			let toggles = child(BS_AUTOCHECKBOX);
+			click_button(toggles, parent).unwrap();
+			assert_eq!(check(toggles), BST_CHECKED as isize);
+
+			let refuses = child(BS_AUTOCHECKBOX);
+			subclass(refuses, Some(refusing_button));
+			let error = click_button(refuses, parent).unwrap_err();
+			assert!(matches!(error.code, ErrorCode::InputFailed), "{error:?}");
+			assert_eq!(check(refuses), BST_UNCHECKED as isize);
+
+			// The pre-read can synchronously disable the form. Recheck before
+			// delivery, not only when classifying the original target.
+			CLICK_MESSAGES.with(|clicks| clicks.set(0));
+			DISABLE_ON_CHECK.with(|disable| disable.set(true));
+			let error = click_button(refuses, parent).unwrap_err();
+			assert!(matches!(error.code, ErrorCode::InputFailed), "{error:?}");
+			assert_eq!(click_messages(), 0);
+			assert_eq!(check(refuses), BST_UNCHECKED as isize);
+			EnableWindow(parent, 1);
+
+			// It can also move the button into another enabled window, where
+			// it is still an eligible button: not the window asked for.
+			let other = top_level();
+			MOVE_ON_CHECK.with(|target| target.set(other));
+			let error = click_button(refuses, parent).unwrap_err();
+			assert!(matches!(error.code, ErrorCode::InputFailed), "{error:?}");
+			assert_eq!(GetParent(refuses), other);
+			assert_eq!(native_button(refuses), Some(NativeButton::Enabled));
+			assert_eq!(click_messages(), 0);
+			DestroyWindow(other);
+
+			// A check box destroyed by its click leaves no state to read: the
+			// click may have landed, so neither ok nor unsent.
+			let destroyed = child(BS_AUTOCHECKBOX);
+			subclass(destroyed, Some(refusing_button));
+			DESTROY_ON_CLICK.with(|destroy| destroy.set(true));
+			let error = click_button(destroyed, parent).unwrap_err();
+			assert!(matches!(error.code, ErrorCode::InputFailed), "{error:?}");
+			assert!(error.message.contains("may have taken effect"), "{error:?}");
+			assert_eq!(click_messages(), 1);
+
+			// A disabled parent (a form behind its modal dialog) disables the
+			// buttons inside it.
+			assert_eq!(native_button(toggles), Some(NativeButton::Enabled));
+			EnableWindow(parent, 0);
+			assert_eq!(native_button(toggles), Some(NativeButton::Disabled));
+			DestroyWindow(parent);
 		}
 	}
 }
