@@ -5784,7 +5784,6 @@ type LiteLLMApiRoute = "openai" | "anthropic" | "other" | "unknown";
 type LiteLLMRichEndpointModel<TApi extends Api> = {
 	model: ModelSpec<TApi>;
 	apiRoute: LiteLLMApiRoute;
-	/** Api the group takes when its routing evidence conflicts across endpoints. */
 	fallbackApi: TApi;
 	supportsVision: unknown;
 	supportsReasoning: unknown;
@@ -5997,14 +5996,14 @@ function getLiteLLMProviders(entry: LiteLLMRichModelEntry): string[] | undefined
 	return providers.length > 0 ? providers : undefined;
 }
 
-/** Whether a LiteLLM group or backend model id names a Claude model. */
-function isLiteLLMClaudeModel(modelId: string): boolean {
-	return classifyModel("litellm", modelId, { lenient: true }).class === "anthropic";
+function isLikelyAnthropicModelId(id: string): boolean {
+	return classifyModel("litellm", id, { lenient: true }).class === "anthropic";
 }
 
-function classifyLiteLLMBackendRoute(provider: string, model: string): LiteLLMApiRoute {
+function liteLLMProviderRoute(provider: string, model: string): LiteLLMApiRoute {
 	if (provider === "openai") return "openai";
-	return provider === "anthropic" || isLiteLLMClaudeModel(model) ? "anthropic" : "other";
+	if (provider === "anthropic" || isLikelyAnthropicModelId(model)) return "anthropic";
+	return "other";
 }
 
 function classifyLiteLLMApiRoute(entry: LiteLLMRichModelEntry | undefined, id: string): LiteLLMApiRoute {
@@ -6012,35 +6011,34 @@ function classifyLiteLLMApiRoute(entry: LiteLLMRichModelEntry | undefined, id: s
 		const providers = getLiteLLMProviders(entry);
 		if (providers) {
 			if (providers.every(provider => provider === "openai")) return "openai";
-			return providers.every(provider => provider === "anthropic") || isLiteLLMClaudeModel(id)
-				? "anthropic"
-				: "other";
+			if (providers.every(provider => provider === "anthropic") || isLikelyAnthropicModelId(id)) return "anthropic";
+			return "other";
 		}
 
 		const params = getLiteLLMParams(entry);
 		const backendModel = toNonEmptyString(params?.model);
 		const configuredProvider = toNonEmptyString(params?.custom_llm_provider)?.toLowerCase();
 		if (configuredProvider) {
-			return classifyLiteLLMBackendRoute(configuredProvider, backendModel ?? id);
+			return liteLLMProviderRoute(configuredProvider, backendModel ?? id);
 		}
 
 		const backendSeparator = backendModel?.indexOf("/") ?? -1;
 		if (backendModel && backendSeparator > 0) {
-			return classifyLiteLLMBackendRoute(backendModel.slice(0, backendSeparator).toLowerCase(), backendModel);
+			return liteLLMProviderRoute(backendModel.slice(0, backendSeparator).toLowerCase(), backendModel);
 		}
 
 		const baseModel = toNonEmptyString(getLiteLLMMetadataValue(entry, "base_model"));
 		const baseSeparator = baseModel?.indexOf("/") ?? -1;
 		if (baseModel && baseSeparator > 0) {
-			return classifyLiteLLMBackendRoute(baseModel.slice(0, baseSeparator).toLowerCase(), baseModel);
+			return liteLLMProviderRoute(baseModel.slice(0, baseSeparator).toLowerCase(), baseModel);
 		}
 	}
 
-	// Without provider metadata (the `/v1/models` fallback, or a key that cannot
-	// read the management endpoints), the id is the only routing evidence.
+	// Without provider metadata, the id is the only routing evidence.
 	const modelId = id.toLowerCase().startsWith("openai/") ? id.slice("openai/".length) : id;
 	if (isLikelyOpenAIResponsesModelId(modelId)) return "openai";
-	return isLiteLLMClaudeModel(id) ? "anthropic" : "unknown";
+	if (isLikelyAnthropicModelId(id)) return "anthropic";
+	return "unknown";
 }
 
 /**
