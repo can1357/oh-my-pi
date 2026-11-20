@@ -2526,8 +2526,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								(!isRemoteMountPath(absolutePath) &&
 									(await findSuffixMatchCached(this.session, suffixCache, prefix.path, signal)) !== null))
 						) {
+							// `file:10:5` is usually a line and column; a reversed range would only fail again.
+							const range =
+								Number(localTarget.sel) > Number(prefix.sel)
+									? ` or :${prefix.sel}-${localTarget.sel} for a range`
+									: "";
 							throw new ToolError(
-								`Invalid line selector ':${prefix.sel}:${localTarget.sel}'. Use :${prefix.sel} for a single line or :${prefix.sel}-${localTarget.sel} for a range.`,
+								`Invalid line selector ':${prefix.sel}:${localTarget.sel}'. Use :${prefix.sel} for a single line${range}.`,
 							);
 						}
 					}
