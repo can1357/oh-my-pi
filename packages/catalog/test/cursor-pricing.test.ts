@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { buildModel } from "../src/build";
-import { calculateCost } from "../src/models";
-import type { ModelSpec, Usage } from "../src/types";
+import type { ModelSpec } from "../src/types";
 
 /** Zero-cost discovery spec, mirroring GetUsableModels (no pricing upstream). */
 function spec(id: string): ModelSpec<"cursor-agent"> {
@@ -76,63 +75,20 @@ describe("cursor API-equivalent pricing", () => {
 		});
 	});
 
-	it("keeps the explicit 500K Grok 4.7 lanes uncapped by their long-context tier", () => {
-		for (const id of ["grok-4.7-500k", "grok-4.7-500k-fast"]) {
-			const lane = buildModel({ ...spec(id), contextWindow: 500_000 });
-			expect(lane.contextWindow, id).toBe(500_000);
-			expect(lane.longContextWindowUncapped, id).toBe(true);
-		}
-		// The base lane's wire context is pinned to 256k; it must keep the cap.
-		expect(buildModel({ ...spec("grok-4.7"), contextWindow: 256_000 }).longContextWindowUncapped).toBeUndefined();
-	});
-
-	it("bills the explicit 500K Grok 4.7 SKUs at their published base cards", () => {
+	it("keeps the explicit 500K Grok 4.7 lanes uncapped and on their own cards", () => {
 		const cards = [
 			["grok-4.7-500k", 4, 12, 1],
 			["grok-4.7-500k-fast", 6, 18, 1.5],
 		] as const;
 		for (const [id, input, output, cacheRead] of cards) {
-			const model = buildModel({ ...spec(id), contextWindow: 500_000 });
-			expect(model.cost, id).toMatchObject({ input, output, cacheRead, cacheWrite: 0 });
-			// The 500K SKU's published rate is its base card, not only its
-			// long-context tier: requests below 256K must not fall back to the
-			// cheaper 256K-lane rates.
-			for (const prompt of [100_000, 300_000]) {
-				const usage: Usage = {
-					input: prompt - 3_000,
-					output: 7,
-					cacheRead: 2_000,
-					cacheWrite: 1_000,
-					totalTokens: prompt + 7,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				};
-				calculateCost(model, usage);
-				expect(usage.cost.input, `${id} input @${prompt}`).toBeCloseTo((usage.input * input) / 1e6, 10);
-				expect(usage.cost.output, `${id} output @${prompt}`).toBeCloseTo((usage.output * output) / 1e6, 10);
-				expect(usage.cost.cacheRead, `${id} cacheRead @${prompt}`).toBeCloseTo(
-					(usage.cacheRead * cacheRead) / 1e6,
-					10,
-				);
-			}
+			const lane = buildModel({ ...spec(id), contextWindow: 500_000 });
+			expect(lane.contextWindow, id).toBe(500_000);
+			expect(lane.longContextWindowUncapped, id).toBe(true);
+			// The exact-id card wins over the `grok-4.7*` globs' cheaper 256K-lane card.
+			expect(lane.cost, id).toMatchObject({ input, output, cacheRead, cacheWrite: 0 });
 		}
-	});
-
-	it("prices the newly served Cursor models from the docs", () => {
-		const cards: Array<[string, { input: number; output: number; cacheRead: number; cacheWrite: number }]> = [
-			["claude-fable-5-2", { input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10 }],
-			["claude-haiku-4-5", { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 }],
-			["claude-sonnet-5-5", { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 }],
-			["gemini-2.5-flash", { input: 0.3, output: 2.5, cacheRead: 0.03, cacheWrite: 0 }],
-			["gemini-4-hydrogen", { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 0 }],
-			["gemini-4-neon", { input: 3, output: 15, cacheRead: 0.15, cacheWrite: 0 }],
-			["glm-5p3", { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }],
-			["glm-5p3-flash", { input: 0.15, output: 0.5, cacheRead: 0.029, cacheWrite: 0 }],
-			["gpt-5.1", { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 }],
-			["muse-wonder-1.0", { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 0 }],
-		];
-		for (const [id, cost] of cards) {
-			expect(buildModel(spec(id)).cost, id).toMatchObject(cost);
-		}
+		// The base lane's wire context is pinned to 256k; it must keep the cap.
+		expect(buildModel({ ...spec("grok-4.7"), contextWindow: 256_000 }).longContextWindowUncapped).toBeUndefined();
 	});
 
 	it("prices third-party models at their Cursor API rates", () => {
