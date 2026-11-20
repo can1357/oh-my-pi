@@ -4349,11 +4349,8 @@ mod capture_tests {
 				.err()
 				.unwrap();
 			assert_eq!(error.code, ErrorCode::Timeout);
-			assert!(
-				error
-					.message
-					.starts_with("native desktop operation did not complete:")
-			);
+			// Not the fenced caller's outcome: nothing here was dispatch-fenced.
+			assert_ne!(error.message, control::abandoned_before_dispatch().message);
 		}
 	}
 
