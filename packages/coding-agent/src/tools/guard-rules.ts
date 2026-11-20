@@ -1878,6 +1878,7 @@ const NEXT_WORD_OPTIONS: Record<string, { long: readonly string[]; short: string
 	checkout: { long: ["--orphan", "--conflict", "--pathspec-from-file"], short: "bB" },
 	switch: { long: ["--create", "--force-create", "--orphan", "--conflict"], short: "cC" },
 	restore: { long: ["--source", "--conflict", "--pathspec-from-file"], short: "s" },
+	clean: { long: ["--exclude"], short: "e" },
 };
 /**
  * Short options of the discarding git subcommands that take a value: the rest of their bundle,
@@ -1886,24 +1887,28 @@ const NEXT_WORD_OPTIONS: Record<string, { long: readonly string[]; short: string
 const SHORT_VALUE_LETTERS: Record<string, string> = { checkout: "bBt", switch: "cCt", restore: "s", clean: "e" };
 
 /**
- * The operands of a git `sub`command (`checkout`, `switch`, `restore`, `reset`), without its
- * options and their values: `named` before a `--`, `paths` after it, and the tree-ish `git restore`
- * names with `--source` or `-s`.
+ * The operands of a git `sub`command (`checkout`, `switch`, `restore`, `reset`, `clean`), without
+ * its options and their values: `named` before a `--`, `paths` after it, the tree-ish `git restore`
+ * names with `--source` or `-s`, and whether an option asks for the usage (`-h`, `--help`,
+ * `--help-all`), which a pathspec after `--` or an option's value (`git checkout -- --help`,
+ * `git clean -e --help`) does not.
  */
 function gitOperands(
 	sub: string,
 	rest: readonly string[],
-): { named: string[]; paths: string[] | undefined; source: string | undefined } {
+): { named: string[]; paths: string[] | undefined; source: string | undefined; help: boolean } {
 	const options = Object.hasOwn(NEXT_WORD_OPTIONS, sub) ? NEXT_WORD_OPTIONS[sub] : { long: [], short: "" };
 	const stuck = Object.hasOwn(SHORT_VALUE_LETTERS, sub) ? SHORT_VALUE_LETTERS[sub] : "";
 	const restore = sub === "restore";
 	const named: string[] = [];
 	let source: string | undefined;
+	let help = false;
 	for (let i = 0; i < rest.length; i++) {
 		const arg = rest[i];
-		if (arg === "--") return { named, paths: rest.slice(i + 1), source };
+		if (arg === "--") return { named, paths: rest.slice(i + 1), source, help };
 		if (arg.startsWith("--")) {
 			const eq = arg.indexOf("=");
+			help ||= arg === "--help" || arg === "--help-all";
 			// `--force` is an option of its own, not short for `git switch --force-create`.
 			const next = arg !== "--force" && options.long.some(name => isLongOption(arg, name));
 			const value = eq > 0 ? arg.slice(eq + 1) : next ? rest[++i] : undefined;
@@ -1911,6 +1916,7 @@ function gitOperands(
 		} else if (arg.startsWith("-") && arg !== "-") {
 			for (let k = 1; k < arg.length; k++) {
 				const letter = arg[k];
+				help ||= letter === "h";
 				if (!stuck.includes(letter)) continue;
 				const value =
 					k + 1 < arg.length ? arg.slice(k + 1) : options.short.includes(letter) ? rest[++i] : undefined;
@@ -1921,7 +1927,7 @@ function gitOperands(
 			named.push(arg);
 		}
 	}
-	return { named, paths: undefined, source };
+	return { named, paths: undefined, source, help };
 }
 
 /** The short option letters `rest` gives a git subcommand, without the values stuck to them. */
@@ -1952,13 +1958,13 @@ function discardProbe(
 ): { check: VcsDiscardCheck; what: string } | undefined {
 	const has = (name: string) => rest.some(arg => arg.startsWith("--") && isLongOption(arg, name));
 	const short = shortOptionLetters(sub, rest);
+	const { named, paths, source, help } = gitOperands(sub, rest);
 	// `-h` and `--help` print the usage and run nothing.
-	if (short.includes("h") || rest.some(arg => arg === "--help" || arg === "--help-all")) return undefined;
+	if (help) return undefined;
 	const tracked = (check: VcsDiscardCheck) => ({
 		check,
 		what: `\`git ${sub}\` would discard uncommitted changes; commit or otherwise save them first`,
 	});
-	const { named, paths, source } = gitOperands(sub, rest);
 	// `--merge` reverts only staged changes (refusing while a path has both, or an untracked file is
 	// in the way); `--hard` loses every change, and to another commit, untracked files it tracks.
 	if (sub === "reset" && has("--hard")) return tracked({ source: named[0] });

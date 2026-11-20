@@ -1551,6 +1551,32 @@ describe("guard rule review regressions", () => {
 		expect(ruleOf(bashApproval(cwd, "git --exec-path=/usr/lib/git-core reset --hard"))).toBe("discard_changes");
 	});
 
+	it("takes `-h` and `--help` for the usage only where an option goes, not as a pathspec or a value", async () => {
+		await dirtyRepo(cwd);
+		// A tracked file named `--help`, so that a pathspec naming it matches, and an untracked one
+		// named `--help-all`, which `git clean` deletes.
+		fs.writeFileSync(path.join(cwd, "--help"), "x\n");
+		await $`git add -- --help && git -c user.email=t@example.com -c user.name=t commit -qm help`.cwd(cwd).quiet();
+		fs.writeFileSync(path.join(cwd, "--help-all"), "x\n");
+		for (const command of [
+			"git checkout -- . --help",
+			"git restore -- . --help",
+			"git clean -f -- --help-all",
+			"git clean -f -e --help",
+			"git clean -f --exclude --help",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "discard_changes" });
+		}
+		for (const command of [
+			"git checkout --help -- --help",
+			"git checkout -h .",
+			"git clean -fh",
+			"git clean --help-all -f",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: undefined });
+		}
+	});
+
 	it("passes a `git clean` without `-f` or `-i`, which git refuses by default", async () => {
 		await dirtyRepo(cwd);
 		fs.writeFileSync(path.join(cwd, "scratch.txt"), "x\n");
