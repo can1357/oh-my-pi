@@ -522,6 +522,7 @@ function detectOpenAICompat(
 		supportsReasoningEffort: !isGrok && !d.isXiaomiMimo && (!(d.isZai || d.isZhipu) || supportsZaiReasoningEffort),
 		trustExplicitThinkingOnly: undefined,
 		supportsReasoningParams: true,
+		reasoningOpaqueReplay: false,
 		supportsSamplingParams: true,
 		supportsPenaltyAndStopParams: !(isGrok && reasoningCapable),
 		reasoningEffortMap: {},

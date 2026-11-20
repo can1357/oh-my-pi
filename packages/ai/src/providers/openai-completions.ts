@@ -1561,7 +1561,7 @@ const streamOpenAICompletionsOnce = (
 					// multiple aliases for the same reasoning text.
 					const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];
 					const deltaRecord = choice.delta as Record<string, unknown>;
-					if (model.provider === "github-copilot") {
+					if (model.compat.reasoningOpaqueReplay) {
 						const opaque = deltaRecord.reasoning_opaque;
 						// Interleaved reasoning can send a new state at each tool call, with
 						// or without its text. Empty values never clear the latest state.
@@ -2541,16 +2541,17 @@ export function completionsDropsOwnThinking(
 }
 
 /**
- * Copilot replays the latest opaque state with the whole turn's summary, but only
+ * Replay the latest opaque state with the whole turn's summary, but only
  * to the exact model that issued it. Counts on pre-transform history can skip an
  * untrusted trailing block as `transformMessages` does.
  */
-export function getCopilotReasoningReplay(
+export function getReasoningOpaqueReplay(
 	turn: AssistantMessage,
 	model: Pick<Model, "api" | "provider" | "id"> | undefined,
+	enabled: boolean,
 	untrustedIndex = -1,
 ): { opaque: string; text: string } | undefined {
-	if (model?.api !== "openai-completions" || model.provider !== "github-copilot" || !isSameModelTurn(turn, model)) {
+	if (!enabled || model?.api !== "openai-completions" || !isSameModelTurn(turn, model)) {
 		return undefined;
 	}
 	let opaque: string | undefined;
@@ -2955,16 +2956,16 @@ export function convertMessages(
 			// it), the encrypted entries kept on unchanged tool calls still replay.
 			// A request that drops the model's own thinking also drops its unsigned text.
 			const receivedReasoningDetails: Record<string, unknown>[] = [];
-			const copilotReasoning = getCopilotReasoningReplay(msg, model);
+			const opaqueReplay = getReasoningOpaqueReplay(msg, model, model.compat.reasoningOpaqueReplay);
 			for (const block of thinkingBlocks) {
 				const stored = parseReasoningDetailsSignature(block.thinkingSignature);
 				if (stored?.reasoningDetails) {
 					for (const detail of stored.reasoningDetails) receivedReasoningDetails.push(detail);
 				}
 			}
-			if (copilotReasoning) {
-				assistantMsg.reasoning_opaque = copilotReasoning.opaque;
-				if (copilotReasoning.text.length > 0) assistantMsg.reasoning_text = copilotReasoning.text;
+			if (opaqueReplay) {
+				assistantMsg.reasoning_opaque = opaqueReplay.opaque;
+				if (opaqueReplay.text.length > 0) assistantMsg.reasoning_text = opaqueReplay.text;
 				hasReasoningField = true;
 			}
 			const reasoningDetails =

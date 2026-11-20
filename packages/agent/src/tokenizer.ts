@@ -4,7 +4,7 @@ import { isFactoryDroidGeminiWire, keepsFactoryGeminiReasoning } from "@oh-my-pi
 import { ollamaChatDropsOwnThinking } from "@oh-my-pi/pi-ai/providers/ollama";
 import {
 	completionsDropsOwnThinking,
-	getCopilotReasoningReplay,
+	getReasoningOpaqueReplay,
 	isLiteLLMThinkingSignature,
 } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import {
@@ -119,6 +119,16 @@ function rebuiltThinkingTurns(model: TokenizerModel | null | undefined): Rebuilt
 function reasoningReplayReader(model: TokenizerModel | null | undefined): ModelIdentity | undefined {
 	// Filtering targets strip native reasoning items before the request is encoded.
 	return filtersReasoningHistory(model) ? undefined : modelIdentity(model);
+}
+
+function replaysReasoningOpaque(model: TokenizerModel | null | undefined): boolean {
+	const compat = model?.compat;
+	return (
+		model?.api === "openai-completions" &&
+		compat !== undefined &&
+		"reasoningOpaqueReplay" in compat &&
+		compat.reasoningOpaqueReplay === true
+	);
 }
 
 /** Identity of the reader whose replayed reasoning a {@link Tokenizer} counts; equal keys count it alike. */
@@ -282,6 +292,7 @@ export class Tokenizer {
 	readonly #rebuiltThinkingTurns: RebuiltThinkingTurns | null;
 	readonly #dropsOllamaThinking: boolean;
 	readonly #dropsCompletionsThinking: boolean;
+	readonly #replaysReasoningOpaque: boolean;
 	/** Claude's own API and prefix-bound hosts keep another model's signature from their deployment. */
 	readonly #readsDeploymentSignatures: boolean;
 	/** Factory's Gemini generate wire, whose replay pass keeps only Google-origin reasoning. */
@@ -326,6 +337,7 @@ export class Tokenizer {
 		this.#rebuiltThinkingTurns = rebuiltThinkingTurns(model);
 		this.#dropsOllamaThinking = ollamaChatDropsOwnThinking(model);
 		this.#dropsCompletionsThinking = completionsDropsOwnThinking(model);
+		this.#replaysReasoningOpaque = replaysReasoningOpaque(model);
 		const compat = model?.compat;
 		this.#readsDeploymentSignatures =
 			model?.api === "anthropic-messages" &&
@@ -538,11 +550,16 @@ export class Tokenizer {
 					message.stopReason !== "toolUse" &&
 					content.some(block => block.type === "toolCall");
 				const untrustedIndex = invalidStop ? content.length - 1 : -1;
-				const copilotReasoning =
+				const opaqueReplay =
 					abandonedToolUse || shouldDropTruncatedThinkingOnlyAssistant(message)
 						? undefined
-						: getCopilotReasoningReplay(message, this.#reasoningReader, untrustedIndex);
-				if (copilotReasoning?.text) fragments.push(copilotReasoning.text);
+						: getReasoningOpaqueReplay(
+								message,
+								this.#reasoningReader,
+								this.#replaysReasoningOpaque,
+								untrustedIndex,
+							);
+				if (opaqueReplay?.text) fragments.push(opaqueReplay.text);
 				// A filtering Responses reader replays no reasoning item and its encoder
 				// drops the turn's own thinking blocks, so usually neither their text nor
 				// their signature reaches the wire (the reconstruction below is the one
@@ -579,15 +596,15 @@ export class Tokenizer {
 							continue;
 						}
 						if (this.#dropsOllamaThinking && ownOllamaTurn) continue;
-						// Copilot's summary is sent as one field, including later source-marked
+						// The summary is sent as one field, including later source-marked
 						// blocks. Count it once and leave out the opaque metadata.
-						const trustedCopilotBlock = copilotReasoning !== undefined && index !== untrustedIndex;
-						const copilotSignature = trustedCopilotBlock
+						const trustedOpaqueBlock = opaqueReplay !== undefined && index !== untrustedIndex;
+						const opaqueSignature = trustedOpaqueBlock
 							? parseReasoningDetailsSignature(block.thinkingSignature)
 							: undefined;
 						if (
-							trustedCopilotBlock &&
-							(block.thinkingSignature === "reasoning_text" || copilotSignature?.field === "reasoning_text")
+							trustedOpaqueBlock &&
+							(block.thinkingSignature === "reasoning_text" || opaqueSignature?.field === "reasoning_text")
 						) {
 							continue;
 						}
@@ -615,7 +632,7 @@ export class Tokenizer {
 						// (its local byte size diverges from provider billing).
 						if (
 							block.thinkingSignature &&
-							!copilotSignature?.reasoningOpaque &&
+							!opaqueSignature?.reasoningOpaque &&
 							!excludeEncryptedReasoning &&
 							signaturesPriced &&
 							typeof replayedReasoning !== "number" &&
@@ -625,7 +642,7 @@ export class Tokenizer {
 						}
 						if (
 							block.thinkingSignature &&
-							!copilotSignature?.reasoningOpaque &&
+							!opaqueSignature?.reasoningOpaque &&
 							!abandonedToolUse &&
 							index !== untrustedIndex
 						) {
@@ -746,6 +763,7 @@ export class Tokenizer {
 			resolveThinkingReplayTokens(model ?? {}) === this.thinkingReplayTokens &&
 			ollamaChatDropsOwnThinking(model) === this.#dropsOllamaThinking &&
 			completionsDropsOwnThinking(model) === this.#dropsCompletionsThinking &&
+			replaysReasoningOpaque(model) === this.#replaysReasoningOpaque &&
 			(options?.nativeHistoryReplay ?? true) === this.nativeHistoryReplay
 		);
 	}

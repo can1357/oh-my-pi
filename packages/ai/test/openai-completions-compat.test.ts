@@ -205,6 +205,7 @@ describe("openai-completions compatibility", () => {
 			maxTokensField: "max_completion_tokens",
 			requiresToolResultName: false,
 			requiresAssistantAfterToolResult: false,
+			foldUserAfterToolResult: false,
 			requiresThinkingAsText: false,
 			requiresMistralToolIds: false,
 			thinkingFormat: "openai",
@@ -226,6 +227,7 @@ describe("openai-completions compatibility", () => {
 			supportsStrictMode: true,
 			toolStrictMode: "none",
 			supportsReasoningParams: true,
+			reasoningOpaqueReplay: false,
 			supportsSamplingParams: true,
 			supportsPenaltyAndStopParams: true,
 			alwaysSendMaxTokens: false,
@@ -1300,10 +1302,9 @@ describe("openai-completions compatibility", () => {
 			getPayloadMessages(await captureOpenAICompletionsPayload(target, history)).find(
 				message => message.role === "assistant",
 			);
-		const own = await replay(model);
-		expect(own?.reasoning_opaque).toBe("latest-state");
-		expect(own?.reasoning_text).toBe(replayText);
-		expect(own?.thinking_blocks).toBeUndefined();
+		expect(JSON.stringify(await replay(model))).toBe(
+			`{"role":"assistant","content":"","tool_calls":[{"id":"call_first","type":"function","function":{"name":"read","arguments":"{}"}},{"id":"call_second","type":"function","function":{"name":"read","arguments":"{}"}}],"reasoning_opaque":"latest-state"${replayText === undefined ? "" : `,"reasoning_text":${JSON.stringify(replayText)}`}}`,
+		);
 		for (const target of [
 			buildModel({ ...copilotGeminiSpec, id: "gemini-4-hydrogen" }),
 			buildModel({ ...copilotGeminiSpec, provider: "openai", baseUrl: "https://api.openai.com/v1" }),
@@ -1313,6 +1314,71 @@ describe("openai-completions compatibility", () => {
 			expect(foreign?.reasoning_opaque).toBeUndefined();
 			expect(foreign?.reasoning_text).toBeUndefined();
 		}
+	});
+
+	it.each([
+		{ label: "opaque", provider: "github-copilot", envelope: { reasoningOpaque: "stale-state" } },
+		{
+			label: "details",
+			provider: "openrouter",
+			envelope: { reasoningDetails: [{ type: "reasoning.encrypted", data: "stale-state" }] },
+		},
+	])("drops turn-scoped reasoning $label with a malformed call", async ({ provider, envelope }) => {
+		const model = buildModel({
+			...copilotGeminiSpec,
+			provider,
+			baseUrl: provider === "openrouter" ? "https://openrouter.ai/api/v1" : copilotGeminiSpec.baseUrl,
+		});
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now(),
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			content: [
+				{
+					type: "thinking",
+					thinking: "Check the file.",
+					thinkingSignature: JSON.stringify({ ...envelope, field: "reasoning_text" }),
+				},
+				{ type: "toolCall", id: "call_bad", name: "", arguments: {} },
+				{ type: "toolCall", id: "call_good", name: "read", arguments: {} },
+			],
+		};
+		const history: Context = {
+			messages: [
+				...baseContext().messages,
+				assistant,
+				...["call_bad", "call_good"].map((toolCallId): ToolResultMessage => ({
+					role: "toolResult",
+					toolCallId,
+					toolName: toolCallId === "call_good" ? "read" : "",
+					content: [{ type: "text", text: toolCallId }],
+					isError: toolCallId === "call_bad",
+					timestamp: Date.now(),
+				})),
+			],
+		};
+		const messages = getPayloadMessages(await captureOpenAICompletionsPayload(model, history));
+		const replay = messages.find(message => message.role === "assistant");
+		expect(replay?.tool_calls).toEqual([
+			{ type: "function", id: "call_good", function: { name: "read", arguments: "{}" } },
+		]);
+		expect(messages.filter(message => message.role === "tool").map(message => message.tool_call_id)).toEqual([
+			"call_good",
+		]);
+		expect(replay?.reasoning_opaque).toBeUndefined();
+		expect(replay?.reasoning_details).toBeUndefined();
+		if (provider === "github-copilot") expect(replay?.reasoning_text).toBeUndefined();
 	});
 
 	it.each([
