@@ -3578,7 +3578,7 @@ describe("ExtensionRunner", () => {
 			expect(events).toEqual([{ path: "src/secret.ts", paths: ["src/secret.ts"] }]);
 		});
 
-		it("leaves path unset and reports all targets for multi-file hashline edits", async () => {
+		it.each(["", " \t"])("reports all multi-file hashline edit targets with header suffix %j", async suffix => {
 			const eventsPath = path.join(tempDir.path(), "tool-call-multi-path-events.jsonl");
 			const extCode = `
 				import * as fs from "node:fs";
@@ -3610,7 +3610,7 @@ describe("ExtensionRunner", () => {
 
 			await expect(
 				wrapped.execute("tool-call-id", {
-					input: "[plans/switch-case-array-syntax.md#ABC1]\nPUT 27.=27:\n+new content\n[packages/coding-agent/src/main.ts#DEF2]\nPUT 1.=1:\n+changed",
+					input: `[plans/switch-case-array-syntax.md#ABC1]${suffix}\nPUT 27.=27:\n+new content\n[packages/coding-agent/src/main.ts#DEF2]\nPUT 1.=1:\n+changed`,
 				}),
 			).rejects.toThrow("Blocked: undefined");
 

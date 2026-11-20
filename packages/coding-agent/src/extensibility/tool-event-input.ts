@@ -47,7 +47,7 @@ function extractHashlinePaths(input: string): string[] {
 	const paths: string[] = [];
 	const stripped = input.startsWith("\uFEFF") ? input.slice(1) : input;
 	for (const rawLine of stripped.split("\n")) {
-		const line = rawLine.replace(/\r$/, "");
+		const line = rawLine.trimEnd();
 		let body: string;
 		if (line.startsWith(HL_FILE_PREFIX) && line.endsWith(HL_FILE_SUFFIX)) {
 			body = line.slice(HL_FILE_PREFIX.length, line.length - HL_FILE_SUFFIX.length);
