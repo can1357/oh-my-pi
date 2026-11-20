@@ -533,6 +533,19 @@ describe("tools.guardRules", () => {
 		expect(new GrepTool(session).approval({ pattern: "token", path: "~/.config/gh" })).toBe("read");
 	});
 
+	it("adds no credential lookup to a read while off", () => {
+		const session = createSession(temp.path(), { "tools.guardRules": false });
+		const read = new ReadTool(session);
+		const homedir = spyOn(os, "homedir");
+		try {
+			expect(read.approval({ path: "README.md" })).toBe("read");
+			expect(read.approval({ path: "~/.ssh/id_rsa" })).toBe("read");
+			expect(homedir).not.toHaveBeenCalled();
+		} finally {
+			homedir.mockRestore();
+		}
+	});
+
 	it("names the rule a compound segment breaks", () => {
 		const tool = new BashTool(createSession(temp.path(), { "bash.allowCompoundCommands": true }));
 		const rows = tool.formatApprovalDetails({ command: "cat ~/.ssh/id_rsa && echo done" });

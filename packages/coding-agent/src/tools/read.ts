@@ -1258,17 +1258,21 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly approval = (args: unknown): ToolApprovalDecision => {
 		let readPath = "";
 		if (args && typeof args === "object" && "path" in args) readPath = String(args.path ?? "");
+		const urlTier = InternalUrlRouter.instance().readTier(readPath);
+		const filePath = splitImageQuestionTarget(readPath).path;
+		const tier =
+			urlTier !== "read"
+				? urlTier
+				: splitPathAndSel(filePath).sel === undefined && splitPdfImageReadPath(filePath)
+					? "exec"
+					: "read";
+		if (!cfgToolsGuardRules.get(this.session.settings)) return tier;
 		// Execution reads a `;`, `,` or whitespace list part by part, as grep searches its roots, so the
 		// guard rules check every part, not only the whole string. Each is checked trimmed and unquoted:
 		// a list part is, and a missing path with trailing blanks (`.netrc `) is found by suffix match.
-		const targets = cfgToolsGuardRules.get(this.session.settings)
-			? approvalRootCandidates(readPath).map(part => splitImageQuestionTarget(normalizePathLikeInput(part)).path)
-			: [];
-		const urlTier = InternalUrlRouter.instance().readTier(readPath);
-		if (urlTier !== "read") return fileToolApproval(urlTier, targets, this.session.cwd);
-		readPath = splitImageQuestionTarget(readPath).path;
-		const target = splitPathAndSel(readPath);
-		const tier = target.sel === undefined && splitPdfImageReadPath(readPath) ? "exec" : "read";
+		const targets = approvalRootCandidates(readPath).map(
+			part => splitImageQuestionTarget(normalizePathLikeInput(part)).path,
+		);
 		return fileToolApproval(tier, targets, this.session.cwd);
 	};
 	/**
