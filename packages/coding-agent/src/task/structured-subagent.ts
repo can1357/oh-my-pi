@@ -628,6 +628,7 @@ export async function resolveEffectiveSubagentPolicy(
 		// are loaded.
 		const decidable =
 			!modelRegistry.isBackgroundRefreshPending() &&
+			!modelRegistry.isRuntimeDiscoveryPending() &&
 			modelScope.resolveModelOverride(modelOverride, { getAvailable: () => available }, settings).model !==
 				undefined &&
 			enabledPatterns.every(

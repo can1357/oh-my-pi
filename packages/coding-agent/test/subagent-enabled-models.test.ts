@@ -14,7 +14,7 @@ import { cfgRetryFallbackChains } from "../src/session/settings";
 import { TurnRecovery, type TurnRecoveryHost } from "../src/session/turn-recovery";
 import * as discovery from "../src/task/discovery";
 import { runSubprocess } from "../src/task/executor";
-import { cfgTaskAgentModelOverrides } from "../src/task/settings";
+import { cfgTaskAgentModelOverrides, cfgTaskAgentPrewalk } from "../src/task/settings";
 import { resolveEffectiveSubagentPolicy } from "../src/task/structured-subagent";
 import type { ToolSession } from "../src/tools";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -127,26 +127,57 @@ test.each([
 	},
 );
 
-test("defers preflight while discovery may add a model matching both the selection and the scope", async () => {
-	registerModels("scope-disc", ["preferred-old", "target"]);
-	cfgEnabledModels.override(settings, ["scope-disc/preferred-*"]);
-	vi.spyOn(registry, "isBackgroundRefreshPending").mockReturnValue(true);
-	const policy = await resolveEffectiveSubagentPolicy({
-		session: session(),
-		invocationKind: "task",
-		assignment: "Inspect the target.",
-		agent: "worker",
-		model: "target",
+test.each([
+	["background refresh", "isBackgroundRefreshPending"],
+	["runtime provider discovery", "isRuntimeDiscoveryPending"],
+] as const)(
+	"defers preflight while %s may add a model matching both the selection and the scope",
+	async (_label, pending) => {
+		registerModels("scope-disc", ["preferred-old", "target"]);
+		cfgEnabledModels.override(settings, ["scope-disc/preferred-*"]);
+		vi.spyOn(registry, pending).mockReturnValue(true);
+		const policy = await resolveEffectiveSubagentPolicy({
+			session: session(),
+			invocationKind: "task",
+			assignment: "Inspect the target.",
+			agent: "worker",
+			model: "target",
+		});
+		registry.unregisterProvider("scope-disc");
+		registerModels("scope-disc", ["preferred-old", "target", "preferred-target"]);
+		const result = await resolveModelOverrideWithAuthFallback(
+			normalizeModelPatternList(policy.modelOverride),
+			policy.parentActiveModelPattern,
+			registry,
+			settings,
+		);
+		expect(result.model?.id).toBe("preferred-target");
+	},
+);
+
+test.each([
+	["inside", ["scope-test/allowed", "scope-test/forbidden"], "forbidden"],
+	["outside", ["scope-test/allowed"], undefined],
+] as const)("arms a subagent prewalk target only when it is %s enabledModels", async (_label, scope, expected) => {
+	let prewalkTarget: string | undefined;
+	vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+		prewalkTarget = options?.prewalk?.target.id;
+		return { session: yieldingChild(), extensionsResult: {}, setToolUIContext: () => {} } as never;
 	});
-	registry.unregisterProvider("scope-disc");
-	registerModels("scope-disc", ["preferred-old", "target", "preferred-target"]);
-	const result = await resolveModelOverrideWithAuthFallback(
-		normalizeModelPatternList(policy.modelOverride),
-		policy.parentActiveModelPattern,
-		registry,
+	cfgEnabledModels.override(settings, [...scope]);
+	cfgTaskAgentPrewalk.override(settings, { worker: "scope-test/forbidden" });
+	await runSubprocess({
+		cwd: tempDir,
+		agent: { name: "worker", description: "Test worker", systemPrompt: "Inspect the target.", source: "bundled" },
+		task: "Inspect the target.",
+		index: 0,
+		id: "scope-prewalk",
+		modelOverride: ["scope-test/allowed"],
 		settings,
-	);
-	expect(result.model?.id).toBe("preferred-target");
+		modelRegistry: registry,
+		enableLsp: false,
+	});
+	expect(prewalkTarget).toBe(expected);
 });
 
 function yieldingChild(): AgentSession {

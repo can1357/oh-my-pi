@@ -367,8 +367,8 @@ function resolveSubagentInheritedRetryFallbackChain(
 /**
  * Membership test for the active `enabledModels` scope, or `undefined` when no
  * scope is configured. Used to leave already-resolved out-of-scope candidates
- * out of the child's retry chain; the child's retry recovery checks the scope
- * again before every switch.
+ * out of the child's retry chain and to skip an out-of-scope prewalk target;
+ * the child's retry recovery checks the scope again before every switch.
  */
 function resolveSubagentEnabledModelScope(
 	settings: Settings,
@@ -5145,6 +5145,13 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						agent: agent.name,
 						pattern: prewalkPattern,
 						warning: resolvedPrewalk.warning,
+					});
+				} else if (resolveSubagentEnabledModelScope(settings, modelRegistry)?.(target) === false) {
+					// The hand-off would switch the child onto a model the enabledModels scope excludes.
+					logger.warn("Subagent prewalk target is outside enabledModels; skipping prewalk", {
+						agent: agent.name,
+						pattern: prewalkPattern,
+						target: `${target.provider}/${target.id}`,
 					});
 				} else if (prewalkWouldBeNoop(model, effectiveThinkingLevel, target, resolvedPrewalk.thinkingLevel)) {
 					// Same model AND same effective thinking level: switching would only
