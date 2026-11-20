@@ -5,7 +5,8 @@ import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-multipl
 import { wrapTmuxPassthrough } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import type { ExtensionContext, ExtensionFactory } from "../extensibility/extensions/types";
-import { isSilentAbort, isUserInterruptAbort, SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
+import { lastAssistantStop } from "../session/assistant-stop";
+import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 
 const WARP_CLI_AGENT_PROTOCOL_VERSION = 1;
 const WARP_CLI_AGENT_SENTINEL = "warp://cli-agent";
@@ -81,53 +82,6 @@ export function createWarpEventEmitter(options: WarpEventEmitterOptions): WarpEv
 			writeTerminalSequence(ring ? `${wrapped}\x07` : wrapped);
 		},
 	};
-}
-
-type LastAssistantStop = {
-	response: string;
-	event: "stop" | "stop_failure";
-	error_type?: "error" | "aborted";
-};
-
-function lastAssistantStop(messages: readonly AgentMessage[]): LastAssistantStop {
-	for (let index = messages.length - 1; index >= 0; index--) {
-		const message = messages[index];
-		if (message.role !== "assistant") continue;
-
-		const text = message.content
-			.filter(content => content.type === "text")
-			.map(content => content.text)
-			.join("");
-
-		let response = "";
-		if (text.length > 0) {
-			response = text;
-		} else {
-			const errorMessage = message.errorMessage;
-			if (typeof errorMessage === "string" && errorMessage.length > 0 && !isSilentAbort(message)) {
-				if (message.stopReason === "error") {
-					response = errorMessage;
-				} else if (message.stopReason === "aborted" && !isUserInterruptAbort(message)) {
-					response = errorMessage;
-				}
-			}
-		}
-
-		if (message.stopReason === "error") {
-			return { response, event: "stop_failure", error_type: "error" };
-		}
-		if (
-			message.stopReason === "aborted" &&
-			!isSilentAbort(message) &&
-			!isUserInterruptAbort(message) &&
-			typeof message.errorMessage === "string" &&
-			message.errorMessage.length > 0
-		) {
-			return { response, event: "stop_failure", error_type: "aborted" };
-		}
-		return { response, event: "stop" };
-	}
-	return { response: "", event: "stop" };
 }
 
 function truncateEventText(text: string): string {

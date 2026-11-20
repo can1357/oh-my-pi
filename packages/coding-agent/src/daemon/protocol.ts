@@ -23,7 +23,7 @@ export const DAEMON_TCP_ENV = "OMP_DAEMON_TCP";
 export const DAEMON_DIR_ENV = "OMP_DAEMON_DIR";
 /** Set by a re-exec'ing daemon for its successor: path of nothing, presence means "restore from the store". */
 export const DAEMON_RESUME_ENV = "OMP_DAEMON_RESUME";
-/** Fixed dimensions negotiated with every supervised PTY. */
+/** Dimensions of a supervised PTY whose spec names none (`ProcSpec.cols`/`rows`). */
 export const DAEMON_PTY_COLUMNS = 120;
 export const DAEMON_PTY_ROWS = 40;
 /** Readiness and wait regexes match line anchors within accumulated output. */
@@ -114,6 +114,8 @@ export type DaemonOp =
 	| { op: "send"; unit: UnitRef; data?: string; signal?: DaemonSignal }
 	/** Abort this connection's in-flight `wait`/follow-`logs` request. */
 	| { op: "cancel"; requestId: string }
+	/** Resize a PTY unit's terminal. On an `exclusiveAttach` unit only the attached viewer's process may. */
+	| { op: "resize"; unit: UnitRef; cols: number; rows: number }
 	/** Module RPC that needs no byte stream. */
 	| { op: "call"; module: string; method: string; params?: unknown; unit?: UnitRef }
 	/** On success the connection leaves control mode: every later byte is tunnelled to the unit. */
@@ -169,6 +171,7 @@ export interface DaemonResults {
 	subscribe: Record<string, never>;
 	upgrade: { reexec: boolean };
 	shutdown: Record<string, never>;
+	resize: { unit: UnitSnapshot };
 }
 
 export type DaemonResult<O extends DaemonOp["op"]> = DaemonResults[O];
@@ -248,6 +251,8 @@ export interface DaemonClient {
 	): Promise<T>;
 	/** Dial a second connection and turn it into a tunnel to `unit`. */
 	attach(unit: UnitRef, channel?: string, signal?: AbortSignal): Promise<DaemonTunnel>;
+	/** Resize a PTY unit's terminal; rejects for a unit without one. */
+	resize(unit: UnitRef, cols: number, rows: number): Promise<void>;
 	onCompletion(
 		owner: string,
 		sink: (event: DaemonCompletionEvent) => Promise<void> | void,

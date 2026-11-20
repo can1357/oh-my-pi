@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import {
+	BACKGROUND_ARMED_MS,
+	BACKGROUND_GUARD_MS,
+	InputController,
+	LeftBackgroundGesture,
+} from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
 import type { InteractiveModeContext, SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -1162,59 +1167,102 @@ describe("InputController Ctrl+C behavior", () => {
 	});
 });
 
-describe("InputController double-tap ← gesture", () => {
+describe("InputController ← gesture", () => {
 	function setup(focusedAgentId?: string) {
+		vi.useFakeTimers();
 		const { ctx, editor } = createContext();
 		(ctx as { lastLeftTapTime: number }).lastLeftTapTime = 0;
 		(ctx as { focusedAgentId?: string }).focusedAgentId = focusedAgentId;
+		const backgroundSession = vi.fn();
+		(ctx as { backgroundSession: () => void }).backgroundSession = backgroundSession;
 		const controller = new InputController(ctx);
 		controller.setupKeyHandlers();
 		return {
 			ctx,
+			editor,
+			backgroundSession,
 			showAgentHub: ctx.showAgentHub as Spy,
 			unfocusSession: ctx.unfocusSession as Spy,
 			tap: () => editor.onLeftAtStart?.(),
 		};
 	}
 
-	it("opens the Agent Hub on a deliberate double-tap", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("backgrounds the session on a single ← from the main composer, never opening the Agent Hub", () => {
 		const now = vi.spyOn(Date, "now");
-		const { showAgentHub, tap } = setup();
+		const { backgroundSession, showAgentHub, tap } = setup();
 		now.mockReturnValue(1_000);
 		tap();
-		now.mockReturnValue(1_200); // 200ms later — a human double-tap
-		tap();
-		expect(showAgentHub).toHaveBeenCalledTimes(1);
+		vi.advanceTimersByTime(100);
+		expect(backgroundSession).toHaveBeenCalledTimes(1);
+		expect(showAgentHub).not.toHaveBeenCalled();
 	});
 
 	it("ignores a terminal-synthesized burst of ← arrows arriving together", () => {
 		const now = vi.spyOn(Date, "now");
-		const { showAgentHub, tap } = setup();
+		const { backgroundSession, tap } = setup();
 		// A "click to move cursor" burst delivers every arrow in one stdin read,
 		// so all taps share the same millisecond timestamp.
 		now.mockReturnValue(1_000);
 		for (let i = 0; i < 6; i++) tap();
-		expect(showAgentHub).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(100);
+		expect(backgroundSession).not.toHaveBeenCalled();
 	});
 
-	it("ignores a second tap closer than the human-plausible minimum gap", () => {
-		const now = vi.spyOn(Date, "now");
-		const { showAgentHub, tap } = setup();
-		now.mockReturnValue(1_000);
-		tap();
-		now.mockReturnValue(1_010); // 10ms later — too fast to be deliberate
-		tap();
-		expect(showAgentHub).not.toHaveBeenCalled();
+	it("only arms right after the composer was emptied, then backgrounds on the next ←", () => {
+		vi.useFakeTimers();
+		const fire = vi.fn();
+		const hint = vi.fn();
+		const gesture = new LeftBackgroundGesture(fire, hint);
+		gesture.noteComposerEmptied(1_000);
+		gesture.tap(1_200); // inside the guard window
+		vi.advanceTimersByTime(100);
+		expect(fire).not.toHaveBeenCalled();
+		expect(hint).toHaveBeenCalledTimes(1);
+		gesture.tap(1_600);
+		vi.advanceTimersByTime(100);
+		expect(fire).toHaveBeenCalledTimes(1);
+	});
+
+	it("backgrounds on the first ← once the guard window after emptying has passed", () => {
+		vi.useFakeTimers();
+		const fire = vi.fn();
+		const hint = vi.fn();
+		const gesture = new LeftBackgroundGesture(fire, hint);
+		gesture.noteComposerEmptied(1_000);
+		gesture.tap(1_000 + BACKGROUND_GUARD_MS);
+		vi.advanceTimersByTime(100);
+		expect(fire).toHaveBeenCalledTimes(1);
+		expect(hint).not.toHaveBeenCalled();
+	});
+
+	it("lets an armed gesture lapse so a much later ← re-arms instead of firing", () => {
+		vi.useFakeTimers();
+		const fire = vi.fn();
+		const hint = vi.fn();
+		const gesture = new LeftBackgroundGesture(fire, hint);
+		gesture.noteComposerEmptied(1_000);
+		gesture.tap(1_100);
+		gesture.noteComposerEmptied(1_100 + BACKGROUND_ARMED_MS + 10);
+		gesture.tap(1_100 + BACKGROUND_ARMED_MS + 20);
+		vi.advanceTimersByTime(100);
+		expect(fire).not.toHaveBeenCalled();
+		expect(hint).toHaveBeenCalledTimes(2);
 	});
 
 	it("returns a focused subagent view to the main session on a deliberate double-tap", () => {
 		const now = vi.spyOn(Date, "now");
-		const { showAgentHub, unfocusSession, tap } = setup("Agent1");
+		const { backgroundSession, showAgentHub, unfocusSession, tap } = setup("Agent1");
 		now.mockReturnValue(1_000);
 		tap();
 		now.mockReturnValue(1_200);
 		tap();
+		vi.advanceTimersByTime(100);
 		expect(unfocusSession).toHaveBeenCalledTimes(1);
 		expect(showAgentHub).not.toHaveBeenCalled();
+		expect(backgroundSession).not.toHaveBeenCalled();
 	});
 });

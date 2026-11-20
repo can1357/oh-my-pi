@@ -9,7 +9,7 @@ import { execReplace, FileLock, type IpcConnection, IpcServer } from "@oh-my-pi/
 import { isEnoent, isRecord, logger, postmortem, setProcessName } from "@oh-my-pi/pi-utils";
 import { daemonBuildId } from "./build";
 import { isSameProcess, processStartTime } from "./children";
-import type { ModuleClient, ModuleTunnel } from "./module";
+import type { ModuleClient } from "./module";
 import { DAEMON_MODULES } from "./modules";
 import {
 	daemonDbPath,
@@ -33,7 +33,7 @@ import {
 	type DaemonWelcome,
 } from "./protocol";
 import { DaemonStore } from "./store";
-import { type UnitConnection, UnitTable } from "./units";
+import { type UnitConnection, UnitTable, type ViewerTunnel } from "./units";
 
 /** Grace after the last connection closes (and no unit holds the daemon) before it exits. */
 const IDLE_EXIT_GRACE_MS = 3_000;
@@ -46,7 +46,7 @@ const LOCK_HANDOVER_TIMEOUT_MS = 10_000;
 const HANDOVER_MAX_AGE_MS = 60_000;
 
 /** Daemon side of one tunnelled connection. */
-class ConnectionTunnel implements ModuleTunnel {
+class ConnectionTunnel implements ViewerTunnel {
 	readonly client: ModuleClient;
 	readonly #connection: IpcConnection;
 	#pending: Uint8Array[] = [];
@@ -91,6 +91,11 @@ class ConnectionTunnel implements ModuleTunnel {
 	close(): void {
 		this.#connection.end();
 		// The peer may keep its write half open; the unit's close handler must not wait for it.
+		queueMicrotask(() => this.ended());
+	}
+
+	destroy(): void {
+		this.#connection.destroy();
 		queueMicrotask(() => this.ended());
 	}
 }
@@ -364,6 +369,8 @@ class Daemon {
 				return units.wait(request, signal);
 			case "send":
 				return units.send(request);
+			case "resize":
+				return units.resize(state, request);
 			case "cancel": {
 				const controller = state.inFlight.get(request.requestId);
 				if (!controller) return { cancelled: false } satisfies DaemonResults["cancel"];

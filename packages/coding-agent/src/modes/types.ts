@@ -674,6 +674,11 @@ export interface InteractiveModeContext {
 	showHookConfirm(title: string, message: string, dialogOptions?: InteractiveSelectorDialogOptions): Promise<boolean>;
 	showDebugSelector(): Promise<void>;
 	showAgentHub(options?: AgentHubOpenOptions): void;
+	/**
+	 * ← on an empty composer, `/background`, `app.session.background`: detach to the
+	 * Agent View when hosted, otherwise hand this session over to a hosted unit.
+	 */
+	backgroundSession(): void;
 	resetObserverRegistry(): void;
 
 	// Input handling

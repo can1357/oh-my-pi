@@ -45,6 +45,37 @@ export const TERMINAL_MULTIPLEXER_ENV_KEYS: readonly string[] = [
 ];
 
 /**
+ * The multiplexer an attached viewer runs inside, standing in for this process's
+ * session markers (see {@link setViewerTerminalMultiplexer}): `null` for a direct
+ * viewer, `undefined` while no viewer identity was adopted.
+ */
+let viewerMultiplexer: TerminalMultiplexer | null | undefined;
+
+/**
+ * Adopt the multiplexer identity of the terminal now viewing this process (a hosted
+ * session reattached from elsewhere). The viewer's session markers name control
+ * sockets of its own terminal, so they are never copied into the environment;
+ * instead every session check against the process environment answers for this
+ * viewer. Explicit environments passed by callers are unaffected. Unknown ids count
+ * as a direct viewer; `undefined` returns to reading the environment.
+ */
+export function setViewerTerminalMultiplexer(id: string | null | undefined): void {
+	if (id === undefined) {
+		viewerMultiplexer = undefined;
+		return;
+	}
+	viewerMultiplexer = id !== null && Object.hasOwn(MULTIPLEXERS_BY_ID, id) ? (id as TerminalMultiplexer) : null;
+}
+
+/** Whether `multiplexer`'s session is active in `env`, as {@link setViewerTerminalMultiplexer} may override. */
+function isInsideSession(multiplexer: TerminalMultiplexerModule<TerminalMultiplexer>, env: NodeJS.ProcessEnv): boolean {
+	if (viewerMultiplexer !== undefined && (env === Bun.env || env === process.env)) {
+		return multiplexer.id === viewerMultiplexer;
+	}
+	return multiplexer.isInside(env);
+}
+
+/**
  * Whether an explicit session marker identifies the current provider.
  *
  * TERM is intentionally excluded: it is a classification fallback, not proof
@@ -54,7 +85,7 @@ export function hasTerminalMultiplexerSession(
 	multiplexer: TerminalMultiplexer,
 	env: NodeJS.ProcessEnv = Bun.env,
 ): boolean {
-	return MULTIPLEXERS_BY_ID[multiplexer].isInside(env);
+	return isInsideSession(MULTIPLEXERS_BY_ID[multiplexer], env);
 }
 
 /**
@@ -64,7 +95,7 @@ export function hasTerminalMultiplexerSession(
 export function terminalMultiplexerSessions(
 	env: NodeJS.ProcessEnv = Bun.env,
 ): TerminalMultiplexerModule<TerminalMultiplexer>[] {
-	return TERMINAL_MULTIPLEXERS.filter(multiplexer => multiplexer.isInside(env));
+	return TERMINAL_MULTIPLEXERS.filter(multiplexer => isInsideSession(multiplexer, env));
 }
 
 /**
@@ -77,7 +108,7 @@ export function isTerminalBackgroundQueryTrusted(
 	platform: NodeJS.Platform = process.platform,
 ): boolean {
 	return !TERMINAL_MULTIPLEXERS.some(
-		multiplexer => multiplexer.isInside(env) && multiplexer.backgroundQueryBrokenOn?.includes(platform),
+		multiplexer => isInsideSession(multiplexer, env) && multiplexer.backgroundQueryBrokenOn?.includes(platform),
 	);
 }
 
@@ -103,9 +134,9 @@ export function classifyTerminalMultiplexerModule(
 	env: NodeJS.ProcessEnv = Bun.env,
 ): TerminalMultiplexerModule<TerminalMultiplexer> | undefined {
 	return (
-		SESSION_TIER.find(multiplexer => multiplexer.isInside(env)) ??
+		SESSION_TIER.find(multiplexer => isInsideSession(multiplexer, env)) ??
 		terminalMultiplexerForTerm(env) ??
-		OUTER_APP_TIER.find(multiplexer => multiplexer.isInside(env))
+		OUTER_APP_TIER.find(multiplexer => isInsideSession(multiplexer, env))
 	);
 }
 

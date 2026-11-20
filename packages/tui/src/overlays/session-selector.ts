@@ -991,6 +991,12 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		this.#filterSessions("");
 	}
 
+	/** Replace the search query, e.g. with the query a caller opened the picker on. */
+	setSearch(query: string): void {
+		this.#searchInput.setValue(query, { cursor: "end" });
+		this.#filterSessions(query);
+	}
+
 	get selectedSession(): T | undefined {
 		return this.#menu.selectedItem;
 	}
@@ -1536,6 +1542,8 @@ export interface SessionSelectorOptions<T extends SessionSelectorEntry = Session
 	 * sheet over the transcript.
 	 */
 	standalone?: boolean;
+	/** Search query the picker opens with (e.g. `/resume <query>` in `omp agents`). */
+	initialQuery?: string;
 }
 
 /**
@@ -1705,6 +1713,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		this.#contentSlot = new Container();
 		this.#contentSlot.addChild(this.#sessionList);
 		this.addChild(this.#contentSlot);
+		if (options.initialQuery) this.#sessionList.setSearch(options.initialQuery);
 		this.#awaitComplete("folder", { sessions, complete: options.completeSessions });
 		if (options.allSessions) this.#awaitComplete("all", options.allSessions);
 	}

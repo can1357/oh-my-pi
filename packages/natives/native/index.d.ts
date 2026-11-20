@@ -3731,6 +3731,11 @@ export interface PtyArgvStartOptions {
   cols?: number
   /** PTY row count. */
   rows?: number
+  /**
+   * Start the child from an empty environment instead of this process's:
+   * `env` becomes the complete environment.
+   */
+  clearEnv?: boolean
 }
 
 /** Effective terminal dimensions shared by PTY sessions and screen emulators. */

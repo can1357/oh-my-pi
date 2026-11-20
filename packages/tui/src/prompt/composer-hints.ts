@@ -10,11 +10,11 @@
  * Add a hint by appending to {@link COMPOSER_HINTS}, extending
  * {@link ComposerHintId}, and recording the gesture where it is handled.
  */
-import { formatDoubleTap, formatKeyHint, type KeybindingsManager } from "../app-keybindings";
+import { formatKeyHint, type KeybindingsManager } from "../app-keybindings";
 import { theme } from "../theme/theme";
 
 /** Stable hint ids; persisted as usage-counter keys, so never rename one. */
-export type ComposerHintId = "agents" | "effort";
+export type ComposerHintId = "agents" | "effort" | "background" | "background-waiting";
 
 /** Live state that hint conditions read. Built by the host on every render of the empty composer. */
 export interface ComposerHintContext {
@@ -24,6 +24,10 @@ export interface ComposerHintContext {
 	focusedOnAgent: boolean;
 	/** The viewed session already has messages. */
 	conversationStarted: boolean;
+	/** The ← background gesture is being advertised (shortly after startup). */
+	backgroundHintActive: boolean;
+	/** Other background sessions waiting for input. */
+	backgroundWaiting: number;
 	keybindings: KeybindingsManager;
 	/** Times the user has performed the gesture a hint teaches. */
 	uses(id: ComposerHintId): number;
@@ -41,14 +45,34 @@ export interface ComposerHint {
 /** Registered hints, highest priority first. */
 export const COMPOSER_HINTS: readonly ComposerHint[] = [
 	{
-		// Matches the ←← gesture in the input controller, which opens the agent hub
-		// from the main session (in a focused view it hops to the parent instead).
+		// Never retires: it reports live state, not a gesture to learn.
+		id: "background-waiting",
+		learnedAfter: Number.POSITIVE_INFINITY,
+		resolve: ctx => {
+			if (ctx.backgroundWaiting === 0 || ctx.focusedOnAgent) return undefined;
+			return { key: formatKeyHint("left"), label: `${ctx.backgroundWaiting} waiting` };
+		},
+	},
+	{
+		// Matches the single ← gesture in the input controller, which backgrounds the
+		// session into the agent view.
+		id: "background",
+		learnedAfter: 3,
+		resolve: ctx => {
+			if (!ctx.backgroundHintActive || ctx.focusedOnAgent) return undefined;
+			return { key: formatKeyHint("left"), label: "agents" };
+		},
+	},
+	{
+		// The `app.agents.hub` key, which opens the agent hub.
 		id: "agents",
 		learnedAfter: 3,
 		resolve: ctx => {
 			if (ctx.runningAgents === 0 || ctx.focusedOnAgent) return undefined;
+			const key = ctx.keybindings.getKeys("app.agents.hub")[0];
+			if (!key) return undefined;
 			return {
-				key: formatDoubleTap("left"),
+				key: formatKeyHint(key),
 				label: `to see ${ctx.runningAgents} running ${ctx.runningAgents === 1 ? "agent" : "agents"}`,
 			};
 		},

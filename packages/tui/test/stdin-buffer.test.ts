@@ -1125,4 +1125,31 @@ describe("StdinBuffer", () => {
 			expect(emittedSequences).toEqual([]);
 		});
 	});
+
+	describe("Agent view attach marker", () => {
+		const marker = `\x1b_omp-attach;${Buffer.from(JSON.stringify({ term: "xterm-ghostty", cols: 120, rows: 40 })).toString("base64")}\x1b\\`;
+
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it("reassembles an attach APC split at every byte boundary into one sequence", () => {
+			for (let cut = 1; cut < marker.length; cut++) {
+				emittedSequences = [];
+				processInput(marker.slice(0, cut));
+				processInput(`${marker.slice(cut)}a`);
+				expect(emittedSequences).toEqual([marker, "a"]);
+				expect(buffer.getBuffer()).toBe("");
+			}
+		});
+
+		it("holds a lone attach opener as a string head instead of flushing it as keys", () => {
+			vi.useFakeTimers();
+			processInput("\x1b_omp-attach;");
+			vi.advanceTimersByTime(100);
+			expect(emittedSequences).toEqual([]);
+			processInput("eyJjb2xzIjo4MH0=\x1b\\");
+			expect(emittedSequences).toEqual(["\x1b_omp-attach;eyJjb2xzIjo4MH0=\x1b\\"]);
+		});
+	});
 });

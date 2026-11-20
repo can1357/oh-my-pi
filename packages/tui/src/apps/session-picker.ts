@@ -32,6 +32,8 @@ export interface SessionPickerOptions<T extends SessionSelectorEntry = SessionSe
 	allowGlobalScope?: boolean;
 	historySearch?: boolean;
 	pinnedIds?: ReadonlySet<string>;
+	/** Search query the picker opens with. */
+	initialQuery?: string;
 }
 
 /**
@@ -84,6 +86,7 @@ export async function selectSession<T extends SessionSelectorEntry>(
 					scopeLabel: options.scopeLabel,
 					showCwd: options.showCwd,
 					pinnedIds,
+					initialQuery: options.initialQuery,
 				},
 			);
 			selector.setOnRequestRender(() => ui.requestRender());

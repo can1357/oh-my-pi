@@ -488,6 +488,10 @@ class DaemonConnection implements DaemonClient {
 		await this.request({ op: "release", lease });
 	}
 
+	async resize(unit: UnitRef, cols: number, rows: number): Promise<void> {
+		await this.request({ op: "resize", unit, cols, rows });
+	}
+
 	async call<T>(
 		module: string,
 		method: string,

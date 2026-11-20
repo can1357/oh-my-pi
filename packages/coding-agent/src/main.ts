@@ -10,6 +10,8 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
+import { hostedAttachToken, initHostedInstance, takeHandoffContinue } from "./agents-view/host";
+import { startAgentStatusPublisher } from "./agents-view/status";
 import { bindAgentMesh } from "./irc/mesh";
 import {
 	APP_NAME,
@@ -40,8 +42,7 @@ import {
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
-import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { fetchBuild } from "./cli/build-service";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { runAutoUpdate } from "./cli/auto-update";
@@ -131,6 +132,7 @@ import {
 	type SessionInfo,
 } from "./session/session-listing";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
+import { createSessionPicker, type SessionPicker } from "./session/session-picker";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
@@ -212,48 +214,6 @@ type RunRpcMode = (session: AgentSession, options?: RpcModeOptions) => Promise<n
 /** Interactive-only graph boundary; login dialogs and overlays load on first real use. */
 async function loadInteractiveModeConstructor() {
 	return (await import("./modes/interactive-mode")).InteractiveMode;
-}
-
-type SessionPicker = (
-	sessions: SessionInfo[],
-	options?: SessionPickerOptions<SessionInfo>,
-) => Promise<SessionInfo | null>;
-
-/** Resume/import-only graph boundary; ordinary launches never construct a picker. */
-async function loadSessionPicker(init?: { foreign?: boolean }): Promise<SessionPicker> {
-	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds, setSessionPinned }, { FileSessionStorage }] =
-		await Promise.all([
-			import("@oh-my-pi/pi-tui/apps/session-picker"),
-			import("./session/history-storage"),
-			import("./session/session-pins"),
-			import("./session/session-storage"),
-		]);
-	return (sessions, options) => {
-		const storage = new FileSessionStorage();
-		// The picker runs before interactive mode loads the user's keymap, and its pin keys are remappable.
-		KeybindingsManager.create();
-		return selectSession(sessions, options, {
-			loadPinnedIds: loadPinnedSessionIds,
-			loadHistoryMatcher: () => {
-				const history = HistoryStorage.open();
-				return query => history.matchingSessionIds(query);
-			},
-			deleteSession: async session => {
-				await storage.deleteSessionWithArtifacts(session.path);
-				return true;
-			},
-			// Foreign import pickers list source-owned sessions, so rename and
-			// pins are native pickers only.
-			...(init?.foreign
-				? {}
-				: {
-						renameSession: (session: SessionInfo, title: string) =>
-							SessionManager.renameSessionTitle(session.path, title, { cwd: session.cwd }),
-						setSessionPinned: (session: SessionInfo, pinned: boolean) => setSessionPinned(session.id, pinned),
-					}),
-			loadAllSessions: () => SessionManager.listAllForPicker(storage),
-		});
-	};
 }
 
 /** Join-only graph boundary; the full built-in slash-command registry is otherwise unnecessary at startup. */
@@ -831,9 +791,11 @@ async function runInteractiveMode(
 		}
 	}
 
+	let restoredTurn = false;
 	if (startupRestore) {
 		try {
 			const { turn, subagents } = await startupRestore();
+			restoredTurn = turn;
 			const agents = subagents.length === 1 ? "1 subagent" : `${subagents.length} subagents`;
 			mode.showStatus(
 				turn && subagents.length > 0
@@ -844,6 +806,15 @@ async function runInteractiveMode(
 							? `Restored: ${agents} going on with their interrupted turns.`
 							: "Restored: nothing was left unfinished.",
 			);
+		} catch (error: unknown) {
+			mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
+		}
+	}
+	// A background handoff that had to abort the running turn: go on with it the way
+	// `/retry` does. `--restore` alone deliberately leaves aborted turns alone.
+	if (!restoredTurn && takeHandoffContinue()) {
+		try {
+			if (await session.retry()) mode.showStatus("Backgrounded: going on with the interrupted turn.");
 		} catch (error: unknown) {
 			mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
 		}
@@ -2193,7 +2164,7 @@ export async function runRootCommand(
 				pauseStartupWatchdog();
 				let selected: SessionInfo | null;
 				try {
-					const selectSessionImpl = deps.selectSession ?? (await loadSessionPicker({ foreign: true }));
+					const selectSessionImpl = deps.selectSession ?? createSessionPicker({ foreign: true });
 					selected = await logger.time(`select${sourceName}Session`, selectSessionImpl, choices, {
 						title: `Import ${sourceName} Session`,
 						scopeLabel: false,
@@ -2314,7 +2285,7 @@ export async function runRootCommand(
 				}
 			}
 			pauseStartupWatchdog();
-			const selectSessionImpl = deps.selectSession ?? (await loadSessionPicker());
+			const selectSessionImpl = deps.selectSession ?? createSessionPicker();
 			const picked = await logger.time("selectSession", selectSessionImpl, folder.sessions, {
 				completeSessions: folder.complete,
 				allSessions: preloadedAllSessions,
@@ -2689,7 +2660,16 @@ export async function runRootCommand(
 				mcpManager,
 				startBackgroundModelDiscovery,
 			} = createdSession;
-			if (isInteractive) session.addDisposer(bindAgentMesh(sessionOptions.cwd ?? getProjectDir(), settingsInstance));
+			if (isInteractive) {
+				session.addDisposer(bindAgentMesh(sessionOptions.cwd ?? getProjectDir(), settingsInstance));
+				// Every top-level interactive session is listed by `omp agents`, whatever `topLevelExtensions` holds.
+				// Memoized: resolves at once outside a hosted unit; InteractiveMode.init reuses it.
+				const statusPublisher = startAgentStatusPublisher(session, {
+					hostKey: await initHostedInstance(),
+					attachToken: hostedAttachToken(),
+				});
+				session.addDisposer(() => void statusPublisher.dispose());
+			}
 			if (!isInteractive) session.validateRetryFallbackChains();
 
 			const sessionToolNames = session.getAllToolNames();

@@ -272,16 +272,74 @@ function safeAbort(label: string, fn: () => void): void {
 	}
 }
 
-// Double-tap ← on an empty editor opens the Agent Hub (and, in a focused
-// subagent view, ←← returns to the main session). The second tap must land
-// inside this window. The lower bound rejects terminal-synthesized arrow-key
-// bursts: "click to move cursor" / pointer features in iTerm2, WezTerm, kitty,
-// and tmux emit several arrow keys in a single stdin read (sub-millisecond
-// apart) on a stray click, which used to pop the hub with no key ever pressed.
-// Three or more rapid taps are likewise treated as a burst, not a gesture. A
-// deliberate human double-tap is always tens of milliseconds apart.
+// In a focused subagent view, double-tap ← on an empty editor returns to the
+// main session. The second tap must land inside this window. The lower bound
+// rejects terminal-synthesized arrow-key bursts: "click to move cursor" /
+// pointer features in iTerm2, WezTerm, kitty, and tmux emit several arrow keys
+// in a single stdin read (sub-millisecond apart) on a stray click. Three or
+// more rapid taps are likewise treated as a burst, not a gesture. A deliberate
+// human double-tap is always tens of milliseconds apart.
 const LEFT_DOUBLE_TAP_MIN_GAP_MS = 40;
 const LEFT_DOUBLE_TAP_MAX_GAP_MS = 500;
+
+/** A ← this soon after the composer was emptied (submit, clear, history) only arms the background gesture. */
+export const BACKGROUND_GUARD_MS = 500;
+/** How long an armed background gesture waits for the confirming ←. */
+export const BACKGROUND_ARMED_MS = 3000;
+
+/**
+ * Single ← on the empty main composer backgrounds the session. The tap fires
+ * after {@link LEFT_DOUBLE_TAP_MIN_GAP_MS}, so a terminal-synthesized burst of
+ * arrows (every tap that close to the previous one) cancels it and never
+ * fires. Right after the composer was emptied the user is likely still
+ * editing, so the first ← only arms the gesture (with a hint) and the next one
+ * within {@link BACKGROUND_ARMED_MS} fires.
+ */
+export class LeftBackgroundGesture {
+	#lastTapAt = Number.NEGATIVE_INFINITY;
+	#emptiedAt = Number.NEGATIVE_INFINITY;
+	#armedUntil = 0;
+	#pending: NodeJS.Timeout | undefined;
+
+	constructor(
+		private readonly fire: () => void,
+		private readonly showArmedHint: () => void,
+	) {}
+
+	/** The composer just went from text to empty. */
+	noteComposerEmptied(now = Date.now()): void {
+		this.#emptiedAt = now;
+	}
+
+	tap(now = Date.now()): void {
+		const sinceLast = now - this.#lastTapAt;
+		this.#lastTapAt = now;
+		if (sinceLast < LEFT_DOUBLE_TAP_MIN_GAP_MS) {
+			// Burst: nothing in it fires, including the tap that started it.
+			clearTimeout(this.#pending);
+			this.#pending = undefined;
+			this.#armedUntil = 0;
+			return;
+		}
+		if (now < this.#armedUntil) {
+			this.#armedUntil = 0;
+		} else if (now - this.#emptiedAt < BACKGROUND_GUARD_MS) {
+			this.#armedUntil = now + BACKGROUND_ARMED_MS;
+			this.showArmedHint();
+			return;
+		}
+		clearTimeout(this.#pending);
+		this.#pending = setTimeout(() => {
+			this.#pending = undefined;
+			this.fire();
+		}, LEFT_DOUBLE_TAP_MIN_GAP_MS);
+	}
+
+	dispose(): void {
+		clearTimeout(this.#pending);
+		this.#pending = undefined;
+	}
+}
 
 export class InputController {
 	constructor(
@@ -343,10 +401,18 @@ export class InputController {
 		return this.#draftText ?? this.ctx.editor.getText();
 	}
 
-	// Tap counter for the double-← gesture; reset whenever a quiet gap
-	// (>= LEFT_DOUBLE_TAP_MAX_GAP_MS) starts a fresh sequence. See
+	// Tap counter for the focused-view double-← gesture; reset whenever a quiet
+	// gap (>= LEFT_DOUBLE_TAP_MAX_GAP_MS) starts a fresh sequence. See
 	// #detectLeftDoubleTap.
 	#leftTapCount = 0;
+	// Single ← on the empty main composer: background the session.
+	readonly #backgroundGesture = new LeftBackgroundGesture(
+		() => {
+			hintUsage.record("background");
+			this.ctx.backgroundSession();
+		},
+		() => this.ctx.showStatus("Press ← again to background this session"),
+	);
 	// Sequential index for `local://paste-N.md` references created by the large-paste
 	// flow. Seeded from 0 and bumped past existing paste files.
 	#pasteCounter = 0;
@@ -800,27 +866,24 @@ export class InputController {
 		const agentsHubKeys = new Set(this.ctx.keybindings.getKeys("app.agents.hub"));
 		const hubKeys = new Set([...agentsHubKeys, ...this.ctx.keybindings.getKeys("app.session.observe")]);
 		for (const key of hubKeys) {
-			this.ctx.editor.setCustomKeyHandler(key, () =>
-				this.ctx.showAgentHub(agentsHubKeys.has(key) ? { trayFirst: true } : undefined),
-			);
+			this.ctx.editor.setCustomKeyHandler(key, () => {
+				if (agentsHubKeys.has(key)) hintUsage.record("agents");
+				this.ctx.showAgentHub(agentsHubKeys.has(key) ? { trayFirst: true } : undefined);
+			});
+		}
+		for (const key of this.ctx.keybindings.getKeys("app.session.background")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.backgroundSession());
 		}
 
-		// Double-tap left arrow on an empty editor: opens the agent hub from the
-		// main session, or returns the focused subagent view to the main session.
-		// Focused ←← intentionally matches Esc. From the main session the gesture
-		// stays inert when there are no subagents (requireContent); the explicit
-		// hub key still opens the empty roster. `armCloseTap` hands this gesture's
-		// tap state to the hub so the same ←← that opened it also arms its close —
-		// otherwise the hub's fresh detector demands a second ←← (issue #4780).
+		// Left arrow on an empty editor: backgrounds the session from the main
+		// session (see LeftBackgroundGesture), or — on a double-tap — returns the
+		// focused subagent view to the main session (intentionally matching Esc).
 		this.ctx.editor.onLeftAtStart = () => {
 			if (this.ctx.focusedAgentId) {
 				this.#handleFocusedLeftTap();
 				return;
 			}
-			if (this.#detectLeftDoubleTap()) {
-				hintUsage.record("agents");
-				this.ctx.showAgentHub({ requireContent: true, armCloseTap: true, trayFirst: true });
-			}
+			this.#backgroundGesture.tap();
 		};
 		// The native composer's viewing header: an ancestor crumb, or back to main.
 		this.ctx.editor.onFocusAgent = id => this.#focusResolvedAgent(id);
@@ -830,6 +893,7 @@ export class InputController {
 		this.ctx.editor.onChange = (text: string) => {
 			const wasComposing = (this.#draftText ?? "").trim() !== "";
 			this.#draftText = text;
+			if (wasComposing && text.trim() === "") this.#backgroundGesture.noteComposerEmptied();
 			// Typing signals an imminent turn; refresh the API connection now so
 			// the handshake overlaps composition instead of delaying the send.
 			if (text) this.ctx.session.prewarmModelConnection();
@@ -1015,7 +1079,7 @@ export class InputController {
 	 * (`[LEFT_DOUBLE_TAP_MIN_GAP_MS, LEFT_DOUBLE_TAP_MAX_GAP_MS)`). Taps closer
 	 * than the lower bound, or any third-and-later tap before a quiet gap, are a
 	 * burst and never fire — so a stray click that makes the terminal emit a run
-	 * of ← keys can no longer pop the Agent Hub.
+	 * of ← keys cannot leave the focused view.
 	 */
 	#detectLeftDoubleTap(): boolean {
 		const now = Date.now();

@@ -1,6 +1,8 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import * as host from "@oh-my-pi/pi-coding-agent/agents-view/host";
+import { encodeDetachMarker } from "@oh-my-pi/pi-coding-agent/agents-view/markers";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -19,6 +21,8 @@ describe("InteractiveMode restart", () => {
 	let sessionManager: SessionManager;
 	let session: AgentSession | undefined;
 	let originalArgv: string[];
+	let lastExecEnv: Record<string, string> | undefined;
+	let lastSpawnEnv: Record<string, string> | undefined;
 
 	beforeAll(() => initTheme());
 	beforeEach(async () => {
@@ -62,6 +66,8 @@ describe("InteractiveMode restart", () => {
 		vi.spyOn(postmortem, "drainStdout").mockResolvedValue();
 		vi.spyOn(postmortem, "quit").mockResolvedValue();
 		await mode.restart();
+		lastExecEnv = exec.mock.calls[0]?.[2] as Record<string, string> | undefined;
+		lastSpawnEnv = (spawn.mock.calls[0]?.[1] as { env?: Record<string, string> } | undefined)?.env;
 		const command = process.platform === "win32" ? spawn.mock.calls[0]?.[0] : exec.mock.calls[0]?.[1];
 		if (!Array.isArray(command)) throw new Error("expected replacement command");
 		return command;
@@ -155,5 +161,21 @@ describe("InteractiveMode restart", () => {
 		expect(sessionManager.isSessionOnDisk()).toBe(false);
 		if (!file) throw new Error("expected allocated journal path");
 		expect(await Bun.file(file).exists()).toBe(false);
+	});
+
+	it("keeps a hosted session hosted and sends its viewer back to the agent view", async () => {
+		const key = "agent-00000000-0000-4000-8000-000000000000";
+		vi.spyOn(host, "hostedInstanceKey").mockReturnValue(key);
+		vi.spyOn(host, "hostedAttachToken").mockReturnValue("token");
+		const written: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+			written.push(String(chunk));
+			return true;
+		});
+		await restart(["--model", "anthropic/claude-sonnet-4-5"]);
+		const env = process.platform === "win32" ? lastSpawnEnv : lastExecEnv;
+		expect(env?.[host.AGENT_INSTANCE_ENV]).toBe(key);
+		expect(process.env[host.AGENT_INSTANCE_ENV]).toBeUndefined();
+		expect(written.join("")).toContain(encodeDetachMarker("token"));
 	});
 });

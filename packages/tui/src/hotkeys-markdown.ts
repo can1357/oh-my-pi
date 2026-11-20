@@ -159,15 +159,15 @@ function hotkeyGroups(bindings: HotkeysMarkdownBindings): HotkeyGroup[] {
 				},
 				{ keys: [act("app.live.toggle")], action: "Start/stop live voice mode (/live)" },
 				{
-					keys: [
-						act("app.agents.hub"),
-						{ text: " / " },
-						act("app.session.observe"),
-						{ text: " / double-tap " },
-						hints(["left"]),
-						{ text: " (empty editor)" },
-					],
+					keys: [act("app.agents.hub"), { text: " / " }, act("app.session.observe")],
 					action: "Open the agent hub",
+				},
+				{
+					keys:
+						bindings.keybindings.getKeys("app.session.background").length > 0
+							? [hints(["left"]), { text: " (empty editor) / " }, act("app.session.background")]
+							: [hints(["left"]), { text: " (empty editor)" }],
+					action: "Background this session (it keeps running) and open the agent view; `/background`",
 				},
 				{ keys: [{ token: "#<number>" }], action: "GitHub issue/PR reference (e.g. `#3164` → `pr://`/`issue://`)" },
 				{

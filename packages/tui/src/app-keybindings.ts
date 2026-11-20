@@ -51,6 +51,7 @@ interface AppKeybindings {
 	"app.clipboard.copyLine": true;
 	"app.clipboard.copyPrompt": true;
 	"app.agents.hub": true;
+	"app.session.background": true;
 	"app.session.new": true;
 	"app.session.tree": true;
 	"app.session.fork": true;
@@ -228,6 +229,11 @@ export const KEYBINDINGS = {
 	"app.agents.hub": {
 		defaultKeys: "alt+a",
 		description: "Open the agent hub",
+	},
+	"app.session.background": {
+		// The plain ← gesture on an empty composer covers the default; this is the remappable chord.
+		defaultKeys: [],
+		description: "Background this session and open the agent view",
 	},
 	"app.session.observe": {
 		defaultKeys: "ctrl+s",

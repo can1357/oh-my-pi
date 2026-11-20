@@ -10,7 +10,8 @@ The Hub also discovers parked subagents from the current session's persisted art
 | -------------- | ---------------------------------------------------------------------------------------------- |
 | `Alt+A`        | Open or close Agent Hub through `app.agents.hub`. This opens the roster even when it is empty. |
 | `Ctrl+S`       | Open or close the same Hub through the legacy `app.session.observe` action.                    |
-| Double-tap `←` | Open the Hub from an empty main-session editor when the current session has an agent to show.  |
+
+On an empty main-session editor, `←` backgrounds the session into the agent view (`omp agents`) instead of opening the Hub.
 
 Run `/hotkeys` to see the active chords. Remap either action in `~/.omp/agent/keybindings.yml`:
 

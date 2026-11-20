@@ -1,9 +1,10 @@
 /**
- * Manage bundled task agents.
+ * The Agent View over live omp sessions, and management of bundled task agents.
  */
 
-import { Args, Command, Flags, renderCommandHelp } from "@oh-my-pi/pi-utils/cli";
+import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { type AgentsAction, type AgentsCommandArgs, runAgentsCommand } from "../cli/agents-cli";
+import { runAgentsOverview } from "../cli/agents-view-cli";
 import { agentsHelp as commandHelp } from "../cli/command-help";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
@@ -13,21 +14,26 @@ export default class Agents extends Command {
 	static description = commandHelp.description;
 	static args = {
 		action: Args.string({
-			description: "Agents action",
+			description: "Agents action (omit to open the Agent View)",
 			required: false,
 			options: ACTIONS,
 		}),
 	};
 
 	static flags = {
-		force: Flags.boolean({ char: "f", description: "Overwrite existing agent files" }),
-		json: Flags.boolean({ description: "Output JSON" }),
-		dir: Flags.string({ description: "Output directory (overrides --user/--project)" }),
-		user: Flags.boolean({ description: "Write to ~/.omp/agent/agents (default)" }),
-		project: Flags.boolean({ description: "Write to ./.omp/agents" }),
+		json: Flags.boolean({ description: "Output JSON (live sessions, or the unpack result)" }),
+		cwd: Flags.string({ description: "Only list sessions working in this directory" }),
+		select: Flags.string({ description: "Internal: session key selected when the Agent View opens" }),
+		force: Flags.boolean({ char: "f", description: "Overwrite existing agent files (unpack)" }),
+		dir: Flags.string({ description: "Output directory, overrides --user/--project (unpack)" }),
+		user: Flags.boolean({ description: "Write to ~/.omp/agent/agents, the default (unpack)" }),
+		project: Flags.boolean({ description: "Write to ./.omp/agents (unpack)" }),
 	};
 
 	static examples = [
+		"# Open the Agent View: live sessions, attach, start background sessions\n  omp agents",
+		"# List live sessions as JSON\n  omp agents --json",
+		"# Only sessions working in the current project\n  omp agents --cwd .",
 		"# Export bundled agents into user config (default)\n  omp agents unpack",
 		"# Export bundled agents into project config\n  omp agents unpack --project",
 		"# Overwrite existing local agent files\n  omp agents unpack --project --force",
@@ -36,8 +42,9 @@ export default class Agents extends Command {
 
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Agents);
+		await initTheme();
 		if (!args.action) {
-			renderCommandHelp("omp", "agents", Agents);
+			await runAgentsOverview({ json: flags.json, cwd: flags.cwd, select: flags.select });
 			return;
 		}
 
@@ -52,7 +59,6 @@ export default class Agents extends Command {
 			},
 		};
 
-		await initTheme();
 		await runAgentsCommand(cmd);
 	}
 }

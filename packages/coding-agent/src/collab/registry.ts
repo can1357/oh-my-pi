@@ -29,6 +29,10 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { IpcConnection, IpcServer, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { getBaseConfigRoot, isEnoent, isFsError } from "@oh-my-pi/pi-utils";
+import { assertPrivateRuntimeDir, ensurePrivateRuntimeDir } from "../utils/owner-private-dir";
+
+/** Error-message label of the registry directory for the shared dir hardening. */
+const REGISTRY_DIR_LABEL = "collab registry directory";
 
 /** Discovery metadata / IPC protocol version. Mixed omp versions fail safely. */
 export const COLLAB_REGISTRY_VERSION = 1;
@@ -334,37 +338,6 @@ function handleConnection(
 }
 
 /**
- * The registry must be a real directory; POSIX also verifies its owner.
- * Both publication and listing check this: listing prunes malformed
- * entries, so following a symlink into an unrelated directory would let a
- * planted link turn `omp collab list` into a deletion tool.
- */
-async function assertPrivateDir(dir: string): Promise<fs.Stats | null> {
-	const stat = await fs.promises.lstat(dir);
-	if (stat.isSymbolicLink()) throw new Error(`collab registry directory is a symlink: ${dir}`);
-	if (!stat.isDirectory()) throw new Error(`collab registry path is not a directory: ${dir}`);
-	if (process.platform === "win32") return null;
-	const uid = process.getuid?.();
-	if (uid !== undefined && stat.uid !== uid) {
-		throw new Error(`collab registry directory is not owned by the current user: ${dir}`);
-	}
-	return stat;
-}
-
-/**
- * Create the directory with owner-only POSIX permissions. Windows retains
- * the config root's ACL. `mkdir` with a mode leaves an
- * existing directory's permissions alone, so an already-present directory is
- * tightened explicitly; a symlink or a directory owned by another user is
- * refused rather than published into.
- */
-async function ensurePrivateDir(dir: string): Promise<void> {
-	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
-	const stat = await assertPrivateDir(dir);
-	if (stat && (stat.mode & 0o077) !== 0) await fs.promises.chmod(dir, 0o700);
-}
-
-/**
  * Unix files an endpoint leaves on disk: the socket and the native listener's
  * `<socket>.bind.lock`. Endpoint names are unique per publication, so no other
  * binder can contend for that lock and unlinking it is race-free.
@@ -398,7 +371,7 @@ export async function publishCollabHost(
 	options?: CollabPublishOptions,
 ): Promise<CollabHostPublication> {
 	const dir = options?.dir ?? collabHostsRuntimeDir();
-	await ensurePrivateDir(dir);
+	await ensurePrivateRuntimeDir(dir, REGISTRY_DIR_LABEL);
 
 	const instanceId = options?.instanceId ?? crypto.randomBytes(8).toString("hex");
 	if (!INSTANCE_ID_PATTERN.test(instanceId)) throw new Error("invalid collab registry instance id");
@@ -610,7 +583,7 @@ async function listLiveEntries(options?: CollabListOptions): Promise<LiveEntry[]
 	const timeoutMs = options?.timeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS;
 	let names: string[];
 	try {
-		await assertPrivateDir(dir);
+		await assertPrivateRuntimeDir(dir, REGISTRY_DIR_LABEL);
 		names = await fs.promises.readdir(dir);
 	} catch (err) {
 		if (isEnoent(err)) return [];
