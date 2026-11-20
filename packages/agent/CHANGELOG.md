@@ -6,6 +6,10 @@
 
 - `Agent.setStandbyTools()` and `AgentContext.standbyTools` name inactive tools that may activate later; they reach the provider as `inactiveTools` until a request declares tools ([#19826](https://github.com/can1357/oh-my-pi/issues/19826))
 
+### Fixed
+
+- Fixed the refusal of an `xd://resolve` or `xd://reject` write sent with other tool calls, which now says that the other calls caused it ([#18859](https://github.com/can1357/oh-my-pi/issues/18859))
+
 ## [19.0.0] - 2026-11-18
 
 ### Added
