@@ -169,8 +169,11 @@ function foldListColons(basePath: string, list: string, minColon: number): { bas
 		}
 		base = base.slice(0, colon);
 	}
-	if (dashed && chunks.length === 1) return { basePath, list };
-	return { basePath: base, list: chunks.reverse().join(",") };
+	const folded = chunks.reverse().join(",");
+	// A lone `N:M` is a line:column or a timestamp, not a range. Folding it
+	// would drop the column, so the caller keeps the original split.
+	if (dashed && !folded.includes(",")) return { basePath, list };
+	return { basePath: base, list: folded };
 }
 
 /**
@@ -201,7 +204,11 @@ export function splitPathAndSel(
 	} else if (FILE_RAW_ONLY_RE.test(candidate)) {
 		const innerColon = basePath.lastIndexOf(":");
 		const innerCandidate = basePath.slice(innerColon + 1);
-		if (innerColon > 0 && FILE_LINE_RANGE_ONLY_RE.test(innerCandidate)) {
+		if (
+			innerColon > 0 &&
+			FILE_LINE_RANGE_ONLY_RE.test(innerCandidate) &&
+			!(BARE_LINE_RE.test(innerCandidate) && basePath.slice(0, innerColon).includes(":"))
+		) {
 			list = innerCandidate;
 			rawSuffix = `:${candidate}`;
 			basePath = basePath.slice(0, innerColon);
@@ -209,6 +216,12 @@ export function splitPathAndSel(
 	}
 	if (list === undefined) return { path: basePath, sel: candidate };
 
+	// A bare trailing number (`file.ts:62:105`) is a line:column, not a
+	// selector. Peel it only when the fold turns it into a comma list
+	// (`file.ts:20:40,85:100`), so a path that does not exist is never
+	// statted with its column dropped.
+	if (!list.includes(",") && BARE_LINE_RE.test(list) && basePath.includes(":") && !basePath.includes(","))
+		return { path: rawPath };
 	if (options?.foldListColons !== false) ({ basePath, list } = foldListColons(basePath, list, 1));
 	if (!rawSuffix) {
 		const innerColon = basePath.lastIndexOf(":");

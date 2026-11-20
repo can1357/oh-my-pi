@@ -1117,6 +1117,17 @@ function repeatReadNotice(
  * URLs and `lines` schemes do; selector-free schemes (`out://`, `attachment://`),
  * opaque MCP resources and unregistered schemes would read the tail as part of the URL.
  */
+/**
+ * A missing file, quoted as the caller passed it. When selector peeling changed the path, the message says so and
+ * names the selector grammar, so a line:column such as `file.ts:62:105` is not reported as a missing `file.ts:62`.
+ */
+const READ_SELECTOR_GRAMMAR = "a selector is 50-80, 50+150, :-60, or a comma list such as 5-16,960-973";
+
+export function missingReadPathError(requestedPath: string, resolvedPath: string): string {
+	const quoted = "Path '" + requestedPath + "' not found";
+	if (resolvedPath === requestedPath) return quoted + ". " + READ_SELECTOR_GRAMMAR + ".";
+	return quoted + ". '" + resolvedPath + "' was read after peeling a trailing selector; " + READ_SELECTOR_GRAMMAR + ".";
+}
 function acceptsLineSelector(path: string): boolean {
 	const router = InternalUrlRouter.instance();
 	if (!router.canResolve(path)) return true;
@@ -2515,7 +2526,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				if (!recoveredApprovedPlan && !suffixResolution) {
 					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal, toolContext);
 					if (delimitedResult) return delimitedResult;
-					throw new ToolError(`Path '${localReadPath}' not found`);
+					throw new ToolError(missingReadPathError(readPath, localReadPath));
 				}
 			} else {
 				throw error;
