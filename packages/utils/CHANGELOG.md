@@ -5,6 +5,7 @@
 ### Added
 
 - Added `getCodexClientVersionPath()` for the Codex client version cache record, resolving under `$XDG_CACHE_HOME/omp` when that root is initialized ([#19776](https://github.com/can1357/oh-my-pi/pull/19776) by [@Parsifa1](https://github.com/Parsifa1))
+- `exec` and `wait` take `stdout: "ignore"` to drain a child's output without retaining it, and `maxStdoutBytes` to cap what a `capture` keeps ([#15337](https://github.com/can1357/oh-my-pi/pull/15337) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [19.0.0] - 2026-11-18
 
@@ -84,7 +85,6 @@
 
 - Fixed relaxed JSON parsing so `__proto__` is preserved as a regular own property rather than modifying the parsed object's prototype.
 - Fixed SIGHUP handling so stopped terminal sessions display recovery hints, including the `--resume` command.
-- `exec` and `wait` take `stdout: "ignore"` to drain a child's output without retaining it, and `maxStdoutBytes` to cap what a `capture` keeps ([#15337](https://github.com/can1357/oh-my-pi/pull/15337) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.0] - 2026-11-07
 
