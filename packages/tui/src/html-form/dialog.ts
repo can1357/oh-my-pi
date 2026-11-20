@@ -43,7 +43,7 @@ import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { ASK_RESERVED_ROWS, type FoldedRows, renderFoldedQuestion } from "../chrome/ask-fold";
 import { OverlayPanel, PanelRows } from "../chrome/overlay-box";
 import { SvgFigure } from "../chat/svg-figure";
-import { convertImageToPngShared } from "../chat/image-loading";
+import { convertImageToPngShared } from "../png-conversion";
 import { Editor } from "../components/editor";
 import { Image, type ImageBudget, measureRender } from "../components/image";
 import { Input } from "../components/input";

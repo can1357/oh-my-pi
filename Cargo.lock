@@ -6118,7 +6118,7 @@ dependencies = [
 
 [[package]]
 name = "omp-ast"
-version = "19.0.0"
+version = "19.0.1"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6160,7 +6160,7 @@ dependencies = [
 
 [[package]]
 name = "omp-builtins"
-version = "19.0.0"
+version = "19.0.1"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6256,14 +6256,14 @@ dependencies = [
 
 [[package]]
 name = "omp-diff"
-version = "19.0.0"
+version = "19.0.1"
 dependencies = [
  "xutf",
 ]
 
 [[package]]
 name = "omp-edit"
-version = "19.0.0"
+version = "19.0.1"
 dependencies = [
  "async-trait",
  "omp-ast",
@@ -6282,7 +6282,7 @@ dependencies = [
 
 [[package]]
 name = "omp-iso"
-version = "19.0.0"
+version = "19.0.1"
 dependencies = [
  "async-trait",
  "libc",
@@ -6295,7 +6295,7 @@ dependencies = [
 
 [[package]]
 name = "omp-natives"
-version = "19.0.0"
+version = "19.0.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6322,6 +6322,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "html-escape",
  "html-to-markdown-rs",
+ "ignore",
  "image",
  "indexmap",
  "libc",
@@ -6368,6 +6369,7 @@ dependencies = [
  "simd-adler32",
  "smallvec",
  "syntect",
+ "tempfile",
  "tiktoken-rs",
  "tinyvec",
  "tokio",
@@ -6390,7 +6392,7 @@ dependencies = [
 
 [[package]]
 name = "omp-predict"
-version = "19.0.0"
+version = "19.0.1"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -6409,7 +6411,7 @@ dependencies = [
 
 [[package]]
 name = "omp-shell"
-version = "19.0.0"
+version = "19.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6448,7 +6450,7 @@ dependencies = [
 
 [[package]]
 name = "omp-vcs"
-version = "19.0.0"
+version = "19.0.1"
 dependencies = [
  "futures",
  "gix",
@@ -6466,7 +6468,7 @@ dependencies = [
 
 [[package]]
 name = "omp-vfs"
-version = "19.0.0"
+version = "19.0.1"
 dependencies = [
  "async-trait",
  "libc",
@@ -6479,7 +6481,7 @@ dependencies = [
 
 [[package]]
 name = "omp-voice"
-version = "19.0.0"
+version = "19.0.1"
 dependencies = [
  "bytes",
  "flume",
@@ -6493,7 +6495,7 @@ dependencies = [
 
 [[package]]
 name = "omp-xfs"
-version = "19.0.0"
+version = "19.0.1"
 dependencies = [
  "async-trait",
  "flume",

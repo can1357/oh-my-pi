@@ -2506,6 +2506,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.showGitUi();
 					return;
 				case "status.cost":
+				case "status.usage":
 					void this.handleUsageCommand();
 					return;
 				// Only the main session has a cache warmer, so a focused subagent's bar shows no

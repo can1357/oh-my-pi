@@ -2769,6 +2769,47 @@ describe("ModelRegistry", () => {
 			expect(registry.find("github-copilot", "gpt-5.6-sol")?.contextWindow).toBe(1_050_000);
 		});
 
+		test("keeps Cursor's explicit 500K Grok 4.7 lane at its served window with extended context off", () => {
+			// A custom Cursor row exercises the catalog rule without a Cursor
+			// account or live discovery. The KDL `long-context-window-uncapped`
+			// rule matches by provider and id, so the served window survives the
+			// registry's premium-tier cap.
+			writeRawModelsJson({
+				cursor: {
+					baseUrl: "https://example.com/v1",
+					auth: "none",
+					api: "openai-completions",
+					models: [
+						{
+							id: "grok-4.7-500k",
+							name: "Grok 4.7 500k",
+							reasoning: true,
+							input: ["text", "image"],
+							contextWindow: 500_000,
+							maxTokens: 64_000,
+							cost: {
+								input: 2,
+								output: 6,
+								cacheRead: 0.5,
+								cacheWrite: 0,
+								longContext: {
+									inputThreshold: 256_000,
+									input: 4,
+									output: 12,
+									cacheRead: 1,
+									cacheWrite: 0,
+								},
+							},
+						},
+					],
+				},
+			});
+			const testSettings = Settings.isolated({ extendedContext: false });
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			const lane = registry.find("cursor", "grok-4.7-500k");
+			expect(lane?.contextWindow).toBe(500_000);
+		});
+
 		test("custom provider models follow the extended-context toggle without retaining an earlier window", async () => {
 			writeRawModelsJson({
 				"proxy-window": {

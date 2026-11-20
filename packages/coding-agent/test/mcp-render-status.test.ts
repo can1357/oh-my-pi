@@ -3,7 +3,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { TSchema } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
-import { DeferredMCPTool, MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
+import { MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { type MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
 import type { MCPServerConnection, MCPToolDefinition, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
@@ -67,10 +67,6 @@ function makeTool(): MCPTool {
 	return new MCPTool(makeConnection(), makeDefinition());
 }
 
-function makeDeferredTool(): DeferredMCPTool {
-	return new DeferredMCPTool("sentry", makeDefinition(), () => Promise.resolve(makeConnection()));
-}
-
 type RenderableMCPAgentTool = AgentTool<TSchema, MCPToolDetails> & { mergeCallAndResult: true };
 
 function makeAgentTool(mcpTool: MCPTool): RenderableMCPAgentTool {
@@ -119,7 +115,6 @@ describe("MCP tool rendering", () => {
 		const rendered = await renderCompletedMCPTool(false);
 
 		expect(makeTool().mergeCallAndResult).toBe(true);
-		expect(makeDeferredTool().mergeCallAndResult).toBe(true);
 		expect(rendered).toContain(`${doneIcon} sentry/search_events`);
 		expect(rendered).not.toContain(`${pendingIcon} sentry/search_events`);
 	}, 15_000);

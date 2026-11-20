@@ -84,8 +84,12 @@ export function askCard(parts: {
 	);
 	const children: NativeChild[] = [
 		withMotion(head, "head"),
-		withMotion(
-			col(parts.body, { role: "omp.ask.card.body", gap: "lg", ...(parts.skip ? { mark: "drop" } : {}) }),
+		// No motion key: the body draws nothing and never moves, and its questions glide on their own keys. With
+		// one it would scale with every question opening or folding, re-rasterizing all of their text each frame.
+		node(
+			"col",
+			{ role: "omp.ask.card.body", gap: "lg", ...(parts.skip ? { mark: "drop" } : {}) },
+			parts.body,
 			"body",
 		),
 	];

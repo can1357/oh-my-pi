@@ -210,6 +210,7 @@ After the tool returns (including a returned error result), the wrapper emits
 `tool_result` with:
 
 - `toolName`, `toolCallId`, normalized `input` for the effective execution arguments
+- In the extension runner, both `tool_call` and `tool_result` include `parentToolCallId` for calls made by a JS or Python eval cell or kernel-defined tool. It identifies the immediately enclosing invocation and is absent on direct calls.
 - `content`
 - `details`
 - `isError: result.isError === true`
@@ -307,7 +308,7 @@ Hook status text set via `ctx.ui.setStatus(key, text)` is:
 
 - stored per key
 - sorted by key name
-- sanitized (ANSI/VT escape sequences stripped; control characters mapped to spaces; repeated spaces collapsed; trimmed)
+- sanitized (OSC/DCS/other ANSI/VT escape sequences stripped; control characters mapped to spaces; repeated spaces collapsed; trimmed). In the ANSI-rendered status bar, SGR foreground colours and text styles are kept (the `status` segment also drops background colours); the native Rex/Tern status line still shows accent text
 - joined and width-truncated for display
 
 ## Error propagation and fallback

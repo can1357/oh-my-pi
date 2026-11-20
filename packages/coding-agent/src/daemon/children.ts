@@ -7,6 +7,9 @@ import { FdStream, Process, reapChild, spawnRaw } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ChildExit, ChildSpawn, ManagedChild, ManagedChildState } from "./module";
 
+/** How long a reaped child's pipes get to deliver output written right before its exit. */
+const OUTPUT_DRAIN_GRACE_MS = 2_000;
+
 /** Allowed skew between a recorded and an observed process start time. */
 const START_TIME_TOLERANCE_MS = 1_000;
 
@@ -63,6 +66,7 @@ class RawManagedChild implements ManagedChild {
 	readonly #stdout = new OutputChannel();
 	readonly #stderr = new OutputChannel();
 	#done = false;
+	#inputClosed = false;
 
 	constructor(state: ManagedChildState) {
 		this.pid = state.pid;
@@ -98,10 +102,17 @@ class RawManagedChild implements ManagedChild {
 				while (isSameProcess(pid, startedAt)) await Bun.sleep(250);
 				exit = {};
 			}
-			// Output written right before exit is still in the pipes.
-			await Promise.race([Promise.all([stdoutClosed.promise, stderrClosed.promise]), Bun.sleep(2_000)]);
+			// Output written right before exit is still in the pipes. The grace timer is cleared
+			// once they close: left pending it would hold an in-process host's exit for its full length.
+			const grace = Promise.withResolvers<void>();
+			const graceTimer = setTimeout(grace.resolve, OUTPUT_DRAIN_GRACE_MS);
+			try {
+				await Promise.race([Promise.all([stdoutClosed.promise, stderrClosed.promise]), grace.promise]);
+			} finally {
+				clearTimeout(graceTimer);
+			}
 			this.#done = true;
-			stdin.close();
+			this.closeInput();
 			stdout.close();
 			stderr.close();
 			return exit;
@@ -109,8 +120,14 @@ class RawManagedChild implements ManagedChild {
 	}
 
 	write(data: string | Uint8Array): boolean {
-		if (this.#done) return false;
+		if (this.#done || this.#inputClosed) return false;
 		return this.#stdin.write(data);
+	}
+
+	closeInput(): void {
+		if (this.#inputClosed) return;
+		this.#inputClosed = true;
+		this.#stdin.close();
 	}
 
 	drained(): Promise<void> {

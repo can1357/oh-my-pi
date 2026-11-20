@@ -105,6 +105,10 @@ impl Backend for Win32Backend {
 		session::screen_state(&self.display)
 	}
 
+	fn window_covered(&mut self, id: &str) -> bool {
+		capture::window_covered(id)
+	}
+
 	fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>> {
 		capture::displays()
 	}
