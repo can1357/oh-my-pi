@@ -689,6 +689,18 @@ export declare class PtySession {
   /** Process id of the running session's child. */
   pid(): number | null
   /**
+   * Whether the program in the terminal waits on the user's keys.
+   *
+   * `true` while echo is off (a password prompt such as `sudo`'s, or a
+   * full-screen program like `less`) or, on Linux, while a foreground
+   * process is blocked reading the terminal (a `[y/N]` prompt). `false` when
+   * no session runs or, on Linux, no foreground process reads the terminal.
+   * `null` when an echoing line prompt cannot be told from a busy program:
+   * always on macOS and Windows, and on Linux when a foreground process
+   * cannot be inspected (one running setuid).
+   */
+  awaitsInput(): boolean | null
+  /**
    * Start a shell command, stream output chunks, and report the spawned child
    * PID.
    */

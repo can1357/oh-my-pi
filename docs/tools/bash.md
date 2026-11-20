@@ -215,6 +215,7 @@ Choose the setting by the desired outcome:
    - Requires `pty: true`, UI context, and `PI_NO_PTY !== "1"`.
    - Uses `runInteractiveBashPty()` and a `PtySession` overlay.
    - Supports interactive input; `Esc` kills the session from the overlay.
+   - While the program waits on keys, the run shows as blocked on the user (title `!`, OSC 7501 `blocked`), and each new wait sends a `Console waiting for input` terminal notification unless `pty.notify` is `off` or keys were sent to the console in the last 10s. `PtySession.awaitsInput()` decides: terminal echo off (password prompts, full-screen programs) on every Unix; on Linux, also a foreground process blocked in `read` on the terminal (`/proc/<pid>/syscall`). Where it cannot tell (macOS and Windows line prompts, an uninspectable setuid process on Linux), 2s of silent output with the cursor after text counts as a prompt.
 4. Explicit background job
    - Requires `async: true` or `notify`, and `async.enabled`.
    - Registers a job with `session.asyncJobManager` and returns `{ state: "running", jobId }` immediately. `timeout: 0` leaves the job without a tool-imposed deadline.
