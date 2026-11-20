@@ -1683,6 +1683,16 @@ impl AxBackend for AtSpiAx {
 						.reply(frame.as_accessible_proxy(&self.connection))
 						.await?
 						.map_err(|err| failed(err.to_string()))?;
+					// A message dialog's name is its kind, not its native title
+					// (see `window_id`): a native window never takes it by title.
+					if self
+						.reply(proxy.get_role())
+						.await?
+						.map_err(|err| failed(err.to_string()))?
+						== Role::Alert
+					{
+						continue;
+					}
 					if self
 						.reply(proxy.name())
 						.await?
@@ -1731,37 +1741,24 @@ impl AxBackend for AtSpiAx {
 					.as_accessible_proxy(connection)
 					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window owner: {err}")))?;
+				// A GTK message dialog's accessible name is its kind ("Question"),
+				// not the title the display server gives it (the program name), so
+				// a title can name another window, never the dialog's own: only
+				// its listed AT-SPI id (above) identifies it.
+				let role = accessible
+					.get_role()
+					.await
+					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window role: {err}")))?;
+				if role == Role::Alert {
+					return Err(DesktopError::ax_failed(
+						"a message dialog is identified only by its listed AT-SPI window; refusing \
+						 ambiguous input ownership",
+					));
+				}
 				let title = accessible
 					.name()
 					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window title: {err}")))?;
-				// The title names one native window only while no other window of
-				// the application carries it: an untitled GTK 3 message dialog is
-				// named after its kind ("Question"), which the app's main window
-				// may be titled too, while the display server titles the dialog
-				// with the program name.
-				let app = accessible
-					.get_application()
-					.await
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI application: {err}")))?;
-				for frame in Self::frames(connection, &app, self.reply_timeout).await? {
-					if frame == object {
-						continue;
-					}
-					let name = frame
-						.as_accessible_proxy(connection)
-						.await
-						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window: {err}")))?
-						.name()
-						.await
-						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window title: {err}")))?;
-					if name == title {
-						return Err(DesktopError::ax_failed(format!(
-							"another AT-SPI window of the application is titled '{title}'; refusing \
-							 ambiguous input ownership"
-						)));
-					}
-				}
 				native_window_for_frame(windows, pid, &title)
 			})
 			.await?
@@ -4484,7 +4481,7 @@ mod tests {
 		}
 
 		#[test]
-		fn a_message_dialog_is_listed_and_never_given_another_window_of_its_title() {
+		fn a_message_dialog_is_found_by_its_listed_window_and_never_by_a_title() {
 			let x11 = |id: &str, title: &str| DesktopWindow {
 				id:      id.into(),
 				title:   title.into(),
@@ -4500,50 +4497,52 @@ mod tests {
 				|path| AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, path));
 			let (yes, dismiss) = (element("/yes"), element("/dismiss"));
 
+			// Wayland: the dialog is listed and owns its button.
 			let (mut ax, _server) = app_with_message_dialog("TDLG");
-			let titles: Vec<_> = ax
+			let listed: Vec<_> = ax
 				.windows()
 				.unwrap()
 				.windows
 				.into_iter()
-				.map(|entry| entry.window.title)
+				.map(|entry| entry.window)
 				.collect();
+			let titles: Vec<_> = listed.iter().map(|window| window.title.as_str()).collect();
 			assert_eq!(titles, ["TDLG", "Question"]);
-			let windows = [x11("1", "TDLG"), x11("2", "Question")];
-			assert_eq!(ax.window_id(&yes, &windows).unwrap(), "2");
-			// An alert inside a window is part of that window.
+			assert_eq!(ax.window_id(&yes, &listed).unwrap(), listed[1].id);
+			// X11: an alert inside a window is part of that window; the dialog,
+			// named "Question" but titled with the program name, takes no window.
+			let windows = [x11("1", "TDLG"), x11("2", "tdlg.py")];
 			assert_eq!(ax.window_id(&dismiss, &windows).unwrap(), "1");
+			assert!(ax.window_id(&yes, &windows).is_err());
 
-			// The main window titled like the untitled dialog, which X11 titles
-			// with the program name: neither window may take the dialog's input.
-			let (mut ax, _server) = app_with_message_dialog("Question");
-			assert!(
-				ax.window_id(&yes, &[x11("1", "Question"), x11("2", "tdlg.py")])
-					.is_err()
-			);
+			// X11, the main window titled "Question" with another accessible
+			// name: neither its input nor its tree goes to the dialog.
+			let (mut ax, _server) = app_with_message_dialog("");
+			let windows = [x11("1", "Question"), x11("2", "tdlg.py")];
+			assert!(ax.window_id(&yes, &windows).is_err());
+			assert!(ax.window_root(&windows[0]).is_err());
 		}
 
 		/// The app of [`app_with_message_dialog`] whose main window, titled like
-		/// the dialog, cannot say its role; and the dialog's X11 window.
-		fn app_with_an_unreadable_window() -> (AtSpiAx, Connection, DesktopWindow) {
-			let (ax, server) = app_with_message_dialog_and_main_role("Question", None);
-			let dialog = DesktopWindow {
-				id:      "2".into(),
-				title:   "Question".into(),
-				app:     "tdlg".into(),
-				pid:     Some(7),
-				x:       10,
-				y:       20,
-				width:   300,
-				height:  200,
-				focused: false,
-			};
-			(ax, server, dialog)
+		/// the dialog, cannot say its role.
+		fn app_with_an_unreadable_window() -> (AtSpiAx, Connection) {
+			app_with_message_dialog_and_main_role("Question", None)
+		}
+
+		/// The listed message dialog of `ax`.
+		fn listed_dialog(ax: &AtSpiAx) -> DesktopWindow {
+			ax.windows()
+				.unwrap()
+				.windows
+				.into_iter()
+				.find(|entry| entry.window.title == "Question")
+				.unwrap()
+				.window
 		}
 
 		#[test]
 		fn the_window_listing_leaves_out_a_window_whose_role_cannot_be_read() {
-			let (ax, _server, _) = app_with_an_unreadable_window();
+			let (ax, _server) = app_with_an_unreadable_window();
 			let titles: Vec<_> = ax
 				.windows()
 				.unwrap()
@@ -4555,34 +4554,22 @@ mod tests {
 		}
 
 		#[test]
-		fn an_element_has_no_window_while_a_sibling_cannot_say_its_role() {
-			let (mut ax, _server, dialog) = app_with_an_unreadable_window();
-			let yes = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/yes"));
-			assert!(ax.window_id(&yes, &[dialog]).is_err());
-		}
-
-		#[test]
 		fn a_window_has_no_root_while_a_sibling_cannot_say_its_role() {
-			let (mut ax, _server, dialog) = app_with_an_unreadable_window();
+			let (mut ax, _server) = app_with_message_dialog("TDLG");
+			let dialog = listed_dialog(&ax);
+			assert!(ax.window_root(&dialog).is_ok());
+			let (mut ax, _server) = app_with_an_unreadable_window();
+			let dialog = listed_dialog(&ax);
 			assert!(ax.window_root(&dialog).is_err());
 		}
 
 		#[test]
 		fn a_window_holds_no_focus_while_a_sibling_cannot_say_its_role() {
-			// The dialog, listed either way, has the focused button.
-			let dialog = |ax: &AtSpiAx| {
-				ax.windows()
-					.unwrap()
-					.windows
-					.into_iter()
-					.find(|entry| entry.window.title == "Question")
-					.unwrap()
-					.window
-			};
+			// The dialog, listed either way, reads as focused.
 			let (ax, _server) = app_with_message_dialog("TDLG");
-			assert!(ax.holds_focus(&dialog(&ax)));
-			let (ax, _server, _) = app_with_an_unreadable_window();
-			assert!(!ax.holds_focus(&dialog(&ax)));
+			assert!(ax.holds_focus(&listed_dialog(&ax)));
+			let (ax, _server) = app_with_an_unreadable_window();
+			assert!(!ax.holds_focus(&listed_dialog(&ax)));
 		}
 
 		#[test]
