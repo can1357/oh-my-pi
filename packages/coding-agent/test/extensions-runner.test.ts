@@ -9,7 +9,7 @@ import { Type } from "@oh-my-pi/omptype/typebox";
 import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import {
 	isPerCallContextMessage,
 	kCursorExecResolved,
@@ -19,6 +19,8 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { disposeVmContextsByOwner } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
+import { disposeKernelSessionsByOwner } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import { ExtensionRuntime, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
@@ -38,6 +40,9 @@ import type {
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { createEvalCustomTools, describeEvalTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -1740,6 +1745,75 @@ describe("ExtensionRunner", () => {
 			const result = await loadTestExtensions();
 			return new ExtensionRunner(result.extensions, result.runtime, tempDir.path(), sessionManager, modelRegistry);
 		};
+
+		for (const language of ["js", "py"] as const) {
+			it.skipIf(language === "py" && Bun.env.PI_PYTHON_INTEGRATION !== "1")(
+				`links both extension hooks to the invoking ${language} eval or kernel-defined tool, not the retained kernel`,
+				async () => {
+					const runner = await runnerFor(`
+						export default function(pi) {
+							const starts = new Map();
+							pi.on("tool_call", e => { starts.set(e.toolCallId, e.parentToolCallId ?? null); });
+							pi.on("tool_result", e => ({
+								content: [{ type: "text", text: JSON.stringify([e.toolCallId, starts.get(e.toolCallId), e.parentToolCallId ?? null]) }],
+							}));
+						}
+					`);
+					const child = new ExtensionToolWrapper<TSchema>({ ...flaggedTool, parameters: Type.Object({}) }, runner);
+					const owner = sessionManager.getSessionId();
+					const context = { ...runner.createContext(), hasQueuedMessages: () => false };
+					const session: ToolSession = {
+						cwd: tempDir.path(),
+						hasUI: false,
+						settings: Settings.isolated({ "eval.autoBackground.enabled": false }),
+						getSessionFile: () => null,
+						getSessionSpawns: () => null,
+						getEvalSessionId: () => owner,
+						getEvalKernelOwnerId: () => owner,
+						getToolByName: name => (name === child.name ? child : undefined),
+						getToolContext: () => context,
+					};
+					const tool = new EvalTool(session);
+					const ids = new Set<string>();
+					try {
+						for (const parent of ["first-eval", "second-eval"]) {
+							const line = `print((await tool.flagged({}))["text"])`;
+							const result = await tool.execute(parent, { language, code: `${line}\n${line}` });
+							expect(result.isError).not.toBe(true);
+							const lines = result.details?.cells?.[0].output.trim().split("\n");
+							expect(lines).toHaveLength(2);
+							for (const text of lines!) {
+								const [id, start, end] = JSON.parse(text);
+								expect([start, end]).toEqual([parent, parent]);
+								expect(id).not.toBe(parent);
+								ids.add(id);
+							}
+						}
+						expect(ids.size).toBe(4);
+						const code =
+							language === "js"
+								? "tool(async function probe() { return (await tool.flagged({})).text; });"
+								: "@tool\nasync def probe() -> str:\n    return (await tool.flagged({}))['text']";
+						const definition = await tool.execute("define-probe", { language, code });
+						expect(definition.isError).not.toBe(true);
+						const [probe] = createEvalCustomTools(session, await describeEvalTools(session, ["probe"]));
+						for (const parent of ["first-probe", "second-probe"]) {
+							const result = await probe.execute(parent, {}, undefined, context);
+							const [id, start, end] = JSON.parse(firstText(result)!);
+							expect([start, end]).toEqual([parent, parent]);
+							expect(id).not.toBe(parent);
+							ids.add(id);
+						}
+						expect(ids.size).toBe(6);
+						const direct = await child.execute("direct", {}, undefined, undefined, context);
+						expect(firstText(direct)).toBe('["direct",null,null]');
+					} finally {
+						if (language === "js") await disposeVmContextsByOwner(owner);
+						else await disposeKernelSessionsByOwner(owner);
+					}
+				},
+			);
+		}
 
 		it("surfaces replacement content while keeping the call an error", async () => {
 			const runner = await runnerFor(`

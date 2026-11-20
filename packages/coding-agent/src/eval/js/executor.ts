@@ -32,6 +32,7 @@ export interface JsExecutorOptions {
 	onReply?: (text: string) => void;
 	signal?: AbortSignal;
 	sessionId: string;
+	parentToolCallId?: string;
 	/** Logical owner identifier; scopes retained-worker cleanup. */
 	kernelOwnerId?: string;
 	reset?: boolean;
@@ -182,6 +183,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			runState: {
 				signal,
 				onReply: options.onReply,
+				parentToolCallId: options.parentToolCallId,
 				onText: chunk => outputSink.push(chunk),
 				onDisplay: output => {
 					if (output.type === "status") {

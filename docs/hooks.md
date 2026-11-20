@@ -210,6 +210,7 @@ After the tool returns (including a returned error result), the wrapper emits
 `tool_result` with:
 
 - `toolName`, `toolCallId`, normalized `input` for the effective execution arguments
+- In the extension runner, both `tool_call` and `tool_result` include `parentToolCallId` for calls made by a JS or Python eval cell or kernel-defined tool. It identifies the immediately enclosing invocation and is absent on direct calls.
 - `content`
 - `details`
 - `isError: result.isError === true`
