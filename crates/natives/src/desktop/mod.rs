@@ -54,17 +54,6 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Captures of a window that keeps changing size between its capture and the
 /// check of its frame.
 const WINDOW_CAPTURE_ATTEMPTS: usize = 3;
-/// Closing line of a tree read from a Chromium window that appeared fully
-/// covered around the read.
-const COVERED_TREE_NOTE: &str =
-	"… covered: this window appeared fully covered around the read, and Chromium can stop updating \
-	 the tree of a window it finds covered, so this tree and the window's screenshot may be stale; \
-	 while it stays covered, do not wait and read it again by any route (screenshot, ax(), find), \
-	 since those may be stale too. To see its current state, read the page with the browser tool \
-	 if it is connected to this app; otherwise raise() the window (it comes in front of the user's \
-	 windows and takes their keyboard; Windows refuses it while they are using another window) and \
-	 read it again, checking for the state you expect rather than trusting the first read after \
-	 it; otherwise go on without it, telling the user what you could not confirm";
 /// How long the display stays awake after the last desktop request, unless an
 /// agent turn holds it (see [`DisplayAwake::hold_until_released`]). Releasing
 /// the assertion restarts the OS display-sleep countdown, so the display can
@@ -1009,12 +998,7 @@ impl Worker {
 			.ax()
 			.ok_or_else(DesktopError::ax_unsupported)?;
 		let mut snapshot = ax::snapshot(ax, registry, &window, options)?;
-		if covered_before || self.backend()?.window_covered(&window.id) {
-			if !snapshot.text.is_empty() {
-				snapshot.text.push('\n');
-			}
-			snapshot.text.push_str(COVERED_TREE_NOTE);
-		}
+		snapshot.covered = covered_before || self.backend()?.window_covered(&window.id);
 		Ok(snapshot)
 	}
 
@@ -4302,7 +4286,7 @@ mod capture_tests {
 				let tree = worker
 					.snapshot(&target, &AxSnapshotOptions::default())
 					.unwrap();
-				assert_eq!(tree.text.ends_with(COVERED_TREE_NOTE), covered, "{}", tree.text);
+				assert_eq!(tree.covered, covered);
 			}
 		}
 	}

@@ -351,6 +351,10 @@ pub struct AxSnapshot {
 	pub text:       String,
 	pub node_count: u32,
 	pub truncated:  bool,
+	/// The window appeared fully covered around the read, and its app can stop
+	/// updating its tree while covered (Chromium on Windows), so the tree may
+	/// be stale.
+	pub covered:    bool,
 }
 
 #[napi(object)]

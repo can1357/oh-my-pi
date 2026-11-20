@@ -1539,6 +1539,12 @@ export interface AxSnapshot {
   text: string
   nodeCount: number
   truncated: boolean
+  /**
+   * The window appeared fully covered around the read, and its app can stop
+   * updating its tree while covered (Chromium on Windows), so the tree may
+   * be stale.
+   */
+  covered: boolean
 }
 
 export interface AxSnapshotOptions {

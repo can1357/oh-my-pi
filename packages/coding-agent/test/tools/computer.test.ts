@@ -17,6 +17,7 @@ import {
 	type ComputerWorkerOutbound,
 	type ComputerWorkerTransport,
 	COVERED_CAPTURE_NOTICE,
+	COVERED_TREE_NOTICE,
 	ESCAPE_AFTER_CALL_MESSAGE,
 	ESCAPE_REFUSED_MESSAGE,
 	ESCAPE_STOPPED_MESSAGE,
@@ -221,7 +222,7 @@ class FakeNativeSession implements NativeDesktopSession {
 	async observe(target: string) {
 		return {
 			capture: await this.capture(target),
-			accessibility: { text: "- button [ref=e1]", nodeCount: 1, truncated: false },
+			accessibility: { text: "- button [ref=e1]", nodeCount: 1, truncated: false, covered: this.covered },
 		};
 	}
 	async holdKeys(target: string, keys: string[], options: { duration: number }) {
@@ -276,8 +277,8 @@ class FakeNativeSession implements NativeDesktopSession {
 	async typeText(_target: string, _text: string, _opts?: PointerOptions | null): Promise<DesktopTypeResult | void> {}
 	async keyChord(_target: string, _keys: string[], _opts?: PointerOptions | null): Promise<void> {}
 	async raiseWindow(_windowId: string): Promise<void> {}
-	async axSnapshot(_target: string, _opts?: AxSnapshotOptions | null): Promise<{ text: string }> {
-		return { text: "- button [ref=e1]" };
+	async axSnapshot(_target: string, _opts?: AxSnapshotOptions | null): Promise<{ text: string; covered?: boolean }> {
+		return { text: "- button [ref=e1]", covered: this.covered };
 	}
 	async axQuery(_target: string, _query: AxQuery): Promise<AxNode[]> {
 		return [axNode];
@@ -1838,6 +1839,25 @@ describe("computer worker round trips", () => {
 				expect(result.payload.returnValue).not.toHaveProperty("covered");
 				expect(result.payload.screenshots[0]).not.toHaveProperty("covered");
 			}
+		}
+	});
+
+	it("closes the tree of a window nothing of which showed with the covered note, and only then", async () => {
+		for (const covered of [true, false]) {
+			const transport = new MemoryTransport();
+			const native = new FakeNativeSession();
+			native.covered = covered;
+			new ComputerWorkerCore(transport, () => native);
+
+			const result = await runWorker(
+				transport,
+				`covered-tree-${covered}`,
+				'const win = await desktop.window("42"); return [await win.ax(), (await win.observe({ silent: true })).ax]',
+			);
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			const expected = covered ? `- button [ref=e1]\n${COVERED_TREE_NOTICE}` : "- button [ref=e1]";
+			expect(result.payload.returnValue).toEqual([expected, expected]);
 		}
 	});
 
@@ -4100,7 +4120,7 @@ describe("expanded computer APIs", () => {
 		class FailingObservation extends ZoomNativeSession {
 			override async observe(_target: string): Promise<{
 				capture: DesktopCapture;
-				accessibility: { text: string; nodeCount: number; truncated: boolean };
+				accessibility: { text: string; nodeCount: number; truncated: boolean; covered: boolean };
 			}> {
 				throw new Error("AccessibilityUnavailable");
 			}

@@ -5,6 +5,7 @@ import escapeAfterCallMessage from "../../prompts/tools/computer-escape-after-ca
 import escapeRefusedMessage from "../../prompts/tools/computer-escape-refused.md" with { type: "text" };
 import escapeStoppedMessage from "../../prompts/tools/computer-escape-stopped.md" with { type: "text" };
 import coveredCaptureNote from "../../prompts/tools/computer-covered-capture.md" with { type: "text" };
+import coveredTreeNote from "../../prompts/tools/computer-covered-tree.md" with { type: "text" };
 import screenLockedCaptureNote from "../../prompts/tools/computer-screen-locked-capture.md" with { type: "text" };
 import secureInputTemplate from "../../prompts/tools/computer-secure-input.md" with { type: "text" };
 import screenStateTemplate from "../../prompts/tools/computer-screen-state.md" with { type: "text" };
@@ -107,6 +108,9 @@ export function screenLockedCaptureNotice(platform: NodeJS.Platform = process.pl
 
 /** Appended to a window screenshot taken while nothing of the window showed on screen. */
 export const COVERED_CAPTURE_NOTICE = prompt.render(coveredCaptureNote);
+
+/** Closing line of an `ax()` tree read from a window that appeared fully covered around the read. */
+export const COVERED_TREE_NOTICE = prompt.render(coveredTreeNote);
 
 /**
  * Tells the model a run ended with the screen locked or the session's

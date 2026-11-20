@@ -206,10 +206,11 @@ fn occluders_above(hwnd: HWND) -> Option<Vec<RECT>> {
 	walk.found.then_some(walk.rects)
 }
 
-/// The screen rectangle `hwnd` hides what lies under: none unless it is
-/// visible, not minimized, not cloaked (another virtual desktop, a suspended
-/// UWP frame), not click-through and not see-through layered; its frame, cut
-/// to a rectangular window region, and none for an empty or shaped one.
+/// The screen rectangle `hwnd` hides what lies under, as Chromium's own
+/// occlusion check counts it: none unless it is visible, not minimized, not
+/// cloaked (another virtual desktop, a suspended UWP frame), without
+/// `WS_EX_TRANSPARENT` and not see-through layered; its frame, cut to a
+/// rectangular window region, and none for an empty or shaped one.
 fn occluder(hwnd: HWND) -> Option<RECT> {
 	let mut cloaked = 0u32;
 	// SAFETY: every call validates the handle; the out-pointers are writable
@@ -228,6 +229,9 @@ fn occluder(hwnd: HWND) -> Option<RECT> {
 			return None;
 		}
 		let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+		// Chromium skips such a window as an occluder even when it is opaque
+		// (`IsWindowVisibleAndFullyOpaque` in ui/gfx/win/hwnd_util.cc), so it
+		// keeps drawing under it and its reads stay current.
 		if style & WS_EX_TRANSPARENT != 0 {
 			return None;
 		}
@@ -705,9 +709,9 @@ mod tests {
 		Graphics::Gdi::SetWindowRgn,
 		System::LibraryLoader::GetModuleHandleW,
 		UI::WindowsAndMessaging::{
-			CreateWindowExW, DefWindowProcW, DestroyWindow, HWND_TOP, RegisterClassW, SWP_NOACTIVATE,
-			SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetLayeredWindowAttributes,
-			SetWindowLongW, SetWindowPos, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+			CreateWindowExW, DefWindowProcW, DestroyWindow, HWND_TOPMOST, RegisterClassW,
+			SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+			SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 		},
 	};
 
@@ -718,7 +722,8 @@ mod tests {
 	}
 
 	/// An ordinary opaque top-level window of class `class` whose visible frame
-	/// is `frame`, shown without activation above every window made before it.
+	/// is `frame`, shown without activation in the topmost band above every
+	/// window made before it, so the desktop's own windows never cover it.
 	fn window(class: &str, frame: RECT) -> HWND {
 		let class = wide(class);
 		// SAFETY: the class name outlives the call; no parent, menu or data.
@@ -743,7 +748,7 @@ mod tests {
 		unsafe {
 			SetWindowPos(
 				hwnd,
-				HWND_TOP,
+				HWND_TOPMOST,
 				0,
 				0,
 				0,
@@ -814,9 +819,21 @@ mod tests {
 		unsafe { SetWindowRgn(cover, null_mut(), 1) };
 		assert!(marked(target));
 
+		// SAFETY: `GetWindowLongW` validates the handle.
+		let plain = unsafe { GetWindowLongW(cover, GWL_EXSTYLE) };
+		// SAFETY: this thread owns `cover`.
+		unsafe { SetWindowLongW(cover, GWL_EXSTYLE, plain | WS_EX_TRANSPARENT as i32) };
+		assert!(
+			!marked(target),
+			"Chromium does not count an opaque WS_EX_TRANSPARENT window as covering it"
+		);
+		// SAFETY: as above.
+		unsafe { SetWindowLongW(cover, GWL_EXSTYLE, plain) };
+		assert!(marked(target));
+
 		// SAFETY: this thread owns `cover`.
 		unsafe {
-			SetWindowLongW(cover, GWL_EXSTYLE, WS_EX_LAYERED as i32);
+			SetWindowLongW(cover, GWL_EXSTYLE, plain | WS_EX_LAYERED as i32);
 			SetLayeredWindowAttributes(cover, 0, 200, LWA_ALPHA);
 		}
 		assert!(!marked(target), "the target shows through a translucent window");
