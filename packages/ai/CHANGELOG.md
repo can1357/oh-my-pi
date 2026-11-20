@@ -3,8 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
-
-- Fixed Factory Droid requests failing with 403 `content_policy_rejected` whenever they carried OMP's default system prompt: the identity sentence Factory's policy check rejects is no longer sent ([#19583](https://github.com/can1357/oh-my-pi/pull/19583) by [@Xytronix](https://github.com/Xytronix))
+- Factory Droid requests no longer send OMP's identity sentence from the default system prompt, which Factory's usage policy check rejects with 403 `content_policy_rejected` ([#19895](https://github.com/can1357/oh-my-pi/pull/19895) by [@Xytronix](https://github.com/Xytronix))
 - LiteLLM requests now switch to another configured key when a 422 budget-exceeded response stops the current key ([#19860](https://github.com/can1357/oh-my-pi/issues/19860)).
 - GPT-6.2 system prompts are now sent as leading `developer` input messages on third-party Responses proxies too, so they hit the prompt cache instead of billing at the full input rate every turn ([openai/codex#62312](https://github.com/openai/codex/issues/62312))
 - Fixed thinking detection so a failed check of one request style no longer ignores another style that already worked, and the next request no longer repeats a style the server already refused. ([#19758](https://github.com/can1357/oh-my-pi/pull/19758) by [@eggpeat](https://github.com/eggpeat))

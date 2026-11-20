@@ -1,4 +1,5 @@
 import { describe, expect, it, mock } from "bun:test";
+import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -283,6 +284,23 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 			expect(body).toContain(JSON.stringify("Before. \n\n# Tone\nConcise.").slice(1, -1));
 		},
 	);
+
+	it("strips the identity line of coding-agent's bundled system prompt", async () => {
+		const bundledPrompt = await Bun.file(
+			path.resolve(import.meta.dir, "../../coding-agent/src/prompts/system/system-prompt.md"),
+		).text();
+		const identityLine = bundledPrompt.split("\n", 1)[0]!;
+		const captured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			kimiK3(),
+			{ systemPrompt: [bundledPrompt], messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, completionsChunks("OK", "kimi-k3")) },
+		).result();
+
+		const body = JSON.stringify(captured[0].body);
+		expect(body).not.toContain(identityLine);
+		expect(body).toContain("# Engineering");
+	});
 
 	it.each([
 		["/o/v1/chat/completions", kimiK3, completionsChunks("OK", "kimi-k3")],

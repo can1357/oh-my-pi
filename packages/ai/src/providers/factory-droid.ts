@@ -76,9 +76,10 @@ import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from 
 const DROID_SYSTEM_PREFIX = droidIdentity.trim();
 
 /**
- * OMP's identity sentence (coding-agent `system-prompt.md`). Factory's proxy
- * answers 403 `content_policy_rejected` to any request whose system channel
- * contains it, on every wire; the Droid sentence already names the agent.
+ * OMP's identity sentence, line 1 of coding-agent `system-prompt.md` (a test
+ * fails when the two drift). Factory's proxy answers 403
+ * `content_policy_rejected` to any request whose system channel contains it,
+ * on every wire; the Droid sentence already names the agent.
  */
 const OMP_IDENTITY_SENTENCE = "You are omp's trusted coding assistant.";
 
