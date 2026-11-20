@@ -191,7 +191,8 @@ describe("agent bridging across subagent workers", () => {
 			expect(activity()).toBe("running read");
 			const lastActivity = liveRef("W1").lastActivity;
 
-			// The worker sends the tool's heartbeat and then the probe reply on the same port.
+			// Tool start flushes progress at once (no 150ms coalescing), so the worker sends
+			// the tool's heartbeat and then the probe reply on the same port.
 			await probe.toolCall(old, "bash");
 			expect(activity()).toBe("running read");
 			expect(liveRef("W1").lastActivity).toBe(lastActivity);
