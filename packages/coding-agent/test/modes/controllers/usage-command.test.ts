@@ -380,6 +380,7 @@ describe("interactive /usage account visibility", () => {
 						},
 						setHidden: () => {},
 						isHidden: () => false,
+						isFocused: () => false,
 					};
 				},
 			},

@@ -503,7 +503,12 @@ describe("CodexResetFireworks under a native surface", () => {
 		vi.useFakeTimers();
 		setNativeRendering(true);
 		let renders = 0;
-		const handle: OverlayHandle = { hide: () => {}, setHidden: () => {}, isHidden: () => false };
+		const handle: OverlayHandle = {
+			hide: () => {},
+			setHidden: () => {},
+			isHidden: () => false,
+			isFocused: () => false,
+		};
 		const controller = new CodexResetFireworksController({
 			ui: {
 				showOverlay: (_component: Component) => handle,

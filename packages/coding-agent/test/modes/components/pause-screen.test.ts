@@ -45,6 +45,7 @@ function makeHost(rows = 24): FakeHost {
 					},
 					setHidden() {},
 					isHidden: () => false,
+					isFocused: () => false,
 				};
 			},
 			setFocus() {},
