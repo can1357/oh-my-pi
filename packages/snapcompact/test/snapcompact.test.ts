@@ -474,6 +474,11 @@ describe("shape resolution", () => {
 		const glmShape = snapcompact.resolveShape({ api: "openai-completions" }, "8on16-bw");
 		expect(snapcompact.resolveShape({ api: "openai-completions", id: "moonshotai/kimi-k2.6" })).toEqual(kimiShape);
 		expect(snapcompact.resolveShape({ api: "openai-completions", id: "z-ai/glm-4.6v" })).toEqual(glmShape);
+		// A GLM row the taxonomy leaves unclassified, on Bedrock's Anthropic-family wire: the residue
+		// rule keeps GLM's layout instead of the wire fallback's `11on16-bw`.
+		const bedrockGlm = getBundledModel("amazon-bedrock", "global.zai.glm-5.3");
+		expect(bedrockGlm.identity?.class).toBe("unknown");
+		expect(snapcompact.resolveShape(bedrockGlm)).toEqual(snapcompact.resolveShape(bedrockGlm, "8on16-bw"));
 
 		// Unmeasured model ids fall back to the API family default shape and,
 		// without a catalog image rule, to the wire family's billing.
