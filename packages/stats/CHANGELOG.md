@@ -5,6 +5,11 @@
 ### Fixed
 
 - Fixed the Spotlight headline's holdout baseline mixing results plain showed whole with results plain truncated, whose cuts get fetched beyond plain's page anyway ([#19380](https://github.com/can1357/oh-my-pi/pull/19380) by [@Xytronix](https://github.com/Xytronix))
+## [19.0.1] - 2026-11-19
+
+### Added
+
+- Added 2d and 3d range presets with hourly buckets to the stats dashboard time selector ([#19766](https://github.com/can1357/oh-my-pi/issues/19766), [#19774](https://github.com/can1357/oh-my-pi/pull/19774) by [@thekitaev](https://github.com/thekitaev)).
 
 ## [19.0.0] - 2026-11-18
 

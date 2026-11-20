@@ -3875,19 +3875,6 @@ export class TUI extends Container {
 			buffer += SYNC_OUTPUT_BEGIN;
 			syncBytes = 0;
 		};
-		if (destructiveReset && TERMINAL.imageProtocol === ImageProtocol.Kitty) {
-			// A reset is explicitly destructive, so remove every placement—not only
-			// the ones this TUI tracked—then resend images composed for the clean
-			// replay. ED2 below reclaims the rest, but only on terminals that treat
-			// an erase as a graphics clear; the explicit delete covers the others.
-			buffer += encodeKittyDeleteAllImages();
-			// `d=A` spares virtual placements, and erasing the placeholder text it
-			// leaves behind does not remove the prototype either. The ids this
-			// reset forgot are named explicitly here — their tracking is gone, so
-			// nothing downstream could find them again.
-			for (const id of this.#imageBudget.takeResetPurgeIds()) buffer += encodeKittyDeleteImage(id);
-			this.#screenImagePlacements.clear();
-		}
 		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
 			for (const id of this.#imageBudget.takePurgeIds()) buffer += encodeKittyDeleteImage(id);
 		} else {
@@ -3909,6 +3896,24 @@ export class TUI extends Container {
 		// image the terminal no longer had and every inline image vanished
 		// after a settled width resize.
 		if (destructiveReset) buffer += `${LINE_TERMINATOR}\x1b[H\x1b[2J\x1b[3J`;
+		if (destructiveReset && TERMINAL.imageProtocol === ImageProtocol.Kitty) {
+			// A reset is explicitly destructive, so remove every placement—not only
+			// the ones this TUI tracked—then resend images composed for the clean
+			// replay. ED2 above reclaims the rest, but only on terminals that treat
+			// an erase as a graphics clear; the explicit delete covers the others.
+			// It MUST follow the erases: `d=A` removes only placements on screen,
+			// and terminals that keep a placement anchored in scrollback move it to
+			// the top-left when ED3 erases its row (herdr-app), so a delete sent
+			// first leaves an id-less placement (an extension's budget-less image)
+			// painted over the fresh screen.
+			buffer += encodeKittyDeleteAllImages();
+			// `d=A` spares virtual placements, and erasing the placeholder text it
+			// leaves behind does not remove the prototype either. The ids this
+			// reset forgot are named explicitly here — their tracking is gone, so
+			// nothing downstream could find them again.
+			for (const id of this.#imageBudget.takeResetPurgeIds()) buffer += encodeKittyDeleteImage(id);
+			this.#screenImagePlacements.clear();
+		}
 		const diffable =
 			geometryStable &&
 			historyRows.length === 0 &&

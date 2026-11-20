@@ -171,4 +171,10 @@ export function reportStaleWorkspaceAddon(
 /** Actionable text for {@link missingNativeExport}. */
 export function missingNativeExportMessage(symbolName: string, addon?: NativeAddonStatus | null): string;
 
+/**
+ * Open one `.node` addon with `process.dlopen` and return its exports, as
+ * `require` does; unlike Bun's `require`, it loads from a path that holds `?`.
+ */
+export function openNativeAddon(candidate: string): Record<string, unknown>;
+
 export function loadNative(): Record<string, unknown>;
