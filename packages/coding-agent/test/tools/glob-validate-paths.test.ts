@@ -152,6 +152,28 @@ describe("delimited path expansion", () => {
 		expect(scope.searchPath).toBe(path.join(tempDir, "apps"));
 		expect(scope.globFilter).toBe("**/*.txt");
 	});
+
+	it("refuses a path with an embedded shell flag and names the directory and the flag", async () => {
+		const scope = (rawPath: string) =>
+			resolveToolSearchScope({
+				rawPaths: [rawPath],
+				cwd: tempDir,
+				internalUrlAction: "search",
+				filesystem: new InternalUrlFilesystem({ context: {}, tier: "read" }),
+			});
+
+		const error = await scope("/Users/zbornheimer/Developer --include=builtin-registry.ts").catch(e => e);
+		expect(error).toBeInstanceOf(Error);
+		expect(error.message).not.toContain("Path not found");
+		expect(error.message).toContain("/Users/zbornheimer/Developer");
+		expect(error.message).toContain("--include=builtin-registry.ts");
+
+		// A genuinely missing directory keeps the plain message.
+		await expect(scope("no-such-dir")).rejects.toThrow("Path not found: no-such-dir");
+		// An existing directory with spaces still resolves.
+		const ok = await scope("folder with spaces");
+		expect(ok.isDirectory).toBe(true);
+	});
 });
 
 describe("globToolRenderer", () => {
