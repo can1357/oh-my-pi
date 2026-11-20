@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, test, vi } from "bun:test";
 import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -321,6 +321,42 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(await registry.refreshIfStale()).toBe(true);
 		expect(registry.find("gateway", "added-model")).toBeDefined();
 		expect(await registry.refreshIfStale()).toBe(false);
+	});
+
+	test("refreshIfStale picks up models another process discovered once the catalog is a TTL old", async () => {
+		writeRawModelsJson({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9992",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		let served = ["old-model"];
+		const fetchMock: FetchImpl = async input =>
+			String(input) === "http://127.0.0.1:9992/v1/models"
+				? Response.json({ data: served.map(id => ({ id, context_length: 65_536 })) })
+				: new Response("", { status: 404 });
+		const startedAt = Date.now();
+		try {
+			setSystemTime(new Date(startedAt));
+			const session = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			await session.refresh("online-if-uncached");
+
+			// A later process (`omp models refresh`, a new session) sees the provider's new model.
+			served = ["old-model", "new-model"];
+			await new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock }).refresh("online");
+
+			setSystemTime(new Date(startedAt + 2 * 60 * 60 * 1000 - 1));
+			expect(await session.refreshIfStale()).toBe(false);
+			expect(session.find("gateway", "new-model")).toBeUndefined();
+
+			setSystemTime(new Date(startedAt + 2 * 60 * 60 * 1000));
+			expect(await session.refreshIfStale()).toBe(true);
+			expect(session.find("gateway", "new-model")).toBeDefined();
+		} finally {
+			setSystemTime();
+		}
 	});
 
 	test("refreshProvider online refreshes expired anthropic OAuth before model discovery", async () => {
