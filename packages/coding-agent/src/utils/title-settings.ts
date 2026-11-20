@@ -85,3 +85,16 @@ export const cfgTitleRefreshAfterPrompts = register({
 		],
 	},
 });
+
+export const cfgTitleFollowCurrentModelChain = register({
+	id: "title.followCurrentModelChain",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tasks",
+		group: "Modes",
+		label: "Titles Follow the Session Model's Fallback Chain",
+		description:
+			"When the title models fail, try the session model and then its retry fallback chain. Off: try the session model alone, so a title never reaches a fallback (for example a paid provider) that only the main session should use",
+	},
+});
