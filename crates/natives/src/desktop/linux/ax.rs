@@ -573,7 +573,9 @@ impl AtSpiAx {
 	}
 
 	/// `app`'s children that are top-level windows. Each reply, not the
-	/// traversal, gets a deadline.
+	/// traversal, gets a deadline. A child whose role cannot be read fails the
+	/// call: every caller decides which window something belongs to, and a
+	/// child that may be a window must not be left out of that.
 	async fn frames(
 		connection: &Connection,
 		app: &ObjectRefOwned,
@@ -591,10 +593,10 @@ impl AtSpiAx {
 				answered("the application", reply_timeout, child.as_accessible_proxy(connection))
 					.await?
 					.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
-			if answered("the application", reply_timeout, child_proxy.get_role())
+			let role = answered("the application", reply_timeout, child_proxy.get_role())
 				.await?
-				.is_ok_and(|role| top_level_role(role, true))
-			{
+				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window role: {err}")))?;
+			if top_level_role(role, true) {
 				frames.push(child);
 			}
 		}
@@ -1742,33 +1744,14 @@ impl AxBackend for AtSpiAx {
 					.get_application()
 					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI application: {err}")))?;
-				// Every child is read here rather than through `Self::frames`,
-				// which skips a child whose role read fails: a sibling that cannot
-				// say whether it is a window, or what it is titled, refuses
-				// ownership.
-				let children = app
-					.as_accessible_proxy(connection)
-					.await
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI application: {err}")))?
-					.get_children()
-					.await
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI application: {err}")))?;
-				for child in children {
-					if child == object {
+				for frame in Self::frames(connection, &app, self.reply_timeout).await? {
+					if frame == object {
 						continue;
 					}
-					let proxy = child
+					let name = frame
 						.as_accessible_proxy(connection)
 						.await
-						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window: {err}")))?;
-					let role = proxy
-						.get_role()
-						.await
-						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window role: {err}")))?;
-					if !top_level_role(role, true) {
-						continue;
-					}
-					let name = proxy
+						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window: {err}")))?
 						.name()
 						.await
 						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window title: {err}")))?;
@@ -4002,7 +3985,7 @@ mod tests {
 		use std::sync::{Arc, Mutex};
 
 		use atspi::zbus::{
-			Guid, connection::Builder as ConnectionBuilder, interface, zvariant::OwnedObjectPath,
+			Guid, connection::Builder as ConnectionBuilder, fdo, interface, zvariant::OwnedObjectPath,
 		};
 
 		use super::*;
@@ -4384,9 +4367,10 @@ mod tests {
 			assert_eq!(listed.unanswered, [":1.8"]);
 		}
 
-		/// An element of a GTK 3 app: its role, name, parent and children.
+		/// An element of a GTK 3 app: its role (`None`: the read fails), name,
+		/// parent and children. The message dialog reads as focused.
 		struct Gtk3 {
-			role:     Role,
+			role:     Option<Role>,
 			name:     &'static str,
 			parent:   &'static str,
 			children: Vec<&'static str>,
@@ -4394,8 +4378,21 @@ mod tests {
 
 		#[interface(name = "org.a11y.atspi.Accessible")]
 		impl Gtk3 {
-			fn get_role(&self) -> u32 {
-				self.role as u32
+			fn get_role(&self) -> fdo::Result<u32> {
+				self
+					.role
+					.map(|role| role as u32)
+					.ok_or_else(|| fdo::Error::Failed("the role cannot be read".into()))
+			}
+
+			fn get_state(&self) -> Vec<u32> {
+				let dialog = self.role == Some(Role::Alert) && self.parent == "/app";
+				let bits = if dialog {
+					StateSet::new(State::Focused).bits()
+				} else {
+					0
+				};
+				vec![bits as u32, (bits >> 32) as u32]
 			}
 
 			fn get_children(&self) -> Vec<(String, OwnedObjectPath)> {
@@ -4439,7 +4436,16 @@ mod tests {
 		/// inside the window), and a message dialog, which accessibility names
 		/// "Question" when it has no title.
 		fn app_with_message_dialog(main: &'static str) -> (AtSpiAx, Connection) {
-			let node = |role, name, parent, children| Gtk3 { role, name, parent, children };
+			app_with_message_dialog_and_main_role(main, Some(Role::Frame))
+		}
+
+		/// [`app_with_message_dialog`] with the main window's role.
+		fn app_with_message_dialog_and_main_role(
+			main: &'static str,
+			main_role: Option<Role>,
+		) -> (AtSpiAx, Connection) {
+			let node =
+				|role, name, parent, children| Gtk3 { role: Some(role), name, parent, children };
 			let frame = || Extents { x: 10, y: 20, delay: Duration::ZERO };
 			backend(HUNG_CALL_TIMEOUT, |server| {
 				server
@@ -4455,7 +4461,12 @@ mod tests {
 						node(Role::Application, "tdlg", "/org/a11y/atspi/null", vec!["/main", "/alert"]),
 					)
 					.unwrap()
-					.serve_at("/main", node(Role::Frame, main, "/app", vec!["/banner"]))
+					.serve_at("/main", Gtk3 {
+						role:     main_role,
+						name:     main,
+						parent:   "/app",
+						children: vec!["/banner"],
+					})
 					.unwrap()
 					.serve_at("/banner", node(Role::Alert, "Saved", "/main", vec!["/dismiss"]))
 					.unwrap()
@@ -4510,6 +4521,68 @@ mod tests {
 				ax.window_id(&yes, &[x11("1", "Question"), x11("2", "tdlg.py")])
 					.is_err()
 			);
+		}
+
+		/// The app of [`app_with_message_dialog`] whose main window, titled like
+		/// the dialog, cannot say its role; and the dialog's X11 window.
+		fn app_with_an_unreadable_window() -> (AtSpiAx, Connection, DesktopWindow) {
+			let (ax, server) = app_with_message_dialog_and_main_role("Question", None);
+			let dialog = DesktopWindow {
+				id:      "2".into(),
+				title:   "Question".into(),
+				app:     "tdlg".into(),
+				pid:     Some(7),
+				x:       10,
+				y:       20,
+				width:   300,
+				height:  200,
+				focused: false,
+			};
+			(ax, server, dialog)
+		}
+
+		#[test]
+		fn the_window_listing_leaves_out_a_window_whose_role_cannot_be_read() {
+			let (ax, _server, _) = app_with_an_unreadable_window();
+			let titles: Vec<_> = ax
+				.windows()
+				.unwrap()
+				.windows
+				.into_iter()
+				.map(|entry| entry.window.title)
+				.collect();
+			assert_eq!(titles, ["Question"]);
+		}
+
+		#[test]
+		fn an_element_has_no_window_while_a_sibling_cannot_say_its_role() {
+			let (mut ax, _server, dialog) = app_with_an_unreadable_window();
+			let yes = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/yes"));
+			assert!(ax.window_id(&yes, &[dialog]).is_err());
+		}
+
+		#[test]
+		fn a_window_has_no_root_while_a_sibling_cannot_say_its_role() {
+			let (mut ax, _server, dialog) = app_with_an_unreadable_window();
+			assert!(ax.window_root(&dialog).is_err());
+		}
+
+		#[test]
+		fn a_window_holds_no_focus_while_a_sibling_cannot_say_its_role() {
+			// The dialog, listed either way, has the focused button.
+			let dialog = |ax: &AtSpiAx| {
+				ax.windows()
+					.unwrap()
+					.windows
+					.into_iter()
+					.find(|entry| entry.window.title == "Question")
+					.unwrap()
+					.window
+			};
+			let (ax, _server) = app_with_message_dialog("TDLG");
+			assert!(ax.holds_focus(&dialog(&ax)));
+			let (ax, _server, _) = app_with_an_unreadable_window();
+			assert!(!ax.holds_focus(&dialog(&ax)));
 		}
 
 		#[test]
