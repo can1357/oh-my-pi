@@ -1,6 +1,6 @@
-# 0071. `/wt` may clone ignored cache directories into new worktrees; subagent isolation is unchanged; ovnfs is not adopted
+# 0071. `/wt` does not clone ignored cache directories; subagent isolation is unchanged; ovnfs is not adopted
 
-Status: Proposed 2026-11-14; machine-reviewed (EGM, 3 rounds), not owner-approved
+Status: Withdrawn 2026-11-19 (class b, owner ruling on O1); proposed 2026-11-14, machine-reviewed (EGM, 3 rounds)
 Date: 2026-11-13 (revised 2026-11-14 after three EGM rounds)
 Area: runtime
 
