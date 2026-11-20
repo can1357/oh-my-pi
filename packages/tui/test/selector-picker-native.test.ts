@@ -181,6 +181,49 @@ describe("reset usage picker", () => {
 		selector.handleNativeEvent(act("close"));
 		expect(spent).toEqual(["a@x.so", "cancel"]);
 	});
+
+	it("tells a user whose reset lookup failed that nothing was spent, not that no resets are usable", () => {
+		const failed: ResetUsageAccount = {
+			label: "c@x.so",
+			provider: "anthropic",
+			providerLabel: "Claude Max",
+			availableCount: 0,
+			redeemableCount: 0,
+			target: { credentialId: 19, provider: "anthropic" },
+			active: false,
+			error: "Failed to load saved resets",
+		};
+		const empty: ResetUsageAccount = {
+			label: "d@x.so",
+			provider: "anthropic",
+			providerLabel: "Claude Max",
+			availableCount: 0,
+			redeemableCount: 0,
+			target: { credentialId: 20, provider: "anthropic" },
+			active: false,
+		};
+		const spent: string[] = [];
+		const selector = new ResetUsageSelectorComponent(
+			[failed, empty],
+			account => spent.push(account.label),
+			() => {},
+		);
+		// The status line the picker draws under the list.
+		const statusText = (): string => {
+			const { subtitle } = sheet(selector.describe(pickerCx)).props;
+			return typeof subtitle === "string" ? subtitle : (subtitle ?? []).map(span => span.t).join("");
+		};
+
+		selector.handleNativeEvent(at("select", "anthropic:19:"));
+		selector.handleInput("\r");
+		expect(statusText()).toContain("Failed to load saved resets");
+		expect(statusText()).toContain("nothing was spent");
+		expect(statusText()).not.toContain("no saved resets usable");
+
+		selector.handleNativeEvent(at("activate", "anthropic:20:"));
+		expect(statusText()).toContain("no saved resets usable right now");
+		expect(spent).toEqual([]);
+	});
 });
 
 describe("hook selector picker", () => {
