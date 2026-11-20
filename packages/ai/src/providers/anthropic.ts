@@ -2422,24 +2422,6 @@ const streamAnthropicOnce = (
 					];
 				}
 				nextParams = toWellFormedDeep(nextParams) as typeof nextParams;
-				// Diagnose an empty provider request here, at the final request
-				// shape: after `onPayload` (which may repair or empty the body) and
-				// after the transport controls above, so a hook that repairs an
-				// empty encoding is not refused and a hook that empties the body is
-				// caught. Anthropic answers `messages: []` with a bare HTTP 400
-				// "messages is required" that does not say who emptied the
-				// conversation, so name the model, provider, and — from the
-				// pre-hook snapshot — which side emptied it.
-				const finalMessageCount = Array.isArray(nextParams.messages) ? nextParams.messages.length : 0;
-				if (finalMessageCount === 0) {
-					const detail =
-						encodedMessageCount === 0
-							? `Context had ${context.messages.length} input messages; none survived encoding.`
-							: `Context had ${context.messages.length} input messages; encoding produced ${encodedMessageCount}, then the onPayload hook returned an empty list.`;
-					throw new Error(
-						`anthropic: refusing to send a request with no messages for model ${model.id} (provider ${model.provider}). ${detail}`,
-					);
-				}
 				if (transport) {
 					const preparedRequest = await transport.prepareRequest(nextParams, requestExtraBetas);
 					transportPayload = preparedRequest.payload;
@@ -2453,6 +2435,28 @@ const streamAnthropicOnce = (
 						url: `${baseUrl}/v1/messages${isOAuthToken ? "?beta=true" : ""}`,
 						body: nextParams,
 					};
+				}
+				// Diagnose an empty provider request on the body that will actually
+				// be sent: after the caller's `onPayload` hook on the normal path,
+				// and after the transport's own request shaping on the transport
+				// path — which is where Bedrock runs the hook, so checking earlier
+				// would judge a body the transport is free to rewrite. Anthropic
+				// answers `messages: []` with a bare HTTP 400 "messages is
+				// required" that does not say who emptied the conversation, so name
+				// the model, provider, and — from the pre-hook snapshot — which side
+				// emptied it.
+				const sentMessages = transport
+					? (transportPayload as { messages?: unknown } | undefined)?.messages
+					: nextParams.messages;
+				const sentMessageCount = Array.isArray(sentMessages) ? sentMessages.length : 0;
+				if (sentMessageCount === 0) {
+					const detail =
+						encodedMessageCount === 0
+							? `Context had ${context.messages.length} input messages; none survived encoding.`
+							: `Context had ${context.messages.length} input messages; encoding produced ${encodedMessageCount}, then the onPayload hook returned an empty list.`;
+					throw new Error(
+						`anthropic: refusing to send a request with no messages for model ${model.id} (provider ${model.provider}). ${detail}`,
+					);
 				}
 				return nextParams;
 			};

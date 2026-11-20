@@ -17,6 +17,7 @@ import {
 	streamAnthropic,
 	stripClaudeToolPrefix,
 } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { streamBedrock } from "@oh-my-pi/pi-ai/providers/amazon-bedrock";
 import { buildAnthropicHeaders, mapStainlessArch, mapStainlessOs } from "@oh-my-pi/pi-ai/providers/anthropic-headers";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import { getClaudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
@@ -3381,9 +3382,20 @@ describe("Anthropic empty-messages guard", () => {
 		expect(sentBody).toContain("repaired by hook");
 	});
 
-	it("does not emit the empty-messages error when context has at least one message", async () => {
-		// onPayload short-circuits before the fetch: we only assert the guard
-		// accepted the non-empty context.
+	it("sends a request when context has at least one message", async () => {
+		// The guard must not fire on a request that carries messages, and the
+		// captured body proves the request left the provider instead of the
+		// absence of one error message proving it.
+		let sentBody: string | undefined;
+		const controller = new AbortController();
+		const fakeFetch = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			sentBody = requestBodyText(init) ?? "";
+			controller.abort();
+			return new Response('event: message_stop\ndata: {"type":"message_stop"}\n\n', {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
 		const stream = streamAnthropic(
 			ANTHROPIC_MODEL,
 			{
@@ -3391,23 +3403,102 @@ describe("Anthropic empty-messages guard", () => {
 				messages: [{ role: "user", content: "hello", timestamp: 1 }],
 				tools: [],
 			},
+			{ apiKey: "sk-ant-oat-test", signal: controller.signal, fetch: fakeFetch },
+		);
+		let refusal: string | undefined;
+		for await (const evt of stream) {
+			if (evt.type === "error" && evt.error.errorMessage?.includes("refusing")) {
+				refusal = evt.error.errorMessage;
+			}
+		}
+		expect(refusal).toBeUndefined();
+		expect(sentBody).toContain("hello");
+	});
+});
+
+describe("Anthropic empty-messages guard on the Bedrock compaction transport", () => {
+	// The transport skips the caller's hook in `streamAnthropicOnce` and runs it
+	// inside `prepareBedrockAnthropicCompactionRequest` instead, so a hook that
+	// repairs an empty encoding there only works if the guard reads the body the
+	// transport produced. Same context as the paired cases above.
+	const bedrockCompactionModel = (): Model<"bedrock-converse-stream"> =>
+		buildModel({
+			id: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+			name: "Claude 3.5 Sonnet",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+			compat: { supportsServerCompaction: true },
+		});
+
+	// Each call returns its own response: a Body is single-use.
+	const eventStream = (): Response =>
+		new Response(
+			new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.close();
+				},
+			}),
+			{ status: 200, headers: { "content-type": "application/vnd.amazon.eventstream" } },
+		);
+
+	const bedrockFetch =
+		(init: { sentBody?: string; onFetch?: () => void } = {}) =>
+		async (_input: string | URL | Request, requestInit?: RequestInit): Promise<Response> => {
+			init.onFetch?.();
+			const raw = requestInit?.body;
+			init.sentBody = raw instanceof Uint8Array ? new TextDecoder().decode(raw) : String(raw ?? "");
+			return eventStream();
+		};
+
+	it("lets the transport's hook repair an empty encoded context", async () => {
+		const seen: { sentBody?: string } = {};
+		const stream = streamBedrock(
+			bedrockCompactionModel(),
+			{ messages: [], tools: [] }, // the encoder produces nothing
 			{
-				apiKey: "sk-ant-oat-test",
-				signal: createAbortedSignal(),
-				onPayload: () => ({
-					model: "claude-sonnet-4-5",
-					messages: [{ role: "user", content: "hello" }],
-					max_tokens: 1024,
-					stream: true,
+				apiKey: "bedrock-test-token",
+				anthropicCompaction: {},
+				fetch: bedrockFetch(seen) as unknown as typeof fetch,
+				onPayload: payload => ({
+					...(payload as Record<string, unknown>),
+					messages: [{ role: "user", content: "repaired by transport hook" }],
 				}),
 			},
 		);
-		let sawEmptyError = false;
+		let refusal: string | undefined;
 		for await (const evt of stream) {
-			if (evt.type === "error" && evt.error.errorMessage?.includes("refusing to send a request with no messages")) {
-				sawEmptyError = true;
+			if (evt.type === "error" && evt.error.errorMessage?.includes("refusing")) {
+				refusal = evt.error.errorMessage;
 			}
 		}
-		expect(sawEmptyError).toBe(false);
+		expect(refusal).toBeUndefined();
+		expect(seen.sentBody).toContain("repaired by transport hook");
+	});
+
+	it("fails before the request when the transport leaves the body empty", async () => {
+		let fetched = false;
+		const stream = streamBedrock(
+			bedrockCompactionModel(),
+			{ messages: [], tools: [] },
+			{
+				apiKey: "bedrock-test-token",
+				anthropicCompaction: {},
+				fetch: bedrockFetch({ onFetch: () => (fetched = true) }) as unknown as typeof fetch,
+			},
+		);
+		let refusal: string | undefined;
+		for await (const evt of stream) {
+			if (evt.type === "error" && evt.error.errorMessage?.includes("refusing to send a request with no messages")) {
+				refusal = evt.error.errorMessage;
+			}
+		}
+		expect(refusal).toContain("none survived encoding.");
+		expect(fetched).toBe(false);
 	});
 });
