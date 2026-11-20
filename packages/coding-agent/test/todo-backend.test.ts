@@ -690,33 +690,39 @@ describe("todo backend", () => {
 			expect(tasksOf(backend).at(-1)).toEqual(["a", "c"]);
 		});
 
-		it("a backend that accepts after the session changed is sent nothing for it", async () => {
-			const backend = tracker("tracker", true);
-			const { session } = await open([backend.extension], "tracker");
-			session.commitTodoPhases(list("a"));
-			await settled(session);
-			const late = Promise.withResolvers<void>();
-			backend.applyHold = late.promise;
+		it("a backend that accepts after the session changed, or after it was deselected, is sent nothing for it", async () => {
+			const left: Array<[(session: AgentSession) => unknown, string[][]]> = [
+				[session => session.newSession(), [["a"], []]],
+				[session => cfgTodoBackend.override(session.settings, "native"), [["a"]]],
+			];
+			for (const [leave, sentBefore] of left) {
+				const backend = tracker("tracker", true);
+				const { session } = await open([backend.extension], "tracker");
+				session.commitTodoPhases(list("a"));
+				await settled(session);
+				const late = Promise.withResolvers<void>();
+				backend.applyHold = late.promise;
 
-			const deciding = backend.entered();
-			const abort = new AbortController();
-			const call = todo(session, { op: "append", phase: "Work", items: ["b"] }, abort.signal);
-			await deciding;
-			abort.abort();
-			await expect(call).rejects.toThrow();
-			await session.newSession();
-			await settled(session);
-			const beforeLateAnswer = tasksOf(backend);
-			late.resolve();
-			// The backend's late answer is handled in a continuation of its own promise.
-			await Bun.sleep(0);
-			await settled(session);
-			// The backend holds the new session's list: setting it again tells it nothing.
-			session.commitTodoPhases([]);
-			await settled(session);
+				const deciding = backend.entered();
+				const abort = new AbortController();
+				const call = todo(session, { op: "append", phase: "Work", items: ["b"] }, abort.signal);
+				await deciding;
+				abort.abort();
+				await expect(call).rejects.toThrow();
+				await leave(session);
+				await settled(session);
+				const beforeLateAnswer = tasksOf(backend);
+				late.resolve();
+				// The backend's late answer is handled in a continuation of its own promise.
+				await Bun.sleep(0);
+				await settled(session);
+				// Setting the live list again tells the backend nothing either.
+				session.commitTodoPhases(session.getTodoPhases());
+				await settled(session);
 
-			expect(beforeLateAnswer).toEqual([["a"], []]);
-			expect(tasksOf(backend)).toEqual(beforeLateAnswer);
+				expect(beforeLateAnswer).toEqual(sentBefore);
+				expect(tasksOf(backend)).toEqual(sentBefore);
+			}
 		});
 
 		it("as the session closes, a todo call fails without asking and a late acceptance is sent nothing", async () => {

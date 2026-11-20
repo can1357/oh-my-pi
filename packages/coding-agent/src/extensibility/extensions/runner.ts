@@ -1818,9 +1818,10 @@ export class ExtensionRunner {
 			if (!Bun.deepEquals(current(), change.previous)) return TODO_LIST_CHANGED_ERROR;
 			// The backend holds a change omp did not commit: omp's list follows, also when it equals
 			// the last one sent. Not as the session closes, nor once it has changed: the backend
-			// keeps that change for a session omp is no longer in.
+			// keeps that change for a session omp is no longer in. Nor once it is no longer selected:
+			// it gets no list from then on, this one included.
 			const resync = () => {
-				if (this.#todoClosed || this.sessionManager.getSessionId() !== sessionId) return;
+				if (this.#todoClosed || this.sessionManager.getSessionId() !== sessionId || selected() !== backend) return;
 				this.#todoStale = true;
 				this.#todoPending ??= { backend, sessionId, phases: current() };
 				this.#queueTodoBackendCall();
