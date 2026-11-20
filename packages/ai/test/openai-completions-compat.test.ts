@@ -1242,6 +1242,78 @@ describe("openai-completions compatibility", () => {
 		expect(assistantObject?.reasoning_content).toBeUndefined();
 	});
 
+	it.each([
+		{ name: "interleaved reasoning", first: "Check ", second: "the file.", replayText: "Check the file." },
+		{ name: "opaque-only reasoning", first: undefined, second: undefined, replayText: undefined },
+	])("persists and replays Copilot $name only to the issuing model", async ({ first, second, replayText }) => {
+		const spec: ModelSpec<"openai-completions"> = {
+			...gpt4oMiniSpec,
+			id: "gemini-4-neon",
+			name: "Gemini 4 Neon",
+			provider: "github-copilot",
+			baseUrl: "https://api.githubcopilot.com",
+			reasoning: true,
+			compat: undefined,
+		};
+		const model = buildModel(spec);
+		const deltas = [
+			{ reasoning_text: first },
+			{ reasoning_opaque: "earlier-state" },
+			{
+				tool_calls: [{ index: 0, id: "call_first", type: "function", function: { name: "read", arguments: "{}" } }],
+			},
+			{ reasoning_text: second },
+			{ reasoning_opaque: "latest-state" },
+			{
+				tool_calls: [
+					{ index: 1, id: "call_second", type: "function", function: { name: "read", arguments: "{}" } },
+				],
+			},
+			{ reasoning_opaque: "" },
+		];
+		const fetchMock = createMockFetch([
+			...deltas.map(delta => ({ choices: [{ index: 0, delta }] })),
+			{ choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+			"[DONE]",
+		]);
+		const context = baseContext();
+		const result = await streamOpenAICompletions(model, context, { apiKey: "test-key", fetch: fetchMock }).result();
+		expect(result.stopReason).toBe("toolUse");
+		const stored = result.content.find(block => block.type === "thinking")?.thinkingSignature;
+		expect(JSON.parse(stored ?? "null")).toMatchObject({ reasoningOpaque: "latest-state" });
+		const history: Context = {
+			messages: [
+				...context.messages,
+				result,
+				...["call_first", "call_second"].map((toolCallId): ToolResultMessage => ({
+					role: "toolResult",
+					toolCallId,
+					toolName: "read",
+					content: [{ type: "text", text: "File contents" }],
+					isError: false,
+					timestamp: Date.now(),
+				})),
+			],
+		};
+		const replay = async (target: Model<"openai-completions">) =>
+			getPayloadMessages(await captureOpenAICompletionsPayload(target, history)).find(
+				message => message.role === "assistant",
+			);
+		const own = await replay(model);
+		expect(own?.reasoning_opaque).toBe("latest-state");
+		expect(own?.reasoning_text).toBe(replayText);
+		expect(own?.thinking_blocks).toBeUndefined();
+		for (const target of [
+			buildModel({ ...spec, id: "gemini-4-hydrogen" }),
+			buildModel({ ...spec, provider: "openai", baseUrl: "https://api.openai.com/v1" }),
+		]) {
+			const foreign = await replay(target);
+			expect(foreign?.tool_calls).toHaveLength(2);
+			expect(foreign?.reasoning_opaque).toBeUndefined();
+			expect(foreign?.reasoning_text).toBeUndefined();
+		}
+	});
+
 	it("maps MiMo unsupported reasoning efforts to opencode-go accepted wire values", async () => {
 		const model: Model<"openai-completions"> = buildModel({
 			id: "mimo-v2.5-pro",
