@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added `async.processWatch.enabled` (off by default): while background jobs run, the `judge` model role checks them on a schedule (30 s, 1, 2, 4, 8 and 16 minutes, then every 30 minutes) and tells the agent at its next turn about jobs that look stalled, failing, or like a server it is waiting on as if it would exit. Tune with `async.processWatch.threshold`, `async.processWatch.schedule` and `async.processWatch.everySeconds`. ([#19295](https://github.com/can1357/oh-my-pi/pull/19295) by [@Xytronix](https://github.com/Xytronix))
-- On Linux, process-watch checks also see host resource pressure (CPU, memory and I/O stall averages, free memory and swap, free disk space), so a job starved by the host is reported as stalled with the cause named and a suggestion to move heavy work off the host or free resources. ([#19295](https://github.com/can1357/oh-my-pi/pull/19295) by [@Xytronix](https://github.com/Xytronix))
 ### Breaking Changes
 
 - Removed the `mcp/transports/*` and `mcp/tool-cache` SDK exports, `DeferredMCPTool`, and the cache and reconnect-policy parameters of `MCPManager`; MCP servers are now reached through the MCP host (`mcp/host/*`)
@@ -32,6 +28,8 @@
 - Sessions now record approval prompts in their session file, even before the first reply: a `tool_approval_requested` entry when a tool call starts waiting on you (naming the dispatching eval call in `parentToolCallId` for calls made from an eval) and a `tool_approval_resolved` entry when it is approved, denied, aborted, or refused, so tools that read session files (sidebars, dashboards) can show a session waiting on approval ([#18837](https://github.com/can1357/oh-my-pi/pull/18837) by [@baekjosh](https://github.com/baekjosh))
 - Added redirected files to a background bash job's streams: `proc://<id>/streams`, the jobs sheet and job widgets (source `file:<n>`) read what a command writes with `> log` while it runs, as they do for `|` stages
 - Added Binary Ninja as a disassembler backend for read analysis views and the dsm namespace. Select it with disassembler.backend = binja; it uses a local install found through binja.installDir, $BN_INSTALL_DIR, or the default install locations ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- Added `async.processWatch.enabled` (off by default): while background jobs run, the `judge` model role checks them on a schedule (30 s, 1, 2, 4, 8 and 16 minutes, then every 30 minutes) and tells the agent at its next turn about jobs that look stalled, failing, or like a server it is waiting on as if it would exit. Tune with `async.processWatch.threshold`, `async.processWatch.schedule` and `async.processWatch.everySeconds`. ([#19901](https://github.com/can1357/oh-my-pi/pull/19901) by [@Xytronix](https://github.com/Xytronix))
+- On Linux, process-watch checks also see host resource pressure (CPU, memory and I/O stall averages, free memory and swap, free disk space), so a job starved by the host is reported as stalled with the cause named and a suggestion to move heavy work off the host or free resources. ([#19901](https://github.com/can1357/oh-my-pi/pull/19901) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
