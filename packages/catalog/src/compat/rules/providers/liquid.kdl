@@ -1,14 +1,18 @@
-// Liquid AI decision models. d1.1 and d1-ultra answer typed questions over
-// JSON state with the TypeSafe System One body (`{model, state, questions}`,
-// plus top-level `images` data URLs) at `POST /decisions/v1/systemone`.
+// Liquid AI decision models. d1.2 and d1.2-ultra, plus the deprecated d1.1 and
+// d1-ultra, answer typed questions over JSON state with the TypeSafe System One
+// body (`{model, state, questions}`, plus top-level `images` data URLs) at
+// `POST /decisions/v1/systemone`.
 
 provider "liquid" {
-	default-model "d1.1"
+	default-model "d1.2"
 	env "LIQUID_API_KEY"
 
-	// docs.liquid.ai/lfm/models/d1 and liquid.ai/pricing: both take text and
-	// image input and bill input tokens only. Context windows as listed on
-	// OpenRouter (liquid/d1.1, liquid/d1-ultra).
+	// docs.liquid.ai/lfm/models/d1 and liquid.ai/pricing: all four take text and
+	// image input and bill input tokens only. d1.2 and d1.2-ultra take 65,536
+	// input tokens per question; the d1.1 and d1-ultra windows are as listed on
+	// OpenRouter (liquid/d1.1, liquid/d1-ultra). Liquid's docs deprecate d1.1 and
+	// d1-ultra for d1.2 and d1.2-ultra, with the same request format, and still
+	// serve both (docs.liquid.ai/lfm/help/deprecations).
 	seed api="liquid-systemone" base-url="https://api.liquid.ai" bundle="always" {
 		model "d1.1" name="d1.1" {
 			reasoning #false
@@ -22,6 +26,20 @@ provider "liquid" {
 			input "text" "image"
 			cost input=0.042 output=0 cache-read=0.042 cache-write=0
 			limits context=32768
+			supports-tools #false
+		}
+		model "d1.2" name="d1.2" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.02 output=0 cache-read=0.02 cache-write=0
+			limits context=65536
+			supports-tools #false
+		}
+		model "d1.2-ultra" name="d1.2-ultra" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.042 output=0 cache-read=0.042 cache-write=0
+			limits context=65536
 			supports-tools #false
 		}
 	}

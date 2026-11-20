@@ -192,6 +192,11 @@ fn window_menu_context(
 			 support is required",
 		));
 	}
+	// The target may have been minimized since the visible-window lookup.
+	// A menu read would otherwise try to make it key or read a sibling's menu.
+	if copy_bool(root, "AXMinimized") == Some(true) {
+		return Err(crate::desktop::menus::minimized_window(&window.id));
+	}
 	let pid = element_pid(root)?;
 	let app = create_application(pid)?;
 	set_timeout(&app)?;

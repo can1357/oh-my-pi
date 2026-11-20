@@ -6,6 +6,7 @@ import type { AgentEvent, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Process } from "@oh-my-pi/pi-natives";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { isRecord, ptree, readLines, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { isAlive, waitFor } from "./fixtures/daemon-harness";
 
 const device = "mcp__stub_regression_announce";
 const deviceUri = `xd://${device}`;
@@ -39,15 +40,6 @@ async function auditEntries(audit: string): Promise<Record<string, unknown>[]> {
 	});
 }
 
-function isAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
 // Both modes enter main.ts -> createAgentSession -> runRpcMode. An SDK-only
 // fixture would miss a lost MCP manager at that launch boundary.
 describe("CLI RPC MCP discovery", () => {
@@ -68,6 +60,9 @@ describe("CLI RPC MCP discovery", () => {
 				PI_CONFIG_DIR: ".omp",
 				PI_CODING_AGENT_DIR: agentDir,
 				PI_NO_TITLE: "1",
+				// Wait for the stub at startup: a server the MCP host has never seen is
+				// probed before it serves, which outlasts the default startup window.
+				OMP_MCP_STARTUP_TIMEOUT_MS: "0",
 			};
 			using model = ptree.spawn([process.execPath, fakeModel, agentDir], {
 				cwd: project,
@@ -178,11 +173,24 @@ describe("CLI RPC MCP discovery", () => {
 						child.stdin.end();
 						child.attachTimeout(10_000);
 						expect(await child.exited).toBe(0);
-						const spawns = (await auditEntries(audit)).filter(entry => entry.event === "spawn");
-						expect(spawns).toHaveLength(phase === "disabled" ? 0 : 1);
+						const entries = await auditEntries(audit);
+						const spawns = entries.filter(entry => entry.event === "spawn");
+						if (phase === "disabled") {
+							expect(spawns).toHaveLength(0);
+						} else {
+							// The host launches the stub to probe it and again to serve. Every
+							// invocation, across both session switches, reached that one server.
+							const firstCall = entries.findIndex(entry => entry.method === "tools/call");
+							const lastSpawn = entries.findLastIndex(entry => entry.event === "spawn");
+							expect(lastSpawn).toBeGreaterThanOrEqual(0);
+							expect(firstCall).toBeGreaterThan(lastSpawn);
+						}
 						for (const spawn of spawns) {
 							if (typeof spawn.pid !== "number") throw new Error("Missing MCP PID");
-							expect(isAlive(spawn.pid), `MCP peer ${spawn.pid} survived RPC shutdown`).toBe(false);
+							const pid = spawn.pid;
+							// The MCP host owns the peer and stops it once the exiting session lets
+							// go: shortly after the CLI is gone, with no event this test could await.
+							await waitFor(() => !isAlive(pid), `MCP peer ${pid} to stop after RPC shutdown`, 5_000);
 						}
 					} finally {
 						observingEof = false;

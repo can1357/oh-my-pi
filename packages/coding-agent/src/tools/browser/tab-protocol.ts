@@ -67,11 +67,14 @@ export interface SessionSnapshot {
 
 /**
  * The page an attach worker drives. `create`: open and own a background tab in a
- * spawned browser or relay; `nearTargetId` selects the relay browser when given.
- * `owned`: an omp tab adopted after recycle. `borrowed`: a user's page, never closed,
- * and focus-emulated only in a browser the user drives (see `userDriven`).
+ * spawned browser, relay or CDP endpoint; `nearTargetId` selects the relay browser when given,
+ * and `reload` loads a URL once the page is set up (a recycle re-creating a page that closed with
+ * its old worker's connection). `owned`: an omp tab adopted after recycle. `borrowed`: a user's
+ * page, never closed, and focus-emulated only in a browser the user drives (see `userDriven`).
  */
-export type AttachPage = { kind: "create"; nearTargetId?: string } | { kind: "owned" | "borrowed"; targetId: string };
+export type AttachPage =
+	| { kind: "create"; nearTargetId?: string; reload?: { url: string; timeoutMs: number } }
+	| { kind: "owned" | "borrowed"; targetId: string };
 
 /** omp created the payload's page: closing the tab closes the page. */
 export function ownsPage(payload: WorkerInitPayload): boolean {
@@ -232,9 +235,10 @@ export interface RunErrorPayload {
 	debuggerDetached?: { when: "during" | "before"; reason: string };
 	/**
 	 * The page's Puppeteer session went stale (main frame detached, CDP session closed) `during` this run, after its
-	 * code started, or `before` it, so nothing ran; the supervisor reattaches the target on a new worker.
+	 * code started, or `before` it, so nothing ran; the supervisor reattaches the target on a new worker. `closed`:
+	 * the page itself closed, which a reattach cannot undo.
 	 */
-	pageLost?: { when: "during" | "before" };
+	pageLost?: { when: "during" | "before"; closed: boolean };
 }
 
 export type WorkerOutbound =
@@ -253,6 +257,13 @@ export type WorkerOutbound =
 			 */
 			type: "page-created";
 			targetId: string;
+	  }
+	| {
+			/**
+			 * The page closed while omp was not closing it. Not sent once the worker stops; a supervisor that cannot
+			 * see the page in the browser's target list (a connection-scoped page) releases the tab on it.
+			 */
+			type: "page-closed";
 	  }
 	| { type: "ready"; info: ReadyInfo }
 	| { type: "init-failed"; error: RunErrorPayload }
