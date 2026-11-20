@@ -163,6 +163,7 @@ export const vcsDetachGitDir = nativeBindings.vcsDetachGitDir ?? missingNativeEx
 export const vcsDiscover = nativeBindings.vcsDiscover ?? missingNativeExport("vcsDiscover");
 export const vcsDiscoverForDisplay = nativeBindings.vcsDiscoverForDisplay ?? missingNativeExport("vcsDiscoverForDisplay");
 export const vcsGitClone = nativeBindings.vcsGitClone ?? missingNativeExport("vcsGitClone");
+export const vcsGitDiscardsWork = nativeBindings.vcsGitDiscardsWork ?? missingNativeExport("vcsGitDiscardsWork");
 export const vcsGitDiscover = nativeBindings.vcsGitDiscover ?? missingNativeExport("vcsGitDiscover");
 export const vcsGitRepoInfo = nativeBindings.vcsGitRepoInfo ?? missingNativeExport("vcsGitRepoInfo");
 export const vcsIsPureJj = nativeBindings.vcsIsPureJj ?? missingNativeExport("vcsIsPureJj");

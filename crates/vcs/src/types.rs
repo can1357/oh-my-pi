@@ -345,6 +345,79 @@ pub struct CleanOptions {
 	pub paths:           Vec<String>,
 }
 
+/// What a work-discarding command would destroy, for
+/// [`discards_work`](crate::git::discards_work).
+#[derive(Debug, Clone)]
+pub enum DiscardCheck {
+	/// Uncommitted changes to tracked files (`reset --hard`, `checkout .`,
+	/// `restore .`), and the untracked files a checkout from another commit
+	/// overwrites.
+	Tracked(TrackedCheck),
+	/// The untracked files a `git clean` with these options would delete.
+	Clean(CleanCheck),
+}
+
+/// Which changes to tracked files [`DiscardCheck::Tracked`] counts.
+#[derive(Debug, Clone, Default)]
+pub struct TrackedCheck {
+	/// Only changes the work tree holds beyond the index: the command
+	/// overwrites the work tree but leaves the index alone (`git checkout .`,
+	/// `git restore .`), which keeps staged changes.
+	pub worktree_only:   bool,
+	/// Pathspecs the command restores, relative to the directory the check
+	/// runs in; empty for the whole work tree.
+	pub pathspecs:       Vec<String>,
+	/// `git reset --merge`: it reverts the staged changes, conflicted paths
+	/// included, and refuses while a path has a staged change and a work-tree
+	/// modification (then it loses nothing). Counts the staged changes only;
+	/// `worktree_only` and `source` do not apply.
+	pub merge:           bool,
+	/// The tree-ish the command checks the files out of when it is neither
+	/// the index nor `HEAD` (`git reset --hard <commit>`, `git checkout -f
+	/// <branch>`, `git checkout <commit> .`, `git restore --source=<tree>
+	/// .`): it also overwrites the untracked, not ignored files under the
+	/// pathspecs that it tracks, that are where it tracks a directory, or that
+	/// are under a path it tracks as a file. A name that resolves to nothing
+	/// is looked up as `git switch` and `git checkout` guess a new branch:
+	/// among the remote-tracking branches of that name.
+	pub source:          Option<String>,
+	/// A `git stash` without `-u` or `-a` before the command saved every
+	/// change to tracked files but left the untracked ones: count only the
+	/// untracked files `source` overwrites.
+	pub tracked_stashed: bool,
+}
+
+/// The options of a `git clean` that [`DiscardCheck::Clean`] previews.
+#[derive(Debug, Clone, Default)]
+pub struct CleanCheck {
+	/// Untracked directories too (`-d`).
+	pub directories:         bool,
+	/// Ignored files too (`-x`).
+	pub include_ignored:     bool,
+	/// Only ignored files (`-X`).
+	pub ignored_only:        bool,
+	/// Untracked nested repositories too (`-ff`).
+	pub nested_repositories: bool,
+	/// Extra ignore patterns (`-e`).
+	pub excludes:            Vec<String>,
+	/// Pathspecs, relative to the directory the check runs in.
+	pub pathspecs:           Vec<String>,
+	/// A `git stash -u` ran before the command: the untracked files it saved
+	/// are gone, so the preview counts only the ignored files the untracked
+	/// preview leaves (what `-x` or `-X` with the excludes adds to it).
+	pub untracked_stashed:   bool,
+}
+
+/// The repository and work tree a git command names with `--git-dir` and
+/// `--work-tree`, in place of the ones git discovers from its directory.
+#[derive(Debug, Clone, Default)]
+pub struct RepositoryPaths {
+	/// `--git-dir`: the repository.
+	pub git_dir:   Option<PathBuf>,
+	/// `--work-tree`: the work tree.
+	pub work_tree: Option<PathBuf>,
+}
+
 /// Options for the CLI-backed `push`.
 #[derive(Debug, Clone, Default)]
 pub struct PushOptions {

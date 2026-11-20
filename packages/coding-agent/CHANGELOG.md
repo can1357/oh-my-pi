@@ -11,6 +11,8 @@
 
 ### Added
 
+- Added opt-in `tools.guardRules` setting: best-effort checks that ask before top-level bash commands read credentials or send secrets over the network, and before `read`/`grep` of credential files ([#19902](https://github.com/can1357/oh-my-pi/pull/19902) by [@Xytronix](https://github.com/Xytronix))
+- Added `discard_changes` and `kills_harness` guard rules under `tools.guardRules`: ask before a git command would discard uncommitted work or a `pkill`/`killall` would stop omp ([#19892](https://github.com/can1357/oh-my-pi/pull/19892) by [@Xytronix](https://github.com/Xytronix))
 - Sloppy edits can replace, delete or move a syntax block by its opening line without quoting its body, and rename a whole identifier with `*** Find all`
 - MCP servers now run in the omp daemon instead of inside every session: sessions with the same server configuration share one process for servers on MCP 2026-07-28, and `/mcp list` shows each server's state, pid and how many sessions share it. Turn off with `mcp.shared` ([#6819](https://github.com/can1357/oh-my-pi/issues/6819))
 - MCP servers start on first use: tool, prompt and resource lists come from a shared cache, so a session that never calls a server starts no process for it, and an unused 2026-07-28 server stops after `mcp.idleStopMinutes` (default 5) ([#2888](https://github.com/can1357/oh-my-pi/issues/2888))
@@ -28,6 +30,7 @@
 - Sessions now record approval prompts in their session file, even before the first reply: a `tool_approval_requested` entry when a tool call starts waiting on you (naming the dispatching eval call in `parentToolCallId` for calls made from an eval) and a `tool_approval_resolved` entry when it is approved, denied, aborted, or refused, so tools that read session files (sidebars, dashboards) can show a session waiting on approval ([#18837](https://github.com/can1357/oh-my-pi/pull/18837) by [@baekjosh](https://github.com/baekjosh))
 - Added redirected files to a background bash job's streams: `proc://<id>/streams`, the jobs sheet and job widgets (source `file:<n>`) read what a command writes with `> log` while it runs, as they do for `|` stages
 - Added Binary Ninja as a disassembler backend for read analysis views and the dsm namespace. Select it with disassembler.backend = binja; it uses a local install found through binja.installDir, $BN_INSTALL_DIR, or the default install locations ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- Added opt-in `tools.guardRules` setting: best-effort checks that ask before top-level bash commands read credentials or send secrets over the network, and before `read`/`grep` of credential files ([#19902](https://github.com/can1357/oh-my-pi/pull/19902) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 

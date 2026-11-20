@@ -1,5 +1,6 @@
 import type {
 	VcsCloneOptions,
+	VcsDiscardCheck,
 	VcsGitRepo,
 	VcsGitRepoInfo,
 	VcsHunkSelection,
@@ -60,6 +61,19 @@ export declare function requireGit(dir: string): VcsGitRepo;
 
 /** Repository metadata only (cheap fs walk) — for synchronous render paths. */
 export declare function gitInfo(dir: string): VcsGitRepoInfo | null;
+
+/**
+ * Whether a work-discarding command run in `dir` would destroy anything:
+ * uncommitted changes to tracked files (with `check.source`, also the
+ * untracked, not ignored files a checkout of that commit overwrites), or
+ * with `check.clean` the untracked files that `git clean` would delete, in
+ * the repository and work tree `check.gitDir`/`check.workTree` name (else the
+ * ones git discovers from `dir`). Synchronous, for approval checks, and runs
+ * no program the repository configures; `false` outside a repository. The
+ * check, every git call it makes included, fails once `timeoutMs` (three
+ * seconds when unset) have passed.
+ */
+export declare function discardsWorkSync(dir: string, check?: VcsDiscardCheck, timeoutMs?: number): boolean;
 
 /** Discover the Jujutsu workspace containing `dir`; `null` when absent. */
 export declare function jj(dir: string): VcsJjWorkspace | null;

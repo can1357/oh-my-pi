@@ -294,15 +294,22 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 	return { tier: "exec", override: false };
 }
 
+/**
+ * Run a tool's approval declaration. `resolution`, when given, is the mode and user policies the
+ * call is being resolved under; a function-valued approval called with a context receives it there
+ * as `approvalResolution`.
+ */
 function getToolDecision(
 	tool: ApprovalSubject,
 	args: unknown,
 	context?: AgentToolContext,
+	resolution?: ResolvedExecuteTimeApproval,
 ): Omit<ResolvedApproval, "policy"> & { policy?: ApprovalPolicy } {
 	const approval = tool.approval;
-	const decision: ToolApprovalDecision | undefined =
-		typeof approval === "function" ? approval(args, context) : approval;
-	return normalizeDecision(decision);
+	if (typeof approval !== "function") return normalizeDecision(approval);
+	return normalizeDecision(
+		approval(args, context && resolution ? { ...context, approvalResolution: resolution } : context),
+	);
 }
 
 /**
@@ -396,7 +403,7 @@ function resolvePolicy(
 	grants: ApprovalGrantStore | undefined,
 	context?: AgentToolContext,
 ): ResolvedApproval {
-	const decision = getToolDecision(tool, args, context);
+	const decision = getToolDecision(tool, args, context, { approvalMode: mode, userPolicies: userConfig });
 	const policyKey = decision.policyKey ?? tool.name;
 	const userPolicy = Object.hasOwn(userConfig, policyKey) ? normalizePolicy(userConfig[policyKey]) : undefined;
 	const fallbackPolicy =
