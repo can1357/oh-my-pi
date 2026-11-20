@@ -139,13 +139,6 @@ import {
 } from "./inference-headers";
 import { isMalformedToolCallName, isValidToolCallId, transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
-import toolResultBridge from "./tool-result-bridge.md" with { type: "text" };
-
-/**
- * Synthetic assistant turn inserted between tool results and a following user
- * message for models with `requiresAssistantAfterToolResult`.
- */
-export const TOOL_RESULT_BRIDGE_TEXT = toolResultBridge.trim();
 
 export interface OpenAIModelIdentity {
 	provider: string;
@@ -2082,11 +2075,6 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
 	/** Naming rule for rebuilt `function_call` names; see {@link ResponsesToolNaming}. */
 	toolNaming?: ResponsesToolNaming;
 	/**
-	 * Insert a synthetic assistant message wherever a user message directly
-	 * follows a tool output; see {@link ResolvedOpenAISharedCompat.requiresAssistantAfterToolResult}.
-	 */
-	requiresAssistantAfterToolResult?: boolean;
-	/**
 	 * Replay no earlier turn's encrypted reasoning: the request retrying a
 	 * refused replay ({@link isOpenAIResponsesRefusedEncryptedReasoningError}).
 	 * Without it, only turns before the latest
@@ -2579,32 +2567,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 	const withRepairedOutputs = options.repairOrphanOutputs ? repairOrphanResponsesToolOutputs(messages) : messages;
 	const withRepairedCalls = repairOrphanResponsesToolCalls(withRepairedOutputs);
 	const hoisted = hoistInterleavedResponsesToolBatchMessages(withRepairedCalls);
-	const bridged = options.requiresAssistantAfterToolResult ? bridgeToolOutputsBeforeUserMessages(hoisted) : hoisted;
-	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(bridged);
-}
-
-/**
- * Insert a {@link TOOL_RESULT_BRIDGE_TEXT} assistant message between a tool
- * output and a user/developer message that directly follows it, for models
- * that fail on that shape (Gemini 4 Neon ends such turns with an empty
- * `MALFORMED_RESPONSE`). Returns the same array when nothing is inserted.
- */
-function bridgeToolOutputsBeforeUserMessages(input: ResponseInput): ResponseInput {
-	let bridged: ResponseInput | undefined;
-	for (let index = 0; index < input.length; index++) {
-		const item = input[index];
-		if (
-			index > 0 &&
-			"role" in item &&
-			(item.role === "user" || item.role === "developer") &&
-			responsesToolOutputKind(input[index - 1].type) !== undefined
-		) {
-			bridged ??= input.slice(0, index);
-			bridged.push({ type: "message", role: "assistant", content: TOOL_RESULT_BRIDGE_TEXT });
-		}
-		bridged?.push(item);
-	}
-	return bridged ?? input;
+	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(hoisted);
 }
 
 type ResponsesReplayAssistantMessage = Omit<ResponseOutputMessage, "id"> & { id?: string };

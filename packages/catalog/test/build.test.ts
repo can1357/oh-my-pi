@@ -810,7 +810,7 @@ describe("openai-completions wire-quirk compat detection", () => {
 		expect(other.filterReasoningHistory).toBe(false);
 	});
 
-	it("requires a synthetic assistant bridge after tool results only for Mistral hosts and Gemini 4 Neon", () => {
+	it("requires a synthetic assistant bridge after tool results only for Mistral hosts", () => {
 		// Mistral/Devstral reject a user message directly after a tool result; the chat
 		// builder bridges it with a synthetic assistant turn, keyed on the Mistral host.
 		expect(
@@ -828,19 +828,28 @@ describe("openai-completions wire-quirk compat detection", () => {
 				}),
 			).compat.requiresAssistantAfterToolResult,
 		).toBe(true);
-		// Gemini 4 Neon fails with an empty MALFORMED_RESPONSE on that shape; Gemini 4 Argon does not.
-		expect(
-			resolveModelPolicy(openrouterSpec({ id: "google/gemini-4-neon" })).compat.requiresAssistantAfterToolResult,
-		).toBe(true);
-		expect(
-			resolveModelPolicy(openrouterSpec({ id: "google/gemini-4-argon" })).compat.requiresAssistantAfterToolResult,
-		).toBe(false);
 		// Non-Mistral hosts must not insert the bridge.
 		expect(resolveModelPolicy(completionsSpec()).compat.requiresAssistantAfterToolResult).toBe(false);
 		expect(
 			resolveModelPolicy(completionsSpec({ provider: "openai", id: "gpt-5", baseUrl: "https://api.openai.com/v1" }))
 				.compat.requiresAssistantAfterToolResult,
 		).toBe(false);
+	});
+
+	it("folds user text into the preceding tool result only for Gemini 4 Neon", () => {
+		// Neon ends requests closing on user text after a function response with an
+		// empty MALFORMED_RESPONSE; Gemini 4 Argon does not.
+		expect(resolveModelPolicy(openrouterSpec({ id: "google/gemini-4-neon" })).compat.foldUserAfterToolResult).toBe(
+			true,
+		);
+		expect(
+			resolveModelPolicy(
+				responsesSpec({ provider: "custom", id: "gemini-4-neon", baseUrl: "https://proxy.example/v1" }),
+			).compat.foldUserAfterToolResult,
+		).toBe(true);
+		expect(resolveModelPolicy(openrouterSpec({ id: "google/gemini-4-argon" })).compat.foldUserAfterToolResult).toBe(
+			false,
+		);
 	});
 
 	it("flags cumulative reasoning deltas for MiniMax provider or id", () => {

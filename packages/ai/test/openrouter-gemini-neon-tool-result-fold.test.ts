@@ -3,9 +3,10 @@ import { stream } from "@oh-my-pi/pi-ai";
 import type { AssistantMessage, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
-// Gemini 4 Neon ends ~half of the turns whose request closes on a user message
-// right after a function response with an empty MALFORMED_RESPONSE. The
-// Responses encoder must bridge that gap with an assistant turn, and only there.
+// Gemini 4 Neon ends ~half of the requests that close on a user message right
+// after a function response with an empty MALFORMED_RESPONSE. Such a message
+// must ride inside the preceding tool output; user text after an assistant
+// turn stays its own message.
 const neon: Model<"openrouter"> = buildModel({
 	id: "google/gemini-4-neon",
 	name: "Gemini 4 Neon",
@@ -41,7 +42,13 @@ function assistant(content: AssistantMessage["content"], stopReason: AssistantMe
 	};
 }
 
-async function captureInput(context: Context): Promise<string[]> {
+interface WireItem {
+	type?: string;
+	role?: string;
+	output?: unknown;
+}
+
+async function captureInput(context: Context): Promise<WireItem[]> {
 	const { promise, resolve } = Promise.withResolvers<unknown>();
 	const controller = new AbortController();
 	controller.abort();
@@ -58,13 +65,12 @@ async function captureInput(context: Context): Promise<string[]> {
 	if (typeof payload !== "object" || payload === null || !("input" in payload) || !Array.isArray(payload.input)) {
 		throw new Error("Responses payload carries no input array");
 	}
-	const items: Array<{ type?: string; role?: string }> = payload.input;
-	return items
-		.filter(item => item.type !== "reasoning")
-		.map(item => (item.type === undefined || item.type === "message" ? `message:${item.role}` : item.type));
+	const items: WireItem[] = payload.input;
+	return items.filter(item => item.type !== "reasoning");
 }
 
-it("bridges only user messages that directly follow tool results", async () => {
+it("folds user text that directly follows a tool result into that result's output", async () => {
+	const irc = "<irc>GfxPassAudit: build is done.</irc>";
 	const context: Context = {
 		messages: [
 			{ role: "user", content: "Audit the render passes.", timestamp: 1 },
@@ -77,30 +83,15 @@ it("bridges only user messages that directly follow tool results", async () => {
 				isError: false,
 				timestamp: 2,
 			},
-			{ role: "user", content: "<irc>GfxPassAudit: build is done.</irc>", timestamp: 3 },
+			{ role: "user", content: irc, timestamp: 3 },
 			assistant([{ type: "text", text: "Acknowledged." }], "stop"),
 			{ role: "user", content: "Continue.", timestamp: 4 },
-			assistant([{ type: "toolCall", id: "call_2", name: "bash", arguments: { command: "ls" } }], "toolUse"),
-			{
-				role: "toolResult",
-				toolCallId: "call_2",
-				toolName: "bash",
-				content: [{ type: "text", text: "plan.rs" }],
-				isError: false,
-				timestamp: 5,
-			},
 		],
 	};
 
-	expect(await captureInput(context)).toEqual([
-		"message:user",
-		"function_call",
-		"function_call_output",
-		"message:assistant",
-		"message:user",
-		"message:assistant",
-		"message:user",
-		"function_call",
-		"function_call_output",
-	]);
+	const input = await captureInput(context);
+	expect(
+		input.map(item => (item.type === undefined || item.type === "message" ? `message:${item.role}` : item.type)),
+	).toEqual(["message:user", "function_call", "function_call_output", "message:assistant", "message:user"]);
+	expect(input[2]?.output).toBe(`fn plan() {}\n${irc}`);
 });
