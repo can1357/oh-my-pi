@@ -2364,9 +2364,23 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 	// session (#6913). The persisted transcript is never touched.
 	const escapeControlTokens = isHarmonyDialectModel(options.model);
 
+	// OpenRouter's Responses adapter drops an array `function_call_output.output`
+	// for non-OpenAI upstreams (#13486). Its tool results keep text outputs, and
+	// their images go in one user message after the batch, as chat completions does.
+	const sendToolImagesAsUserMessage = options.model.provider === "openrouter";
+	const toolImages: ResponseInputImage[] = [];
+	const flushToolImages = (): void => {
+		if (toolImages.length === 0) return;
+		messages.push({
+			role: "user",
+			content: [{ type: "input_text", text: "Attached image(s) from tool result:" }, ...toolImages.splice(0)],
+		});
+	};
+
 	let msgIndex = 0;
 	for (let position = 0; position < transformedMessages.length; position++) {
 		const msg = transformedMessages[position];
+		if (msg.role !== "toolResult") flushToolImages();
 		const dropEncryptedReasoning = position < encryptedReasoningFloor;
 		if (msg.role === "user" || msg.role === "developer") {
 			const providerPayload = (msg as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
@@ -2553,10 +2567,12 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				customCallIds,
 				supportsCustomToolCalls,
 				computerCallIds,
+				sendToolImagesAsUserMessage ? toolImages : undefined,
 			);
 		}
 		msgIndex++;
 	}
+	flushToolImages();
 
 	// Repair orphan outputs/calls first: both can inject an assistant `message`
 	// (an `[Orphan … result]` note, a `[Computer call interrupted …]` note) in
@@ -2935,7 +2951,10 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 	return { output, outputText };
 }
 
-/** Appends one Responses tool result. */
+/**
+ * Appends one Responses tool result. With `toolImages`, an output that carries
+ * images is sent as its text and the images are queued for the caller.
+ */
 export function appendResponsesToolResultMessages<TApi extends Api>(
 	messages: ResponseInput,
 	toolResult: ToolResultMessage,
@@ -2946,6 +2965,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	customCallIds?: ReadonlySet<string>,
 	supportsCustomToolCalls = true,
 	computerCallIds?: ReadonlySet<string>,
+	toolImages?: ResponseInputImage[],
 ): void {
 	const { output, outputText } = encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal);
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
@@ -2997,17 +3017,24 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		} as ResponseInput[number]);
 		return;
 	}
+	let wireOutput = output;
+	if (toolImages && typeof output !== "string") {
+		wireOutput = outputText;
+		for (const part of output) {
+			if (part.type === "input_image") toolImages.push(part);
+		}
+	}
 	if (supportsCustomToolCalls && customCallIds?.has(normalized.callId)) {
 		messages.push({
 			type: "custom_tool_call_output",
 			call_id: normalized.callId,
-			output,
+			output: wireOutput,
 		} as ResponseInput[number]);
 	} else {
 		messages.push({
 			type: "function_call_output",
 			call_id: normalized.callId,
-			output,
+			output: wireOutput,
 		});
 	}
 }

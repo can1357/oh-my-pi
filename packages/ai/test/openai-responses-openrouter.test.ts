@@ -567,6 +567,64 @@ describe("OpenRouter Responses request shape", () => {
 			input.findIndex(item => item.type === "function_call"),
 		);
 	});
+
+	it("sends a Read image result as a text output plus a user image message, not an array output", async () => {
+		// OpenRouter's Responses adapter drops an array `function_call_output.output`
+		// for non-OpenAI upstreams, and the request then ends on the call (#13486).
+		const usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const readTurn: AssistantMessage = {
+			role: "assistant",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			model: "global.anthropic.claude-fable-5-1",
+			stopReason: "toolUse",
+			usage,
+			content: [{ type: "toolCall", id: "call_read_1", name: "read", arguments: { path: "shot.png" } }],
+			timestamp: 1,
+		};
+		const history: Context = {
+			messages: [
+				{ role: "user", content: "read the screenshot", timestamp: 0 },
+				readTurn,
+				{
+					role: "toolResult",
+					toolCallId: "call_read_1",
+					toolName: "read",
+					content: [
+						{ type: "text", text: "Read image file [image/png]" },
+						{ type: "image", mimeType: "image/png", data: "AAAA" },
+					],
+					isError: false,
+					timestamp: 2,
+				},
+				{ role: "user", content: "continue", timestamp: 3 },
+			],
+		};
+		const body = await capturePseudoResponsesRequest(
+			buildOpenRouterModel({ id: "google/gemini-4-argon", input: ["text", "image"] }),
+			{},
+			history,
+		);
+		const input = body.input as Array<Record<string, unknown>>;
+		expect(input.slice(-3)).toEqual([
+			{ type: "function_call_output", call_id: "call_read_1", output: "Read image file [image/png]" },
+			{
+				role: "user",
+				content: [
+					{ type: "input_text", text: "Attached image(s) from tool result:" },
+					{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,AAAA" },
+				],
+			},
+			{ role: "user", content: [{ type: "input_text", text: "continue" }] },
+		]);
+	});
 });
 
 async function captureDirectResponsesRequest(
