@@ -4179,11 +4179,6 @@ export function vercelAiGatewayModelManagerOptions(
 					const pricing = entry.pricing as Record<string, unknown> | undefined;
 					const tags = Array.isArray(entry.tags) ? (entry.tags as string[]) : [];
 					const reportedMaxTokens = typeof entry.max_tokens === "number" ? entry.max_tokens : defaults.maxTokens;
-					const modelId = typeof entry.id === "string" ? entry.id : defaults.id;
-					const maxTokens =
-						modelId === "meta/muse-spark-1.2-contributor" && typeof reportedMaxTokens === "number"
-							? Math.min(reportedMaxTokens, 131_072)
-							: reportedMaxTokens;
 
 					return {
 						...defaults,
@@ -4198,7 +4193,7 @@ export function vercelAiGatewayModelManagerOptions(
 						},
 						contextWindow:
 							typeof entry.context_window === "number" ? entry.context_window : defaults.contextWindow,
-						maxTokens,
+						maxTokens: reportedMaxTokens,
 					};
 				},
 				fetch: config?.fetch,
