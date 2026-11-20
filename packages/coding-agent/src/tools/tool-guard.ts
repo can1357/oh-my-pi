@@ -119,6 +119,8 @@ const GIT_GLOBAL_FLAGS = wordTable(
 		"-v --version -h --help --html-path --man-path --info-path",
 );
 const FIND_ACTIONS = wordTable("-exec -execdir -ok -okdir -delete -fprint -fprint0 -fprintf -fls");
+/** Read-only commands whose arguments {@link readOnlyArguments} checks: an expanded argument hides what it checks. */
+const ARGUMENT_CHECKED = wordTable("tree printf uniq date hostname file");
 /** Prefixes that run the rest of the line as the command; reads stay reads under the first group. */
 const READ_WRAPPERS = wordTable("time nice timeout command");
 const SCRIPT_WRAPPERS = wordTable("time nice timeout command sudo doas env nohup exec");
@@ -178,10 +180,10 @@ export interface ToolGuardHost {
 	/** Stops the run after too many refusals; `reason` names them. */
 	stop(reason: string): void;
 	/**
-	 * The machine's resource pressure, read only for calls that reach the judge; undefined when unknown.
-	 * Defaults to {@link readHostPressure} for the working directory.
+	 * The machine's resource pressure, with disk space for `dir` (where the call runs), read only for calls
+	 * that reach the judge; undefined when unknown. Defaults to {@link readHostPressure}.
 	 */
-	hostPressure?(): Promise<HostPressure | undefined>;
+	hostPressure?(dir: string): Promise<HostPressure | undefined>;
 }
 
 function stringArg(args: unknown, key: string): string | undefined {
@@ -196,6 +198,25 @@ function resolveWord(word: string, base: string): string | undefined {
 	if (word === "~" || word.startsWith("~/")) return path.join(os.homedir(), word.slice(1));
 	if (word.startsWith("~")) return undefined;
 	return path.resolve(base, word);
+}
+
+/**
+ * Whether the shell may turn the word `raw` into a different word, or into several: a parameter or command
+ * expansion outside single quotes (`$ACTION`, `"$X"`, `` `cmd` ``), or a glob or brace expansion at its start
+ * (`*`, `[-]delete`, `{-delete,}`), which can yield an option such as `-delete`. A literal prefix pins what a
+ * glob or brace expansion begins with.
+ */
+function expandsWord(raw: string): boolean {
+	if (/^[*?[{]/.test(raw)) return true;
+	let quote: string | undefined;
+	for (let i = 0; i < raw.length; i++) {
+		const char = raw[i];
+		if (char === "\\" && quote !== "'") i++;
+		else if (char === quote) quote = undefined;
+		else if (quote === undefined && (char === "'" || char === '"')) quote = char;
+		else if (quote !== "'" && (char === "$" || char === "`")) return true;
+	}
+	return false;
 }
 
 /** Leading assignments and read-only wrappers removed (`FOO=1 timeout 5 cat x` → `cat x`). */
@@ -384,6 +405,7 @@ function unquotedRedirect(raw: string): boolean {
 function readOnlySegment(text: string): boolean {
 	const tokens = lexShellCommand(text);
 	const words: string[] = [];
+	const raws: string[] = [];
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i];
 		if (token.kind !== "word") continue;
@@ -415,6 +437,7 @@ function readOnlySegment(text: string): boolean {
 			continue;
 		}
 		words.push(token.value);
+		raws.push(token.raw);
 	}
 	const command = unwrapCommand(words, READ_WRAPPERS);
 	// An assignment (`PATH=/tmp/x git status`, `export PATH=...; git status`) changes which program a
@@ -428,7 +451,13 @@ function readOnlySegment(text: string): boolean {
 	const name = command[0];
 	if (name === undefined) return words.length === 0 || command.length === 0;
 	const args = command.slice(1);
-	if (inTable(READ_ONLY_COMMANDS, name)) return readOnlyArguments(name, args);
+	// A command whose arguments decide whether it writes (`find . $ACTION` with `ACTION=-delete`) is judged
+	// when the shell expands one of them into words this scanner never sees.
+	const expanded = raws.slice(words.length - args.length).some(expandsWord);
+	if (inTable(READ_ONLY_COMMANDS, name)) {
+		return !(expanded && inTable(ARGUMENT_CHECKED, name)) && readOnlyArguments(name, args);
+	}
+	if (expanded) return false;
 	switch (name) {
 		case "find":
 			return !args.some(arg => inTable(FIND_ACTIONS, arg));
@@ -760,7 +789,8 @@ export class ToolGuard {
 			const allowances = cfgToolGuardAllowances.get(authority)?.trim();
 			const command = call.toolName === "bash" ? stringArg(call.args, "command") : undefined;
 			const runIn = stringArg(call.args, "cwd");
-			const scripts = command === undefined ? [] : scriptsRun(command, runIn ? path.resolve(cwd, runIn) : cwd);
+			const runDir = runIn ? path.resolve(cwd, runIn) : cwd;
+			const scripts = command === undefined ? [] : scriptsRun(command, runDir);
 			const shown: JsonValue[] = [];
 			for (const file of scripts) shown.push({ path: file, content: await readScript(file) });
 			const state: Record<string, JsonValue> = {
@@ -779,7 +809,7 @@ export class ToolGuard {
 			};
 			const pressure = await untilAborted(
 				deadline,
-				this.#host.hostPressure ? this.#host.hostPressure() : readHostPressure(cwd),
+				this.#host.hostPressure ? this.#host.hostPressure(runDir) : readHostPressure(runDir),
 			).catch(() => undefined);
 			if (pressure) state.host = summarizeHostPressure(pressure);
 			// A judge that ignores its signal still cannot hold the call past the deadline or an abort.

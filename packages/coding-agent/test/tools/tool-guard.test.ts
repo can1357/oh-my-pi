@@ -84,6 +84,8 @@ describe("tool guard", () => {
 	let stops: string[];
 	/** What the host pressure reader returns; undefined means unknown (off Linux, unreadable). */
 	let hostPressure: HostPressure | undefined;
+	/** The directories the guard read host pressure for. */
+	let pressureDirs: string[];
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@omp-tool-guard-");
@@ -91,6 +93,7 @@ describe("tool guard", () => {
 		messages = [userMessage("Tidy up the README.")];
 		stops = [];
 		hostPressure = undefined;
+		pressureDirs = [];
 	});
 
 	afterEach(() => {
@@ -111,7 +114,10 @@ describe("tool guard", () => {
 			stop: reason => {
 				stops.push(reason);
 			},
-			hostPressure: async () => hostPressure,
+			hostPressure: async dir => {
+				pressureDirs.push(dir);
+				return hostPressure;
+			},
 		};
 		return { guard: new ToolGuard(host), settings };
 	}
@@ -261,6 +267,43 @@ describe("tool guard", () => {
 		// Error and trace flags change nothing a command reads.
 		expect(isReadOnlyCommand("set -euo pipefail; git status")).toBe(true);
 		expect(isReadOnlyCommand("printf '%s\\n' -v")).toBe(true);
+	});
+
+	it("judges a command whose checked arguments the shell expands", () => {
+		for (const command of [
+			"find . $ACTION",
+			'find . "$ACTION"',
+			"find . $1",
+			"find . `echo -delete`",
+			"find . x$ACTION",
+			"find . {-delete,}",
+			"find . [-]delete",
+			"find . *",
+			"sort $OPTS data.txt",
+			"rg $FLAG foo",
+			"git $SUB",
+			"git log $RANGE",
+			"tree $OPTS .",
+			"date $WHEN",
+			"hostname $NAME",
+			"file $FLAGS notes.txt",
+			"uniq data.txt $OUT",
+			"timeout 5 find . $ACTION",
+		]) {
+			expect(isReadOnlyCommand(command)).toBe(false);
+		}
+		for (const command of [
+			"find . -name '*.ts'",
+			"find . -name '$ACTION'",
+			"find . -name \\$ACTION",
+			"find src/* -name x",
+			"cat $FILE",
+			'echo "$HOME"',
+			"ls *.ts",
+			"git log HEAD@{1}",
+		]) {
+			expect(isReadOnlyCommand(command)).toBe(true);
+		}
 	});
 
 	it("treats `>&file` as a write to the file and `>&N` as a descriptor copy", () => {
@@ -467,6 +510,17 @@ describe("tool guard", () => {
 			swap_gib: { used: 3.5, total: 4 },
 			disk_gib: { free: 40, total: 100 },
 		});
+	});
+
+	it("reads disk pressure for the directory the command runs in", async () => {
+		const judge = fakeJudge({ routine: 1 }, 0);
+		const { guard } = guardWith(judge);
+
+		await guard.check(bash, { command: "bun test" }, "exec");
+		await guard.check(bash, { command: "bun test", cwd: "sub" }, "exec");
+		await guard.check(bash, { command: "bun test", cwd: "/mnt/scratch" }, "exec");
+
+		expect(pressureDirs).toEqual([cwd, path.join(cwd, "sub"), "/mnt/scratch"]);
 	});
 
 	it("refuses heavy work on a strained host, naming the strain and pointing elsewhere", async () => {
