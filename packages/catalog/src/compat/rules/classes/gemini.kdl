@@ -95,6 +95,23 @@ class "gemini" {
 			thinking-efforts "low" "medium" "high" "xhigh"
 		}
 	}
+	// Gemini 4 Neon ends about half of the requests that close on a user
+	// message directly after a function response with native finish reason
+	// MALFORMED_RESPONSE: thousands of reasoning tokens, then an empty reply.
+	// Agent harnesses produce that shape whenever a steering, IRC, or async
+	// notification lands mid tool loop. Observed through OpenRouter's Google
+	// endpoint (google/gemini-4-neon-20261118): 32 of 62 such turns failed,
+	// against 1 of 738 turns ending on a tool result; Gemini 3.x Flash and 3.1
+	// Pro on the same route took 1,515 such turns without one. Replaying one
+	// failing 456k-token state with the message folded into the preceding tool
+	// result succeeded 5 of 5 times; a synthetic assistant turn between the
+	// tool result and the message (requires-assistant-after-tool-result) still
+	// failed 4 of 4.
+	// residue: Neon has no family rank, and revision 4 also covers Argon (119
+	// such turns on google-antigravity, none failed), Carbon, and Hydrogen.
+	models "*gemini-4-neon" {
+		fold-user-after-tool-result #true
+	}
 	// Gemini 4 models decode past one 65,536-token streaming segment only when
 	// the request's `maxOutputTokens` is larger (up to 1,048,576 minus input);
 	// the provider then follows Google's continuation tokens. The reported caps

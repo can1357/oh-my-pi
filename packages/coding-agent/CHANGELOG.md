@@ -11,6 +11,8 @@
 
 ### Added
 
+- Accepted Unicode set mode (`v`) in slash-delimited `secrets.yml` regexes.
+- Added the `magic` edit mode (`edit.mode: magic`): `edit` takes changes described in words inside one `<edit file="path">` element per file (or under one `# path` line with `edit.magic.format: markdown`), and a fast model (`edit.magic.model`, a model or role alias such as `@slow`; by default the `smol` role) writes and applies each file's patch, returning the diffs
 - Sloppy edits can replace, delete or move a syntax block by its opening line without quoting its body, and rename a whole identifier with `*** Find all`
 - MCP servers now run in the omp daemon instead of inside every session: sessions with the same server configuration share one process for servers on MCP 2026-07-28, and `/mcp list` shows each server's state, pid and how many sessions share it. Turn off with `mcp.shared` ([#6819](https://github.com/can1357/oh-my-pi/issues/6819))
 - MCP servers start on first use: tool, prompt and resource lists come from a shared cache, so a session that never calls a server starts no process for it, and an unused 2026-07-28 server stops after `mcp.idleStopMinutes` (default 5) ([#2888](https://github.com/can1357/oh-my-pi/issues/2888))
@@ -23,6 +25,7 @@
 - `omp browser-relay install` reports which Chrome, Chromium or Brave profiles have the extension loaded. It prints the one manual Load unpacked step only when none does. The native host admits every registered extension folder's ID
 - Added a coloured extension status variant to `omp gallery --segment status` ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
 - When a program in a bash `pty` console waits on your keys (a `sudo` password prompt, a `[y/N]` question), the terminal title and status record show the session as waiting on you and a notification is sent; turn the notification off with `pty.notify`
+- Eval `completion()` now captures its raw provider frames: a failure writes them to a `.log` file in the session artifacts directory and names the path in the error, and every call feeds them into the session's `/debug` raw-SSE view.
 - Extensions can identify which eval cell or kernel-defined tool dispatched a nested tool: `tool_call` and `tool_result` now include an optional `parentToolCallId` ([#19823](https://github.com/can1357/oh-my-pi/pull/19823) by [@baekjosh](https://github.com/baekjosh)).
 - Session transcripts get a full-text index (`~/.omp/agent/transcripts.db`) of user and assistant messages, built by the omp daemon in the background on the first `archive.search` and kept current on later ones, never on a session's own thread; the first build reads every top-level transcript once
 - Sessions now record approval prompts in their session file, even before the first reply: a `tool_approval_requested` entry when a tool call starts waiting on you (naming the dispatching eval call in `parentToolCallId` for calls made from an eval) and a `tool_approval_resolved` entry when it is approved, denied, aborted, or refused, so tools that read session files (sidebars, dashboards) can show a session waiting on approval ([#18837](https://github.com/can1357/oh-my-pi/pull/18837) by [@baekjosh](https://github.com/baekjosh))
@@ -33,6 +36,8 @@
 
 ### Changed
 
+- TTSR and secret-redaction regexes use WebAssembly SIMD for hot DFA scans, speeding up long inputs without changing match or capture semantics
+- Dense regex scans find candidate starts from required literals and replay short greedy matches and ordered alternatives faster, without changing match priority or falling back to native backtracking
 - Listing sessions across every project (`/resume` across projects, `archive.sessions(project="*")`, `archive.projects()`) is faster with thousands of project directories
 - In the interactive session, `wait` on background jobs now blocks for up to 4 minutes on its first call instead of returning after 5 seconds, saving a wasted turn per wait ([#19873](https://github.com/can1357/oh-my-pi/pull/19873) by [@H4vC](https://github.com/H4vC))
 - Updated MCP OAuth client name to "Codex"
@@ -43,17 +48,28 @@
 - Changed read to treat a file named .i64 or .idb as an IDA database even when it is a SQLite file: it shows database metadata instead of a table listing ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 - Changed an in-place disassembler database to be identified by its real path, so one opened through a symlink gets a new id and dsm handle ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 - Changed dsm.open() to reject a database file that belongs to another disassembler backend, with an error naming the backend to switch to ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- TTSR rules that cannot interrupt what is streaming (`interruptMode: never`, which includes the built-in style rules; `prose-only` rules on tool calls; `tool-only` rules on replies and reasoning) are checked once when the reply, reasoning or tool call ends instead of on every streamed chunk, and a tool call no interrupting rule applies to is not inspected while it streams. They still report the same matches and send the same reminders.
+- Eval `completion()` accepts a user-tagged model agent as its `model` (for example `completion(prompt, { model: "m1" })`); it runs the model the user pinned with `^model`, at the effort they tagged, instead of refusing anything but a tier
 
 ### Fixed
 
+- In Tern, answers keep their turn footer and its Copy button after a resume, a compaction or any other transcript rebuild; previously every answer drawn before the rebuild lost them
+- `--continue` (and `autoResume`) no longer resumes a session another running omp is writing, which duplicated its conversation into a new file on the first message; it starts a new session as plain `omp` does
+- `/handoff` now shows its progress like `/compact` while it writes the summary: a working row with a spinner and timer while the agent is idle, and a row above it while a turn runs. Previously only a one-off status line said it had started
+- On macOS, reading a cloud-only iCloud Drive, Desktop & Documents, Google Drive or Dropbox file now downloads it instead of failing with `EDEADLK`, in tools and in the commands omp runs, even when the terminal turned downloads off for its shells
+- A TTSR rule whose `condition` regex backtracks badly, including one with a backreference, no longer freezes the session; conditions match exactly as before, and `omp ttsr test`/`scan` match the same way ([#19147](https://github.com/can1357/oh-my-pi/issues/19147), [#19360](https://github.com/can1357/oh-my-pi/issues/19360))
+- A `secrets.yml` regex entry that backtracks badly (such as an email pattern with an unbounded `+` on long runs of letters) no longer stalls requests while the history is redacted; entries match exactly as before ([#5372](https://github.com/can1357/oh-my-pi/issues/5372))
 - The shell's `rg` builtin prints paths under an explicit `.` as `./path` like ripgrep, so names starting with `-` (session directories such as `--work-pi--`) can be passed back to `rg` and other commands
 - The shell's `fd` builtin prints paths like fd: `./path` under an explicit `.`, with `-0`, or when a name starts with `-`; directories end in the path separator; `--strip-cwd-prefix` takes effect, `--format`'s `{//}` is the printed path's parent instead of an absolute one, and `--absolute-path` no longer prints `/./`
 - Sloppy edits reject incomplete Find/action pairs without writing, preserve numeric `||` expressions, and no longer mistake a nested or partial closing line for the end of a block range
+- Edit hooks now report all targeted files when a hashline header ends in whitespace ([#19885](https://github.com/can1357/oh-my-pi/pull/19885) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Sloppy edits no longer match a comment continuation against part of a JSDoc opener, and the `Replace Block` example shows how to retain the declaration.
 - OpenCode v2 MCP configurations now discover servers from `mcp.servers` while continuing to import flat `mcp` entries ([#19863](https://github.com/can1357/oh-my-pi/issues/19863))
 - Fixed ovnfs commands failing with "command not found" when `ovnfs.path` is a Windows path with backslashes, or contains spaces or `$` ([#19874](https://github.com/can1357/oh-my-pi/pull/19874) by [@H4vC](https://github.com/H4vC))
 - Failed browser launches no longer log URL userinfo, query strings (including OAuth device codes), or fragments ([#19844](https://github.com/can1357/oh-my-pi/pull/19844) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - `web_search` follows the web search order and exclusions configured for its own session, such as an ACP session opened in a project whose `.omp/config.yml` sets them, instead of the default chain ([#19837](https://github.com/can1357/oh-my-pi/pull/19837) by [@BUR4KBEY](https://github.com/BUR4KBEY), fixes [#11296](https://github.com/can1357/oh-my-pi/issues/11296))
 - Fixed MCP OAuth refresh failing with `AADSTS90009` on Microsoft Entra servers whose client is also the resource: refresh now repeats the granted scope (credentials saved earlier need one `/mcp reauth`) ([#19855](https://github.com/can1357/oh-my-pi/pull/19855) by [@jerry153fish](https://github.com/jerry153fish))
+- Fixed a delayed activity update overwriting the roster entry for a new task agent with the same ID ([#19886](https://github.com/can1357/oh-my-pi/pull/19886) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Cursor's explicit 500K Grok 4.7 lanes now keep their 500K window with extended context off, instead of being capped to the base 256K lane's long-context price threshold ([#19842](https://github.com/can1357/oh-my-pi/pull/19842) by [@fenilmodi00](https://github.com/fenilmodi00)).
 - Eval's `archive` records always carry every documented key, with `null` for missing values, so Python code reading `row["recap"]` on a session without a recap no longer raises `KeyError`
 - `bash` and `eval` calls whose output fits inline, and request-timeout recovery that finds too little to trim, no longer leave an empty `<N>.log` in the session's `local://` directory

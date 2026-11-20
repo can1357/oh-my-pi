@@ -27,6 +27,35 @@ Supported modes are `hashline`, `apply_patch`, `patch`, `replace`, and `sloppy`.
 
 This page primarily documents hashline. The schema, prompt, examples, renderer, and optional Lark format switch with the mode. Models with `editPromptVariant: "compact"` receive the compact hashline prompt. In `apply_patch` custom-tool mode the wire name is `apply_patch`; dispatch, including `xd://apply_patch`, still reaches the same internal tool. The tool is strict, essential, and uses exclusive concurrency.
 
+## `magic` mode
+
+`edit.mode: magic` (or `PI_EDIT_VARIANT=magic`) keeps the `edit` tool but changes its contract: the payload describes the changes in words, one section per file, and an auxiliary model writes each file's patch. `edit.modelVariants` cannot select it. Source: `packages/coding-agent/src/edit/magic.ts`; model-facing prompt: `packages/coding-agent/src/prompts/tools/magic-edit.md`.
+
+```text
+<edit file="src/jobs.ts">
+In `drain()`, declare `limit` before `batch`.
+</edit>
+<edit file="src/parse.ts">
+Rename every `retrunValue` to `returnValue`.
+</edit>
+```
+
+`edit.magic.format` (or `PI_EDIT_MAGIC_FORMAT`) selects the section syntax: `xml`, the default shown above, or `markdown`:
+
+```text
+# src/jobs.ts
+In `drain()`, declare `limit` before `batch`.
+```
+
+The schema is `{ input: string }`. Providers with custom-tool grammars receive the payload's Lark grammar and send it raw, as in `hashline` mode. In `xml` text outside the elements is rejected; in `markdown` a line starting with `# ` always opens the next file. Sections naming the same path merge.
+
+1. Each file is read and shown to the apply model with a line-number gutter, together with its changes. The apply model is `edit.magic.model` when set, else the `smol` role. The setting takes any model selector, including a role alias: `@slow`, or `@apply` for a custom `modelRoles.apply` entry. The files' completions run concurrently.
+2. It answers with SEARCH/REPLACE blocks (`<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE`); `<<<<<<< SEARCH ALL` replaces every occurrence of a fragment, and a first line `CANNOT: <reason>` declines the change.
+3. A file's blocks apply top to bottom as one `replace`-mode batch, before anything else reaches the native engine. The batch is atomic: one block that does not match leaves that file untouched. Writes go one file at a time; plan-mode policy, LSP diagnostics and the result diff are the same as for any other mode.
+4. A rejected batch, or a reply that is not a set of blocks, goes back to the model with the rejection: three completions per file inside one 120 second budget for the call.
+
+Files are independent. A section fails, leaving its file unchanged, when the model declines or no reply applies; when the file is missing, binary, or larger than half the apply model's context window; or when the reply is cut off or the budget runs out. The result then reports `[path] not applied: <reason>` next to the other files' diffs, and the call is an error only when no section applied. The whole call fails when the payload has no section or no apply model resolves.
+
 ## Input
 
 | Field   | Type     | Required | Description                                                                                                                                                                                                      |
@@ -131,7 +160,7 @@ MV lib/welcome.py
 
 `sloppy` uses existing-text anchors, not snapshot tags. Find must identify one match unless it is `*** Find all` (or the file header ends in ` all`), which changes every match; for a bare identifier that means whole words. Bodies are raw text, without diff prefixes or closing markers. `…` in Find captures omitted text; Replace re-emits those captures in order. A Find of a first line, a `…` line, and a last line addresses a block, closing at the line that ends that block rather than a nested or continued one. Insert keeps the anchor and treats `…` literally. `*** Cut` takes the matched lines and the next `*** Paste Before`/`*** Paste After` puts them beside its own match; neither has a body, and a paste that fails leaves the block in place. A Find with no action is rejected. Every pair addresses the original file; matching/validation failures occur before writes.
 
-For a whole multiline construct, put the action and the opening-line prefix on one line: `*** Replace Block: opener`, `*** Delete Block: opener`, `*** Cut Block: opener`, or `*** Paste Before Block: opener` / `*** Paste After Block: opener`. Replace takes the final code; the others take no body. An unresolved syntax block, shared closing line, or ambiguous opener is rejected. Use a text Find with distinctive context instead. `Delete Block` also accepts two adjacent byte-identical copies: it keeps the first and removes the separator and second copy.
+For a whole multiline construct, put the action and the opening-line prefix on one line: `*** Replace Block: opener`, `*** Delete Block: opener`, `*** Cut Block: opener`, or `*** Paste Before Block: opener` / `*** Paste After Block: opener`. The header only locates the old block. Replace takes the complete final code, including the opening line if it stays; the other block actions take no body. An unresolved syntax block, shared closing line, or ambiguous opener is rejected. Use a text Find with distinctive context instead. `Delete Block` also accepts two adjacent byte-identical copies: it keeps the first and removes the separator and second copy.
 
 The mode prompts in `crates/edit/prompts/` define the full syntax.
 

@@ -147,7 +147,7 @@ Environment variables are never written back to `config.yml`. Variables declared
 | `OMP_AUTH_BROKER_TOKEN`                             | `auth.broker.token`                               | Env value takes precedence over config.                                                           |
 | `PI_CODING_AGENT_DIR`                               | (relocates default-profile agent dir)             | Named profiles ignore this override.                                                              |
 | `OMP_PROFILE` / `PI_PROFILE`                        | (selects profile)                                 | `OMP_PROFILE` wins when present; `--profile` wins over env.                                       |
-| `PI_EDIT_VARIANT`                                   | `edit.mode`                                       | `apply_patch`, `hashline`, `patch`, `replace`, or `sloppy`; `auto` is unset.                      |
+| `PI_EDIT_VARIANT`                                   | `edit.mode`                                       | `apply_patch`, `hashline`, `patch`, `replace`, `sloppy`, `magic`, or `none`; `auto` is unset. |
 | `PI_EDIT_FUZZY`                                     | `edit.fuzzyMatch`                                 | Exact lowercase `1`/`true` enables; `0`/`false` disables; other text defers to config.            |
 | `PI_EDIT_FUZZY_THRESHOLD`                           | `edit.fuzzyThreshold`                             | Parsed floating-point threshold from 0–1; invalid/out-of-range values are unset.                  |
 | `PI_INTENT_TRACING`                                 | `tools.intentTracing`                             | Uses the boolean env parser.                                                                      |
@@ -811,7 +811,9 @@ read:
 
 | Key                       | Type    | Default    | Notes                                                                                                             |
 | ------------------------- | ------- | ---------- | ----------------------------------------------------------------------------------------------------------------- |
-| `edit.mode`               | enum    | `hashline` | `apply_patch`, `hashline`, `patch`, `replace`, `sloppy`. `PI_EDIT_VARIANT` pins the mode.                         |
+| `edit.mode`               | enum    | `hashline` | `apply_patch`, `hashline`, `patch`, `replace`, `sloppy`, `magic` (describe the changes; a model writes them). `PI_EDIT_VARIANT` pins the mode.|
+| `edit.magic.format`       | enum    | `xml`      | How `magic` payloads name each file: `xml` (`<edit file="path">` elements) or `markdown` (`# path` lines).       |
+| `edit.magic.model`        | string  | unset      | Model selector, or role alias such as `@slow`, for the model that writes `magic` changes; unset uses the `smol` role. |
 | `edit.modelVariants`      | record  | `{}`       | Case-insensitive model-selector substring → edit mode; the longest matching key wins, ties keep config order.     |
 | `edit.fuzzyMatch`         | boolean | `true`     | Allow fuzzy anchor matching.                                                                                      |
 | `edit.fuzzyThreshold`     | number  | `0.95`     | Similarity threshold for fuzzy matching.                                                                          |
