@@ -7,6 +7,7 @@
 - Removed the `mcp/transports/*` and `mcp/tool-cache` SDK exports, `DeferredMCPTool`, and the cache and reconnect-policy parameters of `MCPManager`; MCP servers are now reached through the MCP host (`mcp/host/*`)
 - The browser relay now runs inside the omp extension's native host while Chrome is open, instead of being started on demand by omp. `omp browser-relay` (serving the relay by hand) and its `--port`, `--token` and `--no-group` options are removed; `browser.relayUrl` still points omp at a relay forwarded from another machine. After updating, reload the omp extension once (or restart Chrome)
 - Eval's `archive.search(query)` now finds sessions by title, idle recap, or what the user and assistant wrote, across all history, and returns session records with their `matches`; prompt-only search moved to `archive.prompts({ query })`. Both match query words against the start of words (`arch` finds `archive`, `chiv` no longer does)
+- RPC hosts must handle the `ask` tool's whole HTML form as a `form` UI request and answer with submitted `data` or cancellation; field-by-field prompts are no longer used for the tool ([#18646](https://github.com/can1357/oh-my-pi/pull/18646) by [@pasquale95](https://github.com/pasquale95))
 
 ### Added
 

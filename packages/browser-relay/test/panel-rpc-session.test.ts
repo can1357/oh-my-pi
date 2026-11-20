@@ -242,6 +242,15 @@ describe("rpc panel session", () => {
 		worker.line({ type: "extension_ui_request", id: "ui-4", method: "cancel", targetId: "ui-3" });
 		expect(session.getSnapshot().uiRequest).toBeNull();
 
+		// The panel cannot render an HTML form, so it cancels one instead of leaving the caller waiting.
+		worker.line({ type: "extension_ui_request", id: "ui-5", method: "form", html: "<form></form>" });
+		expect(session.getSnapshot().uiRequest).toBeNull();
+		expect(worker.sent.filter(command => command.type === "extension_ui_response").at(-1)).toEqual({
+			type: "extension_ui_response",
+			id: "ui-5",
+			cancelled: true,
+		});
+
 		let stopped = false;
 		const stop = session.abort().then(() => {
 			stopped = true;

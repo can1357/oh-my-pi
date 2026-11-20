@@ -300,6 +300,10 @@ export class RpcPanelSession implements PanelSession {
 		if (value === undefined) response = { type: "extension_ui_response", id, cancelled: true };
 		else if (pending.method === "confirm") response = { type: "extension_ui_response", id, confirmed: value === CONFIRM_YES };
 		else response = { type: "extension_ui_response", id, value };
+		this.#sendUiResponse(response);
+	}
+
+	#sendUiResponse(response: ExtensionUiResponse): void {
 		this.#sendLine(JSON.stringify(response)).catch(error => {
 			this.#pushNotice("error", `answer failed: ${errorMessage(error)}`);
 			this.#commit();
@@ -710,6 +714,10 @@ export class RpcPanelSession implements PanelSession {
 				return;
 			case "editor":
 				this.#queueUi(request.id, "editor", { kind: "editor", title: request.title, prefill: request.prefill });
+				return;
+			case "form":
+				// The panel has no HTML form renderer; cancel so the caller does not wait on an unanswerable dialog.
+				this.#sendUiResponse({ type: "extension_ui_response", id: request.id, cancelled: true });
 				return;
 			case "cancel":
 				this.#uiRequests = this.#uiRequests.filter(pending => pending.rpcId !== request.targetId);
