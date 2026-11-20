@@ -179,6 +179,29 @@ describe("initTelemetryExport signals export path", () => {
 	}, 20_000);
 });
 
+describe("OTLP metric identity", () => {
+	async function runMetricIdentityProbe(mode: "default" | "pinned") {
+		const probe = fileURLToPath(new URL("./otel-instance-id-probe.ts", import.meta.url));
+		const proc = Bun.spawn([process.execPath, probe, mode], {
+			env: await cleanProbeEnv(),
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "ignore",
+		});
+		const output = new Response(proc.stdout).text();
+		const exitCode = await proc.exited;
+		return { exitCode, output: (await output).trim() };
+	}
+
+	it("exports a generated service.instance.id and keeps the spawn agent id off metric series", async () => {
+		expect(await runMetricIdentityProbe("default")).toEqual({ exitCode: 0, output: "PROBE: RECEIVED" });
+	}, 20_000);
+
+	it("lets OTEL_RESOURCE_ATTRIBUTES pin service.instance.id over the generated one", async () => {
+		expect(await runMetricIdentityProbe("pinned")).toEqual({ exitCode: 0, output: "PROBE: RECEIVED" });
+	}, 20_000);
+});
+
 describe("OTLP shutdown", () => {
 	it("releases the process promptly when a collector accepts logs but never responds", async () => {
 		const probe = fileURLToPath(new URL("./fixtures/otel-shutdown-probe.ts", import.meta.url));
