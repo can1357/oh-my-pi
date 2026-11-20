@@ -224,7 +224,7 @@ impl Win32Ax {
 			}
 			let mut element = run.call(|| Ok::<_, DesktopError>(hit.clone()))?;
 			let mut found = None;
-			for _ in 0..16 {
+			for _ in 0..MAX_SCROLL_DEPTH {
 				if let Ok(pattern) =
 					run.call(|| Ok::<_, DesktopError>(element.get_pattern::<UIScrollPattern>()))?
 					&& run.call(|| {
@@ -333,8 +333,10 @@ fn bind_scroll_candidate<T>(
 	Ok(None)
 }
 
-/// The most ancestors walked from a hit-tested element to its container.
-const MAX_ANCHOR_DEPTH: usize = 8;
+/// The most ancestors walked from a hit-tested element, both to find its scroll
+/// container and back to that container from a step's anchor, so any point a
+/// container was found for also yields its anchor.
+const MAX_SCROLL_DEPTH: usize = 16;
 
 /// The container's child under `point`: content that a scroll moves by what
 /// it moves the view, and that rows added or removed past it and a resized
@@ -347,23 +349,44 @@ fn content_child<N: Fn() -> Instant>(
 	container: &UIElement,
 	point: POINT,
 ) -> CoreResult<Option<UIElement>> {
-	let Ok(mut element) = run.call(|| {
+	let Ok(hit) = run.call(|| {
 		Ok::<_, DesktopError>(automation.element_from_point(Point::new(point.x, point.y)))
 	})?
 	else {
 		return Ok(None);
 	};
-	for _ in 0..MAX_ANCHOR_DEPTH {
-		let Ok(parent) = run.call(|| Ok::<_, DesktopError>(walker.get_parent(&element)))? else {
+	let Some(child) = child_of(
+		hit,
+		|element| {
+			Ok(run
+				.call(|| Ok::<_, DesktopError>(walker.get_parent(element)))?
+				.ok())
+		},
+		|parent| run.call(|| automation.compare_elements(parent, container)),
+	)?
+	else {
+		return Ok(None);
+	};
+	let kind = run.call(|| child.get_control_type())?;
+	Ok((!matches!(kind, ControlType::ScrollBar | ControlType::Header)).then_some(child))
+}
+
+/// `start` or its ancestor whose parent is the container, within
+/// [`MAX_SCROLL_DEPTH`] parents.
+fn child_of<T>(
+	start: T,
+	mut parent: impl FnMut(&T) -> CoreResult<Option<T>>,
+	mut is_container: impl FnMut(&T) -> CoreResult<bool>,
+) -> CoreResult<Option<T>> {
+	let mut element = start;
+	for _ in 0..MAX_SCROLL_DEPTH {
+		let Some(up) = parent(&element)? else {
 			return Ok(None);
 		};
-		if run.call(|| automation.compare_elements(&parent, container))? {
-			let kind = run.call(|| element.get_control_type())?;
-			return Ok(
-				(!matches!(kind, ControlType::ScrollBar | ControlType::Header)).then_some(element)
-			);
+		if is_container(&up)? {
+			return Ok(Some(element));
 		}
-		element = parent;
+		element = up;
 	}
 	Ok(None)
 }
@@ -973,6 +996,21 @@ mod tests {
 				bind_scroll_candidate("pattern", 1, || Ok(hosts.next().flatten())).unwrap(),
 				expected
 			);
+		}
+	}
+
+	#[test]
+	fn anchor_walk_reaches_any_container_the_container_walk_finds() {
+		// Element `n`'s parent is `n + 1`; the container is `depth` parents
+		// above the hit, as under a nested tree item.
+		for (depth, expected) in [
+			(1, Some(0)),
+			(12, Some(11)),
+			(MAX_SCROLL_DEPTH, Some(MAX_SCROLL_DEPTH - 1)),
+			(MAX_SCROLL_DEPTH + 1, None),
+		] {
+			let child = child_of(0, |element| Ok(Some(element + 1)), |parent| Ok(*parent == depth));
+			assert_eq!(child.unwrap(), expected, "container {depth} parents up");
 		}
 	}
 
