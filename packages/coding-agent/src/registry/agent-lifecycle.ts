@@ -471,10 +471,13 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			// (or cold-revive) a newer owner of the id after the await.
 			const kept = parked === park.ref && parked.session && !park.detached && park.cancel();
 			await park.promise;
+			// A kill that lands while we wait is the user's latest word on this agent:
+			// fail the caller instead of reopening the transcript that was just killed.
+			// An agent already killed before the wait still reopens below.
 			if (this.#registry.get(id) !== parked || (!wasKilled && parked?.status === "aborted")) {
 				throw new Error(`Agent "${id}" changed while waiting for its session to park.`);
 			}
-			if (kept && parked?.session) {
+			if (kept && parked.session) {
 				const adopted = this.#adopted.get(id);
 				if (adopted && adopted.ref === parked && parked.status === "idle") this.#armTimer(id, adopted);
 				return parked.session;

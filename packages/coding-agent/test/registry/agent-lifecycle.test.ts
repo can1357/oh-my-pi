@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { type AgentLifecycleApi, AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import {
+	type AgentRef,
+	AgentRegistry,
+	type AgentRegistryApi,
+	MAIN_AGENT_ID,
+} from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AgentSessionHandle } from "@oh-my-pi/pi-coding-agent/session/agent-session-handle";
@@ -607,8 +612,49 @@ describe("AgentLifecycleManager", () => {
 		);
 		finish.resolve();
 		await parking;
-		await expect(live).rejects.toThrow();
+		await expect(live).rejects.toThrow(/changed while waiting/);
 		expect(replacement.session).toBeNull();
+		expect(revive).not.toHaveBeenCalled();
+	});
+
+	it("does not revive the next owner of an id that took over while a killed agent was reopening", async () => {
+		using tempDir = TempDir.createSync("@omp-lifecycle-reopen-replaced-");
+		const id = "ReplacedWhileReopening";
+		const sessionFile = path.join(tempDir.path(), `${id}.jsonl`);
+		await Bun.write(sessionFile, "");
+		const killed = registry.register({
+			id,
+			displayName: "task",
+			kind: "sub",
+			session: makeSessionStub().session,
+			sessionFile,
+			status: "running",
+		});
+		expect(await lifecycle.release(id, killed, { tombstone: true })).toBe(true);
+		const revive = vi.fn(async () => makeSessionStub().session);
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => revive,
+			() => 0,
+		);
+
+		// Swap in a new owner while the reopen awaits the tombstone removal.
+		let replacement: AgentRef | undefined;
+		vi.spyOn(fsp, "rm").mockImplementation((async (target: string) => {
+			if (!target.endsWith(".tombstone")) return;
+			const reopened = registry.get(id);
+			if (reopened) registry.unregister(id, reopened);
+			replacement = registry.register({
+				id,
+				displayName: "task",
+				kind: "sub",
+				status: "parked",
+				session: null,
+				sessionFile: `/new/${id}.jsonl`,
+			});
+		}) as typeof fsp.rm);
+
+		await expect(lifecycle.ensureLive(id)).rejects.toThrow(/changed while reopening/);
+		expect(replacement?.session).toBeNull();
 		expect(revive).not.toHaveBeenCalled();
 	});
 
