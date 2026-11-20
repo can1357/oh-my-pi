@@ -427,6 +427,13 @@ mod background {
 		control::check()?;
 		let root = hwnd(id)?;
 		ensure_integrity(id, root)?;
+		// A scroll with no wheel steps sends nothing, so no route can refuse it.
+		if let PointerEvent::Scroll { dx, dy, .. } = event
+			&& super::scroll_steps(dx) == 0
+			&& super::scroll_steps(dy) == 0
+		{
+			return Ok(());
+		}
 		let kind = match event {
 			PointerEvent::Click { .. } | PointerEvent::Hold { .. } => EventKind::MouseClick,
 			PointerEvent::Move { .. } => EventKind::MouseMove,
@@ -558,9 +565,6 @@ mod background {
 				let (target, _) = child_under(root, point)?;
 				if wpf_scroll && (target == root || is_wpf_class(&window::class_name(target))) {
 					let (horizontal, vertical) = (super::scroll_steps(dx), super::scroll_steps(dy));
-					if horizontal == 0 && vertical == 0 {
-						return Ok(());
-					}
 					if ax.scroll_at_point(root, point, horizontal, vertical)? {
 						return Ok(());
 					}

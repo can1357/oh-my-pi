@@ -1013,6 +1013,10 @@ public static class Fixture {
 			assert_eq!(list.state(), hosted);
 			assert_eq!(foreground(), list.other);
 		}
+		// No wheel steps: nothing is sent, so nothing is refused or taken over.
+		scroll(x, y, (0.0, 0.0), None).unwrap();
+		assert_eq!(list.state(), hosted);
+		assert_eq!(foreground(), list.other);
 		list.post(CHROMIUM);
 		assert_eq!(list.state(), hosted);
 		assert!(!window::has_chromium_descendant(list.window));
