@@ -215,6 +215,16 @@ export function resolveManagedSessionRoot(sessionDir: string, cwd: string): stri
 }
 
 /**
+ * Whether a session file sits directly inside a managed bucket of the sessions
+ * root (`<sessionsRoot>/<bucket>/<file>.jsonl`), the only layout `listAllSessions`
+ * and `resolveResumableSession` enumerate. A file opened by path from elsewhere,
+ * such as a pi transcript, is not listed, so `--resume <id>` cannot find it (#9544).
+ */
+export function isManagedSessionFile(sessionFile: string): boolean {
+	return path.dirname(path.dirname(path.resolve(sessionFile))) === path.resolve(getSessionsDir());
+}
+
+/**
  * Default session directory for `cwd` under `sessionsRoot`, without the legacy
  * migrations or directory creation {@link computeDefaultSessionDir} performs.
  * Read-only lookups (the `archive` eval prelude) use it so querying a project
