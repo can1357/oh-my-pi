@@ -206,13 +206,15 @@ impl Win32Ax {
 			(true, horizontal, wheel_setting(SPI_GETWHEELSCROLLCHARS)),
 			(false, vertical, wheel_setting(SPI_GETWHEELSCROLLLINES)),
 		];
+		// The takeover wheel still scrolls WPF with these settings at 0 (measured
+		// on Windows 10), so this refusal leaves the scroll to the fallback.
 		if axes
 			.iter()
 			.all(|&(_, notches, per_notch)| notches == 0 || per_notch == 0)
 		{
-			return Err(DesktopError::unsupported(
-				"wheel scrolling is turned off in Windows settings (0 lines or characters per notch); \
-				 no input was sent",
+			return Err(DesktopError::background_unavailable(
+				"Windows wheel scrolling is set to 0 lines or characters per notch, so UI Automation \
+				 has no step size for this scroll; no input was sent",
 			));
 		}
 		let mut run =
@@ -339,6 +341,37 @@ struct Sample {
 	view:     f64,
 }
 
+impl Sample {
+	/// `100 * offset / extent`, from `position = 100 * offset / (extent -
+	/// viewport)` and `view = 100 * viewport / extent`: every step moves it,
+	/// and so do rows added or removed.
+	fn of_extent(self) -> f64 {
+		self.position * (100.0 - self.view) / 100.0
+	}
+
+	/// `100 * offset / viewport`: rows added or removed while the same rows
+	/// stay in view leave it where it was.
+	fn of_viewport(self) -> f64 {
+		if self.view > 0.0 {
+			self.position * (100.0 - self.view) / self.view
+		} else {
+			self.position
+		}
+	}
+
+	/// Whether `after` shows a step the requested way. A list that scrolls by
+	/// item can show a different number of rows after each step, changing
+	/// `view`; a step that changes `view` must also move the offset per
+	/// viewport, which rows added or removed do not.
+	fn moved_to(self, after: Self, forward: bool) -> bool {
+		let changed = |from: f64, to: f64| (to - from).abs() > 1e-9 * from.abs().max(1.0);
+		let (from, to) = (self.of_extent(), after.of_extent());
+		changed(from, to)
+			&& (to > from) == forward
+			&& (!changed(self.view, after.view) || changed(self.of_viewport(), after.of_viewport()))
+	}
+}
+
 /// Every provider call, including lookups and each property read, shares
 /// one operation cutoff. A late reply cannot confirm an already sent step.
 struct ScrollRun<N> {
@@ -407,11 +440,7 @@ impl<N: Fn() -> Instant> ScrollRun<N> {
 		loop {
 			let after = sample(self)?;
 			self.check()?;
-			if (after.view - before.view).abs() > f64::EPSILON {
-				return Err(self.failure(ErrorCode::AxFailed, "the list's size changed"));
-			}
-			let movement = after.position - before.position;
-			if after.position >= 0.0 && ((forward && movement > 0.0) || (!forward && movement < 0.0)) {
+			if after.position >= 0.0 && before.moved_to(after, forward) {
 				return Ok(true);
 			}
 			let now = (self.now)();
@@ -1086,14 +1115,20 @@ mod tests {
 
 		use super::super::super::error::ErrorCode::{AxUnconfirmed, InputFailed, Timeout};
 
+		// A list that scrolls by item, in rows: (offset, rows shown, rows).
+		let sample = |(offset, shown, rows): (f64, f64, f64)| Sample {
+			position: 100.0 * offset / (rows - shown),
+			view:     100.0 * shown / rows,
+		};
+		let top = (2.0, 4.0, 400.0);
 		// The anchor is arbitrary; all decisions use the injected clock.
 		let start = Instant::now();
-		for (case, initial, growth, expected, reads, sends) in [
-			("expired", 50.0, 0.0_f64, Err(Timeout), 0, 0),
-			("late", 50.0, 0.0, Err(AxUnconfirmed), 3, 1),
-			("resize", 50.0, 10.0, Err(AxUnconfirmed), 4, 1),
-			("moved", 50.0, 0.0, Ok(true), 4, 1),
-			("end", 100.0, 0.0, Err(InputFailed), 2, 0),
+		for (case, before, after, expected, reads, sends) in [
+			("expired", top, top, Err(Timeout), 0, 0),
+			("late", top, (3.0, 5.0, 400.0), Err(AxUnconfirmed), 3, 1),
+			("rows removed", top, (2.0, 4.0, 200.0), Err(InputFailed), 6, 1),
+			("moved, one more row shown", (9.0, 4.0, 400.0), (10.0, 5.0, 400.0), Ok(true), 4, 1),
+			("end", (396.0, 4.0, 400.0), top, Err(InputFailed), 2, 0),
 		] {
 			let cutoff = start + Duration::from_secs(1);
 			let clock = Cell::new(if case == "expired" { cutoff } else { start });
@@ -1102,8 +1137,8 @@ mod tests {
 			let result = run.step(
 				true,
 				|run| {
-					let change = f64::from(u8::from(run.sent));
-					let mut values = [initial + change, growth.mul_add(change, 10.0)].into_iter();
+					let shown = sample(if run.sent { after } else { before });
+					let mut values = [shown.position, shown.view].into_iter();
 					let mut read = || {
 						read_count.set(read_count.get() + 1);
 						if run.sent && case == "late" {
@@ -1117,7 +1152,10 @@ mod tests {
 					send_count.set(send_count.get() + 1);
 					Ok(())
 				},
-				|_| panic!("these samples settle without waiting"),
+				|_| {
+					clock.set(clock.get() + Duration::from_millis(600));
+					Ok(())
+				},
 			);
 			let result = result.and_then(|moved| if moved { Ok(true) } else { run.finish(true) });
 			assert_eq!(result.map_err(|error| error.code), expected, "{case}");

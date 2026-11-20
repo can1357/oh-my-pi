@@ -1048,9 +1048,11 @@ public static class Fixture {
 		assert_eq!(list.state(), end);
 		list.post(GROW);
 		assert_eq!(list.state(), end);
+		// Rows added during a step move the scroll percentage but not the
+		// offset: the step did not move, and is not reported as moved.
 		let error = scroll(x, y, (0.0, -100.0), None).unwrap_err();
-		assert_eq!(error.code, ErrorCode::AxUnconfirmed, "{error}");
-		assert!(error.message.contains("list") && error.message.contains("size"), "{error}");
+		assert_eq!(error.code, ErrorCode::InputFailed, "{error}");
+		assert!(error.message.contains("did not move"), "{error}");
 		let grown = list.state();
 		assert_eq!(grown[OFFSET], end[OFFSET]);
 		assert_eq!(grown[ROWS], 120.0);
