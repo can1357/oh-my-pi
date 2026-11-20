@@ -197,7 +197,7 @@ export function resolveBrowserKind(
 		if (!args.includes("--allow-file-access-from-files")) {
 			args.push("--allow-file-access-from-files");
 		}
-		return { kind: "spawned", path: exe, args };
+		return { kind: "spawned", path: exe, args, requestedArgs: params.argv };
 	}
 	const relayUrl = cfgBrowserRelayUrl.get(session.settings);
 	// Explicit app: "relay" wins over every setting; PI_BROWSER_RELAY stays the

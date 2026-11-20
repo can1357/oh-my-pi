@@ -13,7 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
-import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import { createBrowserPrelude, resolveBrowserKind } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import {
 	attachPageWithTimeout,
 	findFreeCdpPort,
@@ -578,6 +578,56 @@ describe("pickElectronTarget", () => {
 		try {
 			expect(await findReusableCdp(existing.path, { appArgs: [`--user-data-dir=${profile}-other`] })).toBeNull();
 			expect(await findReusableCdp(existing.path, { appArgs: [`--user-data-dir=${profile}`] })).toEqual({
+				cdpUrl: `http://127.0.0.1:${cdp.port}`,
+				pid: existing.pid,
+			});
+		} finally {
+			await existing.close();
+			cdp.stop(true);
+		}
+	});
+
+	test("refuses to reuse a live CDP endpoint that lacks a requested app.args flag", async () => {
+		const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
+		const profile = path.join(os.tmpdir(), `omp-cdp-flags-${crypto.randomUUID()}`);
+		const existing = await spawnDisposableExecutable([
+			`--user-data-dir=${profile}`,
+			`--remote-debugging-port=${cdp.port}`,
+			"--disable-gpu",
+		]);
+		const autoplay = "--autoplay-policy=no-user-gesture-required";
+		try {
+			// The same profile, asking for a flag this running browser was started without.
+			await expect(
+				findReusableCdp(existing.path, {
+					appArgs: [`--user-data-dir=${profile}`],
+					requestedArgs: [`--user-data-dir=${profile}`, "--disable-gpu", autoplay],
+				}),
+			).rejects.toThrow(`already running without ${autoplay}`);
+			// Reuse is unchanged when every requested flag is on its command line.
+			expect(
+				await findReusableCdp(existing.path, {
+					appArgs: [`--user-data-dir=${profile}`],
+					requestedArgs: [`--user-data-dir=${profile}`, "--disable-gpu"],
+				}),
+			).toEqual({ cdpUrl: `http://127.0.0.1:${cdp.port}`, pid: existing.pid });
+		} finally {
+			await existing.close();
+			cdp.stop(true);
+		}
+	});
+
+	test("reuses a running app that carries the requested app.args when omp adds its own flags", async () => {
+		const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
+		const existing = await spawnDisposableExecutable([`--remote-debugging-port=${cdp.port}`, "--disable-gpu"]);
+		try {
+			const kind = resolveBrowserKind(
+				{ action: "open", app: existing.path, argv: ["--disable-gpu"] },
+				makeSession(),
+			);
+			if (kind.kind !== "spawned") throw new Error("Expected a spawned app");
+			// omp appends its own flags to the launch argv; they are not app.args and must not be required.
+			expect(await findReusableCdp(kind.path, { appArgs: kind.args, requestedArgs: kind.requestedArgs })).toEqual({
 				cdpUrl: `http://127.0.0.1:${cdp.port}`,
 				pid: existing.pid,
 			});

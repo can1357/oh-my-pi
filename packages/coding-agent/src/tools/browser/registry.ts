@@ -34,7 +34,14 @@ export type PuppeteerBrowserKind =
 			/** Process-local launch flag; shared browsers use the tab-scoped CDP override instead. */
 			insecure?: boolean;
 	  }
-	| { kind: "spawned"; path: string; args?: string[] }
+	| {
+			kind: "spawned";
+			path: string;
+			/** Launch argv: app.args plus omp's own flags and profile. */
+			args?: string[];
+			/** The app.args the caller asked for; a reused browser must carry each of them. */
+			requestedArgs?: string[];
+	  }
 	| { kind: "connected"; cdpUrl: string }
 	| RelayKind;
 
@@ -358,7 +365,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		);
 	}
 	const appArgs = kind.args ?? [];
-	const reused = await findReusableCdp(exe, { signal: opts.signal, appArgs });
+	const reused = await findReusableCdp(exe, { signal: opts.signal, appArgs, requestedArgs: kind.requestedArgs });
 	let cdpUrl: string;
 	let pid: number;
 	let subprocess: Subprocess | undefined;
