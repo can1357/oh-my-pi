@@ -251,6 +251,8 @@ export class UiHelpers {
 	#textRendererSetVersion = 0;
 	/** The text renderer set changed while a replay was in flight; the commit retires stale scrollback. */
 	#textRendererSetChangedDuringReplay = false;
+	/** The latest line of each keyed status ({@link ShowStatusOptions.key}). */
+	readonly #keyedStatuses = new Map<string, StatusNotice>();
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -260,7 +262,8 @@ export class UiHelpers {
 	 * If multiple status messages are emitted back-to-back (without anything else being added to the chat),
 	 * we update the previous status line instead of appending new ones to avoid log spam. A repeat of the
 	 * exact same text replaces the line with a fresh notice: an in-place update with identical props sends
-	 * nothing to a native terminal, so its expired toast would never show again.
+	 * nothing to a native terminal, so its expired toast would never show again. `key` and `collapse`
+	 * opt out of that positional merge; see {@link ShowStatusOptions}.
 	 */
 	showStatus(message: string, options?: ShowStatusOptions): void {
 		const children = this.ctx.chatContainer.children;
@@ -270,8 +273,23 @@ export class UiHelpers {
 		// instead of leaving the palette that was active when it was presented.
 		const styleFn = useDim ? (t: string) => theme.fg("dim", t) : undefined;
 		const notice = { styleFn, toast: options?.toast, action: options?.action };
+		const key = options?.key;
 
-		if (last && last === this.ctx.lastStatus) {
+		if (key !== undefined) {
+			const keyed = this.#keyedStatuses.get(key);
+			if (keyed && this.#onlyNoticesBelow(keyed)) {
+				keyed.setMessage(message, notice);
+				this.ctx.ui.requestRender();
+				return;
+			}
+			const status = new StatusNotice(message, notice);
+			this.ctx.present([status]);
+			this.#keyedStatuses.set(key, status);
+			return;
+		}
+
+		const collapse = options?.collapse ?? true;
+		if (collapse && last && last === this.ctx.lastStatus) {
 			if (this.ctx.lastStatus.message !== message) {
 				this.ctx.lastStatus.setMessage(message, notice);
 				this.ctx.ui.requestRender();
@@ -282,7 +300,19 @@ export class UiHelpers {
 
 		const status = new StatusNotice(message, notice);
 		this.ctx.present([status]);
-		this.ctx.lastStatus = status;
+		if (collapse) this.ctx.lastStatus = status;
+	}
+
+	/** Whether `status` is still in the chat with nothing but notices after it. */
+	#onlyNoticesBelow(status: StatusNotice): boolean {
+		const children = this.ctx.chatContainer.children;
+		const index = children.lastIndexOf(status);
+		if (index === -1) return false;
+		for (let i = index + 1; i < children.length; i++) {
+			const child = children[i];
+			if (!(child instanceof StatusNotice || child instanceof TranscriptNotice)) return false;
+		}
+		return true;
 	}
 
 	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[] {

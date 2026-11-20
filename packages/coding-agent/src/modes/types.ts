@@ -166,6 +166,18 @@ export interface ShowStatusOptions {
 	toast?: boolean;
 	/** A button on the native toast (Undo); the ANSI line has none. */
 	action?: StatusNoticeAction;
+	/**
+	 * Names a status that updates in place (the MCP startup line): a later status with the same key rewrites
+	 * that line while only notices sit below it, so unrelated notices in between survive. Keyed statuses
+	 * never collapse with unkeyed ones.
+	 */
+	key?: string;
+	/**
+	 * Whether the status collapses into the status line directly above it and lets the next one collapse into it
+	 * (default true). False gives it a line of its own: an extension's notice, which must not overwrite or be
+	 * overwritten by another source's status.
+	 */
+	collapse?: boolean;
 }
 
 export interface AgentHubOpenOptions {

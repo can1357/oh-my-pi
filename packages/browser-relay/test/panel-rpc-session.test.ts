@@ -148,16 +148,38 @@ describe("rpc panel session", () => {
 		expect(session.getSnapshot().working).toBe(true);
 
 		worker.line({ type: "message_start", messageId: "msg-1", message: assistant("") });
-		worker.line({ type: "message_update", messageId: "msg-1", message: assistant("Hel"), assistantMessageEvent: { type: "text_delta" } });
-		worker.line({ type: "message_update", messageId: "msg-1", message: assistant("Hello"), assistantMessageEvent: { type: "text_delta" } });
+		worker.line({
+			type: "message_update",
+			messageId: "msg-1",
+			message: assistant("Hel"),
+			assistantMessageEvent: { type: "text_delta" },
+		});
+		worker.line({
+			type: "message_update",
+			messageId: "msg-1",
+			message: assistant("Hello"),
+			assistantMessageEvent: { type: "text_delta" },
+		});
 		// Streaming updates publish once per frame.
 		expect(session.getSnapshot().stream).toEqual(assistant(""));
 		await until(session, snapshot => JSON.stringify(snapshot.stream) === JSON.stringify(assistant("Hello")));
 		expect(session.getSnapshot().stream).toEqual(assistant("Hello"));
 		expect(session.getSnapshot().streamDone).toBe(false);
 
-		worker.line({ type: "tool_execution_start", toolCallId: "t1", toolName: "browser", args: { op: "click" }, intent: "Clicking" });
-		worker.line({ type: "tool_execution_update", toolCallId: "t1", toolName: "browser", args: { op: "click" }, partialResult: { content: [{ type: "text", text: "half" }] } });
+		worker.line({
+			type: "tool_execution_start",
+			toolCallId: "t1",
+			toolName: "browser",
+			args: { op: "click" },
+			intent: "Clicking",
+		});
+		worker.line({
+			type: "tool_execution_update",
+			toolCallId: "t1",
+			toolName: "browser",
+			args: { op: "click" },
+			partialResult: { content: [{ type: "text", text: "half" }] },
+		});
 		await until(session, snapshot => snapshot.activeTools.get("t1")?.partialResult !== undefined);
 		expect(session.getSnapshot().activeTools.get("t1")).toMatchObject({
 			toolName: "browser",
@@ -199,7 +221,10 @@ describe("rpc panel session", () => {
 
 		const before = worker.sent.filter(command => command.type === "get_entries").length;
 		worker.line({ type: "message_end", message: { role: "user", content: "a", timestamp: 1 } });
-		worker.line({ type: "message_end", message: { role: "toolResult", toolCallId: "x", toolName: "y", content: [], isError: false, timestamp: 1 } });
+		worker.line({
+			type: "message_end",
+			message: { role: "toolResult", toolCallId: "x", toolName: "y", content: [], isError: false, timestamp: 1 },
+		});
 		// One fetch in flight; the second request waits for it.
 		expect(worker.sent.filter(command => command.type === "get_entries").length).toBe(before + 1);
 		const second = worker.nextSend("get_entries");
@@ -212,7 +237,11 @@ describe("rpc panel session", () => {
 		const { worker, session } = await attached();
 		const image = { type: "image" as const, data: "iVBORw0K", mimeType: "image/png" };
 		session.prompt("what is this?", [image]);
-		expect(worker.last("prompt")).toMatchObject({ message: "what is this?", images: [image], streamingBehavior: "steer" });
+		expect(worker.last("prompt")).toMatchObject({
+			message: "what is this?",
+			images: [image],
+			streamingBehavior: "steer",
+		});
 
 		worker.line({
 			type: "extension_ui_request",
@@ -222,12 +251,27 @@ describe("rpc panel session", () => {
 			options: ["A", "B"],
 			optionDetails: [{}, { description: "second" }],
 		});
-		worker.line({ type: "extension_ui_request", id: "ui-2", method: "confirm", title: "Proceed?", message: "It deletes files" });
+		worker.line({
+			type: "extension_ui_request",
+			id: "ui-2",
+			method: "confirm",
+			title: "Proceed?",
+			message: "It deletes files",
+		});
 		const select = session.getSnapshot().uiRequest;
-		expect(select).toMatchObject({ kind: "select", title: "Pick one", options: ["A", { label: "B", description: "second" }] });
+		expect(select).toMatchObject({
+			kind: "select",
+			title: "Pick one",
+			options: ["A", { label: "B", description: "second" }],
+		});
 		session.answer(select?.reqId ?? -1, "B");
 		const confirm = session.getSnapshot().uiRequest;
-		expect(confirm).toMatchObject({ kind: "select", title: "Proceed?", helpText: "It deletes files", options: ["Yes", "No"] });
+		expect(confirm).toMatchObject({
+			kind: "select",
+			title: "Proceed?",
+			helpText: "It deletes files",
+			options: ["Yes", "No"],
+		});
 		session.answer(confirm?.reqId ?? -1, "Yes");
 		expect(session.getSnapshot().uiRequest).toBeNull();
 		const responses = worker.sent.filter(command => command.type === "extension_ui_response");
@@ -263,7 +307,9 @@ describe("rpc panel session", () => {
 		]);
 
 		const models = session.listModels?.();
-		worker.respond("get_available_models", { models: [{ id: "m2", name: "Model Two", provider: "acme", contextWindow: null }] });
+		worker.respond("get_available_models", {
+			models: [{ id: "m2", name: "Model Two", provider: "acme", contextWindow: null }],
+		});
 		expect(await models).toEqual([{ provider: "acme", id: "m2", name: "Model Two" }]);
 		const switched = session.setModel?.({ provider: "acme", id: "m2", name: "Model Two" });
 		expect(worker.last("set_model")).toMatchObject({ provider: "acme", modelId: "m2" });

@@ -100,7 +100,7 @@ describe("InteractiveMode MCP connection status", () => {
 				connectedServers: [],
 				failedServers: [],
 			}),
-			{ toast: false },
+			{ toast: false, key: "mcp-status" },
 		);
 	});
 
@@ -174,8 +174,27 @@ describe("InteractiveMode MCP connection status", () => {
 
 		expect(showStatusSpy).toHaveBeenLastCalledWith(
 			"Connected: alpha. Failed: broken: bad config. Still connecting: retry…",
-			{ toast: false },
+			{ toast: false, key: "mcp-status" },
 		);
+	});
+
+	it("keeps extension info notices shown during MCP startup and updates one MCP line", () => {
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "connecting",
+			serverNames: ["alpha"],
+		} satisfies McpConnectionStatusEvent);
+		mode.showHookNotify("A loaded", "info");
+		mode.showHookNotify("B loaded", "info");
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "connected",
+			serverName: "alpha",
+		} satisfies McpConnectionStatusEvent);
+
+		const transcript = mode.chatContainer.render(120).join("\n");
+		expect(transcript).toContain("A loaded");
+		expect(transcript).toContain("B loaded");
+		expect(transcript).toContain("Connected to MCP server: alpha.");
+		expect(transcript).not.toContain("Connecting to MCP servers");
 	});
 
 	it("rejects a malformed mcp:connection-status payload via the guard instead of letting it throw", () => {

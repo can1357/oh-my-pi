@@ -218,7 +218,9 @@ export class GuestClient {
 
 	/** Prompts the host; `images` ride in the same `prompt` frame (omitted when empty). */
 	sendPrompt(text: string, images?: readonly ImageContent[]): void {
-		this.#socket.send(images && images.length > 0 ? { t: "prompt", text, images: [...images] } : { t: "prompt", text });
+		this.#socket.send(
+			images && images.length > 0 ? { t: "prompt", text, images: [...images] } : { t: "prompt", text },
+		);
 	}
 
 	sendUiResponse(reqId: number, value?: CollabUiResponseValue): void {

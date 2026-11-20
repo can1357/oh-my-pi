@@ -247,7 +247,11 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 	try {
 		child = io.spawn(cwd);
 	} catch (error) {
-		send({ t: "exit", code: null, stderr: `failed to start omp: ${error instanceof Error ? error.message : String(error)}` });
+		send({
+			t: "exit",
+			code: null,
+			stderr: `failed to start omp: ${error instanceof Error ? error.message : String(error)}`,
+		});
 		return;
 	}
 	send({ t: "ready", pid: child.pid });
@@ -277,7 +281,9 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 				try {
 					frame = rpcFrames.push(JSON.parse(line));
 				} catch (error) {
-					io.log(`dropping a broken rpc chunk sequence: ${error instanceof Error ? error.message : String(error)}`);
+					io.log(
+						`dropping a broken rpc chunk sequence: ${error instanceof Error ? error.message : String(error)}`,
+					);
 					rpcFrames = new RpcFrameDecoder();
 					return;
 				}

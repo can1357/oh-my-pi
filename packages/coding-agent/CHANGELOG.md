@@ -40,6 +40,7 @@
 
 ### Fixed
 
+- Extension `ctx.ui.notify(…, "info")` notices shown at session start stay visible instead of being overwritten by the next extension's notice or the MCP startup status line ([#19866](https://github.com/can1357/oh-my-pi/issues/19866))
 - Sloppy edits reject incomplete Find/action pairs without writing, preserve numeric `||` expressions, and no longer mistake a nested or partial closing line for the end of a block range
 - OpenCode v2 MCP configurations now discover servers from `mcp.servers` while continuing to import flat `mcp` entries ([#19863](https://github.com/can1357/oh-my-pi/issues/19863))
 - Failed browser launches no longer log URL userinfo, query strings (including OAuth device codes), or fragments ([#19844](https://github.com/can1357/oh-my-pi/pull/19844) by [@JustasMasiulis](https://github.com/JustasMasiulis))

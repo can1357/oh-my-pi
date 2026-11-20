@@ -16,18 +16,11 @@
  * user's logged-in browser.
  */
 import { macOSFrontApp } from "@oh-my-pi/pi-natives";
-import { logger, parseFlag } from "@oh-my-pi/pi-utils";
+import { parseFlag } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { RelayBridge } from "./bridge";
-import {
-	extensionIdForPath,
-	installedRelayExtensionStamp,
-} from "./extension-files";
-import {
-	readRelayInstalls,
-	registeredRelayExtensionIds,
-	syncRelayInstalls,
-} from "./installs";
+import { extensionIdForPath, installedRelayExtensionStamp } from "./extension-files";
+import { readRelayInstalls, registeredRelayExtensionIds, syncRelayInstalls } from "./installs";
 import { RELAY_RECHECK_PATH, RELAY_RESTART_PATH } from "./protocol";
 
 /** Options for {@link startRelayServer}. */
@@ -97,11 +90,7 @@ function isWsAuthority(raw: string): boolean {
 export function startRelayServer(opts: RelayServerOptions): RelayServer {
 	const log = opts.log ?? (() => {});
 	const group =
-		opts.group === false
-			? null
-			: opts.group === true || opts.group === undefined
-				? DEFAULT_GROUP
-				: opts.group;
+		opts.group === false ? null : opts.group === true || opts.group === undefined ? DEFAULT_GROUP : opts.group;
 	const bridge = new RelayBridge({
 		log,
 		group,
@@ -109,9 +98,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 			const installs = await readRelayInstalls({
 				registryFile: opts.installRegistryFile,
 			});
-			const install = installs.find(
-				(row) => !row.missing && extensionIdForPath(row.dir) === extensionId,
-			);
+			const install = installs.find(row => !row.missing && extensionIdForPath(row.dir) === extensionId);
 			return install ? installedRelayExtensionStamp(install.dir) : null;
 		},
 		async updateExtension(extensionId) {
@@ -120,10 +107,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 				registryFile: opts.installRegistryFile,
 			});
 			if (!ours.includes(extensionId)) {
-				log(
-					"connected extension is not a registered install; not updating it",
-					{ extensionId },
-				);
+				log("connected extension is not a registered install; not updating it", { extensionId });
 				return false;
 			}
 			const results = await syncRelayInstalls({
@@ -136,10 +120,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 				if (result.status === "failed") {
 					failed = true;
 					log("extension install sync failed", result);
-				} else if (
-					result.status !== "missing" &&
-					result.ompVersion === VERSION
-				) {
+				} else if (result.status !== "missing" && result.ompVersion === VERSION) {
 					current = true;
 				}
 			}
@@ -149,10 +130,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 	const sockets = new Set<RelayWebSocket>();
 	const instance = crypto.randomUUID();
 	// Only macOS can hand the front app back; elsewhere the relay never reads it.
-	if (
-		process.platform === "darwin" &&
-		parseFlag(process.env.PI_BROWSER_RELAY_KEEP_FRONT, true)
-	) {
+	if (process.platform === "darwin" && parseFlag(process.env.PI_BROWSER_RELAY_KEEP_FRONT, true)) {
 		bridge.keepFrontAppWith(macOSFrontApp);
 	}
 
@@ -172,8 +150,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 			if (path === "/cdp") {
 				// Browsers set Origin on websocket upgrades; native CDP clients
 				// don't. Reject any Origin so a web page can't drive the relay.
-				if (req.headers.get("origin"))
-					return new Response("Forbidden", { status: 403 });
+				if (req.headers.get("origin")) return new Response("Forbidden", { status: 403 });
 				const data: SocketData = {
 					role: "cdp",
 					claim: url.searchParams.get("claim") ?? undefined,
@@ -194,19 +171,15 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 				return new Response("websocket upgrade required", { status: 426 });
 			}
 			if (path === RELAY_RECHECK_PATH) {
-				if (req.method !== "POST")
-					return new Response("Method not allowed", { status: 405 });
+				if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
 				// Like `/cdp`: browsers send Origin, the omp CLI does not; a web page must not trigger reloads.
-				if (req.headers.get("origin"))
-					return new Response("Forbidden", { status: 403 });
+				if (req.headers.get("origin")) return new Response("Forbidden", { status: 403 });
 				bridge.recheckExtensions();
 				return new Response(null, { status: 204 });
 			}
 			if (path === RELAY_RESTART_PATH) {
-				if (req.method !== "POST")
-					return new Response("Method not allowed", { status: 405 });
-				if (req.headers.get("origin"))
-					return new Response("Forbidden", { status: 403 });
+				if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+				if (req.headers.get("origin")) return new Response("Forbidden", { status: 403 });
 				const restarting =
 					opts.onRestart?.({
 						version: url.searchParams.get("version") ?? "",
@@ -214,8 +187,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 					}) ?? false;
 				return new Response(null, { status: restarting ? 202 : 409 });
 			}
-			if (req.method !== "GET")
-				return new Response("Method not allowed", { status: 405 });
+			if (req.method !== "GET") return new Response("Method not allowed", { status: 405 });
 			if (path === "/json/version") {
 				if (!bridge.ready) {
 					const info: RelayUnavailableInfo = {
@@ -250,10 +222,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 				}
 			},
 			message(ws: RelayWebSocket, message: string | Buffer): void {
-				const text =
-					typeof message === "string"
-						? message
-						: new TextDecoder().decode(message);
+				const text = typeof message === "string" ? message : new TextDecoder().decode(message);
 				if (ws.data.role === "ext") {
 					bridge.extMessage(ws, text);
 				} else if (ws.data.connId !== undefined) {

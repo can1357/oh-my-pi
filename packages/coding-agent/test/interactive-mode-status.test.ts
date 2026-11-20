@@ -153,6 +153,39 @@ describe("InteractiveMode.showStatus", () => {
 		expect(ctx.chatContainer.children[0]?.render(120).join("\n")).toContain("STATUS_ONE");
 	});
 
+	test("a keyed status updates its line across notices but appends once other content follows", () => {
+		const ctx = {
+			chatContainer: new Container(),
+			ui: { requestRender: vi.fn() },
+			present: (content: Component | readonly Component[]) => {
+				const items = Array.isArray(content) ? content : [content];
+				for (const item of items) ctx.chatContainer.addChild(item);
+				ctx.ui.requestRender();
+			},
+			lastStatus: undefined,
+		} as unknown as InteractiveModeContext;
+		const helpers = new UiHelpers(ctx);
+
+		helpers.showStatus("Connecting…", { key: "k" });
+		helpers.showStatus("NOTICE_A", { collapse: false });
+		helpers.showStatus("NOTICE_B", { collapse: false });
+		helpers.showStatus("Connected", { key: "k" });
+		// Notices in between survive, and the keyed line is rewritten rather than duplicated.
+		const startup = renderContainer(ctx.chatContainer);
+		expect(ctx.chatContainer.children).toHaveLength(3);
+		expect(startup).toContain("NOTICE_A");
+		expect(startup).toContain("NOTICE_B");
+		expect(startup).toContain("Connected");
+		expect(startup).not.toContain("Connecting…");
+
+		// Once the conversation moves on, the old line may be in scrollback: append a fresh one.
+		ctx.chatContainer.addChild({ render: () => ["OTHER"], invalidate: () => {} });
+		helpers.showStatus("Reconnecting…", { key: "k" });
+		expect(ctx.chatContainer.children).toHaveLength(5);
+		expect(renderLastLine(ctx.chatContainer)).toContain("Reconnecting…");
+		expect(ctx.chatContainer.children[0]?.render(120).join("\n")).toContain("Connected");
+	});
+
 	test("preserves startup notifications while rendering the initial transcript", async () => {
 		await Settings.init({ inMemory: true });
 		try {
