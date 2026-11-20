@@ -71,6 +71,11 @@ export interface ModelPickerCallbacks {
 	 * (clamped to that model) as the session's thinking level. {@link onCancel} follows.
 	 */
 	onKeepThinking?: (level: ConfiguredThinkingLevel) => void;
+	/** Returns the rebuilt `--models` scope after the catalog moved; `undefined` keeps the current one. */
+	onCatalogRefreshed?: () =>
+		| ReadonlyArray<ScopedModelItem>
+		| undefined
+		| Promise<ReadonlyArray<ScopedModelItem> | undefined>;
 	/** The picker was dismissed. */
 	onCancel: () => void;
 }
@@ -304,19 +309,21 @@ export class ModelPickerComponent implements Component {
 		}
 
 		// Re-read only if the catalog moves (startup discovery landing, a
-		// models.yml edit): rebuilding a current catalog on every open blocks
-		// the first paint for seconds. A --models scope is registry-independent.
-		if (this.#scopedModels.length === 0) {
-			this.#registry
-				.refreshIfStale()
-				.then(changed => {
-					if (changed) this.#syncFromRegistryState();
-				})
-				.catch(error => {
-					this.#configError = error instanceof Error ? error.message : String(error);
-				})
-				.finally(() => this.#tui.requestRender());
-		}
+		// models.yml edit, an expired discovery cache): rebuilding a current
+		// catalog on every open blocks the first paint for seconds. The host
+		// re-resolves a --models scope against the moved catalog.
+		this.#registry
+			.refreshIfStale()
+			.then(async changed => {
+				if (!changed) return;
+				const scope = await callbacks.onCatalogRefreshed?.();
+				if (scope) this.#scopedModels = scope;
+				this.#syncFromRegistryState();
+			})
+			.catch(error => {
+				this.#configError = error instanceof Error ? error.message : String(error);
+			})
+			.finally(() => this.#tui.requestRender());
 	}
 
 	invalidate(): void {}
