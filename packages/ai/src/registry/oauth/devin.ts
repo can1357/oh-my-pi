@@ -22,14 +22,12 @@ export const devinIdentityHook: AfterExchangeHook = async (credentials, context)
 	if (context.signal?.aborted) throw new AIError.LoginCancelledError();
 	// Unidentified, the login is stored the way it was before identity capture.
 	if (!report) return credentials;
-	const identity = {
-		email: usageReportMetadataValue(report, "email"),
-		accountId: usageReportMetadataValue(report, "accountId"),
-		orgId: usageReportMetadataValue(report, "orgId"),
-		orgName: usageReportMetadataValue(report, "orgName"),
-	};
+	// An empty field leaves what the exchange returned.
 	return {
 		...credentials,
-		...Object.fromEntries(Object.entries(identity).filter(([, value]) => value)),
+		email: usageReportMetadataValue(report, "email") || credentials.email,
+		accountId: usageReportMetadataValue(report, "accountId") || credentials.accountId,
+		orgId: usageReportMetadataValue(report, "orgId") || credentials.orgId,
+		orgName: usageReportMetadataValue(report, "orgName") || credentials.orgName,
 	};
 };
