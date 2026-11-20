@@ -12,6 +12,7 @@ import {
 import eagerTasksTemplate from "./fixtures/system-prompt-template/eager-tasks.md" with { type: "text" };
 import literalDataTemplate from "./fixtures/system-prompt-template/literal-data.md" with { type: "text" };
 import liveDataTemplate from "./fixtures/system-prompt-template/live-data.md" with { type: "text" };
+import commitGuidance from "../src/prompts/tools/commit-guidance.md" with { type: "text" };
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { cfgSystemPromptTemplates } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -475,6 +476,12 @@ describe("quota-exhaustion prompt fingerprint omission", () => {
 			expect(text).not.toContain("You are omp's trusted coding assistant.");
 			expect(text).not.toContain("Read xd://<tool> for full docs + JSON schema before first use.");
 			expect(text).toContain("You are omp's coding assistant.");
+			expect(commitGuidance).not.toContain(
+				"it selects only the lines you and your subagents wrote and never touches other agents' staged or unstaged work.",
+			);
+			expect(commitGuidance).toContain(
+				"it commits only the lines written in this turn and preserves other work.",
+			);
 		});
 	});
 });
