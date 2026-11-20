@@ -23,6 +23,7 @@ import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
 import { disposeAllKernelSessions, type PythonResult } from "../../src/eval/py/executor";
 import type { ToolSession } from "../../src/tools";
+import type { AgentDefinition } from "../../src/task/types";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { CostGate } from "../../src/session/cost-gate";
 import { SessionManager } from "../../src/session/session-manager";
@@ -260,6 +261,31 @@ describe("runEvalCompletion", () => {
 			return `${model.provider}/${model.id}`;
 		});
 		expect(resolved).toEqual(["p/smol", "p/default", "p/slow"]);
+	});
+
+	it("runs the model a user-tagged agent (`m<N>`) names, at its tagged effort", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+		const tagged = makeReasoningModel("tagged");
+		const session = makeSession({ available: [SMOL, tagged] });
+		session.getSessionAgents = (): readonly AgentDefinition[] => [
+			{ name: "m1", model: ["p/tagged"], thinkingLevel: Effort.High } as AgentDefinition,
+		];
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "m1" }, { session });
+
+		const model = spy.mock.calls[0]?.[0] as Model<Api>;
+		expect(`${model.provider}/${model.id}`).toBe("p/tagged");
+		const opts = spy.mock.calls[0]?.[2] as { reasoning?: unknown } | undefined;
+		expect(opts?.reasoning).toBe(Effort.High);
+		expect(result.details).toEqual({ model: "p/tagged", structured: false });
+	});
+
+	it("refuses a `model` that names neither a tier nor a tagged agent", async () => {
+		const session = makeSession();
+
+		await expect(runEvalCompletionAndWait({ prompt: "q", model: "m9" }, { session })).rejects.toThrow(
+			/could not resolve model "m9"/,
+		);
 	});
 
 	it("counts each completion against the session's cost cap and refuses at it", async () => {

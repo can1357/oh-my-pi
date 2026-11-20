@@ -46,6 +46,7 @@
 - Changed an in-place disassembler database to be identified by its real path, so one opened through a symlink gets a new id and dsm handle ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 - Changed dsm.open() to reject a database file that belongs to another disassembler backend, with an error naming the backend to switch to ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 - TTSR rules that cannot interrupt what is streaming (`interruptMode: never`, which includes the built-in style rules; `prose-only` rules on tool calls; `tool-only` rules on replies and reasoning) are checked once when the reply, reasoning or tool call ends instead of on every streamed chunk, and a tool call no interrupting rule applies to is not inspected while it streams. They still report the same matches and send the same reminders.
+- Eval `completion()` accepts a user-tagged model agent as its `model` (for example `completion(prompt, { model: "m1" })`); it runs the model the user pinned with `^model`, at the effort they tagged, instead of refusing anything but a tier
 
 ### Fixed
 
