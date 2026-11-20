@@ -8,7 +8,7 @@
 
 ### Changed
 
-- LiteLLM discovery now routes Claude model groups through the proxy's Anthropic Messages endpoint (`/v1/messages`), so Claude keeps prompt caching and native thinking
+- LiteLLM discovery now routes Claude model groups through the proxy's Anthropic Messages endpoint (`/v1/messages`), so Claude keeps prompt caching and native thinking ([#19927](https://github.com/can1357/oh-my-pi/pull/19927) by [@cassfij](https://github.com/cassfij))
 
 ### Fixed
 
