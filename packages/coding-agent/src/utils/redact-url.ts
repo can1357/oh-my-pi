@@ -1,8 +1,8 @@
 const SENSITIVE_QUERY_PARAM = /key|token|secret|auth/i;
 
 /**
- * Drop URL userinfo and fragments. Openers omit the whole query since OAuth
- * verification URLs can carry credentials under provider-specific names.
+ * Drop URL userinfo and fragments. By default, redact only query parameters
+ * with credential-like names; `"omit"` drops the whole query.
  */
 export function redactUrlForLog(url: string, query: "redact-sensitive" | "omit" = "redact-sensitive"): string {
 	try {
