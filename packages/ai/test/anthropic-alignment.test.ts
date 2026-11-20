@@ -3261,3 +3261,65 @@ describe("cch attestation", () => {
 		expect(m![1]).toBe((h & 0xfffffn).toString(16).padStart(5, "0"));
 	});
 });
+
+describe("Anthropic empty-messages guard", () => {
+	// `streamAnthropic` runs in an async IIFE, so a `buildParams` throw is
+	// pushed as an "error" event instead of being thrown synchronously. Drain
+	// the stream and surface the captured AssistantMessage's errorMessage.
+	const captureError = async (context: Context): Promise<string | undefined> => {
+		const stream = streamAnthropic(ANTHROPIC_MODEL, context, {
+			apiKey: "sk-ant-oat-test",
+			signal: createAbortedSignal(),
+		});
+		let captured: string | undefined;
+		for await (const evt of stream) {
+			if (evt.type === "error") captured = evt.error.errorMessage;
+		}
+		return captured;
+	};
+
+	it("emits an error before sending when context.messages is empty (regression: 400 'messages is required')", async () => {
+		const errMsg = await captureError({
+			systemPrompt: ["Be helpful."],
+			messages: [], // <-- the bug: a context handler/abort/compaction emptied the context
+			tools: [],
+		});
+		expect(errMsg).toBeDefined();
+		expect(errMsg).toContain("refusing to build request with empty messages");
+		expect(errMsg).toContain("claude-sonnet-4-5");
+		expect(errMsg).toContain("anthropic");
+	});
+
+	it("does not emit the empty-messages error when context has at least one message", async () => {
+		// onPayload short-circuits before the fetch: we only assert buildParams
+		// accepted the non-empty context.
+		const stream = streamAnthropic(
+			ANTHROPIC_MODEL,
+			{
+				systemPrompt: ["Be helpful."],
+				messages: [{ role: "user", content: "hello", timestamp: 1 }],
+				tools: [],
+			},
+			{
+				apiKey: "sk-ant-oat-test",
+				signal: createAbortedSignal(),
+				onPayload: () => ({
+					model: "claude-sonnet-4-5",
+					messages: [{ role: "user", content: "hello" }],
+					max_tokens: 1024,
+					stream: true,
+				}),
+			},
+		);
+		let sawEmptyError = false;
+		for await (const evt of stream) {
+			if (
+				evt.type === "error" &&
+				evt.error.errorMessage?.includes("refusing to build request with empty messages")
+			) {
+				sawEmptyError = true;
+			}
+		}
+		expect(sawEmptyError).toBe(false);
+	});
+});

@@ -5547,6 +5547,19 @@ function buildParams(
 		isOAuthToken,
 		conversion,
 	);
+	// Diagnose an empty provider request before spending a round-trip on it:
+	// Anthropic answers `messages: []` with a bare HTTP 400 "messages is
+	// required" that does not say who emptied the conversation. Encoding can
+	// drop every message (context handlers returning an empty replacement,
+	// aborts, compaction, dropped images), so report the model, provider, and
+	// how many messages arrived, which separates "nothing was passed in" from
+	// "everything was filtered out".
+	if (wireMessages.length === 0) {
+		throw new Error(
+			`anthropic: refusing to build request with empty messages for model ${model.id} (provider ${model.provider}). ` +
+				`Context had ${context.messages.length} input messages; all were filtered out before reaching the provider.`,
+		);
+	}
 
 	// Anchor the stable tools+system head so it stays cached across turns; the
 	// moving message tail is anchored separately in applyPromptCaching below.
