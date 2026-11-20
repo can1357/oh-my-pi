@@ -1403,20 +1403,14 @@ function sessionIdFromSessionPath(file: string): string | undefined {
  * moment ago.
  */
 async function dedupeRealPaths(files: readonly string[]): Promise<string[]> {
+	// Resolved concurrently: one realpath after another dominates a listing of every project.
+	const keys = await Promise.all(files.map(file => fs.promises.realpath(file).catch(() => path.resolve(file))));
 	const seen = new Set<string>();
-	const out: string[] = [];
-	for (const file of files) {
-		let key: string;
-		try {
-			key = await fs.promises.realpath(file);
-		} catch {
-			key = path.resolve(file);
-		}
-		if (seen.has(key)) continue;
-		seen.add(key);
-		out.push(file);
-	}
-	return out;
+	return files.filter((_, index) => {
+		if (seen.has(keys[index])) return false;
+		seen.add(keys[index]);
+		return true;
+	});
 }
 
 /**
@@ -1442,28 +1436,26 @@ async function scanBucketFiles(root: string, pattern: string): Promise<string[]>
 		if (isEnoent(err) || isEnotdir(err)) return [];
 		throw err;
 	}
-	const out: string[] = [];
-	for (const entry of entries) {
-		if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
-		const dir = path.join(root, entry.name);
-		const bucketStart = out.length;
-		try {
-			for await (const name of new Bun.Glob(pattern).scan({ cwd: dir, followSymlinks: true })) {
-				out.push(path.join(dir, name));
+	const glob = new Bun.Glob(pattern);
+	// Buckets scan concurrently: thousands of project directories listed one
+	// after another dominate every cross-project listing.
+	const buckets = await Promise.all(
+		entries.map(async entry => {
+			if (entry.isSymbolicLink() || !entry.isDirectory()) return [];
+			const dir = path.join(root, entry.name);
+			try {
+				return await Array.fromAsync(glob.scan({ cwd: dir, followSymlinks: true }), name => path.join(dir, name));
+			} catch (err) {
+				if (isEnoent(err) || isEacces(err) || hasFsCode(err, "EPERM") || isEnotdir(err)) return [];
+				throw err;
 			}
-		} catch (err) {
-			if (isEnoent(err) || isEacces(err) || hasFsCode(err, "EPERM") || isEnotdir(err)) {
-				out.length = bucketStart;
-				continue;
-			}
-			throw err;
-		}
-	}
-	return out;
+		}),
+	);
+	return buckets.flat();
 }
 
 /** A session file with its stat identity, before any content scan. */
-interface StatedSessionFile {
+export interface StatedSessionFile {
 	file: string;
 	stat: SessionStorageStat;
 }
@@ -1478,47 +1470,45 @@ async function newestSessionFiles(
 	pattern: string,
 	storage: SessionStorage,
 ): Promise<StatedSessionFile[]> {
+	// A pattern that crosses buckets (`*/*.jsonl`) is scanned bucket by
+	// bucket, so a symlinked bucket is skipped rather than followed; a
+	// pattern within one directory has no bucket level to bound.
+	const slash = pattern.lastIndexOf("/");
 	let files: string[];
 	try {
-		if (storage instanceof FileSessionStorage) {
-			// A pattern that crosses buckets (`*/*.jsonl`) is scanned bucket by
-			// bucket, so a symlinked bucket is skipped rather than followed; a
-			// pattern within one directory has no bucket level to bound.
-			const slash = pattern.lastIndexOf("/");
-			files =
-				slash >= 0
-					? await dedupeRealPaths(await scanBucketFiles(root, pattern.slice(slash + 1)))
-					: await Array.fromAsync(new Bun.Glob(pattern).scan({ cwd: root, followSymlinks: true }), name =>
-							path.join(root, name),
-						);
-		} else {
-			files = storage.listFilesSync(root, pattern);
+		if (!(storage instanceof FileSessionStorage)) files = storage.listFilesSync(root, pattern);
+		else if (slash >= 0) files = await scanBucketFiles(root, pattern.slice(slash + 1));
+		else {
+			files = await Array.fromAsync(new Bun.Glob(pattern).scan({ cwd: root, followSymlinks: true }), name =>
+				path.join(root, name),
+			);
 		}
 	} catch {
 		return [];
 	}
-	const stated: StatedSessionFile[] = [];
 	if (storage instanceof FileSessionStorage) {
-		const stats = await Promise.all(
-			files.map(async file => {
-				try {
-					return { file, stat: await fs.promises.stat(file) };
-				} catch {
-					return undefined;
-				}
-			}),
-		);
-		for (const entry of stats) {
-			if (entry) stated.push(entry);
-		}
-	} else {
-		for (const file of files) {
-			try {
-				stated.push({ file, stat: storage.statSync(file) });
-			} catch {}
-		}
+		return statNewestFirst(slash >= 0 ? await dedupeRealPaths(files) : files);
+	}
+	const stated: StatedSessionFile[] = [];
+	for (const file of files) {
+		try {
+			stated.push({ file, stat: storage.statSync(file) });
+		} catch {}
 	}
 	return stated.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+}
+
+/** `files` with their stats, newest mtime first; a file gone before its stat is dropped. */
+async function statNewestFirst(files: readonly string[]): Promise<StatedSessionFile[]> {
+	const stated = await Promise.all(
+		files.map(file =>
+			fs.promises.stat(file).then(
+				stat => ({ file, stat }),
+				() => undefined,
+			),
+		),
+	);
+	return stated.filter(entry => entry !== undefined).sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
 }
 
 /** Header-level {@link SessionInfo} with status for one session file; undefined when unreadable or not a session. */
@@ -1534,6 +1524,11 @@ export interface RecentSessionsQuery {
 	sessionDir?: string;
 	/** Root holding one directory per project. Default: {@link getSessionsDir}. */
 	sessionsRoot?: string;
+	/**
+	 * Exactly these session files, one name per transcript, sparing the
+	 * directory scan; `sessionDir` and `sessionsRoot` are ignored.
+	 */
+	files?: readonly string[];
 }
 
 /**
@@ -1544,9 +1539,10 @@ export interface RecentSessionsQuery {
  */
 export async function listRecentSessions(query: RecentSessionsQuery): Promise<SessionInfo[]> {
 	const storage = new FileSessionStorage();
-	const files = query.sessionDir
-		? await newestSessionFiles(query.sessionDir, "*.jsonl", storage)
-		: await newestSessionFiles(query.sessionsRoot ?? getSessionsDir(), "*/*.jsonl", storage);
+	let files: StatedSessionFile[];
+	if (query.files) files = await statNewestFirst(query.files);
+	else if (query.sessionDir) files = await newestSessionFiles(query.sessionDir, "*.jsonl", storage);
+	else files = await newestSessionFiles(query.sessionsRoot ?? getSessionsDir(), "*/*.jsonl", storage);
 	const sessions: SessionInfo[] = [];
 	for (const { file, stat } of files) {
 		if (sessions.length >= query.limit) break;
@@ -1554,6 +1550,20 @@ export async function listRecentSessions(query: RecentSessionsQuery): Promise<Se
 		if (info && !isEmptySession(info)) sessions.push(info);
 	}
 	return sessions;
+}
+
+/**
+ * Every top-level session file under `sessionsRoot` (subagent transcripts
+ * nested below a session are not), newest mtime first. Stat-only; unlike the
+ * session listings it skips the realpath dedupe, so a transcript linked into
+ * the root under two names is listed under each.
+ */
+export async function listSessionFiles(sessionsRoot: string = getSessionsDir()): Promise<StatedSessionFile[]> {
+	try {
+		return await statNewestFirst(await scanBucketFiles(sessionsRoot, "*.jsonl"));
+	} catch {
+		return [];
+	}
 }
 
 /** One project directory summarized from its session files. */

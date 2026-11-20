@@ -32,8 +32,7 @@ afterEach(() => {
 
 const UI = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
 
-/** The notice's Nerd Font stars: `md-star_off_outline`, `fa-star`, `md-star_shooting_outline`. */
-const STAR_OFF = "\u{f155b}";
+/** The notice's Nerd Font stars: `fa-star`, `md-star_shooting_outline`. */
 const STAR = "\uf005";
 const SHOOTING_STAR = "\u{f1742}";
 
@@ -245,7 +244,7 @@ function blocks(h: TspHarness): readonly TspNode[] {
 }
 
 describe("spotlight notice", () => {
-	it("follows a collapsed card as its own block: bright and clickable when shaping saved, dim when it passed", async () => {
+	it("follows a collapsed card with a clickable saving, but adds no block for a passthrough", async () => {
 		setTranscriptActionHandler(() => {});
 		const transcript = new TranscriptContainer();
 		transcript.addChild(bashCard("c1", REDUCED, SAVED));
@@ -265,14 +264,7 @@ describe("spotlight notice", () => {
 			actions: { click: "spotlight" },
 		});
 		expect(kept?.p).toMatchObject({ key: "c2" });
-		expect(keptNotice?.p).toMatchObject({
-			role: "omp.tool.spotlight",
-			key: "spotlight:c2",
-			tone: "muted",
-			spans: [{ t: STAR_OFF, s: "icon" }],
-			title: "Spotlight: passthrough",
-		});
-		expect(prop(keptNotice, "actions")).toBeUndefined();
+		expect(keptNotice).toBeUndefined();
 		expect(harness.errors).toEqual([]);
 	});
 
@@ -590,9 +582,6 @@ describe("spotlight notice", () => {
 		expect(plainSeries).toHaveLength(120);
 		expect(plainSeries?.every(bar => bar.tone === undefined && bar.value === 5 / 9)).toBe(true);
 		expect(words(plain?.c?.[1])).toBe("kept 10 of 1,000 lines");
-
-		// A passthrough has no card.
-		expect(new SpotlightNotice("c3", PASSTHROUGH, "").describe().p?.hovercard).toBeUndefined();
 	});
 
 	it("draws a held-out result dim with what it would save, and its click opens the would-be cut", async () => {
@@ -604,7 +593,7 @@ describe("spotlight notice", () => {
 		const notice = new SpotlightNotice("c1", heldOut, RICH_ORIGINAL).describe();
 		expect(notice.p).toMatchObject({
 			tone: "muted",
-			spans: [{ t: STAR_OFF, s: "icon" }, { t: "spotlight: held out · would save 150 toks" }],
+			spans: [{ t: "spotlight: held out · would save 150 toks" }],
 		});
 		const card = notice.p?.hovercard as TspPropNode | undefined;
 		expect(words(card?.c?.[1])).toBe("would keep 5 of 10 lines · 2 by score · 1 cut though hot");
@@ -641,7 +630,7 @@ describe("spotlight notice", () => {
 		const notice = new SpotlightNotice("c1", gated, RICH_ORIGINAL).describe();
 		expect(notice.p).toMatchObject({
 			tone: "muted",
-			spans: [{ t: STAR_OFF, s: "icon" }, { t: "spotlight: kept whole for editing · would save 150 toks" }],
+			spans: [{ t: "spotlight: kept whole for editing · would save 150 toks" }],
 		});
 	});
 

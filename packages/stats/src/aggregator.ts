@@ -492,7 +492,7 @@ async function syncAllSessionsLocked(
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 
-type TimeRange = "1h" | "24h" | "7d" | "30d" | "90d" | "all";
+type TimeRange = "1h" | "24h" | "2d" | "3d" | "7d" | "30d" | "90d" | "all";
 
 const DEFAULT_TIME_RANGE: TimeRange = "24h";
 
@@ -500,6 +500,8 @@ const DEFAULT_TIME_RANGE: TimeRange = "24h";
 const TIME_RANGES: Record<TimeRange, { spanMs: number | null; bucketMs: number }> = {
 	"1h": { spanMs: HOUR_MS, bucketMs: 5 * 60 * 1000 },
 	"24h": { spanMs: DAY_MS, bucketMs: HOUR_MS },
+	"2d": { spanMs: 2 * DAY_MS, bucketMs: HOUR_MS },
+	"3d": { spanMs: 3 * DAY_MS, bucketMs: HOUR_MS },
 	"7d": { spanMs: 7 * DAY_MS, bucketMs: DAY_MS },
 	"30d": { spanMs: 30 * DAY_MS, bucketMs: DAY_MS },
 	"90d": { spanMs: 90 * DAY_MS, bucketMs: DAY_MS },

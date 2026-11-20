@@ -91,6 +91,26 @@ describe("UsageDashboardComponent.describe", () => {
 		]);
 	});
 
+	it("labels an exhausted bar-less quota with no amount as Exhausted in the error tone", () => {
+		// Antigravity reports a spent quota as an unknown-unit limit with no
+		// measurable amount; without a label it would read as a red "No data".
+		const reports = [
+			report("google-antigravity", "a@test", [
+				{
+					id: "agy:quota",
+					label: "Gemini quota",
+					scope: { provider: "google-antigravity", windowId: "quota" },
+					amount: { remaining: 0, unit: "unknown" },
+					status: "exhausted",
+				},
+			]),
+		];
+		const amounts = findAll(dashboard(reports).describe(cx), n => n.p?.role === "omp.usage.amount").map(n =>
+			n.k === "text" ? n.p?.spans : undefined,
+		);
+		expect(amounts).toEqual([[{ t: "Exhausted", s: "error" }]]);
+	});
+
 	it("switches to the per-account detail table when the Details tab is selected", () => {
 		const component = dashboard([
 			report("anthropic", "a@test", [limit("anthropic", "5h", "Claude 5h", 0.25, "ok")]),
@@ -242,7 +262,7 @@ describe("SessionInfoOverlay.describe", () => {
 	const dim = (key: string): string => theme.fg("dim", `${key}:`);
 	// Built per test: the theme initializes in `beforeAll`, after this block is collected.
 	const fullReport = (): string =>
-		`${dim("File")} /tmp/s.jsonl\n${dim("ID")} abc-123\n` +
+		`${dim("File")} /tmp/s.jsonl\n${dim("ID")} abc-123\n${dim("Local")} /tmp/s/local\n` +
 		`\n${theme.bold("Provider")}\n${dim("Model")} claude-sonnet-4-5\n` +
 		`\n${theme.bold("Messages")}\n${dim("User")} 6\n${dim("Tool Calls")} 23\n${dim("Total")} 29\n\n` +
 		`${dim("Append-Only")} ${theme.fg("success", "active")} (setting: auto)\n` +
@@ -254,13 +274,14 @@ describe("SessionInfoOverlay.describe", () => {
 	const kvItems = (root: NativeNode, role: string): unknown[] =>
 		findAll(root, n => n.p?.role === role).flatMap(n => (n.k === "kv" ? [n.p?.items] : []));
 
-	it("leads with the session id, then the file, each copying its own value", () => {
+	it("leads with the session id, then the file and local directory, each copying its own value", () => {
 		const overlay = new SessionInfoOverlay({ terminal: { rows: 20 } }, fullReport(), () => {});
 		const root = overlay.describe(cx);
 		const copies = findAll(root, n => n.p?.role === "omp.info.copy");
-		expect(copies.map(n => n.p?.title)).toEqual(["Copy session ID", "Copy /tmp/s.jsonl"]);
+		expect(copies.map(n => n.p?.title)).toEqual(["Copy session ID", "Copy /tmp/s.jsonl", "Copy /tmp/s/local"]);
 		expect(JSON.stringify(copies[0])).toContain("abc-123");
 		expect(JSON.stringify(copies[1])).toContain("/tmp/s.jsonl");
+		expect(JSON.stringify(copies[2])).toContain("/tmp/s/local");
 		expect(JSON.stringify(root)).not.toContain("\x1b");
 	});
 

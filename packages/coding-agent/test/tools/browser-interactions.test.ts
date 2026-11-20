@@ -1025,6 +1025,71 @@ return { value: await tab.value("#msg"), sent: await tab.evaluate(() => window.s
 		}
 	}, 40_000);
 
+	test("fill ends with key events on the field for pages that search on them, typing nothing twice", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `fill-keyup-${crypto.randomUUID()}`;
+		// `#q` searches only on `keyup`, as CyberChef's operation search does, and its input spends the page's user
+		// activation on a popup; input in `#opens` and a keydown in `#hops` move focus to a button; a keydown in `#flip`
+		// makes it a checkbox; `#box` is a MathML element named like a text field.
+		const html = `<!doctype html><input id="q" value="old"><p id="results"></p><input id="opens"><input id="hops">
+<input id="flip"><button id="ok">OK</button><math><textarea id="box" tabindex="0"></textarea></math>
+<script>
+window.events = [];
+for (const type of ["keydown", "keypress", "beforeinput", "input", "keyup", "click"]) {
+  addEventListener(type, event => events.push([type, event.target.id, event.key ?? "", event.target.value].join(":")), true);
+}
+q.addEventListener("input", () => window.open()?.close());
+q.addEventListener("keyup", () => { results.textContent = q.value + " active:" + navigator.userActivation.isActive; });
+opens.addEventListener("input", () => ok.focus());
+hops.addEventListener("keydown", () => ok.focus());
+flip.addEventListener("keydown", () => { flip.type = "checkbox"; });
+</script>`;
+		const context = { session, toolCallId: "browser-fill-keyup" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(html)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.fill("#box", "x");
+const boxKeys = await tab.evaluate(() => window.events.splice(0).filter(event => event.startsWith("key")));
+await tab.fill("#q", "to base64");
+const results = await tab.text("#results");
+await tab.fill("#opens", " ");
+await tab.fill("#hops", "x");
+await tab.fill("#flip", "x");
+return { boxKeys, results, events: await tab.evaluate(() => window.events) };`,
+					timeout: 25,
+				},
+				context,
+			);
+			expect(valueFrom<unknown>(result)).toEqual({
+				results: "to base64 active:false",
+				events: [
+					"beforeinput:q::",
+					"input:q::to base64",
+					"keydown:q:4:to base64",
+					"keyup:q:4:to base64",
+					"beforeinput:opens::",
+					"input:opens:: ",
+					"beforeinput:hops::",
+					"input:hops::x",
+					"keydown:hops:x:x",
+					"beforeinput:flip::",
+					"input:flip::x",
+					"keydown:flip:x:x",
+				],
+				boxKeys: [],
+			});
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 40_000);
+
 	test("clearing a field with an empty fill reports the change to the page", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
@@ -2087,6 +2152,46 @@ document.getElementById("rerender").addEventListener("pointerdown", () => {
 			await page.evaluate("document.querySelector('dialog').close()");
 			expect(await clickElement(closedButton, "click closed").then(() => "clicked")).toBe("clicked");
 			await closed.dispose();
+		} finally {
+			await page.close().catch(() => undefined);
+			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
+		}
+	}, 30_000);
+
+	test("keeps a click on an inert target undelivered while the relay's overlay host comes, changes and goes", async () => {
+		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
+		const page = await browserHandle.browser.newPage();
+		// On the press, the overlay host mounted before the click is replaced by a new one, which is then restyled;
+		// `pageToo` also changes the page itself, which still confirms the click.
+		const outcome = async (pageToo: boolean): Promise<string> => {
+			await page.setContent(`<div inert><button id="inert">Inert</button></div><p id="clock">0</p>
+<omp-overlay></omp-overlay>
+<script>
+addEventListener("pointerdown", () => {
+	document.querySelector("omp-overlay").remove();
+	const host = document.createElement("OMP-OVERLAY");
+	document.body.append(host);
+	host.attachShadow({ mode: "closed" }).innerHTML = "<div>pointer</div>";
+	host.setAttribute("data-state", "pressed");
+	host.style.opacity = "0";
+	${pageToo ? 'document.getElementById("clock").textContent = "1";' : ""}
+}, true);
+</script>`);
+			const handle = await page.$("#inert");
+			if (!handle) throw new Error("Expected #inert");
+			const result = await clickElement(handle, "click #inert").then(
+				() => "clicked",
+				error => (String(error).includes("could not confirm the click reached") ? "refused" : String(error)),
+			);
+			await handle.dispose();
+			// The host changed while the click was watched.
+			expect(await page.evaluate(`document.querySelector("omp-overlay").dataset.state`)).toBe("pressed");
+			return result;
+		};
+		try {
+			expect(await outcome(false)).toBe("refused");
+			expect(await outcome(true)).toBe("clicked");
 		} finally {
 			await page.close().catch(() => undefined);
 			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });

@@ -47,7 +47,9 @@ import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { JobsPanelStream } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { ShellTrace } from "@oh-my-pi/pi-wire";
 import type { SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { ToolSession } from "../tools";
 import type { XdevState } from "../tools/xdev";
@@ -111,6 +113,10 @@ export interface AsyncJobInspection {
 	artifactId?: string;
 	/** The job's live widget (frozen once it settles). */
 	widget?: JobWidgetView;
+	/** The command's shell trace (`AsyncJobProcess.trace`): what of it runs now, ran and failed. */
+	trace?: ShellTrace;
+	/** Where the command's output goes besides `output`: its tapped pipes and redirected files, oldest first. */
+	streams?: readonly JobsPanelStream[];
 }
 
 /** Snapshot of running, recent, and pending-delivery asynchronous jobs. */

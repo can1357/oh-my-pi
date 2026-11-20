@@ -119,9 +119,35 @@ These request deadlines also govern subagent MCP calls over borrowed parent conn
 
 Initial MCP discovery returns after a 250 ms window while slower connections continue in the background. Set `mcp.startupTimeoutMs` or override it with `OMP_MCP_STARTUP_TIMEOUT_MS` to change the window; `0` waits for the initial connection attempts to settle. In print mode (`-p`, `--mode text|json`), OMP additionally waits for all configured servers to load tools or fail before the first turn, up to `OMP_MCP_TIMEOUT_MS` (default 30 seconds). `OMP_MCP_TIMEOUT_MS=0` disables this barrier deadline too, so an unresponsive server can block print mode indefinitely. Servers still unavailable at the deadline are named on stderr; `OMP_MCP_REQUIRE_READY=1` instead exits with code 1 before the turn. These print-mode waits do not affect interactive, RPC, or ACP startup. In interactive and `--mode rpc-ui` sessions, which connect MCP servers in the background, the first turn waits up to 1.5 s for MCP startup, so its system prompt includes servers connected by then; slower servers register later and change the next turn's prompt.
 
-Client-generated remote protocol headers take precedence over configured headers case-insensitively. Streamable HTTP owns `MCP-Protocol-Version`: it ignores configured copies and sends the negotiated version after initialization. Portable Agent Plugins' configured headers are origin-locked and are not forwarded to another origin on redirects.
+Client-generated remote protocol headers take precedence over configured headers case-insensitively. Streamable HTTP owns `MCP-Protocol-Version` (and `Mcp-Method`/`Mcp-Name` for servers on the 2026-07-28 revision): configured copies are ignored. Portable Agent Plugins' configured headers are origin-locked and are not forwarded to another origin on redirects.
 
 Remote HTTP and SSE transports do not impose an additional socket-idle timeout. Without an applicable MCP deadline, a silent connection can wait indefinitely; cancel the call or close the transport to stop it. A quiet stream alone does not prove that its peer is still reachable.
+
+## Where servers run, and when they are shared
+
+OMP sessions do not start MCP servers themselves. Every configured server is hosted by the per-user omp daemon and each session attaches to it. With `mcp.shared` off, or when the daemon cannot be reached, the same host runs inside the session and shares only between sessions of that process.
+
+How a server is shared depends on the protocol revision it speaks, which OMP detects once per server and remembers:
+
+- **MCP 2026-07-28 servers** are stateless by specification. One process (or one remote origin) serves every session whose configuration matches. It starts when a session first needs it and stops after `mcp.idleStopMinutes` (default 5) without use; the next call starts it again.
+- **Servers that require the `initialize` handshake** (2025-11-25 and earlier, and every `sse` server) keep a session inside the process. Each OMP session gets its own process, started on that session's first call and stopped when the session ends.
+
+Tool, prompt and resource lists are cached per server for as long as the server declares them fresh (30 days for handshake-era servers, which declare nothing), so a session that never calls a server starts no process for it. A list past its freshness window is still shown immediately and refreshed in the background.
+
+Two sessions share a stdio server when all of these are equal:
+
+- `command`, `args` and the working directory (`cwd`, or the session's project directory when unset),
+- every variable in the server's `env`, after resolution,
+- every inherited environment variable whose name contains `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `CREDENTIAL`, `API_KEY`, `ACCESS_KEY`, `PRIVATE_KEY`, `PROFILE`, `ACCOUNT`, `TENANT`, `CONFIG`, `CCNAME` or `AUTH`.
+
+Every other inherited variable (`PATH`, terminal and shell state) comes from whichever session started the process. In practice:
+
+- A server without `cwd` is shared per project. Set `cwd` (for example to your home directory) on servers that do not depend on the project, and every project shares one process.
+- If a server must see a variable that differs between your sessions, declare it in `env` (`"env": { "AWS_REGION": "${AWS_REGION}" }`); sessions with different values then get separate processes.
+
+Remote servers are shared between sessions that send the same URL and headers; a refreshed OAuth token is a different set of headers.
+
+`/mcp list` shows for each server whether it is running or idle, its pid, and how many sessions share it. `omp ps` lists the hosted processes.
 
 ### `stdio` transport
 
@@ -480,7 +506,7 @@ After editing, use:
 - `/mcp reload` to rediscover and reconnect servers in the current session
 - `/mcp list` to see which config file a server came from
 - `/mcp test <name>` to test a single server
-- `/mcp reconnect <name>` to reconnect one server without rediscovering all configs
+- `/mcp reconnect <name>` to restart one server without rediscovering all configs; a shared 2026-07-28 server restarts for every session using it
 - `/mcp reauth <name>` to replace managed OAuth credentials, or `/mcp unauth <name>` to remove them
 - `/mcp resources`, `/mcp prompts`, and `/mcp notifications` to inspect non-tool MCP capabilities
 
@@ -566,7 +592,8 @@ Malformed JSON or a missing/invalid server map makes that provider contribute no
 
 ## References
 
-- MCP transport spec: https://modelcontextprotocol.io/specification/2025-11-25/basic/transports
+- MCP specification, current revision: https://modelcontextprotocol.io/specification/2026-07-28
+- Handshake-era transports: https://modelcontextprotocol.io/specification/2025-11-25/basic/transports
 - Filesystem server package: https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem
 - GitHub MCP server: https://github.com/github/github-mcp-server
 - Slack MCP server docs: https://docs.slack.dev/ai/slack-mcp-server/

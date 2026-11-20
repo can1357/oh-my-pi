@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
-import { DeferredMCPTool, MCPTool, type MCPToolDefinition } from "@oh-my-pi/pi-coding-agent/mcp";
+import { MCPTool, type MCPToolDefinition } from "@oh-my-pi/pi-coding-agent/mcp";
 import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -124,30 +124,6 @@ describe("MCP tool arguments", () => {
 		]);
 	});
 
-	it("omits optional empty placeholders for deferred MCP tools", async () => {
-		const calls: CapturedRequest[] = [];
-		const connection = createCapturedConnection(calls);
-		const tool = new DeferredMCPTool("intellij-index", createSearchToolDefinition(), async () => connection);
-
-		await tool.execute(
-			"call-1",
-			{ symbol: "Foo", language: "TypeScript", file: "", column: "", filters: {} },
-			undefined,
-			unusedContext,
-			undefined,
-		);
-
-		expect(calls).toEqual([
-			{
-				method: "tools/call",
-				params: {
-					name: "search",
-					arguments: { symbol: "Foo", language: "TypeScript" },
-				},
-			},
-		]);
-	});
-
 	it("strips the harness intent field before tools/call", async () => {
 		// Regression: the harness injects `i` into every tool's wire schema and
 		// the eval `tool.*` bridge forwards it verbatim. Strict-schema MCP
@@ -169,27 +145,6 @@ describe("MCP tool arguments", () => {
 			{
 				method: "tools/call",
 				params: { name: "search", arguments: { symbol: "Foo", language: "TypeScript" } },
-			},
-		]);
-	});
-
-	it("strips the harness intent field for deferred MCP tools", async () => {
-		const calls: CapturedRequest[] = [];
-		const connection = createCapturedConnection(calls);
-		const tool = new DeferredMCPTool("intellij-index", createSearchToolDefinition(), async () => connection);
-
-		await tool.execute(
-			"call-1",
-			{ [INTENT_FIELD]: "deferred lookup", symbol: "Bar", language: "TypeScript" },
-			undefined,
-			unusedContext,
-			undefined,
-		);
-
-		expect(calls).toEqual([
-			{
-				method: "tools/call",
-				params: { name: "search", arguments: { symbol: "Bar", language: "TypeScript" } },
 			},
 		]);
 	});

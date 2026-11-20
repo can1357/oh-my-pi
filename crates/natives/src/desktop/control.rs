@@ -333,6 +333,19 @@ pub(crate) fn check() -> CoreResult<()> {
 	CURRENT.with_borrow(|token| token.as_ref().map_or(Ok(()), OperationToken::check))
 }
 
+/// Time the current operation has left before it must answer, less
+/// [`DEADLINE_MARGIN`] for the reply; `None` when it has no deadline.
+#[cfg(target_os = "windows")]
+pub(crate) fn time_left() -> Option<Duration> {
+	CURRENT
+		.with_borrow(|token| token.as_ref().and_then(OperationToken::deadline))
+		.map(|deadline| {
+			deadline
+				.saturating_duration_since(Instant::now())
+				.saturating_sub(DEADLINE_MARGIN)
+		})
+}
+
 /// [`check`] for a step that would send new input from inside [`cleanup`],
 /// such as pressing an item of a menu that cleanup is settling: cleanup lets
 /// releases through after cancellation, never fresh input.

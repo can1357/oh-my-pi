@@ -5,9 +5,11 @@
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt as _;
 
+#[cfg(unix)]
 use tokio::process::Command;
 
 use super::*;
+#[cfg(unix)]
 use crate::proctree;
 
 mod builtins;
@@ -34,6 +36,7 @@ impl TestStdio {
 	}
 
 	/// Read stdin from (a duplicate of) `file`.
+	#[cfg(unix)]
 	fn stdin(mut self, file: &fs::File) -> Self {
 		self.stdin = Some(file.try_clone().expect("clone test stdin"));
 		self
@@ -46,6 +49,7 @@ impl TestStdio {
 	}
 
 	/// Write stderr to (a duplicate of) `file`.
+	#[cfg(unix)]
 	fn stderr(mut self, file: &fs::File) -> Self {
 		self.stderr = Some(file.try_clone().expect("clone test stderr"));
 		self
