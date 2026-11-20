@@ -79,11 +79,12 @@ Sources: [`packages/browser-relay/README.md`](../packages/browser-relay/README.m
   Chrome if needed). `--no-chrome` prints the manual load steps. Opt in per call with `app: "relay"` —
   or set `browser.relay`, which makes the relay the profile-wide default across projects (scope
   details in the package README).
-- Behavior: the relay auto-starts through the profile-independent global daemon broker; consumers
-  across projects hold leases, and the relay stops after the last lease is released. `target`
+- Behavior: the extension's native host serves the relay on `127.0.0.1:9224` while Chrome runs (with
+  several browsers, the first host to bind serves and the others forward to it); nothing needs starting.
+  A relay from an older omp restarts when a newer omp first asks for it. `target`
   borrows a tab by exact CDP target id or URL/title substring; otherwise omp opens its own background tab, which a URL
-  navigates and close removes. `omp browser-relay --no-group` disables automatic tab grouping.
-- Security/limits: it binds loopback; use `--token` when local processes are untrusted. Chrome
+  navigates and close removes.
+- Security/limits: it binds loopback only. Chrome
   internal pages, DevTools, Web Store, extension pages, and tabs with DevTools open cannot attach.
 
 ### `packages/collab-web` — browser client for collaborative sessions

@@ -18,9 +18,6 @@ export const DEFAULT_SUGGESTIONS: readonly string[] = [
 	"Fill this form with my usual details",
 ];
 
-/** Relay port the worker dials when none is stored (matches `options.js`). */
-export const DEFAULT_RELAY_PORT = 9224;
-
 /** localStorage mirror of the theme, read synchronously at boot so the panel never flashes the wrong theme. */
 const THEME_MIRROR_KEY = "omp.theme";
 

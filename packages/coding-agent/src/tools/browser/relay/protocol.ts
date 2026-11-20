@@ -136,7 +136,6 @@ export type FoundDownload = {
  */
 export type RelayToExtMessage =
 	| ({ t: "rpc"; id: number } & RelayRpcRequest)
-	| { t: "pong" }
 	| { t: "reload" }
 	/** Acknowledged input for a tab whose overlay is mounted; fire-and-forget, never delays the driver. */
 	| { t: "input"; tabId: number; input: OverlayInput }
@@ -228,6 +227,12 @@ export function stampRelayExtensionScript(
 
 /** `POST` path on the relay after install folders change: connected extensions reload into the new files once idle. */
 export const RELAY_RECHECK_PATH = "/omp/extensions/recheck";
+
+/**
+ * `POST` path on the relay asking the native host serving it to exit, so Chrome restarts it from the installed omp.
+ * Query: `version` (the asking omp's), `idle=1` to restart only while no CDP client is connected.
+ */
+export const RELAY_RESTART_PATH = "/omp/relay/restart";
 
 /** What an extension build declares above its `background.js` ({@link stampRelayExtensionScript}). */
 export interface RelayExtensionStamp {
@@ -328,5 +333,4 @@ export type ExtToRelayMessage =
 			ok: boolean;
 			result?: unknown;
 			error?: string;
-	  }
-	| { t: "ping" };
+	  };

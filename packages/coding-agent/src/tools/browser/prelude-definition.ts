@@ -12,7 +12,7 @@ import { redactUrlForLog } from "../../utils/redact-url";
 import browserJavascript from "./prelude.js" with { type: "text" };
 import browserPython from "./prelude.py" with { type: "text" };
 import type { BrowserKind } from "./registry";
-import { isLoopbackRelayUrl } from "./relay/daemon";
+import { isLoopbackRelayUrl } from "./relay/kind";
 import { cfgBrowserCdpUrl, cfgBrowserEnabled, cfgBrowserRelayUrl } from "./settings";
 
 /**

@@ -1,9 +1,14 @@
 /**
- * The worker's websocket to the omp relay (`ws://127.0.0.1:<port>/ext`): dialing and re-dialing, the hello, RPC
- * dispatch, `input` pushes, and extension → relay calls.
+ * The worker's link to the omp relay: one long-lived native messaging port to the omp native host
+ * ({@link NATIVE_HOST}), which serves the relay for this browser or joins the one another browser's host serves. Over
+ * it run the hello, RPC dispatch, `input` pushes, and extension → relay calls.
  *
- * Service-worker lifetime: the open websocket plus a periodic ping keeps the worker alive while connected (Chrome
- * 116+); a chrome.alarms tick revives it and re-dials after Chrome reaps it while disconnected.
+ * Each `linked` from the host starts a link epoch, ended by `unlinked` (the relay went away; the host finds or becomes
+ * the next one and links again by itself) or by losing the port (the host exited; the worker reconnects with
+ * backoff). RPC ids and calls belong to one epoch.
+ *
+ * Service-worker lifetime: the open native port keeps the worker alive; a chrome.alarms tick revives it and
+ * reconnects after Chrome reaps it.
  */
 import {
 	DOWNLOADS_PROTOCOL_VERSION,
@@ -18,7 +23,12 @@ import {
 	type TabSnapshot,
 } from "../../../coding-agent/src/tools/browser/relay/protocol";
 import { ownedDebuggerTabs } from "../debugger-ownership";
-import type { RelayStatus } from "../messages";
+import {
+	type FromNativeHost,
+	NATIVE_HOST,
+	type RelayStatus,
+	type ToNativeHost,
+} from "../messages";
 import { RelayCalls } from "./calls";
 import { ensureBrowserSession, ensureInstanceId } from "./identity";
 import { snapshot } from "./tabs";
@@ -32,68 +42,63 @@ declare const OMP_INSTALL_VERSION: string | undefined;
 /** The extension build this script belongs to, declared beside `OMP_INSTALL_VERSION`; undeclared when unstamped. */
 declare const OMP_INSTALL_BUILD: string | undefined;
 
-const DEFAULT_PORT = 9224;
-const PING_INTERVAL_MS = 20_000;
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 10_000;
 
-/** What the relay connection hands to the rest of the worker. */
+/** One link epoch, from a `linked` to the next `unlinked` or port loss; open while it lasts. */
+export interface RelayLink {
+	readonly open: boolean;
+}
+
+/** What the relay link hands to the rest of the worker. */
 export interface RelayHandlers {
-	/** Run one RPC; `origin` is the socket it came in on, which alone can carry its answer. */
-	rpc(request: RelayRpcRequest, origin: WebSocket): Promise<unknown>;
+	/** Run one RPC; `origin` is the link epoch it came in on, which alone can carry its answer. */
+	rpc(request: RelayRpcRequest, origin: RelayLink): Promise<unknown>;
 	/** An acknowledged input for a tab's overlay. */
 	input(tabId: number, input: OverlayInput): void;
-	/** The socket opened or closed. */
+	/** The link opened or ended. */
 	status(status: RelayStatus): void;
-	/** The socket closed; the relay released everything it drove. */
+	/** The link ended; the relay released everything it drove. */
 	disconnected(): void;
 }
 
-interface RelaySettings {
-	port: number;
-	token: string;
+/** A link epoch and the extension → relay calls in flight on it. */
+class Link implements RelayLink {
+	readonly calls = new RelayCalls();
+	#open = true;
+
+	get open(): boolean {
+		return this.#open;
+	}
+
+	/** End the epoch; its pending calls fail with `reason`. */
+	close(reason: string): void {
+		this.#open = false;
+		this.calls.failAll(reason);
+	}
 }
 
 let handlers: RelayHandlers | null = null;
-let ws: WebSocket | null = null;
-/** Calls in flight on `ws`. */
-let calls = new RelayCalls();
+/** The port to the native host, while it is connected. */
+let hostPort: chrome.runtime.Port | null = null;
+/** The current link epoch, while a relay listens for this browser. */
+let link: Link | null = null;
 let reconnectDelay = RECONNECT_MIN_MS;
-let pingTimer: NodeJS.Timeout | null = null;
-let settings: RelaySettings = { port: DEFAULT_PORT, token: "" };
+let reconnectTimer: NodeJS.Timeout | null = null;
 /** Reasons the worker is doing work an extension reload would destroy. */
 const busyReasons = new Set<string>();
 
-async function loadSettings(): Promise<RelaySettings> {
-	const stored = await chrome.storage.local.get({
-		port: DEFAULT_PORT,
-		token: "",
-	});
-	const port = Number(stored.port);
-	settings = {
-		port:
-			Number.isInteger(port) && port > 0 && port <= 65535 ? port : DEFAULT_PORT,
-		token: typeof stored.token === "string" ? stored.token : "",
-	};
-	return settings;
-}
-
-/**
- * Whether a `chrome.storage.onChanged` batch changed the relay connection settings. Only `port` and `token` in
- * `local` do: the worker's own identity writes, panel drafts and settings must never drop the socket.
- */
-export function relaySettingsChanged(
-	changes: Record<string, unknown>,
-	areaName: string,
-): boolean {
-	return areaName === "local" && ("port" in changes || "token" in changes);
-}
-
-/** Send `message` to the relay; false when no socket is open. */
+/** Send `message` to the relay; false while unlinked. */
 export function post(message: ExtToRelayMessage): boolean {
-	if (ws?.readyState !== WebSocket.OPEN) return false;
-	ws.send(JSON.stringify(message));
-	return true;
+	if (!link || !hostPort) return false;
+	const frame: ToNativeHost = { t: "relay", line: JSON.stringify(message) };
+	try {
+		hostPort.postMessage(frame);
+		return true;
+	} catch {
+		// The host is gone; its onDisconnect ends the link.
+		return false;
+	}
 }
 
 /**
@@ -108,16 +113,16 @@ export function setBusy(reason: string, busy: boolean): void {
 	if (after !== before) post({ t: "busy", busy: after });
 }
 
-/** Ask the relay for something the side panel needs; rejects when the socket closes or the relay takes too long. */
+/** Ask the relay for something the side panel needs; rejects when the link ends or the relay takes too long. */
 export function callRelay(call: PanelCall): Promise<unknown> {
-	return calls.start(call, post);
+	if (!link) return Promise.reject(new Error("omp relay is not connected"));
+	return link.calls.start(call, post);
 }
 
-/** The relay connection as the panel shows it. */
+/** The relay link as the panel shows it. */
 export function relayStatus(): RelayStatus {
 	return {
-		connected: ws?.readyState === WebSocket.OPEN,
-		port: settings.port,
+		connected: link !== null,
 		extensionVersion:
 			typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
 	};
@@ -172,11 +177,9 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 	};
 }
 
-function handleRelayMessage(
-	socket: WebSocket,
-	socketCalls: RelayCalls,
-	raw: string,
-): void {
+function handleRelayLine(raw: string): void {
+	const origin = link;
+	if (!origin) return;
 	let msg: RelayToExtMessage;
 	try {
 		msg = JSON.parse(raw);
@@ -184,8 +187,6 @@ function handleRelayMessage(
 		return;
 	}
 	switch (msg.t) {
-		case "pong":
-			return;
 		case "reload":
 			// The relay rewrote this extension's files; reloading re-reads them (a Chrome restart would not).
 			chrome.runtime.reload();
@@ -194,18 +195,17 @@ function handleRelayMessage(
 			handlers?.input(msg.tabId, msg.input);
 			return;
 		case "callResult":
-			socketCalls.settle(msg);
+			origin.calls.settle(msg);
 			return;
 		case "rpc": {
-			// Answer only on the socket the RPC came in on: RPC ids are local to that connection, and the relay
-			// already failed the call when it closed.
+			// Answer only within the epoch the RPC came in on: RPC ids are local to it, and the relay already failed
+			// the call when it ended.
 			const answer = (reply: ExtToRelayMessage): void => {
-				if (socket.readyState === WebSocket.OPEN)
-					socket.send(JSON.stringify(reply));
+				if (origin.open) post(reply);
 			};
 			const { id } = msg;
 			const run = handlers
-				? handlers.rpc(msg, socket)
+				? handlers.rpc(msg, origin)
 				: Promise.reject(new Error("worker not ready"));
 			void run
 				.then((result) => answer({ t: "rpcResult", id, ok: true, result }))
@@ -222,72 +222,91 @@ function handleRelayMessage(
 	}
 }
 
+/** A relay listens for this browser: start a new epoch and say hello. */
+function linked(): void {
+	if (link) unlinked("omp relay changed");
+	reconnectDelay = RECONNECT_MIN_MS;
+	const epoch = new Link();
+	link = epoch;
+	void setBadge(true);
+	void buildHello().then((hello) => {
+		if (link !== epoch || !post(hello)) return;
+		// A new link starts idle; tell the relay right away when it isn't.
+		if (busyReasons.size > 0) post({ t: "busy", busy: true });
+	});
+	handlers?.status(relayStatus());
+}
+
+/** The relay went away: end the epoch, failing its calls with `reason`. */
+function unlinked(reason: string): void {
+	const epoch = link;
+	link = null;
+	void setBadge(false);
+	if (!epoch) return;
+	epoch.close(reason);
+	handlers?.disconnected();
+	handlers?.status(relayStatus());
+}
+
 function scheduleReconnect(): void {
 	const delay = reconnectDelay;
 	reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
-	setTimeout(() => void connectRelay(), delay);
+	clearTimeout(reconnectTimer ?? undefined);
+	reconnectTimer = setTimeout(() => {
+		reconnectTimer = null;
+		connectRelay();
+	}, delay);
 }
 
-/** Dial the relay unless a socket is open or opening. */
-export async function connectRelay(): Promise<void> {
-	if (
-		ws &&
-		(ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
-	)
-		return;
-	const { port, token } = await loadSettings();
-	// Another caller dialed while the settings loaded.
-	if (
-		ws &&
-		(ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
-	)
-		return;
-	const url = `ws://127.0.0.1:${port}/ext${token ? `?token=${encodeURIComponent(token)}` : ""}`;
-	const socket = new WebSocket(url);
-	const socketCalls = new RelayCalls();
-	ws = socket;
-	calls = socketCalls;
-	socket.onopen = () => {
-		reconnectDelay = RECONNECT_MIN_MS;
-		void setBadge(true);
-		void buildHello().then((hello) => {
-			if (ws !== socket || !post(hello)) return;
-			// A new socket starts idle; tell the relay right away when it isn't.
-			if (busyReasons.size > 0) post({ t: "busy", busy: true });
-		});
-		clearInterval(pingTimer ?? undefined);
-		pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
-		handlers?.status(relayStatus());
-	};
-	socket.onmessage = (event) => {
-		if (typeof event.data === "string")
-			handleRelayMessage(socket, socketCalls, event.data);
-	};
-	socket.onclose = () => {
-		socketCalls.failAll("omp relay disconnected");
-		if (ws !== socket) return;
-		ws = null;
-		if (pingTimer !== null) {
-			clearInterval(pingTimer);
-			pingTimer = null;
+/** Open the port to the native host and ask it to link this browser, unless the port is open. */
+export function connectRelay(): void {
+	if (hostPort) return;
+	const port = chrome.runtime.connectNative(NATIVE_HOST);
+	hostPort = port;
+	/** Partial oversized relay lines by chunk id. */
+	const chunks = new Map<number, string[]>();
+	port.onMessage.addListener((message: FromNativeHost) => {
+		if (hostPort !== port) return;
+		switch (message.t) {
+			case "linked":
+				linked();
+				return;
+			case "unlinked":
+				unlinked(message.reason);
+				return;
+			case "relay":
+				handleRelayLine(message.line);
+				return;
+			case "chunk": {
+				const parts = chunks.get(message.id) ?? [];
+				parts[message.index] = message.data;
+				if (!message.last) {
+					chunks.set(message.id, parts);
+					return;
+				}
+				chunks.delete(message.id);
+				handleRelayLine(parts.join(""));
+				return;
+			}
 		}
-		void setBadge(false);
-		handlers?.disconnected();
-		handlers?.status(relayStatus());
+	});
+	port.onDisconnect.addListener(() => {
+		// Reading lastError marks it checked; it says why the host is gone (not installed, crashed).
+		const detail = chrome.runtime.lastError?.message;
+		if (hostPort !== port) return;
+		hostPort = null;
+		unlinked(
+			detail
+				? `omp native host disconnected: ${detail}`
+				: "omp native host disconnected",
+		);
 		scheduleReconnect();
-	};
-	socket.onerror = () => {
-		socket.close();
-	};
+	});
+	const request: ToNativeHost = { t: "link", extensionId: chrome.runtime.id };
+	port.postMessage(request);
 }
 
-/** Drop the current socket and dial again with fresh settings. */
-export function redialRelay(): void {
-	ws?.close();
-	void connectRelay();
-}
-
-/** Route relay traffic to `relayHandlers`; call before the first dial. */
+/** Route relay traffic to `relayHandlers`; call before the first connect. */
 export function setRelayHandlers(relayHandlers: RelayHandlers): void {
 	handlers = relayHandlers;
 }

@@ -10,12 +10,7 @@ import type {
 } from "../../messages";
 import { scheduleCaption } from "../schedule";
 import type { PanelWorker } from "../session";
-import {
-	DEFAULT_RELAY_PORT,
-	DEFAULT_SUGGESTIONS,
-	type Stored,
-	sortShortcuts,
-} from "../storage";
+import { DEFAULT_SUGGESTIONS, type Stored, sortShortcuts } from "../storage";
 import { hostOf } from "../tab-context";
 import { Sheet, Toggle } from "../ui";
 
@@ -87,28 +82,6 @@ function ToggleRow(props: {
 }
 
 function Connection({ relay }: { relay: RelayStatus | null }): ReactNode {
-	const [stored, setStored] = useState<{ port: number; token: string } | null>(
-		null,
-	);
-	const [port, setPort] = useState("");
-	const [token, setToken] = useState("");
-	useEffect(() => {
-		void chrome.storage.local
-			.get({ port: DEFAULT_RELAY_PORT, token: "" })
-			.then((value) => {
-				const next = {
-					port: Number(value.port) || DEFAULT_RELAY_PORT,
-					token: String(value.token ?? ""),
-				};
-				setStored(next);
-				setPort(String(next.port));
-				setToken(next.token);
-			});
-	}, []);
-	const parsed = Number(port);
-	const valid = Number.isInteger(parsed) && parsed > 0 && parsed <= 65535;
-	const dirty =
-		stored !== null && (parsed !== stored.port || token !== stored.token);
 	const version =
 		relay?.extensionVersion ?? chrome.runtime.getManifest().version;
 	return (
@@ -118,53 +91,15 @@ function Connection({ relay }: { relay: RelayStatus | null }): ReactNode {
 					className={`pn-status-dot${relay?.connected ? " pn-status-dot--ok" : ""}`}
 				/>
 				<span>
-					Relay on port {relay?.port ?? stored?.port ?? DEFAULT_RELAY_PORT} ·
 					extension {version} ·{" "}
-					{relay === null
-						? "checking…"
-						: relay.connected
-							? "connected"
-							: "not connected"}
+					{relay?.connected ? "connected" : "connecting…"}
 				</span>
 			</div>
-			<div className="pn-set-fields">
-				<label className="pn-form-row">
-					<span className="pn-form-label">Relay port</span>
-					<input
-						className={`pn-field pn-field--mono${valid ? "" : " pn-field--invalid"}`}
-						value={port}
-						inputMode="numeric"
-						onChange={(event) => setPort(event.target.value)}
-					/>
-				</label>
-				<label className="pn-form-row">
-					<span className="pn-form-label">Token</span>
-					<input
-						className="pn-field pn-field--mono"
-						type="password"
-						value={token}
-						placeholder="from `omp browser-relay install`"
-						autoComplete="off"
-						onChange={(event) => setToken(event.target.value)}
-					/>
-				</label>
-			</div>
-			{dirty && (
-				<div className="pn-set-actions">
-					<button
-						type="button"
-						className="sh-btn sh-btn-primary pn-btn"
-						disabled={!valid}
-						onClick={() => {
-							// One write: the worker redials once, with both values.
-							void chrome.storage.local
-								.set({ port: parsed, token })
-								.then(() => setStored({ port: parsed, token }));
-						}}
-					>
-						Save and reconnect
-					</button>
-				</div>
+			{relay !== null && !relay.connected && (
+				<p className="pn-set-note">
+					Still connecting? The omp native host may be missing: run{" "}
+					<code>omp browser-relay install</code>.
+				</p>
 			)}
 		</Section>
 	);

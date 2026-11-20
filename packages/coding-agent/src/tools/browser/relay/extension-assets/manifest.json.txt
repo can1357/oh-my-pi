@@ -27,7 +27,6 @@
 	"side_panel": {
 		"default_path": "panel.html"
 	},
-	"options_page": "options.html",
 	"action": {
 		"default_title": "omp",
 		"default_icon": {

@@ -1,6 +1,6 @@
 /**
- * Extension → relay calls (`call` / `callResult`): numbered requests the side panel makes of the relay over the `/ext`
- * socket, answered on the same socket.
+ * Extension → relay calls (`call` / `callResult`): numbered requests the side panel makes of the relay over one link
+ * epoch, answered within the same epoch.
  */
 import type { ExtToRelayMessage, PanelCall, RelayToExtMessage } from "../../../coding-agent/src/tools/browser/relay/protocol";
 
@@ -13,7 +13,7 @@ interface PendingCall {
 	timer: NodeJS.Timeout;
 }
 
-/** Pending relay calls of one socket, settled by its `callResult`s and failed when it closes. */
+/** Pending relay calls of one link epoch, settled by its `callResult`s and failed when it ends. */
 export class RelayCalls {
 	readonly #pending = new Map<number, PendingCall>();
 	readonly #timeoutMs: number;
@@ -23,7 +23,7 @@ export class RelayCalls {
 		this.#timeoutMs = timeoutMs;
 	}
 
-	/** Send `call` through `send`, which reports whether the socket took it; resolves with the relay's result. */
+	/** Send `call` through `send`, which reports whether the link took it; resolves with the relay's result. */
 	start(call: PanelCall, send: (message: ExtToRelayMessage) => boolean): Promise<unknown> {
 		const id = this.#nextId++;
 		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
@@ -39,7 +39,7 @@ export class RelayCalls {
 		return promise;
 	}
 
-	/** Settle the call a relay `callResult` answers; results for unknown ids (timed out, other socket) are dropped. */
+	/** Settle the call a relay `callResult` answers; results for unknown ids (timed out, other epoch) are dropped. */
 	settle(message: Extract<RelayToExtMessage, { t: "callResult" }>): void {
 		const pending = this.#pending.get(message.id);
 		if (!pending) return;
@@ -49,7 +49,7 @@ export class RelayCalls {
 		else pending.reject(new Error(message.error ?? "omp relay call failed"));
 	}
 
-	/** Fail every pending call: the socket they went out on closed, so no answer can come. */
+	/** Fail every pending call: the epoch they went out on ended, so no answer can come. */
 	failAll(reason: string): void {
 		for (const pending of this.#pending.values()) {
 			clearTimeout(pending.timer);

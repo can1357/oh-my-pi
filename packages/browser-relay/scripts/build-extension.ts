@@ -33,8 +33,6 @@ await Promise.all([
 
 const staticFiles = [
 	"manifest.json",
-	"options.html",
-	"options.js",
 	"panel.html",
 	"offscreen.html",
 	...new Bun.Glob("icons/*.png").scanSync({ cwd: source }),

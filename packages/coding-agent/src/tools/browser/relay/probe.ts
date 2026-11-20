@@ -1,29 +1,23 @@
 /**
- * Client-side wait for the relay's extension handshake.
+ * Client side of the browser relay: waiting for it to drive a browser, and asking an outdated one to restart.
  *
- * `/json/version` answers 503 until the extension dials in, and the 503 body
- * ({@link RelayUnavailableInfo}) says whether an extension has ever done so.
- * That splits the two reasons for a 503 that used to look identical:
- * - Extension seen before: Chrome reaped its MV3 service worker; the
- *   extension's 30s keepalive alarm revives it, so waiting out one alarm
- *   period after the disconnect pays off. Past that, Chrome itself is gone
- *   (quit, profile closed) and the open fails at once.
- * - Extension never seen: an installed extension dials within one alarm
- *   period of the server starting, so once the server has been up that long
- *   nothing is coming and the open fails at once instead of burning the
- *   whole window every call.
+ * The relay is served by the omp extension's native host for as long as Chrome runs with the extension
+ * (`native-relay.ts`). Nothing on the port therefore means no such browser is running, except right after a
+ * restart, while Chrome starts the next host. A 503 means a relay is up and its browser has not said hello yet,
+ * which takes moments.
  */
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { throwIfAborted } from "../../tool-errors";
 import { probeCdpResponse } from "../attach";
-import type { RelayUnavailableInfo } from "./server";
-import { DISCARDED_TABS_PROTOCOL_VERSION, isOlderOmpVersion } from "./protocol";
+import { DISCARDED_TABS_PROTOCOL_VERSION, isOlderOmpVersion, RELAY_RESTART_PATH } from "./protocol";
 
+/** How long a relay that is up may go without its browser's hello. */
+const HELLO_WINDOW_MS = 10_000;
 /**
- * One extension keepalive alarm period (30s, `background.js`) plus the dial
- * and hello. Both the reconnect wait and the "never connected" verdict use it.
+ * How long a restarted relay may take to come back: the extension's reconnect backoff, Chrome starting the next
+ * native host, its bind and the hello.
  */
-const EXTENSION_DIAL_WINDOW_MS = 35_000;
+const RESTART_WINDOW_MS = 20_000;
 const PROBE_TIMEOUT_MS = 2_000;
 const POLL_INTERVAL_MS = 150;
 
@@ -33,10 +27,8 @@ export type RelayWaitOutcome =
 	| "ready"
 	/** Nothing (or something that is not a relay) is serving the endpoint. */
 	| "unreachable"
-	/** The relay is serving but no extension connected within the dial window. */
+	/** The relay is serving but its browser did not say hello within the hello window. */
 	| "no-extension"
-	/** An extension connected earlier but has stayed away past the redial window (e.g. Chrome quit). */
-	| "extension-gone"
 	/** An older relay server is still running. */
 	| "outdated-relay"
 	/** A compatible relay from an older OMP is ready and reports no CDP client connected to it. */
@@ -56,31 +48,24 @@ export function relayCdpClientsOf(parsed: object): number | null {
 		: null;
 }
 
-function parseUnavailableInfo(body: string): Omit<RelayUnavailableInfo, "ompRelayCdpClients"> | null {
+/** A `/json/version` body (ready or waiting) as an object; null when it is not one. */
+function parseVersionBody(body: string): object | null {
 	try {
 		const parsed: unknown = JSON.parse(body);
-		if (
-			typeof parsed === "object" &&
-			parsed !== null &&
-			"extensionSeen" in parsed &&
-			typeof parsed.extensionSeen === "boolean" &&
-			"uptimeMs" in parsed &&
-			typeof parsed.uptimeMs === "number"
-		) {
-			const disconnectedMs =
-				"disconnectedMs" in parsed && typeof parsed.disconnectedMs === "number" ? parsed.disconnectedMs : undefined;
-			return {
-				error: "",
-				extensionSeen: parsed.extensionSeen,
-				uptimeMs: parsed.uptimeMs,
-				ompRelayVersion: relayVersionOf(parsed),
-				disconnectedMs,
-			};
-		}
+		return typeof parsed === "object" && parsed !== null ? parsed : null;
 	} catch {
-		// Not a relay body (older relay or foreign server); treated as opaque 503 below.
+		return null;
 	}
-	return null;
+}
+
+/** The id of the relay server answering at `cdpUrl`, ready or waiting; null when none answers. */
+async function relayInstanceAt(cdpUrl: string, signal?: AbortSignal): Promise<string | null> {
+	const response = await probeCdpResponse(`${cdpUrl}/json/version`, { timeoutMs: PROBE_TIMEOUT_MS, signal });
+	if (response === null) return null;
+	const parsed = parseVersionBody(response.body);
+	return parsed !== null && "ompRelayInstance" in parsed && typeof parsed.ompRelayInstance === "string"
+		? parsed.ompRelayInstance
+		: "";
 }
 
 function readyOutcome(body: string): RelayWaitOutcome {
@@ -111,43 +96,71 @@ function readyOutcome(body: string): RelayWaitOutcome {
 }
 
 /**
- * Poll the relay at `cdpUrl` until its extension is connected. Gives up
- * immediately when nothing serves the endpoint, once one dial window has
- * passed since a previously connected extension went away (service-worker
- * revival), or as soon as the server has been up a full dial window without
- * ever seeing one.
+ * Poll the relay at `cdpUrl` until its browser said hello. Gives up at once when nothing serves the endpoint, unless
+ * `restarted` (then it waits for the next host), and after the hello window when a relay serves without a browser.
  */
-export async function waitForRelayExtension(cdpUrl: string, signal?: AbortSignal): Promise<RelayWaitOutcome> {
+export async function waitForRelayExtension(
+	cdpUrl: string,
+	signal?: AbortSignal,
+	options?: { restarted?: boolean },
+): Promise<RelayWaitOutcome> {
 	const probeUrl = `${cdpUrl}/json/version`;
-	let deadline = Date.now() + EXTENSION_DIAL_WINDOW_MS;
-	let staleRelay = false;
+	const reachableBy = Date.now() + (options?.restarted ? RESTART_WINDOW_MS : 0);
+	let helloBy: number | null = null;
 	for (;;) {
 		throwIfAborted(signal);
 		const response = await probeCdpResponse(probeUrl, { timeoutMs: PROBE_TIMEOUT_MS, signal });
 		throwIfAborted(signal);
-		if (response === null) return "unreachable";
-		if (response.status >= 200 && response.status < 300) return readyOutcome(response.body);
-		if (response.status !== 503) return "unreachable";
-		const info = parseUnavailableInfo(response.body);
-		// Past the dial window a relay from another version reads as outdated even
-		// with CDP clients connected: no extension, so no browser, is behind them.
-		staleRelay = info !== null && info.ompRelayVersion !== VERSION;
-		if (info && !info.extensionSeen) {
-			// Never connected: the window is measured from server start, not from now.
-			deadline = Math.min(deadline, Date.now() - info.uptimeMs + EXTENSION_DIAL_WINDOW_MS);
-		} else if (info?.disconnectedMs !== undefined) {
-			// Seen, then gone: the redial window is measured from the disconnect.
-			deadline = Math.min(deadline, Date.now() - info.disconnectedMs + EXTENSION_DIAL_WINDOW_MS);
-			if (Date.now() >= deadline) return staleRelay ? "outdated-relay" : "extension-gone";
+		if (response === null) {
+			if (Date.now() >= reachableBy) return "unreachable";
+		} else if (response.status >= 200 && response.status < 300) {
+			return readyOutcome(response.body);
+		} else if (response.status !== 503) {
+			return "unreachable";
+		} else {
+			helloBy ??= Date.now() + HELLO_WINDOW_MS;
+			if (Date.now() >= helloBy) {
+				// A relay from another version reads as outdated: no browser is behind it to blame instead.
+				const parsed = parseVersionBody(response.body);
+				return parsed !== null && relayVersionOf(parsed) !== VERSION ? "outdated-relay" : "no-extension";
+			}
 		}
-		if (Date.now() >= deadline) return staleRelay ? "outdated-relay" : "no-extension";
 		await Bun.sleep(POLL_INTERVAL_MS);
 	}
 }
 
+/**
+ * Ask the native host serving the relay at `cdpUrl` to exit, so Chrome starts the next one from the installed omp;
+ * with `idleOnly`, only while no CDP client uses it. Resolves true once the old server stopped answering (the caller
+ * then waits with `restarted`). False when it declined (it is not older than this omp, or it is busy) or stayed.
+ */
+export async function requestRelayRestart(
+	cdpUrl: string,
+	options: { idleOnly: boolean; signal?: AbortSignal },
+): Promise<boolean> {
+	const { signal } = options;
+	const before = await relayInstanceAt(cdpUrl, signal);
+	if (before === null) return false;
+	const query = `version=${encodeURIComponent(VERSION)}${options.idleOnly ? "&idle=1" : ""}`;
+	try {
+		const response = await fetch(`${cdpUrl}${RELAY_RESTART_PATH}?${query}`, { method: "POST", signal });
+		if (response.status !== 202) return false;
+	} catch {
+		throwIfAborted(signal);
+		return false;
+	}
+	const deadline = Date.now() + RESTART_WINDOW_MS;
+	while (Date.now() < deadline) {
+		await Bun.sleep(POLL_INTERVAL_MS);
+		throwIfAborted(signal);
+		// Gone, or already replaced by another browser's host: either way the old server stopped.
+		if ((await relayInstanceAt(cdpUrl, signal)) !== before) return true;
+	}
+	return false;
+}
+
 /** The steps that replace an out-of-date relay extension. */
-export const UPDATE_RELAY_EXTENSION =
-	"Run `omp browser-relay install` and reload the omp extension in Chrome.";
+export const UPDATE_RELAY_EXTENSION = "Run `omp browser-relay install` and reload the omp extension in Chrome.";
 
 /**
  * Notice for an open through a ready relay where a connected extension was

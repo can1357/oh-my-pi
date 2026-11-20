@@ -221,7 +221,7 @@ By default, omp-owned managed Chromium tabs freeze at turn settle and unfreeze o
 - Busy tab: await the active helper/run before issuing another.
 - Selector timeout: re-observe and use a supported selector.
 - Unresponsive WebKit renderer: if a quick read and an independent renderer probe both time out, further calls fail immediately. Explicitly `await browser.close({ name })`, then reopen the tab. Other tabs and user-owned Tern views are not terminated automatically.
-- Relay unavailable: run `omp browser-relay install` and verify the omp toolbar badge in Chrome shows `on`.
+- Relay unavailable: open Chrome with the omp extension; if its toolbar badge stays off, run `omp browser-relay install` to register the native host that serves the relay.
 - Attached target missing: inspect available pages and use a precise `target`.
 
 `tab.run` and direct helpers execute against live browser state. Verify the actual page after every UI-changing action.

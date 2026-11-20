@@ -1,12 +1,16 @@
 /**
- * Chrome native messaging host behind the extension's panel sessions (`omp browser-relay native-host`).
+ * Chrome native messaging host behind the omp extension (`omp browser-relay native-host`): its chats and its relay.
  *
  * Chrome starts one host per `chrome.runtime.connectNative` port and talks to it over stdio: every message is a
  * uint32 little-endian byte length followed by that many bytes of UTF-8 JSON. stdout carries only those frames; logs
- * go to stderr. The first extension message is `open{cwd}`: the host starts `omp --mode rpc` there and relays rpc
- * JSON lines both ways until either side goes away. Chrome caps host→extension messages at 1 MiB, so long lines go out
- * as `chunk` frames. The host negotiates rpc protocol v2 itself and reassembles its `rpc_chunk` frames, so the
- * extension always sees whole logical lines and large responses (a transcript full of screenshots) arrive intact.
+ * go to stderr. The first extension message picks the port's job:
+ * - `open{cwd}`: a chat. The host starts `omp --mode rpc` there and relays rpc JSON lines both ways until either side
+ *   goes away. It negotiates rpc protocol v2 itself, ahead of any extension command, and reassembles its `rpc_chunk`
+ *   frames, so the extension always sees whole logical lines and large responses (a transcript full of screenshots,
+ *   the model list) arrive intact.
+ * - `link{extensionId}`: the browser relay, for as long as the extension's service worker lives (`native-relay.ts`).
+ *
+ * Chrome caps host→extension messages at 1 MiB, so long lines go out as `chunk` frames.
  */
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -14,6 +18,8 @@ import * as path from "node:path";
 import type { FromNativeHost, ToNativeHost } from "../../../../../browser-relay/extension/messages";
 import { RpcFrameDecoder } from "../../../modes/rpc/rpc-frame";
 import { resolveCliEntryCmd } from "../../../subprocess/worker-client";
+import { DEFAULT_RELAY_URL } from "./kind";
+import { serveRelayLink } from "./native-relay";
 
 /** Largest encoded frame the host writes; under Chrome's 1 MiB host→extension cap with headroom. */
 export const NATIVE_FRAME_LIMIT = 900 * 1024;
@@ -46,6 +52,8 @@ export interface NativeHostIo {
 	write(bytes: Uint8Array): void;
 	/** Starts the rpc child in `cwd`. */
 	spawn(cwd: string): RpcChild;
+	/** Port a link port serves (or joins) the relay on. */
+	relayPort: number;
 	/** Diagnostics; never stdout. */
 	log(message: string): void;
 }
@@ -62,6 +70,7 @@ export async function runNativeHost(): Promise<void> {
 			flushed = promise;
 		},
 		spawn: cwd => spawnRpcChild(command, cwd),
+		relayPort: Number(new URL(DEFAULT_RELAY_URL).port),
 		log: message => {
 			process.stderr.write(`omp native host: ${message}\n`);
 		},
@@ -129,11 +138,11 @@ export class NativeFrameReader {
 }
 
 /**
- * Splits one rpc line into the native frames that carry it: a single `rpc` frame when it fits under
+ * Splits one rpc or relay line into the native frames that carry it: a single `t` frame when it fits under
  * {@link NATIVE_FRAME_LIMIT}, else `chunk` frames the extension concatenates in `index` order.
  */
-export function rpcLineFrames(line: string, chunkId: number): FromNativeHost[] {
-	const whole: FromNativeHost = { t: "rpc", line };
+export function lineFrames(t: "rpc" | "relay", line: string, chunkId: number): FromNativeHost[] {
+	const whole: FromNativeHost = { t, line };
 	if (Buffer.byteLength(JSON.stringify(whole), "utf8") <= NATIVE_FRAME_LIMIT) return [whole];
 	const frames: FromNativeHost[] = [];
 	let start = 0;
@@ -173,11 +182,15 @@ function isToNativeHost(value: unknown): value is ToNativeHost {
 	if (typeof value !== "object" || value === null) return false;
 	const t: unknown = Reflect.get(value, "t");
 	if (t === "open") return typeof Reflect.get(value, "cwd") === "string";
-	if (t === "rpc") return typeof Reflect.get(value, "line") === "string";
+	if (t === "link") return typeof Reflect.get(value, "extensionId") === "string";
+	if (t === "rpc" || t === "relay") return typeof Reflect.get(value, "line") === "string";
 	return false;
 }
 
-/** Runs one host session over `io`; resolves once the child exited or the extension disconnected. */
+/**
+ * Runs one host session over `io`; resolves once the chat's child exited, the extension disconnected, or a relay this
+ * host leads accepted a restart.
+ */
 export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 	let disconnected = false;
 	const send = (message: FromNativeHost) => {
@@ -193,7 +206,10 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 			const message = queued.shift();
 			if (message) return message;
 			const { done, value } = await reader.read();
-			if (done) return null;
+			if (done) {
+				disconnected = true;
+				return null;
+			}
 			for (const decoded of frames.push(value)) {
 				if (isToNativeHost(decoded)) queued.push(decoded);
 				else io.log(`ignoring malformed message ${JSON.stringify(decoded).slice(0, 200)}`);
@@ -203,8 +219,21 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 
 	const open = await next();
 	if (open === null) return;
+	if (open.t === "link") {
+		let chunkSeq = 0;
+		return serveRelayLink({
+			port: io.relayPort,
+			extensionId: open.extensionId,
+			next,
+			send,
+			relayLine: line => {
+				for (const frame of lineFrames("relay", line, ++chunkSeq)) send(frame);
+			},
+			log: io.log,
+		});
+	}
 	if (open.t !== "open") {
-		send({ t: "exit", code: null, stderr: "the first message must be open{cwd}" });
+		send({ t: "exit", code: null, stderr: "the first message must be open{cwd} or link{extensionId}" });
 		return;
 	}
 	const cwd = resolveSessionCwd(open.cwd);
@@ -259,7 +288,7 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 				return;
 			}
 			const id = ++chunkSeq;
-			for (const frame of rpcLineFrames(logical, id)) send(frame);
+			for (const frame of lineFrames("rpc", logical, id)) send(frame);
 		};
 		for await (const bytes of child.stdout) {
 			pending += decoder.decode(bytes, { stream: true });
@@ -305,7 +334,6 @@ export async function serveNativeHost(io: NativeHostIo): Promise<void> {
 		return;
 	}
 	// The extension disconnected: stop the session it owned.
-	disconnected = true;
 	child.kill("SIGTERM");
 	const timer = setTimeout(() => {
 		if (!exited) child.kill("SIGKILL");

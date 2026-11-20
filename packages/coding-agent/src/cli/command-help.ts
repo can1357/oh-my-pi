@@ -31,7 +31,7 @@ export const benchHelp = {
 
 /** Root help description for managing omp's Chrome extension and relay. */
 export const browserRelayHelp = {
-	description: "Install or sync the omp Chrome extension and run its local browser relay",
+	description: "Install or sync the omp Chrome extension; its native host serves the browser relay",
 } satisfies CommandMetadata;
 
 export const cleanseHelp = {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import {
 	encodeNativeFrame,
 	NATIVE_FRAME_LIMIT,
@@ -11,6 +12,8 @@ import {
 	serveNativeHost,
 	spawnRpcChild,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/native-host";
+import { requestRelayRestart, waitForRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
+import { RELAY_RESTART_PATH } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 import type { FromNativeHost, ToNativeHost } from "../../../browser-relay/extension/messages";
 
 /**
@@ -65,13 +68,13 @@ interface Harness {
 	disconnect(): void;
 	/** Every host→extension message so far. */
 	received: FromNativeHost[];
-	/** Resolves once a received message satisfies `predicate`. */
-	waitFor(predicate: (message: FromNativeHost) => boolean): Promise<FromNativeHost>;
+	/** Resolves once a message received at index `from` or later satisfies `predicate`. */
+	waitFor(predicate: (message: FromNativeHost) => boolean, from?: number): Promise<FromNativeHost>;
 	done: Promise<void>;
 	spawnedIn: string[];
 }
 
-async function startHost(): Promise<Harness> {
+async function startHost(relayPort = 0): Promise<Harness> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-native-host-"));
 	cleanups.push(() => fs.rm(dir, { recursive: true, force: true }));
 	const script = path.join(dir, "fake-rpc.ts");
@@ -105,6 +108,7 @@ async function startHost(): Promise<Harness> {
 			spawnedIn.push(cwd);
 			return spawnRpcChild([process.execPath, script], cwd);
 		},
+		relayPort,
 		log: () => {},
 	};
 	const done = serveNativeHost(io);
@@ -117,8 +121,8 @@ async function startHost(): Promise<Harness> {
 		},
 		disconnect: () => controller.close(),
 		received,
-		waitFor: predicate => {
-			const hit = received.find(predicate);
+		waitFor: (predicate, from = 0) => {
+			const hit = received.slice(from).find(predicate);
 			if (hit) return Promise.resolve(hit);
 			const { promise, resolve } = Promise.withResolvers<FromNativeHost>();
 			waiters.push({ predicate, resolve });
@@ -203,4 +207,70 @@ describe("native host", () => {
 		expect(resolveSessionCwd("")).toBe(os.homedir());
 		expect(resolveSessionCwd("~/src/x")).toBe(path.join(os.homedir(), "src", "x"));
 	});
+});
+
+const HELLO = {
+	t: "hello",
+	userAgent: "test",
+	browserVersion: "Chrome/151.0.0.0",
+	tabs: [],
+	attachedTabIds: [],
+	discardedTabsProtocol: 1,
+} as const;
+
+/** The `ompRelayInstance` of the relay answering on `port`. */
+async function relayInstance(port: number): Promise<unknown> {
+	const body: unknown = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+	return typeof body === "object" && body !== null ? Reflect.get(body, "ompRelayInstance") : undefined;
+}
+
+/** Links `host` as browser `instanceId` and says hello once the host reports a relay. */
+async function link(host: Harness, instanceId: string, from = 0): Promise<void> {
+	await host.waitFor(message => message.t === "linked", from);
+	host.send({ t: "relay", line: JSON.stringify({ ...HELLO, instanceId }) });
+}
+
+describe("native host relay link", () => {
+	it("serves the relay for the first browser, forwards the next one's, and hands over when the first leaves", async () => {
+		const port = await findFreeCdpPort();
+		const cdpUrl = `http://127.0.0.1:${port}`;
+		const first = await startHost(port);
+		first.send({ t: "link", extensionId: "a".repeat(32) });
+		await link(first, "first");
+		expect(await waitForRelayExtension(cdpUrl)).toBe("ready");
+		const leader = await relayInstance(port);
+
+		const second = await startHost(port);
+		second.send({ t: "link", extensionId: "b".repeat(32) });
+		await link(second, "second");
+		// The follower's calls reach the leader's bridge and its answers come back over the follower's port.
+		second.send({ t: "relay", line: JSON.stringify({ t: "call", id: 7, call: { op: "collabHosts" } }) });
+		await second.waitFor(message => message.t === "relay" && message.line.includes('"t":"callResult","id":7'));
+
+		const mark = second.received.length;
+		first.disconnect();
+		await first.done;
+		await second.waitFor(message => message.t === "unlinked", mark);
+		await link(second, "second", mark);
+		expect(await waitForRelayExtension(cdpUrl)).toBe("ready");
+		expect(await relayInstance(port)).not.toBe(leader);
+		second.disconnect();
+		await second.done;
+		expect(await waitForRelayExtension(cdpUrl)).toBe("unreachable");
+	}, 20_000);
+
+	it("gives way only to a newer omp's restart, and then exits so Chrome starts the next host", async () => {
+		const port = await findFreeCdpPort();
+		const cdpUrl = `http://127.0.0.1:${port}`;
+		const host = await startHost(port);
+		host.send({ t: "link", extensionId: "a".repeat(32) });
+		await link(host, "browser");
+		expect(await waitForRelayExtension(cdpUrl)).toBe("ready");
+
+		expect(await requestRelayRestart(cdpUrl, { idleOnly: false })).toBe(false);
+		const restart = await fetch(`${cdpUrl}${RELAY_RESTART_PATH}?version=999.0.0`, { method: "POST" });
+		expect(restart.status).toBe(202);
+		await host.done;
+		expect(await waitForRelayExtension(cdpUrl)).toBe("unreachable");
+	}, 20_000);
 });

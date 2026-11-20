@@ -21,6 +21,12 @@
     return owned.filter((tabId) => tabId !== undefined);
   }
 
+  // extension/messages.ts
+  var PANEL_PORT = "omp-panel";
+  var NATIVE_HOST = "sh.omp.browser";
+  var SHORTCUTS_KEY = "omp.shortcuts";
+  var SETTINGS_KEY = "omp.settings";
+
   // extension/worker/calls.ts
   var RELAY_CALL_TIMEOUT_MS = 15000;
 
@@ -170,34 +176,36 @@
   }
 
   // extension/worker/relay.ts
-  var DEFAULT_PORT = 9224;
-  var PING_INTERVAL_MS = 20000;
   var RECONNECT_MIN_MS = 1000;
   var RECONNECT_MAX_MS = 1e4;
+
+  class Link {
+    calls = new RelayCalls;
+    #open = true;
+    get open() {
+      return this.#open;
+    }
+    close(reason) {
+      this.#open = false;
+      this.calls.failAll(reason);
+    }
+  }
   var handlers = null;
-  var ws = null;
-  var calls = new RelayCalls;
+  var hostPort = null;
+  var link = null;
   var reconnectDelay = RECONNECT_MIN_MS;
-  var pingTimer = null;
-  var settings = { port: DEFAULT_PORT, token: "" };
+  var reconnectTimer = null;
   var busyReasons = new Set;
-  async function loadSettings() {
-    const stored = await chrome.storage.local.get({ port: DEFAULT_PORT, token: "" });
-    const port = Number(stored.port);
-    settings = {
-      port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : DEFAULT_PORT,
-      token: typeof stored.token === "string" ? stored.token : ""
-    };
-    return settings;
-  }
-  function relaySettingsChanged(changes, areaName) {
-    return areaName === "local" && (("port" in changes) || ("token" in changes));
-  }
   function post(message) {
-    if (ws?.readyState !== WebSocket.OPEN)
+    if (!link || !hostPort)
       return false;
-    ws.send(JSON.stringify(message));
-    return true;
+    const frame = { t: "relay", line: JSON.stringify(message) };
+    try {
+      hostPort.postMessage(frame);
+      return true;
+    } catch {
+      return false;
+    }
   }
   function setBusy(reason, busy) {
     const before = busyReasons.size > 0;
@@ -210,23 +218,29 @@
       post({ t: "busy", busy: after });
   }
   function callRelay(call) {
-    return calls.start(call, post);
+    if (!link)
+      return Promise.reject(new Error("omp relay is not connected"));
+    return link.calls.start(call, post);
   }
   function relayStatus() {
     return {
-      connected: ws?.readyState === WebSocket.OPEN,
-      port: settings.port,
+      connected: link !== null,
       extensionVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined
     };
   }
   async function setBadge(connected) {
     try {
       await chrome.action.setBadgeText({ text: connected ? "on" : "off" });
-      await chrome.action.setBadgeBackgroundColor({ color: connected ? "#1a7f37" : "#8b8b8b" });
+      await chrome.action.setBadgeBackgroundColor({
+        color: connected ? "#1a7f37" : "#8b8b8b"
+      });
     } catch {}
   }
   async function buildHello() {
-    const [tabs, targets] = await Promise.all([chrome.tabs.query({}), chrome.debugger.getTargets()]);
+    const [tabs, targets] = await Promise.all([
+      chrome.tabs.query({}),
+      chrome.debugger.getTargets()
+    ]);
     const snapshots = [];
     for (const tab of tabs) {
       const snap = snapshot(tab);
@@ -252,7 +266,10 @@
       attachedTabIds
     };
   }
-  function handleRelayMessage(socket, socketCalls, raw) {
+  function handleRelayLine(raw) {
+    const origin = link;
+    if (!origin)
+      return;
     let msg;
     try {
       msg = JSON.parse(raw);
@@ -260,8 +277,6 @@
       return;
     }
     switch (msg.t) {
-      case "pong":
-        return;
       case "reload":
         chrome.runtime.reload();
         return;
@@ -269,76 +284,103 @@
         handlers?.input(msg.tabId, msg.input);
         return;
       case "callResult":
-        socketCalls.settle(msg);
+        origin.calls.settle(msg);
         return;
       case "rpc": {
         const answer = (reply) => {
-          if (socket.readyState === WebSocket.OPEN)
-            socket.send(JSON.stringify(reply));
+          if (origin.open)
+            post(reply);
         };
         const { id } = msg;
-        const run = handlers ? handlers.rpc(msg, socket) : Promise.reject(new Error("worker not ready"));
+        const run = handlers ? handlers.rpc(msg, origin) : Promise.reject(new Error("worker not ready"));
         run.then((result) => answer({ t: "rpcResult", id, ok: true, result })).catch((err) => {
-          answer({ t: "rpcResult", id, ok: false, error: err instanceof Error ? err.message : String(err) });
+          answer({
+            t: "rpcResult",
+            id,
+            ok: false,
+            error: err instanceof Error ? err.message : String(err)
+          });
         });
         return;
       }
     }
   }
+  function linked() {
+    if (link)
+      unlinked("omp relay changed");
+    reconnectDelay = RECONNECT_MIN_MS;
+    const epoch = new Link;
+    link = epoch;
+    setBadge(true);
+    buildHello().then((hello) => {
+      if (link !== epoch || !post(hello))
+        return;
+      if (busyReasons.size > 0)
+        post({ t: "busy", busy: true });
+    });
+    handlers?.status(relayStatus());
+  }
+  function unlinked(reason) {
+    const epoch = link;
+    link = null;
+    setBadge(false);
+    if (!epoch)
+      return;
+    epoch.close(reason);
+    handlers?.disconnected();
+    handlers?.status(relayStatus());
+  }
   function scheduleReconnect() {
     const delay = reconnectDelay;
     reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
-    setTimeout(() => void connectRelay(), delay);
+    clearTimeout(reconnectTimer ?? undefined);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connectRelay();
+    }, delay);
   }
-  async function connectRelay() {
-    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))
+  function connectRelay() {
+    if (hostPort)
       return;
-    const { port, token } = await loadSettings();
-    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))
-      return;
-    const url = `ws://127.0.0.1:${port}/ext${token ? `?token=${encodeURIComponent(token)}` : ""}`;
-    const socket = new WebSocket(url);
-    const socketCalls = new RelayCalls;
-    ws = socket;
-    calls = socketCalls;
-    socket.onopen = () => {
-      reconnectDelay = RECONNECT_MIN_MS;
-      setBadge(true);
-      buildHello().then((hello) => {
-        if (ws !== socket || !post(hello))
-          return;
-        if (busyReasons.size > 0)
-          post({ t: "busy", busy: true });
-      });
-      clearInterval(pingTimer ?? undefined);
-      pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
-      handlers?.status(relayStatus());
-    };
-    socket.onmessage = (event) => {
-      if (typeof event.data === "string")
-        handleRelayMessage(socket, socketCalls, event.data);
-    };
-    socket.onclose = () => {
-      socketCalls.failAll("omp relay disconnected");
-      if (ws !== socket)
+    const port = chrome.runtime.connectNative(NATIVE_HOST);
+    hostPort = port;
+    const chunks = new Map;
+    port.onMessage.addListener((message) => {
+      if (hostPort !== port)
         return;
-      ws = null;
-      if (pingTimer !== null) {
-        clearInterval(pingTimer);
-        pingTimer = null;
+      switch (message.t) {
+        case "linked":
+          linked();
+          return;
+        case "unlinked":
+          unlinked(message.reason);
+          return;
+        case "relay":
+          handleRelayLine(message.line);
+          return;
+        case "chunk": {
+          const parts = chunks.get(message.id) ?? [];
+          parts[message.index] = message.data;
+          if (!message.last) {
+            chunks.set(message.id, parts);
+            return;
+          }
+          chunks.delete(message.id);
+          handleRelayLine(parts.join(""));
+          return;
+        }
       }
-      setBadge(false);
-      handlers?.disconnected();
-      handlers?.status(relayStatus());
+    });
+    port.onDisconnect.addListener(() => {
+      const detail = chrome.runtime.lastError?.message;
+      if (hostPort !== port)
+        return;
+      hostPort = null;
+      unlinked(detail ? `omp native host disconnected: ${detail}` : "omp native host disconnected");
       scheduleReconnect();
-    };
-    socket.onerror = () => {
-      socket.close();
-    };
-  }
-  function redialRelay() {
-    ws?.close();
-    connectRelay();
+    });
+    const request = { t: "link", extensionId: chrome.runtime.id };
+    port.postMessage(request);
   }
   function setRelayHandlers(relayHandlers) {
     handlers = relayHandlers;
@@ -803,12 +845,6 @@
     ctx.handle("rpcSessions", () => rpcSessions.list());
   }
 
-  // extension/messages.ts
-  var PANEL_PORT = "omp-panel";
-  var NATIVE_HOST = "sh.omp.browser";
-  var SHORTCUTS_KEY = "omp.shortcuts";
-  var SETTINGS_KEY = "omp.settings";
-
   // extension/worker/panel-hub.ts
   function isOp(request, op) {
     return request.op === op;
@@ -1145,7 +1181,7 @@
         const snap = snapshot(tab);
         if (!snap)
           throw new Error("created tab has no id");
-        if (origin.readyState !== WebSocket.OPEN)
+        if (!origin.open)
           removeTab(snap.tabId).catch(() => {});
         return { tab: snap };
       }
@@ -1881,11 +1917,5 @@ ${text}`;
     if (alarm.name === "omp-relay-keepalive")
       connectRelay();
   });
-  chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (relaySettingsChanged(changes, areaName))
-      redialRelay();
-  });
-  chrome.runtime.onInstalled.addListener(() => void connectRelay());
-  chrome.runtime.onStartup.addListener(() => void connectRelay());
   connectRelay();
 })();

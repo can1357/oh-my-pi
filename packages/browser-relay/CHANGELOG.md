@@ -4,7 +4,8 @@
 
 ### Breaking Changes
 
-- The omp extension now has a pinned Chrome ID. Remove the old unpinned extension and use _Load unpacked_ to install it again once.
+- The omp extension has a pinned Chrome ID. Remove the old unpinned extension and use _Load unpacked_ to install it again once.
+- The omp extension reaches the browser relay through its native host instead of a websocket, so the relay is up whenever Chrome runs. Its options page (relay port and token) is gone.
 
 ### Added
 

@@ -1,5 +1,5 @@
 /**
- * Stubs for the extension service worker's `chrome` and `WebSocket` globals, installed when this module loads. The
+ * Stubs for the extension service worker's `chrome` global, installed when this module loads. The
  * probe entry imports it before the worker, so the worker's top level runs against them. `PROBE_DOWNLOADS=1` exposes
  * a `chrome.downloads` API; without it the worker sees none, as in a browser whose permission set predates `downloads`.
  */
@@ -21,7 +21,9 @@ export interface StubTab {
 /** What the worker did against the stubs, for the probe to report. */
 export const probe = {
 	listeners: {} as Record<string, Listener[]>,
-	sockets: [] as FakeWebSocket[],
+	/** Every `chrome.runtime.connectNative` port the worker opened, oldest first. */
+	nativePorts: [] as FakeNativePort[],
+	/** Relay messages the worker sent, decoded from the `relay` frames of every native port. */
 	sent: [] as Array<Record<string, unknown>>,
 	searchCalls: [] as unknown[],
 	/** `chrome.tabs.sendMessage` calls: tab and message. */
@@ -35,25 +37,40 @@ export const probe = {
 /** Tabs whose page runs a content script that answers `chrome.tabs.sendMessage`. */
 const scripted = new Set<number>();
 
-/** The relay socket the worker dials; the probe opens it and plays the relay. */
-export class FakeWebSocket {
-	static readonly CONNECTING = 0;
-	static readonly OPEN = 1;
-	readyState = FakeWebSocket.CONNECTING;
-	onopen: (() => void) | null = null;
-	onmessage: ((event: { data: string }) => void) | null = null;
-	onclose: (() => void) | null = null;
-	onerror: (() => void) | null = null;
-	readonly url: string;
-	constructor(url: string) {
-		this.url = url;
-		probe.sockets.push(this);
+/** A native messaging port to the omp host; the probe plays the host behind it. */
+export class FakeNativePort {
+	readonly host: string;
+	/** Every frame the worker posted, in order. */
+	readonly posted: Array<Record<string, unknown>> = [];
+	disconnected = false;
+	readonly #messageListeners: Array<(message: unknown) => void> = [];
+	readonly #disconnectListeners: Array<() => void> = [];
+	readonly onMessage = {
+		addListener: (listener: (message: unknown) => void) => this.#messageListeners.push(listener),
+	};
+	readonly onDisconnect = {
+		addListener: (listener: () => void) => this.#disconnectListeners.push(listener),
+	};
+	constructor(host: string) {
+		this.host = host;
+		probe.nativePorts.push(this);
 	}
-	close(): void {
-		this.readyState = 3;
+	postMessage(message: Record<string, unknown>): void {
+		if (this.disconnected) throw new Error("Attempting to use a disconnected port object");
+		this.posted.push(message);
+		if (message.t === "relay" && typeof message.line === "string") probe.sent.push(JSON.parse(message.line));
 	}
-	send(data: string): void {
-		probe.sent.push(JSON.parse(data));
+	disconnect(): void {
+		this.disconnected = true;
+	}
+	/** Deliver `message` from the host to the worker. */
+	hostSays(message: unknown): void {
+		for (const listener of this.#messageListeners) listener(message);
+	}
+	/** The host process exits: Chrome disconnects the port. */
+	hostExits(): void {
+		this.disconnected = true;
+		for (const listener of this.#disconnectListeners) listener();
 	}
 }
 
@@ -104,8 +121,6 @@ function storageArea() {
 	};
 }
 
-/** The stubbed `chrome.storage.local`, which the probe writes the way the options page would. */
-export const stubLocalStorage = storageArea();
 
 function tabFor(id: number): StubTab {
 	return (
@@ -122,10 +137,6 @@ function tabFor(id: number): StubTab {
 }
 
 const globals = globalThis as Record<string, unknown>;
-// The worker's ping timer would keep the probe process alive; the probe never needs it to fire.
-globals.setInterval = () => 0;
-globals.clearInterval = () => {};
-globals.WebSocket = FakeWebSocket;
 globals.chrome = {
 	runtime: {
 		id: "a".repeat(32),
@@ -135,9 +146,7 @@ globals.chrome = {
 		getURL: (path: string) => `chrome-extension://${"a".repeat(32)}/${path}`,
 		getContexts: async () => [],
 		sendMessage: async () => undefined,
-		connectNative: () => {
-			throw new Error("Specified native messaging host not found.");
-		},
+		connectNative: (host: string) => new FakeNativePort(host),
 		onInstalled: event("runtimeOnInstalled"),
 		onStartup: event("runtimeOnStartup"),
 		onConnect: event("runtimeOnConnect"),
@@ -149,7 +158,7 @@ globals.chrome = {
 		setBadgeBackgroundColor: async () => {},
 	},
 	storage: {
-		local: stubLocalStorage,
+		local: storageArea(),
 		session: storageArea(),
 		onChanged: event("storageChanged"),
 	},

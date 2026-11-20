@@ -389,7 +389,7 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 				setHosts(list);
 				return list;
 			},
-			// No relay, no running omp to list; the banner already says the relay is down.
+			// No relay, no running omp to list.
 			() => {
 				setHosts([]);
 				return [];
@@ -811,14 +811,13 @@ export function App({ worker, windowId }: { worker: WorkerClient; windowId: numb
 	}, [session, exited, view.phase, view.endedReason, contextPercent, compacting, compact, show]);
 	const shownStrip = strip ?? (derivedStrip !== null && derivedStrip.key !== dismissedStrip ? derivedStrip : null);
 
+	// No relay banner: chat runs over the native host, and the relay is down whenever no omp is driving a tab.
 	const banner =
 		session !== null && (view.phase === "connecting" || view.phase === "waiting")
 			? "Joining session…"
 			: session !== null && view.phase === "reconnecting"
 				? "Reconnecting…"
-				: relay !== null && !relay.connected
-					? "Relay disconnected"
-					: null;
+				: null;
 
 	const allToasts = useMemo(
 		() =>

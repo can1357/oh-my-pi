@@ -2346,12 +2346,6 @@ select.pn-field {
 	background: var(--ok);
 }
 
-.pn-set-fields {
-	display: grid;
-	grid-template-columns: minmax(84px, 0.4fr) minmax(0, 1fr);
-	gap: 8px;
-}
-
 .pn-set-actions {
 	display: flex;
 	justify-content: flex-end;

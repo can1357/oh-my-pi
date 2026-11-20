@@ -1,6 +1,6 @@
 /**
  * Daemon lease held by a browser consumer for as long as it uses a
- * daemon-supervised process (the project-shared Chromium, the browser relay).
+ * daemon-supervised process (the project-shared Chromium).
  *
  * Leases are connection-bound: a daemon restart drops them. The holder
  * retakes its lease on reconnect, but only on the very process generation it

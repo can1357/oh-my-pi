@@ -555,14 +555,11 @@ export class RelayBridge {
 	#updateTried = new Map<string, Set<string>>();
 	/** Instance whose hello ran last: answers browser-wide requests and owns created tabs. */
 	#lastHelloInstance: string | null = null;
-	#extensionSeen = false;
 	/**
 	 * Tabs omp opened whose close failed while their browser was offline (see {@link #closeTab}), by tab key, with
 	 * the URL the tab showed: closed at that browser's next hello, unless the tab is gone or shows another page.
 	 */
 	#closeOnHello = new Map<string, string>();
-	/** `Date.now()` when the last ready extension socket closed; null while one is ready or none ever was. */
-	#extensionGoneSince: number | null = null;
 	#pendingRpc = new Map<
 		string,
 		{
@@ -695,18 +692,6 @@ export class RelayBridge {
 		return this.#lastHello();
 	}
 
-	/** True after the first hello, and stays true: separates a reaped service worker from an absent extension. */
-	get extensionSeen(): boolean {
-		return this.#extensionSeen;
-	}
-
-	/** Milliseconds since the last ready extension disconnected, or null while one is connected or none ever was. */
-	get extensionGoneForMs(): number | null {
-		return this.#extensionGoneSince === null
-			? null
-			: Date.now() - this.#extensionGoneSince;
-	}
-
 	/** Downstream CDP clients (omp browser sessions, puppeteer) connected right now. */
 	get cdpClientCount(): number {
 		return this.#conns.size;
@@ -827,7 +812,6 @@ export class RelayBridge {
 		this.#groupQueue = this.#groupQueue.filter(
 			(tab) => tab.instanceId !== instanceId,
 		);
-		if (!this.ready) this.#extensionGoneSince ??= Date.now();
 	}
 
 	extMessage(socket: RelaySocket, raw: string): void {
@@ -891,9 +875,6 @@ export class RelayBridge {
 				return;
 			case "tabRemoved":
 				this.#onTabRemoved(tabKeyOf(inst.code, msg.tabId));
-				return;
-			case "ping":
-				socket.send(JSON.stringify({ t: "pong" } satisfies RelayToExtMessage));
 				return;
 			case "call":
 				void this.#answerCall(socket, msg.id, msg.call);
@@ -1027,8 +1008,6 @@ export class RelayBridge {
 			panelProtocol: msg.panelProtocol,
 		};
 		this.#lastHelloInstance = instanceId;
-		this.#extensionSeen = true;
-		this.#extensionGoneSince = null;
 		// The hello GC is scoped to this instance: another browser's tabs are
 		// untouched, which is what lets Chrome and Edge share one relay.
 		const seen = new Set<number>();

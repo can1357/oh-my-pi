@@ -1,10 +1,10 @@
 /**
  * omp — MV3 service worker.
  *
- * Wires the extension's parts together: the relay socket (`worker/relay.ts`) whose RPCs drive tabs through
- * `chrome.debugger`, the page overlay host, the side panel hub and its request handlers, the worker-owned rpc
- * sessions behind the native host, and the feature modules (schedules, Teach, GIF export). CDP orchestration stays
- * in the relay server; this worker executes its RPCs and streams tab and debugger events back.
+ * Wires the extension's parts together: the relay link through the native host (`worker/relay.ts`) whose RPCs drive
+ * tabs through `chrome.debugger`, the page overlay host, the side panel hub and its request handlers, the
+ * worker-owned rpc sessions behind the native host, and the feature modules (schedules, Teach, GIF export). CDP
+ * orchestration stays in the relay server; this worker executes its RPCs and streams tab and debugger events back.
  */
 import type { WorkerContext } from "./messages";
 import { captureVisible } from "./worker/capture";
@@ -21,14 +21,7 @@ import {
 } from "./worker/overlay-host";
 import { activeTabContext, installPanelHandlers } from "./worker/panel-handlers";
 import { PanelHub } from "./worker/panel-hub";
-import {
-	connectRelay,
-	redialRelay,
-	relaySettingsChanged,
-	relayStatus,
-	setBusy,
-	setRelayHandlers,
-} from "./worker/relay";
+import { connectRelay, relayStatus, setBusy, setRelayHandlers } from "./worker/relay";
 import { installRelayEvents } from "./worker/relay-events";
 import { runRelayRpc } from "./worker/relay-rpc";
 import { RPC_ABORT_LINE, RpcSessions } from "./worker/rpc-sessions";
@@ -123,15 +116,8 @@ chrome.tabs.onRemoved.addListener(tabId => void forgetTab(tabId));
 
 chrome.alarms.create("omp-relay-keepalive", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(alarm => {
-	if (alarm.name === "omp-relay-keepalive") void connectRelay();
+	// Revives a reaped worker and reconnects a lost native port; a no-op while the port is open.
+	if (alarm.name === "omp-relay-keepalive") connectRelay();
 });
 
-chrome.storage.onChanged.addListener((changes, areaName) => {
-	// Only the connection settings re-dial; identity writes, panel drafts and settings never drop the socket.
-	if (relaySettingsChanged(changes, areaName)) redialRelay();
-});
-
-chrome.runtime.onInstalled.addListener(() => void connectRelay());
-chrome.runtime.onStartup.addListener(() => void connectRelay());
-
-void connectRelay();
+connectRelay();

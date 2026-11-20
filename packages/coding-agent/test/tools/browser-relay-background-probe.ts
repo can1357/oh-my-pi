@@ -1,11 +1,11 @@
 /**
  * Probe entry for browser-relay-background-bootstrap.test.ts, run in a fresh process per scenario (a failed top-level
  * evaluation stays cached in a module registry, and the worker keeps module state). It loads the stubs, then the
- * worker, opens the dialed socket, runs one scenario through the worker's own listeners, and prints what the relay,
- * the panel and the tabs saw. Scenario from the environment: `PROBE_DOWNLOADS`, `PROBE_FIND_DOWNLOAD`,
- * `PROBE_SCENARIO` (`storage`, `panel`, `overlay`).
+ * worker, links the native port it opened, runs one scenario through the worker's own listeners, and prints what the
+ * host, the relay, the panel and the tabs saw. Scenario from the environment: `PROBE_DOWNLOADS`, `PROBE_FIND_DOWNLOAD`,
+ * `PROBE_SCENARIO` (`panel`, `overlay`, `epoch`, `chunk`, `reconnect`).
  */
-import { FakePort, FakeWebSocket, probe, stubLocalStorage } from "./browser-relay-background-stubs";
+import { FakePort, probe } from "./browser-relay-background-stubs";
 
 /**
  * The worker, loaded after the stubs. A non-literal specifier keeps it out of this package's type program: it is
@@ -24,31 +24,25 @@ function fire(name: string, ...args: unknown[]): void {
 	for (const listener of probe.listeners[name] ?? []) (listener as (...values: unknown[]) => unknown)(...args);
 }
 
+/** The worker's current port to the native host. */
+function host() {
+	const port = probe.nativePorts.at(-1);
+	if (!port) throw new Error("the worker opened no native port");
+	return port;
+}
+
 function relaySays(message: Record<string, unknown>): void {
-	probe.sockets.at(-1)?.onmessage?.({ data: JSON.stringify(message) });
+	host().hostSays({ t: "relay", line: JSON.stringify(message) });
 }
 
 await settle();
-const socket = probe.sockets[0];
-socket.readyState = FakeWebSocket.OPEN;
-socket.onopen?.();
+const report: Record<string, unknown> = {};
+// Nothing but the link request goes out before a relay listens.
+report.postedBeforeLinked = [...host().posted];
+host().hostSays({ t: "linked" });
 await settle();
 
-const report: Record<string, unknown> = {};
-
 switch (Bun.env.PROBE_SCENARIO) {
-	case "storage": {
-		// Writes that are not the connection settings: the worker's identity, another area, panel state.
-		fire("storageChanged", { relayInstanceId: { newValue: "x" } }, "local");
-		fire("storageChanged", { port: { newValue: 9300 } }, "session");
-		fire("storageChanged", { "omp.settings": { newValue: {} } }, "local");
-		await settle();
-		report.socketsAfterOtherWrites = probe.sockets.length;
-		await stubLocalStorage.set({ token: "secret" });
-		fire("storageChanged", { token: { newValue: "secret" } }, "local");
-		await settle();
-		break;
-	}
 	case "panel": {
 		const port = new FakePort("omp-panel");
 		fire("runtimeOnConnect", port);
@@ -79,8 +73,8 @@ switch (Bun.env.PROBE_SCENARIO) {
 		probe.zoom = 1.25;
 		port.deliver({ kind: "request", id: 3, request: { op: "tabContext", tabId: 5 } });
 		await settle();
-		// The socket closes with the collabLink call unanswered.
-		probe.sockets[0].onclose?.();
+		// The relay goes away with the collabLink call unanswered.
+		host().hostSays({ t: "unlinked", reason: "omp relay went away" });
 		await settle();
 		report.panelReceived = port.received;
 		break;
@@ -95,6 +89,62 @@ switch (Bun.env.PROBE_SCENARIO) {
 		await settle();
 		report.tabMessages = probe.tabMessages;
 		report.injected = probe.injected;
+		break;
+	}
+	case "epoch": {
+		relaySays({ t: "rpc", id: 1, op: "findDownload", guid: "g" });
+		// The relay goes away and the next one links before the RPC settles: its answer must not reach the new relay.
+		host().hostSays({ t: "unlinked", reason: "omp relay went away" });
+		host().hostSays({ t: "linked" });
+		await settle();
+		relaySays({ t: "rpc", id: 2, op: "findDownload", guid: "g" });
+		await settle();
+		break;
+	}
+	case "chunk": {
+		const line = JSON.stringify({ t: "rpc", id: 1, op: "findDownload", guid: "g" });
+		const third = Math.ceil(line.length / 3);
+		host().hostSays({ t: "chunk", id: 9, index: 0, last: false, data: line.slice(0, third) });
+		// A whole line between the pieces is its own message.
+		relaySays({ t: "rpc", id: 2, op: "findDownload", guid: "g" });
+		host().hostSays({ t: "chunk", id: 9, index: 1, last: false, data: line.slice(third, 2 * third) });
+		host().hostSays({ t: "chunk", id: 9, index: 2, last: true, data: line.slice(2 * third) });
+		await settle();
+		break;
+	}
+	case "reconnect": {
+		// Hold reconnect timers for the probe to fire; anything else runs as usual.
+		const timers: Array<{ delay: number; run: () => void }> = [];
+		const realSetTimeout = globalThis.setTimeout;
+		const holdReconnects = (run: () => void, delay?: number): ReturnType<typeof setTimeout> => {
+			if (delay !== undefined && delay >= 1_000 && delay <= 10_000) {
+				timers.push({ delay, run });
+				return 0 as unknown as ReturnType<typeof setTimeout>;
+			}
+			return realSetTimeout(run, delay);
+		};
+		globalThis.setTimeout = holdReconnects as unknown as typeof setTimeout;
+		const panel = new FakePort("omp-panel");
+		fire("runtimeOnConnect", panel);
+		panel.deliver({ kind: "hello", windowId: 1 });
+		await settle();
+		// The host exits six times in a row without linking, then links once and exits again.
+		for (let exit = 0; exit < 7; exit++) {
+			if (exit === 6) {
+				host().hostSays({ t: "linked" });
+				await settle();
+			}
+			host().hostExits();
+			await settle();
+			if (exit < 6) timers.at(-1)?.run();
+		}
+		// The keepalive alarm reconnects at once, without waiting out the backoff.
+		const portsBeforeAlarm = probe.nativePorts.length;
+		fire("alarm", { name: "omp-relay-keepalive" });
+		await settle();
+		report.reconnectDelays = timers.map(timer => timer.delay);
+		report.portsBeforeAlarm = portsBeforeAlarm;
+		report.panelReceived = panel.received;
 		break;
 	}
 	default: {
@@ -113,7 +163,7 @@ switch (Bun.env.PROBE_SCENARIO) {
 
 console.log(
 	JSON.stringify({
-		urls: probe.sockets.map(candidate => candidate.url),
+		linkRequests: probe.nativePorts.map(port => ({ host: port.host, first: port.posted[0] })),
 		sent: probe.sent,
 		searchCalls: probe.searchCalls,
 		...report,

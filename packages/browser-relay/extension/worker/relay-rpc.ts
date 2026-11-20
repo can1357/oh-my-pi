@@ -5,11 +5,12 @@ import type { RelayRpcRequest } from "../../../coding-agent/src/tools/browser/re
 import { pastForeignFrames } from "../foreign-frames";
 import { enqueueGroupOp, groupRelayTabs, isNonEmpty } from "./groups";
 import { relayOverlay } from "./overlay-host";
+import type { RelayLink } from "./relay";
 import { findDownload, relayInitiatedDetachTabs } from "./relay-events";
 import { focusTab, removeTab, snapshot } from "./tabs";
 
-/** Run one relay RPC; `origin` is the socket it came in on, which alone can carry its answer. */
-export async function runRelayRpc(request: RelayRpcRequest, origin: WebSocket): Promise<unknown> {
+/** Run one relay RPC; `origin` is the link epoch it came in on, which alone can carry its answer. */
+export async function runRelayRpc(request: RelayRpcRequest, origin: RelayLink): Promise<unknown> {
 	switch (request.op) {
 		case "attach": {
 			const attach = () => chrome.debugger.attach({ tabId: request.tabId }, "1.3");
@@ -38,8 +39,8 @@ export async function runRelayRpc(request: RelayRpcRequest, origin: WebSocket): 
 			const tab = await chrome.tabs.create({ url: request.url, active: request.active ?? true });
 			const snap = snapshot(tab);
 			if (!snap) throw new Error("created tab has no id");
-			// The relay failed this call when its socket closed, so nobody learns this tab's id to close it later.
-			if (origin.readyState !== WebSocket.OPEN) void removeTab(snap.tabId).catch(() => {});
+			// The relay failed this call when its link ended, so nobody learns this tab's id to close it later.
+			if (!origin.open) void removeTab(snap.tabId).catch(() => {});
 			return { tab: snap };
 		}
 		case "removeTab":

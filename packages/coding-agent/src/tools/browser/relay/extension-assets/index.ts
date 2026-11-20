@@ -8,13 +8,11 @@ import asset5 from "./icons/omp-48.png.txt" with { type: "text" };
 import asset6 from "./manifest.json.txt" with { type: "text" };
 import asset7 from "./offscreen.html.txt" with { type: "text" };
 import asset8 from "./offscreen.js.txt" with { type: "text" };
-import asset9 from "./options.html.txt" with { type: "text" };
-import asset10 from "./options.js.txt" with { type: "text" };
-import asset11 from "./overlay.js.txt" with { type: "text" };
-import asset12 from "./panel.css.txt" with { type: "text" };
-import asset13 from "./panel.html.txt" with { type: "text" };
-import asset14 from "./panel.js.txt" with { type: "text" };
-import asset15 from "./recorder.js.txt" with { type: "text" };
+import asset9 from "./overlay.js.txt" with { type: "text" };
+import asset10 from "./panel.css.txt" with { type: "text" };
+import asset11 from "./panel.html.txt" with { type: "text" };
+import asset12 from "./panel.js.txt" with { type: "text" };
+import asset13 from "./recorder.js.txt" with { type: "text" };
 
 /** The unstamped extension files, with binary assets encoded as base64. */
 export const embeddedRelayFiles = {
@@ -27,14 +25,12 @@ export const embeddedRelayFiles = {
 	"manifest.json": asset6,
 	"offscreen.html": asset7,
 	"offscreen.js": asset8,
-	"options.html": asset9,
-	"options.js": asset10,
-	"overlay.js": asset11,
-	"panel.css": asset12,
-	"panel.html": asset13,
-	"panel.js": asset14,
-	"recorder.js": asset15,
+	"overlay.js": asset9,
+	"panel.css": asset10,
+	"panel.html": asset11,
+	"panel.js": asset12,
+	"recorder.js": asset13,
 };
 
 /** Digest of the unstamped files above; installs stamp it into background.js so a relay can spot a stale build. */
-export const embeddedRelayBuild = "cd50e2f22001e22d";
+export const embeddedRelayBuild = "eff066851e980c37";
