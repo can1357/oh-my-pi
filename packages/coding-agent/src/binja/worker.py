@@ -612,11 +612,12 @@ def xrefs_to(t):
     return sorted(out, key=lambda ref: ref["from"])
 
 
-def _instruction_addresses(f):
+def _instructions(f):
+    """(address, architecture) of every instruction; blocks of one function can differ, as ARM and Thumb do."""
     for block in _blocks(f):
         ea = block.start
         for _, length in block:
-            yield ea
+            yield ea, block.arch
             ea += length
 
 
@@ -626,14 +627,16 @@ def xrefs_from(t):
     ea = resolve(t)
     f = bv.get_function_at(ea)
     if f is not None:
-        sources = [(source, f) for source in _instruction_addresses(f)]
+        sources = [(source, f, arch) for source, arch in _instructions(f)]
     else:
-        sources = [(ea, _function_containing(ea))]
+        owner = _function_containing(ea)
+        blocks = _blocks(owner) if owner is not None else ()
+        sources = [(ea, owner, next((block.arch for block in blocks if block.start <= ea < block.end), None))]
     out = []
-    for source, owner in sources:
+    for source, owner, arch in sources:
         if owner is not None:
-            targets = bv.get_code_refs_from(source, owner)
-            kind = "CALL" if targets and _is_call(owner, source) else "CODE"
+            targets = bv.get_code_refs_from(source, owner, arch)
+            kind = "CALL" if targets and _is_call(owner, source, arch) else "CODE"
             for target in targets:
                 out.append({"to": target, "type": kind, "func": _func_name(target)})
         for target in bv.get_data_refs_from(source):
