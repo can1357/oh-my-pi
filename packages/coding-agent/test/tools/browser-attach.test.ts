@@ -84,14 +84,24 @@ function makePage(urlCalls: Array<() => void>, finalUrl = "https://example.com/"
 	return { page, calls: () => calls };
 }
 
-function makeTarget(id: string, page: Page | null = null, pageDelayMs = 0) {
+function makeTarget(
+	id: string,
+	page: Page | null = null,
+	pageDelayMs = 0,
+	info: { url?: string; title?: string } = {},
+) {
 	const pageSpy = vi.fn(async (): Promise<Page | null> => {
 		if (pageDelayMs > 0) await new Promise(resolve => setTimeout(resolve, pageDelayMs));
 		return page;
 	});
+	// Chromium reports a target's URL and title without attaching to its page.
+	const url = info.url ?? "";
+	const title = info.title ?? "";
 	const target = {
 		_targetId: id,
 		type: () => "page",
+		url: () => url,
+		_getTargetInfo: () => ({ url, title }),
 		page: pageSpy,
 	} as unknown as Target & { _targetId: string };
 	if (page) Object.assign(page, { target: () => target });
@@ -144,8 +154,14 @@ function fakePage(options: FakePageOptions): Page {
 }
 
 function fakeTarget(type: string, page: Page | null): Target {
+	// Chromium reports a target's id and URL without attaching; a fakePage's title is async, so the fake reports none.
+	const url = page?.url() ?? "";
+	const targetId = (page?.target() as (Target & { _targetId?: string }) | undefined)?._targetId;
 	return {
+		_targetId: targetId,
 		type: () => type,
+		url: () => url,
+		_getTargetInfo: () => ({ url, title: "" }),
 		page: async () => page,
 	} as unknown as Target;
 }
@@ -1466,18 +1482,55 @@ describe("pickElectronTarget relay path", () => {
 	});
 
 	it("does not satisfy a connected-browser matcher from another page when one is unreadable", async () => {
-		const unreadable = makeTarget("PAGE_A", {
-			url: () => {
-				throw new Error("Page frame unavailable");
-			},
-			title: async () => "Cart",
-		} as unknown as Page);
-		const otherMatch = makeTarget("PAGE_B", fakePage({ url: "https://example.com/cart", title: "Cart" }));
+		const unreadable = makeTarget(
+			"PAGE_A",
+			{
+				url: () => {
+					throw new Error("Page frame unavailable");
+				},
+				title: async () => "Cart",
+			} as unknown as Page,
+			0,
+			{ url: "https://example.com/a", title: "Cart" },
+		);
+		const otherMatch = makeTarget("PAGE_B", fakePage({ url: "https://example.com/cart", title: "Cart" }), 0, {
+			url: "https://example.com/cart",
+			title: "Cart",
+		});
 
 		await expect(
 			pickElectronTarget(makeBrowser([unreadable.target, otherMatch.target]), { matcher: "cart" }),
 		).rejects.toThrow(/tab.*not ready/i);
 	});
+
+	// Regression: a tab whose page never resolved vetoed the healthy match after 10 s with "A browser tab is not ready".
+	it("adopts the healthy tab a matcher names without waiting on an unrelated tab whose page never resolves", async () => {
+		const healthy = fakePage({ id: "PAGE_HEALTHY", url: "https://example.com/healthy", title: "Healthy" });
+		const hung = makeTarget("PAGE_HUNG", null, 0, { url: "https://example.com/hung" });
+		Object.assign(hung.target, { page: () => Promise.withResolvers<Page | null>().promise });
+		const ready = makeTarget("PAGE_HEALTHY", healthy, 0, { url: "https://example.com/healthy", title: "Healthy" });
+
+		const started = Date.now();
+		expect(
+			await pickElectronTarget(makeBrowser([hung.target, ready.target]), { matcher: "https://example.com/healthy" }),
+		).toBe(healthy);
+		expect(Date.now() - started).toBeLessThan(2_000);
+	}, 15_000);
+
+	// The error must name the only tab the matcher can select, so the user can close it.
+	it("names the URL of the unreadable tab a matcher selects", async () => {
+		const hung = makeTarget("PAGE_HUNG", null, 0, { url: "https://example.com/hung" });
+		Object.assign(hung.target, { page: () => Promise.withResolvers<Page | null>().promise });
+		const other = makeTarget("PAGE_OTHER", fakePage({ url: "https://example.com/other", title: "Other" }), 0, {
+			url: "https://example.com/other",
+			title: "Other",
+		});
+
+		const error = await rejectionOf(
+			pickElectronTarget(makeBrowser([hung.target, other.target]), { matcher: "hung" }),
+		);
+		expect((error as Error).message).toContain("https://example.com/hung");
+	}, 15_000);
 
 	it("aborts target discovery when the caller cancels", async () => {
 		const controller = new AbortController();
