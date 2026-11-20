@@ -671,12 +671,15 @@ export class ExtensionRunner {
 	#todoPending: TodoBackendList | undefined;
 	/** Tail of the todo backend calls, which run one at a time. Never rejects. */
 	#todoCalls: Promise<void> = Promise.resolve();
+	/** A delivery is queued and has not started: a list set meanwhile goes out with it. */
+	#todoQueued = false;
 	/**
-	 * The list the backend last took, which is not sent again. `undefined` while a call runs and
-	 * after one failed, so the next list is sent whatever it holds; `"none"` until the first call,
-	 * when an empty list has nothing to tell a backend.
+	 * The list the backend last took, which is not sent again, and the registration that took it:
+	 * an id can pass to another extension, which has not seen that list. `undefined` while a call
+	 * runs and after one failed, so the next list is sent whatever it holds; `"none"` until the
+	 * first call, when an empty list has nothing to tell a backend.
 	 */
-	#todoSent: TodoBackendList | "none" | undefined = "none";
+	#todoSent: { list: TodoBackendList; definition: TodoBackendDefinition } | "none" | undefined = "none";
 	/** Set by {@link closeTodoBackend}: the session is going away and takes no more lists to its backend. */
 	#todoClosed = false;
 	/** `todo.backend` ids already reported as unregistered. */
@@ -1769,12 +1772,15 @@ export class ExtensionRunner {
 	}
 
 	#queueTodoBackendCall(): void {
+		if (this.#todoQueued) return;
+		this.#todoQueued = true;
 		this.#todoCalls = this.#todoCalls
 			.then(() => this.#sendTodoList())
 			.catch((error: unknown) => logger.warn("Todo backend call failed", { error: String(error) }));
 	}
 
 	async #sendTodoList(): Promise<void> {
+		this.#todoQueued = false;
 		const pending = this.#todoPending;
 		this.#todoPending = undefined;
 		// A list set before the session changed belongs to the session left behind; the change sets its own.
@@ -1792,7 +1798,12 @@ export class ExtensionRunner {
 		}
 		const { extension, definition } = owner;
 		const sent = this.#todoSent;
-		if (sent === "none" ? pending.phases.length === 0 : Bun.deepEquals(sent, pending)) return;
+		if (
+			sent === "none"
+				? pending.phases.length === 0
+				: sent?.definition === definition && Bun.deepEquals(sent.list, pending)
+		)
+			return;
 		this.#todoSent = undefined;
 		const taken = await this.#runHandlerWithTimeout(
 			async (event, ctx) => {
@@ -1804,7 +1815,7 @@ export class ExtensionRunner {
 			extension,
 			extensionHandlerTimeoutMs,
 		);
-		if (taken) this.#todoSent = pending;
+		if (taken) this.#todoSent = { list: pending, definition };
 	}
 
 	/**
