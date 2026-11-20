@@ -141,6 +141,7 @@ import {
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
 	resolveCliModel,
+	resolveModelRoleValue,
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
 } from "../config/model-resolver";
@@ -482,7 +483,13 @@ import {
 	type SessionAdvisorsHost,
 } from "./session-advisors";
 import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
-import { buildSessionContext, getRestorableSessionModels, isTranscriptEntry } from "./session-context";
+import {
+	buildSessionContext,
+	getRestorableSessionModels,
+	isTranscriptEntry,
+	resolveSessionThinking,
+	thinkingLevelWithoutSavedChoice,
+} from "./session-context";
 import {
 	type CacheBridgeEstimate,
 	type CacheBridgeOutcome,
@@ -1039,6 +1046,19 @@ function isEvalActivity(message: AgentMessage): boolean {
 }
 
 /**
+ * Explicit thinking suffix on `modelRoles.default`, if that role value carries one.
+ * `availableModels` is the candidate set. Callers pass the session's allowed models
+ * so an `enabledModels` filter hides the same earlier entries startup skips.
+ */
+function explicitDefaultRoleThinking(
+	settings: Settings,
+	availableModels: Model[],
+): ConfiguredThinkingLevel | undefined {
+	const role = resolveModelRoleValue(settings.getModelRole("default"), availableModels, {
+		settings,
+		matchPreferences: getModelMatchPreferences(settings),
+	});
+	return role.explicitThinkingLevel ? role.thinkingLevel : undefined;
  * Whether a dispose for `reason` ends the process under a running turn (an exit, the
  * host's SIGTERM or SIGHUP, a crash) rather than the user stopping it (a quit, Ctrl+C,
  * manual cleanup); see {@link AgentSessionDisposeOptions.reason}.
@@ -2461,7 +2481,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			textOutputCommitted: () => this.#textOutputCommitted,
 			thinkingLevel: () => this.thinkingLevel,
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
-			setThinkingLevel: level => this.#models.setThinkingLevel(level),
+			setThinkingLevel: (level, options) => this.#models.setThinkingLevel(level, false, options),
 			thinkingLevelCeiling: () => this.#models.thinkingLevelCeiling,
 			modelFallbackDisabled: () => this.#disableModelFallback,
 			isDisposed: () => this.#isDisposed,
@@ -13218,11 +13238,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Selects the session thinking level and optionally persists it as the default. */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
 		this.#prewalk.releaseHandoff();
-		this.#models.setThinkingLevel(level, persist);
+		// An explicit pick is a saved choice even when it matches the level a
+		// retry-fallback hop (or an unsaved default) left in effect.
+		this.#models.setThinkingLevel(level, persist, { recordUnchanged: true });
+		this.#recovery.noteExplicitThinkingLevel(this.configuredThinkingLevel());
 	}
 
 	/** Advances through the thinking selectors supported by the active model. */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined {
+		this.#prewalk.releaseHandoff();
+		const next = this.#models.cycleThinkingLevel();
+		if (next !== undefined) this.#recovery.noteExplicitThinkingLevel(this.configuredThinkingLevel());
+		return next;
 		// Ownership transfers only when a level is selected; the level is applied synchronously, before any
 		// in-flight prewalk switch can resume and read the epoch.
 		const level = this.#models.cycleThinkingLevel();
@@ -14746,9 +14773,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.sessionManager.getLastModelChangeRole(),
 			);
 			let targetModel = explicitModel;
+			let restoredSelectorLevel: ConfiguredThinkingLevel | undefined;
 			let modelFallbackWarning: string | undefined;
 			if (!targetModel && !options?.keepModel && targetModelStrings.length > 0) {
-				targetModel = await this.#resolveSessionModel(targetModelStrings);
+				const restoredSessionModel = await this.#resolveSessionModel(targetModelStrings);
+				targetModel = restoredSessionModel?.model;
+				restoredSelectorLevel = restoredSessionModel?.thinkingLevel;
 				if (!targetModel && switchingToDifferentSession) {
 					// Like startup resume: never hand the transcript to a model the
 					// session did not choose unless a UI can say so.
@@ -14803,6 +14833,30 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			} else if (didReloadConversationChange) {
 				this.#closeAllProviderSessions("session reload");
 			}
+			// A retry-fallback hop is not a saved selector when nothing was recorded
+			// before it, so the configured default applies. Decide that before an
+			// explicit model is recorded: that write must not adopt the hop's effort.
+			const resolvedThinking = resolveSessionThinking(this.sessionManager.getBranch());
+			const defaultThinkingLevel = parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings));
+			const restoredConfigured = sessionContext.configuredThinkingLevel;
+			const hasSavedThinking =
+				resolvedThinking.hasSavedThinkingEntry ||
+				(defaultThinkingLevel === AUTO_THINKING && sessionContext.thinkingLevel !== "off");
+			// A kept model is the host's, not this transcript's. Collab mirrors the host
+			// effort afterwards, so the role suffix and selector must not take over.
+			const restoredThinkingLevel: ConfiguredThinkingLevel | undefined = hasSavedThinking
+				? restoredConfigured === AUTO_THINKING
+					? AUTO_THINKING
+					: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
+				: options?.keepModel
+					? defaultThinkingLevel
+					: thinkingLevelWithoutSavedChoice(
+							targetModel ?? this.model,
+							explicitModel ? undefined : restoredSelectorLevel,
+							explicitModel ? undefined : explicitDefaultRoleThinking(this.settings, this.getAvailableModels()),
+							defaultThinkingLevel,
+						);
+			let persistRestoredThinking = false;
 
 			if (targetModel) {
 				const currentModel = this.model;
@@ -14824,6 +14878,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						: undefined;
 				if (explicitModel && !(savedModel && modelsAreEqual(savedModel, targetModel))) {
 					this.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`);
+					// A genuine pre-fallback choice must survive the explicit model entry.
+					// Fallback-only history stays unsaved and continues to follow the default.
+					const adoptedThinking = resolveSessionThinking(this.sessionManager.getBranch());
+					persistRestoredThinking =
+						restoredThinkingLevel !== undefined &&
+						(adoptedThinking.thinkingLevel !== sessionContext.thinkingLevel ||
+							adoptedThinking.configuredThinkingLevel !== sessionContext.configuredThinkingLevel);
 				}
 			}
 
@@ -14841,31 +14902,29 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 			}
 
-			const hasThinkingEntry = this.sessionManager.getBranch().some(entry => entry.type === "thinking_level_change");
 			const hasServiceTierEntry = this.sessionManager
 				.getBranch()
 				.some(entry => entry.type === "service_tier_change");
-			const defaultThinkingLevel = parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings));
 			const configuredServiceTierByFamily = buildServiceTierByFamily(
 				cfgTierOpenai.get(this.settings),
 				cfgTierAnthropic.get(this.settings),
 				cfgTierGoogle.get(this.settings),
 			);
-			// Restore the thinking selector. Each change persists the configured
-			// selector (`auto` or a concrete level), so prefer it: an `auto` session
-			// resumes in auto mode (reclassifying the next turn) instead of freezing at
-			// the last resolved level. Entries written before the `configured` field
-			// existed fall back to the concrete level (legacy pin-on-resume behavior).
-			// With no thinking entry, fall back to the global default so fresh sessions
-			// still classify their first turn.
-			const restoredConfigured = sessionContext.configuredThinkingLevel;
-			const restoredThinkingLevel: ConfiguredThinkingLevel | undefined =
-				hasThinkingEntry || (defaultThinkingLevel === AUTO_THINKING && sessionContext.thinkingLevel !== "off")
-					? restoredConfigured === AUTO_THINKING
-						? AUTO_THINKING
-						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
-					: defaultThinkingLevel;
+			// Thinking was decided before the explicit model entry above. Each saved
+			// change persists the configured selector (`auto` or a concrete level), so
+			// an `auto` session resumes in auto mode instead of freezing at the last
+			// resolved level. Entries written before the `configured` field existed
+			// fall back to the concrete level. With no saved choice, startup's policy
+			// applies: the restored selector's suffix, then the default role's explicit
+			// suffix, then the model's default level, then the global default.
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);
+			if (persistRestoredThinking) {
+				// Keep the raw level concrete for transcript readers; `configured` alone
+				// carries auto, matching ModelControls' ordinary auto entries.
+				this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, restoredThinkingLevel, {
+					retryFallback: false,
+				});
+			}
 			this.#models.restoreServiceTiers(
 				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
 			);
@@ -15020,11 +15079,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * none is in the catalog, refresh the discovery-backed providers among them
 	 * once and retry.
 	 */
-	async #resolveSessionModel(selectors: readonly string[]): Promise<Model | undefined> {
-		const resolve = (): Model | undefined => {
+	async #resolveSessionModel(
+		selectors: readonly string[],
+	): Promise<{ model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined> {
+		const resolve = () => {
 			for (const selector of selectors) {
 				const restored = resolveSessionModelSelector(this.#modelRegistry, selector);
-				if (restored) return restored.model;
+				if (restored) return restored;
 			}
 			return undefined;
 		};

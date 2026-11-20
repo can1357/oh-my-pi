@@ -284,7 +284,7 @@ export interface TurnRecoveryHost {
 	textOutputCommitted(): boolean;
 	thinkingLevel(): ThinkingLevel | undefined;
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined;
-	setThinkingLevel(level: ConfiguredThinkingLevel | undefined): void;
+	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, options?: { retryFallback?: boolean }): void;
 	/** Hard per-session effort ceiling; fallback recovery must never raise thinking above it. */
 	thinkingLevelCeiling(): Effort | undefined;
 	/** The session never switches to a retry fallback model (a per-call `model` subagent). */
@@ -1974,6 +1974,16 @@ export class TurnRecovery {
 		this.#fallbackRoutedFor = undefined;
 	}
 
+	/**
+	 * Records a thinking level explicitly picked while a fallback is active.
+	 * The cooldown restore otherwise treats a pick equal to the level the hop
+	 * applied as untouched and reverts to the pre-fallback level; treating the
+	 * pick as the level to restore keeps it, matching a pick of any other level.
+	 */
+	noteExplicitThinkingLevel(level: ConfiguredThinkingLevel | undefined): void {
+		if (this.#activeRetryFallback) this.#activeRetryFallback.originalThinkingLevel = level;
+	}
+
 	/** Checks whether a fallback selector remains in cooldown. */
 	isRetryFallbackSelectorSuppressed(selector: RetryFallbackSelector): boolean {
 		return this.#host.modelRegistry.isSelectorSuppressed(selector.raw);
@@ -2355,7 +2365,7 @@ export class TurnRecovery {
 		}
 		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
 		this.#host.settings.getStorage()?.recordModelUsage(candidateSelector);
-		this.#host.setThinkingLevel(nextThinkingLevel);
+		this.#host.setThinkingLevel(nextThinkingLevel, { retryFallback: true });
 		if (!this.#activeRetryFallback) {
 			this.#activeRetryFallback = {
 				role,

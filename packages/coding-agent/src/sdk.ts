@@ -257,6 +257,12 @@ import {
 } from "./session/retry-fallback-chains";
 import { describeUsageFallback } from "./session/retry-fallback-reason";
 import { kUsageLimitRequestProvider } from "./session/turn-recovery";
+import {
+	getReadableCompactionEntry,
+	getRestorableSessionModels,
+	resolveSessionThinking,
+	thinkingLevelWithoutSavedChoice,
+} from "./session/session-context";
 import { getReadableCompactionEntry, getRestorableSessionModels } from "./session/session-context";
 import { completionRecord } from "./session/model-usage-journal";
 import { SessionManager } from "./session/session-manager";
@@ -312,7 +318,6 @@ import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
-	newSessionThinkingLevel,
 	parseConfiguredThinkingLevel,
 	parseThinkingLevel,
 	resolveConfiguredThinkingLevel,
@@ -2320,7 +2325,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		deobfuscateSessionContext(sessionManager.buildSessionContext(), obfuscator),
 	);
 	const hasExistingSession = existingBranch.length > 0;
-	const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
+	const hasThinkingEntry = resolveSessionThinking(existingBranch).hasSavedThinkingEntry;
 	const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
 
 	const deferredModelPatterns = Array.isArray(options.modelPattern)
@@ -2426,16 +2431,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				parseConfiguredThinkingLevel(existingSession.configuredThinkingLevel) ??
 				parseThinkingLevel(existingSession.thinkingLevel);
 		}
-		if (level === undefined && !hasThinkingEntry && restoredSessionThinkingLevel !== undefined) {
-			level = restoredSessionThinkingLevel;
-		}
 		if (level !== undefined) return level;
 		const roleLevel =
 			!hasExplicitModel && !hasThinkingEntry && defaultRoleSpec.explicitThinkingLevel
 				? defaultRoleSpec.thinkingLevel
 				: undefined;
-		return newSessionThinkingLevel(
+		return thinkingLevelWithoutSavedChoice(
 			selectedModel,
+			!hasExplicitModel && !hasThinkingEntry ? restoredSessionThinkingLevel : undefined,
 			roleLevel,
 			parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(settings)),
 		);

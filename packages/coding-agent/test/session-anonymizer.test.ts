@@ -246,6 +246,23 @@ describe("SessionAnonymizer", () => {
 		});
 	});
 
+	test("preserves thinking fallback booleans while redacting session_init fallback configuration", () => {
+		const anonymizer = new SessionAnonymizer();
+		for (const retryFallback of [false, true]) {
+			expect(anonymizer.entry({ type: "thinking_level_change", retryFallback })).toEqual({
+				type: "thinking_level_change",
+				retryFallback,
+			});
+		}
+
+		const result = anonymizer.entry({
+			type: "session_init",
+			retryFallback: { primary: "acme/private-model", chain: ["acme/fallback-model"] },
+		});
+		expect(at(result, "retryFallback")).toMatch(/^\[redacted #\d+:/);
+		expect(JSON.stringify(result)).not.toContain("acme");
+	});
+
 	test("keeps a session_init's mounted-device list beside its tool list", () => {
 		const anonymizer = new SessionAnonymizer();
 		const result = anonymizer.entry({

@@ -201,6 +201,12 @@ export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 	 * before auto-mode persistence existed; readers fall back to `thinkingLevel`.
 	 */
 	configured?: string | null;
+	/**
+	 * Whether a retry-fallback hop wrote this entry. New non-fallback changes record
+	 * `false` so a user choice immediately after a bare fallback is distinguishable;
+	 * absent on legacy entries, which are classified by model-entry adjacency.
+	 */
+	retryFallback?: boolean;
 }
 
 export interface ModelChangeEntry extends SessionEntryBase {

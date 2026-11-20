@@ -12,6 +12,7 @@ import {
 	type ServiceTierByFamily,
 } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { type ConfiguredThinkingLevel, newSessionThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import {
 	createBranchSummaryMessage,
@@ -272,6 +273,90 @@ export function getReadableCompactionEntry(
 	return null;
 }
 
+interface SavedThinkingLevel {
+	thinkingLevel: string | undefined;
+	configured: string | undefined;
+}
+
+/**
+ * Thinking selector resume and revival should keep.
+ *
+ * A retry-fallback hop is ephemeral: the level it applied (a chain entry's
+ * `:level`, written on the following entry) must not outlive the hop. When the
+ * path still ends on a hop, restore the level in effect before the first hop.
+ * An explicit choice recorded during that fallback (`retryFallback: false`)
+ * replaces the snapshot, so a later hop restores the choice. A non-fallback
+ * model switch supersedes the snapshot: it keeps the effort then in effect and
+ * writes no thinking entry when the effort does not change, so that effort is
+ * what a later hop restores. When no thinking entry existed before the first hop
+ * and no later switch or explicit choice adopted one, hop entries are ignored
+ * and the configured default is used.
+ */
+export function resolveSessionThinking(path: readonly SessionEntry[]): {
+	thinkingLevel: string | undefined;
+	configuredThinkingLevel: string | undefined;
+	hasSavedThinkingEntry: boolean;
+} {
+	let thinkingLevel: string | undefined = "off";
+	let configuredThinkingLevel: string | undefined;
+	let saved: SavedThinkingLevel | undefined;
+	let preFallbackThinking: SavedThinkingLevel | undefined;
+	let thinkingFromFallbackHop = false;
+	let previous: SessionEntry | undefined;
+
+	for (const entry of path) {
+		if (entry.type === "thinking_level_change") {
+			thinkingLevel = entry.thinkingLevel ?? "off";
+			configuredThinkingLevel = entry.configured ?? entry.thinkingLevel ?? undefined;
+			thinkingFromFallbackHop =
+				entry.retryFallback ?? (previous?.type === "model_change" && previous.resolvedModelIsFallback === true);
+			if (!thinkingFromFallbackHop) {
+				saved = { thinkingLevel, configured: configuredThinkingLevel };
+				// An explicit choice during a fallback replaces what a later hop restores.
+				// Legacy entries omit the flag and keep the snapshot from the first hop.
+				if (preFallbackThinking && entry.retryFallback === false) preFallbackThinking = saved;
+			}
+		} else if (entry.type === "model_change") {
+			if (entry.resolvedModelIsFallback === true) {
+				if (!preFallbackThinking && saved) preFallbackThinking = saved;
+			} else {
+				// A real saved effort survives this switch even when no new thinking entry is
+				// written. With no saved effort, do not promote a fallback hop's ephemeral one.
+				if (saved) saved = { thinkingLevel, configured: configuredThinkingLevel };
+				preFallbackThinking = undefined;
+			}
+		}
+		previous = entry;
+	}
+
+	if (preFallbackThinking && thinkingFromFallbackHop) {
+		thinkingLevel = preFallbackThinking.thinkingLevel;
+		configuredThinkingLevel = preFallbackThinking.configured;
+	} else if (thinkingFromFallbackHop && !saved) {
+		thinkingLevel = "off";
+		configuredThinkingLevel = undefined;
+	}
+
+	return { thinkingLevel, configuredThinkingLevel, hasSavedThinkingEntry: saved !== undefined };
+}
+
+/**
+ * Thinking selector for a resumed session that recorded no saved choice.
+ * A suffix on the restored model selector wins; otherwise a new session's
+ * policy applies (explicit role suffix, then the model's default level, then
+ * the configured default). Callers pass an undefined selector and role when
+ * an explicit model override is in effect, matching startup.
+ */
+export function thinkingLevelWithoutSavedChoice(
+	model: Model | undefined,
+	restoredSelectorLevel: ConfiguredThinkingLevel | undefined,
+	roleLevel: ConfiguredThinkingLevel | undefined,
+	configuredDefault: ConfiguredThinkingLevel | undefined,
+): ConfiguredThinkingLevel | undefined {
+	if (restoredSelectorLevel !== undefined) return restoredSelectorLevel;
+	return newSessionThinkingLevel(model, roleLevel, configuredDefault);
+}
+
 export function buildSessionContext(
 	entries: SessionEntry[],
 	leafId?: string | null,
@@ -327,9 +412,11 @@ export function buildSessionContext(
 	}
 	path.reverse();
 
-	// Extract settings and find compaction
-	let thinkingLevel: string | undefined = "off";
-	let configuredThinkingLevel: string | undefined;
+	// Extract settings and find compaction. Thinking is resolved on its own so a
+	// retry-fallback hop cannot outlive resume (see resolveSessionThinking).
+	const resolvedThinking = resolveSessionThinking(path);
+	const thinkingLevel = resolvedThinking.thinkingLevel;
+	const configuredThinkingLevel = resolvedThinking.configuredThinkingLevel;
 	let serviceTier: ServiceTierByFamily | undefined;
 	const models: Record<string, string> = {};
 	let compaction: CompactionEntry | null = null;
@@ -344,28 +431,9 @@ export function buildSessionContext(
 	// with the wrong model id, which previously clobbered the user's pick on
 	// resume (issue #849).
 	let hasExplicitDefaultModel = false;
-	// A retry-fallback hop is ephemeral: resume and revival restore the
-	// pre-fallback model, so the thinking level the hop applied (a chain entry's
-	// `:level` suffix) must not outlive it either. Snapshot the level in effect
-	// before the first hop; it wins unless a later change (user pick, restore,
-	// non-fallback model switch) superseded the hop's own entry.
-	let preFallbackThinking: { thinkingLevel: string | undefined; configured: string | undefined } | undefined;
-	let thinkingFromFallbackHop = false;
-	let hasThinkingEntry = false;
-	let previous: SessionEntry | undefined;
 
 	for (const entry of path) {
-		if (entry.type === "thinking_level_change") {
-			thinkingLevel = entry.thinkingLevel ?? "off";
-			configuredThinkingLevel = entry.configured ?? entry.thinkingLevel ?? undefined;
-			hasThinkingEntry = true;
-			thinkingFromFallbackHop = previous?.type === "model_change" && previous.resolvedModelIsFallback === true;
-		} else if (entry.type === "model_change") {
-			if (entry.resolvedModelIsFallback !== true) {
-				preFallbackThinking = undefined;
-			} else if (!preFallbackThinking && hasThinkingEntry) {
-				preFallbackThinking = { thinkingLevel, configured: configuredThinkingLevel };
-			}
+		if (entry.type === "model_change") {
 			// New format: { model: "provider/id", role?: string }
 			if (entry.model) {
 				const role = entry.role ?? "default";
@@ -397,11 +465,6 @@ export function buildSessionContext(
 			mode = entry.mode;
 			modeData = entry.data;
 		}
-		previous = entry;
-	}
-	if (preFallbackThinking && thinkingFromFallbackHop) {
-		thinkingLevel = preFallbackThinking.thinkingLevel;
-		configuredThinkingLevel = preFallbackThinking.configured;
 	}
 
 	if (options?.model && !options.transcript) {
