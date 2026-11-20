@@ -14,12 +14,14 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import {
 	dropsForeignReasoningPayload,
+	hasMalformedToolCalls,
 	isSameModelTurn,
 	shouldDropTruncatedThinkingOnlyAssistant,
+	toolCallNameLimits,
 } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { parseReasoningDetailsSignature, replaysSignedReasoningText } from "@oh-my-pi/pi-ai/utils/reasoning-source";
 import { resolveThinkingReplayTokens, type ThinkingReplayTokens } from "@oh-my-pi/pi-catalog/compat/thinking-replay";
-import type { ModelTokenizer } from "@oh-my-pi/pi-catalog/types";
+import type { ModelTokenizer, ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
 import { materializeString, stringifyJson } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
@@ -52,6 +54,7 @@ type TokenizerModel = Pick<Model, "tokenizer"> &
 	snapcompact.ShapeTarget & {
 		compat?: Model["compat"];
 		thinking?: Model["thinking"];
+		providerType?: string;
 		reasoning?: boolean;
 		requestModelId?: string;
 	};
@@ -121,14 +124,22 @@ function reasoningReplayReader(model: TokenizerModel | null | undefined): ModelI
 	return filtersReasoningHistory(model) ? undefined : modelIdentity(model);
 }
 
-function replaysReasoningOpaque(model: TokenizerModel | null | undefined): boolean {
-	const compat = model?.compat;
-	return (
-		model?.api === "openai-completions" &&
-		compat !== undefined &&
-		"reasoningOpaqueReplay" in compat &&
-		compat.reasoningOpaqueReplay === true
-	);
+/** Unknown request effort: reserve summary tokens if either reachable compat view replays them. */
+function opaqueReplayToolNameLimits(model: TokenizerModel | null | undefined) {
+	if (model?.api !== "openai-completions" || !model.id || !model.provider) return undefined;
+	const compat = model.compat as ResolvedOpenAICompat | undefined;
+	if (!compat?.reasoningOpaqueReplay && !(model.reasoning && compat?.whenThinking?.reasoningOpaqueReplay)) {
+		return undefined;
+	}
+	return toolCallNameLimits({
+		api: model.api,
+		id: model.id,
+		provider: model.provider,
+		providerType: model.providerType,
+		requestModelId: model.requestModelId,
+		reasoning: model.reasoning,
+		thinking: model.thinking,
+	});
 }
 
 /** Identity of the reader whose replayed reasoning a {@link Tokenizer} counts; equal keys count it alike. */
@@ -292,7 +303,7 @@ export class Tokenizer {
 	readonly #rebuiltThinkingTurns: RebuiltThinkingTurns | null;
 	readonly #dropsOllamaThinking: boolean;
 	readonly #dropsCompletionsThinking: boolean;
-	readonly #replaysReasoningOpaque: boolean;
+	readonly #opaqueReplayLimits;
 	/** Claude's own API and prefix-bound hosts keep another model's signature from their deployment. */
 	readonly #readsDeploymentSignatures: boolean;
 	/** Factory's Gemini generate wire, whose replay pass keeps only Google-origin reasoning. */
@@ -337,7 +348,7 @@ export class Tokenizer {
 		this.#rebuiltThinkingTurns = rebuiltThinkingTurns(model);
 		this.#dropsOllamaThinking = ollamaChatDropsOwnThinking(model);
 		this.#dropsCompletionsThinking = completionsDropsOwnThinking(model);
-		this.#replaysReasoningOpaque = replaysReasoningOpaque(model);
+		this.#opaqueReplayLimits = opaqueReplayToolNameLimits(model);
 		const compat = model?.compat;
 		this.#readsDeploymentSignatures =
 			model?.api === "anthropic-messages" &&
@@ -550,15 +561,14 @@ export class Tokenizer {
 					message.stopReason !== "toolUse" &&
 					content.some(block => block.type === "toolCall");
 				const untrustedIndex = invalidStop ? content.length - 1 : -1;
-				const opaqueReplay =
-					abandonedToolUse || shouldDropTruncatedThinkingOnlyAssistant(message)
+				const opaqueReplayLimits = this.#opaqueReplayLimits;
+				let opaqueReplay =
+					!opaqueReplayLimits || abandonedToolUse || shouldDropTruncatedThinkingOnlyAssistant(message)
 						? undefined
-						: getReasoningOpaqueReplay(
-								message,
-								this.#reasoningReader,
-								this.#replaysReasoningOpaque,
-								untrustedIndex,
-							);
+						: getReasoningOpaqueReplay(message, this.#reasoningReader, true, untrustedIndex);
+				if (opaqueReplay && opaqueReplayLimits && hasMalformedToolCalls(message, opaqueReplayLimits)) {
+					opaqueReplay = undefined;
+				}
 				if (opaqueReplay?.text) fragments.push(opaqueReplay.text);
 				// A filtering Responses reader replays no reasoning item and its encoder
 				// drops the turn's own thinking blocks, so usually neither their text nor
@@ -754,6 +764,7 @@ export class Tokenizer {
 
 	/** Whether a Tokenizer built for `model` with `options` would count every message as this one does. */
 	countsAlike(model: TokenizerModel | null | undefined, options?: TokenizerOptions): boolean {
+		const opaqueReplayLimits = opaqueReplayToolNameLimits(model);
 		return (
 			tokenizerEncodingForModel(model) === this.#encoding &&
 			snapcompact.frameBillingKey(snapcompact.frameBilling(model ?? undefined)) === this.frameBillingKey &&
@@ -763,7 +774,8 @@ export class Tokenizer {
 			resolveThinkingReplayTokens(model ?? {}) === this.thinkingReplayTokens &&
 			ollamaChatDropsOwnThinking(model) === this.#dropsOllamaThinking &&
 			completionsDropsOwnThinking(model) === this.#dropsCompletionsThinking &&
-			replaysReasoningOpaque(model) === this.#replaysReasoningOpaque &&
+			opaqueReplayLimits?.allowedName === this.#opaqueReplayLimits?.allowedName &&
+			opaqueReplayLimits?.maxLength === this.#opaqueReplayLimits?.maxLength &&
 			(options?.nativeHistoryReplay ?? true) === this.nativeHistoryReplay
 		);
 	}

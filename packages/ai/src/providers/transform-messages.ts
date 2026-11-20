@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
-import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import type { CatalogPolicyInputs, ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
 	Api,
@@ -357,11 +357,16 @@ const GOOGLE_TOOL_CALL_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_.:-]*$/;
 /** Any character some provider accepts in a declared tool name, for checks with no target. */
 const ANY_PROVIDER_TOOL_CALL_NAME_RE = /^[a-zA-Z0-9_.:-]+$/;
 
+interface ToolCallNameLimits {
+	allowedName: RegExp;
+	maxLength: number;
+}
+
 /**
  * Charset and length a tool-call name must meet to replay to `model`. Without a
  * target, a name passes when any provider could declare it.
  */
-function toolCallNameLimits(model: Model | undefined): { allowedName: RegExp; maxLength: number } {
+export function toolCallNameLimits(model: CatalogPolicyInputs | undefined): ToolCallNameLimits {
 	if (!model) return { allowedName: ANY_PROVIDER_TOOL_CALL_NAME_RE, maxLength: MAX_TOOL_CALL_NAME_LENGTH };
 	const policy = resolveCatalogPolicy(model);
 	return {
@@ -395,6 +400,14 @@ function isMalformedToolCall(block: { id: string; name: string }, allowedName: R
 	return isMalformedToolCallId(block.id) || isMalformedToolCallName(block.name, allowedName, maxLength);
 }
 
+/** Whether the target's sanitizer will remove a call and invalidate this turn's reasoning envelope. */
+export function hasMalformedToolCalls(msg: AssistantMessage, { allowedName, maxLength }: ToolCallNameLimits): boolean {
+	for (const block of msg.content) {
+		if (block.type === "toolCall" && isMalformedToolCall(block, allowedName, maxLength)) return true;
+	}
+	return false;
+}
+
 /**
  * Drop assistant `toolCall` blocks with an empty / whitespace-only `id` or a `name`
  * the target provider cannot declare (see {@link isMalformedToolCallName}),
@@ -420,19 +433,16 @@ function isMalformedToolCall(block: { id: string; name: string }, allowedName: R
  * list returns the input untouched.
  */
 function sanitizeMalformedToolCalls(messages: Message[], model: Model): Message[] {
-	const { allowedName, maxLength } = toolCallNameLimits(model);
+	const limits = toolCallNameLimits(model);
 	// Fast path: skip the rewrite entirely when nothing is malformed.
 	let hasMalformed = false;
-	outer: for (const msg of messages) {
-		if (msg.role !== "assistant") continue;
-		for (const block of msg.content) {
-			if (block.type === "toolCall" && isMalformedToolCall(block, allowedName, maxLength)) {
-				hasMalformed = true;
-				break outer;
-			}
-		}
+	for (const msg of messages) {
+		if (msg.role !== "assistant" || !hasMalformedToolCalls(msg, limits)) continue;
+		hasMalformed = true;
+		break;
 	}
 	if (!hasMalformed) return messages;
+	const { allowedName, maxLength } = limits;
 
 	// Positional FIFO pairing within one assistant→tool-result window: a tool-call
 	// id can repeat across history when an OpenAI-Responses composite id
