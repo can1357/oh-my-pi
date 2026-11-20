@@ -40,6 +40,7 @@
 - Changed read to treat a file named .i64 or .idb as an IDA database even when it is a SQLite file: it shows database metadata instead of a table listing ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 - Changed an in-place disassembler database to be identified by its real path, so one opened through a symlink gets a new id and dsm handle ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 - Changed dsm.open() to reject a database file that belongs to another disassembler backend, with an error naming the backend to switch to ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- Sessions that fell back after their model refused the content (for example `Refusal (cyber)`) now retry that model after a compaction, unless `retry.fallbackRevertPolicy` is `never` ([#14744](https://github.com/can1357/oh-my-pi/pull/14744) by [@mvid](https://github.com/mvid))
 
 ### Fixed
 
