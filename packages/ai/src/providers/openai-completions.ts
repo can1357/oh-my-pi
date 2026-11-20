@@ -132,7 +132,7 @@ import {
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
-import { completionsSendsOwnThinking, transformMessages } from "./transform-messages";
+import { completionsSendsOwnThinking, isSameModelTurn, transformMessages } from "./transform-messages";
 import {
 	isOpenAICompletionsVisionSupported,
 	joinTextWithImagePlaceholder,
@@ -358,7 +358,7 @@ function getLiteLLMThinkingBlocksDelta(delta: object): unknown[] | undefined {
 /**
  * Whether a thinking block's signature is a raw LiteLLM (Anthropic) one, not a
  * reasoning field name, the Mistral content-parts marker, or a
- * `reasoning_details` envelope.
+ * chat-completions reasoning replay envelope.
  */
 export function isLiteLLMThinkingSignature(signature: string | undefined): signature is string {
 	return !!signature && !isReasoningSourceSignature(signature) && !parseReasoningDetailsSignature(signature);
@@ -389,6 +389,7 @@ function encodeLiteLLMThinkingBlocks(content: AssistantMessage["content"]): Lite
 type OpenAICompletionsAssistantMessageParam = ChatCompletionAssistantMessageParam &
 	Partial<Record<OpenAICompletionsReasoningField | GeminiMessageThoughtSignatureField, string>> & {
 		reasoning_details?: unknown[];
+		reasoning_opaque?: string;
 		thinking_blocks?: LiteLLMThinkingBlock[];
 	};
 
@@ -706,6 +707,7 @@ export function isOpenAICompletionsProgressChunk(chunk: unknown): boolean {
 				reasoning?: unknown;
 				reasoning_content?: unknown;
 				reasoning_text?: unknown;
+				reasoning_opaque?: unknown;
 				reasoning_details?: unknown;
 				refusal?: unknown;
 			};
@@ -724,6 +726,7 @@ export function isOpenAICompletionsProgressChunk(chunk: unknown): boolean {
 	if (typeof delta.reasoning === "string" && delta.reasoning.length > 0) return true;
 	if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) return true;
 	if (typeof delta.reasoning_text === "string" && delta.reasoning_text.length > 0) return true;
+	if (typeof delta.reasoning_opaque === "string" && delta.reasoning_opaque.length > 0) return true;
 	if (Array.isArray(delta.reasoning_details) && delta.reasoning_details.length > 0) return true;
 	if (typeof delta.refusal === "string" && delta.refusal.length > 0) return true;
 	return false;
@@ -1157,6 +1160,7 @@ const streamOpenAICompletionsOnce = (
 			};
 			let currentBlock: OpenAIStreamBlock | undefined;
 			let messageThoughtSignature: GeminiMessageThoughtSignature | undefined;
+			let reasoningOpaque: string | undefined;
 			// Content blocks are append-only for the lifetime of the stream, so each
 			// block's index is stable once pushed. Map block → index to keep the
 			// per-delta contentIndex lookup O(1): a linear `indexOf` per delta turns a
@@ -1557,6 +1561,12 @@ const streamOpenAICompletionsOnce = (
 					// multiple aliases for the same reasoning text.
 					const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];
 					const deltaRecord = choice.delta as Record<string, unknown>;
+					if (model.provider === "github-copilot") {
+						const opaque = deltaRecord.reasoning_opaque;
+						// Interleaved reasoning can send a new state at each tool call, with
+						// or without its text. Empty values never clear the latest state.
+						if (typeof opaque === "string" && opaque.length > 0) reasoningOpaque = opaque;
+					}
 					let foundReasoningField: string | undefined;
 					let foundReasoningDelta = "";
 					for (const field of reasoningFields) {
@@ -1884,18 +1894,17 @@ const streamOpenAICompletionsOnce = (
 				);
 			}
 
-			// Keep the received `reasoning_details` on the first thinking block whose
-			// signature only names its text's source field, so replay sends them back
-			// verbatim. With no such block, an empty thinking block holds them only when
-			// the turn has other content (text or tool calls, already pushed by now): an
-			// encrypted-only turn stays empty so the empty-stop retry still runs.
-			if (receivedReasoningDetails.length > 0) {
+			// Store message-level reasoning replay data on the first thinking block
+			// carrying only a source marker. Use an empty thinking block if needed,
+			// but leave a turn with no other content eligible for empty-stop retry.
+			if (receivedReasoningDetails.length > 0 || reasoningOpaque !== undefined) {
 				const holder = output.content.find(
 					(block): block is ThinkingContent =>
 						block.type === "thinking" &&
 						(block.thinkingSignature === undefined || isReasoningField(block.thinkingSignature)),
 				);
-				const stored: ReasoningDetailsSignature = { reasoningDetails: receivedReasoningDetails };
+				const stored: ReasoningDetailsSignature = { reasoningOpaque };
+				if (receivedReasoningDetails.length > 0) stored.reasoningDetails = receivedReasoningDetails;
 				const holderField = holder?.thinkingSignature;
 				const field = isReasoningField(holderField) ? holderField : mirroredReasoningField;
 				if (field) stored.field = field;
@@ -2915,11 +2924,29 @@ export function convertMessages(
 			// (a pass rewrote the turn's thinking or arguments, or the turn predates
 			// it), the encrypted entries kept on unchanged tool calls still replay.
 			// A request that drops the model's own thinking also drops its unsigned text.
-			const receivedReasoningDetails = msg.content.flatMap(block =>
-				block.type === "thinking"
-					? (parseReasoningDetailsSignature(block.thinkingSignature)?.reasoningDetails ?? [])
-					: [],
-			);
+			const receivedReasoningDetails: Record<string, unknown>[] = [];
+			let reasoningOpaque: string | undefined;
+			const replaysCopilotReasoning = model.provider === "github-copilot" && isSameModelTurn(msg, model);
+			for (const block of thinkingBlocks) {
+				const stored = parseReasoningDetailsSignature(block.thinkingSignature);
+				if (stored?.reasoningDetails) {
+					for (const detail of stored.reasoningDetails) receivedReasoningDetails.push(detail);
+				}
+				if (replaysCopilotReasoning && stored?.reasoningOpaque) reasoningOpaque = stored.reasoningOpaque;
+			}
+			if (reasoningOpaque !== undefined) {
+				assistantMsg.reasoning_opaque = reasoningOpaque;
+				// Copilot expects the latest opaque state with the full summary, in
+				// order and without any separators that weren't in the stream.
+				let reasoningText = "";
+				for (const block of thinkingBlocks) {
+					if (signatureReasoningField(block.thinkingSignature) === "reasoning_text") {
+						reasoningText += block.thinking;
+					}
+				}
+				if (reasoningText.length > 0) assistantMsg.reasoning_text = reasoningText;
+				hasReasoningField = true;
+			}
 			const reasoningDetails =
 				receivedReasoningDetails.length > 0
 					? receivedReasoningDetails

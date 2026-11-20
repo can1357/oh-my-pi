@@ -5,12 +5,11 @@
  * encoder reads them to echo reasoning back in the field it came from, so
  * they are replay state, not opaque provider material.
  *
- * A chat-completions turn that streamed `reasoning_details` stores a JSON
- * envelope instead: the entries as received, which replay verbatim, plus the
- * reasoning field marker the block would otherwise carry. The entries cover
- * the whole turn (every thinking block's text and each tool call's encrypted
- * signature), so a pass that rewrites any of that drops the envelope with
- * {@link dropReasoningDetailsEnvelopes}.
+ * A chat-completions turn that streamed `reasoning_details` or Copilot's
+ * `reasoning_opaque` stores a JSON envelope instead: the replay data as
+ * received, plus the reasoning field marker the block would otherwise carry.
+ * The replay data covers the whole turn, so rewriting its thinking or tool
+ * arguments invalidates the envelope; see {@link dropReasoningDetailsEnvelopes}.
  */
 import type { OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { isRecord, tryParseJson } from "@oh-my-pi/pi-utils";
@@ -22,10 +21,12 @@ export const MISTRAL_CONTENT_PARTS_SIGNATURE = "mistral-content-parts";
 /** OpenAI-compatible delta fields that stream plain reasoning text. */
 export type ReasoningField = NonNullable<OpenAICompat["reasoningContentField"]>;
 
-/** `thinkingSignature` envelope of a chat-completions turn that streamed `reasoning_details`. */
+/** `thinkingSignature` envelope for chat-completions reasoning replay data. */
 export interface ReasoningDetailsSignature {
 	/** The `reasoning_details` entries as received, replayed verbatim. */
-	reasoningDetails: Record<string, unknown>[];
+	reasoningDetails?: Record<string, unknown>[];
+	/** Copilot's latest non-empty `reasoning_opaque`, replayed verbatim. */
+	reasoningOpaque?: string;
 	/** The reasoning field the block's text arrived in, when one streamed. */
 	field?: ReasoningField;
 }
@@ -39,16 +40,24 @@ export function isReasoningSourceSignature(signature: string): boolean {
 	return isReasoningField(signature) || signature === MISTRAL_CONTENT_PARTS_SIGNATURE;
 }
 
-/** The `reasoning_details` envelope `signature` holds, if it is one. */
+/** The chat-completions reasoning replay envelope `signature` holds, if it is one. */
 export function parseReasoningDetailsSignature(signature: string | undefined): ReasoningDetailsSignature | undefined {
 	if (!signature?.startsWith("{")) return undefined;
 	const stored = tryParseJson(signature);
-	if (!isRecord(stored) || !Array.isArray(stored.reasoningDetails)) return undefined;
-	const reasoningDetails = stored.reasoningDetails as Record<string, unknown>[];
-	return isReasoningField(stored.field) ? { reasoningDetails, field: stored.field } : { reasoningDetails };
+	if (!isRecord(stored)) return undefined;
+	const reasoningDetails = Array.isArray(stored.reasoningDetails)
+		? (stored.reasoningDetails as Record<string, unknown>[])
+		: undefined;
+	const reasoningOpaque =
+		typeof stored.reasoningOpaque === "string" && stored.reasoningOpaque.length > 0
+			? stored.reasoningOpaque
+			: undefined;
+	if (reasoningDetails === undefined && reasoningOpaque === undefined) return undefined;
+	const field = isReasoningField(stored.field) ? stored.field : undefined;
+	return { reasoningDetails, reasoningOpaque, field };
 }
 
-/** The reasoning field a thinking block's text arrived in, read from its bare marker or `reasoning_details` envelope. */
+/** The reasoning field a thinking block's text arrived in, read from its bare marker or replay envelope. */
 export function signatureReasoningField(signature: string | undefined): ReasoningField | undefined {
 	return isReasoningField(signature) ? signature : parseReasoningDetailsSignature(signature)?.field;
 }
@@ -73,11 +82,10 @@ export function replaysSignedReasoningText(signature: string | undefined): boole
 }
 
 /**
- * `content` with every `reasoning_details` envelope reduced to its field
- * marker. A pass that rewrote any thinking text or tool call arguments of the
- * turn calls this: the entries still hold the original bytes, so replaying
- * them would resend what the pass removed. Encrypted entries stay on the tool
- * calls whose arguments were left unchanged and replay from there.
+ * `content` with each chat-completions reasoning replay envelope reduced to
+ * its field marker. Rewriting the turn's thinking or tool arguments invalidates
+ * its replay data. Per-call encrypted entries on unchanged tool calls still
+ * replay from those calls.
  */
 export function dropReasoningDetailsEnvelopes(content: AssistantMessage["content"]): AssistantMessage["content"] {
 	let result: AssistantMessage["content"] | undefined;
