@@ -182,7 +182,7 @@ describe("read tool head+tail selectors", () => {
 		expect(output).toContain("literal-3.");
 		expect(output).not.toContain("row-1.");
 	});
-	it("rejects a bare trailing number and quotes the raw path", async () => {
+	it("keeps a line:column in the path and quotes it when the file is missing", async () => {
 		const raw = `${filePath}:62:105`;
 
 		expect(splitPathAndSel(raw)).toEqual({ path: raw });
@@ -195,9 +195,26 @@ describe("read tool head+tail selectors", () => {
 		);
 		expect(error).toBeInstanceOf(Error);
 		const message = error instanceof Error ? error.message : String(error);
-		expect(message).toContain(raw);
+		expect(message).toContain(`'${raw}'`);
 		expect(message).not.toContain(`${filePath}:62'`);
 		expect(message).toContain("50-80");
 		expect(message).toContain("50+150");
+	});
+
+	it("still reads a real range under the same path", async () => {
+		const output = getTextOutput(await tool.execute("range-after-column", { path: `${filePath}:62-105` }));
+
+		for (const line of [62, 80, 105]) expect(output).toContain(`row-${line}.`);
+		expect(output).not.toContain("row-1.");
+		expect(output).not.toContain("row-200.");
+	});
+
+	it("reads a file whose own name ends in a colon and a number", async () => {
+		const literal = path.join(testDir, "notes:62");
+		await Bun.write(literal, "colon file body.\n");
+
+		const output = getTextOutput(await tool.execute("literal-colon", { path: literal }));
+
+		expect(output).toContain("colon file body.");
 	});
 });

@@ -123,6 +123,9 @@ const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
 );
 
 const BARE_LINE_RE = /^\d+$/;
+// `clip.mp4:1:30` is a timestamp: the colon pairs minutes and seconds, so the
+// tail stays a selector the video reader parses.
+const VIDEO_PATH_RE = /\.(?:mp4|m4v|mov|mkv|webm|avi|flv|wmv|mpe?g)$/i;
 // A comma list whose chunks carry their own `raw` (`:1-32:raw,48-50:raw`, `:raw:5,raw:9-12`).
 const RAW_CHUNK_SRC = `(?:raw:)?${LIST_CHUNK_SRC}(?::raw)?`;
 const PER_CHUNK_RAW_LIST_RE = new RegExp(`:(${RAW_CHUNK_SRC}(?:,${RAW_CHUNK_SRC})+)$`, "i");
@@ -220,7 +223,13 @@ export function splitPathAndSel(
 	// selector. Peel it only when the fold turns it into a comma list
 	// (`file.ts:20:40,85:100`), so a path that does not exist is never
 	// statted with its column dropped.
-	if (!list.includes(",") && BARE_LINE_RE.test(list) && basePath.includes(":") && !basePath.includes(","))
+	if (
+		!list.includes(",") &&
+		BARE_LINE_RE.test(list) &&
+		basePath.includes(":") &&
+		!basePath.includes(",") &&
+		!VIDEO_PATH_RE.test(basePath.split(":")[0]!)
+	)
 		return { path: rawPath };
 	if (options?.foldListColons !== false) ({ basePath, list } = foldListColons(basePath, list, 1));
 	if (!rawSuffix) {
