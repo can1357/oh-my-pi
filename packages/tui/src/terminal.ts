@@ -650,12 +650,6 @@ export interface Terminal {
 	 */
 	onSixelSupport?(callback: (supported: boolean) => void): void;
 	/**
-	 * Latest DA1 SIXEL advertisement (attribute 4 present), or `undefined`
-	 * before any DA1 reply. A definite `false` contradicts a graphics-query
-	 * success: the terminal answers capability queries it cannot act on.
-	 */
-	sixelSupported?: boolean | undefined;
-	/**
 	 * Whether the latest DA1 reply carried no capability attributes at all
 	 * (`ESC [ c`), or `undefined` before any DA1 reply. A definite `true`
 	 * marks a broken responder: it answers capability queries while claiming
@@ -1077,10 +1071,6 @@ export class ProcessTerminal implements Terminal {
 	onSixelSupport(callback: (supported: boolean) => void): void {
 		this.#sixelSupportCallbacks.push(callback);
 		if (this.#sixelSupport !== undefined) callback(this.#sixelSupport);
-	}
-	/** Latest DA1 SIXEL advertisement, or `undefined` before any DA1 reply. */
-	get sixelSupported(): boolean | undefined {
-		return this.#sixelSupport;
 	}
 	/** Whether the latest DA1 reply carried no capability attributes at all. */
 	get da1CapabilityEmpty(): boolean | undefined {
@@ -2687,6 +2677,7 @@ export class ProcessTerminal implements Terminal {
 		this.#glyphProtocolCallbacks = [];
 		this.#sixelSupport = undefined;
 		this.#sixelSupportCallbacks = [];
+		this.#da1CapabilityEmpty = undefined;
 		setTerminalGlyphProtocol(false);
 		this.#tspPending = false;
 		this.#endTspTmuxPane();
