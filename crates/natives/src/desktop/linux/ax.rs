@@ -42,6 +42,8 @@ pub struct AtSpiAx {
 	/// The display server's own list of windows, where it knows where each one
 	/// is (X11).
 	native:        Option<Box<dyn NativeWindows>>,
+	/// Wayland lists message dialogs by AT-SPI identity, without native title matching.
+	alert_windows: bool,
 	frames:        FrameCache,
 }
 
@@ -319,6 +321,7 @@ impl AtSpiAx {
 			connection,
 			reply_timeout: REPLY_TIMEOUT,
 			native: None,
+			alert_windows: false,
 			frames: FrameCache::default(),
 		})
 	}
@@ -327,6 +330,12 @@ impl AtSpiAx {
 	/// where `native` says their window is.
 	pub(crate) fn with_native_windows(mut self, native: Box<dyn NativeWindows>) -> Self {
 		self.native = Some(native);
+		self
+	}
+
+	/// Lists GTK message dialogs where no native title matching is needed.
+	pub(crate) const fn with_alert_windows(mut self) -> Self {
+		self.alert_windows = true;
 		self
 	}
 
@@ -394,7 +403,7 @@ impl AtSpiAx {
 					return false;
 				};
 				let Ok(frames) =
-					Self::frames(&self.connection, &app, self.reply_timeout, self.native.is_none()).await
+					Self::frames(&self.connection, &app, self.reply_timeout, self.alert_windows).await
 				else {
 					return false;
 				};
@@ -445,7 +454,7 @@ impl AtSpiAx {
 			if !self
 				.reply(frame_proxy.get_role())
 				.await?
-				.is_ok_and(|role| top_level_role(role, true, self.native.is_none()))
+				.is_ok_and(|role| top_level_role(role, true, self.alert_windows))
 			{
 				continue;
 			}
@@ -775,7 +784,7 @@ impl AtSpiAx {
 		bounds: WalkBounds,
 		children: Option<u32>,
 	) -> CoreResult<(AxProps, Vec<ObjectRefOwned>)> {
-		let Self { rt, connection, native, frames, reply_timeout } = self;
+		let Self { rt, connection, native, frames, reply_timeout, .. } = self;
 		rt.block_on(cancellable(answered(
 			"the application",
 			*reply_timeout,
@@ -1673,7 +1682,7 @@ impl AxBackend for AtSpiAx {
 			.run(async {
 				let app = self.app_for_window(win).await?;
 				let frames =
-					Self::frames(&self.connection, &app, self.reply_timeout, self.native.is_none()).await?;
+					Self::frames(&self.connection, &app, self.reply_timeout, self.alert_windows).await?;
 				let mut matches = Vec::new();
 				for frame in frames {
 					let id = atspi_window_id(&frame);
@@ -1714,7 +1723,7 @@ impl AxBackend for AtSpiAx {
 		self.run(async {
 			let connection = &self.connection;
 			let object =
-				Self::top_level(connection, object, self.reply_timeout, self.native.is_none()).await?;
+				Self::top_level(connection, object, self.reply_timeout, self.alert_windows).await?;
 			// The ancestry scan is per-reply; the following single-window
 			// identification keeps its operation budget.
 			answered("the application", self.reply_timeout, async {
@@ -1916,7 +1925,7 @@ impl AxBackend for AtSpiAx {
 	fn element_at(&mut self, x: f64, y: f64) -> CoreResult<Option<AxHandle>> {
 		let x = x.round() as i32;
 		let y = y.round() as i32;
-		let Self { rt, connection, native, frames: cache, reply_timeout } = self;
+		let Self { rt, connection, native, frames: cache, reply_timeout, alert_windows } = self;
 		cache.refresh();
 		rt.block_on(cancellable(async {
 			let bus = &*connection;
@@ -1925,7 +1934,7 @@ impl AxBackend for AtSpiAx {
 				.await
 				.map_err(DesktopError::ax_failed)?
 			{
-				let frames = Self::frames(connection, &app, *reply_timeout, native.is_none()).await?;
+				let frames = Self::frames(connection, &app, *reply_timeout, *alert_windows).await?;
 				for frame in frames {
 					// This probes one frame, not the traversal: retain its
 					// single-element operation budget.
@@ -3992,7 +4001,14 @@ mod tests {
 				tokio::try_join!(serve(server).build(), client).unwrap()
 			});
 			(
-				AtSpiAx { rt, connection, reply_timeout, native: None, frames: FrameCache::default() },
+				AtSpiAx {
+					rt,
+					connection,
+					reply_timeout,
+					native: None,
+					alert_windows: false,
+					frames: FrameCache::default(),
+				},
 				server,
 			)
 		}
@@ -4449,7 +4465,8 @@ mod tests {
 
 		#[test]
 		fn wayland_lists_a_message_dialog_and_resolves_its_button() {
-			let (mut ax, _server) = app_with_message_dialog("TDLG");
+			let (ax, _server) = app_with_message_dialog("TDLG");
+			let mut ax = ax.with_alert_windows();
 			let listed: Vec<_> = ax
 				.windows()
 				.unwrap()
@@ -4469,8 +4486,12 @@ mod tests {
 
 		#[test]
 		fn native_windows_leave_alert_ownership_as_on_main() {
-			let (ax, _server) = app_with_message_dialog("Main");
+			let (mut ax, _server) = app_with_message_dialog("Main");
 			let windows = [window("1", "Question", 0, 0), window("2", "tdlg.py", 0, 0)];
+			// Menu operations construct the default backend without a native provider.
+			assert!(ax.window_root(&windows[0]).is_err());
+			let yes = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/yes"));
+			assert!(ax.window_id(&yes, &windows).is_err());
 			let mut ax = ax.with_native_windows(Box::new(Native::new(&[
 				("1", "Question", 0, 0),
 				("2", "tdlg.py", 0, 0),
