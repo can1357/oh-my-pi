@@ -1236,9 +1236,16 @@ export class InputController {
 
 		if (!text && !hasInputImages) return "kept";
 
-		const queueBody = parseQueueShorthand(text);
-		if (queueBody !== undefined) {
-			await this.#queueForYield(queueBody, {
+		// A chord steers its shorthand body, not the sigil. An empty body keeps the approval pending and restores the draft.
+		const shorthandBody = parseQueueShorthand(text);
+		if (approval) {
+			if (shorthandBody !== undefined) text = shorthandBody;
+			if (!text && !hasInputImages) {
+				this.#restoreResetSubmission(submittedText);
+				return "kept";
+			}
+		} else if (shorthandBody !== undefined) {
+			await this.#queueForYield(shorthandBody, {
 				historyText: text,
 				images: inputImages,
 				imageLinks: inputImageLinks,

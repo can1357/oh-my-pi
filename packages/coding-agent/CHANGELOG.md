@@ -41,6 +41,8 @@
 - Changed read to treat a file named .i64 or .idb as an IDA database even when it is a SQLite file: it shows database metadata instead of a table listing ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 - Changed an in-place disassembler database to be identified by its real path, so one opened through a symlink gets a new id and dsm handle ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 - Changed dsm.open() to reject a database file that belongs to another disassembler backend, with an error naming the backend to switch to ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- Ctrl+Enter approves a pending tool call and sends a typed composer note with it ([#18466](https://github.com/can1357/oh-my-pi/pull/18466) by [@heitor-lassarote](https://github.com/heitor-lassarote))
+- `onPromptQueued` on prompt, steer, follow-up, and skill dispatch options now runs just before the messages are queued, so queue listeners can recognize them; the queue does not contain them yet when the callback runs ([#18466](https://github.com/can1357/oh-my-pi/pull/18466) by [@heitor-lassarote](https://github.com/heitor-lassarote))
 
 ### Fixed
 
@@ -857,7 +859,6 @@
 - `omp gc` now shows a progress bar for each slow step (listing and scanning sessions, scanning transcripts for blob refs, archiving) on interactive terminals.
 - `omp gc --strip` and `--compress` start work immediately instead of first reading every session's metadata, and `--strip` processes several sessions at once with a running tally of transcripts stripped.
 - `omp gc` without `--apply` now says up front that it is a dry run.
-- Ctrl+Enter approves a pending tool call and sends a typed composer note with it ([#18466](https://github.com/can1357/oh-my-pi/pull/18466) by [@heitor-lassarote](https://github.com/heitor-lassarote))
 
 ### Fixed
 

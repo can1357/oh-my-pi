@@ -93,6 +93,37 @@ describe("approval chord outcome mapping", () => {
 		expect(mainPrompt).not.toHaveBeenCalled();
 	});
 
+	it("queue shorthand from a chord steers instead of queueing for the next yield", async () => {
+		const { ctx, mainPrompt } = createContext(true);
+		const approval: ApprovalSubmit = { steer: vi.fn(async () => {}) };
+		const outcome = await new InputController(ctx).submitApprovalNote("-> wait for the tests", approval);
+		expect(outcome).toBe("steered");
+		expect(approval.steer).toHaveBeenCalledWith("wait for the tests", undefined);
+		expect(mainPrompt).not.toHaveBeenCalled();
+	});
+
+	it("bare shorthand from a chord keeps the approval pending and restores the draft", async () => {
+		const { ctx, mainPrompt } = createContext(true);
+		const approval: ApprovalSubmit = { steer: vi.fn(async () => {}) };
+		const outcome = await new InputController(ctx).submitApprovalNote("->", approval);
+		expect(outcome).toBe("kept");
+		expect(approval.steer).not.toHaveBeenCalled();
+		expect(mainPrompt).not.toHaveBeenCalled();
+		expect(ctx.editor.setText).toHaveBeenCalledWith("->");
+	});
+
+	it("chord does not arm loop mode", async () => {
+		const { ctx } = createContext(true);
+		ctx.loopModeEnabled = true;
+		ctx.setLoopPrompt = vi.fn();
+		vi.spyOn(builtinSlashCommands, "executeBuiltinSlashCommand").mockResolvedValue("fix the build");
+		const approval: ApprovalSubmit = { steer: vi.fn(async () => {}) };
+		const outcome = await new InputController(ctx).submitApprovalNote("/loop fix the build", approval);
+		expect(outcome).toBe("steered");
+		expect(ctx.setLoopPrompt).not.toHaveBeenCalled();
+		expect(approval.steer).toHaveBeenCalledWith("fix the build", undefined);
+	});
+
 	it("dispatched command reports dispatched and does not steer", async () => {
 		const { ctx, mainPrompt } = createContext(true);
 		vi.spyOn(builtinSlashCommands, "executeBuiltinSlashCommand").mockResolvedValue(true);

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- User messages can carry an `approvalLine`, so a message approving a tool call renders that line before the note ([#18466](https://github.com/can1357/oh-my-pi/pull/18466) by [@heitor-lassarote](https://github.com/heitor-lassarote))
+
 ### Fixed
 - LiteLLM requests now switch to another configured key when a 422 budget-exceeded response stops the current key ([#19860](https://github.com/can1357/oh-my-pi/issues/19860)).
 - GPT-6.2 system prompts are now sent as leading `developer` input messages on third-party Responses proxies too, so they hit the prompt cache instead of billing at the full input rate every turn ([openai/codex#62312](https://github.com/openai/codex/issues/62312))
@@ -233,7 +237,6 @@
 
 - Added edit execution context support for Cursor handlers, allowing integrations to identify frames that materialize native file edits and detect when server-side edits have settled.
 - Exported Responses replay utilities so callers can determine which turns are sent as native payload items when estimating or trimming context.
-- User messages can carry an `approvalLine` prefix so a steer sent while approving a tool call tells the model what it approved ([#18466](https://github.com/can1357/oh-my-pi/pull/18466) by [@heitor-lassarote](https://github.com/heitor-lassarote))
 
 ### Fixed
 

@@ -11,6 +11,7 @@
 ### Added
 
 - Added handling of `features` terminal events to update UI without waiting for a new hello
+- Added `Editor.cancelAutocomplete()` to close an open autocomplete menu from a submit path that bypasses `submit()` ([#18466](https://github.com/can1357/oh-my-pi/pull/18466) by [@heitor-lassarote](https://github.com/heitor-lassarote))
 
 ### Changed
 
@@ -299,7 +300,6 @@
 
 - Added a model catalog refresh callback that lets applications update the active model scope after catalogs are re-fetched.
 - Preserved unfinished answers in ask dialogs and custom editors, allowing users to resume drafts when reopening them.
-- Added `Editor.cancelAutocomplete()` to close an open autocomplete menu from a submit path that bypasses `submit()` ([#18466](https://github.com/can1357/oh-my-pi/pull/18466) by [@heitor-lassarote](https://github.com/heitor-lassarote))
 
 ### Changed
 
