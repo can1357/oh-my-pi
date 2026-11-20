@@ -1094,6 +1094,34 @@ describe("supermemoryBackend", () => {
 		expect(create).toHaveBeenCalledTimes(1);
 	});
 
+	it("keeps an answer added after a yielded pause even when a new user turn follows in the same run", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		session.emitPause(true);
+		await session.getSupermemorySessionState()?.flush();
+		// A background job wakes the run; the model answers it, then the user steers in the same run.
+		session.sessionManager.getEntries().push({
+			type: "message",
+			id: "a-wake",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: { role: "assistant", content: [{ type: "text", text: "job result answer" }], timestamp: 0 },
+		} as never);
+		session.addTurn("two");
+		await session.endTurn();
+		const docs = create.mock.calls.map(call => call[1]);
+		expect(docs).toHaveLength(3);
+		expect(docs[1]?.id).toBe(docs[0]?.id);
+		expect(docs[1]?.content).toContain("job result answer");
+		expect(docs[2]?.id).not.toBe(docs[0]?.id);
+		expect(docs[2]?.content).toContain("reply to two");
+		expect(docs[2]?.content).not.toContain("job result answer");
+	});
+
 	it("a job queued behind a slow upload retains only turns settled when it was queued", async () => {
 		// Only the first upload is slow; later ones answer at once.
 		const first = Promise.withResolvers<{ id: string; status: string }>();

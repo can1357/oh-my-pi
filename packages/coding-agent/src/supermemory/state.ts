@@ -334,7 +334,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		if (!this.automatic) return;
 		this.#unsubscribe = this.session.subscribe(event => {
 			if (
-				(event.type === "agent_start" || event.type === "agent_end") &&
+				(event.type === "agent_start" || event.type === "agent_pause" || event.type === "agent_end") &&
 				this.#config.autoRetain &&
 				!this.#hasCursor
 			) {
@@ -659,19 +659,18 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		// An unfinished last turn stays open: a bare resume or `/retry` completes it without adding a
 		// user turn, so closing it now would leave the finished answer out of every window.
 		const settledTurns = history.openTail ? userStarts.length - 1 : userStarts.length;
+		// The last closed window gained messages after it was sent (a continuation, or a background
+		// job's wake after a yielded pause), possibly followed by newer user turns: re-send it under its
+		// document id first, so that text is not left out of every window.
+		const closedEnd = userStarts[this.lastRetainedTurn] ?? (history.openTail ? 0 : messages.length);
+		if (this.lastRetainedTurn > this.#windowStart && closedEnd > this.#retainedMessages) {
+			if (!(await this.#retainWindow(messages, userStarts, this.#windowStart, this.lastRetainedTurn, history))) {
+				return;
+			}
+		}
 		while (settledTurns - this.lastRetainedTurn >= every) {
 			const start = this.lastRetainedTurn;
 			if (!(await this.#retainWindow(messages, userStarts, start, start + every, history))) return;
-		}
-		// A continuation (`.`/`c`) answered after the last full window without a new user turn:
-		// re-send that window under its document id so the answer is added to it.
-		if (
-			!history.openTail &&
-			settledTurns === this.lastRetainedTurn &&
-			this.lastRetainedTurn > this.#windowStart &&
-			messages.length > this.#retainedMessages
-		) {
-			await this.#retainWindow(messages, userStarts, this.#windowStart, this.lastRetainedTurn, history);
 		}
 	}
 
