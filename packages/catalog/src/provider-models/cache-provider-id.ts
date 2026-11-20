@@ -1,8 +1,10 @@
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
-import { CODEX_BASE_URL, CODEX_CLIENT_VERSION } from "../wire/codex";
+import { CODEX_BASE_URL } from "../wire/codex";
+import { getCodexClientVersion } from "../wire/codex-version";
 import { CURSOR_DEFAULT_BASE_URL } from "../wire/cursor";
 import { type AccountScope, factoryDroidModelCacheProviderId } from "../wire/factory-droid";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
+import { decodeKiroCredential, kiroCredentialCacheScope } from "../wire/kiro";
 import { normalizeModalBaseUrl } from "../wire/modal";
 import {
 	SINGULARITYAPI_DEV_API_BASE_URL,
@@ -36,6 +38,12 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	otari: true,
 	// LiteLLM virtual keys have different /v1/models rosters on the same proxy.
 	litellm: true,
+	// Kiro's namespace is scoped per login route (OAuth) or per key and region
+	// (API key), so a synchronous bare-provider read would leak another
+	// credential's catalog or hide the scoped one.
+	kiro: true,
+	// Bifrost virtual keys can restrict the gateway's /v1/models roster per key.
+	bifrost: true,
 	// OpenRouter's keyed roster is the set of models the key's workspace
 	// guardrails allow, and discovery is authoritative.
 	openrouter: true,
@@ -66,6 +74,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return normalizeModalBaseUrl(Bun.env.MODAL_BASE_URL);
 		case "otari":
 			return Bun.env.OTARI_BASE_URL?.trim() || "https://api.otari.ai/api/v1";
+		case "bifrost":
+			return Bun.env.BIFROST_BASE_URL?.trim() || "http://localhost:8080/v1";
 		case "opencode-go":
 			return "https://opencode.ai/inference/go/v1";
 		case "opencode-zen":
@@ -119,8 +129,19 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// namespace must follow the endpoint. The official backend keeps the
 			// unhashed namespace so existing caches stay valid.
 			const baseUrl = options.baseUrl?.trim().replace(/\/+$/, "");
-			if (!baseUrl || baseUrl === CODEX_BASE_URL) return `${providerId}:${CODEX_CLIENT_VERSION}`;
-			return `${providerId}:${CODEX_CLIENT_VERSION}:${Bun.hash(baseUrl).toString(36)}`;
+			if (!baseUrl || baseUrl === CODEX_BASE_URL) return `${providerId}:${getCodexClientVersion()}`;
+			return `${providerId}:${getCodexClientVersion()}:${Bun.hash(baseUrl).toString(36)}`;
+		}
+		case "kiro": {
+			// An undecodable credential gets its own namespace, never a shared one.
+			if (!options.apiKey) return providerId;
+			let scope: string;
+			try {
+				scope = kiroCredentialCacheScope(decodeKiroCredential(options.apiKey));
+			} catch {
+				scope = `invalid:${options.apiKey}`;
+			}
+			return `kiro:models-v2:${Bun.hash(scope).toString(36)}`;
 		}
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);
@@ -166,10 +187,12 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const scope = `${jwtCredentialSubject(apiKey) ?? apiKey}\u0000${baseUrl}`;
 			return `kimi-code:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
-		// Per-key rosters (Otari: one workspace's enabled models) behind a
-		// configurable endpoint: scope by both so switching either re-runs discovery.
+		// Per-key rosters (Otari: one workspace's enabled models; Bifrost: one
+		// virtual key's allowed models) behind a configurable endpoint: scope by
+		// both so switching either re-runs discovery.
 		case "muse-code":
-		case "otari": {
+		case "otari":
+		case "bifrost": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;

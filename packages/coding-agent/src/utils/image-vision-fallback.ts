@@ -29,6 +29,7 @@ import type { Settings } from "../config/settings";
 import { type LocalProtocolOptions, resolveLocalRoot } from "../internal-urls";
 import { cfgImagesBlockImages } from "../modes/settings";
 import type { CostGateApi } from "../session/cost-gate";
+import { journalCompletion, type ModelUsageLedger } from "../session/model-usage-journal";
 import { cfgImagesDescribeForTextModels } from "../session/settings";
 import describeUserPrompt from "../prompts/tools/image-attachment-describe.md" with { type: "text" };
 import describeSystemPrompt from "../prompts/tools/image-attachment-describe-system.md" with { type: "text" };
@@ -74,6 +75,8 @@ export interface DescribeAttachedImagesDeps {
 	completeImpl?: typeof completeSimple;
 	/** The session tree's cost gate: at the cap images are not described, and each description's cost is added. */
 	costGate?: CostGateApi;
+	/** The session the images were attached to; each description request is journaled there as `image-describe`. */
+	usageLedger?: Partial<ModelUsageLedger>;
 }
 
 /** Map an image MIME type to a file extension for the saved artifact. */
@@ -159,6 +162,8 @@ async function describeImage(
 	signal: AbortSignal | undefined,
 ): Promise<string | null> {
 	if (deps.costGate?.check()) return null;
+	// Usage only: the request carries a fixed instruction and the image, and the description lands in the transcript.
+	const journal = journalCompletion(deps.usageLedger, { purpose: "image-describe", usageOnly: true });
 	try {
 		const response = await instrumentedCompleteSimple(
 			visionModel,
@@ -179,6 +184,7 @@ async function describeImage(
 			{ telemetry, oneshotKind: ONESHOT_KIND, completeImpl: deps.completeImpl },
 		);
 		deps.costGate?.record(response.usage.cost.total);
+		journal?.(response);
 		if (response.stopReason === "error" || response.stopReason === "aborted") {
 			logger.warn("image attachment description did not complete", {
 				stopReason: response.stopReason,

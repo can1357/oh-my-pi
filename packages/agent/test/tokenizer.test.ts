@@ -404,6 +404,15 @@ describe("chat-completions history estimate", () => {
 		},
 		// LiteLLM replays a raw signature's thinking in `thinking_blocks`.
 		{ name: "a raw LiteLLM signature", model: dropping, signature: "EqQBCkgIARABGAIiQL", carried: true },
+		// Signed `reasoning_details` text replays intact with the encrypted entries.
+		{
+			name: "signed reasoning_details text",
+			model: dropping,
+			signature: JSON.stringify({
+				reasoningDetails: [{ type: "reasoning.text", text: THINKING, signature: "text-signature" }],
+			}),
+			carried: true,
+		},
 	])("counts thinking only when a request carries it: $name", ({ model, from, signature, carried }) => {
 		const turn = thinkingTurn(from ?? model, signature ?? "reasoning_content");
 		const views = [model.compat, model.compat.whenThinking].filter(view => view !== undefined);

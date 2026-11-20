@@ -221,7 +221,7 @@ export interface DiscoveryContext {
 }
 
 type OllamaDiscoveredModelMetadata = {
-	reasoning: boolean;
+	reasoning?: boolean;
 	input: ("text" | "image")[];
 	contextWindow?: number;
 };
@@ -271,6 +271,49 @@ function toPositiveNumberOrUndefined(value: unknown): number | undefined {
 function toTokenLimitOrUndefined(value: unknown): number | undefined {
 	const parsed = toPositiveNumberOrUndefined(value);
 	return parsed !== undefined && Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+/**
+ * Context window a gateway implies by publishing both halves of its token
+ * budget (`limits.max_input_tokens` + `limits.max_output_tokens`). Either half
+ * alone is not a window, and a sum outside the safe-integer range is rejected
+ * so a malformed row cannot overflow into a bogus context.
+ */
+function nestedLimitsContextWindow(limits: Record<string, unknown> | undefined): number | undefined {
+	const maxInputTokens = toTokenLimitOrUndefined(limits?.max_input_tokens);
+	const maxOutputTokens = toTokenLimitOrUndefined(limits?.max_output_tokens);
+	if (maxInputTokens === undefined || maxOutputTokens === undefined) return undefined;
+	const total = maxInputTokens + maxOutputTokens;
+	return Number.isSafeInteger(total) ? total : undefined;
+}
+
+/**
+ * Output cap a `/v1/models` row advertises. Gateways spell it nested
+ * (`limits.max_output_tokens`), flat (`max_output_tokens`, OpenRouter-style
+ * `max_completion_tokens`, generic `max_tokens` (#13062)), or under
+ * OpenRouter's `top_provider.max_completion_tokens` (ModelRelay and other
+ * OpenRouter-shaped catalogs). Each spelling is validated on its own so a
+ * malformed one never masks a usable sibling. A `/v1/models` row declares what
+ * the endpoint accepts, so `max_tokens` here is a cap — unlike llama.cpp, whose
+ * positive `max_tokens` is only a per-request default.
+ */
+function advertisedOutputTokenLimit(
+	item: {
+		max_output_tokens?: unknown;
+		max_completion_tokens?: unknown;
+		max_tokens?: unknown;
+		top_provider?: unknown;
+	},
+	limits: Record<string, unknown> | undefined,
+): number | undefined {
+	const topProvider = isRecord(item.top_provider) ? item.top_provider : undefined;
+	return (
+		toTokenLimitOrUndefined(limits?.max_output_tokens) ??
+		toTokenLimitOrUndefined(item.max_output_tokens) ??
+		toTokenLimitOrUndefined(item.max_completion_tokens) ??
+		toTokenLimitOrUndefined(topProvider?.max_completion_tokens) ??
+		toTokenLimitOrUndefined(item.max_tokens)
+	);
 }
 
 function isLlamaCppUnlimitedSentinel(value: unknown): boolean {
@@ -487,7 +530,7 @@ async function discoverAppleFoundationModels(providerConfig: DiscoveryProviderCo
 			api: providerConfig.api,
 			provider: providerConfig.provider,
 			baseUrl: providerConfig.baseUrl ?? "local://apple-foundation-models",
-			reasoning: availability.reasoningCapable ?? false,
+			reasoning: availability.reasoningCapable,
 			input: availability.vision ? ["text", "image"] : ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow,
@@ -536,14 +579,13 @@ async function discoverOllamaModelMetadata(
 		}
 		if (!isRecord(capabilities)) {
 			return {
-				reasoning: false,
 				input: ["text"],
 				contextWindow,
 			};
 		}
 		const supportsVision = capabilities.vision === true || capabilities.image === true;
 		return {
-			reasoning: capabilities.thinking === true,
+			reasoning: typeof capabilities.thinking === "boolean" ? capabilities.thinking : undefined,
 			input: supportsVision ? ["text", "image"] : ["text"],
 			contextWindow,
 		};
@@ -593,7 +635,7 @@ export async function discoverOllamaModels(
 			api: providerConfig.api,
 			provider: providerConfig.provider,
 			baseUrl: `${endpoint}/v1`,
-			reasoning: metadata?.reasoning ?? false,
+			reasoning: metadata?.reasoning,
 			input: metadata?.input ?? ["text"],
 			imageInputDecoder: "stb",
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -711,7 +753,6 @@ async function discoverLlamaCppModelsAt(
 					api: providerConfig.api,
 					provider: providerConfig.provider,
 					baseUrl: ensureLlamaCppV1BaseUrl(baseUrl),
-					reasoning: false,
 					input: item.input ?? serverMetadata?.input ?? ["text"],
 					imageInputDecoder: "stb",
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -959,6 +1000,8 @@ function advertisedReasoningEnabled(providerConfig: DiscoveryProviderConfig): bo
 type AdvertisedReasoning =
 	/** The row states it does not reason. */
 	| { kind: "none" }
+	/** The row confirms reasoning without advertising a controllable ladder. */
+	| { kind: "native" }
 	/** The row advertises an effort ladder, whether it accepts `none`, its aliases, and whether thinking can be off. */
 	| {
 			kind: "ladder";
@@ -999,7 +1042,9 @@ function extractAdvertisedReasoning(item: {
 	if ((metadata?.reasoning ?? item.reasoning) === false) return { kind: "none" };
 	const raw = metadata?.supported_reasoning_levels ?? item.supported_reasoning_levels;
 	const efforts = extractReasoningLevels(raw);
-	if (efforts === undefined) return undefined;
+	if (efforts === undefined) {
+		return (metadata?.reasoning ?? item.reasoning) === true ? { kind: "native" } : undefined;
+	}
 	const rawDefault = metadata?.default_reasoning_level ?? item.default_reasoning_level;
 	const defaultLevel = advertisedReasoningEffort(rawDefault);
 	const effortMap = extractReasoningEffortMap(metadata?.reasoning_effort_map ?? item.reasoning_effort_map);
@@ -1066,6 +1111,7 @@ function withAdvertisedEfforts(
 ): ModelSpec<Api> {
 	if (advertised === undefined) return spec;
 	if (advertised.kind === "none") return withoutReasoning(spec, isAnthropic);
+	if (advertised.kind === "native") return { ...spec, reasoning: true };
 	// `defaultLevel` is not decoration: `pickInitialThinkingLevel` (sdk.ts) and
 	// the model switcher read it ahead of the user's `defaultThinkingLevel`
 	// setting, so pinning it to the ladder's first tier would start every gateway
@@ -1239,29 +1285,8 @@ export async function discoverOpenAIModelsList(
 			extractOpenAIModelsListInputCapabilities(item) ??
 			reference?.input ?? ["text"];
 		const limits = isRecord(item.limits) ? item.limits : undefined;
-		const maxInputTokens = toTokenLimitOrUndefined(limits?.max_input_tokens);
-		const maxOutputTokens = toTokenLimitOrUndefined(limits?.max_output_tokens);
-		const reportedLimitsContextWindow =
-			maxInputTokens !== undefined &&
-			maxOutputTokens !== undefined &&
-			Number.isSafeInteger(maxInputTokens + maxOutputTokens)
-				? maxInputTokens + maxOutputTokens
-				: undefined;
-		// Gateways spell the output cap nested (`limits.max_output_tokens`),
-		// flat (`max_output_tokens`, OpenRouter-style `max_completion_tokens`,
-		// generic `max_tokens` (#13062)), or under OpenRouter's
-		// `top_provider.max_completion_tokens` (ModelRelay and other
-		// OpenRouter-shaped catalogs). Each spelling is validated on its own so a
-		// malformed one never masks a usable sibling. A `/v1/models` row declares
-		// what the endpoint accepts, so `max_tokens` here is a cap — unlike
-		// llama.cpp, whose positive `max_tokens` is only a per-request default.
-		const topProvider = isRecord(item.top_provider) ? item.top_provider : undefined;
-		const reportedMaxTokens =
-			maxOutputTokens ??
-			toTokenLimitOrUndefined(item.max_output_tokens) ??
-			toTokenLimitOrUndefined(item.max_completion_tokens) ??
-			toTokenLimitOrUndefined(topProvider?.max_completion_tokens) ??
-			toTokenLimitOrUndefined(item.max_tokens);
+		const reportedLimitsContextWindow = nestedLimitsContextWindow(limits);
+		const reportedMaxTokens = advertisedOutputTokenLimit(item, limits);
 		const reportedContextWindow =
 			toPositiveNumberOrUndefined(item.max_model_len) ??
 			toPositiveNumberOrUndefined(item.context_length) ??
@@ -1322,7 +1347,7 @@ export async function discoverOpenAIModelsList(
 			kind: runnerApiKind(api),
 			provider: providerConfig.provider,
 			baseUrl,
-			reasoning: reference?.reasoning === true,
+			reasoning: reference?.reasoning,
 			thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
 			input,
 			...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
@@ -1343,7 +1368,9 @@ export async function discoverOpenAIModelsList(
 			compat: {
 				supportsStore: false,
 				supportsDeveloperRole: false,
-				supportsReasoningEffort: referenceCompat?.supportsReasoningEffort ?? false,
+				...(referenceCompat?.supportsReasoningEffort !== undefined
+					? { supportsReasoningEffort: referenceCompat.supportsReasoningEffort }
+					: {}),
 				...(referenceCompat?.reasoningEffortMap ? { reasoningEffortMap: referenceCompat.reasoningEffortMap } : {}),
 				...(referenceCompat?.omitReasoningEffort !== undefined
 					? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
@@ -1488,6 +1515,14 @@ export async function discoverProxyModels(
 					name?: string;
 					supported_endpoint_types?: string[];
 					context_length?: number;
+					max_output_tokens?: unknown;
+					max_completion_tokens?: unknown;
+					max_tokens?: unknown;
+					limits?: unknown;
+					top_provider?: unknown;
+					input?: unknown;
+					input_modalities?: unknown;
+					architecture?: unknown;
 					metadata?: unknown;
 					supported_reasoning_levels?: unknown;
 					default_reasoning_level?: unknown;
@@ -1515,6 +1550,10 @@ export async function discoverProxyModels(
 		if (!api) continue;
 		const isAnthropic = api === "anthropic-messages";
 		const reference = resolveModelReference(id, getBundledModelReferenceIndex());
+		const referenceEffortSupport =
+			reference?.compat && "supportsReasoningEffort" in reference.compat
+				? reference.compat.supportsReasoningEffort
+				: undefined;
 		// A proxy that dispatches with its own catalog advertises the ladder it
 		// accepts for each row. That ladder is authoritative over the reference
 		// guess: cross-provider references carry no thinking at all, so rows whose
@@ -1527,26 +1566,39 @@ export async function discoverProxyModels(
 			reference?.name ??
 			stripBracketedModelIdAffixes(id) ??
 			id;
+		// Same row shapes the generic list discovery reads: Synthetic-style
+		// `input_modalities`, OpenRouter-style `architecture.input_modalities`,
+		// and a flat `input` array. Keep the bundled reference as the fallback so
+		// silent rows behave exactly as before.
+		const input = extractOpenAIModelsListInputCapabilities(item) ?? reference?.input ?? ["text"];
+		const limits = isRecord(item.limits) ? item.limits : undefined;
+		const reportedMaxTokens = advertisedOutputTokenLimit(item, limits);
+		const contextWindow =
+			toPositiveNumberOrUndefined(item.context_length) ??
+			nestedLimitsContextWindow(limits) ??
+			reference?.contextWindow ??
+			DISCOVERY_DEFAULT_CONTEXT_WINDOW;
 		const spec = {
 			id,
 			name: displayName,
 			api,
 			provider: providerConfig.provider,
 			baseUrl,
-			reasoning: reference?.reasoning ?? false,
+			reasoning: reference?.reasoning,
 			thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
-			input: reference?.input ?? ["text"],
+			input,
 			// Proxy pricing is provider-specific and usually does not match
 			// upstream bundled catalogs, so keep costs local-unknown even when
 			// we successfully recover the upstream model identity.
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			// Prefer the context_length the API reports for this model; fall
-			// back to the bundled reference, then a sane default.
-			contextWindow:
-				toPositiveNumberOrUndefined(item.context_length) ??
-				reference?.contextWindow ??
-				DISCOVERY_DEFAULT_CONTEXT_WINDOW,
-			maxTokens: reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
+			// Prefer what the API reports for this model; fall back to the
+			// bundled reference, then a sane default. Cap the output limit at the
+			// context window so a row cannot request more tokens than it accepts.
+			contextWindow,
+			maxTokens: Math.min(
+				reportedMaxTokens ?? reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
+				contextWindow,
+			),
 			headers: baseHeaders,
 			// OpenAI-compat fields are no-ops on anthropic models; the
 			// Anthropic SDK ignores them. Provider-level disableStrictTools
@@ -1558,7 +1610,7 @@ export async function discoverProxyModels(
 				: {
 						supportsStore: false,
 						supportsDeveloperRole: false,
-						supportsReasoningEffort: false,
+						...(referenceEffortSupport !== undefined ? { supportsReasoningEffort: referenceEffortSupport } : {}),
 					},
 		} as ModelSpec<Api>;
 		const model = skipAmbiguousModel(providerConfig.provider, id, () =>

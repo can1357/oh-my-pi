@@ -33,7 +33,7 @@ export interface JobTextChunk {
  * a pipe, UTF-16 units for a tap); a reader only hands back an `end` it got.
  */
 export interface JobTextSource {
-	/** Stable id a widget rule names in `from`: `out`, `pipe:1`, `tools`, `bg_7:pipe:1`. */
+	/** Stable id a widget rule names in `from`: `out`, `pipe:1`, `file:2`, `tools`, `bg_7:pipe:1`. */
 	readonly id: string;
 	/** What the text is, for the widget author (`cargo nextest run … → tail -n 5`). */
 	readonly label: string;

@@ -4,9 +4,12 @@
  * the main thread's mirror of a worker-homed session, which scopes the same
  * root manager to the child's agent id.
  */
+import type { PipeStreams } from "@oh-my-pi/pi-natives";
 import type { AsyncJob, AsyncJobManagerApi } from "../async";
+import { pipeSourceId } from "../job-widgets/pipe-source";
 import type { JobWidgetRegistry } from "../job-widgets/types";
 import { AgentRegistry } from "../registry/agent-registry";
+import type { JobsPanelStream } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { AsyncJobInspection, AsyncJobSnapshot, AsyncJobSnapshotItem, AsyncJobTree } from "./agent-session-types";
 
@@ -123,10 +126,37 @@ export function requestJobTreeCaptions(manager: AsyncJobManagerApi, rootId: stri
 	}
 }
 
+/** Bytes off a stream's end a job inspector reads: screens of text, not the megabyte a stream keeps. */
+const STREAM_TAIL_BYTES = 64 * 1024;
+
+/** The newest text of stream `id` from its first whole line on; undefined for binary data. */
+function streamTail(streams: PipeStreams, id: number, total: number): string | undefined {
+	const chunk = streams.read(id, Math.max(0, total - STREAM_TAIL_BYTES));
+	if (!chunk) return "";
+	if (chunk.data.indexOf(0) !== -1) return undefined;
+	const text = new TextDecoder().decode(chunk.data);
+	// A read that starts past the stream's head starts mid-line, maybe mid-character.
+	return chunk.start > 0 ? text.slice(text.indexOf("\n") + 1) : text;
+}
+
+/** A command's tapped pipes and redirected files as a job inspector lists them, oldest first. */
+function jobStreams(streams: PipeStreams): JobsPanelStream[] {
+	return streams.list().map(info => ({
+		id: pipeSourceId(info),
+		kind: info.file ? "file" : "pipe",
+		producer: info.producer,
+		consumer: info.consumer,
+		bytes: info.total,
+		open: info.open,
+		tail: () => streamTail(streams, info.id, info.total),
+	}));
+}
+
 /**
  * One async job in `rootId`'s tree (see {@link asyncJobTree}): its command,
- * live pids, exit status and output. Undefined when the job is unknown, owned
- * outside the tree, or evicted.
+ * live pids, exit status, output, shell trace and the streams its output
+ * takes instead. Undefined when the job is unknown, owned outside the tree,
+ * or evicted.
  */
 export function inspectAsyncJob(
 	manager: AsyncJobManagerApi,
@@ -148,6 +178,8 @@ export function inspectAsyncJob(
 		output,
 		artifactId: details?.meta?.truncation?.artifactId,
 		widget: manager.widgets?.view(job),
+		trace: job.process?.trace?.(),
+		streams: job.process?.streams && jobStreams(job.process.streams),
 	};
 }
 

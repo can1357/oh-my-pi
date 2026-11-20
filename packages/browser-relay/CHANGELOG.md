@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- The omp extension has a pinned Chrome ID. Remove the old unpinned extension and use _Load unpacked_ to install it again once.
+- The omp extension reaches the browser relay through its native host instead of a websocket, so the relay is up whenever Chrome runs. Its options page (relay port and token) is gone.
+
+### Added
+
+- The omp extension adds a Chrome side panel, page overlays, image and element picks, Teach, scheduled shortcuts, and GIF export.
+
+### Changed
+
+- The omp extension now keeps registered installations current across omp upgrades and reloads when idle.
+
+## [19.0.1] - 2026-11-19
+
+### Fixed
+
+- The browser relay extension survives a browser whose loaded permission set predates the `downloads` permission: the service worker keeps working without download pairing instead of crashing before it ever connects ([#19659](https://github.com/can1357/oh-my-pi/pull/19659) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+
+## [18.22.1] - 2026-11-17
+
+### Fixed
+
+- Fixed an issue where the browser relay could fail to identify the page and title of a frame it emptied and hid in a tab.
+
 ## [18.18.2] - 2026-11-08
 
 ### Added

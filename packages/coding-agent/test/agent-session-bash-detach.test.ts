@@ -2,10 +2,10 @@
  * End-to-end coverage for running every external command of the embedded
  * bash engine in its own session.
  *
- * pi-shell's host spawns externals with `Sessions::Detach`
- * (`crates/pi-shell/src/host.rs`), which `setsid`s the child before exec
- * (`crates/pi-shell/src/sys/spawn/unix.rs`). That is verified at the unit
- * level by pi-shell's `embedded_external_command_runs_in_its_own_session`
+ * omp-shell's host spawns externals with `Sessions::Detach`
+ * (`crates/shell/src/host.rs`), which `setsid`s the child before exec
+ * (`crates/shell/src/sys/spawn/unix.rs`). That is verified at the unit
+ * level by omp-shell's `embedded_external_command_runs_in_its_own_session`
  * (real spawn). This test pulls the behavior end-to-end through the OMP
  * coding agent stack:
  *
@@ -14,8 +14,8 @@
  *       → Agent loop dispatches a tool call
  *         → BashTool.execute
  *           → executeBash
- *             → pi-natives `Shell.run` (real native binding)
- *               → pi-shell host spawn (`Sessions::Detach`)
+ *             → omp-natives `Shell.run` (real native binding)
+ *               → omp-shell host spawn (`Sessions::Detach`)
  *                 → spawned child reports getsid()/getpid()
  *
  * The assistant's first turn is one scripted `bash` tool call that runs both

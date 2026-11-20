@@ -4,6 +4,8 @@ import * as prompt from "@oh-my-pi/pi-utils/prompt";
 import escapeAfterCallMessage from "../../prompts/tools/computer-escape-after-call.md" with { type: "text" };
 import escapeRefusedMessage from "../../prompts/tools/computer-escape-refused.md" with { type: "text" };
 import escapeStoppedMessage from "../../prompts/tools/computer-escape-stopped.md" with { type: "text" };
+import coveredCaptureNote from "../../prompts/tools/computer-covered-capture.md" with { type: "text" };
+import coveredTreeNote from "../../prompts/tools/computer-covered-tree.md" with { type: "text" };
 import screenLockedCaptureNote from "../../prompts/tools/computer-screen-locked-capture.md" with { type: "text" };
 import secureInputTemplate from "../../prompts/tools/computer-secure-input.md" with { type: "text" };
 import screenStateTemplate from "../../prompts/tools/computer-screen-state.md" with { type: "text" };
@@ -14,6 +16,8 @@ export { COMPUTER_WORKER_ARG } from "../../cli/worker-selectors";
 export interface ComputerSessionSnapshot {
 	cwd: string;
 	sessionId: string;
+	/** Registry id of the agent the run acts for; another session waiting for its input lock names it. */
+	agentId?: string;
 	captureMaxWidth: number;
 	captureMaxHeight: number;
 	display: string;
@@ -85,6 +89,9 @@ export interface ComputerRunOk {
 	capabilities?: DesktopCapabilities;
 }
 
+/** Supervisor result: successful output, or partial output with `error` describing the failed run. */
+export type ComputerRunResult = ComputerRunOk & { error?: RunErrorPayload };
+
 /** Result of a computer call the user stopped with physical Escape during takeover input. */
 export const ESCAPE_STOPPED_MESSAGE = prompt.render(escapeStoppedMessage);
 
@@ -98,6 +105,12 @@ export const ESCAPE_REFUSED_MESSAGE = prompt.render(escapeRefusedMessage);
 export function screenLockedCaptureNotice(platform: NodeJS.Platform = process.platform): string {
 	return prompt.render(screenLockedCaptureNote, { windows: platform === "win32" });
 }
+
+/** Appended to a window screenshot taken while nothing of the window showed on screen. */
+export const COVERED_CAPTURE_NOTICE = prompt.render(coveredCaptureNote);
+
+/** Closing line of an `ax()` tree read from a window that appeared fully covered around the read. */
+export const COVERED_TREE_NOTICE = prompt.render(coveredTreeNote);
 
 /**
  * Tells the model a run ended with the screen locked or the session's
@@ -129,6 +142,8 @@ export interface ComputerScreenshot {
 	target: string;
 	/** The session was locked, disconnected or on a secure desktop when captured. */
 	screenLocked?: true;
+	/** The target window appeared fully covered around the capture, and its app can stop drawing while covered. */
+	covered?: true;
 }
 
 /** Clone-safe error metadata returned across the worker boundary. */
@@ -146,7 +161,7 @@ export type ComputerWorkerOutbound =
 	| { type: "control-revoked"; id: string }
 	| { type: "pong"; id: string }
 	| { type: "result"; id: string; ok: true; payload: ComputerRunOk }
-	| { type: "result"; id: string; ok: false; error: RunErrorPayload }
+	| { type: "result"; id: string; ok: false; error: RunErrorPayload; output?: ComputerRunOk }
 	| { type: "capabilities"; id: string; ok: true; capabilities: DesktopCapabilities }
 	| { type: "capabilities"; id: string; ok: false; error: RunErrorPayload }
 	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }

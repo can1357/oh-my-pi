@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- `GuestClient.sendPrompt` accepts images and sends them with the prompt.
+
+## [19.0.0] - 2026-11-18
+
+### Fixed
+
+- Fixed web search cards without a synthesized answer displaying raw numbered result lists; they now show a concise excerpt for each source instead.
+
+## [18.22.0] - 2026-11-16
+
+### Fixed
+
+- Improved streaming performance in the collab viewer, preventing long replies from becoming progressively slower as they are received.
+
 ## [18.20.1] - 2026-11-14
 
 ### Fixed

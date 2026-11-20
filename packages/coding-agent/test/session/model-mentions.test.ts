@@ -332,6 +332,19 @@ describe("model mentions", () => {
 		expect(agents[0].systemPrompt).toBe(task.systemPrompt);
 	});
 
+	test("keeps sentence punctuation outside a registered model tag", () => {
+		expect(mentions.expandMentions("ask ^a/x, then ^b/y.")).toBe(
+			'ask <model agent="m1" name="X One"/>, then <model agent="m2" name="Y"/>.',
+		);
+	});
+
+	test("prefers a literal model id ending in punctuation over stripping it", () => {
+		vi.spyOn(registry, "getAvailable").mockReturnValue([...models, model("a", "x,", "Comma")]);
+		expect(mentions.expandMentions("ask ^a/x, and ^a/x,,")).toBe(
+			'ask <model agent="m1" name="Comma"/> and <model agent="m1" name="Comma"/>,',
+		);
+	});
+
 	test("registers a tagged effort as its own pseudonym under one canonical spelling", () => {
 		expect(mentions.expandMentions("^d/r:hi ^d/r ^d/r:auto ^d/r:high")).toBe(
 			'<model agent="m1" name="R One · high"/> <model agent="m2" name="R One"/> ' +

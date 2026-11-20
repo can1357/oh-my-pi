@@ -4,6 +4,7 @@ import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-messa
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { Image } from "@oh-my-pi/pi-tui/components/image";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
 import { ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 
@@ -278,5 +279,76 @@ describe("Kitty PNG conversion cache", () => {
 		expect(assistant.isTranscriptBlockPending()).toBe(false);
 		const batch = transcript.peekFinalizedBatch(80, 5);
 		expect(batch?.rows.join("\n")).toContain("\x1b_G");
+	});
+});
+
+describe("Image component Kitty format", () => {
+	afterEach(() => {
+		setTerminalImageProtocol(originalProtocol);
+	});
+
+	it("sends a non-PNG source as PNG in the rows it reserved while converting", async () => {
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const webp = (await new Bun.Image(Buffer.from(IMAGE.data, "base64")).resize(100, 200).webp().bytes()).toBase64();
+		const landed = Promise.withResolvers<void>();
+		// No budget: a direct `a=T` placement, as extensions build it.
+		const image = new Image(webp, "image/webp", { fallbackColor: text => text }, { requestRender: landed.resolve });
+
+		const pending = image.render(80);
+		expect(pending.join("")).not.toContain("\x1b_G");
+		await landed.promise;
+		const drawn = image.render(80);
+		expect(drawn.join("")).toContain("\x1b_Ga=T,f=100");
+		expect(drawn.join("")).toContain(";iVBORw0KGgo");
+		expect(drawn.length).toBeGreaterThan(1);
+		expect(pending.length).toBe(drawn.length);
+	});
+
+	it("keeps the text fallback in its reserved rows when the source cannot be decoded", async () => {
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const corrupt = Buffer.from("RIFF\x10\x00\x00\x00WEBPVP8 not an image", "latin1").toBase64();
+		const settled = Promise.withResolvers<void>();
+		const image = new Image(
+			corrupt,
+			"image/webp",
+			{ fallbackColor: text => text },
+			{ requestRender: settled.resolve },
+		);
+
+		const pending = image.render(80);
+		await settled.promise;
+		const failed = image.render(80);
+		expect(failed.join("")).not.toContain("\x1b_G");
+		expect(failed.at(-1)).toContain("[Image: [image/webp]");
+		expect(failed.length).toBe(pending.length);
+	});
+
+	it("sizes a converted JPEG from its EXIF-rotated PNG, not the unrotated JPEG header", async () => {
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const seed = Buffer.from(IMAGE.data, "base64");
+		const jpeg = Buffer.from(await new Bun.Image(seed).resize(400, 100).jpeg().bytes());
+		// APP1 Exif, big-endian TIFF, one IFD entry: Orientation (0x0112) = 6, rotate 90° clockwise.
+		const exif = Buffer.from(
+			"457869660000" + "4d4d002a00000008" + "0001" + "011200030000000100060000" + "00000000",
+			"hex",
+		);
+		const app1 = Buffer.concat([Buffer.from([0xff, 0xe1, 0, exif.length + 2]), exif]);
+		const rotated = Buffer.concat([jpeg.subarray(0, 2), app1, jpeg.subarray(2)]).toBase64();
+		const portrait = (await new Bun.Image(seed).resize(100, 400).png().bytes()).toBase64();
+		const placement = (lines: readonly string[]) =>
+			lines.join("").match(/\x1b_Ga=T,f=100,q=2,C=1,(c=\d+,r=\d+)/)?.[1];
+		const landed = Promise.withResolvers<void>();
+		const image = new Image(
+			rotated,
+			"image/jpeg",
+			{ fallbackColor: text => text },
+			{ requestRender: landed.resolve },
+		);
+
+		image.render(80);
+		await landed.promise;
+		const expected = placement(new Image(portrait, "image/png", { fallbackColor: text => text }).render(80));
+		expect(expected).toBeDefined();
+		expect(placement(image.render(80))).toBe(expected);
 	});
 });

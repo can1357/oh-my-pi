@@ -1053,6 +1053,11 @@ export class PerplexityProvider extends SearchProvider {
 		return true;
 	}
 
+	/** Without a direct credential, search runs on the anonymous ask endpoint. */
+	override isKeyless(authStorage: AuthStorage): boolean {
+		return !this.isAvailable(authStorage);
+	}
+
 	search(params: SearchParams): Promise<SearchResponse> {
 		return searchPerplexity({
 			signal: params.signal,

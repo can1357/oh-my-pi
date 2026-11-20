@@ -32,8 +32,7 @@ afterEach(() => {
 
 const UI = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
 
-/** The notice's Nerd Font stars: `md-star_off_outline`, `fa-star`, `md-star_shooting_outline`. */
-const STAR_OFF = "\u{f155b}";
+/** The notice's Nerd Font stars: `fa-star`, `md-star_shooting_outline`. */
 const STAR = "\uf005";
 const SHOOTING_STAR = "\u{f1742}";
 
@@ -49,7 +48,7 @@ const SAVED: SpotlightDetails = {
 	outTokens: 12_000,
 	savedTokens: 40_000,
 	original: {
-		url: "artifact://7",
+		url: "local://7.log",
 		lines: 5,
 		start: 1,
 		heat: "1-29",
@@ -147,7 +146,7 @@ const RICH: SpotlightDetails = {
 	outTokens: 150,
 	savedTokens: 150,
 	original: {
-		url: "artifact://9",
+		url: "local://9.log",
 		lines: 10,
 		start: 40,
 		path: "src/ingest.ts",
@@ -245,7 +244,7 @@ function blocks(h: TspHarness): readonly TspNode[] {
 }
 
 describe("spotlight notice", () => {
-	it("follows a collapsed card as its own block: bright and clickable when shaping saved, dim when it passed", async () => {
+	it("follows a collapsed card with a clickable saving, but adds no block for a passthrough", async () => {
 		setTranscriptActionHandler(() => {});
 		const transcript = new TranscriptContainer();
 		transcript.addChild(bashCard("c1", REDUCED, SAVED));
@@ -265,14 +264,7 @@ describe("spotlight notice", () => {
 			actions: { click: "spotlight" },
 		});
 		expect(kept?.p).toMatchObject({ key: "c2" });
-		expect(keptNotice?.p).toMatchObject({
-			role: "omp.tool.spotlight",
-			key: "spotlight:c2",
-			tone: "muted",
-			spans: [{ t: STAR_OFF, s: "icon" }],
-			title: "Spotlight: passthrough",
-		});
-		expect(prop(keptNotice, "actions")).toBeUndefined();
+		expect(keptNotice).toBeUndefined();
 		expect(harness.errors).toEqual([]);
 	});
 
@@ -558,7 +550,7 @@ describe("spotlight notice", () => {
 		const shown = [...why].map(c => reasonShows(c as SpotlightReason));
 		const spotlight: SpotlightDetails = {
 			...RICH,
-			original: { url: "artifact://3", lines: 240, start: 1, heat, why, kept: keptRanges(shown) },
+			original: { url: "local://3.log", lines: 240, start: 1, heat, why, kept: keptRanges(shown) },
 		};
 		const card = new SpotlightNotice("c1", spotlight, "").describe().p?.hovercard as TspPropNode | undefined;
 		expect(card?.k).toBe("col");
@@ -582,7 +574,7 @@ describe("spotlight notice", () => {
 		// A long result shares bars; one without reasons draws plain bars and only what was kept.
 		const long: SpotlightDetails = {
 			...SAVED,
-			original: { url: "artifact://4", lines: 1_000, start: 1, heat: "5".repeat(1_000), kept: [[1, 10]] },
+			original: { url: "local://4.log", lines: 1_000, start: 1, heat: "5".repeat(1_000), kept: [[1, 10]] },
 		};
 		const plain = new SpotlightNotice("c2", long, "").describe().p?.hovercard as TspPropNode | undefined;
 		const plainChart = plain?.c?.[0]?.p as TspChartProps | undefined;
@@ -590,21 +582,18 @@ describe("spotlight notice", () => {
 		expect(plainSeries).toHaveLength(120);
 		expect(plainSeries?.every(bar => bar.tone === undefined && bar.value === 5 / 9)).toBe(true);
 		expect(words(plain?.c?.[1])).toBe("kept 10 of 1,000 lines");
-
-		// A passthrough has no card.
-		expect(new SpotlightNotice("c3", PASSTHROUGH, "").describe().p?.hovercard).toBeUndefined();
 	});
 
 	it("draws a held-out result dim with what it would save, and its click opens the would-be cut", async () => {
 		const heldOut: SpotlightDetails = {
 			...RICH,
 			holdout: true,
-			original: { ...RICH.original!, shapedUrl: "artifact://10" },
+			original: { ...RICH.original!, shapedUrl: "local://10.log" },
 		};
 		const notice = new SpotlightNotice("c1", heldOut, RICH_ORIGINAL).describe();
 		expect(notice.p).toMatchObject({
 			tone: "muted",
-			spans: [{ t: STAR_OFF, s: "icon" }, { t: "spotlight: held out · would save 150 toks" }],
+			spans: [{ t: "spotlight: held out · would save 150 toks" }],
 		});
 		const card = notice.p?.hovercard as TspPropNode | undefined;
 		expect(words(card?.c?.[1])).toBe("would keep 5 of 10 lines · 2 by score · 1 cut though hot");
@@ -636,12 +625,12 @@ describe("spotlight notice", () => {
 			// A gated trace saves nothing; what it would have saved is `plain`'s tokens less the would-be cut's.
 			savedTokens: 0,
 			plainTokens: RICH.outTokens + 150,
-			original: { ...RICH.original!, shapedUrl: "artifact://10" },
+			original: { ...RICH.original!, shapedUrl: "local://10.log" },
 		};
 		const notice = new SpotlightNotice("c1", gated, RICH_ORIGINAL).describe();
 		expect(notice.p).toMatchObject({
 			tone: "muted",
-			spans: [{ t: STAR_OFF, s: "icon" }, { t: "spotlight: kept whole for editing · would save 150 toks" }],
+			spans: [{ t: "spotlight: kept whole for editing · would save 150 toks" }],
 		});
 	});
 
@@ -662,7 +651,7 @@ describe("spotlight notice", () => {
 			...SAVED,
 			tool: "read",
 			original: {
-				url: "artifact://11",
+				url: "local://11.log",
 				lines: 7,
 				start: 1,
 				windows: [
@@ -754,7 +743,7 @@ describe("spotlight notice", () => {
 			...SAVED,
 			tool: "read",
 			original: {
-				url: "artifact://12",
+				url: "local://12.log",
 				lines: 5_013,
 				start: 1,
 				windows: [

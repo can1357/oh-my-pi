@@ -7,14 +7,18 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import { formatDuration, prompt } from "@oh-my-pi/pi-utils";
 import { IrcBus } from "../irc/bus";
+import { agentMesh } from "../irc/mesh";
+import { parsePeerAddress } from "../irc/mesh-protocol";
 import waitDescription from "../prompts/tools/wait.md" with { type: "text" };
 import waitIdleTemplate from "../prompts/tools/wait-idle.md" with { type: "text" };
 import type { ToolSession } from ".";
 import type { AsyncJob, AsyncJobManagerApi } from "../async/job-manager";
-import { buildJobResult, settledJobIds, snapshotJobs, undeliveredJobs } from "../async/job-control";
+import { buildJobResult, describeEvictedJob, settledJobIds, snapshotJobs, undeliveredJobs } from "../async/job-control";
 import { hasLiveOwnedService, listServicesTolerant, waitForOwnedServiceCompletion } from "../launch/services";
 import { USER_AWAIT_ID } from "../registry/agent-awaits";
 import type { AgentRegistryApi } from "../registry/agent-registry";
+import type { PromptCacheEntry } from "../session/cache-warmer";
+import { stalledWaiters } from "../session/stalled-waiters";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { throwIfAborted } from "./tool-errors";
@@ -24,28 +28,48 @@ import { cfgLaunchEnabled } from "./settings";
 const waitSchema = type({});
 /**
  * Windows (ms) a blocking wait gives its first wake before it returns with
- * nothing new. Each back-to-back idle wait climbs one rung, so the agent gets
- * its turn back early while work warms up, and a wait loop backs off. A
- * back-to-back wait that is the only call of its turn takes the top rung at
- * once: the agent has nothing else to do, so an early return would only cost
- * it a request. The top rung stays inside a 5-minute prompt-cache lifetime:
- * an idle return re-reads the whole prompt, and subagents run without the
- * cache warmer, so a longer window would make every top-rung return a miss.
+ * nothing new. The first idle wait hands the agent its turn back early while
+ * work warms up; a back-to-back idle wait means it has nothing else to do, so
+ * it takes the top window, and keeps taking it while the waits stay
+ * back-to-back. The top-level interactive session skips the floor on job
+ * waits: an early return there can only end its turn, one more request
+ * than blocking until the result. Every idle return re-reads the whole prompt, and each one is a
+ * request. A job or service wait keeps this top window, inside the shortest
+ * (5-minute) prompt-cache lifetime, since each return also reports the job's
+ * progress. A reply or parent wait reports nothing until the answer, so its
+ * top window stretches to the session's known cache lifetime (see
+ * {@link agentWaitTopMs}): the return still hits a live cache, with fewer
+ * requests per hour of waiting.
  */
-const WAIT_LADDER_MS = [5_000, 10_000, 30_000, 60_000, 240_000] as const;
+const WAIT_LADDER_MS = [5_000, 240_000] as const;
 const WAIT_TOP_RUNG = WAIT_LADDER_MS.length - 1;
+/** How long before its cache entry expires a reply wait's top window returns. */
+const AGENT_WAIT_CACHE_MARGIN_MS = 60_000;
+/** Longest top window of a reply wait, whatever the cache lifetime. */
+const AGENT_WAIT_TOP_MAX_MS = 30 * 60_000;
 /** A gap this long since the last idle wait returned means the agent worked in between: the ladder restarts at the floor. */
 const WAIT_LADDER_RESET_MS = 60_000;
-/** First rung whose elapsed window appends the progress reminder: one idle wait is patience, a second back-to-back is a loop. */
-const WAIT_NOTICE_RUNG = 1;
 /** After one watched job settles, keep collecting briefly so near-simultaneous completions share one wait result. */
 const WAIT_SETTLE_WINDOW_MS = 1500;
 const PROGRESS_INTERVAL_MS = 500;
+/** How long after its row is evicted a job is still named by a wait that finds nothing to wait for. */
+const RECENTLY_EVICTED_MS = 10 * 60_000;
+/** Most evicted jobs such a wait names. */
+const RECENTLY_EVICTED_SHOWN = 3;
+
+/**
+ * Top window of a reply or parent wait: the cache lifetime of the caller's
+ * latest request less a margin, between the job top window and
+ * {@link AGENT_WAIT_TOP_MAX_MS}; the job top window without a known entry.
+ */
+function agentWaitTopMs(entry: PromptCacheEntry | undefined): number {
+	const floor = WAIT_LADDER_MS[WAIT_TOP_RUNG];
+	if (!entry) return floor;
+	return Math.min(Math.max(entry.ttlMs - AGENT_WAIT_CACHE_MARGIN_MS, floor), AGENT_WAIT_TOP_MAX_MS);
+}
 
 /** Back-to-back waits that each elapsed with nothing new. */
 interface IdleStreak {
-	/** Rung of the latest elapsed wait. */
-	rung: number;
 	/** When the latest elapsed wait returned. */
 	endedAt: number;
 	/** Window time spent across the streak. */
@@ -95,13 +119,23 @@ function interruptedResult(): AgentToolResult<CoordinationDetails> {
 	};
 }
 
+/** An agent waiting on the caller, directly or through the agents `via` (nearest it first). */
+interface BlockedOnCaller {
+	id: string;
+	via: readonly string[];
+}
+
 interface PendingReplies {
-	/** Agents asked that can still answer: running, holding the question for a turn of its own, or that promised a reply, and not blocked on the caller or the user. */
+	/** Agents asked that can still answer: running, holding the question for a turn of its own, or that promised a reply and have something to wake them, and not blocked on the caller or the user; plus the caller's live parent (see {@link liveParent}). */
 	from: string[];
-	/** Agents asked that cannot answer before the caller finishes (see `AgentAwaits.blocksOn`). */
-	blocked: string[];
-	/** Agents asked that cannot answer before the user does: a dialog of theirs waits on the user (`ask`, an approval). */
+	/** The caller's live parent, when it is in these lists without having been asked. */
+	parent?: string;
+	/** Agents asked that cannot answer before the caller acts: they wait on it (see `AgentAwaits.blockedVia`). */
+	blocked: BlockedOnCaller[];
+	/** Agents asked that cannot answer before the user does: a dialog of theirs waits on the user (`ask`, an approval), or a top-level agent is idle with nothing to wake it. */
 	onUser: string[];
+	/** Subagents that promised a reply, or the live parent, now idle with nothing to wake them but a message (see `AgentSessionHandle.hasPendingWake`). */
+	stalled: string[];
 	/** Agents asked whose turn ended without an answer, or that are gone. */
 	stopped: string[];
 }
@@ -113,36 +147,107 @@ interface PendingReplies {
  * result. A running agent, or one still holding the question for a turn of
  * its own (a subagent answers a message that reached it as it finished after
  * its result is out), can answer, and so can a live one that sent progress
- * promising a later reply. Any other idle agent has finished the turn it got
- * the question in, and any automatic reply (a woken subagent's relayed
- * output) has arrived by then.
+ * promising a later reply while something can still wake it. Any other idle
+ * agent has finished the turn it got the question in, and any automatic reply
+ * (a woken subagent's relayed output) has arrived by then. An idle promiser
+ * (or parent) with nothing to wake it acts only once messaged: a top-level
+ * agent waits on the user, a subagent is stalled.
  */
 function pendingReplies(messaging: WaitMessaging): PendingReplies {
 	const { registry, senderId } = messaging;
-	const replies: PendingReplies = { from: [], blocked: [], onUser: [], stopped: [] };
+	const replies: PendingReplies = { from: [], blocked: [], onUser: [], stalled: [], stopped: [] };
 	const since = registry.get(senderId)?.session?.runStartedAt ?? 0;
+	const asked = new Set<string>();
+	const mesh = agentMesh();
 	for (const { to, sentAt, promised } of IrcBus.global().unansweredSends(senderId, since)) {
-		const session = registry.get(to)?.session;
-		if (session && registry.awaits.blocksOn(to, senderId, sentAt)) replies.blocked.push(to);
-		else if (session && registry.awaits.blocksOn(to, USER_AWAIT_ID, sentAt)) replies.onUser.push(to);
-		else if (session && (promised || session.isStreaming || session.hasQueuedIrcFrom(senderId)))
+		asked.add(to);
+		const peer = mesh && parsePeerAddress(to);
+		if (mesh && peer && !registry.get(to) && mesh.peer(peer.pid)) {
+			// Another instance's agent: its state is not visible here, so a live instance can still answer.
 			replies.from.push(to);
-		else replies.stopped.push(to);
+			continue;
+		}
+		const ref = registry.get(to);
+		const session = ref?.session;
+		const via = session ? registry.awaits.blockedVia(to, senderId, sentAt) : undefined;
+		if (!ref || !session) replies.stopped.push(to);
+		else if (via) replies.blocked.push({ id: to, via });
+		else if (registry.awaits.blocksOn(to, USER_AWAIT_ID, sentAt)) replies.onUser.push(to);
+		else if (session.isStreaming || session.hasQueuedIrcFrom(senderId)) replies.from.push(to);
+		else if (!promised) replies.stopped.push(to);
+		else if (session.hasPendingWake) replies.from.push(to);
+		else (ref.kind === "main" ? replies.onUser : replies.stalled).push(to);
+	}
+	const parent = liveParent(messaging);
+	const parentRef = parent ? registry.get(parent) : undefined;
+	if (parent && parentRef && !asked.has(parent)) {
+		replies.parent = parent;
+		// Sent at 0: any block of the parent's counts, even one a message could end,
+		// since the caller is waiting rather than sending one.
+		const via = registry.awaits.blockedVia(parent, senderId, 0);
+		if (via) replies.blocked.push({ id: parent, via });
+		else if (registry.awaits.blocksOn(parent, USER_AWAIT_ID, 0)) replies.onUser.push(parent);
+		else if (parentRef.session?.hasPendingWake) replies.from.push(parent);
+		else (parentRef.kind === "main" ? replies.onUser : replies.stalled).push(parent);
 	}
 	return replies;
 }
 
+/**
+ * The caller's spawning parent while its session is live. A parent directs
+ * its subagent and may message it at any time ("wait for my go"), so a
+ * subagent's wait with nothing else to block on blocks for it, unless the
+ * parent is itself waiting on the caller or the user.
+ */
+function liveParent(messaging: WaitMessaging): string | undefined {
+	const parentId = messaging.registry.get(messaging.senderId)?.parentId;
+	return parentId && messaging.registry.get(parentId)?.session ? parentId : undefined;
+}
+
+/**
+ * A subagent a wait would block on, through its job, that itself waits on the
+ * caller (directly or through others): the new hold would close the cycle that
+ * parks both. Only a wait that subagents' jobs alone can end holds on them (a
+ * bash job or service is another way out). A block that began before the
+ * caller's latest message to the subagent is ending, so it does not count.
+ */
+function watchedAgentBlockedOnCaller(messaging: WaitMessaging, jobs: readonly AsyncJob[]): BlockedOnCaller | undefined {
+	const agents = jobs.flatMap(job => (job.agentId ? [job.agentId] : []));
+	if (agents.length === 0 || agents.length !== jobs.length) return undefined;
+	const { registry, senderId } = messaging;
+	const bus = IrcBus.global();
+	for (const id of agents) {
+		const via = registry.awaits.blockedVia(id, senderId, bus.lastMessageAt(senderId, id) ?? 0);
+		if (via) return { id, via };
+	}
+	return undefined;
+}
+
+/** `ids` as backticked names, comma-separated. */
+function idList(ids: readonly string[]): string {
+	return ids.map(id => `\`${id}\``).join(", ");
+}
+
+/** "`B` is waiting on you (via `C`)": each agent waiting on the caller, with the chain it waits through. */
+function waitingOnCaller(blocked: readonly BlockedOnCaller[]): string {
+	return blocked
+		.map(({ id, via }) => `\`${id}\` is waiting on you${via.length > 0 ? ` (via ${idList(via)})` : ""}`)
+		.join("; ");
+}
+
 /** Why a reply wait cannot (or can no longer) get its answer. */
 function noReplyText(replies: PendingReplies): string {
-	const ids = (list: string[]) => list.map(id => `\`${id}\``).join(", ");
 	if (replies.blocked.length > 0) {
-		return `${ids(replies.blocked)} cannot reply before you finish: it is waiting on your result. Finish without the answer.`;
+		return `${waitingOnCaller(replies.blocked)}, so it cannot reply before you act. Answer it first, or finish without its reply.`;
+	}
+	if (replies.stalled.length > 0) {
+		return `${idList(replies.stalled)} is idle and nothing will wake it: message it (that wakes it), or finish with this item marked pending.`;
 	}
 	if (replies.onUser.length > 0) {
-		return `${ids(replies.onUser)} is waiting on the user and cannot reply until they answer. Go on without the answer; its reply, if it comes, arrives as a message.`;
+		return `${idList(replies.onUser)} is waiting on the user and cannot reply until they answer. Go on without the answer; its reply, if it comes, arrives as a message.`;
 	}
 	if (replies.stopped.length > 0) {
-		return `${ids(replies.stopped)} finished its turn without replying. Ask again, or finish without the answer.`;
+		return `${idList(replies.stopped)} finished its turn without replying. Ask again, or finish without the answer.`;
 	}
 	return "no background job or service you started is running, and no agent you messaged this run owes a reply. Other agents' results and messages arrive on their own.";
 }
@@ -152,37 +257,24 @@ function noReplyText(replies: PendingReplies): string {
  * nothing else is left. A bare still-running snapshot reads as an empty
  * result, and agents then start `sleep` jobs to block for longer. Every result
  * and message starts the next turn of an `endTurn` caller (see
- * `ToolSession.tuiTranscript`), so it is told to end its turn; any other
- * caller, to wait again right away with no other tool call, which takes the
- * top rung (a minute away from `wait` restarts the ladder at the floor).
+ * `ToolSession.tuiTranscript`), so it is told to end its turn, unless agents
+ * stay blocked on it with nothing left to wake it (`blocking`, see
+ * `stalledWaiters`): those are named instead. Any other caller is told to wait
+ * again right away, which takes the top window (a minute away from `wait`
+ * restarts at the first window).
  */
-function elapsedReport(what: string, rung: number, endTurn: boolean): string {
-	const next = endTurn
-		? "Nothing else left? End your turn: results and messages start your next one."
-		: `Nothing else left? Call \`wait\` right away with no other tool call: it then blocks up to ${formatDuration(WAIT_LADDER_MS[WAIT_TOP_RUNG])}.`;
-	return `${what} within ${formatDuration(WAIT_LADDER_MS[rung])}. ${next}`;
-}
-
-/**
- * Whether `toolCallId` is the only tool call of the turn that made it: the
- * latest assistant message in the caller's context. A call that is not there
- * (no context, or a call from an eval cell) counts as not alone.
- */
-function isOnlyCallOfTurn(session: ToolSession, toolCallId: string): boolean {
-	const messages = session.getContextMessages?.() ?? [];
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const message = messages[i];
-		if (message.role !== "assistant") continue;
-		let calls = 0;
-		let found = false;
-		for (const block of message.content) {
-			if (block.type !== "toolCall") continue;
-			calls++;
-			found ||= block.id === toolCallId;
-		}
-		return found && calls === 1;
-	}
-	return false;
+function elapsedReport(
+	what: string,
+	span: { ms: number; topMs: number },
+	endTurn: boolean,
+	blocking: readonly string[],
+): string {
+	const next = !endTurn
+		? `Nothing else left? Call \`wait\` again right away: it then blocks up to ${formatDuration(span.topMs)}.`
+		: blocking.length > 0
+			? `${idList(blocking)} is waiting on you, and nothing will wake you once your turn ends: message it first, or start a job that does what it waits for.`
+			: "Nothing else left? End your turn: results and messages start your next one.";
+	return `${what} within ${formatDuration(span.ms)}. ${next}`;
 }
 
 /** Whether `session` has the `wait` tool active, so prompts may point blocked callers at it. */
@@ -192,14 +284,19 @@ export function hasWaitTool(session: ToolSession): boolean {
 
 /**
  * Blocks on background jobs and services the calling agent started, or on
- * the reply to a message it sent this run. Other agents' work never sustains
- * a wait: a peer owes no message. A reply wait ends once no agent asked can
+ * the reply to a message it sent this run, or (for a subagent) its live
+ * parent's next message. Other agents' work never sustains a wait: a peer
+ * owes no message. A reply wait ends once no agent asked can
  * still answer soon: each one finished its turn, is blocked on the caller
- * itself (the cycle that would park both sides), or is waiting on the user.
- * With nothing new, a wait returns after a window from {@link WAIT_LADDER_MS}
- * that climbs across back-to-back idle waits, or takes the top rung when the
- * wait is the only call of its turn. A direct message arriving
- * mid-wait ends any wait. Messages never ride in the wait's result: each one
+ * itself (the cycle that would park both sides), is waiting on the user, or
+ * is idle with nothing but a message to wake it. A wait that would block on
+ * subagents waiting on the caller returns at once, naming them. While it
+ * blocks on agents (subagents' jobs, the agents asked, the parent), a wait
+ * holds on them in `AgentAwaits`, which their own waits and turn ends read.
+ * With nothing new, a wait returns after a window from {@link WAIT_LADDER_MS}:
+ * the first for a first idle wait (the top for the interactive session's job
+ * waits), the top for each back-to-back one. A
+ * direct message arriving mid-wait ends any wait. Messages never ride in the wait's result: each one
  * reaches the caller as a user turn right after it (see `handOffMail`).
  * Broadcast legs and progress notes ask the caller nothing, so they never end
  * a wait and inject as asides once it returns; the exception is a broadcast
@@ -217,6 +314,8 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	readonly interruptible = true;
 	readonly handlesToolInterrupt = true;
 	readonly approval = "read";
+	/** Starts after earlier calls of its batch settle, so a job a same-batch `task` or `bash` call registers is waited on. */
+	readonly concurrency = "exclusive";
 	readonly loadMode = "essential";
 	readonly intent = "optional";
 	#idle: IdleStreak | undefined;
@@ -227,12 +326,13 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		this.#endTurn = session.tuiTranscript === true;
 		this.description = prompt.render(waitDescription, {
 			endTurn: this.#endTurn,
+			subagent: (session.taskDepth ?? 0) > 0,
 			longest: formatDuration(WAIT_LADDER_MS[WAIT_TOP_RUNG]),
 		});
 	}
 
 	async execute(
-		toolCallId: string,
+		_toolCallId: string,
 		_params: typeof waitSchema.infer,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<CoordinationDetails>,
@@ -255,7 +355,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			return interruptedResult();
 		}
 		// Refreshes owned-service tracking only; jobs are in-process, so a hung
-		// broker must not turn every wait into an error.
+		// daemon must not turn every wait into an error.
 		if (cfgLaunchEnabled.get(this.session.settings)) {
 			try {
 				await listServicesTolerant(this.session, signal);
@@ -283,23 +383,50 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			});
 		}
 		const serviceRunning = hasLiveOwnedService(this.session);
+		const cycle = messaging && !serviceRunning ? watchedAgentBlockedOnCaller(messaging, jobs) : undefined;
+		if (cycle) {
+			return {
+				content: [
+					{
+						type: "text",
+						text: `${waitingOnCaller([cycle])}, so its job cannot finish before you act. Answer it first, or go on without its result.`,
+					},
+				],
+				details: { op: "wait", jobs: snapshotJobs(this.session, jobs) },
+			};
+		}
 		if (jobs.length === 0 && !serviceRunning) {
-			const replies = messaging ? pendingReplies(messaging) : { from: [], blocked: [], onUser: [], stopped: [] };
+			const replies: PendingReplies = messaging
+				? pendingReplies(messaging)
+				: { from: [], blocked: [], onUser: [], stalled: [], stopped: [] };
 			if (replies.from.length === 0) {
 				// An idle poll, not a failure: flagged so the loop guard keeps counting
-				// across it, unless an interrupt (news for the model) landed meanwhile
-				// or the text names an agent asked that can no longer answer.
-				const news =
-					signal?.aborted || replies.blocked.length > 0 || replies.onUser.length > 0 || replies.stopped.length > 0;
+				// across it, unless an interrupt (news for the model) landed meanwhile,
+				// the text names an agent asked that can no longer answer, or an agent
+				// waited on is stalled (only the caller's message wakes it).
+				const askedStuck = [...replies.blocked.map(({ id }) => id), ...replies.onUser, ...replies.stopped].some(
+					id => id !== replies.parent,
+				);
+				const news = signal?.aborted || askedStuck || replies.stalled.length > 0;
+				// Jobs whose rows are gone read as missing; say where their results went.
+				const gone = (manager?.getEvictedJobs({ ownerId: senderId }) ?? [])
+					.filter(record => callStartedAt - record.evictedAt < RECENTLY_EVICTED_MS)
+					.slice(0, RECENTLY_EVICTED_SHOWN)
+					.map(record => `\n- ${describeEvictedJob(record, callStartedAt)}`)
+					.join("");
 				return {
-					content: [{ type: "text", text: `Nothing to wait for: ${noReplyText(replies)}` }],
+					content: [
+						{
+							type: "text",
+							text: `Nothing to wait for: ${noReplyText(replies)}${gone ? `\nFinished earlier:${gone}` : ""}`,
+						},
+					],
 					details: { op: "wait", jobs: [] },
 					...(news ? {} : { useless: true }),
 				};
 			}
 		}
 		return this.#blockUntilWake({
-			toolCallId,
 			jobs,
 			manager,
 			messaging,
@@ -317,7 +444,6 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	 * With neither jobs nor a service, the block is a reply wait: it also ends once no agent asked can still reply.
 	 */
 	async #blockUntilWake(args: {
-		toolCallId: string;
 		jobs: AsyncJob[];
 		manager: AsyncJobManagerApi | undefined;
 		messaging: WaitMessaging | undefined;
@@ -332,17 +458,18 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	}): Promise<AgentToolResult<CoordinationDetails>> {
 		const { jobs, manager, messaging, serviceRunning, idle, signal, onUpdate, startedAtMs, settledAtEntry } = args;
 		const streak = idle && Date.now() - idle.endedAt < WAIT_LADDER_RESET_MS ? idle : undefined;
-		const rung = !streak
-			? 0
-			: isOnlyCallOfTurn(this.session, args.toolCallId)
-				? WAIT_TOP_RUNG
-				: Math.min(streak.rung + 1, WAIT_TOP_RUNG);
 		const watchedIds = jobs.map(job => job.id);
 		manager?.watchJobs(watchedIds);
 		const serviceAbort = new AbortController();
 		const serviceLeg = serviceRunning ? waitForOwnedServiceCompletion(this.session, serviceAbort.signal) : undefined;
 		const replyWait = messaging !== undefined && jobs.length === 0 && !serviceRunning;
-		const asked = replyWait ? pendingReplies(messaging).from : [];
+		const rung = streak || (this.#endTurn && jobs.length > 0) ? WAIT_TOP_RUNG : 0;
+		const topMs = replyWait ? agentWaitTopMs(this.session.getPromptCacheEntry?.()) : WAIT_LADDER_MS[WAIT_TOP_RUNG];
+		const span = { ms: rung === WAIT_TOP_RUNG ? topMs : WAIT_LADDER_MS[rung], topMs };
+		const initialReplies = replyWait ? pendingReplies(messaging) : undefined;
+		const asked = initialReplies?.from ?? [];
+		// Only the parent can end this wait, and the caller asked it nothing.
+		const parentOnly = asked.length === 1 && asked[0] === initialReplies?.parent;
 		const busAbort = new AbortController();
 		// Only `busAbort` can reject this leg, and it fires once the wait has settled.
 		// Without a session to hand it to, a message the leg took would be lost.
@@ -380,15 +507,18 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			}
 		}
 		// A wait that only these subagents' results can end blocks the caller on
-		// them, which their own reply waits read. A bash job or service is
-		// another way out, so such a wait blocks on no one.
+		// them, and a reply or parent wait on the agents that can still answer (a
+		// message from one ends it, a promise keeps it going): their own waits
+		// and turn ends read these holds. A bash job or service is another way
+		// out, so such a wait blocks on no one.
 		const watchedAgents = jobs.flatMap(job => (job.agentId ? [job.agentId] : []));
-		const releaseHold =
-			messaging && !serviceRunning && watchedAgents.length === jobs.length
-				? messaging.registry.awaits.hold(messaging.senderId, watchedAgents, { interruptible: true })
-				: undefined;
+		const awaited = replyWait ? asked : !serviceRunning && watchedAgents.length === jobs.length ? watchedAgents : [];
+		const releaseHold = messaging?.registry.awaits.hold(messaging.senderId, awaited, {
+			interruptible: true,
+			message: replyWait,
+		});
 		const { promise: timeout, resolve: timedOut } = Promise.withResolvers<void>();
-		const timer = setTimeout(timedOut, WAIT_LADDER_MS[rung]);
+		const timer = setTimeout(timedOut, span.ms);
 		const abort = Promise.withResolvers<void>();
 		const onAbort = () => abort.resolve();
 		if (signal) {
@@ -460,8 +590,9 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				if (wake === "timeout") {
 					// The report is one text block (`buildJobResult`); the timeout line joins it.
 					const report = result.content.find(block => block.type === "text")?.text ?? "";
-					const text = `${report}\n\n${elapsedReport("No job finished", rung, this.#endTurn)}`;
-					return this.#elapsed({ ...result, content: [{ type: "text", text }] }, rung, streak);
+					const blocking = this.#blockedOnIdleCaller(messaging, jobs, serviceRunning);
+					const text = `${report}\n\n${elapsedReport("No job finished", span, this.#endTurn, blocking)}`;
+					return this.#elapsed({ ...result, content: [{ type: "text", text }] }, span.ms, streak);
 				}
 				// A finished service is news even while every watched job still runs.
 				if (wake !== "service") return result;
@@ -469,16 +600,22 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				return woke;
 			}
 			if (wake === "timeout") {
+				const blocking = this.#blockedOnIdleCaller(messaging, jobs, serviceRunning);
 				const text = replyWait
-					? elapsedReport("No reply", rung, this.#endTurn)
-					: `${elapsedReport("No service finished", rung, this.#endTurn)} Read proc:// for status.`;
+					? elapsedReport(
+							parentOnly ? `No message from \`${asked[0]}\`` : "No reply",
+							span,
+							this.#endTurn,
+							blocking,
+						)
+					: `${elapsedReport("No service finished", span, this.#endTurn, blocking)} Read proc:// for status.`;
 				// A wait that ran out with nothing to report is an idle poll.
 				const result: AgentToolResult<CoordinationDetails> = {
 					content: [{ type: "text", text }],
 					details: { op: "wait", jobs: [] },
 					useless: true,
 				};
-				return this.#elapsed(result, rung, streak);
+				return this.#elapsed(result, span.ms, streak);
 			}
 			return {
 				content: [
@@ -498,18 +635,38 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	}
 
 	/**
+	 * Agents blocked on an `endTurn` caller that nothing wakes once its turn
+	 * ends (see `stalledWaiters`): no job of its own that can settle without it
+	 * (a subagent's job whose subagent waits on it cannot), no live service, and
+	 * no other wake of its session. Empty for any other caller, or when
+	 * something will wake it.
+	 */
+	#blockedOnIdleCaller(
+		messaging: WaitMessaging | undefined,
+		jobs: readonly AsyncJob[],
+		serviceRunning: boolean,
+	): string[] {
+		if (!this.#endTurn || !messaging || serviceRunning) return [];
+		const { registry, senderId } = messaging;
+		if (jobs.some(job => !job.agentId || !registry.awaits.blocksOn(job.agentId, senderId, 0))) return [];
+		if (this.session.hasWakeAfterTurn?.()) return [];
+		return stalledWaiters(registry, senderId).map(waiter => waiter.id);
+	}
+
+	/**
 	 * End a wait whose window elapsed with nothing new: extend the idle streak
-	 * and, from {@link WAIT_NOTICE_RUNG} on, append the reminder to get on with
+	 * and, once the streak holds a second wait, append the reminder to get on with
 	 * work that does not need the result instead of waiting again.
 	 */
 	#elapsed(
 		result: AgentToolResult<CoordinationDetails>,
-		rung: number,
+		windowMs: number,
 		streak: IdleStreak | undefined,
 	): AgentToolResult<CoordinationDetails> {
-		const waitedMs = (streak?.waitedMs ?? 0) + WAIT_LADDER_MS[rung];
-		this.#idle = { rung, endedAt: Date.now(), waitedMs };
-		if (rung < WAIT_NOTICE_RUNG) return result;
+		const waitedMs = (streak?.waitedMs ?? 0) + windowMs;
+		this.#idle = { endedAt: Date.now(), waitedMs };
+		// One idle wait is patience; a second back-to-back is a loop.
+		if (!streak) return result;
 		const notice = prompt.render(waitIdleTemplate, { waited: formatDuration(waitedMs) });
 		return { ...result, content: [...result.content, { type: "text", text: notice }] };
 	}
