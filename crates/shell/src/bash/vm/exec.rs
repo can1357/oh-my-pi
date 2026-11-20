@@ -4,7 +4,6 @@
 use std::{
 	collections::{HashMap, HashSet},
 	fmt::NumBuffer,
-	iter::Peekable,
 	sync::Arc,
 	task::{Context, Poll},
 };
@@ -543,19 +542,18 @@ fn zsh_return_flow(
 	if status != 0 && !ignore_errexit && errexit_on(k, cx, vp) {
 		// zsh `execlist` after `return N` (N ≠ 0) under `errexit`: the ZERR
 		// trap runs inside the function, then the shell exits.
+		// Capture before starting either trap carrier: the return has already
+		// abandoned its suffix, even when the trap subsequently exits itself.
+		let top = if target.is_some() {
+			TopCut::ReturnUnwind(status)
+		} else {
+			TopCut::At(top_frame(vp).pc + 1)
+		};
+		capture_exit_report(k, vp, cx, status, top, ExitCause::Exit, false);
 		if start_trap(k, vp, cx, TrapKey::Err) {
 			set_trap_line(vp, line_of(vp, op.node));
 			mark_trap_exit(vp);
 		} else {
-			// The return already committed its frame to unwind: its own
-			// suffix is abandoned, and attribution resumes in the caller.
-			// A top-level `return` (no function or sourced file above)
-			// ends the script itself: like `exit`, its suffix is unrun.
-			let top = if target.is_some() {
-				TopCut::ReturnUnwind(status)
-			} else {
-				TopCut::At(top_frame(vp).pc + 1)
-			};
 			exit_shell(k, vp, cx, status, top, ExitCause::Exit);
 		}
 	} else if run_always(k, vp, cx, target.unwrap_or(0), TryEnd::Return(status)) {
@@ -647,167 +645,51 @@ fn starts_command(unit: &Unit, op: Op) -> bool {
 	}
 }
 
-/// Whether unread script bytes hold another command. Alias text precedes
-/// source text, even when a comment or line continuation spans that boundary.
-/// Match the lexer: only space, tab, newline and escaped newline are trivia,
-/// and a command-position word consults the alias table like the lexer's
-/// `alias_expand_token` — an alias whose expansion holds no command (empty,
-/// comment-only, chained to one) leaves nothing to run, while a quoted or
-/// escaped word, an unknown word, or any other byte is still input. `None`
-/// (expansion off) reads every word literally.
-fn script_has_command(src: impl Iterator<Item = u8>, aliases: Option<&dyn AliasLookup>) -> bool {
-	Source { src: src.peekable() }.holds_command(aliases, &mut Vec::new(), false)
-}
-
-/// A byte that ends a word: blanks, newlines and the shell's
-/// metacharacters, plus quote and escape starts. `#` only starts a comment
-/// at a word start, so it is not one.
-const fn ends_word(b: u8) -> bool {
-	matches!(
-		b,
-		b' '
-			| 0x09
-			| b'\n'
-			| b';'
-			| b'|'
-			| b'&'
-			| b'('
-			| b')'
-			| b'<'
-			| b'>'
-			| b'\''
-			| b'"'
-			| b'`'
-			| b'\\'
-	)
-}
-
-/// The unread stream the exit walk judges: an alias's replacement text
-/// precedes the source text that followed its name, so both flow through
-/// one cursor.
-struct Source<S: Iterator<Item = u8>> {
-	src: Peekable<S>,
-}
-
-/// The replacement text for `word` when it names an alias that may expand
-/// now: unknown to the table, already in the active chain, or a chain
-/// deeper than nested expansions ever read all count as none.
-fn expansion<'a>(aliases: &'a dyn AliasLookup, word: &[u8], chain: &[Vec<u8>]) -> Option<&'a [u8]> {
-	if chain.len() >= 32 || chain.iter().any(|name| name == word) {
-		return None;
-	}
-	aliases.alias(word)
-}
-
-impl<S: Iterator<Item = u8>> Source<S> {
-	fn next(&mut self) -> Option<u8> {
-		self.src.next()
-	}
-
-	fn peek(&mut self) -> Option<u8> {
-		self.src.peek().copied()
-	}
-
-	/// Whether a command word remains. `chain` holds the alias names whose
-	/// expansions are being read (bash's in-use marks: a repeated name stays
-	/// literal instead of looping); `comment` marks a comment left open by a
-	/// pending expansion that is still swallowing bytes.
-	fn holds_command(
-		&mut self,
-		aliases: Option<&dyn AliasLookup>,
-		chain: &mut Vec<Vec<u8>>,
-		mut comment: bool,
-	) -> bool {
-		while let Some(b) = self.next() {
-			if comment {
-				if b == b'\n' {
-					comment = false;
-				}
-				continue;
-			}
-			match b {
-				b'#' => comment = true,
-				b' ' | 0x09 | b'\n' => {},
-				b'\\' if self.peek() == Some(b'\n') => {
-					self.next();
-				},
-				b'\'' | b'"' | b'`' | b'\\' => return true,
-				first => {
-					let Some(aliases) = aliases else {
-						return true;
-					};
-					let mut word = vec![first];
-					while let Some(b) = self.peek().filter(|b| !ends_word(*b)) {
-						word.push(b);
-						self.next();
-					}
-					if let Some(value) = expansion(aliases, &word, chain) {
-						chain.push(word);
-						let holds = self.holds_expansion(value, aliases, chain);
-						chain.pop();
-						return holds;
-					}
-					return true;
-				},
-			}
+/// Inspect unread input with the execution parser, including its pending
+/// replacement bytes and active-alias guard. Parse errors are still submitted
+/// input; only a stream with no complete command or error is empty.
+fn script_has_command(
+	src: &[u8],
+	feat: Features,
+	aliases: Option<&dyn AliasLookup>,
+	resume: &Resume,
+) -> bool {
+	// Trivia can span the pending/source boundary without a word for the
+	// parser to classify. Keep that byte stream continuous before consulting
+	// the parser's token-level alias machinery.
+	let mut bytes = resume
+		.pending
+		.iter()
+		.copied()
+		.chain(src[resume.pos.offset as usize..].iter().copied())
+		.peekable();
+	let mut comment = false;
+	let mut input = false;
+	while let Some(byte) = bytes.next() {
+		if comment {
+			comment = byte != b'\n';
+			continue;
 		}
-		false
-	}
-
-	/// Whether an alias's replacement text — then the rest of the stream —
-	/// holds a command word. A comment left open at the end of the
-	/// replacement keeps swallowing the following source, and a trailing
-	/// backslash escapes the first source byte, like the lexer's alias text
-	/// that precedes it.
-	fn holds_expansion(
-		&mut self,
-		value: &[u8],
-		aliases: &dyn AliasLookup,
-		chain: &mut Vec<Vec<u8>>,
-	) -> bool {
-		let mut i = 0;
-		let mut comment = false;
-		let mut escaped_end = false;
-		while i < value.len() {
-			let b = value[i];
-			i += 1;
-			if comment {
-				if b == b'\n' {
-					comment = false;
-				}
-				continue;
-			}
-			match b {
-				b'#' => comment = true,
-				b' ' | 0x09 | b'\n' => {},
-				b'\\' if value.get(i) == Some(&b'\n') => i += 1,
-				b'\\' if i == value.len() => escaped_end = true,
-				b'\'' | b'"' | b'`' | b'\\' => return true,
-				_ => {
-					let start = i - 1;
-					while i < value.len() && !ends_word(value[i]) {
-						i += 1;
-					}
-					let word = &value[start..i];
-					if let Some(next) = expansion(aliases, word, chain) {
-						chain.push(word.to_vec());
-						let holds = self.holds_expansion(next, aliases, chain);
-						chain.pop();
-						return holds;
-					}
-					return true;
-				},
-			}
+		match byte {
+			b'#' => comment = true,
+			b' ' | 0x09 | b'\n' => {},
+			b'\\' if bytes.peek() == Some(&b'\n') => {
+				bytes.next();
+			},
+			_ => {
+				input = true;
+				break;
+			},
 		}
-		if escaped_end {
-			return match self.next() {
-				None => false,
-				Some(b'\n') => self.holds_command(Some(aliases), chain, false),
-				Some(_) => true,
-			};
-		}
-		self.holds_command(Some(aliases), chain, comment)
 	}
+	if !input {
+		return false;
+	}
+	let aliases = aliases.unwrap_or(crate::bash::syntax::NO_ALIASES);
+	Parser::new(src, feat, aliases)
+		.with_resume(resume)
+		.next_command()
+		.is_some()
 }
 
 /// Tri-state continuation status for the unrun-input walk. Branches test
@@ -1131,12 +1013,12 @@ struct CutFrame {
 /// no rule of their own (every arm that names a kind skips them), so they
 /// share [`FrameSnap::Other`].
 enum FrameSnap {
-	/// A script frame: what kind it is, and its unread source — pending
-	/// alias text followed by unread script bytes — as one buffer, in the
-	/// order the parser reads them.
+	/// A script frame and the parser continuation execution would read.
 	Script {
-		what: ScriptKind,
-		tail: Box<[u8]>,
+		what:   ScriptKind,
+		tail:   Box<[u8]>,
+		resume: Resume,
+		parse:  Option<Box<ParseSnapshot>>,
 	},
 	Function,
 	NoFork,
@@ -1157,6 +1039,7 @@ pub struct CutShortInput {
 	cleanup_runs: bool,
 	options:      Vec<super::exit_options::WalkOptions>,
 	aliases:      Option<builtins::Aliases>,
+	features:     Features,
 }
 
 impl CutShortInput {
@@ -1169,6 +1052,7 @@ impl CutShortInput {
 		cleanup_runs: bool,
 		options: &[super::exit_options::WalkOptions],
 		aliases: Option<&builtins::Aliases>,
+		features: Features,
 	) -> Self {
 		Self {
 			frames: vp
@@ -1179,15 +1063,20 @@ impl CutShortInput {
 					pc:        frame.pc,
 					kind:      match &frame.kind {
 						FrameKind::Script { src, pos, aux, what, .. } => FrameSnap::Script {
-							what: *what,
-							tail: aux
-								.as_deref()
-								.and_then(|a| a.pending.as_ref())
-								.map_or(&[][..], |p| p.0.as_slice())
-								.iter()
-								.chain(src[pos.0 as usize..].iter())
-								.copied()
-								.collect(),
+							what:   *what,
+							tail:   src[pos.0 as usize..].into(),
+							resume: Resume {
+								pos:     Pos { offset: 0, line: pos.1 },
+								pending: aux
+									.as_deref()
+									.and_then(|a| a.pending.as_ref())
+									.map_or_default(|p| p.0.to_vec()),
+								active:  aux
+									.as_deref()
+									.and_then(|a| a.pending.as_ref())
+									.map_or_default(|p| p.1.iter().map(|a| a.to_vec()).collect()),
+							},
+							parse:  aux.as_deref().and_then(|a| a.parse.clone()).map(Box::new),
 						},
 						FrameKind::Function { .. } => FrameSnap::Function,
 						FrameKind::NoFork => FrameSnap::NoFork,
@@ -1216,6 +1105,7 @@ impl CutShortInput {
 			cleanup_runs,
 			options: options.to_vec(),
 			aliases: aliases.cloned(),
+			features,
 		}
 	}
 
@@ -1360,10 +1250,17 @@ pub fn walk_cut_short(
 					&& current_options.continueonerror
 					&& matches!(frame.kind, FrameSnap::Script { what: ScriptKind::Run, .. }));
 			if reads_source
-				&& let FrameSnap::Script { tail, .. } = &frame.kind
+				&& let FrameSnap::Script { tail, resume, parse, .. } = &frame.kind
 				&& script_has_command(
-					tail.iter().copied(),
-					input.aliases.as_ref().map(|a| a as &dyn AliasLookup),
+					tail,
+					parse
+						.as_ref()
+						.map_or(input.features, |p| Features::from_bits(p.features)),
+					parse
+						.as_ref()
+						.map_or(input.aliases.as_ref(), |p| p.aliases.as_ref())
+						.map(|a| a as &dyn AliasLookup),
+					resume,
 				) {
 				return true;
 			}
@@ -1480,7 +1377,14 @@ pub(super) fn capture_exit_report(
 				k.fail(err);
 				None
 			});
-			(run.id, CutShortInput::of(vp, top, status, cleanup_runs, &options, aliases.as_ref()))
+			let feat = features(k, cx.store, vp).unwrap_or_else(|err| {
+				k.fail(err);
+				Features::NONE
+			});
+			(
+				run.id,
+				CutShortInput::of(vp, top, status, cleanup_runs, &options, aliases.as_ref(), feat),
+			)
 		});
 	}
 }
@@ -6489,7 +6393,8 @@ mod tests {
 		aliases: Option<&builtins::Aliases>,
 		child_status: impl FnMut(Vpid) -> Option<i32>,
 	) -> bool {
-		CutShortInput::of(vp, top, status, cleanup_runs, options, aliases).walk(child_status)
+		CutShortInput::of(vp, top, status, cleanup_runs, options, aliases, Features::NONE)
+			.walk(child_status)
 	}
 
 	#[test]
@@ -6543,7 +6448,10 @@ mod tests {
 			("\\#literal", "", true),
 		] {
 			assert_eq!(
-				script_has_command(alias.bytes().chain(source.bytes()), None),
+				script_has_command(source.as_bytes(), Features::NONE, None, &Resume {
+					pending: alias.as_bytes().to_vec(),
+					..Resume::default()
+				}),
 				expected,
 				"alias={alias:?}, source={source:?}"
 			);

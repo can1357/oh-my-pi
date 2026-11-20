@@ -725,6 +725,23 @@ async fn exit_classification_alias_expanded_unread_source_scan() {
 			true,
 		),
 		("zsh-empty", "emulate zsh\nalias noop=''\nexit 0\nnoop", false),
+		(
+			"nested-expansion-tail",
+			"shopt -s expand_aliases\nalias a='b :'\nalias b=''\nexit 0\na",
+			true,
+		),
+		(
+			"nested-comment-tail",
+			"shopt -s expand_aliases\nalias a='b\n:'\nalias b='# comment'\nexit 0\na",
+			true,
+		),
+		("repeated-empty-word", "shopt -s expand_aliases\nalias a=''\nexit 0\na a", false),
+		("repeated-empty-line", "shopt -s expand_aliases\nalias a=''\nexit 0\na\na", false),
+		("partly-quoted-word", "shopt -s expand_aliases\nalias a='# comment'\nexit 0\na''", true),
+		("continued-name", "shopt -s expand_aliases\nalias noop=''\nexit 0\nno\\\nop", false),
+		("mutual-alias", "shopt -s expand_aliases\nalias a=b\nalias b=a\nexit 0\na", true),
+		("pending-active-alias", "shopt -s expand_aliases\nalias a='exit 0\na'\na", true),
+		("pending-empty-alias", "shopt -s expand_aliases\nalias a='exit 0\nb'\nalias b=''\na", false),
 	] {
 		let shell = Shell::new(None);
 		let (tx, rx) = flume::unbounded();
@@ -803,6 +820,30 @@ async fn exit_classification_zsh_errexit_after_return_boundary() {
 		),
 		("bash-no-suffix", "bash", "set -e; f() { return 1; }; f", 1, "", false),
 		(
+			"zsh-eval-return",
+			"zsh",
+			"emulate zsh\nset -e; f() { eval 'return 1; printf abandoned'; printf abandoned; }; f",
+			1,
+			"",
+			false,
+		),
+		(
+			"zsh-nested-return",
+			"zsh",
+			"emulate zsh\nset -e; g() { return 1; printf abandoned; }; f() { g; }; f",
+			1,
+			"",
+			false,
+		),
+		(
+			"zsh-nested-caller",
+			"zsh",
+			"emulate zsh\nset -e; g() { return 1; printf abandoned; }; f() { g; printf live; }; f",
+			1,
+			"",
+			true,
+		),
+		(
 			"zsh-return-in-loop",
 			"zsh",
 			"emulate zsh\nset -e; f() { for i in 1; do return 1; printf unreachable; done; }; f; \
@@ -812,19 +853,27 @@ async fn exit_classification_zsh_errexit_after_return_boundary() {
 			true,
 		),
 	] {
-		let shell = Shell::new(None);
-		let (tx, rx) = flume::unbounded();
-		let result = shell
-			.run(
-				ShellRunOptions { command: command.into(), ..Default::default() },
-				Some(tx),
-				CancelToken::default(),
-			)
-			.await
-			.expect("shell run");
-		let output: String = rx.try_iter().collect();
-		assert_eq!(output, expected_output, "{name}: {command}");
-		assert_eq!(result.exit_code, Some(expected_exit), "{name}: {command}");
-		assert_eq!(result.ended_by_exit, expected, "{dialect} {name}: {command}");
+		for trap in ["", "trap ':' ZERR; ", "TRAPZERR() { :; }; "] {
+			if dialect == "bash" && !trap.is_empty() {
+				continue;
+			}
+			let command = command
+				.replace("set -e;", &format!("set -e; {trap}"))
+				.replace("set +e;", &format!("set +e; {trap}"));
+			let shell = Shell::new(None);
+			let (tx, rx) = flume::unbounded();
+			let result = shell
+				.run(
+					ShellRunOptions { command: command.clone(), ..Default::default() },
+					Some(tx),
+					CancelToken::default(),
+				)
+				.await
+				.expect("shell run");
+			let output: String = rx.try_iter().collect();
+			assert_eq!(output, expected_output, "{name}: {command}");
+			assert_eq!(result.exit_code, Some(expected_exit), "{name}: {command}");
+			assert_eq!(result.ended_by_exit, expected, "{dialect} {name}: {command}");
+		}
 	}
 }

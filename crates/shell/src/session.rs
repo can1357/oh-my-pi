@@ -994,24 +994,36 @@ impl Driver {
 	async fn settle_exit_window(&mut self, run: RunId, cap: Duration) {
 		let deadline = tokio::time::Instant::now() + cap;
 		loop {
+			// Runnable background work must not evade the deadline or monopolize
+			// the current-thread runtime while the sibling waits on that runtime.
+			if tokio::time::Instant::now() >= deadline {
+				return;
+			}
 			self.poll_tools();
 			match self.step(Budget::default()) {
 				Step::Done { run: done, status } => self.on_done(done, status),
 				Step::Call { id, call } => self.on_call(id, call),
 				Step::Yield | Step::SuspendReady => {},
 				Step::Blocked | Step::Paused => {
+					if !self.shell.exit_children_pending(&mut self.store, run) {
+						return;
+					}
 					let now = tokio::time::Instant::now();
 					if now >= deadline {
 						return;
 					}
-					let limit = (deadline - now).min(MAX_PARK);
+					let host_now = crate::bash::Host::now_ns(&self.host);
+					let tool_wait = self.tools.next_deadline().map_or(MAX_PARK, |at| {
+						Duration::from_nanos(at.saturating_sub(host_now)).min(MAX_PARK)
+					});
+					let limit = (deadline - now).min(tool_wait);
 					let ctl = self.shell.control();
 					let bell = Arc::clone(&self.bell);
 					tokio::select! {
 						biased;
 						() = poll_fn(|cx| ctl.poll_runnable(cx)) => {},
 						() = bell.0.notified() => {},
-						() = tokio::time::sleep(limit) => return,
+						() = tokio::time::sleep(limit) => {},
 					}
 				},
 				Step::Idle => return,
@@ -1019,6 +1031,7 @@ impl Driver {
 			if !self.shell.exit_children_pending(&mut self.store, run) {
 				return;
 			}
+			tokio::task::yield_now().await;
 		}
 	}
 
@@ -2074,6 +2087,40 @@ mod tests {
 		assert!(outcome(&mut s, "exit 0").await.exited);
 		assert!(outcome(&mut s, "exit 0; echo no").await.exited);
 		assert!(!outcome(&mut s, "false").await.cut_short);
+	}
+
+	#[tokio::test(flavor = "current_thread")]
+	async fn exit_settle_window_is_bounded_and_cooperative_with_busy_background_work() {
+		for busy in [false, true] {
+			let mut s = session();
+			if busy {
+				s.run("while :; do :; done &", RunStdio::default(), CancellationToken::new())
+					.await
+					.unwrap();
+			}
+			let started = Instant::now();
+			let outcome = s
+				.run(
+					"set -o pipefail; shopt -s lastpipe; /bin/sleep 0.6 | exit 0 || :",
+					RunStdio::default(),
+					CancellationToken::new(),
+				)
+				.await
+				.unwrap();
+			assert!(outcome.cut_short, "unresolved sibling must remain conservative");
+			assert!(
+				started.elapsed() < Duration::from_millis(400),
+				"busy={busy}: {:?}",
+				started.elapsed()
+			);
+			assert_eq!(
+				s.run("set +o pipefail; :", RunStdio::default(), CancellationToken::new())
+					.await
+					.unwrap()
+					.status,
+				0
+			);
+		}
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
