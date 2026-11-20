@@ -3288,13 +3288,15 @@ describe("Anthropic empty-messages guard", () => {
 		expect(errMsg).toContain("refusing to send a request with no messages");
 		expect(errMsg).toContain("claude-sonnet-4-5");
 		expect(errMsg).toContain("anthropic");
+		expect(errMsg).toContain("none survived encoding.");
 	});
 
-	it("reports the cause when a non-empty context encodes away to nothing", async () => {
+	it("fails when the encoded context is empty and no hook repairs it", async () => {
 		// A user message whose content a context handler filtered down to
 		// nothing: `context.messages` has one entry, the encoder emits zero wire
-		// messages. The reported input count is what separates this from an
-		// empty context.
+		// messages. Pairs with "does not fail when the hook repairs that same
+		// empty encoding": same context, opposite expectation, so the pair
+		// brackets the guard around the hook.
 		const errMsg = await captureError({
 			systemPrompt: ["Be helpful."],
 			messages: [{ role: "user", content: [], timestamp: 1 }],
@@ -3303,11 +3305,13 @@ describe("Anthropic empty-messages guard", () => {
 		expect(errMsg).toBeDefined();
 		expect(errMsg).toContain("refusing to send a request with no messages");
 		expect(errMsg).toContain("Context had 1 input messages");
+		expect(errMsg).toContain("none survived encoding.");
 	});
 
 	it("reports the cause when an onPayload hook empties the request", async () => {
 		// The guard runs on the final request shape, so a hook that drops every
-		// message is diagnosed too instead of reaching the provider.
+		// message is diagnosed too instead of reaching the provider — and the
+		// message names the hook, not the encoder, as the culprit.
 		const stream = streamAnthropic(
 			ANTHROPIC_MODEL,
 			{
@@ -3327,6 +3331,54 @@ describe("Anthropic empty-messages guard", () => {
 		}
 		expect(captured).toContain("refusing to send a request with no messages");
 		expect(captured).toContain("Context had 1 input messages");
+		expect(captured).toContain("encoding produced 1, then the onPayload hook returned an empty list");
+	});
+
+	it("does not fail when the hook repairs that same empty encoding", async () => {
+		// Pairs with "fails when the encoded context is empty and no hook
+		// repairs it": the identical context encodes away, and here the hook
+		// fills it back in. The guard runs after the hook, so the request must
+		// reach the transport — the captured body is what proves it, since a
+		// guard placed before the hook would throw with different wording.
+		let sentBody: string | undefined;
+		const controller = new AbortController();
+		const fakeFetch = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			sentBody = requestBodyText(init) ?? "";
+			controller.abort();
+			return new Response('event: message_stop\ndata: {"type":"message_stop"}\n\n', {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+		const stream = streamAnthropic(
+			ANTHROPIC_MODEL,
+			{
+				systemPrompt: ["Be helpful."],
+				// Same context as the sibling case: one user message whose content
+				// encodes away. Without the hook this throws; with it, it must not.
+				messages: [{ role: "user", content: [], timestamp: 1 }],
+				tools: [],
+			},
+			{
+				apiKey: "sk-ant-oat-test",
+				signal: controller.signal,
+				fetch: fakeFetch,
+				onPayload: params => ({
+					...(params as MessageCreateParams),
+					messages: [{ role: "user", content: "repaired by hook" }],
+				}),
+			},
+		);
+		let refusal: string | undefined;
+		for await (const evt of stream) {
+			// Any wording counts: a guard moved back before the hook refuses with
+			// different text, and the pair must catch that too.
+			if (evt.type === "error" && evt.error.errorMessage?.includes("refusing")) {
+				refusal = evt.error.errorMessage;
+			}
+		}
+		expect(refusal).toBeUndefined();
+		expect(sentBody).toContain("repaired by hook");
 	});
 
 	it("does not emit the empty-messages error when context has at least one message", async () => {
