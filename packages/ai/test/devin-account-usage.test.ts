@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { gzipSync } from "node:zlib";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchParams, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { devinUsageProvider } from "@oh-my-pi/pi-ai/usage/devin";
@@ -344,5 +345,99 @@ describe("Devin account usage", () => {
 		expect(devinUsageProvider.supports?.(params("raw-token", "api_key"))).toBe(true);
 		expect(devinUsageProvider.supports?.(params(""))).toBe(false);
 		expect(devinUsageProvider.supports?.({ ...params("raw-token"), provider: "cursor" })).toBe(false);
+	});
+});
+
+/** Far-future reset so the quota windows stay current whatever the run date. */
+const FUTURE_RESET_SECONDS = 4_102_444_800n;
+
+/** One email, two subscriptions: each login's weekly quota and on-demand balance. */
+function loginPayload(weeklyQuotaRemainingPercent: number, overageBalanceMicros: bigint): Uint8Array {
+	return userStatusPayload(
+		{ billingStrategy: BillingStrategy.QUOTA, hideDailyQuota: true },
+		{
+			email: "will@example.com",
+			userId: "user-1",
+			weeklyQuotaRemainingPercent,
+			weeklyQuotaResetAtUnix: FUTURE_RESET_SECONDS,
+			overageBalanceMicros,
+		},
+	);
+}
+
+/** Answers GetUserStatus for whichever login's session token the request carries. */
+function loginsFetch(payloads: Record<string, Uint8Array>): typeof fetch {
+	return Object.assign(
+		async (_input: string | URL | Request, init?: RequestInit) => {
+			const body = new Uint8Array(init?.body as Uint8Array);
+			const apiKey = fromBinary(GetUserStatusRequestSchema, body).metadata?.apiKey ?? "";
+			const token = Object.keys(payloads).find(candidate => apiKey.includes(candidate));
+			return new Response(token ? payloads[token] : "unknown token", {
+				status: token ? 200 : 401,
+				headers: { "content-type": "application/proto" },
+			});
+		},
+		{ preconnect: fetch.preconnect },
+	);
+}
+
+async function storeWithLogins(tokens: string[]): Promise<SqliteAuthCredentialStore> {
+	const store = await SqliteAuthCredentialStore.open(":memory:");
+	await new AuthStorage(store).credentials.set(
+		"devin",
+		tokens.map(token => ({
+			type: "oauth" as const,
+			access: token,
+			refresh: `${token}-refresh`,
+			expires: Number(FUTURE_RESET_SECONDS) * 1_000,
+		})),
+	);
+	return store;
+}
+
+describe("Devin login ranking", () => {
+	test("serves sessions from the login with quota left, moving one pinned on a spent login", async () => {
+		const usageFetch = loginsFetch({
+			"spent-token": loginPayload(0, 150_000_000n),
+			"quota-token": loginPayload(82, 0n),
+		});
+		const store = await storeWithLogins(["spent-token", "quota-token"]);
+		try {
+			// Without ranking, sessions take the logins in turn; pin one on the spent login.
+			const unranked = new AuthStorage(store, { usageFetch, rankingStrategyResolver: () => undefined });
+			await unranked.reload();
+			let pinned: string | undefined;
+			for (let i = 0; i < 4 && pinned === undefined; i += 1) {
+				const key = await unranked.keys.get("devin", `pinned-${i}`);
+				if (key?.includes("spent-token")) pinned = `pinned-${i}`;
+			}
+			if (pinned === undefined) throw new Error("expected a session on the spent login");
+
+			const storage = new AuthStorage(store, { usageFetch });
+			await storage.reload();
+			expect(await storage.keys.get("devin", pinned)).toContain("quota-token");
+			for (let i = 0; i < 6; i += 1) {
+				expect(await storage.keys.get("devin", `fresh-${i}`)).toContain("quota-token");
+			}
+		} finally {
+			store.close();
+		}
+	});
+
+	test("falls back to the login its on-demand balance funds once every quota is spent", async () => {
+		const usageFetch = loginsFetch({
+			"empty-token": loginPayload(0, 0n),
+			"funded-token": loginPayload(0, 150_000_000n),
+		});
+		const store = await storeWithLogins(["empty-token", "funded-token"]);
+		try {
+			const storage = new AuthStorage(store, { usageFetch });
+			await storage.reload();
+			for (let i = 0; i < 6; i += 1) {
+				expect(await storage.keys.get("devin", `session-${i}`)).toContain("funded-token");
+			}
+		} finally {
+			store.close();
+		}
 	});
 });
