@@ -1358,6 +1358,9 @@ describe("Editor vim mode", () => {
 			expect(editor.getText()).toBe("two");
 			press(editor, "u");
 			expect(editor.getText()).toBe("");
+		});
+	});
+
 	describe("WORD motions", () => {
 		it("treats punctuation as part of a WORD", () => {
 			const editor = vimEditor("foo-bar baz.qux");
