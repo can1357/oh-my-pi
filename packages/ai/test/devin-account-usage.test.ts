@@ -353,7 +353,8 @@ const FUTURE_RESET_SECONDS = 4_102_444_800n;
 
 /**
  * Stores one Devin login per token, all under one email, and answers each login's
- * GetUserStatus with its weekly quota left (percent) and on-demand balance (micros).
+ * GetUserStatus with its weekly quota left (percent), on-demand balance (micros),
+ * and a plan-period prompt-credit bucket already spent.
  */
 async function devinLogins(logins: Record<string, [number, bigint]>) {
 	const store = await SqliteAuthCredentialStore.open(":memory:");
@@ -368,10 +369,11 @@ async function devinLogins(logins: Record<string, [number, bigint]>) {
 			const [weeklyQuotaRemainingPercent, overageBalanceMicros] =
 				logins[tokens.find(token => request.metadata?.apiKey.includes(token)) ?? ""];
 			const payload = userStatusPayload(
-				{ billingStrategy: BillingStrategy.QUOTA, hideDailyQuota: true },
+				{ billingStrategy: BillingStrategy.QUOTA, hideDailyQuota: true, monthlyPromptCredits: 500 },
 				{
 					email: "will@example.com",
 					userId: "user-1",
+					usedPromptCredits: 500,
 					weeklyQuotaRemainingPercent,
 					weeklyQuotaResetAtUnix: FUTURE_RESET_SECONDS,
 					overageBalanceMicros,

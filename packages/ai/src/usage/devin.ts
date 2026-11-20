@@ -314,6 +314,7 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 
 export const devinUsageProvider: UsageProvider = {
 	id: PROVIDER,
+	cacheVersion: 1,
 	fetchUsage: fetchDevinUsage,
 	supports: params => params.provider === PROVIDER && devinCredential(params.credential) !== undefined,
 	validatesCredentials: true,
@@ -322,11 +323,12 @@ export const devinUsageProvider: UsageProvider = {
 const DAILY_QUOTA_LIMIT_ID = "devin:quota:daily";
 const WEEKLY_QUOTA_LIMIT_ID = "devin:quota:weekly";
 
-/**
- * Ranks Devin logins by their daily and weekly quota windows. Credit buckets
- * are plan-period balances rather than rate windows, so they never hard-block;
- * the reserve check and spent-allowance ranking still read every limit.
- */
+/** The renewable daily and weekly quota windows; credit buckets are plan-period balances. */
+function devinQuotaLimits(report: UsageReport): UsageLimit[] {
+	return report.limits.filter(limit => limit.id === DAILY_QUOTA_LIMIT_ID || limit.id === WEEKLY_QUOTA_LIMIT_ID);
+}
+
+/** Ranks Devin logins by their daily and weekly quota windows; only those can block a login. */
 export const devinRankingStrategy: CredentialRankingStrategy = {
 	findWindowLimits(report) {
 		return {
@@ -334,11 +336,12 @@ export const devinRankingStrategy: CredentialRankingStrategy = {
 			secondary: report.limits.find(limit => limit.id === WEEKLY_QUOTA_LIMIT_ID),
 		};
 	},
-	scopeLimits(report) {
-		return report.limits.filter(limit => limit.id === DAILY_QUOTA_LIMIT_ID || limit.id === WEEKLY_QUOTA_LIMIT_ID);
-	},
+	scopeLimits: devinQuotaLimits,
+	// The quota windows are the renewable allowance; a plan without them keeps
+	// its credit buckets in the reserve check.
 	scopeLimitsForReserve(report) {
-		return report.limits;
+		const quotaLimits = devinQuotaLimits(report);
+		return quotaLimits.length > 0 ? quotaLimits : report.limits;
 	},
 	windowDefaults: { primaryMs: DAY_MS, secondaryMs: WEEK_MS },
 };
