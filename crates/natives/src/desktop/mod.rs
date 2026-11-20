@@ -4184,6 +4184,14 @@ mod capture_tests {
 		assert_eq!(*awake.lock(), [true, false], "the late return neither holds nor releases again");
 	}
 
+	/// Ends a fake session without `close`'s shutdown deadline: disconnects
+	/// its queue and joins the worker once it has finished.
+	fn shut_down(core: &SessionCore) {
+		let mut lifecycle = core.lifecycle.lock();
+		drop(lifecycle.tx.take());
+		lifecycle.join.take().unwrap().join().unwrap();
+	}
+
 	#[test]
 	fn a_dispatched_provider_reply_timeout_is_unconfirmed() {
 		let mut backend = FakeWaylandBackend::new();
@@ -4193,8 +4201,11 @@ mod capture_tests {
 		backend.on_windows = Some(Box::new({
 			let mutations = Arc::clone(&mutations);
 			move || {
-				control::dispatching()?;
-				entered_tx.send(()).expect("caller did not await dispatch");
+				let dispatched = control::dispatching();
+				entered_tx
+					.send(dispatched.is_ok())
+					.expect("caller did not await dispatch");
+				dispatched?;
 				blocked.recv().expect("provider was not unblocked");
 				mutations.fetch_add(1, Ordering::AcqRel);
 				Ok(())
@@ -4211,7 +4222,7 @@ mod capture_tests {
 				|reply| Request::ListWindows { reply },
 				|_, reply_by| {
 					assert_eq!(reply_by, run_by.checked_sub(control::DEADLINE_MARGIN / 2).unwrap());
-					entered.recv().expect("provider did not dispatch");
+					assert!(entered.recv().unwrap(), "provider did not cross its dispatch boundary");
 					Err(flume::RecvTimeoutError::Timeout)
 				},
 			)
@@ -4221,7 +4232,7 @@ mod capture_tests {
 		assert_eq!(mutations.load(Ordering::Acquire), 0);
 		unblock.send(()).expect("provider did not resume");
 		drop(unblock);
-		core.close().unwrap();
+		shut_down(&core);
 		assert_eq!(mutations.load(Ordering::Acquire), 1);
 	}
 
@@ -4271,7 +4282,7 @@ mod capture_tests {
 			result.recv().expect("provider did not check the fence"),
 			Some(ErrorCode::Timeout),
 		);
-		core.close().unwrap();
+		shut_down(&core);
 		assert_eq!(mutations.load(Ordering::Acquire), 0);
 	}
 
@@ -4299,34 +4310,54 @@ mod capture_tests {
 			Ok(Response::Windows(_))
 		));
 		assert_eq!(mutations.load(Ordering::Acquire), 1);
-		core.close().unwrap();
+		shut_down(&core);
 	}
 
 	#[test]
 	fn unfenced_requests_keep_their_native_reply_deadline_and_timeout() {
-		let core = session_serving(FakeWaylandBackend::new());
+		// No worker: only the caller's side of each off-side request runs.
+		let core = SessionCore::with_operation_timeout(
+			DisplaySelector::Active,
+			Arc::default(),
+			None,
+			HUNG_CALL_TIMEOUT,
+		);
+		let (tx, _queued) = flume::unbounded();
+		core.lifecycle.lock().tx = Some(tx);
 		let run_by = Instant::now();
 		core.cancellation.set_deadline(Some(run_by));
-		let token = core.cancellation.token();
-		assert!(token.dispatch_fence().is_none());
-		let error = core
-			.call_with_wait(
-				token,
-				|reply| Request::ListWindows { reply },
-				|_, reply_by| {
-					assert!(reply_by > run_by);
-					Err(flume::RecvTimeoutError::Timeout)
-				},
-			)
-			.err()
-			.unwrap();
-		assert_eq!(error.code, ErrorCode::Timeout);
-		assert!(
-			error
-				.message
-				.starts_with("native desktop operation did not complete:")
-		);
-		core.close().unwrap();
+		// Windows fences only actions without a menu path; others fence none.
+		let menu = cfg!(target_os = "windows").then(|| vec!["Open".to_owned()]);
+		for action in [true, false] {
+			let error = core
+				.call_with_wait(
+					core.cancellation.token(),
+					|reply| {
+						if action {
+							Request::AxPerform {
+								reference: "e1".into(),
+								action: "press".into(),
+								menu: menu.clone(),
+								reply,
+							}
+						} else {
+							Request::ListWindows { reply }
+						}
+					},
+					|_, reply_by| {
+						assert!(reply_by > run_by);
+						Err(flume::RecvTimeoutError::Timeout)
+					},
+				)
+				.err()
+				.unwrap();
+			assert_eq!(error.code, ErrorCode::Timeout);
+			assert!(
+				error
+					.message
+					.starts_with("native desktop operation did not complete:")
+			);
+		}
 	}
 
 	#[test]
