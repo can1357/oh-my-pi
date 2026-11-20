@@ -1441,4 +1441,77 @@ describe("Editor vim mode", () => {
 			expect(editor.vimMode).toBe("normal");
 		});
 	});
+
+	describe("linewise changes and line motions", () => {
+		it("cc keeps the changed line in the register as a whole line", () => {
+			const editor = vimEditor("alpha\nbeta");
+			editor.handleInput("cc");
+			editor.handleInput(ESC);
+			editor.handleInput("jp");
+			expect(editor.getText()).toBe("\nbeta\nalpha");
+		});
+
+		it("cj clears both lines entirely even from mid-line", () => {
+			const editor = vimEditor("  abc\ndef\nghi");
+			editor.handleInput("lllcj");
+			expect(editor.vimMode).toBe("insert");
+			editor.handleInput("x");
+			expect(editor.getText()).toBe("x\nghi");
+		});
+
+		it("S is cc, including its count and dot repeat", () => {
+			const editor = vimEditor("a\nb\nc\nd\ne");
+			editor.handleInput("2S");
+			expect(editor.vimMode).toBe("insert");
+			editor.handleInput("x");
+			editor.handleInput(ESC);
+			expect(editor.getText()).toBe("x\nc\nd\ne");
+			editor.handleInput("j.");
+			expect(editor.getText()).toBe("x\nx\ne");
+		});
+
+		it("s substitutes count characters without touching the line", () => {
+			const editor = vimEditor("abcd\nnext");
+			editor.handleInput("2s");
+			editor.handleInput("X");
+			expect(editor.getText()).toBe("Xcd\nnext");
+		});
+
+		it("an operator before S is cancelled", () => {
+			const editor = vimEditor("abc\ndef");
+			editor.handleInput("dS");
+			expect(editor.getText()).toBe("abc\ndef");
+			expect(editor.vimMode).toBe("normal");
+		});
+
+		it("Visual S changes whole lines from a charwise selection", () => {
+			const editor = vimEditor("alpha beta\ngamma\ndelta");
+			editor.handleInput("wvjS");
+			expect(editor.vimMode).toBe("insert");
+			editor.handleInput("x");
+			expect(editor.getText()).toBe("x\ndelta");
+		});
+
+		it("- and + move by lines onto the first non-blank", () => {
+			const editor = vimEditor("  one\n    two\nthree");
+			editor.handleInput("+");
+			expect(cursor(editor)).toEqual({ line: 1, col: 4 });
+			editor.handleInput("+");
+			expect(cursor(editor)).toEqual({ line: 2, col: 0 });
+			editor.handleInput("2-");
+			expect(cursor(editor)).toEqual({ line: 0, col: 2 });
+		});
+
+		it("-, + and _ are linewise under an operator", () => {
+			const up = vimEditor("one\ntwo\nthree");
+			up.handleInput("jld-");
+			expect(up.getText()).toBe("three");
+			const down = vimEditor("one\ntwo\nthree");
+			down.handleInput("lld+");
+			expect(down.getText()).toBe("three");
+			const line = vimEditor("one\ntwo\nthree");
+			line.handleInput("l2d_");
+			expect(line.getText()).toBe("three");
+		});
+	});
 });

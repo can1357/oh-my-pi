@@ -38,7 +38,7 @@ app.history.search: []
 | `app.tools.toggleVisibility` | `Ctrl+Shift+O`                                                        | Show or hide tool activity                                                                                                                             |
 | `app.links.hint`             | `Alt+O`                                                               | Tag each [extension link](./extensions.md#extension-link-schemes) on screen; type a tag to pick it, `Esc` cancels; again or `Page Up` browses all      |
 | `app.ask.hide`               | `Alt+H`                                                               | Hide a pending `ask` question to one line (the Hide button in Tern); the same key, `Enter`, or Show brings it back                                     |
-| `app.ask.note`               | `N`, `Alt+N`                                                          | Add or edit a note on the highlighted `ask` option; dropdowns use the first key that does not type text, since letters jump to options                  |
+| `app.ask.note`               | `N`, `Alt+N`                                                          | Add or edit a note on the highlighted `ask` option; dropdowns use the first key that does not type text, since letters jump to options                 |
 | `app.approval.approve`       | `Ctrl+Enter`, `Ctrl+Q`                                                | Approve a pending tool call outright (the Approve button in Tern); `Esc` denies, and `Enter` takes the Approve/Deny choice highlighted with the arrows |
 | `app.thinking.toggle`        | `Ctrl+T`                                                              | Toggle thinking-block visibility                                                                                                                       |
 | `app.thinking.cycle`         | `Shift+Tab`                                                           | Cycle thinking level                                                                                                                                   |
@@ -57,7 +57,7 @@ app.history.search: []
 | `app.stt.toggle`             | Unbound                                                               | Start or stop speech-to-text recording with each press; independent of push-to-talk.                                                                   |
 | `app.live.toggle`            | `Ctrl+L`                                                              | Start or stop live voice mode (same as `/live`)                                                                                                        |
 | `app.agents.hub`             | `Alt+A`                                                               | [Open the Agent Hub](./agent-hub.md)                                                                                                                   |
-| `app.session.delete`         | `Backspace`, `Delete`                                                 | Ask to delete the selected session in the resume picker; a key that also deletes backward edits a typed search query instead                         |
+| `app.session.delete`         | `Backspace`, `Delete`                                                 | Ask to delete the selected session in the resume picker; a key that also deletes backward edits a typed search query instead                           |
 | `app.session.pin`            | `Alt+K`                                                               | Pin the selected session in the resume picker; pinned sessions stay on top, including in search results                                                |
 | `app.session.unpin`          | `Alt+Shift+K`                                                         | Unpin the selected session in the resume picker                                                                                                        |
 | `app.tree.previousBranch`    | Unbound                                                               | Jump to the previous visible branch in `/tree` ([details](./tree.md))                                                                                  |
@@ -121,6 +121,7 @@ The status line also shows the mode, pending command, and multi-line Visual sele
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `h` `j` `k` `l`           | Move by character and line (arrow keys work too)                                                                                                                                  |
 | `0` `^` `$`               | Line start / first non-blank / line end                                                                                                                                           |
+| `-` `+` `_`               | Previous / next / current line, on its first non-blank; linewise under an operator (`d-`, `c+`, `2d_`)                                                                            |
 | `w` `b` `e` / `W` `B` `E` | Move by word / whitespace-delimited WORD                                                                                                                                          |
 | `f` `F` `t` `T` + char    | Find / till that character on the line (`;` repeats, `,` reverses)                                                                                                                |
 | `gg` `G`                  | First line, last line (`5gg` and `5G` jump to line 5)                                                                                                                             |
@@ -128,6 +129,7 @@ The status line also shows the mode, pending command, and multi-line Visual sele
 | `i` `a` `I` `A`           | Insert before / after cursor, at line start / line end                                                                                                                            |
 | `o` `O`                   | Open a line below / above and insert                                                                                                                                              |
 | `x` `D` `C`               | Delete character, delete to line end (`2D` takes `count` lines), change to line end (`2C` likewise)                                                                               |
+| `s` `S`                   | Substitute: `s` is `cl` (`3s` changes three characters), `S` is `cc` (`2S` changes two lines)                                                                                     |
 | `r` + char                | Replace the character under the cursor (`3rx` replaces three)                                                                                                                     |
 | `R`                       | Replace mode: typed characters overwrite until Escape                                                                                                                             |
 | `%`                       | Jump to the matching `()` `[]` `{}` `"` `'` on or after the cursor. Quotes stay on the line; brackets can cross lines. With a count, `50%` goes to that percentage of the buffer. |
@@ -135,7 +137,7 @@ The status line also shows the mode, pending command, and multi-line Visual sele
 | `J`                       | Join lines, dropping the indent of the following line (an empty line joins without a space)                                                                                       |
 | `>>` `<<`                 | Indent / outdent by two spaces (`3>>` shifts three lines; `>}` shifts a motion). Empty lines are left alone.                                                                      |
 | `d` `y` `c` + motion      | Operate over a motion, e.g. `dw`, `d$`, `yb`, `cw`                                                                                                                                |
-| `dd` `yy` `cc`            | Linewise delete / yank / change                                                                                                                                                   |
+| `dd` `yy` `cc`            | Linewise delete / yank / change; `cc` keeps one empty line and stores the old lines whole, so `p` puts them back as lines                                                         |
 | `d` `y` `c` + text object | Operate over a text object, e.g. `diw`, `ca(`, `ci"`, `dap`                                                                                                                       |
 | `p` `P`                   | Put the last yank or delete after / before the cursor                                                                                                                             |
 | `u`                       | Undo (a whole Insert session, or a whole `.`, undoes in one step)                                                                                                                 |
@@ -156,7 +158,7 @@ A text object follows an operator (`diw`) or extends a Visual selection (`viw`).
 
 ### Visual mode
 
-`v` starts a character-wise selection and `V` a line-wise one; motions move the free end. `y` copies the selection to the system clipboard (and to the internal register, so `p` puts it back), `d` deletes it, and `c` deletes it and drops into Insert mode. `x` deletes like `d`, and `s` changes like `c`. `o` jumps to the other end of the selection. `Escape` cancels.
+`v` starts a character-wise selection and `V` a line-wise one; motions move the free end. `y` copies the selection to the system clipboard (and to the internal register, so `p` puts it back), `d` deletes it, and `c` deletes it and drops into Insert mode. `x` deletes like `d`, `s` changes like `c`, and `S` changes every line the selection touches, even a character-wise one. `o` jumps to the other end of the selection. `Escape` cancels.
 
 A selection that would cut through an attachment placeholder such as `[Image #1, 800x600]` or `[Paste #2, +30 lines]` takes the whole placeholder with it, so a delete can never leave a corrupt fragment behind.
 

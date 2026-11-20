@@ -2796,7 +2796,7 @@ export class Editor implements Component, Focusable {
 					break;
 				}
 				case "delete":
-					this.#deleteVimRange(command.from, command.to, command.linewise);
+					this.#deleteVimRange(command.from, command.to, command.linewise, command.insert);
 					break;
 				case "openLine":
 					this.#openVimLine(command.below);
@@ -2967,15 +2967,17 @@ export class Editor implements Component, Focusable {
 		return parts.join("\n");
 	}
 
-	#deleteVimRange(from: VimPosition, to: VimPosition, linewise: boolean): void {
+	/** `insert` marks a change (`cc`): a linewise range then leaves one empty line to type into. */
+	#deleteVimRange(from: VimPosition, to: VimPosition, linewise: boolean, insert: boolean): void {
 		const lines = this.#state.lines;
 		if (linewise) {
 			const last = Math.min(to.line, lines.length - 1);
 			const removed = this.#sliceRange(from, to, true);
-			if (!removed && from.line === last && lines.length === 1) return;
+			if (!removed && from.line === last && (insert || lines.length === 1)) return;
 			this.#recordUndoState();
 			this.#killRing.push(`${removed}\n`, { prepend: false });
-			lines.splice(from.line, last - from.line + 1);
+			if (insert) lines.splice(from.line, last - from.line + 1, "");
+			else lines.splice(from.line, last - from.line + 1);
 			if (lines.length === 0) lines.push("");
 			this.#state.cursorLine = Math.min(from.line, lines.length - 1);
 			this.#setCursorCol(0);
