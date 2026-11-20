@@ -3,6 +3,7 @@ name: OMP Nix
 on:
   push:
     branches: [main]
+    tags: ["v*"]
     paths:
       - ".github/workflows/nix.yml"
       - ".cargo/**"
@@ -29,13 +30,21 @@ on:
       - "flake.lock"
       - "nix/**"
       - "bun.lock"
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
 
 concurrency:
-  group: "${{ github.workflow }}-${{ github.ref }}"
-  cancel-in-progress: true
+  # Only evaluation-only runs share a cancellable group; cache builds finish.
+  group: "${{ github.workflow }}-${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && github.ref || github.run_id }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 permissions:
   contents: read
+
+# Community cache for the draft; a project-owned cache can replace this name.
+env:
+  CACHIX_CACHE: aw1cks-omp
 
 jobs:
   evaluate:
@@ -51,3 +60,64 @@ jobs:
         run: nix flake check --all-systems --no-build --show-trace
       - name: Verify generated Bun dependencies
         run: nix build --no-link .#checks.x86_64-linux.bun-lock --show-trace
+
+  # Cache the default package so normal installs can substitute it.
+  # PRs and main branch pushes remain evaluation-only.
+  build:
+    name: Build package (${{ matrix.system }})
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.ref, 'refs/tags/v')
+    needs: evaluate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-22.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: aarch64-darwin
+            runner: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+      - name: Configure public Cachix substitutions
+        uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: ${{ env.CACHIX_CACHE }}
+          # Builds never receive publishing credentials or upload arbitrary paths.
+          skipPush: true
+      - name: Build default omp
+        run: |
+          out=$(nix build .#omp --no-link --print-out-paths --print-build-logs \
+            --show-trace --no-update-lock-file)
+          echo "OMP_OUT=$out" >> "$GITHUB_ENV"
+      - name: Collect explicit cache paths
+        run: |
+          printf '%s\n' "$OMP_OUT" > "$RUNNER_TEMP/omp-cache-paths"
+          # The runtime closure omits these reusable build-only artifacts.
+          nix build .#omp.nativeBuild .#omp.nativeBuild.dependencyArtifacts \
+            --no-link --print-out-paths --show-trace --no-update-lock-file \
+            >> "$RUNNER_TEMP/omp-cache-paths"
+      - name: Smoke-test omp
+        run: |
+          "$OMP_OUT/bin/omp" --version
+          "$OMP_OUT/bin/omp" --smoke-test
+      - name: Publish verified package and native build artifacts
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          if [ -z "${CACHIX_AUTH_TOKEN:-}" ]; then
+            echo "::notice::Skipping cache upload: configure the cache-scoped CACHIX_AUTH_TOKEN secret."
+            exit 0
+          fi
+          cachix push "$CACHIX_CACHE" < "$RUNNER_TEMP/omp-cache-paths"

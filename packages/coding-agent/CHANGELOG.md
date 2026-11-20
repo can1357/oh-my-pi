@@ -5,6 +5,7 @@
 ### Added
 
 - Added a coloured extension status variant to `omp gallery --segment status` ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
+- Added an opt-in community Nix binary cache for Linux x86-64/ARM64 and Apple Silicon installs ([#19344](https://github.com/can1357/oh-my-pi/pull/19344) by [@aw1cks](https://github.com/aw1cks)).
 
 ### Fixed
 
