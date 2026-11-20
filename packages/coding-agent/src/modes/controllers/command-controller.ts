@@ -116,7 +116,7 @@ import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "@oh-my-pi/pi
 import type { UnavailableUsageAccount } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
 
 import { cfgTerminalShowImages } from "../settings";
-import { cfgProviderAppendOnlyContext } from "../../session/settings";
+import { cfgProviderAppendOnlyContext, cfgSessionDeleteEnabled } from "../../session/settings";
 import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../../commands/settings";
 import { flagConsumesValue, restartArgv } from "../../cli/flag-tables";
 import {
@@ -1430,6 +1430,10 @@ export class CommandController {
 	}
 
 	async handleDeleteCommand(): Promise<void> {
+		if (!cfgSessionDeleteEnabled.get(this.ctx.settings)) {
+			this.ctx.showError("Session deletion is disabled (session.delete.enabled=false)");
+			return;
+		}
 		if (!this.ctx.sessionManager.getSessionFile()) {
 			this.ctx.showError("Nothing to delete (in-memory session)");
 			return;

@@ -6,6 +6,7 @@
 
 - Added a coloured extension status variant to `omp gallery --segment status` ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
 - Extensions can identify which eval cell or kernel-defined tool dispatched a nested tool: `tool_call` and `tool_result` now include an optional `parentToolCallId` ([#19823](https://github.com/can1357/oh-my-pi/pull/19823) by [@baekjosh](https://github.com/baekjosh)).
+- `session.delete.enabled` (default true) turns off every user session-delete entry point — `/delete`, `/session delete`, and the resume picker's Backspace/Delete action — which then refuse with a message instead of permanently unlinking the session
 - Sessions now record approval prompts in their session file, even before the first reply: a `tool_approval_requested` entry when a tool call starts waiting on you (naming the dispatching eval call in `parentToolCallId` for calls made from an eval) and a `tool_approval_resolved` entry when it is approved, denied, aborted, or refused, so tools that read session files (sidebars, dashboards) can show a session waiting on approval ([#18837](https://github.com/can1357/oh-my-pi/pull/18837) by [@baekjosh](https://github.com/baekjosh))
 
 ### Changed

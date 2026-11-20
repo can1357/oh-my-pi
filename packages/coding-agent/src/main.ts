@@ -196,6 +196,7 @@ import {
 	cfgOmitThinking,
 	cfgPrewalkEnabled,
 	cfgPrewalkInto,
+	cfgSessionDeleteEnabled,
 	cfgSessionMaxCost,
 	cfgSessionWarnCost,
 	cfgSessionWorktreeScope,
@@ -2314,6 +2315,7 @@ export async function runRootCommand(
 			const picked = await logger.time("selectSession", selectSessionImpl, folder.sessions, {
 				completeSessions: folder.complete,
 				allSessions: preloadedAllSessions,
+				allowDelete: cfgSessionDeleteEnabled.get(settingsInstance),
 			});
 			resumeStartupWatchdog();
 			if (!picked) {

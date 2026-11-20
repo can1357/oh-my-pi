@@ -55,6 +55,20 @@ export const cfgSessionWorktreeScope = register({
 	},
 });
 
+/** Master switch for every user-facing session-delete entry point. */
+export const cfgSessionDeleteEnabled = register({
+	id: "session.delete.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Startup & Updates",
+		label: "Allow Session Deletion",
+		description:
+			"Allow deleting stored sessions: /delete, /session delete, and the resume picker's delete key. Off refuses each with a message instead of unlinking.",
+	},
+});
+
 // Power assertions: macOS IOKit, Linux login1/ScreenSaver, Windows execution state.
 export const cfgPowerSleepPrevention = register({
 	id: "power.sleepPrevention",
