@@ -29,6 +29,7 @@ import {
 	stoppedState,
 } from "./jit";
 import { ASSERT, AT_START, CHAR, holds, MATCH, type Nfa, SPLIT } from "./nfa";
+import type { RegexStream } from "./stream";
 
 /** Pseudo-class for the end of the text. */
 const END = -1;
@@ -446,7 +447,7 @@ export class LazyDfa {
  * {@link RegexStream.push}, {@link RegexStream.matched} is whether the
  * automaton matches all text so far, at the cost of the new chunk only.
  */
-export class RegexStream {
+export class DfaStream implements RegexStream {
 	readonly #dfa: LazyDfa;
 	#state: number;
 	#epoch: number;

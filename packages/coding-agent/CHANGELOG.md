@@ -11,6 +11,7 @@
 
 ### Added
 
+- Accepted Unicode set mode (`v`) in slash-delimited `secrets.yml` regexes.
 - Added the `magic_edit` edit mode (`edit.mode: magic_edit`): `edit` takes changes described in words under one `# path` line per file (or one `<edit file="path">` element with `edit.magic.format: xml`), and a fast model (`edit.magic.model`, by default the `smol` role) writes and applies each file's patch, returning the diffs
 - Sloppy edits can replace, delete or move a syntax block by its opening line without quoting its body, and rename a whole identifier with `*** Find all`
 - MCP servers now run in the omp daemon instead of inside every session: sessions with the same server configuration share one process for servers on MCP 2026-07-28, and `/mcp list` shows each server's state, pid and how many sessions share it. Turn off with `mcp.shared` ([#6819](https://github.com/can1357/oh-my-pi/issues/6819))
@@ -57,6 +58,7 @@
 - The shell's `fd` builtin prints paths like fd: `./path` under an explicit `.`, with `-0`, or when a name starts with `-`; directories end in the path separator; `--strip-cwd-prefix` takes effect, `--format`'s `{//}` is the printed path's parent instead of an absolute one, and `--absolute-path` no longer prints `/./`
 - Sloppy edits reject incomplete Find/action pairs without writing, preserve numeric `||` expressions, and no longer mistake a nested or partial closing line for the end of a block range
 - Edit hooks now report all targeted files when a hashline header ends in whitespace ([#19885](https://github.com/can1357/oh-my-pi/pull/19885) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Sloppy edits no longer match a comment continuation against part of a JSDoc opener, and the `Replace Block` example shows how to retain the declaration.
 - OpenCode v2 MCP configurations now discover servers from `mcp.servers` while continuing to import flat `mcp` entries ([#19863](https://github.com/can1357/oh-my-pi/issues/19863))
 - Fixed ovnfs commands failing with "command not found" when `ovnfs.path` is a Windows path with backslashes, or contains spaces or `$` ([#19874](https://github.com/can1357/oh-my-pi/pull/19874) by [@H4vC](https://github.com/H4vC))
 - Failed browser launches no longer log URL userinfo, query strings (including OAuth device codes), or fragments ([#19844](https://github.com/can1357/oh-my-pi/pull/19844) by [@JustasMasiulis](https://github.com/JustasMasiulis))

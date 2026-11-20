@@ -15,7 +15,7 @@ export function compileSecretRegex(pattern: string, flags?: string): LinearRegEx
 	let resolvedFlags = flags ?? "";
 
 	// Detect regex literal syntax: /pattern/flags
-	const literalMatch = /^\/((?:[^\\/]|\\.)*)\/([ gimsuy]*)$/.exec(pattern);
+	const literalMatch = /^\/((?:[^\\/]|\\.)*)\/([ gimsuvy]*)$/.exec(pattern);
 	if (literalMatch) {
 		resolvedPattern = literalMatch[1];
 		// Merge flags from literal with explicit flags param (deduplicate)

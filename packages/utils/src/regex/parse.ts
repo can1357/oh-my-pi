@@ -1,5 +1,5 @@
 /**
- * Parser for JavaScript `RegExp` sources in legacy and Unicode (`u`) modes.
+ * Parser for JavaScript `RegExp` sources in legacy and Unicode (`u`/`v`) modes.
  *
  * Feeds {@link LinearRegExp}: each atom keeps a standalone source for JSC to
  * classify. Unicode atoms are lowered into sequences of UTF-16 matchers, with
@@ -11,7 +11,9 @@
 
 import {
 	addUnitRange,
+	firstUnit,
 	hasSurrogate,
+	insideSurrogatePair,
 	LEAD_SURROGATE,
 	oracleSet,
 	supplementaryRanges,
@@ -109,7 +111,7 @@ export function capturesWithin(node: RegexNode): [number, number] | undefined {
 export class UnsupportedPatternError extends Error {}
 
 /**
- * Parses a compiled `RegExp` source (except `v` mode).
+ * Parses a compiled `RegExp` source.
  *
  * @throws {UnsupportedPatternError} on unsupported constructs or malformed groups.
  */
@@ -124,24 +126,36 @@ export function parsePattern(source: string, flags = ""): ParsedPattern {
 	return { root, groups: parser.groups, names: parser.names, unicode: parser.unicode, scopedCase: parser.scopedCase };
 }
 
-/** Capturing groups in `source`, counted like JS: `(` and `(?<name>`, outside classes and escapes. */
-export function countCapturingGroups(source: string): number {
+/** Capturing groups in `source`, ignoring escapes and (under `v`) nested classes. */
+export function countCapturingGroups(source: string, flags = ""): number {
+	const unicodeSets = flags.includes("v");
 	let count = 0;
 	for (let index = 0; index < source.length; index++) {
 		const char = source[index];
 		if (char === "\\") index++;
-		else if (char === "[") index = classEnd(source, index) - 1;
+		else if (char === "[") index = classEnd(source, index, unicodeSets) - 1;
 		else if (char === "(" && (source[index + 1] !== "?" || isGroupName(source, index))) count++;
 	}
 	return count;
 }
 
-/** Index just past the class opened at `start`; a non-`v` class ends at the first unescaped `]`. */
-function classEnd(source: string, start: number): number {
-	let index = start + 1;
-	if (source[index] === "^") index++;
-	while (index < source.length && source[index] !== "]") index += source[index] === "\\" ? 2 : 1;
-	return index + 1;
+/** Index just past the class opened at `start`; in `v` only unescaped brackets can nest. */
+function classEnd(source: string, start: number, unicodeSets: boolean): number {
+	let depth = 1;
+	for (let index = start + 1; index < source.length; index++) {
+		switch (source[index]) {
+			case "\\":
+				index++;
+				break;
+			case "[":
+				if (unicodeSets) depth++;
+				break;
+			case "]":
+				if (--depth === 0) return index + 1;
+				break;
+		}
+	}
+	return source.length + 1;
 }
 
 /** Whether the `(` at `index` opens a named group `(?<name>`, not a lookbehind. */
@@ -151,11 +165,11 @@ function isGroupName(source: string, index: number): boolean {
 	);
 }
 
-function hasNamedGroups(source: string): boolean {
+function hasNamedGroups(source: string, unicodeSets: boolean): boolean {
 	for (let index = 0; index < source.length; index++) {
 		const char = source[index];
 		if (char === "\\") index++;
-		else if (char === "[") index = classEnd(source, index) - 1;
+		else if (char === "[") index = classEnd(source, index, unicodeSets) - 1;
 		else if (char === "(" && isGroupName(source, index)) return true;
 	}
 	return false;
@@ -265,6 +279,128 @@ function readHex(source: string, start: number, digits: number): number | undefi
 	return hex.length === digits && HEX.test(hex) ? Number.parseInt(hex, 16) : undefined;
 }
 
+/** Reads `\uXXXX`, the paired spelling of a supplementary point, or `\u{...}`. */
+function readUnicodeEscape(source: string, start: number, unicode: boolean): { code: number; end: number } | undefined {
+	if (unicode && source[start + 2] === "{") {
+		const close = source.indexOf("}", start + 3);
+		return { code: Number.parseInt(source.slice(start + 3, close), 16), end: close + 1 };
+	}
+	const code = readHex(source, start + 2, 4);
+	if (code === undefined) return undefined;
+	const end = start + 6;
+	if (unicode && code >= LEAD_SURROGATE && code < TRAIL_SURROGATE && source.startsWith("\\u", end)) {
+		const trail = readHex(source, end + 2, 4);
+		if (trail !== undefined && trail >= TRAIL_SURROGATE && trail < SURROGATE_END) {
+			return { code: 0x10000 + ((code - LEAD_SURROGATE) << 10) + trail - TRAIL_SURROGATE, end: end + 6 };
+		}
+	}
+	return { code, end };
+}
+
+/** Only `v` recognizes properties of strings. Use the engine's property names, not a Unicode snapshot. */
+function requireCodePointProperty(source: string): void {
+	try {
+		new RegExp(source, "u");
+	} catch (error) {
+		if (!(error instanceof SyntaxError)) throw error;
+		throw new UnsupportedPatternError(`v-mode property of strings: ${source}`);
+	}
+}
+
+const CLASS_SET_ESCAPE = "^$\\.*+?()[]{}|/&-!#%,:;<=>@`~";
+
+/** Decodes one `\q` alternative and stops at its unescaped delimiter. */
+function readClassString(
+	source: string,
+	start: number,
+): { text: string; end: number; codePoints: number; matchable: boolean } {
+	let text = "";
+	let codePoints = 0;
+	let matchable = true;
+	let index = start;
+	while (index < source.length) {
+		const char = source[index]!;
+		if (char === "|" || char === "}") return { text, end: index, codePoints, matchable };
+		let code: number | undefined;
+		if (char !== "\\") {
+			code = source.codePointAt(index)!;
+			index += code > 0xffff ? 2 : 1;
+		} else {
+			const escape = source[index + 1]!;
+			if (escape === "u") {
+				const value = readUnicodeEscape(source, index, true);
+				code = value?.code;
+				index = value?.end ?? index + 2;
+			} else {
+				index += 2;
+				const control = CONTROL_ESCAPES[escape];
+				if (control !== undefined) code = control;
+				else if (escape === "b") code = 0x08;
+				else if (escape === "0") code = 0;
+				else if (escape === "x") {
+					code = readHex(source, index, 2);
+					index += 2;
+				} else if (escape === "c") {
+					const letter = source[index++];
+					if (isAsciiLetter(letter)) code = letter!.charCodeAt(0) % 32;
+				} else if (CLASS_SET_ESCAPE.includes(escape)) {
+					code = escape.charCodeAt(0);
+				}
+			}
+		}
+		if (code === undefined) throw new UnsupportedPatternError("unsupported escape in v-mode class string");
+		const boundary = text.length;
+		text += String.fromCodePoint(code);
+		// Two separately escaped surrogates are distinct set elements but can
+		// never match adjacent input code points if they form a pair.
+		matchable &&= !insideSurrogatePair(text, boundary);
+		codePoints++;
+	}
+	throw new UnsupportedPatternError("unterminated v-mode class string");
+}
+
+/**
+ * Projects a `v` class onto one-code-point members and collects its finite string candidates.
+ * Projection distributes over set operations, so preserving the syntax leaves the engine in
+ * charge of deciding membership. Without string properties, any other member must originate
+ * in a `\q` operand; intersection and subtraction cannot create new strings.
+ */
+function inspectUnicodeSet(source: string): { points: string; strings?: Map<string, number> } {
+	let strings: Map<string, number> | undefined;
+	let points = "";
+	let copied = 0;
+	for (let index = 0; index < source.length; index++) {
+		if (source[index] !== "\\") continue;
+		const escape = source[++index];
+		if (escape === "p" || escape === "P") {
+			const end = source.indexOf("}", index + 2);
+			requireCodePointProperty(source.slice(index - 1, end + 1));
+			index = end;
+		} else if (escape === "q") {
+			const start = index - 1;
+			let next = index + 2;
+			const singles: string[] = [];
+			let removed = false;
+			for (;;) {
+				const alternative = readClassString(source, next);
+				if (alternative.codePoints === 1) singles.push(source.slice(next, alternative.end));
+				else {
+					if (alternative.matchable) (strings ??= new Map()).set(alternative.text, alternative.codePoints);
+					removed = true;
+				}
+				index = alternative.end;
+				if (source[index] === "}") break;
+				next = index + 1;
+			}
+			if (removed) {
+				points += source.slice(copied, start) + (singles.length ? `\\q{${singles.join("|")}}` : "[]");
+				copied = index + 1;
+			}
+		}
+	}
+	return { points: copied ? points + source.slice(copied) : source, strings };
+}
+
 class Parser {
 	pos = 0;
 	readonly groups: RegexNode[] = [];
@@ -272,6 +408,7 @@ class Parser {
 	readonly #source: string;
 	readonly #groupCount: number;
 	readonly #namedGroups: boolean;
+	readonly #unicodeSets: boolean;
 	readonly unicode: boolean;
 	scopedCase = false;
 	readonly #outerFlags: string;
@@ -280,11 +417,12 @@ class Parser {
 	#nextGroup = 1;
 
 	constructor(source: string, flags: string) {
-		this.unicode = flags.includes("u");
+		this.#unicodeSets = flags.includes("v");
+		this.unicode = this.#unicodeSets || flags.includes("u");
 		this.#outerFlags = flags;
 		this.#source = source;
-		this.#groupCount = countCapturingGroups(source);
-		this.#namedGroups = hasNamedGroups(source);
+		this.#groupCount = countCapturingGroups(source, flags);
+		this.#namedGroups = hasNamedGroups(source, this.#unicodeSets);
 	}
 
 	disjunction(): RegexNode {
@@ -322,7 +460,7 @@ class Parser {
 		if (char === "(") {
 			atom = this.#group();
 		} else if (char === "[") {
-			const end = classEnd(source, this.pos);
+			const end = classEnd(source, this.pos, this.#unicodeSets);
 			atom = this.#unit(source.slice(this.pos, end));
 			this.pos = end;
 		} else if (char === "\\") {
@@ -400,14 +538,58 @@ class Parser {
 		if (!this.unicode) return { type: "unit", source, code, ignoreCase, dotAll };
 		const folded = ignoreCase ?? this.#outerFlags.includes("i");
 		const matchesAll = source === "." && (dotAll ?? this.#outerFlags.includes("s"));
-		const flags = `${folded ? "i" : ""}${matchesAll ? "s" : ""}u`;
+		const flags = `${folded ? "i" : ""}${matchesAll ? "s" : ""}${this.#unicodeSets ? "v" : "u"}`;
 		const key = `${flags}/${source}`;
 		let node = this.#lowered.get(key);
 		if (!node) {
-			node = lowerUnit(source, flags, code);
+			if (this.#unicodeSets && source[0] === "[") {
+				node = this.#lowerSet(source, flags);
+			} else {
+				if (this.#unicodeSets && (source.startsWith("\\p{") || source.startsWith("\\P{"))) {
+					requireCodePointProperty(source);
+				}
+				node = lowerUnit(source, flags, code);
+			}
 			this.#lowered.set(key, node);
 		}
 		return node;
+	}
+
+	#lowerSet(source: string, flags: string): RegexNode {
+		const { points, strings } = inspectUnicodeSet(source);
+		const single = lowerUnit(points, flags, undefined);
+		if (!strings) return single;
+
+		// The class itself decides membership, including case folding and set operations.
+		const whole = new RegExp(`^(?:${source})(?![\\s\\S])`, flags);
+		const options: RegexNode[] = [];
+		const ordered: [string, number][] = [];
+		for (const entry of strings) {
+			if (entry[0] !== "" && whole.test(entry[0])) ordered.push(entry);
+		}
+		ordered.sort((left, right) => right[1] - left[1]);
+		for (const [text] of ordered) {
+			const items: RegexNode[] = [];
+			for (const char of text) {
+				const code = char.codePointAt(0)!;
+				items.push(this.#unit(literalSource(code), code));
+			}
+			options.push({ type: "seq", items });
+		}
+
+		if (strings.has("") && whole.test("")) {
+			const empty: RegexNode = { type: "seq", items: [] };
+			const point = firstUnit(oracleSet(points, flags)) ?? supplementaryRanges(points, flags)[0];
+			// JSC can put its empty branch before the singleton class. Observe the
+			// actual priority, without a suffix forcing either alternative to retry.
+			const emptyFirst =
+				point !== undefined && new RegExp(`^(?:${source})`, flags).exec(String.fromCodePoint(point))?.[0] === "";
+			if (emptyFirst) options.push(empty, single);
+			else options.push(single, empty);
+		} else {
+			options.push(single);
+		}
+		return options.length === 1 ? single : { type: "alt", options };
 	}
 
 	#backreference(target: string | number): RegexNode {
@@ -436,24 +618,8 @@ class Parser {
 				return code === undefined ? unit(2, 0x78) : unit(4, code);
 			}
 			case "u": {
-				if (this.unicode && source[start + 2] === "{") {
-					const end = source.indexOf("}", start + 3);
-					return unit(end + 1 - start, Number.parseInt(source.slice(start + 3, end), 16));
-				}
-				const code = readHex(source, start + 2, 4);
-				if (
-					this.unicode &&
-					code !== undefined &&
-					code >= LEAD_SURROGATE &&
-					code < TRAIL_SURROGATE &&
-					source.startsWith("\\u", start + 6)
-				) {
-					const trail = readHex(source, start + 8, 4);
-					if (trail !== undefined && trail >= TRAIL_SURROGATE && trail < SURROGATE_END) {
-						return unit(12, 0x10000 + ((code - LEAD_SURROGATE) << 10) + trail - TRAIL_SURROGATE);
-					}
-				}
-				return code === undefined ? unit(2, 0x75) : unit(6, code);
+				const escape = readUnicodeEscape(source, start, this.unicode);
+				return escape === undefined ? unit(2, 0x75) : unit(escape.end - start, escape.code);
 			}
 			case "p":
 			case "P":

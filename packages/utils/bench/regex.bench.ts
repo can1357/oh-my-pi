@@ -61,6 +61,24 @@ await group(
 	scanCases(String.raw`(?=\w+@)\w+@[a-z0-9.]+`, "g", dense),
 );
 
+await group(
+	"ambiguous Unicode set repetition, no match",
+	{ samples: 5 },
+	scanCases(String.raw`^(?:[[a-z]--[q]]+|[a-z])*(!)$`, "gv", `${"a".repeat(16)}q`),
+);
+await group(
+	"large counted run with a terminal assertion, 22,000 units, no match",
+	{ samples: 5 },
+	scanCases("a{20000,30000}$", "g", `${"a".repeat(22_000)}!`),
+);
+const words = Array.from({ length: 2500 }, (_, index) => `ab${String.fromCharCode(0x3400 + index)}cd`);
+const dictionaryMisses = `${"ab??cd ".repeat(25_000)}${words[2499]}`;
+await group(
+	"2,500 literal alternatives with a common prefix, late match",
+	{ units: dictionaryMisses.length, unit: "char" },
+	scanCases(`(${words.join("|")})`, "g", dictionaryMisses),
+);
+
 // The #19147 rule shape: every extra body line multiplies the native engine's work.
 const rule = "^[ \\t]*def[ \\t]+[^\\n]+\\n(?:[ \\t]+[^\\n]*\\n|[ \\t]*\\n)*?[ \\t]+import ";
 const body = (lines: number): string =>

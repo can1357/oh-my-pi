@@ -21,9 +21,10 @@
  *   a step budget. What it cannot afford it hands to the two above.
  *
  * A small set of patterns proven to have linear search cost use native `exec`
- * and keep the automaton for streaming. Unicode (`u`) atoms are lowered to
- * UTF-16, with guards at code-point boundaries. Unsupported constructs
- * (including `v` and patterns exceeding the engine's size limits) keep the native engine.
+ * and keep the automaton for streaming. Unicode atoms are lowered to UTF-16,
+ * with guards at code-point boundaries. Large literal vocabularies and large
+ * single-unit runs have their own scanners rather than expanded automata.
+ * Unsupported constructs and other patterns beyond engine limits keep the native engine.
  *
  * @example
  * const condition = new LinearRegExp("^def[^\\n]*\\n(?:[ \\t]+[^\\n]*\\n|[ \\t]*\\n)*?[ \\t]+import ", "m");
@@ -32,11 +33,14 @@
 import * as logger from "../logger";
 import { insideSurrogatePair, OracleMismatchError } from "./alphabet";
 import { type BacktrackMatch, Backtracker, type MemoLimits } from "./backtrack";
-import { type DfaLimits, LazyDfa, RegexStream } from "./dfa";
+import { type DfaLimits, DfaStream, LazyDfa } from "./dfa";
+import { compileLiteralAlternatives } from "./literal-alternatives";
 import { canUseNativeExec } from "./native-exec";
-import { CharClasses, compileNfa } from "./nfa";
+import { CharClasses, compileNfa, type PatternFlags } from "./nfa";
 import { type ParsedPattern, parsePattern, type RegexNode, UnsupportedPatternError } from "./parse";
 import { scanPrefix } from "./scanner-prefix";
+import type { RegexStream } from "./stream";
+import { compileWideRun } from "./wide-run";
 
 /**
  * A positive lookaround the whole pattern starts with, as an automaton marking
@@ -86,13 +90,27 @@ function leadingLookarounds(root: RegexNode): Extract<RegexNode, { type: "look" 
 	return looks;
 }
 
-/** One compiled pattern: automata for existence, backtracker for the match itself. */
-class Engine {
-	/** Whether the automaton decides alone (no lookarounds or backreferences). */
+interface Matcher {
+	test(text: string, from: number): boolean;
+	match(text: string, from: number): BacktrackMatch | undefined;
+	stream(): RegexStream;
+}
+
+interface CompiledPattern {
+	matcher: Matcher;
+	names: ParsedPattern["names"];
+	exact: boolean;
+	native?: RegExp;
+}
+
+interface MatchFlags extends PatternFlags {
+	sticky: boolean;
+}
+
+/** Automata for existence and a backtracker for the exact match. */
+class Engine implements Matcher {
 	readonly regular: boolean;
-	/** Private matcher for patterns proven to run in linear time natively. */
 	readonly native: RegExp | undefined;
-	readonly #pattern: ParsedPattern;
 	readonly #classes: CharClasses;
 	readonly #anchored: boolean;
 	readonly #forward: LazyDfa;
@@ -103,34 +121,33 @@ class Engine {
 	readonly #marks = new Uint8Array(SCRATCH);
 	readonly #filterMarks = new Uint8Array(SCRATCH);
 
-	constructor(source: string, flagSet: string, limits: EngineLimits) {
-		const flags = {
-			ignoreCase: flagSet.includes("i"),
-			multiline: flagSet.includes("m"),
-			dotAll: flagSet.includes("s"),
-		};
+	constructor(
+		source: string,
+		flagSet: string,
+		pattern: ParsedPattern,
+		classes: CharClasses,
+		flags: MatchFlags,
+		limits: EngineLimits,
+	) {
 		this.#limits = limits;
-		this.#pattern = parsePattern(source, flagSet);
-		this.#classes = new CharClasses(this.#pattern, flags);
-		this.#anchored = flagSet.includes("y");
-		const looks = this.#anchored ? [] : leadingLookarounds(this.#pattern.root);
-		if (canUseNativeExec(this.#pattern, this.#classes)) {
+		this.#classes = classes;
+		this.#anchored = flags.sticky;
+		const looks = this.#anchored ? [] : leadingLookarounds(pattern.root);
+		if (canUseNativeExec(pattern, classes)) {
 			// A leading lookbehind can be much cheaper to find forwards than to test at each start.
-			const prefix = looks.some(look => look.behind)
-				? scanPrefix(this.#pattern.root, this.#classes, flags)
-				: undefined;
+			const prefix = looks.some(look => look.behind) ? scanPrefix(pattern.root, classes, flags) : undefined;
 			if (!prefix || prefix.kind === "run" || prefix.low >= 0) this.native = new RegExp(source, flagSet);
 		}
 		/** Unanchored automaton for `root`: marks where it can start (`reverse`) or end. */
 		const marker = (root: RegexNode, reverse: boolean): LazyDfa =>
-			new LazyDfa(compileNfa({ ...this.#pattern, root }, this.#classes, flags.multiline, reverse), false, limits);
-		const forward = compileNfa(this.#pattern, this.#classes, flags.multiline, false);
+			new LazyDfa(compileNfa({ ...pattern, root }, classes, flags.multiline, reverse), false, limits);
+		const forward = compileNfa(pattern, classes, flags.multiline, false);
 		this.regular = forward.exact;
 		this.#forward = new LazyDfa(forward, this.#anchored, limits);
-		this.#reverse = this.#anchored ? undefined : marker(this.#pattern.root, true);
+		this.#reverse = this.#anchored ? undefined : marker(pattern.root, true);
 		// Without them the automata drop lookarounds, so `(?<=password=)\S+` could start almost anywhere.
 		this.#filters = looks.map(look => ({ dfa: marker(look.body, !look.behind), behind: look.behind }));
-		this.#backtracker = new Backtracker(this.#pattern, this.#classes, flags, limits);
+		this.#backtracker = new Backtracker(pattern, classes, flags, limits);
 	}
 
 	/** Whether a match starts at or after `from`. */
@@ -151,55 +168,7 @@ class Engine {
 	}
 
 	stream(): RegexStream {
-		return new RegexStream(this.#forward);
-	}
-
-	/** The `exec` result for a match. */
-	execArray(text: string, match: BacktrackMatch, withIndices: boolean): RegExpExecArray {
-		const { registers } = match;
-		const count = registers.length / 2;
-		const whole = text.slice(match.start, match.end);
-		const values = [whole];
-		for (let group = 1; group < count; group++) {
-			const start = registers[2 * group]!;
-			if (start >= 0) values[group] = text.slice(start, registers[2 * group + 1]);
-			else defineUndefined(values, group);
-		}
-		const names = this.#pattern.names;
-		let groups: Record<string, string> | undefined;
-		if (names.size > 0) {
-			groups = Object.create(null);
-			for (const [name, indices] of names) {
-				// Duplicate names sit in different alternatives: at most one participated.
-				const index = indices.find(group => registers[2 * group]! >= 0);
-				if (index === undefined) defineUndefined(groups!, name);
-				else groups![name] = values[index]!;
-			}
-		}
-		attachMatchMetadata(values, match.start, text, groups);
-		if (withIndices) values.indices = this.#indices(match);
-		return values;
-	}
-
-	/** The `indices` of an `exec` result under the `d` flag. */
-	#indices({ start, end, registers }: BacktrackMatch): RegExpIndicesArray {
-		const spans: RegExpIndicesArray = [[start, end]];
-		for (let group = 1; group < registers.length / 2; group++) {
-			if (registers[2 * group]! >= 0) spans[group] = [registers[2 * group]!, registers[2 * group + 1]!];
-			else defineUndefined(spans, group);
-		}
-		const names = this.#pattern.names;
-		let groups: Record<string, [number, number]> | undefined;
-		if (names.size > 0) {
-			groups = Object.create(null);
-			for (const [name, indices] of names) {
-				const index = indices.find(group => registers[2 * group]! >= 0);
-				if (index === undefined) defineUndefined(groups!, name);
-				else groups![name] = spans[index]!;
-			}
-		}
-		spans.groups = groups;
-		return spans;
+		return new DfaStream(this.#forward);
 	}
 
 	#firstMatchEnd(text: string, from: number): number {
@@ -243,6 +212,49 @@ class Engine {
 	}
 }
 
+/** Formats captures and metadata identically for every matcher. */
+function execArray(
+	text: string,
+	match: BacktrackMatch,
+	names: ParsedPattern["names"],
+	withIndices: boolean,
+): RegExpExecArray {
+	const { registers } = match;
+	const values = [text.slice(match.start, match.end)];
+	for (let group = 1; group < registers.length / 2; group++) {
+		const start = registers[2 * group]!;
+		if (start >= 0) values[group] = text.slice(start, registers[2 * group + 1]);
+		else defineUndefined(values, group);
+	}
+	attachMatchMetadata(values, match.start, text, namedGroups(names, registers, values));
+	if (withIndices) {
+		const spans: RegExpIndicesArray = [[match.start, match.end]];
+		for (let group = 1; group < registers.length / 2; group++) {
+			if (registers[2 * group]! >= 0) spans[group] = [registers[2 * group]!, registers[2 * group + 1]!];
+			else defineUndefined(spans, group);
+		}
+		spans.groups = namedGroups<[number, number]>(names, registers, spans);
+		values.indices = spans;
+	}
+	return values;
+}
+
+function namedGroups<T>(
+	names: ParsedPattern["names"],
+	registers: Int32Array,
+	values: readonly (T | undefined)[],
+): Record<string, T> | undefined {
+	if (names.size === 0) return undefined;
+	const groups: Record<string, T> = Object.create(null);
+	for (const [name, indices] of names) {
+		// Duplicate names sit in different alternatives: at most one participated.
+		const index = indices.find(group => registers[2 * group]! >= 0);
+		if (index === undefined) defineUndefined(groups, name);
+		else groups[name] = values[index]!;
+	}
+	return groups;
+}
+
 /** Gives the captures array the own metadata properties of a native `exec` result. */
 function attachMatchMetadata(
 	values: string[],
@@ -272,7 +284,7 @@ function toLength(value: unknown): number {
  * Construct it like `RegExp`; everything that matches through `exec` follows.
  */
 export class LinearRegExp extends RegExp {
-	#engine: Engine | null | undefined;
+	#engine: CompiledPattern | null | undefined;
 	readonly #limits: EngineLimits;
 
 	/**
@@ -302,16 +314,16 @@ export class LinearRegExp extends RegExp {
 			return result;
 		}
 		// Unicode matching at the second unit of a pair starts at the beginning of that code point.
-		if (this.unicode && insideSurrogatePair(text, from)) from--;
+		if ((this.unicode || this.unicodeSets) && insideSurrogatePair(text, from)) from--;
 		// `toLength` leaves the index double-tagged; at most `text.length` it fits int32, which the JIT code
 		// below speculates on (a double index makes every scan bail out of optimized code).
-		const match = from > text.length ? undefined : engine.match(text, from | 0);
+		const match = from > text.length ? undefined : engine.matcher.match(text, from | 0);
 		if (!match) {
 			if (advancing) this.lastIndex = 0;
 			return null;
 		}
 		if (advancing) this.lastIndex = match.end;
-		return engine.execArray(text, match, this.hasIndices);
+		return execArray(text, match, engine.names, this.hasIndices);
 	}
 
 	override test(string: string): boolean {
@@ -319,7 +331,7 @@ export class LinearRegExp extends RegExp {
 		if (!engine) return super.test(string);
 		if (this.global || this.sticky) return this.exec(string) !== null;
 		const text = String(string);
-		return engine.native ? engine.native.test(text) : engine.test(text, 0);
+		return engine.native ? engine.native.test(text) : engine.matcher.test(text, 0);
 	}
 
 	/**
@@ -328,26 +340,45 @@ export class LinearRegExp extends RegExp {
 	 * "yes" is final only when {@link LinearRegExp.streamsExactly}.
 	 */
 	stream(): RegexStream | undefined {
-		return this.#compiled()?.stream();
+		return this.#compiled()?.matcher.stream();
 	}
 
 	/** Whether {@link LinearRegExp.stream} answers exactly (no lookarounds or backreferences). */
 	get streamsExactly(): boolean {
-		return this.#compiled()?.regular ?? false;
+		return this.#compiled()?.exact ?? false;
 	}
 
-	#compiled(): Engine | null {
+	#compiled(): CompiledPattern | null {
 		if (this.#engine === undefined) this.#engine = compile(this, this.#limits);
 		return this.#engine;
 	}
 }
 
-function compile(regex: RegExp, limits: EngineLimits): Engine | null {
-	const flags = regex.flags;
-	if (flags.includes("v")) return null;
+function compile(regex: RegExp, limits: EngineLimits): CompiledPattern | null {
+	const source = regex.source;
+	const flagSet = regex.flags;
+	const flags: MatchFlags = {
+		ignoreCase: flagSet.includes("i"),
+		multiline: flagSet.includes("m"),
+		dotAll: flagSet.includes("s"),
+		sticky: flagSet.includes("y"),
+	};
+	let pattern: ParsedPattern | undefined;
 	try {
-		return new Engine(regex.source, flags, limits);
+		pattern = parsePattern(source, flagSet);
+		const names = pattern.names;
+		const literals = compileLiteralAlternatives(pattern, flags);
+		if (literals) return { matcher: literals, names, exact: true };
+		const classes = new CharClasses(pattern, flags);
+		const run = compileWideRun(pattern, classes, flags);
+		if (run) return { matcher: run, names, exact: true };
+		const engine = new Engine(source, flagSet, pattern, classes, flags, limits);
+		return { matcher: engine, names, exact: engine.regular, native: engine.native };
 	} catch (error) {
+		if (pattern && error instanceof RangeError) {
+			const literals = compileLiteralAlternatives(pattern, flags, true);
+			if (literals) return { matcher: literals, names: pattern.names, exact: true };
+		}
 		if (
 			error instanceof UnsupportedPatternError ||
 			error instanceof OracleMismatchError ||

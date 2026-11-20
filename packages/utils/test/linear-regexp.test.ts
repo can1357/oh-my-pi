@@ -607,15 +607,93 @@ describe("LinearRegExp covers the RegExp surface", () => {
 		}
 	});
 
-	it("leaves v-mode sets and oversized quantifiers to the native engine", () => {
-		const cases: [string, string, string][] = [
-			[String.raw`[\p{L}--[a-z]]`, "v", "aÑb"],
-			["a{1,20000}", "", "aaa"],
-		];
-		for (const [source, flagSet, text] of cases) {
-			const linear = new LinearRegExp(source, flagSet);
+	it("lowers Unicode sets without changing folded complements, code-point offsets, or captures", () => {
+		const cases = [
+			[String.raw`(?<letter>[[\p{L}--[a-z]]&&[^\p{Script=Greek}]])+`, "dgv", "xÑÅΔ𐐀βb中"],
+			[String.raw`(\P{Lowercase_Letter})`, "dgiv", "kKKſ𐐀𐐨ǅ!123"],
+			[String.raw`(?<symbol>[[\p{Emoji}&&[\u{1f600}-\u{1f64f}]]--[😀]])`, "dyv", "😁😀😃"],
+			[String.raw`(?<letter>[[A-Z]--[I]]+)\k<letter>`, "dgiv", "abcdefgh BCbc IKik"],
+			[String.raw`(?<word>[\q{a|ab}])b$`, "dgv", "abb"],
+			[String.raw`^[\q{ab|abc}--\q{ab}]$`, "dgv", "abc"],
+			[String.raw`(?<word>[\q{ab|a|}])`, "dgv", "ab a b"],
+			[String.raw`(?<word>[\q{😀x|😀}]+)!`, "dgv", "😀x😀!"],
+		] as const;
+		for (const [source, flags, text] of cases) {
+			const linear = new LinearRegExp(source, flags);
+			const native = new RegExp(source, flags);
+			const stream = linear.stream();
+			expect(stream).toBeDefined();
+			for (let from = 0; from <= text.length; from++) {
+				linear.lastIndex = native.lastIndex = from;
+				expect(linear.exec(text)).toEqual(native.exec(text));
+				expect(linear.lastIndex).toBe(native.lastIndex);
+			}
+			if (flags.includes("y")) continue;
+			for (let end = 1; end <= text.length; end++) {
+				stream!.push(text[end - 1]!);
+				native.lastIndex = 0;
+				const found = native.test(text.slice(0, end));
+				if (linear.streamsExactly || found) expect(stream!.matched).toBe(found);
+			}
+		}
+	});
+
+	it("finds the first long counted run and preserves its selected width and captures", () => {
+		const text = `!${"0".repeat(20_002)}!`;
+		for (const [source, flags, from] of [
+			[String.raw`(?<digits>\d{20000,20001})`, "dg", 0],
+			[String.raw`(?<digits>\d{20000,20001}?)`, "dgy", 2],
+			[String.raw`^(?<digits>\d{20000,})$`, "dgm", 0],
+		] as const) {
+			const input = flags.includes("m") ? `skip\n${text.slice(1, -1)}\nend` : text;
+			const linear = new LinearRegExp(source, flags);
+			const native = new RegExp(source, flags);
+			expect(linear.streamsExactly).toBe(true);
+			linear.lastIndex = native.lastIndex = from;
+			expect(linear.exec(input)).toEqual(native.exec(input));
+			expect(linear.lastIndex).toBe(native.lastIndex);
+		}
+		const endAnchored = new LinearRegExp(String.raw`(?<tail>a{20000,30000})$`, "dg");
+		const longRun = "a".repeat(80_000);
+		expect(endAnchored.exec(`${longRun}!`)).toBeNull();
+		expect(endAnchored.exec(longRun)?.indices?.groups?.tail).toEqual([50_000, 80_000]);
+		const stream = new LinearRegExp(String.raw`^0{20000,20001}$`).stream()!;
+		stream.push("0".repeat(19_999));
+		expect(stream.matched).toBe(false);
+		stream.push("00");
+		expect(stream.matched).toBe(true);
+		stream.push("0");
+		expect(stream.matched).toBe(false);
+	});
+
+	it("keeps native priority and indices when a large vocabulary uses the literal matcher", () => {
+		const words = Array.from({ length: 1_200 }, (_, index) => `key-${String.fromCharCode(0x3400 + index)}-end`);
+		const source = `(?<key>${[...words, "abcd", "ab", "xyz", "xyz-more"].join("|")})`;
+		const text = `miss abcdef ${words[1199]} xyz-more`;
+		const linear = new LinearRegExp(source, "dgu");
+		const native = new RegExp(source, "dgu");
+		expect(linear.streamsExactly).toBe(true);
+		expect([...text.matchAll(linear)]).toEqual([...text.matchAll(native)]);
+		const stream = linear.stream()!;
+		stream.push("key-");
+		expect(stream.matched).toBe(false);
+		stream.push(words[1199]!.slice(4));
+		expect(stream.matched).toBe(true);
+		const sticky = new LinearRegExp(source, "dgy");
+		sticky.lastIndex = 4;
+		expect(sticky.exec(text)).toBeNull();
+		expect(sticky.lastIndex).toBe(0);
+	});
+
+	it("keeps native fallback for unsupported string properties and complex oversized repeats", () => {
+		for (const [source, flags, text] of [
+			[String.raw`\p{RGI_Emoji}`, "v", "a👨‍👩‍👧‍👦b"],
+			[String.raw`[\p{RGI_Emoji}]`, "v", "a👨‍👩‍👧‍👦b"],
+			["(?:ab|cd){20000}", "", "abc"],
+		] as const) {
+			const linear = new LinearRegExp(source, flags);
 			expect(linear.stream()).toBeUndefined();
-			expect(linear.exec(text)).toEqual(new RegExp(source, flagSet).exec(text));
+			expect(linear.exec(text)).toEqual(new RegExp(source, flags).exec(text));
 		}
 	});
 

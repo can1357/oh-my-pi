@@ -58,6 +58,15 @@ function has(set: UnitSet, unit: number): boolean {
 	return (set[unit >>> 5]! & (1 << (unit & 31))) !== 0;
 }
 
+/** The first member of a code-unit set, if any. */
+export function firstUnit(set: UnitSet): number | undefined {
+	for (let word = 0; word < set.length; word++) {
+		const bits = set[word]!;
+		if (bits) return word * 32 + 31 - Math.clz32(bits & -bits);
+	}
+	return undefined;
+}
+
 /** The set holding every code unit except the units left in `rest`. */
 function complementOf(rest: string): UnitSet {
 	const set = new Uint32Array(SET_WORDS).fill(0xffffffff);
@@ -168,17 +177,17 @@ export function oracleSet(source: string, flags: string): UnitSet {
 	// Removing whole runs keeps the replace to a few matches even for sets like `.` or `[^\n]`.
 	const units = unitString();
 	// Keep every surrogate isolated; in ascending order the middle two form a pair.
-	const text = flags.includes("u")
-		? (unicodeUnits ??=
-				units.slice(0, LEAD_SURROGATE) +
-				units.slice(TRAIL_SURROGATE, SURROGATE_END) +
-				units.slice(LEAD_SURROGATE, TRAIL_SURROGATE) +
-				units.slice(SURROGATE_END))
-		: units;
+	const text =
+		flags.includes("u") || flags.includes("v")
+			? (unicodeUnits ??=
+					units.slice(0, LEAD_SURROGATE) +
+					units.slice(TRAIL_SURROGATE, SURROGATE_END) +
+					units.slice(LEAD_SURROGATE, TRAIL_SURROGATE) +
+					units.slice(SURROGATE_END))
+			: units;
 	const set = complementOf(text.replace(new RegExp(`(?:${source})+`, `${flags}g`), ""));
-	let member = 0;
-	while (member < UNIT_COUNT && !has(set, member)) member++;
-	if (member < UNIT_COUNT && !new RegExp(`^(?:${source})$`, flags).test(String.fromCharCode(member))) {
+	const member = firstUnit(set);
+	if (member !== undefined && !new RegExp(`^(?:${source})$`, flags).test(String.fromCharCode(member))) {
 		throw new OracleMismatchError(`"${source}" does not match one code unit`);
 	}
 	if (oracleCache.size >= ORACLE_CACHE_LIMIT) oracleCache.clear();
