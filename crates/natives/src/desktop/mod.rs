@@ -2207,7 +2207,7 @@ impl SessionCore {
 		wait: impl FnOnce(
 			&flume::Receiver<CoreResult<Response>>,
 			Instant,
-		) -> Result<CoreResult<Response>, flume::RecvTimeoutError>,
+		) -> std::result::Result<CoreResult<Response>, flume::RecvTimeoutError>,
 	) -> CoreResult<Response> {
 		token.check()?;
 		// Rendezvous delivery: a timed-out/dropped caller must never commit a
