@@ -1521,6 +1521,22 @@ export function searchPathTier(args: unknown): ToolTier {
  *  4. derive a single search base path / glob, or a multi-target list,
  *  5. stat the resolved base path through `filesystem` so callers can branch on directory vs file scope.
  */
+const EMBEDDED_SHELL_FLAG_RE = /^(.*?)\s+(--[A-Za-z][\w-]*(?:=\S*)?)(?:\s.*)?$/s;
+
+/**
+ * A `path` like `/repo --include=x.ts` is a shell command line pasted into one
+ * argument, never a directory. Refuse it before any stat and name both halves.
+ */
+function rejectEmbeddedShellFlag(rawPath: string): void {
+	const match = EMBEDDED_SHELL_FLAG_RE.exec(rawPath);
+	if (!match) return;
+	const directory = match[1]!.trim();
+	const flag = match[2]!;
+	throw new ToolError(
+		`Path contains a shell flag: directory ${JSON.stringify(directory)} and flag ${JSON.stringify(flag)} were passed as one \`path\`. Pass only the directory as \`path\` and move the flag into the tool's own filter parameter (glob, pattern, or type).`,
+	);
+}
+
 export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<ToolScopeResolution> {
 	const { rawPaths: inputs, cwd, internalUrlAction } = opts;
 	const normalizedRawPaths = inputs.map(normalizePathLikeInput);
@@ -1531,6 +1547,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 	if (rawPaths.some(rawPath => rawPath.length === 0)) {
 		throw new ToolError("Search scope entries must be non-empty paths or globs");
 	}
+	for (const rawPath of rawPaths) rejectEmbeddedShellFlag(rawPath);
 	// Strict external-URL schemes. `file://` is intentionally absent: it has
 	// local-path semantics (expandPath strips it downstream), so it flows through
 	// the ordinary filesystem pipeline instead of the external-URL resolver.
