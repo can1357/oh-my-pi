@@ -136,6 +136,7 @@ Options:
   --tasks <ids>              Comma-separated task IDs to run (default: sampled)
   --max-tasks <n>            Max tasks to sample evenly (default: 80, 0 = all)
   --fixtures <path>          Fixtures directory or .tar.gz archive (default: built-in)
+  --tools <list>             Comma-separated tools for the model, e.g. bash (default: read,edit,write,apply_patch)
   --edit-variant <v>         Edit variant, e.g. hashline, replace, apply_patch (default: auto)
   --edit-fuzzy <bool>        Fuzzy matching: true, false, auto
   --edit-fuzzy-threshold <n> Fuzzy threshold 0-1 or auto
@@ -178,6 +179,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 			tasks: { type: "string" },
 			"max-tasks": { type: "string", default: "80" },
 			fixtures: { type: "string" },
+			tools: { type: "string" },
 			"edit-variant": { type: "string" },
 			"edit-fuzzy": { type: "string" },
 			"edit-fuzzy-threshold": { type: "string" },
@@ -259,6 +261,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 			inProcess: true,
 			earlyStopOnMatch: !values["no-early-stop-on-match"],
 		};
+		if (values.tools) config.tools = values.tools.split(",").map(value => value.trim());
 		const editVariant = values["edit-variant"];
 		if (editVariant) config.editVariant = editVariant;
 		const editFuzzy = parseFuzzy(values["edit-fuzzy"]);
@@ -283,6 +286,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 		log(`Timeout: ${config.timeout}ms`);
 		log(`Task concurrency: ${config.taskConcurrency}`);
 		log(`Guided mode: ${config.guided ? "enabled" : "disabled"}`);
+		if (config.tools) log(`Tools: ${config.tools.join(",")}`);
 		if (config.editVariant) log(`Edit variant: ${config.editVariant}`);
 		if (config.editFuzzy !== undefined) log(`Edit fuzzy: ${config.editFuzzy}`);
 		if (config.editFuzzyThreshold !== undefined) log(`Edit fuzzy threshold: ${config.editFuzzyThreshold}`);

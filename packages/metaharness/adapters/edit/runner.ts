@@ -97,6 +97,8 @@ export interface BenchmarkConfig {
 	autoFormat?: boolean;
 	/** If true, abort the agent loop as soon as the formatted file content matches the expected fixture. Default: true. */
 	earlyStopOnMatch?: boolean;
+	/** Tools exposed to the model. Default: {@link BENCHMARK_TOOL_NAMES}. */
+	tools?: string[];
 	editVariant?: string;
 	editFuzzy?: boolean | "auto";
 	editFuzzyThreshold?: number | "auto";
@@ -266,8 +268,13 @@ function isEditTool(toolName: unknown): toolName is (typeof EDIT_TOOL_NAMES)[num
 	return toolName === "edit" || toolName === "vim" || toolName === "apply_patch";
 }
 
+/** Shell calls count as mutations: in a bash-only tool set they are the only way to edit. */
 function isMutationTool(toolName: unknown): boolean {
-	return isEditTool(toolName) || toolName === "write";
+	return isEditTool(toolName) || toolName === "write" || toolName === "bash";
+}
+
+function benchmarkTools(config: BenchmarkConfig): string[] {
+	return config.tools ?? [...BENCHMARK_TOOL_NAMES];
 }
 
 /**
@@ -660,7 +667,7 @@ async function buildGuidedContext(
 }
 
 function buildInstructions(config: BenchmarkConfig): string {
-	return config.noEditRequired
+	return config.noEditRequired || !benchmarkTools(config).some(isEditTool)
 		? "Read the relevant files first, then apply the fix."
 		: "Read the relevant files first, then use the edit or vim tool to apply the fix.";
 }
@@ -762,7 +769,7 @@ function buildBenchmarkRpcArgs(config: BenchmarkConfig, multiFile: boolean, prov
 		"--append-system-prompt",
 		buildBenchmarkSystemPrompt({ multiFile, config }),
 		"--tools",
-		BENCHMARK_TOOL_NAMES.join(","),
+		benchmarkTools(config).join(","),
 		"--no-skills",
 		"--no-title",
 		"--no-rules",
@@ -1030,6 +1037,7 @@ async function runSingleTask(
 		editAutocorrects: 0,
 		totalInputChars: 0,
 	};
+	let bashCalls = 0;
 	const hashlineSubtypes: Record<string, number> = {};
 
 	const logFile = path.join(TMP, `run-${task.id}-${runIndex}.jsonl`);
@@ -1076,7 +1084,7 @@ async function runSingleTask(
 					cwd,
 					model: config.model,
 					appendSystemPrompt: buildBenchmarkSystemPrompt({ multiFile: false, config }),
-					tools: [...BENCHMARK_TOOL_NAMES],
+					tools: benchmarkTools(config),
 					editVariant: config.editVariant,
 					editFuzzy: config.editFuzzy,
 					editFuzzyThreshold: config.editFuzzyThreshold,
@@ -1252,6 +1260,8 @@ async function runSingleTask(
 								pendingEdits.set(e.toolCallId, { args: e.args, rawBlock: rawToolBlocks.get(e.toolCallId) });
 						} else if (toolName === "write") {
 							toolStats.write++;
+						} else if (toolName === "bash") {
+							bashCalls++;
 						}
 
 						// Count input chars from args
@@ -1304,7 +1314,7 @@ async function runSingleTask(
 				}
 
 				// Retry if the model didn't attempt any edit/write (read-only or no tool calls)
-				const madeEditAttempt = toolStats.edit > 0 || toolStats.write > 0;
+				const madeEditAttempt = toolStats.edit > 0 || toolStats.write > 0 || bashCalls > 0;
 				if (!madeEditAttempt && zeroToolRetries < noOpRetryLimit) {
 					zeroToolRetries++;
 					await logEvent({ type: "zero_tool_retry", attempt: attempt + 1, retryNumber: zeroToolRetries });
