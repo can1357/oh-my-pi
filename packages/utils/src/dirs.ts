@@ -914,6 +914,15 @@ export function getAuthBrokerSnapshotCachePath(): string {
 	return dirs.rootSubdir(path.join("cache", "auth-broker-snapshot.enc"), "cache");
 }
 
+/**
+ * Get the cached OpenAI Codex client version record
+ * (~/.omp/agent/codex-client-version.json; XDG default: $XDG_CACHE_HOME/omp/codex-client-version.json).
+ * It is a refetchable cache, not config, so it belongs under the cache dir.
+ */
+export function getCodexClientVersionPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "codex-client-version.json", "cache");
+}
+
 /** Get the commit-author avatar cache directory (~/.omp/cache/avatars). */
 export function getAvatarCacheDir(): string {
 	return dirs.rootSubdir(path.join("cache", "avatars"), "cache");

@@ -827,6 +827,22 @@ const PICKER_VALUE_EXAMPLES: Record<string, string> = {
 const PICKER_INPUT_TYPES = Object.keys(PICKER_VALUE_EXAMPLES);
 
 /**
+ * Run on a filled text field (`this`, an HTML `<textarea>` or text-entry `<input>`) with the value's last character: a
+ * keydown and then a keyup, each only while it is still such a field and has focus. Created in the page, they carry
+ * no text, held modifier or default action.
+ */
+const FIELD_KEY_EVENTS = `function (key) {
+	const textEntry = ["text", "search", "email", "url", "tel", "password", "number"];
+	for (const type of ["keydown", "keyup"]) {
+		const field =
+			this.namespaceURI === "http://www.w3.org/1999/xhtml" &&
+			(this.localName === "textarea" || (this.localName === "input" && textEntry.includes(this.type)));
+		if (!field || this.getRootNode().activeElement !== this) return;
+		this.dispatchEvent(new KeyboardEvent(type, { key, bubbles: true, cancelable: true, composed: true }));
+	}
+}`;
+
+/**
  * Focus a field that can take text, clear any existing value, then insert the value in one input. A colour, date, time or
  * range input gets its value set the way its picker would, and refuses one it rejects. A
  * contenteditable element has its contents selected and replaced by one text insertion (or deleted
@@ -1009,10 +1025,31 @@ export async function fillViaHandle(
 			// One `Input.insertText` puts the whole value in with a single native input event: a newline stays text
 			// instead of pressing Enter (which submits chat forms), a controlled component sees the full value
 			// rather than re-rendering its old one between keys, and long text takes one round trip.
+			// It fires no key events, which pages that search as you type often wait for (`keyup`), so a text field
+			// then gets {@link FIELD_KEY_EVENTS} for the value's last code point that is not a control character. They
+			// go out without the user gesture puppeteer's `evaluate` requests, which would renew the page's user
+			// activation.
 			if (!value) return;
 			throwIfAborted(signal);
 			try {
 				await untilAborted(signal, () => page.keyboard.sendCharacter(value));
+				let end = value.length;
+				while (end > 0 && /\p{Cc}/u.test(value.charAt(end - 1))) end--;
+				// A trailing low surrogate ends the code point its high surrogate starts.
+				const start = end > 1 && (value.codePointAt(end - 2) ?? 0) > 0xffff ? end - 2 : end - 1;
+				const key = value.slice(start, end);
+				if (key) {
+					// The insert is done; a page that navigated or dropped the field in answer has no field to tell.
+					await untilAborted(signal, () =>
+						handle.frame.client
+							.send("Runtime.callFunctionOn", {
+								objectId: handle.remoteObject().objectId,
+								functionDeclaration: FIELD_KEY_EVENTS,
+								arguments: [{ value: key }],
+							})
+							.catch(() => undefined),
+					);
+				}
 			} catch (error) {
 				if (signal?.aborted) {
 					throw new TypingInterruptedError("the value was already sent and may have reached the field", {

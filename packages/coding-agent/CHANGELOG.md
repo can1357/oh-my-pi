@@ -4,8 +4,7 @@
 
 ### Added
 
-- `/session` shows the path of the session's `local://` directory, and `/copy local` copies it, creating the directory first so it can be entered before anything was written there ([#19778](https://github.com/can1357/oh-my-pi/pull/19778) by [@farnoy](https://github.com/farnoy))
-- `snapcompactShape` on `models.yml` models, `modelOverrides` and extension `registerProvider` models sets that model's snapcompact frame shape ([#19591](https://github.com/can1357/oh-my-pi/pull/19591) by [@ryanskidmore](https://github.com/ryanskidmore))
+- Added a coloured extension status variant to `omp gallery --segment status` ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
 - Added Binary Ninja as a disassembler backend for read analysis views and the dsm namespace. Select it with disassembler.backend = binja; it uses a local install found through binja.installDir, $BN_INSTALL_DIR, or the default install locations ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
 
 ### Changed
@@ -16,6 +15,30 @@
 
 ### Fixed
 
+- `read` suggests the line-range syntax for `file:1:2` when `file` exists, directly or by unique suffix, but `file:1` does not ([#19821](https://github.com/can1357/oh-my-pi/pull/19821) by [@baekjosh](https://github.com/baekjosh)).
+- Fixed in-memory text reads (including converted documents, URLs, notebooks, and internal resources) losing source line totals and continuation selectors to a second output truncation when their rendered page fits the inline budget.
+- Filling a search field in Chrome with the browser tool's `fill` updates its results again on pages that search as you type on key events, such as CyberChef's operation search, which showed nothing after a fill in 19.0.0 ([#19748](https://github.com/can1357/oh-my-pi/pull/19748) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `/commit` moving an insertion across another writer's unselected replacement. Insertions with no clear position in HEAD now go to review; lines already committed at the boundary stay out of later drafts ([#19786](https://github.com/can1357/oh-my-pi/pull/19786) by [@baekjosh](https://github.com/baekjosh))
+- Fixed every omp launch storing new copies of each loaded extension's modules in Bun's transpiler cache (`~/Library/Caches/bun/@t@` on macOS, `~/.bun/install/cache/@t@` elsewhere), which grew without limit; launches with unchanged extensions now reuse the cached copies ([#16600](https://github.com/can1357/oh-my-pi/pull/16600) by [@enieuwy](https://github.com/enieuwy))
+- Extensions, plugins, custom tools, hooks, custom commands and share scripts under a path containing `?` now fail with an error naming the path and the fix, instead of "Cannot find module" ([#19763](https://github.com/can1357/oh-my-pi/pull/19763) by [@sjawhar](https://github.com/sjawhar))
+- Fixed browser tabs on CDP engines that keep each page on its own connection, such as Lightpanda: listing tabs no longer closes them, and a timed-out run or exited worker opens a new page on the same URL instead of closing the tab ([#19658](https://github.com/can1357/oh-my-pi/pull/19658) by [@azais-corentin](https://github.com/azais-corentin))
+- Fixed per-call subagent models rejecting OpenRouter route variants such as `openrouter/<id>:nitro` with "No available model matches", which also left a role naming the variant unusable for subagents; they now resolve like `--model` and `/model` do ([#19575](https://github.com/can1357/oh-my-pi/pull/19575) by [@yibaimeng](https://github.com/yibaimeng))
+- Fixed shared sessions with secret redaction still carrying provider-encrypted reasoning from chat-completions tool calls ([#19595](https://github.com/can1357/oh-my-pi/pull/19595) by [@Xytronix](https://github.com/Xytronix))
+- Fixed `bash.allowCompoundCommands` rejecting `&&` chains (and marking segments uncovered in compound approval prompts) when a segment began with a leading `KEY=VALUE` environment assignment permitted by `bash.allowedEnvVars` or the matching rule's `env` list, or passed a single-dash flag containing `c` or `e` (such as `go test -race`) without shell-control arguments, and prevented wildcard `allow` rules (such as `match: "*"`) that do not begin with an assignment prefix from matching single commands with unlisted leading environment assignments ([#19681](https://github.com/can1357/oh-my-pi/pull/19681) by [@asuffield](https://github.com/asuffield)).
+- `/commit`'s selective commit now retries when HEAD moves after the expected-HEAD check, such as inside a `commit-msg` hook, instead of failing the commit ([#19393](https://github.com/can1357/oh-my-pi/pull/19393) by [@eggpeat](https://github.com/eggpeat))
+
+## [19.0.1] - 2026-11-19
+
+### Added
+
+- `/session` shows the path of the session's `local://` directory, and `/copy local` copies it, creating the directory first so it can be entered before anything was written there ([#19778](https://github.com/can1357/oh-my-pi/pull/19778) by [@farnoy](https://github.com/farnoy))
+- In native terminal hosts such as Tern, clicking the usage segment in the composer's status bar (the 5h/7d limits) opens `/usage`
+- Turning Tern's Agents tray setting off (or on) switches running sessions between the tray's cards and the running agents and jobs counters over the composer at once, without restarting omp
+- `snapcompactShape` on `models.yml` models, `modelOverrides` and extension `registerProvider` models sets that model's snapcompact frame shape ([#19591](https://github.com/can1357/oh-my-pi/pull/19591) by [@ryanskidmore](https://github.com/ryanskidmore))
+
+### Fixed
+
+- Fixed PTY command transcripts sometimes gaining a blank line where a `\r\n` line ending was split across two terminal reads.
 - Fixed the shell's `dirname` builtin on Windows ignoring `\` separators and drive prefixes (`dirname 'C:\a\b'` printed `.`), which broke scripts like VS Code's `code` launcher (`./Code.exe: No such file or directory`)
 - Fixed bash output minimizing being skipped on Windows when a command is named by a `\` path or with `.exe` (`"C:\Program Files\Git\cmd\git.exe" status`, `git.exe log`)
 - Fixed the bundled `omp://tools` docs still describing the removed `ida` tool; `tools/dsm.md` now documents eval's `dsm` namespace and `disassembler.*` settings, and `tools/read.md` documents metadata-only executable reads ([#19608](https://github.com/can1357/oh-my-pi/issues/19608))

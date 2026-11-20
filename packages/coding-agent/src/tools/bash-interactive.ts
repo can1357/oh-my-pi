@@ -6,6 +6,7 @@ import { loadXtermTerminal } from "@oh-my-pi/pi-tui/tools/terminal-output";
 import { Settings } from "../config/settings";
 import { buildNonInteractiveEnv } from "../exec/non-interactive-env";
 import { OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { StreamNewlineNormalizer } from "../utils/stream-newlines";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
 
@@ -62,6 +63,7 @@ export async function runInteractiveBashPty(
 	// Load the xterm Terminal ctor here (async boundary) — the ui.custom factory below is sync.
 	const XtermTerminal = await loadXtermTerminal();
 	const graphics = new TerminalGraphicsDecoder();
+	const newlines = new StreamNewlineNormalizer();
 	const sink = new OutputSink({
 		artifactPath: options.artifactPath,
 		artifactId: options.artifactId,
@@ -141,7 +143,7 @@ export async function runInteractiveBashPty(
 							if (finished || err || !chunk) return;
 							component.appendOutput(chunk);
 							const clean = graphics.push(chunk);
-							if (clean) sink.push(clean.replace(/\r\n?/gu, "\n"));
+							if (clean) sink.push(newlines.push(clean));
 							tui.requestRender();
 						},
 						(err, pid) => {

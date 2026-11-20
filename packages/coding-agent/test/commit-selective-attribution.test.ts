@@ -27,10 +27,10 @@ function commitFor(head: string | null, edits: Edit[], work: string | null, scop
 	const headLines = toLines(head);
 	const workLines = toLines(work);
 	const attribution = attribute(headLines, historySteps(headLines, recorded, workLines, tailHint), workLines);
-	const { status } = classify(attribution, new Set(scope));
+	const { status, reasons } = classify(attribution, new Set(scope));
 	const selected = new Set(attribution.ops.filter(op => status[op.id] === "own").map(op => op.id));
 	const verdicts = attribution.ops.map(op => `${status[op.id]} ${op.kind}${op.text}`);
-	return { content: fromLines(buildContent(attribution, selected)), verdicts };
+	return { content: fromLines(buildContent(attribution, selected)), verdicts, reasons };
 }
 
 const CHANGELOG = "# Changelog\n## [Unreleased]\n### Fixed\n- old entry\n";
@@ -45,6 +45,79 @@ describe("selective commit attribution", () => {
 		const { content } = commitFor(CHANGELOG, [{ actor: "Main", before: foreignFirst, after: own }], work, ["Main"]);
 
 		expect(content).toBe(CHANGELOG.replace("### Fixed\n", "### Fixed\n- Fixed /commit picking foreign hunks\n"));
+	});
+
+	for (const [side, workBody, selectedBody] of [
+		["before", "check\nshared\nnew", "check\nshared\nold\nshared"],
+		["after", "new\ncheck\nshared", "old\nshared\ncheck\nshared"],
+	]) {
+		it(`keeps an insertion ${side} a replacement when the replacement is not selected`, () => {
+			const head = "begin\nold\nshared\nend";
+			const before = "begin\nnew\nend";
+			// Identical text in the old body does not make our new line a restoration of it.
+			const work = `begin\n${workBody}\nend`;
+			const edits = [
+				{ actor: "Other", before: head, after: before },
+				{ actor: "Main", before, after: work },
+			];
+
+			const committed = commitFor(head, edits, work, ["Main"]).content;
+			expect(committed).toBe(`begin\n${selectedBody}\nend`);
+			// A replacement made before recording also keeps the repeated text on its own side.
+			expect(commitFor(head, edits.slice(1), work, ["Main"]).content).toBe(committed);
+			expect(commitFor(head, edits, work, ["Other"]).content).toBe(before);
+			expect(commitFor(head, edits, work, ["Main", "Other"]).content).toBe(work);
+			expect(commitFor(head, edits, work, []).content).toBe(head);
+
+			const replay = commitFor(committed, edits, work, ["Main"]);
+			expect(replay.verdicts).toEqual(["other -old", "other -shared", "other +new"]);
+			expect(replay.content).toBe(committed);
+			const remaining = commitFor(committed, edits, work, ["Other"]);
+			expect(remaining.verdicts).toEqual(["own -old", "own -shared", "own +new"]);
+			expect(remaining.content).toBe(work);
+		});
+	}
+
+	it("places the rest of an insertion around a line already committed at the boundary", () => {
+		const original = "begin\nold\nend";
+		const before = "begin\nnew\nend";
+		const work = "begin\nfirst\ncheck\nlast\nnew\nend";
+		const committed = "begin\ncheck\nold\nend";
+		const edits = [
+			// The gap after this snapshot hides the committed check until Main re-adds it.
+			{ actor: "Earlier", before: null, after: committed },
+			{ actor: "Other", before: original, after: before },
+			{ actor: "Main", before, after: work },
+		];
+		const replay = commitFor(committed, edits, work, ["Main"]);
+		expect(replay.content).toBe("begin\nfirst\ncheck\nlast\nold\nend");
+		expect(replay.verdicts).toEqual(["own +first", "own +last", "other -old", "other +new"]);
+	});
+
+	it("reviews an entire insertion between lines of someone else's replacement", () => {
+		const head = "begin\nold\nshared\nend";
+		const before = "begin\nfirst\nsecond\nend";
+		const work = "begin\nfirst\ncheck\nshared\nsecond\nend";
+		const edits = [
+			{ actor: "Other", before: head, after: before },
+			{ actor: "Main", before, after: work },
+		];
+
+		const { content, verdicts, reasons } = commitFor(head, edits, work, ["Main"]);
+		expect(content).toBe(head);
+		expect(verdicts).toContain("review +check");
+		expect(verdicts).toContain("review +shared");
+		expect([...reasons.values()]).toContainEqual({ kind: "placement", with: ["Other"] });
+		expect(commitFor(head, edits, work, ["Other"]).content).toBe(before);
+		expect(commitFor(head, edits, work, ["Main", "Other"]).content).toBe(work);
+	});
+
+	it("does not infer authorship from the position of an unrecorded insertion", () => {
+		const head = "old";
+		const after = "first\nsecond";
+		const work = "first\ninserted\nsecond";
+		const { content } = commitFor(head, [{ actor: "Main", before: head, after }], work, ["Main"], "Main");
+		expect(content).toBe(after);
 	});
 
 	it("leaves a foreign edit between the agent's edits out and holds back own lines rewritten later", () => {

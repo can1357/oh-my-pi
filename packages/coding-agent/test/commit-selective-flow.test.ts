@@ -152,6 +152,35 @@ async function sharedWorkspace() {
 }
 
 describe("selective commit flow", () => {
+	it("commits an inserted statement before a return changed only in the worktree", async () => {
+		const { root, journal, write } = await emptyRepo();
+		const file = "value.luau";
+		const head = "local function value()\n    return 1\nend\n";
+		const foreign = head.replace("return 1", "return 2");
+		const statement = "    assert(true)\n";
+		const insert = (source: string) => source.replace("    return", `${statement}    return`);
+		await Bun.write(path.join(root, file), head);
+		await git(root, ["add", file]);
+		await git(root, ["commit", "-qm", "seed"]);
+		await write("Other", undefined, file, foreign);
+		await write("Main", undefined, file, insert(foreign));
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		await commitSelection(draft, { subject: "test: assert before return" }, { journal, agent: { agent: "Main" } });
+
+		expect(await git(root, ["show", `HEAD:${file}`])).toBe(insert(head));
+		expect(await Bun.file(path.join(root, file)).text()).toBe(insert(foreign));
+
+		const replay = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(replay.selection()).toEqual([]);
+		expect(replay.summary()).not.toContain("Review:");
+		const remaining = await createDraft({ cwd: root, journal, caller: "Other" });
+		await commitSelection(remaining, { subject: "test: update return" }, { journal, agent: { agent: "Other" } });
+		expect(await git(root, ["show", `HEAD:${file}`])).toBe(insert(foreign));
+		expect(await git(root, ["status", "--porcelain"])).toBe("");
+	});
+
 	it("explicitly selects a gitlink SHA with ordinary edits without committing child dirt or other staged work", async () => {
 		const { root, module, journal, write, before, after } = await gitlinkWorkspace();
 		await Bun.write(path.join(root, "user.txt"), "user staged\n");
@@ -600,6 +629,33 @@ describe("selective commit flow", () => {
 			commitSelection(draft, { subject: "fix: a" }, { journal, agent: { agent: "Main" } }),
 		).rejects.toThrow(/HEAD moved .* changed a\.ts/);
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"retries the commit when a hook moves HEAD after the expected-HEAD check",
+		async () => {
+			const { root, journal, head } = await sharedWorkspace();
+			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+			await git(root, ["config", "core.hooksPath", ".git/hooks"]);
+			// A concurrent commit carrying the seed's tree, made without touching the worktree or index.
+			const moved = (await git(root, ["commit-tree", `${head}^{tree}`, "-p", head, "-m", "concurrent"])).trim();
+			// `commit-msg` runs after the expected-HEAD check and before the swap that updates HEAD.
+			const hook = path.join(root, ".git", "hooks", "commit-msg");
+			await fs.mkdir(path.dirname(hook), { recursive: true });
+			await Bun.write(hook, `#!/bin/sh\ngit update-ref refs/heads/main ${moved}\n`);
+			await fs.chmod(hook, 0o755);
+
+			const outcome = await commitSelection(
+				draft,
+				{ subject: "fix(parser): added parse" },
+				{ journal, agent: { agent: "Main" } },
+			);
+
+			// The lost swap is retried on the new HEAD instead of failing the commit.
+			expect(outcome.parent).toBe(moved);
+			expect((await git(root, ["rev-parse", "HEAD~1"])).trim()).toBe(moved);
+			expect(await git(root, ["show", "HEAD:a.ts"])).toBe("export const a = 2;\n");
+		},
+	);
 
 	it("refuses to commit during a merge in a linked worktree without changing HEAD or the index", async () => {
 		const { root: mainRoot, journal } = await emptyRepo();
