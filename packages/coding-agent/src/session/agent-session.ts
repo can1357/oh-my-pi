@@ -10525,9 +10525,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// user's prompt anchor, matching the live agent_start clear.
 			synthetic: true,
 		};
+		const queued = imageDescriptionNotice ? [imageDescriptionNotice, directive] : [directive];
 		// The callback runs before the queue listeners fire, so a caller can
 		// recognize these messages before the follow-up queue notifies.
-		options.onPromptQueued?.(imageDescriptionNotice ? [imageDescriptionNotice, directive] : [directive]);
+		options.onPromptQueued?.(queued);
 		if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 		this.agent.followUp(directive);
 		this.#scheduleIdleQueueDrain();
@@ -11372,17 +11373,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#allowQueuedMessageDrainRetry();
 		// Keyword notices and their user message must enter the queue in one synchronous phase.
 		const queued = [...prependMessages, ...(descriptionNotice ? [descriptionNotice] : []), normalizedAppMessage];
+		// The callback runs before the queue listeners fire, so a deny-watch can
+		// filter the exact messages this admission will enqueue.
+		onPromptQueued?.(queued);
 		if (deliverAs === "followUp") {
-			// The callback runs before the queue listeners fire, so a deny-watch can
-			// filter the exact messages this admission will enqueue.
-			onPromptQueued?.(queued);
 			for (const notice of prependMessages) this.agent.followUp(notice);
 			if (descriptionNotice) this.agent.followUp(descriptionNotice);
 			this.agent.followUp(normalizedAppMessage);
 		} else {
-			// The callback runs before the queue listeners fire, so a deny-watch can
-			// filter the exact messages this admission will enqueue.
-			onPromptQueued?.(queued);
 			for (const notice of prependMessages) this.agent.steer(notice);
 			if (descriptionNotice) this.agent.steer(descriptionNotice);
 			this.agent.steer(normalizedAppMessage);

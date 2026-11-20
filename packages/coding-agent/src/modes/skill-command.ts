@@ -43,7 +43,7 @@ interface InvokeSkillCommandOptions {
 	 * does not leave the submission invisible (issue #8895).
 	 */
 	optimistic?: boolean;
-	/** With `queueOnly`: called just before the messages the skill prompt pushes onto a queue (see `PromptOptions.onPromptQueued`). */
+	/** Called just before the messages the skill prompt pushes onto a queue (see `PromptOptions.onPromptQueued`). */
 	onPromptQueued?: (queued: readonly AgentMessage[]) => void;
 	/**
 	 * Without `queueOnly`: prompts that must run after the skill, in order (see `PromptOptions.followUps`).
