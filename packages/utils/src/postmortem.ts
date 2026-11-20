@@ -75,6 +75,14 @@ const CLEANUP_DEADLINE_MS = 10_000;
  */
 export const NATIVE_PROCESS_EXIT = Symbol.for("omp.postmortem.nativeProcessExit");
 
+/**
+ * Stamped by `withHostGuard` on each throwing exit replacement, carrying the
+ * mutable record of the module whose load window is open (see
+ * {@link guardedExitWindow}). Read by the host's own shutdown so an exit that
+ * an open guard window would intercept can name its offender (#ZYS-10217).
+ */
+export const HOST_GUARD_EXIT_INFO = Symbol.for("omp.postmortem.hostGuardExitInfo");
+
 type HardExitFn = (code?: number) => never;
 
 /**
@@ -121,6 +129,35 @@ function nativeHardExit(fn: HardExitFn | undefined): HardExitFn | undefined {
  * the logger otherwise flushes on, which would drop the last batch on every
  * signal and fatal exit.
  */
+/**
+ * The open guard window behind a throwing exit primitive, if any.
+ *
+ * Walks the same `NATIVE_PROCESS_EXIT` chain {@link nativeHardExit} follows so
+ * nested guard windows are seen through, and returns the record stamped there.
+ */
+function guardedExitWindow(fn: HardExitFn | undefined): { label: string | null } | undefined {
+	let current = fn;
+	const seen = new Set<HardExitFn>();
+	while (typeof current === "function" && !seen.has(current)) {
+		seen.add(current);
+		const info = Reflect.get(current, HOST_GUARD_EXIT_INFO);
+		if (info && typeof info === "object") return info as { label: string | null };
+		const behind = Reflect.get(current, NATIVE_PROCESS_EXIT);
+		if (typeof behind !== "function") return undefined;
+		current = behind as HardExitFn;
+	}
+	return undefined;
+}
+
+const reportedInterceptedShutdowns = new Set<string>();
+
+/** Names an intercepted shutdown's offender once per label on stderr. */
+function reportInterceptedShutdown(label: string | null): void {
+	const who = label ?? "an extension/hook module";
+	if (reportedInterceptedShutdowns.has(who)) return;
+	reportedInterceptedShutdowns.add(who);
+	process.stderr.write(`[omp] extension loading was still guarded for ${who} at shutdown; exiting through the native exit.\n`);
+}
 export function exitProcess(code: number): never {
 	logger.flush();
 	const reallyExit = nativeHardExit(typeof process.reallyExit === "function" ? process.reallyExit : undefined);
@@ -1001,17 +1038,36 @@ async function runQuit(code: number, exitMode: "guarded" | "native", options: Qu
 	}
 
 	switch (exitMode) {
-		case "guarded":
+		case "guarded": {
+			// A successful shutdown must outrank an open guard window: loaders keep
+			// `process.exit` fenced while a module is being imported, and a still-running
+			// hook or a deferred import in flight at quit time would otherwise turn a
+			// clean exit into a thrown ExtensionExitError and a non-zero status
+			// (#ZYS-10217). Report the offender once and exit through the native
+			// primitive with the host's real status. A failing shutdown keeps failing:
+			// a non-zero code still routes through the stub, so the guard's protection
+			// against a module terminating the host mid-turn is unchanged.
+			if (code === 0) {
+				const window = guardedExitWindow(process.exit as HardExitFn);
+				if (window) {
+					reportInterceptedShutdown(window.label);
+					return exitProcess(code);
+				}
+			}
 			return process.exit(code);
+		}
 		case "native":
 			return exitProcess(code);
 	}
 }
 
 /**
- * Runs all cleanup callbacks and exits through the current `process.exit`.
+ * Runs all cleanup callbacks and exits with the host's real status.
  *
- * In main thread: waits for stdout drain unless disabled, then calls `process.exit()`.
+ * In main thread: waits for stdout drain unless disabled, then exits. A
+ * successful (`0`) exit resolves past an open extension-load guard window,
+ * naming the module that held it; a non-zero code still goes through the
+ * guarded `process.exit` so a module cannot hide a failure behind the guard.
  * In workers: runs cleanup only (process.exit would kill entire process).
  */
 export function quit(code: number = 0, options: QuitOptions = {}): Promise<void> {

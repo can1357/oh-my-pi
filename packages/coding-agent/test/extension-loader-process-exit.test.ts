@@ -273,6 +273,46 @@ await Bun.sleep(10_000);
 		},
 	);
 
+	it("exits 0 and names the module once when the host quits inside an open load guard (#ZYS-10217)", async () => {
+		const { exitCode, stdout, stderr } = await runProbe(`
+import { postmortem } from "@oh-my-pi/pi-utils";
+import { withHostGuard } from "@oh-my-pi/pi-coding-agent/extensibility/utils";
+
+// A deferred extension/hook import still in flight at quit time keeps the guard window open.
+void withHostGuard(async () => {
+	await Bun.sleep(10_000);
+}, "/opt/ext/deferred-extension.ts");
+await postmortem.quit(0);
+`);
+
+		expect(exitCode).toBe(0);
+		expect(stdout).toBe("");
+		expect(stderr.match(/deferred-extension\.ts/g)).toHaveLength(1);
+		expect(stderr).not.toContain("Unhandled Rejection");
+	});
+
+	it("still fails a shutdown when a non-zero exit is intercepted during a load guard (#ZYS-10217)", async () => {
+		const { exitCode, stderr } = await runProbe(`
+import { postmortem } from "@oh-my-pi/pi-utils";
+import { withHostGuard } from "@oh-my-pi/pi-coding-agent/extensibility/utils";
+
+void withHostGuard(async () => {
+	await Bun.sleep(10_000);
+}, "/opt/ext/failing-extension.ts");
+
+try {
+	await postmortem.quit(3);
+} catch (err) {
+	process.stderr.write(\`caught:\${err instanceof Error ? err.message : String(err)}\\n\`);
+	process.exit(1);
+}
+`);
+
+		expect(exitCode).not.toBe(0);
+		expect(stderr).toContain("failing-extension.ts");
+		expect(stderr).toContain("must not terminate the host process");
+	});
+
 	it("only the outermost guard restores process.exit when guards nest", async () => {
 		const originalExit = process.exit;
 

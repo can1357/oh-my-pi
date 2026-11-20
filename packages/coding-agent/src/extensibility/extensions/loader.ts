@@ -497,7 +497,7 @@ async function runExtensionFactory(
 export async function importExtensionModule(extensionPath: string, cwd: string): Promise<PreparedExtension> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	try {
-		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath))) as LoadedExtensionModule;
+			const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath), resolvedPath)) as LoadedExtensionModule;
 		const factory = getExtensionFactory(module);
 
 		if (typeof factory !== "function") {
@@ -530,7 +530,7 @@ async function bindExtension(
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
 		const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
-		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
+		await withHostGuard(() => runExtensionFactory(factory, api, runtime), imported.resolvedPath);
 
 		return { extension, error: null };
 	} catch (err) {

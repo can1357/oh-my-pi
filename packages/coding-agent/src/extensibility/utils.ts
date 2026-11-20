@@ -56,16 +56,16 @@ export class ExtensionExitError extends Error {
 	constructor(
 		code: number | string | undefined,
 		readonly alias = "process.exit",
+		label?: string | null,
 	) {
 		super(
-			`Module called ${alias}(${code === undefined ? "" : String(code)}) during guarded extension/hook loading; ` +
+			`${label ? `Module ${label} called` : "Module called"} ${alias}(${code === undefined ? "" : String(code)}) during guarded extension/hook loading; ` +
 				`OMP extension/hook modules must not terminate the host process.`,
 		);
 		this.name = "ExtensionExitError";
 		this.code = code;
 	}
 }
-
 type ExitAliasName = "process.exit" | "process.reallyExit";
 
 /**
@@ -86,6 +86,15 @@ let hostGuardOriginalReallyExit: typeof process.reallyExit | null = null;
 let hostGuardStdinListeners: Record<StdinGuardEvent, StdinGuardListener[]> | null = null;
 let hostGuardStdinWasPaused = false;
 let hostGuardStdinWasRaw = false;
+
+/**
+ * Mutable record of the extension / hook / tool entry whose load window is
+ * currently open. Each throwing exit replacement is stamped with this record
+ * under {@link postmortem.HOST_GUARD_EXIT_INFO}, so the host's own shutdown can
+ * name the module that kept the guard installed instead of failing with an
+ * anonymous `ExtensionExitError` (#ZYS-10217).
+ */
+const hostGuardWindow: { label: string | null } = { label: null };
 
 /**
  * Run `fn` with host-owned process state fenced off from third-party module
@@ -111,11 +120,11 @@ let hostGuardStdinWasRaw = false;
  */
 function guardedExit(alias: ExitAliasName): (code?: number | string) => never {
 	return (code?: number | string): never => {
-		throw new ExtensionExitError(code, alias);
+		throw new ExtensionExitError(code, alias, hostGuardWindow.label);
 	};
 }
 
-export async function withHostGuard<T>(fn: () => Promise<T>): Promise<T> {
+export async function withHostGuard<T>(fn: () => Promise<T>, label?: string): Promise<T> {
 	if (hostGuardDepth === 0) {
 		// Stamp each throwing replacement with the native primitive it shadows so
 		// host-owned shutdown (postmortem's signal/fatal handlers) can still exit
@@ -123,12 +132,14 @@ export async function withHostGuard<T>(fn: () => Promise<T>): Promise<T> {
 		hostGuardOriginalProcessExit = process.exit;
 		const processExitGuard = guardedExit("process.exit") as typeof process.exit;
 		Reflect.set(processExitGuard, postmortem.NATIVE_PROCESS_EXIT, hostGuardOriginalProcessExit);
+		Reflect.set(processExitGuard, postmortem.HOST_GUARD_EXIT_INFO, hostGuardWindow);
 		process.exit = processExitGuard;
 
 		if (typeof process.reallyExit === "function") {
 			hostGuardOriginalReallyExit = process.reallyExit;
 			const reallyExitGuard = guardedExit("process.reallyExit") as typeof process.reallyExit;
 			Reflect.set(reallyExitGuard, postmortem.NATIVE_PROCESS_EXIT, hostGuardOriginalReallyExit);
+			Reflect.set(reallyExitGuard, postmortem.HOST_GUARD_EXIT_INFO, hostGuardWindow);
 			process.reallyExit = reallyExitGuard;
 		}
 
@@ -141,10 +152,13 @@ export async function withHostGuard<T>(fn: () => Promise<T>): Promise<T> {
 		}
 		hostGuardStdinListeners = snapshot;
 	}
+	const previousLabel = hostGuardWindow.label;
+	if (label !== undefined) hostGuardWindow.label = label;
 	hostGuardDepth++;
 	try {
 		return await fn();
 	} finally {
+		hostGuardWindow.label = previousLabel;
 		hostGuardDepth--;
 		if (hostGuardDepth === 0) {
 			if (hostGuardOriginalProcessExit) {

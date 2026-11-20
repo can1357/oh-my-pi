@@ -149,7 +149,7 @@ async function loadHook(hookPath: string, cwd: string): Promise<{ hook: LoadedHo
 
 	try {
 		// Import the module using native Bun import
-		const module = await withHostGuard(() => import(resolvedPath));
+		const module = await withHostGuard(() => import(resolvedPath), resolvedPath);
 		const factory = module.default as HookFactory;
 
 		if (typeof factory !== "function") {
@@ -164,7 +164,7 @@ async function loadHook(hookPath: string, cwd: string): Promise<{ hook: LoadedHo
 		);
 
 		// Call factory to register handlers
-		await withHostGuard(async () => factory(api));
+		await withHostGuard(async () => factory(api), resolvedPath);
 
 		return {
 			hook: {
