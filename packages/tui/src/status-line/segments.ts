@@ -971,18 +971,22 @@ const timeSegment: StatusLineSegment = {
 	},
 };
 
+/**
+ * Session id as the `session` segment shows it: the first 13 characters, which for a UUIDv7
+ * (`01a03242-993e`) is its whole 48-bit millisecond timestamp. Eight characters dropped the
+ * low 16 bits, so sessions created within ~65 s looked identical.
+ */
+function sessionIdDisplay(ctx: SegmentContext): string {
+	return ctx.session.sessionManager?.getSessionId?.()?.slice(0, 13) || "new";
+}
+
 const sessionSegment: StatusLineSegment = {
 	id: "session",
 	render(ctx) {
-		const sessionManager = ctx.session.sessionManager;
-		const sessionId = sessionManager?.getSessionId?.();
-		const display = sessionId?.slice(0, 8) || "new";
-
-		return { content: withIcon(theme.icon.session, display), visible: true };
+		return { content: withIcon(theme.icon.session, sessionIdDisplay(ctx)), visible: true };
 	},
 	describe(ctx) {
-		const sessionId = ctx.session.sessionManager?.getSessionId?.();
-		return segView([span(sessionId?.slice(0, 8) || "new")], "session");
+		return segView([span(sessionIdDisplay(ctx))], "session");
 	},
 };
 
