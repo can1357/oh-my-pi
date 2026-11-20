@@ -534,8 +534,11 @@ async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<Se
 	{
 		return Err(io::Error::new(
 			io::ErrorKind::InvalidInput,
-			"--list-details, --exec, and --exec-batch are not supported by the in-process fd builtin",
+			"-x/--exec, -X/--exec-batch and -l/--list-details are not supported by the in-process fd builtin; \
+			 run the batch as a pipe into the in-process `xargs` instead — `fd -e dwo . <dir> | xargs rm -f` \
+			 for a batch delete, `fd ... | xargs <cmd>` for any exec, and `fd ... | xargs ls -l` for -l detail",
 		));
+	}
 	}
 	let _ = (cli.color, cli.hyperlink, cli.strip_cwd_prefix);
 
@@ -1315,6 +1318,33 @@ mod tests {
 			capture.stdout()
 		);
 		assert!(capture.err().is_empty(), "stderr should stay clean: {:?}", capture.stderr());
+	}
+
+	/// ZYS-10208: `-x`/`-X` are the batch-delete shape an agent reaches
+	/// for, and the in-process fd cannot run them. The refusal has to name the
+	/// form that does run — the pipe into the in-process `xargs` — so the
+	/// caller is never left with no way to perform the delete.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn exec_flags_name_the_xargs_substitute() {
+		let tree = seeded_tree("exec");
+		let path = tree.path().to_str().expect("utf8 path");
+		for flag in ["-X", "-x"] {
+			let (code, capture) =
+				run_async_util::<FdCli>(&[flag, "rm", "haystack", path], "", tree.path()).await;
+
+			assert_eq!(code, 2, "{flag} should be a usage error");
+			let err = capture.err();
+			assert!(
+				err.contains("fd -e dwo . <dir> | xargs rm -f"),
+				"{flag} refusal should name the batch delete that runs: {:?}",
+				capture.stderr()
+			);
+			assert!(
+				err.contains("| xargs <cmd>"),
+				"{flag} refusal should name the exec form: {:?}",
+				capture.stderr()
+			);
+		}
 	}
 
 	#[cfg(unix)]
