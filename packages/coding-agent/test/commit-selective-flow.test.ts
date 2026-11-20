@@ -181,6 +181,34 @@ describe("selective commit flow", () => {
 		expect(await git(root, ["status", "--porcelain"])).toBe("");
 	});
 
+	it("never selects a second copy of a paragraph already committed during a reorder", async () => {
+		const { root, journal, write } = await emptyRepo();
+		const file = "notes.md";
+		const contents = (order: string, main = "old", other = "old") =>
+			Array.from(order, key => `## ${key}\n\nsame body\n\n\n`).join("") +
+			`footer\nmain: ${main}\nseparator\nother: ${other}\n`;
+		await Bun.write(path.join(root, file), contents("AB"));
+		await git(root, ["add", file]);
+		await git(root, ["commit", "-qm", "initial paragraphs"]);
+		await write("Main", undefined, file, contents("BAC"));
+		await write("Other", undefined, file, contents("BADC", "old", "pending"));
+		// Another commit takes D alone without touching the working file.
+		await Bun.write(path.join(root, ".git", "snapshot"), contents("ABD"));
+		const sha = (await git(root, ["hash-object", "-w", ".git/snapshot"])).trim();
+		await git(root, ["update-index", "--cacheinfo", `100644,${sha},${file}`]);
+		await git(root, ["commit", "-qm", "take D"]);
+		await write("Main", undefined, file, contents("ABCD", "pending", "pending"));
+		await journal.flush();
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(draft.summary()).toContain("review the net change");
+		expect(draft.diff()).toContain("+main: pending");
+		expect(draft.diff()).not.toContain("+## B");
+		draft.take({ path: file, units: ["1"] }); // C only, not the other writer's footer
+		await commitSelection(draft, { subject: "add C" }, { journal, agent: { agent: "Main" } });
+		expect(await git(root, ["show", `HEAD:${file}`])).toBe(contents("ABCD", "pending", "old"));
+		expect(await Bun.file(path.join(root, file)).text()).toBe(contents("ABCD", "pending", "pending"));
+	});
+
 	it("explicitly selects a gitlink SHA with ordinary edits without committing child dirt or other staged work", async () => {
 		const { root, module, journal, write, before, after } = await gitlinkWorkspace();
 		await Bun.write(path.join(root, "user.txt"), "user staged\n");

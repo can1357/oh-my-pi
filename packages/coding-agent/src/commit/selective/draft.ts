@@ -29,6 +29,7 @@ import {
 	historySteps,
 	PRE,
 	type RecordedEdit,
+	REORDERED,
 	type ReviewReason,
 	TAIL,
 	toLines,
@@ -154,6 +155,7 @@ function actorName(actor: string): string {
 		case GAP:
 		case TAIL:
 		case UNRECORDED:
+		case REORDERED:
 			return "unrecorded";
 		default:
 			return actor;
@@ -195,6 +197,8 @@ function spellings(file: string, roots: readonly string[]): string[] {
 
 function describeReason(reason: ReviewReason): string {
 	switch (reason.kind) {
+		case "reordered":
+			return "replayed edits disagree with the HEAD-to-worktree diff after a reorder; review the net change";
 		case "entangled":
 			return `edits lines added by ${reason.with.map(actorName).join(", ")} that were never committed`;
 		case "placement":
