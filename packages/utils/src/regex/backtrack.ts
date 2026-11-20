@@ -418,22 +418,15 @@ export class Backtracker {
 	 */
 	probe(text: string, from: number): BacktrackMatch | null | number {
 		const greedy = this.#greedy;
-		// Try a few false leads without building a marks array. An undecided
-		// attempt must still take priority over every later start.
-		for (let attempts = 0; greedy && attempts < 3; attempts++) {
-			const start = greedy.firstStart(text, from);
-			if (start === undefined) break;
-			if (start < 0) return null;
-			const end = greedy.match(text, start, this.#registers);
-			if (end === REPLAY_LIMIT) {
-				from = start;
-				break;
-			}
-			if (end >= 0) {
+		if (greedy) {
+			const end = greedy.probe(text, from, this.#registers, this.#scanOut);
+			if (end === NONE) return null;
+			const start = this.#scanOut[0]!;
+			if (end !== REPLAY_LIMIT) {
 				if (this.#text !== undefined && text !== this.#text) this.release();
 				return this.#matched(text, start, end);
 			}
-			from = start + 1;
+			from = start;
 		}
 		const scan = this.#scan();
 		if (!scan) return from;

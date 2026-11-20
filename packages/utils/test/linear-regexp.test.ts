@@ -721,6 +721,33 @@ describe("LinearRegExp covers the RegExp surface", () => {
 		expect(regex.test("😀".repeat(2_000))).toBe(true);
 	});
 
+	it("preserves delimiter replay across false leads, captures, and long leading runs", () => {
+		const text = `é invalid@. ok@host.example ${"a".repeat(160)}@host.example`;
+		for (const source of [
+			String.raw`[a-z]+@[a-z.]+\.[a-z]{2,}`,
+			String.raw`(?<local>[a-z]+)@(?<host>[a-z.]+\.[a-z]{2,})`,
+		]) {
+			const native = new RegExp(source, "gid");
+			const linear = new LinearRegExp(source, "gid");
+			for (const from of [0, 4, 20, 88]) {
+				native.lastIndex = linear.lastIndex = from;
+				expect([...text.matchAll(linear)]).toEqual([...text.matchAll(native)]);
+			}
+		}
+	});
+
+	it("keeps captures before a required suffix when the search starts partway through a run", () => {
+		const source = String.raw`(?<body>(?:ab|c)*)END`;
+		const text = "ccccEND abcabccEND abEND";
+		const linear = new LinearRegExp(source, "gd");
+		const native = new RegExp(source, "gd");
+		for (const from of [0, 2, 4, 9, 17, text.length]) {
+			linear.lastIndex = native.lastIndex = from;
+			expect(linear.exec(text)).toEqual(native.exec(text));
+			expect(linear.lastIndex).toBe(native.lastIndex);
+		}
+	});
+
 	it("handles many nonliteral alphabet classes without incorrect ASCII or UTF-16 transitions", () => {
 		const variants = Array.from({ length: 2_200 }, (_, index) => `[${String.fromCharCode(0x3400 + index)}\uffff]`);
 		const source = `(?<key>${variants.join("|")}|a(?:b|c)defghi)[0-9]`;

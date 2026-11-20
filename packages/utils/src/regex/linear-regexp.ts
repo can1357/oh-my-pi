@@ -38,7 +38,7 @@ import { compileLiteralAlternatives } from "./literal-alternatives";
 import { canUseNativeExec } from "./native-exec";
 import { CharClasses, compileNfa, type PatternFlags } from "./nfa";
 import { type ParsedPattern, parsePattern, type RegexNode, UnsupportedPatternError } from "./parse";
-import { scanPrefix } from "./scanner-prefix";
+import { compileRequiredProbe, type RequiredProbe, scanPrefix } from "./scanner-prefix";
 import type { RegexStream } from "./stream";
 import { compileWideBlock } from "./wide-block";
 import { compileWideRun } from "./wide-run";
@@ -101,6 +101,7 @@ interface CompiledPattern {
 	matcher: Matcher;
 	names: ParsedPattern["names"];
 	exact: boolean;
+	unicode: boolean;
 	native?: RegExp;
 }
 
@@ -117,6 +118,7 @@ class Engine implements Matcher {
 	readonly #forward: LazyDfa;
 	readonly #reverse: LazyDfa | undefined;
 	readonly #filters: StartFilter[];
+	readonly #required: RequiredProbe | undefined;
 	readonly #backtracker: Backtracker;
 	readonly #limits: EngineLimits;
 	readonly #marks = new Uint8Array(SCRATCH);
@@ -139,6 +141,7 @@ class Engine implements Matcher {
 			const prefix = looks.some(look => look.behind) ? scanPrefix(pattern.root, classes, flags) : undefined;
 			if (!prefix || prefix.kind === "run" || prefix.low >= 0) this.native = new RegExp(source, flagSet);
 		}
+		if (!this.#anchored && !this.native) this.#required = compileRequiredProbe(pattern.root, classes);
 		/** Unanchored automaton for `root`: marks where it can start (`reverse`) or end. */
 		const marker = (root: RegexNode, reverse: boolean): LazyDfa =>
 			new LazyDfa(compileNfa({ ...pattern, root }, classes, flags.multiline, reverse), false, limits);
@@ -153,12 +156,18 @@ class Engine implements Matcher {
 
 	/** Whether a match starts at or after `from`. */
 	test(text: string, from: number): boolean {
-		if (this.regular) return this.#firstMatchEnd(text, from) >= 0;
+		if (this.regular) {
+			return (!this.#required || this.#required(text, from)) && this.#firstMatchEnd(text, from) >= 0;
+		}
 		return this.match(text, from) !== undefined;
 	}
 
 	/** The match JavaScript finds when searching from `from`. */
 	match(text: string, from: number): BacktrackMatch | undefined {
+		if (this.#required && !this.#required(text, from)) {
+			this.#backtracker.release();
+			return undefined;
+		}
 		const probed = this.#anchored ? from : this.#backtracker.probe(text, from);
 		let match: BacktrackMatch | undefined;
 		if (typeof probed === "number") match = this.#anchored ? this.#matchAt(text, from) : this.#search(text, probed);
@@ -315,7 +324,7 @@ export class LinearRegExp extends RegExp {
 			return result;
 		}
 		// Unicode matching at the second unit of a pair starts at the beginning of that code point.
-		if ((this.unicode || this.unicodeSets) && insideSurrogatePair(text, from)) from--;
+		if (engine.unicode && insideSurrogatePair(text, from)) from--;
 		// `toLength` leaves the index double-tagged; at most `text.length` it fits int32, which the JIT code
 		// below speculates on (a double index makes every scan bail out of optimized code).
 		const match = from > text.length ? undefined : engine.matcher.match(text, from | 0);
@@ -368,19 +377,21 @@ function compile(regex: RegExp, limits: EngineLimits): CompiledPattern | null {
 	try {
 		pattern = parsePattern(source, flagSet);
 		const names = pattern.names;
+		const unicode = pattern.unicode === true;
 		const literals = compileLiteralAlternatives(pattern, flags);
-		if (literals) return { matcher: literals, names, exact: true };
+		if (literals) return { matcher: literals, names, unicode, exact: true };
 		const blocks = compileWideBlock(pattern, flags);
-		if (blocks) return { matcher: blocks, names, exact: true };
+		if (blocks) return { matcher: blocks, names, unicode, exact: true };
 		const classes = new CharClasses(pattern, flags);
 		const run = compileWideRun(pattern, classes, flags);
-		if (run) return { matcher: run, names, exact: true };
+		if (run) return { matcher: run, names, unicode, exact: true };
 		const engine = new Engine(source, flagSet, pattern, classes, flags, limits);
-		return { matcher: engine, names, exact: engine.regular, native: engine.native };
+		return { matcher: engine, names, unicode, exact: engine.regular, native: engine.native };
 	} catch (error) {
 		if (pattern && error instanceof RangeError) {
 			const literals = compileLiteralAlternatives(pattern, flags, true);
-			if (literals) return { matcher: literals, names: pattern.names, exact: true };
+			if (literals)
+				return { matcher: literals, names: pattern.names, unicode: pattern.unicode === true, exact: true };
 		}
 		if (
 			error instanceof UnsupportedPatternError ||

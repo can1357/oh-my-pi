@@ -14,6 +14,7 @@
 
 - Sped up `LinearRegExp` scans with delimiter-separated runs and word backreferences when the pattern can run safely in the native engine.
 - Sped up `LinearRegExp` searches for required literals, lookbehinds, and other patterns on long inputs.
+- Sped up `LinearRegExp` misses for patterns with a required suffix and for patterns with large character alphabets.
 
 ## [19.0.0] - 2026-11-18
 

@@ -277,3 +277,66 @@ export function scanPrefix(root: RegexNode, classes: CharClasses, flags: Flags):
 	}
 	return prefix;
 }
+
+/** Rejects a search only when a mandatory consuming fragment is absent. */
+export type RequiredProbe = (text: string, from: number) => boolean;
+
+/**
+ * A required fragment can rule out a long miss without scanning the automata.
+ * Restrict this extra search to loops that cannot use a scanner or to wide
+ * alphabets, where each DFA step pays for the larger transition table.
+ */
+export function compileRequiredProbe(root: RegexNode, classes: CharClasses): RequiredProbe | undefined {
+	const wide = classes.alphabet.size > 128;
+	if (!wide && root.type !== "seq" && root.type !== "group") return undefined;
+	const items: RegexNode[] = [];
+	flatten(root, items);
+	if (!wide && !items.some(item => item.type === "repeat" && item.max === Infinity && item.body.type !== "unit")) {
+		return undefined;
+	}
+
+	let literal = "";
+	let longest = "";
+	for (const item of items) {
+		const unit = item.type === "unit" ? singleton(item, classes) : undefined;
+		literal = unit === undefined ? "" : literal + unit;
+		if (literal.length > longest.length) longest = literal;
+		if (longest.length === MAX_WIDTH) break;
+	}
+	if (longest.length > 1) return (text, from) => text.indexOf(longest, from) >= 0;
+	if (!wide) return undefined;
+
+	// A small ASCII interval is a cheap native scan, even with thousands of
+	// unrelated classes. The containing interval need not be exact.
+	const { runs } = classes.alphabet;
+	let bestLow = 0;
+	let bestHigh = 127;
+	for (const item of items) {
+		if (item.type !== "unit") continue;
+		const members = classes.sets[classes.setOf(item)]!;
+		let low = 128;
+		let high = -1;
+		for (let id = 0; id < members.length; id++) {
+			if (!members[id]) continue;
+			const ranges = runs[id]!;
+			low = Math.min(low, ranges[0]!);
+			high = Math.max(high, ranges[ranges.length - 1]!);
+			if (high >= 128 || high - low >= bestHigh - bestLow) break;
+		}
+		if (high >= low && high < 128 && high - low < bestHigh - bestLow) {
+			bestLow = low;
+			bestHigh = high;
+		}
+	}
+	if (bestLow === bestHigh) {
+		const char = String.fromCharCode(bestLow);
+		return (text, from) => text.indexOf(char, from) >= 0;
+	}
+	if (bestHigh - bestLow >= 16) return undefined;
+	const escape = (unit: number) => `\\x${unit.toString(16).padStart(2, "0")}`;
+	const probe = new RegExp(`[${escape(bestLow)}-${escape(bestHigh)}]`, "g");
+	return (text, from) => {
+		probe.lastIndex = from;
+		return probe.test(text);
+	};
+}

@@ -33,6 +33,8 @@ interface Needle {
 	text: string;
 	/** Single run before a required delimiter; absent for a literal prefix. */
 	leading?: Run;
+	/** Replay can skip the known prefix when it contains no capture writes. */
+	resume: number | undefined;
 }
 
 /**
@@ -135,23 +137,56 @@ export class GreedyRuns {
 		return entry >= 0 ? new GreedyRuns(classes, steps, entry, { branched, captures }) : undefined;
 	}
 
-	/** The first candidate, -1 for no match, or undefined when the probe cannot decide. */
-	firstStart(text: string, from: number): number | undefined {
+	/** Returns the replay end, -1 for no match, or REPLAY_LIMIT. On a match or limit, writes the start. */
+	probe(text: string, from: number, registers: Int32Array, startOut: Int32Array): number {
 		const needle = this.#needle;
-		const { blockIndex, blocks } = this.#classes.alphabet;
-		if (!needle) {
-			const starts = this.#starts;
-			if (!starts) return undefined;
-			const end = Math.min(text.length, from + START_WINDOW);
-			for (let at = from; at < end; at++) {
-				const unit = text.charCodeAt(at);
-				if (starts[blocks[(blockIndex[unit >>> 8]! << 8) | (unit & 255)]!]) return at;
+		// Try a few false leads before handing the rest of the search to the VM.
+		for (let attempts = 0; attempts < 3; attempts++) {
+			let start: number;
+			let at: number;
+			let pc = this.#entry;
+			if (needle) {
+				const found = text.indexOf(needle.text, from);
+				if (found < 0) return -1;
+				start = needle.leading ? this.#leadingStart(text, from, found, needle.leading) : found;
+				if (start < 0) break;
+				at = start;
+				if (needle.resume !== undefined) {
+					// The prefix matched and any leading run cannot cross the
+					// delimiter. Neither has choices for replay to retry.
+					at = found + needle.text.length;
+					pc = needle.resume;
+				}
+			} else {
+				const starts = this.#starts;
+				if (!starts) break;
+				const limit = Math.min(text.length, from + START_WINDOW);
+				const { blockIndex, blocks } = this.#classes.alphabet;
+				start = from;
+				while (start < limit) {
+					const unit = text.charCodeAt(start);
+					if (starts[blocks[(blockIndex[unit >>> 8]! << 8) | (unit & 255)]!]) break;
+					start++;
+				}
+				if (start >= limit) {
+					if (limit === text.length) return -1;
+					break;
+				}
+				at = start;
 			}
-			return end === text.length ? -1 : undefined;
+			const end = this.#replay(text, start, registers, at, pc);
+			if (end !== -1) {
+				startOut[0] = start;
+				return end;
+			}
+			from = start + 1;
 		}
-		const found = text.indexOf(needle.text, from);
-		if (found < 0 || !needle.leading) return found;
-		const { min, max, members } = needle.leading;
+		startOut[0] = from;
+		return REPLAY_LIMIT;
+	}
+
+	#leadingStart(text: string, from: number, found: number, { min, max, members }: Run): number {
+		const { blockIndex, blocks } = this.#classes.alphabet;
 		const earliest = Math.max(from, found - max);
 		const stop = Math.max(earliest, found - MAX_UNITS);
 		let start = found;
@@ -160,12 +195,17 @@ export class GreedyRuns {
 			if (!members[blocks[(blockIndex[unit >>> 8]! << 8) | (unit & 255)]!]) break;
 			start--;
 		}
-		if ((start === stop && stop > earliest) || found - start < min) return undefined;
-		return start;
+		return (start === stop && stop > earliest) || found - start < min ? -1 : start;
 	}
 
 	/** Fills captures on success; -1 means no match, {@link REPLAY_LIMIT} means undecided. */
 	match(text: string, start: number, registers: Int32Array): number {
+		return this.#replay(text, start, registers, start, this.#entry);
+	}
+
+	#replay(text: string, start: number, registers: Int32Array, at: number, pc: number): number {
+		const stop = Math.min(text.length, start + MAX_UNITS);
+		if (at > stop && stop < text.length) return REPLAY_LIMIT;
 		const { blockIndex, blocks } = this.#classes.alphabet;
 		const latin1 = blockIndex[0]! << 8;
 		const steps = this.#steps;
@@ -174,10 +214,7 @@ export class GreedyRuns {
 		let depth = 0;
 		let saved = 0;
 		if (undo) registers.fill(-1);
-		const stop = Math.min(text.length, start + MAX_UNITS);
 		let retries = MAX_RETRIES;
-		let pc = this.#entry;
-		let at = start;
 		while (pc !== DONE) {
 			const step = steps[pc]!;
 			if (step.type === "save") {
@@ -267,13 +304,18 @@ function startNeedle(steps: readonly Step[], entry: number, classes: CharClasses
 		text += step.text;
 		pc = afterSaves(steps, step.next);
 	}
-	if (text !== "") return { text };
+	if (text !== "") {
+		const first = steps[entry];
+		return { text, resume: first?.type === "literal" && first.text === text ? first.next : undefined };
+	}
 	const leading = steps[pc];
 	if (leading?.type !== "run") return undefined;
-	const delimiter = steps[afterSaves(steps, leading.next)];
+	const delimiterPc = afterSaves(steps, leading.next);
+	const delimiter = steps[delimiterPc];
 	if (delimiter?.type !== "literal" || leading.members[alphabet.classOf(delimiter.text.charCodeAt(0))])
 		return undefined;
-	return { text: delimiter.text, leading };
+	const resume = pc === entry && delimiterPc === leading.next ? delimiter.next : undefined;
+	return { text: delimiter.text, leading, resume };
 }
 
 /** Union of eligible first classes. Nullable programs cannot skip any start. */
