@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Changed
+- Provider stream watchdogs (time-to-first-event and inter-event idle) now default to 15 minutes, up from 5, so slow one-shot completions are not cut off
 - Gemini reasoning streams are now interrupted after 64 consecutive planning headers with no tool call (was 36)
 
 ### Fixed

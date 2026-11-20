@@ -12,11 +12,14 @@
  * in, text (or, with `schema`, a structured object) out.
  */
 
+import * as os from "node:os";
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model, type Tool } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
+import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 
 import type { ModelRegistry } from "../config/model-registry";
@@ -368,6 +371,7 @@ async function executeCompletion(
 	session: ToolSession,
 	signal: AbortSignal,
 	attempts: CompletionAttempt[],
+	rawBuffer: RawSseDebugBuffer,
 ): Promise<EvalCompletionResult> {
 	const registry = session.modelRegistry;
 	if (!registry) throw new ToolError("completion() has no model registry.");
@@ -433,6 +437,9 @@ async function executeCompletion(
 					reasoning: candidate.reasoning,
 					disableReasoning: candidate.disableReasoning,
 					toolChoice: schema ? { type: "tool", name: STRUCTURED_TOOL_NAME } : undefined,
+					// Capture this request's raw provider frames (SSE / synthesized WS
+					// frames) so a failure can be diagnosed from what the wire returned.
+					onSseEvent: (event, model) => rawBuffer.recordEvent(event, model),
 				},
 				{ telemetry, oneshotKind: "eval_completion" },
 			);
@@ -521,9 +528,51 @@ export async function runEvalCompletion(
 		);
 	}
 
-	return retainCompletionHandle("cmp", options, (signal, attempts) =>
-		executeCompletion(prompt, tier, system, schema, candidates, options.session, signal, attempts),
-	);
+	return retainCompletionHandle("cmp", options, async (signal, attempts) => {
+		const rawBuffer = new RawSseDebugBuffer();
+		try {
+			return await executeCompletion(
+				prompt,
+				tier,
+				system,
+				schema,
+				candidates,
+				options.session,
+				signal,
+				attempts,
+				rawBuffer,
+			);
+		} catch (error) {
+			// A user cancel is not a diagnostic failure; skip the dump.
+			if (!signal.aborted) {
+				const file = await dumpCompletionStream(rawBuffer, options.session);
+				if (file && error instanceof Error) {
+					error.message = `${error.message}\nStreamed provider frames written to ${file}.`;
+				}
+			}
+			throw error;
+		}
+	});
+}
+
+/**
+ * Persist a failed `completion()`'s captured provider frames to a `.log` file,
+ * preferring the session artifacts directory so it is discoverable and cleaned
+ * up with the session. Returns the path, or `null` when nothing was captured
+ * (e.g. a transport without raw-frame support) or the write failed.
+ */
+async function dumpCompletionStream(buffer: RawSseDebugBuffer, session: ToolSession): Promise<string | null> {
+	const text = buffer.toRawText();
+	if (!text.trim()) return null;
+	const dir = session.sessionManager?.getArtifactsDir?.() ?? os.tmpdir();
+	const file = path.join(dir, `completion-${Snowflake.next()}.sse.log`);
+	try {
+		await Bun.write(file, text);
+		return file;
+	} catch (error) {
+		logger.debug("completion() stream dump failed", { file, error });
+		return null;
+	}
 }
 
 /**

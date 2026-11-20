@@ -1,6 +1,6 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Model, RawSseEvent } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -610,6 +610,35 @@ describe("runEvalCompletion", () => {
 		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session: makeSession() });
 		expect(result.text).toBe("the answer");
 		expect(result.details).toEqual({ model: "p/smol", tier: "smol", structured: false });
+	});
+
+	it("dumps captured provider frames to a .log when a completion fails", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-completion-dump-");
+		const session = makeSession();
+		// ToolSession narrows `sessionManager`; the dump only needs `getArtifactsDir`.
+		const scoped = session as { sessionManager?: { getArtifactsDir: () => string | null } };
+		scoped.sessionManager = { getArtifactsDir: () => tempDir.path() };
+		const frame: RawSseEvent = {
+			event: "content_block_delta",
+			data: '{"delta":"thinking"}',
+			raw: ["event: content_block_delta", 'data: {"delta":"thinking"}'],
+		};
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (model, _ctx, opts) => {
+			// A real transport feeds raw frames through the request's `onSseEvent`
+			// hook; the empty-content response then surfaces the no-text-output error.
+			opts?.onSseEvent?.(frame, model);
+			return assistant({});
+		});
+
+		const error = (await rejectionOf(
+			runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session }),
+		)) as Error;
+		expect(error.message).toContain("completion() returned no text output.");
+		const match = /Streamed provider frames written to (.+?)\.$/.exec(error.message);
+		expect(match).not.toBeNull();
+		const dumped = await Bun.file(match![1]!).text();
+		expect(dumped).toContain("content_block_delta");
+		expect(dumped).toContain('{"delta":"thinking"}');
 	});
 
 	it("supplies a non-empty systemPrompt when system is omitted (codex 'Instructions are required' guard)", async () => {
