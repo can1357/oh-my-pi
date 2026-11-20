@@ -352,8 +352,10 @@ describe("ModelRegistry runtime discovery", () => {
 			expect(session.find("gateway", "new-model")).toBeUndefined();
 
 			setSystemTime(new Date(startedAt + 2 * 60 * 60 * 1000));
+			session.suppressSelector("gateway/old-model", startedAt + 3 * 60 * 60 * 1000);
 			expect(await session.refreshIfStale()).toBe(true);
 			expect(session.find("gateway", "new-model")).toBeDefined();
+			expect(session.isSelectorSuppressed("gateway/old-model")).toBe(true);
 		} finally {
 			setSystemTime();
 		}
