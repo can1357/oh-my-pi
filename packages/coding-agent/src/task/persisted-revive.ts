@@ -165,23 +165,24 @@ export function createPersistedSubagentReviverFactory(
 	const registry = AgentRegistry.global();
 	return async ref => {
 		const sessionFile = ref.sessionFile;
-		if (!sessionFile) return undefined;
+		if (!sessionFile) return { reason: "it has no transcript file" };
 		const peek = await SessionManager.peekSessionInit(sessionFile);
-		// No persisted contract (pre-session_init file) or the recorded workspace
-		// is gone (isolated/merged worktree, moved dir): leave it transcript-only
-		// (history://) rather than resurrect a wrong or broken session.
-		if (!peek?.init) return undefined;
+		// Unreadable file, no persisted contract (pre-session_init file), or the
+		// recorded workspace is gone (isolated/merged worktree, moved dir): leave it
+		// transcript-only (history://) rather than resurrect a wrong or broken session.
+		if (!peek) return { reason: "its transcript file is missing or unreadable" };
+		if (!peek.init) return { reason: "its transcript has no persisted session contract" };
 		// Isolated runs are never resumable: their worktree is merged + cleaned,
 		// and the parent was told messaging is impossible. A retained workspace
 		// (capture/persist failure) still exists on disk and would pass the cwd
 		// probe below, so gate on the stamped contract instead — otherwise a
 		// restart + peer message revives the agent outside isolation, in the
 		// parent cwd, contradicting the delivery notice.
-		if (peek.init.isolated) return undefined;
+		if (peek.init.isolated) return { reason: "it ran isolated; its worktree is not reattached after a restart" };
 		try {
 			await fs.stat(peek.cwd);
 		} catch {
-			return undefined;
+			return { reason: `its workspace ${peek.cwd} no longer exists` };
 		}
 		// taskDepth drives real capability gating (task-spawn allowance, memory
 		// startup, …); derive it from the persisted parent chain rather than
