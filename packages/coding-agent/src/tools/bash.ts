@@ -29,6 +29,7 @@ import {
 	raceJobSettlement,
 	resolveAutoBackgroundWaitMs,
 } from "../async";
+import { shellChangeSnapshots } from "../commit/selective/journal";
 import { type BoardEntry, registerOnBoard } from "../daemon/client";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import { shellMounts, shellProcessCommand } from "../exec/shell-process";
@@ -68,6 +69,7 @@ import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { outputMeta, resolveInlineByteCapBudget } from "./output-meta";
 import { resolveShellDirectory, resolveToCwd } from "./path-utils";
 import {
+	BASH_APPROVAL_SHELL_CONTROL_CHARS,
 	extractAndChainSegments,
 	extractLeadingCdTarget,
 	extractLiteralAndChainSegments,
@@ -114,19 +116,6 @@ import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight
 import { SPOTLIGHT_FULL_OUTPUT_MAX_BYTES } from "../spotlight/types";
 import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
 
-const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
-	"\n": true,
-	"\r": true,
-	";": true,
-	"&": true,
-	"|": true,
-	"<": true,
-	">": true,
-	"`": true,
-	$: true,
-	"(": true,
-	")": true,
-};
 const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^-]*[ce]|--(?:command|eval))(?:[= \t]|$)/u;
 
 function hasBashApprovalShellControl(command: string): boolean {
@@ -356,9 +345,18 @@ function bashApprovalRuleMatches(
 ): boolean {
 	if (rule.approval === "allow") {
 		if (hasBashApprovalShellControl(command)) return false;
-		if (commandMatchesBashApprovalPattern(command, rule.match)) return true;
+		const trimmedCommand = command.trimStart();
+		const hasLeadingEnv =
+			withoutLeadingEnvironmentAssignments(trimmedCommand) !== null || isShellEnvironmentAssignment(trimmedCommand);
+		if (
+			(!hasLeadingEnv || isShellEnvironmentAssignment(rule.match)) &&
+			commandMatchesBashApprovalPattern(command, rule.match)
+		) {
+			return true;
+		}
+		if (!hasLeadingEnv) return false;
 		const effectiveEnv = rule.env ? [...rule.env, ...allowedEnvVars] : allowedEnvVars;
-		const stripped = stripAllowedLeadingEnvAssignments(command, effectiveEnv);
+		const stripped = stripAllowedLeadingEnvAssignments(trimmedCommand, effectiveEnv);
 		return stripped !== undefined && commandMatchesBashApprovalPattern(stripped, rule.match);
 	}
 	return commandSegmentMatchesBashApprovalPattern(command, rule.match);
@@ -981,7 +979,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		signal: AbortSignal | undefined,
 		options: Omit<InternalUrlFilesystemOptions, "context">,
 	): InternalUrlFilesystem {
-		return new InternalUrlFilesystem({ ...options, context: sessionResolveContext(this.session, { signal }) });
+		return new InternalUrlFilesystem({
+			...options,
+			context: sessionResolveContext(this.session, { signal }),
+			// What the command's builtins and redirections write is journaled like an edit tool's write.
+			onFileChange:
+				this.session.recordFileChange &&
+				(change => this.session.recordFileChange?.({ tool: "bash", ...shellChangeSnapshots(change) })),
+		});
 	}
 
 	/**
@@ -1070,8 +1075,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			signal: AbortSignal | undefined;
 			/** `urlmap` commands for the session's URL paths ({@link shellMounts}). */
 			mounts: string;
-			artifactPath: string | undefined;
-			artifactId: string | undefined;
 		},
 	): Promise<BashInteractiveResult> {
 		const seed = await this.#sessionSeed(run.sessionId, run.hostCwd, run.signal);
@@ -1088,8 +1091,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				env: { ...seed.env, ...run.sessionEnv },
 				timeoutMs: run.timeoutMs,
 				signal: run.signal,
-				artifactPath: run.artifactPath,
-				artifactId: run.artifactId,
+				allocateArtifact: this.session.allocateOutputArtifact,
 				onStart: pid => {
 					board.entry = registerOnBoard({
 						kind: "external",
@@ -1466,7 +1468,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						: undefined;
 				// A cancelled job reports nothing more, even while its command is still shutting down.
 				if (notifier) runSignal.addEventListener("abort", () => notifier.stop(), { once: true });
-				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.()) ?? {};
 				const wallTimeStart = performance.now();
 				try {
 					const result = await executeBash(options.command, {
@@ -1494,8 +1495,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							toolCallId: options.toolCallId,
 						}).shellFilesystem(),
 						speech: sessionShellSpeech(this.session),
-						artifactPath,
-						artifactId,
+						allocateArtifact: this.session.allocateOutputArtifact,
 						onChunk: chunk => {
 							outputTap.append(chunk);
 							notifier?.poll();
@@ -1571,7 +1571,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			{
 				ownerId: this.session.getAgentId?.() ?? undefined,
 				foreground: options.foreground,
-				process: { command: options.command, cwd: options.commandCwd, pids: () => pids(), streams },
+				process: {
+					command: options.command,
+					cwd: options.commandCwd,
+					pids: () => pids(),
+					streams,
+					trace: () => liveTrace ?? latestProgressDetails?.trace,
+				},
 				intent: options.intent,
 				widgetInputs: {
 					sources: () => [outputTap, ...pipeSources.list()],
@@ -2297,9 +2303,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			}
 		}
 
-		// Allocate artifact for truncated output storage
-		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.()) ?? {};
-
 		const interactiveUi = canUseInteractiveBashPty(pty === true, ctx) ? ctx?.ui : undefined;
 		if (pty && !interactiveUi) {
 			pendingNotices.push("pty requested but unavailable in this environment; ran without a terminal");
@@ -2329,8 +2332,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					timeoutMs,
 					signal,
 					mounts: await shellMounts(sessionResolveContext(this.session, { signal }), approvalTier),
-					artifactPath,
-					artifactId,
 				})
 			: // executeBash runs its OWN direnv preflight internally — pass the RAW
 				// command here so the unset prefix is not applied twice.
@@ -2354,8 +2355,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						toolCallId,
 					}).shellFilesystem(),
 					speech: sessionShellSpeech(this.session),
-					artifactPath,
-					artifactId,
+					allocateArtifact: this.session.allocateOutputArtifact,
 					// Stream the sink's own inline view rather than re-buffering chunks.
 					onPreview: emitFrame
 						? text => {

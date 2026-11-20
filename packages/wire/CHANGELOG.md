@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `features` terminal event: the terminal's feature list changed (a setting), replacing the `hello` reply's
+
 ## [19.0.0] - 2026-11-18
 
 ### Added

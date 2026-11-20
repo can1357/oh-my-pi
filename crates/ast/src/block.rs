@@ -13,7 +13,7 @@
 //! in grammars that nest decorators inside the declaration. Any other outer
 //! attribute resolves to its first line only, whatever its height.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, ops::Range};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -64,18 +64,50 @@ fn first_content_column(code: &str, row: usize) -> Option<usize> {
 /// node begins on that line, or the resolved subtree contains a syntax error.
 pub fn block_range_at(options: BlockRangeOptions) -> Result<Option<BlockRange>> {
 	let BlockRangeOptions { code, lang, path, line } = options;
+	Ok(resolve_block(&code, lang.as_deref(), path.as_deref(), line)?.map(|(lines, _)| lines))
+}
+
+/// Byte range of the complete lines of a multiline syntax block starting on
+/// `line`, excluding its terminal newline. Reject a shared closing line so
+/// moving or deleting the block cannot take a neighbouring statement with it.
+pub fn standalone_block_at(code: &str, path: &str, line: u32) -> Result<Option<Range<usize>>> {
+	let Some((lines, bytes)) = resolve_block(code, None, Some(path), line)? else {
+		return Ok(None);
+	};
+	if lines.start_line != line || lines.end_line <= line {
+		return Ok(None);
+	}
+	let start = code[..bytes.start].rfind('\n').map_or(0, |at| at + 1);
+	let node_end = code[..bytes.end]
+		.strip_suffix('\n')
+		.map_or(bytes.end, str::len);
+	let end = code[node_end..]
+		.find('\n')
+		.map_or(code.len(), |at| node_end + at);
+	if !code[start..bytes.start].trim().is_empty() || !code[node_end..end].trim().is_empty() {
+		return Ok(None);
+	}
+	Ok(Some(start..end))
+}
+
+fn resolve_block(
+	code: &str,
+	lang: Option<&str>,
+	path: Option<&str>,
+	line: u32,
+) -> Result<Option<(BlockRange, Range<usize>)>> {
 	if line == 0 || code.is_empty() {
 		return Ok(None);
 	}
-	let Some(language) = resolve_language(lang.as_deref(), path.as_deref()) else {
+	let Some(language) = resolve_language(lang, path) else {
 		return Ok(None);
 	};
 	let row = (line - 1) as usize;
-	let Some(col) = first_content_column(&code, row) else {
+	let Some(col) = first_content_column(code, row) else {
 		return Ok(None);
 	};
 
-	let Some(tree) = parse_cached(&code, language, path.as_deref())? else {
+	let Some(tree) = parse_cached(code, language, path)? else {
 		return Ok(None);
 	};
 	let root = tree.root_node();
@@ -127,10 +159,13 @@ pub fn block_range_at(options: BlockRangeOptions) -> Result<Option<BlockRange>> 
 	if node.has_error() {
 		return Ok(None);
 	}
-	let Some(end_line) = block_end_line(node) else {
+	let Some((end_line, end_byte)) = block_end(node) else {
 		return Ok(None);
 	};
-	Ok(Some(BlockRange { start_line: node_start_line(node), end_line }))
+	Ok(Some((
+		BlockRange { start_line: node_start_line(node), end_line },
+		node.start_byte()..end_byte,
+	)))
 }
 
 /// The last line of the block that `node` opens: the last line of `node`
@@ -151,9 +186,9 @@ pub fn block_range_at(options: BlockRangeOptions) -> Result<Option<BlockRange>> 
 /// attributes (`inner_attribute_item`) keep their own span. Returns `None`
 /// when a skipped attribute or the item carries a syntax error, for the same
 /// reason the caller refuses an error inside `node`.
-fn block_end_line(node: Node<'_>) -> Option<u32> {
+fn block_end(node: Node<'_>) -> Option<(u32, usize)> {
 	if !is_outer_attribute(node) {
-		return Some(node_content_end_line(node));
+		return Some((node_content_end_line(node), node.end_byte()));
 	}
 	if is_first_outer_attribute(node) {
 		let mut next = node.next_named_sibling();
@@ -162,12 +197,12 @@ fn block_end_line(node: Node<'_>) -> Option<u32> {
 				return None;
 			}
 			if !sibling.is_extra() && sibling.kind() != "attribute_item" {
-				return Some(node_content_end_line(sibling));
+				return Some((node_content_end_line(sibling), sibling.end_byte()));
 			}
 			next = sibling.next_named_sibling();
 		}
 	}
-	Some(node_start_line(node))
+	Some((node_start_line(node), node.end_byte()))
 }
 
 /// Is `node` an outer attribute of the Rust item after it: an

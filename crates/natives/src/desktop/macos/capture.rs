@@ -563,25 +563,39 @@ fn stacked(options: CGWindowListOption, relative_to: u32) -> Option<Vec<window_o
 	)
 }
 
-/// Frame of on-screen window `id` in global points, or `None` once it is gone.
-/// Bounds need no Screen Recording permission.
-pub(super) fn window_frame(id: u32) -> Option<CGRect> {
+/// Reads one exact Quartz record, regardless of visibility; this grants no
+/// capture or input eligibility.
+fn read_window<T>(id: u32, read: impl FnOnce(&WindowDictionary) -> Option<T>) -> Option<T> {
 	let snapshot = CGWindowListCopyWindowInfo(CGWindowListOption::OptionIncludingWindow, id)?;
 	// SAFETY: CoreGraphics returns an immutable array of dictionaries whose
 	// documented window keys are CFStrings and whose values are CFTypes.
 	let snapshot = unsafe { CFRetained::cast_unchecked::<CFArray<WindowDictionary>>(snapshot) };
 	// SAFETY: This copy-rule snapshot remains alive and is never mutated.
 	let dictionary = unsafe { snapshot.iter_unchecked() }.next()?;
-	// SAFETY: The CoreGraphics key constants are process-lived. Typed
-	// downcasts reject absent or malformed window metadata.
-	unsafe {
-		if window_number(dictionary, kCGWindowNumber)? != i64::from(id) {
-			return None;
-		}
+	// SAFETY: The CoreGraphics key constant is process-lived.
+	if window_number(dictionary, unsafe { kCGWindowNumber })? != i64::from(id) {
+		return None;
+	}
+	read(dictionary)
+}
+
+pub(super) fn window_owner_pid(id: u32) -> Option<libc::pid_t> {
+	read_window(id, |dictionary| {
+		// SAFETY: The CoreGraphics key constant is process-lived.
+		libc::pid_t::try_from(window_number(dictionary, unsafe { kCGWindowOwnerPID })?)
+			.ok()
+			.filter(|pid| *pid > 0)
+	})
+}
+
+/// Frame of window `id` in global points, or `None` once it is gone.
+pub(super) fn window_frame(id: u32) -> Option<CGRect> {
+	// SAFETY: The CoreGraphics key constant is process-lived.
+	read_window(id, |dictionary| unsafe {
 		let bounds = window_value(dictionary, kCGWindowBounds)?.downcast_ref::<CFDictionary>()?;
 		let mut rect = CGRect::default();
 		CGRectMakeWithDictionaryRepresentation(Some(bounds), &mut rect).then_some(rect)
-	}
+	})
 }
 
 /// Whether capture sees the record. Without Screen Recording permission,
