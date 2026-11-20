@@ -1483,6 +1483,19 @@ export const cfgAskNotify = register({
 	},
 });
 
+export const cfgPtyNotify = register({
+	id: "pty.notify",
+	type: "enum",
+	values: ["on", "off"] as const,
+	default: "on",
+	ui: {
+		tab: "interaction",
+		group: "Notifications",
+		label: "Console Notification",
+		description: "Notify when an interactive console (bash `pty`) is waiting on you",
+	},
+});
+
 export const cfgRecapEnabled = register({
 	id: "recap.enabled",
 	type: "boolean",

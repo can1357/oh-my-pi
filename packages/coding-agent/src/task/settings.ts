@@ -188,9 +188,12 @@ export const cfgOvnfsPath = register({
  * or `undefined` when that binary is not found. Read by the system prompt (checkout
  * guidance), the bash git guard, and, when `isolation.backend` is auto, the task
  * runner (ovnfs-backed isolation) and `/wt` (ovnfs-backed session worktrees).
+ * Windows paths come back with forward slashes: the command is pasted into
+ * bash, which strips backslashes (`C:\Users\…` runs as `C:Users…`).
  */
 export function ovnfsCommand(settings?: Settings): string | undefined {
-	const command = (settings && cfgOvnfsPath.get(settings)?.trim()) || "ovnfs";
+	const configured = (settings && cfgOvnfsPath.get(settings)?.trim()) || "ovnfs";
+	const command = process.platform === "win32" ? configured.replaceAll("\\", "/") : configured;
 	return $which(command) ? command : undefined;
 }
 

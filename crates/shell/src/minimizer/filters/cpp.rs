@@ -67,13 +67,7 @@ fn invocation_tool(command: &str) -> Option<CppTool> {
 }
 
 fn token_tool(token: &str) -> Option<CppTool> {
-	let name = token
-		.rsplit('/')
-		.next()
-		.unwrap_or(token)
-		.to_ascii_lowercase();
-	let name = name.trim_start_matches("./");
-	direct_tool(name)
+	direct_tool(&crate::minimizer::detect::program_name(token).to_ascii_lowercase())
 }
 
 fn command_tokens(command: &str) -> impl Iterator<Item = &str> {

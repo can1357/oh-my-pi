@@ -193,16 +193,18 @@ describe("wait", () => {
 		build.resolve("done");
 	});
 
-	test("only the top-level interactive session is told to end its turn instead of waiting again", async () => {
+	test("only the top-level interactive session skips the 5s floor and is told to end its turn instead of waiting again", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		const build = Promise.withResolvers<string>();
 		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
 		const interactive = new WaitTool(session(manager, "Main", false, { tuiTranscript: true }));
 		expect(interactive.description).toContain("End your turn instead");
-		expect(report(await elapse(interactive, 5_000))).toContain(
-			"End your turn: results and messages start your next one.",
-		);
+		// An early return could only end its turn: one more request than blocking until the result.
+		const first = await elapse(interactive, 240_000);
+		expect(report(first)).toContain("within 4m");
+		expect(report(first)).toContain("End your turn: results and messages start your next one.");
+		expect(notice(first)).toBeUndefined();
 		// Print mode exits and cancels the jobs when the turn ends; ACP holds results until the client's next prompt.
 		const headless = new WaitTool(session(manager));
 		expect(headless.description).not.toContain("End your turn");

@@ -1,15 +1,24 @@
 import type { PipeStreamInfo, PipeStreams } from "@oh-my-pi/pi-natives";
+import { collapseCommand } from "@oh-my-pi/pi-tui/apps/ps-data";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { truncate } from "@oh-my-pi/pi-utils";
 import type { JobTextChunk, JobTextSource } from "./types";
 
-/** Longest pipe label: `producer → consumer` on one line. */
+/** Longest stream label: `producer → consumer` on one line. */
 const MAX_LABEL_CHARS = 80;
+
+/** A stream's id among its job's sources: `pipe:<n>`, or `file:<n>` for a redirected file. */
+export function pipeSourceId(info: PipeStreamInfo): string {
+	return `${info.file ? "file" : "pipe"}:${info.id}`;
+}
 
 /**
  * One tapped pipe of a bash run as a {@link JobTextSource} with id
- * `pipe:<n>`. Offsets are stream bytes; a streaming decoder keeps multi-byte
- * characters split across reads intact and restarts whenever a read does not
- * continue where the previous one ended (a gap, or a reread from the start).
+ * `pipe:<n>`, or one file a command of the run redirects its output into,
+ * with id `file:<n>`. Offsets are stream bytes; a streaming decoder keeps
+ * multi-byte characters split across reads intact and restarts whenever a
+ * read does not continue where the previous one ended (a gap, or a reread
+ * from the start).
  *
  * A pipe that carried a NUL byte (`git archive | tar -x`, `curl | gunzip`) is
  * binary from then on and reads as empty text: decoded, its runs between
@@ -32,11 +41,16 @@ export class PipeTextSource implements JobTextSource {
 		readonly streams: PipeStreams,
 		info: PipeStreamInfo,
 	) {
-		this.id = `pipe:${info.id}`;
+		this.id = pipeSourceId(info);
 		this.streamId = info.id;
-		// Stage source can span lines (`for …; do …; done`); the label keeps each side on one line.
-		const [producer, consumer] = [info.producer, info.consumer].map(stage => stage.replace(/\s+/g, " ").trim());
-		this.label = truncate(`${producer} → ${consumer}`, MAX_LABEL_CHARS);
+		// Stage source can span lines (`for …; do …; done`): the label keeps each side on one. The path leads a
+		// file's label, so a long command never cuts it off.
+		this.label = truncate(
+			info.file
+				? `file ${shortenPath(info.consumer)} ← ${collapseCommand(info.producer)}`
+				: `${collapseCommand(info.producer)} → ${collapseCommand(info.consumer)}`,
+			MAX_LABEL_CHARS,
+		);
 	}
 
 	read(from: number): JobTextChunk {
@@ -52,8 +66,8 @@ export class PipeTextSource implements JobTextSource {
 }
 
 /**
- * The pipes of one bash run as text sources, one stable {@link PipeTextSource}
- * per stream so each keeps its decoder across refreshes.
+ * The pipes and redirected files of one bash run as text sources, one stable
+ * {@link PipeTextSource} per stream so each keeps its decoder across refreshes.
  */
 export class PipeTextSources {
 	readonly #sources = new Map<number, PipeTextSource>();
