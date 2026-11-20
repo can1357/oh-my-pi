@@ -420,7 +420,7 @@ impl Request {
 
 	/// Only routes that mark their mutation boundary may change timeout
 	/// outcomes.
-	fn dispatch_fenced(&self) -> bool {
+	const fn dispatch_fenced(&self) -> bool {
 		cfg!(target_os = "windows") && matches!(self, Self::AxPerform { menu: None, .. })
 	}
 
@@ -4212,7 +4212,7 @@ mod capture_tests {
 				token,
 				|reply| Request::ListWindows { reply },
 				|_, reply_by| {
-					assert_eq!(reply_by, run_by - control::DEADLINE_MARGIN / 2);
+					assert_eq!(reply_by, run_by.checked_sub(control::DEADLINE_MARGIN / 2).unwrap());
 					entered
 						.recv_timeout(Duration::from_secs(30))
 						.expect("provider did not dispatch");
@@ -4270,7 +4270,7 @@ mod capture_tests {
 				token,
 				|reply| Request::ListWindows { reply },
 				|_, reply_by| {
-					assert_eq!(reply_by, run_by - control::DEADLINE_MARGIN / 2);
+					assert_eq!(reply_by, run_by.checked_sub(control::DEADLINE_MARGIN / 2).unwrap());
 					entered
 						.recv_timeout(Duration::from_secs(30))
 						.expect("provider did not enter");

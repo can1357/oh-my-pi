@@ -236,12 +236,9 @@ impl OperationToken {
 		if self.dispatch.is_none() {
 			return reply_by;
 		}
-		self
-			.source
-			.0
-			.deadline
-			.lock()
-			.map_or(reply_by, |run_by| reply_by.min(run_by - DEADLINE_MARGIN / 2))
+		self.source.0.deadline.lock().map_or(reply_by, |run_by| {
+			reply_by.min(run_by.checked_sub(DEADLINE_MARGIN / 2).unwrap_or(run_by))
+		})
 	}
 
 	pub(crate) fn enter(&self) -> OperationScope {
@@ -1391,7 +1388,10 @@ mod tests {
 		let early_reply = start + Duration::from_secs(5);
 		let late_reply = start + Duration::from_secs(20);
 		assert_eq!(outer.reply_wait_deadline(early_reply), early_reply);
-		assert_eq!(outer.reply_wait_deadline(late_reply), run_by - DEADLINE_MARGIN / 2);
+		assert_eq!(
+			outer.reply_wait_deadline(late_reply),
+			run_by.checked_sub(DEADLINE_MARGIN / 2).unwrap()
+		);
 		assert_eq!(plain.reply_wait_deadline(late_reply), late_reply);
 	}
 
