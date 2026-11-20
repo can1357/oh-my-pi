@@ -38,6 +38,13 @@ export interface TtsrCheckOptions {
 	 * whole buffer. Defaults: `false` for `checkDelta`, `true` for `checkSnapshot`.
 	 */
 	final?: boolean;
+	/**
+	 * Evaluate only the rules a non-final check skips. A rule that cannot interrupt the stream's
+	 * source ({@link TtsrManager.interrupts}) reports after the output ends anyway, so it waits for
+	 * the final check. Skips a stream that buffered no text: this settles a stream whose closing
+	 * event never arrived, without interrupting finished output.
+	 */
+	deferredOnly?: boolean;
 }
 
 /** One completed assistant output (reply, reasoning, or one file of a tool call) as rules see it. */
@@ -862,9 +869,12 @@ export class TtsrManager {
 		if (context.source === "thinking" && !this.#canMatchThinking) {
 			return [];
 		}
+		if (options?.deferredOnly && !this.#buffers.has(this.#bufferKey(context))) {
+			return [];
+		}
 		const buffer = this.#streamBuffer(context);
 		buffer.append(delta);
-		return this.#matchBuffer(buffer, context, options?.final ?? false);
+		return this.#matchBuffer(buffer, context, options?.final ?? false, options?.deferredOnly ?? false);
 	}
 
 	/**
@@ -880,7 +890,53 @@ export class TtsrManager {
 	checkSnapshot(snapshot: string, context: TtsrMatchContext, options?: TtsrCheckOptions): Rule[] {
 		const buffer = this.#streamBuffer(context);
 		buffer.replace(snapshot);
-		return this.#matchBuffer(buffer, context, options?.final ?? true);
+		return this.#matchBuffer(buffer, context, options?.final ?? true, options?.deferredOnly ?? false);
+	}
+
+	/**
+	 * Whether `rule` interrupts output from `source`: its own `interruptMode` wins over the global
+	 * setting. A rule that does not only reports the match after the output ends.
+	 */
+	interrupts(rule: Rule, source: TtsrMatchSource): boolean {
+		switch (rule.interruptMode ?? this.#settings.interruptMode) {
+			case "always":
+				return true;
+			case "prose-only":
+				return source === "text" || source === "thinking";
+			case "tool-only":
+				return source === "tool";
+			default:
+				return false;
+		}
+	}
+
+	/**
+	 * Whether a non-final check of a `toolName` call's stream can match anything: some regex rule
+	 * that can still trigger interrupts tool calls and is scoped to this tool (path globs aside).
+	 * When none is, the call needs only its final check.
+	 */
+	interruptsToolStream(toolName: string): boolean {
+		if (!this.#settings.enabled) {
+			return false;
+		}
+		const tool = toolName.trim().toLowerCase();
+		for (const entry of this.#rules.values()) {
+			if (
+				entry.question ||
+				entry.conditions.length === 0 ||
+				!this.#canTrigger(entry.rule) ||
+				!this.interrupts(entry.rule, "tool")
+			) {
+				continue;
+			}
+			if (
+				entry.scope.allowAnyTool ||
+				entry.scope.toolScopes.some(scope => !scope.toolName || scope.toolName === tool)
+			) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	#streamBuffer(context: TtsrMatchContext): StreamBuffer {
@@ -1051,40 +1107,55 @@ export class TtsrManager {
 		return claimed;
 	}
 
-	#matchBuffer(buffer: StreamBuffer, context: TtsrMatchContext, final: boolean): Rule[] {
+	#matchBuffer(buffer: StreamBuffer, context: TtsrMatchContext, final: boolean, deferredOnly: boolean): Rule[] {
 		if (!this.#settings.enabled) {
 			return [];
 		}
 		const matches: Rule[] = [];
-		for (const [name, entry] of this.#rules) {
+		const deferred: TtsrEntry[] = [];
+		for (const entry of this.#rules.values()) {
 			if (entry.question || !this.#canTrigger(entry.rule)) {
 				continue;
 			}
-			if (!this.#matchesScope(entry, context)) {
+			const interrupts = this.interrupts(entry.rule, context.source);
+			if (deferredOnly && interrupts) {
 				continue;
 			}
-			if (!this.#matchesGlobalPaths(entry, context)) {
+			if (!this.#matchesScope(entry, context) || !this.#matchesGlobalPaths(entry, context)) {
 				continue;
 			}
-			if (
-				!entry.conditions.some((condition, index) => buffer.matches(condition, entry.conditionTraits[index], final))
-			) {
-				continue;
+			if (!final && !interrupts) {
+				deferred.push(entry);
+			} else if (this.#bufferMatches(buffer, entry, context, final)) {
+				matches.push(entry.rule);
 			}
-
-			const excerpt = buffer.excerpt(name, entry.conditions);
-			matches.push(entry.rule);
-			logger.debug("TTSR condition matched", {
-				ruleName: name,
-				conditions: entry.rule.condition,
-				excerpt,
-				source: context.source,
-				toolName: context.toolName,
-				filePaths: context.filePaths,
-			});
 		}
-
+		// A non-final match interrupts the stream, so this is the deferred rules' last check:
+		// the interrupt names every rule the discarded output broke.
+		if (matches.length > 0) {
+			for (const entry of deferred) {
+				if (this.#bufferMatches(buffer, entry, context, true)) matches.push(entry.rule);
+			}
+		}
 		return matches;
+	}
+
+	#bufferMatches(buffer: StreamBuffer, entry: TtsrEntry, context: TtsrMatchContext, final: boolean): boolean {
+		if (
+			!entry.conditions.some((condition, index) => buffer.matches(condition, entry.conditionTraits[index], final))
+		) {
+			return false;
+		}
+		const name = entry.rule.name;
+		logger.debug("TTSR condition matched", {
+			ruleName: name,
+			conditions: entry.rule.condition,
+			excerpt: buffer.excerpt(name, entry.conditions),
+			source: context.source,
+			toolName: context.toolName,
+			filePaths: context.filePaths,
+		});
+		return true;
 	}
 
 	/** Text that matched this rule in this stream; AST-only and zero-width matches have no excerpt. */

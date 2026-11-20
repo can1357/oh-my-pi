@@ -82,27 +82,21 @@ describe("TTSR incremental stream matching", () => {
 		expect(manager.matchExcerpt("long", TEXT)).toBe("new TOKEN_short context");
 	});
 
-	it("keeps settled matches cheap while a non-interrupting rule stays pending", () => {
+	it("leaves a non-interrupting rule to the final check", () => {
 		const manager = new TtsrManager({ enabled: true });
-		manager.addRule({
-			...rule("early", "EARLY_HIT"),
-			condition: ["NEVER_\\d{3}", "EARLY_HIT"],
-			interruptMode: "never",
-		});
-		manager.checkDelta("EARLY_HIT\n", TEXT);
-		const exec = RegExp.prototype.exec;
-		let scanned = 0;
-		const spy = vi.spyOn(RegExp.prototype, "exec").mockImplementation(function (this: RegExp, input: string) {
-			if (this.source.includes("EARLY_HIT") || this.source.includes("NEVER_")) scanned += input.length;
-			return exec.call(this, input);
-		});
-		try {
-			for (let index = 0; index < 2_000; index++) manager.checkDelta("const value = compute(input);\n", TEXT);
-			expect(scanned).toBeLessThan(2 * FILLER.length);
-			expect(manager.matchExcerpt("early", TEXT)).toBe("EARLY_HIT");
-		} finally {
-			spy.mockRestore();
-		}
+		manager.addRule({ ...rule("warn", "WARN_ME"), interruptMode: "never" });
+		expect(manager.checkDelta("WARN_ME\n", TEXT)).toEqual([]);
+		expect(manager.checkDelta(FILLER, TEXT)).toEqual([]);
+		expect(names(manager.checkDelta("", TEXT, { final: true }))).toEqual(["warn"]);
+		expect(manager.matchExcerpt("warn", TEXT)).toStartWith("WARN_ME");
+	});
+
+	it("names a non-interrupting rule the stream already broke when another rule interrupts it", () => {
+		const manager = new TtsrManager({ enabled: true });
+		manager.addRule({ ...rule("warn", "WARN_ME"), interruptMode: "never" });
+		manager.addRule({ ...rule("stop", "STOP_NOW"), interruptMode: "always" });
+		expect(manager.checkDelta("WARN_ME\n", TEXT)).toEqual([]);
+		expect(names(manager.checkDelta("STOP_NOW", TEXT)).sort()).toEqual(["stop", "warn"]);
 	});
 
 	it("omits zero-width excerpts without losing the rule match", () => {
