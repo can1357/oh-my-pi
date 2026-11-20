@@ -1071,6 +1071,8 @@ describe("provider context image budgets", () => {
 		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
 		// The newest screenshots stay.
 		expect(body).toContain(`"[Previous computer result; call_id=call_199]`);
+		// The oldest went; each note opens with the omission, so cutting its long text keeps it.
+		expect(body).toContain(`call_id=call_0]: ${omitted()}`);
 	});
 
 	it("keeps five 1 MB computer screenshots on Factory's Responses route under the body limit", async () => {

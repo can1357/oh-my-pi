@@ -47,6 +47,8 @@ export interface ManagedChild {
 	/** False once more than 1 MiB is unwritten. */
 	write(data: string | Uint8Array): boolean;
 	drained(): Promise<void>;
+	/** Close the child's stdin: end-of-input, the graceful stop signal of stdio protocols. Idempotent; later writes are dropped. */
+	closeInput(): void;
 	/** Call each at most once; output produced earlier is buffered. */
 	onStdout(sink: (chunk: Uint8Array) => void): void;
 	onStderr(sink: (chunk: Uint8Array) => void): void;
