@@ -31,7 +31,12 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isUnexpectedSocketCloseMessage, logger, prompt, sleepLong, sleepUntil } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
-import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
+import {
+	filterAvailableModelsByEnabledPatterns,
+	formatModelStringWithRouting,
+	resolveModelOverride,
+} from "../config/model-resolver";
+import { cfgEnabledModels } from "../config/model-settings";
 
 import type { Settings } from "../config/settings";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
@@ -289,6 +294,11 @@ export interface TurnRecoveryHost {
 	thinkingLevelCeiling(): Effort | undefined;
 	/** The session never switches to a retry fallback model (a per-call `model` subagent). */
 	modelFallbackDisabled?(): boolean;
+	/**
+	 * Retry fallbacks must stay inside the `enabledModels` scope (subagent sessions). Checked when a
+	 * candidate is considered, so a selector the registry only learns about later is still validated.
+	 */
+	retryFallbackScopedToEnabledModels?(): boolean;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	isCompacting(): boolean;
@@ -2065,9 +2075,29 @@ export class TurnRecovery {
 			currentModel,
 			options,
 		);
-		if (!cfgOffline.get(this.#host.settings)) return candidates;
 		const provider = this.#host.model()?.provider;
-		return candidates.filter(candidate => provider !== undefined && candidate.provider === provider);
+		const scopePatterns = this.#host.retryFallbackScopedToEnabledModels?.()
+			? cfgEnabledModels.get(this.#host.settings)
+			: [];
+		const scopedModels =
+			scopePatterns.length > 0
+				? filterAvailableModelsByEnabledPatterns(
+						this.#host.modelRegistry.getAvailable(),
+						scopePatterns,
+						this.#host.settings,
+					)
+				: undefined;
+		return candidates.filter(candidate => {
+			if (cfgOffline.get(this.#host.settings) && (provider === undefined || candidate.provider !== provider)) {
+				return false;
+			}
+			if (!scopedModels) return true;
+			// Resolve the way the switch does, so the scope judges the model it would dispatch.
+			const candidateModel =
+				resolveModelOverride([candidate.raw], this.#host.modelRegistry, this.#host.settings).model ??
+				this.#host.modelRegistry.find(candidate.provider, candidate.id);
+			return candidateModel !== undefined && scopedModels.some(scoped => modelsAreEqual(scoped, candidateModel));
+		});
 	}
 
 	async #maybeApplyUsageAwareFallback(signal: AbortSignal, confirmer?: UsageFallbackConfirmer): Promise<boolean> {

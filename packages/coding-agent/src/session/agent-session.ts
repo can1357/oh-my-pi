@@ -1352,6 +1352,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Creation-time permission for switchSession to keep the current model when a target's saved model is unrestorable. */
 	readonly #allowSessionModelFallback: boolean;
 	readonly #disableModelFallback: boolean;
+	readonly #retryFallbackScopedToEnabledModels: boolean;
 	/** Creation-time: false when the extension UI context cannot reach a human (ACP without form elicitation). */
 	readonly #interactivePrompts: boolean;
 	/** Newest usage reports, cached by fetchUsageReports. */
@@ -2257,6 +2258,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#modelRegistry = config.modelRegistry;
 		this.#allowSessionModelFallback = config.allowSessionModelFallback === true;
 		this.#disableModelFallback = config.disableModelFallback === true;
+		this.#retryFallbackScopedToEnabledModels = config.retryFallbackScopedToEnabledModels === true;
 		this.#interactivePrompts = config.interactivePrompts !== false;
 		this.#extensionRoots =
 			config.extensionRoots ??
@@ -2464,6 +2466,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			setThinkingLevel: level => this.#models.setThinkingLevel(level),
 			thinkingLevelCeiling: () => this.#models.thinkingLevelCeiling,
 			modelFallbackDisabled: () => this.#disableModelFallback,
+			retryFallbackScopedToEnabledModels: () => this.#retryFallbackScopedToEnabledModels,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
 			isCompacting: () => this.isCompacting,

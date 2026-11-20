@@ -366,9 +366,9 @@ function resolveSubagentInheritedRetryFallbackChain(
 
 /**
  * Membership test for the active `enabledModels` scope, or `undefined` when no
- * scope is configured. Retry fallbacks resolve against the full registry at
- * runtime, so every candidate the child may switch to is held to the same scope
- * as its initial model.
+ * scope is configured. Used to leave already-resolved out-of-scope candidates
+ * out of the child's retry chain; the child's retry recovery checks the scope
+ * again before every switch.
  */
 function resolveSubagentEnabledModelScope(
 	settings: Settings,
@@ -5013,12 +5013,16 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings).filter(
 					candidate => isAllowedRetryModel(candidate.model),
 				),
+				// An entry the registry cannot resolve yet stays: the child may register it later, and its
+				// retry recovery checks the enabledModels scope before switching to it. Offline mode keeps
+				// dropping it because only the parent's provider is reachable.
 				inheritedFallbackChain:
 					allowedProvider === undefined && inEnabledModelScope === undefined
 						? inheritedRetryFallbackChain
-						: inheritedRetryFallbackChain?.filter(entry =>
-								isAllowedRetryModel(resolveModelOverride([entry], modelRegistry, subagentSettings).model),
-							),
+						: inheritedRetryFallbackChain?.filter(entry => {
+								const candidate = resolveModelOverride([entry], modelRegistry, subagentSettings).model;
+								return candidate === undefined ? allowedProvider === undefined : isAllowedRetryModel(candidate);
+							}),
 				model,
 				authFallbackUsed,
 			});

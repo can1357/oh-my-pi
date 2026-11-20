@@ -5538,6 +5538,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			disableModelFallback: options.disableModelFallback,
+			retryFallbackScopedToEnabledModels: isSubagentSession,
 			initialRetryFallback,
 			deferRetryFallbackValidation: options.deferRetryFallbackValidation,
 			prewalk,

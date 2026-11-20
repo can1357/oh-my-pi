@@ -9,7 +9,9 @@ import { Settings } from "../src/config/settings";
 import * as sdkModule from "../src/sdk";
 import type { AgentSession } from "../src/session/agent-session";
 import type { AuthStorage } from "../src/session/auth-storage";
+import { installRetryFallbackRole } from "../src/session/retry-fallback-chains";
 import { cfgRetryFallbackChains } from "../src/session/settings";
+import { TurnRecovery, type TurnRecoveryHost } from "../src/session/turn-recovery";
 import * as discovery from "../src/task/discovery";
 import { runSubprocess } from "../src/task/executor";
 import { cfgTaskAgentModelOverrides } from "../src/task/settings";
@@ -197,6 +199,53 @@ test.each<[string, string[], Record<string, string[]>, string[] | undefined]>([
 		enableLsp: false,
 	});
 	expect(childChain).toEqual(expected);
+});
+
+test("keeps an inherited entry the registry cannot resolve yet in the child retry chain", async () => {
+	let childChain: unknown;
+	vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+		childChain = options?.settings ? cfgRetryFallbackChains.get(options.settings)["subagent:late-retry"] : undefined;
+		return { session: yieldingChild(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+	});
+	cfgEnabledModels.override(settings, ["scope-test/allowed", "late-provider/ready"]);
+	cfgRetryFallbackChains.override(settings, { default: ["late-provider/ready", "scope-test/forbidden"] });
+	await runSubprocess({
+		cwd: tempDir,
+		agent: { name: "worker", description: "Test worker", systemPrompt: "Inspect the target.", source: "bundled" },
+		task: "Inspect the target.",
+		index: 0,
+		id: "late-retry",
+		modelOverride: ["scope-test/allowed"],
+		settings,
+		modelRegistry: registry,
+		enableLsp: false,
+	});
+	expect(childChain).toEqual(["late-provider/ready"]);
+});
+
+test.each([
+	["a subagent session", true, ["late-provider/ready"]],
+	["a main session", false, ["late-provider/ready", "late-provider/outside"]],
+] as const)("checks late-registered retry fallbacks against enabledModels in %s", (_label, scoped, expected) => {
+	cfgEnabledModels.override(settings, ["scope-test/allowed", "late-provider/ready"]);
+	installRetryFallbackRole(settings, "subagent:late-switch", {
+		primary: "scope-test/allowed",
+		chain: ["late-provider/ready", "late-provider/outside"],
+	});
+	const current = registry.find("scope-test", "allowed");
+	const recovery = new TurnRecovery({
+		model: () => current,
+		thinkingLevel: () => undefined,
+		sessionManager: { getSessionId: () => "late-switch" },
+		settings,
+		modelRegistry: registry,
+		configWarnings: [],
+		retryFallbackScopedToEnabledModels: () => scoped,
+	} as unknown as TurnRecoveryHost);
+	// The child registers both chain models only after the chain was installed.
+	registerModels("late-provider", ["ready", "outside"]);
+	const candidates = recovery.findRetryFallbackCandidates("subagent:late-switch", "scope-test/allowed", current);
+	expect(candidates.map(candidate => candidate.raw)).toEqual([...expected]);
 });
 
 test("still rejects at preflight once the scoped model is registered and the selection is outside it", async () => {
