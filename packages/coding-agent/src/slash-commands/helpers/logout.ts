@@ -1,3 +1,4 @@
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { getOAuthCredentialProvider } from "@oh-my-pi/pi-ai/oauth";
 import type { AgentSession } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity, StoredAuthCredential } from "../../session/auth-storage";
@@ -14,7 +15,7 @@ function nonEmpty(value: string | undefined): string | undefined {
 	return trimmed && trimmed.length > 0 ? trimmed : undefined;
 }
 
-function oauthLabel(row: StoredAuthCredential): string {
+function oauthLabel(row: StoredAuthCredential, projectScoped: boolean): string {
 	const credential = row.credential;
 	if (credential.type !== "oauth") return `API key #${row.id}`;
 	const base =
@@ -26,7 +27,12 @@ function oauthLabel(row: StoredAuthCredential): string {
 	// Two subscriptions (orgs) can share one email — the org is the only
 	// user-visible way to tell which row a logout will remove.
 	const org = nonEmpty(credential.orgName) ?? nonEmpty(credential.orgId);
-	return org && org !== base ? `${base} (${org})` : base;
+	if (org && org !== base) return `${base} (${org})`;
+	if (projectScoped) {
+		const projectId = nonEmpty(credential.projectId);
+		if (projectId && projectId !== base) return `${base} (${projectId})`;
+	}
+	return base;
 }
 
 function oauthDetail(row: StoredAuthCredential, label: string): string {
@@ -48,6 +54,7 @@ function oauthDetail(row: StoredAuthCredential, label: string): string {
 function oauthMatchesActiveIdentity(
 	row: StoredAuthCredential,
 	activeIdentity: OAuthAccountIdentity | undefined,
+	projectScoped: boolean,
 ): boolean {
 	if (!activeIdentity || row.credential.type !== "oauth") return false;
 	const credential = row.credential;
@@ -68,6 +75,12 @@ function oauthMatchesActiveIdentity(
 			return true;
 		}
 	}
+	if (projectScoped) {
+		if (credential.projectId !== activeIdentity.projectId) return false;
+		if (activeIdentity.accountId === undefined && activeIdentity.email === undefined) {
+			return activeIdentity.projectId !== undefined;
+		}
+	}
 	// When both sides carry an email it decides: Codex Team seats share an
 	// account id and Antigravity accounts share one Google project.
 	if (activeIdentity.email !== undefined && credential.email !== undefined) {
@@ -84,20 +97,21 @@ export function toLogoutAccounts(
 	credentials: StoredAuthCredential[],
 	options: LogoutAccountOptions = {},
 ): LogoutAccount[] {
+	const projectScoped = authPolicyFor(provider)?.projectScopedIdentity === true;
 	return credentials
 		.map(row => {
-			const label = oauthLabel(row);
+			const label = oauthLabel(row, projectScoped);
 			const active =
 				row.credential.type === "oauth"
-					? oauthMatchesActiveIdentity(row, options.activeIdentity)
+					? oauthMatchesActiveIdentity(row, options.activeIdentity, projectScoped)
 					: options.activeApiKey === true;
 			return {
-				credentialId: row.id,
 				provider,
 				label,
 				detail: oauthDetail(row, label),
 				type: row.credential.type,
 				active,
+				credentialId: row.id,
 			} satisfies LogoutAccount;
 		})
 		.sort((left, right) => {

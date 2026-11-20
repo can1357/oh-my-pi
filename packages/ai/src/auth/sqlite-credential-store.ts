@@ -210,9 +210,14 @@ function resolveProviderCredentialIdentityKey(provider: string, identifiers: str
 		return orgIdentifier ?? null;
 	}
 	const accountIdentifier = identifiers.find(identifier => identifier.startsWith("account:"));
+	const projectIdentifier = identifiers.find(identifier => identifier.startsWith("project:"));
+	if (authPolicyFor(provider)?.projectScopedIdentity === true) {
+		const base = accountIdentifier ?? emailIdentifier;
+		if (base) return projectIdentifier ? `${base}|${projectIdentifier}` : base;
+		return projectIdentifier ?? null;
+	}
 	if (accountIdentifier) return accountIdentifier;
 	if (emailIdentifier) return emailIdentifier;
-	const projectIdentifier = identifiers.find(identifier => identifier.startsWith("project:"));
 	if (projectIdentifier) return projectIdentifier;
 	return null;
 }
@@ -314,12 +319,19 @@ export function matchesReplacementCredential(
  * Whether two OAuth credentials belong to the same account of the same organization,
  * whichever identity key each is stored under. The email decides when both carry one;
  * otherwise a matching account id does, unless it is the organization's own id (a
- * ChatGPT workspace id shared by every member). Project ids are shared between users
- * (every consumer Antigravity login has the same one) and never count.
+ * ChatGPT workspace id shared by every member). Project ids are ignored by default
+ * (every consumer Antigravity login has the same one), except when the provider's
+ * auth policy sets `project-scoped-identity`, where they distinguish accounts.
  */
-export function isSameOAuthAccount(a: OAuthCredential, b: OAuthCredential): boolean {
+export function isSameOAuthAccount(a: OAuthCredential, b: OAuthCredential, provider: string): boolean {
 	const orgId = normalizeStoredAccountId(a.orgId);
 	if (orgId !== normalizeStoredAccountId(b.orgId)) return false;
+	if (
+		authPolicyFor(provider)?.projectScopedIdentity === true &&
+		normalizeStoredAccountId(a.projectId) !== normalizeStoredAccountId(b.projectId)
+	) {
+		return false;
+	}
 	const emailA = normalizeStoredEmail(a.email);
 	const emailB = normalizeStoredEmail(b.email);
 	if (emailA !== null && emailB !== null) return emailA === emailB;

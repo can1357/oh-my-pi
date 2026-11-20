@@ -732,6 +732,9 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 			case "org-scoped-identity":
 				result.orgScopedIdentity = singleBool(child);
 				break;
+			case "project-scoped-identity":
+				result.projectScopedIdentity = singleBool(child);
+				break;
 			case "login-subscription":
 				result.loginSubscription = singleBool(child);
 				break;

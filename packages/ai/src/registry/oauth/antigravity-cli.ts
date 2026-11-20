@@ -5,12 +5,17 @@ import type { Subprocess } from "bun";
 import * as AIError from "../../error";
 import { agyGeminiDir, resolveAgyBinary } from "../../providers/antigravity-cli/binary";
 import {
+	AGY_GCP_OAUTH_CLIENT_ID,
+	AGY_GCP_OAUTH_REDIRECT_URI,
+	AGY_GCP_OAUTH_SCOPES,
 	AGY_OAUTH_CLIENT_ID,
 	agyCredentialEnv,
+	exchangeAgyGcpCode,
 	exportAgyCredentials,
 	refreshAgyCredentials,
 } from "../../providers/antigravity-cli/credentials";
 import type { OAuthController, OAuthCredentials } from "./types";
+import { generatePKCE } from "./pkce";
 
 const PROVIDER = "antigravity-cli";
 const START_TIMEOUT_MS = 60_000;
@@ -55,12 +60,25 @@ export class AgyAuthUrlParser {
 	}
 }
 
-export function agyAuthorizationCode(input: string): string {
+export function agyAuthorizationCode(input: string, expectedState?: string): string {
 	let code = input.trim();
 	if (/^https?:\/\//i.test(code)) {
+		let url: URL | undefined;
 		try {
-			code = new URL(code).searchParams.get("code") ?? "";
+			url = new URL(code);
 		} catch {
+			url = undefined;
+		}
+		if (url) {
+			const returnedState = url.searchParams.get("state");
+			if (expectedState !== undefined && returnedState !== expectedState) {
+				throw new AIError.OAuthError("Antigravity CLI OAuth state mismatch; try signing in again", {
+					kind: "validation",
+					provider: PROVIDER,
+				});
+			}
+			code = url.searchParams.get("code") ?? "";
+		} else {
 			code = "";
 		}
 	}
@@ -273,6 +291,63 @@ export async function loginAntigravityCli(ctrl: OAuthController): Promise<OAuthC
 		// export fail. It remains private and recoverable without another login.
 		if (!signedIn || exported) await fs.rm(directory, { recursive: true, force: true });
 	}
+}
+
+export async function loginAntigravityGcp(ctrl: OAuthController): Promise<OAuthCredentials> {
+	if (!ctrl.onPrompt) throw new AIError.OnPromptRequiredError("Antigravity CLI");
+	if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError("Antigravity CLI sign-in cancelled");
+	const deadline = AbortSignal.timeout(LOGIN_TIMEOUT_MS);
+	const signal = ctrl.signal ? AbortSignal.any([ctrl.signal, deadline]) : deadline;
+	const defaultProject =
+		[Bun.env.GOOGLE_CLOUD_PROJECT, Bun.env.GCP_PROJECT, Bun.env.GCLOUD_PROJECT]
+			.map(value => value?.trim())
+			.find(Boolean) ?? "";
+	const projectInput = await bounded(
+		ctrl.onPrompt({
+			message: defaultProject ? `Google Cloud Project ID (default: ${defaultProject})` : "Google Cloud Project ID",
+			placeholder: defaultProject || undefined,
+			allowEmpty: Boolean(defaultProject),
+		}),
+		signal,
+	);
+	const projectId = (projectInput.trim() || defaultProject).trim();
+	if (!projectId) {
+		throw new AIError.OAuthError("Google Cloud Project ID is required for Gemini Enterprise", {
+			kind: "validation",
+			provider: PROVIDER,
+		});
+	}
+	const locationInput = await bounded(
+		ctrl.onPrompt({
+			message: "Google Cloud Location",
+			placeholder: "global",
+			allowEmpty: true,
+		}),
+		signal,
+	);
+	const region = locationInput.trim() || "global";
+	const { verifier, challenge } = await generatePKCE();
+	const state = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url");
+	const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+	authUrl.searchParams.set("client_id", AGY_GCP_OAUTH_CLIENT_ID);
+	authUrl.searchParams.set("redirect_uri", AGY_GCP_OAUTH_REDIRECT_URI);
+	authUrl.searchParams.set("response_type", "code");
+	authUrl.searchParams.set("scope", AGY_GCP_OAUTH_SCOPES.join(" "));
+	authUrl.searchParams.set("access_type", "offline");
+	authUrl.searchParams.set("prompt", "consent");
+	authUrl.searchParams.set("code_challenge", challenge);
+	authUrl.searchParams.set("code_challenge_method", "S256");
+	authUrl.searchParams.set("state", state);
+	ctrl.onAuth?.({
+		url: authUrl.toString(),
+		instructions:
+			"Sign in with your Google Cloud Gemini Enterprise account, then paste the authorization code or callback URL.",
+	});
+	const input = ctrl.onManualCodeInput
+		? ctrl.onManualCodeInput(signal)
+		: ctrl.onPrompt({ message: "Paste the authorization code (or callback URL)" });
+	const code = agyAuthorizationCode(await bounded(input, signal), state);
+	return exchangeAgyGcpCode({ code, codeVerifier: verifier, projectId, region }, signal, ctrl.fetch);
 }
 
 export const refreshAntigravityCli = refreshAgyCredentials;

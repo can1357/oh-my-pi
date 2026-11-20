@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `antigravity-cli-enterprise` auth login provider and `project-scoped-identity` auth policy for Gemini Enterprise GCP project isolation ([#19858](https://github.com/can1357/oh-my-pi/pull/19858) by [@konsailabs](https://github.com/konsailabs))
+
 ### Fixed
 
 - Devin usage from two organizations under one email is no longer merged into one account ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))

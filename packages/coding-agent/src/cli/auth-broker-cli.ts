@@ -585,7 +585,7 @@ function brokerAlreadyHas(
 		return (
 			entry.credential.type === "oauth" &&
 			(matchesReplacementCredential(provider, entry.credential, entry.identityKey, credential) ||
-				isSameOAuthAccount(entry.credential, credential))
+				isSameOAuthAccount(entry.credential, credential, provider))
 		);
 	});
 }

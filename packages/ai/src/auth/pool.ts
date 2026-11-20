@@ -74,6 +74,7 @@ export function authCredentialEquals(left: AuthCredential, right: AuthCredential
 		left.accountId === right.accountId &&
 		left.email === right.email &&
 		left.projectId === right.projectId &&
+		left.region === right.region &&
 		left.enterpriseUrl === right.enterpriseUrl
 	);
 }

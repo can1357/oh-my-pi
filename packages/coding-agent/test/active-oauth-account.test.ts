@@ -283,6 +283,37 @@ describe("toLogoutAccounts org scoping", () => {
 			"shared@example.com (Team Workspace)",
 		]);
 	});
+
+	test("antigravity-cli distinguishes consumer and enterprise projects in labels and active matching", () => {
+		const row = (id: number, projectId?: string): StoredAuthCredential => ({
+			id,
+			provider: "antigravity-cli",
+			credential: {
+				type: "oauth",
+				access: `access-${id}`,
+				refresh: `refresh-${id}`,
+				expires: Date.now() + 60_000,
+				email: "alice@example.com",
+				accountId: "sub-alice",
+				projectId,
+			},
+			disabledCause: null,
+		});
+		const accounts = toLogoutAccounts("antigravity-cli", [row(1), row(2, "proj-a"), row(3, "proj-b")], {
+			activeIdentity: { email: "alice@example.com", accountId: "sub-alice", projectId: "proj-a" },
+		});
+		expect(accounts.filter(account => account.active).map(account => account.credentialId)).toEqual([2]);
+		expect(accounts.map(account => account.label).sort()).toEqual([
+			"alice@example.com",
+			"alice@example.com (proj-a)",
+			"alice@example.com (proj-b)",
+		]);
+
+		const consumerActive = toLogoutAccounts("antigravity-cli", [row(1), row(2, "proj-a")], {
+			activeIdentity: { email: "alice@example.com", accountId: "sub-alice" },
+		});
+		expect(consumerActive.filter(account => account.active).map(account => account.credentialId)).toEqual([1]);
+	});
 });
 
 describe("limitMatchesActiveAccount: credential-scoped identity (API-key accounts)", () => {
