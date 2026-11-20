@@ -9,6 +9,7 @@
 - Added `ShellFilesystem.onFileChange`: the embedded shell reports each text file git would track that a command changed itself (a builtin's write, rename or removal; a redirection's target) with its content before and after
 - Added `diffLineRunsWithin(oldText, newText, maxEdits)`: `diffLineRuns` that returns `null` once more than `maxEdits` lines are added or removed, instead of spending time quadratic in the size of a wholesale rewrite
 - Added `enableConsoleVtInput()` and `restoreConsoleInputMode()`, which turn Windows console VT input on and back off without `bun:ffi`
+- Added redirected files to `PipeStreams`: a regular file a run's command redirects its output into (`>`, `>>`, `&>`) is listed with `file: true` and read from disk
 - Added `translateWindowsAltGrSequence()`, which recovers the text an AltGr chord produced on the active Windows keyboard layout when the console host reported it as an Alt chord
 
 ### Changed
