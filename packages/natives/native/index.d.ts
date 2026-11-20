@@ -883,9 +883,11 @@ export declare class TextPredictor {
 }
 
 /**
- * Dedicated, cancellable terminal writer. The destination must be a TTY that
- * can be independently reopened (unix) or a console (Windows); pipes and
- * files are deliberately rejected.
+ * Dedicated, cancellable terminal writer.
+ *
+ * The destination must be a TTY (reopened independently when possible, else
+ * duplicated) on unix or a console on Windows; pipes and files are
+ * deliberately rejected.
  */
 export declare class TtyWriter {
   /**
@@ -907,7 +909,8 @@ export declare class TtyWriter {
   flushSync(timeoutMs: number): boolean
   /**
    * Drain until the deadline, then cancel and join. Nothing is written after
-   * return, except one chunk a Windows console refused to abort. Already
+   * return, except one chunk whose write could not be aborted (a Windows
+   * console refusing to, a blocking duplicate on unix). Already
    * queued JS callbacks may still run; callers must ignore callbacks from a
    * stopped writer.
    */

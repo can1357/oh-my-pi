@@ -7,6 +7,12 @@
 - Added `ShellFilesystem.onFileChange`: the embedded shell reports each text file git would track that a command changed itself (a builtin's write, rename or removal; a redirection's target) with its content before and after
 - Added `diffLineRunsWithin(oldText, newText, maxEdits)`: `diffLineRuns` that returns `null` once more than `maxEdits` lines are added or removed, instead of spending time quadratic in the size of a wholesale rewrite
 
+### Changed
+
+- `TtyWriter` writes a terminal it cannot reopen (a PTY master, a TTY that is not yours after `su`, a sandbox that hides its path) through a duplicate instead of refusing it
+- `TtyWriter` ends each 16 KiB write where a row or a `write()` ends whenever one fits, so a large repaint is no longer cut inside a row or an escape sequence
+- `TtyWriter` turns Windows console VT processing back on when it finds it off, instead of printing escape sequences as text
+
 ### Fixed
 
 - Fixed the native addon failing to load when HOME, PI_NATIVES_DIR or the install directory contains `?` ([#19763](https://github.com/can1357/oh-my-pi/pull/19763) by [@sjawhar](https://github.com/sjawhar))
