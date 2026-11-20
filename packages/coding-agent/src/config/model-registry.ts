@@ -1131,7 +1131,7 @@ export class ModelRegistry {
 			// replay it; only expired ones fetch.
 			this.refreshInBackground("online-if-uncached");
 			await this.#backgroundRefresh;
-			return true;
+			changed = true;
 		}
 		if (this.#modelsConfigFile.getMtimeMs() !== this.#lastStaticLoadMtime) {
 			await this.refresh("offline");
