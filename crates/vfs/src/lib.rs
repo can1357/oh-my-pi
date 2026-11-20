@@ -33,6 +33,7 @@
 //! errors matter.
 
 mod canonicalize;
+mod changes;
 mod dir;
 mod error;
 mod file;
@@ -48,6 +49,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use changes::{ChangeGuard, ChangeSink};
 pub use dir::{DirEntry, ReadDir};
 pub use error::{
 	cancelled, crosses_devices, invalid_argument, is_a_directory, is_cancelled, no_provider,

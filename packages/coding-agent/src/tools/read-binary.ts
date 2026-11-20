@@ -2,7 +2,14 @@ import * as fs from "node:fs/promises";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { cfgDisasmBackend, DISASM_BACKENDS, type DisasmBackendId, isExecutableFile, SLICE_SEPARATOR } from "../disasm";
+import {
+	cfgDisasmBackend,
+	DISASM_BACKEND_IDS,
+	type DisasmBackendId,
+	databaseOwner,
+	isExecutableFile,
+	SLICE_SEPARATOR,
+} from "../disasm";
 import { acquireDatabase } from "../disasm/client";
 import { readBinaryMetadata } from "../disasm/metadata";
 import type { ToolSession } from "../sdk";
@@ -35,6 +42,8 @@ const SLICE_PREFIX = "@";
 const XREFS_PREFIX = "xrefs:";
 const ASM_SUFFIX = ":asm";
 const VIEW_TIMEOUT_MS = 120_000;
+/** Every value of `disassembler.backend` that enables analysis: "auto, ida, ghidra, or binja". */
+const BACKEND_CHOICES = new Intl.ListFormat("en", { type: "disjunction" }).format(["auto", ...DISASM_BACKEND_IDS]);
 
 /**
  * Parse the view suffix of a binary read. Reserved words (`overview`, `imports`,
@@ -74,7 +83,7 @@ export async function resolveBinaryViewPath(session: ToolSession, readPath: stri
 	for (let i = readPath.lastIndexOf(":"); i > 0; i = readPath.lastIndexOf(":", i - 1)) {
 		const absolutePath = resolveReadPath(readPath.slice(0, i), session.cwd);
 		if (!(await isFile(absolutePath))) continue;
-		if (DISASM_BACKENDS.ida.isDatabasePath(absolutePath) || (await isExecutableFile(absolutePath))) {
+		if (databaseOwner(absolutePath) || (await isExecutableFile(absolutePath))) {
 			return { backend, absolutePath, ...splitSliceView(readPath.slice(i + 1)) };
 		}
 	}
@@ -103,7 +112,7 @@ export async function readBinary(
 		const p = metadata.fat ? `${bin}${SLICE_SEPARATOR}${metadata.fat.slice.arch}` : bin;
 		const guidance =
 			target.backend === undefined
-				? "Analysis disabled: set disassembler.backend to auto, ida, or ghidra to enable explicit analysis views and dsm."
+				? `Analysis disabled: set disassembler.backend to ${BACKEND_CHOICES} to enable explicit analysis views and dsm.`
 				: `Analysis (explicit opt-in): ${p}:overview, ${p}:<func|0xaddr>, ${p}:<func>:asm, :imports, :exports, :strings, :xrefs:<func|0xaddr>. Use the dsm namespace at xd://eval/dsm for scripting or dsm.open.`;
 		const slices = metadata.fat
 			? `\nPick a universal slice with ${bin}${SLICE_SEPARATOR}<arch> (metadata only until a view is added).`
@@ -117,12 +126,13 @@ export async function readBinary(
 	}
 	if (target.backend === undefined) {
 		throw new ToolError(
-			"Binary analysis is disabled or unavailable; set disassembler.backend to auto, ida, or ghidra. Read the bare binary path for on-disk metadata.",
+			`Binary analysis is disabled or unavailable; set disassembler.backend to ${BACKEND_CHOICES}. Read the bare binary path for on-disk metadata.`,
 		);
 	}
-	if (DISASM_BACKENDS.ida.isDatabasePath(target.absolutePath) && target.backend !== "ida") {
+	const owner = databaseOwner(target.absolutePath);
+	if (owner && owner.id !== target.backend) {
 		throw new ToolError(
-			"IDA databases require disassembler.backend=ida and an IDA installation. Read the bare database path for metadata.",
+			`${owner.label} databases require disassembler.backend=${owner.id} with ${owner.label} installed. Read the bare database path for metadata.`,
 		);
 	}
 	const view = parseBinaryView(target.view);

@@ -10,7 +10,7 @@ Kiro is a native provider backed by the Kiro API (`kiro-api`). For general crede
 
 ## Login methods
 
-**Identity Center** runs an AWS IAM Identity Center device login. OMP asks for the **Start URL** (your HTTPS access portal URL, for example `https://company.awsapps.com/start`) and the **OIDC region**, shows a verification URL and one-time code, and waits for browser approval. When several Kiro profiles are available, you pick one; the selected profile decides the region requests and discovery use.
+**Identity Center** runs an AWS IAM Identity Center device login. OMP asks for the **Start URL** (your HTTPS access portal URL, for example `https://company.awsapps.com/start`) and the **OIDC region**, shows a verification URL and one-time code, and waits for browser approval. OMP then lists the Kiro profiles in the partition of that region: `us-east-1` and `eu-central-1` for commercial AWS, or `us-gov-west-1` and `us-gov-east-1` when the OIDC region is an AWS GovCloud (US) region. When several Kiro profiles are available, you pick one; the selected profile decides the region requests and discovery use. AWS GovCloud (US) supports only Identity Center: Builder ID and Google/GitHub sign-in are not available there.
 
 **Builder ID** signs in with a personal AWS Builder ID through the same device flow, pinned to the public Builder portal and `us-east-1`, so it asks for nothing.
 
@@ -35,7 +35,9 @@ Each `/login kiro` adds an account, like every other provider, so logging the sa
 
 Each OAuth login gets a random login id, and its identity key is `account:<login id>`. Use that key in account pools, or match it in `auth.accountPolicies` with `account: { accountId: "<login id>" }`. A `ksk_…` API key has no identity key.
 
-`/usage` shows each account's monthly plan credits with the reset date, active bonus credits with their expiry, and overage credits when overage billing is enabled in your Kiro account. With several accounts, requests prefer accounts with free credits left; accounts that can only draw overage are used last.
+`/usage` shows each account's monthly plan credits with the reset date, active bonus and purchased add-on credits with their expiry, and overage credits when overage billing is enabled in your Kiro account. With several accounts, requests prefer accounts with plan, bonus, or add-on credits left; accounts that can only draw overage are used last.
+
+An add-on expires at the time reported by Kiro. OMP reads the legacy purchased-credit list only when the current list is missing or empty, so the same purchase is never counted twice.
 
 ## Logout and re-login
 

@@ -11,6 +11,7 @@
  */
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { shellChangeSnapshots } from "../commit/selective/journal";
 import { executeBash } from "../exec/bash-executor";
 import { cfgBashGitGuard } from "../exec/settings";
 import { sessionResolveContext } from "../internal-urls/context";
@@ -75,6 +76,9 @@ export async function runEvalShell(args: unknown, options: EvalShellBridgeOption
 		filesystem: new InternalUrlFilesystem({
 			context: sessionResolveContext(session, { signal }),
 			tier: "read",
+			onFileChange:
+				session.recordFileChange &&
+				(change => session.recordFileChange?.({ tool: "eval", ...shellChangeSnapshots(change) })),
 		}).shellFilesystem(),
 		speech: sessionShellSpeech(session),
 		// The sink's inline window is a bounded preview; collect the whole stream instead.

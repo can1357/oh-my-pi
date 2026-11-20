@@ -2,7 +2,7 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-use std::{borrow::Cow, ffi::OsString, io::Write};
+use std::{ffi::OsString, io::Write};
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use uucore::{display::Quotable, line_ending::LineEnding};
@@ -72,6 +72,11 @@ impl Utility for Dirname {
 /// 4. If no `/` found, return `.`
 /// 5. Strip trailing slashes from result (unless result would be empty)
 ///
+/// On Windows `\` is a separator too, and a drive prefix (`C:`) stays put:
+/// `C:\a\b` → `C:\a`, `C:\a` → `C:\`, `C:a` → `C:`. The shell spells host
+/// paths natively (`realpath`, `$0` of a `PATH` script), so scripts taking
+/// `"$(dirname "$(realpath "$0")")"` need this.
+///
 /// Examples:
 /// - `foo/.` → `foo`
 /// - `foo/./bar` → `foo/.`
@@ -82,64 +87,83 @@ impl Utility for Dirname {
 /// <https://pubs.opengroup.org/onlinepubs/9699919799/utilities/dirname.html>
 ///
 /// See issue #8910 and similar fix in basename (#8373, commit c5268a897).
-fn dirname_string_manipulation(path_bytes: &[u8]) -> Cow<'_, [u8]> {
-	if path_bytes.is_empty() {
-		return Cow::Borrowed(b".");
+fn dirname_string_manipulation(path_bytes: &[u8]) -> &[u8] {
+	let prefix_len = drive_prefix_len(path_bytes);
+	let path = &path_bytes[prefix_len..];
+	match parent(path) {
+		Parent::Dot if prefix_len > 0 => &path_bytes[..prefix_len],
+		Parent::Dot => b".",
+		// The root keeps its own spelling (`/` or `\`).
+		Parent::Root => &path_bytes[..=prefix_len],
+		Parent::Within(end) => &path_bytes[..prefix_len + end],
 	}
+}
 
-	let mut bytes = path_bytes;
+/// Where the parent of a prefix-less path lies.
+enum Parent {
+	/// No separator: the current directory.
+	Dot,
+	/// The root, spelled by the path's first byte.
+	Root,
+	/// The path's first `n` bytes.
+	Within(usize),
+}
+
+/// `/`, and on Windows also `\`.
+const fn is_sep(b: u8) -> bool {
+	b == b'/' || (cfg!(windows) && b == b'\\')
+}
+
+/// Length of a Windows drive prefix (`C:`); 0 elsewhere.
+fn drive_prefix_len(bytes: &[u8]) -> usize {
+	if cfg!(windows) && bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+		2
+	} else {
+		0
+	}
+}
+
+fn parent(bytes: &[u8]) -> Parent {
+	if bytes.is_empty() {
+		return Parent::Dot;
+	}
 
 	// Step 1: Strip trailing slashes (but not if the entire path is slashes)
-	let all_slashes = bytes.iter().all(|&b| b == b'/');
-	if all_slashes {
-		return Cow::Borrowed(b"/");
+	if bytes.iter().all(|&b| is_sep(b)) {
+		return Parent::Root;
 	}
-
-	while bytes.len() > 1 && bytes.ends_with(b"/") {
-		bytes = &bytes[..bytes.len() - 1];
+	let mut end = bytes.len();
+	while end > 1 && is_sep(bytes[end - 1]) {
+		end -= 1;
 	}
+	let bytes = &bytes[..end];
 
 	// Step 2: Check if it ends with `/.` and strip the `/+.` pattern
-	if bytes.ends_with(b".") && bytes.len() >= 2 {
-		let dot_pos = bytes.len() - 1;
-		if bytes[dot_pos - 1] == b'/' {
-			// Find where the slashes before the dot start
-			let mut slash_start = dot_pos - 1;
-			while slash_start > 0 && bytes[slash_start - 1] == b'/' {
-				slash_start -= 1;
-			}
-			// Return the stripped result
-			if slash_start == 0 {
-				// Result would be empty
-				return if path_bytes.starts_with(b"/") {
-					Cow::Borrowed(b"/")
-				} else {
-					Cow::Borrowed(b".")
-				};
-			}
-			return Cow::Borrowed(&bytes[..slash_start]);
+	if end >= 2 && bytes[end - 1] == b'.' && is_sep(bytes[end - 2]) {
+		let mut slash_start = end - 2;
+		while slash_start > 0 && is_sep(bytes[slash_start - 1]) {
+			slash_start -= 1;
 		}
+		return if slash_start == 0 {
+			Parent::Root
+		} else {
+			Parent::Within(slash_start)
+		};
 	}
 
-	// Step 3: Normal dirname - find last / and remove everything after it
-	if let Some(last_slash_pos) = bytes.iter().rposition(|&b| b == b'/') {
-		// Found a slash, remove everything after it
-		let mut result = &bytes[..last_slash_pos];
-
-		// Strip trailing slashes from result (but keep at least one if at the start)
-		while result.len() > 1 && result.ends_with(b"/") {
-			result = &result[..result.len() - 1];
-		}
-
-		if result.is_empty() {
-			return Cow::Borrowed(b"/");
-		}
-
-		return Cow::Borrowed(result);
+	// Step 3: Normal dirname - find last / and remove everything after it,
+	// then strip trailing slashes from the result (keeping a leading one)
+	let Some(mut result_end) = bytes.iter().rposition(|&b| is_sep(b)) else {
+		return Parent::Dot;
+	};
+	while result_end > 1 && is_sep(bytes[result_end - 1]) {
+		result_end -= 1;
 	}
-
-	// No slash found, return "."
-	Cow::Borrowed(b".")
+	if result_end == 0 {
+		Parent::Root
+	} else {
+		Parent::Within(result_end)
+	}
 }
 
 /// The `dirname` argument model.
@@ -152,7 +176,7 @@ fn app() -> Command {
 		.infer_long_args(true)
 		.after_help(
 			"Output each NAME with its last non-slash component and trailing slashes\n  removed; if \
-			 NAME contains no /'s, output '.' (meaning the current directory).",
+			 NAME contains no /'s (or \\'s on Windows), output '.' (meaning the current directory).",
 		)
 		.arg(
 			Arg::new(options::ZERO)
@@ -243,5 +267,23 @@ mod tests {
 		assert_eq!(code, 1);
 		assert_eq!(stdout, "");
 		assert!(stderr.contains("missing operand"));
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn test_windows_separators_and_drive() {
+		let (code, stdout, _) = run_test(&[
+			r"C:\Program Files\Microsoft VS Code\bin\code",
+			r"C:\Program Files\Microsoft VS Code\bin/code",
+			r"C:\a",
+			r"C:\",
+			"C:a",
+		]);
+		assert_eq!(code, 0);
+		assert_eq!(
+			stdout,
+			"C:\\Program Files\\Microsoft VS Code\\bin\nC:\\Program Files\\Microsoft VS \
+			 Code\\bin\nC:\\\nC:\\\nC:\n"
+		);
 	}
 }

@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import { clearSubmittedText } from "./helpers/draft";
 import { Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME, formatAge } from "@oh-my-pi/pi-utils";
@@ -619,7 +620,16 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				clearSubmittedText(runtime);
 				return;
 			}
-			runtime.ctx.showStatus("Usage: /copy [code|cmd|link]");
+			if (arg === "local") {
+				// Created first, so the copied path is one to cd into or drop files in.
+				const localRoot = runtime.ctx.session.localRoot;
+				await fs.mkdir(localRoot, { recursive: true });
+				await copyToClipboard(localRoot);
+				runtime.ctx.showStatus(`Copied ${shortenPath(localRoot)} to clipboard`);
+				clearSubmittedText(runtime);
+				return;
+			}
+			runtime.ctx.showStatus("Usage: /copy [code|cmd|link|local]");
 			clearSubmittedText(runtime);
 		},
 	},

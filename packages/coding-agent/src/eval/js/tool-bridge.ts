@@ -55,6 +55,7 @@ export type { JsStatusEvent } from "./shared/types";
 
 export interface ToolBridgeOptions {
 	session: ToolSession;
+	parentToolCallId?: string;
 	signal?: AbortSignal;
 	/** The cell's `timeout` in ms, the budget of a prelude call that sets none (`EvalPreludeContext.cellTimeoutMs`). */
 	cellTimeoutMs?: number;
@@ -405,7 +406,7 @@ async function runSessionTool(
 					validatedArgs,
 					options.signal,
 					onUpdate,
-					context && { ...context, programmatic: true },
+					context && { ...context, programmatic: true, parentToolCallId: options.parentToolCallId },
 				);
 			} finally {
 				settled = true;

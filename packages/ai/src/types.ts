@@ -1791,7 +1791,10 @@ export interface Context {
 	systemPrompt?: string[];
 	messages: Message[];
 	tools?: Tool[];
-	/** Definitions of tools the transcript's latest Anthropic request declared but that are no longer in `tools`; only the Anthropic provider reads it. */
+	/**
+	 * Definitions of declared tools that are not in `tools`: those the transcript's latest Anthropic request declared,
+	 * or, before any request declared tools, those that may become active later. Only the Anthropic provider reads it.
+	 */
 	inactiveTools?: Tool[];
 }
 

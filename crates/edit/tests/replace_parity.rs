@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use common::run_fixture;
 use omp_edit::{
-	EditMode, EditStore, PathPolicy,
+	EditMode, PathPolicy,
 	fuzzy::{FindMatchOptions, find_match},
 	path_policy::canonical_key,
 	text::adjust_indentation,
@@ -141,6 +141,8 @@ fn canonical_snapshot_key_returns_input_when_no_ancestor_exists() {
 #[cfg(unix)]
 #[test]
 fn canonical_snapshot_keys_fuse_symlink_equivalent_paths() {
+	use omp_edit::EditStore;
+
 	let root = tempfile::tempdir().expect("tempdir");
 	let real = root.path().join("real");
 	let alias = root.path().join("alias");
