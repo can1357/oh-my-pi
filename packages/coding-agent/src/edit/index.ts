@@ -742,7 +742,6 @@ export class EditTool implements AgentTool<TInput> {
 				tool: "edit",
 				before: snapshot.text,
 				after,
-				beforeMtimeMs: snapshot.mtimeMs,
 			});
 		};
 		if (request.op === "delete") {

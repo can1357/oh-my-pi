@@ -8,11 +8,21 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 /** Kiro API keys are `ksk_…`; the prefix tells a raw key from an encoded credential. */
 export const KIRO_API_KEY_PREFIX = "ksk_";
 
-/** Regions probed when a region is unknown: an unpinned API key, or a login's profile listing. */
+/** Commercial regions probed when a region is unknown: an unpinned API key, or a social login's profile listing. */
 export const KIRO_BOOTSTRAP_REGIONS = ["us-east-1", "eu-central-1"] as const;
+/** Kiro profile regions in AWS GovCloud (US), whose Identity Center tokens only those regions accept. */
+const KIRO_GOVCLOUD_REGIONS = ["us-gov-west-1", "us-gov-east-1"] as const;
 
 const REGION = /^[a-z]{2}(?:-[a-z0-9]+)+-\d+$/;
-const PROFILE_ARN = /^arn:aws:codewhisperer:([a-z]{2}(?:-[a-z0-9]+)+-\d+):\d+:profile\/[A-Za-z0-9_-]+$/;
+const PROFILE_ARN = /^arn:aws(?:-us-gov)?:codewhisperer:([a-z]{2}(?:-[a-z0-9]+)+-\d+):\d+:profile\/[A-Za-z0-9_-]+$/;
+
+/**
+ * Profile regions an Identity Center login in `oidcRegion` can hold: a token
+ * never crosses the AWS partition it was issued in.
+ */
+export function kiroProfileRegions(oidcRegion: string): readonly string[] {
+	return oidcRegion.startsWith("us-gov-") ? KIRO_GOVCLOUD_REGIONS : KIRO_BOOTSTRAP_REGIONS;
+}
 
 /** Whether `value` is an AWS region id, safe to place in a Kiro host name. */
 export function isKiroRegion(value: unknown): value is string {

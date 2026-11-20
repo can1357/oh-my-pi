@@ -109,7 +109,8 @@ Each provider search transport receives a hard timeout from `providers.webSearch
    - `limit`, `recency`, `temperature`, `maxOutputTokens`, `numSearchResults`,
    - `timeoutMs`, derived from `providers.webSearchTimeoutSeconds`,
    - `systemPrompt` from `packages/coding-agent/src/prompts/system/web-search.md`,
-   - the parsed structured query, including recognized directives and date/domain/title/URL/filetype constraints.
+   - the parsed structured query, including recognized directives and date/domain/title/URL/filetype constraints,
+   - the candidate's thinking level (a `:<level>` selector suffix such as `openai-codex/gpt-6-luna:xhigh`). Codex and OpenAI API send it as `reasoning.effort`, clamped to the model's supported levels as chat does, and omit the field when the level is unset, `auto`, or `off`. Gemini clamps it the same way to pick an effort-routed wire model id. xAI always sends effort `low`. Other adapters ignore it.
 6. After a provider responds, `applyQueryConstraints()` leniently post-filters its sources for constraints not guaranteed upstream. It applies each filterable dimension in turn; any dimension that would eliminate every remaining result is relaxed and a leading `Note: no results matched ...` is emitted. Answer/citation text is not rewritten.
 7. Grounded chat responses must contain sources or citations; answer-only completions are rejected with status `204`. Any response with no renderable content is also rejected. The first acceptable response is formatted into one text block.
 8. If a provider throws, `executeSearch()` records the error and tries the next provider. There is no provider-level parallel fan-out; fallback is sequential.
@@ -163,13 +164,13 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - Output may include `answer`, `sources`, `citations`, `searchQueries`, `usage.searchRequests`, `model`, `requestId`.
    - **Codex** — `packages/coding-agent/src/web/search/providers/codex.ts`
       - Availability: OAuth credential for `openai-codex` in `agent.db`, or `OPENAI_CODEX_OAUTH_TOKEN` in the environment when no stored row exists; refresh is lazy during search. This uses ChatGPT/Codex OAuth, not OpenAI API billing. Custom model-registry endpoints may instead use a configured API-key/command credential, but official OAuth/env credentials are refused for custom endpoints.
-      - Querying: streams the Codex Responses endpoint with hosted `web_search` and `search_context_size: "high"`. Google-style directives are re-emitted in the query.
+      - Querying: streams the Codex Responses endpoint with hosted `web_search`, `search_context_size: "high"`, and `reasoning.effort` from the candidate's thinking level when one is set. Google-style directives are re-emitted in the query.
       - Model: the selected `web` candidate. A completion without a `web_search_call` is rejected rather than presented as searched content.
       - Ignores `recency`, `max_tokens`, and `temperature`. `num_search_results ?? limit` slices parsed sources locally.
       - Output may include `answer`, `sources`, `usage`, `model`, `requestId`. If the stream has no `url_citation` annotations, the adapter falls back to markdown links and bare URLs from the answer.
    - **OpenAI API** — `packages/coding-agent/src/web/search/providers/openai.ts`
       - Availability: non-OAuth credentials for the selected model provider. It uses the model-registry resolver and explicitly rejects OAuth; it does not borrow `openai-codex` credentials.
-      - Querying: sends a non-streaming JSON POST to the selected model's Responses endpoint (`<model.baseUrl>/responses`; the standard OpenAI base URL is `https://api.openai.com/v1`) with hosted `web_search`.
+      - Querying: sends a non-streaming JSON POST to the selected model's Responses endpoint (`<model.baseUrl>/responses`; the standard OpenAI base URL is `https://api.openai.com/v1`) with hosted `web_search`. `reasoning.effort` comes from the candidate's thinking level when one is set; catalog Pro aliases also send `reasoning.mode`.
       - Model: catalog `openai`-class GPT-5+ models on the `openai-responses` API declare this grounding, including compatible proxy hosts. Models without catalog grounding are not `web` candidates.
       - A generated answer is rejected unless the response includes an actual `web_search_call`. `usage.searchRequests` counts `search` actions, not `open_page` or `find_in_page`, and is omitted when there are none.
       - `site:` hosts map to `filters.allowed_domains`; other directives are re-emitted in the query. `max_tokens` passes through as `max_output_tokens`. Ignores `recency` and `temperature`.

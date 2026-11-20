@@ -25,6 +25,8 @@ grep-matcher.workspace = true
 futures.workspace = true
 html-escape.workspace = true
 html-to-markdown-rs.workspace = true
+# Already in the graph via omp-builtins; git-ignore rules for the shell's file change reports.
+ignore.workspace = true
 image = { workspace = true, features = ["bmp"] }
 resvg.workspace = true
 # Feature activation only (see workspace manifest): zune-jpeg needs `log` to compile.
@@ -99,7 +101,7 @@ libc.workspace = true
 [target.'cfg(windows)'.dependencies]
 xcap = { version = "=0.9.6", default-features = false }
 windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_Storage_EnhancedStorage", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem"] }
-windows-sys = { workspace = true, features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_Packaging_Appx", "Win32_System_RemoteDesktop", "Win32_System_StationsAndDesktops", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Environment", "Win32_System_Pipes", "Win32_System_Power", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { workspace = true, features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_Packaging_Appx", "Win32_System_RemoteDesktop", "Win32_System_StationsAndDesktops", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Environment", "Win32_System_Pipes", "Win32_System_Power", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 clipboard-win.workspace = true
 enigo = { version = "=0.6.1", default-features = false }
 uiautomation = "=0.25.1"
@@ -108,6 +110,7 @@ winreg.workspace = true
 [dev-dependencies]
 fancy-regex.workspace = true # utok scanner differential oracle
 shlex.workspace = true
+tempfile.workspace = true
 tiktoken-rs.workspace = true # utok openai differential oracle
 xkeysym = "=0.2.1"
 
