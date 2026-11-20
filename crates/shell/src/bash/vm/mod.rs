@@ -2726,10 +2726,14 @@ impl Shell {
 		let mut pending = false;
 		if id == run && self.k.exited == Some(run) {
 			for vpid in cut.pending_children() {
-				match Kernel::read_proc_state(store, vpid) {
-					Ok(state) => pending |= state.and_then(ProcState::exited).is_none(),
-					Err(_) => return false,
-				}
+				let Ok(state) = Kernel::read_proc_state(store, vpid) else {
+					// Like a failed capture read, a failed attribution-only
+					// read keeps the frozen input for the next probe
+					// instead of dropping it.
+					self.k.pending_cut_short = Some((id, cut));
+					return false;
+				};
+				pending |= state.and_then(ProcState::exited).is_none();
 			}
 		}
 		self.k.pending_cut_short = Some((id, cut));

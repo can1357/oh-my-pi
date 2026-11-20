@@ -6524,6 +6524,9 @@ mod tests {
 							shell.exit_children_pending(&mut store, run),
 							!fail && child_status.is_none()
 						);
+						// A failed probe keeps the frozen input for the next
+						// turn instead of dropping it.
+						assert!(shell.k.pending_cut_short.is_some());
 					}
 					let expected = !fail && child_status.is_none_or(|s| (s == 0) == on_success);
 					assert_eq!(

@@ -180,7 +180,7 @@ it.skipIf(process.platform === "win32")(
 // The notice assertions below inject their native result through the
 // `__test.run` seam, so they run the same on every addon version
 // (pull-request CI tests against main's prebuilt addon, which predates the
-// flag). The flag itself is pinned in `crates/pi-shell`
+// flag). The flag itself is pinned in `crates/shell`
 // (`exit_and_errexit_report_ended_by_exit`); a source-built addon is
 // additionally checked end-to-end by the native-backed test below.
 
