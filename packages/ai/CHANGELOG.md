@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- API-key sessions on a usage-ranked provider now stay on their key until it hits a usage limit or an auth failure, instead of switching when usage reports change; a new subagent starts on its parent's key (Anthropic also re-ranks after an hour idle) ([#12034](https://github.com/can1357/oh-my-pi/issues/12034))
 - LiteLLM requests now switch to another configured key when a 422 budget-exceeded response stops the current key ([#19860](https://github.com/can1357/oh-my-pi/issues/19860)).
 - GPT-6.2 system prompts are now sent as leading `developer` input messages on third-party Responses proxies too, so they hit the prompt cache instead of billing at the full input rate every turn ([openai/codex#62312](https://github.com/openai/codex/issues/62312))
 - Fixed thinking detection so a failed check of one request style no longer ignores another style that already worked, and the next request no longer repeats a style the server already refused. ([#19758](https://github.com/can1357/oh-my-pi/pull/19758) by [@eggpeat](https://github.com/eggpeat))
