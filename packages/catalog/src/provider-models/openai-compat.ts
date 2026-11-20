@@ -3615,11 +3615,25 @@ export function openrouterDecisionsBaseUrl(chatBaseUrl: string): string {
 	return base.endsWith("/v1") ? `${base.slice(0, -"/v1".length)}/alpha` : `${base}/alpha`;
 }
 
-function mapOpenRouterThinking(entry: OpenAICompatibleModelRecord): ThinkingConfig | undefined {
+/**
+ * OpenRouter's live reasoning controls. A `mandatory` endpoint that publishes
+ * no `supported_efforts` (e.g. `liquid/lfm-3-1.7b`) keeps the reference or
+ * policy-derived ladder but gains `requiresEffort`, so thinking-off clamps to
+ * the lowest effort instead of sending a rejected `reasoning.enabled: false`.
+ */
+function mapOpenRouterThinking(
+	entry: OpenAICompatibleModelRecord,
+	spec: ModelSpec<"openrouter">,
+): ThinkingConfig | undefined {
 	const reasoning = entry.reasoning;
 	if (!isRecord(reasoning)) return undefined;
+	const requiresEffort = reasoning.mandatory === true;
 	const supportedEfforts = reasoning.supported_efforts;
-	if (!Array.isArray(supportedEfforts)) return undefined;
+	if (!Array.isArray(supportedEfforts)) {
+		if (!requiresEffort) return undefined;
+		const ladder = spec.thinking ?? resolveModelPolicy({ ...spec, reasoning: true, thinking: undefined }).thinking;
+		return ladder && { ...ladder, requiresEffort: true };
+	}
 	const efforts = THINKING_EFFORTS.filter(effort => supportedEfforts.includes(effort));
 	if (efforts.length === 0) return undefined;
 	const defaultLevel =
@@ -3630,7 +3644,7 @@ function mapOpenRouterThinking(entry: OpenAICompatibleModelRecord): ThinkingConf
 		mode: "effort",
 		efforts,
 		...(defaultLevel !== undefined && efforts.includes(defaultLevel) ? { defaultLevel } : {}),
-		...(reasoning.mandatory === true ? { requiresEffort: true } : {}),
+		...(requiresEffort ? { requiresEffort: true } : {}),
 	};
 }
 
@@ -3671,7 +3685,7 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 							const params = Array.isArray(entry.supported_parameters)
 								? entry.supported_parameters.filter((value): value is string => typeof value === "string")
 								: [];
-							const thinking = mapOpenRouterThinking(entry);
+							const thinking = mapOpenRouterThinking(entry, baseModel);
 							const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
 							const input: ("text" | "image")[] = Array.isArray(architecture?.input_modalities)
 								? toInputCapabilities(architecture.input_modalities)
