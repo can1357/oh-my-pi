@@ -3578,7 +3578,7 @@ describe("ExtensionRunner", () => {
 			expect(events).toEqual([{ path: "src/secret.ts", paths: ["src/secret.ts"] }]);
 		});
 
-		it.each(["", " \t"])("reports all multi-file hashline edit targets with header suffix %j", async suffix => {
+		it.each(["", " \t\u0085"])("reports all multi-file hashline edit targets with header suffix %j", async suffix => {
 			const eventsPath = path.join(tempDir.path(), "tool-call-multi-path-events.jsonl");
 			const extCode = `
 				import * as fs from "node:fs";
