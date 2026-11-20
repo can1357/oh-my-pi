@@ -751,6 +751,81 @@ describe("openai-completions compatibility", () => {
 		expect(replayMessages.find(message => message.role === "tool")?.tool_call_id).toBe(toolCallId);
 	});
 
+	it("shortens a foreign tool-call ID over 64 characters on replay and keeps its result paired (#15056)", async () => {
+		// A regression sends the ~1200-character LiteLLM/Vertex id unchanged, and the endpoint answers 400 string_above_max_length.
+		const gateway = buildModel({
+			id: "gpt-5.6-sol",
+			name: "GPT 5.6 Sol via LiteLLM",
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "http://localhost:4000/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		} satisfies ModelSpec<"openai-completions">);
+		// Both ids share the long signed prefix: plain truncation would give them the same 64 characters.
+		const signedPrefix = `vertex_tool_00000000-0000-4000-8000-000000000000__sig_${"QUJD".repeat(300)}`;
+		const toolCallIds = [`${signedPrefix}_read_a`, `${signedPrefix}_read_b`];
+		const replayFrom = (sourceModel: string): Context => ({
+			messages: [
+				{ role: "user", content: "Read both files", timestamp: 1 },
+				{
+					role: "assistant",
+					content: toolCallIds.map((id, index) => ({
+						type: "toolCall",
+						id,
+						name: "read",
+						arguments: { path: `file-${index}.md` },
+					})),
+					api: "openai-completions",
+					provider: "litellm",
+					model: sourceModel,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 2,
+				},
+				...toolCallIds.map((id, index): ToolResultMessage => ({
+					role: "toolResult",
+					toolCallId: id,
+					toolName: "read",
+					content: [{ type: "text", text: `contents of file-${index}.md` }],
+					isError: false,
+					timestamp: 3,
+				})),
+			],
+		});
+		const replayedIds = async (sourceModel: string) => {
+			const payload = await captureOpenAICompletionsPayload(gateway, replayFrom(sourceModel));
+			const messages = getPayloadMessages(payload);
+			const callIds = messages.flatMap(message => {
+				const toolCalls = message.tool_calls;
+				return Array.isArray(toolCalls) ? toolCalls.map(call => toObject(call)?.id) : [];
+			});
+			const resultIds = messages.flatMap(message => (message.role === "tool" ? [message.tool_call_id] : []));
+			return { callIds, resultIds };
+		};
+
+		const foreign = await replayedIds("gemini-3-pro");
+		expect(foreign.callIds).toHaveLength(2);
+		for (const id of foreign.callIds) expect(id).toMatch(/^.{1,64}$/);
+		expect(new Set(foreign.callIds).size).toBe(2);
+		expect(foreign.resultIds).toEqual(foreign.callIds);
+
+		// The same model keeps its own ids verbatim (#8641); only a foreign id is shortened.
+		const sameModel = await replayedIds("gpt-5.6-sol");
+		expect(sameModel.callIds).toEqual(toolCallIds);
+		expect(sameModel.resultIds).toEqual(toolCallIds);
+	});
+
 	it("keeps unindexed batched tool-call arguments isolated", async () => {
 		const model: Model<"openai-completions"> = buildModel({
 			...gpt4oMiniSpec,

@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Fixed `400 string_above_max_length` on OpenAI-compatible endpoints after switching models mid-session: tool-call IDs from the other model that are longer than 64 characters are now shortened on replay ([#15056](https://github.com/can1357/oh-my-pi/issues/15056)).
 - LiteLLM requests now switch to another configured key when a 422 budget-exceeded response stops the current key ([#19860](https://github.com/can1357/oh-my-pi/issues/19860)).
 - GPT-6.2 system prompts are now sent as leading `developer` input messages on third-party Responses proxies too, so they hit the prompt cache instead of billing at the full input rate every turn ([openai/codex#62312](https://github.com/openai/codex/issues/62312))
 - Fixed thinking detection so a failed check of one request style no longer ignores another style that already worked, and the next request no longer repeats a style the server already refused. ([#19758](https://github.com/can1357/oh-my-pi/pull/19758) by [@eggpeat](https://github.com/eggpeat))
