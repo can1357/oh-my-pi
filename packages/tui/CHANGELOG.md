@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
+- The quick model picker (alt+p) in a session limited by `--models` or `enabledModels` now lists models the catalog gained since the session started, as the unlimited picker does ([#19878](https://github.com/can1357/oh-my-pi/pull/19878) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [19.1.0] - 2026-11-21
 

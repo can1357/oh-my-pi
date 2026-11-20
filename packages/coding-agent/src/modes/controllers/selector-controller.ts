@@ -868,6 +868,10 @@ export class SelectorController {
 					this.ctx.statusLine.invalidate();
 					this.ctx.updateEditorBorderColor();
 				},
+				onCatalogRefreshed: async () => {
+					await this.ctx.session.refreshScopedModels();
+					return this.ctx.session.scopedModels;
+				},
 				onCancel: done,
 			},
 			{
