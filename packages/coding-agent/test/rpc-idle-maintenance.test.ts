@@ -53,16 +53,15 @@ const scriptedIdleExtension = `function (pi) {
 }
 `;
 
-describe("RPC idle maintenance", () => {
-	it(
-		"runs configured idle compaction after extension startup turns without journaling an idle recap",
-		async () => {
-			await using temp = await TempDir.create("@rpc-idle-maintenance-");
-			const sourceDir = path.resolve(import.meta.dir, "../src");
-			const fixturePath = temp.join("runtime.ts");
-			await Bun.write(
-				fixturePath,
-				`
+interface RpcIdleFixtureOptions {
+	idleDelayMs?: number;
+	signalTimerArmed?: boolean;
+}
+
+function rpcIdleFixtureSource(sourceDir: string, options: RpcIdleFixtureOptions = {}): string {
+	const idleDelayMs = options.idleDelayMs ?? 25;
+	const signalTimerArmed = options.signalTimerArmed === true;
+	return `
 import { createAssistantMessageEventStream } from ${JSON.stringify(path.resolve(import.meta.dir, "../../ai/src/index.ts"))};
 import { buildModel } from ${JSON.stringify(path.resolve(import.meta.dir, "../../catalog/src/build.ts"))};
 import { createAgentSession, Settings } from ${JSON.stringify(path.join(sourceDir, "sdk.ts"))};
@@ -103,12 +102,29 @@ const { session } = await createAgentSession({
 		"todo.reminders": false,
 	}),
 });
-const originalSetTimeout = globalThis.setTimeout;
-globalThis.setTimeout = ((callback, delay = 0, ...args) =>
-	originalSetTimeout(callback, delay === 60000 ? 25 : delay, ...args)) as typeof setTimeout;
+let idleTimeoutPatched = false;
+if (!idleTimeoutPatched) {
+	idleTimeoutPatched = true;
+	const originalSetTimeout = globalThis.setTimeout;
+	globalThis.setTimeout = ((callback, delay = 0, ...args) => {
+		if (delay === 60000 && ${signalTimerArmed}) {
+			process.stdout.write(JSON.stringify({ type: "fixture_idle_timer_armed" }) + "\\n");
+		}
+		return originalSetTimeout(callback, delay === 60000 ? ${idleDelayMs} : delay, ...args);
+	}) as typeof setTimeout;
+}
 await runRpcMode(session, { headless: true });
-`,
-			);
+`;
+}
+
+describe("RPC idle maintenance", () => {
+	it(
+		"runs configured idle compaction after extension startup turns without journaling an idle recap",
+		async () => {
+			await using temp = await TempDir.create("@rpc-idle-maintenance-");
+			const sourceDir = path.resolve(import.meta.dir, "../src");
+			const fixturePath = temp.join("runtime.ts");
+			await Bun.write(fixturePath, rpcIdleFixtureSource(sourceDir));
 			const agentDir = temp.join("agent");
 			const child = Bun.spawn([process.execPath, fixturePath], {
 				cwd: temp.path(),
@@ -180,6 +196,101 @@ await runRpcMode(session, { headless: true });
 				}
 			}
 			expect(recapCount).toBe(0);
+		},
+		RPC_TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"cancels an armed idle compaction on disable and re-arms it when auto-compaction resumes",
+		async () => {
+			await using temp = await TempDir.create("@rpc-idle-maintenance-toggle-");
+			const sourceDir = path.resolve(import.meta.dir, "../src");
+			const fixturePath = temp.join("runtime.ts");
+			await Bun.write(fixturePath, rpcIdleFixtureSource(sourceDir, { idleDelayMs: 1_000, signalTimerArmed: true }));
+			const agentDir = temp.join("agent");
+			const child = Bun.spawn([process.execPath, fixturePath], {
+				cwd: temp.path(),
+				env: {
+					PATH: Bun.env.PATH,
+					HOME: temp.join("home"),
+					PI_CODING_AGENT_DIR: agentDir,
+					XDG_CONFIG_HOME: temp.join("config"),
+					XDG_DATA_HOME: temp.join("data"),
+					XDG_CACHE_HOME: temp.join("cache"),
+					CI: "true",
+					PI_NO_TITLE: "1",
+				},
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "pipe",
+				timeout: RPC_CHILD_TIMEOUT_MS,
+			});
+			const stderr = new Response(child.stderr).text();
+			const firstArmed = Promise.withResolvers<void>();
+			const rearmed = Promise.withResolvers<void>();
+			const disabled = Promise.withResolvers<void>();
+			const enabled = Promise.withResolvers<void>();
+			const compactionEnd = Promise.withResolvers<void>();
+			const frames: unknown[] = [];
+			let armedCount = 0;
+			let idleStarts = 0;
+			const reader = (async () => {
+				for await (const frame of readJsonl<unknown>(child.stdout)) {
+					if (!isRecord(frame)) continue;
+					frames.push(frame);
+					if (frame.type === "fixture_idle_timer_armed") {
+						armedCount++;
+						if (armedCount === 1) firstArmed.resolve();
+						if (armedCount === 2) rearmed.resolve();
+					} else if (frame.type === "response" && frame.id === "disable-auto") {
+						disabled.resolve();
+					} else if (frame.type === "response" && frame.id === "enable-auto") {
+						enabled.resolve();
+					} else if (frame.type === "auto_compaction_start" && frame.reason === "idle") {
+						idleStarts++;
+					} else if (frame.type === "auto_compaction_end") {
+						compactionEnd.resolve();
+						break;
+					}
+				}
+			})();
+			const send = (command: object) => {
+				child.stdin.write(`${JSON.stringify(command)}\n`);
+				child.stdin.flush();
+			};
+			const compactionCount = async () => {
+				const files = await Array.fromAsync(new Bun.Glob("sessions/**/*.jsonl").scan({ cwd: agentDir }));
+				const entries = await Promise.all(
+					files.map(async file => parseSessionEntries(await Bun.file(path.join(agentDir, file)).text())),
+				);
+				return entries.flat().filter(entry => entry.type === "compaction").length;
+			};
+			let failure: unknown;
+			try {
+				await withTimeout(firstArmed.promise, 10_000, "Initial idle timer never armed");
+				send({ id: "disable-auto", type: "set_auto_compaction", enabled: false });
+				await withTimeout(disabled.promise, 5_000, "Disable command was not answered");
+				await Bun.sleep(1_200);
+				expect(idleStarts).toBe(0);
+				expect(armedCount).toBe(1);
+				expect(await compactionCount()).toBe(0);
+
+				send({ id: "enable-auto", type: "set_auto_compaction", enabled: true });
+				await withTimeout(enabled.promise, 5_000, "Enable command was not answered");
+				await withTimeout(rearmed.promise, 5_000, "Re-enabled auto-compaction did not re-arm idle maintenance");
+				await withTimeout(compactionEnd.promise, 5_000, "Re-enabled idle compaction did not finish");
+				expect(idleStarts).toBe(1);
+				expect(armedCount).toBe(2);
+				expect(await compactionCount()).toBe(1);
+			} catch (error) {
+				failure = error;
+			} finally {
+				child.stdin.end();
+				child.kill();
+				await child.exited;
+				await reader;
+			}
+			if (failure) throw new Error(`${String(failure)}\n${JSON.stringify(frames)}\n${await stderr}`);
 		},
 		RPC_TEST_TIMEOUT_MS,
 	);

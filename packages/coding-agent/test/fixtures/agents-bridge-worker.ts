@@ -92,6 +92,7 @@ const peerSeen: { events: string[]; runStates: string[] } = { events: [], runSta
 let threadName = "";
 let gate = Promise.withResolvers<void>();
 let gateOpen = false;
+let idleTimeoutPatched = false;
 
 async function makeSession(id: string, gated: boolean, idleMaintenance = false): Promise<AgentSession> {
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -110,7 +111,8 @@ async function makeSession(id: string, gated: boolean, idleMaintenance = false):
 	});
 	const authStorage = await AuthStorage.create(":memory:");
 	authStorage.keys.setRuntime("anthropic", "test-key");
-	if (idleMaintenance) {
+	if (idleMaintenance && !idleTimeoutPatched) {
+		idleTimeoutPatched = true;
 		const originalSetTimeout = globalThis.setTimeout;
 		globalThis.setTimeout = ((callback: () => void, delay = 0, ...args: unknown[]) =>
 			originalSetTimeout(callback, delay === 60_000 ? 25 : delay, ...args)) as typeof setTimeout;

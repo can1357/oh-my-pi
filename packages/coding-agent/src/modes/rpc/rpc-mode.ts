@@ -67,6 +67,7 @@ import type { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { CACHE_WARMING_MODES } from "../../session/cache-warmer";
+import { cfgAutoCompactionEnabled } from "../../session/context-settings";
 import { findMostRecentNonEmptySession, findRecentSessionContinuation } from "../../session/session-listing";
 import { probeSessionLeases } from "../../session/session-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -1568,8 +1569,6 @@ export interface RpcModeOptions {
 	createDictationController?: RpcDictationControllerFactory;
 	/** The session's MCP manager, so `/mcp` builtins resolve and reconnect live servers. */
 	mcpManager?: MCPManager;
-	/** Goal-only wait boundary for tests; idle maintenance still uses the session's real barriers. */
-	goalWaitForIdle?: () => Promise<void>;
 }
 
 /**
@@ -1585,7 +1584,6 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		input = claimRpcInput(),
 		createLiveSession,
 		createDictationController,
-		goalWaitForIdle,
 	} = options;
 	// Signal to RPC clients that the server is ready to accept commands
 	// Suppress terminal notifications: they write \x07 (BEL) or OSC sequences directly to
@@ -1646,14 +1644,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const wordPredictor = new RpcWordPredictor();
 	const btw = new RpcBtwController(session, output);
 	// A continuation abandoned while waiting leaves nothing to end the activity stretch: re-check settlement and idle work.
-	const goalController = new RpcGoalController(
-		session,
-		() => {
-			session.refreshIdleMaintenance();
-			void settleWatcher.check();
-		},
-		goalWaitForIdle,
-	);
+	const goalController = new RpcGoalController(session, () => {
+		session.refreshIdleMaintenance();
+		void settleWatcher.check();
+	});
 	// A scheduled or held goal turn will start a turn: every settle report treats it as busy,
 	// and any report of "not settled" for that reason is later closed by `session_settled`.
 	const goalTurnScheduled = watchedScheduledTurnProbe(
@@ -1966,9 +1960,11 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	let rpcStartupComplete = false;
 	session.enableIdleMaintenance({
 		recap: false,
-		isBlocked: () => !rpcStartupComplete,
+		isBlocked: () => !rpcStartupComplete || !session.autoCompactionEnabled,
 		scheduledTurn: goalTurnScheduled,
 	});
+	// React to RPC overrides and live config edits, but do not let duplicate values postpone idle work.
+	cfgAutoCompactionEnabled.listen(session, () => session.refreshIdleMaintenance());
 
 	// Set up extensions with RPC-based UI context
 	await initializeExtensions(session, {

@@ -3,7 +3,11 @@ import {
 	validateModelCompactionThresholds,
 } from "../config/compaction-threshold";
 import { combine, register, type SettingValueOf } from "../config/registry";
-import { COMPACTION_METHOD_CHOICES, DEFAULT_COMPACTION_METHOD_ORDER } from "./compaction-methods";
+import {
+	COMPACTION_METHOD_CHOICES,
+	DEFAULT_COMPACTION_METHOD_ORDER,
+	resolveCompactionMethodOrder,
+} from "./compaction-methods";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 
 const EMPTY_STRING_ARRAY: string[] = [];
@@ -403,6 +407,11 @@ export const cfgCompaction = combine({
 	supersedeReads: cfgCompactionSupersedeReads,
 	dropUseless: cfgCompactionDropUseless,
 });
+
+/** Effective session state for automatic context maintenance, independent of the separate idle opt-in. */
+export const cfgAutoCompactionEnabled = cfgCompaction.map(
+	compaction => compaction.enabled && resolveCompactionMethodOrder(compaction.methodOrder).length > 0,
+);
 
 /**
  * Configured compaction policy ({@link cfgCompaction}). `baseWindowTokens` is
