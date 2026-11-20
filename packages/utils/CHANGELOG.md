@@ -16,6 +16,10 @@
 - Sped up `LinearRegExp` searches for required literals, lookbehinds, and other patterns on long inputs.
 - Sped up `LinearRegExp` misses for patterns with a required suffix and for patterns with large character alphabets.
 
+### Fixed
+
+- `formatAge` reads ages of a year or more in years (`23y ago`) instead of months (`282mo ago`)
+
 ## [19.0.0] - 2026-11-18
 
 ### Added
