@@ -1725,13 +1725,39 @@ impl AxBackend for AtSpiAx {
 					.get_connection_unix_process_id(name.clone().into())
 					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window pid: {err}")))?;
-				let title = object
+				let accessible = object
 					.as_accessible_proxy(connection)
 					.await
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window owner: {err}")))?
+					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window owner: {err}")))?;
+				let title = accessible
 					.name()
 					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window title: {err}")))?;
+				// The title names one native window only while no other window of
+				// the application carries it: an untitled GTK 3 message dialog is
+				// named after its kind ("Question"), which the app's main window
+				// may be titled too, while the display server titles the dialog
+				// with the program name.
+				let app = accessible
+					.get_application()
+					.await
+					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI application: {err}")))?;
+				let mut namesakes = 0;
+				for frame in Self::frames(connection, &app, self.reply_timeout).await? {
+					let proxy = frame
+						.as_accessible_proxy(connection)
+						.await
+						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI window: {err}")))?;
+					if proxy.name().await.is_ok_and(|name| name == title) {
+						namesakes += 1;
+					}
+				}
+				if namesakes > 1 {
+					return Err(DesktopError::ax_failed(format!(
+						"{namesakes} AT-SPI windows of the application are titled '{title}'; refusing \
+						 ambiguous input ownership"
+					)));
+				}
 				native_window_for_frame(windows, pid, &title)
 			})
 			.await?
@@ -3014,7 +3040,7 @@ mod tests {
 	}
 
 	#[test]
-	fn file_dialogs_and_alerts_are_top_levels_only_under_the_application() {
+	fn file_dialogs_are_top_levels_only_under_the_application() {
 		use atspi::zbus::{
 			connection::Builder as ConnectionBuilder, interface, zvariant::OwnedObjectPath,
 		};
@@ -3048,23 +3074,17 @@ mod tests {
 		let rt = Builder::new_current_thread().enable_all().build().unwrap();
 		let (top_levels, owners) = rt.block_on(async {
 			let (client, server) = tokio::net::UnixStream::pair().unwrap();
-			// A file dialog holding its own chooser widget, a GTK message
-			// dialog (an alert), and a frame that embeds a chooser and an alert.
+			// A file dialog holding its own chooser widget, and a frame that
+			// embeds one.
 			let tree = [
-				("/app", Role::Application, "/org/a11y/atspi/null", vec![
-					"/dialog", "/alert", "/frame",
-				]),
+				("/app", Role::Application, "/org/a11y/atspi/null", vec!["/dialog", "/frame"]),
 				("/dialog", Role::FileChooser, "/app", vec!["/filler"]),
 				("/filler", Role::Filler, "/dialog", vec!["/widget"]),
 				("/widget", Role::FileChooser, "/filler", vec!["/open"]),
 				("/open", Role::Button, "/widget", vec![]),
-				("/alert", Role::Alert, "/app", vec!["/yes"]),
-				("/yes", Role::Button, "/alert", vec![]),
-				("/frame", Role::Frame, "/app", vec!["/embedded", "/banner"]),
+				("/frame", Role::Frame, "/app", vec!["/embedded"]),
 				("/embedded", Role::FileChooser, "/frame", vec!["/ok"]),
 				("/ok", Role::Button, "/embedded", vec![]),
-				("/banner", Role::Alert, "/frame", vec!["/dismiss"]),
-				("/dismiss", Role::Button, "/banner", vec![]),
 			];
 			let mut server = ConnectionBuilder::unix_stream(server)
 				.server(atspi::zbus::Guid::generate())
@@ -3081,7 +3101,7 @@ mod tests {
 			let path = |object: ObjectRefOwned| object.path_as_str().to_owned();
 			let top_levels = AtSpiAx::frames(&client, &object("/app"), REPLY_TIMEOUT).await;
 			let mut owners = Vec::new();
-			for element in ["/open", "/dialog", "/ok", "/yes", "/dismiss"] {
+			for element in ["/open", "/dialog", "/ok"] {
 				owners.push(
 					AtSpiAx::top_level(&client, object(element), REPLY_TIMEOUT)
 						.await
@@ -3092,18 +3112,8 @@ mod tests {
 			drop(server);
 			(top_levels.map(|items| items.into_iter().map(path).collect::<Vec<_>>()), owners)
 		});
-		assert_eq!(top_levels.unwrap(), vec![
-			"/dialog".to_owned(),
-			"/alert".to_owned(),
-			"/frame".to_owned()
-		]);
-		assert_eq!(owners, [
-			Some("/dialog".into()),
-			Some("/dialog".into()),
-			Some("/frame".into()),
-			Some("/alert".into()),
-			Some("/frame".into())
-		]);
+		assert_eq!(top_levels.unwrap(), vec!["/dialog".to_owned(), "/frame".to_owned()]);
+		assert_eq!(owners, [Some("/dialog".into()), Some("/dialog".into()), Some("/frame".into())]);
 	}
 
 	#[test]
@@ -4351,6 +4361,134 @@ mod tests {
 			assert_eq!(listed.windows.len(), 1);
 			assert_eq!(listed.windows[0].window.title, "Document");
 			assert_eq!(listed.unanswered, [":1.8"]);
+		}
+
+		/// An element of a GTK 3 app: its role, name, parent and children.
+		struct Gtk3 {
+			role:     Role,
+			name:     &'static str,
+			parent:   &'static str,
+			children: Vec<&'static str>,
+		}
+
+		#[interface(name = "org.a11y.atspi.Accessible")]
+		impl Gtk3 {
+			fn get_role(&self) -> u32 {
+				self.role as u32
+			}
+
+			fn get_children(&self) -> Vec<(String, OwnedObjectPath)> {
+				self
+					.children
+					.iter()
+					.map(|child| (PEER.to_owned(), path(child)))
+					.collect()
+			}
+
+			#[allow(clippy::unused_self, reason = "every element belongs to the one app")]
+			fn get_application(&self) -> (String, OwnedObjectPath) {
+				(PEER.to_owned(), path("/app"))
+			}
+
+			#[zbus(property)]
+			fn name(&self) -> String {
+				self.name.to_owned()
+			}
+
+			#[zbus(property)]
+			fn parent(&self) -> (String, OwnedObjectPath) {
+				(PEER.to_owned(), path(self.parent))
+			}
+		}
+
+		/// The bus daemon's process lookup: the app is process 7.
+		struct Bus;
+
+		#[interface(name = "org.freedesktop.DBus")]
+		impl Bus {
+			#[zbus(name = "GetConnectionUnixProcessID")]
+			#[allow(clippy::unused_self, reason = "one process")]
+			fn pid(&self, name: String) -> u32 {
+				assert_eq!(name, PEER);
+				7
+			}
+		}
+
+		/// A GTK 3 app with a window titled `main`, holding a banner (an alert
+		/// inside the window), and a message dialog, which accessibility names
+		/// "Question" when it has no title.
+		fn app_with_message_dialog(main: &'static str) -> (AtSpiAx, Connection) {
+			let node = |role, name, parent, children| Gtk3 { role, name, parent, children };
+			let frame = || Extents { x: 10, y: 20, delay: Duration::ZERO };
+			backend(HUNG_CALL_TIMEOUT, |server| {
+				server
+					.serve_at("/org/freedesktop/DBus", Bus)
+					.unwrap()
+					.serve_at(
+						"/org/a11y/atspi/accessible/root",
+						node(Role::DesktopFrame, "main", "/org/a11y/atspi/null", vec!["/app"]),
+					)
+					.unwrap()
+					.serve_at(
+						"/app",
+						node(Role::Application, "tdlg", "/org/a11y/atspi/null", vec!["/main", "/alert"]),
+					)
+					.unwrap()
+					.serve_at("/main", node(Role::Frame, main, "/app", vec!["/banner"]))
+					.unwrap()
+					.serve_at("/banner", node(Role::Alert, "Saved", "/main", vec!["/dismiss"]))
+					.unwrap()
+					.serve_at("/dismiss", node(Role::Button, "Dismiss", "/banner", vec![]))
+					.unwrap()
+					.serve_at("/main", frame())
+					.unwrap()
+					.serve_at("/alert", node(Role::Alert, "Question", "/app", vec!["/yes"]))
+					.unwrap()
+					.serve_at("/alert", frame())
+					.unwrap()
+					.serve_at("/yes", node(Role::Button, "Yes", "/alert", vec![]))
+					.unwrap()
+			})
+		}
+
+		#[test]
+		fn a_message_dialog_is_listed_and_never_given_another_window_of_its_title() {
+			let x11 = |id: &str, title: &str| DesktopWindow {
+				id:      id.into(),
+				title:   title.into(),
+				app:     "tdlg".into(),
+				pid:     Some(7),
+				x:       0,
+				y:       0,
+				width:   300,
+				height:  200,
+				focused: false,
+			};
+			let element =
+				|path| AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, path));
+			let (yes, dismiss) = (element("/yes"), element("/dismiss"));
+
+			let (mut ax, _server) = app_with_message_dialog("TDLG");
+			let titles: Vec<_> = ax
+				.windows()
+				.unwrap()
+				.windows
+				.into_iter()
+				.map(|entry| entry.window.title)
+				.collect();
+			assert_eq!(titles, ["TDLG", "Question"]);
+			let windows = [x11("1", "TDLG"), x11("2", "Question")];
+			assert_eq!(ax.window_id(&yes, &windows).unwrap(), "2");
+			// An alert inside a window is part of that window.
+			assert_eq!(ax.window_id(&dismiss, &windows).unwrap(), "1");
+
+			// The main window titled like the untitled dialog, which X11 titles
+			// with the program name: neither window may take the dialog's input.
+			let (mut ax, _server) = app_with_message_dialog("Question");
+			assert!(
+				ax.window_id(&yes, &[x11("1", "Question"), x11("2", "tdlg.py")])
+					.is_err()
+			);
 		}
 
 		#[test]
