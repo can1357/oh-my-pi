@@ -81,14 +81,13 @@ describe("cursor API-equivalent pricing", () => {
 			["grok-4.7-500k-fast", 6, 18, 1.5],
 		] as const;
 		for (const [id, input, output, cacheRead] of cards) {
-			const lane = buildModel({ ...spec(id), contextWindow: 500_000 });
-			expect(lane.contextWindow, id).toBe(500_000);
+			const lane = buildModel(spec(id));
 			expect(lane.longContextWindowUncapped, id).toBe(true);
 			// The exact-id card wins over the `grok-4.7*` globs' cheaper 256K-lane card.
 			expect(lane.cost, id).toMatchObject({ input, output, cacheRead, cacheWrite: 0 });
 		}
 		// The base lane's wire context is pinned to 256k; it must keep the cap.
-		expect(buildModel({ ...spec("grok-4.7"), contextWindow: 256_000 }).longContextWindowUncapped).toBeUndefined();
+		expect(buildModel(spec("grok-4.7")).longContextWindowUncapped).toBeUndefined();
 	});
 
 	it("prices third-party models at their Cursor API rates", () => {

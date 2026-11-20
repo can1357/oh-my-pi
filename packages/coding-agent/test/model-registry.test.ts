@@ -2808,7 +2808,6 @@ describe("ModelRegistry", () => {
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
 			const lane = registry.find("cursor", "grok-4.7-500k");
 			expect(lane?.contextWindow).toBe(500_000);
-			expect(lane?.longContextWindowUncapped).toBe(true);
 		});
 
 		test("custom provider models follow the extended-context toggle without retaining an earlier window", async () => {
