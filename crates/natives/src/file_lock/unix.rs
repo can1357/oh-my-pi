@@ -1,5 +1,7 @@
+#[cfg(not(target_os = "linux"))]
+use std::fs::TryLockError;
 use std::{
-	fs::{File, OpenOptions, TryLockError},
+	fs::{File, OpenOptions},
 	io,
 	os::unix::fs::OpenOptionsExt,
 };
@@ -17,13 +19,31 @@ pub fn try_acquire(path: &str) -> io::Result<Option<PlatformFileLock>> {
 		.truncate(false)
 		.mode(0o600)
 		.open(path)?;
-	// The lock is attached to this open file description (`flock(2)`).
+	Ok(lock_exclusive(&file)?.then(|| PlatformFileLock { file: Some(file) }))
+}
+
+#[cfg(target_os = "linux")]
+fn lock_exclusive(file: &File) -> io::Result<bool> {
+	match whole_file_lock(file, libc::F_OFD_SETLK, libc::F_WRLCK as libc::c_short) {
+		Ok(_) => Ok(true),
+		Err(error) if matches!(error.raw_os_error(), Some(libc::EAGAIN | libc::EACCES)) => Ok(false),
+		Err(error) => Err(error),
+	}
+}
+
+#[cfg(not(target_os = "linux"))]
+fn lock_exclusive(file: &File) -> io::Result<bool> {
 	match file.try_lock() {
-		Ok(()) => Ok(Some(PlatformFileLock { file: Some(file) })),
-		Err(TryLockError::WouldBlock) => Ok(None),
+		Ok(()) => Ok(true),
+		Err(TryLockError::WouldBlock) => Ok(false),
 		Err(TryLockError::Error(error)) => Err(error),
 	}
 }
+
+#[cfg(target_os = "linux")]
+const PROBE_COMMAND: libc::c_int = libc::F_OFD_GETLK;
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const PROBE_COMMAND: libc::c_int = libc::F_GETLK;
 
 /// `flock(2)` has no query, but macOS and the BSDs keep `flock` and `fcntl`
 /// locks on one per-vnode list, and `F_GETLK` returns the first lock there
@@ -34,23 +54,13 @@ pub fn try_acquire(path: &str) -> io::Result<Option<PlatformFileLock>> {
 /// locked the path.
 #[cfg(not(target_os = "android"))]
 pub fn is_held(path: &str) -> io::Result<bool> {
-	use std::os::fd::AsRawFd;
-
 	let file = match OpenOptions::new().read(true).open(path) {
 		Ok(file) => file,
 		Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
 		Err(error) => return Err(error),
 	};
-	// SAFETY: an all-zero `flock` is valid. Zero `l_whence` is `SEEK_SET`, and
-	// zero `l_start`/`l_len` from there covers the whole file.
-	let mut query: libc::flock = unsafe { std::mem::zeroed() };
-	query.l_type = libc::F_RDLCK;
-	// SAFETY: `file` owns a live descriptor and `query` is a valid `flock` for
-	// the duration of the call; `F_GETLK` only reads lock state into it.
-	if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &raw mut query) } == -1 {
-		return Err(io::Error::last_os_error());
-	}
-	Ok(query.l_type != libc::F_UNLCK as libc::c_short)
+	let conflicting = whole_file_lock(&file, PROBE_COMMAND, libc::F_RDLCK as libc::c_short)?;
+	Ok(conflicting != libc::F_UNLCK as libc::c_short)
 }
 
 /// Android runs a Linux kernel, which keeps `flock` locks apart from `fcntl`
@@ -58,6 +68,27 @@ pub fn is_held(path: &str) -> io::Result<bool> {
 #[cfg(target_os = "android")]
 pub fn is_held(_path: &str) -> io::Result<bool> {
 	Err(io::ErrorKind::Unsupported.into())
+}
+
+#[cfg(not(target_os = "android"))]
+fn whole_file_lock(
+	file: &File,
+	command: libc::c_int,
+	lock_type: libc::c_short,
+) -> io::Result<libc::c_short> {
+	use std::os::fd::AsRawFd;
+
+	// SAFETY: an all-zero `flock` is valid. Zero `l_whence` is `SEEK_SET`, zero
+	// `l_start`/`l_len` from there covers the whole file, and zero `l_pid` is
+	// what the `F_OFD_*` commands require.
+	let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+	lock.l_type = lock_type;
+	// SAFETY: `file` owns a live descriptor and `lock` is a valid `flock` for
+	// the duration of the call.
+	if unsafe { libc::fcntl(file.as_raw_fd(), command, &raw mut lock) } == -1 {
+		return Err(io::Error::last_os_error());
+	}
+	Ok(lock.l_type)
 }
 
 impl PlatformFileLock {
