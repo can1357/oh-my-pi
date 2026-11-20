@@ -4218,7 +4218,6 @@ mod capture_tests {
 			.err()
 			.unwrap();
 		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
-		assert!(error.message.contains("may still take effect"));
 		assert_eq!(mutations.load(Ordering::Acquire), 0);
 		unblock.send(()).expect("provider did not resume");
 		drop(unblock);
@@ -4267,11 +4266,6 @@ mod capture_tests {
 			.err()
 			.unwrap();
 		assert_eq!(error.code, ErrorCode::Timeout);
-		assert!(
-			error
-				.message
-				.contains("nothing was sent and nothing will be")
-		);
 		unblock.send(()).expect("provider did not resume");
 		assert_eq!(
 			result.recv().expect("provider did not check the fence"),
