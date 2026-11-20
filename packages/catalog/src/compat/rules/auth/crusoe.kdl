@@ -1,0 +1,9 @@
+auth "crusoe" {
+	name "Crusoe"
+	login "api-key" {
+		auth-url "https://console.crusoecloud.com/foundry/models"
+		instructions "Create or copy your API key from Crusoe Intelligence Foundry"
+		prompt "Paste your Crusoe API key" placeholder="..."
+		validate "models-endpoint" label="Crusoe" url="https://api.inference.crusoecloud.com/v1/models"
+	}
+}

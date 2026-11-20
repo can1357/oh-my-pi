@@ -179,6 +179,9 @@ behavior {
 	// Control-plane resource ids are not accepted by the inference API.
 	exclude-models provider="fireworks" prefix="accounts/fireworks/"
 	exclude-models provider="firepass" prefix="accounts/fireworks/"
+	// Crusoe's serverless roster includes a speech-to-speech model that the
+	// OpenAI Chat Completions transport cannot serve.
+	exclude-models provider="crusoe" exact="nvidia/nemotron-3-voicechat"
 	// Text-chat transports cannot serve Xiaomi's audio-only models.
 	exclude-models provider="xiaomi" substring="-tts" substring="-asr"
 	exclude-models provider="xiaomi-token-plan-ams" substring="-tts" substring="-asr"

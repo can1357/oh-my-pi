@@ -1311,6 +1311,23 @@ export function cerebrasModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// Crusoe
+// ---------------------------------------------------------------------------
+
+export function crusoeModelManagerOptions(config?: ModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "crusoe",
+		defaultBaseUrl: "https://api.inference.crusoecloud.com/v1",
+		config,
+		requireApiKey: true,
+		dynamicModelsAuthoritative: true,
+		filterModel: (_entry, model) => !isExcludedModel("crusoe", model.id),
+		mapModel: (entry, defaults, reference) => mapWithBundledReference(entry, defaults, reference),
+	});
+}
+
+// ---------------------------------------------------------------------------
 // 3.5 SambaNova
 // ---------------------------------------------------------------------------
 

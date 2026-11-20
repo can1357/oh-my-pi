@@ -1,0 +1,121 @@
+// Crusoe Serverless Inference exposes an OpenAI-compatible, credential-scoped
+// roster. The reviewed seed is the documented fallback; successful live
+// discovery replaces it so retired models do not remain selectable.
+
+provider "crusoe" {
+	default-model "deepseek-ai/DeepSeek-V4.1-Flash"
+	env "CRUSOE_API_KEY"
+	dynamic-models-authoritative #true
+	discovery label="Crusoe"
+
+	// Sources:
+	// https://docs.crusoecloud.com/serverless-inference/available-models
+	// https://www.crusoe.ai/cloud/pricing#Serverless-Inference
+	seed api="openai-completions" base-url="https://api.inference.crusoecloud.com/v1" bundle="fallback" {
+		model "deepseek-ai/DeepSeek-V4.1-Flash" name="DeepSeek V4.1 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.29 output=1.20 cache-read=0.007 cache-write=0
+			limits context=1048576
+		}
+		model "google/gemma-4-31b-it" name="Gemma 4 31B" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.14 output=0.40 cache-read=0.14 cache-write=0
+			limits context=262144
+		}
+		model "nvidia/Nemotron-3-Nano-Omni-Reasoning-30B-A3B" name="Nemotron 3 Nano Omni Reasoning 30B A3B" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.30 output=1.83 cache-read=0.30 cache-write=0
+			limits context=262144
+		}
+		model "nvidia/nemotron-3.5-lightning-30b-a3b" name="Nemotron 3.5 Lightning 30B A3B" {
+			reasoning #false
+			input "text"
+			cost input=0.05 output=0.20 cache-read=0.03 cache-write=0
+			limits context=262144
+		}
+		model "nvidia/nemotron-3.5-super-vl-120b-a12b" name="Nemotron 3.5 Super VL 120B A12B" {
+			reasoning #false
+			input "text" "image"
+			cost input=0.10 output=0.40 cache-read=0.08 cache-write=0
+			limits context=1048576
+		}
+		model "openai/gpt-oss-120b" name="GPT-OSS 120B" {
+			reasoning #true
+			input "text"
+			cost input=0.05 output=0.25 cache-read=0.05 cache-write=0
+			limits context=131072
+		}
+		model "qwen/Qwen3.8-27B" name="Qwen3.8 27B" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.25 output=2.00 cache-read=0.15 cache-write=0
+			limits context=262144
+		}
+		model "zai-org/GLM-5.3" name="GLM-5.3" {
+			reasoning #true
+			input "text"
+			cost input=1.40 output=4.40 cache-read=0.26 cache-write=0
+			limits context=1048576
+		}
+		model "zai-org/GLM-5.3-Flash" name="GLM-5.3 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.15 output=0.50 cache-read=0.03 cache-write=0
+			limits context=1048576
+		}
+	}
+
+	// Crusoe documents streaming usage via stream_options.
+	supports-usage-in-streaming #true
+
+	// Preserve Crusoe's deployment-specific rate card, modalities, and context
+	// limits when live /models rows contain only OpenAI's basic model fields.
+	models "deepseek-ai/DeepSeek-V4.1-Flash" {
+		input-modalities "text" "image"
+		cost-patch { input 0.29; output 1.20; cache-read 0.007; cache-write 0 }
+		limits-patch { context-window 1048576 }
+	}
+	models "google/gemma-4-31b-it" {
+		input-modalities "text" "image"
+		cost-patch { input 0.14; output 0.40; cache-read 0.14; cache-write 0 }
+		limits-patch { context-window 262144 }
+	}
+	models "nvidia/Nemotron-3-Nano-Omni-Reasoning-30B-A3B" {
+		input-modalities "text" "image"
+		cost-patch { input 0.30; output 1.83; cache-read 0.30; cache-write 0 }
+		limits-patch { context-window 262144 }
+	}
+	models "nvidia/nemotron-3.5-lightning-30b-a3b" {
+		input-modalities "text"
+		cost-patch { input 0.05; output 0.20; cache-read 0.03; cache-write 0 }
+		limits-patch { context-window 262144 }
+	}
+	models "nvidia/nemotron-3.5-super-vl-120b-a12b" {
+		input-modalities "text" "image"
+		cost-patch { input 0.10; output 0.40; cache-read 0.08; cache-write 0 }
+		limits-patch { context-window 1048576 }
+	}
+	models "openai/gpt-oss-120b" {
+		input-modalities "text"
+		cost-patch { input 0.05; output 0.25; cache-read 0.05; cache-write 0 }
+		limits-patch { context-window 131072 }
+	}
+	models "qwen/Qwen3.8-27B" {
+		input-modalities "text" "image"
+		cost-patch { input 0.25; output 2.00; cache-read 0.15; cache-write 0 }
+		limits-patch { context-window 262144 }
+	}
+	models "zai-org/GLM-5.3" {
+		input-modalities "text"
+		cost-patch { input 1.40; output 4.40; cache-read 0.26; cache-write 0 }
+		limits-patch { context-window 1048576 }
+	}
+	models "zai-org/GLM-5.3-Flash" {
+		input-modalities "text" "image"
+		cost-patch { input 0.15; output 0.50; cache-read 0.03; cache-write 0 }
+		limits-patch { context-window 1048576 }
+	}
+}
