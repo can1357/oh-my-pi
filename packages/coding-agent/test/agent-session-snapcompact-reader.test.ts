@@ -400,6 +400,35 @@ describe("snapcompact archive read by another model", () => {
 		expectOriginalIntact(latestCompaction(sessionManager), original);
 	});
 
+	it("re-renders the archive in a reader's configured snapcompactShape, and sends the original to the same model unconfigured", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const original = await seedArchive(sessionManager, { model: claude });
+		const frames = snapcompact.getPreservedArchive(original.preserveData)!.frames.map(frame => frame.data);
+		// The same model id, configured (models.yml / modelOverrides) to read another shape.
+		const configured: Model = { ...claude, snapcompactShape: { variant: "8on22-bw", frameSize: 1024 } };
+		expect(snapcompact.resolveShape(claude).frameSize).not.toBe(1024);
+		const { session, mock } = startSession(sessionManager, claude);
+		const widths = (images: string[]) => images.map(data => Buffer.from(data, "base64").readUInt32BE(16));
+
+		// The unconfigured model reads the original frames, and its scan of the context is cached.
+		await session.prompt("Continue.");
+		expect(requestContent(mock.calls[0]?.context.messages).images).toEqual(frames);
+
+		// The switch itself swaps the re-rendered frames into the live context, before any call.
+		await session.setModel(configured);
+		const live = requestContent(convertToLlm(session.agent.state.messages)).images;
+		expect(live.length).toBeGreaterThan(0);
+		expect(widths(live)).toEqual(live.map(() => 1024));
+		await session.prompt("Continue again.");
+		const forConfigured = requestContent(mock.calls[1]?.context.messages).images;
+		expect(widths(forConfigured)).toEqual(forConfigured.map(() => 1024));
+
+		await session.setModel(claude);
+		await session.prompt("Continue once more.");
+		expect(requestContent(mock.calls[2]?.context.messages).images).toEqual(frames);
+		expectOriginalIntact(latestCompaction(sessionManager), original);
+	});
+
 	it("keeps both ends of an archive's text that would crowd a small window, and all of it in a large one", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const original = await seedArchive(sessionManager);

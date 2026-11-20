@@ -5185,7 +5185,7 @@ export class SessionMaintenance {
 		if (!model) return;
 		const reader = archiveReader(model);
 		// The views a scan swapped in were fitted to this model's window (#viewWithoutFrames) and frame shape (#viewInShape).
-		const scanKey = `${reader.key}|${model.api}|${model.provider}/${model.id}|${this.#archiveTextBudget(model)}|${cfgSnapcompactShape.get(this.#host.settings)}`;
+		const scanKey = `${reader.key}|${this.#shapedViewKey(model)}`;
 		const lists = activeMessages
 			? [this.#host.agent.state.messages, activeMessages]
 			: [this.#host.agent.state.messages];
@@ -5539,10 +5539,10 @@ export class SessionMaintenance {
 		return { summary: snapcompact.viewSummary(entry.summary, result.summary, !includeThinking), archive: rendered };
 	}
 
-	/** What decides `model`'s re-shaped views: its wire, identity, shape setting and budgets. */
+	/** What decides `model`'s re-shaped views: its wire, identity, configured shape, shape setting and budgets. */
 	#shapedViewKey(model: Model): string {
 		const shapeSetting = cfgSnapcompactShape.get(this.#host.settings);
-		return `reader|${model.api}|${model.provider}/${model.id}|${shapeSetting}|${this.#archiveTextBudget(model)}|${snapcompact.frameDataBytesBudget(model)}|${snapcompact.providerFrameBudget(model)}`;
+		return `reader|${model.api}|${model.provider}/${model.id}|${JSON.stringify(model.snapcompactShape ?? null)}|${shapeSetting}|${this.#archiveTextBudget(model)}|${snapcompact.frameDataBytesBudget(model)}|${snapcompact.providerFrameBudget(model)}`;
 	}
 
 	/**
