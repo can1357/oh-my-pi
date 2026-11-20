@@ -814,7 +814,11 @@ describe("Generate E2E Tests", () => {
 			}
 		});
 
-		it("routes Vertex Mistral rawPredict with ADC auth and an OpenAI-shaped body (#19010)", async () => {
+		async function captureVertexAdcRequest<TApi extends Api>(
+			model: Model<TApi>,
+			context: Context,
+			config?: { location?: string; options?: OptionsForApi<TApi> },
+		): Promise<{ url: string; authorization: string | null; body: Record<string, unknown> }> {
 			const envKeys = [
 				"GOOGLE_CLOUD_PROJECT",
 				"GCP_PROJECT",
@@ -828,8 +832,60 @@ describe("Generate E2E Tests", () => {
 			] as const;
 			const originalEnv = envKeys.map(key => [key, Bun.env[key]] as const);
 			// Force the metadata-server token path (see the Claude rawPredict test above).
-			const absentAdcHome = path.join(os.tmpdir(), `vertex-adc-mistral-${Date.now()}`);
+			const absentAdcHome = path.join(os.tmpdir(), `vertex-adc-capture-${Date.now()}`);
 			const homedirSpy = spyOn(os, "homedir").mockReturnValue(absentAdcHome);
+			const captured = Promise.withResolvers<{
+				url: string;
+				authorization: string | null;
+				body: Record<string, unknown>;
+			}>();
+
+			try {
+				__resetVertexTokenCache();
+				for (const key of envKeys) delete Bun.env[key];
+				Bun.env.GOOGLE_CLOUD_PROJECT = "vertex-project";
+				if (config?.location) Bun.env.GOOGLE_VERTEX_LOCATION = config.location;
+				Bun.env.APPDATA = absentAdcHome;
+
+				const events = stream(model, context, {
+					...config?.options,
+					apiKey: "<authenticated>",
+					fetch: async (input, init) => {
+						const url = input instanceof Request ? input.url : input.toString();
+						if (
+							url ===
+							"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+						) {
+							return new Response(JSON.stringify({ access_token: "vertex-token", expires_in: 3600 }));
+						}
+						const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+						const bodyText = input instanceof Request ? await input.clone().text() : String(init?.body ?? "");
+						captured.resolve({
+							url,
+							authorization: headers.get("authorization"),
+							body: JSON.parse(bodyText) as Record<string, unknown>,
+						});
+						return new Response(JSON.stringify({ error: { message: "stop after capture" } }), {
+							status: 400,
+						});
+					},
+				} as OptionsForApi<TApi>);
+
+				for await (const _event of events) {
+				}
+
+				return await captured.promise;
+			} finally {
+				__resetVertexTokenCache();
+				homedirSpy.mockRestore();
+				for (const [key, value] of originalEnv) {
+					if (value === undefined) delete Bun.env[key];
+					else Bun.env[key] = value;
+				}
+			}
+		}
+
+		it("routes Vertex Mistral rawPredict with ADC auth and an OpenAI-shaped body (#19010)", async () => {
 			const model: Model<"openai-completions"> = buildModel({
 				id: "mistral-small-2503",
 				name: "Mistral Small 2503",
@@ -843,136 +899,138 @@ describe("Generate E2E Tests", () => {
 				contextWindow: 131_072,
 				maxTokens: 8_192,
 			});
-			const captured = Promise.withResolvers<{
-				url: string;
-				authorization: string | null;
-				body: unknown;
-			}>();
+			// Replay one tool call issued by another model: a long
+			// OpenAI-style id must be clamped to 9 alphanumerics, the tool
+			// result must carry its name, and `max_tokens` (not
+			// `max_completion_tokens`) must be sent with no `store`.
+			const priorAssistant: AssistantMessage = {
+				role: "assistant",
+				api: "openai-completions",
+				provider: "openai",
+				model: "gpt-4o",
+				content: [
+					{
+						type: "toolCall",
+						id: "call_abcdefghijklmnopqrstuvwxyz",
+						name: "math_operation",
+						arguments: { a: 1, b: 2, operation: "add" },
+					},
+				],
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			};
 
-			try {
-				__resetVertexTokenCache();
-				for (const key of envKeys) delete Bun.env[key];
-				Bun.env.GOOGLE_CLOUD_PROJECT = "vertex-project";
-				Bun.env.GOOGLE_VERTEX_LOCATION = "global";
-				Bun.env.APPDATA = absentAdcHome;
-
-				// Replay one tool call issued by another model: a long
-				// OpenAI-style id must be clamped to 9 alphanumerics, the tool
-				// result must carry its name, and `max_tokens` (not
-				// `max_completion_tokens`) must be sent with no `store`.
-				const priorAssistant: AssistantMessage = {
-					role: "assistant",
-					api: "openai-completions",
-					provider: "openai",
-					model: "gpt-4o",
-					content: [
+			const request = await captureVertexAdcRequest(
+				model,
+				{
+					messages: [
+						{ role: "user", content: "Hello", timestamp: Date.now() },
+						priorAssistant,
 						{
-							type: "toolCall",
-							id: "call_abcdefghijklmnopqrstuvwxyz",
-							name: "math_operation",
-							arguments: { a: 1, b: 2, operation: "add" },
+							role: "toolResult",
+							toolCallId: "call_abcdefghijklmnopqrstuvwxyz",
+							toolName: "math_operation",
+							content: [{ type: "text", text: "3" }],
+							isError: false,
+							timestamp: Date.now(),
 						},
+						{ role: "user", content: "Thanks", timestamp: Date.now() },
 					],
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "toolUse",
-					timestamp: Date.now(),
-				};
-				const events = stream(
-					model,
-					{
-						messages: [
-							{ role: "user", content: "Hello", timestamp: Date.now() },
-							priorAssistant,
-							{
-								role: "toolResult",
-								toolCallId: "call_abcdefghijklmnopqrstuvwxyz",
-								toolName: "math_operation",
-								content: [{ type: "text", text: "3" }],
-								isError: false,
-								timestamp: Date.now(),
-							},
-							{ role: "user", content: "Thanks", timestamp: Date.now() },
-						],
-					},
-					{
-						apiKey: "<authenticated>",
-						maxTokens: 100,
-						fetch: async (input, init) => {
-							const url = input instanceof Request ? input.url : input.toString();
-							if (
-								url ===
-								"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
-							) {
-								return new Response(JSON.stringify({ access_token: "vertex-token", expires_in: 3600 }));
-							}
-							const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
-							const bodyText = input instanceof Request ? await input.clone().text() : String(init?.body ?? "");
-							captured.resolve({
-								url,
-								authorization: headers.get("authorization"),
-								body: JSON.parse(bodyText),
-							});
-							return new Response(JSON.stringify({ error: { message: "stop after capture" } }), {
-								status: 400,
-							});
-						},
-					},
-				);
+				},
+				{ location: "global", options: { maxTokens: 100 } },
+			);
 
-				for await (const _event of events) {
-				}
-
-				const request = await captured.promise;
-				// The openai-completions transport appends /chat/completions to
-				// the model baseUrl; the rawPredict endpoint takes no suffix.
-				expect(request.url).toBe(
-					"https://aiplatform.googleapis.com/v1/projects/vertex-project/locations/global/publishers/mistralai/models/mistral-small-2503:streamRawPredict",
-				);
-				expect(request.authorization).toBe("Bearer vertex-token");
-				// OpenAI-shaped body: the Anthropic transform must not strip
-				// `model` or inject `anthropic_version` on partner publishers.
-				const body = request.body as Record<string, unknown>;
-				expect(body.model).toBe("mistral-small-2503");
-				expect(body.anthropic_version).toBeUndefined();
-				// Mistral wire shape: `max_tokens`, no `store`, clamped ids.
-				expect(body.max_tokens).toBe(100);
-				expect(body.max_completion_tokens).toBeUndefined();
-				expect(body.store).toBeUndefined();
-				const wireMessages = body.messages as Array<Record<string, unknown>>;
-				const assistantMsg = wireMessages.find(
-					msg => msg.role === "assistant" && Array.isArray(msg.tool_calls),
-				) as unknown as {
-					tool_calls: Array<{ id: string; function: { name: string; arguments: string } }>;
-				};
-				expect(assistantMsg.tool_calls).toHaveLength(1);
-				expect(assistantMsg.tool_calls[0]?.id).toBe("callabcde");
-				expect(assistantMsg.tool_calls[0]?.function.name).toBe("math_operation");
-				const toolMsg = wireMessages.find(msg => msg.role === "tool") as unknown as {
-					tool_call_id: string;
-					name: string;
-				};
-				expect(toolMsg.tool_call_id).toBe("callabcde");
-				expect(toolMsg.name).toBe("math_operation");
-				// A synthetic bridge assistant follows the tool result: Mistral
-				// rejects user turns directly after tool results.
-				const toolIndex = wireMessages.findIndex(msg => msg.role === "tool");
-				expect((wireMessages[toolIndex + 1] as Record<string, unknown>).role).toBe("assistant");
-			} finally {
-				__resetVertexTokenCache();
-				homedirSpy.mockRestore();
-				for (const [key, value] of originalEnv) {
-					if (value === undefined) delete Bun.env[key];
-					else Bun.env[key] = value;
-				}
-			}
+			// The openai-completions transport appends /chat/completions to
+			// the model baseUrl; the rawPredict endpoint takes no suffix.
+			expect(request.url).toBe(
+				"https://aiplatform.googleapis.com/v1/projects/vertex-project/locations/global/publishers/mistralai/models/mistral-small-2503:streamRawPredict",
+			);
+			expect(request.authorization).toBe("Bearer vertex-token");
+			// OpenAI-shaped body: the Anthropic transform must not strip
+			// `model` or inject `anthropic_version` on partner publishers.
+			const body = request.body;
+			expect(body.model).toBe("mistral-small-2503");
+			expect(body.anthropic_version).toBeUndefined();
+			// Mistral wire shape: `max_tokens`, no `store`, clamped ids.
+			expect(body.max_tokens).toBe(100);
+			expect(body.max_completion_tokens).toBeUndefined();
+			expect(body.store).toBeUndefined();
+			const wireMessages = body.messages as Array<Record<string, unknown>>;
+			const assistantMsg = wireMessages.find(
+				msg => msg.role === "assistant" && Array.isArray(msg.tool_calls),
+			) as unknown as {
+				tool_calls: Array<{ id: string; function: { name: string; arguments: string } }>;
+			};
+			expect(assistantMsg.tool_calls).toHaveLength(1);
+			expect(assistantMsg.tool_calls[0]?.id).toBe("callabcde");
+			expect(assistantMsg.tool_calls[0]?.function.name).toBe("math_operation");
+			const toolMsg = wireMessages.find(msg => msg.role === "tool") as unknown as {
+				tool_call_id: string;
+				name: string;
+			};
+			expect(toolMsg.tool_call_id).toBe("callabcde");
+			expect(toolMsg.name).toBe("math_operation");
+			// A synthetic bridge assistant follows the tool result: Mistral
+			// rejects user turns directly after tool results.
+			const toolIndex = wireMessages.findIndex(msg => msg.role === "tool");
+			expect((wireMessages[toolIndex + 1] as Record<string, unknown>).role).toBe("assistant");
 		});
+
+		it.each([
+			{
+				name: "global Meta publisher endpoint without GOOGLE_VERTEX_LOCATION",
+				id: "muse-spark-1.3",
+				baseUrl: "https://aiplatform.googleapis.com/v1/projects/{project}/locations/global/publishers/meta/v1",
+				location: undefined,
+				expectedUrl:
+					"https://aiplatform.googleapis.com/v1/projects/vertex-project/locations/global/publishers/meta/v1/responses",
+			},
+			{
+				name: "multi-region us OpenAI publisher endpoint",
+				id: "gpt-6",
+				baseUrl:
+					"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/openai/v1",
+				location: "us",
+				expectedUrl:
+					"https://aiplatform.us.rep.googleapis.com/v1/projects/vertex-project/locations/us/publishers/openai/v1/responses",
+			},
+		])(
+			"routes Vertex openai-responses ($name) with ADC auth (#19009)",
+			async ({ id, baseUrl, location, expectedUrl }) => {
+				const model: Model<"openai-responses"> = buildModel({
+					id,
+					name: id,
+					api: "openai-responses",
+					provider: "google-vertex",
+					baseUrl,
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 131_072,
+					maxTokens: 8_192,
+				});
+
+				const request = await captureVertexAdcRequest(
+					model,
+					{ messages: [{ role: "user", content: "Hello", timestamp: Date.now() }] },
+					{ location },
+				);
+
+				expect(request.url).toBe(expectedUrl);
+				expect(request.authorization).toBe("Bearer vertex-token");
+				expect(request.body.model).toBe(id);
+				expect(request.body.store).toBe(false);
+				expect(request.body.stream).toBe(true);
+			},
+		);
 	});
 
 	describe("Google Vertex Provider (gemini-3-flash-preview)", () => {

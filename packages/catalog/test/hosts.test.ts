@@ -3,6 +3,7 @@ import {
 	hostMatchesUrl,
 	isDashscopeCompatibleModeUrl,
 	isVertexExpressOpenAIUrl,
+	isVertexPublisherResponsesUrl,
 	isVertexRawPredictUrl,
 	modelMatchesHost,
 	resolveVertexEndpointHost,
@@ -50,6 +51,58 @@ describe("endpoint shape predicates", () => {
 		expect(
 			isVertexExpressOpenAIUrl(
 				"https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us/publishers/google/models/gemini",
+			),
+		).toBe(false);
+	});
+	test("recognizes Vertex publisher Responses API URLs", () => {
+		expect(
+			isVertexPublisherResponsesUrl(
+				"https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/meta/v1",
+			),
+		).toBe(true);
+		expect(
+			isVertexPublisherResponsesUrl(
+				"https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/meta/v1/",
+			),
+		).toBe(true);
+		expect(
+			isVertexPublisherResponsesUrl(
+				"https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/meta/v1/responses",
+			),
+		).toBe(false);
+		expect(
+			isVertexPublisherResponsesUrl(
+				"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/openai/v1",
+			),
+		).toBe(true);
+		expect(
+			isVertexPublisherResponsesUrl(
+				"https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/openai/v1/responses",
+			),
+		).toBe(false);
+		expect(
+			isVertexPublisherResponsesUrl(
+				"https://aiplatform.googleapis.com/v1/projects/p/locations/us/publishers/anthropic/models/claude:rawPredict",
+			),
+		).toBe(false);
+		expect(
+			isVertexPublisherResponsesUrl(
+				"https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/mistralai/models/mistral:streamRawPredict",
+			),
+		).toBe(false);
+		expect(
+			isVertexPublisherResponsesUrl(
+				"https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us/publishers/google/models/gemini",
+			),
+		).toBe(false);
+		expect(
+			isVertexPublisherResponsesUrl(
+				"https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us/endpoints/openapi",
+			),
+		).toBe(false);
+		expect(
+			isVertexPublisherResponsesUrl(
+				"https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/meta/v1/chat/completions",
 			),
 		).toBe(false);
 	});
