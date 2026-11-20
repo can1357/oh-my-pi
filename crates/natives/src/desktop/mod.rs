@@ -2203,11 +2203,20 @@ impl SessionCore {
 		// before this caller does.
 		let token = token.replying_by(reply_by);
 		let response = tx
-			.send(QueuedRequest { request: make(txr), token })
+			.send(QueuedRequest { request: make(txr), token: token.clone() })
 			.map_err(|_| DesktopError::internal("native desktop worker stopped unexpectedly"))
 			.and_then(|()| {
 				rxr.recv_deadline(reply_by).map_err(|e| {
+					let dispatched =
+						matches!(e, flume::RecvTimeoutError::Timeout) && token.abandon_reply();
 					self.display_awake.cancel_and_release(&self.cancellation);
+					if dispatched {
+						return DesktopError::new(
+							error::ErrorCode::AxUnconfirmed,
+							"desktop input was sent, but the operation did not reply in time; inspect \
+							 before retrying",
+						);
+					}
 					DesktopError::timeout(format!("native desktop operation did not complete: {e}"))
 				})
 			});
@@ -3205,6 +3214,8 @@ mod capture_tests {
 		/// Each window listing signals the sender, then blocks until the
 		/// receiver's sender drops.
 		hang_windows:           Option<(flume::Sender<()>, flume::Receiver<()>)>,
+		/// Injects a provider call, including its dispatch boundary.
+		on_windows:             Option<Box<dyn Fn() -> CoreResult<()> + Send>>,
 		/// Runs as each menu read is served.
 		on_menu_read:           Option<Box<dyn Fn() + Send>>,
 		/// Another process drawing the window, such as an Open panel's.
@@ -3297,6 +3308,7 @@ mod capture_tests {
 				overlap: None,
 				window_present: true,
 				minimized_id: None,
+				on_windows: None,
 				tree: None,
 				menu_control: false,
 				no_input: false,
@@ -3560,6 +3572,9 @@ mod capture_tests {
 		}
 
 		fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>> {
+			if let Some(on_windows) = &self.on_windows {
+				on_windows()?;
+			}
 			if let Some((entered, hang)) = &self.hang_windows {
 				let _ = entered.send(());
 				let _ = hang.recv();
@@ -4127,6 +4142,89 @@ mod capture_tests {
 		drop(unblock);
 		core.close().unwrap();
 		assert_eq!(*awake.lock(), [true, false], "the late return neither holds nor releases again");
+	}
+
+	#[test]
+	fn a_dispatched_provider_reply_timeout_is_unconfirmed() {
+		let mut backend = FakeWaylandBackend::new();
+		let (entered_tx, entered) = flume::bounded(0);
+		let (unblock, blocked) = flume::bounded::<()>(0);
+		let mutations = Arc::new(AtomicUsize::new(0));
+		backend.on_windows = Some(Box::new({
+			let mutations = Arc::clone(&mutations);
+			move || {
+				control::dispatching()?;
+				mutations.fetch_add(1, Ordering::AcqRel);
+				entered_tx.send(()).unwrap();
+				let _ = blocked.recv();
+				Ok(())
+			}
+		}));
+		let core = session_serving(backend);
+		let caller = thread::spawn({
+			let core = Arc::clone(&core);
+			move || core.call(core.cancellation.token(), |reply| Request::ListWindows { reply })
+		});
+		entered.recv().unwrap();
+		assert_eq!(caller.join().unwrap().err().unwrap().code, ErrorCode::AxUnconfirmed);
+		assert_eq!(mutations.load(Ordering::Acquire), 1);
+		drop(unblock);
+		core.close().unwrap();
+	}
+
+	#[test]
+	fn an_abandoned_provider_cannot_dispatch_after_reply_timeout() {
+		let mut backend = FakeWaylandBackend::new();
+		let (entered_tx, entered) = flume::bounded(0);
+		let (unblock, blocked) = flume::bounded::<()>(0);
+		let (result_tx, result) = flume::bounded(1);
+		let mutations = Arc::new(AtomicUsize::new(0));
+		backend.on_windows = Some(Box::new({
+			let mutations = Arc::clone(&mutations);
+			move || {
+				entered_tx.send(()).unwrap();
+				let _ = blocked.recv();
+				let dispatched = control::dispatching();
+				result_tx
+					.send(dispatched.as_ref().err().map(|error| error.code))
+					.unwrap();
+				dispatched?;
+				mutations.fetch_add(1, Ordering::AcqRel);
+				Ok(())
+			}
+		}));
+		let core = session_serving(backend);
+		let caller = thread::spawn({
+			let core = Arc::clone(&core);
+			move || core.call(core.cancellation.token(), |reply| Request::ListWindows { reply })
+		});
+		entered.recv().unwrap();
+		assert_eq!(caller.join().unwrap().err().unwrap().code, ErrorCode::Timeout);
+		drop(unblock);
+		assert_eq!(result.recv().unwrap(), Some(ErrorCode::Timeout));
+		core.close().unwrap();
+		assert_eq!(mutations.load(Ordering::Acquire), 0);
+	}
+
+	#[test]
+	fn a_dispatched_provider_can_reply_on_time() {
+		let mut backend = FakeWaylandBackend::new();
+		let mutations = Arc::new(AtomicUsize::new(0));
+		backend.on_windows = Some(Box::new({
+			let mutations = Arc::clone(&mutations);
+			move || {
+				control::dispatching()?;
+				mutations.fetch_add(1, Ordering::AcqRel);
+				Ok(())
+			}
+		}));
+		let core = session_serving(backend);
+		assert!(matches!(
+			core.call(core.cancellation.token(), |reply| Request::ListWindows { reply }),
+			Ok(Response::Windows(_))
+		));
+		assert_eq!(mutations.load(Ordering::Acquire), 1);
+		core.close().unwrap();
 	}
 
 	#[test]

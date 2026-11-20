@@ -10,7 +10,7 @@ use std::{
 	rc::Rc,
 	sync::{
 		Arc, LazyLock, Weak,
-		atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+		atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
 	},
 	thread,
 	time::{Duration, Instant},
@@ -96,6 +96,7 @@ impl CancellationSource {
 			source:     self.clone(),
 			generation: self.0.generation.load(Ordering::Acquire),
 			reply_by:   None,
+			dispatch:   None,
 		}
 	}
 
@@ -177,12 +178,17 @@ impl EmergencyStop {
 	}
 }
 
+const DISPATCH_IDLE: u8 = 0;
+const DISPATCH_SENT: u8 = 1;
+const DISPATCH_ABANDONED: u8 = 2;
+
 #[derive(Clone)]
 pub(crate) struct OperationToken {
 	source:     CancellationSource,
 	generation: u64,
 	/// When the caller stops waiting for this request's reply.
 	reply_by:   Option<Instant>,
+	dispatch:   Option<Arc<AtomicU8>>,
 }
 
 impl OperationToken {
@@ -198,7 +204,20 @@ impl OperationToken {
 
 	/// This token for a request whose caller waits for its reply until `at`.
 	pub(crate) fn replying_by(self, at: Instant) -> Self {
-		Self { reply_by: Some(at), ..self }
+		Self { reply_by: Some(at), dispatch: Some(Arc::new(AtomicU8::new(DISPATCH_IDLE))), ..self }
+	}
+
+	/// Fences out a not-yet-dispatched request when its caller stops waiting.
+	/// Returns whether the route already crossed its dispatch boundary.
+	pub(crate) fn abandon_reply(&self) -> bool {
+		self.dispatch.as_ref().is_some_and(|dispatch| {
+			dispatch.compare_exchange(
+				DISPATCH_IDLE,
+				DISPATCH_ABANDONED,
+				Ordering::AcqRel,
+				Ordering::Acquire,
+			) == Err(DISPATCH_SENT)
+		})
 	}
 
 	pub(crate) fn enter(&self) -> OperationScope {
@@ -331,6 +350,28 @@ pub(crate) fn check() -> CoreResult<()> {
 		return Ok(());
 	}
 	CURRENT.with_borrow(|token| token.as_ref().map_or(Ok(()), OperationToken::check))
+}
+
+/// Crosses the current request's dispatch boundary immediately before a
+/// mutation.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn dispatching() -> CoreResult<()> {
+	CURRENT.with_borrow(|token| {
+		let Some(dispatch) = token.as_ref().and_then(|token| token.dispatch.as_ref()) else {
+			return Ok(());
+		};
+		match dispatch.compare_exchange(
+			DISPATCH_IDLE,
+			DISPATCH_SENT,
+			Ordering::AcqRel,
+			Ordering::Acquire,
+		) {
+			Ok(_) | Err(DISPATCH_SENT) => Ok(()),
+			Err(_) => Err(DesktopError::timeout(
+				"desktop caller stopped waiting before dispatch; nothing was sent",
+			)),
+		}
+	})
 }
 
 /// Time the current operation has left before it must answer, less
@@ -1296,6 +1337,24 @@ pub(crate) fn alone(test: &str) -> bool {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn dispatch_fence_tracks_each_request_independently() {
+		dispatching().unwrap();
+		let source = CancellationSource::default();
+		let token = source.token().replying_by(Instant::now());
+		{
+			let _scope = token.enter();
+			dispatching().unwrap();
+			dispatching().unwrap();
+			assert!(token.abandon_reply());
+		}
+		let abandoned = token.replying_by(Instant::now());
+		assert!(!abandoned.abandon_reply());
+		assert!(!abandoned.abandon_reply());
+		let _scope = abandoned.enter();
+		assert_eq!(dispatching().unwrap_err().code, ErrorCode::Timeout);
+	}
 
 	/// Removes this process's private kernel lock (see `KernelLease::path`).
 	fn remove_test_lock() {

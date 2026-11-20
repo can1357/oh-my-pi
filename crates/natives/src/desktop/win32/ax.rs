@@ -18,6 +18,7 @@ use super::{
 	super::{
 		ax::{AxBounds, AxHandle, AxProps, normalize_role_uia},
 		backend::AxBackend,
+		control,
 		error::{CoreResult, DesktopError},
 		types::DesktopWindow,
 	},
@@ -433,15 +434,19 @@ impl AxBackend for Win32Ax {
 		self.contained(element, || match action.as_str() {
 			"press" => {
 				if let Some(pattern) = positionless_press(element) {
+					control::dispatching()?;
 					return pattern.run().map_err(ax_error);
 				}
 				if let Ok(pattern) = element.get_pattern::<UIInvokePattern>() {
+					control::dispatching()?;
 					return pattern.invoke().map_err(ax_error);
 				}
 				if let Ok(pattern) = element.get_pattern::<UITogglePattern>() {
+					control::dispatching()?;
 					return pattern.toggle().map_err(ax_error);
 				}
 				if let Ok(pattern) = element.get_pattern::<UISelectionItemPattern>() {
+					control::dispatching()?;
 					return pattern.select().map_err(ax_error);
 				}
 				let pattern = element
@@ -450,32 +455,47 @@ impl AxBackend for Win32Ax {
 				if pattern.get_default_action().map_err(ax_error)?.is_empty() {
 					return Err(DesktopError::ax_failed("UIA element has no default press action"));
 				}
+				control::dispatching()?;
 				pattern.do_default_action().map_err(ax_error)
 			},
-			"invoke" => element
-				.get_pattern::<UIInvokePattern>()
-				.and_then(|pattern| pattern.invoke())
-				.map_err(ax_error),
-			"toggle" => element
-				.get_pattern::<UITogglePattern>()
-				.and_then(|pattern| pattern.toggle())
-				.map_err(ax_error),
-			"expand" => element
-				.get_pattern::<UIExpandCollapsePattern>()
-				.and_then(|pattern| pattern.expand())
-				.map_err(ax_error),
-			"collapse" => element
-				.get_pattern::<UIExpandCollapsePattern>()
-				.and_then(|pattern| pattern.collapse())
-				.map_err(ax_error),
-			"select" => element
-				.get_pattern::<UISelectionItemPattern>()
-				.and_then(|pattern| pattern.select())
-				.map_err(ax_error),
-			"scrollintoview" => element
-				.get_pattern::<UIScrollItemPattern>()
-				.and_then(|pattern| pattern.scroll_into_view())
-				.map_err(ax_error),
+			"invoke" => {
+				let pattern = element.get_pattern::<UIInvokePattern>().map_err(ax_error)?;
+				control::dispatching()?;
+				pattern.invoke().map_err(ax_error)
+			},
+			"toggle" => {
+				let pattern = element.get_pattern::<UITogglePattern>().map_err(ax_error)?;
+				control::dispatching()?;
+				pattern.toggle().map_err(ax_error)
+			},
+			"expand" => {
+				let pattern = element
+					.get_pattern::<UIExpandCollapsePattern>()
+					.map_err(ax_error)?;
+				control::dispatching()?;
+				pattern.expand().map_err(ax_error)
+			},
+			"collapse" => {
+				let pattern = element
+					.get_pattern::<UIExpandCollapsePattern>()
+					.map_err(ax_error)?;
+				control::dispatching()?;
+				pattern.collapse().map_err(ax_error)
+			},
+			"select" => {
+				let pattern = element
+					.get_pattern::<UISelectionItemPattern>()
+					.map_err(ax_error)?;
+				control::dispatching()?;
+				pattern.select().map_err(ax_error)
+			},
+			"scrollintoview" => {
+				let pattern = element
+					.get_pattern::<UIScrollItemPattern>()
+					.map_err(ax_error)?;
+				control::dispatching()?;
+				pattern.scroll_into_view().map_err(ax_error)
+			},
 			other => {
 				Err(DesktopError::ax_failed(format!("unsupported UI Automation action '{other}'")))
 			},
