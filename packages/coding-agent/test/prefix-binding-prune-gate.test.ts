@@ -25,6 +25,21 @@ function createPrefixBindingModel(): Model<"anthropic-messages"> {
 	});
 }
 
+function createGpt62Model(): Model<"openai-codex-responses"> {
+	return buildModel({
+		id: "gpt-6.2-sol",
+		name: "GPT-6.2 Sol",
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		baseUrl: "https://chatgpt.com/backend-api",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 272_000,
+		maxTokens: 128_000,
+	});
+}
+
 function createModel(): Model<"openai-responses"> {
 	return buildModel({
 		id: "mock",
@@ -137,15 +152,21 @@ describe("prefix-bound stale-result pruning", () => {
 		for (const session of sessions.splice(0)) await session.dispose();
 	});
 
-	it("keeps a warm superseded read for prefix binding while the control model prunes it", async () => {
-		const prefixBindingSession = newSession(createPrefixBindingModel());
-		const controlSession = newSession(createModel());
-		sessions.push(prefixBindingSession, controlSession);
+	it.each([
+		["Claude Fable 5.1", createPrefixBindingModel],
+		["GPT-6.2 Sol", createGpt62Model],
+	])(
+		"keeps a warm superseded read for prefix binding on %s while the control model prunes it",
+		async (_name, createBoundModel) => {
+			const prefixBindingSession = newSession(createBoundModel());
+			const controlSession = newSession(createModel());
+			sessions.push(prefixBindingSession, controlSession);
 
-		await runMaintenance(prefixBindingSession);
-		await runMaintenance(controlSession);
+			await runMaintenance(prefixBindingSession);
+			await runMaintenance(controlSession);
 
-		expect(oldResultText(prefixBindingSession)).toBe(OLD_RESULT);
-		expect(oldResultText(controlSession)).toBe(SUPERSEDED_NOTICE);
-	});
+			expect(oldResultText(prefixBindingSession)).toBe(OLD_RESULT);
+			expect(oldResultText(controlSession)).toBe(SUPERSEDED_NOTICE);
+		},
+	);
 });
