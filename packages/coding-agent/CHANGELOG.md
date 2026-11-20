@@ -15,6 +15,7 @@
 - Extensions can identify which eval cell or kernel-defined tool dispatched a nested tool: `tool_call` and `tool_result` now include an optional `parentToolCallId` ([#19823](https://github.com/can1357/oh-my-pi/pull/19823) by [@baekjosh](https://github.com/baekjosh)).
 - Sessions now record approval prompts in their session file, even before the first reply: a `tool_approval_requested` entry when a tool call starts waiting on you (naming the dispatching eval call in `parentToolCallId` for calls made from an eval) and a `tool_approval_resolved` entry when it is approved, denied, aborted, or refused, so tools that read session files (sidebars, dashboards) can show a session waiting on approval ([#18837](https://github.com/can1357/oh-my-pi/pull/18837) by [@baekjosh](https://github.com/baekjosh))
 - Added Binary Ninja as a disassembler backend for read analysis views and the dsm namespace. Select it with disassembler.backend = binja; it uses a local install found through binja.installDir, $BN_INSTALL_DIR, or the default install locations ([#19752](https://github.com/can1357/oh-my-pi/pull/19752) by [@m4ul3r](https://github.com/m4ul3r)).
+- `read` no longer inlines unbounded text from a `local://N.log` spill: pages are capped at `read.pageBudget` across all of a call's ranges, with a notice naming the next range to read ([#15062](https://github.com/can1357/oh-my-pi/issues/15062), [#15172](https://github.com/can1357/oh-my-pi/pull/15172) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
 
@@ -103,7 +104,6 @@
 - Added excludeFromContext to pi.sendMessage payloads so extensions can display and save per-turn messages without sending them to the model.
 - Added a 30-second retry window for CLI and print-mode commands while the authentication broker restarts or is briefly unavailable.
 - Added a notify option to the bash tool for reporting matching output from background commands and named services, waking idle sessions or ending blocked waits.
-- `read` no longer inlines unbounded text from a `local://N.log` spill: pages are capped at `read.pageBudget` across all of a call's ranges, with a notice naming the next range to read ([#15062](https://github.com/can1357/oh-my-pi/issues/15062), [#15172](https://github.com/can1357/oh-my-pi/pull/15172) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - `urlmap` shell builtin maps a URL path onto a host directory or file for the shell and the programs it runs (`urlmap [-r] [-e] URL PATH`, `urlmap -d URL`, bare `urlmap` lists the mounts as commands); named services and `pty` commands get the session's `local://`, `skill://`, `artifact://` and `attachment://` paths through it
 - `tab.screenshot({path})` saves the capture to a chosen file and `format: "webp"` is supported on Chromium; unknown screenshot options are rejected
 - Session files now account for side-channel model calls such as compaction, recaps, memory extraction, commit drafts, image generation, and web search, with timing and compact replies where available
