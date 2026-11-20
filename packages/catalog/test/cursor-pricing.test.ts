@@ -75,6 +75,34 @@ describe("cursor API-equivalent pricing", () => {
 		});
 	});
 
+	it("keeps the explicit 500K Grok 4.7 lanes uncapped by their long-context tier", () => {
+		for (const id of ["grok-4.7-500k", "grok-4.7-500k-fast"]) {
+			const lane = buildModel({ ...spec(id), contextWindow: 500_000 });
+			expect(lane.contextWindow, id).toBe(500_000);
+			expect(lane.longContextWindowUncapped, id).toBe(true);
+		}
+		// The base lane's wire context is pinned to 256k; it must keep the cap.
+		expect(buildModel({ ...spec("grok-4.7"), contextWindow: 256_000 }).longContextWindowUncapped).toBeUndefined();
+	});
+
+	it("prices the newly served Cursor models from the docs", () => {
+		const cards: Array<[string, { input: number; output: number; cacheRead: number; cacheWrite: number }]> = [
+			["claude-fable-5-2", { input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10 }],
+			["claude-haiku-4-5", { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 }],
+			["claude-sonnet-5-5", { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 }],
+			["gemini-2.5-flash", { input: 0.3, output: 2.5, cacheRead: 0.03, cacheWrite: 0 }],
+			["gemini-4-hydrogen", { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 0 }],
+			["gemini-4-neon", { input: 3, output: 15, cacheRead: 0.15, cacheWrite: 0 }],
+			["glm-5p3", { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }],
+			["glm-5p3-flash", { input: 0.15, output: 0.5, cacheRead: 0.029, cacheWrite: 0 }],
+			["gpt-5.1", { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 }],
+			["muse-wonder-1.0", { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 0 }],
+		];
+		for (const [id, cost] of cards) {
+			expect(buildModel(spec(id)).cost, id).toMatchObject(cost);
+		}
+	});
+
 	it("prices third-party models at their Cursor API rates", () => {
 		expect(buildModel(spec("claude-opus-4-7-high-fast")).cost).toMatchObject({
 			input: 30,
@@ -188,11 +216,16 @@ describe("cursor API-equivalent pricing", () => {
 			"claude-fable-5-1-max",
 			"claude-fable-5-1-medium",
 			"claude-fable-5-1-xhigh",
+			"claude-fable-5-2",
+			"claude-fable-5-2-1m",
+			"claude-fable-5-2-1m-fast",
+			"claude-fable-5-2-fast",
 			"claude-fable-5-high",
 			"claude-fable-5-low",
 			"claude-fable-5-max",
 			"claude-fable-5-medium",
 			"claude-fable-5-xhigh",
+			"claude-haiku-4-5",
 			"claude-opus-4-7-high",
 			"claude-opus-4-7-high-fast",
 			"claude-opus-4-7-low",
@@ -230,6 +263,8 @@ describe("cursor API-equivalent pricing", () => {
 			"claude-sonnet-5-max",
 			"claude-sonnet-5-medium",
 			"claude-sonnet-5-xhigh",
+			"claude-sonnet-5-5",
+			"claude-sonnet-5-5-1m",
 			"composer-1",
 			"composer-1.5",
 			"composer-2.5",
@@ -251,9 +286,16 @@ describe("cursor API-equivalent pricing", () => {
 			"gemini-3.6-flash",
 			"gemini-3.7-flash",
 			"gemini-3.8-flash",
+			"gemini-2.5-flash",
 			"gemini-4-argon",
 			"gemini-4-carbon",
+			"gemini-4-hydrogen",
+			"gemini-4-hydrogen-1m",
+			"gemini-4-neon",
+			"gemini-4-neon-1m",
 			"glm-5.2",
+			"glm-5p3",
+			"glm-5p3-flash",
 			"gpt-5-mini",
 			"gpt-5.1",
 			"gpt-5.1-codex-max",
@@ -313,6 +355,8 @@ describe("cursor API-equivalent pricing", () => {
 			"kimi-k3-low",
 			"kimi-k3-max",
 			"muse-spark-1.3",
+			"muse-wonder-1.0",
+			"muse-wonder-1.0-1m",
 		];
 		const unpriced: Record<string, true> = {
 			// Absent from https://cursor.com/docs/models-and-pricing; left
@@ -320,9 +364,6 @@ describe("cursor API-equivalent pricing", () => {
 			"composer-1": true,
 			"composer-1.5": true,
 			default: true,
-			"gpt-5.1": true,
-			"gpt-5.1-high": true,
-			"gpt-5.1-low": true,
 			"grok-code-fast-1": true,
 			"kimi-k2.5": true,
 		};
